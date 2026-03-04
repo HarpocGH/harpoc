@@ -41,10 +41,10 @@ Storage     SQLite (WAL mode, encrypted payloads)
 |---------|-------------|--------|
 | `@harpoc/shared` | Types, Zod schemas, error codes, constants | Complete |
 | `@harpoc/core` | VaultEngine, crypto, storage, secrets, audit, access control | Complete |
+| `@harpoc/cli` | `harpoc` CLI (Commander.js) | Complete |
 | `@harpoc/mcp-server` | MCP tools, resources, guards (stdio transport) | Planned |
 | `@harpoc/rest-api` | Hono HTTP routes, JWT middleware | Planned |
 | `@harpoc/sdk` | TypeScript client (REST + in-process modes) | Planned |
-| `@harpoc/cli` | `harpoc` CLI (Commander.js) | Planned |
 
 ## Quick Start
 
@@ -68,12 +68,14 @@ pnpm format          # Fix formatting
 
 ## Security Model
 
-- **3-tier key hierarchy**: password → master key (Argon2id) → KEK (HKDF) → per-secret DEK (random). Password change is O(1) — only re-wraps the KEK.
+- **3-tier key hierarchy**: password → master key (Argon2id) → KEK (AES-256-GCM key wrap) → per-secret DEK (random). JWT and audit keys are independently generated and wrapped with the KEK. Password change is O(1) — only re-wraps the KEK; all other keys remain unchanged.
 - **AES-256-GCM** with authenticated additional data (AAD) binding per secret ID, preventing ciphertext substitution.
 - **Argon2id** with OWASP-recommended parameters (64 MB memory, 3 iterations, 4 parallelism).
-- **SSRF prevention**: private IP blocking (RFC 1918, link-local, IPv4-mapped IPv6), HTTPS enforcement, redirect validation with credential stripping on cross-origin hops.
-- **Secret names encrypted** with vault-level KEK — database inspection reveals nothing about stored services.
-- **JWT sessions** with sliding window TTL (15 min default, 24 h maximum), store-based token revocation.
+- **Password validation**: minimum 8-character length enforced on vault creation and password change.
+- **SSRF prevention**: private IP blocking (RFC 1918, link-local, IPv4-mapped IPv6), DNS rebinding protection via pre-flight DNS resolution, HTTPS enforcement, redirect validation with credential stripping on cross-origin hops.
+- **Secret names encrypted** with vault-level KEK — database inspection reveals nothing about stored services. HMAC-SHA256 name index enables O(1) handle resolution without decrypting all names.
+- **Lazy secret expiry**: secrets with an `expires_at` timestamp are checked on access and automatically transitioned to expired status.
+- **JWT sessions** with sliding window TTL (15 min default, 24 h maximum), store-based token revocation with automatic pruning of expired entries.
 
 ## Roadmap
 

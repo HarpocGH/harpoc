@@ -69,24 +69,24 @@ describe("lifecycle", () => {
   });
 
   it("unlocks an existing vault", async () => {
-    await engine.initVault("my-pass");
+    await engine.initVault("my-pass1");
     await engine.lock();
 
     const engine2 = new VaultEngine({ dbPath, sessionPath });
-    await engine2.unlock("my-pass");
+    await engine2.unlock("my-pass1");
     expect(engine2.getState()).toBe(VaultState.UNLOCKED);
     await engine2.destroy();
   });
 
   it("rejects wrong password on unlock", async () => {
-    await engine.initVault("correct");
+    await engine.initVault("correct1");
     await engine.lock();
 
     const engine2 = new VaultEngine({ dbPath, sessionPath });
-    await expect(engine2.unlock("wrong")).rejects.toThrow(VaultError);
+    await expect(engine2.unlock("wrong123")).rejects.toThrow(VaultError);
 
     try {
-      await engine2.unlock("wrong");
+      await engine2.unlock("wrong123");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.INVALID_PASSWORD);
     }
@@ -121,6 +121,15 @@ describe("lifecycle", () => {
     // engine2 should not have a store to close — no leaked handle
     await engine2.destroy();
   });
+
+  it("rejects weak password on initVault", async () => {
+    try {
+      await engine.initVault("short");
+      expect.fail("Should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.WEAK_PASSWORD);
+    }
+  });
 });
 
 describe("secrets", () => {
@@ -128,8 +137,8 @@ describe("secrets", () => {
     await engine.initVault("password");
   });
 
-  it("creates and lists secrets", () => {
-    engine.createSecret({
+  it("creates and lists secrets", async () => {
+    await engine.createSecret({
       name: "test-key",
       type: "api_key",
       value: new Uint8Array(Buffer.from("secret-value")),
@@ -140,63 +149,63 @@ describe("secrets", () => {
     expect(list[0]?.name).toBe("test-key");
   });
 
-  it("creates and retrieves secret info", () => {
-    engine.createSecret({
+  it("creates and retrieves secret info", async () => {
+    await engine.createSecret({
       name: "info-key",
       type: "api_key",
       value: new Uint8Array(Buffer.from("val")),
     });
 
-    const info = engine.getSecretInfo("secret://info-key");
+    const info = await engine.getSecretInfo("secret://info-key");
     expect(info.name).toBe("info-key");
     expect(info.status).toBe("active");
   });
 
-  it("creates and retrieves secret value", () => {
-    engine.createSecret({
+  it("creates and retrieves secret value", async () => {
+    await engine.createSecret({
       name: "get-val",
       type: "api_key",
       value: new Uint8Array(Buffer.from("the-secret")),
     });
 
-    const value = engine.getSecretValue("secret://get-val");
+    const value = await engine.getSecretValue("secret://get-val");
     expect(Buffer.from(value).toString()).toBe("the-secret");
   });
 
-  it("handles pending → set value flow", () => {
-    engine.createSecret({ name: "pending", type: "api_key" });
-    engine.setSecretValue("secret://pending", new Uint8Array(Buffer.from("now-set")));
+  it("handles pending → set value flow", async () => {
+    await engine.createSecret({ name: "pending", type: "api_key" });
+    await engine.setSecretValue("secret://pending", new Uint8Array(Buffer.from("now-set")));
 
-    const info = engine.getSecretInfo("secret://pending");
+    const info = await engine.getSecretInfo("secret://pending");
     expect(info.status).toBe("active");
   });
 
-  it("rotates a secret", () => {
-    engine.createSecret({
+  it("rotates a secret", async () => {
+    await engine.createSecret({
       name: "rotate-me",
       type: "api_key",
       value: new Uint8Array(Buffer.from("old")),
     });
 
-    engine.rotateSecret("secret://rotate-me", new Uint8Array(Buffer.from("new")));
+    await engine.rotateSecret("secret://rotate-me", new Uint8Array(Buffer.from("new")));
 
-    const info = engine.getSecretInfo("secret://rotate-me");
+    const info = await engine.getSecretInfo("secret://rotate-me");
     expect(info.version).toBe(2);
 
-    const value = engine.getSecretValue("secret://rotate-me");
+    const value = await engine.getSecretValue("secret://rotate-me");
     expect(Buffer.from(value).toString()).toBe("new");
   });
 
-  it("revokes a secret", () => {
-    engine.createSecret({
+  it("revokes a secret", async () => {
+    await engine.createSecret({
       name: "rev",
       type: "api_key",
       value: new Uint8Array(Buffer.from("v")),
     });
 
-    engine.revokeSecret("secret://rev");
+    await engine.revokeSecret("secret://rev");
 
-    const info = engine.getSecretInfo("secret://rev");
+    const info = await engine.getSecretInfo("secret://rev");
     expect(info.status).toBe("revoked");
   });
 });
@@ -206,69 +215,69 @@ describe("error propagation through VaultEngine", () => {
     await engine.initVault("password");
   });
 
-  it("getSecretInfo throws SECRET_NOT_FOUND for non-existent handle", () => {
+  it("getSecretInfo throws SECRET_NOT_FOUND for non-existent handle", async () => {
     try {
-      engine.getSecretInfo("secret://nonexistent");
+      await engine.getSecretInfo("secret://nonexistent");
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SECRET_NOT_FOUND);
     }
   });
 
-  it("getSecretValue throws SECRET_NOT_FOUND for non-existent handle", () => {
+  it("getSecretValue throws SECRET_NOT_FOUND for non-existent handle", async () => {
     try {
-      engine.getSecretValue("secret://nonexistent");
+      await engine.getSecretValue("secret://nonexistent");
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SECRET_NOT_FOUND);
     }
   });
 
-  it("getSecretInfo throws INVALID_HANDLE for malformed handle", () => {
+  it("getSecretInfo throws INVALID_HANDLE for malformed handle", async () => {
     try {
-      engine.getSecretInfo("not-a-handle");
+      await engine.getSecretInfo("not-a-handle");
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.INVALID_HANDLE);
     }
   });
 
-  it("getSecretValue throws SECRET_REVOKED for revoked secret", () => {
-    engine.createSecret({
+  it("getSecretValue throws SECRET_REVOKED for revoked secret", async () => {
+    await engine.createSecret({
       name: "rev",
       type: "api_key",
       value: new Uint8Array(Buffer.from("v")),
     });
-    engine.revokeSecret("secret://rev");
+    await engine.revokeSecret("secret://rev");
 
     try {
-      engine.getSecretValue("secret://rev");
+      await engine.getSecretValue("secret://rev");
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SECRET_REVOKED);
     }
   });
 
-  it("getSecretValue throws SECRET_VALUE_REQUIRED for pending secret", () => {
-    engine.createSecret({ name: "pend", type: "api_key" });
+  it("getSecretValue throws SECRET_VALUE_REQUIRED for pending secret", async () => {
+    await engine.createSecret({ name: "pend", type: "api_key" });
 
     try {
-      engine.getSecretValue("secret://pend");
+      await engine.getSecretValue("secret://pend");
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SECRET_VALUE_REQUIRED);
     }
   });
 
-  it("createSecret throws DUPLICATE_SECRET for duplicate name", () => {
-    engine.createSecret({
+  it("createSecret throws DUPLICATE_SECRET for duplicate name", async () => {
+    await engine.createSecret({
       name: "dup",
       type: "api_key",
       value: new Uint8Array(Buffer.from("v")),
     });
 
     try {
-      engine.createSecret({
+      await engine.createSecret({
         name: "dup",
         type: "api_key",
         value: new Uint8Array(Buffer.from("v2")),
@@ -279,16 +288,16 @@ describe("error propagation through VaultEngine", () => {
     }
   });
 
-  it("rotateSecret throws SECRET_REVOKED for revoked secret", () => {
-    engine.createSecret({
+  it("rotateSecret throws SECRET_REVOKED for revoked secret", async () => {
+    await engine.createSecret({
       name: "rot-rev",
       type: "api_key",
       value: new Uint8Array(Buffer.from("v")),
     });
-    engine.revokeSecret("secret://rot-rev");
+    await engine.revokeSecret("secret://rot-rev");
 
     try {
-      engine.rotateSecret("secret://rot-rev", new Uint8Array(Buffer.from("new")));
+      await engine.rotateSecret("secret://rot-rev", new Uint8Array(Buffer.from("new")));
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SECRET_REVOKED);
@@ -309,12 +318,12 @@ describe("error propagation through VaultEngine", () => {
   });
 
   it("useSecret throws SECRET_REVOKED for revoked secret", async () => {
-    engine.createSecret({
+    await engine.createSecret({
       name: "use-rev",
       type: "api_key",
       value: new Uint8Array(Buffer.from("v")),
     });
-    engine.revokeSecret("secret://use-rev");
+    await engine.revokeSecret("secret://use-rev");
 
     try {
       await engine.useSecret(
@@ -329,7 +338,7 @@ describe("error propagation through VaultEngine", () => {
   });
 
   it("useSecret throws URL_INVALID for invalid URL", async () => {
-    engine.createSecret({
+    await engine.createSecret({
       name: "url-test",
       type: "api_key",
       value: new Uint8Array(Buffer.from("v")),
@@ -348,7 +357,7 @@ describe("error propagation through VaultEngine", () => {
   });
 
   it("useSecret throws SSRF_BLOCKED for private IP", async () => {
-    engine.createSecret({
+    await engine.createSecret({
       name: "ssrf-test",
       type: "api_key",
       value: new Uint8Array(Buffer.from("v")),
@@ -373,7 +382,7 @@ describe("useSecret (HTTP injection)", () => {
   });
 
   it("injects bearer token and returns response", async () => {
-    engine.createSecret({
+    await engine.createSecret({
       name: "api-token",
       type: "api_key",
       value: new Uint8Array(Buffer.from("my-bearer-token")),
@@ -394,18 +403,15 @@ describe("useSecret (HTTP injection)", () => {
 describe("policies", () => {
   beforeEach(async () => {
     await engine.initVault("password");
-    engine.createSecret({
+    await engine.createSecret({
       name: "policy-test",
       type: "api_key",
       value: new Uint8Array(Buffer.from("v")),
     });
   });
 
-  it("grants and lists policies", () => {
-    // resolveHandle doesn't return the id, but we can use the internal secret
-    // For testing, we grant by resolving the handle internally
-    const secretId = (engine as unknown as { secretManager: { resolveHandle: (h: string) => { id: string } } })
-      .secretManager.resolveHandle("secret://policy-test").id;
+  it("grants and lists policies", async () => {
+    const secretId = await engine.resolveSecretId("secret://policy-test");
 
     const policy = engine.grantPolicy(
       {
@@ -423,9 +429,8 @@ describe("policies", () => {
     expect(policies.length).toBe(1);
   });
 
-  it("revokes a policy", () => {
-    const secretId = (engine as unknown as { secretManager: { resolveHandle: (h: string) => { id: string } } })
-      .secretManager.resolveHandle("secret://policy-test").id;
+  it("revokes a policy", async () => {
+    const secretId = await engine.resolveSecretId("secret://policy-test");
 
     const policy = engine.grantPolicy(
       {
@@ -515,6 +520,22 @@ describe("JWT tokens", () => {
       expect((e as VaultError).code).toBe(ErrorCode.TOKEN_EXPIRED);
     }
   });
+
+  it("caps token TTL at MAX_TOKEN_TTL_MS", () => {
+    // Request 7 days — should be capped to 24h
+    const token = engine.createToken("user-1", ["read"], 7 * 24 * 60 * 60 * 1000);
+    const decoded = engine.verifyToken(token);
+    const ttlSeconds = decoded.exp - decoded.iat;
+    expect(ttlSeconds).toBeLessThanOrEqual(24 * 60 * 60);
+  });
+
+  it("revocation with explicit expiresAt uses that value", () => {
+    const token = engine.createToken("user-1", ["read"]);
+    const decoded = engine.verifyToken(token);
+
+    engine.revokeToken(decoded.jti, decoded.exp);
+    expect(() => engine.verifyToken(token)).toThrow("revoked");
+  });
 });
 
 describe("JWT edge cases", () => {
@@ -590,8 +611,8 @@ describe("audit trail", () => {
     expect(events.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("logs secret creation", () => {
-    engine.createSecret({
+  it("logs secret creation", async () => {
+    await engine.createSecret({
       name: "audit-test",
       type: "api_key",
       value: new Uint8Array(Buffer.from("v")),
@@ -602,14 +623,14 @@ describe("audit trail", () => {
     expect(events[0]?.detail?.handle).toBe("secret://audit-test");
   });
 
-  it("logs getSecretValue with action: get_value", () => {
-    engine.createSecret({
+  it("logs getSecretValue with action: get_value", async () => {
+    await engine.createSecret({
       name: "audit-getval",
       type: "api_key",
       value: new Uint8Array(Buffer.from("v")),
     });
 
-    engine.getSecretValue("secret://audit-getval");
+    await engine.getSecretValue("secret://audit-getval");
 
     const events = engine.queryAudit({ eventType: AuditEventType.SECRET_READ });
     const getValEvents = events.filter((e) => e.detail?.action === "get_value");
@@ -621,7 +642,7 @@ describe("audit trail", () => {
 describe("audit trail for failed useSecret", () => {
   beforeEach(async () => {
     await engine.initVault("password");
-    engine.createSecret({
+    await engine.createSecret({
       name: "audit-use",
       type: "api_key",
       value: new Uint8Array(Buffer.from("val")),
@@ -672,7 +693,7 @@ describe("audit trail for failed useSecret", () => {
 describe("session loading", () => {
   it("loads session after restart", async () => {
     await engine.initVault("password");
-    engine.createSecret({
+    await engine.createSecret({
       name: "persist",
       type: "api_key",
       value: new Uint8Array(Buffer.from("val")),
@@ -694,7 +715,7 @@ describe("session loading", () => {
 
   it("session restore preserves audit log decryptability", async () => {
     await engine.initVault("password");
-    engine.createSecret({
+    await engine.createSecret({
       name: "audit-persist",
       type: "api_key",
       value: new Uint8Array(Buffer.from("val")),
@@ -718,7 +739,7 @@ describe("session loading", () => {
     expect(afterEvents[0]?.detail?.handle).toBe("secret://audit-persist");
 
     // Create a new audit entry to verify audit key works for new writes too
-    engine2.createSecret({
+    await engine2.createSecret({
       name: "post-restart",
       type: "api_key",
       value: new Uint8Array(Buffer.from("val2")),
@@ -756,7 +777,7 @@ describe("destroy() correctness", () => {
     await engine.destroy();
 
     try {
-      engine.createSecret({
+      await engine.createSecret({
         name: "fail",
         type: "api_key",
         value: new Uint8Array(Buffer.from("v")),
@@ -770,22 +791,365 @@ describe("destroy() correctness", () => {
 
 describe("password change", () => {
   it("changes password and re-unlocks with new password", async () => {
-    await engine.initVault("old-pass");
-    engine.createSecret({
+    await engine.initVault("old-pass1");
+    await engine.createSecret({
       name: "keep",
       type: "api_key",
       value: new Uint8Array(Buffer.from("secret-val")),
     });
 
-    await engine.changePassword("old-pass", "new-pass");
+    await engine.changePassword("old-pass1", "new-pass1");
     await engine.lock();
 
     const engine2 = new VaultEngine({ dbPath, sessionPath });
-    await engine2.unlock("new-pass");
+    await engine2.unlock("new-pass1");
 
-    const value = engine2.getSecretValue("secret://keep");
+    const value = await engine2.getSecretValue("secret://keep");
     expect(Buffer.from(value).toString()).toBe("secret-val");
 
     await engine2.destroy();
+  });
+
+  it("rejects change with wrong old password", async () => {
+    await engine.initVault("correct-pass");
+
+    try {
+      await engine.changePassword("wrong-pass", "new-pass1");
+      expect.fail("Should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.ENCRYPTION_ERROR);
+    }
+  });
+
+  it("old password no longer works after change", async () => {
+    await engine.initVault("old-pass1");
+    await engine.changePassword("old-pass1", "new-pass1");
+    await engine.lock();
+
+    const engine2 = new VaultEngine({ dbPath, sessionPath });
+    try {
+      await engine2.unlock("old-pass1");
+      expect.fail("Should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.INVALID_PASSWORD);
+    }
+    await engine2.destroy();
+  });
+
+  it("rejects weak new password on changePassword", async () => {
+    await engine.initVault("password");
+
+    try {
+      await engine.changePassword("password", "short");
+      expect.fail("Should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.WEAK_PASSWORD);
+    }
+  });
+});
+
+describe("lockout mechanism", () => {
+  it("triggers lockout after 5 failed unlock attempts", async () => {
+    await engine.initVault("correct1");
+    await engine.lock();
+
+    for (let i = 0; i < 5; i++) {
+      const eng = new VaultEngine({ dbPath, sessionPath });
+      try {
+        await eng.unlock("wrong123");
+      } catch {
+        // Expected INVALID_PASSWORD
+      }
+      await eng.destroy();
+    }
+
+    // 6th attempt should hit lockout
+    const eng = new VaultEngine({ dbPath, sessionPath });
+    try {
+      await eng.unlock("wrong123");
+      expect.fail("Should throw lockout");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.LOCKOUT_ACTIVE);
+    }
+    await eng.destroy();
+  });
+
+  it("lockout rejects even the correct password", async () => {
+    await engine.initVault("correct1");
+    await engine.lock();
+
+    for (let i = 0; i < 5; i++) {
+      const eng = new VaultEngine({ dbPath, sessionPath });
+      try {
+        await eng.unlock("wrong123");
+      } catch {
+        // Expected
+      }
+      await eng.destroy();
+    }
+
+    // Correct password during lockout should also fail
+    const eng = new VaultEngine({ dbPath, sessionPath });
+    try {
+      await eng.unlock("correct1");
+      expect.fail("Should throw lockout");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.LOCKOUT_ACTIVE);
+    }
+    await eng.destroy();
+  });
+
+  it("resets failed attempt counter on successful unlock", async () => {
+    await engine.initVault("correct1");
+    await engine.lock();
+
+    // 4 failed attempts (just below threshold)
+    for (let i = 0; i < 4; i++) {
+      const eng = new VaultEngine({ dbPath, sessionPath });
+      try {
+        await eng.unlock("wrong123");
+      } catch {
+        // Expected
+      }
+      await eng.destroy();
+    }
+
+    // Successful unlock resets counter
+    const eng = new VaultEngine({ dbPath, sessionPath });
+    await eng.unlock("correct1");
+    await eng.lock();
+
+    // 4 more failed attempts should NOT trigger lockout (counter was reset)
+    for (let i = 0; i < 4; i++) {
+      const eng2 = new VaultEngine({ dbPath, sessionPath });
+      try {
+        await eng2.unlock("wrong123");
+      } catch {
+        // Expected
+      }
+      await eng2.destroy();
+    }
+
+    // 5th attempt should still succeed (total 4 since reset)
+    const eng3 = new VaultEngine({ dbPath, sessionPath });
+    try {
+      await eng3.unlock("correct1");
+      expect(eng3.getState()).toBe(VaultState.UNLOCKED);
+    } finally {
+      await eng3.destroy();
+    }
+  });
+});
+
+describe("audit trail completeness", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+  });
+
+  it("logs secret rotation", async () => {
+    await engine.createSecret({
+      name: "rot-audit",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("old")),
+    });
+
+    await engine.rotateSecret("secret://rot-audit", new Uint8Array(Buffer.from("new")));
+
+    const events = engine.queryAudit({ eventType: AuditEventType.SECRET_ROTATE });
+    expect(events.length).toBe(1);
+    expect(events[0]?.detail?.handle).toBe("secret://rot-audit");
+  });
+
+  it("logs secret revocation", async () => {
+    await engine.createSecret({
+      name: "rev-audit",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+
+    await engine.revokeSecret("secret://rev-audit");
+
+    const events = engine.queryAudit({ eventType: AuditEventType.SECRET_REVOKE });
+    expect(events.length).toBe(1);
+    expect(events[0]?.detail?.handle).toBe("secret://rev-audit");
+  });
+
+  it("logs set_value on pending secret", async () => {
+    await engine.createSecret({ name: "pending-audit", type: "api_key" });
+    await engine.setSecretValue("secret://pending-audit", new Uint8Array(Buffer.from("val")));
+
+    const events = engine.queryAudit({ eventType: AuditEventType.SECRET_CREATE });
+    const setValueEvents = events.filter((e) => e.detail?.action === "set_value");
+    expect(setValueEvents.length).toBe(1);
+    expect(setValueEvents[0]?.detail?.handle).toBe("secret://pending-audit");
+  });
+
+  it("logs vault lock", async () => {
+    await engine.lock();
+
+    // Need a new engine to query audit (current engine is sealed)
+    const engine2 = new VaultEngine({ dbPath, sessionPath });
+    await engine2.unlock("password");
+
+    const events = engine2.queryAudit({ eventType: AuditEventType.VAULT_LOCK });
+    expect(events.length).toBe(1);
+
+    await engine2.destroy();
+  });
+
+  it("logs password change", async () => {
+    await engine.changePassword("password", "new-password");
+
+    const events = engine.queryAudit({ eventType: AuditEventType.VAULT_PASSWORD_CHANGE });
+    expect(events.length).toBe(1);
+  });
+
+  it("logs policy grant", async () => {
+    await engine.createSecret({
+      name: "pol-audit",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+
+    const secretId = await engine.resolveSecretId("secret://pol-audit");
+
+    engine.grantPolicy(
+      { secretId, principalType: "agent", principalId: "agent-1", permissions: ["read"] },
+      "admin",
+    );
+
+    const events = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT });
+    expect(events.length).toBe(1);
+    expect(events[0]?.detail?.principal).toBe("agent:agent-1");
+  });
+
+  it("logs policy revocation", async () => {
+    await engine.createSecret({
+      name: "pol-rev-audit",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+
+    const secretId = await engine.resolveSecretId("secret://pol-rev-audit");
+
+    const policy = engine.grantPolicy(
+      { secretId, principalType: "agent", principalId: "agent-1", permissions: ["read"] },
+      "admin",
+    );
+
+    engine.revokePolicy(policy.id);
+
+    const events = engine.queryAudit({ eventType: AuditEventType.POLICY_REVOKE });
+    expect(events.length).toBe(1);
+    expect(events[0]?.detail?.policy_id).toBe(policy.id);
+  });
+});
+
+describe("secrets through VaultEngine — additional coverage", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+  });
+
+  it("creates a secret with injection config", async () => {
+    const result = await engine.createSecret({
+      name: "injected-key",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+      injection: { type: "header", header_name: "X-Api-Key" },
+    });
+
+    expect(result.handle).toBe("secret://injected-key");
+    expect(result.status).toBe("created");
+  });
+
+  it("lists secrets filtered by project", async () => {
+    await engine.createSecret({
+      name: "a",
+      type: "api_key",
+      project: "proj-a",
+      value: new Uint8Array(Buffer.from("va")),
+    });
+    await engine.createSecret({
+      name: "b",
+      type: "api_key",
+      project: "proj-b",
+      value: new Uint8Array(Buffer.from("vb")),
+    });
+    await engine.createSecret({
+      name: "c",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("vc")),
+    });
+
+    const projA = engine.listSecrets("proj-a");
+    expect(projA.length).toBe(1);
+    expect(projA[0]?.name).toBe("a");
+
+    const all = engine.listSecrets();
+    expect(all.length).toBe(3);
+  });
+
+  it("creates a pending secret and sets its value", async () => {
+    await engine.createSecret({ name: "deferred", type: "api_key" });
+
+    const infoBefore = await engine.getSecretInfo("secret://deferred");
+    expect(infoBefore.status).toBe("pending");
+
+    await engine.setSecretValue("secret://deferred", new Uint8Array(Buffer.from("set-later")));
+
+    const infoAfter = await engine.getSecretInfo("secret://deferred");
+    expect(infoAfter.status).toBe("active");
+
+    const value = await engine.getSecretValue("secret://deferred");
+    expect(Buffer.from(value).toString()).toBe("set-later");
+  });
+});
+
+describe("lazy expiry in info/list", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+  });
+
+  it("getSecretInfo returns expired status for past-expiry secret", async () => {
+    await engine.createSecret({
+      name: "exp-test",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+      expiresAt: Date.now() - 1000, // Already expired
+    });
+
+    const info = await engine.getSecretInfo("secret://exp-test");
+    expect(info.status).toBe("expired");
+  });
+
+  it("listSecrets returns expired status for past-expiry secret", async () => {
+    await engine.createSecret({
+      name: "exp-list",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+      expiresAt: Date.now() - 1000,
+    });
+
+    const list = engine.listSecrets();
+    const found = list.find((s) => s.name === "exp-list");
+    expect(found?.status).toBe("expired");
+  });
+});
+
+describe("double lock / double destroy edge cases", () => {
+  it("lock on sealed vault does not throw", async () => {
+    await engine.initVault("password");
+    await engine.lock();
+
+    // Second lock should not throw — it's already sealed, auditLogger is null
+    await engine.lock();
+    expect(engine.getState()).toBe(VaultState.SEALED);
+  });
+
+  it("destroy is idempotent", async () => {
+    await engine.initVault("password");
+    await engine.destroy();
+    await engine.destroy();
+    expect(engine.getState()).toBe(VaultState.SEALED);
   });
 });

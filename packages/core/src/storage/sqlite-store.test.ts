@@ -72,8 +72,8 @@ describe("schema creation", () => {
     expect(names).toContain("audit_log");
   });
 
-  it("sets schema_version to 2", () => {
-    expect(store.getMeta("schema_version")).toBe("2");
+  it("sets schema_version to 3", () => {
+    expect(store.getMeta("schema_version")).toBe("3");
   });
 });
 

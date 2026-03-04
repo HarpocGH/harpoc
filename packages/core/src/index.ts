@@ -13,8 +13,11 @@ export {
   encryptName,
   decryptName,
   changePassword,
+  wrapKeyWithKek,
+  unwrapKeyFromKek,
+  computeNameHmac,
 } from "./crypto/key-hierarchy.js";
-export type { VaultKeys, UnlockedKeys, WrappedDek, EncryptedValue } from "./crypto/key-hierarchy.js";
+export type { VaultKeys, UnlockedKeys, WrappedDek, EncryptedValue, WrappedKey } from "./crypto/key-hierarchy.js";
 export { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
 
 // Storage

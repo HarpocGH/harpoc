@@ -61,6 +61,7 @@ describe("HTTP status mapping", () => {
     [ErrorCode.REDIRECT_POLICY_VIOLATION, 502],
     [ErrorCode.INVALID_INJECTION_CONFIG, 400],
     // Validation
+    [ErrorCode.WEAK_PASSWORD, 400],
     [ErrorCode.INVALID_INPUT, 400],
     [ErrorCode.INVALID_HANDLE, 400],
     [ErrorCode.INVALID_PROJECT_NAME, 400],
@@ -84,7 +85,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(39);
+    expect(members).toHaveLength(40);
   });
 });
 
@@ -256,5 +257,12 @@ describe("factory methods", () => {
   it("sessionFileError() with detail", () => {
     const err = VaultError.sessionFileError("parse failed");
     expect(err.message).toBe("Session file error: parse failed");
+  });
+
+  it("weakPassword()", () => {
+    const err = VaultError.weakPassword(8);
+    expect(err.code).toBe(ErrorCode.WEAK_PASSWORD);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toBe("Password must be at least 8 characters");
   });
 });

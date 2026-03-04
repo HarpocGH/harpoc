@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import { openSync, closeSync, fsyncSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile, chmod } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -44,10 +45,19 @@ export class SessionManager {
       // Atomic rename
       renameSync(tmpPath, this.sessionPath);
 
-      // Set permissions (no-op on Windows)
-      await chmod(this.sessionPath, 0o600).catch(() => {
-        // Ignore permission errors on Windows
-      });
+      // Set file permissions: owner-only access
+      if (process.platform === "win32") {
+        try {
+          execSync(
+            `icacls "${this.sessionPath}" /inheritance:r /grant:r "%USERNAME%:F"`,
+            { stdio: "ignore", windowsHide: true },
+          );
+        } catch {
+          // Best-effort: icacls may not be available
+        }
+      } else {
+        await chmod(this.sessionPath, 0o600).catch(() => {});
+      }
     } catch (err) {
       // Clean up temp file on failure
       try {

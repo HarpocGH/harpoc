@@ -10,6 +10,7 @@ export enum ErrorCode {
 
   // Auth
   INVALID_PASSWORD = "INVALID_PASSWORD",
+  WEAK_PASSWORD = "WEAK_PASSWORD",
   INVALID_TOKEN = "INVALID_TOKEN",
   TOKEN_EXPIRED = "TOKEN_EXPIRED",
   TOKEN_REVOKED = "TOKEN_REVOKED",
@@ -65,6 +66,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
 
   // Auth
   [ErrorCode.INVALID_PASSWORD]: 401,
+  [ErrorCode.WEAK_PASSWORD]: 400,
   [ErrorCode.INVALID_TOKEN]: 401,
   [ErrorCode.TOKEN_EXPIRED]: 401,
   [ErrorCode.TOKEN_REVOKED]: 401,
@@ -209,5 +211,12 @@ export class VaultError extends Error {
   static sessionFileError(detail?: string): VaultError {
     const msg = detail ? `Session file error: ${detail}` : "Session file error";
     return new VaultError(ErrorCode.SESSION_FILE_ERROR, msg);
+  }
+
+  static weakPassword(minLength: number): VaultError {
+    return new VaultError(
+      ErrorCode.WEAK_PASSWORD,
+      `Password must be at least ${minLength} characters`,
+    );
   }
 }

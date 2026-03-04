@@ -97,6 +97,23 @@ export const VAULT_AUDIT_ENABLED = true;
 
 export const DEFAULT_HTTP_TIMEOUT_MS = 30_000; // 30 seconds
 
+// -- Token -------------------------------------------------------------------
+
+export const MAX_TOKEN_TTL_MS = 24 * 60 * 60 * 1_000; // 24 hours
+
+// -- Password ----------------------------------------------------------------
+
+export const MIN_PASSWORD_LENGTH = 8;
+
+// -- HKDF info strings for name indexing -------------------------------------
+
+export const HKDF_INFO_NAME_INDEX = "name-index-v1";
+
+// -- AAD for wrapped JWT/audit keys in vault_meta ----------------------------
+
+export const AAD_WRAPPED_JWT_KEY = "wrapped-jwt-key";
+export const AAD_WRAPPED_AUDIT_KEY = "wrapped-audit-key";
+
 // -- Name constraints --------------------------------------------------------
 
 export const MAX_NAME_LENGTH = 255;

@@ -14,6 +14,7 @@ import {
   parseHandle,
 } from "@harpoc/shared";
 import {
+  computeNameHmac,
   decryptName,
   decryptSecretValue,
   encryptName,
@@ -48,22 +49,44 @@ export interface SecretInfo {
 }
 
 export class SecretManager {
+  private backfillDone = false;
+
   constructor(
     private readonly store: SqliteStore,
     private readonly kek: Uint8Array,
   ) {}
 
   /**
+   * One-time migration: backfill name_hmac for secrets that don't have one.
+   * Called lazily on first resolve/create to avoid blocking constructor.
+   */
+  private async ensureNameHmacBackfill(): Promise<void> {
+    if (this.backfillDone) return;
+    this.backfillDone = true;
+
+    const secrets = this.store.listSecrets();
+    for (const secret of secrets) {
+      if (secret.name_hmac) continue;
+      const name = decryptName(this.kek, secret.name_encrypted, secret.name_iv, secret.name_tag, secret.id);
+      const hmac = await computeNameHmac(this.kek, name, secret.project);
+      this.store.updateSecretNameHmac(secret.id, hmac);
+    }
+  }
+
+  /**
    * Create a new secret. If no value is provided, status is PENDING.
    */
-  createSecret(input: CreateSecretInput): CreateSecretResponse {
+  async createSecret(input: CreateSecretInput): Promise<CreateSecretResponse> {
     const { name, type, project, value, expiresAt } = input;
 
     // Check for duplicate name+project
-    this.assertNoDuplicate(name, project ?? null);
+    await this.assertNoDuplicate(name, project ?? null);
 
     const id = generateUUIDv7();
     const now = Date.now();
+
+    // Compute name HMAC for O(1) lookup
+    const nameHmac = await computeNameHmac(this.kek, name, project ?? null);
 
     // Encrypt name with KEK
     const nameEnc = encryptName(this.kek, name, id);
@@ -119,6 +142,7 @@ export class SecretManager {
       version: 1,
       status,
       sync_version: 0,
+      name_hmac: nameHmac,
     };
 
     this.store.insertSecret(secret);
@@ -136,8 +160,8 @@ export class SecretManager {
   /**
    * Set the value for a PENDING secret (transitions to ACTIVE).
    */
-  setSecretValue(handle: string, value: Uint8Array): void {
-    const secret = this.resolveHandleToSecret(handle);
+  async setSecretValue(handle: string, value: Uint8Array): Promise<void> {
+    const secret = await this.resolveHandleToSecret(handle);
 
     if (secret.status !== SecretStatus.PENDING) {
       throw new VaultError(
@@ -167,8 +191,8 @@ export class SecretManager {
   /**
    * Get secret info (metadata only, no value) — safe to return to LLM.
    */
-  getSecretInfo(handle: string): SecretInfo {
-    const secret = this.resolveHandleToSecret(handle);
+  async getSecretInfo(handle: string): Promise<SecretInfo> {
+    const secret = await this.resolveHandleToSecret(handle);
     const name = decryptName(this.kek, secret.name_encrypted, secret.name_iv, secret.name_tag, secret.id);
 
     return {
@@ -176,7 +200,7 @@ export class SecretManager {
       name,
       type: secret.type,
       project: secret.project,
-      status: secret.status,
+      status: this.effectiveStatus(secret),
       version: secret.version,
       createdAt: secret.created_at,
       updatedAt: secret.updated_at,
@@ -188,8 +212,8 @@ export class SecretManager {
   /**
    * Get the decrypted secret value. NEVER return this to the LLM.
    */
-  getSecretValue(handle: string): Uint8Array {
-    const secret = this.resolveHandleToSecret(handle);
+  async getSecretValue(handle: string): Promise<Uint8Array> {
+    const secret = await this.resolveHandleToSecret(handle);
     this.assertUsable(secret, handle);
 
     const dek = unwrapDek(this.kek, secret.wrapped_dek, secret.dek_iv, secret.dek_tag, secret.id);
@@ -214,7 +238,7 @@ export class SecretManager {
         name,
         type: s.type,
         project: s.project,
-        status: s.status,
+        status: this.effectiveStatus(s),
         version: s.version,
         createdAt: s.created_at,
         updatedAt: s.updated_at,
@@ -227,8 +251,8 @@ export class SecretManager {
   /**
    * Rotate a secret: new DEK, new ciphertext, version incremented.
    */
-  rotateSecret(handle: string, newValue: Uint8Array): void {
-    const secret = this.resolveHandleToSecret(handle);
+  async rotateSecret(handle: string, newValue: Uint8Array): Promise<void> {
+    const secret = await this.resolveHandleToSecret(handle);
     this.assertUsable(secret, handle);
 
     const newVersion = secret.version + 1;
@@ -257,8 +281,8 @@ export class SecretManager {
   /**
    * Revoke a secret (sets status to REVOKED).
    */
-  revokeSecret(handle: string): void {
-    const secret = this.resolveHandleToSecret(handle);
+  async revokeSecret(handle: string): Promise<void> {
+    const secret = await this.resolveHandleToSecret(handle);
 
     if (secret.status === SecretStatus.REVOKED) {
       throw VaultError.secretRevoked(handle);
@@ -273,7 +297,7 @@ export class SecretManager {
   /**
    * Resolve a handle to a secret record.
    */
-  resolveHandle(handle: string): Secret {
+  async resolveHandle(handle: string): Promise<Secret> {
     return this.resolveHandleToSecret(handle);
   }
 
@@ -281,21 +305,12 @@ export class SecretManager {
   // Private
   // ---------------------------------------------------------------------------
 
-  private resolveHandleToSecret(handle: string): Secret {
+  private async resolveHandleToSecret(handle: string): Promise<Secret> {
+    await this.ensureNameHmacBackfill();
+
     const parsed: ParsedHandle = parseHandle(handle);
-    const allSecrets = this.store.listSecrets();
-
-    const matches: Secret[] = [];
-
-    for (const secret of allSecrets) {
-      const name = decryptName(this.kek, secret.name_encrypted, secret.name_iv, secret.name_tag, secret.id);
-
-      if (name !== parsed.name) continue;
-      if (parsed.project !== undefined && secret.project !== parsed.project) continue;
-      if (parsed.project === undefined && secret.project !== null) continue;
-
-      matches.push(secret);
-    }
+    const nameHmac = await computeNameHmac(this.kek, parsed.name, parsed.project ?? null);
+    const matches = this.store.getSecretsByNameHmac(nameHmac);
 
     if (matches.length === 0) {
       throw VaultError.secretNotFound(handle);
@@ -320,27 +335,43 @@ export class SecretManager {
     return matches[0] as Secret;
   }
 
-  private assertNoDuplicate(name: string, project: string | null): void {
-    const allSecrets = this.store.listSecrets();
+  private effectiveStatus(secret: Secret): string {
+    if (
+      secret.status !== SecretStatus.EXPIRED &&
+      secret.expires_at !== null &&
+      secret.expires_at <= Date.now()
+    ) {
+      return SecretStatus.EXPIRED;
+    }
+    return secret.status;
+  }
 
-    for (const secret of allSecrets) {
+  private async assertNoDuplicate(name: string, project: string | null): Promise<void> {
+    await this.ensureNameHmacBackfill();
+
+    const nameHmac = await computeNameHmac(this.kek, name, project);
+    const matches = this.store.getSecretsByNameHmac(nameHmac);
+
+    for (const secret of matches) {
       if (secret.status === SecretStatus.REVOKED) continue;
-
-      const existingName = decryptName(
-        this.kek,
-        secret.name_encrypted,
-        secret.name_iv,
-        secret.name_tag,
-        secret.id,
-      );
-
-      if (existingName === name && secret.project === project) {
-        throw VaultError.duplicateSecret(name);
-      }
+      throw VaultError.duplicateSecret(name);
     }
   }
 
   private assertUsable(secret: Secret, handle: string): void {
+    // Lazy expiry: if expires_at is set and past, transition to EXPIRED
+    if (
+      secret.status !== SecretStatus.EXPIRED &&
+      secret.expires_at !== null &&
+      secret.expires_at <= Date.now()
+    ) {
+      this.store.updateSecret(secret.id, {
+        status: SecretStatus.EXPIRED,
+        updated_at: Date.now(),
+      });
+      throw VaultError.secretExpired(handle);
+    }
+
     if (secret.status === SecretStatus.EXPIRED) {
       throw VaultError.secretExpired(handle);
     }

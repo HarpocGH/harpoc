@@ -92,3 +92,11 @@ CREATE TABLE IF NOT EXISTS revoked_tokens (
 export const CREATE_REVOKED_TOKENS_INDEXES = `
 CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires_at ON revoked_tokens (expires_at);
 `;
+
+export const ALTER_SECRETS_ADD_NAME_HMAC = `
+ALTER TABLE secrets ADD COLUMN name_hmac TEXT;
+`;
+
+export const CREATE_NAME_HMAC_INDEX = `
+CREATE INDEX IF NOT EXISTS idx_secrets_name_hmac ON secrets (name_hmac);
+`;

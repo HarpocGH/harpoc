@@ -1,3 +1,4 @@
+import { promises as dns } from "node:dns";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
@@ -51,6 +52,9 @@ export function isPrivateIp(ip: string): boolean {
     // Loopback 127.0.0.0/8
     if (octets[0] === 127) return true;
 
+    // 0.0.0.0/8 — routes to localhost on many OSes
+    if (octets[0] === 0) return true;
+
     return false;
   }
 
@@ -70,6 +74,11 @@ export function isLoopback(hostname: string): boolean {
   return LOOPBACK_HOSTS.has(hostname.toLowerCase());
 }
 
+export interface ValidatedUrl {
+  url: URL;
+  resolvedAddress?: string;
+}
+
 /**
  * Validate a URL for use in secret injection.
  *
@@ -77,8 +86,13 @@ export function isLoopback(hostname: string): boolean {
  * - Must be a valid URL
  * - Must use HTTPS (exception: HTTP for loopback)
  * - Must not target private/internal IP ranges (SSRF prevention)
+ * - DNS resolution is checked to prevent DNS rebinding attacks
+ *
+ * Returns the validated URL and the resolved IP address (if DNS was performed).
+ * Callers should use the resolved address to connect directly, preventing TOCTOU
+ * DNS rebinding attacks.
  */
-export function validateUrl(urlStr: string): URL {
+export async function validateUrl(urlStr: string): Promise<ValidatedUrl> {
   let url: URL;
   try {
     url = new URL(urlStr);
@@ -111,5 +125,36 @@ export function validateUrl(urlStr: string): URL {
     );
   }
 
-  return url;
+  // DNS rebinding protection: resolve hostname and check resolved IP
+  let resolvedAddress: string | undefined;
+  if (!isLoopback(hostname) && !isPrivateIp(hostname) && !isIpAddress(hostname)) {
+    try {
+      const { address } = await dns.lookup(hostname);
+      if (isPrivateIp(address)) {
+        throw new VaultError(
+          ErrorCode.SSRF_BLOCKED,
+          `SSRF blocked: ${hostname} resolves to private IP ${address}`,
+        );
+      }
+      resolvedAddress = address;
+    } catch (err) {
+      if (err instanceof VaultError) throw err;
+      throw new VaultError(
+        ErrorCode.DNS_RESOLUTION_FAILED,
+        `DNS resolution failed for ${hostname}: ${err instanceof Error ? err.message : "unknown"}`,
+      );
+    }
+  }
+
+  return { url, resolvedAddress };
+}
+
+/** Check if a string looks like an IP address (v4 or v6). */
+function isIpAddress(host: string): boolean {
+  const normalized = host.replace(/^\[|\]$/g, "");
+  // IPv4: four dot-separated octets
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(normalized)) return true;
+  // IPv6: contains a colon
+  if (normalized.includes(":")) return true;
+  return false;
 }

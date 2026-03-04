@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { AES_KEY_LENGTH, ErrorCode, VaultError } from "@harpoc/shared";
 import {
   changePassword,
+  computeNameHmac,
   createVaultKeys,
   decryptName,
   decryptSecretValue,
@@ -14,7 +15,7 @@ import {
 import { generateRandomBytes } from "./random.js";
 
 describe("createVaultKeys", () => {
-  it("returns all required vault keys", async () => {
+  it("returns all required vault keys including wrapped jwt/audit keys", async () => {
     const keys = await createVaultKeys("test-password");
 
     expect(keys.salt).toBeInstanceOf(Uint8Array);
@@ -31,11 +32,26 @@ describe("createVaultKeys", () => {
     expect(keys.vaultId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
+
+    // New: wrapped keys present
+    expect(keys.wrappedJwtKey).toBeDefined();
+    expect(keys.wrappedJwtKey.ciphertext).toBeInstanceOf(Uint8Array);
+    expect(keys.wrappedAuditKey).toBeDefined();
+    expect(keys.wrappedAuditKey.ciphertext).toBeInstanceOf(Uint8Array);
+  });
+
+  it("generates random jwt/audit keys (not HKDF-derived)", async () => {
+    const keys1 = await createVaultKeys("same-password");
+    const keys2 = await createVaultKeys("same-password");
+
+    // Even with same password, jwt/audit keys should differ (random, not derived)
+    expect(Buffer.from(keys1.jwtKey).equals(Buffer.from(keys2.jwtKey))).toBe(false);
+    expect(Buffer.from(keys1.auditKey).equals(Buffer.from(keys2.auditKey))).toBe(false);
   });
 });
 
 describe("unlockVault", () => {
-  it("recovers KEK, JWT key, and audit key", async () => {
+  it("recovers KEK, JWT key, and audit key via wrapped keys", async () => {
     const password = "my-secure-password";
     const created = await createVaultKeys(password);
 
@@ -46,11 +62,33 @@ describe("unlockVault", () => {
       created.wrappedKekIv,
       created.wrappedKekTag,
       created.vaultId,
+      created.wrappedJwtKey,
+      created.wrappedAuditKey,
     );
 
     expect(Buffer.from(unlocked.kek).equals(Buffer.from(created.kek))).toBe(true);
     expect(Buffer.from(unlocked.jwtKey).equals(Buffer.from(created.jwtKey))).toBe(true);
     expect(Buffer.from(unlocked.auditKey).equals(Buffer.from(created.auditKey))).toBe(true);
+  });
+
+  it("falls back to HKDF when no wrapped keys provided (legacy)", async () => {
+    const password = "my-secure-password";
+    const created = await createVaultKeys(password);
+
+    // Omit wrapped keys — should still unlock (HKDF fallback)
+    const unlocked = await unlockVault(
+      password,
+      created.salt,
+      created.wrappedKek,
+      created.wrappedKekIv,
+      created.wrappedKekTag,
+      created.vaultId,
+    );
+
+    expect(Buffer.from(unlocked.kek).equals(Buffer.from(created.kek))).toBe(true);
+    // HKDF-derived keys will differ from random keys
+    expect(unlocked.jwtKey).toBeInstanceOf(Uint8Array);
+    expect(unlocked.auditKey).toBeInstanceOf(Uint8Array);
   });
 
   it("fails with wrong password", async () => {
@@ -64,6 +102,8 @@ describe("unlockVault", () => {
         created.wrappedKekIv,
         created.wrappedKekTag,
         created.vaultId,
+        created.wrappedJwtKey,
+        created.wrappedAuditKey,
       ),
     ).rejects.toThrow(VaultError);
 
@@ -75,21 +115,13 @@ describe("unlockVault", () => {
         created.wrappedKekIv,
         created.wrappedKekTag,
         created.vaultId,
+        created.wrappedJwtKey,
+        created.wrappedAuditKey,
       );
     } catch (e) {
       expect(e).toBeInstanceOf(VaultError);
       expect((e as VaultError).code).toBe(ErrorCode.ENCRYPTION_ERROR);
     }
-  });
-
-  it("different vaultIds produce different derived keys", async () => {
-    const password = "test-pw";
-    const keys1 = await createVaultKeys(password);
-    const keys2 = await createVaultKeys(password);
-
-    // JWT keys should differ because vaultId differs
-    expect(Buffer.from(keys1.jwtKey).equals(Buffer.from(keys2.jwtKey))).toBe(false);
-    expect(Buffer.from(keys1.auditKey).equals(Buffer.from(keys2.auditKey))).toBe(false);
   });
 });
 
@@ -204,7 +236,7 @@ describe("encryptName / decryptName", () => {
 });
 
 describe("changePassword", () => {
-  it("re-wraps KEK with new password", async () => {
+  it("re-wraps KEK with new password (no jwt/audit keys returned)", async () => {
     const oldPassword = "old-pass";
     const newPassword = "new-pass";
     const created = await createVaultKeys(oldPassword);
@@ -216,8 +248,11 @@ describe("changePassword", () => {
       created.wrappedKek,
       created.wrappedKekIv,
       created.wrappedKekTag,
-      created.vaultId,
     );
+
+    // Should NOT have jwtKey/auditKey in result
+    expect(changed).not.toHaveProperty("jwtKey");
+    expect(changed).not.toHaveProperty("auditKey");
 
     // Unlock with new password should work
     const unlocked = await unlockVault(
@@ -227,6 +262,8 @@ describe("changePassword", () => {
       changed.newWrappedKekIv,
       changed.newWrappedKekTag,
       created.vaultId,
+      created.wrappedJwtKey,
+      created.wrappedAuditKey,
     );
 
     // KEK should be the same
@@ -245,7 +282,6 @@ describe("changePassword", () => {
       created.wrappedKek,
       created.wrappedKekIv,
       created.wrappedKekTag,
-      created.vaultId,
     );
 
     await expect(
@@ -271,7 +307,6 @@ describe("changePassword", () => {
         created.wrappedKek,
         created.wrappedKekIv,
         created.wrappedKekTag,
-        created.vaultId,
       ),
     ).rejects.toThrow(VaultError);
   });
@@ -295,7 +330,6 @@ describe("changePassword", () => {
       created.wrappedKek,
       created.wrappedKekIv,
       created.wrappedKekTag,
-      created.vaultId,
     );
 
     // Unlock with new password
@@ -306,6 +340,8 @@ describe("changePassword", () => {
       changed.newWrappedKekIv,
       changed.newWrappedKekTag,
       created.vaultId,
+      created.wrappedJwtKey,
+      created.wrappedAuditKey,
     );
 
     // Unwrap DEK with recovered KEK
@@ -331,6 +367,36 @@ describe("changePassword", () => {
   });
 });
 
+describe("computeNameHmac", () => {
+  it("produces consistent HMAC for same inputs", async () => {
+    const keys = await createVaultKeys("password");
+    const h1 = await computeNameHmac(keys.kek, "test", null);
+    const h2 = await computeNameHmac(keys.kek, "test", null);
+    expect(h1).toBe(h2);
+  });
+
+  it("produces different HMAC for different names", async () => {
+    const keys = await createVaultKeys("password");
+    const h1 = await computeNameHmac(keys.kek, "name-a", null);
+    const h2 = await computeNameHmac(keys.kek, "name-b", null);
+    expect(h1).not.toBe(h2);
+  });
+
+  it("produces different HMAC for same name in different projects", async () => {
+    const keys = await createVaultKeys("password");
+    const h1 = await computeNameHmac(keys.kek, "token", "proj-a");
+    const h2 = await computeNameHmac(keys.kek, "token", "proj-b");
+    expect(h1).not.toBe(h2);
+  });
+
+  it("produces different HMAC for name with project vs without", async () => {
+    const keys = await createVaultKeys("password");
+    const h1 = await computeNameHmac(keys.kek, "token", null);
+    const h2 = await computeNameHmac(keys.kek, "token", "proj");
+    expect(h1).not.toBe(h2);
+  });
+});
+
 describe("full key hierarchy lifecycle", () => {
   it("creates vault, unlocks, wraps DEK, encrypts name+value, decrypts all", async () => {
     // Create vault
@@ -344,6 +410,8 @@ describe("full key hierarchy lifecycle", () => {
       vault.wrappedKekIv,
       vault.wrappedKekTag,
       vault.vaultId,
+      vault.wrappedJwtKey,
+      vault.wrappedAuditKey,
     );
 
     // Create a secret with its own DEK

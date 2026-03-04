@@ -34,40 +34,51 @@ export class HttpInjector {
     followRedirects: FollowRedirects = "same-origin",
     secretId?: string,
   ): Promise<UseSecretResponse> {
-    // Validate URL
-    const url = validateUrl(request.url);
-
-    // Build headers
-    const headers: Record<string, string> = { ...request.headers };
-    const valueStr = Buffer.from(secretValue).toString("utf8");
-
-    // Inject credential
-    let finalUrl = url.toString();
-    switch (injection.type) {
-      case "bearer":
-        headers["Authorization"] = `Bearer ${valueStr}`;
-        break;
-      case "basic_auth":
-        headers["Authorization"] = `Basic ${Buffer.from(valueStr).toString("base64")}`;
-        break;
-      case "header":
-        if (!injection.header_name) {
-          throw new VaultError(ErrorCode.INVALID_INJECTION_CONFIG, "header_name required for header injection");
-        }
-        headers[injection.header_name] = valueStr;
-        break;
-      case "query":
-        if (!injection.query_param) {
-          throw new VaultError(ErrorCode.INVALID_INJECTION_CONFIG, "query_param required for query injection");
-        }
-        url.searchParams.set(injection.query_param, valueStr);
-        finalUrl = url.toString();
-        break;
-    }
-
-    const timeoutMs = request.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
-
     try {
+      // Validate URL (includes DNS rebinding check)
+      const validated = await validateUrl(request.url);
+      const url = validated.url;
+
+      // Build headers
+      const headers: Record<string, string> = { ...request.headers };
+      const valueStr = Buffer.from(secretValue).toString("utf8");
+
+      // Inject credential
+      let finalUrl = url.toString();
+      switch (injection.type) {
+        case "bearer":
+          headers["Authorization"] = `Bearer ${valueStr}`;
+          break;
+        case "basic_auth":
+          // RFC 7617: value is expected to be "user:password", base64-encoded as-is
+          headers["Authorization"] = `Basic ${Buffer.from(valueStr).toString("base64")}`;
+          break;
+        case "header":
+          if (!injection.header_name) {
+            throw new VaultError(ErrorCode.INVALID_INJECTION_CONFIG, "header_name required for header injection");
+          }
+          headers[injection.header_name] = valueStr;
+          break;
+        case "query":
+          if (!injection.query_param) {
+            throw new VaultError(ErrorCode.INVALID_INJECTION_CONFIG, "query_param required for query injection");
+          }
+          url.searchParams.set(injection.query_param, valueStr);
+          finalUrl = url.toString();
+          break;
+      }
+
+      // Pin to resolved IP for HTTP to prevent DNS rebinding TOCTOU.
+      // For HTTPS, TLS certificate validation provides rebinding protection.
+      if (validated.resolvedAddress && url.protocol === "http:") {
+        const pinnedUrl = new URL(finalUrl);
+        headers["Host"] = pinnedUrl.hostname;
+        pinnedUrl.hostname = validated.resolvedAddress;
+        finalUrl = pinnedUrl.toString();
+      }
+
+      const timeoutMs = request.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
+
       const response = await this.fetchWithRedirects(
         finalUrl,
         request.method,
@@ -103,6 +114,12 @@ export class HttpInjector {
           },
           success: false,
         });
+
+        // DNS resolution failures are operational errors — return as response, don't throw
+        if (err.code === ErrorCode.DNS_RESOLUTION_FAILED) {
+          return { status: null, error: err.code };
+        }
+
         throw err;
       }
 
@@ -180,9 +197,14 @@ export class HttpInjector {
         // Resolve redirect URL
         const redirectUrl = new URL(location, currentUrl);
 
-        // Validate redirect target against SSRF
+        // Validate redirect target against SSRF (includes DNS rebinding check)
         try {
-          validateUrl(redirectUrl.toString());
+          const redirectValidated = await validateUrl(redirectUrl.toString());
+          // Pin redirect target to resolved IP for HTTP
+          if (redirectValidated.resolvedAddress && redirectUrl.protocol === "http:") {
+            currentHeaders["Host"] = redirectUrl.hostname;
+            redirectUrl.hostname = redirectValidated.resolvedAddress;
+          }
         } catch {
           throw new VaultError(
             ErrorCode.REDIRECT_POLICY_VIOLATION,

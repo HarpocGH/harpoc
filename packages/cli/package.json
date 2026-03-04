@@ -14,7 +14,11 @@
   },
   "dependencies": {
     "@harpoc/shared": "workspace:*",
-    "@harpoc/core": "workspace:*"
+    "@harpoc/core": "workspace:*",
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0"
   },
   "scripts": {
     "build": "tsc",

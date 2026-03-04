@@ -113,6 +113,7 @@ export interface Secret {
   version: number;
   status: SecretStatus;
   sync_version: number;
+  name_hmac: string | null;
 }
 
 /** Per-secret access control — maps to the `access_policies` SQLite table. */

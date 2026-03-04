@@ -14,11 +14,15 @@ import {
   AAD_SESSION_AUDIT,
   AAD_SESSION_JWT,
   AAD_SESSION_KEK,
+  AAD_WRAPPED_AUDIT_KEY,
+  AAD_WRAPPED_JWT_KEY,
   AES_KEY_LENGTH,
   AuditEventType,
   ErrorCode,
   LOCKOUT_DURATIONS_MS,
   LOCKOUT_MAX_ATTEMPTS,
+  MAX_TOKEN_TTL_MS,
+  MIN_PASSWORD_LENGTH,
   SESSION_CLEANUP_INTERVAL_MS,
   VaultError,
   VaultState,
@@ -30,10 +34,12 @@ import { AuditLogger } from "./audit/audit-logger.js";
 import { AuditQuery } from "./audit/audit-query.js";
 import type { AuditQueryOptions, DecryptedAuditEvent } from "./audit/audit-query.js";
 import { decrypt, encrypt } from "./crypto/aes-gcm.js";
+import type { WrappedKey } from "./crypto/key-hierarchy.js";
 import {
   changePassword,
   createVaultKeys,
   unlockVault,
+  wrapKeyWithKek,
 } from "./crypto/key-hierarchy.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
 import { HttpInjector } from "./injection/http-injector.js";
@@ -92,6 +98,8 @@ export class VaultEngine {
    * Initialize a new vault: generate keys, create database, write session.
    */
   async initVault(password: string): Promise<{ vaultId: string }> {
+    this.validatePassword(password);
+
     const keys = await createVaultKeys(password);
 
     const store = new SqliteStore(this.options.dbPath);
@@ -103,6 +111,10 @@ export class VaultEngine {
     store.setMeta("wrapped_kek", Buffer.from(keys.wrappedKek).toString("base64"));
     store.setMeta("wrapped_kek_iv", Buffer.from(keys.wrappedKekIv).toString("base64"));
     store.setMeta("wrapped_kek_tag", Buffer.from(keys.wrappedKekTag).toString("base64"));
+
+    // Store wrapped JWT and audit keys in vault_meta
+    this.storeWrappedKey(store, "wrapped_jwt_key", keys.wrappedJwtKey);
+    this.storeWrappedKey(store, "wrapped_audit_key", keys.wrappedAuditKey);
 
     // Set internal state
     this.store = store;
@@ -117,7 +129,8 @@ export class VaultEngine {
     // Write session
     await this.writeNewSession();
 
-    this.auditLogger?.log({
+    const logger = this.auditLogger as AuditLogger;
+    logger.log({
       eventType: AuditEventType.VAULT_UNLOCK,
       sessionId: this.sessionId ?? undefined,
     });
@@ -137,6 +150,15 @@ export class VaultEngine {
       throw VaultError.vaultNotFound();
     }
 
+    // Version check
+    const vaultVersion = store.getMeta("vault_version");
+    if (vaultVersion && vaultVersion > VAULT_VERSION) {
+      store.close();
+      throw VaultError.vaultCorrupted(
+        `Vault version ${vaultVersion} is newer than supported ${VAULT_VERSION}`,
+      );
+    }
+
     // Check lockout
     this.checkLockout(store);
 
@@ -145,8 +167,15 @@ export class VaultEngine {
     const wrappedKekIv = this.loadBase64Meta(store, "wrapped_kek_iv");
     const wrappedKekTag = this.loadBase64Meta(store, "wrapped_kek_tag");
 
+    // Load optional wrapped JWT/audit keys from vault_meta
+    const wrappedJwtKey = this.loadOptionalWrappedKey(store, "wrapped_jwt_key");
+    const wrappedAuditKey = this.loadOptionalWrappedKey(store, "wrapped_audit_key");
+
     try {
-      const keys = await unlockVault(password, salt, wrappedKek, wrappedKekIv, wrappedKekTag, vaultId);
+      const keys = await unlockVault(
+        password, salt, wrappedKek, wrappedKekIv, wrappedKekTag, vaultId,
+        wrappedJwtKey, wrappedAuditKey,
+      );
 
       this.store = store;
       this.vaultId = vaultId;
@@ -155,13 +184,22 @@ export class VaultEngine {
       this.auditKey = keys.auditKey;
       this.state = VaultState.UNLOCKED;
 
+      // One-time migration: if no wrapped keys in meta, generate and store them
+      if (!wrappedJwtKey || !wrappedAuditKey) {
+        const wJwt = wrapKeyWithKek(keys.kek, keys.jwtKey, AAD_WRAPPED_JWT_KEY);
+        const wAudit = wrapKeyWithKek(keys.kek, keys.auditKey, AAD_WRAPPED_AUDIT_KEY);
+        this.storeWrappedKey(store, "wrapped_jwt_key", wJwt);
+        this.storeWrappedKey(store, "wrapped_audit_key", wAudit);
+      }
+
       // Reset lockout on success
       store.setMeta("failed_attempts", "0");
 
       this.initManagers();
       await this.writeNewSession();
 
-      this.auditLogger?.log({
+      const logger = this.auditLogger as AuditLogger;
+      logger.log({
         eventType: AuditEventType.VAULT_UNLOCK,
         sessionId: this.sessionId ?? undefined,
       });
@@ -270,16 +308,16 @@ export class VaultEngine {
   // Secrets
   // ---------------------------------------------------------------------------
 
-  createSecret(input: {
+  async createSecret(input: {
     name: string;
     type: SecretType;
     project?: string;
     value?: Uint8Array;
     injection?: InjectionConfig;
     expiresAt?: number;
-  }): CreateSecretResponse {
+  }): Promise<CreateSecretResponse> {
     const s = this.assertUnlocked();
-    const result = s.secretManager.createSecret(input);
+    const result = await s.secretManager.createSecret(input);
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_CREATE,
@@ -290,9 +328,9 @@ export class VaultEngine {
     return result;
   }
 
-  getSecretInfo(handle: string): SecretInfo {
+  async getSecretInfo(handle: string): Promise<SecretInfo> {
     const s = this.assertUnlocked();
-    const info = s.secretManager.getSecretInfo(handle);
+    const info = await s.secretManager.getSecretInfo(handle);
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_READ,
@@ -303,9 +341,9 @@ export class VaultEngine {
     return info;
   }
 
-  getSecretValue(handle: string): Uint8Array {
+  async getSecretValue(handle: string): Promise<Uint8Array> {
     const s = this.assertUnlocked();
-    const value = s.secretManager.getSecretValue(handle);
+    const value = await s.secretManager.getSecretValue(handle);
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_READ,
@@ -321,9 +359,9 @@ export class VaultEngine {
     return s.secretManager.listSecrets(project);
   }
 
-  setSecretValue(handle: string, value: Uint8Array): void {
+  async setSecretValue(handle: string, value: Uint8Array): Promise<void> {
     const s = this.assertUnlocked();
-    s.secretManager.setSecretValue(handle, value);
+    await s.secretManager.setSecretValue(handle, value);
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_CREATE,
@@ -332,9 +370,9 @@ export class VaultEngine {
     });
   }
 
-  rotateSecret(handle: string, newValue: Uint8Array): void {
+  async rotateSecret(handle: string, newValue: Uint8Array): Promise<void> {
     const s = this.assertUnlocked();
-    s.secretManager.rotateSecret(handle, newValue);
+    await s.secretManager.rotateSecret(handle, newValue);
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_ROTATE,
@@ -343,9 +381,9 @@ export class VaultEngine {
     });
   }
 
-  revokeSecret(handle: string): void {
+  async revokeSecret(handle: string): Promise<void> {
     const s = this.assertUnlocked();
-    s.secretManager.revokeSecret(handle);
+    await s.secretManager.revokeSecret(handle);
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_REVOKE,
@@ -371,8 +409,8 @@ export class VaultEngine {
   ): Promise<UseSecretResponse> {
     const s = this.assertUnlocked();
 
-    const secret = s.secretManager.resolveHandle(handle);
-    const value = s.secretManager.getSecretValue(handle);
+    const secret = await s.secretManager.resolveHandle(handle);
+    const value = await s.secretManager.getSecretValue(handle);
 
     try {
       return await s.httpInjector.executeWithSecret(
@@ -447,13 +485,14 @@ export class VaultEngine {
   ): string {
     const s = this.assertUnlocked();
 
+    const effectiveTtl = Math.min(Math.max(ttlMs, 0), MAX_TOKEN_TTL_MS);
     const now = Math.floor(Date.now() / 1000);
     const payload: VaultApiToken = {
       sub: subject,
       vault_id: s.vaultId,
       scope,
       iat: now,
-      exp: now + Math.floor(ttlMs / 1000),
+      exp: now + Math.floor(effectiveTtl / 1000),
       jti: generateUUIDv7(),
     };
 
@@ -465,6 +504,9 @@ export class VaultEngine {
    */
   verifyToken(token: string): VaultApiToken {
     const s = this.assertUnlocked();
+
+    // Opportunistic cleanup of expired revocation entries
+    s.store.pruneExpiredTokens();
 
     const payload = this.verifyJwt(token);
 
@@ -489,7 +531,10 @@ export class VaultEngine {
    */
   revokeToken(jti: string, expiresAt?: number): void {
     const s = this.assertUnlocked();
-    s.store.insertRevokedToken(jti, expiresAt ?? Math.floor(Date.now() / 1000) + 86400);
+    // Fallback: MAX_TOKEN_TTL_MS from now ensures the revocation entry always
+    // outlives any token (since createToken caps TTL at MAX_TOKEN_TTL_MS).
+    const fallback = Math.floor(Date.now() / 1000) + Math.floor(MAX_TOKEN_TTL_MS / 1000);
+    s.store.insertRevokedToken(jti, expiresAt ?? fallback);
   }
 
   // ---------------------------------------------------------------------------
@@ -497,6 +542,8 @@ export class VaultEngine {
   // ---------------------------------------------------------------------------
 
   async changePassword(oldPassword: string, newPassword: string): Promise<void> {
+    this.validatePassword(newPassword);
+
     const s = this.assertUnlocked();
 
     const salt = this.loadBase64Meta(s.store, "kdf_salt");
@@ -511,7 +558,6 @@ export class VaultEngine {
       wrappedKek,
       wrappedKekIv,
       wrappedKekTag,
-      s.vaultId,
     );
 
     s.store.setMeta("kdf_salt", Buffer.from(result.newSalt).toString("base64"));
@@ -519,21 +565,24 @@ export class VaultEngine {
     s.store.setMeta("wrapped_kek_iv", Buffer.from(result.newWrappedKekIv).toString("base64"));
     s.store.setMeta("wrapped_kek_tag", Buffer.from(result.newWrappedKekTag).toString("base64"));
 
-    // Update in-memory keys
-    this.jwtKey = result.jwtKey;
-    this.auditKey = result.auditKey;
+    // JWT and audit keys are unchanged — they're wrapped with KEK, not derived from master key
 
-    // Re-init audit with new key
-    this.auditLogger = new AuditLogger(s.store, this.auditKey as Uint8Array);
-    this.auditQuery = new AuditQuery(s.store, this.auditKey as Uint8Array);
-
-    this.auditLogger.log({
+    s.auditLogger.log({
       eventType: AuditEventType.VAULT_PASSWORD_CHANGE,
       sessionId: this.sessionId ?? undefined,
     });
 
     // Write new session with updated keys
     await this.writeNewSession();
+  }
+
+  /**
+   * Resolve a secret handle to its internal UUID.
+   */
+  async resolveSecretId(handle: string): Promise<string> {
+    const s = this.assertUnlocked();
+    const secret = await s.secretManager.resolveHandle(handle);
+    return secret.id;
   }
 
   // ---------------------------------------------------------------------------
@@ -595,30 +644,34 @@ export class VaultEngine {
     const vaultId = this.vaultId as string;
 
     const sessionKey = generateRandomBytes(AES_KEY_LENGTH);
-    const sessionIdVal = generateUUIDv7();
-    this.sessionId = sessionIdVal;
+    try {
+      const sessionIdVal = generateUUIDv7();
+      this.sessionId = sessionIdVal;
 
-    // Wrap KEK, JWT key, and audit key with session key
-    const wrappedKek = encrypt(sessionKey, kek, AAD_SESSION_KEK);
-    const wrappedJwt = encrypt(sessionKey, jwtKey, AAD_SESSION_JWT);
-    const wrappedAudit = encrypt(sessionKey, auditKey, AAD_SESSION_AUDIT);
+      // Wrap KEK, JWT key, and audit key with session key
+      const wrappedKek = encrypt(sessionKey, kek, AAD_SESSION_KEK);
+      const wrappedJwt = encrypt(sessionKey, jwtKey, AAD_SESSION_JWT);
+      const wrappedAudit = encrypt(sessionKey, auditKey, AAD_SESSION_AUDIT);
 
-    const session = SessionManager.createSessionData(
-      sessionIdVal,
-      vaultId,
-      Buffer.from(sessionKey).toString("base64"),
-      Buffer.from(wrappedKek.ciphertext).toString("base64"),
-      Buffer.from(wrappedKek.iv).toString("base64"),
-      Buffer.from(wrappedKek.tag).toString("base64"),
-      Buffer.from(wrappedJwt.ciphertext).toString("base64"),
-      Buffer.from(wrappedJwt.iv).toString("base64"),
-      Buffer.from(wrappedJwt.tag).toString("base64"),
-      Buffer.from(wrappedAudit.ciphertext).toString("base64"),
-      Buffer.from(wrappedAudit.iv).toString("base64"),
-      Buffer.from(wrappedAudit.tag).toString("base64"),
-    );
+      const session = SessionManager.createSessionData(
+        sessionIdVal,
+        vaultId,
+        Buffer.from(sessionKey).toString("base64"),
+        Buffer.from(wrappedKek.ciphertext).toString("base64"),
+        Buffer.from(wrappedKek.iv).toString("base64"),
+        Buffer.from(wrappedKek.tag).toString("base64"),
+        Buffer.from(wrappedJwt.ciphertext).toString("base64"),
+        Buffer.from(wrappedJwt.iv).toString("base64"),
+        Buffer.from(wrappedJwt.tag).toString("base64"),
+        Buffer.from(wrappedAudit.ciphertext).toString("base64"),
+        Buffer.from(wrappedAudit.iv).toString("base64"),
+        Buffer.from(wrappedAudit.tag).toString("base64"),
+      );
 
-    await this.sessionManager.writeSession(session);
+      await this.sessionManager.writeSession(session);
+    } finally {
+      wipeBuffer(sessionKey);
+    }
   }
 
   private startSessionMonitor(): void {
@@ -719,6 +772,30 @@ export class VaultEngine {
   // ---------------------------------------------------------------------------
   // Private: helpers
   // ---------------------------------------------------------------------------
+
+  private validatePassword(password: string): void {
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      throw VaultError.weakPassword(MIN_PASSWORD_LENGTH);
+    }
+  }
+
+  private loadOptionalWrappedKey(store: SqliteStore, prefix: string): WrappedKey | undefined {
+    const ct = store.getMeta(`${prefix}`);
+    const iv = store.getMeta(`${prefix}_iv`);
+    const tag = store.getMeta(`${prefix}_tag`);
+    if (!ct || !iv || !tag) return undefined;
+    return {
+      ciphertext: new Uint8Array(Buffer.from(ct, "base64")),
+      iv: new Uint8Array(Buffer.from(iv, "base64")),
+      tag: new Uint8Array(Buffer.from(tag, "base64")),
+    };
+  }
+
+  private storeWrappedKey(store: SqliteStore, prefix: string, key: WrappedKey): void {
+    store.setMeta(`${prefix}`, Buffer.from(key.ciphertext).toString("base64"));
+    store.setMeta(`${prefix}_iv`, Buffer.from(key.iv).toString("base64"));
+    store.setMeta(`${prefix}_tag`, Buffer.from(key.tag).toString("base64"));
+  }
 
   private loadBase64Meta(store: SqliteStore, key: string): Uint8Array {
     const value = store.getMeta(key);

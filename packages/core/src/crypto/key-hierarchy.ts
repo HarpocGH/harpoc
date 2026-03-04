@@ -1,16 +1,27 @@
+import { createHmac } from "node:crypto";
 import {
   AAD_DEK_WRAP,
   AAD_NAME_ENCRYPTION,
   AAD_SECRET_PAYLOAD,
   AAD_VAULT_KEK,
+  AAD_WRAPPED_AUDIT_KEY,
+  AAD_WRAPPED_JWT_KEY,
   AES_KEY_LENGTH,
   HKDF_INFO_AUDIT,
   HKDF_INFO_JWT_SIGNING,
+  HKDF_INFO_NAME_INDEX,
 } from "@harpoc/shared";
 import { decrypt, encrypt } from "./aes-gcm.js";
 import { deriveKey, generateSalt } from "./argon2.js";
 import { deriveSubkey } from "./hkdf.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./random.js";
+
+/** A key wrapped with AES-256-GCM. */
+export interface WrappedKey {
+  ciphertext: Uint8Array;
+  iv: Uint8Array;
+  tag: Uint8Array;
+}
 
 /** Result of creating a new vault. */
 export interface VaultKeys {
@@ -22,6 +33,8 @@ export interface VaultKeys {
   jwtKey: Uint8Array;
   auditKey: Uint8Array;
   vaultId: string;
+  wrappedJwtKey: WrappedKey;
+  wrappedAuditKey: WrappedKey;
 }
 
 /** Result of unlocking a vault. */
@@ -63,18 +76,29 @@ export async function createVaultKeys(password: string): Promise<VaultKeys> {
     // Generate vault ID
     const vaultId = generateUUIDv7();
 
-    // Derive JWT and audit keys via HKDF
-    const jwtKey = await deriveSubkey(masterKey, vaultId, HKDF_INFO_JWT_SIGNING);
-    const auditKey = await deriveSubkey(masterKey, vaultId, HKDF_INFO_AUDIT);
+    // Generate RANDOM JWT and audit keys (not HKDF-derived)
+    const jwtKey = generateRandomBytes(AES_KEY_LENGTH);
+    const auditKey = generateRandomBytes(AES_KEY_LENGTH);
 
-    return { salt, wrappedKek, wrappedKekIv, wrappedKekTag, kek, jwtKey, auditKey, vaultId };
+    // Wrap JWT and audit keys with KEK for persistent storage
+    const wrappedJwtKey = wrapKeyWithKek(kek, jwtKey, AAD_WRAPPED_JWT_KEY);
+    const wrappedAuditKey = wrapKeyWithKek(kek, auditKey, AAD_WRAPPED_AUDIT_KEY);
+
+    return {
+      salt, wrappedKek, wrappedKekIv, wrappedKekTag,
+      kek, jwtKey, auditKey, vaultId,
+      wrappedJwtKey, wrappedAuditKey,
+    };
   } finally {
     wipeBuffer(masterKey);
   }
 }
 
 /**
- * Unlock vault: derive master key from password, unwrap KEK, derive JWT/audit keys.
+ * Unlock vault: derive master key from password, unwrap KEK, recover JWT/audit keys.
+ *
+ * If wrappedJwtKey/wrappedAuditKey are provided, unwraps them from KEK.
+ * Otherwise falls back to HKDF derivation from master key (legacy vault support).
  */
 export async function unlockVault(
   password: string,
@@ -83,13 +107,26 @@ export async function unlockVault(
   wrappedKekIv: Uint8Array,
   wrappedKekTag: Uint8Array,
   vaultId: string,
+  wrappedJwtKey?: WrappedKey,
+  wrappedAuditKey?: WrappedKey,
 ): Promise<UnlockedKeys> {
   const masterKey = await deriveKey(password, salt);
 
   try {
     const kek = decrypt(masterKey, wrappedKek, wrappedKekIv, wrappedKekTag, AAD_VAULT_KEK);
-    const jwtKey = await deriveSubkey(masterKey, vaultId, HKDF_INFO_JWT_SIGNING);
-    const auditKey = await deriveSubkey(masterKey, vaultId, HKDF_INFO_AUDIT);
+
+    let jwtKey: Uint8Array;
+    let auditKey: Uint8Array;
+
+    if (wrappedJwtKey && wrappedAuditKey) {
+      // New path: unwrap from KEK
+      jwtKey = decrypt(kek, wrappedJwtKey.ciphertext, wrappedJwtKey.iv, wrappedJwtKey.tag, AAD_WRAPPED_JWT_KEY);
+      auditKey = decrypt(kek, wrappedAuditKey.ciphertext, wrappedAuditKey.iv, wrappedAuditKey.tag, AAD_WRAPPED_AUDIT_KEY);
+    } else {
+      // Legacy path: derive from master key via HKDF
+      jwtKey = await deriveSubkey(masterKey, vaultId, HKDF_INFO_JWT_SIGNING);
+      auditKey = await deriveSubkey(masterKey, vaultId, HKDF_INFO_AUDIT);
+    }
 
     return { kek, jwtKey, auditKey };
   } finally {
@@ -176,6 +213,7 @@ export function decryptName(
 
 /**
  * Change vault password: re-wraps KEK with new master key. O(1) — no DEKs/ciphertexts touched.
+ * JWT and audit keys are unchanged (wrapped with KEK, not derived from master key).
  */
 export async function changePassword(
   oldPassword: string,
@@ -184,14 +222,11 @@ export async function changePassword(
   wrappedKek: Uint8Array,
   wrappedKekIv: Uint8Array,
   wrappedKekTag: Uint8Array,
-  vaultId: string,
 ): Promise<{
   newSalt: Uint8Array;
   newWrappedKek: Uint8Array;
   newWrappedKekIv: Uint8Array;
   newWrappedKekTag: Uint8Array;
-  jwtKey: Uint8Array;
-  auditKey: Uint8Array;
 }> {
   // Unwrap KEK with old password
   const oldMasterKey = await deriveKey(oldPassword, salt);
@@ -214,12 +249,48 @@ export async function changePassword(
       tag: newWrappedKekTag,
     } = encrypt(newMasterKey, kek, AAD_VAULT_KEK);
 
-    const jwtKey = await deriveSubkey(newMasterKey, vaultId, HKDF_INFO_JWT_SIGNING);
-    const auditKey = await deriveSubkey(newMasterKey, vaultId, HKDF_INFO_AUDIT);
-
-    return { newSalt, newWrappedKek, newWrappedKekIv, newWrappedKekTag, jwtKey, auditKey };
+    return { newSalt, newWrappedKek, newWrappedKekIv, newWrappedKekTag };
   } finally {
     wipeBuffer(newMasterKey);
     wipeBuffer(kek);
+  }
+}
+
+/**
+ * Wrap a key with the vault KEK using a specific AAD string.
+ */
+export function wrapKeyWithKek(kek: Uint8Array, key: Uint8Array, aad: string): WrappedKey {
+  const { ciphertext, iv, tag } = encrypt(kek, key, aad);
+  return { ciphertext, iv, tag };
+}
+
+/**
+ * Unwrap a key from the vault KEK using a specific AAD string.
+ */
+export function unwrapKeyFromKek(
+  kek: Uint8Array,
+  wrapped: WrappedKey,
+  aad: string,
+): Uint8Array {
+  return decrypt(kek, wrapped.ciphertext, wrapped.iv, wrapped.tag, aad);
+}
+
+/**
+ * Compute an HMAC for secret name lookup. Enables O(1) resolution without
+ * decrypting all secret names.
+ *
+ * HMAC(HKDF(kek, "name-index-v1"), name + ":" + project)
+ */
+export async function computeNameHmac(
+  kek: Uint8Array,
+  name: string,
+  project: string | null,
+): Promise<string> {
+  const hmacKey = await deriveSubkey(kek, HKDF_INFO_NAME_INDEX, HKDF_INFO_NAME_INDEX);
+  try {
+    const data = project ? `${name}:${project}` : name;
+    return createHmac("sha256", hmacKey).update(data).digest("hex");
+  } finally {
+    wipeBuffer(hmacKey);
   }
 }

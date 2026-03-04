@@ -11,6 +11,7 @@ import type {
 import { SQLITE_PRAGMAS, VaultError } from "@harpoc/shared";
 import { migration001 } from "./migrations/001-initial.js";
 import { migration002 } from "./migrations/002-revoked-tokens.js";
+import { migration003 } from "./migrations/003-name-hmac.js";
 
 /** Filters for querying secrets. */
 export interface SecretFilter {
@@ -42,6 +43,7 @@ export class SqliteStore {
     "status",
     "expires_at",
     "sync_version",
+    "name_hmac",
   ]);
 
   readonly db: Database.Database;
@@ -74,6 +76,10 @@ export class SqliteStore {
     if (currentVersion < 2) {
       this.db.exec(migration002.up);
       this.setMeta("schema_version", "2");
+    }
+    if (currentVersion < 3) {
+      this.db.exec(migration003.up);
+      this.setMeta("schema_version", "3");
     }
   }
 
@@ -124,14 +130,14 @@ export class SqliteStore {
             ciphertext, ct_iv, ct_tag,
             metadata_encrypted, metadata_iv, metadata_tag,
             created_at, updated_at, expires_at, rotated_at,
-            version, status, sync_version
+            version, status, sync_version, name_hmac
           ) VALUES (
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?,
             ?, ?, ?,
             ?, ?, ?,
             ?, ?, ?, ?,
-            ?, ?, ?
+            ?, ?, ?, ?
           )`,
         )
         .run(
@@ -157,6 +163,7 @@ export class SqliteStore {
           secret.version,
           secret.status,
           secret.sync_version,
+          secret.name_hmac,
         );
     } catch (err) {
       throw VaultError.databaseError(
@@ -212,6 +219,7 @@ export class SqliteStore {
         | "status"
         | "expires_at"
         | "sync_version"
+        | "name_hmac"
       >
     >,
   ): void {
@@ -232,6 +240,17 @@ export class SqliteStore {
     this.db
       .prepare(`UPDATE secrets SET ${setClauses.join(", ")} WHERE id = ?`)
       .run(...params);
+  }
+
+  getSecretsByNameHmac(nameHmac: string): Secret[] {
+    const rows = this.db
+      .prepare("SELECT * FROM secrets WHERE name_hmac = ? ORDER BY created_at DESC")
+      .all(nameHmac) as Record<string, unknown>[];
+    return rows.map((row) => this.rowToSecret(row));
+  }
+
+  updateSecretNameHmac(id: string, nameHmac: string): void {
+    this.db.prepare("UPDATE secrets SET name_hmac = ? WHERE id = ?").run(nameHmac, id);
   }
 
   deleteSecret(id: string): boolean {
@@ -436,6 +455,7 @@ export class SqliteStore {
       version: row.version as number,
       status: row.status as SecretStatus,
       sync_version: row.sync_version as number,
+      name_hmac: (row.name_hmac as string) ?? null,
     };
   }
 

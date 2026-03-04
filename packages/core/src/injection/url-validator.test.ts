@@ -17,6 +17,13 @@ describe("isPrivateIp", () => {
     expect(isPrivateIp(ip)).toBe(true);
   });
 
+  it.each(["0.0.0.0", "0.0.0.1", "0.255.255.255"])(
+    "returns true for 0.0.0.0/8 address %s",
+    (ip) => {
+      expect(isPrivateIp(ip)).toBe(true);
+    },
+  );
+
   it.each(["8.8.8.8", "1.1.1.1", "203.0.113.1", "172.32.0.1", "11.0.0.1"])(
     "returns false for public IPv4 %s",
     (ip) => {
@@ -69,86 +76,106 @@ describe("isLoopback", () => {
 });
 
 describe("validateUrl", () => {
-  it("accepts valid HTTPS URLs", () => {
-    const url = validateUrl("https://api.example.com/v1/test");
-    expect(url.protocol).toBe("https:");
+  it("accepts valid HTTPS URLs", async () => {
+    // Use an IP address to avoid DNS resolution in test environment
+    const result = await validateUrl("https://8.8.8.8/v1/test");
+    expect(result.url.protocol).toBe("https:");
   });
 
-  it("accepts HTTP for localhost", () => {
-    const url = validateUrl("http://localhost:3000/api");
-    expect(url.protocol).toBe("http:");
+  it("accepts HTTP for localhost", async () => {
+    const result = await validateUrl("http://localhost:3000/api");
+    expect(result.url.protocol).toBe("http:");
   });
 
-  it("accepts HTTP for 127.0.0.1", () => {
-    const url = validateUrl("http://127.0.0.1:8080/test");
-    expect(url.hostname).toBe("127.0.0.1");
+  it("accepts HTTP for 127.0.0.1", async () => {
+    const result = await validateUrl("http://127.0.0.1:8080/test");
+    expect(result.url.hostname).toBe("127.0.0.1");
   });
 
-  it("rejects HTTP for non-loopback", () => {
+  it("rejects HTTP for non-loopback", async () => {
     try {
-      validateUrl("http://api.example.com/test");
+      await validateUrl("http://api.example.com/test");
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.URL_HTTPS_REQUIRED);
     }
   });
 
-  it("rejects non-HTTP(S) schemes", () => {
+  it("rejects non-HTTP(S) schemes", async () => {
     try {
-      validateUrl("ftp://example.com/file");
+      await validateUrl("ftp://example.com/file");
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.URL_HTTPS_REQUIRED);
     }
   });
 
-  it("rejects invalid URLs", () => {
+  it("rejects invalid URLs", async () => {
     try {
-      validateUrl("not-a-url");
+      await validateUrl("not-a-url");
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.URL_INVALID);
     }
   });
 
-  it("blocks SSRF for private IPs", () => {
+  it("blocks SSRF for private IPs", async () => {
     try {
-      validateUrl("https://10.0.0.1/api");
+      await validateUrl("https://10.0.0.1/api");
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
     }
   });
 
-  it("blocks SSRF for 192.168.x.x", () => {
+  it("blocks SSRF for 192.168.x.x", async () => {
     try {
-      validateUrl("https://192.168.1.1/api");
+      await validateUrl("https://192.168.1.1/api");
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
     }
   });
 
-  it("blocks SSRF for 172.16-31.x.x", () => {
+  it("blocks SSRF for 172.16-31.x.x", async () => {
     try {
-      validateUrl("https://172.16.0.1/api");
+      await validateUrl("https://172.16.0.1/api");
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
     }
   });
 
-  it("allows loopback despite being 'private'", () => {
-    expect(() => validateUrl("http://127.0.0.1/test")).not.toThrow();
-    expect(() => validateUrl("http://localhost/test")).not.toThrow();
+  it("allows loopback despite being 'private'", async () => {
+    await expect(validateUrl("http://127.0.0.1/test")).resolves.not.toThrow();
+    await expect(validateUrl("http://localhost/test")).resolves.not.toThrow();
   });
 
-  it("blocks SSRF for IPv4-mapped IPv6 private addresses", () => {
+  it("blocks SSRF for IPv4-mapped IPv6 private addresses", async () => {
     try {
-      validateUrl("https://[::ffff:192.168.1.1]/api");
+      await validateUrl("https://[::ffff:192.168.1.1]/api");
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
     }
+  });
+
+  it("blocks SSRF for 0.0.0.0", async () => {
+    try {
+      await validateUrl("https://0.0.0.0/api");
+      expect.fail("Should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
+    }
+  });
+
+  it("returns resolvedAddress for IP-based URLs as undefined", async () => {
+    const result = await validateUrl("https://8.8.8.8/v1/test");
+    expect(result.resolvedAddress).toBeUndefined();
+  });
+
+  it("returns resolvedAddress as undefined for loopback", async () => {
+    const result = await validateUrl("http://127.0.0.1:3000/api");
+    expect(result.resolvedAddress).toBeUndefined();
   });
 });
