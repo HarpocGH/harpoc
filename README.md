@@ -56,6 +56,40 @@ pnpm build
 pnpm test
 ```
 
+## MCP Configuration
+
+To use Harpoc as an MCP server with Claude Desktop or Claude Code:
+
+```bash
+# 1. Initialize and unlock a vault
+npx harpoc init
+npx harpoc unlock
+
+# 2. Add a secret
+npx harpoc secret set MY_API_KEY
+
+# 3. Generate a scoped launch token
+npx harpoc auth token --scope list,read,use --agent claude --ttl 480
+
+# 4. Start the MCP server
+npx harpoc server start --mcp --token <YOUR_TOKEN>
+```
+
+Add to your **Claude Desktop** config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows) or **Claude Code** config (`.mcp.json` in project root):
+
+```json
+{
+  "mcpServers": {
+    "harpoc": {
+      "command": "npx",
+      "args": ["harpoc", "server", "start", "--mcp", "--token", "<YOUR_TOKEN>"]
+    }
+  }
+}
+```
+
+See [`docs/examples/`](../docs/examples/) for full configuration examples with vault directory and token options.
+
 ## Development
 
 ```bash
