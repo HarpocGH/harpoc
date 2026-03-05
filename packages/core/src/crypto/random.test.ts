@@ -23,9 +23,7 @@ describe("generateRandomBytes", () => {
 describe("generateUUIDv7", () => {
   it("produces valid UUID format", () => {
     const uuid = generateUUIDv7();
-    expect(uuid).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-    );
+    expect(uuid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 
   it("has version 7 in the version nibble", () => {

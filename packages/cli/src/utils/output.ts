@@ -121,5 +121,8 @@ export function formatTimestamp(ts: number | null): string {
   if (ts === null) return "-";
   // If the timestamp looks like seconds (< 10 billion), convert to ms
   const ms = ts < 1e10 ? ts * 1000 : ts;
-  return new Date(ms).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "Z");
+  return new Date(ms)
+    .toISOString()
+    .replace("T", " ")
+    .replace(/\.\d{3}Z$/, "Z");
 }

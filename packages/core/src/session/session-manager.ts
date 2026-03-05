@@ -25,10 +25,7 @@ export class SessionManager {
    * Write a new session file atomically. Sets file permissions to 0o600.
    */
   async writeSession(session: SessionFile): Promise<void> {
-    const tmpPath = join(
-      dirname(this.sessionPath),
-      `.session.json.tmp.${process.pid}`,
-    );
+    const tmpPath = join(dirname(this.sessionPath), `.session.json.tmp.${process.pid}`);
 
     try {
       const data = JSON.stringify(session, null, 2);
@@ -48,10 +45,10 @@ export class SessionManager {
       // Set file permissions: owner-only access
       if (process.platform === "win32") {
         try {
-          execSync(
-            `icacls "${this.sessionPath}" /inheritance:r /grant:r "%USERNAME%:F"`,
-            { stdio: "ignore", windowsHide: true },
-          );
+          execSync(`icacls "${this.sessionPath}" /inheritance:r /grant:r "%USERNAME%:F"`, {
+            stdio: "ignore",
+            windowsHide: true,
+          });
         } catch {
           // Best-effort: icacls may not be available
         }
@@ -112,9 +109,7 @@ export class SessionManager {
    * Extend the session's expiry using a sliding window.
    * new_expires_at = min(now + ttl, max_expires_at)
    */
-  async extendSession(
-    ttlMs: number = DEFAULT_SESSION_TTL_MS,
-  ): Promise<SessionFile | null> {
+  async extendSession(ttlMs: number = DEFAULT_SESSION_TTL_MS): Promise<SessionFile | null> {
     const session = await this.readSession();
     if (!session) return null;
 

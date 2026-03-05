@@ -1,6 +1,17 @@
 {
   "name": "@harpoc/integration",
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "Cross-package integration tests for Harpoc",
+  "license": "BUSL-1.1",
+  "author": "Stefan Gönitzer",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HarpocGH/harpoc.git",
+    "directory": "packages/integration"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "private": true,
   "type": "module",
   "dependencies": {

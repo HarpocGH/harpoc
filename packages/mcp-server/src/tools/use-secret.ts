@@ -21,19 +21,34 @@ export function registerUseSecret(
     "Execute an HTTP request with a secret injected (the secret value is never exposed)",
     {
       handle: z.string().describe("Secret handle"),
-      request: z.object({
-        method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]).describe("HTTP method"),
-        url: z.string().url().describe("Target URL (HTTPS required)"),
-        headers: z.record(z.string()).optional().describe("Additional HTTP headers"),
-        body: z.string().optional().describe("Request body"),
-        timeout_ms: z.number().int().positive().max(300_000).optional().describe("Timeout in milliseconds"),
-      }).describe("HTTP request configuration"),
-      injection: z.object({
-        type: z.enum(["header", "query", "basic_auth", "bearer"]).describe("How to inject the secret"),
-        header_name: z.string().optional().describe("Header name (for type=header)"),
-        query_param: z.string().optional().describe("Query parameter name (for type=query)"),
-      }).describe("Secret injection method"),
-      follow_redirects: z.enum(["same-origin", "none", "any"]).optional().describe("Redirect policy"),
+      request: z
+        .object({
+          method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]).describe("HTTP method"),
+          url: z.string().url().describe("Target URL (HTTPS required)"),
+          headers: z.record(z.string()).optional().describe("Additional HTTP headers"),
+          body: z.string().optional().describe("Request body"),
+          timeout_ms: z
+            .number()
+            .int()
+            .positive()
+            .max(300_000)
+            .optional()
+            .describe("Timeout in milliseconds"),
+        })
+        .describe("HTTP request configuration"),
+      injection: z
+        .object({
+          type: z
+            .enum(["header", "query", "basic_auth", "bearer"])
+            .describe("How to inject the secret"),
+          header_name: z.string().optional().describe("Header name (for type=header)"),
+          query_param: z.string().optional().describe("Query parameter name (for type=query)"),
+        })
+        .describe("Secret injection method"),
+      follow_redirects: z
+        .enum(["same-origin", "none", "any"])
+        .optional()
+        .describe("Redirect policy"),
     },
     async (args) => {
       const parsed = parseHandle(args.handle);

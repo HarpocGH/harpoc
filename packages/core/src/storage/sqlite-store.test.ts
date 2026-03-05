@@ -192,9 +192,9 @@ describe("secrets CRUD", () => {
     const secret = makeSecret();
     store.insertSecret(secret);
 
-    expect(() =>
-      store.updateSecret(secret.id, { "DROP TABLE secrets; --": "x" } as never),
-    ).toThrow("Invalid column name");
+    expect(() => store.updateSecret(secret.id, { "DROP TABLE secrets; --": "x" } as never)).toThrow(
+      "Invalid column name",
+    );
   });
 
   it("deletes a secret", () => {
@@ -256,9 +256,7 @@ describe("access_policies CRUD", () => {
     const secret = makeSecret();
     store.insertSecret(secret);
 
-    store.insertPolicy(
-      makePolicy(secret.id, { principal_type: "agent", principal_id: "agent-x" }),
-    );
+    store.insertPolicy(makePolicy(secret.id, { principal_type: "agent", principal_id: "agent-x" }));
 
     const result = store.listPoliciesByPrincipal("agent", "agent-x");
     expect(result.length).toBe(1);

@@ -29,14 +29,20 @@ export function registerRotateSecret(
       // In stdio MCP transport, we have no secure channel to collect the value.
       // Return a deferred message — user must set the new value via CLI.
       return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({
-            handle: args.handle,
-            status: "pending_rotation",
-            message: `Set new value with: harpoc secret rotate ${parsed.name}`,
-          }, null, 2),
-        }],
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                handle: args.handle,
+                status: "pending_rotation",
+                message: `Set new value with: harpoc secret rotate ${parsed.name}`,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
     },
   );

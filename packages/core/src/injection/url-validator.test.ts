@@ -101,12 +101,9 @@ describe("isPrivateIp", () => {
     expect(typeof result).toBe("boolean");
   });
 
-  it.each(["fcff:ffff::1", "fdff:ffff::1"])(
-    "IPv6 ULA expanded %s is private",
-    (ip) => {
-      expect(isPrivateIp(ip)).toBe(true);
-    },
-  );
+  it.each(["fcff:ffff::1", "fdff:ffff::1"])("IPv6 ULA expanded %s is private", (ip) => {
+    expect(isPrivateIp(ip)).toBe(true);
+  });
 
   it("IPv4-mapped IPv6 hex form ::ffff:c0a8:0101 (192.168.1.1) is private", () => {
     expect(isPrivateIp("::ffff:c0a8:0101")).toBe(true);
@@ -116,12 +113,9 @@ describe("isPrivateIp", () => {
     expect(isPrivateIp("::ffff:0a00:0001")).toBe(true);
   });
 
-  it.each(["2600:1f18::1", "2607:f8b0:4004:800::200e"])(
-    "public IPv6 %s is not private",
-    (ip) => {
-      expect(isPrivateIp(ip)).toBe(false);
-    },
-  );
+  it.each(["2600:1f18::1", "2607:f8b0:4004:800::200e"])("public IPv6 %s is not private", (ip) => {
+    expect(isPrivateIp(ip)).toBe(false);
+  });
 });
 
 describe("isLoopback", () => {
@@ -259,7 +253,11 @@ describe("validateUrl", () => {
     } catch (e) {
       // URL constructor may parse this or throw — either SSRF_BLOCKED or URL_INVALID is acceptable
       const err = e as VaultError;
-      expect([ErrorCode.URL_INVALID, ErrorCode.SSRF_BLOCKED, ErrorCode.DNS_RESOLUTION_FAILED]).toContain(err.code);
+      expect([
+        ErrorCode.URL_INVALID,
+        ErrorCode.SSRF_BLOCKED,
+        ErrorCode.DNS_RESOLUTION_FAILED,
+      ]).toContain(err.code);
     }
   });
 

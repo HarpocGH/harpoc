@@ -67,7 +67,13 @@ export class SecretManager {
     const secrets = this.store.listSecrets();
     for (const secret of secrets) {
       if (secret.name_hmac) continue;
-      const name = decryptName(this.kek, secret.name_encrypted, secret.name_iv, secret.name_tag, secret.id);
+      const name = decryptName(
+        this.kek,
+        secret.name_encrypted,
+        secret.name_iv,
+        secret.name_tag,
+        secret.id,
+      );
       const hmac = await computeNameHmac(this.kek, name, secret.project);
       this.store.updateSecretNameHmac(secret.id, hmac);
     }
@@ -193,7 +199,13 @@ export class SecretManager {
    */
   async getSecretInfo(handle: string): Promise<SecretInfo> {
     const secret = await this.resolveHandleToSecret(handle);
-    const name = decryptName(this.kek, secret.name_encrypted, secret.name_iv, secret.name_tag, secret.id);
+    const name = decryptName(
+      this.kek,
+      secret.name_encrypted,
+      secret.name_iv,
+      secret.name_tag,
+      secret.id,
+    );
 
     return {
       handle: formatHandle(name, secret.project ?? undefined),
@@ -219,7 +231,14 @@ export class SecretManager {
     const dek = unwrapDek(this.kek, secret.wrapped_dek, secret.dek_iv, secret.dek_tag, secret.id);
 
     try {
-      return decryptSecretValue(dek, secret.ciphertext, secret.ct_iv, secret.ct_tag, secret.id, secret.version);
+      return decryptSecretValue(
+        dek,
+        secret.ciphertext,
+        secret.ct_iv,
+        secret.ct_tag,
+        secret.id,
+        secret.version,
+      );
     } finally {
       wipeBuffer(dek);
     }

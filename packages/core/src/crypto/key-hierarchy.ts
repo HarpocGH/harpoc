@@ -70,8 +70,11 @@ export async function createVaultKeys(password: string): Promise<VaultKeys> {
     const kek = generateRandomBytes(AES_KEY_LENGTH);
 
     // Wrap KEK with master key
-    const { ciphertext: wrappedKek, iv: wrappedKekIv, tag: wrappedKekTag } =
-      encrypt(masterKey, kek, AAD_VAULT_KEK);
+    const {
+      ciphertext: wrappedKek,
+      iv: wrappedKekIv,
+      tag: wrappedKekTag,
+    } = encrypt(masterKey, kek, AAD_VAULT_KEK);
 
     // Generate vault ID
     const vaultId = generateUUIDv7();
@@ -85,9 +88,16 @@ export async function createVaultKeys(password: string): Promise<VaultKeys> {
     const wrappedAuditKey = wrapKeyWithKek(kek, auditKey, AAD_WRAPPED_AUDIT_KEY);
 
     return {
-      salt, wrappedKek, wrappedKekIv, wrappedKekTag,
-      kek, jwtKey, auditKey, vaultId,
-      wrappedJwtKey, wrappedAuditKey,
+      salt,
+      wrappedKek,
+      wrappedKekIv,
+      wrappedKekTag,
+      kek,
+      jwtKey,
+      auditKey,
+      vaultId,
+      wrappedJwtKey,
+      wrappedAuditKey,
     };
   } finally {
     wipeBuffer(masterKey);
@@ -120,8 +130,20 @@ export async function unlockVault(
 
     if (wrappedJwtKey && wrappedAuditKey) {
       // New path: unwrap from KEK
-      jwtKey = decrypt(kek, wrappedJwtKey.ciphertext, wrappedJwtKey.iv, wrappedJwtKey.tag, AAD_WRAPPED_JWT_KEY);
-      auditKey = decrypt(kek, wrappedAuditKey.ciphertext, wrappedAuditKey.iv, wrappedAuditKey.tag, AAD_WRAPPED_AUDIT_KEY);
+      jwtKey = decrypt(
+        kek,
+        wrappedJwtKey.ciphertext,
+        wrappedJwtKey.iv,
+        wrappedJwtKey.tag,
+        AAD_WRAPPED_JWT_KEY,
+      );
+      auditKey = decrypt(
+        kek,
+        wrappedAuditKey.ciphertext,
+        wrappedAuditKey.iv,
+        wrappedAuditKey.tag,
+        AAD_WRAPPED_AUDIT_KEY,
+      );
     } else {
       // Legacy path: derive from master key via HKDF
       jwtKey = await deriveSubkey(masterKey, vaultId, HKDF_INFO_JWT_SIGNING);
@@ -138,8 +160,11 @@ export async function unlockVault(
  * Wrap a per-secret DEK with the vault KEK.
  */
 export function wrapDek(kek: Uint8Array, dek: Uint8Array, secretId: string): WrappedDek {
-  const { ciphertext: wrappedDek, iv: dekIv, tag: dekTag } =
-    encrypt(kek, dek, AAD_DEK_WRAP(secretId));
+  const {
+    ciphertext: wrappedDek,
+    iv: dekIv,
+    tag: dekTag,
+  } = encrypt(kek, dek, AAD_DEK_WRAP(secretId));
   return { wrappedDek, dekIv, dekTag };
 }
 
@@ -165,8 +190,7 @@ export function encryptSecretValue(
   secretId: string,
   version: number,
 ): EncryptedValue {
-  const { ciphertext, iv, tag } =
-    encrypt(dek, plaintext, AAD_SECRET_PAYLOAD(secretId, version));
+  const { ciphertext, iv, tag } = encrypt(dek, plaintext, AAD_SECRET_PAYLOAD(secretId, version));
   return { ciphertext, iv, tag };
 }
 
@@ -187,11 +211,7 @@ export function decryptSecretValue(
 /**
  * Encrypt a secret name with the vault KEK (not per-secret DEK).
  */
-export function encryptName(
-  kek: Uint8Array,
-  name: string,
-  secretId: string,
-): EncryptedValue {
+export function encryptName(kek: Uint8Array, name: string, secretId: string): EncryptedValue {
   const plaintext = new Uint8Array(Buffer.from(name, "utf8"));
   const { ciphertext, iv, tag } = encrypt(kek, plaintext, AAD_NAME_ENCRYPTION(secretId));
   return { ciphertext, iv, tag };
@@ -267,11 +287,7 @@ export function wrapKeyWithKek(kek: Uint8Array, key: Uint8Array, aad: string): W
 /**
  * Unwrap a key from the vault KEK using a specific AAD string.
  */
-export function unwrapKeyFromKek(
-  kek: Uint8Array,
-  wrapped: WrappedKey,
-  aad: string,
-): Uint8Array {
+export function unwrapKeyFromKek(kek: Uint8Array, wrapped: WrappedKey, aad: string): Uint8Array {
   return decrypt(kek, wrapped.ciphertext, wrapped.iv, wrapped.tag, aad);
 }
 

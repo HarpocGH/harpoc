@@ -27,11 +27,13 @@ export function registerAuditResource(
       }));
 
       return {
-        contents: [{
-          uri: uri.href,
-          mimeType: "application/json",
-          text: JSON.stringify(result, null, 2),
-        }],
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
       };
     },
   );

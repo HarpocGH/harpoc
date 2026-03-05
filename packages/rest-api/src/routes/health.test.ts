@@ -16,7 +16,10 @@ const MOCK_TOKEN: VaultApiToken = {
   jti: "jti-1",
 };
 
-function createTestApp(state: string, secrets: Array<{ expiresAt: number | null; status: string }> = []) {
+function createTestApp(
+  state: string,
+  secrets: Array<{ expiresAt: number | null; status: string }> = [],
+) {
   const engine = {
     getState: vi.fn().mockReturnValue(state),
     verifyToken: vi.fn().mockReturnValue(MOCK_TOKEN),

@@ -331,7 +331,11 @@ describe("secret routes", () => {
       const res = await app.request("/api/v1/secrets", {
         method: "POST",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ name: "new-key", type: "api_key", expires_at: Date.now() + 86400000 }),
+        body: JSON.stringify({
+          name: "new-key",
+          type: "api_key",
+          expires_at: Date.now() + 86400000,
+        }),
       });
       expect(res.status).toBe(201);
     });

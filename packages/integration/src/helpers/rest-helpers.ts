@@ -21,8 +21,9 @@ export function startTestServer(engine: VaultEngine): TestServer {
 
   return {
     baseUrl,
-    close: () => new Promise<void>((resolve, reject) => {
-      server.close((err) => (err ? reject(err) : resolve()));
-    }),
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      }),
   };
 }

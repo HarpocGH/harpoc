@@ -117,9 +117,7 @@ export class SqliteStore {
   }
 
   setMeta(key: string, value: string): void {
-    this.db
-      .prepare("INSERT OR REPLACE INTO vault_meta (key, value) VALUES (?, ?)")
-      .run(key, value);
+    this.db.prepare("INSERT OR REPLACE INTO vault_meta (key, value) VALUES (?, ?)").run(key, value);
   }
 
   // ---------------------------------------------------------------------------
@@ -243,9 +241,7 @@ export class SqliteStore {
     if (setClauses.length === 0) return;
 
     params.push(id);
-    this.db
-      .prepare(`UPDATE secrets SET ${setClauses.join(", ")} WHERE id = ?`)
-      .run(...params);
+    this.db.prepare(`UPDATE secrets SET ${setClauses.join(", ")} WHERE id = ?`).run(...params);
   }
 
   getSecretsByNameHmac(nameHmac: string): Secret[] {
@@ -310,10 +306,7 @@ export class SqliteStore {
     return rows.map((row) => this.rowToPolicy(row));
   }
 
-  listPoliciesByPrincipal(
-    principalType: PrincipalType,
-    principalId: string,
-  ): AccessPolicy[] {
+  listPoliciesByPrincipal(principalType: PrincipalType, principalId: string): AccessPolicy[] {
     const rows = this.db
       .prepare(
         "SELECT * FROM access_policies WHERE principal_type = ? AND principal_id = ? ORDER BY created_at DESC",
@@ -402,9 +395,9 @@ export class SqliteStore {
   }
 
   isTokenRevoked(jti: string): boolean {
-    const row = this.db
-      .prepare("SELECT jti FROM revoked_tokens WHERE jti = ?")
-      .get(jti) as { jti: string } | undefined;
+    const row = this.db.prepare("SELECT jti FROM revoked_tokens WHERE jti = ?").get(jti) as
+      | { jti: string }
+      | undefined;
     return row !== undefined;
   }
 

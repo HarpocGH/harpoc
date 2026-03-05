@@ -97,9 +97,7 @@ describe("errorHandler", () => {
       });
 
       const res = await app.request("/test");
-      expect(res.status).toBe(
-        code === ErrorCode.VAULT_LOCKED ? 503 : expectedStatus,
-      );
+      expect(res.status).toBe(code === ErrorCode.VAULT_LOCKED ? 503 : expectedStatus);
       const body = await res.json();
       expect(body.error).toBe(code);
     }

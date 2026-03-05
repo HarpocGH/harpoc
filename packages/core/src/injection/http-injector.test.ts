@@ -48,7 +48,9 @@ beforeAll(async () => {
     }
 
     if (url.pathname === "/redirect") {
-      res.writeHead(302, { Location: `http://localhost:${(server.address() as { port: number }).port}/echo` });
+      res.writeHead(302, {
+        Location: `http://localhost:${(server.address() as { port: number }).port}/echo`,
+      });
       res.end();
       return;
     }

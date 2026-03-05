@@ -30,16 +30,22 @@ export function registerHealthResource(
       }
 
       return {
-        contents: [{
-          uri: uri.href,
-          mimeType: "application/json",
-          text: JSON.stringify({
-            vault_state: engine.getState(),
-            total_secrets: secrets.length,
-            by_status: byStatus,
-            expiring_soon: expiringSoon,
-          }, null, 2),
-        }],
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(
+              {
+                vault_state: engine.getState(),
+                total_secrets: secrets.length,
+                by_status: byStatus,
+                expiring_soon: expiringSoon,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
     },
   );

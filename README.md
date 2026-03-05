@@ -37,20 +37,22 @@ Storage     SQLite (WAL mode, encrypted payloads)
 
 ## Packages
 
-| Package | Description | Status |
-|---------|-------------|--------|
-| `@harpoc/shared` | Types, Zod schemas, error codes, constants | Complete |
-| `@harpoc/core` | VaultEngine, crypto, storage, secrets, audit, access control | Complete |
-| `@harpoc/cli` | `harpoc` CLI (Commander.js) | Complete |
-| `@harpoc/mcp-server` | MCP tools, resources, guards (stdio transport) | Complete |
-| `@harpoc/rest-api` | Hono HTTP API, JWT auth, rate limiting, audit middleware | Complete |
-| `@harpoc/sdk` | TypeScript client (REST + in-process modes) | Complete |
+| Package              | Description                                                  | Status   |
+| -------------------- | ------------------------------------------------------------ | -------- |
+| `@harpoc/shared`     | Types, Zod schemas, error codes, constants                   | Complete |
+| `@harpoc/core`       | VaultEngine, crypto, storage, secrets, audit, access control | Complete |
+| `@harpoc/cli`        | `harpoc` CLI (Commander.js)                                  | Complete |
+| `@harpoc/mcp-server` | MCP tools, resources, guards (stdio transport)               | Complete |
+| `@harpoc/rest-api`   | Hono HTTP API, JWT auth, rate limiting, audit middleware     | Complete |
+| `@harpoc/sdk`        | TypeScript client (REST + in-process modes)                  | Complete |
 
 ## Quick Start
 
 **Prerequisites:** Node.js 22+, pnpm 10+
 
 ```bash
+git clone https://github.com/HarpocGH/harpoc.git
+cd harpoc
 pnpm install
 pnpm build
 pnpm test
@@ -75,7 +77,7 @@ npx harpoc auth token --scope list,read,use --agent claude --ttl 480
 npx harpoc server start --mcp --token <YOUR_TOKEN>
 ```
 
-Add to your **Claude Desktop** config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows) or **Claude Code** config (`.mcp.json` in project root):
+Add to your **Claude Desktop** config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows) or **Claude Code** config (`.mcp.json` in project root or `~/.claude/.mcp.json` for global):
 
 ```json
 {
@@ -88,7 +90,54 @@ Add to your **Claude Desktop** config (`~/Library/Application Support/Claude/cla
 }
 ```
 
-See [`docs/examples/`](../docs/examples/) for full configuration examples with vault directory and token options.
+### Minimal Configuration (no token)
+
+```json
+{
+  "mcpServers": {
+    "harpoc": {
+      "command": "npx",
+      "args": ["harpoc", "server", "start", "--mcp"]
+    }
+  }
+}
+```
+
+### Custom Vault Directory
+
+By default, Harpoc looks for a `.harpoc` directory in the current working directory, then in `~/.harpoc`. To use a vault in a different location:
+
+```json
+{
+  "mcpServers": {
+    "harpoc": {
+      "command": "npx",
+      "args": ["harpoc", "server", "start", "--mcp", "--vault-dir", "/path/to/.harpoc"]
+    }
+  }
+}
+```
+
+### Launch Token Options
+
+A launch token restricts what the MCP server can do — which permissions, secrets, and project scope are available:
+
+```bash
+npx harpoc auth token \
+  --scope list,read,use \
+  --agent claude \
+  --project my-project \
+  --secrets "API_KEY,DB_PASSWORD" \
+  --ttl 480
+```
+
+Flags:
+
+- `--scope` — Comma-separated permissions: `list`, `read`, `use`, `create`, `rotate`, `revoke`, `admin`
+- `--agent` — Agent name (sets JWT subject)
+- `--project` — Project scope
+- `--secrets` — Comma-separated secret names the token can access
+- `--ttl` — Token lifetime in minutes (default: 60)
 
 ## Development
 
@@ -110,16 +159,6 @@ pnpm format          # Fix formatting
 - **Secret names encrypted** with vault-level KEK — database inspection reveals nothing about stored services. HMAC-SHA256 name index enables O(1) handle resolution without decrypting all names.
 - **Lazy secret expiry**: secrets with an `expires_at` timestamp are checked on access and automatically transitioned to expired status.
 - **JWT sessions** with sliding window TTL (15 min default, 24 h maximum), store-based token revocation with automatic pruning of expired entries.
-
-## Roadmap
-
-| Version | Scope |
-|---------|-------|
-| **v1.0** | Core vault + MCP + REST + SDK + CLI. API keys and static tokens. Local single-user. HTTP-only injection. |
-| **v1.1** | OAuth 2.1 proxy (PKCE, provider presets, auto-refresh). Certificate lifecycle (ACME). |
-| **v1.2** | Web UI for vault management and agent governance. Agent registry, permission matrix, token lifecycle dashboard, per-agent audit feed. |
-| **v2.0** | Cloud sync (vector clocks, conflict resolution). Team vaults (Shamir's Secret Sharing). |
-| **v2.1+** | Non-HTTP injection: database connection strings, SSH key agent, SMTP, WebSocket auth. |
 
 ## Tech Stack
 

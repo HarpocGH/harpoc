@@ -28,14 +28,20 @@ export function registerRevokeSecret(
       await engine.revokeSecret(args.handle);
 
       return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({
-            handle: args.handle,
-            status: "revoked",
-            message: "Secret has been permanently revoked",
-          }, null, 2),
-        }],
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                handle: args.handle,
+                status: "revoked",
+                message: "Secret has been permanently revoked",
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
     },
   );

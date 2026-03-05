@@ -45,7 +45,13 @@ export function isPrivateIp(ip: string): boolean {
 
     for (const [prefix0, prefix1, cidr] of PRIVATE_IPV4_RANGES) {
       if (cidr === 8 && octets[0] === prefix0) return true;
-      if (cidr === 12 && octets[0] === prefix0 && (octets[1] ?? 0) >= prefix1 && (octets[1] ?? 0) <= prefix1 + 15) return true;
+      if (
+        cidr === 12 &&
+        octets[0] === prefix0 &&
+        (octets[1] ?? 0) >= prefix1 &&
+        (octets[1] ?? 0) <= prefix1 + 15
+      )
+        return true;
       if (cidr === 16 && octets[0] === prefix0 && octets[1] === prefix1) return true;
     }
 

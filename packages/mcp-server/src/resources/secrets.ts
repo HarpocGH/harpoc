@@ -12,7 +12,10 @@ export function registerSecretsResource(
   server.resource(
     "secrets-list",
     "secret://vault/secrets",
-    { description: "List of all secret handles with metadata (never values)", mimeType: "application/json" },
+    {
+      description: "List of all secret handles with metadata (never values)",
+      mimeType: "application/json",
+    },
     async (uri) => {
       scopeGuard.checkAccess("list");
       const secrets = scopeGuard.filterByScope(engine.listSecrets());
@@ -25,7 +28,9 @@ export function registerSecretsResource(
         version: s.version,
       }));
       return {
-        contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(result, null, 2) }],
+        contents: [
+          { uri: uri.href, mimeType: "application/json", text: JSON.stringify(result, null, 2) },
+        ],
       };
     },
   );
@@ -47,32 +52,49 @@ export function registerSecretsResource(
         };
       },
     }),
-    { description: "Metadata for a specific secret (never the value)", mimeType: "application/json" },
+    {
+      description: "Metadata for a specific secret (never the value)",
+      mimeType: "application/json",
+    },
     async (uri, variables) => {
       const name = variables.name as string;
       scopeGuard.checkAccess("read", undefined, name);
       const secrets = engine.listSecrets();
       const secret = secrets.find((s) => s.name === name);
       if (!secret) {
-        return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify({ error: "Secret not found" }) }] };
+        return {
+          contents: [
+            {
+              uri: uri.href,
+              mimeType: "application/json",
+              text: JSON.stringify({ error: "Secret not found" }),
+            },
+          ],
+        };
       }
       return {
-        contents: [{
-          uri: uri.href,
-          mimeType: "application/json",
-          text: JSON.stringify({
-            handle: secret.handle,
-            name: secret.name,
-            type: secret.type,
-            project: secret.project,
-            status: secret.status,
-            version: secret.version,
-            created_at: secret.createdAt,
-            updated_at: secret.updatedAt,
-            expires_at: secret.expiresAt,
-            rotated_at: secret.rotatedAt,
-          }, null, 2),
-        }],
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(
+              {
+                handle: secret.handle,
+                name: secret.name,
+                type: secret.type,
+                project: secret.project,
+                status: secret.status,
+                version: secret.version,
+                created_at: secret.createdAt,
+                updated_at: secret.updatedAt,
+                expires_at: secret.expiresAt,
+                rotated_at: secret.rotatedAt,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
     },
   );

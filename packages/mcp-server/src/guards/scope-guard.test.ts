@@ -111,11 +111,13 @@ describe("ScopeGuard", () => {
 
   describe("combined enforcement", () => {
     it("enforces permission + project + secret name", () => {
-      const guard = new ScopeGuard(makeToken({
-        scope: ["use"],
-        project: "prod",
-        secrets: ["api-key"],
-      }));
+      const guard = new ScopeGuard(
+        makeToken({
+          scope: ["use"],
+          project: "prod",
+          secrets: ["api-key"],
+        }),
+      );
 
       // All match
       expect(guard.checkAccess("use", "prod", "api-key")).toBe("test-agent");

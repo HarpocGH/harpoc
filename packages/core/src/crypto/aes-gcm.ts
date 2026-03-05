@@ -1,8 +1,4 @@
-import {
-  createCipheriv,
-  createDecipheriv,
-  randomBytes,
-} from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import {
   AES_IV_LENGTH,
   AES_KEY_LENGTH,
@@ -20,11 +16,7 @@ export interface EncryptResult {
 /**
  * Encrypt plaintext with AES-256-GCM. Always generates a fresh random IV.
  */
-export function encrypt(
-  key: Uint8Array,
-  plaintext: Uint8Array,
-  aad: string,
-): EncryptResult {
+export function encrypt(key: Uint8Array, plaintext: Uint8Array, aad: string): EncryptResult {
   if (key.length !== AES_KEY_LENGTH) {
     throw new VaultError(
       ErrorCode.ENCRYPTION_ERROR,

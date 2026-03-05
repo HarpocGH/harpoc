@@ -16,24 +16,14 @@ export function deriveSubkey(
   length: number = AES_KEY_LENGTH,
 ): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
-    hkdf(
-      "sha256",
-      ikm,
-      salt,
-      info,
-      length,
-      (err, derivedKey) => {
-        if (err) {
-          reject(
-            new VaultError(
-              ErrorCode.KEY_DERIVATION_ERROR,
-              `HKDF derivation failed: ${err.message}`,
-            ),
-          );
-          return;
-        }
-        resolve(new Uint8Array(derivedKey));
-      },
-    );
+    hkdf("sha256", ikm, salt, info, length, (err, derivedKey) => {
+      if (err) {
+        reject(
+          new VaultError(ErrorCode.KEY_DERIVATION_ERROR, `HKDF derivation failed: ${err.message}`),
+        );
+        return;
+      }
+      resolve(new Uint8Array(derivedKey));
+    });
   });
 }

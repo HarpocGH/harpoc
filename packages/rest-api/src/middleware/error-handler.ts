@@ -13,8 +13,5 @@ export const errorHandler: ErrorHandler<HarpocEnv> = (err, c) => {
     return c.json(body, status as 400);
   }
 
-  return c.json(
-    { error: ErrorCode.INTERNAL_ERROR, message: "Internal server error" },
-    500,
-  );
+  return c.json({ error: ErrorCode.INTERNAL_ERROR, message: "Internal server error" }, 500);
 };

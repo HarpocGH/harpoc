@@ -4,11 +4,7 @@ import type {
   InjectionConfig,
   UseSecretResponse,
 } from "@harpoc/shared";
-import {
-  DEFAULT_HTTP_TIMEOUT_MS,
-  ErrorCode,
-  VaultError,
-} from "@harpoc/shared";
+import { DEFAULT_HTTP_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { validateUrl } from "./url-validator.js";
 
@@ -55,13 +51,19 @@ export class HttpInjector {
           break;
         case "header":
           if (!injection.header_name) {
-            throw new VaultError(ErrorCode.INVALID_INJECTION_CONFIG, "header_name required for header injection");
+            throw new VaultError(
+              ErrorCode.INVALID_INJECTION_CONFIG,
+              "header_name required for header injection",
+            );
           }
           headers[injection.header_name] = valueStr;
           break;
         case "query":
           if (!injection.query_param) {
-            throw new VaultError(ErrorCode.INVALID_INJECTION_CONFIG, "query_param required for query injection");
+            throw new VaultError(
+              ErrorCode.INVALID_INJECTION_CONFIG,
+              "query_param required for query injection",
+            );
           }
           url.searchParams.set(injection.query_param, valueStr);
           finalUrl = url.toString();
@@ -187,10 +189,7 @@ export class HttpInjector {
         }
 
         if (remainingRedirects <= 0) {
-          throw new VaultError(
-            ErrorCode.REDIRECT_POLICY_VIOLATION,
-            "Too many redirects",
-          );
+          throw new VaultError(ErrorCode.REDIRECT_POLICY_VIOLATION, "Too many redirects");
         }
         remainingRedirects--;
 
@@ -232,9 +231,7 @@ export class HttpInjector {
           if (injection?.type === "header" && injection.header_name) {
             const headerToStrip = injection.header_name.toLowerCase();
             currentHeaders = Object.fromEntries(
-              Object.entries(currentHeaders).filter(
-                ([k]) => k.toLowerCase() !== headerToStrip,
-              ),
+              Object.entries(currentHeaders).filter(([k]) => k.toLowerCase() !== headerToStrip),
             );
           }
 
@@ -281,7 +278,11 @@ export class HttpInjector {
     if (err.name === "AbortError" || combined.includes("abort") || combined.includes("timeout")) {
       return ErrorCode.TIMEOUT;
     }
-    if (combined.includes("enotfound") || combined.includes("getaddrinfo") || combined.includes("dns")) {
+    if (
+      combined.includes("enotfound") ||
+      combined.includes("getaddrinfo") ||
+      combined.includes("dns")
+    ) {
       return ErrorCode.DNS_RESOLUTION_FAILED;
     }
     if (combined.includes("econnrefused") || combined.includes("connection refused")) {

@@ -402,7 +402,10 @@ describe("full lifecycle integration", () => {
     expect(new TextDecoder().decode(value)).toBe("initial-value");
 
     // 6. Rotate
-    await engine2.rotateSecret("secret://integration-key", new TextEncoder().encode("rotated-value"));
+    await engine2.rotateSecret(
+      "secret://integration-key",
+      new TextEncoder().encode("rotated-value"),
+    );
     const rotatedVal = await engine2.getSecretValue("secret://integration-key");
     expect(new TextDecoder().decode(rotatedVal)).toBe("rotated-value");
     const rotatedInfo = await engine2.getSecretInfo("secret://integration-key");

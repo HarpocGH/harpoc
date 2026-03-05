@@ -62,7 +62,9 @@ async function readResource(
   server: McpServer,
   uri: string,
 ): Promise<{ contents: Array<{ uri: string; text?: string; mimeType?: string }> }> {
-  const lowLevelServer = (server as unknown as { server: { _requestHandlers: Map<string, unknown> } }).server;
+  const lowLevelServer = (
+    server as unknown as { server: { _requestHandlers: Map<string, unknown> } }
+  ).server;
   const handler = lowLevelServer._requestHandlers.get("resources/read") as (
     req: { method: string; params: { uri: string } },
     extra: unknown,
@@ -147,7 +149,10 @@ describe("MCP Resources", () => {
 
     it("returns projects with secret counts", async () => {
       const result = await readResource(server, "secret://vault/projects");
-      const data = JSON.parse(getResourceText(result)) as Array<{ project: string; secret_count: number }>;
+      const data = JSON.parse(getResourceText(result)) as Array<{
+        project: string;
+        secret_count: number;
+      }>;
       expect(data).toHaveLength(2);
       const none = data.find((d) => d.project === "(none)");
       const prod = data.find((d) => d.project === "prod");
@@ -208,7 +213,10 @@ describe("MCP Resources", () => {
       registerProjectsResource(srv, engine, scoped);
 
       const result = await readResource(srv, "secret://vault/projects");
-      const data = JSON.parse(getResourceText(result)) as Array<{ project: string; secret_count: number }>;
+      const data = JSON.parse(getResourceText(result)) as Array<{
+        project: string;
+        secret_count: number;
+      }>;
       expect(data).toHaveLength(1);
       expect(data[0].project).toBe("prod");
     });

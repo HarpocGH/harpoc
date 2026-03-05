@@ -12,7 +12,7 @@ let manager: SessionManager;
 
 function makeValidSession(overrides: Partial<SessionFile> = {}): SessionFile {
   const now = Date.now();
-  const b64 = Buffer.from("a]$%^&*(){}:\";<>?/.,test").toString("base64");
+  const b64 = Buffer.from('a]$%^&*(){}:";<>?/.,test').toString("base64");
   return {
     version: 1,
     session_id: "test-session",
@@ -153,7 +153,18 @@ describe("createSessionData", () => {
   it("creates a session with correct structure", () => {
     const b64 = Buffer.from("test").toString("base64");
     const session = SessionManager.createSessionData(
-      "sid", "vid", b64, b64, b64, b64, b64, b64, b64, b64, b64, b64,
+      "sid",
+      "vid",
+      b64,
+      b64,
+      b64,
+      b64,
+      b64,
+      b64,
+      b64,
+      b64,
+      b64,
+      b64,
     );
 
     expect(session.version).toBe(1);
@@ -168,7 +179,19 @@ describe("createSessionData", () => {
   it("accepts custom TTL", () => {
     const b64 = Buffer.from("test").toString("base64");
     const session = SessionManager.createSessionData(
-      "sid", "vid", b64, b64, b64, b64, b64, b64, b64, b64, b64, b64, 5000,
+      "sid",
+      "vid",
+      b64,
+      b64,
+      b64,
+      b64,
+      b64,
+      b64,
+      b64,
+      b64,
+      b64,
+      b64,
+      5000,
     );
 
     expect(session.expires_at - session.created_at).toBe(5000);

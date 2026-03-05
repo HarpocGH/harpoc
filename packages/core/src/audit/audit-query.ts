@@ -4,7 +4,10 @@ import { decrypt } from "../crypto/aes-gcm.js";
 import type { AuditFilter, SqliteStore } from "../storage/sqlite-store.js";
 
 /** Audit event with decrypted detail. */
-export interface DecryptedAuditEvent extends Omit<AuditEvent, "detail_encrypted" | "detail_iv" | "detail_tag"> {
+export interface DecryptedAuditEvent extends Omit<
+  AuditEvent,
+  "detail_encrypted" | "detail_iv" | "detail_tag"
+> {
   detail: Record<string, unknown> | null;
 }
 

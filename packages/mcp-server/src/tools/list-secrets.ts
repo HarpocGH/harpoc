@@ -18,8 +18,14 @@ export function registerListSecrets(
     "List all secrets in the vault (metadata only, never values)",
     {
       project: z.string().optional().describe("Filter by project name"),
-      type: z.string().optional().describe("Filter by secret type (api_key, oauth_token, certificate)"),
-      status: z.string().optional().describe("Filter by status (active, pending, expired, revoked)"),
+      type: z
+        .string()
+        .optional()
+        .describe("Filter by secret type (api_key, oauth_token, certificate)"),
+      status: z
+        .string()
+        .optional()
+        .describe("Filter by status (active, pending, expired, revoked)"),
     },
     async (args) => {
       scopeGuard.checkAccess(PERMISSION, args.project);

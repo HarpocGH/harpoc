@@ -80,7 +80,9 @@ async function callTool(
   name: string,
   args: Record<string, unknown>,
 ): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
-  const lowLevelServer = (server as unknown as { server: { _requestHandlers: Map<string, unknown> } }).server;
+  const lowLevelServer = (
+    server as unknown as { server: { _requestHandlers: Map<string, unknown> } }
+  ).server;
   const handler = lowLevelServer._requestHandlers.get("tools/call") as (
     req: { method: string; params: { name: string; arguments?: Record<string, unknown> } },
     extra: unknown,
@@ -187,7 +189,7 @@ describe("MCP Tools", () => {
     it("sanitizes credential patterns in response", async () => {
       (engine.useSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
         status: 200,
-        body: 'Bearer eyJhbGciOiJIUzI1NiJ9.test.signature leaked!',
+        body: "Bearer eyJhbGciOiJIUzI1NiJ9.test.signature leaked!",
       });
 
       const result = await callTool(server, "use_secret", {
@@ -210,7 +212,11 @@ describe("MCP Tools", () => {
 
       expect(engine.useSecret).toHaveBeenCalledWith(
         "secret://my-key",
-        expect.objectContaining({ method: "POST", url: "https://api.example.com/data", body: "test" }),
+        expect.objectContaining({
+          method: "POST",
+          url: "https://api.example.com/data",
+          body: "test",
+        }),
         { type: "header", header_name: "X-API-Key" },
         "none",
       );

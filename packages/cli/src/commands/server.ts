@@ -62,9 +62,8 @@ export function registerServerCommand(program: Command): void {
 
           if (opts.mcp) {
             const { createMcpServer } = await import("@harpoc/mcp-server");
-            const { StdioServerTransport } = await import(
-              "@modelcontextprotocol/sdk/server/stdio.js"
-            );
+            const { StdioServerTransport } =
+              await import("@modelcontextprotocol/sdk/server/stdio.js");
             const server = createMcpServer({ engine, launchToken: opts.token });
             const transport = new StdioServerTransport();
             await server.connect(transport);

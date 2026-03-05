@@ -25,9 +25,7 @@ export function registerCheckHealth(
       rateLimiter.checkLimit();
 
       const secrets = engine.listSecrets();
-      const filtered = args.handle
-        ? secrets.filter((s) => s.handle === args.handle)
-        : secrets;
+      const filtered = args.handle ? secrets.filter((s) => s.handle === args.handle) : secrets;
 
       const byStatus: Record<string, number> = {};
       const expiringSoon: Array<{ handle: string; expires_at: number }> = [];
@@ -42,15 +40,21 @@ export function registerCheckHealth(
       }
 
       return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({
-            vault_state: engine.getState(),
-            total_secrets: filtered.length,
-            by_status: byStatus,
-            expiring_soon: expiringSoon,
-          }, null, 2),
-        }],
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                vault_state: engine.getState(),
+                total_secrets: filtered.length,
+                by_status: byStatus,
+                expiring_soon: expiringSoon,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
     },
   );

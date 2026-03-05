@@ -220,7 +220,13 @@ describe("encryptName / decryptName", () => {
     const name = "schl\u00fcssel-\ud83d\udd11";
 
     const encrypted = encryptName(cachedKeys.kek, name, "id1");
-    const decrypted = decryptName(cachedKeys.kek, encrypted.ciphertext, encrypted.iv, encrypted.tag, "id1");
+    const decrypted = decryptName(
+      cachedKeys.kek,
+      encrypted.ciphertext,
+      encrypted.iv,
+      encrypted.tag,
+      "id1",
+    );
 
     expect(decrypted).toBe(name);
   });
@@ -319,7 +325,12 @@ describe("changePassword", () => {
     const dek = generateRandomBytes(AES_KEY_LENGTH);
     const secretId = "my-secret";
     const wrapped = wrapDek(created.kek, dek, secretId);
-    const encrypted = encryptSecretValue(dek, new Uint8Array(Buffer.from("secret-value")), secretId, 1);
+    const encrypted = encryptSecretValue(
+      dek,
+      new Uint8Array(Buffer.from("secret-value")),
+      secretId,
+      1,
+    );
 
     // Change password
     const changed = await changePassword(
@@ -439,13 +450,7 @@ describe("full key hierarchy lifecycle", () => {
     );
 
     // Decrypt name
-    const name = decryptName(
-      unlocked.kek,
-      nameEnc.ciphertext,
-      nameEnc.iv,
-      nameEnc.tag,
-      secretId,
-    );
+    const name = decryptName(unlocked.kek, nameEnc.ciphertext, nameEnc.iv, nameEnc.tag, secretId);
     expect(name).toBe("api-key");
 
     // Decrypt value

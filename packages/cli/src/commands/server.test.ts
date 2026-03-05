@@ -78,33 +78,25 @@ describe("server start", () => {
   it("exits with error when neither --mcp nor --rest is provided", async () => {
     await expect(run([])).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(
-      "Error: At least one of --mcp or --rest is required.",
-    );
+    expect(errorSpy).toHaveBeenCalledWith("Error: At least one of --mcp or --rest is required.");
   });
 
   it("exits with error for non-numeric port", async () => {
     await expect(run(["--rest", "--port", "abc"])).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Invalid port"),
-    );
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid port"));
   });
 
   it("exits with error for port out of range", async () => {
     await expect(run(["--rest", "--port", "99999"])).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Invalid port"),
-    );
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid port"));
   });
 
   it("exits with error for port 0", async () => {
     await expect(run(["--rest", "--port", "0"])).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Invalid port"),
-    );
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid port"));
   });
 
   it("exits with error when --token is used without --mcp", async () => {
@@ -117,9 +109,7 @@ describe("server start", () => {
 
   it("starts MCP server with --mcp", async () => {
     const { createMcpServer } = await import("@harpoc/mcp-server");
-    const { StdioServerTransport } = await import(
-      "@modelcontextprotocol/sdk/server/stdio.js"
-    );
+    const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
 
     await run(["--mcp"]);
 

@@ -11,7 +11,7 @@ describe("InjectionGuard", () => {
 
   it("redacts Bearer tokens", () => {
     const guard = new InjectionGuard();
-    const input = 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.something.signature';
+    const input = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.something.signature";
     const result = guard.sanitize(input);
     expect(result).toBe("Authorization: [REDACTED]");
     expect(guard.totalRedactions).toBe(1);
@@ -19,7 +19,7 @@ describe("InjectionGuard", () => {
 
   it("redacts Basic auth", () => {
     const guard = new InjectionGuard();
-    const input = 'Authorization: Basic dXNlcjpwYXNzd29yZA==';
+    const input = "Authorization: Basic dXNlcjpwYXNzd29yZA==";
     const result = guard.sanitize(input);
     expect(result).toBe("Authorization: [REDACTED]");
     expect(guard.totalRedactions).toBe(1);
@@ -27,7 +27,7 @@ describe("InjectionGuard", () => {
 
   it("redacts API key patterns", () => {
     const guard = new InjectionGuard();
-    const input = 'api_key=sk_live_1234567890abcdef';
+    const input = "api_key=sk_live_1234567890abcdef";
     const result = guard.sanitize(input);
     expect(result).toBe("api_key=[REDACTED]");
   });
@@ -48,13 +48,13 @@ describe("InjectionGuard", () => {
 
   it("preserves non-matching content", () => {
     const guard = new InjectionGuard();
-    const input = 'Some normal text with api mentions and short tokens like abc';
+    const input = "Some normal text with api mentions and short tokens like abc";
     expect(guard.sanitize(input)).toBe(input);
   });
 
   it("handles multiple patterns in one string", () => {
     const guard = new InjectionGuard();
-    const input = 'Bearer eyJhbGciOiJIUzI1NiJ9.x.y and api_key=sk_1234567890abcdef';
+    const input = "Bearer eyJhbGciOiJIUzI1NiJ9.x.y and api_key=sk_1234567890abcdef";
     const result = guard.sanitize(input);
     expect(result).toContain("[REDACTED]");
     expect(result).not.toContain("eyJhbG");

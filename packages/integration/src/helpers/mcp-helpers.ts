@@ -14,7 +14,8 @@ export async function callTool(
   name: string,
   args: Record<string, unknown>,
 ): Promise<ToolResult> {
-  const lowLevel = (server as unknown as { server: { _requestHandlers: Map<string, unknown> } }).server;
+  const lowLevel = (server as unknown as { server: { _requestHandlers: Map<string, unknown> } })
+    .server;
   const handler = lowLevel._requestHandlers.get("tools/call") as (
     req: { method: string; params: { name: string; arguments?: Record<string, unknown> } },
     extra: unknown,
@@ -35,7 +36,8 @@ export async function readResource(
   server: McpServer,
   uri: string,
 ): Promise<{ contents: Array<{ uri: string; mimeType?: string; text?: string }> }> {
-  const lowLevel = (server as unknown as { server: { _requestHandlers: Map<string, unknown> } }).server;
+  const lowLevel = (server as unknown as { server: { _requestHandlers: Map<string, unknown> } })
+    .server;
   const handler = lowLevel._requestHandlers.get("resources/read") as (
     req: { method: string; params: { uri: string } },
     extra: unknown,
