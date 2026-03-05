@@ -221,14 +221,52 @@ describe("RestClient", () => {
   });
 
   describe("error handling", () => {
-    it("maps error responses to VaultError", async () => {
+    it("maps error responses to VaultError with correct code", async () => {
       fetchSpy.mockResolvedValueOnce({
         ok: false,
         status: 404,
         json: async () => ({ error: ErrorCode.SECRET_NOT_FOUND, message: "Not found" }),
       });
 
-      await expect(client.getSecretInfo("secret://missing")).rejects.toThrow("Not found");
+      await expect(client.getSecretInfo("secret://missing")).rejects.toThrow(
+        expect.objectContaining({ code: ErrorCode.SECRET_NOT_FOUND, message: "Not found" }),
+      );
+    });
+
+    it("maps 401 responses to VaultError", async () => {
+      fetchSpy.mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        json: async () => ({ error: ErrorCode.TOKEN_EXPIRED, message: "Token expired" }),
+      });
+
+      await expect(client.listSecrets()).rejects.toThrow(
+        expect.objectContaining({ code: ErrorCode.TOKEN_EXPIRED }),
+      );
+    });
+
+    it("maps 503 responses to VaultError", async () => {
+      fetchSpy.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        json: async () => ({ error: ErrorCode.VAULT_LOCKED, message: "Vault is locked" }),
+      });
+
+      await expect(client.listSecrets()).rejects.toThrow(
+        expect.objectContaining({ code: ErrorCode.VAULT_LOCKED }),
+      );
+    });
+
+    it("falls back to INTERNAL_ERROR when error field is missing", async () => {
+      fetchSpy.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: async () => ({ message: "Something broke" }),
+      });
+
+      await expect(client.listSecrets()).rejects.toThrow(
+        expect.objectContaining({ code: ErrorCode.INTERNAL_ERROR }),
+      );
     });
 
     it("sets Authorization header on all requests", async () => {

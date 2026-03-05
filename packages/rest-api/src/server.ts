@@ -17,8 +17,8 @@ export function startServer(options: ServerOptions): ReturnType<typeof serve> {
 
   const app = createApp(engine);
 
-  const server = serve({ fetch: app.fetch, port });
-  console.log(`[harpoc] REST API listening on port ${port}`);
+  const server = serve({ fetch: app.fetch, port, hostname: "127.0.0.1" });
+  console.log(`[harpoc] REST API listening on 127.0.0.1:${port}`);
 
   return server;
 }

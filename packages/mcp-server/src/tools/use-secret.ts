@@ -55,9 +55,17 @@ export function registerUseSecret(
         args.follow_redirects as FollowRedirects | undefined,
       );
 
-      // Sanitize the response body to prevent credential leakage
+      // Sanitize response to prevent credential leakage
       if (response.body) {
         response.body = injectionGuard.sanitize(response.body);
+      }
+      if (response.headers) {
+        for (const [key, value] of Object.entries(response.headers)) {
+          response.headers[key] = injectionGuard.sanitize(value);
+        }
+      }
+      if (response.error) {
+        response.error = injectionGuard.sanitize(response.error);
       }
 
       return {

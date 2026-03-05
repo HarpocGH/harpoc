@@ -70,16 +70,22 @@ export class SqliteStore {
   private runMigrations(): void {
     const currentVersion = this.getMigrationVersion();
     if (currentVersion < 1) {
-      this.db.exec(migration001.up);
-      this.setMeta("schema_version", "1");
+      this.db.transaction(() => {
+        this.db.exec(migration001.up);
+        this.setMeta("schema_version", "1");
+      })();
     }
     if (currentVersion < 2) {
-      this.db.exec(migration002.up);
-      this.setMeta("schema_version", "2");
+      this.db.transaction(() => {
+        this.db.exec(migration002.up);
+        this.setMeta("schema_version", "2");
+      })();
     }
     if (currentVersion < 3) {
-      this.db.exec(migration003.up);
-      this.setMeta("schema_version", "3");
+      this.db.transaction(() => {
+        this.db.exec(migration003.up);
+        this.setMeta("schema_version", "3");
+      })();
     }
   }
 

@@ -12,7 +12,7 @@ export function registerAuditResource(
     "secret://vault/audit/recent",
     { description: "Last 50 audit log entries (metadata only)", mimeType: "application/json" },
     async (uri) => {
-      scopeGuard.checkAccess("list");
+      scopeGuard.checkAccess("admin");
 
       const events = engine.queryAudit({ limit: 50 });
       const result = events.map((e) => ({

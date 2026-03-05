@@ -15,7 +15,7 @@ export function registerSecretsResource(
     { description: "List of all secret handles with metadata (never values)", mimeType: "application/json" },
     async (uri) => {
       scopeGuard.checkAccess("list");
-      const secrets = engine.listSecrets();
+      const secrets = scopeGuard.filterByScope(engine.listSecrets());
       const result = secrets.map((s) => ({
         handle: s.handle,
         name: s.name,
@@ -35,7 +35,8 @@ export function registerSecretsResource(
     "secret-by-name",
     new ResourceTemplate("secret://vault/secrets/{name}", {
       list: async () => {
-        const secrets = engine.listSecrets();
+        scopeGuard.checkAccess("list");
+        const secrets = scopeGuard.filterByScope(engine.listSecrets());
         return {
           resources: secrets.map((s) => ({
             uri: `secret://vault/secrets/${s.name}`,

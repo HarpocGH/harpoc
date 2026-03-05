@@ -14,7 +14,7 @@ export function registerProjectsResource(
     async (uri) => {
       scopeGuard.checkAccess("list");
 
-      const secrets = engine.listSecrets();
+      const secrets = scopeGuard.filterByScope(engine.listSecrets());
       const counts = new Map<string, number>();
 
       for (const s of secrets) {

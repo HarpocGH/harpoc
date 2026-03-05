@@ -68,4 +68,52 @@ describe("InjectionGuard", () => {
     guard.sanitize("Basic dXNlcjpwYXNzd29yZA==");
     expect(guard.totalRedactions).toBe(2);
   });
+
+  it("does not redact short tokens below pattern threshold", () => {
+    const guard = new InjectionGuard();
+    // Bearer pattern requires 20+ chars after "Bearer "
+    const shortBearer = "Bearer " + "a".repeat(19);
+    expect(guard.sanitize(shortBearer)).toBe(shortBearer);
+    expect(guard.totalRedactions).toBe(0);
+  });
+
+  it("redacts tokens at exact threshold length", () => {
+    const guard = new InjectionGuard();
+    // Bearer pattern requires 20+ chars
+    const exactBearer = "Bearer " + "a".repeat(20);
+    expect(guard.sanitize(exactBearer)).toBe("[REDACTED]");
+    expect(guard.totalRedactions).toBe(1);
+  });
+
+  it("does not redact api_key values below 16 chars", () => {
+    const guard = new InjectionGuard();
+    const shortKey = "api_key=" + "x".repeat(15);
+    expect(guard.sanitize(shortKey)).toBe(shortKey);
+    expect(guard.totalRedactions).toBe(0);
+  });
+
+  it("redacts api_key values at exactly 16 chars", () => {
+    const guard = new InjectionGuard();
+    const exactKey = "api_key=" + "x".repeat(16);
+    expect(guard.sanitize(exactKey)).toBe("api_key=[REDACTED]");
+    expect(guard.totalRedactions).toBe(1);
+  });
+
+  it("handles empty string without error", () => {
+    const guard = new InjectionGuard();
+    expect(guard.sanitize("")).toBe("");
+    expect(guard.totalRedactions).toBe(0);
+  });
+
+  it("redacts api-key with hyphen separator", () => {
+    const guard = new InjectionGuard();
+    const input = "api-key=sk_live_1234567890abcdef";
+    expect(guard.sanitize(input)).toBe("api-key=[REDACTED]");
+  });
+
+  it("redacts apikey without separator", () => {
+    const guard = new InjectionGuard();
+    const input = "apikey=sk_live_1234567890abcdef";
+    expect(guard.sanitize(input)).toBe("apikey=[REDACTED]");
+  });
 });

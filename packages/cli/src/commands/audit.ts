@@ -17,11 +17,16 @@ export function registerAuditCommand(program: Command): void {
       try {
         const engine = await loadUnlockedEngine(vaultDir);
         try {
+          const limit = options.limit ? parseInt(options.limit, 10) : 50;
+          if (isNaN(limit) || limit <= 0) {
+            throw new Error("--limit must be a positive number");
+          }
+
           const events = engine.queryAudit({
             secretId: options.secret,
             eventType: options.event as AuditEventType | undefined,
             since: options.since ? new Date(options.since).getTime() : undefined,
-            limit: options.limit ? parseInt(options.limit, 10) : 50,
+            limit,
           });
 
           if (options.json) {

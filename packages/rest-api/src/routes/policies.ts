@@ -1,17 +1,8 @@
 import { Hono } from "hono";
-import type { Permission, PrincipalType, VaultApiToken } from "@harpoc/shared";
-import { VaultError } from "@harpoc/shared";
+import type { PrincipalType, Permission } from "@harpoc/shared";
+import { VaultError, ErrorCode, accessPolicyInputSchema } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
-
-function requireScope(token: VaultApiToken, permission: Permission): void {
-  if (!token.scope.includes(permission) && !token.scope.includes("admin")) {
-    throw VaultError.accessDenied(`Token lacks permission: ${permission}`);
-  }
-}
-
-function buildHandle(handle: string): string {
-  return `secret://${handle}`;
-}
+import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
 
 export function createPolicyRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
@@ -19,7 +10,8 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
   // List policies for a secret
   router.get("/:handle/policies", async (c) => {
     const token = c.get("token");
-    requireScope(token, "read");
+    const { project, name } = parseHandleParam(c.req.param("handle"));
+    checkTokenScope(token, "read", project, name);
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
@@ -32,32 +24,26 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
   // Grant a policy
   router.post("/:handle/policies", async (c) => {
     const token = c.get("token");
-    requireScope(token, "admin");
+    const { project, name } = parseHandleParam(c.req.param("handle"));
+    checkTokenScope(token, "admin", project, name);
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
     const secretId = await engine.resolveSecretId(handle);
 
-    const body = await c.req.json<{
-      principal_type: string;
-      principal_id: string;
-      permissions: string[];
-      expires_at?: number;
-    }>();
-
-    if (!body.principal_type || !body.principal_id || !body.permissions?.length) {
-      throw VaultError.invalidInput(
-        "principal_type, principal_id, and permissions are required",
-      );
+    const body = await c.req.json<Record<string, unknown>>();
+    const parsed = accessPolicyInputSchema.safeParse(body);
+    if (!parsed.success) {
+      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
     }
 
     const policy = engine.grantPolicy(
       {
         secretId,
-        principalType: body.principal_type as PrincipalType,
-        principalId: body.principal_id,
-        permissions: body.permissions as Permission[],
-        expiresAt: body.expires_at,
+        principalType: parsed.data.principal_type as PrincipalType,
+        principalId: parsed.data.principal_id,
+        permissions: parsed.data.permissions as Permission[],
+        expiresAt: parsed.data.expires_at,
       },
       token.sub,
     );
@@ -66,12 +52,22 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
   });
 
   // Revoke a policy
-  router.delete("/:handle/policies/:policyId", (c) => {
+  router.delete("/:handle/policies/:policyId", async (c) => {
     const token = c.get("token");
-    requireScope(token, "admin");
+    const { project, name } = parseHandleParam(c.req.param("handle"));
+    checkTokenScope(token, "admin", project, name);
 
     const engine = c.get("engine");
+    const handle = buildHandle(c.req.param("handle"));
+    const secretId = await engine.resolveSecretId(handle);
     const policyId = c.req.param("policyId");
+
+    // Verify the policy belongs to this secret to prevent cross-secret IDOR
+    const policies = engine.listPolicies(secretId);
+    if (!policies.some((p) => p.id === policyId)) {
+      throw new VaultError(ErrorCode.POLICY_NOT_FOUND, "Policy not found for this secret");
+    }
+
     engine.revokePolicy(policyId);
 
     return c.json({ data: { revoked: true } });

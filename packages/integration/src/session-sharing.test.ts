@@ -125,7 +125,8 @@ describe("Session Sharing", () => {
     );
     expect(response.status).toBe(200);
     const body = JSON.parse(response.body!) as { headers: Record<string, string> };
-    expect(body.headers.authorization).toBe(`Bearer ${SECRET_VALUE}`);
+    // Exact-match redaction in VaultEngine.useSecret() scrubs the secret value
+    expect(body.headers.authorization).toBe("Bearer [REDACTED]");
   });
 
   // ---- Test 7: Token from Engine1 valid on Engine2 (REST auth) ------------

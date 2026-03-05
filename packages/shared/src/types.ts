@@ -47,6 +47,8 @@ export const AuditEventType = {
   CERT_ISSUE: "cert.issue",
   CERT_RENEW: "cert.renew",
   CERT_REVOKE: "cert.revoke",
+  TOKEN_CREATE: "token.create",
+  TOKEN_REVOKE: "token.revoke",
   SYNC_PUSH: "sync.push",
   SYNC_PULL: "sync.pull",
   SYNC_CONFLICT: "sync.conflict",

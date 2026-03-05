@@ -45,6 +45,7 @@ export type { CreateSecretInput, SecretInfo } from "./secrets/secret-manager.js"
 export { validateUrl, isPrivateIp, isLoopback } from "./injection/url-validator.js";
 export { HttpInjector } from "./injection/http-injector.js";
 export type { HttpInjectorRequest } from "./injection/http-injector.js";
+export { InjectionGuard } from "./injection/injection-guard.js";
 
 // VaultEngine
 export { VaultEngine } from "./vault-engine.js";

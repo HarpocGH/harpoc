@@ -147,7 +147,16 @@ export class RestClient implements VaultClient {
     }
 
     const response = await fetch(url, init);
-    const json = (await response.json()) as { data?: T; error?: string; message?: string };
+
+    let json: { data?: T; error?: string; message?: string };
+    try {
+      json = (await response.json()) as { data?: T; error?: string; message?: string };
+    } catch {
+      throw new VaultError(
+        ErrorCode.INTERNAL_ERROR,
+        `Server returned non-JSON response (HTTP ${response.status})`,
+      );
+    }
 
     if (!response.ok) {
       const code = (json.error ?? ErrorCode.INTERNAL_ERROR) as ErrorCode;

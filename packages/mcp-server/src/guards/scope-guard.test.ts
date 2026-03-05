@@ -65,10 +65,18 @@ describe("ScopeGuard", () => {
       );
     });
 
-    it("allows when no project context provided", () => {
+    it("allows listing without project context", () => {
       const guard = new ScopeGuard(makeToken({ project: "my-project" }));
-      // No project in the access check — allowed (project check only applies when context is given)
+      // No project in the access check — allowed for listing (no secretName)
       expect(guard.checkAccess("use")).toBe("test-agent");
+    });
+
+    it("denies individual access to global (project-less) secrets", () => {
+      const guard = new ScopeGuard(makeToken({ project: "my-project" }));
+      // Secret with no project accessed individually (secretName provided)
+      expect(() => guard.checkAccess("use", undefined, "global-key")).toThrow(
+        expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }),
+      );
     });
 
     it("allows when token has no project scope", () => {

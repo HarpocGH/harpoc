@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { VAULT_VERSION, VaultState } from "@harpoc/shared";
+import { ErrorCode, VAULT_VERSION, VaultError, VaultState } from "@harpoc/shared";
 import { DirectClient } from "./direct-client.js";
 
 function createMockEngine() {
@@ -182,7 +182,41 @@ describe("DirectClient", () => {
     const client = new DirectClient(engine as never);
 
     const health = await client.getHealth();
-    expect(health.state).toBe("unlocked");
+    expect(health.state).toBe(VaultState.UNLOCKED);
     expect(health.version).toBe(VAULT_VERSION);
+  });
+
+  describe("error propagation", () => {
+    it("propagates VAULT_LOCKED from engine", async () => {
+      const engine = createMockEngine();
+      engine.listSecrets.mockImplementation(() => {
+        throw VaultError.vaultLocked();
+      });
+      const client = new DirectClient(engine as never);
+
+      await expect(client.listSecrets()).rejects.toThrow(
+        expect.objectContaining({ code: ErrorCode.VAULT_LOCKED }),
+      );
+    });
+
+    it("propagates SECRET_NOT_FOUND from engine", async () => {
+      const engine = createMockEngine();
+      engine.getSecretInfo.mockRejectedValue(VaultError.secretNotFound("missing"));
+      const client = new DirectClient(engine as never);
+
+      await expect(client.getSecretInfo("secret://missing")).rejects.toThrow(
+        expect.objectContaining({ code: ErrorCode.SECRET_NOT_FOUND }),
+      );
+    });
+
+    it("propagates ACCESS_DENIED from engine", async () => {
+      const engine = createMockEngine();
+      engine.getSecretValue.mockRejectedValue(VaultError.accessDenied("no permission"));
+      const client = new DirectClient(engine as never);
+
+      await expect(client.getSecretValue("secret://key")).rejects.toThrow(
+        expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }),
+      );
+    });
   });
 });

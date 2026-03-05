@@ -15,10 +15,16 @@ export function createHealthRoutes(): Hono<HarpocEnv> {
     });
   });
 
-  router.get("/expiring", (c) => {
+  return router;
+}
+
+export function createExpiringSecretsRoute(): Hono<HarpocEnv> {
+  const router = new Hono<HarpocEnv>();
+
+  router.get("/", (c) => {
     const engine = c.get("engine");
     if (engine.getState() !== VaultState.UNLOCKED) {
-      return c.json({ data: [] });
+      return c.json({ data: { count: 0 } });
     }
 
     const daysParam = c.req.query("days");

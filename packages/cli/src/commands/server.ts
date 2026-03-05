@@ -17,6 +17,7 @@ export function registerServerCommand(program: Command): void {
         opts: { mcp?: boolean; rest?: boolean; port: string; token?: string },
         cmd: Command,
       ) => {
+        let engine: Awaited<ReturnType<typeof loadUnlockedEngine>> | undefined;
         try {
           if (!opts.mcp && !opts.rest) {
             console.error("Error: At least one of --mcp or --rest is required.");
@@ -35,7 +36,7 @@ export function registerServerCommand(program: Command): void {
           }
 
           const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir as string | undefined);
-          const engine = await loadUnlockedEngine(vaultDir);
+          engine = await loadUnlockedEngine(vaultDir);
 
           let mcpServer: { close(): Promise<void> } | undefined;
           let restServer: { close(): void } | undefined;
@@ -46,7 +47,7 @@ export function registerServerCommand(program: Command): void {
             shuttingDown = true;
             if (mcpServer) await mcpServer.close();
             if (restServer) restServer.close();
-            await engine.destroy();
+            await engine?.destroy();
             process.exit(0);
           };
 
@@ -76,6 +77,7 @@ export function registerServerCommand(program: Command): void {
             restServer = startServer({ engine, port });
           }
         } catch (err: unknown) {
+          await engine?.destroy();
           handleError(err);
         }
       },

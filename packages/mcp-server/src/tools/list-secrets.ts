@@ -22,10 +22,13 @@ export function registerListSecrets(
       status: z.string().optional().describe("Filter by status (active, pending, expired, revoked)"),
     },
     async (args) => {
-      scopeGuard.checkAccess(PERMISSION);
+      scopeGuard.checkAccess(PERMISSION, args.project);
       rateLimiter.checkLimit();
 
       let secrets = engine.listSecrets(args.project);
+
+      // Filter by token's secret-name scope
+      secrets = scopeGuard.filterByScope(secrets);
 
       if (args.type) {
         secrets = secrets.filter((s) => s.type === args.type);

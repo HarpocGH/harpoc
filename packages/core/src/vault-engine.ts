@@ -142,6 +142,7 @@ export class VaultEngine {
    * Unlock an existing vault with a password.
    */
   async unlock(password: string): Promise<void> {
+    const isNewStore = this.store === null;
     const store = this.store ?? new SqliteStore(this.options.dbPath);
 
     const vaultId = store.getMeta("vault_id");
@@ -209,6 +210,8 @@ export class VaultEngine {
         this.incrementLockout(store);
         throw VaultError.invalidPassword();
       }
+      // Non-password error: close store if we opened it in this call
+      if (isNewStore) store.close();
       throw err;
     }
   }
@@ -413,15 +416,44 @@ export class VaultEngine {
     const value = await s.secretManager.getSecretValue(handle);
 
     try {
-      return await s.httpInjector.executeWithSecret(
+      const response = await s.httpInjector.executeWithSecret(
         request,
         value,
         injection,
         followRedirects,
         secret.id,
       );
+
+      // Exact-match redaction: scrub the actual secret value from the response
+      const valueStr = Buffer.from(value).toString("utf8");
+      if (valueStr.length > 0) {
+        this.redactValue(response, valueStr);
+        // Also redact base64 form (used in basic_auth injection)
+        const valueB64 = Buffer.from(valueStr).toString("base64");
+        if (valueB64 !== valueStr) {
+          this.redactValue(response, valueB64);
+        }
+      }
+
+      return response;
     } finally {
       wipeBuffer(value);
+    }
+  }
+
+  private redactValue(response: UseSecretResponse, needle: string): void {
+    if (response.body?.includes(needle)) {
+      response.body = response.body.replaceAll(needle, "[REDACTED]");
+    }
+    if (response.error?.includes(needle)) {
+      response.error = response.error.replaceAll(needle, "[REDACTED]");
+    }
+    if (response.headers) {
+      for (const [key, val] of Object.entries(response.headers)) {
+        if (val.includes(needle)) {
+          response.headers[key] = val.replaceAll(needle, "[REDACTED]");
+        }
+      }
     }
   }
 
@@ -500,7 +532,15 @@ export class VaultEngine {
     if (options?.project) payload.project = options.project;
     if (options?.secrets?.length) payload.secrets = options.secrets;
 
-    return this.signJwt(payload);
+    const token = this.signJwt(payload);
+
+    s.auditLogger.log({
+      eventType: AuditEventType.TOKEN_CREATE,
+      detail: { subject, jti: payload.jti, scope, project: options?.project },
+      sessionId: this.sessionId ?? undefined,
+    });
+
+    return token;
   }
 
   /**
@@ -539,6 +579,12 @@ export class VaultEngine {
     // outlives any token (since createToken caps TTL at MAX_TOKEN_TTL_MS).
     const fallback = Math.floor(Date.now() / 1000) + Math.floor(MAX_TOKEN_TTL_MS / 1000);
     s.store.insertRevokedToken(jti, expiresAt ?? fallback);
+
+    s.auditLogger.log({
+      eventType: AuditEventType.TOKEN_REVOKE,
+      detail: { jti },
+      sessionId: this.sessionId ?? undefined,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -683,8 +729,10 @@ export class VaultEngine {
     this.sessionMonitorInterval = setInterval(async () => {
       const session = await this.sessionManager.extendSession();
       if (!session) {
-        // Session expired or removed
+        // Session expired or removed — close store and seal
         this.wipeKeys();
+        this.store?.close();
+        this.store = null;
         this.state = VaultState.SEALED;
         this.stopSessionMonitor();
       }

@@ -286,6 +286,12 @@ export async function computeNameHmac(
   name: string,
   project: string | null,
 ): Promise<string> {
+  // Guard against delimiter collision: name/project must not contain ":"
+  // (enforced by namePattern regex at schema layer, but defense-in-depth here)
+  if (name.includes(":") || (project && project.includes(":"))) {
+    throw new Error("Name and project must not contain ':'");
+  }
+
   const hmacKey = await deriveSubkey(kek, HKDF_INFO_NAME_INDEX, HKDF_INFO_NAME_INDEX);
   try {
     const data = project ? `${name}:${project}` : name;

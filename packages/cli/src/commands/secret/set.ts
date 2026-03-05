@@ -44,10 +44,6 @@ export function registerSecretSetCommand(secret: Command): void {
             injection,
           });
 
-          if (result.status === "pending") {
-            await engine.setSecretValue(result.handle, new TextEncoder().encode(value));
-          }
-
           if (json) {
             printJson(result);
           } else {

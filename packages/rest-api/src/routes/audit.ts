@@ -1,20 +1,15 @@
 import { Hono } from "hono";
-import type { AuditEventType, Permission, VaultApiToken } from "@harpoc/shared";
+import { auditQuerySchema } from "@harpoc/shared";
 import { VaultError } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
-
-function requireScope(token: VaultApiToken, permission: Permission): void {
-  if (!token.scope.includes(permission) && !token.scope.includes("admin")) {
-    throw VaultError.accessDenied(`Token lacks permission: ${permission}`);
-  }
-}
+import { checkTokenScope } from "../middleware/scope.js";
 
 export function createAuditRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
 
   router.get("/", (c) => {
     const token = c.get("token");
-    requireScope(token, "admin");
+    checkTokenScope(token, "admin");
 
     const engine = c.get("engine");
 
@@ -24,12 +19,25 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
     const until = c.req.query("until");
     const limit = c.req.query("limit");
 
-    const events = engine.queryAudit({
-      secretId: secretId ?? undefined,
-      eventType: eventType ? (eventType as AuditEventType) : undefined,
+    const raw = {
+      secret_id: secretId ?? undefined,
+      event_type: eventType ?? undefined,
       since: since ? parseInt(since, 10) : undefined,
       until: until ? parseInt(until, 10) : undefined,
       limit: limit ? parseInt(limit, 10) : undefined,
+    };
+
+    const parsed = auditQuerySchema.safeParse(raw);
+    if (!parsed.success) {
+      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+    }
+
+    const events = engine.queryAudit({
+      secretId: parsed.data.secret_id,
+      eventType: parsed.data.event_type,
+      since: parsed.data.since,
+      until: parsed.data.until,
+      limit: parsed.data.limit,
     });
 
     return c.json({ data: events });

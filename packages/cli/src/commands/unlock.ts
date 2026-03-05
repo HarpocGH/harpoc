@@ -7,7 +7,6 @@ export function registerUnlockCommand(program: Command): void {
   program
     .command("unlock")
     .description("Unlock the vault")
-    .option("--ttl <minutes>", "Session TTL in minutes", "15")
     .action(async (_options, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {

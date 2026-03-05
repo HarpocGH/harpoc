@@ -19,6 +19,11 @@ export class ScopeGuard {
     // Null token = full access (no launch token provided)
     if (!this.token) return "local";
 
+    // 0. Token expiry recheck (long-running MCP server may outlive token TTL)
+    if (this.token.exp <= Math.floor(Date.now() / 1000)) {
+      throw VaultError.tokenExpired();
+    }
+
     // 1. Permission check
     if (!this.token.scope.includes(permission) && !this.token.scope.includes("admin")) {
       throw VaultError.accessDenied(`Token lacks permission: ${permission}`);
@@ -26,6 +31,10 @@ export class ScopeGuard {
 
     // 2. Project scope check
     if (this.token.project && project !== undefined && project !== this.token.project) {
+      throw VaultError.accessDenied(`Token is scoped to project: ${this.token.project}`);
+    }
+    // Deny individual access to global (project-less) secrets for project-scoped tokens
+    if (this.token.project && secretName !== undefined && project === undefined) {
       throw VaultError.accessDenied(`Token is scoped to project: ${this.token.project}`);
     }
 
@@ -37,6 +46,23 @@ export class ScopeGuard {
     }
 
     return this.token.sub;
+  }
+
+  /**
+   * Filter a list of secrets by the token's project and secret-name scope.
+   * Returns only secrets the token is allowed to see.
+   */
+  filterByScope<T extends { name: string; project: string | null }>(secrets: T[]): T[] {
+    if (!this.token) return secrets;
+
+    let filtered = secrets;
+    if (this.token.project) {
+      filtered = filtered.filter((s) => s.project === this.token?.project);
+    }
+    if (this.token.secrets?.length) {
+      filtered = filtered.filter((s) => this.token?.secrets?.includes(s.name));
+    }
+    return filtered;
   }
 
   /** Get the principal ID without performing access checks. */

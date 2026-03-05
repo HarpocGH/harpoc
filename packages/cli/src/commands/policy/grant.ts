@@ -1,5 +1,6 @@
 import type { Command } from "commander";
 import type { Permission, PrincipalType } from "@harpoc/shared";
+import { permissionSchema } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printSuccess, printJson, printRecord } from "../../utils/output.js";
 
@@ -20,9 +21,21 @@ export function registerPolicyGrantCommand(policy: Command): void {
           // Resolve the handle to get the internal secret UUID
           const secretId = await resolveSecretId(engine, handle);
 
-          const permissions = options.permissions.split(",").map((p) => p.trim()) as Permission[];
-          const expiresAt = options.expires
-            ? Date.now() + parseInt(options.expires, 10) * 60 * 1000
+          const permStrings = options.permissions.split(",").map((p) => p.trim());
+          for (const p of permStrings) {
+            const result = permissionSchema.safeParse(p);
+            if (!result.success) {
+              throw new Error(`Invalid permission: "${p}". Valid: list, read, use, create, rotate, revoke, admin`);
+            }
+          }
+          const permissions = permStrings as Permission[];
+
+          const expiresMinutes = options.expires ? parseInt(options.expires, 10) : undefined;
+          if (expiresMinutes !== undefined && (isNaN(expiresMinutes) || expiresMinutes <= 0)) {
+            throw new Error("--expires must be a positive number of minutes");
+          }
+          const expiresAt = expiresMinutes !== undefined
+            ? Date.now() + expiresMinutes * 60 * 1000
             : undefined;
 
           const policyResult = engine.grantPolicy(

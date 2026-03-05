@@ -55,6 +55,15 @@ export class RateLimiter {
       bucket.tokens = Math.min(limit, bucket.tokens + tokensToAdd);
       bucket.lastRefill = now;
     }
+
+    // Evict idle secret buckets that are fully refilled
+    if (this.secretBuckets.size > 1000) {
+      for (const [id, b] of this.secretBuckets) {
+        if (b.tokens >= this.perSecretLimit) {
+          this.secretBuckets.delete(id);
+        }
+      }
+    }
   }
 }
 

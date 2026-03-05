@@ -64,7 +64,10 @@ async function main(): Promise<void> {
 }
 
 // Only run main when executed directly (not imported)
-const isDirectRun = process.argv[1]?.endsWith("index.js") || process.argv[1]?.endsWith("harpoc-mcp");
+const isDirectRun =
+  process.argv[1]?.endsWith("/mcp-server/dist/index.js") ||
+  process.argv[1]?.endsWith("\\mcp-server\\dist\\index.js") ||
+  process.argv[1]?.endsWith("harpoc-mcp");
 if (isDirectRun) {
   main().catch((err: unknown) => {
     process.stderr.write(`Fatal: ${err instanceof Error ? err.message : String(err)}\n`);

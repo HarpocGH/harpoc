@@ -6,7 +6,11 @@ export const errorHandler: ErrorHandler<HarpocEnv> = (err, c) => {
   if (err instanceof VaultError) {
     // VAULT_LOCKED → 503 in REST API (service unavailable)
     const status = err.code === ErrorCode.VAULT_LOCKED ? 503 : err.statusCode;
-    return c.json({ error: err.code, message: err.message }, status as 400);
+    const body: Record<string, unknown> = { error: err.code, message: err.message };
+    if (err.details) {
+      body.details = err.details;
+    }
+    return c.json(body, status as 400);
   }
 
   return c.json(

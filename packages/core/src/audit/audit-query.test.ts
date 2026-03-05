@@ -80,6 +80,27 @@ describe("AuditQuery", () => {
     expect(events.length).toBe(2);
   });
 
+  it("filters by combined secretId and eventType", () => {
+    logger.log({ eventType: AuditEventType.SECRET_READ, secretId: "s1" });
+    logger.log({ eventType: AuditEventType.SECRET_CREATE, secretId: "s1" });
+    logger.log({ eventType: AuditEventType.SECRET_READ, secretId: "s2" });
+
+    const events = query.query({
+      secretId: "s1",
+      eventType: AuditEventType.SECRET_READ,
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]?.event_type).toBe("secret.read");
+    expect(events[0]?.secret_id).toBe("s1");
+  });
+
+  it("returns empty array when no events match filters", () => {
+    logger.log({ eventType: AuditEventType.SECRET_READ, secretId: "s1" });
+
+    const events = query.query({ secretId: "nonexistent" });
+    expect(events).toHaveLength(0);
+  });
+
   it("omits raw encrypted fields from result", () => {
     logger.log({
       eventType: AuditEventType.SECRET_USE,

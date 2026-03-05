@@ -409,7 +409,8 @@ describe("useSecret (HTTP injection)", () => {
 
     expect(response.status).toBe(200);
     const body = JSON.parse(response.body ?? "{}") as Record<string, string>;
-    expect(body.authorization).toBe("Bearer my-bearer-token");
+    // Exact-match redaction scrubs the secret value from reflected responses
+    expect(body.authorization).toBe("Bearer [REDACTED]");
   });
 });
 

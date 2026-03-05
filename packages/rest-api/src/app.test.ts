@@ -39,7 +39,16 @@ function createMockEngine() {
     rotateSecret: vi.fn().mockResolvedValue(undefined),
     useSecret: vi.fn().mockResolvedValue({ status: 200 }),
     resolveSecretId: vi.fn().mockResolvedValue("uuid-1"),
-    listPolicies: vi.fn().mockReturnValue([]),
+    listPolicies: vi.fn().mockReturnValue([{
+      id: "p1",
+      secret_id: "uuid-1",
+      principal_type: "agent",
+      principal_id: "a1",
+      permissions: ["read"],
+      created_at: Date.now(),
+      expires_at: null,
+      created_by: "test-agent",
+    }]),
     grantPolicy: vi.fn().mockReturnValue({
       id: "p1",
       secret_id: "uuid-1",

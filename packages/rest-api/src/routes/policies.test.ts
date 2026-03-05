@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import { VaultError } from "@harpoc/shared";
 import type { VaultApiToken, AccessPolicy } from "@harpoc/shared";
 import { authMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
@@ -150,14 +149,23 @@ describe("policy routes", () => {
     });
 
     it("returns 404 for unknown policy", async () => {
-      engine.revokePolicy.mockImplementation(() => {
-        throw new VaultError("POLICY_NOT_FOUND" as never, "Policy not found: unknown");
-      });
       const res = await app.request("/api/v1/secrets/test-key/policies/unknown", {
         method: "DELETE",
         headers: AUTH,
       });
       expect(res.status).toBe(404);
+    });
+
+    it("returns 404 for policy belonging to a different secret (IDOR prevention)", async () => {
+      // listPolicies returns MOCK_POLICY with id "policy-1" for secret "secret-uuid-1"
+      // Trying to delete "other-policy-id" through this secret should fail
+      const res = await app.request("/api/v1/secrets/test-key/policies/other-policy-id", {
+        method: "DELETE",
+        headers: AUTH,
+      });
+      expect(res.status).toBe(404);
+      const body = await res.json();
+      expect(body.error).toBe("POLICY_NOT_FOUND");
     });
   });
 });

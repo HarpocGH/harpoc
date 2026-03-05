@@ -4,6 +4,7 @@ import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
 import { authMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
+import { RateLimiter } from "../middleware/rate-limit.js";
 import { createSecretRoutes } from "./secrets.js";
 import type { HarpocEnv } from "../types.js";
 
@@ -58,6 +59,7 @@ function createMockEngine() {
       headers: { "content-type": "application/json" },
       body: '{"ok":true}',
     }),
+    resolveSecretId: vi.fn().mockResolvedValue("secret-uuid-1"),
   };
 }
 
@@ -68,8 +70,10 @@ beforeEach(() => {
   engine = createMockEngine();
   app = new Hono<HarpocEnv>();
   app.onError(errorHandler);
+  const limiter = new RateLimiter();
   app.use("*", async (c, next) => {
     c.set("engine", engine as never);
+    c.set("limiter", limiter);
     await next();
   });
   app.use("/api/v1/secrets", authMiddleware);
@@ -253,6 +257,83 @@ describe("secret routes", () => {
       expect(call[0]).toBe("secret://test-key");
       expect((call[1] as { timeoutMs: number }).timeoutMs).toBe(5000);
       expect(call[3]).toBe("none");
+    });
+  });
+
+  describe("POST /api/v1/secrets/:handle/use validation", () => {
+    it("rejects invalid URL", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/use", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          request: { method: "GET", url: "not-a-url" },
+          injection: { type: "bearer" },
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects timeout_ms exceeding 300000", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/use", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          request: { method: "GET", url: "https://example.com", timeout_ms: 9007199254740991 },
+          injection: { type: "bearer" },
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects non-integer timeout_ms", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/use", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          request: { method: "GET", url: "https://example.com", timeout_ms: 1.5 },
+          injection: { type: "bearer" },
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("sanitizes credential patterns in response body", async () => {
+      engine.useSecret.mockResolvedValue({
+        status: 200,
+        body: '{"error":"Invalid token: Bearer sk_live_abcdefghij1234567890"}',
+      });
+      const res = await app.request("/api/v1/secrets/test-key/use", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          request: { method: "GET", url: "https://api.example.com/data" },
+          injection: { type: "bearer" },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data.body).not.toContain("sk_live_abcdefghij1234567890");
+      expect(body.data.body).toContain("[REDACTED]");
+    });
+  });
+
+  describe("POST /api/v1/secrets create validation", () => {
+    it("rejects non-numeric expires_at", async () => {
+      const res = await app.request("/api/v1/secrets", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ name: "new-key", type: "api_key", expires_at: "never" }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("accepts valid numeric expires_at", async () => {
+      const res = await app.request("/api/v1/secrets", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ name: "new-key", type: "api_key", expires_at: Date.now() + 86400000 }),
+      });
+      expect(res.status).toBe(201);
     });
   });
 
