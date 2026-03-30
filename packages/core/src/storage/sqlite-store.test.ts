@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AccessPolicy, Secret } from "@harpoc/shared";
 import { AuditEventType, SecretStatus, SecretType } from "@harpoc/shared";
+import type { CertificateRow, OAuthTokenRow } from "./sqlite-store.js";
 import { SqliteStore } from "./sqlite-store.js";
 
 let store: SqliteStore;
@@ -72,8 +73,22 @@ describe("schema creation", () => {
     expect(names).toContain("audit_log");
   });
 
-  it("sets schema_version to 3", () => {
-    expect(store.getMeta("schema_version")).toBe("3");
+  it("creates oauth_tokens table", () => {
+    const row = store.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='oauth_tokens'")
+      .get() as { name: string } | undefined;
+    expect(row?.name).toBe("oauth_tokens");
+  });
+
+  it("creates certificates table", () => {
+    const row = store.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='certificates'")
+      .get() as { name: string } | undefined;
+    expect(row?.name).toBe("certificates");
+  });
+
+  it("sets schema_version to 5", () => {
+    expect(store.getMeta("schema_version")).toBe("5");
   });
 });
 
@@ -561,6 +576,387 @@ describe("revoked_tokens", () => {
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='revoked_tokens'")
       .get() as { name: string } | undefined;
     expect(row?.name).toBe("revoked_tokens");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OAuth token helpers
+// ---------------------------------------------------------------------------
+
+function makeOAuthToken(secretId: string, overrides: Partial<OAuthTokenRow> = {}): OAuthTokenRow {
+  return {
+    secret_id: secretId,
+    provider: "github",
+    grant_type: "authorization_code",
+    token_endpoint: "https://github.com/login/oauth/access_token",
+    auth_endpoint: "https://github.com/login/oauth/authorize",
+    client_id_encrypted: new Uint8Array([10, 20, 30]),
+    client_id_iv: new Uint8Array(12).fill(1),
+    client_id_tag: new Uint8Array(16).fill(2),
+    client_secret_encrypted: null,
+    client_secret_iv: null,
+    client_secret_tag: null,
+    scopes: null,
+    refresh_token_encrypted: null,
+    refresh_token_iv: null,
+    refresh_token_tag: null,
+    access_token_encrypted: null,
+    access_token_iv: null,
+    access_token_tag: null,
+    access_token_expires_at: null,
+    redirect_uri: null,
+    pkce_method: "S256",
+    ...overrides,
+  };
+}
+
+function makeCertificate(
+  secretId: string,
+  overrides: Partial<CertificateRow> = {},
+): CertificateRow {
+  return {
+    secret_id: secretId,
+    subject: "CN=example.com",
+    issuer: null,
+    serial_number: null,
+    not_before: null,
+    not_after: null,
+    private_key_encrypted: new Uint8Array([40, 50, 60]),
+    private_key_iv: new Uint8Array(12).fill(3),
+    private_key_tag: new Uint8Array(16).fill(4),
+    certificate_pem: null,
+    chain_pem: null,
+    csr_pem: null,
+    auto_renew: false,
+    renew_before_days: 30,
+    acme_account_encrypted: null,
+    acme_account_iv: null,
+    acme_account_tag: null,
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// oauth_tokens CRUD
+// ---------------------------------------------------------------------------
+
+describe("oauth_tokens CRUD", () => {
+  it("inserts and retrieves an OAuth token record", () => {
+    const secret = makeSecret({ type: SecretType.OAUTH_TOKEN });
+    store.insertSecret(secret);
+
+    const oauthRow = makeOAuthToken(secret.id);
+    store.insertOAuthToken(oauthRow);
+
+    const retrieved = store.getOAuthToken(secret.id);
+    expect(retrieved).toBeDefined();
+    expect(retrieved?.secret_id).toBe(secret.id);
+    expect(retrieved?.provider).toBe("github");
+    expect(retrieved?.grant_type).toBe("authorization_code");
+    expect(retrieved?.token_endpoint).toBe("https://github.com/login/oauth/access_token");
+    expect(retrieved?.pkce_method).toBe("S256");
+  });
+
+  it("returns undefined for missing OAuth token", () => {
+    expect(store.getOAuthToken("nonexistent")).toBeUndefined();
+  });
+
+  it("stores and retrieves encrypted client_id blob", () => {
+    const secret = makeSecret({ type: SecretType.OAUTH_TOKEN });
+    store.insertSecret(secret);
+
+    const oauthRow = makeOAuthToken(secret.id);
+    store.insertOAuthToken(oauthRow);
+
+    const retrieved = store.getOAuthToken(secret.id);
+    expect(retrieved?.client_id_encrypted).toBeInstanceOf(Uint8Array);
+    expect(
+      Buffer.from(retrieved?.client_id_encrypted ?? []).equals(
+        Buffer.from(oauthRow.client_id_encrypted),
+      ),
+    ).toBe(true);
+  });
+
+  it("stores nullable encrypted fields as null", () => {
+    const secret = makeSecret({ type: SecretType.OAUTH_TOKEN });
+    store.insertSecret(secret);
+
+    store.insertOAuthToken(makeOAuthToken(secret.id));
+
+    const retrieved = store.getOAuthToken(secret.id);
+    expect(retrieved?.client_secret_encrypted).toBeNull();
+    expect(retrieved?.refresh_token_encrypted).toBeNull();
+    expect(retrieved?.access_token_encrypted).toBeNull();
+  });
+
+  it("stores and retrieves all encrypted optional fields", () => {
+    const secret = makeSecret({ type: SecretType.OAUTH_TOKEN });
+    store.insertSecret(secret);
+
+    const oauthRow = makeOAuthToken(secret.id, {
+      client_secret_encrypted: new Uint8Array([11, 22]),
+      client_secret_iv: new Uint8Array(12).fill(5),
+      client_secret_tag: new Uint8Array(16).fill(6),
+      refresh_token_encrypted: new Uint8Array([33, 44]),
+      refresh_token_iv: new Uint8Array(12).fill(7),
+      refresh_token_tag: new Uint8Array(16).fill(8),
+      access_token_encrypted: new Uint8Array([55, 66]),
+      access_token_iv: new Uint8Array(12).fill(9),
+      access_token_tag: new Uint8Array(16).fill(10),
+      access_token_expires_at: Date.now() + 3600_000,
+      scopes: '["repo","user"]',
+      redirect_uri: "http://localhost:19876/oauth/callback",
+    });
+    store.insertOAuthToken(oauthRow);
+
+    const retrieved = store.getOAuthToken(secret.id);
+    expect(retrieved?.client_secret_encrypted).toBeInstanceOf(Uint8Array);
+    expect(retrieved?.refresh_token_encrypted).toBeInstanceOf(Uint8Array);
+    expect(retrieved?.access_token_encrypted).toBeInstanceOf(Uint8Array);
+    expect(retrieved?.scopes).toBe('["repo","user"]');
+    expect(retrieved?.redirect_uri).toBe("http://localhost:19876/oauth/callback");
+    expect(retrieved?.access_token_expires_at).toBe(oauthRow.access_token_expires_at);
+  });
+
+  it("updates token fields", () => {
+    const secret = makeSecret({ type: SecretType.OAUTH_TOKEN });
+    store.insertSecret(secret);
+    store.insertOAuthToken(makeOAuthToken(secret.id));
+
+    const newAccessToken = new Uint8Array([99, 88, 77]);
+    const newIv = new Uint8Array(12).fill(11);
+    const newTag = new Uint8Array(16).fill(12);
+    const expiresAt = Date.now() + 7200_000;
+
+    store.updateOAuthToken(secret.id, {
+      access_token_encrypted: newAccessToken,
+      access_token_iv: newIv,
+      access_token_tag: newTag,
+      access_token_expires_at: expiresAt,
+    });
+
+    const retrieved = store.getOAuthToken(secret.id);
+    expect(
+      Buffer.from(retrieved?.access_token_encrypted ?? []).equals(Buffer.from(newAccessToken)),
+    ).toBe(true);
+    expect(retrieved?.access_token_expires_at).toBe(expiresAt);
+  });
+
+  it("rejects update with invalid column name", () => {
+    const secret = makeSecret({ type: SecretType.OAUTH_TOKEN });
+    store.insertSecret(secret);
+    store.insertOAuthToken(makeOAuthToken(secret.id));
+
+    expect(() =>
+      store.updateOAuthToken(secret.id, { "DROP TABLE; --": "x" } as never),
+    ).toThrow("Invalid column name");
+  });
+
+  it("cascades delete when secret is deleted", () => {
+    const secret = makeSecret({ type: SecretType.OAUTH_TOKEN });
+    store.insertSecret(secret);
+    store.insertOAuthToken(makeOAuthToken(secret.id));
+
+    store.deleteSecret(secret.id);
+    expect(store.getOAuthToken(secret.id)).toBeUndefined();
+  });
+
+  it("getExpiringOAuthTokens returns tokens expiring within window", () => {
+    const s1 = makeSecret({ type: SecretType.OAUTH_TOKEN, status: SecretStatus.ACTIVE });
+    const s2 = makeSecret({ type: SecretType.OAUTH_TOKEN, status: SecretStatus.ACTIVE });
+    const s3 = makeSecret({ type: SecretType.OAUTH_TOKEN, status: SecretStatus.ACTIVE });
+    store.insertSecret(s1);
+    store.insertSecret(s2);
+    store.insertSecret(s3);
+
+    // Expiring in 2 minutes
+    store.insertOAuthToken(
+      makeOAuthToken(s1.id, { access_token_expires_at: Date.now() + 2 * 60 * 1000 }),
+    );
+    // Expiring in 10 minutes
+    store.insertOAuthToken(
+      makeOAuthToken(s2.id, { access_token_expires_at: Date.now() + 10 * 60 * 1000 }),
+    );
+    // No expiry set
+    store.insertOAuthToken(makeOAuthToken(s3.id, { access_token_expires_at: null }));
+
+    // Query for tokens expiring within 5 minutes
+    const expiring = store.getExpiringOAuthTokens(5 * 60 * 1000);
+    expect(expiring).toHaveLength(1);
+    expect(expiring[0]?.secret_id).toBe(s1.id);
+  });
+
+  it("getExpiringOAuthTokens excludes revoked secrets", () => {
+    const secret = makeSecret({ type: SecretType.OAUTH_TOKEN, status: SecretStatus.REVOKED });
+    store.insertSecret(secret);
+    store.insertOAuthToken(
+      makeOAuthToken(secret.id, { access_token_expires_at: Date.now() + 60_000 }),
+    );
+
+    const expiring = store.getExpiringOAuthTokens(5 * 60 * 1000);
+    expect(expiring).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// certificates CRUD
+// ---------------------------------------------------------------------------
+
+describe("certificates CRUD", () => {
+  it("inserts and retrieves a certificate record", () => {
+    const secret = makeSecret({ type: SecretType.CERTIFICATE });
+    store.insertSecret(secret);
+
+    const certRow = makeCertificate(secret.id);
+    store.insertCertificate(certRow);
+
+    const retrieved = store.getCertificate(secret.id);
+    expect(retrieved).toBeDefined();
+    expect(retrieved?.secret_id).toBe(secret.id);
+    expect(retrieved?.subject).toBe("CN=example.com");
+    expect(retrieved?.auto_renew).toBe(false);
+    expect(retrieved?.renew_before_days).toBe(30);
+  });
+
+  it("returns undefined for missing certificate", () => {
+    expect(store.getCertificate("nonexistent")).toBeUndefined();
+  });
+
+  it("stores and retrieves encrypted private key blob", () => {
+    const secret = makeSecret({ type: SecretType.CERTIFICATE });
+    store.insertSecret(secret);
+
+    const certRow = makeCertificate(secret.id);
+    store.insertCertificate(certRow);
+
+    const retrieved = store.getCertificate(secret.id);
+    expect(retrieved?.private_key_encrypted).toBeInstanceOf(Uint8Array);
+    expect(
+      Buffer.from(retrieved?.private_key_encrypted ?? []).equals(
+        Buffer.from(certRow.private_key_encrypted),
+      ),
+    ).toBe(true);
+  });
+
+  it("stores all optional fields", () => {
+    const secret = makeSecret({ type: SecretType.CERTIFICATE });
+    store.insertSecret(secret);
+
+    const now = Date.now();
+    const certRow = makeCertificate(secret.id, {
+      issuer: "CN=Let's Encrypt",
+      serial_number: "0123456789abcdef",
+      not_before: now - 86_400_000,
+      not_after: now + 90 * 86_400_000,
+      certificate_pem: "-----BEGIN CERTIFICATE-----\nMII...",
+      chain_pem: "-----BEGIN CERTIFICATE-----\nMII...",
+      csr_pem: "-----BEGIN CERTIFICATE REQUEST-----\nMII...",
+      auto_renew: true,
+      renew_before_days: 14,
+      acme_account_encrypted: new Uint8Array([70, 80]),
+      acme_account_iv: new Uint8Array(12).fill(11),
+      acme_account_tag: new Uint8Array(16).fill(12),
+    });
+    store.insertCertificate(certRow);
+
+    const retrieved = store.getCertificate(secret.id);
+    expect(retrieved?.issuer).toBe("CN=Let's Encrypt");
+    expect(retrieved?.serial_number).toBe("0123456789abcdef");
+    expect(retrieved?.not_before).toBe(certRow.not_before);
+    expect(retrieved?.not_after).toBe(certRow.not_after);
+    expect(retrieved?.certificate_pem).toBe(certRow.certificate_pem);
+    expect(retrieved?.chain_pem).toBe(certRow.chain_pem);
+    expect(retrieved?.csr_pem).toBe(certRow.csr_pem);
+    expect(retrieved?.auto_renew).toBe(true);
+    expect(retrieved?.renew_before_days).toBe(14);
+    expect(retrieved?.acme_account_encrypted).toBeInstanceOf(Uint8Array);
+  });
+
+  it("updates certificate fields", () => {
+    const secret = makeSecret({ type: SecretType.CERTIFICATE });
+    store.insertSecret(secret);
+    store.insertCertificate(makeCertificate(secret.id));
+
+    const newExpiry = Date.now() + 365 * 86_400_000;
+    store.updateCertificate(secret.id, {
+      issuer: "CN=Updated Issuer",
+      not_after: newExpiry,
+      certificate_pem: "-----BEGIN CERTIFICATE-----\nUpdated...",
+      auto_renew: true,
+    });
+
+    const retrieved = store.getCertificate(secret.id);
+    expect(retrieved?.issuer).toBe("CN=Updated Issuer");
+    expect(retrieved?.not_after).toBe(newExpiry);
+    expect(retrieved?.certificate_pem).toBe("-----BEGIN CERTIFICATE-----\nUpdated...");
+    expect(retrieved?.auto_renew).toBe(true);
+  });
+
+  it("rejects update with invalid column name", () => {
+    const secret = makeSecret({ type: SecretType.CERTIFICATE });
+    store.insertSecret(secret);
+    store.insertCertificate(makeCertificate(secret.id));
+
+    expect(() =>
+      store.updateCertificate(secret.id, { "DROP TABLE; --": "x" } as never),
+    ).toThrow("Invalid column name");
+  });
+
+  it("cascades delete when secret is deleted", () => {
+    const secret = makeSecret({ type: SecretType.CERTIFICATE });
+    store.insertSecret(secret);
+    store.insertCertificate(makeCertificate(secret.id));
+
+    store.deleteSecret(secret.id);
+    expect(store.getCertificate(secret.id)).toBeUndefined();
+  });
+
+  it("getExpiringCertificates returns certs expiring within window", () => {
+    const s1 = makeSecret({ type: SecretType.CERTIFICATE, status: SecretStatus.ACTIVE });
+    const s2 = makeSecret({ type: SecretType.CERTIFICATE, status: SecretStatus.ACTIVE });
+    const s3 = makeSecret({ type: SecretType.CERTIFICATE, status: SecretStatus.ACTIVE });
+    store.insertSecret(s1);
+    store.insertSecret(s2);
+    store.insertSecret(s3);
+
+    const dayMs = 86_400_000;
+    // Expiring in 10 days
+    store.insertCertificate(
+      makeCertificate(s1.id, { not_after: Date.now() + 10 * dayMs }),
+    );
+    // Expiring in 60 days
+    store.insertCertificate(
+      makeCertificate(s2.id, { not_after: Date.now() + 60 * dayMs }),
+    );
+    // No expiry
+    store.insertCertificate(makeCertificate(s3.id, { not_after: null }));
+
+    // Query for certs expiring within 30 days
+    const expiring = store.getExpiringCertificates(30);
+    expect(expiring).toHaveLength(1);
+    expect(expiring[0]?.secret_id).toBe(s1.id);
+  });
+
+  it("getExpiringCertificates excludes revoked secrets", () => {
+    const secret = makeSecret({ type: SecretType.CERTIFICATE, status: SecretStatus.REVOKED });
+    store.insertSecret(secret);
+    store.insertCertificate(
+      makeCertificate(secret.id, { not_after: Date.now() + 86_400_000 }),
+    );
+
+    const expiring = store.getExpiringCertificates(30);
+    expect(expiring).toHaveLength(0);
+  });
+
+  it("certificates table has indexes", () => {
+    const indexes = store.db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='certificates' ORDER BY name",
+      )
+      .all() as { name: string }[];
+    const names = indexes.map((i) => i.name);
+    expect(names).toContain("idx_certs_expiry");
+    expect(names).toContain("idx_certs_subject");
   });
 });
 

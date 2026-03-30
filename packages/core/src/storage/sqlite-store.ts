@@ -12,6 +12,8 @@ import { SQLITE_PRAGMAS, VaultError } from "@harpoc/shared";
 import { migration001 } from "./migrations/001-initial.js";
 import { migration002 } from "./migrations/002-revoked-tokens.js";
 import { migration003 } from "./migrations/003-name-hmac.js";
+import { migration004 } from "./migrations/004-oauth-tokens.js";
+import { migration005 } from "./migrations/005-certificates.js";
 
 /** Filters for querying secrets. */
 export interface SecretFilter {
@@ -27,6 +29,52 @@ export interface AuditFilter {
   since?: number;
   until?: number;
   limit?: number;
+}
+
+/** OAuth token record for DB storage (encrypted fields as Buffer/Uint8Array). */
+export interface OAuthTokenRow {
+  secret_id: string;
+  provider: string;
+  grant_type: string;
+  token_endpoint: string;
+  auth_endpoint: string | null;
+  client_id_encrypted: Uint8Array;
+  client_id_iv: Uint8Array;
+  client_id_tag: Uint8Array;
+  client_secret_encrypted: Uint8Array | null;
+  client_secret_iv: Uint8Array | null;
+  client_secret_tag: Uint8Array | null;
+  scopes: string | null;
+  refresh_token_encrypted: Uint8Array | null;
+  refresh_token_iv: Uint8Array | null;
+  refresh_token_tag: Uint8Array | null;
+  access_token_encrypted: Uint8Array | null;
+  access_token_iv: Uint8Array | null;
+  access_token_tag: Uint8Array | null;
+  access_token_expires_at: number | null;
+  redirect_uri: string | null;
+  pkce_method: string;
+}
+
+/** Certificate record for DB storage (encrypted fields as Buffer/Uint8Array). */
+export interface CertificateRow {
+  secret_id: string;
+  subject: string;
+  issuer: string | null;
+  serial_number: string | null;
+  not_before: number | null;
+  not_after: number | null;
+  private_key_encrypted: Uint8Array;
+  private_key_iv: Uint8Array;
+  private_key_tag: Uint8Array;
+  certificate_pem: string | null;
+  chain_pem: string | null;
+  csr_pem: string | null;
+  auto_renew: boolean;
+  renew_before_days: number;
+  acme_account_encrypted: Uint8Array | null;
+  acme_account_iv: Uint8Array | null;
+  acme_account_tag: Uint8Array | null;
 }
 
 export class SqliteStore {
@@ -85,6 +133,18 @@ export class SqliteStore {
       this.db.transaction(() => {
         this.db.exec(migration003.up);
         this.setMeta("schema_version", "3");
+      })();
+    }
+    if (currentVersion < 4) {
+      this.db.transaction(() => {
+        this.db.exec(migration004.up);
+        this.setMeta("schema_version", "4");
+      })();
+    }
+    if (currentVersion < 5) {
+      this.db.transaction(() => {
+        this.db.exec(migration005.up);
+        this.setMeta("schema_version", "5");
       })();
     }
   }
@@ -409,6 +469,264 @@ export class SqliteStore {
   }
 
   // ---------------------------------------------------------------------------
+  // oauth_tokens
+  // ---------------------------------------------------------------------------
+
+  insertOAuthToken(record: OAuthTokenRow): void {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO oauth_tokens (
+            secret_id, provider, grant_type, token_endpoint, auth_endpoint,
+            client_id_encrypted, client_id_iv, client_id_tag,
+            client_secret_encrypted, client_secret_iv, client_secret_tag,
+            scopes,
+            refresh_token_encrypted, refresh_token_iv, refresh_token_tag,
+            access_token_encrypted, access_token_iv, access_token_tag,
+            access_token_expires_at, redirect_uri, pkce_method
+          ) VALUES (
+            ?, ?, ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?,
+            ?,
+            ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?
+          )`,
+        )
+        .run(
+          record.secret_id,
+          record.provider,
+          record.grant_type,
+          record.token_endpoint,
+          record.auth_endpoint,
+          Buffer.from(record.client_id_encrypted),
+          Buffer.from(record.client_id_iv),
+          Buffer.from(record.client_id_tag),
+          record.client_secret_encrypted ? Buffer.from(record.client_secret_encrypted) : null,
+          record.client_secret_iv ? Buffer.from(record.client_secret_iv) : null,
+          record.client_secret_tag ? Buffer.from(record.client_secret_tag) : null,
+          record.scopes,
+          record.refresh_token_encrypted ? Buffer.from(record.refresh_token_encrypted) : null,
+          record.refresh_token_iv ? Buffer.from(record.refresh_token_iv) : null,
+          record.refresh_token_tag ? Buffer.from(record.refresh_token_tag) : null,
+          record.access_token_encrypted ? Buffer.from(record.access_token_encrypted) : null,
+          record.access_token_iv ? Buffer.from(record.access_token_iv) : null,
+          record.access_token_tag ? Buffer.from(record.access_token_tag) : null,
+          record.access_token_expires_at,
+          record.redirect_uri,
+          record.pkce_method,
+        );
+    } catch (err) {
+      throw VaultError.databaseError(
+        `Failed to insert OAuth token: ${err instanceof Error ? err.message : "unknown"}`,
+      );
+    }
+  }
+
+  getOAuthToken(secretId: string): OAuthTokenRow | undefined {
+    const row = this.db.prepare("SELECT * FROM oauth_tokens WHERE secret_id = ?").get(secretId) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? this.rowToOAuthToken(row) : undefined;
+  }
+
+  updateOAuthToken(
+    secretId: string,
+    fields: Partial<
+      Pick<
+        OAuthTokenRow,
+        | "refresh_token_encrypted"
+        | "refresh_token_iv"
+        | "refresh_token_tag"
+        | "access_token_encrypted"
+        | "access_token_iv"
+        | "access_token_tag"
+        | "access_token_expires_at"
+        | "scopes"
+      >
+    >,
+  ): void {
+    const ALLOWED = new Set([
+      "refresh_token_encrypted",
+      "refresh_token_iv",
+      "refresh_token_tag",
+      "access_token_encrypted",
+      "access_token_iv",
+      "access_token_tag",
+      "access_token_expires_at",
+      "scopes",
+    ]);
+
+    const setClauses: string[] = [];
+    const params: unknown[] = [];
+
+    for (const [key, value] of Object.entries(fields)) {
+      if (!ALLOWED.has(key)) {
+        throw VaultError.internalError(`Invalid column name for OAuth token update: ${key}`);
+      }
+      setClauses.push(`${key} = ?`);
+      params.push(value instanceof Uint8Array ? Buffer.from(value) : value);
+    }
+
+    if (setClauses.length === 0) return;
+
+    params.push(secretId);
+    this.db
+      .prepare(`UPDATE oauth_tokens SET ${setClauses.join(", ")} WHERE secret_id = ?`)
+      .run(...params);
+  }
+
+  getExpiringOAuthTokens(withinMs: number): OAuthTokenRow[] {
+    const threshold = Date.now() + withinMs;
+    const rows = this.db
+      .prepare(
+        `SELECT ot.* FROM oauth_tokens ot
+         JOIN secrets s ON s.id = ot.secret_id
+         WHERE ot.access_token_expires_at IS NOT NULL
+           AND ot.access_token_expires_at <= ?
+           AND s.status = 'active'
+         ORDER BY ot.access_token_expires_at ASC`,
+      )
+      .all(threshold) as Record<string, unknown>[];
+    return rows.map((row) => this.rowToOAuthToken(row));
+  }
+
+  // ---------------------------------------------------------------------------
+  // certificates
+  // ---------------------------------------------------------------------------
+
+  insertCertificate(record: CertificateRow): void {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO certificates (
+            secret_id, subject, issuer, serial_number,
+            not_before, not_after,
+            private_key_encrypted, private_key_iv, private_key_tag,
+            certificate_pem, chain_pem, csr_pem,
+            auto_renew, renew_before_days,
+            acme_account_encrypted, acme_account_iv, acme_account_tag
+          ) VALUES (
+            ?, ?, ?, ?,
+            ?, ?,
+            ?, ?, ?,
+            ?, ?, ?,
+            ?, ?,
+            ?, ?, ?
+          )`,
+        )
+        .run(
+          record.secret_id,
+          record.subject,
+          record.issuer,
+          record.serial_number,
+          record.not_before,
+          record.not_after,
+          Buffer.from(record.private_key_encrypted),
+          Buffer.from(record.private_key_iv),
+          Buffer.from(record.private_key_tag),
+          record.certificate_pem,
+          record.chain_pem,
+          record.csr_pem,
+          record.auto_renew ? 1 : 0,
+          record.renew_before_days,
+          record.acme_account_encrypted ? Buffer.from(record.acme_account_encrypted) : null,
+          record.acme_account_iv ? Buffer.from(record.acme_account_iv) : null,
+          record.acme_account_tag ? Buffer.from(record.acme_account_tag) : null,
+        );
+    } catch (err) {
+      throw VaultError.databaseError(
+        `Failed to insert certificate: ${err instanceof Error ? err.message : "unknown"}`,
+      );
+    }
+  }
+
+  getCertificate(secretId: string): CertificateRow | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM certificates WHERE secret_id = ?")
+      .get(secretId) as Record<string, unknown> | undefined;
+    return row ? this.rowToCertificate(row) : undefined;
+  }
+
+  updateCertificate(
+    secretId: string,
+    fields: Partial<
+      Pick<
+        CertificateRow,
+        | "subject"
+        | "issuer"
+        | "serial_number"
+        | "not_before"
+        | "not_after"
+        | "certificate_pem"
+        | "chain_pem"
+        | "csr_pem"
+        | "auto_renew"
+        | "renew_before_days"
+        | "acme_account_encrypted"
+        | "acme_account_iv"
+        | "acme_account_tag"
+      >
+    >,
+  ): void {
+    const ALLOWED = new Set([
+      "subject",
+      "issuer",
+      "serial_number",
+      "not_before",
+      "not_after",
+      "certificate_pem",
+      "chain_pem",
+      "csr_pem",
+      "auto_renew",
+      "renew_before_days",
+      "acme_account_encrypted",
+      "acme_account_iv",
+      "acme_account_tag",
+    ]);
+
+    const setClauses: string[] = [];
+    const params: unknown[] = [];
+
+    for (const [key, value] of Object.entries(fields)) {
+      if (!ALLOWED.has(key)) {
+        throw VaultError.internalError(`Invalid column name for certificate update: ${key}`);
+      }
+      setClauses.push(`${key} = ?`);
+      if (value instanceof Uint8Array) {
+        params.push(Buffer.from(value));
+      } else if (key === "auto_renew") {
+        params.push(value ? 1 : 0);
+      } else {
+        params.push(value);
+      }
+    }
+
+    if (setClauses.length === 0) return;
+
+    params.push(secretId);
+    this.db
+      .prepare(`UPDATE certificates SET ${setClauses.join(", ")} WHERE secret_id = ?`)
+      .run(...params);
+  }
+
+  getExpiringCertificates(withinDays: number): CertificateRow[] {
+    const threshold = Date.now() + withinDays * 24 * 60 * 60 * 1000;
+    const rows = this.db
+      .prepare(
+        `SELECT c.* FROM certificates c
+         JOIN secrets s ON s.id = c.secret_id
+         WHERE c.not_after IS NOT NULL
+           AND c.not_after <= ?
+           AND s.status = 'active'
+         ORDER BY c.not_after ASC`,
+      )
+      .all(threshold) as Record<string, unknown>[];
+    return rows.map((row) => this.rowToCertificate(row));
+  }
+
+  // ---------------------------------------------------------------------------
   // Transaction helper
   // ---------------------------------------------------------------------------
 
@@ -487,6 +805,78 @@ export class SqliteStore {
       ip_address: (row.ip_address as string) ?? null,
       session_id: (row.session_id as string) ?? null,
       success: row.success === 1,
+    };
+  }
+
+  private rowToOAuthToken(row: Record<string, unknown>): OAuthTokenRow {
+    return {
+      secret_id: row.secret_id as string,
+      provider: row.provider as string,
+      grant_type: row.grant_type as string,
+      token_endpoint: row.token_endpoint as string,
+      auth_endpoint: (row.auth_endpoint as string) ?? null,
+      client_id_encrypted: new Uint8Array(row.client_id_encrypted as Buffer),
+      client_id_iv: new Uint8Array(row.client_id_iv as Buffer),
+      client_id_tag: new Uint8Array(row.client_id_tag as Buffer),
+      client_secret_encrypted: row.client_secret_encrypted
+        ? new Uint8Array(row.client_secret_encrypted as Buffer)
+        : null,
+      client_secret_iv: row.client_secret_iv
+        ? new Uint8Array(row.client_secret_iv as Buffer)
+        : null,
+      client_secret_tag: row.client_secret_tag
+        ? new Uint8Array(row.client_secret_tag as Buffer)
+        : null,
+      scopes: (row.scopes as string) ?? null,
+      refresh_token_encrypted: row.refresh_token_encrypted
+        ? new Uint8Array(row.refresh_token_encrypted as Buffer)
+        : null,
+      refresh_token_iv: row.refresh_token_iv
+        ? new Uint8Array(row.refresh_token_iv as Buffer)
+        : null,
+      refresh_token_tag: row.refresh_token_tag
+        ? new Uint8Array(row.refresh_token_tag as Buffer)
+        : null,
+      access_token_encrypted: row.access_token_encrypted
+        ? new Uint8Array(row.access_token_encrypted as Buffer)
+        : null,
+      access_token_iv: row.access_token_iv
+        ? new Uint8Array(row.access_token_iv as Buffer)
+        : null,
+      access_token_tag: row.access_token_tag
+        ? new Uint8Array(row.access_token_tag as Buffer)
+        : null,
+      access_token_expires_at: (row.access_token_expires_at as number) ?? null,
+      redirect_uri: (row.redirect_uri as string) ?? null,
+      pkce_method: (row.pkce_method as string) ?? "S256",
+    };
+  }
+
+  private rowToCertificate(row: Record<string, unknown>): CertificateRow {
+    return {
+      secret_id: row.secret_id as string,
+      subject: row.subject as string,
+      issuer: (row.issuer as string) ?? null,
+      serial_number: (row.serial_number as string) ?? null,
+      not_before: (row.not_before as number) ?? null,
+      not_after: (row.not_after as number) ?? null,
+      private_key_encrypted: new Uint8Array(row.private_key_encrypted as Buffer),
+      private_key_iv: new Uint8Array(row.private_key_iv as Buffer),
+      private_key_tag: new Uint8Array(row.private_key_tag as Buffer),
+      certificate_pem: (row.certificate_pem as string) ?? null,
+      chain_pem: (row.chain_pem as string) ?? null,
+      csr_pem: (row.csr_pem as string) ?? null,
+      auto_renew: row.auto_renew === 1,
+      renew_before_days: (row.renew_before_days as number) ?? 30,
+      acme_account_encrypted: row.acme_account_encrypted
+        ? new Uint8Array(row.acme_account_encrypted as Buffer)
+        : null,
+      acme_account_iv: row.acme_account_iv
+        ? new Uint8Array(row.acme_account_iv as Buffer)
+        : null,
+      acme_account_tag: row.acme_account_tag
+        ? new Uint8Array(row.acme_account_tag as Buffer)
+        : null,
     };
   }
 }

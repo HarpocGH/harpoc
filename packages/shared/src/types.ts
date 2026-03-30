@@ -88,6 +88,28 @@ export type VaultState = (typeof VaultState)[keyof typeof VaultState];
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD";
 
 // ---------------------------------------------------------------------------
+// OAuth & Certificate enums (v1.1)
+// ---------------------------------------------------------------------------
+
+/** OAuth grant types supported by the proxy. */
+export const OAuthGrantType = {
+  AUTHORIZATION_CODE: "authorization_code",
+  CLIENT_CREDENTIALS: "client_credentials",
+  DEVICE_CODE: "device_code",
+} as const;
+export type OAuthGrantType = (typeof OAuthGrantType)[keyof typeof OAuthGrantType];
+
+/** Provider preset names. */
+export const OAuthProviderPreset = {
+  GITHUB: "github",
+  GOOGLE: "google",
+  MICROSOFT: "microsoft",
+  SLACK: "slack",
+  CUSTOM: "custom",
+} as const;
+export type OAuthProviderPreset = (typeof OAuthProviderPreset)[keyof typeof OAuthProviderPreset];
+
+// ---------------------------------------------------------------------------
 // Domain interfaces (v1.0 scope)
 // ---------------------------------------------------------------------------
 
@@ -237,5 +259,82 @@ export interface ParsedHandle {
 export interface CreateSecretResponse {
   handle: string;
   status: "created" | "pending";
+  message: string;
+}
+
+// ---------------------------------------------------------------------------
+// OAuth & Certificate interfaces (v1.1)
+// ---------------------------------------------------------------------------
+
+/** OAuth provider configuration (stored alongside secret). */
+export interface OAuthProviderConfig {
+  provider: OAuthProviderPreset;
+  grant_type: OAuthGrantType;
+  token_endpoint: string;
+  auth_endpoint?: string;
+  device_authorization_endpoint?: string;
+  client_id: string;
+  client_secret?: string;
+  scopes?: string[];
+  redirect_uri?: string;
+  pkce_method?: "S256";
+}
+
+/** OAuth token state stored in vault (encrypted). */
+export interface OAuthTokenRecord {
+  secret_id: string;
+  provider: OAuthProviderPreset;
+  grant_type: OAuthGrantType;
+  token_endpoint: string;
+  auth_endpoint: string | null;
+  scopes: string | null;
+  access_token_expires_at: number | null;
+  redirect_uri: string | null;
+  pkce_method: string;
+}
+
+/** Certificate record stored in vault. */
+export interface CertificateRecord {
+  secret_id: string;
+  subject: string;
+  issuer: string | null;
+  serial_number: string | null;
+  not_before: number | null;
+  not_after: number | null;
+  certificate_pem: string | null;
+  chain_pem: string | null;
+  csr_pem: string | null;
+  auto_renew: boolean;
+  renew_before_days: number;
+}
+
+/** Status of an OAuth token (for health checks and UI). */
+export interface OAuthTokenStatus {
+  secret_id: string;
+  provider: OAuthProviderPreset;
+  has_access_token: boolean;
+  access_token_expires_at: number | null;
+  has_refresh_token: boolean;
+  last_refreshed_at: number | null;
+  refresh_status: "ok" | "expiring_soon" | "expired" | "no_refresh_token";
+}
+
+/** Status of a certificate (for health checks and UI). */
+export interface CertificateStatus {
+  secret_id: string;
+  subject: string;
+  issuer: string | null;
+  not_before: number | null;
+  not_after: number | null;
+  auto_renew: boolean;
+  renewal_status: "ok" | "expiring_soon" | "expired" | "no_certificate";
+}
+
+/** start_oauth_flow response. */
+export interface OAuthFlowResult {
+  handle: string;
+  status: "authorized" | "pending_authorization";
+  auth_url?: string;
+  user_code?: string;
   message: string;
 }

@@ -4,17 +4,22 @@ import {
   accessPolicyInputSchema,
   auditEventTypeSchema,
   auditQuerySchema,
+  certificateImportSchema,
   createSecretInputSchema,
   followRedirectsSchema,
   handleSchema,
   httpMethodSchema,
   injectionConfigSchema,
   injectionTypeSchema,
+  oauthGrantTypeSchema,
+  oauthProviderConfigSchema,
+  oauthProviderPresetSchema,
   permissionSchema,
   principalTypeSchema,
   secretStatusSchema,
   secretTypeSchema,
   sessionFileSchema,
+  startOAuthFlowInputSchema,
   useSecretRequestSchema,
 } from "./schemas.js";
 
@@ -556,6 +561,322 @@ describe("sessionFileSchema", () => {
   it("rejects non-base64 string for wrapped_kek", () => {
     expect(() =>
       sessionFileSchema.parse({ ...validSession, wrapped_kek: "%%%invalid%%%" }),
+    ).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// oauthGrantTypeSchema
+// ---------------------------------------------------------------------------
+
+describe("oauthGrantTypeSchema", () => {
+  it("accepts valid grant types", () => {
+    expect(oauthGrantTypeSchema.parse("authorization_code")).toBe("authorization_code");
+    expect(oauthGrantTypeSchema.parse("client_credentials")).toBe("client_credentials");
+    expect(oauthGrantTypeSchema.parse("device_code")).toBe("device_code");
+  });
+
+  it("rejects invalid grant type", () => {
+    expect(() => oauthGrantTypeSchema.parse("implicit")).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// oauthProviderPresetSchema
+// ---------------------------------------------------------------------------
+
+describe("oauthProviderPresetSchema", () => {
+  it("accepts valid provider presets", () => {
+    for (const p of ["github", "google", "microsoft", "slack", "custom"]) {
+      expect(oauthProviderPresetSchema.parse(p)).toBe(p);
+    }
+  });
+
+  it("rejects invalid provider preset", () => {
+    expect(() => oauthProviderPresetSchema.parse("facebook")).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// oauthProviderConfigSchema
+// ---------------------------------------------------------------------------
+
+describe("oauthProviderConfigSchema", () => {
+  const baseConfig = {
+    provider: "github" as const,
+    grant_type: "authorization_code" as const,
+    token_endpoint: "https://github.com/login/oauth/access_token",
+    auth_endpoint: "https://github.com/login/oauth/authorize",
+    client_id: "client-123",
+  };
+
+  it("accepts valid authorization_code config", () => {
+    const result = oauthProviderConfigSchema.parse(baseConfig);
+    expect(result.provider).toBe("github");
+    expect(result.grant_type).toBe("authorization_code");
+  });
+
+  it("accepts authorization_code with all optional fields", () => {
+    const result = oauthProviderConfigSchema.parse({
+      ...baseConfig,
+      client_secret: "secret-456",
+      scopes: ["repo", "user"],
+      redirect_uri: "http://localhost:19876/oauth/callback",
+      pkce_method: "S256",
+    });
+    expect(result.client_secret).toBe("secret-456");
+    expect(result.scopes).toEqual(["repo", "user"]);
+    expect(result.pkce_method).toBe("S256");
+  });
+
+  it("rejects authorization_code without auth_endpoint", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { auth_endpoint: _omitted, ...noAuthEndpoint } = baseConfig;
+    expect(() => oauthProviderConfigSchema.parse(noAuthEndpoint)).toThrow();
+  });
+
+  it("accepts valid client_credentials config", () => {
+    const result = oauthProviderConfigSchema.parse({
+      provider: "custom",
+      grant_type: "client_credentials",
+      token_endpoint: "https://auth.example.com/token",
+      client_id: "client-123",
+      client_secret: "secret-456",
+    });
+    expect(result.grant_type).toBe("client_credentials");
+  });
+
+  it("accepts valid device_code config", () => {
+    const result = oauthProviderConfigSchema.parse({
+      provider: "github",
+      grant_type: "device_code",
+      token_endpoint: "https://github.com/login/oauth/access_token",
+      device_authorization_endpoint: "https://github.com/login/device/code",
+      client_id: "client-123",
+    });
+    expect(result.grant_type).toBe("device_code");
+  });
+
+  it("rejects device_code without device_authorization_endpoint", () => {
+    expect(() =>
+      oauthProviderConfigSchema.parse({
+        provider: "github",
+        grant_type: "device_code",
+        token_endpoint: "https://github.com/login/oauth/access_token",
+        client_id: "client-123",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects HTTP token_endpoint (requires HTTPS)", () => {
+    expect(() =>
+      oauthProviderConfigSchema.parse({
+        ...baseConfig,
+        token_endpoint: "http://github.com/login/oauth/access_token",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects empty client_id", () => {
+    expect(() =>
+      oauthProviderConfigSchema.parse({
+        ...baseConfig,
+        client_id: "",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects invalid pkce_method", () => {
+    expect(() =>
+      oauthProviderConfigSchema.parse({
+        ...baseConfig,
+        pkce_method: "plain",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects empty scope strings", () => {
+    expect(() =>
+      oauthProviderConfigSchema.parse({
+        ...baseConfig,
+        scopes: [""],
+      }),
+    ).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// startOAuthFlowInputSchema
+// ---------------------------------------------------------------------------
+
+describe("startOAuthFlowInputSchema", () => {
+  it("accepts valid minimal input", () => {
+    const result = startOAuthFlowInputSchema.parse({
+      name: "github-token",
+      provider: "github",
+      grant_type: "authorization_code",
+      client_id: "client-123",
+    });
+    expect(result.name).toBe("github-token");
+    expect(result.provider).toBe("github");
+  });
+
+  it("accepts input with all optional fields", () => {
+    const result = startOAuthFlowInputSchema.parse({
+      name: "github-token",
+      provider: "github",
+      grant_type: "authorization_code",
+      client_id: "client-123",
+      client_secret: "secret-456",
+      scopes: ["repo"],
+      project: "my-project",
+      auth_endpoint: "https://github.com/login/oauth/authorize",
+      token_endpoint: "https://github.com/login/oauth/access_token",
+    });
+    expect(result.project).toBe("my-project");
+    expect(result.scopes).toEqual(["repo"]);
+  });
+
+  it("rejects invalid name format", () => {
+    expect(() =>
+      startOAuthFlowInputSchema.parse({
+        name: "has space",
+        provider: "github",
+        grant_type: "authorization_code",
+        client_id: "client-123",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects empty client_id", () => {
+    expect(() =>
+      startOAuthFlowInputSchema.parse({
+        name: "token",
+        provider: "github",
+        grant_type: "authorization_code",
+        client_id: "",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects HTTP endpoints (requires HTTPS)", () => {
+    expect(() =>
+      startOAuthFlowInputSchema.parse({
+        name: "token",
+        provider: "github",
+        grant_type: "authorization_code",
+        client_id: "client-123",
+        token_endpoint: "http://insecure.example.com/token",
+      }),
+    ).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// certificateImportSchema
+// ---------------------------------------------------------------------------
+
+describe("certificateImportSchema", () => {
+  const validPem = "-----BEGIN PRIVATE KEY-----\nMIIEvQ...\n-----END PRIVATE KEY-----";
+  const validCertPem = "-----BEGIN CERTIFICATE-----\nMIIEvQ...\n-----END CERTIFICATE-----";
+
+  it("accepts valid minimal input", () => {
+    const result = certificateImportSchema.parse({
+      name: "my-cert",
+      private_key_pem: validPem,
+    });
+    expect(result.name).toBe("my-cert");
+    expect(result.auto_renew).toBe(false);
+    expect(result.renew_before_days).toBe(30);
+  });
+
+  it("accepts input with all optional fields", () => {
+    const result = certificateImportSchema.parse({
+      name: "my-cert",
+      private_key_pem: validPem,
+      certificate_pem: validCertPem,
+      chain_pem: validCertPem,
+      project: "my-project",
+      auto_renew: true,
+      renew_before_days: 60,
+    });
+    expect(result.auto_renew).toBe(true);
+    expect(result.renew_before_days).toBe(60);
+    expect(result.project).toBe("my-project");
+  });
+
+  it("rejects non-PEM private key", () => {
+    expect(() =>
+      certificateImportSchema.parse({
+        name: "my-cert",
+        private_key_pem: "not-a-pem-value",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects empty private_key_pem", () => {
+    expect(() =>
+      certificateImportSchema.parse({
+        name: "my-cert",
+        private_key_pem: "",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects invalid name format", () => {
+    expect(() =>
+      certificateImportSchema.parse({
+        name: "has space",
+        private_key_pem: validPem,
+      }),
+    ).toThrow();
+  });
+
+  it("rejects renew_before_days over 365", () => {
+    expect(() =>
+      certificateImportSchema.parse({
+        name: "my-cert",
+        private_key_pem: validPem,
+        renew_before_days: 366,
+      }),
+    ).toThrow();
+  });
+
+  it("rejects renew_before_days: 0", () => {
+    expect(() =>
+      certificateImportSchema.parse({
+        name: "my-cert",
+        private_key_pem: validPem,
+        renew_before_days: 0,
+      }),
+    ).toThrow();
+  });
+
+  it("accepts renew_before_days: 1 (minimum)", () => {
+    const result = certificateImportSchema.parse({
+      name: "my-cert",
+      private_key_pem: validPem,
+      renew_before_days: 1,
+    });
+    expect(result.renew_before_days).toBe(1);
+  });
+
+  it("accepts renew_before_days: 365 (maximum)", () => {
+    const result = certificateImportSchema.parse({
+      name: "my-cert",
+      private_key_pem: validPem,
+      renew_before_days: 365,
+    });
+    expect(result.renew_before_days).toBe(365);
+  });
+
+  it("rejects non-PEM certificate_pem", () => {
+    expect(() =>
+      certificateImportSchema.parse({
+        name: "my-cert",
+        private_key_pem: validPem,
+        certificate_pem: "not-pem",
+      }),
     ).toThrow();
   });
 });

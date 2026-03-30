@@ -71,6 +71,21 @@ describe("HTTP status mapping", () => {
     [ErrorCode.POLICY_NOT_FOUND, 404],
     [ErrorCode.POLICY_CONFLICT, 409],
     [ErrorCode.PRINCIPAL_NOT_FOUND, 404],
+    // OAuth
+    [ErrorCode.OAUTH_FLOW_FAILED, 502],
+    [ErrorCode.OAUTH_CALLBACK_TIMEOUT, 504],
+    [ErrorCode.OAUTH_INVALID_STATE, 400],
+    [ErrorCode.OAUTH_TOKEN_EXCHANGE_FAILED, 502],
+    [ErrorCode.OAUTH_REFRESH_FAILED, 502],
+    [ErrorCode.OAUTH_PROVIDER_NOT_FOUND, 404],
+    [ErrorCode.OAUTH_NOT_CONFIGURED, 400],
+    // Certificates
+    [ErrorCode.CERT_INVALID, 400],
+    [ErrorCode.CERT_EXPIRED, 410],
+    [ErrorCode.CERT_PRIVATE_KEY_MISMATCH, 400],
+    [ErrorCode.CERT_ACME_FAILED, 502],
+    [ErrorCode.CERT_CSR_FAILED, 500],
+    [ErrorCode.CERT_NOT_CONFIGURED, 400],
     // System
     [ErrorCode.INTERNAL_ERROR, 500],
     [ErrorCode.DATABASE_ERROR, 500],
@@ -85,7 +100,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(41);
+    expect(members).toHaveLength(54);
   });
 });
 
@@ -264,5 +279,138 @@ describe("factory methods", () => {
     expect(err.code).toBe(ErrorCode.WEAK_PASSWORD);
     expect(err.statusCode).toBe(400);
     expect(err.message).toBe("Password must be at least 8 characters");
+  });
+
+  it("oauthFlowFailed() without detail", () => {
+    const err = VaultError.oauthFlowFailed();
+    expect(err.code).toBe(ErrorCode.OAUTH_FLOW_FAILED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toBe("OAuth flow failed");
+  });
+
+  it("oauthFlowFailed() with detail", () => {
+    const err = VaultError.oauthFlowFailed("provider unreachable");
+    expect(err.message).toBe("OAuth flow failed: provider unreachable");
+  });
+
+  it("oauthCallbackTimeout()", () => {
+    const err = VaultError.oauthCallbackTimeout();
+    expect(err.code).toBe(ErrorCode.OAUTH_CALLBACK_TIMEOUT);
+    expect(err.statusCode).toBe(504);
+  });
+
+  it("oauthInvalidState()", () => {
+    const err = VaultError.oauthInvalidState();
+    expect(err.code).toBe(ErrorCode.OAUTH_INVALID_STATE);
+    expect(err.statusCode).toBe(400);
+  });
+
+  it("oauthTokenExchangeFailed() without detail", () => {
+    const err = VaultError.oauthTokenExchangeFailed();
+    expect(err.code).toBe(ErrorCode.OAUTH_TOKEN_EXCHANGE_FAILED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toBe("OAuth token exchange failed");
+  });
+
+  it("oauthTokenExchangeFailed() with detail", () => {
+    const err = VaultError.oauthTokenExchangeFailed("invalid grant");
+    expect(err.message).toBe("OAuth token exchange failed: invalid grant");
+  });
+
+  it("oauthRefreshFailed() without detail", () => {
+    const err = VaultError.oauthRefreshFailed();
+    expect(err.code).toBe(ErrorCode.OAUTH_REFRESH_FAILED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toBe("OAuth token refresh failed");
+  });
+
+  it("oauthRefreshFailed() with detail", () => {
+    const err = VaultError.oauthRefreshFailed("refresh token revoked");
+    expect(err.message).toBe("OAuth token refresh failed: refresh token revoked");
+  });
+
+  it("oauthProviderNotFound()", () => {
+    const err = VaultError.oauthProviderNotFound("unknown-provider");
+    expect(err.code).toBe(ErrorCode.OAUTH_PROVIDER_NOT_FOUND);
+    expect(err.statusCode).toBe(404);
+    expect(err.message).toBe("OAuth provider not found: unknown-provider");
+  });
+
+  it("oauthNotConfigured() without handle", () => {
+    const err = VaultError.oauthNotConfigured();
+    expect(err.code).toBe(ErrorCode.OAUTH_NOT_CONFIGURED);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toBe("OAuth not configured for secret");
+  });
+
+  it("oauthNotConfigured() with handle", () => {
+    const err = VaultError.oauthNotConfigured("secret://my-key");
+    expect(err.message).toBe("OAuth not configured for secret: secret://my-key");
+  });
+
+  it("certInvalid() without detail", () => {
+    const err = VaultError.certInvalid();
+    expect(err.code).toBe(ErrorCode.CERT_INVALID);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toBe("Certificate invalid");
+  });
+
+  it("certInvalid() with detail", () => {
+    const err = VaultError.certInvalid("malformed PEM");
+    expect(err.message).toBe("Certificate invalid: malformed PEM");
+  });
+
+  it("certExpired() without subject", () => {
+    const err = VaultError.certExpired();
+    expect(err.code).toBe(ErrorCode.CERT_EXPIRED);
+    expect(err.statusCode).toBe(410);
+    expect(err.message).toBe("Certificate expired");
+  });
+
+  it("certExpired() with subject", () => {
+    const err = VaultError.certExpired("CN=example.com");
+    expect(err.message).toBe("Certificate expired: CN=example.com");
+  });
+
+  it("certPrivateKeyMismatch()", () => {
+    const err = VaultError.certPrivateKeyMismatch();
+    expect(err.code).toBe(ErrorCode.CERT_PRIVATE_KEY_MISMATCH);
+    expect(err.statusCode).toBe(400);
+  });
+
+  it("certAcmeFailed() without detail", () => {
+    const err = VaultError.certAcmeFailed();
+    expect(err.code).toBe(ErrorCode.CERT_ACME_FAILED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toBe("ACME operation failed");
+  });
+
+  it("certAcmeFailed() with detail", () => {
+    const err = VaultError.certAcmeFailed("challenge failed");
+    expect(err.message).toBe("ACME operation failed: challenge failed");
+  });
+
+  it("certCsrFailed() without detail", () => {
+    const err = VaultError.certCsrFailed();
+    expect(err.code).toBe(ErrorCode.CERT_CSR_FAILED);
+    expect(err.statusCode).toBe(500);
+    expect(err.message).toBe("CSR generation failed");
+  });
+
+  it("certCsrFailed() with detail", () => {
+    const err = VaultError.certCsrFailed("invalid subject");
+    expect(err.message).toBe("CSR generation failed: invalid subject");
+  });
+
+  it("certNotConfigured() without handle", () => {
+    const err = VaultError.certNotConfigured();
+    expect(err.code).toBe(ErrorCode.CERT_NOT_CONFIGURED);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toBe("Certificate not configured for secret");
+  });
+
+  it("certNotConfigured() with handle", () => {
+    const err = VaultError.certNotConfigured("secret://my-cert");
+    expect(err.message).toBe("Certificate not configured for secret: secret://my-cert");
   });
 });

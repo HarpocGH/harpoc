@@ -4,6 +4,8 @@ import {
   AuditEventType,
   FollowRedirects,
   InjectionType,
+  OAuthGrantType,
+  OAuthProviderPreset,
   Permission,
   PrincipalType,
   SecretStatus,
@@ -49,10 +51,18 @@ describe("enum member counts", () => {
     expect(Object.values(VaultState)).toHaveLength(2);
   });
 
-  it("ErrorCode has 41 members", () => {
+  it("OAuthGrantType has 3 members", () => {
+    expect(Object.values(OAuthGrantType)).toHaveLength(3);
+  });
+
+  it("OAuthProviderPreset has 5 members", () => {
+    expect(Object.values(OAuthProviderPreset)).toHaveLength(5);
+  });
+
+  it("ErrorCode has 54 members", () => {
     // Filter out reverse mappings (numeric keys) from TypeScript enum
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(41);
+    expect(members).toHaveLength(54);
   });
 });
 
@@ -107,5 +117,27 @@ describe("InjectionType values", () => {
     ["BEARER", "bearer"],
   ] as const)("%s is '%s'", (key, value) => {
     expect(InjectionType[key]).toBe(value);
+  });
+});
+
+describe("OAuthGrantType values", () => {
+  it.each([
+    ["AUTHORIZATION_CODE", "authorization_code"],
+    ["CLIENT_CREDENTIALS", "client_credentials"],
+    ["DEVICE_CODE", "device_code"],
+  ] as const)("%s is '%s'", (key, value) => {
+    expect(OAuthGrantType[key]).toBe(value);
+  });
+});
+
+describe("OAuthProviderPreset values", () => {
+  it.each([
+    ["GITHUB", "github"],
+    ["GOOGLE", "google"],
+    ["MICROSOFT", "microsoft"],
+    ["SLACK", "slack"],
+    ["CUSTOM", "custom"],
+  ] as const)("%s is '%s'", (key, value) => {
+    expect(OAuthProviderPreset[key]).toBe(value);
   });
 });

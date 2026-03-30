@@ -6,6 +6,8 @@ import {
   AuditEventType,
   FollowRedirects,
   InjectionType,
+  OAuthGrantType,
+  OAuthProviderPreset,
   Permission,
   PrincipalType,
   SecretStatus,
@@ -135,4 +137,81 @@ export const sessionFileSchema = z.object({
   wrapped_audit_key: base64Pattern,
   wrapped_audit_key_iv: base64Pattern,
   wrapped_audit_key_tag: base64Pattern,
+});
+
+// ---------------------------------------------------------------------------
+// OAuth schemas (v1.1)
+// ---------------------------------------------------------------------------
+
+const oauthGrantTypeValues = Object.values(OAuthGrantType) as [OAuthGrantType, ...OAuthGrantType[]];
+export const oauthGrantTypeSchema = z.enum(oauthGrantTypeValues);
+
+const oauthProviderPresetValues = Object.values(OAuthProviderPreset) as [
+  OAuthProviderPreset,
+  ...OAuthProviderPreset[],
+];
+export const oauthProviderPresetSchema = z.enum(oauthProviderPresetValues);
+
+const httpsUrlSchema = z.string().url().startsWith("https://", "URL must use HTTPS");
+
+export const oauthProviderConfigSchema = z
+  .object({
+    provider: oauthProviderPresetSchema,
+    grant_type: oauthGrantTypeSchema,
+    token_endpoint: httpsUrlSchema,
+    auth_endpoint: httpsUrlSchema.optional(),
+    device_authorization_endpoint: httpsUrlSchema.optional(),
+    client_id: z.string().min(1),
+    client_secret: z.string().min(1).optional(),
+    scopes: z.array(z.string().min(1)).optional(),
+    redirect_uri: z.string().url().optional(),
+    pkce_method: z.literal("S256").optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.grant_type === OAuthGrantType.AUTHORIZATION_CODE && !data.auth_endpoint) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "auth_endpoint is required for authorization_code grant type",
+        path: ["auth_endpoint"],
+      });
+    }
+    if (data.grant_type === OAuthGrantType.DEVICE_CODE && !data.device_authorization_endpoint) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "device_authorization_endpoint is required for device_code grant type",
+        path: ["device_authorization_endpoint"],
+      });
+    }
+  });
+
+export const startOAuthFlowInputSchema = z.object({
+  name: namePattern,
+  provider: oauthProviderPresetSchema,
+  grant_type: oauthGrantTypeSchema,
+  client_id: z.string().min(1),
+  client_secret: z.string().min(1).optional(),
+  scopes: z.array(z.string().min(1)).optional(),
+  project: namePattern.optional(),
+  auth_endpoint: httpsUrlSchema.optional(),
+  token_endpoint: httpsUrlSchema.optional(),
+  device_authorization_endpoint: httpsUrlSchema.optional(),
+});
+
+// ---------------------------------------------------------------------------
+// Certificate schemas (v1.1)
+// ---------------------------------------------------------------------------
+
+const pemPattern = z
+  .string()
+  .min(1)
+  .refine((s) => s.startsWith("-----BEGIN "), "Value must be PEM-encoded");
+
+export const certificateImportSchema = z.object({
+  name: namePattern,
+  private_key_pem: pemPattern,
+  certificate_pem: pemPattern.optional(),
+  chain_pem: pemPattern.optional(),
+  project: namePattern.optional(),
+  auto_renew: z.boolean().optional().default(false),
+  renew_before_days: z.number().int().positive().max(365).optional().default(30),
 });

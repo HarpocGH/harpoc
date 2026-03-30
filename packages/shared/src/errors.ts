@@ -49,6 +49,23 @@ export enum ErrorCode {
   POLICY_CONFLICT = "POLICY_CONFLICT",
   PRINCIPAL_NOT_FOUND = "PRINCIPAL_NOT_FOUND",
 
+  // OAuth
+  OAUTH_FLOW_FAILED = "OAUTH_FLOW_FAILED",
+  OAUTH_CALLBACK_TIMEOUT = "OAUTH_CALLBACK_TIMEOUT",
+  OAUTH_INVALID_STATE = "OAUTH_INVALID_STATE",
+  OAUTH_TOKEN_EXCHANGE_FAILED = "OAUTH_TOKEN_EXCHANGE_FAILED",
+  OAUTH_REFRESH_FAILED = "OAUTH_REFRESH_FAILED",
+  OAUTH_PROVIDER_NOT_FOUND = "OAUTH_PROVIDER_NOT_FOUND",
+  OAUTH_NOT_CONFIGURED = "OAUTH_NOT_CONFIGURED",
+
+  // Certificates
+  CERT_INVALID = "CERT_INVALID",
+  CERT_EXPIRED = "CERT_EXPIRED",
+  CERT_PRIVATE_KEY_MISMATCH = "CERT_PRIVATE_KEY_MISMATCH",
+  CERT_ACME_FAILED = "CERT_ACME_FAILED",
+  CERT_CSR_FAILED = "CERT_CSR_FAILED",
+  CERT_NOT_CONFIGURED = "CERT_NOT_CONFIGURED",
+
   // Rate limiting
   RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED",
 
@@ -107,6 +124,23 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.POLICY_NOT_FOUND]: 404,
   [ErrorCode.POLICY_CONFLICT]: 409,
   [ErrorCode.PRINCIPAL_NOT_FOUND]: 404,
+
+  // OAuth
+  [ErrorCode.OAUTH_FLOW_FAILED]: 502,
+  [ErrorCode.OAUTH_CALLBACK_TIMEOUT]: 504,
+  [ErrorCode.OAUTH_INVALID_STATE]: 400,
+  [ErrorCode.OAUTH_TOKEN_EXCHANGE_FAILED]: 502,
+  [ErrorCode.OAUTH_REFRESH_FAILED]: 502,
+  [ErrorCode.OAUTH_PROVIDER_NOT_FOUND]: 404,
+  [ErrorCode.OAUTH_NOT_CONFIGURED]: 400,
+
+  // Certificates
+  [ErrorCode.CERT_INVALID]: 400,
+  [ErrorCode.CERT_EXPIRED]: 410,
+  [ErrorCode.CERT_PRIVATE_KEY_MISMATCH]: 400,
+  [ErrorCode.CERT_ACME_FAILED]: 502,
+  [ErrorCode.CERT_CSR_FAILED]: 500,
+  [ErrorCode.CERT_NOT_CONFIGURED]: 400,
 
   // Rate limiting
   [ErrorCode.RATE_LIMIT_EXCEEDED]: 429,
@@ -224,5 +258,78 @@ export class VaultError extends Error {
       ErrorCode.WEAK_PASSWORD,
       `Password must be at least ${minLength} characters`,
     );
+  }
+
+  static oauthFlowFailed(detail?: string): VaultError {
+    const msg = detail ? `OAuth flow failed: ${detail}` : "OAuth flow failed";
+    return new VaultError(ErrorCode.OAUTH_FLOW_FAILED, msg);
+  }
+
+  static oauthCallbackTimeout(): VaultError {
+    return new VaultError(ErrorCode.OAUTH_CALLBACK_TIMEOUT, "OAuth callback timed out");
+  }
+
+  static oauthInvalidState(): VaultError {
+    return new VaultError(ErrorCode.OAUTH_INVALID_STATE, "OAuth state parameter mismatch");
+  }
+
+  static oauthTokenExchangeFailed(detail?: string): VaultError {
+    const msg = detail
+      ? `OAuth token exchange failed: ${detail}`
+      : "OAuth token exchange failed";
+    return new VaultError(ErrorCode.OAUTH_TOKEN_EXCHANGE_FAILED, msg);
+  }
+
+  static oauthRefreshFailed(detail?: string): VaultError {
+    const msg = detail ? `OAuth token refresh failed: ${detail}` : "OAuth token refresh failed";
+    return new VaultError(ErrorCode.OAUTH_REFRESH_FAILED, msg);
+  }
+
+  static oauthProviderNotFound(provider: string): VaultError {
+    return new VaultError(
+      ErrorCode.OAUTH_PROVIDER_NOT_FOUND,
+      `OAuth provider not found: ${provider}`,
+    );
+  }
+
+  static oauthNotConfigured(handle?: string): VaultError {
+    const msg = handle
+      ? `OAuth not configured for secret: ${handle}`
+      : "OAuth not configured for secret";
+    return new VaultError(ErrorCode.OAUTH_NOT_CONFIGURED, msg);
+  }
+
+  static certInvalid(detail?: string): VaultError {
+    const msg = detail ? `Certificate invalid: ${detail}` : "Certificate invalid";
+    return new VaultError(ErrorCode.CERT_INVALID, msg);
+  }
+
+  static certExpired(subject?: string): VaultError {
+    const msg = subject ? `Certificate expired: ${subject}` : "Certificate expired";
+    return new VaultError(ErrorCode.CERT_EXPIRED, msg);
+  }
+
+  static certPrivateKeyMismatch(): VaultError {
+    return new VaultError(
+      ErrorCode.CERT_PRIVATE_KEY_MISMATCH,
+      "Private key does not match certificate",
+    );
+  }
+
+  static certAcmeFailed(detail?: string): VaultError {
+    const msg = detail ? `ACME operation failed: ${detail}` : "ACME operation failed";
+    return new VaultError(ErrorCode.CERT_ACME_FAILED, msg);
+  }
+
+  static certCsrFailed(detail?: string): VaultError {
+    const msg = detail ? `CSR generation failed: ${detail}` : "CSR generation failed";
+    return new VaultError(ErrorCode.CERT_CSR_FAILED, msg);
+  }
+
+  static certNotConfigured(handle?: string): VaultError {
+    const msg = handle
+      ? `Certificate not configured for secret: ${handle}`
+      : "Certificate not configured for secret";
+    return new VaultError(ErrorCode.CERT_NOT_CONFIGURED, msg);
   }
 }

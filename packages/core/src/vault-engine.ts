@@ -5,12 +5,17 @@ import type {
   FollowRedirects,
   HttpMethod,
   InjectionConfig,
+  OAuthProviderConfig,
+  OAuthTokenStatus,
   Permission,
-  SecretType,
   UseSecretResponse,
   VaultApiToken,
 } from "@harpoc/shared";
 import {
+  AAD_OAUTH_ACCESS_TOKEN,
+  AAD_OAUTH_CLIENT_ID,
+  AAD_OAUTH_CLIENT_SECRET,
+  AAD_OAUTH_REFRESH_TOKEN,
   AAD_SESSION_AUDIT,
   AAD_SESSION_JWT,
   AAD_SESSION_KEK,
@@ -23,6 +28,9 @@ import {
   LOCKOUT_MAX_ATTEMPTS,
   MAX_TOKEN_TTL_MS,
   MIN_PASSWORD_LENGTH,
+  OAuthProviderPreset,
+  SecretStatus,
+  SecretType,
   SESSION_CLEANUP_INTERVAL_MS,
   VaultError,
   VaultState,
@@ -43,10 +51,12 @@ import {
 } from "./crypto/key-hierarchy.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
 import { HttpInjector } from "./injection/http-injector.js";
+import { validateUrl } from "./injection/url-validator.js";
 import type { SecretInfo } from "./secrets/secret-manager.js";
 import { SecretManager } from "./secrets/secret-manager.js";
 import { SessionManager } from "./session/session-manager.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
+import type { OAuthTokenRow } from "./storage/sqlite-store.js";
 
 export interface VaultEngineOptions {
   dbPath: string;
@@ -419,7 +429,14 @@ export class VaultEngine {
     const s = this.assertUnlocked();
 
     const secret = await s.secretManager.resolveHandle(handle);
-    const value = await s.secretManager.getSecretValue(handle);
+
+    let value: Uint8Array;
+    if (secret.type === SecretType.OAUTH_TOKEN) {
+      const accessToken = await this.getOAuthAccessToken(secret.id);
+      value = new Uint8Array(Buffer.from(accessToken, "utf8"));
+    } else {
+      value = await s.secretManager.getSecretValue(handle);
+    }
 
     try {
       const response = await s.httpInjector.executeWithSecret(
@@ -461,6 +478,440 @@ export class VaultEngine {
         }
       }
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // OAuth
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Create an OAuth secret with provider configuration.
+   * Status is PENDING until completeOAuthFlow is called.
+   */
+  async createOAuthSecret(
+    name: string,
+    providerConfig: OAuthProviderConfig,
+    project?: string,
+  ): Promise<{ handle: string; secretId: string }> {
+    const s = this.assertUnlocked();
+
+    const result = await s.secretManager.createSecret({
+      name,
+      type: SecretType.OAUTH_TOKEN,
+      project,
+    });
+
+    const secret = await s.secretManager.resolveHandle(result.handle);
+
+    // Encrypt client_id with KEK
+    const clientIdBytes = new Uint8Array(Buffer.from(providerConfig.client_id, "utf8"));
+    const clientIdEnc = encrypt(s.kek, clientIdBytes, AAD_OAUTH_CLIENT_ID(secret.id));
+
+    // Encrypt client_secret with KEK (if provided)
+    let clientSecretEnc: { ciphertext: Uint8Array; iv: Uint8Array; tag: Uint8Array } | null = null;
+    if (providerConfig.client_secret) {
+      const clientSecretBytes = new Uint8Array(
+        Buffer.from(providerConfig.client_secret, "utf8"),
+      );
+      clientSecretEnc = encrypt(s.kek, clientSecretBytes, AAD_OAUTH_CLIENT_SECRET(secret.id));
+    }
+
+    s.store.insertOAuthToken({
+      secret_id: secret.id,
+      provider: providerConfig.provider,
+      grant_type: providerConfig.grant_type,
+      token_endpoint: providerConfig.token_endpoint,
+      auth_endpoint: providerConfig.auth_endpoint ?? null,
+      client_id_encrypted: clientIdEnc.ciphertext,
+      client_id_iv: clientIdEnc.iv,
+      client_id_tag: clientIdEnc.tag,
+      client_secret_encrypted: clientSecretEnc?.ciphertext ?? null,
+      client_secret_iv: clientSecretEnc?.iv ?? null,
+      client_secret_tag: clientSecretEnc?.tag ?? null,
+      scopes: providerConfig.scopes ? JSON.stringify(providerConfig.scopes) : null,
+      refresh_token_encrypted: null,
+      refresh_token_iv: null,
+      refresh_token_tag: null,
+      access_token_encrypted: null,
+      access_token_iv: null,
+      access_token_tag: null,
+      access_token_expires_at: null,
+      redirect_uri: providerConfig.redirect_uri ?? null,
+      pkce_method: providerConfig.pkce_method ?? "S256",
+    });
+
+    s.auditLogger.log({
+      eventType: AuditEventType.OAUTH_AUTHORIZE,
+      secretId: secret.id,
+      detail: {
+        handle: result.handle,
+        provider: providerConfig.provider,
+        grant_type: providerConfig.grant_type,
+      },
+      sessionId: this.sessionId ?? undefined,
+    });
+
+    return { handle: result.handle, secretId: secret.id };
+  }
+
+  /**
+   * Complete an OAuth flow: encrypt and store tokens, transition secret to ACTIVE.
+   */
+  async completeOAuthFlow(
+    secretId: string,
+    accessToken: string,
+    refreshToken?: string,
+    expiresAt?: number,
+  ): Promise<void> {
+    const s = this.assertUnlocked();
+
+    const secret = s.store.getSecret(secretId);
+    if (!secret) throw VaultError.secretNotFound();
+    if (secret.type !== SecretType.OAUTH_TOKEN) {
+      throw VaultError.oauthNotConfigured();
+    }
+
+    const oauthRow = s.store.getOAuthToken(secretId);
+    if (!oauthRow) throw VaultError.oauthNotConfigured();
+
+    // Encrypt access token with KEK
+    const accessTokenBytes = new Uint8Array(Buffer.from(accessToken, "utf8"));
+    const accessTokenEnc = encrypt(s.kek, accessTokenBytes, AAD_OAUTH_ACCESS_TOKEN(secretId));
+
+    const accessUpdate = {
+      access_token_encrypted: accessTokenEnc.ciphertext,
+      access_token_iv: accessTokenEnc.iv,
+      access_token_tag: accessTokenEnc.tag,
+      access_token_expires_at: expiresAt ?? null,
+    };
+
+    if (refreshToken) {
+      const refreshTokenBytes = new Uint8Array(Buffer.from(refreshToken, "utf8"));
+      const refreshTokenEnc = encrypt(
+        s.kek,
+        refreshTokenBytes,
+        AAD_OAUTH_REFRESH_TOKEN(secretId),
+      );
+      s.store.updateOAuthToken(secretId, {
+        ...accessUpdate,
+        refresh_token_encrypted: refreshTokenEnc.ciphertext,
+        refresh_token_iv: refreshTokenEnc.iv,
+        refresh_token_tag: refreshTokenEnc.tag,
+      });
+    } else {
+      s.store.updateOAuthToken(secretId, accessUpdate);
+    }
+
+    // Transition secret to ACTIVE
+    s.store.updateSecret(secretId, {
+      status: SecretStatus.ACTIVE,
+      updated_at: Date.now(),
+    });
+
+    s.auditLogger.log({
+      eventType: AuditEventType.OAUTH_CALLBACK,
+      secretId,
+      detail: { has_refresh_token: !!refreshToken, expires_at: expiresAt ?? null },
+      sessionId: this.sessionId ?? undefined,
+      success: true,
+    });
+  }
+
+  /**
+   * Refresh an OAuth token: decrypt refresh_token, call token endpoint, encrypt new tokens.
+   * Returns the new access_token expiry timestamp (or null if no expires_in in response).
+   */
+  async refreshOAuthToken(secretId: string): Promise<number | null> {
+    const s = this.assertUnlocked();
+
+    const oauthRow = s.store.getOAuthToken(secretId);
+    if (!oauthRow) throw VaultError.oauthNotConfigured();
+
+    if (
+      !oauthRow.refresh_token_encrypted ||
+      !oauthRow.refresh_token_iv ||
+      !oauthRow.refresh_token_tag
+    ) {
+      throw VaultError.oauthRefreshFailed("No refresh token available");
+    }
+
+    // Decrypt refresh token
+    const refreshToken = Buffer.from(
+      decrypt(
+        s.kek,
+        oauthRow.refresh_token_encrypted,
+        oauthRow.refresh_token_iv,
+        oauthRow.refresh_token_tag,
+        AAD_OAUTH_REFRESH_TOKEN(secretId),
+      ),
+    ).toString("utf8");
+
+    // Decrypt client_id
+    const clientId = Buffer.from(
+      decrypt(
+        s.kek,
+        oauthRow.client_id_encrypted,
+        oauthRow.client_id_iv,
+        oauthRow.client_id_tag,
+        AAD_OAUTH_CLIENT_ID(secretId),
+      ),
+    ).toString("utf8");
+
+    // Decrypt client_secret (optional)
+    let clientSecret: string | undefined;
+    if (
+      oauthRow.client_secret_encrypted &&
+      oauthRow.client_secret_iv &&
+      oauthRow.client_secret_tag
+    ) {
+      clientSecret = Buffer.from(
+        decrypt(
+          s.kek,
+          oauthRow.client_secret_encrypted,
+          oauthRow.client_secret_iv,
+          oauthRow.client_secret_tag,
+          AAD_OAUTH_CLIENT_SECRET(secretId),
+        ),
+      ).toString("utf8");
+    }
+
+    // Validate token endpoint (SSRF protection)
+    await validateUrl(oauthRow.token_endpoint);
+
+    // POST to token endpoint
+    const params = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: clientId,
+    });
+    if (clientSecret) {
+      params.set("client_secret", clientSecret);
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(oauthRow.token_endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: params.toString(),
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (err) {
+      throw VaultError.oauthRefreshFailed(
+        err instanceof Error ? err.message : "Network error",
+      );
+    }
+
+    if (!response.ok) {
+      throw VaultError.oauthRefreshFailed(
+        `Token endpoint returned HTTP ${response.status}`,
+      );
+    }
+
+    let tokenResponse: {
+      access_token?: string;
+      refresh_token?: string;
+      expires_in?: number;
+    };
+    try {
+      tokenResponse = (await response.json()) as typeof tokenResponse;
+    } catch {
+      throw VaultError.oauthRefreshFailed("Invalid JSON response from token endpoint");
+    }
+
+    if (!tokenResponse.access_token) {
+      throw VaultError.oauthRefreshFailed("No access_token in response");
+    }
+
+    // Encrypt new access token
+    const newAccessTokenBytes = new Uint8Array(
+      Buffer.from(tokenResponse.access_token, "utf8"),
+    );
+    const newAccessTokenEnc = encrypt(
+      s.kek,
+      newAccessTokenBytes,
+      AAD_OAUTH_ACCESS_TOKEN(secretId),
+    );
+
+    const newExpiresAt = tokenResponse.expires_in
+      ? Date.now() + tokenResponse.expires_in * 1000
+      : null;
+
+    const accessUpdate = {
+      access_token_encrypted: newAccessTokenEnc.ciphertext,
+      access_token_iv: newAccessTokenEnc.iv,
+      access_token_tag: newAccessTokenEnc.tag,
+      access_token_expires_at: newExpiresAt,
+    };
+
+    if (tokenResponse.refresh_token) {
+      const newRefreshBytes = new Uint8Array(
+        Buffer.from(tokenResponse.refresh_token, "utf8"),
+      );
+      const newRefreshEnc = encrypt(
+        s.kek,
+        newRefreshBytes,
+        AAD_OAUTH_REFRESH_TOKEN(secretId),
+      );
+      s.store.updateOAuthToken(secretId, {
+        ...accessUpdate,
+        refresh_token_encrypted: newRefreshEnc.ciphertext,
+        refresh_token_iv: newRefreshEnc.iv,
+        refresh_token_tag: newRefreshEnc.tag,
+      });
+    } else {
+      s.store.updateOAuthToken(secretId, accessUpdate);
+    }
+
+    s.store.updateSecret(secretId, { updated_at: Date.now() });
+
+    s.auditLogger.log({
+      eventType: AuditEventType.OAUTH_REFRESH,
+      secretId,
+      detail: { new_expires_at: newExpiresAt },
+      sessionId: this.sessionId ?? undefined,
+      success: true,
+    });
+
+    return newExpiresAt;
+  }
+
+  /**
+   * Get OAuth token status without decrypting sensitive fields.
+   */
+  getOAuthTokenStatus(secretId: string): OAuthTokenStatus {
+    const s = this.assertUnlocked();
+
+    const oauthRow = s.store.getOAuthToken(secretId);
+    if (!oauthRow) throw VaultError.oauthNotConfigured();
+
+    const secret = s.store.getSecret(secretId);
+
+    const hasAccessToken = oauthRow.access_token_encrypted !== null;
+    const hasRefreshToken = oauthRow.refresh_token_encrypted !== null;
+    const expiresAt = oauthRow.access_token_expires_at;
+
+    let refreshStatus: OAuthTokenStatus["refresh_status"];
+    if (!hasRefreshToken) {
+      refreshStatus = "no_refresh_token";
+    } else if (!hasAccessToken || (expiresAt !== null && expiresAt <= Date.now())) {
+      refreshStatus = "expired";
+    } else if (expiresAt !== null && expiresAt <= Date.now() + 5 * 60 * 1000) {
+      refreshStatus = "expiring_soon";
+    } else {
+      refreshStatus = "ok";
+    }
+
+    return {
+      secret_id: secretId,
+      provider: oauthRow.provider as OAuthProviderPreset,
+      has_access_token: hasAccessToken,
+      access_token_expires_at: expiresAt,
+      has_refresh_token: hasRefreshToken,
+      last_refreshed_at: secret?.updated_at ?? null,
+      refresh_status: refreshStatus,
+    };
+  }
+
+  /**
+   * Get the decrypted OAuth access token. Auto-refreshes if expired or within 60s of expiry.
+   * NEVER return this to the LLM — only use within the injection pipeline.
+   */
+  async getOAuthAccessToken(secretId: string): Promise<string> {
+    const s = this.assertUnlocked();
+
+    const secret = s.store.getSecret(secretId);
+    if (!secret) throw VaultError.secretNotFound();
+    if (secret.type !== SecretType.OAUTH_TOKEN) {
+      throw VaultError.oauthNotConfigured();
+    }
+
+    // Lazy expiry check
+    if (
+      secret.status !== SecretStatus.EXPIRED &&
+      secret.expires_at !== null &&
+      secret.expires_at <= Date.now()
+    ) {
+      s.store.updateSecret(secretId, {
+        status: SecretStatus.EXPIRED,
+        updated_at: Date.now(),
+      });
+      throw VaultError.secretExpired();
+    }
+    if (secret.status === SecretStatus.EXPIRED) throw VaultError.secretExpired();
+    if (secret.status === SecretStatus.REVOKED) throw VaultError.secretRevoked();
+    if (secret.status === SecretStatus.PENDING) {
+      throw VaultError.oauthNotConfigured("OAuth flow not completed");
+    }
+
+    const oauthRow = s.store.getOAuthToken(secretId);
+    if (!oauthRow) throw VaultError.oauthNotConfigured();
+
+    // Auto-refresh if expired or within 60s of expiry
+    const AUTO_REFRESH_BUFFER_MS = 60_000;
+    if (
+      oauthRow.access_token_expires_at !== null &&
+      oauthRow.access_token_expires_at <= Date.now() + AUTO_REFRESH_BUFFER_MS
+    ) {
+      if (oauthRow.refresh_token_encrypted) {
+        try {
+          await this.refreshOAuthToken(secretId);
+          const refreshed = s.store.getOAuthToken(secretId);
+          if (
+            refreshed?.access_token_encrypted &&
+            refreshed.access_token_iv &&
+            refreshed.access_token_tag
+          ) {
+            return Buffer.from(
+              decrypt(
+                s.kek,
+                refreshed.access_token_encrypted,
+                refreshed.access_token_iv,
+                refreshed.access_token_tag,
+                AAD_OAUTH_ACCESS_TOKEN(secretId),
+              ),
+            ).toString("utf8");
+          }
+        } catch (err) {
+          if (oauthRow.access_token_expires_at <= Date.now()) {
+            throw err instanceof VaultError
+              ? err
+              : VaultError.oauthRefreshFailed("Refresh failed");
+          }
+          // Token not yet expired — fall through to return current token
+        }
+      } else if (oauthRow.access_token_expires_at <= Date.now()) {
+        throw VaultError.oauthRefreshFailed(
+          "Access token expired and no refresh token available",
+        );
+      }
+    }
+
+    if (
+      !oauthRow.access_token_encrypted ||
+      !oauthRow.access_token_iv ||
+      !oauthRow.access_token_tag
+    ) {
+      throw VaultError.oauthNotConfigured("No access token stored");
+    }
+
+    return Buffer.from(
+      decrypt(
+        s.kek,
+        oauthRow.access_token_encrypted,
+        oauthRow.access_token_iv,
+        oauthRow.access_token_tag,
+        AAD_OAUTH_ACCESS_TOKEN(secretId),
+      ),
+    ).toString("utf8");
+  }
+
+  /**
+   * Get OAuth tokens expiring within the given time window.
+   */
+  getExpiringOAuthTokens(withinMs: number): OAuthTokenRow[] {
+    const s = this.assertUnlocked();
+    return s.store.getExpiringOAuthTokens(withinMs);
   }
 
   // ---------------------------------------------------------------------------

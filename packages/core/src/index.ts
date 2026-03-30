@@ -28,7 +28,12 @@ export { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random
 
 // Storage
 export { SqliteStore } from "./storage/sqlite-store.js";
-export type { SecretFilter, AuditFilter } from "./storage/sqlite-store.js";
+export type {
+  SecretFilter,
+  AuditFilter,
+  OAuthTokenRow,
+  CertificateRow,
+} from "./storage/sqlite-store.js";
 
 // Session
 export { SessionManager } from "./session/session-manager.js";

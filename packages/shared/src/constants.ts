@@ -114,6 +114,24 @@ export const HKDF_INFO_NAME_INDEX = "name-index-v1";
 export const AAD_WRAPPED_JWT_KEY = "wrapped-jwt-key";
 export const AAD_WRAPPED_AUDIT_KEY = "wrapped-audit-key";
 
+// -- AAD for OAuth encrypted fields (v1.1) -----------------------------------
+
+export function AAD_OAUTH_CLIENT_ID(secretId: string): string {
+  return `oauth-client-id:${secretId}`;
+}
+
+export function AAD_OAUTH_CLIENT_SECRET(secretId: string): string {
+  return `oauth-client-secret:${secretId}`;
+}
+
+export function AAD_OAUTH_ACCESS_TOKEN(secretId: string): string {
+  return `oauth-access-token:${secretId}`;
+}
+
+export function AAD_OAUTH_REFRESH_TOKEN(secretId: string): string {
+  return `oauth-refresh-token:${secretId}`;
+}
+
 // -- Name constraints --------------------------------------------------------
 
 export const MAX_NAME_LENGTH = 255;

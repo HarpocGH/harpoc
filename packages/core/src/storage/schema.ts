@@ -100,3 +100,56 @@ ALTER TABLE secrets ADD COLUMN name_hmac TEXT;
 export const CREATE_NAME_HMAC_INDEX = `
 CREATE INDEX IF NOT EXISTS idx_secrets_name_hmac ON secrets (name_hmac);
 `;
+
+export const CREATE_OAUTH_TOKENS = `
+CREATE TABLE oauth_tokens (
+  secret_id                  TEXT PRIMARY KEY REFERENCES secrets(id) ON DELETE CASCADE,
+  provider                   TEXT NOT NULL,
+  grant_type                 TEXT NOT NULL,
+  token_endpoint             TEXT NOT NULL,
+  auth_endpoint              TEXT,
+  client_id_encrypted        BLOB NOT NULL,
+  client_id_iv               BLOB NOT NULL,
+  client_id_tag              BLOB NOT NULL,
+  client_secret_encrypted    BLOB,
+  client_secret_iv           BLOB,
+  client_secret_tag          BLOB,
+  scopes                     TEXT,
+  refresh_token_encrypted    BLOB,
+  refresh_token_iv           BLOB,
+  refresh_token_tag          BLOB,
+  access_token_encrypted     BLOB,
+  access_token_iv            BLOB,
+  access_token_tag           BLOB,
+  access_token_expires_at    INTEGER,
+  redirect_uri               TEXT,
+  pkce_method                TEXT DEFAULT 'S256'
+) STRICT;
+`;
+
+export const CREATE_CERTIFICATES = `
+CREATE TABLE certificates (
+  secret_id                TEXT PRIMARY KEY REFERENCES secrets(id) ON DELETE CASCADE,
+  subject                  TEXT NOT NULL,
+  issuer                   TEXT,
+  serial_number            TEXT,
+  not_before               INTEGER,
+  not_after                INTEGER,
+  private_key_encrypted    BLOB NOT NULL,
+  private_key_iv           BLOB NOT NULL,
+  private_key_tag          BLOB NOT NULL,
+  certificate_pem          TEXT,
+  chain_pem                TEXT,
+  csr_pem                  TEXT,
+  auto_renew               INTEGER NOT NULL DEFAULT 0,
+  renew_before_days        INTEGER DEFAULT 30,
+  acme_account_encrypted   BLOB,
+  acme_account_iv          BLOB,
+  acme_account_tag         BLOB
+) STRICT;
+`;
+
+export const CREATE_CERTIFICATES_INDEXES = `
+CREATE INDEX IF NOT EXISTS idx_certs_expiry ON certificates(not_after);
+CREATE INDEX IF NOT EXISTS idx_certs_subject ON certificates(subject);
+`;
