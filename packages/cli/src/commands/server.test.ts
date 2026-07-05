@@ -2,19 +2,26 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Hoisted mocks (available inside vi.mock factories) ─────────────
 
-const { mockEngine, mockMcpServer, mockTransport, mockRestServer } = vi.hoisted(() => ({
-  mockEngine: {
-    destroy: vi.fn().mockResolvedValue(undefined),
-  },
-  mockMcpServer: {
-    connect: vi.fn().mockResolvedValue(undefined),
-    close: vi.fn().mockResolvedValue(undefined),
-  },
-  mockTransport: {},
-  mockRestServer: {
-    close: vi.fn(),
-  },
-}));
+const { mockEngine, mockMcpServer, mockMcpHttpServer, mockTransport, mockRestServer } = vi.hoisted(
+  () => ({
+    mockEngine: {
+      destroy: vi.fn().mockResolvedValue(undefined),
+    },
+    mockMcpServer: {
+      connect: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+    },
+    mockMcpHttpServer: {
+      port: 3001,
+      endpoint: "/mcp",
+      close: vi.fn().mockResolvedValue(undefined),
+    },
+    mockTransport: {},
+    mockRestServer: {
+      close: vi.fn(),
+    },
+  }),
+);
 
 // ── Module mocks ───────────────────────────────────────────────────
 
@@ -25,6 +32,7 @@ vi.mock("../utils/vault-loader.js", () => ({
 
 vi.mock("@harpoc/mcp-server", () => ({
   createMcpServer: vi.fn().mockReturnValue(mockMcpServer),
+  startMcpHttpServer: vi.fn().mockResolvedValue(mockMcpHttpServer),
 }));
 
 vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
@@ -75,10 +83,12 @@ describe("server start", () => {
 
   // ── Validation errors ───────────────────────────────────────────
 
-  it("exits with error when neither --mcp nor --rest is provided", async () => {
+  it("exits with error when no server flag is provided", async () => {
     await expect(run([])).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith("Error: At least one of --mcp or --rest is required.");
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Error: At least one of --mcp, --mcp-http or --rest is required.",
+    );
   });
 
   it("exits with error for non-numeric port", async () => {
@@ -102,7 +112,26 @@ describe("server start", () => {
   it("exits with error when --token is used without --mcp", async () => {
     await expect(run(["--rest", "--token", "jwt"])).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith("Error: --token requires --mcp.");
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--token requires --mcp"));
+  });
+
+  it("exits with error when --token is used with --mcp-http only", async () => {
+    await expect(run(["--mcp-http", "--token", "jwt"])).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--token requires --mcp"));
+  });
+
+  it("exits with error for an invalid --mcp-http-port", async () => {
+    await expect(run(["--mcp-http", "--mcp-http-port", "abc"])).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid MCP HTTP port"));
+  });
+
+  it("exits with error when REST and MCP HTTP ports collide", async () => {
+    await expect(run(["--rest", "--mcp-http", "--port", "4000", "--mcp-http-port", "4000"]))
+      .rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("must differ"));
   });
 
   // ── MCP mode ────────────────────────────────────────────────────
@@ -130,6 +159,36 @@ describe("server start", () => {
       engine: mockEngine,
       launchToken: "my.jwt.token",
     });
+  });
+
+  // ── MCP Streamable HTTP mode ────────────────────────────────────
+
+  it("starts MCP Streamable HTTP server with --mcp-http", async () => {
+    const { startMcpHttpServer } = await import("@harpoc/mcp-server");
+
+    await run(["--mcp-http"]);
+
+    expect(startMcpHttpServer).toHaveBeenCalledWith({ engine: mockEngine, port: 3001 });
+  });
+
+  it("starts MCP Streamable HTTP server with custom port", async () => {
+    const { startMcpHttpServer } = await import("@harpoc/mcp-server");
+
+    await run(["--mcp-http", "--mcp-http-port", "8090"]);
+
+    expect(startMcpHttpServer).toHaveBeenCalledWith({ engine: mockEngine, port: 8090 });
+  });
+
+  it("starts stdio and Streamable HTTP MCP servers together", async () => {
+    const { createMcpServer, startMcpHttpServer } = await import("@harpoc/mcp-server");
+    const originalLog = console.log;
+
+    await run(["--mcp", "--mcp-http"]);
+
+    expect(createMcpServer).toHaveBeenCalled();
+    expect(startMcpHttpServer).toHaveBeenCalled();
+
+    console.log = originalLog;
   });
 
   // ── REST mode ───────────────────────────────────────────────────

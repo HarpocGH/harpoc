@@ -18,6 +18,9 @@ import { registerSecretsResource } from "./resources/secrets.js";
 export interface CreateMcpServerOptions {
   engine: VaultEngine;
   launchToken?: string;
+  /** Shared across per-session servers (Streamable HTTP) so limits span sessions. */
+  rateLimiter?: RateLimiter;
+  injectionGuard?: InjectionGuard;
 }
 
 /**
@@ -40,8 +43,8 @@ export function createMcpServer(options: CreateMcpServerOptions): McpServer {
     scopeGuard = new ScopeGuard(null);
   }
 
-  const rateLimiter = new RateLimiter();
-  const injectionGuard = new InjectionGuard();
+  const rateLimiter = options.rateLimiter ?? new RateLimiter();
+  const injectionGuard = options.injectionGuard ?? new InjectionGuard();
 
   const server = new McpServer(
     { name: "harpoc", version: "0.0.0" },
