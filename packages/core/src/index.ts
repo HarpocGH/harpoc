@@ -35,6 +35,7 @@ export type {
   CertificateRow,
   InjectionPolicyRow,
   McpServerRow,
+  ConnectionConfigRow,
 } from "./storage/sqlite-store.js";
 
 // Session
@@ -55,13 +56,28 @@ export { SecretManager } from "./secrets/secret-manager.js";
 export type { CreateSecretInput, SecretInfo } from "./secrets/secret-manager.js";
 
 // Injection
-export { validateUrl, isPrivateIp, isLoopback } from "./injection/url-validator.js";
+export { validateUrl, validateHostPort, isPrivateIp, isLoopback } from "./injection/url-validator.js";
+export type { ValidatedHostPort } from "./injection/url-validator.js";
 export { HttpInjector } from "./injection/http-injector.js";
 export type { HttpInjectorRequest } from "./injection/http-injector.js";
 export { InjectionGuard } from "./injection/injection-guard.js";
 export { ProcessInjector } from "./injection/process-injector.js";
+export { spawnCaptured } from "./injection/spawn-captured.js";
+export type { SpawnCapturedResult, SpawnCapturedOptions } from "./injection/spawn-captured.js";
+export { DatabaseInjector } from "./injection/database-injector.js";
+export type {
+  DbEngineAdapter,
+  DbConnection,
+  DbConnectOptions,
+  DbQueryResult,
+} from "./injection/db-adapters.js";
+export { SshInjector } from "./injection/ssh-injector.js";
+export { EphemeralSshAgent } from "./injection/ssh-agent.js";
+export { GitInjector } from "./injection/git-injector.js";
 export {
   matchesUrlAllowlist,
+  matchesHostAllowlist,
+  matchesHostPortAllowlist,
   resolveAndMatchCommand,
   resolveExecutable,
   controlledPathDirs,

@@ -4,7 +4,9 @@ import { MAX_NAME_LENGTH, MAX_PROCESS_ARGS } from "./constants.js";
 import { isValidHandle } from "./handle.js";
 import {
   AuditEventType,
+  DatabaseEngine,
   FollowRedirects,
+  GitOperation,
   InjectionType,
   McpTransport,
   OAuthGrantType,
@@ -132,11 +134,70 @@ export const mcpActionSchema = z.object({
   timeout_ms: z.number().int().positive().max(300_000).optional(),
 });
 
+const databaseEngineValues = Object.values(DatabaseEngine) as [DatabaseEngine, ...DatabaseEngine[]];
+export const databaseEngineSchema = z.enum(databaseEngineValues);
+
+const gitOperationValues = Object.values(GitOperation) as [GitOperation, ...GitOperation[]];
+export const gitOperationSchema = z.enum(gitOperationValues);
+
+/** Host or host:port (no scheme). IPv6 literals are out of scope — use a hostname. */
+const hostPattern = z
+  .string()
+  .min(1)
+  .max(2048)
+  .regex(/^[a-zA-Z0-9._-]+(:\d{1,5})?$/, "Invalid host format");
+
+/** Database action — request-mediated injection; connection assembled in-vault. */
+export const databaseActionSchema = z.object({
+  type: z.literal("database"),
+  engine: databaseEngineSchema,
+  host: hostPattern,
+  port: z.number().int().positive().max(65_535).optional(),
+  database: z
+    .string()
+    .min(1)
+    .max(255)
+    .regex(/^[a-zA-Z0-9_.$-]+$/, "Invalid database name"),
+  query: z.string().min(1).max(1_000_000),
+  params: z.array(z.unknown()).max(1_000).optional(),
+  timeout_ms: z.number().int().positive().max(300_000).optional(),
+});
+
+/** Git action — transport (HTTPS vs SSH) is derived from `repository` in the injector. */
+export const gitActionSchema = z.object({
+  type: z.literal("git"),
+  operation: gitOperationSchema,
+  repository: z.string().min(1).max(2048),
+  args: z.array(z.string().max(4096)).max(MAX_PROCESS_ARGS).optional(),
+  working_directory: z.string().min(1).max(4096).optional(),
+  timeout_ms: z.number().int().positive().max(300_000).optional(),
+});
+
+/** SSH action — process-mediated injection via an ephemeral ssh-agent. */
+export const sshActionSchema = z.object({
+  type: z.literal("ssh"),
+  host: z
+    .string()
+    .min(1)
+    .max(255)
+    .regex(/^[a-zA-Z0-9._-]+$/, "Invalid host format"),
+  user: z
+    .string()
+    .min(1)
+    .max(255)
+    .regex(/^[a-zA-Z0-9._-]+$/, "Invalid user format"),
+  command: z.string().min(1).max(65_536),
+  timeout_ms: z.number().int().positive().max(300_000).optional(),
+});
+
 /** Discriminated union over the execution context. */
 export const useSecretActionSchema = z.discriminatedUnion("type", [
   httpActionSchema,
   processActionSchema,
   mcpActionSchema,
+  databaseActionSchema,
+  gitActionSchema,
+  sshActionSchema,
 ]);
 
 export const useSecretRequestSchema = z.object({
@@ -144,7 +205,7 @@ export const useSecretRequestSchema = z.object({
   action: useSecretActionSchema,
 });
 
-/** Per-secret injection policy input (URL + command + env allowlists). */
+/** Per-secret injection policy input (URL + host + command + env allowlists). */
 export const injectionPolicyInputSchema = z.object({
   url_allowlist: z.array(z.string().min(1).max(2048)).max(100).optional().default([]),
   command_allowlist: z.array(z.string().min(1).max(4096)).max(100).optional().default([]),
@@ -153,7 +214,42 @@ export const injectionPolicyInputSchema = z.object({
     .max(100)
     .optional()
     .default([]),
+  host_allowlist: z.array(z.string().min(1).max(2048)).max(100).optional().default([]),
 });
+
+/**
+ * Per-secret endpoint-authentication config input (trusted admin path only).
+ * At least one of `database` / `ssh` must be present.
+ */
+export const connectionConfigSchema = z
+  .object({
+    database: z
+      .object({
+        tls_mode: z.enum(["require", "disable"]).optional(),
+        ca_pem: z.string().min(1).max(65_536).optional(),
+        servername: z
+          .string()
+          .min(1)
+          .max(255)
+          .regex(/^[a-zA-Z0-9._-]+$/, "Invalid servername")
+          .optional(),
+      })
+      .optional(),
+    ssh: z
+      .object({
+        known_hosts: z.array(z.string().min(1).max(4096)).min(1).max(50),
+      })
+      .optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (!data.database && !data.ssh) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "connection config must set at least one of database or ssh",
+        path: [],
+      });
+    }
+  });
 
 const mcpTransportValues = Object.values(McpTransport) as [McpTransport, ...McpTransport[]];
 export const mcpTransportSchema = z.enum(mcpTransportValues);

@@ -87,6 +87,9 @@ export const ActionType = {
   HTTP: "http",
   PROCESS: "process",
   MCP: "mcp",
+  DATABASE: "database",
+  GIT: "git",
+  SSH: "ssh",
 } as const;
 export type ActionType = (typeof ActionType)[keyof typeof ActionType];
 
@@ -96,6 +99,21 @@ export const McpTransport = {
   HTTP: "http",
 } as const;
 export type McpTransport = (typeof McpTransport)[keyof typeof McpTransport];
+
+/** SQL engine of a database action. The `engine` field keeps the taxonomy open. */
+export const DatabaseEngine = {
+  POSTGRESQL: "postgresql",
+  MYSQL: "mysql",
+} as const;
+export type DatabaseEngine = (typeof DatabaseEngine)[keyof typeof DatabaseEngine];
+
+/** Git operation forwarded to the spawned git binary. */
+export const GitOperation = {
+  CLONE: "clone",
+  PULL: "pull",
+  PUSH: "push",
+} as const;
+export type GitOperation = (typeof GitOperation)[keyof typeof GitOperation];
 
 export const VaultState = {
   SEALED: "sealed",
@@ -268,8 +286,58 @@ export interface McpAction {
   timeout_ms?: number;
 }
 
+/**
+ * Database action — request-mediated injection. The vault assembles the
+ * connection string in-process (the credential is the secret, `user:password`),
+ * connects with TLS by default, executes the query and returns the result set.
+ * `host` may embed a port (`host:port`); an explicit `port` overrides it.
+ */
+export interface DatabaseAction {
+  type: typeof ActionType.DATABASE;
+  engine: DatabaseEngine;
+  host: string;
+  port?: number;
+  database: string;
+  query: string;
+  params?: unknown[];
+  timeout_ms?: number;
+}
+
+/**
+ * Git action — request-mediated over HTTPS (credential helper) or process-mediated
+ * over SSH (ephemeral ssh-agent), selected by the `repository` transport. The
+ * credential never appears in the command output or the agent's context.
+ */
+export interface GitAction {
+  type: typeof ActionType.GIT;
+  operation: GitOperation;
+  repository: string;
+  args?: string[];
+  working_directory?: string;
+  timeout_ms?: number;
+}
+
+/**
+ * SSH action — process-mediated injection. The vault spawns `ssh` with the
+ * private key served through an ephemeral ssh-agent (signatures only, key never
+ * on disk) and strict host-key verification against the pinned known_hosts.
+ */
+export interface SshAction {
+  type: typeof ActionType.SSH;
+  host: string;
+  user: string;
+  command: string;
+  timeout_ms?: number;
+}
+
 /** Discriminated union of context-specific use_secret action specifications. */
-export type UseSecretAction = HttpAction | ProcessAction | McpAction;
+export type UseSecretAction =
+  | HttpAction
+  | ProcessAction
+  | McpAction
+  | DatabaseAction
+  | GitAction
+  | SshAction;
 
 /** Request to use a secret via a context-specific action. */
 export interface UseSecretRequest {
@@ -308,19 +376,90 @@ export interface McpResult {
   truncated?: boolean;
 }
 
+/** Result of a request-mediated (database) use_secret invocation. */
+export interface DatabaseResult {
+  type: typeof ActionType.DATABASE;
+  row_count: number;
+  rows: unknown[];
+  fields?: { name: string }[];
+  command?: string;
+  truncated?: boolean;
+  error?: string;
+}
+
+/** Result of a Git use_secret invocation (captured, sanitized git output). */
+export interface GitResult {
+  type: typeof ActionType.GIT;
+  operation: GitOperation;
+  exit_code: number | null;
+  stdout: string;
+  stderr: string;
+  timed_out?: boolean;
+  truncated?: boolean;
+  signal?: string;
+  error?: string;
+}
+
+/** Result of an SSH use_secret invocation (captured, sanitized remote output). */
+export interface SshResult {
+  type: typeof ActionType.SSH;
+  exit_code: number | null;
+  stdout: string;
+  stderr: string;
+  timed_out?: boolean;
+  truncated?: boolean;
+  signal?: string;
+  error?: string;
+}
+
 /** Response from use_secret — discriminated by execution mechanism. */
-export type UseSecretResponse = HttpResult | ProcessResult | McpResult;
+export type UseSecretResponse =
+  | HttpResult
+  | ProcessResult
+  | McpResult
+  | DatabaseResult
+  | GitResult
+  | SshResult;
 
 /**
  * Per-secret injection policy: allowlists constraining where a credential may
- * be used. `url_allowlist` bounds request-mediated targets; `command_allowlist`
- * bounds process-mediated binaries; `env_allowlist` names additional environment
+ * be used (thesis §4.7 target allowlisting). `url_allowlist` bounds URL targets
+ * (HTTP, Git-over-HTTPS, MCP-over-HTTP); `host_allowlist` bounds host and
+ * host:port targets (SSH, Git-over-SSH, database); `command_allowlist` bounds
+ * process-mediated binaries; `env_allowlist` names additional environment
  * variables passed through to a spawned subprocess.
  */
 export interface InjectionPolicy {
   url_allowlist: string[];
   command_allowlist: string[];
   env_allowlist: string[];
+  host_allowlist: string[];
+}
+
+/**
+ * Database endpoint-authentication config. TLS is required by default; `disable`
+ * is the audited per-secret opt-out for trusted local sockets (thesis §4.5.5).
+ */
+export interface DatabaseConnectionConfig {
+  tls_mode?: "require" | "disable";
+  ca_pem?: string;
+  servername?: string;
+}
+
+/** SSH endpoint-authentication config: host keys pinned at secret creation. */
+export interface SshConnectionConfig {
+  known_hosts: string[];
+}
+
+/**
+ * Per-secret endpoint-authentication pins (KEK-encrypted at rest), the §4.7
+ * "authenticated target connections" counterpart to the target allowlist. Set
+ * only via the trusted admin path (CLI/REST) — never via an MCP tool. `ssh` is
+ * shared by the SSH and Git-over-SSH contexts.
+ */
+export interface ConnectionConfig {
+  database?: DatabaseConnectionConfig;
+  ssh?: SshConnectionConfig;
 }
 
 /**

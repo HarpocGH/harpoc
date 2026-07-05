@@ -164,3 +164,51 @@ function isIpAddress(host: string): boolean {
   if (normalized.includes(":")) return true;
   return false;
 }
+
+export interface ValidatedHostPort {
+  host: string;
+  port: number;
+  resolvedAddress: string;
+}
+
+/**
+ * Validate a bare host and port for a non-HTTP network context (database, SSH,
+ * Git-over-SSH). Applies the same SSRF / DNS-rebinding protection as validateUrl
+ * without the HTTPS-scheme requirement: private/internal targets are rejected,
+ * hostnames are resolved and the resolved IP re-checked, and the resolved
+ * address is returned so callers can pin the connection. Loopback is permitted
+ * (trusted local sockets — e.g. a database over 127.0.0.1).
+ */
+export async function validateHostPort(host: string, port: number): Promise<ValidatedHostPort> {
+  const hostname = host.replace(/^\[|\]$/g, "");
+
+  if (isLoopback(hostname)) {
+    return { host: hostname, port, resolvedAddress: hostname };
+  }
+  if (isPrivateIp(hostname)) {
+    throw new VaultError(
+      ErrorCode.SSRF_BLOCKED,
+      `SSRF blocked: ${hostname} is a private/internal IP address`,
+    );
+  }
+  if (isIpAddress(hostname)) {
+    return { host: hostname, port, resolvedAddress: hostname };
+  }
+
+  try {
+    const { address } = await dns.lookup(hostname);
+    if (isPrivateIp(address)) {
+      throw new VaultError(
+        ErrorCode.SSRF_BLOCKED,
+        `SSRF blocked: ${hostname} resolves to private IP ${address}`,
+      );
+    }
+    return { host: hostname, port, resolvedAddress: address };
+  } catch (err) {
+    if (err instanceof VaultError) throw err;
+    throw new VaultError(
+      ErrorCode.DNS_RESOLUTION_FAILED,
+      `DNS resolution failed for ${hostname}: ${err instanceof Error ? err.message : "unknown"}`,
+    );
+  }
+}

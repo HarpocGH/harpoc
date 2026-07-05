@@ -53,6 +53,22 @@ export enum ErrorCode {
   MCP_PROTOCOL_ERROR = "MCP_PROTOCOL_ERROR",
   MCP_TIMEOUT = "MCP_TIMEOUT",
 
+  // Database / Git / SSH contexts
+  HOST_NOT_ALLOWED = "HOST_NOT_ALLOWED",
+  DB_CONNECTION_FAILED = "DB_CONNECTION_FAILED",
+  DB_QUERY_FAILED = "DB_QUERY_FAILED",
+  DB_TLS_REQUIRED = "DB_TLS_REQUIRED",
+  UNSUPPORTED_DB_ENGINE = "UNSUPPORTED_DB_ENGINE",
+  INVALID_DATABASE_CONFIG = "INVALID_DATABASE_CONFIG",
+  SSH_CONNECT_FAILED = "SSH_CONNECT_FAILED",
+  SSH_HOST_KEY_MISMATCH = "SSH_HOST_KEY_MISMATCH",
+  SSH_AGENT_FAILED = "SSH_AGENT_FAILED",
+  SSH_NOT_CONFIGURED = "SSH_NOT_CONFIGURED",
+  INVALID_SSH_CONFIG = "INVALID_SSH_CONFIG",
+  GIT_OPERATION_FAILED = "GIT_OPERATION_FAILED",
+  GIT_UNSUPPORTED_TRANSPORT = "GIT_UNSUPPORTED_TRANSPORT",
+  INVALID_GIT_CONFIG = "INVALID_GIT_CONFIG",
+
   // Validation
   INVALID_INPUT = "INVALID_INPUT",
   INVALID_HANDLE = "INVALID_HANDLE",
@@ -144,6 +160,22 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.MCP_SERVER_CRASHED]: 502,
   [ErrorCode.MCP_PROTOCOL_ERROR]: 502,
   [ErrorCode.MCP_TIMEOUT]: 504,
+
+  // Database / Git / SSH contexts
+  [ErrorCode.HOST_NOT_ALLOWED]: 403,
+  [ErrorCode.DB_CONNECTION_FAILED]: 502,
+  [ErrorCode.DB_QUERY_FAILED]: 400,
+  [ErrorCode.DB_TLS_REQUIRED]: 400,
+  [ErrorCode.UNSUPPORTED_DB_ENGINE]: 400,
+  [ErrorCode.INVALID_DATABASE_CONFIG]: 400,
+  [ErrorCode.SSH_CONNECT_FAILED]: 502,
+  [ErrorCode.SSH_HOST_KEY_MISMATCH]: 502,
+  [ErrorCode.SSH_AGENT_FAILED]: 500,
+  [ErrorCode.SSH_NOT_CONFIGURED]: 400,
+  [ErrorCode.INVALID_SSH_CONFIG]: 400,
+  [ErrorCode.GIT_OPERATION_FAILED]: 502,
+  [ErrorCode.GIT_UNSUPPORTED_TRANSPORT]: 400,
+  [ErrorCode.INVALID_GIT_CONFIG]: 400,
 
   // Validation
   [ErrorCode.INVALID_INPUT]: 400,
@@ -438,5 +470,79 @@ export class VaultError extends Error {
       ? `Certificate not configured for secret: ${handle}`
       : "Certificate not configured for secret";
     return new VaultError(ErrorCode.CERT_NOT_CONFIGURED, msg);
+  }
+
+  static hostNotAllowed(host?: string): VaultError {
+    const msg = host ? `Host not in secret allowlist: ${host}` : "Host not in secret allowlist";
+    return new VaultError(ErrorCode.HOST_NOT_ALLOWED, msg);
+  }
+
+  static dbConnectionFailed(detail?: string): VaultError {
+    const msg = detail ? `Database connection failed: ${detail}` : "Database connection failed";
+    return new VaultError(ErrorCode.DB_CONNECTION_FAILED, msg);
+  }
+
+  static dbQueryFailed(detail?: string): VaultError {
+    const msg = detail ? `Database query failed: ${detail}` : "Database query failed";
+    return new VaultError(ErrorCode.DB_QUERY_FAILED, msg);
+  }
+
+  static dbTlsRequired(): VaultError {
+    return new VaultError(
+      ErrorCode.DB_TLS_REQUIRED,
+      "TLS is required for this database connection; set tls_mode 'disable' to opt out",
+    );
+  }
+
+  static unsupportedDbEngine(engine: string): VaultError {
+    return new VaultError(ErrorCode.UNSUPPORTED_DB_ENGINE, `Unsupported database engine: ${engine}`);
+  }
+
+  static invalidDatabaseConfig(message: string): VaultError {
+    return new VaultError(ErrorCode.INVALID_DATABASE_CONFIG, message);
+  }
+
+  static sshConnectFailed(detail?: string): VaultError {
+    const msg = detail ? `SSH connection failed: ${detail}` : "SSH connection failed";
+    return new VaultError(ErrorCode.SSH_CONNECT_FAILED, msg);
+  }
+
+  static sshHostKeyMismatch(host?: string): VaultError {
+    const msg = host
+      ? `SSH host key does not match the pinned key for: ${host}`
+      : "SSH host key does not match the pinned key";
+    return new VaultError(ErrorCode.SSH_HOST_KEY_MISMATCH, msg);
+  }
+
+  static sshAgentFailed(detail?: string): VaultError {
+    const msg = detail ? `Ephemeral ssh-agent failed: ${detail}` : "Ephemeral ssh-agent failed";
+    return new VaultError(ErrorCode.SSH_AGENT_FAILED, msg);
+  }
+
+  static sshNotConfigured(handle?: string): VaultError {
+    const msg = handle
+      ? `SSH host keys not pinned for secret: ${handle}`
+      : "SSH host keys not pinned for secret";
+    return new VaultError(ErrorCode.SSH_NOT_CONFIGURED, msg);
+  }
+
+  static invalidSshConfig(message: string): VaultError {
+    return new VaultError(ErrorCode.INVALID_SSH_CONFIG, message);
+  }
+
+  static gitOperationFailed(detail?: string): VaultError {
+    const msg = detail ? `Git operation failed: ${detail}` : "Git operation failed";
+    return new VaultError(ErrorCode.GIT_OPERATION_FAILED, msg);
+  }
+
+  static gitUnsupportedTransport(repository?: string): VaultError {
+    const msg = repository
+      ? `Unsupported git transport for repository: ${repository}`
+      : "Unsupported git transport";
+    return new VaultError(ErrorCode.GIT_UNSUPPORTED_TRANSPORT, msg);
+  }
+
+  static invalidGitConfig(message: string): VaultError {
+    return new VaultError(ErrorCode.INVALID_GIT_CONFIG, message);
   }
 }

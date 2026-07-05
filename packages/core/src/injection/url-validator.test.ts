@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
-import { isLoopback, isPrivateIp, validateUrl } from "./url-validator.js";
+import { isLoopback, isPrivateIp, validateHostPort, validateUrl } from "./url-validator.js";
 
 describe("isPrivateIp", () => {
   it.each([
@@ -318,5 +318,34 @@ describe("validateUrl", () => {
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
     }
+  });
+});
+
+describe("validateHostPort", () => {
+  it("accepts a public literal IP and returns it as the resolved address", async () => {
+    const result = await validateHostPort("8.8.8.8", 5432);
+    expect(result.resolvedAddress).toBe("8.8.8.8");
+    expect(result.port).toBe(5432);
+  });
+
+  it("allows loopback (trusted local socket)", async () => {
+    const result = await validateHostPort("127.0.0.1", 5432);
+    expect(result.resolvedAddress).toBe("127.0.0.1");
+    await expect(validateHostPort("localhost", 3306)).resolves.toBeDefined();
+  });
+
+  it.each(["10.0.0.1", "192.168.1.1", "172.16.0.1", "169.254.1.1", "0.0.0.0"])(
+    "blocks SSRF for private literal IP %s",
+    async (ip) => {
+      await expect(validateHostPort(ip, 5432)).rejects.toMatchObject({
+        code: ErrorCode.SSRF_BLOCKED,
+      });
+    },
+  );
+
+  it("blocks SSRF for an IPv6 ULA literal", async () => {
+    await expect(validateHostPort("fc00::1", 5432)).rejects.toMatchObject({
+      code: ErrorCode.SSRF_BLOCKED,
+    });
   });
 });

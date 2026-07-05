@@ -65,6 +65,44 @@ function matchHost(patternHost: string, host: string): boolean {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// Host / host:port allowlist (SSH, Git-over-SSH, database targets)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if `host` is permitted by `patterns` (bare-host patterns with an
+ * optional `*.` subdomain wildcard). An empty allowlist is not enforced (returns
+ * true) — like the URL allowlist, this is an optional layer; process-mediated
+ * callers (SSH, Git-over-SSH) additionally reject an empty allowlist themselves
+ * for fail-safe deny.
+ */
+export function matchesHostAllowlist(host: string, patterns: string[]): boolean {
+  if (patterns.length === 0) return true;
+  return patterns.some((p) => matchHost(p.trim(), host));
+}
+
+/**
+ * Returns true if `host`:`port` is permitted by `patterns`. A pattern may be a
+ * bare host (matches any port) or `host:port` (port must match exactly). Host
+ * matching supports the `*.` subdomain wildcard. An empty allowlist is not
+ * enforced (returns true) — the mandatory floor for the database context is the
+ * SSRF check plus TLS verification.
+ */
+export function matchesHostPortAllowlist(host: string, port: number, patterns: string[]): boolean {
+  if (patterns.length === 0) return true;
+  return patterns.some((raw) => {
+    const p = raw.trim();
+    const colon = p.lastIndexOf(":");
+    if (colon > 0 && /^\d+$/.test(p.slice(colon + 1))) {
+      const patternHost = p.slice(0, colon);
+      const patternPort = p.slice(colon + 1);
+      if (patternPort !== String(port)) return false;
+      return matchHost(patternHost, host);
+    }
+    return matchHost(p, host);
+  });
+}
+
 /** Full-anchored glob where `*` matches any run of characters. */
 function globMatch(pattern: string, value: string): boolean {
   const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").split("*").join(".*");

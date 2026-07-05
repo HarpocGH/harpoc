@@ -41,11 +41,17 @@ function createMockEngine() {
     revokeSecret: vi.fn().mockResolvedValue(undefined),
     useSecret: vi.fn().mockResolvedValue({ type: "http", status: 200, body: "ok" }),
     setInjectionPolicy: vi.fn().mockResolvedValue(undefined),
-    getInjectionPolicy: vi
-      .fn()
-      .mockResolvedValue({ url_allowlist: [], command_allowlist: [], env_allowlist: [] }),
+    getInjectionPolicy: vi.fn().mockResolvedValue({
+      url_allowlist: [],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: [],
+    }),
     setMcpServerConfig: vi.fn().mockResolvedValue(undefined),
     getMcpServerConfig: vi.fn().mockResolvedValue(undefined),
+    setConnectionConfig: vi.fn().mockResolvedValue(undefined),
+    getConnectionConfig: vi.fn().mockResolvedValue(undefined),
+    deleteConnectionConfig: vi.fn().mockResolvedValue(true),
     resolveSecretId: vi.fn().mockResolvedValue("uuid-1"),
     grantPolicy: vi.fn().mockReturnValue({
       id: "p1",
@@ -176,6 +182,22 @@ describe("DirectClient", () => {
     const got = await client.getMcpServerConfig("secret://key");
     expect(engine.getMcpServerConfig).toHaveBeenCalledWith("secret://key");
     expect(got).toBeUndefined();
+  });
+
+  it("connection-config methods delegate to the engine", async () => {
+    const engine = createMockEngine();
+    const client = new DirectClient(engine as never);
+
+    const config = { database: { tls_mode: "require" as const }, ssh: { known_hosts: ["h k v"] } };
+    await client.setConnectionConfig("secret://key", config);
+    expect(engine.setConnectionConfig).toHaveBeenCalledWith("secret://key", config);
+
+    await client.getConnectionConfig("secret://key");
+    expect(engine.getConnectionConfig).toHaveBeenCalledWith("secret://key");
+
+    const deleted = await client.deleteConnectionConfig("secret://key");
+    expect(engine.deleteConnectionConfig).toHaveBeenCalledWith("secret://key");
+    expect(deleted).toBe(true);
   });
 
   it("grantPolicy resolves secret ID and delegates", async () => {

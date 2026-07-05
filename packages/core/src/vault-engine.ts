@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type {
   AccessPolicy,
+  ConnectionConfig,
   CreateSecretResponse,
   HttpResult,
   InjectionConfig,
@@ -14,6 +15,7 @@ import type {
   VaultApiToken,
 } from "@harpoc/shared";
 import {
+  AAD_CONNECTION_CONFIG,
   AAD_INJECTION_POLICY,
   AAD_MCP_SERVER_CONFIG,
   AAD_OAUTH_ACCESS_TOKEN,
@@ -55,10 +57,13 @@ import {
 } from "./crypto/key-hierarchy.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
 import { matchesUrlAllowlist } from "./injection/allowlist.js";
+import { DatabaseInjector } from "./injection/database-injector.js";
+import { GitInjector } from "./injection/git-injector.js";
 import { HttpInjector } from "./injection/http-injector.js";
 import { McpInjector } from "./injection/mcp-injector.js";
 import { McpConnectionRegistry } from "./injection/mcp-registry.js";
 import { ProcessInjector } from "./injection/process-injector.js";
+import { SshInjector } from "./injection/ssh-injector.js";
 import { validateUrl } from "./injection/url-validator.js";
 import type { SecretInfo } from "./secrets/secret-manager.js";
 import { SecretManager } from "./secrets/secret-manager.js";
@@ -85,6 +90,9 @@ interface UnlockedState {
   processInjector: ProcessInjector;
   mcpInjector: McpInjector;
   mcpRegistry: McpConnectionRegistry;
+  databaseInjector: DatabaseInjector;
+  sshInjector: SshInjector;
+  gitInjector: GitInjector;
 }
 
 /**
@@ -107,6 +115,9 @@ export class VaultEngine {
   private processInjector: ProcessInjector | null = null;
   private mcpInjector: McpInjector | null = null;
   private mcpRegistry: McpConnectionRegistry | null = null;
+  private databaseInjector: DatabaseInjector | null = null;
+  private sshInjector: SshInjector | null = null;
+  private gitInjector: GitInjector | null = null;
   private sessionManager: SessionManager;
   private sessionMonitorInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -463,44 +474,65 @@ export class VaultEngine {
         return await s.mcpInjector.executeWithSecret(action, value, policy, config, secret.id);
       }
 
-      // Request-mediated (HTTP): enforce the per-secret URL allowlist before injection.
-      if (!matchesUrlAllowlist(action.url, policy.url_allowlist)) {
-        s.auditLogger.log({
-          eventType: AuditEventType.SECRET_USE,
-          secretId: secret.id,
-          detail: { context: "http", url: action.url, error: ErrorCode.URL_NOT_ALLOWED },
-          success: false,
-          sessionId: this.sessionId ?? undefined,
-        });
-        throw VaultError.urlNotAllowed(action.url);
-      }
-
-      const response = await s.httpInjector.executeWithSecret(
-        {
-          method: action.method,
-          url: action.url,
-          headers: action.headers,
-          body: action.body,
-          timeoutMs: action.timeout_ms,
-        },
-        value,
-        action.injection,
-        action.follow_redirects,
-        secret.id,
-      );
-
-      // Exact-match redaction: scrub the actual secret value from the response
-      const valueStr = Buffer.from(value).toString("utf8");
-      if (valueStr.length > 0) {
-        this.redactValue(response, valueStr);
-        // Also redact base64 form (used in basic_auth injection)
-        const valueB64 = Buffer.from(valueStr).toString("base64");
-        if (valueB64 !== valueStr) {
-          this.redactValue(response, valueB64);
+      if (action.type === "http") {
+        // Request-mediated (HTTP): enforce the per-secret URL allowlist before injection.
+        if (!matchesUrlAllowlist(action.url, policy.url_allowlist)) {
+          s.auditLogger.log({
+            eventType: AuditEventType.SECRET_USE,
+            secretId: secret.id,
+            detail: { context: "http", url: action.url, error: ErrorCode.URL_NOT_ALLOWED },
+            success: false,
+            sessionId: this.sessionId ?? undefined,
+          });
+          throw VaultError.urlNotAllowed(action.url);
         }
+
+        const response = await s.httpInjector.executeWithSecret(
+          {
+            method: action.method,
+            url: action.url,
+            headers: action.headers,
+            body: action.body,
+            timeoutMs: action.timeout_ms,
+          },
+          value,
+          action.injection,
+          action.follow_redirects,
+          secret.id,
+        );
+
+        // Exact-match redaction: scrub the actual secret value from the response
+        const valueStr = Buffer.from(value).toString("utf8");
+        if (valueStr.length > 0) {
+          this.redactValue(response, valueStr);
+          // Also redact base64 form (used in basic_auth injection)
+          const valueB64 = Buffer.from(valueStr).toString("base64");
+          if (valueB64 !== valueStr) {
+            this.redactValue(response, valueB64);
+          }
+        }
+
+        return response;
       }
 
-      return response;
+      if (action.type === "database") {
+        const config = this.loadConnectionConfig(s, secret.id);
+        return await s.databaseInjector.executeWithSecret(action, value, policy, config, secret.id);
+      }
+
+      if (action.type === "ssh") {
+        const config = this.loadConnectionConfig(s, secret.id);
+        return await s.sshInjector.executeWithSecret(action, value, policy, config, secret.id);
+      }
+
+      if (action.type === "git") {
+        const config = this.loadConnectionConfig(s, secret.id);
+        return await s.gitInjector.executeWithSecret(action, value, policy, config, secret.id);
+      }
+
+      throw VaultError.invalidInput(
+        `Unsupported action type: ${(action as { type: string }).type}`,
+      );
     } finally {
       wipeBuffer(value);
     }
@@ -530,7 +562,7 @@ export class VaultEngine {
   private loadInjectionPolicy(s: UnlockedState, secretId: string): InjectionPolicy {
     const row = s.store.getInjectionPolicy(secretId);
     if (!row) {
-      return { url_allowlist: [], command_allowlist: [], env_allowlist: [] };
+      return { url_allowlist: [], command_allowlist: [], env_allowlist: [], host_allowlist: [] };
     }
     const bytes = decrypt(
       s.kek,
@@ -544,6 +576,7 @@ export class VaultEngine {
       url_allowlist: parsed.url_allowlist ?? [],
       command_allowlist: parsed.command_allowlist ?? [],
       env_allowlist: parsed.env_allowlist ?? [],
+      host_allowlist: parsed.host_allowlist ?? [],
     };
   }
 
@@ -559,6 +592,7 @@ export class VaultEngine {
       url_allowlist: policy.url_allowlist ?? [],
       command_allowlist: policy.command_allowlist ?? [],
       env_allowlist: policy.env_allowlist ?? [],
+      host_allowlist: policy.host_allowlist ?? [],
     });
     const enc = encrypt(
       s.kek,
@@ -583,6 +617,7 @@ export class VaultEngine {
         url_count: policy.url_allowlist?.length ?? 0,
         command_count: policy.command_allowlist?.length ?? 0,
         env_count: policy.env_allowlist?.length ?? 0,
+        host_count: policy.host_allowlist?.length ?? 0,
       },
       sessionId: this.sessionId ?? undefined,
     });
@@ -667,6 +702,86 @@ export class VaultEngine {
         eventType: AuditEventType.POLICY_REVOKE,
         secretId: secret.id,
         detail: { policy: "mcp_server" },
+        sessionId: this.sessionId ?? undefined,
+      });
+    }
+    return deleted;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Connection config (database TLS policy / SSH pinned host keys)
+  // ---------------------------------------------------------------------------
+
+  /** Load a secret's endpoint-authentication config, or undefined when unset. */
+  private loadConnectionConfig(s: UnlockedState, secretId: string): ConnectionConfig | undefined {
+    const row = s.store.getConnectionConfig(secretId);
+    if (!row) return undefined;
+    const bytes = decrypt(
+      s.kek,
+      row.config_encrypted,
+      row.config_iv,
+      row.config_tag,
+      AAD_CONNECTION_CONFIG(secretId),
+    );
+    return JSON.parse(Buffer.from(bytes).toString("utf8")) as ConnectionConfig;
+  }
+
+  /**
+   * Set (or replace) a secret's endpoint-authentication config (database TLS
+   * policy / SSH pinned host keys). Trusted administrative operation (CLI/REST
+   * only — never an MCP tool); encrypted under the KEK.
+   */
+  async setConnectionConfig(handle: string, config: ConnectionConfig): Promise<void> {
+    const s = this.assertUnlocked();
+    const secret = await s.secretManager.resolveHandle(handle);
+
+    const json = JSON.stringify(config);
+    const enc = encrypt(
+      s.kek,
+      new Uint8Array(Buffer.from(json, "utf8")),
+      AAD_CONNECTION_CONFIG(secret.id),
+    );
+    const now = Date.now();
+    s.store.upsertConnectionConfig({
+      secret_id: secret.id,
+      config_encrypted: enc.ciphertext,
+      config_iv: enc.iv,
+      config_tag: enc.tag,
+      created_at: now,
+      updated_at: now,
+    });
+
+    s.auditLogger.log({
+      eventType: AuditEventType.POLICY_GRANT,
+      secretId: secret.id,
+      detail: {
+        policy: "connection",
+        has_database: config.database !== undefined,
+        has_ssh: config.ssh !== undefined,
+        database_tls: config.database?.tls_mode,
+        known_hosts_count: config.ssh?.known_hosts.length ?? 0,
+      },
+      sessionId: this.sessionId ?? undefined,
+    });
+  }
+
+  /** Read a secret's endpoint-authentication config (undefined when unset). */
+  async getConnectionConfig(handle: string): Promise<ConnectionConfig | undefined> {
+    const s = this.assertUnlocked();
+    const secret = await s.secretManager.resolveHandle(handle);
+    return this.loadConnectionConfig(s, secret.id);
+  }
+
+  /** Remove a secret's endpoint-authentication config. */
+  async deleteConnectionConfig(handle: string): Promise<boolean> {
+    const s = this.assertUnlocked();
+    const secret = await s.secretManager.resolveHandle(handle);
+    const deleted = s.store.deleteConnectionConfig(secret.id);
+    if (deleted) {
+      s.auditLogger.log({
+        eventType: AuditEventType.POLICY_REVOKE,
+        secretId: secret.id,
+        detail: { policy: "connection" },
         sessionId: this.sessionId ?? undefined,
       });
     }
@@ -1307,6 +1422,9 @@ export class VaultEngine {
       processInjector: this.processInjector as ProcessInjector,
       mcpInjector: this.mcpInjector as McpInjector,
       mcpRegistry: this.mcpRegistry as McpConnectionRegistry,
+      databaseInjector: this.databaseInjector as DatabaseInjector,
+      sshInjector: this.sshInjector as SshInjector,
+      gitInjector: this.gitInjector as GitInjector,
     };
   }
 
@@ -1323,6 +1441,9 @@ export class VaultEngine {
     this.processInjector = new ProcessInjector(this.auditLogger);
     this.mcpRegistry = new McpConnectionRegistry(this.auditLogger);
     this.mcpInjector = new McpInjector(this.auditLogger, this.mcpRegistry);
+    this.databaseInjector = new DatabaseInjector(this.auditLogger);
+    this.sshInjector = new SshInjector(this.auditLogger);
+    this.gitInjector = new GitInjector(this.auditLogger);
   }
 
   private wipeKeys(): void {

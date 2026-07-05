@@ -12,6 +12,7 @@ interface AllowOptions {
   command?: string[];
   url?: string[];
   env?: string[];
+  host?: string[];
   show?: boolean;
   json?: boolean;
 }
@@ -19,9 +20,10 @@ interface AllowOptions {
 export function registerSecretAllowCommand(secret: Command): void {
   secret
     .command("allow <handle>")
-    .description("Set or show a secret's injection allowlists (URL + command)")
+    .description("Set or show a secret's injection allowlists (URL + host + command)")
     .option("--command <name>", "Allowlisted command for process execution (repeatable)", collect, [])
     .option("--url <pattern>", "Allowlisted URL pattern for HTTP injection (repeatable)", collect, [])
+    .option("--host <pattern>", "Allowlisted host or host:port for database/SSH/Git-SSH (repeatable)", collect, [])
     .option("--env <name>", "Env var passed through to spawned processes (repeatable)", collect, [])
     .option("--show", "Show the current policy instead of setting it")
     .option("--json", "Output as JSON")
@@ -33,6 +35,7 @@ export function registerSecretAllowCommand(secret: Command): void {
           const setCount =
             (options.command?.length ?? 0) +
             (options.url?.length ?? 0) +
+            (options.host?.length ?? 0) +
             (options.env?.length ?? 0);
 
           if (options.show || setCount === 0) {
@@ -45,6 +48,7 @@ export function registerSecretAllowCommand(secret: Command): void {
             url_allowlist: options.url ?? [],
             command_allowlist: options.command ?? [],
             env_allowlist: options.env ?? [],
+            host_allowlist: options.host ?? [],
           });
           if (!parsed.success) {
             throw new Error(parsed.error.issues.map((i) => i.message).join(", "));

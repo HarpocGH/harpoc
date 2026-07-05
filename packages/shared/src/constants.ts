@@ -111,6 +111,14 @@ export const MCP_SHUTDOWN_TIMEOUT_MS = 5_000; // graceful close budget on sessio
 export const MAX_MCP_RESULT_BYTES = 1_048_576; // 1 MiB serialized tool result
 export const MAX_MCP_STDERR_BYTES = 65_536; // capped downstream stderr ring (audit only)
 
+// -- Database / Git / SSH / use_secret defaults -------------------------------
+
+export const DEFAULT_DB_TIMEOUT_MS = 30_000; // connect + query budget
+export const DEFAULT_GIT_TIMEOUT_MS = 120_000; // clone/pull/push may be slow
+export const DEFAULT_SSH_TIMEOUT_MS = 30_000; // remote command budget
+export const MAX_DB_ROWS = 10_000; // result-set row cap (flags truncated)
+export const MAX_DB_RESULT_BYTES = 1_048_576; // 1 MiB serialized result set
+
 // -- Token -------------------------------------------------------------------
 
 export const MAX_TOKEN_TTL_MS = 24 * 60 * 60 * 1_000; // 24 hours
@@ -156,6 +164,12 @@ export function AAD_INJECTION_POLICY(secretId: string): string {
 
 export function AAD_MCP_SERVER_CONFIG(secretId: string): string {
   return `mcp-server-config:${secretId}`;
+}
+
+// -- AAD for per-secret connection config (database TLS / SSH host keys) -------
+
+export function AAD_CONNECTION_CONFIG(secretId: string): string {
+  return `connection-config:${secretId}`;
 }
 
 // -- Name constraints --------------------------------------------------------

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { VaultError } from "@harpoc/shared";
 import {
+  connectionConfigSchema,
   createSecretInputSchema,
   injectionPolicyInputSchema,
   mcpServerConfigSchema,
@@ -242,6 +243,48 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
     const deleted = await engine.deleteMcpServerConfig(handle);
+    return c.json({ data: { deleted } });
+  });
+
+  // Get endpoint-authentication config (database TLS / SSH host keys)
+  router.get("/:handle/connection-config", async (c) => {
+    const token = c.get("token");
+    const { project, name } = parseHandleParam(c.req.param("handle"));
+    checkTokenScope(token, "read", project, name);
+
+    const engine = c.get("engine");
+    const handle = buildHandle(c.req.param("handle"));
+    const config = await engine.getConnectionConfig(handle);
+    return c.json({ data: config ?? null });
+  });
+
+  // Set endpoint-authentication config (trusted administrative operation)
+  router.put("/:handle/connection-config", async (c) => {
+    const token = c.get("token");
+    const { project, name } = parseHandleParam(c.req.param("handle"));
+    checkTokenScope(token, "rotate", project, name);
+
+    const engine = c.get("engine");
+    const body = await c.req.json<Record<string, unknown>>();
+    const parsed = connectionConfigSchema.safeParse(body);
+    if (!parsed.success) {
+      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+    }
+
+    const handle = buildHandle(c.req.param("handle"));
+    await engine.setConnectionConfig(handle, parsed.data);
+    return c.json({ data: { updated: true } });
+  });
+
+  // Delete endpoint-authentication config
+  router.delete("/:handle/connection-config", async (c) => {
+    const token = c.get("token");
+    const { project, name } = parseHandleParam(c.req.param("handle"));
+    checkTokenScope(token, "rotate", project, name);
+
+    const engine = c.get("engine");
+    const handle = buildHandle(c.req.param("handle"));
+    const deleted = await engine.deleteConnectionConfig(handle);
     return c.json({ data: { deleted } });
   });
 

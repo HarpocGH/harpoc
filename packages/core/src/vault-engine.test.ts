@@ -434,16 +434,23 @@ describe("injection policy", () => {
       url_allowlist: [`${baseUrl}/*`],
       command_allowlist: ["gh"],
       env_allowlist: ["HOME"],
+      host_allowlist: ["db.example.com:5432"],
     });
     const p = await engine.getInjectionPolicy("secret://pol");
     expect(p.url_allowlist).toEqual([`${baseUrl}/*`]);
     expect(p.command_allowlist).toEqual(["gh"]);
     expect(p.env_allowlist).toEqual(["HOME"]);
+    expect(p.host_allowlist).toEqual(["db.example.com:5432"]);
   });
 
   it("returns empty allowlists when no policy is set", async () => {
     const p = await engine.getInjectionPolicy("secret://pol");
-    expect(p).toEqual({ url_allowlist: [], command_allowlist: [], env_allowlist: [] });
+    expect(p).toEqual({
+      url_allowlist: [],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: [],
+    });
   });
 
   it("audits a policy change as POLICY_GRANT", async () => {
@@ -584,6 +591,140 @@ describe("useSecret (process injection)", () => {
   });
 });
 
+describe("useSecret (database) — engine dispatch", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "db",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("admin:dbpass")),
+    });
+  });
+
+  it("rejects a host outside the host allowlist before connecting", async () => {
+    await engine.setInjectionPolicy("secret://db", {
+      url_allowlist: [],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: ["db.internal:5432"],
+    });
+    try {
+      await engine.useSecret("secret://db", {
+        type: "database",
+        engine: "postgresql",
+        host: "8.8.8.8",
+        database: "app",
+        query: "SELECT 1",
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.HOST_NOT_ALLOWED);
+    }
+    const denied = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_USE })
+      .find((e) => e.detail?.error === "HOST_NOT_ALLOWED");
+    expect(denied?.success).toBe(false);
+    expect(denied?.detail?.context).toBe("database");
+  });
+
+  it("blocks SSRF to a private database host", async () => {
+    try {
+      await engine.useSecret("secret://db", {
+        type: "database",
+        engine: "postgresql",
+        host: "10.0.0.5",
+        database: "app",
+        query: "SELECT 1",
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
+    }
+  });
+});
+
+describe("useSecret (ssh) — engine dispatch", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "sshkey",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----")),
+    });
+  });
+
+  it("denies by default when the host allowlist is empty", async () => {
+    try {
+      await engine.useSecret("secret://sshkey", {
+        type: "ssh",
+        host: "deploy.example.com",
+        user: "deploy",
+        command: "whoami",
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.HOST_NOT_ALLOWED);
+    }
+  });
+
+  it("requires pinned host keys once the host is allowlisted", async () => {
+    await engine.setInjectionPolicy("secret://sshkey", {
+      url_allowlist: [],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: ["deploy.example.com"],
+    });
+    try {
+      await engine.useSecret("secret://sshkey", {
+        type: "ssh",
+        host: "deploy.example.com",
+        user: "deploy",
+        command: "whoami",
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.SSH_NOT_CONFIGURED);
+    }
+  });
+});
+
+describe("useSecret (git) — engine dispatch", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "gh",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("x-access-token:ghp_token")),
+    });
+  });
+
+  it("rejects a forbidden transport before touching the command", async () => {
+    try {
+      await engine.useSecret("secret://gh", {
+        type: "git",
+        operation: "clone",
+        repository: "ext::sh -c whoami",
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.GIT_UNSUPPORTED_TRANSPORT);
+    }
+  });
+
+  it("denies git by default when no command allowlist is set", async () => {
+    try {
+      await engine.useSecret("secret://gh", {
+        type: "git",
+        operation: "clone",
+        repository: "https://github.com/user/repo.git",
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
+    }
+  });
+});
+
 const MCP_TEST_SERVER = `
 const readline = require("node:readline");
 const rl = readline.createInterface({ input: process.stdin });
@@ -659,6 +800,56 @@ describe("MCP server config", () => {
 
   it("returns false when deleting a nonexistent config", async () => {
     expect(await engine.deleteMcpServerConfig("secret://mcp")).toBe(false);
+  });
+});
+
+describe("connection config", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "conn",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("connsecret")),
+    });
+  });
+
+  it("round-trips a database + ssh config", async () => {
+    await engine.setConnectionConfig("secret://conn", {
+      database: { tls_mode: "require", servername: "db.example.com" },
+      ssh: { known_hosts: ["db.example.com ssh-ed25519 AAAA..."] },
+    });
+    const config = await engine.getConnectionConfig("secret://conn");
+    expect(config?.database?.tls_mode).toBe("require");
+    expect(config?.database?.servername).toBe("db.example.com");
+    expect(config?.ssh?.known_hosts).toEqual(["db.example.com ssh-ed25519 AAAA..."]);
+  });
+
+  it("returns undefined when no config is set", async () => {
+    expect(await engine.getConnectionConfig("secret://conn")).toBeUndefined();
+  });
+
+  it("audits a config change as POLICY_GRANT with policy=connection", async () => {
+    await engine.setConnectionConfig("secret://conn", {
+      database: { tls_mode: "disable" },
+    });
+    const events = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT });
+    const grant = events.find((e) => e.detail?.policy === "connection");
+    expect(grant?.detail?.has_database).toBe(true);
+    expect(grant?.detail?.database_tls).toBe("disable");
+  });
+
+  it("deletes a config and audits POLICY_REVOKE", async () => {
+    await engine.setConnectionConfig("secret://conn", {
+      ssh: { known_hosts: ["h ssh-ed25519 AAAA..."] },
+    });
+    expect(await engine.deleteConnectionConfig("secret://conn")).toBe(true);
+    expect(await engine.getConnectionConfig("secret://conn")).toBeUndefined();
+    const events = engine.queryAudit({ eventType: AuditEventType.POLICY_REVOKE });
+    expect(events.find((e) => e.detail?.policy === "connection")).toBeDefined();
+  });
+
+  it("returns false when deleting a nonexistent config", async () => {
+    expect(await engine.deleteConnectionConfig("secret://conn")).toBe(false);
   });
 });
 

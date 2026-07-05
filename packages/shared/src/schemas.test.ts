@@ -450,8 +450,51 @@ describe("useSecretActionSchema", () => {
     expect(result.type).toBe("mcp");
   });
 
+  it("accepts a database action", () => {
+    const result = useSecretActionSchema.parse({
+      type: "database",
+      engine: "postgresql",
+      host: "db.example.com:5432",
+      database: "app_production",
+      query: "SELECT 1",
+    });
+    expect(result.type).toBe("database");
+  });
+
+  it("accepts a git action", () => {
+    const result = useSecretActionSchema.parse({
+      type: "git",
+      operation: "clone",
+      repository: "https://github.com/user/repo.git",
+      args: ["--depth", "1"],
+    });
+    expect(result.type).toBe("git");
+  });
+
+  it("accepts an ssh action", () => {
+    const result = useSecretActionSchema.parse({
+      type: "ssh",
+      host: "deploy.example.com",
+      user: "deploy",
+      command: "systemctl restart app",
+    });
+    expect(result.type).toBe("ssh");
+  });
+
   it("rejects an unknown action type", () => {
-    expect(() => useSecretActionSchema.parse({ type: "ssh", command: "ls" })).toThrow();
+    expect(() => useSecretActionSchema.parse({ type: "telnet", command: "ls" })).toThrow();
+  });
+
+  it("rejects a database action with an unsupported engine", () => {
+    expect(() =>
+      useSecretActionSchema.parse({
+        type: "database",
+        engine: "oracle",
+        host: "db.example.com",
+        database: "app",
+        query: "SELECT 1",
+      }),
+    ).toThrow();
   });
 
   it("rejects a missing discriminant", () => {
@@ -506,7 +549,12 @@ describe("useSecretRequestSchema", () => {
 describe("injectionPolicyInputSchema", () => {
   it("defaults all allowlists to empty arrays", () => {
     const result = injectionPolicyInputSchema.parse({});
-    expect(result).toEqual({ url_allowlist: [], command_allowlist: [], env_allowlist: [] });
+    expect(result).toEqual({
+      url_allowlist: [],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: [],
+    });
   });
 
   it("accepts populated allowlists", () => {

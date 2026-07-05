@@ -67,6 +67,9 @@ function createMockEngine() {
     setMcpServerConfig: vi.fn().mockResolvedValue(undefined),
     getMcpServerConfig: vi.fn().mockResolvedValue(undefined),
     deleteMcpServerConfig: vi.fn().mockResolvedValue(true),
+    setConnectionConfig: vi.fn().mockResolvedValue(undefined),
+    getConnectionConfig: vi.fn().mockResolvedValue(undefined),
+    deleteConnectionConfig: vi.fn().mockResolvedValue(true),
     resolveSecretId: vi.fn().mockResolvedValue("secret-uuid-1"),
   };
 }
@@ -514,6 +517,52 @@ describe("secret routes", () => {
       const body = await res.json();
       expect(body.data.deleted).toBe(true);
       expect(engine.deleteMcpServerConfig).toHaveBeenCalledWith("secret://test-key");
+    });
+  });
+
+  describe("connection-config routes", () => {
+    it("GET returns null when no config is set", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/connection-config", {
+        method: "GET",
+        headers: AUTH,
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data).toBeNull();
+    });
+
+    it("PUT sets a database + ssh config", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/connection-config", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          database: { tls_mode: "require" },
+          ssh: { known_hosts: ["deploy.example.com ssh-ed25519 AAAA"] },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setConnectionConfig.mock.calls[0] as unknown[];
+      expect(call[0]).toBe("secret://test-key");
+    });
+
+    it("PUT rejects an empty config", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/connection-config", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("DELETE removes the config", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/connection-config", {
+        method: "DELETE",
+        headers: AUTH,
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data.deleted).toBe(true);
+      expect(engine.deleteConnectionConfig).toHaveBeenCalledWith("secret://test-key");
     });
   });
 

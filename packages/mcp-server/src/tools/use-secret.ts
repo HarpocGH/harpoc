@@ -19,11 +19,11 @@ export function registerUseSecret(
 ): void {
   server.tool(
     "use_secret",
-    "Use a secret via a context-specific action — an HTTP request, a process execution, or a proxied MCP tool call to a downstream server. The secret value is injected at the execution layer and never exposed.",
+    "Use a secret via a context-specific action — an HTTP request, a process execution, a proxied MCP tool call, a database query, a Git operation, or an SSH command. The secret value is injected at the execution layer and never exposed.",
     {
       handle: z.string().describe("Secret handle (secret://name)"),
       action: useSecretActionSchema.describe(
-        "Action specification. HTTP: {type:'http', method, url, injection, headers?, body?, follow_redirects?}. Process: {type:'process', command, args?, env_var, working_directory?}. MCP: {type:'mcp', server, tool, arguments?} — forwards one tool call to the downstream MCP server configured for this secret.",
+        "Action specification. HTTP: {type:'http', method, url, injection, headers?, body?, follow_redirects?}. Process: {type:'process', command, args?, env_var, working_directory?}. MCP: {type:'mcp', server, tool, arguments?}. Database: {type:'database', engine:'postgresql'|'mysql', host, database, query, params?}. Git: {type:'git', operation:'clone'|'pull'|'push', repository, args?, working_directory?}. SSH: {type:'ssh', host, user, command}. Target allowlists, TLS/host-key pinning and downstream config are set out-of-band via the trusted admin path (CLI/REST), never here.",
       ),
     },
     async (args) => {

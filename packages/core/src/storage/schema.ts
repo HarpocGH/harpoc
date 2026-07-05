@@ -175,3 +175,14 @@ CREATE TABLE mcp_servers (
   updated_at        INTEGER NOT NULL
 ) STRICT;
 `;
+
+export const CREATE_CONNECTION_CONFIGS = `
+CREATE TABLE connection_configs (
+  secret_id         TEXT PRIMARY KEY REFERENCES secrets(id) ON DELETE CASCADE,
+  config_encrypted  BLOB NOT NULL,
+  config_iv         BLOB NOT NULL,
+  config_tag        BLOB NOT NULL,
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL
+) STRICT;
+`;

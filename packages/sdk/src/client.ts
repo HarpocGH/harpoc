@@ -1,5 +1,6 @@
 import type {
   AccessPolicy,
+  ConnectionConfig,
   CreateSecretResponse,
   InjectionConfig,
   InjectionPolicy,
@@ -46,6 +47,9 @@ export interface VaultClient {
   getInjectionPolicy(handle: string): Promise<InjectionPolicy>;
   setMcpServerConfig(handle: string, config: McpServerConfig): Promise<void>;
   getMcpServerConfig(handle: string): Promise<McpServerConfig | undefined>;
+  setConnectionConfig(handle: string, config: ConnectionConfig): Promise<void>;
+  getConnectionConfig(handle: string): Promise<ConnectionConfig | undefined>;
+  deleteConnectionConfig(handle: string): Promise<boolean>;
   grantPolicy(handle: string, input: GrantPolicyInput): Promise<AccessPolicy>;
   revokePolicy(handle: string, policyId: string): Promise<void>;
   listPolicies(handle: string): Promise<AccessPolicy[]>;

@@ -4,10 +4,55 @@ import { describe, expect, it } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import {
   controlledPathDirs,
+  matchesHostAllowlist,
+  matchesHostPortAllowlist,
   matchesUrlAllowlist,
   resolveAndMatchCommand,
   resolveExecutable,
 } from "./allowlist.js";
+
+// ---------------------------------------------------------------------------
+// Host / host:port allowlist
+// ---------------------------------------------------------------------------
+
+describe("matchesHostAllowlist", () => {
+  it("is not enforced when the allowlist is empty", () => {
+    expect(matchesHostAllowlist("evil.example.com", [])).toBe(true);
+  });
+
+  it("matches an exact host (case-insensitive)", () => {
+    expect(matchesHostAllowlist("Deploy.Example.com", ["deploy.example.com"])).toBe(true);
+    expect(matchesHostAllowlist("other.example.com", ["deploy.example.com"])).toBe(false);
+  });
+
+  it("matches a subdomain wildcard but not the bare domain", () => {
+    expect(matchesHostAllowlist("a.example.com", ["*.example.com"])).toBe(true);
+    expect(matchesHostAllowlist("example.com", ["*.example.com"])).toBe(false);
+  });
+});
+
+describe("matchesHostPortAllowlist", () => {
+  it("is not enforced when the allowlist is empty", () => {
+    expect(matchesHostPortAllowlist("db.example.com", 5432, [])).toBe(true);
+  });
+
+  it("matches host:port exactly", () => {
+    expect(matchesHostPortAllowlist("db.example.com", 5432, ["db.example.com:5432"])).toBe(true);
+    expect(matchesHostPortAllowlist("db.example.com", 5433, ["db.example.com:5432"])).toBe(false);
+  });
+
+  it("matches any port when the pattern omits the port", () => {
+    expect(matchesHostPortAllowlist("db.example.com", 5432, ["db.example.com"])).toBe(true);
+    expect(matchesHostPortAllowlist("db.example.com", 3306, ["db.example.com"])).toBe(true);
+  });
+
+  it("supports a subdomain wildcard with a port", () => {
+    expect(matchesHostPortAllowlist("primary.db.example.com", 5432, ["*.db.example.com:5432"])).toBe(
+      true,
+    );
+    expect(matchesHostPortAllowlist("evil.example.com", 5432, ["*.db.example.com:5432"])).toBe(false);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // URL allowlist

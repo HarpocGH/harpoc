@@ -36,5 +36,17 @@ export function sanitizeUseSecretResult(result: UseSecretResponse, guard: Inject
       }
       return;
     }
+    case "database": {
+      result.rows = mapStringLeaves(result.rows, (s) => guard.sanitize(s)) as unknown[];
+      if (result.error) result.error = guard.sanitize(result.error);
+      return;
+    }
+    case "git":
+    case "ssh": {
+      result.stdout = guard.sanitize(result.stdout);
+      result.stderr = guard.sanitize(result.stderr);
+      if (result.error) result.error = guard.sanitize(result.error);
+      return;
+    }
   }
 }

@@ -26,6 +26,15 @@ interface UseOptions {
   server?: string;
   tool?: string;
   arguments?: string;
+  engine?: string;
+  host?: string;
+  port?: string;
+  database?: string;
+  query?: string;
+  param?: string[];
+  operation?: string;
+  repository?: string;
+  user?: string;
   json?: boolean;
 }
 
@@ -33,9 +42,9 @@ export function registerSecretUseCommand(secret: Command): void {
   secret
     .command("use <handle>")
     .description(
-      "Use a secret via an HTTP request, process execution or proxied MCP tool call (value never exposed)",
+      "Use a secret via an HTTP request, process, MCP tool call, database query, Git operation or SSH command (value never exposed)",
     )
-    .option("--action <type>", "Action type: http | process | mcp", "http")
+    .option("--action <type>", "Action type: http | process | mcp | database | git | ssh", "http")
     // HTTP action
     .option("--method <method>", "HTTP method", "GET")
     .option("--url <url>", "Target URL (http action)")
@@ -54,6 +63,18 @@ export function registerSecretUseCommand(secret: Command): void {
     .option("--server <name>", "Configured downstream MCP server name (mcp action)")
     .option("--tool <name>", "Downstream tool to call (mcp action)")
     .option("--arguments <json>", "Tool arguments as a JSON object (mcp action)")
+    // Database action
+    .option("--engine <engine>", "Database engine: postgresql | mysql (database action)")
+    .option("--host <host>", "Host (database/ssh action)")
+    .option("--port <port>", "Port (database action)")
+    .option("--database <name>", "Database name (database action)")
+    .option("--query <sql>", "SQL query (database action)")
+    .option("--param <value>", "Query parameter (repeatable, database action)", collect, [])
+    // Git action
+    .option("--operation <op>", "Git operation: clone | pull | push (git action)")
+    .option("--repository <url>", "Git repository URL (git action)")
+    // SSH action
+    .option("--user <name>", "Remote user (ssh action)")
     .option("--json", "Output as JSON")
     .action(async (handle: string, options: UseOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
@@ -101,6 +122,37 @@ function buildAction(options: UseOptions): Record<string, unknown> {
       server: options.server,
       tool: options.tool,
       arguments: toolArguments,
+    };
+  }
+
+  if (options.action === "database") {
+    return {
+      type: "database",
+      engine: options.engine,
+      host: options.host,
+      port: options.port !== undefined ? Number(options.port) : undefined,
+      database: options.database,
+      query: options.query,
+      params: options.param && options.param.length > 0 ? options.param : undefined,
+    };
+  }
+
+  if (options.action === "git") {
+    return {
+      type: "git",
+      operation: options.operation,
+      repository: options.repository,
+      args: options.arg ?? [],
+      working_directory: options.cwd,
+    };
+  }
+
+  if (options.action === "ssh") {
+    return {
+      type: "ssh",
+      host: options.host,
+      user: options.user,
+      command: options.command,
     };
   }
 

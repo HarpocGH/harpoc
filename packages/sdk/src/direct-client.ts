@@ -1,6 +1,7 @@
 import type { VaultEngine } from "@harpoc/core";
 import type {
   AccessPolicy,
+  ConnectionConfig,
   CreateSecretResponse,
   InjectionPolicy,
   McpServerConfig,
@@ -61,6 +62,18 @@ export class DirectClient implements VaultClient {
 
   async getMcpServerConfig(handle: string): Promise<McpServerConfig | undefined> {
     return this.engine.getMcpServerConfig(handle);
+  }
+
+  async setConnectionConfig(handle: string, config: ConnectionConfig): Promise<void> {
+    return this.engine.setConnectionConfig(handle, config);
+  }
+
+  async getConnectionConfig(handle: string): Promise<ConnectionConfig | undefined> {
+    return this.engine.getConnectionConfig(handle);
+  }
+
+  async deleteConnectionConfig(handle: string): Promise<boolean> {
+    return this.engine.deleteConnectionConfig(handle);
   }
 
   async grantPolicy(handle: string, input: GrantPolicyInput): Promise<AccessPolicy> {

@@ -1,5 +1,6 @@
 import type {
   AccessPolicy,
+  ConnectionConfig,
   CreateSecretResponse,
   InjectionPolicy,
   McpServerConfig,
@@ -88,6 +89,7 @@ export class RestClient implements VaultClient {
         url_allowlist: policy.url_allowlist,
         command_allowlist: policy.command_allowlist,
         env_allowlist: policy.env_allowlist,
+        host_allowlist: policy.host_allowlist,
       },
     );
   }
@@ -113,6 +115,30 @@ export class RestClient implements VaultClient {
       `/api/v1/secrets/${this.encodeHandle(handle)}/mcp-server`,
     );
     return config ?? undefined;
+  }
+
+  async setConnectionConfig(handle: string, config: ConnectionConfig): Promise<void> {
+    await this.request<{ updated: boolean }>(
+      "PUT",
+      `/api/v1/secrets/${this.encodeHandle(handle)}/connection-config`,
+      config,
+    );
+  }
+
+  async getConnectionConfig(handle: string): Promise<ConnectionConfig | undefined> {
+    const config = await this.request<ConnectionConfig | null>(
+      "GET",
+      `/api/v1/secrets/${this.encodeHandle(handle)}/connection-config`,
+    );
+    return config ?? undefined;
+  }
+
+  async deleteConnectionConfig(handle: string): Promise<boolean> {
+    const result = await this.request<{ deleted: boolean }>(
+      "DELETE",
+      `/api/v1/secrets/${this.encodeHandle(handle)}/connection-config`,
+    );
+    return result.deleted;
   }
 
   async grantPolicy(handle: string, input: GrantPolicyInput): Promise<AccessPolicy> {

@@ -1,17 +1,10 @@
-import { spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import type { ProcessAction, ProcessResult } from "@harpoc/shared";
-import {
-  DEFAULT_PROCESS_TIMEOUT_MS,
-  ErrorCode,
-  MAX_PROCESS_OUTPUT_BYTES,
-  VaultError,
-} from "@harpoc/shared";
+import { DEFAULT_PROCESS_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveAndMatchCommand } from "./allowlist.js";
-import { CappedOutput } from "./capped-output.js";
 import { buildCleanEnv } from "./clean-env.js";
-import { redactSecretEncodings } from "./output-sanitizer.js";
+import { spawnCaptured } from "./spawn-captured.js";
 
 /**
  * Executes a subprocess with an injected credential (process-mediated injection,
@@ -72,7 +65,7 @@ export class ProcessInjector {
     return result;
   }
 
-  private runProcess(
+  private async runProcess(
     command: string,
     args: string[],
     env: Record<string, string>,
@@ -80,61 +73,26 @@ export class ProcessInjector {
     timeoutMs: number,
     secretStr: string,
   ): Promise<ProcessResult> {
-    const stdout = new CappedOutput(MAX_PROCESS_OUTPUT_BYTES);
-    const stderr = new CappedOutput(MAX_PROCESS_OUTPUT_BYTES);
-
-    return new Promise<ProcessResult>((resolvePromise) => {
-      let child: ReturnType<typeof spawn>;
-      try {
-        child = spawn(command, args, { shell: false, env, cwd, windowsHide: true });
-      } catch (err) {
-        resolvePromise({
-          type: "process",
-          exit_code: null,
-          stdout: "",
-          stderr: "",
-          error: ErrorCode.PROCESS_SPAWN_FAILED,
-        });
-        void err;
-        return;
-      }
-
-      let timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGKILL");
-      }, timeoutMs);
-      if (timer.unref) timer.unref();
-
-      child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
-      child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
-
-      child.on("error", () => {
-        clearTimeout(timer);
-        resolvePromise({
-          type: "process",
-          exit_code: null,
-          stdout: redactSecretEncodings(stdout.toString(), secretStr),
-          stderr: redactSecretEncodings(stderr.toString(), secretStr),
-          error: ErrorCode.PROCESS_SPAWN_FAILED,
-        });
-      });
-
-      child.on("close", (code, signal) => {
-        clearTimeout(timer);
-        const truncated = stdout.truncated || stderr.truncated;
-        resolvePromise({
-          type: "process",
-          exit_code: code,
-          stdout: redactSecretEncodings(stdout.toString(), secretStr),
-          stderr: redactSecretEncodings(stderr.toString(), secretStr),
-          timed_out: timedOut ? true : undefined,
-          truncated: truncated ? true : undefined,
-          signal: signal ?? undefined,
-          error: timedOut ? ErrorCode.PROCESS_TIMEOUT : undefined,
-        });
-      });
+    const r = await spawnCaptured(command, args, {
+      env,
+      cwd,
+      timeoutMs,
+      redact: [secretStr],
     });
+    return {
+      type: "process",
+      exit_code: r.exit_code,
+      stdout: r.stdout,
+      stderr: r.stderr,
+      timed_out: r.timed_out ? true : undefined,
+      truncated: r.truncated ? true : undefined,
+      signal: r.signal ?? undefined,
+      error: r.spawn_failed
+        ? ErrorCode.PROCESS_SPAWN_FAILED
+        : r.timed_out
+          ? ErrorCode.PROCESS_TIMEOUT
+          : undefined,
+    };
   }
 
   private assertDirectory(dir: string): void {

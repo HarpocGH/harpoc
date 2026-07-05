@@ -16,6 +16,7 @@ import { migration004 } from "./migrations/004-oauth-tokens.js";
 import { migration005 } from "./migrations/005-certificates.js";
 import { migration006 } from "./migrations/006-injection-policies.js";
 import { migration007 } from "./migrations/007-mcp-servers.js";
+import { migration008 } from "./migrations/008-connection-configs.js";
 
 /** Filters for querying secrets. */
 export interface SecretFilter {
@@ -106,6 +107,20 @@ export interface McpServerRow {
   updated_at: number;
 }
 
+/**
+ * Per-secret endpoint-authentication config for DB storage. The config JSON
+ * (database TLS policy / SSH pinned host keys) is encrypted as a single blob
+ * before it reaches the store.
+ */
+export interface ConnectionConfigRow {
+  secret_id: string;
+  config_encrypted: Uint8Array;
+  config_iv: Uint8Array;
+  config_tag: Uint8Array;
+  created_at: number;
+  updated_at: number;
+}
+
 export class SqliteStore {
   private static readonly UPDATABLE_COLUMNS = new Set([
     "ciphertext",
@@ -186,6 +201,12 @@ export class SqliteStore {
       this.db.transaction(() => {
         this.db.exec(migration007.up);
         this.setMeta("schema_version", "7");
+      })();
+    }
+    if (currentVersion < 8) {
+      this.db.transaction(() => {
+        this.db.exec(migration008.up);
+        this.setMeta("schema_version", "8");
       })();
     }
   }
@@ -858,6 +879,52 @@ export class SqliteStore {
   }
 
   // ---------------------------------------------------------------------------
+  // connection_configs
+  // ---------------------------------------------------------------------------
+
+  upsertConnectionConfig(record: ConnectionConfigRow): void {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO connection_configs (
+            secret_id, config_encrypted, config_iv, config_tag, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(secret_id) DO UPDATE SET
+            config_encrypted = excluded.config_encrypted,
+            config_iv = excluded.config_iv,
+            config_tag = excluded.config_tag,
+            updated_at = excluded.updated_at`,
+        )
+        .run(
+          record.secret_id,
+          Buffer.from(record.config_encrypted),
+          Buffer.from(record.config_iv),
+          Buffer.from(record.config_tag),
+          record.created_at,
+          record.updated_at,
+        );
+    } catch (err) {
+      throw VaultError.databaseError(
+        `Failed to upsert connection config: ${err instanceof Error ? err.message : "unknown"}`,
+      );
+    }
+  }
+
+  getConnectionConfig(secretId: string): ConnectionConfigRow | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM connection_configs WHERE secret_id = ?")
+      .get(secretId) as Record<string, unknown> | undefined;
+    return row ? this.rowToConnectionConfig(row) : undefined;
+  }
+
+  deleteConnectionConfig(secretId: string): boolean {
+    const result = this.db
+      .prepare("DELETE FROM connection_configs WHERE secret_id = ?")
+      .run(secretId);
+    return result.changes > 0;
+  }
+
+  // ---------------------------------------------------------------------------
   // Transaction helper
   // ---------------------------------------------------------------------------
 
@@ -1023,6 +1090,17 @@ export class SqliteStore {
   }
 
   private rowToMcpServer(row: Record<string, unknown>): McpServerRow {
+    return {
+      secret_id: row.secret_id as string,
+      config_encrypted: new Uint8Array(row.config_encrypted as Buffer),
+      config_iv: new Uint8Array(row.config_iv as Buffer),
+      config_tag: new Uint8Array(row.config_tag as Buffer),
+      created_at: row.created_at as number,
+      updated_at: row.updated_at as number,
+    };
+  }
+
+  private rowToConnectionConfig(row: Record<string, unknown>): ConnectionConfigRow {
     return {
       secret_id: row.secret_id as string,
       config_encrypted: new Uint8Array(row.config_encrypted as Buffer),

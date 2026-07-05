@@ -24,11 +24,16 @@
     "@harpoc/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "argon2": "^0.43.0",
-    "better-sqlite3": "^12.6.2"
+    "better-sqlite3": "^12.6.2",
+    "mysql2": "^3.22.5",
+    "pg": "^8.22.0",
+    "ssh2": "^1.17.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^22.15.0"
+    "@types/node": "^22.15.0",
+    "@types/pg": "^8.20.0",
+    "@types/ssh2": "^1.15.5"
   },
   "scripts": {
     "build": "tsc",

@@ -6,6 +6,7 @@ import type { AccessPolicy, Secret } from "@harpoc/shared";
 import { AuditEventType, SecretStatus, SecretType } from "@harpoc/shared";
 import type {
   CertificateRow,
+  ConnectionConfigRow,
   InjectionPolicyRow,
   McpServerRow,
   OAuthTokenRow,
@@ -106,8 +107,15 @@ describe("schema creation", () => {
     expect(row?.name).toBe("mcp_servers");
   });
 
-  it("sets schema_version to 7", () => {
-    expect(store.getMeta("schema_version")).toBe("7");
+  it("creates connection_configs table", () => {
+    const row = store.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='connection_configs'")
+      .get() as { name: string } | undefined;
+    expect(row?.name).toBe("connection_configs");
+  });
+
+  it("sets schema_version to 8", () => {
+    expect(store.getMeta("schema_version")).toBe("8");
   });
 });
 
@@ -1141,6 +1149,92 @@ describe("mcp_servers CRUD", () => {
 
     store.deleteSecret(secret.id);
     expect(store.getMcpServer(secret.id)).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// connection_configs CRUD
+// ---------------------------------------------------------------------------
+
+function makeConnectionConfigRow(
+  secretId: string,
+  overrides: Partial<ConnectionConfigRow> = {},
+): ConnectionConfigRow {
+  const now = Date.now();
+  return {
+    secret_id: secretId,
+    config_encrypted: new Uint8Array([1, 2, 3, 4]),
+    config_iv: new Uint8Array(12).fill(7),
+    config_tag: new Uint8Array(16).fill(8),
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  };
+}
+
+describe("connection_configs CRUD", () => {
+  it("upserts and retrieves a config", () => {
+    const secret = makeSecret();
+    store.insertSecret(secret);
+
+    const row = makeConnectionConfigRow(secret.id);
+    store.upsertConnectionConfig(row);
+
+    const retrieved = store.getConnectionConfig(secret.id);
+    expect(retrieved).toBeDefined();
+    expect(retrieved?.secret_id).toBe(secret.id);
+    expect(
+      Buffer.from(retrieved?.config_encrypted ?? []).equals(Buffer.from(row.config_encrypted)),
+    ).toBe(true);
+  });
+
+  it("returns undefined for missing config", () => {
+    expect(store.getConnectionConfig("nonexistent")).toBeUndefined();
+  });
+
+  it("upsert overwrites the blob but preserves created_at", () => {
+    const secret = makeSecret();
+    store.insertSecret(secret);
+
+    store.upsertConnectionConfig(
+      makeConnectionConfigRow(secret.id, { created_at: 1000, updated_at: 1000 }),
+    );
+    store.upsertConnectionConfig(
+      makeConnectionConfigRow(secret.id, {
+        config_encrypted: new Uint8Array([9, 9, 9]),
+        created_at: 5000, // ignored on conflict
+        updated_at: 5000,
+      }),
+    );
+
+    const retrieved = store.getConnectionConfig(secret.id);
+    expect(retrieved?.created_at).toBe(1000);
+    expect(retrieved?.updated_at).toBe(5000);
+    expect(Buffer.from(retrieved?.config_encrypted ?? []).equals(Buffer.from([9, 9, 9]))).toBe(
+      true,
+    );
+  });
+
+  it("deletes a config", () => {
+    const secret = makeSecret();
+    store.insertSecret(secret);
+    store.upsertConnectionConfig(makeConnectionConfigRow(secret.id));
+
+    expect(store.deleteConnectionConfig(secret.id)).toBe(true);
+    expect(store.getConnectionConfig(secret.id)).toBeUndefined();
+  });
+
+  it("returns false when deleting a nonexistent config", () => {
+    expect(store.deleteConnectionConfig("nonexistent")).toBe(false);
+  });
+
+  it("cascades delete when secret is deleted", () => {
+    const secret = makeSecret();
+    store.insertSecret(secret);
+    store.upsertConnectionConfig(makeConnectionConfigRow(secret.id));
+
+    store.deleteSecret(secret.id);
+    expect(store.getConnectionConfig(secret.id)).toBeUndefined();
   });
 });
 
