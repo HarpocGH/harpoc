@@ -64,6 +64,9 @@ function createMockEngine() {
     getInjectionPolicy: vi
       .fn()
       .mockResolvedValue({ url_allowlist: [], command_allowlist: [], env_allowlist: [] }),
+    setMcpServerConfig: vi.fn().mockResolvedValue(undefined),
+    getMcpServerConfig: vi.fn().mockResolvedValue(undefined),
+    deleteMcpServerConfig: vi.fn().mockResolvedValue(true),
     resolveSecretId: vi.fn().mockResolvedValue("secret-uuid-1"),
   };
 }
@@ -370,6 +373,52 @@ describe("secret routes", () => {
       expect(body.data.stdout).not.toContain("sk_live_abcdefghij1234567890");
       expect(body.data.stdout).toContain("[REDACTED]");
     });
+
+    it("accepts an mcp action and returns the proxied result", async () => {
+      engine.useSecret.mockResolvedValueOnce({
+        type: "mcp",
+        content: [{ type: "text", text: "downstream result" }],
+      });
+      const res = await app.request("/api/v1/secrets/test-key/use", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          action: { type: "mcp", server: "github-mcp", tool: "list_repositories" },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data.type).toBe("mcp");
+      expect(body.data.content[0].text).toBe("downstream result");
+    });
+
+    it("rejects an mcp action without a tool", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/use", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ action: { type: "mcp", server: "github-mcp" } }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("sanitizes credential patterns in mcp content", async () => {
+      engine.useSecret.mockResolvedValueOnce({
+        type: "mcp",
+        content: [{ type: "text", text: "Bearer sk_live_abcdefghij1234567890 leaked" }],
+        structured_content: { note: "Bearer sk_live_abcdefghij1234567890 nested" },
+      });
+      const res = await app.request("/api/v1/secrets/test-key/use", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          action: { type: "mcp", server: "github-mcp", tool: "leaky" },
+        }),
+      });
+      const body = await res.json();
+      expect(JSON.stringify(body)).not.toContain("sk_live_abcdefghij1234567890");
+      expect(body.data.content[0].text).toContain("[REDACTED]");
+      expect(body.data.structured_content.note).toContain("[REDACTED]");
+    });
   });
 
   describe("injection-policy routes", () => {
@@ -402,6 +451,69 @@ describe("secret routes", () => {
         body: JSON.stringify({ env_allowlist: ["1BAD"] }),
       });
       expect(res.status).toBe(400);
+    });
+  });
+
+  describe("mcp-server config routes", () => {
+    it("GET returns null when no config is set", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/mcp-server", {
+        method: "GET",
+        headers: AUTH,
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data).toBeNull();
+    });
+
+    it("PUT sets a stdio config", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/mcp-server", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          server_name: "github-mcp",
+          transport: "stdio",
+          command: "node",
+          args: ["server.js"],
+          env_var: "GITHUB_TOKEN",
+        }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setMcpServerConfig.mock.calls[0] as unknown[];
+      expect(call[0]).toBe("secret://test-key");
+      expect((call[1] as { server_name: string }).server_name).toBe("github-mcp");
+    });
+
+    it("PUT rejects a stdio config without env_var", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/mcp-server", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          server_name: "github-mcp",
+          transport: "stdio",
+          command: "node",
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("PUT rejects an http config without url", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/mcp-server", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ server_name: "remote", transport: "http" }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("DELETE removes the config", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/mcp-server", {
+        method: "DELETE",
+        headers: AUTH,
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data.deleted).toBe(true);
+      expect(engine.deleteMcpServerConfig).toHaveBeenCalledWith("secret://test-key");
     });
   });
 

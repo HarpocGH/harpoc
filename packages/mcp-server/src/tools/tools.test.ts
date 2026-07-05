@@ -254,6 +254,46 @@ describe("MCP Tools", () => {
         }),
       );
     });
+
+    it("accepts an mcp action and returns the proxied result", async () => {
+      (engine.useSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
+        type: "mcp",
+        content: [{ type: "text", text: "downstream says hi" }],
+      });
+
+      const result = await callTool(server, "use_secret", {
+        handle: "secret://my-key",
+        action: { type: "mcp", server: "github-mcp", tool: "list_repositories" },
+      });
+      const data = JSON.parse(getToolText(result));
+      expect(data.type).toBe("mcp");
+      expect(data.content[0].text).toBe("downstream says hi");
+
+      expect(engine.useSecret).toHaveBeenCalledWith(
+        "secret://my-key",
+        expect.objectContaining({ type: "mcp", server: "github-mcp", tool: "list_repositories" }),
+      );
+    });
+
+    it("sanitizes credential patterns in mcp content and structured_content", async () => {
+      (engine.useSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
+        type: "mcp",
+        content: [{ type: "text", text: "Bearer eyJhbGciOiJIUzI1NiJ9.test.signature leaked!" }],
+        structured_content: {
+          note: "Bearer eyJhbGciOiJIUzI1NiJ9.test.signature nested!",
+        },
+      });
+
+      const result = await callTool(server, "use_secret", {
+        handle: "secret://my-key",
+        action: { type: "mcp", server: "github-mcp", tool: "leaky" },
+      });
+      const data = JSON.parse(getToolText(result));
+      expect(data.content[0].text).toContain("[REDACTED]");
+      expect(data.content[0].text).not.toContain("eyJhbG");
+      expect(data.structured_content.note).toContain("[REDACTED]");
+      expect(data.structured_content.note).not.toContain("eyJhbG");
+    });
   });
 
   describe("create_secret", () => {

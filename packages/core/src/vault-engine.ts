@@ -5,6 +5,7 @@ import type {
   HttpResult,
   InjectionConfig,
   InjectionPolicy,
+  McpServerConfig,
   OAuthProviderConfig,
   OAuthTokenStatus,
   Permission,
@@ -14,6 +15,7 @@ import type {
 } from "@harpoc/shared";
 import {
   AAD_INJECTION_POLICY,
+  AAD_MCP_SERVER_CONFIG,
   AAD_OAUTH_ACCESS_TOKEN,
   AAD_OAUTH_CLIENT_ID,
   AAD_OAUTH_CLIENT_SECRET,
@@ -54,6 +56,8 @@ import {
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
 import { matchesUrlAllowlist } from "./injection/allowlist.js";
 import { HttpInjector } from "./injection/http-injector.js";
+import { McpInjector } from "./injection/mcp-injector.js";
+import { McpConnectionRegistry } from "./injection/mcp-registry.js";
 import { ProcessInjector } from "./injection/process-injector.js";
 import { validateUrl } from "./injection/url-validator.js";
 import type { SecretInfo } from "./secrets/secret-manager.js";
@@ -79,6 +83,8 @@ interface UnlockedState {
   auditQuery: AuditQuery;
   httpInjector: HttpInjector;
   processInjector: ProcessInjector;
+  mcpInjector: McpInjector;
+  mcpRegistry: McpConnectionRegistry;
 }
 
 /**
@@ -99,6 +105,8 @@ export class VaultEngine {
   private auditQuery: AuditQuery | null = null;
   private httpInjector: HttpInjector | null = null;
   private processInjector: ProcessInjector | null = null;
+  private mcpInjector: McpInjector | null = null;
+  private mcpRegistry: McpConnectionRegistry | null = null;
   private sessionManager: SessionManager;
   private sessionMonitorInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -308,6 +316,10 @@ export class VaultEngine {
       sessionId: this.sessionId ?? undefined,
     });
 
+    // Graceful downstream MCP teardown while the audit logger is still alive;
+    // wipeKeys() below hard-kills anything that survived the budget.
+    await this.mcpRegistry?.closeAll("vault_lock");
+
     this.wipeKeys();
     await this.sessionManager.eraseSession();
     this.state = VaultState.SEALED;
@@ -318,6 +330,7 @@ export class VaultEngine {
    * Destroy and close everything. Does NOT erase the database.
    */
   async destroy(): Promise<void> {
+    await this.mcpRegistry?.closeAll("engine_destroy");
     this.wipeKeys();
     this.stopSessionMonitor();
     this.store?.close();
@@ -419,9 +432,9 @@ export class VaultEngine {
 
   /**
    * Use a secret via a context-specific action (use_secret). Dispatches to the
-   * request-mediated (HTTP) or process-mediated (process) injector. The secret
-   * plaintext is resolved inside the vault, injected, and wiped before return;
-   * it never crosses the vault-to-agent boundary.
+   * request-mediated (HTTP), process-mediated (process) or MCP proxy injector.
+   * The secret plaintext is resolved inside the vault, injected, and wiped
+   * before return; it never crosses the vault-to-agent boundary.
    */
   async useSecret(handle: string, action: UseSecretAction): Promise<UseSecretResponse> {
     const s = this.assertUnlocked();
@@ -440,6 +453,14 @@ export class VaultEngine {
     try {
       if (action.type === "process") {
         return await s.processInjector.executeWithSecret(action, value, policy, secret.id);
+      }
+
+      if (action.type === "mcp") {
+        const config = this.loadMcpServerConfig(s, secret.id);
+        if (!config) {
+          throw VaultError.mcpServerNotConfigured(handle);
+        }
+        return await s.mcpInjector.executeWithSecret(action, value, policy, config, secret.id);
       }
 
       // Request-mediated (HTTP): enforce the per-secret URL allowlist before injection.
@@ -572,6 +593,84 @@ export class VaultEngine {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
     return this.loadInjectionPolicy(s, secret.id);
+  }
+
+  /** Load a secret's downstream MCP server config, or undefined when unset. */
+  private loadMcpServerConfig(s: UnlockedState, secretId: string): McpServerConfig | undefined {
+    const row = s.store.getMcpServer(secretId);
+    if (!row) return undefined;
+    const bytes = decrypt(
+      s.kek,
+      row.config_encrypted,
+      row.config_iv,
+      row.config_tag,
+      AAD_MCP_SERVER_CONFIG(secretId),
+    );
+    return JSON.parse(Buffer.from(bytes).toString("utf8")) as McpServerConfig;
+  }
+
+  /**
+   * Set (or replace) a secret's downstream MCP server config. Trusted
+   * administrative operation (CLI/REST only — never an MCP tool); the config
+   * is encrypted under the KEK. A live downstream connection for this secret
+   * is terminated so the next invocation connects with the new config.
+   */
+  async setMcpServerConfig(handle: string, config: McpServerConfig): Promise<void> {
+    const s = this.assertUnlocked();
+    const secret = await s.secretManager.resolveHandle(handle);
+
+    const json = JSON.stringify(config);
+    const enc = encrypt(
+      s.kek,
+      new Uint8Array(Buffer.from(json, "utf8")),
+      AAD_MCP_SERVER_CONFIG(secret.id),
+    );
+    const now = Date.now();
+    s.store.upsertMcpServer({
+      secret_id: secret.id,
+      config_encrypted: enc.ciphertext,
+      config_iv: enc.iv,
+      config_tag: enc.tag,
+      created_at: now,
+      updated_at: now,
+    });
+
+    s.auditLogger.log({
+      eventType: AuditEventType.POLICY_GRANT,
+      secretId: secret.id,
+      detail: {
+        policy: "mcp_server",
+        server_name: config.server_name,
+        transport: config.transport,
+      },
+      sessionId: this.sessionId ?? undefined,
+    });
+
+    await s.mcpRegistry.terminate(secret.id, "config_changed");
+  }
+
+  /** Read a secret's downstream MCP server config (undefined when unset). */
+  async getMcpServerConfig(handle: string): Promise<McpServerConfig | undefined> {
+    const s = this.assertUnlocked();
+    const secret = await s.secretManager.resolveHandle(handle);
+    return this.loadMcpServerConfig(s, secret.id);
+  }
+
+  /** Remove a secret's downstream MCP server config, terminating any live connection. */
+  async deleteMcpServerConfig(handle: string): Promise<boolean> {
+    const s = this.assertUnlocked();
+    const secret = await s.secretManager.resolveHandle(handle);
+    await s.mcpRegistry.terminate(secret.id, "config_removed");
+    const deleted = s.store.deleteMcpServer(secret.id);
+    if (deleted) {
+      s.auditLogger.log({
+        eventType: AuditEventType.POLICY_REVOKE,
+        secretId: secret.id,
+        detail: { policy: "mcp_server" },
+        sessionId: this.sessionId ?? undefined,
+      });
+    }
+    return deleted;
   }
 
   // ---------------------------------------------------------------------------
@@ -1206,6 +1305,8 @@ export class VaultEngine {
       auditQuery: this.auditQuery as AuditQuery,
       httpInjector: this.httpInjector as HttpInjector,
       processInjector: this.processInjector as ProcessInjector,
+      mcpInjector: this.mcpInjector as McpInjector,
+      mcpRegistry: this.mcpRegistry as McpConnectionRegistry,
     };
   }
 
@@ -1220,6 +1321,8 @@ export class VaultEngine {
     this.auditQuery = new AuditQuery(store, auditKey);
     this.httpInjector = new HttpInjector(this.auditLogger);
     this.processInjector = new ProcessInjector(this.auditLogger);
+    this.mcpRegistry = new McpConnectionRegistry(this.auditLogger);
+    this.mcpInjector = new McpInjector(this.auditLogger, this.mcpRegistry);
   }
 
   private wipeKeys(): void {
@@ -1236,12 +1339,18 @@ export class VaultEngine {
       this.auditKey = null;
     }
 
+    // Every seal path funnels through here: no downstream MCP child may
+    // outlive the keys that authorized it.
+    this.mcpRegistry?.killAllSync();
+
     this.secretManager = null;
     this.policyEngine = null;
     this.auditLogger = null;
     this.auditQuery = null;
     this.httpInjector = null;
     this.processInjector = null;
+    this.mcpInjector = null;
+    this.mcpRegistry = null;
     this.sessionId = null;
     this.vaultId = null;
   }
@@ -1293,6 +1402,7 @@ export class VaultEngine {
       const session = await this.sessionManager.extendSession();
       if (!session) {
         // Session expired or removed — close store and seal
+        await this.mcpRegistry?.closeAll("session_expired");
         this.wipeKeys();
         this.store?.close();
         this.store = null;

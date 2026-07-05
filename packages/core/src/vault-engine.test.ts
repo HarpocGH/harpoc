@@ -584,6 +584,204 @@ describe("useSecret (process injection)", () => {
   });
 });
 
+const MCP_TEST_SERVER = `
+const readline = require("node:readline");
+const rl = readline.createInterface({ input: process.stdin });
+function send(msg) { process.stdout.write(JSON.stringify(msg) + "\\n"); }
+rl.on("line", (line) => {
+  let m; try { m = JSON.parse(line); } catch { return; }
+  if (m.method === "initialize") {
+    send({ jsonrpc: "2.0", id: m.id, result: {
+      protocolVersion: m.params.protocolVersion,
+      capabilities: { tools: {} },
+      serverInfo: { name: "engine-test-downstream", version: "1.0.0" },
+    }});
+  } else if (m.method === "tools/call") {
+    send({ jsonrpc: "2.0", id: m.id, result: {
+      content: [{ type: "text", text: process.env.DOWNSTREAM_TOKEN || "unset" }],
+    }});
+  }
+});
+`;
+
+describe("MCP server config", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "mcp",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("mcpsecret")),
+    });
+  });
+
+  it("round-trips a stdio config", async () => {
+    await engine.setMcpServerConfig("secret://mcp", {
+      server_name: "github-mcp",
+      transport: "stdio",
+      command: process.execPath,
+      args: ["server.js"],
+      env_var: "GITHUB_TOKEN",
+    });
+    const config = await engine.getMcpServerConfig("secret://mcp");
+    expect(config?.server_name).toBe("github-mcp");
+    expect(config?.transport).toBe("stdio");
+    expect(config?.command).toBe(process.execPath);
+    expect(config?.env_var).toBe("GITHUB_TOKEN");
+  });
+
+  it("returns undefined when no config is set", async () => {
+    expect(await engine.getMcpServerConfig("secret://mcp")).toBeUndefined();
+  });
+
+  it("audits a config change as POLICY_GRANT with policy=mcp_server", async () => {
+    await engine.setMcpServerConfig("secret://mcp", {
+      server_name: "github-mcp",
+      transport: "http",
+      url: "https://mcp.example.com/mcp",
+    });
+    const events = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT });
+    const grant = events.find((e) => e.detail?.policy === "mcp_server");
+    expect(grant?.detail?.server_name).toBe("github-mcp");
+    expect(grant?.detail?.transport).toBe("http");
+  });
+
+  it("deletes a config and audits POLICY_REVOKE", async () => {
+    await engine.setMcpServerConfig("secret://mcp", {
+      server_name: "github-mcp",
+      transport: "http",
+      url: "https://mcp.example.com/mcp",
+    });
+    expect(await engine.deleteMcpServerConfig("secret://mcp")).toBe(true);
+    expect(await engine.getMcpServerConfig("secret://mcp")).toBeUndefined();
+    const events = engine.queryAudit({ eventType: AuditEventType.POLICY_REVOKE });
+    expect(events.find((e) => e.detail?.policy === "mcp_server")).toBeDefined();
+  });
+
+  it("returns false when deleting a nonexistent config", async () => {
+    expect(await engine.deleteMcpServerConfig("secret://mcp")).toBe(false);
+  });
+});
+
+describe("useSecret (MCP proxy)", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "mcpuse",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("mcpusesecret")),
+    });
+  });
+
+  it("rejects an mcp action when no server config is set", async () => {
+    try {
+      await engine.useSecret("secret://mcpuse", {
+        type: "mcp",
+        server: "github-mcp",
+        tool: "echo",
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.MCP_SERVER_NOT_CONFIGURED);
+    }
+  });
+
+  it("forwards a tool call to a spawned stdio server with the credential injected", async () => {
+    await engine.setInjectionPolicy("secret://mcpuse", {
+      url_allowlist: [],
+      command_allowlist: [process.execPath],
+      env_allowlist: [],
+    });
+    await engine.setMcpServerConfig("secret://mcpuse", {
+      server_name: "test-mcp",
+      transport: "stdio",
+      command: process.execPath,
+      args: ["-e", MCP_TEST_SERVER],
+      env_var: "DOWNSTREAM_TOKEN",
+    });
+
+    const res = await engine.useSecret("secret://mcpuse", {
+      type: "mcp",
+      server: "test-mcp",
+      tool: "leak",
+    });
+    if (res.type !== "mcp") throw new Error("expected mcp result");
+    // The downstream server echoed its env credential; the vault redacted it.
+    const text = JSON.stringify(res.content);
+    expect(text).not.toContain("mcpusesecret");
+    expect(text).toContain("[REDACTED]");
+  });
+
+  it("fail-safe denies a stdio launch without a command allowlist", async () => {
+    await engine.setMcpServerConfig("secret://mcpuse", {
+      server_name: "test-mcp",
+      transport: "stdio",
+      command: process.execPath,
+      args: ["-e", MCP_TEST_SERVER],
+      env_var: "DOWNSTREAM_TOKEN",
+    });
+    try {
+      await engine.useSecret("secret://mcpuse", {
+        type: "mcp",
+        server: "test-mcp",
+        tool: "leak",
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
+    }
+  });
+
+  it("audits mcp.spawn on first use and secret.use with context=mcp", async () => {
+    await engine.setInjectionPolicy("secret://mcpuse", {
+      url_allowlist: [],
+      command_allowlist: [process.execPath],
+      env_allowlist: [],
+    });
+    await engine.setMcpServerConfig("secret://mcpuse", {
+      server_name: "test-mcp",
+      transport: "stdio",
+      command: process.execPath,
+      args: ["-e", MCP_TEST_SERVER],
+      env_var: "DOWNSTREAM_TOKEN",
+    });
+
+    await engine.useSecret("secret://mcpuse", { type: "mcp", server: "test-mcp", tool: "leak" });
+    await engine.useSecret("secret://mcpuse", { type: "mcp", server: "test-mcp", tool: "leak" });
+
+    const spawns = engine.queryAudit({ eventType: AuditEventType.MCP_SPAWN });
+    expect(spawns).toHaveLength(1);
+    expect(spawns[0]?.detail?.server).toBe("test-mcp");
+
+    const uses = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
+    const mcpUses = uses.filter((e) => e.detail?.context === "mcp");
+    expect(mcpUses).toHaveLength(2);
+  });
+
+  it("lock() terminates live downstream servers and audits mcp.terminate", async () => {
+    await engine.setInjectionPolicy("secret://mcpuse", {
+      url_allowlist: [],
+      command_allowlist: [process.execPath],
+      env_allowlist: [],
+    });
+    await engine.setMcpServerConfig("secret://mcpuse", {
+      server_name: "test-mcp",
+      transport: "stdio",
+      command: process.execPath,
+      args: ["-e", MCP_TEST_SERVER],
+      env_var: "DOWNSTREAM_TOKEN",
+    });
+    await engine.useSecret("secret://mcpuse", { type: "mcp", server: "test-mcp", tool: "leak" });
+
+    await engine.lock();
+
+    // The terminate must have been audited before the keys were wiped.
+    await engine.unlock("password");
+    const terminates = engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
+    expect(terminates).toHaveLength(1);
+    expect(terminates[0]?.detail?.reason).toBe("vault_lock");
+  });
+});
+
 describe("policies", () => {
   beforeEach(async () => {
     await engine.initVault("password");

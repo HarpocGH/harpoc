@@ -6,6 +6,7 @@ import {
   AuditEventType,
   FollowRedirects,
   InjectionType,
+  McpTransport,
   OAuthGrantType,
   OAuthProviderPreset,
   Permission,
@@ -115,10 +116,27 @@ export const processActionSchema = z.object({
   timeout_ms: z.number().int().positive().max(300_000).optional(),
 });
 
+/**
+ * MCP action — the vault forwards one tool call to the downstream MCP server
+ * named by `server`; transport configuration comes from the secret's
+ * McpServerConfig, never from the action.
+ */
+export const mcpActionSchema = z.object({
+  type: z.literal("mcp"),
+  server: z
+    .string()
+    .regex(/^[a-zA-Z0-9_-]+$/, "Invalid server name format")
+    .max(MAX_NAME_LENGTH),
+  tool: z.string().min(1).max(MAX_NAME_LENGTH),
+  arguments: z.record(z.unknown()).optional(),
+  timeout_ms: z.number().int().positive().max(300_000).optional(),
+});
+
 /** Discriminated union over the execution context. */
 export const useSecretActionSchema = z.discriminatedUnion("type", [
   httpActionSchema,
   processActionSchema,
+  mcpActionSchema,
 ]);
 
 export const useSecretRequestSchema = z.object({
@@ -136,6 +154,55 @@ export const injectionPolicyInputSchema = z.object({
     .optional()
     .default([]),
 });
+
+const mcpTransportValues = Object.values(McpTransport) as [McpTransport, ...McpTransport[]];
+export const mcpTransportSchema = z.enum(mcpTransportValues);
+
+/**
+ * Per-secret downstream MCP server configuration (trusted admin path only).
+ * stdio requires `command` + `env_var`; http requires `url`.
+ */
+export const mcpServerConfigSchema = z
+  .object({
+    server_name: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/, "Invalid server name format")
+      .max(MAX_NAME_LENGTH),
+    transport: mcpTransportSchema,
+    command: z.string().min(1).max(4096).optional(),
+    args: z.array(z.string().max(4096)).max(MAX_PROCESS_ARGS).optional(),
+    env_var: z
+      .string()
+      .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Invalid environment variable name")
+      .optional(),
+    working_directory: z.string().min(1).max(4096).optional(),
+    url: z.string().url().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.transport === McpTransport.STDIO) {
+      if (!data.command) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "command is required for stdio transport",
+          path: ["command"],
+        });
+      }
+      if (!data.env_var) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "env_var is required for stdio transport",
+          path: ["env_var"],
+        });
+      }
+    }
+    if (data.transport === McpTransport.HTTP && !data.url) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "url is required for http transport",
+        path: ["url"],
+      });
+    }
+  });
 
 export const accessPolicyInputSchema = z.object({
   principal_type: principalTypeSchema,

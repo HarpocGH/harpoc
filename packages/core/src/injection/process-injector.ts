@@ -9,36 +9,9 @@ import {
 } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveAndMatchCommand } from "./allowlist.js";
+import { CappedOutput } from "./capped-output.js";
+import { buildCleanEnv } from "./clean-env.js";
 import { redactSecretEncodings } from "./output-sanitizer.js";
-
-/** Accumulates process output up to a byte cap, flagging truncation. */
-class CappedOutput {
-  private readonly chunks: Buffer[] = [];
-  private size = 0;
-  truncated = false;
-
-  constructor(private readonly max: number) {}
-
-  push(chunk: Buffer): void {
-    if (this.size >= this.max) {
-      this.truncated = true;
-      return;
-    }
-    const remaining = this.max - this.size;
-    if (chunk.length > remaining) {
-      this.chunks.push(chunk.subarray(0, remaining));
-      this.size = this.max;
-      this.truncated = true;
-    } else {
-      this.chunks.push(chunk);
-      this.size += chunk.length;
-    }
-  }
-
-  toString(): string {
-    return Buffer.concat(this.chunks).toString("utf8");
-  }
-}
 
 /**
  * Executes a subprocess with an injected credential (process-mediated injection,
@@ -79,7 +52,7 @@ export class ProcessInjector {
     }
 
     const valueStr = Buffer.from(secretValue).toString("utf8");
-    const env = this.buildCleanEnv(action.env_var, valueStr, policy.env_allowlist);
+    const env = buildCleanEnv(action.env_var, valueStr, policy.env_allowlist);
     const args = action.args ?? [];
     const timeoutMs = action.timeout_ms ?? DEFAULT_PROCESS_TIMEOUT_MS;
 
@@ -162,27 +135,6 @@ export class ProcessInjector {
         });
       });
     });
-  }
-
-  /**
-   * Build the child environment: the injected credential, a controlled PATH and
-   * the explicitly allowlisted pass-through variables — nothing inherited beyond
-   * that. The credential is written last so an allowlist entry cannot shadow it.
-   */
-  private buildCleanEnv(
-    envVar: string,
-    value: string,
-    envAllowlist: string[],
-  ): Record<string, string> {
-    const env: Record<string, string> = {};
-    const path = process.env.PATH ?? process.env.Path;
-    if (path) env.PATH = path;
-    for (const name of envAllowlist) {
-      const v = process.env[name];
-      if (v !== undefined) env[name] = v;
-    }
-    env[envVar] = value;
-    return env;
   }
 
   private assertDirectory(dir: string): void {

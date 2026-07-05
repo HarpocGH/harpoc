@@ -261,6 +261,40 @@ describe("secret delete command flow", () => {
   });
 });
 
+describe("secret mcp-server command flow", () => {
+  beforeEach(async () => {
+    await engine.initVault(TEST_PASSWORD);
+    await engine.createSecret({
+      name: "mcp-test",
+      type: SecretType.API_KEY,
+      value: new TextEncoder().encode("val"),
+    });
+  });
+
+  it("sets, shows and deletes an MCP server config", async () => {
+    await engine.setMcpServerConfig("secret://mcp-test", {
+      server_name: "github-mcp",
+      transport: "stdio",
+      command: "node",
+      args: ["server.js"],
+      env_var: "GITHUB_TOKEN",
+    });
+
+    const config = await engine.getMcpServerConfig("secret://mcp-test");
+    expect(config?.server_name).toBe("github-mcp");
+    expect(config?.transport).toBe("stdio");
+
+    expect(await engine.deleteMcpServerConfig("secret://mcp-test")).toBe(true);
+    expect(await engine.getMcpServerConfig("secret://mcp-test")).toBeUndefined();
+  });
+
+  it("rejects an mcp use without a configured server", async () => {
+    await expect(
+      engine.useSecret("secret://mcp-test", { type: "mcp", server: "github-mcp", tool: "x" }),
+    ).rejects.toMatchObject({ code: ErrorCode.MCP_SERVER_NOT_CONFIGURED });
+  });
+});
+
 describe("audit command flow", () => {
   beforeEach(async () => {
     await engine.initVault(TEST_PASSWORD);

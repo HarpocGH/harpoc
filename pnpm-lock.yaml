@@ -60,6 +60,9 @@ importers:
       '@harpoc/shared':
         specifier: workspace:*
         version: link:../shared
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.27.1
+        version: 1.27.1(zod@3.25.76)
       argon2:
         specifier: ^0.43.0
         version: 0.43.1

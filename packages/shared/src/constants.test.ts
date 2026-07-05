@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AAD_AUDIT_DETAIL,
   AAD_DEK_WRAP,
+  AAD_MCP_SERVER_CONFIG,
   AAD_METADATA,
   AAD_NAME_ENCRYPTION,
   AAD_SECRET_PAYLOAD,
@@ -93,6 +94,12 @@ describe("AAD_METADATA", () => {
 
   it("handles empty string", () => {
     expect(AAD_METADATA("")).toBe("metadata:");
+  });
+});
+
+describe("AAD_MCP_SERVER_CONFIG", () => {
+  it("returns 'mcp-server-config:<secretId>'", () => {
+    expect(AAD_MCP_SERVER_CONFIG("abc-123")).toBe("mcp-server-config:abc-123");
   });
 });
 

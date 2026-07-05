@@ -190,6 +190,31 @@ describe("RestClient", () => {
       expect(call[0]).toContain("/api/v1/secrets/k/injection-policy");
       expect(policy.command_allowlist).toEqual(["gh"]);
     });
+
+    it("setMcpServerConfig sends PUT with the config", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setMcpServerConfig("secret://k", {
+        server_name: "github-mcp",
+        transport: "stdio",
+        command: "node",
+        args: ["server.js"],
+        env_var: "GITHUB_TOKEN",
+      });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toContain("/api/v1/secrets/k/mcp-server");
+      expect(call[1].method).toBe("PUT");
+      const body = JSON.parse(call[1].body as string);
+      expect(body.server_name).toBe("github-mcp");
+      expect(body.env_var).toBe("GITHUB_TOKEN");
+    });
+
+    it("getMcpServerConfig sends GET and maps null to undefined", async () => {
+      mockFetchResponse(null);
+      const config = await client.getMcpServerConfig("secret://k");
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toContain("/api/v1/secrets/k/mcp-server");
+      expect(config).toBeUndefined();
+    });
   });
 
   describe("policies", () => {

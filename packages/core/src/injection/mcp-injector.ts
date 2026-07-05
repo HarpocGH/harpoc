@@ -1,0 +1,313 @@
+import { createHash } from "node:crypto";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
+import {
+  CallToolResultSchema,
+  McpError,
+  ErrorCode as McpErrorCode,
+} from "@modelcontextprotocol/sdk/types.js";
+import type { InjectionPolicy, McpAction, McpResult, McpServerConfig } from "@harpoc/shared";
+import {
+  DEFAULT_MCP_TIMEOUT_MS,
+  MAX_MCP_RESULT_BYTES,
+  MCP_INIT_TIMEOUT_MS,
+  McpTransport,
+  VAULT_VERSION,
+  VaultError,
+} from "@harpoc/shared";
+import type { AuditLogger } from "../audit/audit-logger.js";
+import { controlledPathDirs, matchesUrlAllowlist, resolveAndMatchCommand } from "./allowlist.js";
+import { buildCleanEnv } from "./clean-env.js";
+import type { McpConnectionEntry, McpConnectionRegistry } from "./mcp-registry.js";
+import { StdioChildTransport } from "./mcp-stdio-transport.js";
+import { mapStringLeaves, redactSecretEncodings } from "./output-sanitizer.js";
+import { validateUrl } from "./url-validator.js";
+
+/** Hard ceiling on a per-invocation timeout override (parity with http/process). */
+const MAX_TIMEOUT_MS = 300_000;
+
+/**
+ * MCP proxy injector (thesis §4.5.4). The vault interposes between the agent
+ * and a downstream MCP server, authenticating at the transport layer:
+ *
+ *  - stdio (process-mediated): the downstream server is spawned with the
+ *    credential in a clean environment; the launch command is validated
+ *    against the secret's command allowlist (fail-safe deny, pinned resolved
+ *    absolute path) on EVERY call.
+ *  - Streamable HTTP (request-mediated): the credential is injected as an
+ *    `Authorization: Bearer` header; the endpoint is validated against the
+ *    secret's URL allowlist and SSRF checks on every outbound request.
+ *
+ * Lifecycle: spawn on first use, reuse across calls, terminate on session end
+ * (McpConnectionRegistry). Crashes fail visibly with a structured error and
+ * respawn only on the next invocation. Tool results are sanitized (raw value
+ * + encodings across every string leaf) before returning to the agent.
+ */
+export class McpInjector {
+  constructor(
+    private readonly auditLogger: AuditLogger | null,
+    private readonly registry: McpConnectionRegistry,
+  ) {}
+
+  async executeWithSecret(
+    action: McpAction,
+    secretValue: Uint8Array,
+    policy: InjectionPolicy,
+    config: McpServerConfig,
+    secretId: string,
+  ): Promise<McpResult> {
+    if (action.server !== config.server_name) {
+      const err = VaultError.mcpServerMismatch(action.server, config.server_name);
+      this.audit(action, secretId, config, { error: err.code }, false);
+      throw err;
+    }
+
+    // Target validation on every call — complete mediation, independent of
+    // whether a live connection is reused.
+    let resolvedCommand: string | undefined;
+    try {
+      if (config.transport === McpTransport.STDIO) {
+        resolvedCommand = resolveAndMatchCommand(
+          config.command as string,
+          policy.command_allowlist,
+          controlledPathDirs(),
+        );
+      } else {
+        const url = config.url as string;
+        if (!matchesUrlAllowlist(url, policy.url_allowlist)) {
+          throw VaultError.urlNotAllowed(url);
+        }
+        await validateUrl(url);
+      }
+    } catch (err) {
+      if (err instanceof VaultError) {
+        this.audit(action, secretId, config, { error: err.code }, false);
+      }
+      throw err;
+    }
+
+    const valueStr = Buffer.from(secretValue).toString("utf8");
+    const credentialFingerprint = sha256Hex(secretValue);
+    const configFingerprint = sha256Hex(Buffer.from(JSON.stringify(config), "utf8"));
+
+    // Staleness: a live server holding a rotated/refreshed credential or an
+    // outdated config is deliberately terminated; the fresh connect below
+    // re-injects the newly resolved credential.
+    const existing = this.registry.get(secretId);
+    if (existing) {
+      if (existing.credentialFingerprint !== credentialFingerprint) {
+        await this.registry.terminate(secretId, "credential_rotated");
+      } else if (existing.configFingerprint !== configFingerprint) {
+        await this.registry.terminate(secretId, "config_changed");
+      }
+    }
+
+    let entry: McpConnectionEntry;
+    try {
+      entry = await this.registry.acquire(secretId, () =>
+        this.establish(secretId, config, resolvedCommand, valueStr, policy, {
+          credentialFingerprint,
+          configFingerprint,
+        }),
+      );
+    } catch (err) {
+      const detail = err instanceof Error ? redactSecretEncodings(err.message, valueStr) : undefined;
+      const vaultErr = VaultError.mcpConnectFailed(config.server_name, detail);
+      this.audit(action, secretId, config, { error: vaultErr.code }, false);
+      throw vaultErr;
+    }
+
+    const timeout = Math.min(action.timeout_ms ?? DEFAULT_MCP_TIMEOUT_MS, MAX_TIMEOUT_MS);
+    let rawResult: { content?: unknown; structuredContent?: unknown; isError?: unknown };
+    try {
+      rawResult = (await entry.client.callTool(
+        { name: action.tool, arguments: action.arguments ?? {} },
+        CallToolResultSchema,
+        { timeout },
+      )) as { content?: unknown; structuredContent?: unknown; isError?: unknown };
+    } catch (err) {
+      const vaultErr = this.mapCallError(err, entry, config.server_name, valueStr);
+      this.audit(action, secretId, config, { error: vaultErr.code }, false);
+      throw vaultErr;
+    }
+
+    const result = this.sanitizeResult(rawResult, valueStr);
+    this.audit(
+      action,
+      secretId,
+      config,
+      { is_error: result.is_error ?? false, truncated: result.truncated ?? false },
+      true,
+    );
+    return result;
+  }
+
+  /** Factory for a fresh downstream connection — the only injection moment. */
+  private async establish(
+    secretId: string,
+    config: McpServerConfig,
+    resolvedCommand: string | undefined,
+    valueStr: string,
+    policy: InjectionPolicy,
+    fingerprints: { credentialFingerprint: string; configFingerprint: string },
+  ): Promise<McpConnectionEntry> {
+    const client = new Client({ name: "harpoc-vault", version: VAULT_VERSION });
+
+    let stdioTransport: StdioChildTransport | undefined;
+    if (config.transport === McpTransport.STDIO) {
+      stdioTransport = new StdioChildTransport({
+        resolvedCommand: resolvedCommand as string,
+        args: config.args ?? [],
+        env: buildCleanEnv(config.env_var as string, valueStr, policy.env_allowlist),
+        cwd: config.working_directory,
+      });
+      await client.connect(stdioTransport, { timeout: MCP_INIT_TIMEOUT_MS });
+    } else {
+      const transport = new StreamableHTTPClientTransport(new URL(config.url as string), {
+        fetch: this.validatingAuthFetch(valueStr),
+        reconnectionOptions: {
+          // A lost connection must fail visibly (no-auto-respawn semantics),
+          // not be silently re-established mid-call.
+          maxRetries: 0,
+          maxReconnectionDelay: 30_000,
+          initialReconnectionDelay: 1_000,
+          reconnectionDelayGrowFactor: 1.5,
+        },
+      });
+      await client.connect(transport, { timeout: MCP_INIT_TIMEOUT_MS });
+    }
+
+    this.auditLogger?.log({
+      eventType: "mcp.spawn",
+      secretId,
+      detail: {
+        server: config.server_name,
+        transport: config.transport,
+        ...(config.transport === McpTransport.STDIO
+          ? { command: config.command, pid: stdioTransport?.pid ?? null }
+          : { url: config.url }),
+      },
+      success: true,
+    });
+
+    return {
+      secretId,
+      serverName: config.server_name,
+      transportKind: config.transport,
+      client,
+      stdioTransport,
+      state: "connecting",
+      crashed: false,
+      ...fingerprints,
+      spawnedAt: Date.now(),
+    };
+  }
+
+  /**
+   * Every outbound request (POST send, GET stream, DELETE terminate, and any
+   * redirect the SDK follows) is re-validated against SSRF/DNS-rebinding rules
+   * and carries the bearer credential — injected here, never visible upstream.
+   */
+  private validatingAuthFetch(valueStr: string): FetchLike {
+    return async (url, init) => {
+      await validateUrl(String(url));
+      const headers = new Headers(init?.headers);
+      headers.set("Authorization", `Bearer ${valueStr}`);
+      return fetch(url, { ...init, headers });
+    };
+  }
+
+  /** Map SDK call failures to structured vault errors — never secret material. */
+  private mapCallError(
+    err: unknown,
+    entry: McpConnectionEntry,
+    server: string,
+    valueStr: string,
+  ): VaultError {
+    if (err instanceof McpError) {
+      if (err.code === (McpErrorCode.ConnectionClosed as number)) {
+        if (entry.crashed) {
+          const exit = entry.stdioTransport?.exitInfo ?? null;
+          return VaultError.mcpServerCrashed(server, exit?.code ?? null, exit?.signal ?? null);
+        }
+        return VaultError.mcpConnectFailed(server, "connection closed");
+      }
+      if (err.code === (McpErrorCode.RequestTimeout as number)) {
+        // A slow tool is not a crash: the server stays alive and the agent may retry.
+        return VaultError.mcpTimeout(server);
+      }
+      return VaultError.mcpProtocolError(server, redactSecretEncodings(err.message, valueStr));
+    }
+    if (err instanceof VaultError) return err;
+    const detail = err instanceof Error ? redactSecretEncodings(err.message, valueStr) : undefined;
+    return VaultError.mcpProtocolError(server, detail);
+  }
+
+  /**
+   * Redact the credential (raw + encodings) from every string leaf of the tool
+   * result, then enforce the serialized size cap: structured_content is dropped
+   * first, then trailing content blocks, with `truncated` flagged.
+   */
+  private sanitizeResult(
+    raw: { content?: unknown; structuredContent?: unknown; isError?: unknown },
+    valueStr: string,
+  ): McpResult {
+    const redact = (s: string): string => redactSecretEncodings(s, valueStr);
+
+    const content = mapStringLeaves(
+      Array.isArray(raw.content) ? raw.content : [],
+      redact,
+    ) as unknown[];
+    const structuredContent =
+      raw.structuredContent !== undefined && raw.structuredContent !== null
+        ? (mapStringLeaves(raw.structuredContent, redact) as Record<string, unknown>)
+        : undefined;
+
+    const result: McpResult = {
+      type: "mcp",
+      content,
+      ...(structuredContent !== undefined ? { structured_content: structuredContent } : {}),
+      ...(raw.isError === true ? { is_error: true } : {}),
+    };
+
+    if (byteLength(result) > MAX_MCP_RESULT_BYTES) {
+      result.truncated = true;
+      delete result.structured_content;
+      while (result.content.length > 0 && byteLength(result) > MAX_MCP_RESULT_BYTES) {
+        result.content.pop();
+      }
+    }
+
+    return result;
+  }
+
+  private audit(
+    action: McpAction,
+    secretId: string,
+    config: McpServerConfig,
+    detail: Record<string, unknown>,
+    success: boolean,
+  ): void {
+    this.auditLogger?.log({
+      eventType: "secret.use",
+      secretId,
+      detail: {
+        context: "mcp",
+        server: action.server,
+        tool: action.tool,
+        transport: config.transport,
+        ...detail,
+      },
+      success,
+    });
+  }
+}
+
+function sha256Hex(data: Uint8Array): string {
+  return createHash("sha256").update(data).digest("hex");
+}
+
+function byteLength(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}

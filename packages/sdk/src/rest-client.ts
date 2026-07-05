@@ -2,6 +2,7 @@ import type {
   AccessPolicy,
   CreateSecretResponse,
   InjectionPolicy,
+  McpServerConfig,
   UseSecretAction,
   UseSecretResponse,
 } from "@harpoc/shared";
@@ -96,6 +97,22 @@ export class RestClient implements VaultClient {
       "GET",
       `/api/v1/secrets/${this.encodeHandle(handle)}/injection-policy`,
     );
+  }
+
+  async setMcpServerConfig(handle: string, config: McpServerConfig): Promise<void> {
+    await this.request<{ updated: boolean }>(
+      "PUT",
+      `/api/v1/secrets/${this.encodeHandle(handle)}/mcp-server`,
+      config,
+    );
+  }
+
+  async getMcpServerConfig(handle: string): Promise<McpServerConfig | undefined> {
+    const config = await this.request<McpServerConfig | null>(
+      "GET",
+      `/api/v1/secrets/${this.encodeHandle(handle)}/mcp-server`,
+    );
+    return config ?? undefined;
   }
 
   async grantPolicy(handle: string, input: GrantPolicyInput): Promise<AccessPolicy> {

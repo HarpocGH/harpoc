@@ -103,6 +103,14 @@ export const DEFAULT_PROCESS_TIMEOUT_MS = 30_000; // 30 seconds
 export const MAX_PROCESS_OUTPUT_BYTES = 1_048_576; // 1 MiB captured per stream
 export const MAX_PROCESS_ARGS = 256;
 
+// -- MCP proxy / use_secret defaults ------------------------------------------
+
+export const DEFAULT_MCP_TIMEOUT_MS = 30_000; // per tools/call
+export const MCP_INIT_TIMEOUT_MS = 15_000; // connect + initialize handshake
+export const MCP_SHUTDOWN_TIMEOUT_MS = 5_000; // graceful close budget on session end
+export const MAX_MCP_RESULT_BYTES = 1_048_576; // 1 MiB serialized tool result
+export const MAX_MCP_STDERR_BYTES = 65_536; // capped downstream stderr ring (audit only)
+
 // -- Token -------------------------------------------------------------------
 
 export const MAX_TOKEN_TTL_MS = 24 * 60 * 60 * 1_000; // 24 hours
@@ -142,6 +150,12 @@ export function AAD_OAUTH_REFRESH_TOKEN(secretId: string): string {
 
 export function AAD_INJECTION_POLICY(secretId: string): string {
   return `injection-policy:${secretId}`;
+}
+
+// -- AAD for per-secret MCP server config -------------------------------------
+
+export function AAD_MCP_SERVER_CONFIG(secretId: string): string {
+  return `mcp-server-config:${secretId}`;
 }
 
 // -- Name constraints --------------------------------------------------------

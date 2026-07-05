@@ -13,6 +13,9 @@ import {
   injectionConfigSchema,
   injectionPolicyInputSchema,
   injectionTypeSchema,
+  mcpActionSchema,
+  mcpServerConfigSchema,
+  mcpTransportSchema,
   oauthGrantTypeSchema,
   oauthProviderConfigSchema,
   oauthProviderPresetSchema,
@@ -83,6 +86,9 @@ describe("enum schemas", () => {
     expect(auditEventTypeSchema.parse("vault.unlock")).toBe("vault.unlock");
     expect(auditEventTypeSchema.parse("secret.create")).toBe("secret.create");
     expect(auditEventTypeSchema.parse("access.denied")).toBe("access.denied");
+    expect(auditEventTypeSchema.parse("mcp.spawn")).toBe("mcp.spawn");
+    expect(auditEventTypeSchema.parse("mcp.crash")).toBe("mcp.crash");
+    expect(auditEventTypeSchema.parse("mcp.terminate")).toBe("mcp.terminate");
   });
 
   it("principalTypeSchema accepts valid values", () => {
@@ -371,6 +377,46 @@ describe("processActionSchema", () => {
 });
 
 // ---------------------------------------------------------------------------
+// mcpActionSchema
+// ---------------------------------------------------------------------------
+
+describe("mcpActionSchema", () => {
+  const validMcp = {
+    type: "mcp",
+    server: "github-mcp",
+    tool: "list_repositories",
+  };
+
+  it("accepts a minimal mcp action", () => {
+    const result = mcpActionSchema.parse(validMcp);
+    expect(result.server).toBe("github-mcp");
+    expect(result.tool).toBe("list_repositories");
+  });
+
+  it("accepts arguments and timeout_ms", () => {
+    const result = mcpActionSchema.parse({
+      ...validMcp,
+      arguments: { visibility: "public", count: 10 },
+      timeout_ms: 5_000,
+    });
+    expect(result.arguments).toEqual({ visibility: "public", count: 10 });
+    expect(result.timeout_ms).toBe(5_000);
+  });
+
+  it("rejects an invalid server name format", () => {
+    expect(() => mcpActionSchema.parse({ ...validMcp, server: "bad name!" })).toThrow();
+  });
+
+  it("rejects a missing tool", () => {
+    expect(() => mcpActionSchema.parse({ type: "mcp", server: "github-mcp" })).toThrow();
+  });
+
+  it("rejects a timeout above the cap", () => {
+    expect(() => mcpActionSchema.parse({ ...validMcp, timeout_ms: 300_001 })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // useSecretActionSchema (discriminated union)
 // ---------------------------------------------------------------------------
 
@@ -392,6 +438,16 @@ describe("useSecretActionSchema", () => {
       env_var: "GH_TOKEN",
     });
     expect(result.type).toBe("process");
+  });
+
+  it("accepts an mcp action", () => {
+    const result = useSecretActionSchema.parse({
+      type: "mcp",
+      server: "github-mcp",
+      tool: "list_repositories",
+      arguments: { visibility: "public" },
+    });
+    expect(result.type).toBe("mcp");
   });
 
   it("rejects an unknown action type", () => {
@@ -468,6 +524,81 @@ describe("injectionPolicyInputSchema", () => {
 
   it("rejects an empty command allowlist entry", () => {
     expect(() => injectionPolicyInputSchema.parse({ command_allowlist: [""] })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mcpServerConfigSchema
+// ---------------------------------------------------------------------------
+
+describe("mcpTransportSchema", () => {
+  it("accepts stdio and http", () => {
+    expect(mcpTransportSchema.parse("stdio")).toBe("stdio");
+    expect(mcpTransportSchema.parse("http")).toBe("http");
+  });
+
+  it("rejects unknown transports", () => {
+    expect(() => mcpTransportSchema.parse("sse")).toThrow();
+  });
+});
+
+describe("mcpServerConfigSchema", () => {
+  const validStdio = {
+    server_name: "github-mcp",
+    transport: "stdio",
+    command: "node",
+    args: ["server.js"],
+    env_var: "GITHUB_TOKEN",
+  };
+
+  const validHttp = {
+    server_name: "remote-mcp",
+    transport: "http",
+    url: "https://mcp.example.com/mcp",
+  };
+
+  it("accepts a valid stdio config", () => {
+    const result = mcpServerConfigSchema.parse(validStdio);
+    expect(result.transport).toBe("stdio");
+    expect(result.command).toBe("node");
+  });
+
+  it("accepts a valid http config", () => {
+    const result = mcpServerConfigSchema.parse(validHttp);
+    expect(result.transport).toBe("http");
+    expect(result.url).toBe("https://mcp.example.com/mcp");
+  });
+
+  it("rejects stdio without a command", () => {
+    expect(() =>
+      mcpServerConfigSchema.parse({
+        server_name: "x",
+        transport: "stdio",
+        env_var: "TOKEN",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects stdio without an env_var", () => {
+    expect(() =>
+      mcpServerConfigSchema.parse({
+        server_name: "x",
+        transport: "stdio",
+        command: "node",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects http without a url", () => {
+    expect(() => mcpServerConfigSchema.parse({ server_name: "x", transport: "http" })).toThrow();
+  });
+
+  it("rejects an invalid env_var name", () => {
+    expect(() => mcpServerConfigSchema.parse({ ...validStdio, env_var: "has-dash" })).toThrow();
+  });
+
+  it("rejects an invalid server_name format", () => {
+    expect(() => mcpServerConfigSchema.parse({ ...validStdio, server_name: "bad name" })).toThrow();
   });
 });
 

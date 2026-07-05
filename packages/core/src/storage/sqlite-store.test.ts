@@ -4,7 +4,12 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AccessPolicy, Secret } from "@harpoc/shared";
 import { AuditEventType, SecretStatus, SecretType } from "@harpoc/shared";
-import type { CertificateRow, InjectionPolicyRow, OAuthTokenRow } from "./sqlite-store.js";
+import type {
+  CertificateRow,
+  InjectionPolicyRow,
+  McpServerRow,
+  OAuthTokenRow,
+} from "./sqlite-store.js";
 import { SqliteStore } from "./sqlite-store.js";
 
 let store: SqliteStore;
@@ -94,8 +99,15 @@ describe("schema creation", () => {
     expect(row?.name).toBe("injection_policies");
   });
 
-  it("sets schema_version to 6", () => {
-    expect(store.getMeta("schema_version")).toBe("6");
+  it("creates mcp_servers table", () => {
+    const row = store.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='mcp_servers'")
+      .get() as { name: string } | undefined;
+    expect(row?.name).toBe("mcp_servers");
+  });
+
+  it("sets schema_version to 7", () => {
+    expect(store.getMeta("schema_version")).toBe("7");
   });
 });
 
@@ -1047,6 +1059,88 @@ describe("injection_policies CRUD", () => {
 
     store.deleteSecret(secret.id);
     expect(store.getInjectionPolicy(secret.id)).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mcp_servers CRUD
+// ---------------------------------------------------------------------------
+
+function makeMcpServerRow(secretId: string, overrides: Partial<McpServerRow> = {}): McpServerRow {
+  const now = Date.now();
+  return {
+    secret_id: secretId,
+    config_encrypted: new Uint8Array([1, 2, 3, 4]),
+    config_iv: new Uint8Array(12).fill(7),
+    config_tag: new Uint8Array(16).fill(8),
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  };
+}
+
+describe("mcp_servers CRUD", () => {
+  it("upserts and retrieves a config", () => {
+    const secret = makeSecret();
+    store.insertSecret(secret);
+
+    const row = makeMcpServerRow(secret.id);
+    store.upsertMcpServer(row);
+
+    const retrieved = store.getMcpServer(secret.id);
+    expect(retrieved).toBeDefined();
+    expect(retrieved?.secret_id).toBe(secret.id);
+    expect(
+      Buffer.from(retrieved?.config_encrypted ?? []).equals(Buffer.from(row.config_encrypted)),
+    ).toBe(true);
+  });
+
+  it("returns undefined for missing config", () => {
+    expect(store.getMcpServer("nonexistent")).toBeUndefined();
+  });
+
+  it("upsert overwrites the blob but preserves created_at", () => {
+    const secret = makeSecret();
+    store.insertSecret(secret);
+
+    const first = makeMcpServerRow(secret.id, { created_at: 1000, updated_at: 1000 });
+    store.upsertMcpServer(first);
+
+    const updated = makeMcpServerRow(secret.id, {
+      config_encrypted: new Uint8Array([9, 9, 9]),
+      created_at: 5000, // ignored on conflict
+      updated_at: 5000,
+    });
+    store.upsertMcpServer(updated);
+
+    const retrieved = store.getMcpServer(secret.id);
+    expect(retrieved?.created_at).toBe(1000);
+    expect(retrieved?.updated_at).toBe(5000);
+    expect(Buffer.from(retrieved?.config_encrypted ?? []).equals(Buffer.from([9, 9, 9]))).toBe(
+      true,
+    );
+  });
+
+  it("deletes a config", () => {
+    const secret = makeSecret();
+    store.insertSecret(secret);
+    store.upsertMcpServer(makeMcpServerRow(secret.id));
+
+    expect(store.deleteMcpServer(secret.id)).toBe(true);
+    expect(store.getMcpServer(secret.id)).toBeUndefined();
+  });
+
+  it("returns false when deleting a nonexistent config", () => {
+    expect(store.deleteMcpServer("nonexistent")).toBe(false);
+  });
+
+  it("cascades delete when secret is deleted", () => {
+    const secret = makeSecret();
+    store.insertSecret(secret);
+    store.upsertMcpServer(makeMcpServerRow(secret.id));
+
+    store.deleteSecret(secret.id);
+    expect(store.getMcpServer(secret.id)).toBeUndefined();
   });
 });
 

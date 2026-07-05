@@ -44,6 +44,8 @@ function createMockEngine() {
     getInjectionPolicy: vi
       .fn()
       .mockResolvedValue({ url_allowlist: [], command_allowlist: [], env_allowlist: [] }),
+    setMcpServerConfig: vi.fn().mockResolvedValue(undefined),
+    getMcpServerConfig: vi.fn().mockResolvedValue(undefined),
     resolveSecretId: vi.fn().mockResolvedValue("uuid-1"),
     grantPolicy: vi.fn().mockReturnValue({
       id: "p1",
@@ -155,6 +157,25 @@ describe("DirectClient", () => {
     const got = await client.getInjectionPolicy("secret://key");
     expect(engine.getInjectionPolicy).toHaveBeenCalledWith("secret://key");
     expect(got.command_allowlist).toEqual([]);
+  });
+
+  it("setMcpServerConfig and getMcpServerConfig delegate to the engine", async () => {
+    const engine = createMockEngine();
+    const client = new DirectClient(engine as never);
+
+    const config = {
+      server_name: "github-mcp",
+      transport: "stdio" as const,
+      command: "node",
+      args: ["server.js"],
+      env_var: "GITHUB_TOKEN",
+    };
+    await client.setMcpServerConfig("secret://key", config);
+    expect(engine.setMcpServerConfig).toHaveBeenCalledWith("secret://key", config);
+
+    const got = await client.getMcpServerConfig("secret://key");
+    expect(engine.getMcpServerConfig).toHaveBeenCalledWith("secret://key");
+    expect(got).toBeUndefined();
   });
 
   it("grantPolicy resolves secret ID and delegates", async () => {

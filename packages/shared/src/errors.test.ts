@@ -67,6 +67,13 @@ describe("HTTP status mapping", () => {
     [ErrorCode.PROCESS_TIMEOUT, 504],
     [ErrorCode.PROCESS_OUTPUT_LIMIT, 413],
     [ErrorCode.INVALID_PROCESS_CONFIG, 400],
+    // MCP proxy
+    [ErrorCode.MCP_SERVER_NOT_CONFIGURED, 400],
+    [ErrorCode.MCP_SERVER_MISMATCH, 400],
+    [ErrorCode.MCP_CONNECT_FAILED, 502],
+    [ErrorCode.MCP_SERVER_CRASHED, 502],
+    [ErrorCode.MCP_PROTOCOL_ERROR, 502],
+    [ErrorCode.MCP_TIMEOUT, 504],
     // Validation
     [ErrorCode.WEAK_PASSWORD, 400],
     [ErrorCode.INVALID_INPUT, 400],
@@ -107,7 +114,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(60);
+    expect(members).toHaveLength(66);
   });
 });
 
@@ -476,5 +483,48 @@ describe("factory methods", () => {
     expect(err.code).toBe(ErrorCode.INVALID_PROCESS_CONFIG);
     expect(err.statusCode).toBe(400);
     expect(err.message).toBe("env_var required");
+  });
+
+  it("mcpServerNotConfigured() with handle", () => {
+    const err = VaultError.mcpServerNotConfigured("secret://gh");
+    expect(err.code).toBe(ErrorCode.MCP_SERVER_NOT_CONFIGURED);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toBe("MCP server not configured for secret: secret://gh");
+  });
+
+  it("mcpServerMismatch()", () => {
+    const err = VaultError.mcpServerMismatch("other-mcp", "github-mcp");
+    expect(err.code).toBe(ErrorCode.MCP_SERVER_MISMATCH);
+    expect(err.message).toBe(
+      "MCP server 'other-mcp' does not match configured server 'github-mcp'",
+    );
+  });
+
+  it("mcpConnectFailed() with detail", () => {
+    const err = VaultError.mcpConnectFailed("github-mcp", "spawn ENOENT");
+    expect(err.code).toBe(ErrorCode.MCP_CONNECT_FAILED);
+    expect(err.statusCode).toBe(502);
+    expect(err.details).toEqual({ server: "github-mcp" });
+  });
+
+  it("mcpServerCrashed() carries exit forensics", () => {
+    const err = VaultError.mcpServerCrashed("github-mcp", 1, null);
+    expect(err.code).toBe(ErrorCode.MCP_SERVER_CRASHED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toBe("MCP server 'github-mcp' exited unexpectedly");
+    expect(err.details).toEqual({ server: "github-mcp", exit_code: 1, signal: null });
+  });
+
+  it("mcpProtocolError()", () => {
+    const err = VaultError.mcpProtocolError("github-mcp", "unknown tool");
+    expect(err.code).toBe(ErrorCode.MCP_PROTOCOL_ERROR);
+    expect(err.message).toBe("MCP protocol error from server 'github-mcp': unknown tool");
+  });
+
+  it("mcpTimeout()", () => {
+    const err = VaultError.mcpTimeout("github-mcp");
+    expect(err.code).toBe(ErrorCode.MCP_TIMEOUT);
+    expect(err.statusCode).toBe(504);
+    expect(err.details).toEqual({ server: "github-mcp" });
   });
 });

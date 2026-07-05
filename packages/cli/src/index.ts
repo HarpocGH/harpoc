@@ -16,6 +16,7 @@ import { registerSecretRotateCommand } from "./commands/secret/rotate.js";
 import { registerSecretDeleteCommand } from "./commands/secret/delete.js";
 import { registerSecretUseCommand } from "./commands/secret/use.js";
 import { registerSecretAllowCommand } from "./commands/secret/allow.js";
+import { registerSecretMcpServerCommand } from "./commands/secret/mcp-server.js";
 import { registerAuditCommand } from "./commands/audit.js";
 import { registerAuthTokenCommand } from "./commands/auth/token.js";
 import { registerAuthRevokeCommand } from "./commands/auth/revoke.js";
@@ -48,6 +49,7 @@ registerSecretRotateCommand(secret);
 registerSecretDeleteCommand(secret);
 registerSecretUseCommand(secret);
 registerSecretAllowCommand(secret);
+registerSecretMcpServerCommand(secret);
 
 // auth subcommands
 const auth = program.command("auth").description("Manage API tokens");

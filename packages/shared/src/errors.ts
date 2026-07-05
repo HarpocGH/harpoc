@@ -45,6 +45,14 @@ export enum ErrorCode {
   PROCESS_OUTPUT_LIMIT = "PROCESS_OUTPUT_LIMIT",
   INVALID_PROCESS_CONFIG = "INVALID_PROCESS_CONFIG",
 
+  // MCP proxy
+  MCP_SERVER_NOT_CONFIGURED = "MCP_SERVER_NOT_CONFIGURED",
+  MCP_SERVER_MISMATCH = "MCP_SERVER_MISMATCH",
+  MCP_CONNECT_FAILED = "MCP_CONNECT_FAILED",
+  MCP_SERVER_CRASHED = "MCP_SERVER_CRASHED",
+  MCP_PROTOCOL_ERROR = "MCP_PROTOCOL_ERROR",
+  MCP_TIMEOUT = "MCP_TIMEOUT",
+
   // Validation
   INVALID_INPUT = "INVALID_INPUT",
   INVALID_HANDLE = "INVALID_HANDLE",
@@ -128,6 +136,14 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.PROCESS_TIMEOUT]: 504,
   [ErrorCode.PROCESS_OUTPUT_LIMIT]: 413,
   [ErrorCode.INVALID_PROCESS_CONFIG]: 400,
+
+  // MCP proxy
+  [ErrorCode.MCP_SERVER_NOT_CONFIGURED]: 400,
+  [ErrorCode.MCP_SERVER_MISMATCH]: 400,
+  [ErrorCode.MCP_CONNECT_FAILED]: 502,
+  [ErrorCode.MCP_SERVER_CRASHED]: 502,
+  [ErrorCode.MCP_PROTOCOL_ERROR]: 502,
+  [ErrorCode.MCP_TIMEOUT]: 504,
 
   // Validation
   [ErrorCode.INVALID_INPUT]: 400,
@@ -303,6 +319,52 @@ export class VaultError extends Error {
 
   static invalidProcessConfig(message: string): VaultError {
     return new VaultError(ErrorCode.INVALID_PROCESS_CONFIG, message);
+  }
+
+  static mcpServerNotConfigured(handle?: string): VaultError {
+    const msg = handle
+      ? `MCP server not configured for secret: ${handle}`
+      : "MCP server not configured for secret";
+    return new VaultError(ErrorCode.MCP_SERVER_NOT_CONFIGURED, msg);
+  }
+
+  static mcpServerMismatch(requested: string, configured: string): VaultError {
+    return new VaultError(
+      ErrorCode.MCP_SERVER_MISMATCH,
+      `MCP server '${requested}' does not match configured server '${configured}'`,
+    );
+  }
+
+  static mcpConnectFailed(server: string, detail?: string): VaultError {
+    const msg = detail
+      ? `Failed to connect to MCP server '${server}': ${detail}`
+      : `Failed to connect to MCP server '${server}'`;
+    return new VaultError(ErrorCode.MCP_CONNECT_FAILED, msg, { server });
+  }
+
+  static mcpServerCrashed(
+    server: string,
+    exitCode: number | null,
+    signal: string | null,
+  ): VaultError {
+    return new VaultError(
+      ErrorCode.MCP_SERVER_CRASHED,
+      `MCP server '${server}' exited unexpectedly`,
+      { server, exit_code: exitCode, signal },
+    );
+  }
+
+  static mcpProtocolError(server: string, detail?: string): VaultError {
+    const msg = detail
+      ? `MCP protocol error from server '${server}': ${detail}`
+      : `MCP protocol error from server '${server}'`;
+    return new VaultError(ErrorCode.MCP_PROTOCOL_ERROR, msg, { server });
+  }
+
+  static mcpTimeout(server: string): VaultError {
+    return new VaultError(ErrorCode.MCP_TIMEOUT, `MCP tool call to server '${server}' timed out`, {
+      server,
+    });
   }
 
   static oauthFlowFailed(detail?: string): VaultError {

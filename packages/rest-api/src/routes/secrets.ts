@@ -4,29 +4,13 @@ import { VaultError } from "@harpoc/shared";
 import {
   createSecretInputSchema,
   injectionPolicyInputSchema,
+  mcpServerConfigSchema,
   useSecretActionSchema,
 } from "@harpoc/shared";
-import type { InjectionConfig, UseSecretResponse } from "@harpoc/shared";
-import { InjectionGuard } from "@harpoc/core";
+import type { InjectionConfig } from "@harpoc/shared";
+import { InjectionGuard, sanitizeUseSecretResult } from "@harpoc/core";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
-
-/** Sanitize a use_secret result across both injection mechanisms. */
-function sanitizeUseSecretResult(result: UseSecretResponse, guard: InjectionGuard): void {
-  if (result.type === "http") {
-    if (result.body) result.body = guard.sanitize(result.body);
-    if (result.headers) {
-      for (const [key, value] of Object.entries(result.headers)) {
-        result.headers[key] = guard.sanitize(value);
-      }
-    }
-    if (result.error) result.error = guard.sanitize(result.error);
-  } else {
-    result.stdout = guard.sanitize(result.stdout);
-    result.stderr = guard.sanitize(result.stderr);
-    if (result.error) result.error = guard.sanitize(result.error);
-  }
-}
 
 export function createSecretRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
@@ -217,6 +201,48 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const handle = buildHandle(c.req.param("handle"));
     await engine.setInjectionPolicy(handle, parsed.data);
     return c.json({ data: { updated: true } });
+  });
+
+  // Get downstream MCP server config
+  router.get("/:handle/mcp-server", async (c) => {
+    const token = c.get("token");
+    const { project, name } = parseHandleParam(c.req.param("handle"));
+    checkTokenScope(token, "read", project, name);
+
+    const engine = c.get("engine");
+    const handle = buildHandle(c.req.param("handle"));
+    const config = await engine.getMcpServerConfig(handle);
+    return c.json({ data: config ?? null });
+  });
+
+  // Set downstream MCP server config (trusted administrative operation)
+  router.put("/:handle/mcp-server", async (c) => {
+    const token = c.get("token");
+    const { project, name } = parseHandleParam(c.req.param("handle"));
+    checkTokenScope(token, "rotate", project, name);
+
+    const engine = c.get("engine");
+    const body = await c.req.json<Record<string, unknown>>();
+    const parsed = mcpServerConfigSchema.safeParse(body);
+    if (!parsed.success) {
+      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+    }
+
+    const handle = buildHandle(c.req.param("handle"));
+    await engine.setMcpServerConfig(handle, parsed.data);
+    return c.json({ data: { updated: true } });
+  });
+
+  // Delete downstream MCP server config
+  router.delete("/:handle/mcp-server", async (c) => {
+    const token = c.get("token");
+    const { project, name } = parseHandleParam(c.req.param("handle"));
+    checkTokenScope(token, "rotate", project, name);
+
+    const engine = c.get("engine");
+    const handle = buildHandle(c.req.param("handle"));
+    const deleted = await engine.deleteMcpServerConfig(handle);
+    return c.json({ data: { deleted } });
   });
 
   return router;

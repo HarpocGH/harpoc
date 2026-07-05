@@ -32,8 +32,8 @@ describe("enum member counts", () => {
     expect(Object.values(Permission)).toHaveLength(7);
   });
 
-  it("AuditEventType has 24 members", () => {
-    expect(Object.values(AuditEventType)).toHaveLength(24);
+  it("AuditEventType has 27 members", () => {
+    expect(Object.values(AuditEventType)).toHaveLength(27);
   });
 
   it("PrincipalType has 4 members", () => {
@@ -48,8 +48,8 @@ describe("enum member counts", () => {
     expect(Object.values(FollowRedirects)).toHaveLength(3);
   });
 
-  it("ActionType has 2 members", () => {
-    expect(Object.values(ActionType)).toHaveLength(2);
+  it("ActionType has 3 members", () => {
+    expect(Object.values(ActionType)).toHaveLength(3);
   });
 
   it("VaultState has 2 members", () => {
@@ -64,10 +64,10 @@ describe("enum member counts", () => {
     expect(Object.values(OAuthProviderPreset)).toHaveLength(5);
   });
 
-  it("ErrorCode has 60 members", () => {
+  it("ErrorCode has 66 members", () => {
     // Filter out reverse mappings (numeric keys) from TypeScript enum
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(60);
+    expect(members).toHaveLength(66);
   });
 });
 

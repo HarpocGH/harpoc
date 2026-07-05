@@ -164,3 +164,14 @@ CREATE TABLE injection_policies (
   updated_at        INTEGER NOT NULL
 ) STRICT;
 `;
+
+export const CREATE_MCP_SERVERS = `
+CREATE TABLE mcp_servers (
+  secret_id         TEXT PRIMARY KEY REFERENCES secrets(id) ON DELETE CASCADE,
+  config_encrypted  BLOB NOT NULL,
+  config_iv         BLOB NOT NULL,
+  config_tag        BLOB NOT NULL,
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL
+) STRICT;
+`;

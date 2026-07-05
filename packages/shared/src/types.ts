@@ -53,6 +53,9 @@ export const AuditEventType = {
   SYNC_PULL: "sync.pull",
   SYNC_CONFLICT: "sync.conflict",
   ACCESS_DENIED: "access.denied",
+  MCP_SPAWN: "mcp.spawn",
+  MCP_CRASH: "mcp.crash",
+  MCP_TERMINATE: "mcp.terminate",
 } as const;
 export type AuditEventType = (typeof AuditEventType)[keyof typeof AuditEventType];
 
@@ -83,8 +86,16 @@ export type FollowRedirects = (typeof FollowRedirects)[keyof typeof FollowRedire
 export const ActionType = {
   HTTP: "http",
   PROCESS: "process",
+  MCP: "mcp",
 } as const;
 export type ActionType = (typeof ActionType)[keyof typeof ActionType];
+
+/** Transport of a downstream MCP server: spawned stdio child or Streamable HTTP endpoint. */
+export const McpTransport = {
+  STDIO: "stdio",
+  HTTP: "http",
+} as const;
+export type McpTransport = (typeof McpTransport)[keyof typeof McpTransport];
 
 export const VaultState = {
   SEALED: "sealed",
@@ -243,8 +254,22 @@ export interface ProcessAction {
   timeout_ms?: number;
 }
 
+/**
+ * MCP action — the vault acts as a transparent MCP proxy, forwarding a single
+ * tool call to the downstream MCP server named by `server`. The transport and
+ * launch/endpoint configuration come from the secret's McpServerConfig (trusted
+ * admin path), never from the action.
+ */
+export interface McpAction {
+  type: typeof ActionType.MCP;
+  server: string;
+  tool: string;
+  arguments?: Record<string, unknown>;
+  timeout_ms?: number;
+}
+
 /** Discriminated union of context-specific use_secret action specifications. */
-export type UseSecretAction = HttpAction | ProcessAction;
+export type UseSecretAction = HttpAction | ProcessAction | McpAction;
 
 /** Request to use a secret via a context-specific action. */
 export interface UseSecretRequest {
@@ -274,8 +299,17 @@ export interface ProcessResult {
   error?: string;
 }
 
+/** Result of an MCP-proxied use_secret invocation (sanitized downstream tool result). */
+export interface McpResult {
+  type: typeof ActionType.MCP;
+  content: unknown[];
+  structured_content?: Record<string, unknown>;
+  is_error?: boolean;
+  truncated?: boolean;
+}
+
 /** Response from use_secret — discriminated by execution mechanism. */
-export type UseSecretResponse = HttpResult | ProcessResult;
+export type UseSecretResponse = HttpResult | ProcessResult | McpResult;
 
 /**
  * Per-secret injection policy: allowlists constraining where a credential may
@@ -287,6 +321,23 @@ export interface InjectionPolicy {
   url_allowlist: string[];
   command_allowlist: string[];
   env_allowlist: string[];
+}
+
+/**
+ * Per-secret downstream MCP server configuration (KEK-encrypted at rest).
+ * Set only via the trusted admin path (CLI/REST) — never via an MCP tool.
+ * stdio: `command` + `env_var` required; the launch command is validated
+ * against the secret's command allowlist (fail-safe deny) at every use.
+ * http: `url` required; validated against the URL allowlist and SSRF checks.
+ */
+export interface McpServerConfig {
+  server_name: string;
+  transport: McpTransport;
+  command?: string;
+  args?: string[];
+  env_var?: string;
+  working_directory?: string;
+  url?: string;
 }
 
 /** Argon2id key derivation parameters — stored in vault header. */

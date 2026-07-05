@@ -3,6 +3,7 @@ import type {
   AccessPolicy,
   CreateSecretResponse,
   InjectionPolicy,
+  McpServerConfig,
   UseSecretAction,
   UseSecretResponse,
 } from "@harpoc/shared";
@@ -52,6 +53,14 @@ export class DirectClient implements VaultClient {
 
   async getInjectionPolicy(handle: string): Promise<InjectionPolicy> {
     return this.engine.getInjectionPolicy(handle);
+  }
+
+  async setMcpServerConfig(handle: string, config: McpServerConfig): Promise<void> {
+    return this.engine.setMcpServerConfig(handle, config);
+  }
+
+  async getMcpServerConfig(handle: string): Promise<McpServerConfig | undefined> {
+    return this.engine.getMcpServerConfig(handle);
   }
 
   async grantPolicy(handle: string, input: GrantPolicyInput): Promise<AccessPolicy> {

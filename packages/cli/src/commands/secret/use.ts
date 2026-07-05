@@ -23,14 +23,19 @@ interface UseOptions {
   arg?: string[];
   envVar?: string;
   cwd?: string;
+  server?: string;
+  tool?: string;
+  arguments?: string;
   json?: boolean;
 }
 
 export function registerSecretUseCommand(secret: Command): void {
   secret
     .command("use <handle>")
-    .description("Use a secret via an HTTP request or process execution (value never exposed)")
-    .option("--action <type>", "Action type: http | process", "http")
+    .description(
+      "Use a secret via an HTTP request, process execution or proxied MCP tool call (value never exposed)",
+    )
+    .option("--action <type>", "Action type: http | process | mcp", "http")
     // HTTP action
     .option("--method <method>", "HTTP method", "GET")
     .option("--url <url>", "Target URL (http action)")
@@ -45,6 +50,10 @@ export function registerSecretUseCommand(secret: Command): void {
     .option("--arg <arg>", "Command argument (repeatable)", collect, [])
     .option("--env-var <name>", "Env var to inject the secret into (process action)")
     .option("--cwd <dir>", "Working directory (process action)")
+    // MCP action
+    .option("--server <name>", "Configured downstream MCP server name (mcp action)")
+    .option("--tool <name>", "Downstream tool to call (mcp action)")
+    .option("--arguments <json>", "Tool arguments as a JSON object (mcp action)")
     .option("--json", "Output as JSON")
     .action(async (handle: string, options: UseOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
@@ -75,6 +84,23 @@ function buildAction(options: UseOptions): Record<string, unknown> {
       args: options.arg ?? [],
       env_var: options.envVar,
       working_directory: options.cwd,
+    };
+  }
+
+  if (options.action === "mcp") {
+    let toolArguments: unknown;
+    if (options.arguments !== undefined) {
+      try {
+        toolArguments = JSON.parse(options.arguments);
+      } catch {
+        throw new Error("--arguments must be a valid JSON object");
+      }
+    }
+    return {
+      type: "mcp",
+      server: options.server,
+      tool: options.tool,
+      arguments: toolArguments,
     };
   }
 

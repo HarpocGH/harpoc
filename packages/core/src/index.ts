@@ -34,6 +34,7 @@ export type {
   OAuthTokenRow,
   CertificateRow,
   InjectionPolicyRow,
+  McpServerRow,
 } from "./storage/sqlite-store.js";
 
 // Session
@@ -65,7 +66,13 @@ export {
   resolveExecutable,
   controlledPathDirs,
 } from "./injection/allowlist.js";
-export { redactSecretEncodings } from "./injection/output-sanitizer.js";
+export { redactSecretEncodings, mapStringLeaves } from "./injection/output-sanitizer.js";
+export { sanitizeUseSecretResult } from "./injection/sanitize-result.js";
+export { McpInjector } from "./injection/mcp-injector.js";
+export { McpConnectionRegistry } from "./injection/mcp-registry.js";
+export type { McpConnectionEntry, McpEntryState } from "./injection/mcp-registry.js";
+export { StdioChildTransport } from "./injection/mcp-stdio-transport.js";
+export type { ChildExitInfo, StdioChildParams } from "./injection/mcp-stdio-transport.js";
 
 // VaultEngine
 export { VaultEngine } from "./vault-engine.js";
