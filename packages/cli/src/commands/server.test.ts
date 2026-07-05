@@ -200,7 +200,11 @@ describe("server start", () => {
 
     await run(["--rest"]);
 
-    expect(startServer).toHaveBeenCalledWith({ engine: mockEngine, port: 3000 });
+    expect(startServer).toHaveBeenCalledWith({
+      engine: mockEngine,
+      port: 3000,
+      hostname: "127.0.0.1",
+    });
   });
 
   it("starts REST server with custom port", async () => {
@@ -208,7 +212,23 @@ describe("server start", () => {
 
     await run(["--rest", "--port", "8080"]);
 
-    expect(startServer).toHaveBeenCalledWith({ engine: mockEngine, port: 8080 });
+    expect(startServer).toHaveBeenCalledWith({
+      engine: mockEngine,
+      port: 8080,
+      hostname: "127.0.0.1",
+    });
+  });
+
+  it("starts REST server with custom bind address", async () => {
+    const { startServer } = await import("@harpoc/rest-api");
+
+    await run(["--rest", "--host", "0.0.0.0"]);
+
+    expect(startServer).toHaveBeenCalledWith({
+      engine: mockEngine,
+      port: 3000,
+      hostname: "0.0.0.0",
+    });
   });
 
   // ── Dual mode ───────────────────────────────────────────────────

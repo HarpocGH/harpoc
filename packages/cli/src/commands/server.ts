@@ -22,6 +22,7 @@ export function registerServerCommand(program: Command): void {
     .option("--mcp-http-port <port>", "MCP Streamable HTTP port", "3001")
     .option("--rest", "Start REST API server")
     .option("--port <port>", "REST API port", "3000")
+    .option("--host <address>", "REST API bind address (loopback by default)", "127.0.0.1")
     .option("--token <jwt>", "Launch token for MCP scope enforcement (stdio only)")
     .action(
       async (
@@ -31,6 +32,7 @@ export function registerServerCommand(program: Command): void {
           mcpHttpPort: string;
           rest?: boolean;
           port: string;
+          host: string;
           token?: string;
         },
         cmd: Command,
@@ -112,7 +114,7 @@ export function registerServerCommand(program: Command): void {
 
           if (opts.rest) {
             const { startServer } = await import("@harpoc/rest-api");
-            restServer = startServer({ engine, port });
+            restServer = startServer({ engine, port, hostname: opts.host });
           }
         } catch (err: unknown) {
           await engine?.destroy();

@@ -47,13 +47,11 @@ describe("Memory Wiping", () => {
     destroyTestVault(vault).catch(() => {});
   });
 
-  it("wipeBuffer() overwrites all bytes to non-zero randomness", () => {
+  it("wipeBuffer() zeroes every byte (thesis §4.6 memory hygiene)", () => {
     const buf = new Uint8Array(32);
-    buf.fill(0);
+    buf.fill(0xaa);
     wipeBuffer(buf);
-    // After wipe, at least some bytes should be non-zero (overwhelmingly likely with random fill)
-    const nonZero = buf.filter((b) => b !== 0).length;
-    expect(nonZero).toBeGreaterThan(0);
+    expect(buf.every((b) => b === 0)).toBe(true);
   });
 
   it("lock() makes vault inoperable (consequence of wipeKeys)", async () => {

@@ -29,8 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Out-of-band value collection for `create_secret` / `rotate_secret`** — the thesis's full channel chain. Channel 1, URL-mode elicitation: when the client declares the `elicitation.url` capability, the vault serves a one-time local form (256-bit single-use token, timing-safe compare, 5-minute expiry, JS-free page) and the browser posts the value directly into the vault process — it never traverses the MCP channel. Channel 2, controlling-terminal prompt (stdio launches only, `enableTtyPrompt`): a masked prompt opened directly on `/dev/tty` (POSIX) or `CONIN$`/`CONOUT$` (Windows) — the server's stdin carries JSON-RPC and is never read; unavailable terminals degrade gracefully. Channel 3, deferred/pending (CLI `harpoc secret set` / `harpoc secret rotate`), unchanged. `rotate_secret` now performs the rotation when a value is collected
 
+- REST API bind address is configurable: `harpoc server start --rest --host <address>` (default `127.0.0.1`, per thesis §4.1; non-loopback binds log a warning)
+
 ### Changed
 
+- `wipeBuffer` now zeroes buffers (`Buffer.fill(0)`) instead of random-filling, matching the thesis's §4.6 memory-hygiene discipline; the session-file secure erase keeps its intentional random-byte overwrite
 - **Breaking:** `use_secret` request shape changed from `{ request, injection, follow_redirects }` to `{ action }`, a discriminated union on `action.type` (`http` | `process` | `mcp` | `database` | `git` | `ssh`), across MCP, REST and SDK. Responses are discriminated too (`HttpResult` | `ProcessResult` | `McpResult` | `DatabaseResult` | `GitResult` | `SshResult`). The existing HTTP path is now `action.type: "http"`.
 
 ### Notes

@@ -70,15 +70,13 @@ describe("generateUUIDv7", () => {
 });
 
 describe("wipeBuffer", () => {
-  it("overwrites the buffer contents", () => {
+  it("zeroes every byte", () => {
     const buf = new Uint8Array(32);
     buf.fill(0xaa);
-    const original = new Uint8Array(buf);
 
     wipeBuffer(buf);
 
-    // After wiping, it should be different from the original (with overwhelming probability)
-    expect(Buffer.from(buf).equals(Buffer.from(original))).toBe(false);
+    expect(buf.every((b) => b === 0)).toBe(true);
   });
 
   it("does not change the buffer length", () => {

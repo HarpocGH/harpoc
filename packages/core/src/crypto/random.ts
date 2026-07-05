@@ -1,4 +1,4 @@
-import { randomBytes, randomFillSync } from "node:crypto";
+import { randomBytes } from "node:crypto";
 
 /**
  * Generate cryptographically secure random bytes.
@@ -47,8 +47,10 @@ export function generateUUIDv7(): string {
 }
 
 /**
- * Securely wipe a buffer by overwriting with random bytes.
+ * Securely wipe a buffer by overwriting it with zeros (thesis §4.6 memory
+ * hygiene). The session-file secure erase intentionally uses random bytes
+ * instead — that is a file-erasure mechanism, not this one.
  */
 export function wipeBuffer(buf: Uint8Array): void {
-  randomFillSync(buf);
+  buf.fill(0);
 }
