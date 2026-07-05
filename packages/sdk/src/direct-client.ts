@@ -1,11 +1,16 @@
 import type { VaultEngine } from "@harpoc/core";
-import type { AccessPolicy, CreateSecretResponse, UseSecretResponse } from "@harpoc/shared";
+import type {
+  AccessPolicy,
+  CreateSecretResponse,
+  InjectionPolicy,
+  UseSecretAction,
+  UseSecretResponse,
+} from "@harpoc/shared";
 import type { AuditQueryOptions, DecryptedAuditEvent, SecretInfo } from "@harpoc/core";
 import type {
   CreateSecretInput,
   GrantPolicyInput,
   HealthResponse,
-  UseSecretInput,
   VaultClient,
 } from "./client.js";
 import { VAULT_VERSION } from "@harpoc/shared";
@@ -37,8 +42,16 @@ export class DirectClient implements VaultClient {
     return this.engine.revokeSecret(handle);
   }
 
-  async useSecret(handle: string, input: UseSecretInput): Promise<UseSecretResponse> {
-    return this.engine.useSecret(handle, input.request, input.injection, input.followRedirects);
+  async useSecret(handle: string, action: UseSecretAction): Promise<UseSecretResponse> {
+    return this.engine.useSecret(handle, action);
+  }
+
+  async setInjectionPolicy(handle: string, policy: InjectionPolicy): Promise<void> {
+    return this.engine.setInjectionPolicy(handle, policy);
+  }
+
+  async getInjectionPolicy(handle: string): Promise<InjectionPolicy> {
+    return this.engine.getInjectionPolicy(handle);
   }
 
   async grantPolicy(handle: string, input: GrantPolicyInput): Promise<AccessPolicy> {

@@ -106,8 +106,12 @@ describe("Full Lifecycle", () => {
   it("MCP use_secret injects bearer token and sanitizes response", async () => {
     const result = await callTool(mcpServer, "use_secret", {
       handle,
-      request: { method: "GET", url: echoUrl },
-      injection: { type: "bearer" },
+      action: {
+        type: "http",
+        method: "GET",
+        url: echoUrl,
+        injection: { type: "bearer" },
+      },
     });
     expect(result.isError).toBeFalsy();
     const response = JSON.parse(result.content[0]!.text) as { status: number; body: string };

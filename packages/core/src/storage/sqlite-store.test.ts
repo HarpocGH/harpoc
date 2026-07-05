@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AccessPolicy, Secret } from "@harpoc/shared";
 import { AuditEventType, SecretStatus, SecretType } from "@harpoc/shared";
-import type { CertificateRow, OAuthTokenRow } from "./sqlite-store.js";
+import type { CertificateRow, InjectionPolicyRow, OAuthTokenRow } from "./sqlite-store.js";
 import { SqliteStore } from "./sqlite-store.js";
 
 let store: SqliteStore;
@@ -87,8 +87,15 @@ describe("schema creation", () => {
     expect(row?.name).toBe("certificates");
   });
 
-  it("sets schema_version to 5", () => {
-    expect(store.getMeta("schema_version")).toBe("5");
+  it("creates injection_policies table", () => {
+    const row = store.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='injection_policies'")
+      .get() as { name: string } | undefined;
+    expect(row?.name).toBe("injection_policies");
+  });
+
+  it("sets schema_version to 6", () => {
+    expect(store.getMeta("schema_version")).toBe("6");
   });
 });
 
@@ -957,6 +964,89 @@ describe("certificates CRUD", () => {
     const names = indexes.map((i) => i.name);
     expect(names).toContain("idx_certs_expiry");
     expect(names).toContain("idx_certs_subject");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// injection_policies CRUD
+// ---------------------------------------------------------------------------
+
+function makeInjectionPolicyRow(
+  secretId: string,
+  overrides: Partial<InjectionPolicyRow> = {},
+): InjectionPolicyRow {
+  const now = Date.now();
+  return {
+    secret_id: secretId,
+    policy_encrypted: new Uint8Array([1, 2, 3, 4]),
+    policy_iv: new Uint8Array(12).fill(7),
+    policy_tag: new Uint8Array(16).fill(8),
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  };
+}
+
+describe("injection_policies CRUD", () => {
+  it("upserts and retrieves a policy", () => {
+    const secret = makeSecret();
+    store.insertSecret(secret);
+
+    const row = makeInjectionPolicyRow(secret.id);
+    store.upsertInjectionPolicy(row);
+
+    const retrieved = store.getInjectionPolicy(secret.id);
+    expect(retrieved).toBeDefined();
+    expect(retrieved?.secret_id).toBe(secret.id);
+    expect(Buffer.from(retrieved?.policy_encrypted ?? []).equals(Buffer.from(row.policy_encrypted))).toBe(
+      true,
+    );
+  });
+
+  it("returns undefined for missing policy", () => {
+    expect(store.getInjectionPolicy("nonexistent")).toBeUndefined();
+  });
+
+  it("upsert overwrites the blob but preserves created_at", () => {
+    const secret = makeSecret();
+    store.insertSecret(secret);
+
+    const first = makeInjectionPolicyRow(secret.id, { created_at: 1000, updated_at: 1000 });
+    store.upsertInjectionPolicy(first);
+
+    const updated = makeInjectionPolicyRow(secret.id, {
+      policy_encrypted: new Uint8Array([9, 9, 9]),
+      created_at: 5000, // ignored on conflict
+      updated_at: 5000,
+    });
+    store.upsertInjectionPolicy(updated);
+
+    const retrieved = store.getInjectionPolicy(secret.id);
+    expect(retrieved?.created_at).toBe(1000);
+    expect(retrieved?.updated_at).toBe(5000);
+    expect(Buffer.from(retrieved?.policy_encrypted ?? []).equals(Buffer.from([9, 9, 9]))).toBe(true);
+  });
+
+  it("deletes a policy", () => {
+    const secret = makeSecret();
+    store.insertSecret(secret);
+    store.upsertInjectionPolicy(makeInjectionPolicyRow(secret.id));
+
+    expect(store.deleteInjectionPolicy(secret.id)).toBe(true);
+    expect(store.getInjectionPolicy(secret.id)).toBeUndefined();
+  });
+
+  it("returns false when deleting a nonexistent policy", () => {
+    expect(store.deleteInjectionPolicy("nonexistent")).toBe(false);
+  });
+
+  it("cascades delete when secret is deleted", () => {
+    const secret = makeSecret();
+    store.insertSecret(secret);
+    store.upsertInjectionPolicy(makeInjectionPolicyRow(secret.id));
+
+    store.deleteSecret(secret.id);
+    expect(store.getInjectionPolicy(secret.id)).toBeUndefined();
   });
 });
 

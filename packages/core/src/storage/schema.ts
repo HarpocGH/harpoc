@@ -153,3 +153,14 @@ export const CREATE_CERTIFICATES_INDEXES = `
 CREATE INDEX IF NOT EXISTS idx_certs_expiry ON certificates(not_after);
 CREATE INDEX IF NOT EXISTS idx_certs_subject ON certificates(subject);
 `;
+
+export const CREATE_INJECTION_POLICIES = `
+CREATE TABLE injection_policies (
+  secret_id         TEXT PRIMARY KEY REFERENCES secrets(id) ON DELETE CASCADE,
+  policy_encrypted  BLOB NOT NULL,
+  policy_iv         BLOB NOT NULL,
+  policy_tag        BLOB NOT NULL,
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL
+) STRICT;
+`;

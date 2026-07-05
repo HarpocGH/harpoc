@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { MAX_NAME_LENGTH } from "./constants.js";
+import { MAX_NAME_LENGTH, MAX_PROCESS_ARGS } from "./constants.js";
 import { isValidHandle } from "./handle.js";
 import {
   AuditEventType,
@@ -86,17 +86,55 @@ export const createSecretInputSchema = z.object({
 
 export const httpMethodSchema = z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]);
 
-export const useSecretRequestSchema = z.object({
-  handle: handleSchema,
-  request: z.object({
-    method: httpMethodSchema,
-    url: z.string().url(),
-    headers: z.record(z.string()).optional(),
-    body: z.string().optional(),
-    timeout_ms: z.number().int().positive().max(300_000).optional(),
-  }),
+// ---------------------------------------------------------------------------
+// use_secret action schemas (thesis §4.5: two-mechanism injection taxonomy)
+// ---------------------------------------------------------------------------
+
+/** HTTP action — request-mediated injection. */
+export const httpActionSchema = z.object({
+  type: z.literal("http"),
+  method: httpMethodSchema,
+  url: z.string().url(),
+  headers: z.record(z.string()).optional(),
+  body: z.string().optional(),
   injection: injectionConfigSchema,
   follow_redirects: followRedirectsSchema.optional(),
+  timeout_ms: z.number().int().positive().max(300_000).optional(),
+});
+
+/** Process action — process-mediated injection. `command`/`args` are data, never shell-interpreted. */
+export const processActionSchema = z.object({
+  type: z.literal("process"),
+  command: z.string().min(1).max(4096),
+  args: z.array(z.string().max(4096)).max(MAX_PROCESS_ARGS).optional(),
+  working_directory: z.string().min(1).max(4096).optional(),
+  env_var: z
+    .string()
+    .min(1)
+    .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Invalid environment variable name"),
+  timeout_ms: z.number().int().positive().max(300_000).optional(),
+});
+
+/** Discriminated union over the execution context. */
+export const useSecretActionSchema = z.discriminatedUnion("type", [
+  httpActionSchema,
+  processActionSchema,
+]);
+
+export const useSecretRequestSchema = z.object({
+  handle: handleSchema,
+  action: useSecretActionSchema,
+});
+
+/** Per-secret injection policy input (URL + command + env allowlists). */
+export const injectionPolicyInputSchema = z.object({
+  url_allowlist: z.array(z.string().min(1).max(2048)).max(100).optional().default([]),
+  command_allowlist: z.array(z.string().min(1).max(4096)).max(100).optional().default([]),
+  env_allowlist: z
+    .array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Invalid environment variable name"))
+    .max(100)
+    .optional()
+    .default([]),
 });
 
 export const accessPolicyInputSchema = z.object({

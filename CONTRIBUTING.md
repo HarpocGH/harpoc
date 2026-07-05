@@ -22,7 +22,7 @@ pnpm test
 | Package               | Path                   | Description                                         |
 | --------------------- | ---------------------- | --------------------------------------------------- |
 | `@harpoc/shared`      | `packages/shared`      | Types, error codes, Zod schemas, constants          |
-| `@harpoc/core`        | `packages/core`        | VaultEngine, crypto, SQLite storage, HTTP injection |
+| `@harpoc/core`        | `packages/core`        | VaultEngine, crypto, SQLite storage, HTTP + process injection |
 | `@harpoc/cli`         | `packages/cli`         | `harpoc` CLI binary (Commander.js)                  |
 | `@harpoc/mcp-server`  | `packages/mcp-server`  | MCP server with tools, resources, and guards        |
 | `@harpoc/rest-api`    | `packages/rest-api`    | Hono HTTP API with JWT auth and rate limiting       |

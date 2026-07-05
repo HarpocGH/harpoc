@@ -1,7 +1,6 @@
 export type {
   VaultClient,
   CreateSecretInput,
-  UseSecretInput,
   GrantPolicyInput,
   HealthResponse,
 } from "./client.js";

@@ -39,7 +39,11 @@ function createMockEngine() {
     getSecretValue: vi.fn().mockResolvedValue(new Uint8Array([72, 101, 108, 108, 111])),
     rotateSecret: vi.fn().mockResolvedValue(undefined),
     revokeSecret: vi.fn().mockResolvedValue(undefined),
-    useSecret: vi.fn().mockResolvedValue({ status: 200, body: "ok" }),
+    useSecret: vi.fn().mockResolvedValue({ type: "http", status: 200, body: "ok" }),
+    setInjectionPolicy: vi.fn().mockResolvedValue(undefined),
+    getInjectionPolicy: vi
+      .fn()
+      .mockResolvedValue({ url_allowlist: [], command_allowlist: [], env_allowlist: [] }),
     resolveSecretId: vi.fn().mockResolvedValue("uuid-1"),
     grantPolicy: vi.fn().mockReturnValue({
       id: "p1",
@@ -109,23 +113,48 @@ describe("DirectClient", () => {
     expect(engine.revokeSecret).toHaveBeenCalledWith("secret://key");
   });
 
-  it("useSecret delegates to engine with correct args", async () => {
+  it("useSecret delegates the action to the engine", async () => {
     const engine = createMockEngine();
     const client = new DirectClient(engine as never);
 
-    const result = await client.useSecret("secret://key", {
-      request: { method: "GET", url: "https://api.example.com" },
-      injection: { type: "bearer" },
-      followRedirects: "none",
-    });
+    const action = {
+      type: "http" as const,
+      method: "GET" as const,
+      url: "https://api.example.com",
+      injection: { type: "bearer" as const },
+      follow_redirects: "none" as const,
+    };
+    const result = await client.useSecret("secret://key", action);
 
-    expect(result.status).toBe(200);
-    expect(engine.useSecret).toHaveBeenCalledWith(
-      "secret://key",
-      { method: "GET", url: "https://api.example.com" },
-      { type: "bearer" },
-      "none",
-    );
+    expect(result.type).toBe("http");
+    expect(engine.useSecret).toHaveBeenCalledWith("secret://key", action);
+  });
+
+  it("useSecret delegates a process action to the engine", async () => {
+    const engine = createMockEngine();
+    const client = new DirectClient(engine as never);
+
+    const action = {
+      type: "process" as const,
+      command: "gh",
+      args: ["api", "/user"],
+      env_var: "GH_TOKEN",
+    };
+    await client.useSecret("secret://key", action);
+    expect(engine.useSecret).toHaveBeenCalledWith("secret://key", action);
+  });
+
+  it("setInjectionPolicy and getInjectionPolicy delegate to the engine", async () => {
+    const engine = createMockEngine();
+    const client = new DirectClient(engine as never);
+
+    const policy = { url_allowlist: ["https://api.github.com/*"], command_allowlist: ["gh"], env_allowlist: [] };
+    await client.setInjectionPolicy("secret://key", policy);
+    expect(engine.setInjectionPolicy).toHaveBeenCalledWith("secret://key", policy);
+
+    const got = await client.getInjectionPolicy("secret://key");
+    expect(engine.getInjectionPolicy).toHaveBeenCalledWith("secret://key");
+    expect(got.command_allowlist).toEqual([]);
   });
 
   it("grantPolicy resolves secret ID and delegates", async () => {

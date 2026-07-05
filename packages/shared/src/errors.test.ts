@@ -60,6 +60,13 @@ describe("HTTP status mapping", () => {
     [ErrorCode.TIMEOUT, 504],
     [ErrorCode.REDIRECT_POLICY_VIOLATION, 502],
     [ErrorCode.INVALID_INJECTION_CONFIG, 400],
+    [ErrorCode.URL_NOT_ALLOWED, 403],
+    // Process execution
+    [ErrorCode.COMMAND_NOT_ALLOWED, 403],
+    [ErrorCode.PROCESS_SPAWN_FAILED, 500],
+    [ErrorCode.PROCESS_TIMEOUT, 504],
+    [ErrorCode.PROCESS_OUTPUT_LIMIT, 413],
+    [ErrorCode.INVALID_PROCESS_CONFIG, 400],
     // Validation
     [ErrorCode.WEAK_PASSWORD, 400],
     [ErrorCode.INVALID_INPUT, 400],
@@ -100,7 +107,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(54);
+    expect(members).toHaveLength(60);
   });
 });
 
@@ -412,5 +419,62 @@ describe("factory methods", () => {
   it("certNotConfigured() with handle", () => {
     const err = VaultError.certNotConfigured("secret://my-cert");
     expect(err.message).toBe("Certificate not configured for secret: secret://my-cert");
+  });
+
+  it("urlNotAllowed() without url", () => {
+    const err = VaultError.urlNotAllowed();
+    expect(err.code).toBe(ErrorCode.URL_NOT_ALLOWED);
+    expect(err.statusCode).toBe(403);
+    expect(err.message).toBe("URL not in secret allowlist");
+  });
+
+  it("urlNotAllowed() with url", () => {
+    const err = VaultError.urlNotAllowed("https://evil.com/steal");
+    expect(err.message).toBe("URL not in secret allowlist: https://evil.com/steal");
+  });
+
+  it("commandNotAllowed() without command", () => {
+    const err = VaultError.commandNotAllowed();
+    expect(err.code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
+    expect(err.statusCode).toBe(403);
+    expect(err.message).toBe("Command not in secret allowlist");
+  });
+
+  it("commandNotAllowed() with command", () => {
+    const err = VaultError.commandNotAllowed("curl");
+    expect(err.message).toBe("Command not in secret allowlist: curl");
+  });
+
+  it("processSpawnFailed() without detail", () => {
+    const err = VaultError.processSpawnFailed();
+    expect(err.code).toBe(ErrorCode.PROCESS_SPAWN_FAILED);
+    expect(err.statusCode).toBe(500);
+    expect(err.message).toBe("Process spawn failed");
+  });
+
+  it("processSpawnFailed() with detail", () => {
+    const err = VaultError.processSpawnFailed("ENOENT");
+    expect(err.message).toBe("Process spawn failed: ENOENT");
+  });
+
+  it("processTimeout()", () => {
+    const err = VaultError.processTimeout();
+    expect(err.code).toBe(ErrorCode.PROCESS_TIMEOUT);
+    expect(err.statusCode).toBe(504);
+    expect(err.message).toBe("Process timed out");
+  });
+
+  it("processOutputLimit()", () => {
+    const err = VaultError.processOutputLimit();
+    expect(err.code).toBe(ErrorCode.PROCESS_OUTPUT_LIMIT);
+    expect(err.statusCode).toBe(413);
+    expect(err.message).toBe("Process output exceeded limit");
+  });
+
+  it("invalidProcessConfig()", () => {
+    const err = VaultError.invalidProcessConfig("env_var required");
+    expect(err.code).toBe(ErrorCode.INVALID_PROCESS_CONFIG);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toBe("env_var required");
   });
 });

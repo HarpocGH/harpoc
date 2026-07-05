@@ -118,11 +118,12 @@ describe("Session Sharing", () => {
     const value = await engine2.getSecretValue(handle);
     expect(Buffer.from(value).toString("utf8")).toBe(SECRET_VALUE);
 
-    const response = await engine2.useSecret(
-      handle,
-      { method: "GET", url: echoUrl },
-      { type: InjectionType.BEARER },
-    );
+    const response = await engine2.useSecret(handle, {
+      type: "http",
+      method: "GET",
+      url: echoUrl,
+      injection: { type: InjectionType.BEARER },
+    });
     expect(response.status).toBe(200);
     const body = JSON.parse(response.body!) as { headers: Record<string, string> };
     // Exact-match redaction in VaultEngine.useSecret() scrubs the secret value

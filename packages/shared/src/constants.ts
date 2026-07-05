@@ -97,6 +97,12 @@ export const VAULT_AUDIT_ENABLED = true;
 
 export const DEFAULT_HTTP_TIMEOUT_MS = 30_000; // 30 seconds
 
+// -- Process execution / use_secret defaults ---------------------------------
+
+export const DEFAULT_PROCESS_TIMEOUT_MS = 30_000; // 30 seconds
+export const MAX_PROCESS_OUTPUT_BYTES = 1_048_576; // 1 MiB captured per stream
+export const MAX_PROCESS_ARGS = 256;
+
 // -- Token -------------------------------------------------------------------
 
 export const MAX_TOKEN_TTL_MS = 24 * 60 * 60 * 1_000; // 24 hours
@@ -130,6 +136,12 @@ export function AAD_OAUTH_ACCESS_TOKEN(secretId: string): string {
 
 export function AAD_OAUTH_REFRESH_TOKEN(secretId: string): string {
   return `oauth-refresh-token:${secretId}`;
+}
+
+// -- AAD for per-secret injection policy -------------------------------------
+
+export function AAD_INJECTION_POLICY(secretId: string): string {
+  return `injection-policy:${secretId}`;
 }
 
 // -- Name constraints --------------------------------------------------------

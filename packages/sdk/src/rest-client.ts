@@ -1,11 +1,16 @@
-import type { AccessPolicy, CreateSecretResponse, UseSecretResponse } from "@harpoc/shared";
+import type {
+  AccessPolicy,
+  CreateSecretResponse,
+  InjectionPolicy,
+  UseSecretAction,
+  UseSecretResponse,
+} from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditQueryOptions, DecryptedAuditEvent, SecretInfo } from "@harpoc/core";
 import type {
   CreateSecretInput,
   GrantPolicyInput,
   HealthResponse,
-  UseSecretInput,
   VaultClient,
 } from "./client.js";
 
@@ -66,21 +71,30 @@ export class RestClient implements VaultClient {
     );
   }
 
-  async useSecret(handle: string, input: UseSecretInput): Promise<UseSecretResponse> {
+  async useSecret(handle: string, action: UseSecretAction): Promise<UseSecretResponse> {
     return this.request<UseSecretResponse>(
       "POST",
       `/api/v1/secrets/${this.encodeHandle(handle)}/use`,
+      { action },
+    );
+  }
+
+  async setInjectionPolicy(handle: string, policy: InjectionPolicy): Promise<void> {
+    await this.request<{ updated: boolean }>(
+      "PUT",
+      `/api/v1/secrets/${this.encodeHandle(handle)}/injection-policy`,
       {
-        request: {
-          method: input.request.method,
-          url: input.request.url,
-          headers: input.request.headers,
-          body: input.request.body,
-          timeout_ms: input.request.timeoutMs,
-        },
-        injection: input.injection,
-        follow_redirects: input.followRedirects,
+        url_allowlist: policy.url_allowlist,
+        command_allowlist: policy.command_allowlist,
+        env_allowlist: policy.env_allowlist,
       },
+    );
+  }
+
+  async getInjectionPolicy(handle: string): Promise<InjectionPolicy> {
+    return this.request<InjectionPolicy>(
+      "GET",
+      `/api/v1/secrets/${this.encodeHandle(handle)}/injection-policy`,
     );
   }
 

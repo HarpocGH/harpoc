@@ -8,18 +8,22 @@ import {
   createSecretInputSchema,
   followRedirectsSchema,
   handleSchema,
+  httpActionSchema,
   httpMethodSchema,
   injectionConfigSchema,
+  injectionPolicyInputSchema,
   injectionTypeSchema,
   oauthGrantTypeSchema,
   oauthProviderConfigSchema,
   oauthProviderPresetSchema,
   permissionSchema,
   principalTypeSchema,
+  processActionSchema,
   secretStatusSchema,
   secretTypeSchema,
   sessionFileSchema,
   startOAuthFlowInputSchema,
+  useSecretActionSchema,
   useSecretRequestSchema,
 } from "./schemas.js";
 
@@ -254,125 +258,217 @@ describe("createSecretInputSchema", () => {
 });
 
 // ---------------------------------------------------------------------------
-// useSecretRequestSchema
+// httpActionSchema
 // ---------------------------------------------------------------------------
 
-describe("useSecretRequestSchema", () => {
-  const validRequest = {
-    handle: "secret://github-token",
-    request: {
-      method: "GET" as const,
-      url: "https://api.github.com/user",
-    },
+describe("httpActionSchema", () => {
+  const validHttp = {
+    type: "http" as const,
+    method: "GET" as const,
+    url: "https://api.github.com/user",
     injection: { type: "bearer" as const },
   };
 
-  it("accepts valid full request", () => {
-    const result = useSecretRequestSchema.parse(validRequest);
-    expect(result.handle).toBe("secret://github-token");
-    expect(result.request.method).toBe("GET");
+  it("accepts a minimal HTTP action", () => {
+    const result = httpActionSchema.parse(validHttp);
+    expect(result.type).toBe("http");
+    expect(result.method).toBe("GET");
   });
 
-  it("accepts request with all optional fields", () => {
-    const result = useSecretRequestSchema.parse({
-      ...validRequest,
-      request: {
-        ...validRequest.request,
-        headers: { Accept: "application/json" },
-        body: '{"key": "val"}',
-        timeout_ms: 5000,
-      },
+  it("accepts all optional fields", () => {
+    const result = httpActionSchema.parse({
+      ...validHttp,
+      headers: { Accept: "application/json" },
+      body: '{"key":"val"}',
       follow_redirects: "none",
+      timeout_ms: 5_000,
     });
-    expect(result.request.headers).toEqual({ Accept: "application/json" });
+    expect(result.headers).toEqual({ Accept: "application/json" });
     expect(result.follow_redirects).toBe("none");
+    expect(result.timeout_ms).toBe(5_000);
   });
 
   it("rejects invalid method", () => {
-    expect(() =>
-      useSecretRequestSchema.parse({
-        ...validRequest,
-        request: { ...validRequest.request, method: "CONNECT" },
-      }),
-    ).toThrow();
+    expect(() => httpActionSchema.parse({ ...validHttp, method: "CONNECT" })).toThrow();
   });
 
   it("rejects invalid URL", () => {
-    expect(() =>
-      useSecretRequestSchema.parse({
-        ...validRequest,
-        request: { ...validRequest.request, url: "not-a-url" },
-      }),
-    ).toThrow();
-  });
-
-  it("rejects missing required fields", () => {
-    expect(() => useSecretRequestSchema.parse({ handle: "secret://k" })).toThrow();
-    expect(() => useSecretRequestSchema.parse({ ...validRequest, handle: undefined })).toThrow();
+    expect(() => httpActionSchema.parse({ ...validHttp, url: "not-a-url" })).toThrow();
   });
 
   it("rejects timeout_ms: 0", () => {
-    expect(() =>
-      useSecretRequestSchema.parse({
-        ...validRequest,
-        request: { ...validRequest.request, timeout_ms: 0 },
-      }),
-    ).toThrow();
+    expect(() => httpActionSchema.parse({ ...validHttp, timeout_ms: 0 })).toThrow();
   });
 
-  it("rejects timeout_ms: -1", () => {
-    expect(() =>
-      useSecretRequestSchema.parse({
-        ...validRequest,
-        request: { ...validRequest.request, timeout_ms: -1 },
-      }),
-    ).toThrow();
+  it("rejects timeout_ms exceeding 300000", () => {
+    expect(() => httpActionSchema.parse({ ...validHttp, timeout_ms: 300_001 })).toThrow();
   });
 
-  it("rejects timeout_ms: 1.5 (non-integer)", () => {
-    expect(() =>
-      useSecretRequestSchema.parse({
-        ...validRequest,
-        request: { ...validRequest.request, timeout_ms: 1.5 },
-      }),
-    ).toThrow();
-  });
-
-  it("accepts timeout_ms: 1", () => {
-    const result = useSecretRequestSchema.parse({
-      ...validRequest,
-      request: { ...validRequest.request, timeout_ms: 1 },
-    });
-    expect(result.request.timeout_ms).toBe(1);
-  });
-
-  it("rejects timeout_ms exceeding 300000 (5 minutes)", () => {
-    expect(() =>
-      useSecretRequestSchema.parse({
-        ...validRequest,
-        request: { ...validRequest.request, timeout_ms: 300_001 },
-      }),
-    ).toThrow();
-  });
-
-  it("accepts timeout_ms: 300000 (5 minutes)", () => {
-    const result = useSecretRequestSchema.parse({
-      ...validRequest,
-      request: { ...validRequest.request, timeout_ms: 300_000 },
-    });
-    expect(result.request.timeout_ms).toBe(300_000);
+  it("accepts timeout_ms: 300000", () => {
+    expect(httpActionSchema.parse({ ...validHttp, timeout_ms: 300_000 }).timeout_ms).toBe(300_000);
   });
 
   it.each(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] as const)(
     "accepts HTTP method %s",
     (method) => {
-      const result = useSecretRequestSchema.parse({
-        ...validRequest,
-        request: { ...validRequest.request, method },
-      });
-      expect(result.request.method).toBe(method);
+      expect(httpActionSchema.parse({ ...validHttp, method }).method).toBe(method);
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// processActionSchema
+// ---------------------------------------------------------------------------
+
+describe("processActionSchema", () => {
+  const validProcess = {
+    type: "process" as const,
+    command: "gh",
+    env_var: "GH_TOKEN",
+  };
+
+  it("accepts a minimal process action", () => {
+    const result = processActionSchema.parse(validProcess);
+    expect(result.type).toBe("process");
+    expect(result.command).toBe("gh");
+    expect(result.env_var).toBe("GH_TOKEN");
+  });
+
+  it("accepts all optional fields", () => {
+    const result = processActionSchema.parse({
+      ...validProcess,
+      args: ["api", "/user/repos"],
+      working_directory: "/home/user/project",
+      timeout_ms: 10_000,
+    });
+    expect(result.args).toEqual(["api", "/user/repos"]);
+    expect(result.working_directory).toBe("/home/user/project");
+  });
+
+  it("rejects empty command", () => {
+    expect(() => processActionSchema.parse({ ...validProcess, command: "" })).toThrow();
+  });
+
+  it("rejects missing env_var", () => {
+    expect(() => processActionSchema.parse({ type: "process", command: "gh" })).toThrow();
+  });
+
+  it.each(["1BAD", "has-dash", "has space", "with.dot", ""])(
+    "rejects invalid env_var name %j",
+    (env_var) => {
+      expect(() => processActionSchema.parse({ ...validProcess, env_var })).toThrow();
+    },
+  );
+
+  it.each(["GH_TOKEN", "_underscore", "A", "PATH2"])("accepts valid env_var name %j", (env_var) => {
+    expect(processActionSchema.parse({ ...validProcess, env_var }).env_var).toBe(env_var);
+  });
+
+  it("rejects args beyond the max count", () => {
+    const args = Array.from({ length: 257 }, () => "x");
+    expect(() => processActionSchema.parse({ ...validProcess, args })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useSecretActionSchema (discriminated union)
+// ---------------------------------------------------------------------------
+
+describe("useSecretActionSchema", () => {
+  it("accepts an http action", () => {
+    const result = useSecretActionSchema.parse({
+      type: "http",
+      method: "GET",
+      url: "https://api.github.com/user",
+      injection: { type: "bearer" },
+    });
+    expect(result.type).toBe("http");
+  });
+
+  it("accepts a process action", () => {
+    const result = useSecretActionSchema.parse({
+      type: "process",
+      command: "gh",
+      env_var: "GH_TOKEN",
+    });
+    expect(result.type).toBe("process");
+  });
+
+  it("rejects an unknown action type", () => {
+    expect(() => useSecretActionSchema.parse({ type: "ssh", command: "ls" })).toThrow();
+  });
+
+  it("rejects a missing discriminant", () => {
+    expect(() => useSecretActionSchema.parse({ command: "gh", env_var: "GH_TOKEN" })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useSecretRequestSchema
+// ---------------------------------------------------------------------------
+
+describe("useSecretRequestSchema", () => {
+  it("accepts an http request", () => {
+    const result = useSecretRequestSchema.parse({
+      handle: "secret://github-token",
+      action: {
+        type: "http",
+        method: "GET",
+        url: "https://api.github.com/user",
+        injection: { type: "bearer" },
+      },
+    });
+    expect(result.handle).toBe("secret://github-token");
+    expect(result.action.type).toBe("http");
+  });
+
+  it("accepts a process request", () => {
+    const result = useSecretRequestSchema.parse({
+      handle: "secret://gh-token",
+      action: { type: "process", command: "gh", args: ["api"], env_var: "GH_TOKEN" },
+    });
+    expect(result.action.type).toBe("process");
+  });
+
+  it("rejects a missing handle", () => {
+    expect(() =>
+      useSecretRequestSchema.parse({
+        action: { type: "process", command: "gh", env_var: "GH_TOKEN" },
+      }),
+    ).toThrow();
+  });
+
+  it("rejects a missing action", () => {
+    expect(() => useSecretRequestSchema.parse({ handle: "secret://k" })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// injectionPolicyInputSchema
+// ---------------------------------------------------------------------------
+
+describe("injectionPolicyInputSchema", () => {
+  it("defaults all allowlists to empty arrays", () => {
+    const result = injectionPolicyInputSchema.parse({});
+    expect(result).toEqual({ url_allowlist: [], command_allowlist: [], env_allowlist: [] });
+  });
+
+  it("accepts populated allowlists", () => {
+    const result = injectionPolicyInputSchema.parse({
+      url_allowlist: ["https://api.github.com/*"],
+      command_allowlist: ["gh", "/usr/bin/git"],
+      env_allowlist: ["PATH", "HOME"],
+    });
+    expect(result.command_allowlist).toEqual(["gh", "/usr/bin/git"]);
+  });
+
+  it("rejects an invalid env var name in env_allowlist", () => {
+    expect(() => injectionPolicyInputSchema.parse({ env_allowlist: ["has-dash"] })).toThrow();
+  });
+
+  it("rejects an empty command allowlist entry", () => {
+    expect(() => injectionPolicyInputSchema.parse({ command_allowlist: [""] })).toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------------

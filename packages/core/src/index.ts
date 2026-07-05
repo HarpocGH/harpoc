@@ -33,6 +33,7 @@ export type {
   AuditFilter,
   OAuthTokenRow,
   CertificateRow,
+  InjectionPolicyRow,
 } from "./storage/sqlite-store.js";
 
 // Session
@@ -57,6 +58,14 @@ export { validateUrl, isPrivateIp, isLoopback } from "./injection/url-validator.
 export { HttpInjector } from "./injection/http-injector.js";
 export type { HttpInjectorRequest } from "./injection/http-injector.js";
 export { InjectionGuard } from "./injection/injection-guard.js";
+export { ProcessInjector } from "./injection/process-injector.js";
+export {
+  matchesUrlAllowlist,
+  resolveAndMatchCommand,
+  resolveExecutable,
+  controlledPathDirs,
+} from "./injection/allowlist.js";
+export { redactSecretEncodings } from "./injection/output-sanitizer.js";
 
 // VaultEngine
 export { VaultEngine } from "./vault-engine.js";

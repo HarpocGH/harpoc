@@ -79,6 +79,13 @@ export const FollowRedirects = {
 } as const;
 export type FollowRedirects = (typeof FollowRedirects)[keyof typeof FollowRedirects];
 
+/** Execution context selected by a use_secret action's discriminant. */
+export const ActionType = {
+  HTTP: "http",
+  PROCESS: "process",
+} as const;
+export type ActionType = (typeof ActionType)[keyof typeof ActionType];
+
 export const VaultState = {
   SEALED: "sealed",
   UNLOCKED: "unlocked",
@@ -200,22 +207,54 @@ export interface VaultApiToken {
   secrets?: string[];
 }
 
-/** Request to execute an HTTP call with an injected secret. */
-export interface UseSecretRequest {
-  handle: string;
-  request: {
-    method: HttpMethod;
-    url: string;
-    headers?: Record<string, string>;
-    body?: string;
-    timeout_ms?: number;
-  };
-  injection: InjectionConfig;
-  follow_redirects?: FollowRedirects;
+/** How a secret value is injected into an HTTP request. */
+export interface InjectionConfig {
+  type: InjectionType;
+  header_name?: string;
+  query_param?: string;
 }
 
-/** Response from use_secret — either an HTTP response or a transport error. */
-export interface UseSecretResponse {
+/**
+ * HTTP action — request-mediated injection. The vault assembles an outbound
+ * HTTP request with the credential placed in a structured field.
+ */
+export interface HttpAction {
+  type: typeof ActionType.HTTP;
+  method: HttpMethod;
+  url: string;
+  headers?: Record<string, string>;
+  body?: string;
+  injection: InjectionConfig;
+  follow_redirects?: FollowRedirects;
+  timeout_ms?: number;
+}
+
+/**
+ * Process action — process-mediated injection. The vault spawns a subprocess
+ * with the credential placed in its environment under `env_var`. The command
+ * and args are passed as data; no shell interpretation is performed.
+ */
+export interface ProcessAction {
+  type: typeof ActionType.PROCESS;
+  command: string;
+  args?: string[];
+  working_directory?: string;
+  env_var: string;
+  timeout_ms?: number;
+}
+
+/** Discriminated union of context-specific use_secret action specifications. */
+export type UseSecretAction = HttpAction | ProcessAction;
+
+/** Request to use a secret via a context-specific action. */
+export interface UseSecretRequest {
+  handle: string;
+  action: UseSecretAction;
+}
+
+/** Result of a request-mediated (HTTP) use_secret invocation. */
+export interface HttpResult {
+  type: typeof ActionType.HTTP;
   status: number | null;
   headers?: Record<string, string>;
   body?: string;
@@ -223,11 +262,31 @@ export interface UseSecretResponse {
   redirect_warning?: string;
 }
 
-/** How a secret value is injected into an HTTP request. */
-export interface InjectionConfig {
-  type: InjectionType;
-  header_name?: string;
-  query_param?: string;
+/** Result of a process-mediated use_secret invocation. */
+export interface ProcessResult {
+  type: typeof ActionType.PROCESS;
+  exit_code: number | null;
+  stdout: string;
+  stderr: string;
+  timed_out?: boolean;
+  truncated?: boolean;
+  signal?: string;
+  error?: string;
+}
+
+/** Response from use_secret — discriminated by execution mechanism. */
+export type UseSecretResponse = HttpResult | ProcessResult;
+
+/**
+ * Per-secret injection policy: allowlists constraining where a credential may
+ * be used. `url_allowlist` bounds request-mediated targets; `command_allowlist`
+ * bounds process-mediated binaries; `env_allowlist` names additional environment
+ * variables passed through to a spawned subprocess.
+ */
+export interface InjectionPolicy {
+  url_allowlist: string[];
+  command_allowlist: string[];
+  env_allowlist: string[];
 }
 
 /** Argon2id key derivation parameters — stored in vault header. */

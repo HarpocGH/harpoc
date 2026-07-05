@@ -54,6 +54,7 @@ function mockEngine(): VaultEngine {
       rotatedAt: null,
     } satisfies SecretInfo),
     useSecret: vi.fn().mockResolvedValue({
+      type: "http",
       status: 200,
       headers: { "content-type": "application/json" },
       body: '{"ok":true}',
@@ -175,50 +176,82 @@ describe("MCP Tools", () => {
       registerUseSecret(server, engine, scopeGuard, rateLimiter, injectionGuard);
     });
 
-    it("returns sanitized HTTP response", async () => {
+    it("returns a sanitized HTTP response", async () => {
       const result = await callTool(server, "use_secret", {
         handle: "secret://my-key",
-        request: { method: "GET", url: "https://api.example.com/data" },
-        injection: { type: "bearer" },
+        action: {
+          type: "http",
+          method: "GET",
+          url: "https://api.example.com/data",
+          injection: { type: "bearer" },
+        },
       });
       const data = JSON.parse(getToolText(result));
       expect(data.status).toBe(200);
       expect(data.body).toBe('{"ok":true}');
     });
 
-    it("sanitizes credential patterns in response", async () => {
+    it("sanitizes credential patterns in an HTTP response", async () => {
       (engine.useSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
+        type: "http",
         status: 200,
         body: "Bearer eyJhbGciOiJIUzI1NiJ9.test.signature leaked!",
       });
 
       const result = await callTool(server, "use_secret", {
         handle: "secret://my-key",
-        request: { method: "GET", url: "https://api.example.com/data" },
-        injection: { type: "bearer" },
+        action: {
+          type: "http",
+          method: "GET",
+          url: "https://api.example.com/data",
+          injection: { type: "bearer" },
+        },
       });
       const data = JSON.parse(getToolText(result));
       expect(data.body).toContain("[REDACTED]");
       expect(data.body).not.toContain("eyJhbG");
     });
 
-    it("calls engine.useSecret with correct args", async () => {
+    it("sanitizes credential patterns in process output", async () => {
+      (engine.useSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
+        type: "process",
+        exit_code: 0,
+        stdout: "Bearer eyJhbGciOiJIUzI1NiJ9.test.signature leaked!",
+        stderr: "",
+      });
+
+      const result = await callTool(server, "use_secret", {
+        handle: "secret://my-key",
+        action: { type: "process", command: "gh", args: ["api"], env_var: "GH_TOKEN" },
+      });
+      const data = JSON.parse(getToolText(result));
+      expect(data.stdout).toContain("[REDACTED]");
+      expect(data.stdout).not.toContain("eyJhbG");
+    });
+
+    it("passes the action to engine.useSecret", async () => {
       await callTool(server, "use_secret", {
         handle: "secret://my-key",
-        request: { method: "POST", url: "https://api.example.com/data", body: "test" },
-        injection: { type: "header", header_name: "X-API-Key" },
-        follow_redirects: "none",
+        action: {
+          type: "http",
+          method: "POST",
+          url: "https://api.example.com/data",
+          body: "test",
+          injection: { type: "header", header_name: "X-API-Key" },
+          follow_redirects: "none",
+        },
       });
 
       expect(engine.useSecret).toHaveBeenCalledWith(
         "secret://my-key",
         expect.objectContaining({
+          type: "http",
           method: "POST",
           url: "https://api.example.com/data",
           body: "test",
+          injection: { type: "header", header_name: "X-API-Key" },
+          follow_redirects: "none",
         }),
-        { type: "header", header_name: "X-API-Key" },
-        "none",
       );
     });
   });

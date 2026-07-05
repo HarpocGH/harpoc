@@ -4,14 +4,15 @@ Secure secret management for LLMs and AI agents. Secrets are encrypted at rest, 
 
 ## Why
 
-The MCP specification has no built-in credential management. In practice, 79% of MCP servers pass credentials via environment variables and 48% recommend `.env` files. Harpoc solves this with a zero-knowledge vault where the LLM never sees raw credentials — it only references opaque handles like `secret://github-token`, and the vault injects credentials into HTTP requests at execution time.
+The MCP specification has no built-in credential management. In practice, 79% of MCP servers pass credentials via environment variables and 48% recommend `.env` files. Harpoc solves this with a zero-knowledge vault where the LLM never sees raw credentials — it only references opaque handles like `secret://github-token`, and the vault injects credentials at execution time (into an HTTP request or the environment of a spawned subprocess), never exposing them to the model.
 
 ## Features
 
 - **Zero-knowledge to LLM** — models see `secret://` handles, never raw values
 - **Encrypted at rest** — AES-256-GCM with Argon2id key derivation, 3-tier key hierarchy (master → KEK → per-secret DEK)
 - **MCP-native** — first-class MCP server (`harpoc-mcp`) for Claude, GPT, and any MCP-capable client
-- **HTTP secret injection** — bearer tokens, custom headers, query parameters, basic auth — injected at fetch time with SSRF prevention
+- **HTTP secret injection** — bearer tokens, custom headers, query parameters, basic auth — injected at fetch time with SSRF prevention and optional per-secret URL allowlisting
+- **Process secret injection** — run a command with the credential in its environment: no shell, clean environment, output sanitization, and fail-safe per-secret command allowlisting
 - **Audit trail** — every vault operation logged, detail fields encrypted at rest
 - **Access control** — per-secret policies with scoped permissions
 - **Multiple interfaces** — MCP server, REST API, TypeScript SDK, CLI
@@ -27,7 +28,8 @@ Core        ┌──┴─────────────┴────�
             │  VaultEngine
             │  ├── Crypto (AES-256-GCM, Argon2id, HKDF, key hierarchy)
             │  ├── SecretManager (CRUD, rotation, handle resolution)
-            │  ├── HttpInjector (secret injection, SSRF prevention)
+            │  ├── HttpInjector (request-mediated injection, SSRF prevention, URL allowlist)
+            │  ├── ProcessInjector (process-mediated injection, clean env, output sanitization, command allowlist)
             │  ├── PolicyEngine (per-secret access control)
             │  ├── AuditLogger (encrypted audit trail)
             │  └── SessionManager (JWT auth, sliding window TTL)
@@ -40,7 +42,7 @@ Storage     SQLite (WAL mode, encrypted payloads)
 | Package              | Description                                                  | Status   |
 | -------------------- | ------------------------------------------------------------ | -------- |
 | `@harpoc/shared`     | Types, Zod schemas, error codes, constants                   | Complete |
-| `@harpoc/core`       | VaultEngine, crypto, storage, secrets, audit, access control | Complete |
+| `@harpoc/core`       | VaultEngine, crypto, storage, secrets, audit, access control, HTTP + process injection | Complete |
 | `@harpoc/cli`        | `harpoc` CLI (Commander.js)                                  | Complete |
 | `@harpoc/mcp-server` | MCP tools, resources, guards (stdio transport)               | Complete |
 | `@harpoc/rest-api`   | Hono HTTP API, JWT auth, rate limiting, audit middleware     | Complete |
@@ -156,6 +158,7 @@ pnpm format          # Fix formatting
 - **Argon2id** with OWASP-recommended parameters (64 MB memory, 3 iterations, 4 parallelism).
 - **Password validation**: minimum 8-character length enforced on vault creation and password change.
 - **SSRF prevention**: private IP blocking (RFC 1918, link-local, IPv4-mapped IPv6), DNS rebinding protection via pre-flight DNS resolution, HTTPS enforcement, redirect validation with credential stripping on cross-origin hops.
+- **Injection allowlisting** (per-secret, KEK-encrypted): a URL allowlist bounds request-mediated targets (optional; re-validated on each redirect hop), and a command allowlist bounds process-mediated binaries (fail-safe deny, pinned to a resolved absolute path). Process execution spawns with no shell, a clean environment, and best-effort output sanitization of the credential and its common encodings.
 - **Secret names encrypted** with vault-level KEK — database inspection reveals nothing about stored services. HMAC-SHA256 name index enables O(1) handle resolution without decrypting all names.
 - **Lazy secret expiry**: secrets with an `expires_at` timestamp are checked on access and automatically transitioned to expired status.
 - **JWT sessions** with sliding window TTL (15 min default, 24 h maximum), store-based token revocation with automatic pruning of expired entries.

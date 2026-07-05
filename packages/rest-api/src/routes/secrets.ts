@@ -1,24 +1,32 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { VaultError, ErrorCode } from "@harpoc/shared";
+import { VaultError } from "@harpoc/shared";
 import {
   createSecretInputSchema,
-  injectionConfigSchema,
-  followRedirectsSchema,
-  httpMethodSchema,
+  injectionPolicyInputSchema,
+  useSecretActionSchema,
 } from "@harpoc/shared";
-import type { InjectionConfig, FollowRedirects, HttpMethod } from "@harpoc/shared";
+import type { InjectionConfig, UseSecretResponse } from "@harpoc/shared";
 import { InjectionGuard } from "@harpoc/core";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
 
-const useSecretRequestSchema = z.object({
-  method: httpMethodSchema,
-  url: z.string().url(),
-  headers: z.record(z.string()).optional(),
-  body: z.string().optional(),
-  timeout_ms: z.number().int().positive().max(300_000).optional(),
-});
+/** Sanitize a use_secret result across both injection mechanisms. */
+function sanitizeUseSecretResult(result: UseSecretResponse, guard: InjectionGuard): void {
+  if (result.type === "http") {
+    if (result.body) result.body = guard.sanitize(result.body);
+    if (result.headers) {
+      for (const [key, value] of Object.entries(result.headers)) {
+        result.headers[key] = guard.sanitize(value);
+      }
+    }
+    if (result.error) result.error = guard.sanitize(result.error);
+  } else {
+    result.stdout = guard.sanitize(result.stdout);
+    result.stderr = guard.sanitize(result.stderr);
+    if (result.error) result.error = guard.sanitize(result.error);
+  }
+}
 
 export function createSecretRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
@@ -156,7 +164,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     return c.json({ data: { rotated: true } });
   });
 
-  // Use secret (HTTP injection)
+  // Use secret (request- or process-mediated injection)
   router.post("/:handle/use", async (c) => {
     const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
@@ -165,58 +173,50 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     const body = await c.req.json<Record<string, unknown>>();
 
-    if (!body.request || !body.injection) {
-      throw new VaultError(ErrorCode.INVALID_INPUT, "request and injection are required");
+    const parsed = useSecretActionSchema.safeParse(body.action);
+    if (!parsed.success) {
+      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
     }
 
-    const reqParsed = useSecretRequestSchema.safeParse(body.request);
-    if (!reqParsed.success) {
-      throw VaultError.schemaValidation(reqParsed.error.issues.map((i) => i.message).join(", "));
-    }
-
-    const injParsed = injectionConfigSchema.safeParse(body.injection);
-    if (!injParsed.success) {
-      throw VaultError.schemaValidation(injParsed.error.issues.map((i) => i.message).join(", "));
-    }
-
-    if (body.follow_redirects !== undefined) {
-      const frParsed = followRedirectsSchema.safeParse(body.follow_redirects);
-      if (!frParsed.success) {
-        throw VaultError.schemaValidation("Invalid follow_redirects value");
-      }
-    }
-
-    const req = reqParsed.data;
     const handle = buildHandle(c.req.param("handle"));
     const secretId = await engine.resolveSecretId(handle);
     c.get("limiter").checkSecret(secretId, true);
-    const result = await engine.useSecret(
-      handle,
-      {
-        method: req.method as HttpMethod,
-        url: req.url,
-        headers: req.headers,
-        body: req.body,
-        timeoutMs: req.timeout_ms,
-      },
-      injParsed.data as InjectionConfig,
-      body.follow_redirects as FollowRedirects | undefined,
-    );
+    const result = await engine.useSecret(handle, parsed.data);
 
-    // Sanitize response to prevent credential leakage (parity with MCP server)
-    if (result.body) {
-      result.body = injectionGuard.sanitize(result.body);
-    }
-    if (result.headers) {
-      for (const [key, value] of Object.entries(result.headers)) {
-        result.headers[key] = injectionGuard.sanitize(value);
-      }
-    }
-    if (result.error) {
-      result.error = injectionGuard.sanitize(result.error);
-    }
+    // Sanitize response to prevent credential leakage (parity across interfaces)
+    sanitizeUseSecretResult(result, injectionGuard);
 
     return c.json({ data: result });
+  });
+
+  // Get injection policy (URL + command allowlists)
+  router.get("/:handle/injection-policy", async (c) => {
+    const token = c.get("token");
+    const { project, name } = parseHandleParam(c.req.param("handle"));
+    checkTokenScope(token, "read", project, name);
+
+    const engine = c.get("engine");
+    const handle = buildHandle(c.req.param("handle"));
+    const policy = await engine.getInjectionPolicy(handle);
+    return c.json({ data: policy });
+  });
+
+  // Set injection policy (trusted administrative operation)
+  router.put("/:handle/injection-policy", async (c) => {
+    const token = c.get("token");
+    const { project, name } = parseHandleParam(c.req.param("handle"));
+    checkTokenScope(token, "rotate", project, name);
+
+    const engine = c.get("engine");
+    const body = await c.req.json<Record<string, unknown>>();
+    const parsed = injectionPolicyInputSchema.safeParse(body);
+    if (!parsed.success) {
+      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+    }
+
+    const handle = buildHandle(c.req.param("handle"));
+    await engine.setInjectionPolicy(handle, parsed.data);
+    return c.json({ data: { updated: true } });
   });
 
   return router;

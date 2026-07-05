@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ActionType,
   AuditEventType,
   FollowRedirects,
   InjectionType,
@@ -47,6 +48,10 @@ describe("enum member counts", () => {
     expect(Object.values(FollowRedirects)).toHaveLength(3);
   });
 
+  it("ActionType has 2 members", () => {
+    expect(Object.values(ActionType)).toHaveLength(2);
+  });
+
   it("VaultState has 2 members", () => {
     expect(Object.values(VaultState)).toHaveLength(2);
   });
@@ -59,10 +64,10 @@ describe("enum member counts", () => {
     expect(Object.values(OAuthProviderPreset)).toHaveLength(5);
   });
 
-  it("ErrorCode has 54 members", () => {
+  it("ErrorCode has 60 members", () => {
     // Filter out reverse mappings (numeric keys) from TypeScript enum
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(54);
+    expect(members).toHaveLength(60);
   });
 });
 
@@ -117,6 +122,15 @@ describe("InjectionType values", () => {
     ["BEARER", "bearer"],
   ] as const)("%s is '%s'", (key, value) => {
     expect(InjectionType[key]).toBe(value);
+  });
+});
+
+describe("ActionType values", () => {
+  it.each([
+    ["HTTP", "http"],
+    ["PROCESS", "process"],
+  ] as const)("%s is '%s'", (key, value) => {
+    expect(ActionType[key]).toBe(value);
   });
 });
 

@@ -1,9 +1,4 @@
-import type {
-  FollowRedirects,
-  HttpMethod,
-  InjectionConfig,
-  UseSecretResponse,
-} from "@harpoc/shared";
+import type { FollowRedirects, HttpMethod, HttpResult, InjectionConfig } from "@harpoc/shared";
 import { DEFAULT_HTTP_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { validateUrl } from "./url-validator.js";
@@ -29,7 +24,7 @@ export class HttpInjector {
     injection: InjectionConfig,
     followRedirects: FollowRedirects = "same-origin",
     secretId?: string,
-  ): Promise<UseSecretResponse> {
+  ): Promise<HttpResult> {
     try {
       // Validate URL (includes DNS rebinding check)
       const validated = await validateUrl(request.url);
@@ -119,7 +114,7 @@ export class HttpInjector {
 
         // DNS resolution failures are operational errors — return as response, don't throw
         if (err.code === ErrorCode.DNS_RESOLUTION_FAILED) {
-          return { status: null, error: err.code };
+          return { type: "http", status: null, error: err.code };
         }
 
         throw err;
@@ -140,6 +135,7 @@ export class HttpInjector {
       });
 
       return {
+        type: "http",
         status: null,
         error: errorCode,
       };
@@ -156,7 +152,7 @@ export class HttpInjector {
     timeoutMs: number,
     followRedirects: FollowRedirects,
     injection?: InjectionConfig,
-  ): Promise<UseSecretResponse> {
+  ): Promise<HttpResult> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -245,7 +241,7 @@ export class HttpInjector {
     }
   }
 
-  private async buildResponse(response: Response): Promise<UseSecretResponse> {
+  private async buildResponse(response: Response): Promise<HttpResult> {
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((value, key) => {
       responseHeaders[key] = value;
@@ -259,6 +255,7 @@ export class HttpInjector {
     }
 
     return {
+      type: "http",
       status: response.status,
       headers: responseHeaders,
       body,

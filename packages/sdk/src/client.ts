@@ -1,12 +1,12 @@
 import type {
   AccessPolicy,
   CreateSecretResponse,
-  FollowRedirects,
-  HttpMethod,
   InjectionConfig,
+  InjectionPolicy,
   Permission,
   PrincipalType,
   SecretType,
+  UseSecretAction,
   UseSecretResponse,
   VaultState,
 } from "@harpoc/shared";
@@ -19,18 +19,6 @@ export interface CreateSecretInput {
   value?: Uint8Array;
   injection?: InjectionConfig;
   expiresAt?: number;
-}
-
-export interface UseSecretInput {
-  request: {
-    method: HttpMethod;
-    url: string;
-    headers?: Record<string, string>;
-    body?: string;
-    timeoutMs?: number;
-  };
-  injection: InjectionConfig;
-  followRedirects?: FollowRedirects;
 }
 
 export interface GrantPolicyInput {
@@ -52,7 +40,9 @@ export interface VaultClient {
   createSecret(input: CreateSecretInput): Promise<CreateSecretResponse>;
   rotateSecret(handle: string, newValue: Uint8Array): Promise<void>;
   revokeSecret(handle: string): Promise<void>;
-  useSecret(handle: string, input: UseSecretInput): Promise<UseSecretResponse>;
+  useSecret(handle: string, action: UseSecretAction): Promise<UseSecretResponse>;
+  setInjectionPolicy(handle: string, policy: InjectionPolicy): Promise<void>;
+  getInjectionPolicy(handle: string): Promise<InjectionPolicy>;
   grantPolicy(handle: string, input: GrantPolicyInput): Promise<AccessPolicy>;
   revokePolicy(handle: string, policyId: string): Promise<void>;
   listPolicies(handle: string): Promise<AccessPolicy[]>;

@@ -55,10 +55,15 @@ function createMockEngine() {
     revokeSecret: vi.fn().mockResolvedValue(undefined),
     rotateSecret: vi.fn().mockResolvedValue(undefined),
     useSecret: vi.fn().mockResolvedValue({
+      type: "http",
       status: 200,
       headers: { "content-type": "application/json" },
       body: '{"ok":true}',
     }),
+    setInjectionPolicy: vi.fn().mockResolvedValue(undefined),
+    getInjectionPolicy: vi
+      .fn()
+      .mockResolvedValue({ url_allowlist: [], command_allowlist: [], env_allowlist: [] }),
     resolveSecretId: vi.fn().mockResolvedValue("secret-uuid-1"),
   };
 }
@@ -228,13 +233,17 @@ describe("secret routes", () => {
   });
 
   describe("POST /api/v1/secrets/:handle/use", () => {
-    it("executes HTTP request with injected secret", async () => {
+    it("executes an HTTP action with an injected secret", async () => {
       const res = await app.request("/api/v1/secrets/test-key/use", {
         method: "POST",
         headers: { ...AUTH, "content-type": "application/json" },
         body: JSON.stringify({
-          request: { method: "GET", url: "https://api.example.com/data" },
-          injection: { type: "bearer" },
+          action: {
+            type: "http",
+            method: "GET",
+            url: "https://api.example.com/data",
+            injection: { type: "bearer" },
+          },
         }),
       });
       expect(res.status).toBe(200);
@@ -242,63 +251,86 @@ describe("secret routes", () => {
       expect(body.data.status).toBe(200);
     });
 
-    it("passes timeout_ms and follow_redirects correctly", async () => {
+    it("passes the action to the engine verbatim", async () => {
       await app.request("/api/v1/secrets/test-key/use", {
         method: "POST",
         headers: { ...AUTH, "content-type": "application/json" },
         body: JSON.stringify({
-          request: { method: "GET", url: "https://api.example.com", timeout_ms: 5000 },
-          injection: { type: "bearer" },
-          follow_redirects: "none",
+          action: {
+            type: "http",
+            method: "GET",
+            url: "https://api.example.com",
+            timeout_ms: 5000,
+            follow_redirects: "none",
+            injection: { type: "bearer" },
+          },
         }),
       });
 
       const call = engine.useSecret.mock.calls[0] as unknown[];
       expect(call[0]).toBe("secret://test-key");
-      expect((call[1] as { timeoutMs: number }).timeoutMs).toBe(5000);
-      expect(call[3]).toBe("none");
+      const action = call[1] as { type: string; timeout_ms: number; follow_redirects: string };
+      expect(action.type).toBe("http");
+      expect(action.timeout_ms).toBe(5000);
+      expect(action.follow_redirects).toBe("none");
+    });
+
+    it("executes a process action", async () => {
+      engine.useSecret.mockResolvedValueOnce({
+        type: "process",
+        exit_code: 0,
+        stdout: "done",
+        stderr: "",
+      });
+      const res = await app.request("/api/v1/secrets/test-key/use", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          action: { type: "process", command: "gh", args: ["api"], env_var: "GH_TOKEN" },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data.type).toBe("process");
+      expect(body.data.exit_code).toBe(0);
     });
   });
 
   describe("POST /api/v1/secrets/:handle/use validation", () => {
-    it("rejects invalid URL", async () => {
+    it("rejects a missing action", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/use", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects an invalid URL", async () => {
       const res = await app.request("/api/v1/secrets/test-key/use", {
         method: "POST",
         headers: { ...AUTH, "content-type": "application/json" },
         body: JSON.stringify({
-          request: { method: "GET", url: "not-a-url" },
-          injection: { type: "bearer" },
+          action: { type: "http", method: "GET", url: "not-a-url", injection: { type: "bearer" } },
         }),
       });
       expect(res.status).toBe(400);
     });
 
-    it("rejects timeout_ms exceeding 300000", async () => {
+    it("rejects a process action with an invalid env var name", async () => {
       const res = await app.request("/api/v1/secrets/test-key/use", {
         method: "POST",
         headers: { ...AUTH, "content-type": "application/json" },
         body: JSON.stringify({
-          request: { method: "GET", url: "https://example.com", timeout_ms: 9007199254740991 },
-          injection: { type: "bearer" },
+          action: { type: "process", command: "gh", env_var: "1BAD-NAME" },
         }),
       });
       expect(res.status).toBe(400);
     });
 
-    it("rejects non-integer timeout_ms", async () => {
-      const res = await app.request("/api/v1/secrets/test-key/use", {
-        method: "POST",
-        headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({
-          request: { method: "GET", url: "https://example.com", timeout_ms: 1.5 },
-          injection: { type: "bearer" },
-        }),
-      });
-      expect(res.status).toBe(400);
-    });
-
-    it("sanitizes credential patterns in response body", async () => {
-      engine.useSecret.mockResolvedValue({
+    it("sanitizes credential patterns in an HTTP response body", async () => {
+      engine.useSecret.mockResolvedValueOnce({
+        type: "http",
         status: 200,
         body: '{"error":"Invalid token: Bearer sk_live_abcdefghij1234567890"}',
       });
@@ -306,14 +338,70 @@ describe("secret routes", () => {
         method: "POST",
         headers: { ...AUTH, "content-type": "application/json" },
         body: JSON.stringify({
-          request: { method: "GET", url: "https://api.example.com/data" },
-          injection: { type: "bearer" },
+          action: {
+            type: "http",
+            method: "GET",
+            url: "https://api.example.com/data",
+            injection: { type: "bearer" },
+          },
         }),
       });
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.data.body).not.toContain("sk_live_abcdefghij1234567890");
       expect(body.data.body).toContain("[REDACTED]");
+    });
+
+    it("sanitizes credential patterns in process stdout", async () => {
+      engine.useSecret.mockResolvedValueOnce({
+        type: "process",
+        exit_code: 0,
+        stdout: "leaked Bearer sk_live_abcdefghij1234567890 here",
+        stderr: "",
+      });
+      const res = await app.request("/api/v1/secrets/test-key/use", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          action: { type: "process", command: "gh", env_var: "GH_TOKEN" },
+        }),
+      });
+      const body = await res.json();
+      expect(body.data.stdout).not.toContain("sk_live_abcdefghij1234567890");
+      expect(body.data.stdout).toContain("[REDACTED]");
+    });
+  });
+
+  describe("injection-policy routes", () => {
+    it("GET returns the policy", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "GET",
+        headers: AUTH,
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data).toEqual({ url_allowlist: [], command_allowlist: [], env_allowlist: [] });
+    });
+
+    it("PUT sets the policy", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ command_allowlist: ["gh"], url_allowlist: ["https://api.github.com/*"] }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+      expect(call[0]).toBe("secret://test-key");
+      expect((call[1] as { command_allowlist: string[] }).command_allowlist).toEqual(["gh"]);
+    });
+
+    it("PUT rejects an invalid env var name", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ env_allowlist: ["1BAD"] }),
+      });
+      expect(res.status).toBe(400);
     });
   });
 

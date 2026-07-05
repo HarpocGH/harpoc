@@ -14,6 +14,8 @@ import { registerSecretGetCommand } from "./commands/secret/get.js";
 import { registerSecretListCommand } from "./commands/secret/list.js";
 import { registerSecretRotateCommand } from "./commands/secret/rotate.js";
 import { registerSecretDeleteCommand } from "./commands/secret/delete.js";
+import { registerSecretUseCommand } from "./commands/secret/use.js";
+import { registerSecretAllowCommand } from "./commands/secret/allow.js";
 import { registerAuditCommand } from "./commands/audit.js";
 import { registerAuthTokenCommand } from "./commands/auth/token.js";
 import { registerAuthRevokeCommand } from "./commands/auth/revoke.js";
@@ -44,6 +46,8 @@ registerSecretGetCommand(secret);
 registerSecretListCommand(secret);
 registerSecretRotateCommand(secret);
 registerSecretDeleteCommand(secret);
+registerSecretUseCommand(secret);
+registerSecretAllowCommand(secret);
 
 // auth subcommands
 const auth = program.command("auth").description("Manage API tokens");

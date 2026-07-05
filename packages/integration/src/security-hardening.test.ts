@@ -85,11 +85,12 @@ describe("Memory Wiping", () => {
     });
 
     // useSecret should complete without error (value decrypted, injected, then wiped)
-    const response = await vault.engine.useSecret(
-      result.handle,
-      { method: "GET", url: echoUrl },
-      { type: InjectionType.BEARER },
-    );
+    const response = await vault.engine.useSecret(result.handle, {
+      type: "http",
+      method: "GET",
+      url: echoUrl,
+      injection: { type: InjectionType.BEARER },
+    });
     expect(response.status).toBe(200);
 
     await new Promise<void>((resolve, reject) => {
@@ -298,11 +299,12 @@ describe("Error Message Sanitization", () => {
 
     // useSecret with bad handle
     try {
-      await vault.engine.useSecret(
-        "secret://nonexistent",
-        { method: "GET", url: "https://example.com" },
-        { type: InjectionType.BEARER },
-      );
+      await vault.engine.useSecret("secret://nonexistent", {
+        type: "http",
+        method: "GET",
+        url: "https://example.com",
+        injection: { type: InjectionType.BEARER },
+      });
     } catch (e) {
       if (e instanceof VaultError) collectedErrors.push(e);
     }
@@ -834,11 +836,12 @@ describe("SSRF E2E via useSecret", () => {
 
   it("useSecret to https://10.0.0.1/api → SSRF_BLOCKED", async () => {
     try {
-      await vault.engine.useSecret(
-        handle,
-        { method: "GET", url: "https://10.0.0.1/api" },
-        { type: InjectionType.BEARER },
-      );
+      await vault.engine.useSecret(handle, {
+        type: "http",
+        method: "GET",
+        url: "https://10.0.0.1/api",
+        injection: { type: InjectionType.BEARER },
+      });
       expect.fail("Should throw SSRF_BLOCKED");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
@@ -847,11 +850,12 @@ describe("SSRF E2E via useSecret", () => {
 
   it("useSecret to https://192.168.1.1/api → SSRF_BLOCKED", async () => {
     try {
-      await vault.engine.useSecret(
-        handle,
-        { method: "GET", url: "https://192.168.1.1/api" },
-        { type: InjectionType.BEARER },
-      );
+      await vault.engine.useSecret(handle, {
+        type: "http",
+        method: "GET",
+        url: "https://192.168.1.1/api",
+        injection: { type: InjectionType.BEARER },
+      });
       expect.fail("Should throw SSRF_BLOCKED");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
@@ -860,11 +864,12 @@ describe("SSRF E2E via useSecret", () => {
 
   it("useSecret to https://[fc00::1]/api → SSRF_BLOCKED", async () => {
     try {
-      await vault.engine.useSecret(
-        handle,
-        { method: "GET", url: "https://[fc00::1]/api" },
-        { type: InjectionType.BEARER },
-      );
+      await vault.engine.useSecret(handle, {
+        type: "http",
+        method: "GET",
+        url: "https://[fc00::1]/api",
+        injection: { type: InjectionType.BEARER },
+      });
       expect.fail("Should throw SSRF_BLOCKED");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
@@ -872,11 +877,12 @@ describe("SSRF E2E via useSecret", () => {
   });
 
   it("useSecret to loopback echo server succeeds", async () => {
-    const response = await vault.engine.useSecret(
-      handle,
-      { method: "GET", url: echoUrl },
-      { type: InjectionType.BEARER },
-    );
+    const response = await vault.engine.useSecret(handle, {
+      type: "http",
+      method: "GET",
+      url: echoUrl,
+      injection: { type: InjectionType.BEARER },
+    });
     expect(response.status).toBe(200);
   });
 
@@ -884,11 +890,12 @@ describe("SSRF E2E via useSecret", () => {
     // ::1 is loopback — HTTP should be allowed (though connection may fail if
     // no server is listening on IPv6; we test the URL validation passes)
     try {
-      await vault.engine.useSecret(
-        handle,
-        { method: "GET", url: "http://[::1]:1/test" },
-        { type: InjectionType.BEARER },
-      );
+      await vault.engine.useSecret(handle, {
+        type: "http",
+        method: "GET",
+        url: "http://[::1]:1/test",
+        injection: { type: InjectionType.BEARER },
+      });
       // Connection may fail but should NOT be SSRF_BLOCKED
     } catch (e) {
       const err = e as VaultError;

@@ -317,11 +317,12 @@ describe("error propagation through VaultEngine", () => {
 
   it("useSecret throws SECRET_NOT_FOUND for non-existent handle", async () => {
     try {
-      await engine.useSecret(
-        "secret://nonexistent",
-        { method: "GET", url: `${baseUrl}/test` },
-        { type: "bearer" },
-      );
+      await engine.useSecret("secret://nonexistent", {
+        type: "http",
+        method: "GET",
+        url: `${baseUrl}/test`,
+        injection: { type: "bearer" },
+      });
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SECRET_NOT_FOUND);
@@ -337,11 +338,12 @@ describe("error propagation through VaultEngine", () => {
     await engine.revokeSecret("secret://use-rev");
 
     try {
-      await engine.useSecret(
-        "secret://use-rev",
-        { method: "GET", url: `${baseUrl}/test` },
-        { type: "bearer" },
-      );
+      await engine.useSecret("secret://use-rev", {
+        type: "http",
+        method: "GET",
+        url: `${baseUrl}/test`,
+        injection: { type: "bearer" },
+      });
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SECRET_REVOKED);
@@ -356,11 +358,12 @@ describe("error propagation through VaultEngine", () => {
     });
 
     try {
-      await engine.useSecret(
-        "secret://url-test",
-        { method: "GET", url: "not-a-url" },
-        { type: "bearer" },
-      );
+      await engine.useSecret("secret://url-test", {
+        type: "http",
+        method: "GET",
+        url: "not-a-url",
+        injection: { type: "bearer" },
+      });
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.URL_INVALID);
@@ -375,11 +378,12 @@ describe("error propagation through VaultEngine", () => {
     });
 
     try {
-      await engine.useSecret(
-        "secret://ssrf-test",
-        { method: "GET", url: "https://10.0.0.1/api" },
-        { type: "bearer" },
-      );
+      await engine.useSecret("secret://ssrf-test", {
+        type: "http",
+        method: "GET",
+        url: "https://10.0.0.1/api",
+        injection: { type: "bearer" },
+      });
       expect.fail("Should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
@@ -399,16 +403,184 @@ describe("useSecret (HTTP injection)", () => {
       value: new Uint8Array(Buffer.from("my-bearer-token")),
     });
 
-    const response = await engine.useSecret(
-      "secret://api-token",
-      { method: "GET", url: `${baseUrl}/test` },
-      { type: "bearer" },
-    );
+    const response = await engine.useSecret("secret://api-token", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/test`,
+      injection: { type: "bearer" },
+    });
 
+    expect(response.type).toBe("http");
+    if (response.type !== "http") throw new Error("expected http result");
     expect(response.status).toBe(200);
     const body = JSON.parse(response.body ?? "{}") as Record<string, string>;
     // Exact-match redaction scrubs the secret value from reflected responses
     expect(body.authorization).toBe("Bearer [REDACTED]");
+  });
+});
+
+describe("injection policy", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "pol",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+  });
+
+  it("round-trips a policy", async () => {
+    await engine.setInjectionPolicy("secret://pol", {
+      url_allowlist: [`${baseUrl}/*`],
+      command_allowlist: ["gh"],
+      env_allowlist: ["HOME"],
+    });
+    const p = await engine.getInjectionPolicy("secret://pol");
+    expect(p.url_allowlist).toEqual([`${baseUrl}/*`]);
+    expect(p.command_allowlist).toEqual(["gh"]);
+    expect(p.env_allowlist).toEqual(["HOME"]);
+  });
+
+  it("returns empty allowlists when no policy is set", async () => {
+    const p = await engine.getInjectionPolicy("secret://pol");
+    expect(p).toEqual({ url_allowlist: [], command_allowlist: [], env_allowlist: [] });
+  });
+
+  it("audits a policy change as POLICY_GRANT", async () => {
+    await engine.setInjectionPolicy("secret://pol", {
+      url_allowlist: [],
+      command_allowlist: ["gh"],
+      env_allowlist: [],
+    });
+    const events = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT });
+    expect(events.length).toBeGreaterThanOrEqual(1);
+    expect(events[0]?.detail?.policy).toBe("injection");
+  });
+});
+
+describe("URL allowlist enforcement (HTTP)", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "url-al",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+  });
+
+  it("allows a request matching the allowlist", async () => {
+    await engine.setInjectionPolicy("secret://url-al", {
+      url_allowlist: [`${baseUrl}/*`],
+      command_allowlist: [],
+      env_allowlist: [],
+    });
+    const res = await engine.useSecret("secret://url-al", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/ok`,
+      injection: { type: "bearer" },
+    });
+    if (res.type !== "http") throw new Error("expected http result");
+    expect(res.status).toBe(200);
+  });
+
+  it("blocks a request not matching the allowlist", async () => {
+    await engine.setInjectionPolicy("secret://url-al", {
+      url_allowlist: [`${baseUrl}/allowed/*`],
+      command_allowlist: [],
+      env_allowlist: [],
+    });
+    try {
+      await engine.useSecret("secret://url-al", {
+        type: "http",
+        method: "GET",
+        url: `${baseUrl}/blocked`,
+        injection: { type: "bearer" },
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.URL_NOT_ALLOWED);
+    }
+  });
+
+  it("audits a blocked URL with success=false", async () => {
+    await engine.setInjectionPolicy("secret://url-al", {
+      url_allowlist: [`${baseUrl}/allowed/*`],
+      command_allowlist: [],
+      env_allowlist: [],
+    });
+    try {
+      await engine.useSecret("secret://url-al", {
+        type: "http",
+        method: "GET",
+        url: `${baseUrl}/blocked`,
+        injection: { type: "bearer" },
+      });
+    } catch {
+      // expected
+    }
+    const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
+    const denied = events.find((e) => e.detail?.error === "URL_NOT_ALLOWED");
+    expect(denied?.success).toBe(false);
+  });
+});
+
+describe("useSecret (process injection)", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "proc",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("procsecret")),
+    });
+  });
+
+  it("runs an allowlisted command with the secret injected as an env var", async () => {
+    await engine.setInjectionPolicy("secret://proc", {
+      url_allowlist: [],
+      command_allowlist: [process.execPath],
+      env_allowlist: [],
+    });
+    const res = await engine.useSecret("secret://proc", {
+      type: "process",
+      command: process.execPath,
+      args: ["-e", `process.stdout.write(process.env.TOKEN ? "SET" : "UNSET")`],
+      env_var: "TOKEN",
+    });
+    if (res.type !== "process") throw new Error("expected process result");
+    expect(res.exit_code).toBe(0);
+    expect(res.stdout).toBe("SET");
+  });
+
+  it("redacts the secret from process output", async () => {
+    await engine.setInjectionPolicy("secret://proc", {
+      url_allowlist: [],
+      command_allowlist: [process.execPath],
+      env_allowlist: [],
+    });
+    const res = await engine.useSecret("secret://proc", {
+      type: "process",
+      command: process.execPath,
+      args: ["-e", `process.stdout.write(process.env.TOKEN)`],
+      env_var: "TOKEN",
+    });
+    if (res.type !== "process") throw new Error("expected process result");
+    expect(res.stdout).not.toContain("procsecret");
+    expect(res.stdout).toContain("[REDACTED]");
+  });
+
+  it("denies a process command by default when no allowlist is set", async () => {
+    try {
+      await engine.useSecret("secret://proc", {
+        type: "process",
+        command: process.execPath,
+        args: ["-e", `process.stdout.write("x")`],
+        env_var: "TOKEN",
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
+    }
   });
 });
 
@@ -662,11 +834,12 @@ describe("audit trail for failed useSecret", () => {
   });
 
   it("logs DNS failure with success=false", async () => {
-    await engine.useSecret(
-      "secret://audit-use",
-      { method: "GET", url: "https://this-host-does-not-exist-xyz123.invalid/api" },
-      { type: "bearer" },
-    );
+    await engine.useSecret("secret://audit-use", {
+      type: "http",
+      method: "GET",
+      url: "https://this-host-does-not-exist-xyz123.invalid/api",
+      injection: { type: "bearer" },
+    });
 
     const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
     expect(events.length).toBeGreaterThanOrEqual(1);
@@ -675,11 +848,12 @@ describe("audit trail for failed useSecret", () => {
   });
 
   it("logs successful request with success=true", async () => {
-    await engine.useSecret(
-      "secret://audit-use",
-      { method: "GET", url: `${baseUrl}/test` },
-      { type: "bearer" },
-    );
+    await engine.useSecret("secret://audit-use", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/test`,
+      injection: { type: "bearer" },
+    });
 
     const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
     expect(events.length).toBeGreaterThanOrEqual(1);
@@ -689,11 +863,13 @@ describe("audit trail for failed useSecret", () => {
   });
 
   it("logs connection refused with success=false", async () => {
-    await engine.useSecret(
-      "secret://audit-use",
-      { method: "GET", url: "http://127.0.0.1:2/api", timeoutMs: 5000 },
-      { type: "bearer" },
-    );
+    await engine.useSecret("secret://audit-use", {
+      type: "http",
+      method: "GET",
+      url: "http://127.0.0.1:2/api",
+      timeout_ms: 5000,
+      injection: { type: "bearer" },
+    });
 
     const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
     expect(events.length).toBeGreaterThanOrEqual(1);

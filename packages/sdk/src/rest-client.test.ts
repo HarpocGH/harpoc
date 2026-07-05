@@ -134,18 +134,61 @@ describe("RestClient", () => {
   });
 
   describe("useSecret", () => {
-    it("sends use request with proper field mapping", async () => {
-      mockFetchResponse({ status: 200, body: "ok" });
+    it("posts the action to the /use endpoint", async () => {
+      mockFetchResponse({ type: "http", status: 200, body: "ok" });
       await client.useSecret("secret://k", {
-        request: { method: "GET", url: "https://api.example.com", timeoutMs: 5000 },
+        type: "http",
+        method: "GET",
+        url: "https://api.example.com",
+        timeout_ms: 5000,
         injection: { type: "bearer" },
-        followRedirects: "none",
+        follow_redirects: "none",
       });
 
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toContain("/api/v1/secrets/k/use");
       const body = JSON.parse(call[1].body as string);
-      expect(body.request.timeout_ms).toBe(5000);
-      expect(body.follow_redirects).toBe("none");
+      expect(body.action.type).toBe("http");
+      expect(body.action.timeout_ms).toBe(5000);
+      expect(body.action.follow_redirects).toBe("none");
+    });
+
+    it("posts a process action", async () => {
+      mockFetchResponse({ type: "process", exit_code: 0, stdout: "", stderr: "" });
+      await client.useSecret("secret://k", {
+        type: "process",
+        command: "gh",
+        args: ["api"],
+        env_var: "GH_TOKEN",
+      });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(call[1].body as string);
+      expect(body.action.type).toBe("process");
+      expect(body.action.command).toBe("gh");
+    });
+  });
+
+  describe("injection policy", () => {
+    it("setInjectionPolicy sends PUT with the allowlists", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", {
+        url_allowlist: ["https://api.github.com/*"],
+        command_allowlist: ["gh"],
+        env_allowlist: [],
+      });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toContain("/api/v1/secrets/k/injection-policy");
+      expect(call[1].method).toBe("PUT");
+      const body = JSON.parse(call[1].body as string);
+      expect(body.command_allowlist).toEqual(["gh"]);
+    });
+
+    it("getInjectionPolicy sends GET", async () => {
+      mockFetchResponse({ url_allowlist: [], command_allowlist: ["gh"], env_allowlist: [] });
+      const policy = await client.getInjectionPolicy("secret://k");
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toContain("/api/v1/secrets/k/injection-policy");
+      expect(policy.command_allowlist).toEqual(["gh"]);
     });
   });
 

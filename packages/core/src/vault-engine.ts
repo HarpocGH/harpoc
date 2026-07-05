@@ -2,16 +2,18 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type {
   AccessPolicy,
   CreateSecretResponse,
-  FollowRedirects,
-  HttpMethod,
+  HttpResult,
   InjectionConfig,
+  InjectionPolicy,
   OAuthProviderConfig,
   OAuthTokenStatus,
   Permission,
+  UseSecretAction,
   UseSecretResponse,
   VaultApiToken,
 } from "@harpoc/shared";
 import {
+  AAD_INJECTION_POLICY,
   AAD_OAUTH_ACCESS_TOKEN,
   AAD_OAUTH_CLIENT_ID,
   AAD_OAUTH_CLIENT_SECRET,
@@ -50,7 +52,9 @@ import {
   wrapKeyWithKek,
 } from "./crypto/key-hierarchy.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
+import { matchesUrlAllowlist } from "./injection/allowlist.js";
 import { HttpInjector } from "./injection/http-injector.js";
+import { ProcessInjector } from "./injection/process-injector.js";
 import { validateUrl } from "./injection/url-validator.js";
 import type { SecretInfo } from "./secrets/secret-manager.js";
 import { SecretManager } from "./secrets/secret-manager.js";
@@ -74,6 +78,7 @@ interface UnlockedState {
   auditLogger: AuditLogger;
   auditQuery: AuditQuery;
   httpInjector: HttpInjector;
+  processInjector: ProcessInjector;
 }
 
 /**
@@ -93,6 +98,7 @@ export class VaultEngine {
   private auditLogger: AuditLogger | null = null;
   private auditQuery: AuditQuery | null = null;
   private httpInjector: HttpInjector | null = null;
+  private processInjector: ProcessInjector | null = null;
   private sessionManager: SessionManager;
   private sessionMonitorInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -412,23 +418,16 @@ export class VaultEngine {
   }
 
   /**
-   * Execute an HTTP request with an injected secret (use_secret).
+   * Use a secret via a context-specific action (use_secret). Dispatches to the
+   * request-mediated (HTTP) or process-mediated (process) injector. The secret
+   * plaintext is resolved inside the vault, injected, and wiped before return;
+   * it never crosses the vault-to-agent boundary.
    */
-  async useSecret(
-    handle: string,
-    request: {
-      method: HttpMethod;
-      url: string;
-      headers?: Record<string, string>;
-      body?: string;
-      timeoutMs?: number;
-    },
-    injection: InjectionConfig,
-    followRedirects?: FollowRedirects,
-  ): Promise<UseSecretResponse> {
+  async useSecret(handle: string, action: UseSecretAction): Promise<UseSecretResponse> {
     const s = this.assertUnlocked();
 
     const secret = await s.secretManager.resolveHandle(handle);
+    const policy = this.loadInjectionPolicy(s, secret.id);
 
     let value: Uint8Array;
     if (secret.type === SecretType.OAUTH_TOKEN) {
@@ -439,11 +438,33 @@ export class VaultEngine {
     }
 
     try {
+      if (action.type === "process") {
+        return await s.processInjector.executeWithSecret(action, value, policy, secret.id);
+      }
+
+      // Request-mediated (HTTP): enforce the per-secret URL allowlist before injection.
+      if (!matchesUrlAllowlist(action.url, policy.url_allowlist)) {
+        s.auditLogger.log({
+          eventType: AuditEventType.SECRET_USE,
+          secretId: secret.id,
+          detail: { context: "http", url: action.url, error: ErrorCode.URL_NOT_ALLOWED },
+          success: false,
+          sessionId: this.sessionId ?? undefined,
+        });
+        throw VaultError.urlNotAllowed(action.url);
+      }
+
       const response = await s.httpInjector.executeWithSecret(
-        request,
+        {
+          method: action.method,
+          url: action.url,
+          headers: action.headers,
+          body: action.body,
+          timeoutMs: action.timeout_ms,
+        },
         value,
-        injection,
-        followRedirects,
+        action.injection,
+        action.follow_redirects,
         secret.id,
       );
 
@@ -464,7 +485,7 @@ export class VaultEngine {
     }
   }
 
-  private redactValue(response: UseSecretResponse, needle: string): void {
+  private redactValue(response: HttpResult, needle: string): void {
     if (response.body?.includes(needle)) {
       response.body = response.body.replaceAll(needle, "[REDACTED]");
     }
@@ -478,6 +499,79 @@ export class VaultEngine {
         }
       }
     }
+  }
+
+  /**
+   * Load a secret's injection policy, decrypting the allowlists. Returns empty
+   * allowlists when no policy is set (URL allowlisting is then not enforced;
+   * command allowlisting denies by default — see ProcessInjector).
+   */
+  private loadInjectionPolicy(s: UnlockedState, secretId: string): InjectionPolicy {
+    const row = s.store.getInjectionPolicy(secretId);
+    if (!row) {
+      return { url_allowlist: [], command_allowlist: [], env_allowlist: [] };
+    }
+    const bytes = decrypt(
+      s.kek,
+      row.policy_encrypted,
+      row.policy_iv,
+      row.policy_tag,
+      AAD_INJECTION_POLICY(secretId),
+    );
+    const parsed = JSON.parse(Buffer.from(bytes).toString("utf8")) as Partial<InjectionPolicy>;
+    return {
+      url_allowlist: parsed.url_allowlist ?? [],
+      command_allowlist: parsed.command_allowlist ?? [],
+      env_allowlist: parsed.env_allowlist ?? [],
+    };
+  }
+
+  /**
+   * Set (or replace) a secret's injection policy. Trusted administrative
+   * operation — the allowlists are encrypted under the KEK.
+   */
+  async setInjectionPolicy(handle: string, policy: InjectionPolicy): Promise<void> {
+    const s = this.assertUnlocked();
+    const secret = await s.secretManager.resolveHandle(handle);
+
+    const json = JSON.stringify({
+      url_allowlist: policy.url_allowlist ?? [],
+      command_allowlist: policy.command_allowlist ?? [],
+      env_allowlist: policy.env_allowlist ?? [],
+    });
+    const enc = encrypt(
+      s.kek,
+      new Uint8Array(Buffer.from(json, "utf8")),
+      AAD_INJECTION_POLICY(secret.id),
+    );
+    const now = Date.now();
+    s.store.upsertInjectionPolicy({
+      secret_id: secret.id,
+      policy_encrypted: enc.ciphertext,
+      policy_iv: enc.iv,
+      policy_tag: enc.tag,
+      created_at: now,
+      updated_at: now,
+    });
+
+    s.auditLogger.log({
+      eventType: AuditEventType.POLICY_GRANT,
+      secretId: secret.id,
+      detail: {
+        policy: "injection",
+        url_count: policy.url_allowlist?.length ?? 0,
+        command_count: policy.command_allowlist?.length ?? 0,
+        env_count: policy.env_allowlist?.length ?? 0,
+      },
+      sessionId: this.sessionId ?? undefined,
+    });
+  }
+
+  /** Read a secret's injection policy (empty allowlists when unset). */
+  async getInjectionPolicy(handle: string): Promise<InjectionPolicy> {
+    const s = this.assertUnlocked();
+    const secret = await s.secretManager.resolveHandle(handle);
+    return this.loadInjectionPolicy(s, secret.id);
   }
 
   // ---------------------------------------------------------------------------
@@ -1111,6 +1205,7 @@ export class VaultEngine {
       auditLogger: this.auditLogger as AuditLogger,
       auditQuery: this.auditQuery as AuditQuery,
       httpInjector: this.httpInjector as HttpInjector,
+      processInjector: this.processInjector as ProcessInjector,
     };
   }
 
@@ -1124,6 +1219,7 @@ export class VaultEngine {
     this.auditLogger = new AuditLogger(store, auditKey);
     this.auditQuery = new AuditQuery(store, auditKey);
     this.httpInjector = new HttpInjector(this.auditLogger);
+    this.processInjector = new ProcessInjector(this.auditLogger);
   }
 
   private wipeKeys(): void {
@@ -1145,6 +1241,7 @@ export class VaultEngine {
     this.auditLogger = null;
     this.auditQuery = null;
     this.httpInjector = null;
+    this.processInjector = null;
     this.sessionId = null;
     this.vaultId = null;
   }

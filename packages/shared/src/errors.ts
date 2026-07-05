@@ -36,6 +36,14 @@ export enum ErrorCode {
   TIMEOUT = "TIMEOUT",
   REDIRECT_POLICY_VIOLATION = "REDIRECT_POLICY_VIOLATION",
   INVALID_INJECTION_CONFIG = "INVALID_INJECTION_CONFIG",
+  URL_NOT_ALLOWED = "URL_NOT_ALLOWED",
+
+  // Process execution
+  COMMAND_NOT_ALLOWED = "COMMAND_NOT_ALLOWED",
+  PROCESS_SPAWN_FAILED = "PROCESS_SPAWN_FAILED",
+  PROCESS_TIMEOUT = "PROCESS_TIMEOUT",
+  PROCESS_OUTPUT_LIMIT = "PROCESS_OUTPUT_LIMIT",
+  INVALID_PROCESS_CONFIG = "INVALID_PROCESS_CONFIG",
 
   // Validation
   INVALID_INPUT = "INVALID_INPUT",
@@ -112,6 +120,14 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.TIMEOUT]: 504,
   [ErrorCode.REDIRECT_POLICY_VIOLATION]: 502,
   [ErrorCode.INVALID_INJECTION_CONFIG]: 400,
+  [ErrorCode.URL_NOT_ALLOWED]: 403,
+
+  // Process execution
+  [ErrorCode.COMMAND_NOT_ALLOWED]: 403,
+  [ErrorCode.PROCESS_SPAWN_FAILED]: 500,
+  [ErrorCode.PROCESS_TIMEOUT]: 504,
+  [ErrorCode.PROCESS_OUTPUT_LIMIT]: 413,
+  [ErrorCode.INVALID_PROCESS_CONFIG]: 400,
 
   // Validation
   [ErrorCode.INVALID_INPUT]: 400,
@@ -258,6 +274,35 @@ export class VaultError extends Error {
       ErrorCode.WEAK_PASSWORD,
       `Password must be at least ${minLength} characters`,
     );
+  }
+
+  static urlNotAllowed(url?: string): VaultError {
+    const msg = url ? `URL not in secret allowlist: ${url}` : "URL not in secret allowlist";
+    return new VaultError(ErrorCode.URL_NOT_ALLOWED, msg);
+  }
+
+  static commandNotAllowed(command?: string): VaultError {
+    const msg = command
+      ? `Command not in secret allowlist: ${command}`
+      : "Command not in secret allowlist";
+    return new VaultError(ErrorCode.COMMAND_NOT_ALLOWED, msg);
+  }
+
+  static processSpawnFailed(detail?: string): VaultError {
+    const msg = detail ? `Process spawn failed: ${detail}` : "Process spawn failed";
+    return new VaultError(ErrorCode.PROCESS_SPAWN_FAILED, msg);
+  }
+
+  static processTimeout(): VaultError {
+    return new VaultError(ErrorCode.PROCESS_TIMEOUT, "Process timed out");
+  }
+
+  static processOutputLimit(): VaultError {
+    return new VaultError(ErrorCode.PROCESS_OUTPUT_LIMIT, "Process output exceeded limit");
+  }
+
+  static invalidProcessConfig(message: string): VaultError {
+    return new VaultError(ErrorCode.INVALID_PROCESS_CONFIG, message);
   }
 
   static oauthFlowFailed(detail?: string): VaultError {

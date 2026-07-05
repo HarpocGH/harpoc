@@ -405,12 +405,14 @@ describe("useSecret with OAuth", () => {
   it("uses OAuth access token for HTTP injection (bearer)", async () => {
     await engine.completeOAuthFlow(secretId, "bearer-token-value", "refresh", Date.now() + 3600_000);
 
-    const response = await engine.useSecret(
-      "secret://use-test",
-      { method: "GET", url: `${targetServerUrl}/api/data` },
-      { type: "bearer" },
-    );
+    const response = await engine.useSecret("secret://use-test", {
+      type: "http",
+      method: "GET",
+      url: `${targetServerUrl}/api/data`,
+      injection: { type: "bearer" },
+    });
 
+    if (response.type !== "http") throw new Error("expected http result");
     expect(response.status).toBe(200);
     // Token is correctly redacted from response (server echoes Authorization header)
     const body = JSON.parse(response.body ?? "{}");
@@ -420,12 +422,14 @@ describe("useSecret with OAuth", () => {
   it("auto-refreshes expired OAuth token before HTTP injection", async () => {
     await engine.completeOAuthFlow(secretId, "old-token", "refresh-tok", Date.now() - 5000);
 
-    const response = await engine.useSecret(
-      "secret://use-test",
-      { method: "GET", url: `${targetServerUrl}/api/data` },
-      { type: "bearer" },
-    );
+    const response = await engine.useSecret("secret://use-test", {
+      type: "http",
+      method: "GET",
+      url: `${targetServerUrl}/api/data`,
+      injection: { type: "bearer" },
+    });
 
+    if (response.type !== "http") throw new Error("expected http result");
     expect(response.status).toBe(200);
     // Refreshed token is used and redacted from response
     const body = JSON.parse(response.body ?? "{}");

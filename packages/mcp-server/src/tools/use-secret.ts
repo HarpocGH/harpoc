@@ -1,13 +1,30 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { VaultEngine } from "@harpoc/core";
-import type { FollowRedirects, HttpMethod, InjectionConfig, Permission } from "@harpoc/shared";
-import { parseHandle } from "@harpoc/shared";
+import type { Permission, UseSecretAction, UseSecretResponse } from "@harpoc/shared";
+import { parseHandle, useSecretActionSchema } from "@harpoc/shared";
 import { InjectionGuard } from "../guards/injection-guard.js";
 import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
 
 const PERMISSION: Permission = "use";
+
+/** Sanitize a use_secret result across both injection mechanisms. */
+function sanitizeResult(result: UseSecretResponse, guard: InjectionGuard): void {
+  if (result.type === "http") {
+    if (result.body) result.body = guard.sanitize(result.body);
+    if (result.headers) {
+      for (const [key, value] of Object.entries(result.headers)) {
+        result.headers[key] = guard.sanitize(value);
+      }
+    }
+    if (result.error) result.error = guard.sanitize(result.error);
+  } else {
+    result.stdout = guard.sanitize(result.stdout);
+    result.stderr = guard.sanitize(result.stderr);
+    if (result.error) result.error = guard.sanitize(result.error);
+  }
+}
 
 export function registerUseSecret(
   server: McpServer,
@@ -18,37 +35,12 @@ export function registerUseSecret(
 ): void {
   server.tool(
     "use_secret",
-    "Execute an HTTP request with a secret injected (the secret value is never exposed)",
+    "Use a secret via a context-specific action — an HTTP request or a process execution. The secret value is injected at the execution layer and never exposed.",
     {
-      handle: z.string().describe("Secret handle"),
-      request: z
-        .object({
-          method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]).describe("HTTP method"),
-          url: z.string().url().describe("Target URL (HTTPS required)"),
-          headers: z.record(z.string()).optional().describe("Additional HTTP headers"),
-          body: z.string().optional().describe("Request body"),
-          timeout_ms: z
-            .number()
-            .int()
-            .positive()
-            .max(300_000)
-            .optional()
-            .describe("Timeout in milliseconds"),
-        })
-        .describe("HTTP request configuration"),
-      injection: z
-        .object({
-          type: z
-            .enum(["header", "query", "basic_auth", "bearer"])
-            .describe("How to inject the secret"),
-          header_name: z.string().optional().describe("Header name (for type=header)"),
-          query_param: z.string().optional().describe("Query parameter name (for type=query)"),
-        })
-        .describe("Secret injection method"),
-      follow_redirects: z
-        .enum(["same-origin", "none", "any"])
-        .optional()
-        .describe("Redirect policy"),
+      handle: z.string().describe("Secret handle (secret://name)"),
+      action: useSecretActionSchema.describe(
+        "Action specification. HTTP: {type:'http', method, url, injection, headers?, body?, follow_redirects?}. Process: {type:'process', command, args?, env_var, working_directory?}.",
+      ),
     },
     async (args) => {
       const parsed = parseHandle(args.handle);
@@ -57,31 +49,10 @@ export function registerUseSecret(
       const secretId = await engine.resolveSecretId(args.handle);
       rateLimiter.checkLimit(secretId, true);
 
-      const response = await engine.useSecret(
-        args.handle,
-        {
-          method: args.request.method as HttpMethod,
-          url: args.request.url,
-          headers: args.request.headers,
-          body: args.request.body,
-          timeoutMs: args.request.timeout_ms,
-        },
-        args.injection as InjectionConfig,
-        args.follow_redirects as FollowRedirects | undefined,
-      );
+      const response = await engine.useSecret(args.handle, args.action as UseSecretAction);
 
-      // Sanitize response to prevent credential leakage
-      if (response.body) {
-        response.body = injectionGuard.sanitize(response.body);
-      }
-      if (response.headers) {
-        for (const [key, value] of Object.entries(response.headers)) {
-          response.headers[key] = injectionGuard.sanitize(value);
-        }
-      }
-      if (response.error) {
-        response.error = injectionGuard.sanitize(response.error);
-      }
+      // Defense-in-depth response sanitization (pattern-based, atop engine redaction)
+      sanitizeResult(response, injectionGuard);
 
       return {
         content: [{ type: "text" as const, text: JSON.stringify(response, null, 2) }],

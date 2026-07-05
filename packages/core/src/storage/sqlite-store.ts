@@ -14,6 +14,7 @@ import { migration002 } from "./migrations/002-revoked-tokens.js";
 import { migration003 } from "./migrations/003-name-hmac.js";
 import { migration004 } from "./migrations/004-oauth-tokens.js";
 import { migration005 } from "./migrations/005-certificates.js";
+import { migration006 } from "./migrations/006-injection-policies.js";
 
 /** Filters for querying secrets. */
 export interface SecretFilter {
@@ -75,6 +76,19 @@ export interface CertificateRow {
   acme_account_encrypted: Uint8Array | null;
   acme_account_iv: Uint8Array | null;
   acme_account_tag: Uint8Array | null;
+}
+
+/**
+ * Per-secret injection policy for DB storage. The policy JSON (URL, command and
+ * env allowlists) is encrypted as a single blob before it reaches the store.
+ */
+export interface InjectionPolicyRow {
+  secret_id: string;
+  policy_encrypted: Uint8Array;
+  policy_iv: Uint8Array;
+  policy_tag: Uint8Array;
+  created_at: number;
+  updated_at: number;
 }
 
 export class SqliteStore {
@@ -145,6 +159,12 @@ export class SqliteStore {
       this.db.transaction(() => {
         this.db.exec(migration005.up);
         this.setMeta("schema_version", "5");
+      })();
+    }
+    if (currentVersion < 6) {
+      this.db.transaction(() => {
+        this.db.exec(migration006.up);
+        this.setMeta("schema_version", "6");
       })();
     }
   }
@@ -727,6 +747,52 @@ export class SqliteStore {
   }
 
   // ---------------------------------------------------------------------------
+  // injection_policies
+  // ---------------------------------------------------------------------------
+
+  upsertInjectionPolicy(record: InjectionPolicyRow): void {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO injection_policies (
+            secret_id, policy_encrypted, policy_iv, policy_tag, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(secret_id) DO UPDATE SET
+            policy_encrypted = excluded.policy_encrypted,
+            policy_iv = excluded.policy_iv,
+            policy_tag = excluded.policy_tag,
+            updated_at = excluded.updated_at`,
+        )
+        .run(
+          record.secret_id,
+          Buffer.from(record.policy_encrypted),
+          Buffer.from(record.policy_iv),
+          Buffer.from(record.policy_tag),
+          record.created_at,
+          record.updated_at,
+        );
+    } catch (err) {
+      throw VaultError.databaseError(
+        `Failed to upsert injection policy: ${err instanceof Error ? err.message : "unknown"}`,
+      );
+    }
+  }
+
+  getInjectionPolicy(secretId: string): InjectionPolicyRow | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM injection_policies WHERE secret_id = ?")
+      .get(secretId) as Record<string, unknown> | undefined;
+    return row ? this.rowToInjectionPolicy(row) : undefined;
+  }
+
+  deleteInjectionPolicy(secretId: string): boolean {
+    const result = this.db
+      .prepare("DELETE FROM injection_policies WHERE secret_id = ?")
+      .run(secretId);
+    return result.changes > 0;
+  }
+
+  // ---------------------------------------------------------------------------
   // Transaction helper
   // ---------------------------------------------------------------------------
 
@@ -877,6 +943,17 @@ export class SqliteStore {
       acme_account_tag: row.acme_account_tag
         ? new Uint8Array(row.acme_account_tag as Buffer)
         : null,
+    };
+  }
+
+  private rowToInjectionPolicy(row: Record<string, unknown>): InjectionPolicyRow {
+    return {
+      secret_id: row.secret_id as string,
+      policy_encrypted: new Uint8Array(row.policy_encrypted as Buffer),
+      policy_iv: new Uint8Array(row.policy_iv as Buffer),
+      policy_tag: new Uint8Array(row.policy_tag as Buffer),
+      created_at: row.created_at as number,
+      updated_at: row.updated_at as number,
     };
   }
 }
