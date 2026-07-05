@@ -21,6 +21,13 @@ export interface CreateMcpServerOptions {
   /** Shared across per-session servers (Streamable HTTP) so limits span sessions. */
   rateLimiter?: RateLimiter;
   injectionGuard?: InjectionGuard;
+  /**
+   * Allow create/rotate to fall back to a masked prompt on the controlling
+   * terminal (thesis value-collection channel 2). Only stdio entry points
+   * enable this — never the Streamable HTTP transport, whose clients are
+   * remote from the vault host's terminal.
+   */
+  enableTtyPrompt?: boolean;
 }
 
 /**
@@ -56,12 +63,14 @@ export function createMcpServer(options: CreateMcpServerOptions): McpServer {
     },
   );
 
+  const enableTtyPrompt = options.enableTtyPrompt ?? false;
+
   // Register tools
   registerListSecrets(server, engine, scopeGuard, rateLimiter);
   registerGetSecretInfo(server, engine, scopeGuard, rateLimiter);
   registerUseSecret(server, engine, scopeGuard, rateLimiter, injectionGuard);
-  registerCreateSecret(server, engine, scopeGuard, rateLimiter);
-  registerRotateSecret(server, engine, scopeGuard, rateLimiter);
+  registerCreateSecret(server, engine, scopeGuard, rateLimiter, enableTtyPrompt);
+  registerRotateSecret(server, engine, scopeGuard, rateLimiter, enableTtyPrompt);
   registerRevokeSecret(server, engine, scopeGuard, rateLimiter);
   registerCheckHealth(server, engine, scopeGuard, rateLimiter);
 

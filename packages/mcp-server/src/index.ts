@@ -75,6 +75,7 @@ async function main(): Promise<void> {
     const server = createMcpServer({
       engine,
       launchToken: values.token as string | undefined,
+      enableTtyPrompt: true,
     });
     const transport = new StdioServerTransport();
     await server.connect(transport);

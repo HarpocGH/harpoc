@@ -145,6 +145,7 @@ describe("server start", () => {
     expect(createMcpServer).toHaveBeenCalledWith({
       engine: mockEngine,
       launchToken: undefined,
+      enableTtyPrompt: true,
     });
     expect(StdioServerTransport).toHaveBeenCalled();
     expect(mockMcpServer.connect).toHaveBeenCalledWith(mockTransport);
@@ -158,6 +159,7 @@ describe("server start", () => {
     expect(createMcpServer).toHaveBeenCalledWith({
       engine: mockEngine,
       launchToken: "my.jwt.token",
+      enableTtyPrompt: true,
     });
   });
 
