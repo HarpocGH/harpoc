@@ -9,6 +9,7 @@ import {
   OAuthProviderPreset,
   Permission,
   PrincipalType,
+  ResponseMode,
   SecretStatus,
   SecretType,
   VaultState,
@@ -48,6 +49,10 @@ describe("enum member counts", () => {
     expect(Object.values(FollowRedirects)).toHaveLength(3);
   });
 
+  it("ResponseMode has 3 members", () => {
+    expect(Object.values(ResponseMode)).toHaveLength(3);
+  });
+
   it("ActionType has 6 members", () => {
     expect(Object.values(ActionType)).toHaveLength(6);
   });
@@ -64,10 +69,10 @@ describe("enum member counts", () => {
     expect(Object.values(OAuthProviderPreset)).toHaveLength(5);
   });
 
-  it("ErrorCode has 80 members", () => {
+  it("ErrorCode has 81 members", () => {
     // Filter out reverse mappings (numeric keys) from TypeScript enum
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(80);
+    expect(members).toHaveLength(81);
   });
 });
 

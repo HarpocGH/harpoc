@@ -62,7 +62,9 @@ import { GitInjector } from "./injection/git-injector.js";
 import { HttpInjector } from "./injection/http-injector.js";
 import { McpInjector } from "./injection/mcp-injector.js";
 import { McpConnectionRegistry } from "./injection/mcp-registry.js";
+import { redactSecretEncodings } from "./injection/output-sanitizer.js";
 import { ProcessInjector } from "./injection/process-injector.js";
+import { isResponseModeAllowed } from "./injection/response-mode.js";
 import { SshInjector } from "./injection/ssh-injector.js";
 import { validateUrl } from "./injection/url-validator.js";
 import type { SecretInfo } from "./secrets/secret-manager.js";
@@ -487,6 +489,28 @@ export class VaultEngine {
           throw VaultError.urlNotAllowed(action.url);
         }
 
+        // Tighten-only response-mode override (thesis §4.5.2): a loosening
+        // override would reopen the echo channel — rejected before the
+        // request executes.
+        const policyMode = policy.response_mode ?? "filtered";
+        if (action.response_mode && !isResponseModeAllowed(policyMode, action.response_mode)) {
+          s.auditLogger.log({
+            eventType: AuditEventType.SECRET_USE,
+            secretId: secret.id,
+            detail: {
+              context: "http",
+              url: action.url,
+              requested_mode: action.response_mode,
+              policy_mode: policyMode,
+              error: ErrorCode.RESPONSE_MODE_NOT_ALLOWED,
+            },
+            success: false,
+            sessionId: this.sessionId ?? undefined,
+          });
+          throw VaultError.responseModeNotAllowed(action.response_mode, policyMode);
+        }
+        const responseMode = action.response_mode ?? policyMode;
+
         const response = await s.httpInjector.executeWithSecret(
           {
             method: action.method,
@@ -494,6 +518,8 @@ export class VaultEngine {
             headers: action.headers,
             body: action.body,
             timeoutMs: action.timeout_ms,
+            responseMode,
+            responseHeaderAllowlist: policy.response_header_allowlist ?? [],
           },
           value,
           action.injection,
@@ -501,14 +527,12 @@ export class VaultEngine {
           secret.id,
         );
 
-        // Exact-match redaction: scrub the actual secret value from the response
-        const valueStr = Buffer.from(value).toString("utf8");
-        if (valueStr.length > 0) {
-          this.redactValue(response, valueStr);
-          // Also redact base64 form (used in basic_auth injection)
-          const valueB64 = Buffer.from(valueStr).toString("base64");
-          if (valueB64 !== valueStr) {
-            this.redactValue(response, valueB64);
+        // Value + encodings redaction (I2a) — skipped only under the
+        // policy-gated `full` opt-out.
+        if (responseMode !== "full") {
+          const valueStr = Buffer.from(value).toString("utf8");
+          if (valueStr.length > 0) {
+            this.redactHttpResult(response, valueStr);
           }
         }
 
@@ -538,18 +562,17 @@ export class VaultEngine {
     }
   }
 
-  private redactValue(response: HttpResult, needle: string): void {
-    if (response.body?.includes(needle)) {
-      response.body = response.body.replaceAll(needle, "[REDACTED]");
+  /** Scrub the secret value and its common encodings from an HTTP result (I2a). */
+  private redactHttpResult(response: HttpResult, valueStr: string): void {
+    if (response.body) {
+      response.body = redactSecretEncodings(response.body, valueStr);
     }
-    if (response.error?.includes(needle)) {
-      response.error = response.error.replaceAll(needle, "[REDACTED]");
+    if (response.error) {
+      response.error = redactSecretEncodings(response.error, valueStr);
     }
     if (response.headers) {
       for (const [key, val] of Object.entries(response.headers)) {
-        if (val.includes(needle)) {
-          response.headers[key] = val.replaceAll(needle, "[REDACTED]");
-        }
+        response.headers[key] = redactSecretEncodings(val, valueStr);
       }
     }
   }
@@ -562,7 +585,14 @@ export class VaultEngine {
   private loadInjectionPolicy(s: UnlockedState, secretId: string): InjectionPolicy {
     const row = s.store.getInjectionPolicy(secretId);
     if (!row) {
-      return { url_allowlist: [], command_allowlist: [], env_allowlist: [], host_allowlist: [] };
+      return {
+        url_allowlist: [],
+        command_allowlist: [],
+        env_allowlist: [],
+        host_allowlist: [],
+        response_mode: "filtered",
+        response_header_allowlist: [],
+      };
     }
     const bytes = decrypt(
       s.kek,
@@ -577,6 +607,8 @@ export class VaultEngine {
       command_allowlist: parsed.command_allowlist ?? [],
       env_allowlist: parsed.env_allowlist ?? [],
       host_allowlist: parsed.host_allowlist ?? [],
+      response_mode: parsed.response_mode ?? "filtered",
+      response_header_allowlist: parsed.response_header_allowlist ?? [],
     };
   }
 
@@ -593,6 +625,8 @@ export class VaultEngine {
       command_allowlist: policy.command_allowlist ?? [],
       env_allowlist: policy.env_allowlist ?? [],
       host_allowlist: policy.host_allowlist ?? [],
+      response_mode: policy.response_mode ?? "filtered",
+      response_header_allowlist: policy.response_header_allowlist ?? [],
     });
     const enc = encrypt(
       s.kek,
@@ -618,6 +652,8 @@ export class VaultEngine {
         command_count: policy.command_allowlist?.length ?? 0,
         env_count: policy.env_allowlist?.length ?? 0,
         host_count: policy.host_allowlist?.length ?? 0,
+        response_mode: policy.response_mode ?? "filtered",
+        response_header_count: policy.response_header_allowlist?.length ?? 0,
       },
       sessionId: this.sessionId ?? undefined,
     });

@@ -90,6 +90,8 @@ export class RestClient implements VaultClient {
         command_allowlist: policy.command_allowlist,
         env_allowlist: policy.env_allowlist,
         host_allowlist: policy.host_allowlist,
+        response_mode: policy.response_mode,
+        response_header_allowlist: policy.response_header_allowlist,
       },
     );
   }

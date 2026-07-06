@@ -13,6 +13,7 @@ import {
   OAuthProviderPreset,
   Permission,
   PrincipalType,
+  ResponseMode,
   SecretStatus,
   SecretType,
 } from "./types.js";
@@ -44,6 +45,9 @@ const followRedirectsValues = Object.values(FollowRedirects) as [
   ...FollowRedirects[],
 ];
 export const followRedirectsSchema = z.enum(followRedirectsValues);
+
+const responseModeValues = Object.values(ResponseMode) as [ResponseMode, ...ResponseMode[]];
+export const responseModeSchema = z.enum(responseModeValues);
 
 // ---------------------------------------------------------------------------
 // Handle schema
@@ -103,6 +107,7 @@ export const httpActionSchema = z.object({
   injection: injectionConfigSchema,
   follow_redirects: followRedirectsSchema.optional(),
   timeout_ms: z.number().int().positive().max(300_000).optional(),
+  response_mode: responseModeSchema.optional(),
 });
 
 /** Process action — process-mediated injection. `command`/`args` are data, never shell-interpreted. */
@@ -205,7 +210,7 @@ export const useSecretRequestSchema = z.object({
   action: useSecretActionSchema,
 });
 
-/** Per-secret injection policy input (URL + host + command + env allowlists). */
+/** Per-secret injection policy input (URL + host + command + env allowlists + HTTP response mode). */
 export const injectionPolicyInputSchema = z.object({
   url_allowlist: z.array(z.string().min(1).max(2048)).max(100).optional().default([]),
   command_allowlist: z.array(z.string().min(1).max(4096)).max(100).optional().default([]),
@@ -215,6 +220,18 @@ export const injectionPolicyInputSchema = z.object({
     .optional()
     .default([]),
   host_allowlist: z.array(z.string().min(1).max(2048)).max(100).optional().default([]),
+  response_mode: responseModeSchema.optional().default(ResponseMode.FILTERED),
+  response_header_allowlist: z
+    .array(
+      z
+        .string()
+        .min(1)
+        .max(256)
+        .regex(/^[a-zA-Z0-9\-_]+$/, "Invalid header name characters"),
+    )
+    .max(100)
+    .optional()
+    .default([]),
 });
 
 /**

@@ -82,6 +82,17 @@ export const FollowRedirects = {
 } as const;
 export type FollowRedirects = (typeof FollowRedirects)[keyof typeof FollowRedirects];
 
+/**
+ * HTTP response shaping mode (thesis §4.5.2). `status_only` removes the
+ * response body structurally — the echo channel is absent, not filtered.
+ */
+export const ResponseMode = {
+  FULL: "full",
+  FILTERED: "filtered",
+  STATUS_ONLY: "status_only",
+} as const;
+export type ResponseMode = (typeof ResponseMode)[keyof typeof ResponseMode];
+
 /** Execution context selected by a use_secret action's discriminant. */
 export const ActionType = {
   HTTP: "http",
@@ -256,6 +267,7 @@ export interface HttpAction {
   injection: InjectionConfig;
   follow_redirects?: FollowRedirects;
   timeout_ms?: number;
+  response_mode?: ResponseMode;
 }
 
 /**
@@ -427,13 +439,19 @@ export type UseSecretResponse =
  * (HTTP, Git-over-HTTPS, MCP-over-HTTP); `host_allowlist` bounds host and
  * host:port targets (SSH, Git-over-SSH, database); `command_allowlist` bounds
  * process-mediated binaries; `env_allowlist` names additional environment
- * variables passed through to a spawned subprocess.
+ * variables passed through to a spawned subprocess. `response_mode` is the
+ * HTTP response shaping floor (default `filtered`; per-invocation overrides
+ * may only tighten it, thesis §4.5.2); `response_header_allowlist` names the
+ * headers still returned under `status_only`. Both are optional — absent on
+ * older policy blobs — and defaulted by the loader.
  */
 export interface InjectionPolicy {
   url_allowlist: string[];
   command_allowlist: string[];
   env_allowlist: string[];
   host_allowlist: string[];
+  response_mode?: ResponseMode;
+  response_header_allowlist?: string[];
 }
 
 /**

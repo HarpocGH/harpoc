@@ -37,6 +37,7 @@ export enum ErrorCode {
   REDIRECT_POLICY_VIOLATION = "REDIRECT_POLICY_VIOLATION",
   INVALID_INJECTION_CONFIG = "INVALID_INJECTION_CONFIG",
   URL_NOT_ALLOWED = "URL_NOT_ALLOWED",
+  RESPONSE_MODE_NOT_ALLOWED = "RESPONSE_MODE_NOT_ALLOWED",
 
   // Process execution
   COMMAND_NOT_ALLOWED = "COMMAND_NOT_ALLOWED",
@@ -145,6 +146,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.REDIRECT_POLICY_VIOLATION]: 502,
   [ErrorCode.INVALID_INJECTION_CONFIG]: 400,
   [ErrorCode.URL_NOT_ALLOWED]: 403,
+  [ErrorCode.RESPONSE_MODE_NOT_ALLOWED]: 403,
 
   // Process execution
   [ErrorCode.COMMAND_NOT_ALLOWED]: 403,
@@ -327,6 +329,13 @@ export class VaultError extends Error {
   static urlNotAllowed(url?: string): VaultError {
     const msg = url ? `URL not in secret allowlist: ${url}` : "URL not in secret allowlist";
     return new VaultError(ErrorCode.URL_NOT_ALLOWED, msg);
+  }
+
+  static responseModeNotAllowed(requested: string, allowed: string): VaultError {
+    return new VaultError(
+      ErrorCode.RESPONSE_MODE_NOT_ALLOWED,
+      `Response mode "${requested}" not allowed: secret policy is "${allowed}" and overrides may only tighten`,
+    );
   }
 
   static commandNotAllowed(command?: string): VaultError {

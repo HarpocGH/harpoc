@@ -19,6 +19,7 @@ interface UseOptions {
   body?: string;
   header?: string[];
   followRedirects?: string;
+  responseMode?: string;
   command?: string;
   arg?: string[];
   envVar?: string;
@@ -54,6 +55,10 @@ export function registerSecretUseCommand(secret: Command): void {
     .option("--body <body>", "Request body (http action)")
     .option("--header <kv>", "Extra request header 'Key: Value' (repeatable)", collect, [])
     .option("--follow-redirects <policy>", "Redirect policy: same-origin | none | any")
+    .option(
+      "--response-mode <mode>",
+      "Response mode override: full | filtered | status_only (may only tighten the policy)",
+    )
     // Process action
     .option("--command <command>", "Command to run (process action)")
     .option("--arg <arg>", "Command argument (repeatable)", collect, [])
@@ -175,5 +180,6 @@ function buildAction(options: UseOptions): Record<string, unknown> {
     body: options.body,
     injection,
     follow_redirects: options.followRedirects,
+    response_mode: options.responseMode,
   };
 }

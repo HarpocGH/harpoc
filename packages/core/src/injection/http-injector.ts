@@ -1,4 +1,10 @@
-import type { FollowRedirects, HttpMethod, HttpResult, InjectionConfig } from "@harpoc/shared";
+import type {
+  FollowRedirects,
+  HttpMethod,
+  HttpResult,
+  InjectionConfig,
+  ResponseMode,
+} from "@harpoc/shared";
 import { DEFAULT_HTTP_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { validateUrl } from "./url-validator.js";
@@ -9,6 +15,8 @@ export interface HttpInjectorRequest {
   headers?: Record<string, string>;
   body?: string;
   timeoutMs?: number;
+  responseMode?: ResponseMode;
+  responseHeaderAllowlist?: string[];
 }
 
 /**
@@ -84,6 +92,8 @@ export class HttpInjector {
         timeoutMs,
         followRedirects,
         injection,
+        request.responseMode ?? "filtered",
+        request.responseHeaderAllowlist ?? [],
       );
 
       this.auditLogger?.log({
@@ -94,6 +104,7 @@ export class HttpInjector {
           url: request.url,
           status: response.status,
           injection_type: injection.type,
+          response_mode: request.responseMode ?? "filtered",
         },
       });
 
@@ -108,6 +119,7 @@ export class HttpInjector {
             url: request.url,
             error: err.code,
             injection_type: injection.type,
+            response_mode: request.responseMode ?? "filtered",
           },
           success: false,
         });
@@ -130,6 +142,7 @@ export class HttpInjector {
           url: request.url,
           error: errorCode,
           injection_type: injection.type,
+          response_mode: request.responseMode ?? "filtered",
         },
         success: false,
       });
@@ -151,7 +164,9 @@ export class HttpInjector {
     body: string | undefined,
     timeoutMs: number,
     followRedirects: FollowRedirects,
-    injection?: InjectionConfig,
+    injection: InjectionConfig | undefined,
+    responseMode: ResponseMode,
+    responseHeaderAllowlist: string[],
   ): Promise<HttpResult> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -173,7 +188,7 @@ export class HttpInjector {
 
         // Not a redirect — return response
         if (response.status < 300 || response.status >= 400) {
-          const result = await this.buildResponse(response);
+          const result = await this.buildResponse(response, responseMode, responseHeaderAllowlist);
           if (redirectWarning) result.redirect_warning = redirectWarning;
           return result;
         }
@@ -181,8 +196,11 @@ export class HttpInjector {
         const location = response.headers.get("location");
 
         if (followRedirects === "none" || !location) {
-          return this.buildResponse(response);
+          return this.buildResponse(response, responseMode, responseHeaderAllowlist);
         }
+
+        // This hop's body is never read — release the connection before following.
+        await response.body?.cancel().catch(() => {});
 
         if (remainingRedirects <= 0) {
           throw new VaultError(ErrorCode.REDIRECT_POLICY_VIOLATION, "Too many redirects");
@@ -241,7 +259,31 @@ export class HttpInjector {
     }
   }
 
-  private async buildResponse(response: Response): Promise<HttpResult> {
+  private async buildResponse(
+    response: Response,
+    responseMode: ResponseMode,
+    responseHeaderAllowlist: string[],
+  ): Promise<HttpResult> {
+    if (responseMode === "status_only") {
+      // Structural I2a (thesis §4.5.2): the body is never read — the echo
+      // channel is absent, not filtered. Cancel releases the connection.
+      await response.body?.cancel().catch(() => {});
+
+      const allowed = new Set(responseHeaderAllowlist.map((name) => name.toLowerCase()));
+      const responseHeaders: Record<string, string> = {};
+      response.headers.forEach((value, key) => {
+        if (allowed.has(key.toLowerCase())) {
+          responseHeaders[key] = value;
+        }
+      });
+
+      const result: HttpResult = { type: "http", status: response.status };
+      if (Object.keys(responseHeaders).length > 0) {
+        result.headers = responseHeaders;
+      }
+      return result;
+    }
+
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((value, key) => {
       responseHeaders[key] = value;

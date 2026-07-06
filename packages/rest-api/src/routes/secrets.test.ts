@@ -61,9 +61,14 @@ function createMockEngine() {
       body: '{"ok":true}',
     }),
     setInjectionPolicy: vi.fn().mockResolvedValue(undefined),
-    getInjectionPolicy: vi
-      .fn()
-      .mockResolvedValue({ url_allowlist: [], command_allowlist: [], env_allowlist: [] }),
+    getInjectionPolicy: vi.fn().mockResolvedValue({
+      url_allowlist: [],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+    }),
     setMcpServerConfig: vi.fn().mockResolvedValue(undefined),
     getMcpServerConfig: vi.fn().mockResolvedValue(undefined),
     deleteMcpServerConfig: vi.fn().mockResolvedValue(true),
@@ -432,19 +437,45 @@ describe("secret routes", () => {
       });
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.data).toEqual({ url_allowlist: [], command_allowlist: [], env_allowlist: [] });
+      expect(body.data).toEqual({
+        url_allowlist: [],
+        command_allowlist: [],
+        env_allowlist: [],
+        host_allowlist: [],
+        response_mode: "filtered",
+        response_header_allowlist: [],
+      });
     });
 
     it("PUT sets the policy", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ command_allowlist: ["gh"], url_allowlist: ["https://api.github.com/*"] }),
+        body: JSON.stringify({
+          command_allowlist: ["gh"],
+          url_allowlist: ["https://api.github.com/*"],
+          response_mode: "status_only",
+          response_header_allowlist: ["Content-Type"],
+        }),
       });
       expect(res.status).toBe(200);
       const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
       expect(call[0]).toBe("secret://test-key");
       expect((call[1] as { command_allowlist: string[] }).command_allowlist).toEqual(["gh"]);
+      const policy = call[1] as { response_mode: string; response_header_allowlist: string[] };
+      expect(policy.response_mode).toBe("status_only");
+      expect(policy.response_header_allowlist).toEqual(["Content-Type"]);
+    });
+
+    it("PUT omitting response_mode defaults it to filtered (whole-policy replace)", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ url_allowlist: ["https://api.github.com/*"] }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+      expect((call[1] as { response_mode: string }).response_mode).toBe("filtered");
     });
 
     it("PUT rejects an invalid env var name", async () => {
@@ -452,6 +483,24 @@ describe("secret routes", () => {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
         body: JSON.stringify({ env_allowlist: ["1BAD"] }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("PUT rejects an invalid response_mode", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ response_mode: "raw" }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("PUT rejects an invalid response header name", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ response_header_allowlist: ["Bad: Header"] }),
       });
       expect(res.status).toBe(400);
     });

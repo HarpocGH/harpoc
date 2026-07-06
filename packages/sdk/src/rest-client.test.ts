@@ -183,6 +183,22 @@ describe("RestClient", () => {
       expect(body.command_allowlist).toEqual(["gh"]);
     });
 
+    it("setInjectionPolicy forwards response_mode and response_header_allowlist", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", {
+        url_allowlist: [],
+        command_allowlist: [],
+        env_allowlist: [],
+        host_allowlist: [],
+        response_mode: "status_only",
+        response_header_allowlist: ["Content-Type"],
+      });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(call[1].body as string);
+      expect(body.response_mode).toBe("status_only");
+      expect(body.response_header_allowlist).toEqual(["Content-Type"]);
+    });
+
     it("getInjectionPolicy sends GET", async () => {
       mockFetchResponse({ url_allowlist: [], command_allowlist: ["gh"], env_allowlist: [] });
       const policy = await client.getInjectionPolicy("secret://k");

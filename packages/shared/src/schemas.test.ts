@@ -22,6 +22,7 @@ import {
   permissionSchema,
   principalTypeSchema,
   processActionSchema,
+  responseModeSchema,
   secretStatusSchema,
   secretTypeSchema,
   sessionFileSchema,
@@ -101,6 +102,16 @@ describe("enum schemas", () => {
     expect(followRedirectsSchema.parse("same-origin")).toBe("same-origin");
     expect(followRedirectsSchema.parse("none")).toBe("none");
     expect(followRedirectsSchema.parse("any")).toBe("any");
+  });
+
+  it("responseModeSchema accepts valid values", () => {
+    expect(responseModeSchema.parse("full")).toBe("full");
+    expect(responseModeSchema.parse("filtered")).toBe("filtered");
+    expect(responseModeSchema.parse("status_only")).toBe("status_only");
+  });
+
+  it("responseModeSchema rejects unknown values", () => {
+    expect(() => responseModeSchema.parse("raw")).toThrow();
   });
 });
 
@@ -288,10 +299,20 @@ describe("httpActionSchema", () => {
       body: '{"key":"val"}',
       follow_redirects: "none",
       timeout_ms: 5_000,
+      response_mode: "status_only",
     });
     expect(result.headers).toEqual({ Accept: "application/json" });
     expect(result.follow_redirects).toBe("none");
     expect(result.timeout_ms).toBe(5_000);
+    expect(result.response_mode).toBe("status_only");
+  });
+
+  it("leaves response_mode undefined when omitted", () => {
+    expect(httpActionSchema.parse(validHttp).response_mode).toBeUndefined();
+  });
+
+  it("rejects an invalid response_mode", () => {
+    expect(() => httpActionSchema.parse({ ...validHttp, response_mode: "raw" })).toThrow();
   });
 
   it("rejects invalid method", () => {
@@ -547,13 +568,15 @@ describe("useSecretRequestSchema", () => {
 // ---------------------------------------------------------------------------
 
 describe("injectionPolicyInputSchema", () => {
-  it("defaults all allowlists to empty arrays", () => {
+  it("defaults all allowlists to empty arrays and response_mode to filtered", () => {
     const result = injectionPolicyInputSchema.parse({});
     expect(result).toEqual({
       url_allowlist: [],
       command_allowlist: [],
       env_allowlist: [],
       host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
     });
   });
 
@@ -572,6 +595,29 @@ describe("injectionPolicyInputSchema", () => {
 
   it("rejects an empty command allowlist entry", () => {
     expect(() => injectionPolicyInputSchema.parse({ command_allowlist: [""] })).toThrow();
+  });
+
+  it("accepts response_mode and response_header_allowlist", () => {
+    const result = injectionPolicyInputSchema.parse({
+      response_mode: "status_only",
+      response_header_allowlist: ["Content-Type", "X-Request-Id"],
+    });
+    expect(result.response_mode).toBe("status_only");
+    expect(result.response_header_allowlist).toEqual(["Content-Type", "X-Request-Id"]);
+  });
+
+  it("rejects an invalid response_mode", () => {
+    expect(() => injectionPolicyInputSchema.parse({ response_mode: "raw" })).toThrow();
+  });
+
+  it("rejects invalid response header names", () => {
+    expect(() =>
+      injectionPolicyInputSchema.parse({ response_header_allowlist: ["Bad: Header"] }),
+    ).toThrow();
+    expect(() =>
+      injectionPolicyInputSchema.parse({ response_header_allowlist: ["x\r\ny"] }),
+    ).toThrow();
+    expect(() => injectionPolicyInputSchema.parse({ response_header_allowlist: [""] })).toThrow();
   });
 });
 

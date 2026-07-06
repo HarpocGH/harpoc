@@ -239,6 +239,7 @@ describe("MCP Tools", () => {
           body: "test",
           injection: { type: "header", header_name: "X-API-Key" },
           follow_redirects: "none",
+          response_mode: "status_only",
         },
       });
 
@@ -251,8 +252,46 @@ describe("MCP Tools", () => {
           body: "test",
           injection: { type: "header", header_name: "X-API-Key" },
           follow_redirects: "none",
+          response_mode: "status_only",
         }),
       );
+    });
+
+    it("rejects an invalid response_mode in the action", async () => {
+      const result = await callTool(server, "use_secret", {
+        handle: "secret://my-key",
+        action: {
+          type: "http",
+          method: "GET",
+          url: "https://api.example.com/data",
+          injection: { type: "bearer" },
+          response_mode: "raw",
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(engine.useSecret).not.toHaveBeenCalled();
+    });
+
+    it("returns a status_only-shaped result without body or headers keys", async () => {
+      (engine.useSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
+        type: "http",
+        status: 201,
+      });
+
+      const result = await callTool(server, "use_secret", {
+        handle: "secret://my-key",
+        action: {
+          type: "http",
+          method: "POST",
+          url: "https://api.example.com/data",
+          injection: { type: "bearer" },
+          response_mode: "status_only",
+        },
+      });
+      const data = JSON.parse(getToolText(result)) as Record<string, unknown>;
+      expect(data.status).toBe(201);
+      expect("body" in data).toBe(false);
+      expect("headers" in data).toBe(false);
     });
 
     it("accepts an mcp action and returns the proxied result", async () => {

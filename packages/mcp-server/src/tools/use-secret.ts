@@ -23,7 +23,7 @@ export function registerUseSecret(
     {
       handle: z.string().describe("Secret handle (secret://name)"),
       action: useSecretActionSchema.describe(
-        "Action specification. HTTP: {type:'http', method, url, injection, headers?, body?, follow_redirects?}. Process: {type:'process', command, args?, env_var, working_directory?}. MCP: {type:'mcp', server, tool, arguments?}. Database: {type:'database', engine:'postgresql'|'mysql', host, database, query, params?}. Git: {type:'git', operation:'clone'|'pull'|'push', repository, args?, working_directory?}. SSH: {type:'ssh', host, user, command}. Target allowlists, TLS/host-key pinning and downstream config are set out-of-band via the trusted admin path (CLI/REST), never here.",
+        "Action specification. HTTP: {type:'http', method, url, injection, headers?, body?, follow_redirects?, response_mode?}. Process: {type:'process', command, args?, env_var, working_directory?}. MCP: {type:'mcp', server, tool, arguments?}. Database: {type:'database', engine:'postgresql'|'mysql', host, database, query, params?}. Git: {type:'git', operation:'clone'|'pull'|'push', repository, args?, working_directory?}. SSH: {type:'ssh', host, user, command}. HTTP response_mode ('full'|'filtered'|'status_only') may only equal or tighten the secret's policy mode; 'status_only' returns the status code without a body. Target allowlists, the response-mode policy, TLS/host-key pinning and downstream config are set out-of-band via the trusted admin path (CLI/REST), never here.",
       ),
     },
     async (args) => {

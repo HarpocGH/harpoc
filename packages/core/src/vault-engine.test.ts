@@ -26,11 +26,25 @@ let engine: VaultEngine;
 // Test HTTP server
 let server: Server;
 let baseUrl: string;
+let requestCount = 0;
 
 beforeAll(async () => {
   server = createServer((req, res) => {
-    const auth = req.headers["authorization"] ?? "none";
+    requestCount++;
+    const auth = (req.headers["authorization"] ?? "none") as string;
     res.writeHead(200, { "Content-Type": "application/json" });
+    if (req.url?.startsWith("/enc")) {
+      // Echo the bearer token in encoded forms (sanitizer-bypass probes)
+      const token = auth.replace("Bearer ", "");
+      res.end(
+        JSON.stringify({
+          b64: Buffer.from(token).toString("base64"),
+          hex: Buffer.from(token).toString("hex"),
+          pct: encodeURIComponent(token),
+        }),
+      );
+      return;
+    }
     res.end(JSON.stringify({ authorization: auth, path: req.url }));
   });
 
@@ -435,12 +449,16 @@ describe("injection policy", () => {
       command_allowlist: ["gh"],
       env_allowlist: ["HOME"],
       host_allowlist: ["db.example.com:5432"],
+      response_mode: "status_only",
+      response_header_allowlist: ["Content-Type"],
     });
     const p = await engine.getInjectionPolicy("secret://pol");
     expect(p.url_allowlist).toEqual([`${baseUrl}/*`]);
     expect(p.command_allowlist).toEqual(["gh"]);
     expect(p.env_allowlist).toEqual(["HOME"]);
     expect(p.host_allowlist).toEqual(["db.example.com:5432"]);
+    expect(p.response_mode).toBe("status_only");
+    expect(p.response_header_allowlist).toEqual(["Content-Type"]);
   });
 
   it("returns empty allowlists when no policy is set", async () => {
@@ -450,7 +468,20 @@ describe("injection policy", () => {
       command_allowlist: [],
       env_allowlist: [],
       host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
     });
+  });
+
+  it("defaults response mode fields on a policy set without them", async () => {
+    await engine.setInjectionPolicy("secret://pol", {
+      url_allowlist: [`${baseUrl}/*`],
+      command_allowlist: [],
+      env_allowlist: [],
+    });
+    const p = await engine.getInjectionPolicy("secret://pol");
+    expect(p.response_mode).toBe("filtered");
+    expect(p.response_header_allowlist).toEqual([]);
   });
 
   it("audits a policy change as POLICY_GRANT", async () => {
@@ -462,6 +493,7 @@ describe("injection policy", () => {
     const events = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT });
     expect(events.length).toBeGreaterThanOrEqual(1);
     expect(events[0]?.detail?.policy).toBe("injection");
+    expect(events[0]?.detail?.response_mode).toBe("filtered");
   });
 });
 
@@ -529,6 +561,187 @@ describe("URL allowlist enforcement (HTTP)", () => {
     const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
     const denied = events.find((e) => e.detail?.error === "URL_NOT_ALLOWED");
     expect(denied?.success).toBe(false);
+  });
+});
+
+describe("response mode enforcement (HTTP)", () => {
+  const secretValue = "rm-secret-value-2026";
+
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "rm",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from(secretValue)),
+    });
+  });
+
+  it("defaults to filtered: body and headers returned, value redacted", async () => {
+    const res = await engine.useSecret("secret://rm", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/x`,
+      injection: { type: "bearer" },
+    });
+    if (res.type !== "http") throw new Error("expected http result");
+    expect(res.status).toBe(200);
+    expect(res.headers).toBeDefined();
+    const body = JSON.parse(res.body ?? "{}") as Record<string, string>;
+    expect(body.authorization).toBe("Bearer [REDACTED]");
+  });
+
+  it("filtered redacts encoded echoes (base64, hex, percent)", async () => {
+    const res = await engine.useSecret("secret://rm", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/enc`,
+      injection: { type: "bearer" },
+    });
+    if (res.type !== "http") throw new Error("expected http result");
+    expect(res.body).toBeDefined();
+    expect(res.body).not.toContain(Buffer.from(secretValue).toString("base64"));
+    expect(res.body).not.toContain(Buffer.from(secretValue).toString("hex"));
+    expect(res.body).toContain("[REDACTED]");
+  });
+
+  it("status_only policy strips body and headers", async () => {
+    await engine.setInjectionPolicy("secret://rm", { response_mode: "status_only" });
+    const res = await engine.useSecret("secret://rm", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/x`,
+      injection: { type: "bearer" },
+    });
+    if (res.type !== "http") throw new Error("expected http result");
+    expect(res.status).toBe(200);
+    expect(res.body).toBeUndefined();
+    expect(res.headers).toBeUndefined();
+  });
+
+  it("status_only returns only allowlisted headers", async () => {
+    await engine.setInjectionPolicy("secret://rm", {
+      response_mode: "status_only",
+      response_header_allowlist: ["Content-Type"],
+    });
+    const res = await engine.useSecret("secret://rm", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/x`,
+      injection: { type: "bearer" },
+    });
+    if (res.type !== "http") throw new Error("expected http result");
+    expect(res.headers).toEqual({ "content-type": "application/json" });
+    expect(res.body).toBeUndefined();
+  });
+
+  it("a per-invocation override may tighten the default floor", async () => {
+    const res = await engine.useSecret("secret://rm", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/x`,
+      injection: { type: "bearer" },
+      response_mode: "status_only",
+    });
+    if (res.type !== "http") throw new Error("expected http result");
+    expect(res.status).toBe(200);
+    expect(res.body).toBeUndefined();
+  });
+
+  it("an equal-mode override is accepted", async () => {
+    await engine.setInjectionPolicy("secret://rm", { response_mode: "status_only" });
+    const res = await engine.useSecret("secret://rm", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/x`,
+      injection: { type: "bearer" },
+      response_mode: "status_only",
+    });
+    if (res.type !== "http") throw new Error("expected http result");
+    expect(res.status).toBe(200);
+  });
+
+  it("rejects a loosening override without executing the request", async () => {
+    await engine.setInjectionPolicy("secret://rm", { response_mode: "status_only" });
+    const before = requestCount;
+    try {
+      await engine.useSecret("secret://rm", {
+        type: "http",
+        method: "GET",
+        url: `${baseUrl}/x`,
+        injection: { type: "bearer" },
+        response_mode: "full",
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.RESPONSE_MODE_NOT_ALLOWED);
+    }
+    expect(requestCount).toBe(before);
+    const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
+    const denied = events.find((e) => e.detail?.error === "RESPONSE_MODE_NOT_ALLOWED");
+    expect(denied?.success).toBe(false);
+    expect(denied?.detail?.requested_mode).toBe("full");
+    expect(denied?.detail?.policy_mode).toBe("status_only");
+  });
+
+  it("rejects requesting full against the default filtered floor", async () => {
+    try {
+      await engine.useSecret("secret://rm", {
+        type: "http",
+        method: "GET",
+        url: `${baseUrl}/x`,
+        injection: { type: "bearer" },
+        response_mode: "full",
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.RESPONSE_MODE_NOT_ALLOWED);
+    }
+  });
+
+  it("full policy returns the raw echo unredacted", async () => {
+    await engine.setInjectionPolicy("secret://rm", { response_mode: "full" });
+    const res = await engine.useSecret("secret://rm", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/x`,
+      injection: { type: "bearer" },
+    });
+    if (res.type !== "http") throw new Error("expected http result");
+    const body = JSON.parse(res.body ?? "{}") as Record<string, string>;
+    expect(body.authorization).toBe(`Bearer ${secretValue}`);
+  });
+
+  it("full policy may be tightened to filtered per invocation", async () => {
+    await engine.setInjectionPolicy("secret://rm", { response_mode: "full" });
+    const res = await engine.useSecret("secret://rm", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/x`,
+      injection: { type: "bearer" },
+      response_mode: "filtered",
+    });
+    if (res.type !== "http") throw new Error("expected http result");
+    const body = JSON.parse(res.body ?? "{}") as Record<string, string>;
+    expect(body.authorization).toBe("Bearer [REDACTED]");
+  });
+
+  it("checks the URL allowlist before the response mode", async () => {
+    await engine.setInjectionPolicy("secret://rm", {
+      url_allowlist: [`${baseUrl}/allowed/*`],
+      response_mode: "status_only",
+    });
+    try {
+      await engine.useSecret("secret://rm", {
+        type: "http",
+        method: "GET",
+        url: `${baseUrl}/blocked`,
+        injection: { type: "bearer" },
+        response_mode: "full",
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.URL_NOT_ALLOWED);
+    }
   });
 });
 

@@ -61,6 +61,7 @@ describe("HTTP status mapping", () => {
     [ErrorCode.REDIRECT_POLICY_VIOLATION, 502],
     [ErrorCode.INVALID_INJECTION_CONFIG, 400],
     [ErrorCode.URL_NOT_ALLOWED, 403],
+    [ErrorCode.RESPONSE_MODE_NOT_ALLOWED, 403],
     // Process execution
     [ErrorCode.COMMAND_NOT_ALLOWED, 403],
     [ErrorCode.PROCESS_SPAWN_FAILED, 500],
@@ -114,7 +115,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(80);
+    expect(members).toHaveLength(81);
   });
 });
 
@@ -438,6 +439,14 @@ describe("factory methods", () => {
   it("urlNotAllowed() with url", () => {
     const err = VaultError.urlNotAllowed("https://evil.com/steal");
     expect(err.message).toBe("URL not in secret allowlist: https://evil.com/steal");
+  });
+
+  it("responseModeNotAllowed()", () => {
+    const err = VaultError.responseModeNotAllowed("full", "status_only");
+    expect(err.code).toBe(ErrorCode.RESPONSE_MODE_NOT_ALLOWED);
+    expect(err.statusCode).toBe(403);
+    expect(err.message).toContain('"full"');
+    expect(err.message).toContain('"status_only"');
   });
 
   it("commandNotAllowed() without command", () => {

@@ -171,6 +171,100 @@ describe("HttpInjector", () => {
     });
   });
 
+  describe("response mode shaping", () => {
+    it("status_only returns the status without body or headers", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/echo`, responseMode: "status_only" },
+        new Uint8Array(Buffer.from("shape-tok")),
+        { type: "bearer" },
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body).toBeUndefined();
+      expect(response.headers).toBeUndefined();
+      expect(response.error).toBeUndefined();
+    });
+
+    it("status_only returns only allowlisted headers, case-insensitively", async () => {
+      const response = await injector.executeWithSecret(
+        {
+          method: "GET",
+          url: `${baseUrl}/echo`,
+          responseMode: "status_only",
+          responseHeaderAllowlist: ["CONTENT-TYPE"],
+        },
+        new Uint8Array(Buffer.from("shape-tok")),
+        { type: "bearer" },
+      );
+
+      expect(response.headers).toEqual({ "content-type": "application/json" });
+      expect(response.body).toBeUndefined();
+    });
+
+    it("status_only shapes a 3xx returned under the none redirect policy", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/redirect`, responseMode: "status_only" },
+        new Uint8Array(Buffer.from("shape-tok")),
+        { type: "bearer" },
+        "none",
+      );
+
+      expect(response.status).toBe(302);
+      expect(response.body).toBeUndefined();
+      expect(response.headers).toBeUndefined();
+    });
+
+    it("status_only preserves redirect_warning across a followed cross-origin redirect", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/redirect`, responseMode: "status_only" },
+        new Uint8Array(Buffer.from("shape-tok")),
+        { type: "bearer" },
+        "same-origin",
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body).toBeUndefined();
+      expect(response.redirect_warning).toContain("credentials stripped");
+    });
+
+    it("status_only handles a 204 response without a body stream", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/status?code=204`, responseMode: "status_only" },
+        new Uint8Array(Buffer.from("shape-tok")),
+        { type: "bearer" },
+      );
+
+      expect(response.status).toBe(204);
+      expect(response.body).toBeUndefined();
+    });
+
+    it("status_only preserves the error field on failure", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/slow`, timeoutMs: 500, responseMode: "status_only" },
+        new Uint8Array(Buffer.from("shape-tok")),
+        { type: "bearer" },
+      );
+
+      expect(response.status).toBeNull();
+      expect(response.error).toBe("TIMEOUT");
+    });
+
+    it.each(["filtered", "full"] as const)(
+      "%s returns body and headers at the injector layer",
+      async (mode) => {
+        const response = await injector.executeWithSecret(
+          { method: "GET", url: `${baseUrl}/echo`, responseMode: mode },
+          new Uint8Array(Buffer.from("shape-tok")),
+          { type: "bearer" },
+        );
+
+        expect(response.status).toBe(200);
+        expect(response.body).toBeDefined();
+        expect(response.headers).toBeDefined();
+      },
+    );
+  });
+
   describe("URL validation", () => {
     it("rejects HTTP for non-loopback", async () => {
       await expect(
