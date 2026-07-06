@@ -1,6 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Command } from "commander";
 import type { InjectionPolicy } from "@harpoc/shared";
-import { mergePolicy } from "./allow.js";
+
+const { mockEngine } = vi.hoisted(() => ({
+  mockEngine: {
+    getInjectionPolicy: vi.fn(),
+    setInjectionPolicy: vi.fn().mockResolvedValue(undefined),
+    destroy: vi.fn().mockResolvedValue(undefined),
+  },
+}));
+
+vi.mock("../../utils/vault-loader.js", () => ({
+  resolveVaultDir: vi.fn().mockReturnValue("/mock/.harpoc"),
+  loadUnlockedEngine: vi.fn().mockResolvedValue(mockEngine),
+}));
+
+import { mergePolicy, registerSecretAllowCommand } from "./allow.js";
 
 const current: InjectionPolicy = {
   url_allowlist: ["https://api.github.com/*"],
@@ -58,5 +73,54 @@ describe("mergePolicy", () => {
     expect(merged.response_mode).toBe("filtered");
     expect(merged.url_allowlist).toEqual([]);
     expect(merged.response_header_allowlist).toEqual([]);
+  });
+});
+
+describe("secret allow command — interpreter acknowledgement pass-through", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.getInjectionPolicy.mockResolvedValue({
+      url_allowlist: [],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+    });
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  async function run(args: string[]): Promise<void> {
+    const program = new Command();
+    program.option("--vault-dir <path>", "Path to vault directory");
+    const secret = program.command("secret");
+    registerSecretAllowCommand(secret);
+    program.exitOverride();
+    program.configureOutput({ writeErr: () => {} });
+    await program.parseAsync(["node", "harpoc", "secret", "allow", ...args]);
+  }
+
+  it("--acknowledge-interpreter passes acknowledge_interpreters: true to the engine", async () => {
+    await run(["secret://k", "--command", "python", "--acknowledge-interpreter"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ command_allowlist: ["python"] }),
+      { acknowledge_interpreters: true },
+    );
+  });
+
+  it("defaults acknowledge_interpreters to false when the flag is absent", async () => {
+    await run(["secret://k", "--command", "gh"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ command_allowlist: ["gh"] }),
+      { acknowledge_interpreters: false },
+    );
   });
 });

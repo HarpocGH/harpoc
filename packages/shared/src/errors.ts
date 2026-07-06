@@ -45,6 +45,7 @@ export enum ErrorCode {
   PROCESS_TIMEOUT = "PROCESS_TIMEOUT",
   PROCESS_OUTPUT_LIMIT = "PROCESS_OUTPUT_LIMIT",
   INVALID_PROCESS_CONFIG = "INVALID_PROCESS_CONFIG",
+  INTERPRETER_NOT_ACKNOWLEDGED = "INTERPRETER_NOT_ACKNOWLEDGED",
 
   // MCP proxy
   MCP_SERVER_NOT_CONFIGURED = "MCP_SERVER_NOT_CONFIGURED",
@@ -154,6 +155,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.PROCESS_TIMEOUT]: 504,
   [ErrorCode.PROCESS_OUTPUT_LIMIT]: 413,
   [ErrorCode.INVALID_PROCESS_CONFIG]: 400,
+  [ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED]: 400,
 
   // MCP proxy
   [ErrorCode.MCP_SERVER_NOT_CONFIGURED]: 400,
@@ -343,6 +345,13 @@ export class VaultError extends Error {
       ? `Command not in secret allowlist: ${command}`
       : "Command not in secret allowlist";
     return new VaultError(ErrorCode.COMMAND_NOT_ALLOWED, msg);
+  }
+
+  static interpreterNotAcknowledged(entries: string[]): VaultError {
+    return new VaultError(
+      ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED,
+      `Refusing to allowlist known interpreter(s): ${entries.join(", ")} — allowlisting an interpreter collapses the capability ladder for this secret; pass the explicit acknowledgement (--acknowledge-interpreter / acknowledge_interpreters) to proceed`,
+    );
   }
 
   static processSpawnFailed(detail?: string): VaultError {

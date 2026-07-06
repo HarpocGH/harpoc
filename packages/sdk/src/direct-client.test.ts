@@ -158,11 +158,22 @@ describe("DirectClient", () => {
 
     const policy = { url_allowlist: ["https://api.github.com/*"], command_allowlist: ["gh"], env_allowlist: [] };
     await client.setInjectionPolicy("secret://key", policy);
-    expect(engine.setInjectionPolicy).toHaveBeenCalledWith("secret://key", policy);
+    expect(engine.setInjectionPolicy).toHaveBeenCalledWith("secret://key", policy, undefined);
 
     const got = await client.getInjectionPolicy("secret://key");
     expect(engine.getInjectionPolicy).toHaveBeenCalledWith("secret://key");
     expect(got.command_allowlist).toEqual([]);
+  });
+
+  it("setInjectionPolicy forwards the interpreter acknowledgement to the engine", async () => {
+    const engine = createMockEngine();
+    const client = new DirectClient(engine as never);
+
+    const policy = { url_allowlist: [], command_allowlist: ["python"], env_allowlist: [] };
+    await client.setInjectionPolicy("secret://key", policy, { acknowledge_interpreters: true });
+    expect(engine.setInjectionPolicy).toHaveBeenCalledWith("secret://key", policy, {
+      acknowledge_interpreters: true,
+    });
   });
 
   it("setMcpServerConfig and getMcpServerConfig delegate to the engine", async () => {

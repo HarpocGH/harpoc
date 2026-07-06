@@ -41,6 +41,8 @@ export const AuditEventType = {
   SECRET_DELETE: "secret.delete",
   POLICY_GRANT: "policy.grant",
   POLICY_REVOKE: "policy.revoke",
+  POLICY_INTERPRETER_REFUSED: "policy.interpreter_refused",
+  POLICY_INTERPRETER_ACKNOWLEDGED: "policy.interpreter_acknowledged",
   OAUTH_AUTHORIZE: "oauth.authorize",
   OAUTH_CALLBACK: "oauth.callback",
   OAUTH_REFRESH: "oauth.refresh",
@@ -452,6 +454,18 @@ export interface InjectionPolicy {
   host_allowlist: string[];
   response_mode?: ResponseMode;
   response_header_allowlist?: string[];
+}
+
+/**
+ * Options for the trusted-admin injection-policy set path.
+ * `acknowledge_interpreters` is the thesis §4.5.3 acknowledgement flag: adding
+ * a known interpreter binary to `command_allowlist` collapses the L2/L3
+ * capability-ladder split for that secret, so the vault refuses the addition
+ * without it and audits both outcomes. A per-operation flag — never stored on
+ * the policy.
+ */
+export interface SetInjectionPolicyOptions {
+  acknowledge_interpreters?: boolean;
 }
 
 /**

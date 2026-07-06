@@ -235,6 +235,15 @@ export const injectionPolicyInputSchema = z.object({
 });
 
 /**
+ * PUT injection-policy request body: the policy plus the per-operation
+ * interpreter acknowledgement flag (thesis §4.5.3). The flag is a request
+ * field, never stored on the policy.
+ */
+export const setInjectionPolicyRequestSchema = injectionPolicyInputSchema.extend({
+  acknowledge_interpreters: z.boolean().optional().default(false),
+});
+
+/**
  * Per-secret endpoint-authentication config input (trusted admin path only).
  * At least one of `database` / `ssh` must be present.
  */

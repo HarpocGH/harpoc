@@ -26,6 +26,7 @@ import {
   secretStatusSchema,
   secretTypeSchema,
   sessionFileSchema,
+  setInjectionPolicyRequestSchema,
   startOAuthFlowInputSchema,
   useSecretActionSchema,
   useSecretRequestSchema,
@@ -618,6 +619,41 @@ describe("injectionPolicyInputSchema", () => {
       injectionPolicyInputSchema.parse({ response_header_allowlist: ["x\r\ny"] }),
     ).toThrow();
     expect(() => injectionPolicyInputSchema.parse({ response_header_allowlist: [""] })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// setInjectionPolicyRequestSchema
+// ---------------------------------------------------------------------------
+
+describe("setInjectionPolicyRequestSchema", () => {
+  it("defaults acknowledge_interpreters to false", () => {
+    const result = setInjectionPolicyRequestSchema.parse({ command_allowlist: ["gh"] });
+    expect(result.acknowledge_interpreters).toBe(false);
+    expect(result.command_allowlist).toEqual(["gh"]);
+  });
+
+  it("accepts an explicit acknowledgement", () => {
+    const result = setInjectionPolicyRequestSchema.parse({
+      command_allowlist: ["python"],
+      acknowledge_interpreters: true,
+    });
+    expect(result.acknowledge_interpreters).toBe(true);
+  });
+
+  it("rejects a non-boolean acknowledgement", () => {
+    expect(() =>
+      setInjectionPolicyRequestSchema.parse({ acknowledge_interpreters: "yes" }),
+    ).toThrow();
+  });
+
+  it("still validates the policy fields", () => {
+    expect(() =>
+      setInjectionPolicyRequestSchema.parse({
+        command_allowlist: [""],
+        acknowledge_interpreters: true,
+      }),
+    ).toThrow();
   });
 });
 

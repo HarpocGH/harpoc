@@ -4,8 +4,8 @@ import { VaultError } from "@harpoc/shared";
 import {
   connectionConfigSchema,
   createSecretInputSchema,
-  injectionPolicyInputSchema,
   mcpServerConfigSchema,
+  setInjectionPolicyRequestSchema,
   useSecretActionSchema,
 } from "@harpoc/shared";
 import type { InjectionConfig } from "@harpoc/shared";
@@ -194,13 +194,14 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const body = await c.req.json<Record<string, unknown>>();
-    const parsed = injectionPolicyInputSchema.safeParse(body);
+    const parsed = setInjectionPolicyRequestSchema.safeParse(body);
     if (!parsed.success) {
       throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
     }
 
     const handle = buildHandle(c.req.param("handle"));
-    await engine.setInjectionPolicy(handle, parsed.data);
+    const { acknowledge_interpreters, ...policy } = parsed.data;
+    await engine.setInjectionPolicy(handle, policy, { acknowledge_interpreters });
     return c.json({ data: { updated: true } });
   });
 

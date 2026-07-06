@@ -10,6 +10,7 @@ import type {
   OAuthProviderConfig,
   OAuthTokenStatus,
   Permission,
+  SetInjectionPolicyOptions,
   UseSecretAction,
   UseSecretResponse,
   VaultApiToken,
@@ -30,6 +31,7 @@ import {
   AES_KEY_LENGTH,
   AuditEventType,
   ErrorCode,
+  findKnownInterpreters,
   LOCKOUT_DURATIONS_MS,
   LOCKOUT_MAX_ATTEMPTS,
   MAX_TOKEN_TTL_MS,
@@ -615,10 +617,35 @@ export class VaultEngine {
   /**
    * Set (or replace) a secret's injection policy. Trusted administrative
    * operation — the allowlists are encrypted under the KEK.
+   *
+   * Command-allowlist entries naming a known interpreter (thesis §4.5.3)
+   * collapse the L2/L3 capability-ladder split for this secret, so a newly
+   * added interpreter entry is refused unless the caller passes
+   * `options.acknowledge_interpreters`; the refusal and any acknowledged
+   * addition are both audited. Entries already on the stored allowlist are
+   * not re-gated — re-asserting them is not an addition.
    */
-  async setInjectionPolicy(handle: string, policy: InjectionPolicy): Promise<void> {
+  async setInjectionPolicy(
+    handle: string,
+    policy: InjectionPolicy,
+    options?: SetInjectionPolicyOptions,
+  ): Promise<void> {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
+
+    const stored = new Set(this.loadInjectionPolicy(s, secret.id).command_allowlist);
+    const addedInterpreters = findKnownInterpreters(
+      (policy.command_allowlist ?? []).filter((entry) => !stored.has(entry)),
+    );
+    if (addedInterpreters.length > 0 && options?.acknowledge_interpreters !== true) {
+      s.auditLogger.log({
+        eventType: AuditEventType.POLICY_INTERPRETER_REFUSED,
+        secretId: secret.id,
+        detail: { policy: "injection", interpreters: addedInterpreters },
+        sessionId: this.sessionId ?? undefined,
+      });
+      throw VaultError.interpreterNotAcknowledged(addedInterpreters);
+    }
 
     const json = JSON.stringify({
       url_allowlist: policy.url_allowlist ?? [],
@@ -657,6 +684,15 @@ export class VaultEngine {
       },
       sessionId: this.sessionId ?? undefined,
     });
+
+    if (addedInterpreters.length > 0) {
+      s.auditLogger.log({
+        eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED,
+        secretId: secret.id,
+        detail: { policy: "injection", interpreters: addedInterpreters },
+        sessionId: this.sessionId ?? undefined,
+      });
+    }
   }
 
   /** Read a secret's injection policy (empty allowlists when unset). */

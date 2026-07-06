@@ -8,6 +8,7 @@ import type {
   Permission,
   PrincipalType,
   SecretType,
+  SetInjectionPolicyOptions,
   UseSecretAction,
   UseSecretResponse,
   VaultState,
@@ -43,7 +44,11 @@ export interface VaultClient {
   rotateSecret(handle: string, newValue: Uint8Array): Promise<void>;
   revokeSecret(handle: string): Promise<void>;
   useSecret(handle: string, action: UseSecretAction): Promise<UseSecretResponse>;
-  setInjectionPolicy(handle: string, policy: InjectionPolicy): Promise<void>;
+  setInjectionPolicy(
+    handle: string,
+    policy: InjectionPolicy,
+    options?: SetInjectionPolicyOptions,
+  ): Promise<void>;
   getInjectionPolicy(handle: string): Promise<InjectionPolicy>;
   setMcpServerConfig(handle: string, config: McpServerConfig): Promise<void>;
   getMcpServerConfig(handle: string): Promise<McpServerConfig | undefined>;

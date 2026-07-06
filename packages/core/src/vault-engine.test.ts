@@ -497,6 +497,148 @@ describe("injection policy", () => {
   });
 });
 
+describe("interpreter acknowledgement (thesis §4.5.3)", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "interp",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+  });
+
+  it("refuses to add a known interpreter without acknowledgement and audits the refusal", async () => {
+    try {
+      await engine.setInjectionPolicy("secret://interp", {
+        url_allowlist: [],
+        command_allowlist: ["python"],
+        env_allowlist: [],
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED);
+    }
+    // The policy is unchanged and no grant was recorded
+    const p = await engine.getInjectionPolicy("secret://interp");
+    expect(p.command_allowlist).toEqual([]);
+    expect(engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })).toHaveLength(0);
+
+    const refused = engine.queryAudit({
+      eventType: AuditEventType.POLICY_INTERPRETER_REFUSED,
+    });
+    expect(refused).toHaveLength(1);
+    expect(refused[0]?.detail?.policy).toBe("injection");
+    expect(refused[0]?.detail?.interpreters).toEqual(["python"]);
+  });
+
+  it("accepts an acknowledged interpreter addition and audits it", async () => {
+    await engine.setInjectionPolicy(
+      "secret://interp",
+      { url_allowlist: [], command_allowlist: ["python"], env_allowlist: [] },
+      { acknowledge_interpreters: true },
+    );
+    const p = await engine.getInjectionPolicy("secret://interp");
+    expect(p.command_allowlist).toEqual(["python"]);
+
+    const acked = engine.queryAudit({
+      eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED,
+    });
+    expect(acked).toHaveLength(1);
+    expect(acked[0]?.detail?.interpreters).toEqual(["python"]);
+    expect(engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })).toHaveLength(1);
+  });
+
+  it("detects interpreters by basename across paths, extensions and versions", async () => {
+    for (const entry of [
+      "/usr/local/bin/python3.12",
+      "C:\\Program Files\\nodejs\\node.exe",
+      "bash",
+    ]) {
+      try {
+        await engine.setInjectionPolicy("secret://interp", {
+          url_allowlist: [],
+          command_allowlist: [entry],
+          env_allowlist: [],
+        });
+        expect.fail("should throw");
+      } catch (e) {
+        expect((e as VaultError).code).toBe(ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED);
+      }
+    }
+  });
+
+  it("does not re-gate an interpreter already on the stored allowlist", async () => {
+    await engine.setInjectionPolicy(
+      "secret://interp",
+      { url_allowlist: [], command_allowlist: ["python"], env_allowlist: [] },
+      { acknowledge_interpreters: true },
+    );
+    // Re-asserting the stored entry while changing another group needs no flag
+    await engine.setInjectionPolicy("secret://interp", {
+      url_allowlist: ["https://api.example.com/*"],
+      command_allowlist: ["python"],
+      env_allowlist: [],
+    });
+    const p = await engine.getInjectionPolicy("secret://interp");
+    expect(p.url_allowlist).toEqual(["https://api.example.com/*"]);
+    expect(p.command_allowlist).toEqual(["python"]);
+    // Exactly one acknowledgement in the trail — the original addition
+    expect(
+      engine.queryAudit({ eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED }),
+    ).toHaveLength(1);
+    expect(
+      engine.queryAudit({ eventType: AuditEventType.POLICY_INTERPRETER_REFUSED }),
+    ).toHaveLength(0);
+  });
+
+  it("gates each newly added interpreter entry, reporting only the new ones", async () => {
+    await engine.setInjectionPolicy(
+      "secret://interp",
+      { url_allowlist: [], command_allowlist: ["python"], env_allowlist: [] },
+      { acknowledge_interpreters: true },
+    );
+    try {
+      await engine.setInjectionPolicy("secret://interp", {
+        url_allowlist: [],
+        command_allowlist: ["python", "bash"],
+        env_allowlist: [],
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED);
+    }
+    const refused = engine.queryAudit({
+      eventType: AuditEventType.POLICY_INTERPRETER_REFUSED,
+    });
+    expect(refused).toHaveLength(1);
+    expect(refused[0]?.detail?.interpreters).toEqual(["bash"]);
+  });
+
+  it("never gates non-interpreter commands", async () => {
+    await engine.setInjectionPolicy("secret://interp", {
+      url_allowlist: [],
+      command_allowlist: ["gh", "/usr/bin/git"],
+      env_allowlist: [],
+    });
+    const p = await engine.getInjectionPolicy("secret://interp");
+    expect(p.command_allowlist).toEqual(["gh", "/usr/bin/git"]);
+    expect(
+      engine.queryAudit({ eventType: AuditEventType.POLICY_INTERPRETER_REFUSED }),
+    ).toHaveLength(0);
+  });
+
+  it("logs no acknowledgement event when the flag is passed without interpreters", async () => {
+    await engine.setInjectionPolicy(
+      "secret://interp",
+      { url_allowlist: [], command_allowlist: ["gh"], env_allowlist: [] },
+      { acknowledge_interpreters: true },
+    );
+    expect(
+      engine.queryAudit({ eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED }),
+    ).toHaveLength(0);
+  });
+});
+
 describe("URL allowlist enforcement (HTTP)", () => {
   beforeEach(async () => {
     await engine.initVault("password");
@@ -756,11 +898,11 @@ describe("useSecret (process injection)", () => {
   });
 
   it("runs an allowlisted command with the secret injected as an env var", async () => {
-    await engine.setInjectionPolicy("secret://proc", {
-      url_allowlist: [],
-      command_allowlist: [process.execPath],
-      env_allowlist: [],
-    });
+    await engine.setInjectionPolicy(
+      "secret://proc",
+      { url_allowlist: [], command_allowlist: [process.execPath], env_allowlist: [] },
+      { acknowledge_interpreters: true },
+    );
     const res = await engine.useSecret("secret://proc", {
       type: "process",
       command: process.execPath,
@@ -773,11 +915,11 @@ describe("useSecret (process injection)", () => {
   });
 
   it("redacts the secret from process output", async () => {
-    await engine.setInjectionPolicy("secret://proc", {
-      url_allowlist: [],
-      command_allowlist: [process.execPath],
-      env_allowlist: [],
-    });
+    await engine.setInjectionPolicy(
+      "secret://proc",
+      { url_allowlist: [], command_allowlist: [process.execPath], env_allowlist: [] },
+      { acknowledge_interpreters: true },
+    );
     const res = await engine.useSecret("secret://proc", {
       type: "process",
       command: process.execPath,
@@ -1090,11 +1232,11 @@ describe("useSecret (MCP proxy)", () => {
   });
 
   it("forwards a tool call to a spawned stdio server with the credential injected", async () => {
-    await engine.setInjectionPolicy("secret://mcpuse", {
-      url_allowlist: [],
-      command_allowlist: [process.execPath],
-      env_allowlist: [],
-    });
+    await engine.setInjectionPolicy(
+      "secret://mcpuse",
+      { url_allowlist: [], command_allowlist: [process.execPath], env_allowlist: [] },
+      { acknowledge_interpreters: true },
+    );
     await engine.setMcpServerConfig("secret://mcpuse", {
       server_name: "test-mcp",
       transport: "stdio",
@@ -1136,11 +1278,11 @@ describe("useSecret (MCP proxy)", () => {
   });
 
   it("audits mcp.spawn on first use and secret.use with context=mcp", async () => {
-    await engine.setInjectionPolicy("secret://mcpuse", {
-      url_allowlist: [],
-      command_allowlist: [process.execPath],
-      env_allowlist: [],
-    });
+    await engine.setInjectionPolicy(
+      "secret://mcpuse",
+      { url_allowlist: [], command_allowlist: [process.execPath], env_allowlist: [] },
+      { acknowledge_interpreters: true },
+    );
     await engine.setMcpServerConfig("secret://mcpuse", {
       server_name: "test-mcp",
       transport: "stdio",
@@ -1162,11 +1304,11 @@ describe("useSecret (MCP proxy)", () => {
   });
 
   it("lock() terminates live downstream servers and audits mcp.terminate", async () => {
-    await engine.setInjectionPolicy("secret://mcpuse", {
-      url_allowlist: [],
-      command_allowlist: [process.execPath],
-      env_allowlist: [],
-    });
+    await engine.setInjectionPolicy(
+      "secret://mcpuse",
+      { url_allowlist: [], command_allowlist: [process.execPath], env_allowlist: [] },
+      { acknowledge_interpreters: true },
+    );
     await engine.setMcpServerConfig("secret://mcpuse", {
       server_name: "test-mcp",
       transport: "stdio",

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ErrorCode } from "@harpoc/shared";
+import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
@@ -42,11 +42,13 @@ describe("Process execution context (I2b / output-channel leakage)", () => {
       value: new Uint8Array(Buffer.from(SECRET, "utf8")),
     });
     handle = created.handle;
-    await vault.engine.setInjectionPolicy(handle, {
-      url_allowlist: [],
-      command_allowlist: [NODE],
-      env_allowlist: [],
-    });
+    // NODE is a known interpreter — the §4.5.3 gate requires the explicit
+    // acknowledgement, making the ladder collapse a recorded policy decision.
+    await vault.engine.setInjectionPolicy(
+      handle,
+      { url_allowlist: [], command_allowlist: [NODE], env_allowlist: [] },
+      { acknowledge_interpreters: true },
+    );
   });
 
   afterEach(async () => {
@@ -148,6 +150,43 @@ describe("Process execution context (I2b / output-channel leakage)", () => {
     await expect(
       vault.engine.useSecret(created.handle, procAction(`process.stdout.write("x")`)),
     ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+  });
+
+  // --- Interpreter acknowledgement (§4.5.3: the L3 -> L4 raise is conditional) ---
+
+  it("§4.5.3: refuses to allowlist an interpreter without acknowledgement and audits the refusal", async () => {
+    const created = await vault.engine.createSecret({
+      name: "interp-gate",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from(SECRET, "utf8")),
+    });
+    await expect(
+      vault.engine.setInjectionPolicy(created.handle, {
+        url_allowlist: [],
+        command_allowlist: [NODE],
+        env_allowlist: [],
+      }),
+    ).rejects.toMatchObject({ code: ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED });
+
+    // The allowlist stays empty, so the fail-safe deny still holds
+    await expect(
+      vault.engine.useSecret(created.handle, procAction(`process.stdout.write("x")`)),
+    ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+
+    const refused = vault.engine.queryAudit({
+      eventType: AuditEventType.POLICY_INTERPRETER_REFUSED,
+    });
+    expect(refused).toHaveLength(1);
+    expect(refused[0]?.detail?.interpreters).toEqual([NODE]);
+  });
+
+  it("§4.5.3: the acknowledged interpreter addition is recorded in the audit trail", async () => {
+    // beforeEach acknowledged NODE for `handle`
+    const acked = vault.engine.queryAudit({
+      eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED,
+    });
+    expect(acked).toHaveLength(1);
+    expect(acked[0]?.detail?.interpreters).toEqual([NODE]);
   });
 
   it("clean environment: the child does not inherit the vault's process env", async () => {

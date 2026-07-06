@@ -504,6 +504,52 @@ describe("secret routes", () => {
       });
       expect(res.status).toBe(400);
     });
+
+    it("PUT passes the interpreter acknowledgement to the engine, not the policy", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ command_allowlist: ["python"], acknowledge_interpreters: true }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+      expect((call[1] as Record<string, unknown>).acknowledge_interpreters).toBeUndefined();
+      expect(call[2]).toEqual({ acknowledge_interpreters: true });
+    });
+
+    it("PUT defaults the interpreter acknowledgement to false", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ command_allowlist: ["gh"] }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+      expect(call[2]).toEqual({ acknowledge_interpreters: false });
+    });
+
+    it("PUT rejects a non-boolean acknowledge_interpreters", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ acknowledge_interpreters: "yes" }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("PUT maps an unacknowledged interpreter refusal to 400", async () => {
+      engine.setInjectionPolicy.mockRejectedValueOnce(
+        VaultError.interpreterNotAcknowledged(["python"]),
+      );
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ command_allowlist: ["python"] }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe(ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED);
+    });
   });
 
   describe("mcp-server config routes", () => {

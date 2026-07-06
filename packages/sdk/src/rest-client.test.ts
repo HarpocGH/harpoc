@@ -199,6 +199,30 @@ describe("RestClient", () => {
       expect(body.response_header_allowlist).toEqual(["Content-Type"]);
     });
 
+    it("setInjectionPolicy defaults acknowledge_interpreters to false in the body", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", {
+        url_allowlist: [],
+        command_allowlist: ["gh"],
+        env_allowlist: [],
+      });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(call[1].body as string);
+      expect(body.acknowledge_interpreters).toBe(false);
+    });
+
+    it("setInjectionPolicy carries the interpreter acknowledgement in the body", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy(
+        "secret://k",
+        { url_allowlist: [], command_allowlist: ["python"], env_allowlist: [] },
+        { acknowledge_interpreters: true },
+      );
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(call[1].body as string);
+      expect(body.acknowledge_interpreters).toBe(true);
+    });
+
     it("getInjectionPolicy sends GET", async () => {
       mockFetchResponse({ url_allowlist: [], command_allowlist: ["gh"], env_allowlist: [] });
       const policy = await client.getInjectionPolicy("secret://k");

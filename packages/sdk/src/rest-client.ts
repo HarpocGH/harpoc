@@ -4,6 +4,7 @@ import type {
   CreateSecretResponse,
   InjectionPolicy,
   McpServerConfig,
+  SetInjectionPolicyOptions,
   UseSecretAction,
   UseSecretResponse,
 } from "@harpoc/shared";
@@ -81,7 +82,11 @@ export class RestClient implements VaultClient {
     );
   }
 
-  async setInjectionPolicy(handle: string, policy: InjectionPolicy): Promise<void> {
+  async setInjectionPolicy(
+    handle: string,
+    policy: InjectionPolicy,
+    options?: SetInjectionPolicyOptions,
+  ): Promise<void> {
     await this.request<{ updated: boolean }>(
       "PUT",
       `/api/v1/secrets/${this.encodeHandle(handle)}/injection-policy`,
@@ -92,6 +97,7 @@ export class RestClient implements VaultClient {
         host_allowlist: policy.host_allowlist,
         response_mode: policy.response_mode,
         response_header_allowlist: policy.response_header_allowlist,
+        acknowledge_interpreters: options?.acknowledge_interpreters ?? false,
       },
     );
   }

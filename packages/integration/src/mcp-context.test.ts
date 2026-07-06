@@ -84,11 +84,13 @@ describe("MCP proxy context — stdio transport (thesis §4.5.4)", () => {
       value: new Uint8Array(Buffer.from(SECRET, "utf8")),
     });
     handle = created.handle;
-    await vault.engine.setInjectionPolicy(handle, {
-      url_allowlist: [],
-      command_allowlist: [NODE],
-      env_allowlist: [],
-    });
+    // NODE is a known interpreter (§4.5.3) — the common case for stdio MCP
+    // servers, so the launch command needs the explicit acknowledgement.
+    await vault.engine.setInjectionPolicy(
+      handle,
+      { url_allowlist: [], command_allowlist: [NODE], env_allowlist: [] },
+      { acknowledge_interpreters: true },
+    );
     await vault.engine.setMcpServerConfig(handle, {
       server_name: "integ-mcp",
       transport: "stdio",

@@ -68,6 +68,7 @@ describe("HTTP status mapping", () => {
     [ErrorCode.PROCESS_TIMEOUT, 504],
     [ErrorCode.PROCESS_OUTPUT_LIMIT, 413],
     [ErrorCode.INVALID_PROCESS_CONFIG, 400],
+    [ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED, 400],
     // MCP proxy
     [ErrorCode.MCP_SERVER_NOT_CONFIGURED, 400],
     [ErrorCode.MCP_SERVER_MISMATCH, 400],
@@ -115,7 +116,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(81);
+    expect(members).toHaveLength(82);
   });
 });
 
@@ -459,6 +460,14 @@ describe("factory methods", () => {
   it("commandNotAllowed() with command", () => {
     const err = VaultError.commandNotAllowed("curl");
     expect(err.message).toBe("Command not in secret allowlist: curl");
+  });
+
+  it("interpreterNotAcknowledged()", () => {
+    const err = VaultError.interpreterNotAcknowledged(["python", "/usr/bin/node"]);
+    expect(err.code).toBe(ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toContain("python, /usr/bin/node");
+    expect(err.message).toContain("--acknowledge-interpreter");
   });
 
   it("processSpawnFailed() without detail", () => {

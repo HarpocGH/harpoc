@@ -16,6 +16,7 @@ export interface AllowOptions {
   host?: string[];
   responseMode?: string;
   responseHeader?: string[];
+  acknowledgeInterpreter?: boolean;
   clear?: boolean;
   show?: boolean;
   json?: boolean;
@@ -70,6 +71,10 @@ export function registerSecretAllowCommand(secret: Command): void {
       collect,
       [],
     )
+    .option(
+      "--acknowledge-interpreter",
+      "Explicitly acknowledge allowlisting a known interpreter (sh, bash, python, node, ...) — collapses the capability ladder for this secret; refused and audited otherwise",
+    )
     .option("--clear", "Reset the whole policy to defaults before applying the other flags")
     .option("--show", "Show the current policy instead of setting it")
     .option("--json", "Output as JSON")
@@ -99,7 +104,9 @@ export function registerSecretAllowCommand(secret: Command): void {
             throw new Error(parsed.error.issues.map((i) => i.message).join(", "));
           }
 
-          await engine.setInjectionPolicy(handle, parsed.data);
+          await engine.setInjectionPolicy(handle, parsed.data, {
+            acknowledge_interpreters: options.acknowledgeInterpreter === true,
+          });
           printSuccess(`Injection policy updated (${handle})`);
         } finally {
           await engine.destroy();
