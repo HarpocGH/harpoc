@@ -1,9 +1,10 @@
 import type { Permission, VaultApiToken } from "@harpoc/shared";
-import { VaultError } from "@harpoc/shared";
+import { matchesSecretNameScope, VaultError } from "@harpoc/shared";
 import { parseHandle } from "@harpoc/shared";
 
 /**
- * Enforce 3-dimensional token scope (permission, project, secret names).
+ * Enforce 3-dimensional token scope (permission, project, secret-name
+ * patterns — `*` wildcards, thesis §4.7).
  * Mirrors ScopeGuard.checkAccess() from mcp-server.
  */
 export function checkTokenScope(
@@ -26,11 +27,9 @@ export function checkTokenScope(
     throw VaultError.accessDenied(`Token is scoped to project: ${token.project}`);
   }
 
-  // 3. Secret name scope check
-  if (token.secrets?.length && secretName !== undefined) {
-    if (!token.secrets.includes(secretName)) {
-      throw VaultError.accessDenied("Token does not grant access to this secret");
-    }
+  // 3. Secret name scope check (name patterns, thesis §4.7)
+  if (secretName !== undefined && !matchesSecretNameScope(secretName, token.secrets)) {
+    throw VaultError.accessDenied("Token does not grant access to this secret");
   }
 }
 

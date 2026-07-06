@@ -107,6 +107,64 @@ describe("ScopeGuard", () => {
       const guard = new ScopeGuard(makeToken());
       expect(guard.checkAccess("use", undefined, "any-secret")).toBe("test-agent");
     });
+
+    it("matches secret-name patterns with * wildcards (thesis §4.7)", () => {
+      const guard = new ScopeGuard(makeToken({ secrets: ["db-*"] }));
+      expect(guard.checkAccess("use", undefined, "db-prod")).toBe("test-agent");
+      expect(guard.checkAccess("use", undefined, "db-staging")).toBe("test-agent");
+      expect(() => guard.checkAccess("use", undefined, "api-key")).toThrow(
+        expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }),
+      );
+    });
+
+    it("mixes literal names and patterns", () => {
+      const guard = new ScopeGuard(makeToken({ secrets: ["api-key", "db-*"] }));
+      expect(guard.checkAccess("use", undefined, "api-key")).toBe("test-agent");
+      expect(guard.checkAccess("use", undefined, "db-prod")).toBe("test-agent");
+      expect(() => guard.checkAccess("use", undefined, "github-token")).toThrow(
+        expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }),
+      );
+    });
+
+    it("anchors patterns to the whole name", () => {
+      const guard = new ScopeGuard(makeToken({ secrets: ["db-*"] }));
+      expect(() => guard.checkAccess("use", undefined, "mydb-prod")).toThrow(
+        expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }),
+      );
+    });
+  });
+
+  describe("filterByScope", () => {
+    const secrets = [
+      { name: "db-prod", project: "api" },
+      { name: "db-staging", project: "api" },
+      { name: "api-key", project: "api" },
+      { name: "github-token", project: null },
+    ];
+
+    it("passes everything through without a token", () => {
+      const guard = new ScopeGuard(null);
+      expect(guard.filterByScope(secrets)).toEqual(secrets);
+    });
+
+    it("filters by secret-name patterns", () => {
+      const guard = new ScopeGuard(makeToken({ secrets: ["db-*"] }));
+      expect(guard.filterByScope(secrets).map((s) => s.name)).toEqual(["db-prod", "db-staging"]);
+    });
+
+    it("filters by exact names and patterns together", () => {
+      const guard = new ScopeGuard(makeToken({ secrets: ["api-key", "db-*"] }));
+      expect(guard.filterByScope(secrets).map((s) => s.name)).toEqual([
+        "db-prod",
+        "db-staging",
+        "api-key",
+      ]);
+    });
+
+    it("combines project and name-pattern filtering", () => {
+      const guard = new ScopeGuard(makeToken({ project: "api", secrets: ["db-*"] }));
+      expect(guard.filterByScope(secrets).map((s) => s.name)).toEqual(["db-prod", "db-staging"]);
+    });
   });
 
   describe("combined enforcement", () => {

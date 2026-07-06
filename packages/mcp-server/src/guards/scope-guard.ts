@@ -1,11 +1,12 @@
 import type { Permission, VaultApiToken } from "@harpoc/shared";
-import { VaultError } from "@harpoc/shared";
+import { matchesSecretNameScope, VaultError } from "@harpoc/shared";
 
 /**
  * 3-dimensional launch-token scope enforcement:
  * 1. Permission — token's scope must include the required permission (or admin)
  * 2. Project — if token specifies a project, only that project's secrets are accessible
- * 3. Secrets — if token specifies secret names, only those secrets are accessible
+ * 3. Secrets — if token specifies secret-name patterns (`*` wildcards, thesis
+ *    §4.7), only secrets with matching names are accessible
  */
 export class ScopeGuard {
   constructor(private readonly token: VaultApiToken | null) {}
@@ -38,11 +39,9 @@ export class ScopeGuard {
       throw VaultError.accessDenied(`Token is scoped to project: ${this.token.project}`);
     }
 
-    // 3. Secret name scope check
-    if (this.token.secrets?.length && secretName !== undefined) {
-      if (!this.token.secrets.includes(secretName)) {
-        throw VaultError.accessDenied("Token does not grant access to this secret");
-      }
+    // 3. Secret name scope check (name patterns, thesis §4.7)
+    if (secretName !== undefined && !matchesSecretNameScope(secretName, this.token.secrets)) {
+      throw VaultError.accessDenied("Token does not grant access to this secret");
     }
 
     return this.token.sub;
@@ -60,7 +59,7 @@ export class ScopeGuard {
       filtered = filtered.filter((s) => s.project === this.token?.project);
     }
     if (this.token.secrets?.length) {
-      filtered = filtered.filter((s) => this.token?.secrets?.includes(s.name));
+      filtered = filtered.filter((s) => matchesSecretNameScope(s.name, this.token?.secrets));
     }
     return filtered;
   }

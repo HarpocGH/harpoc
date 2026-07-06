@@ -1388,6 +1388,25 @@ describe("JWT tokens", () => {
     expect(decoded.scope).toEqual(["read", "use"]);
   });
 
+  it("carries secret-name patterns in the secrets claim (thesis §4.7)", () => {
+    const token = engine.createToken("user-1", ["use"], 60_000, {
+      secrets: ["db-*", "api-key"],
+    });
+    const decoded = engine.verifyToken(token);
+    expect(decoded.secrets).toEqual(["db-*", "api-key"]);
+  });
+
+  it("rejects an invalid secret-name pattern at creation", () => {
+    for (const pattern of ["db/*", "db prod", "", "[a]"]) {
+      try {
+        engine.createToken("user-1", ["use"], 60_000, { secrets: [pattern] });
+        expect.fail("should throw");
+      } catch (e) {
+        expect((e as VaultError).code).toBe(ErrorCode.INVALID_SECRET_NAME);
+      }
+    }
+  });
+
   it("rejects invalid token", () => {
     expect(() => engine.verifyToken("bad.token.here")).toThrow(VaultError);
   });

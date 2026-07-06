@@ -126,6 +126,38 @@ describe("secret routes", () => {
     });
   });
 
+  describe("token secret-name patterns (thesis §4.7)", () => {
+    it("filters the list by * patterns", async () => {
+      engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["test-*"] });
+      const res = await app.request("/api/v1/secrets", { headers: AUTH });
+      const body = await res.json();
+      expect(body.data).toHaveLength(1);
+
+      engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["db-*"] });
+      const res2 = await app.request("/api/v1/secrets", { headers: AUTH });
+      const body2 = await res2.json();
+      expect(body2.data).toHaveLength(0);
+    });
+
+    it("enforces patterns on individual secret access", async () => {
+      engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["db-*"] });
+      const denied = await app.request("/api/v1/secrets/test-key", { headers: AUTH });
+      expect(denied.status).toBe(403);
+
+      const allowed = await app.request("/api/v1/secrets/db-prod", { headers: AUTH });
+      expect(allowed.status).toBe(200);
+    });
+
+    it("keeps exact-name scoping intact", async () => {
+      engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["test-key"] });
+      const allowed = await app.request("/api/v1/secrets/test-key", { headers: AUTH });
+      expect(allowed.status).toBe(200);
+
+      const denied = await app.request("/api/v1/secrets/test-key-2", { headers: AUTH });
+      expect(denied.status).toBe(403);
+    });
+  });
+
   describe("POST /api/v1/secrets", () => {
     it("creates a secret", async () => {
       const res = await app.request("/api/v1/secrets", {

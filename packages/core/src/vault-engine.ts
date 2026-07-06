@@ -32,6 +32,7 @@ import {
   AuditEventType,
   ErrorCode,
   findKnownInterpreters,
+  isValidSecretNamePattern,
   LOCKOUT_DURATIONS_MS,
   LOCKOUT_MAX_ATTEMPTS,
   MAX_TOKEN_TTL_MS,
@@ -1346,6 +1347,10 @@ export class VaultEngine {
 
   /**
    * Create a scoped JWT API token. HMAC-SHA256 signed.
+   *
+   * `options.secrets` entries are secret-name patterns (thesis §4.7): literal
+   * names or `*` wildcards (`db-*`). Each entry is validated against the
+   * pattern grammar — name characters plus `*`, no other meta-characters.
    */
   createToken(
     subject: string,
@@ -1354,6 +1359,15 @@ export class VaultEngine {
     options?: { project?: string; secrets?: string[] },
   ): string {
     const s = this.assertUnlocked();
+
+    for (const pattern of options?.secrets ?? []) {
+      if (!isValidSecretNamePattern(pattern)) {
+        throw new VaultError(
+          ErrorCode.INVALID_SECRET_NAME,
+          `Invalid secret name pattern: "${pattern}" — letters, digits, "_", "-" and "*" wildcards only`,
+        );
+      }
+    }
 
     const effectiveTtl = Math.min(Math.max(ttlMs, 0), MAX_TOKEN_TTL_MS);
     const now = Math.floor(Date.now() / 1000);

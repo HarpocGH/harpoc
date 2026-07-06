@@ -15,7 +15,10 @@ export function registerAuthTokenCommand(auth: Command): void {
     .option("--ttl <minutes>", "Token TTL in minutes", "60")
     .option("--agent <name>", "Agent name (sets JWT subject)")
     .option("--project <name>", "Project scope for the token")
-    .option("--secrets <names>", "Comma-separated secret names the token can access")
+    .option(
+      "--secrets <patterns>",
+      "Comma-separated secret names or patterns with * wildcards (e.g. db-*) the token can access",
+    )
     .option("--json", "Output as JSON")
     .action(
       async (

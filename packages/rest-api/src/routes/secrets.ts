@@ -4,6 +4,7 @@ import { VaultError } from "@harpoc/shared";
 import {
   connectionConfigSchema,
   createSecretInputSchema,
+  matchesSecretNameScope,
   mcpServerConfigSchema,
   setInjectionPolicyRequestSchema,
   useSecretActionSchema,
@@ -33,9 +34,9 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     let secrets = engine.listSecrets(effectiveProject);
 
-    // If token is secret-name-scoped, filter results
+    // If token is secret-name-scoped, filter results (name patterns, thesis §4.7)
     if (token.secrets?.length) {
-      secrets = secrets.filter((s) => token.secrets?.includes(s.name));
+      secrets = secrets.filter((s) => matchesSecretNameScope(s.name, token.secrets));
     }
 
     return c.json({ data: secrets });

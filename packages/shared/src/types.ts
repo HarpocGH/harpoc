@@ -246,6 +246,7 @@ export interface VaultApiToken {
   exp: number;
   jti: string;
   project?: string;
+  /** Secret-name patterns (`*` wildcards, thesis §4.7); absent = unrestricted. */
   secrets?: string[];
 }
 
