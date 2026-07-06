@@ -1,10 +1,19 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync, statSync, readdirSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  statSync,
+  readdirSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SessionFile } from "@harpoc/shared";
 import { DEFAULT_SESSION_TTL_MS, MAX_SESSION_TTL_MS } from "@harpoc/shared";
 import { SessionManager } from "./session-manager.js";
+import type { SessionKeyProtector } from "./session-key-protector.js";
 
 let sessionDir: string;
 let sessionPath: string;
@@ -243,5 +252,145 @@ describe("secure erase", () => {
 
     const remaining = readdirSync(sessionDir).filter((f) => f.includes(".tmp"));
     expect(remaining).toHaveLength(0);
+  });
+});
+
+describe("session-key protection", () => {
+  class FakeKeystoreProtector implements SessionKeyProtector {
+    readonly scheme = "dpapi" as const;
+    protectCalls = 0;
+    unprotectCalls = 0;
+    failProtect = false;
+    failUnprotect = false;
+
+    async protect(key: Uint8Array): Promise<Uint8Array> {
+      this.protectCalls++;
+      if (this.failProtect) throw new Error("keystore unavailable");
+      return new Uint8Array(Buffer.concat([Buffer.from("WRAP:"), Buffer.from(key)]));
+    }
+
+    async unprotect(blob: Uint8Array): Promise<Uint8Array> {
+      this.unprotectCalls++;
+      if (this.failUnprotect) throw new Error("keystore unavailable");
+      const buf = Buffer.from(blob);
+      if (!buf.subarray(0, 5).equals(Buffer.from("WRAP:"))) throw new Error("not a wrapped blob");
+      return new Uint8Array(buf.subarray(5));
+    }
+  }
+
+  function readRawFile(): SessionFile {
+    return JSON.parse(readFileSync(sessionPath, "utf8")) as SessionFile;
+  }
+
+  it("wraps the session key at rest and unwraps it on read", async () => {
+    const protector = new FakeKeystoreProtector();
+    const mgr = new SessionManager(sessionPath, { protector });
+    const session = makeValidSession();
+
+    await mgr.writeSession(session);
+
+    const raw = readRawFile();
+    expect(raw.key_protection).toBe("dpapi");
+    expect(raw.session_key).not.toBe(session.session_key);
+    expect(Buffer.from(raw.session_key, "base64").subarray(0, 5).toString()).toBe("WRAP:");
+
+    const read = await mgr.readSession();
+    expect(read?.session_key).toBe(session.session_key);
+    expect(read?.key_protection).toBe("none");
+    expect(protector.protectCalls).toBe(1);
+    expect(protector.unprotectCalls).toBe(1);
+  });
+
+  it("readStoredSession returns the wrapped form without a keystore call", async () => {
+    const protector = new FakeKeystoreProtector();
+    const mgr = new SessionManager(sessionPath, { protector });
+    const session = makeValidSession();
+    await mgr.writeSession(session);
+
+    const stored = await mgr.readStoredSession();
+    expect(stored?.key_protection).toBe("dpapi");
+    expect(stored?.session_key).not.toBe(session.session_key);
+    expect(protector.unprotectCalls).toBe(0);
+  });
+
+  it("extendSession slides expiry without any keystore roundtrip", async () => {
+    const protector = new FakeKeystoreProtector();
+    const mgr = new SessionManager(sessionPath, { protector });
+    const now = Date.now();
+    const session = makeValidSession({ expires_at: now + 5000 });
+    await mgr.writeSession(session);
+    expect(protector.protectCalls).toBe(1);
+
+    const extended = await mgr.extendSession(DEFAULT_SESSION_TTL_MS);
+    expect(extended).not.toBeNull();
+    expect(extended?.expires_at).toBeGreaterThan(now + 5000);
+    expect(protector.protectCalls).toBe(1);
+    expect(protector.unprotectCalls).toBe(0);
+
+    const raw = readRawFile();
+    expect(raw.key_protection).toBe("dpapi");
+    const read = await mgr.readSession();
+    expect(read?.session_key).toBe(session.session_key);
+  });
+
+  it("falls back to an unwrapped write when the keystore fails", async () => {
+    const protector = new FakeKeystoreProtector();
+    protector.failProtect = true;
+    const fallbacks: Error[] = [];
+    const mgr = new SessionManager(sessionPath, {
+      protector,
+      onProtectionFallback: (err) => fallbacks.push(err),
+    });
+    const session = makeValidSession();
+
+    await mgr.writeSession(session);
+
+    expect(fallbacks).toHaveLength(1);
+    const raw = readRawFile();
+    expect(raw.key_protection).toBe("none");
+    expect(raw.session_key).toBe(session.session_key);
+    expect((await mgr.readSession())?.session_key).toBe(session.session_key);
+  });
+
+  it("fails closed (null) when unwrapping fails", async () => {
+    const protector = new FakeKeystoreProtector();
+    const mgr = new SessionManager(sessionPath, { protector });
+    await mgr.writeSession(makeValidSession());
+
+    protector.failUnprotect = true;
+    expect(await mgr.readSession()).toBeNull();
+    expect(await mgr.readStoredSession()).not.toBeNull();
+  });
+
+  it("fails closed (null) when the stored scheme does not match the protector", async () => {
+    const wrapped = new SessionManager(sessionPath, { protector: new FakeKeystoreProtector() });
+    await wrapped.writeSession(makeValidSession());
+
+    // The default manager in tests runs the none protector (HARPOC_SESSION_KEYSTORE=off).
+    const plain = new SessionManager(sessionPath);
+    expect(await plain.readSession()).toBeNull();
+  });
+
+  it("reads legacy files without key_protection as unwrapped", async () => {
+    const protector = new FakeKeystoreProtector();
+    const session = makeValidSession();
+    writeFileSync(sessionPath, JSON.stringify(session, null, 2), "utf8");
+
+    const mgr = new SessionManager(sessionPath, { protector });
+    const read = await mgr.readSession();
+    expect(read?.session_key).toBe(session.session_key);
+    expect(protector.unprotectCalls).toBe(0);
+  });
+
+  it("reads none-tagged files under a keystore protector without unwrapping", async () => {
+    const session = makeValidSession();
+    await new SessionManager(sessionPath).writeSession(session);
+    expect(readRawFile().key_protection).toBe("none");
+
+    const protector = new FakeKeystoreProtector();
+    const wrapped = new SessionManager(sessionPath, { protector });
+    const read = await wrapped.readSession();
+    expect(read?.session_key).toBe(session.session_key);
+    expect(protector.unprotectCalls).toBe(0);
   });
 });

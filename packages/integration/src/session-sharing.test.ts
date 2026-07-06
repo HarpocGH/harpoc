@@ -1,8 +1,11 @@
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { VaultEngine } from "@harpoc/core";
+import { DpapiSessionKeyProtector, VaultEngine } from "@harpoc/core";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { InjectionType, PrincipalType, SecretType, VaultState } from "@harpoc/shared";
@@ -189,5 +192,44 @@ describe("Session Sharing", () => {
     expect(secrets2).toHaveLength(1);
     expect(info1.name).toBe(SECRET_NAME);
     expect(info2.name).toBe(SECRET_NAME);
+  });
+});
+
+// Thesis §4.6 off-host session-file hardening: the real platform keystore path.
+// Tests above run with HARPOC_SESSION_KEYSTORE=off; this suite opts back in with
+// explicit DPAPI protectors and therefore only runs on Windows.
+describe.runIf(process.platform === "win32")("DPAPI-protected session sharing (Windows)", () => {
+  it("shares a DPAPI-wrapped session file between engines", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "harpoc-dpapi-"));
+    const dbPath = join(tmpDir, "default.vault.db");
+    const sessionPath = join(tmpDir, "session.json");
+
+    const engineA = new VaultEngine({
+      dbPath,
+      sessionPath,
+      sessionKeyProtector: new DpapiSessionKeyProtector(),
+    });
+    try {
+      await engineA.initVault("dpapi-integ-pw");
+
+      const file = JSON.parse(readFileSync(sessionPath, "utf8")) as { key_protection?: string };
+      expect(file.key_protection).toBe("dpapi");
+
+      const engineB = new VaultEngine({
+        dbPath,
+        sessionPath,
+        sessionKeyProtector: new DpapiSessionKeyProtector(),
+      });
+      try {
+        expect(await engineB.loadSession()).toBe(true);
+        expect(engineB.getState()).toBe(VaultState.UNLOCKED);
+        expect(engineB.listSecrets()).toEqual([]);
+      } finally {
+        await engineB.destroy();
+      }
+    } finally {
+      await engineA.destroy();
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

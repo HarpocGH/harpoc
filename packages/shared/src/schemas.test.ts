@@ -920,6 +920,25 @@ describe("sessionFileSchema", () => {
       sessionFileSchema.parse({ ...validSession, wrapped_kek: "%%%invalid%%%" }),
     ).toThrow();
   });
+
+  it("accepts key_protection none and dpapi", () => {
+    expect(sessionFileSchema.parse({ ...validSession, key_protection: "none" }).key_protection).toBe(
+      "none",
+    );
+    expect(
+      sessionFileSchema.parse({ ...validSession, key_protection: "dpapi" }).key_protection,
+    ).toBe("dpapi");
+  });
+
+  it("treats key_protection as optional (legacy files)", () => {
+    expect(sessionFileSchema.parse(validSession).key_protection).toBeUndefined();
+  });
+
+  it("rejects unknown key_protection values", () => {
+    expect(() =>
+      sessionFileSchema.parse({ ...validSession, key_protection: "keychain" }),
+    ).toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------------

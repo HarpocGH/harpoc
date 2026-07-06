@@ -25,7 +25,7 @@ describe("Lock Coordination", () => {
   });
 
   // ---- Test 1: Engine2 detects Engine1's lock via monitor -----------------
-  // Uses mocked readSession (returns null after lock erases session) with fake timers,
+  // Uses mocked readStoredSession (returns null after lock erases session) with fake timers,
   // same pattern as session-expiry test 1.
   it("Engine2 detects Engine1's lock within one monitor interval", async () => {
     const engine1 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
@@ -41,8 +41,8 @@ describe("Lock Coordination", () => {
       await engine2.loadSession();
       expect(engine2.getState()).toBe(VaultState.UNLOCKED);
 
-      // Simulate Engine1 locking (session file erased) by mocking readSession to return null
-      const spy = vi.spyOn(SessionManager.prototype, "readSession").mockResolvedValue(null);
+      // Simulate Engine1 locking (session file erased) by mocking readStoredSession to return null
+      const spy = vi.spyOn(SessionManager.prototype, "readStoredSession").mockResolvedValue(null);
 
       // Advance past monitor interval
       await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS + 1_000);
@@ -73,7 +73,7 @@ describe("Lock Coordination", () => {
       await engine2.loadSession();
       const app = createApp(engine2);
 
-      const spy = vi.spyOn(SessionManager.prototype, "readSession").mockResolvedValue(null);
+      const spy = vi.spyOn(SessionManager.prototype, "readStoredSession").mockResolvedValue(null);
       await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS + 1_000);
 
       const res = await app.request("/api/v1/secrets", {
@@ -103,7 +103,7 @@ describe("Lock Coordination", () => {
       await engine2.loadSession();
       const mcpServer: McpServer = createMcpServer({ engine: engine2 });
 
-      const spy = vi.spyOn(SessionManager.prototype, "readSession").mockResolvedValue(null);
+      const spy = vi.spyOn(SessionManager.prototype, "readStoredSession").mockResolvedValue(null);
       await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS + 1_000);
 
       const result = await callTool(mcpServer, "list_secrets", {});
@@ -131,7 +131,7 @@ describe("Lock Coordination", () => {
       await engine2.loadSession();
       const client = new DirectClient(engine2);
 
-      const spy = vi.spyOn(SessionManager.prototype, "readSession").mockResolvedValue(null);
+      const spy = vi.spyOn(SessionManager.prototype, "readStoredSession").mockResolvedValue(null);
       await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS + 1_000);
 
       await expect(client.listSecrets()).rejects.toThrow("Vault is locked");
@@ -157,7 +157,7 @@ describe("Lock Coordination", () => {
       });
       await engine2.loadSession();
 
-      const spy = vi.spyOn(SessionManager.prototype, "readSession").mockResolvedValue(null);
+      const spy = vi.spyOn(SessionManager.prototype, "readStoredSession").mockResolvedValue(null);
 
       // Advance halfway — monitor should NOT have fired yet
       await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS / 2);

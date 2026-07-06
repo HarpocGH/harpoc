@@ -40,6 +40,16 @@ export type {
 
 // Session
 export { SessionManager } from "./session/session-manager.js";
+export type { SessionManagerOptions } from "./session/session-manager.js";
+export {
+  DpapiSessionKeyProtector,
+  NoneSessionKeyProtector,
+  createSessionKeyProtector,
+} from "./session/session-key-protector.js";
+export type {
+  SessionKeyProtector,
+  DpapiSessionKeyProtectorOptions,
+} from "./session/session-key-protector.js";
 
 // Audit
 export { AuditLogger } from "./audit/audit-logger.js";

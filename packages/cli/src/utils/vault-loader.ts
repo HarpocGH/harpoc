@@ -22,7 +22,15 @@ export function resolveVaultDir(vaultDirOption?: string): string {
 export function createEngine(vaultDir: string): VaultEngine {
   const dbPath = join(vaultDir, VAULT_DB_NAME);
   const sessionPath = join(vaultDir, SESSION_FILE_NAME);
-  return new VaultEngine({ dbPath, sessionPath });
+  return new VaultEngine({
+    dbPath,
+    sessionPath,
+    onSessionKeyProtectionFallback: (error) => {
+      console.error(
+        `Warning: platform keystore unavailable — session file protected by file permissions only (${error.message})`,
+      );
+    },
+  });
 }
 
 /**

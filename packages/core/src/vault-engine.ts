@@ -73,12 +73,17 @@ import { validateUrl } from "./injection/url-validator.js";
 import type { SecretInfo } from "./secrets/secret-manager.js";
 import { SecretManager } from "./secrets/secret-manager.js";
 import { SessionManager } from "./session/session-manager.js";
+import type { SessionKeyProtector } from "./session/session-key-protector.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
 import type { OAuthTokenRow } from "./storage/sqlite-store.js";
 
 export interface VaultEngineOptions {
   dbPath: string;
   sessionPath: string;
+  /** Override the session-key protector (default: platform keystore — DPAPI on Windows, none elsewhere). */
+  sessionKeyProtector?: SessionKeyProtector;
+  /** Surface session-key keystore fallback events (default: silent — core never logs). */
+  onSessionKeyProtectionFallback?: (error: Error) => void;
 }
 
 interface UnlockedState {
@@ -127,7 +132,10 @@ export class VaultEngine {
   private sessionMonitorInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly options: VaultEngineOptions) {
-    this.sessionManager = new SessionManager(options.sessionPath);
+    this.sessionManager = new SessionManager(options.sessionPath, {
+      protector: options.sessionKeyProtector,
+      onProtectionFallback: options.onSessionKeyProtectionFallback,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -320,6 +328,8 @@ export class VaultEngine {
     } catch {
       if (isNewStore) store.close();
       return false;
+    } finally {
+      wipeBuffer(sessionKeyBytes);
     }
   }
 

@@ -35,7 +35,7 @@ describe("Session Expiry", () => {
 
   // ---- Test 1: Session monitor detects expired session --------------------
   // Also covers MCP, REST, SDK behavior after monitor-induced seal.
-  // We mock readSession to return null (simulating expiry) because vitest's
+  // We mock readStoredSession to return null (simulating expiry) because vitest's
   // fake timers don't properly await async file I/O inside setInterval callbacks.
   it("session monitor detects expired session — MCP/REST/SDK all fail", async () => {
     const engine1 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
@@ -58,10 +58,10 @@ describe("Session Expiry", () => {
       const app = createApp(engine2);
       const client = new DirectClient(engine2);
 
-      // Mock readSession to return null — simulates expired session without file I/O
-      const spy = vi.spyOn(SessionManager.prototype, "readSession").mockResolvedValue(null);
+      // Mock readStoredSession to return null — simulates expired session without file I/O
+      const spy = vi.spyOn(SessionManager.prototype, "readStoredSession").mockResolvedValue(null);
 
-      // Advance past monitor interval — callback calls extendSession → readSession (mocked) → null → seal
+      // Advance past monitor interval — callback calls extendSession → readStoredSession (mocked) → null → seal
       await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS + 1_000);
 
       expect(engine2.getState()).toBe(VaultState.SEALED);

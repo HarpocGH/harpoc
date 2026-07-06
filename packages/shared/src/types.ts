@@ -217,6 +217,9 @@ export interface AuditEvent {
   success: boolean;
 }
 
+/** How the session file's `session_key` is protected at rest (thesis §4.6 off-host hardening). */
+export type SessionKeyProtectionScheme = "none" | "dpapi";
+
 /** Session file persisted at ~/.harpoc/session.json (all binary values base64-encoded). */
 export interface SessionFile {
   version: 1;
@@ -225,6 +228,8 @@ export interface SessionFile {
   created_at: number;
   expires_at: number;
   max_expires_at: number;
+  /** Scheme wrapping `session_key`; absent means "none" (files written before this field existed). */
+  key_protection?: SessionKeyProtectionScheme;
   session_key: string;
   wrapped_kek: string;
   wrapped_kek_iv: string;

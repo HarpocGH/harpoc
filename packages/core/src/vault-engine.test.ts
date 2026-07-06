@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, VaultError, VaultState } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
+import { DpapiSessionKeyProtector } from "./session/session-key-protector.js";
+import type { SessionKeyProtector } from "./session/session-key-protector.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();
@@ -2102,5 +2104,111 @@ describe("double lock / double destroy edge cases", () => {
     await engine.destroy();
     await engine.destroy();
     expect(engine.getState()).toBe(VaultState.SEALED);
+  });
+});
+
+describe("session keystore protection", () => {
+  class FakeKeystoreProtector implements SessionKeyProtector {
+    readonly scheme = "dpapi" as const;
+
+    async protect(key: Uint8Array): Promise<Uint8Array> {
+      return new Uint8Array(Buffer.concat([Buffer.from("WRAP:"), Buffer.from(key)]));
+    }
+
+    async unprotect(blob: Uint8Array): Promise<Uint8Array> {
+      const buf = Buffer.from(blob);
+      if (!buf.subarray(0, 5).equals(Buffer.from("WRAP:"))) throw new Error("not a wrapped blob");
+      return new Uint8Array(buf.subarray(5));
+    }
+  }
+
+  it("shares a wrapped session across engines with the same protector", async () => {
+    const engineA = new VaultEngine({
+      dbPath,
+      sessionPath,
+      sessionKeyProtector: new FakeKeystoreProtector(),
+    });
+    await engineA.initVault("password");
+
+    const file = JSON.parse(readFileSync(sessionPath, "utf8")) as { key_protection?: string };
+    expect(file.key_protection).toBe("dpapi");
+
+    const engineB = new VaultEngine({
+      dbPath,
+      sessionPath,
+      sessionKeyProtector: new FakeKeystoreProtector(),
+    });
+    expect(await engineB.loadSession()).toBe(true);
+    expect(engineB.getState()).toBe(VaultState.UNLOCKED);
+    await engineB.destroy();
+    await engineA.destroy();
+  });
+
+  it("fails to load when the engine's protector cannot handle the stored scheme", async () => {
+    const engineA = new VaultEngine({
+      dbPath,
+      sessionPath,
+      sessionKeyProtector: new FakeKeystoreProtector(),
+    });
+    await engineA.initVault("password");
+
+    // The default protector (none in tests) cannot unwrap the dpapi-tagged file.
+    const engineB = new VaultEngine({ dbPath, sessionPath });
+    expect(await engineB.loadSession()).toBe(false);
+    expect(engineB.getState()).toBe(VaultState.SEALED);
+    await engineB.destroy();
+    await engineA.destroy();
+  });
+
+  it("fails to load when key_protection is stripped from a wrapped file", async () => {
+    const engineA = new VaultEngine({
+      dbPath,
+      sessionPath,
+      sessionKeyProtector: new FakeKeystoreProtector(),
+    });
+    await engineA.initVault("password");
+
+    const file = JSON.parse(readFileSync(sessionPath, "utf8")) as Record<string, unknown>;
+    file["key_protection"] = "none";
+    writeFileSync(sessionPath, JSON.stringify(file), "utf8");
+
+    // The wrapped blob is now presented as a raw key — the KEK unwrap must fail.
+    const engineB = new VaultEngine({
+      dbPath,
+      sessionPath,
+      sessionKeyProtector: new FakeKeystoreProtector(),
+    });
+    expect(await engineB.loadSession()).toBe(false);
+    await engineB.destroy();
+    await engineA.destroy();
+  });
+
+  describe.runIf(process.platform === "win32")("DPAPI end-to-end (Windows)", () => {
+    it("wraps the session key via DPAPI and shares it across engines", async () => {
+      const engineA = new VaultEngine({
+        dbPath,
+        sessionPath,
+        sessionKeyProtector: new DpapiSessionKeyProtector(),
+      });
+      await engineA.initVault("password");
+
+      const file = JSON.parse(readFileSync(sessionPath, "utf8")) as {
+        key_protection?: string;
+        session_key?: string;
+      };
+      expect(file.key_protection).toBe("dpapi");
+      // A DPAPI blob is far larger than the 32-byte raw key (44 base64 chars).
+      expect((file.session_key ?? "").length).toBeGreaterThan(100);
+
+      const engineB = new VaultEngine({
+        dbPath,
+        sessionPath,
+        sessionKeyProtector: new DpapiSessionKeyProtector(),
+      });
+      expect(await engineB.loadSession()).toBe(true);
+      expect(engineB.getState()).toBe(VaultState.UNLOCKED);
+      await engineB.destroy();
+      await engineA.destroy();
+    });
   });
 });

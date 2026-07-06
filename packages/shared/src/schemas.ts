@@ -354,6 +354,7 @@ export const sessionFileSchema = z.object({
   created_at: z.number().int().positive(),
   expires_at: z.number().int().positive(),
   max_expires_at: z.number().int().positive(),
+  key_protection: z.enum(["none", "dpapi"]).optional(),
   session_key: base64Pattern,
   wrapped_kek: base64Pattern,
   wrapped_kek_iv: base64Pattern,
