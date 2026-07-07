@@ -225,14 +225,14 @@ describe("validateUrl", () => {
     }
   });
 
-  it("returns resolvedAddress for IP-based URLs as undefined", async () => {
+  it("returns resolvedAddresses for IP-based URLs as undefined", async () => {
     const result = await validateUrl("https://8.8.8.8/v1/test");
-    expect(result.resolvedAddress).toBeUndefined();
+    expect(result.resolvedAddresses).toBeUndefined();
   });
 
-  it("returns resolvedAddress as undefined for loopback", async () => {
+  it("returns resolvedAddresses as undefined for loopback", async () => {
     const result = await validateUrl("http://127.0.0.1:3000/api");
-    expect(result.resolvedAddress).toBeUndefined();
+    expect(result.resolvedAddresses).toBeUndefined();
   });
 
   // --- Edge case tests ---

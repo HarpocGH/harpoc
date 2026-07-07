@@ -82,7 +82,12 @@ export function isLoopback(hostname: string): boolean {
 
 export interface ValidatedUrl {
   url: URL;
-  resolvedAddress?: string;
+  /**
+   * Every address returned by the pre-flight A/AAAA lookup — set only when DNS
+   * was performed (public hostnames). Callers must pin the connection to these
+   * addresses so the socket cannot be re-resolved between validation and connect.
+   */
+  resolvedAddresses?: string[];
 }
 
 /**
@@ -94,9 +99,10 @@ export interface ValidatedUrl {
  * - Must not target private/internal IP ranges (SSRF prevention)
  * - DNS resolution is checked to prevent DNS rebinding attacks
  *
- * Returns the validated URL and the resolved IP address (if DNS was performed).
- * Callers should use the resolved address to connect directly, preventing TOCTOU
- * DNS rebinding attacks.
+ * Returns the validated URL and every resolved IP address (if DNS was performed;
+ * all addresses are re-checked against the SSRF policy). Callers must pin the
+ * connection to the resolved addresses, closing the TOCTOU window DNS rebinding
+ * would otherwise open between validation and connect.
  */
 export async function validateUrl(urlStr: string): Promise<ValidatedUrl> {
   let url: URL;
@@ -131,18 +137,27 @@ export async function validateUrl(urlStr: string): Promise<ValidatedUrl> {
     );
   }
 
-  // DNS rebinding protection: resolve hostname and check resolved IP
-  let resolvedAddress: string | undefined;
+  // DNS rebinding protection: resolve every A/AAAA address up front and check
+  // each one — the full set is returned so the connection can be pinned to it.
+  let resolvedAddresses: string[] | undefined;
   if (!isLoopback(hostname) && !isPrivateIp(hostname) && !isIpAddress(hostname)) {
     try {
-      const { address } = await dns.lookup(hostname);
-      if (isPrivateIp(address)) {
+      const results = await dns.lookup(hostname, { all: true });
+      if (results.length === 0) {
         throw new VaultError(
-          ErrorCode.SSRF_BLOCKED,
-          `SSRF blocked: ${hostname} resolves to private IP ${address}`,
+          ErrorCode.DNS_RESOLUTION_FAILED,
+          `DNS resolution failed for ${hostname}: no addresses returned`,
         );
       }
-      resolvedAddress = address;
+      for (const { address } of results) {
+        if (isPrivateIp(address)) {
+          throw new VaultError(
+            ErrorCode.SSRF_BLOCKED,
+            `SSRF blocked: ${hostname} resolves to private IP ${address}`,
+          );
+        }
+      }
+      resolvedAddresses = results.map((result) => result.address);
     } catch (err) {
       if (err instanceof VaultError) throw err;
       throw new VaultError(
@@ -152,7 +167,7 @@ export async function validateUrl(urlStr: string): Promise<ValidatedUrl> {
     }
   }
 
-  return { url, resolvedAddress };
+  return { url, resolvedAddresses };
 }
 
 /** Check if a string looks like an IP address (v4 or v6). */

@@ -27,7 +27,8 @@
     "better-sqlite3": "^12.6.2",
     "mysql2": "^3.22.5",
     "pg": "^8.22.0",
-    "ssh2": "^1.17.0"
+    "ssh2": "^1.17.0",
+    "undici": "^7.28.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

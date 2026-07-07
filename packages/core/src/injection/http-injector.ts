@@ -1,3 +1,6 @@
+import { lookup as dnsLookup } from "node:dns";
+import type { LookupAddress } from "node:dns";
+import { isIP } from "node:net";
 import type {
   FollowRedirects,
   HttpMethod,
@@ -6,8 +9,59 @@ import type {
   ResponseMode,
 } from "@harpoc/shared";
 import { DEFAULT_HTTP_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
+import { Agent, fetch as undiciFetch } from "undici";
+import type { Response as UndiciResponse } from "undici";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { validateUrl } from "./url-validator.js";
+
+type PinnedLookup = (
+  hostname: string,
+  options: { all?: boolean; family?: number | string },
+  callback: (
+    err: NodeJS.ErrnoException | null,
+    address: string | LookupAddress[],
+    family?: number,
+  ) => void,
+) => void;
+
+/**
+ * Connection-time DNS lookup that serves only the addresses the pre-flight
+ * validation approved. Pinning at the socket layer keeps the URL's hostname
+ * intact, so the Host header and TLS SNI/certificate validation are untouched
+ * while the connection cannot be re-resolved to an attacker-controlled address
+ * between validation and connect (DNS-rebinding TOCTOU).
+ */
+export function createPinnedLookup(pins: ReadonlyMap<string, readonly string[]>): PinnedLookup {
+  return (hostname, options, callback) => {
+    const pinned = pins.get(hostname.toLowerCase());
+    if (!pinned || pinned.length === 0) {
+      // Only loopback targets reach the socket layer unpinned — validateUrl
+      // pins every public hostname. Delegate to the system resolver.
+      (dnsLookup as unknown as PinnedLookup)(hostname, options, callback);
+      return;
+    }
+    const requestedFamily = typeof options.family === "number" ? options.family : 0;
+    const entries = pinned
+      .map((address) => ({ address, family: isIP(address) }))
+      .filter(
+        (entry) => entry.family !== 0 && (requestedFamily === 0 || entry.family === requestedFamily),
+      );
+    if (entries.length === 0) {
+      const err: NodeJS.ErrnoException = new Error(
+        `No pinned address of family ${requestedFamily} for ${hostname}`,
+      );
+      err.code = "ENOTFOUND";
+      callback(err, []);
+      return;
+    }
+    if (options.all) {
+      callback(null, entries);
+    } else {
+      const first = entries[0] as { address: string; family: number };
+      callback(null, first.address, first.family);
+    }
+  };
+}
 
 export interface HttpInjectorRequest {
   method: HttpMethod;
@@ -73,28 +127,37 @@ export class HttpInjector {
           break;
       }
 
-      // Pin to resolved IP for HTTP to prevent DNS rebinding TOCTOU.
-      // For HTTPS, TLS certificate validation provides rebinding protection.
-      if (validated.resolvedAddress && url.protocol === "http:") {
-        const pinnedUrl = new URL(finalUrl);
-        headers["Host"] = pinnedUrl.hostname;
-        pinnedUrl.hostname = validated.resolvedAddress;
-        finalUrl = pinnedUrl.toString();
+      // DNS-rebinding TOCTOU protection: every request connects through a
+      // dispatcher whose connection-time lookup serves only the addresses the
+      // pre-flight validation approved (redirect hops register their own pins
+      // after re-validation). Loopback targets carry no pin — they resolve
+      // locally and never leave the host.
+      const pins = new Map<string, string[]>();
+      if (validated.resolvedAddresses) {
+        pins.set(url.hostname.toLowerCase(), validated.resolvedAddresses);
       }
+      const dispatcher = new Agent({ connect: { lookup: createPinnedLookup(pins) } });
 
       const timeoutMs = request.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
 
-      const response = await this.fetchWithRedirects(
-        finalUrl,
-        request.method,
-        headers,
-        request.body,
-        timeoutMs,
-        followRedirects,
-        injection,
-        request.responseMode ?? "filtered",
-        request.responseHeaderAllowlist ?? [],
-      );
+      let response: HttpResult;
+      try {
+        response = await this.fetchWithRedirects(
+          finalUrl,
+          request.method,
+          headers,
+          request.body,
+          timeoutMs,
+          followRedirects,
+          injection,
+          request.responseMode ?? "filtered",
+          request.responseHeaderAllowlist ?? [],
+          pins,
+          dispatcher,
+        );
+      } finally {
+        await dispatcher.close();
+      }
 
       this.auditLogger?.log({
         eventType: "secret.use",
@@ -167,6 +230,8 @@ export class HttpInjector {
     injection: InjectionConfig | undefined,
     responseMode: ResponseMode,
     responseHeaderAllowlist: string[],
+    pins: Map<string, string[]>,
+    dispatcher: Agent,
   ): Promise<HttpResult> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -178,12 +243,13 @@ export class HttpInjector {
 
     try {
       while (true) {
-        const response = await fetch(currentUrl, {
+        const response = await undiciFetch(currentUrl, {
           method,
           headers: currentHeaders,
           body: body ?? null,
           signal: controller.signal,
           redirect: "manual",
+          dispatcher,
         });
 
         // Not a redirect — return response
@@ -213,10 +279,10 @@ export class HttpInjector {
         // Validate redirect target against SSRF (includes DNS rebinding check)
         try {
           const redirectValidated = await validateUrl(redirectUrl.toString());
-          // Pin redirect target to resolved IP for HTTP
-          if (redirectValidated.resolvedAddress && redirectUrl.protocol === "http:") {
-            currentHeaders["Host"] = redirectUrl.hostname;
-            redirectUrl.hostname = redirectValidated.resolvedAddress;
+          // Re-pin: this hop's hostname connects only to the addresses its own
+          // pre-flight validation just approved.
+          if (redirectValidated.resolvedAddresses) {
+            pins.set(redirectUrl.hostname.toLowerCase(), redirectValidated.resolvedAddresses);
           }
         } catch {
           throw new VaultError(
@@ -260,7 +326,7 @@ export class HttpInjector {
   }
 
   private async buildResponse(
-    response: Response,
+    response: UndiciResponse,
     responseMode: ResponseMode,
     responseHeaderAllowlist: string[],
   ): Promise<HttpResult> {
