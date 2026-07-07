@@ -42,6 +42,7 @@ import {
   SecretStatus,
   SecretType,
   SESSION_CLEANUP_INTERVAL_MS,
+  SESSION_SLIDE_INTERVAL_MS,
   VaultError,
   VaultState,
   VAULT_VERSION,
@@ -132,6 +133,8 @@ export class VaultEngine {
   private gitInjector: GitInjector | null = null;
   private sessionManager: SessionManager;
   private sessionMonitorInterval: ReturnType<typeof setInterval> | null = null;
+  private lastSessionSlideAt = 0;
+  private sessionSlide: Promise<void> | null = null;
 
   constructor(private readonly options: VaultEngineOptions) {
     this.sessionManager = new SessionManager(options.sessionPath, {
@@ -344,13 +347,18 @@ export class VaultEngine {
       sessionId: this.sessionId ?? undefined,
     });
 
+    // Seal first so no further use-driven slide can start, then settle any
+    // in-flight slide — its atomic rename racing the secure erase below could
+    // otherwise resurrect the session file after the unlink.
+    this.state = VaultState.SEALED;
+    await this.settleSessionSlide();
+
     // Graceful downstream MCP teardown while the audit logger is still alive;
     // wipeKeys() below hard-kills anything that survived the budget.
     await this.mcpRegistry?.closeAll("vault_lock");
 
     this.wipeKeys();
     await this.sessionManager.eraseSession();
-    this.state = VaultState.SEALED;
     this.stopSessionMonitor();
   }
 
@@ -358,12 +366,13 @@ export class VaultEngine {
    * Destroy and close everything. Does NOT erase the database.
    */
   async destroy(): Promise<void> {
+    this.state = VaultState.SEALED;
+    await this.settleSessionSlide();
     await this.mcpRegistry?.closeAll("engine_destroy");
     this.wipeKeys();
     this.stopSessionMonitor();
     this.store?.close();
     this.store = null;
-    this.state = VaultState.SEALED;
   }
 
   getState(): VaultState {
@@ -465,6 +474,19 @@ export class VaultEngine {
    * before return; it never crosses the vault-to-agent boundary.
    */
   async useSecret(handle: string, action: UseSecretAction): Promise<UseSecretResponse> {
+    try {
+      return await this.useSecretInner(handle, action);
+    } finally {
+      // Completion slide (throttled): a long-running action ends with a fresh
+      // idle window instead of one aged by the action's own runtime.
+      this.touchSession();
+    }
+  }
+
+  private async useSecretInner(
+    handle: string,
+    action: UseSecretAction,
+  ): Promise<UseSecretResponse> {
     const s = this.assertUnlocked();
 
     const secret = await s.secretManager.resolveHandle(handle);
@@ -1517,6 +1539,9 @@ export class VaultEngine {
     if (this.state !== VaultState.UNLOCKED) {
       throw VaultError.vaultLocked();
     }
+    // Every authenticated operation passes through here — the session TTL
+    // slides on use (thesis §5.4.7), not on process liveness.
+    this.touchSession();
     return {
       store: this.store as SqliteStore,
       kek: this.kek as Uint8Array,
@@ -1590,6 +1615,11 @@ export class VaultEngine {
   // ---------------------------------------------------------------------------
 
   private async writeNewSession(): Promise<void> {
+    // A use-driven expiry slide may be writing the session file right now
+    // (e.g. changePassword's own assertUnlocked started one) — settle it so
+    // the two writers cannot collide on the write-then-rename.
+    await this.settleSessionSlide();
+
     const kek = this.kek as Uint8Array;
     const jwtKey = this.jwtKey as Uint8Array;
     const auditKey = this.auditKey as Uint8Array;
@@ -1628,23 +1658,65 @@ export class VaultEngine {
 
   private startSessionMonitor(): void {
     this.stopSessionMonitor();
-    this.sessionMonitorInterval = setInterval(async () => {
-      const session = await this.sessionManager.extendSession();
-      if (!session) {
-        // Session expired or removed — close store and seal
-        await this.mcpRegistry?.closeAll("session_expired");
-        this.wipeKeys();
-        this.store?.close();
-        this.store = null;
-        this.state = VaultState.SEALED;
-        this.stopSessionMonitor();
-      }
+    this.lastSessionSlideAt = 0;
+    this.sessionMonitorInterval = setInterval(() => {
+      void this.sessionMonitorTick();
     }, SESSION_CLEANUP_INTERVAL_MS);
 
     // Don't block Node.js exit
     if (this.sessionMonitorInterval.unref) {
       this.sessionMonitorInterval.unref();
     }
+  }
+
+  /**
+   * Monitor tick — enforcement only. The monitor never extends the session:
+   * the TTL slides exclusively on authenticated use (touchSession), so an
+   * idle-but-running engine process reaches expiry and seals instead of
+   * keeping the session alive to the absolute ceiling by mere liveness.
+   */
+  private async sessionMonitorTick(): Promise<void> {
+    const session = await this.sessionManager.readStoredSession();
+    if (session) return;
+    // Session expired or removed — close store and seal
+    await this.mcpRegistry?.closeAll("session_expired");
+    this.wipeKeys();
+    this.store?.close();
+    this.store = null;
+    this.state = VaultState.SEALED;
+    this.stopSessionMonitor();
+  }
+
+  /**
+   * Slide the session's expiry window on authenticated use, throttled to one
+   * write per SESSION_SLIDE_INTERVAL_MS per process — the same file-write
+   * cadence the monitor produced when it did the sliding. Called from
+   * assertUnlocked (every authenticated operation passes through it) and
+   * again on use_secret completion, so a long-running action both starts and
+   * ends with a fresh window. Fire-and-forget: a failed or already-expired
+   * slide never fails the operation — expiry enforcement stays with the
+   * monitor. The slide operates on the stored form (no keystore roundtrip);
+   * lock() settles an in-flight write before erasing the file.
+   */
+  private touchSession(): void {
+    if (this.state !== VaultState.UNLOCKED) return;
+    const now = Date.now();
+    if (this.sessionSlide !== null || now - this.lastSessionSlideAt < SESSION_SLIDE_INTERVAL_MS) {
+      return;
+    }
+    this.lastSessionSlideAt = now;
+    this.sessionSlide = this.sessionManager
+      .extendSession()
+      .then(() => undefined)
+      .catch(() => undefined)
+      .finally(() => {
+        this.sessionSlide = null;
+      });
+  }
+
+  /** Await an in-flight expiry slide (never throws — slides swallow errors). */
+  private async settleSessionSlide(): Promise<void> {
+    if (this.sessionSlide) await this.sessionSlide;
   }
 
   private stopSessionMonitor(): void {

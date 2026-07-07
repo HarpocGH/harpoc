@@ -1757,6 +1757,76 @@ describe("session loading", () => {
   });
 });
 
+describe("session TTL sliding (use-driven, thesis §5.4.7)", () => {
+  type SlideInternals = {
+    sessionSlide: Promise<void> | null;
+    lastSessionSlideAt: number;
+    sessionMonitorTick(): Promise<void>;
+  };
+  const internals = (e: VaultEngine): SlideInternals => e as unknown as SlideInternals;
+
+  function readExpiry(): number {
+    return (JSON.parse(readFileSync(sessionPath, "utf-8")) as { expires_at: number }).expires_at;
+  }
+
+  function tamperExpiry(expiresAt: number): void {
+    const session = JSON.parse(readFileSync(sessionPath, "utf-8")) as Record<string, unknown>;
+    session.expires_at = expiresAt;
+    writeFileSync(sessionPath, JSON.stringify(session));
+  }
+
+  it("an authenticated operation slides the stored expiry", async () => {
+    await engine.initVault("password");
+    await internals(engine).sessionSlide;
+    const tampered = Date.now() + 60_000;
+    tamperExpiry(tampered);
+    internals(engine).lastSessionSlideAt = 0;
+
+    engine.listSecrets();
+    await internals(engine).sessionSlide;
+
+    expect(readExpiry()).toBeGreaterThan(tampered);
+  });
+
+  it("skips the slide when the last one is younger than the slide interval", async () => {
+    await engine.initVault("password");
+    await internals(engine).sessionSlide;
+    internals(engine).lastSessionSlideAt = 0;
+    engine.listSecrets(); // arms the throttle
+    await internals(engine).sessionSlide;
+
+    const tampered = Date.now() + 60_000;
+    tamperExpiry(tampered);
+    engine.listSecrets(); // within the interval — no slide starts
+
+    expect(internals(engine).sessionSlide).toBeNull();
+    expect(readExpiry()).toBe(tampered);
+  });
+
+  it("the monitor tick never extends a live session", async () => {
+    await engine.initVault("password");
+    await internals(engine).sessionSlide;
+    const tampered = Date.now() + 60_000;
+    tamperExpiry(tampered);
+
+    await internals(engine).sessionMonitorTick();
+
+    expect(engine.getState()).toBe(VaultState.UNLOCKED);
+    expect(readExpiry()).toBe(tampered);
+  });
+
+  it("the monitor tick seals the vault once the session expires", async () => {
+    await engine.initVault("password");
+    await internals(engine).sessionSlide;
+    tamperExpiry(Date.now() - 1);
+
+    await internals(engine).sessionMonitorTick();
+
+    expect(engine.getState()).toBe(VaultState.SEALED);
+    expect(() => engine.listSecrets()).toThrow();
+  });
+});
+
 describe("destroy() correctness", () => {
   it("sets state to SEALED after destroy", async () => {
     await engine.initVault("password");

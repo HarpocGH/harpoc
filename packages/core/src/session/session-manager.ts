@@ -36,6 +36,7 @@ export interface SessionManagerOptions {
  *   scheme so a copy of the file alone does not yield the session key.
  */
 export class SessionManager {
+  private static nextWriteId = 0;
   private readonly protector: SessionKeyProtector;
   private readonly onProtectionFallback: (error: Error) => void;
 
@@ -206,9 +207,15 @@ export class SessionManager {
 
   /**
    * Write the session file exactly as given, atomically, with 0o600 permissions.
+   * The temp name is unique per write (pid + counter), so overlapping writers —
+   * a use-driven expiry slide racing a session rewrite — never share a temp
+   * file; last rename wins.
    */
   private async writeStoredSession(session: SessionFile): Promise<void> {
-    const tmpPath = join(dirname(this.sessionPath), `.session.json.tmp.${process.pid}`);
+    const tmpPath = join(
+      dirname(this.sessionPath),
+      `.session.json.tmp.${process.pid}.${SessionManager.nextWriteId++}`,
+    );
 
     try {
       const data = JSON.stringify(session, null, 2);
