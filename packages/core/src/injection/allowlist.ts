@@ -113,9 +113,25 @@ function globMatch(pattern: string, value: string): boolean {
 // Command allowlist
 // ---------------------------------------------------------------------------
 
-/** Executable extensions probed when resolving a bare command name. */
-const EXECUTABLE_EXTENSIONS =
-  process.platform === "win32" ? ["", ".exe", ".cmd", ".bat", ".com"] : [""];
+/**
+ * Executable extensions probed when resolving a bare command name. Windows
+ * batch files (`.cmd`/`.bat`) are deliberately absent — see `isWindowsBatchFile`.
+ */
+const EXECUTABLE_EXTENSIONS = process.platform === "win32" ? ["", ".exe", ".com"] : [""];
+
+/**
+ * Windows batch files are never resolvable as commands. Spawning a `.cmd`/`.bat`
+ * with `shell:false` is cmd.exe interpretation in disguise: Node versions
+ * before the CVE-2024-27980 fix silently wrapped such spawns in cmd.exe — an
+ * argument-injection surface that collapses the no-shell property the process
+ * context is built on — and patched versions refuse them with EINVAL. The
+ * vault enforces the exclusion itself rather than inheriting it from the
+ * runtime's version. Checked against the final symlink-resolved path so a
+ * symlink cannot smuggle a batch file in.
+ */
+function isWindowsBatchFile(p: string): boolean {
+  return process.platform === "win32" && /\.(cmd|bat)$/i.test(p);
+}
 
 /**
  * The vault's own PATH, used both to resolve requested commands and as the
@@ -135,7 +151,9 @@ function normalizeForCompare(p: string): string {
  * Resolve a command (bare name or absolute path) to an existing executable's
  * absolute, symlink-resolved path. Returns null when it cannot be resolved.
  * Relative paths containing a separator are rejected (null) — callers must use
- * a bare name resolved against the controlled PATH or an absolute path.
+ * a bare name resolved against the controlled PATH or an absolute path. On
+ * Windows, batch files are never resolved — neither probed for bare names nor
+ * accepted as absolute paths.
  */
 export function resolveExecutable(command: string, pathDirs: string[]): string | null {
   const candidates: string[] = [];
@@ -152,11 +170,14 @@ export function resolveExecutable(command: string, pathDirs: string[]): string |
       const full = base + ext;
       try {
         if (statSync(full).isFile()) {
+          let resolved: string;
           try {
-            return realpathSync(full);
+            resolved = realpathSync(full);
           } catch {
-            return resolve(full);
+            resolved = resolve(full);
           }
+          if (isWindowsBatchFile(resolved)) continue;
+          return resolved;
         }
       } catch {
         // not here — keep probing

@@ -1,6 +1,7 @@
-import { basename, dirname } from "node:path";
-import { realpathSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { basename, dirname, join } from "node:path";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import {
   controlledPathDirs,
@@ -179,6 +180,52 @@ describe("resolveAndMatchCommand", () => {
   it("denies an unresolvable command", () => {
     try {
       resolveAndMatchCommand("definitely-not-real-xyz", ["definitely-not-real-xyz"], []);
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
+    }
+  });
+});
+
+// Batch files are excluded by the vault itself, not by relying on patched
+// Node's EINVAL for shell-less .cmd/.bat spawns (CVE-2024-27980).
+const describeWindows = process.platform === "win32" ? describe : describe.skip;
+
+describeWindows("Windows batch file exclusion", () => {
+  let dir: string;
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "harpoc-batch-"));
+    writeFileSync(join(dir, "tool.cmd"), "@echo off\r\n");
+    writeFileSync(join(dir, "tool.bat"), "@echo off\r\n");
+    writeFileSync(join(dir, "tool.exe"), "");
+    writeFileSync(join(dir, "batchonly.cmd"), "@echo off\r\n");
+    writeFileSync(join(dir, "batchonly.bat"), "@echo off\r\n");
+    writeFileSync(join(dir, "UPPER.CMD"), "@echo off\r\n");
+  });
+
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not probe .cmd/.bat when resolving a bare name", () => {
+    expect(resolveExecutable("batchonly", [dir])).toBeNull();
+  });
+
+  it("still probes .exe for a bare name, even with batch siblings", () => {
+    expect(resolveExecutable("tool", [dir])).toBe(realpathSync(join(dir, "tool.exe")));
+  });
+
+  it("rejects an absolute path to a batch file, case-insensitively", () => {
+    expect(resolveExecutable(join(dir, "tool.cmd"), [])).toBeNull();
+    expect(resolveExecutable(join(dir, "tool.bat"), [])).toBeNull();
+    expect(resolveExecutable(join(dir, "UPPER.CMD"), [])).toBeNull();
+  });
+
+  it("denies a batch file at the command-allowlist choke point even when allowlisted", () => {
+    const cmd = join(dir, "tool.cmd");
+    try {
+      resolveAndMatchCommand(cmd, [cmd], []);
       expect.fail("should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
