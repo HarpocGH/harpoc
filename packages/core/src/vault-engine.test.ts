@@ -34,6 +34,11 @@ beforeAll(async () => {
   server = createServer((req, res) => {
     requestCount++;
     const auth = (req.headers["authorization"] ?? "none") as string;
+    if (req.url?.startsWith("/redirect-hop")) {
+      res.writeHead(302, { Location: `http://${req.headers.host ?? "127.0.0.1"}/target` });
+      res.end();
+      return;
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
     if (req.url?.startsWith("/enc")) {
       // Echo the bearer token in encoded forms (sanitizer-bypass probes)
@@ -702,6 +707,33 @@ describe("URL allowlist enforcement (HTTP)", () => {
     } catch {
       // expected
     }
+    const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
+    const denied = events.find((e) => e.detail?.error === "URL_NOT_ALLOWED");
+    expect(denied?.success).toBe(false);
+  });
+
+  it("re-validates every redirect hop against the allowlist (thesis §4.5.2)", async () => {
+    await engine.setInjectionPolicy("secret://url-al", {
+      url_allowlist: [`${baseUrl}/redirect-hop*`],
+      command_allowlist: [],
+      env_allowlist: [],
+    });
+    const before = requestCount;
+    try {
+      await engine.useSecret("secret://url-al", {
+        type: "http",
+        method: "GET",
+        url: `${baseUrl}/redirect-hop`,
+        injection: { type: "bearer" },
+        follow_redirects: "any",
+      });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.URL_NOT_ALLOWED);
+    }
+    // The credential-bearing request never followed the redirect: only the
+    // 302 itself was fetched, /target was not.
+    expect(requestCount - before).toBe(1);
     const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
     const denied = events.find((e) => e.detail?.error === "URL_NOT_ALLOWED");
     expect(denied?.success).toBe(false);

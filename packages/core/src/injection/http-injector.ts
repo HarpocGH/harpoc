@@ -12,6 +12,7 @@ import { DEFAULT_HTTP_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
 import { Agent, fetch as undiciFetch } from "undici";
 import type { Response as UndiciResponse } from "undici";
 import type { AuditLogger } from "../audit/audit-logger.js";
+import { matchesUrlAllowlist } from "./allowlist.js";
 import { validateUrl } from "./url-validator.js";
 
 type PinnedLookup = (
@@ -71,6 +72,13 @@ export interface HttpInjectorRequest {
   timeoutMs?: number;
   responseMode?: ResponseMode;
   responseHeaderAllowlist?: string[];
+  /**
+   * The secret's URL allowlist (empty = not enforced). The engine validates the
+   * initial URL before injection; the injector re-validates every redirect hop
+   * against the same patterns, so a redirect can never carry the request to a
+   * non-allowlisted target — whichever follow_redirects mode is active.
+   */
+  urlAllowlist?: string[];
 }
 
 /**
@@ -152,6 +160,7 @@ export class HttpInjector {
           injection,
           request.responseMode ?? "filtered",
           request.responseHeaderAllowlist ?? [],
+          request.urlAllowlist ?? [],
           pins,
           dispatcher,
         );
@@ -230,6 +239,7 @@ export class HttpInjector {
     injection: InjectionConfig | undefined,
     responseMode: ResponseMode,
     responseHeaderAllowlist: string[],
+    urlAllowlist: string[],
     pins: Map<string, string[]>,
     dispatcher: Agent,
   ): Promise<HttpResult> {
@@ -289,6 +299,14 @@ export class HttpInjector {
             ErrorCode.REDIRECT_POLICY_VIOLATION,
             `Redirect target blocked: ${redirectUrl.toString()}`,
           );
+        }
+
+        // §4.5.2: every hop is independently re-validated against the secret's
+        // URL allowlist (empty = not enforced) — a redirect can never carry the
+        // request to a non-allowlisted target, whichever follow_redirects mode
+        // is active. Checked before the hop executes.
+        if (!matchesUrlAllowlist(redirectUrl.toString(), urlAllowlist)) {
+          throw VaultError.urlNotAllowed(redirectUrl.toString());
         }
 
         const originalUrl = new URL(currentUrl);

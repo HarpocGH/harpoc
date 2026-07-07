@@ -533,6 +533,7 @@ export class VaultEngine {
             timeoutMs: action.timeout_ms,
             responseMode,
             responseHeaderAllowlist: policy.response_header_allowlist ?? [],
+            urlAllowlist: policy.url_allowlist,
           },
           value,
           action.injection,

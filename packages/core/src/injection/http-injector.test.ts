@@ -1,14 +1,17 @@
 import { createServer } from "node:http";
 import type { Server } from "node:http";
+import { ErrorCode } from "@harpoc/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { HttpInjector } from "./http-injector.js";
 
 let server: Server;
 let baseUrl: string;
+const requestPaths: string[] = [];
 
 beforeAll(async () => {
   server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", `http://localhost`);
+    requestPaths.push(url.pathname);
 
     if (url.pathname === "/echo") {
       const chunks: Buffer[] = [];
@@ -50,6 +53,14 @@ beforeAll(async () => {
     if (url.pathname === "/redirect") {
       res.writeHead(302, {
         Location: `http://localhost:${(server.address() as { port: number }).port}/echo`,
+      });
+      res.end();
+      return;
+    }
+
+    if (url.pathname === "/redirect-same") {
+      res.writeHead(302, {
+        Location: `http://127.0.0.1:${(server.address() as { port: number }).port}/echo`,
       });
       res.end();
       return;
@@ -168,6 +179,78 @@ describe("HttpInjector", () => {
       );
 
       expect(response.status).toBe(302);
+    });
+  });
+
+  describe("redirect URL-allowlist enforcement (thesis §4.5.2)", () => {
+    const port = () => new URL(baseUrl).port;
+
+    it("blocks a credential-bearing cross-origin redirect to a non-allowlisted target (any mode)", async () => {
+      const before = requestPaths.length;
+      await expect(
+        injector.executeWithSecret(
+          { method: "GET", url: `${baseUrl}/redirect`, urlAllowlist: [`${baseUrl}/*`] },
+          new Uint8Array(Buffer.from("token")),
+          { type: "bearer" },
+          "any",
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
+      // Only the redirect response itself was fetched — the hop never executed.
+      expect(requestPaths.slice(before)).toEqual(["/redirect"]);
+    });
+
+    it("blocks a non-allowlisted cross-origin hop even when credentials would be stripped (same-origin mode)", async () => {
+      await expect(
+        injector.executeWithSecret(
+          { method: "GET", url: `${baseUrl}/redirect`, urlAllowlist: [`${baseUrl}/*`] },
+          new Uint8Array(Buffer.from("token")),
+          { type: "bearer" },
+          "same-origin",
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
+    });
+
+    it("follows a redirect whose hop matches the allowlist", async () => {
+      const response = await injector.executeWithSecret(
+        {
+          method: "GET",
+          url: `${baseUrl}/redirect`,
+          urlAllowlist: [`${baseUrl}/*`, `http://localhost:${port()}/*`],
+        },
+        new Uint8Array(Buffer.from("token")),
+        { type: "bearer" },
+        "any",
+      );
+
+      expect(response.status).toBe(200);
+      const body = JSON.parse(response.body ?? "{}") as Record<string, string>;
+      expect(body.authorization).toBe("Bearer token");
+    });
+
+    it("enforces path patterns per hop even on same-origin redirects", async () => {
+      await expect(
+        injector.executeWithSecret(
+          {
+            method: "GET",
+            url: `${baseUrl}/redirect-same`,
+            urlAllowlist: [`${baseUrl}/redirect-same*`],
+          },
+          new Uint8Array(Buffer.from("token")),
+          { type: "bearer" },
+          "any",
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
+    });
+
+    it("leaves hops unconstrained when no allowlist is configured", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/redirect` },
+        new Uint8Array(Buffer.from("token")),
+        { type: "bearer" },
+        "any",
+      );
+
+      expect(response.status).toBe(200);
     });
   });
 
