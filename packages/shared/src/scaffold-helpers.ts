@@ -2,6 +2,7 @@
  * Shared test helpers for scaffold.test.ts files across all packages.
  * Excluded from the build via tsconfig.json — test-time only.
  */
+import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -72,5 +73,67 @@ export function describeWorkspaceDeps(pkgRoot: string, deps: string[]): void {
         expect(dependencies[dep]).toBe("workspace:*");
       });
     }
+  });
+}
+
+/**
+ * Assert that importing `entryUrl` in a fresh Node process never resolves a
+ * `forbidden` package (exact specifier or a subpath of it — dependency
+ * confinement, thesis §5.2). A module-customization resolve hook acts as the
+ * tripwire, writing markers straight to fd 2 (`writeSync`, so a fast exit
+ * cannot lose them); a control case imports `control` to prove the tripwire
+ * actually trips.
+ */
+export function describeRuntimeDependencyConfinement(options: {
+  entryUrl: string;
+  cwd: string;
+  forbidden: string[];
+  control: string;
+}): void {
+  const MARKER = "FORBIDDEN_MODULE_RESOLVED";
+  const hook =
+    'import { writeSync } from "node:fs";\n' +
+    `const FORBIDDEN = ${JSON.stringify(options.forbidden)};\n` +
+    "export async function resolve(specifier, context, nextResolve) {\n" +
+    '  if (FORBIDDEN.some((pattern) => specifier === pattern || specifier.startsWith(pattern + "/"))) {\n' +
+    `    writeSync(2, "${MARKER} " + specifier + "\\n");\n` +
+    "  }\n" +
+    "  return nextResolve(specifier, context);\n" +
+    "}\n";
+  const hookUrl = `data:text/javascript,${encodeURIComponent(hook)}`;
+
+  function runWithTripwire(body: string): Promise<{ exitCode: number | null; stderr: string }> {
+    const script = [
+      'import { register } from "node:module";',
+      `register(${JSON.stringify(hookUrl)});`,
+      body,
+    ].join("\n");
+    return new Promise((resolveRun, rejectRun) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+        cwd: options.cwd,
+        stdio: ["ignore", "ignore", "pipe"],
+        windowsHide: true,
+      });
+      let stderr = "";
+      child.stderr?.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString("utf8");
+      });
+      child.on("error", rejectRun);
+      child.on("close", (code) => resolveRun({ exitCode: code, stderr }));
+    });
+  }
+
+  describe("runtime dependency confinement (thesis §5.2)", () => {
+    it("importing the package resolves no confined module", { timeout: 30_000 }, async () => {
+      const result = await runWithTripwire(`await import(${JSON.stringify(options.entryUrl)});`);
+      expect(result.stderr).not.toContain(MARKER);
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("control: the tripwire detects a confined import", { timeout: 30_000 }, async () => {
+      const result = await runWithTripwire(`await import(${JSON.stringify(options.control)});`);
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toContain(MARKER);
+    });
   });
 }

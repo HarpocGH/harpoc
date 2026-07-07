@@ -21,8 +21,18 @@
     }
   },
   "dependencies": {
-    "@harpoc/shared": "workspace:*",
+    "@harpoc/shared": "workspace:*"
+  },
+  "devDependencies": {
     "@harpoc/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "@harpoc/core": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@harpoc/core": {
+      "optional": true
+    }
   },
   "scripts": {
     "build": "tsc",

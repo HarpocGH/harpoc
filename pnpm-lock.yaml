@@ -160,12 +160,13 @@ importers:
 
   packages/sdk:
     dependencies:
-      '@harpoc/core':
-        specifier: workspace:*
-        version: link:../core
       '@harpoc/shared':
         specifier: workspace:*
         version: link:../shared
+    devDependencies:
+      '@harpoc/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/shared:
     dependencies:

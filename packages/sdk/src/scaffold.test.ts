@@ -13,5 +13,5 @@ const distDir = resolve(pkgRoot, "dist");
 describe("sdk", () => {
   describeBuildOutput(distDir);
   describeCrossPackageImports(["@harpoc/shared", "@harpoc/core"]);
-  describeWorkspaceDeps(pkgRoot, ["@harpoc/shared", "@harpoc/core"]);
+  describeWorkspaceDeps(pkgRoot, ["@harpoc/shared"]);
 });

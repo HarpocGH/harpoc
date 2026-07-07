@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
+import type { ReadBuffer } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { MAX_MCP_STDERR_BYTES } from "@harpoc/shared";
@@ -22,6 +22,8 @@ export interface StdioChildParams {
 
 /** Grace period between shutdown escalation steps (stdin end → SIGTERM → SIGKILL). */
 const CLOSE_GRACE_MS = 2_000;
+
+type McpStdioModule = typeof import("@modelcontextprotocol/sdk/shared/stdio.js");
 
 /**
  * MCP client transport over a vault-spawned stdio child (thesis §4.5.4).
@@ -48,7 +50,7 @@ export class StdioChildTransport implements Transport {
   readonly stderrTail = new CappedOutput(MAX_MCP_STDERR_BYTES);
 
   private child: ChildProcess | null = null;
-  private readonly readBuffer = new ReadBuffer();
+  private serializeMessage: McpStdioModule["serializeMessage"] | null = null;
   private started = false;
 
   constructor(private readonly params: StdioChildParams) {}
@@ -62,6 +64,12 @@ export class StdioChildTransport implements Transport {
       throw new Error("StdioChildTransport already started");
     }
     this.started = true;
+
+    // Lazy SDK import (dependency confinement, §5.2): SDK code enters the
+    // process only once a downstream server is actually spawned.
+    const stdio = await import("@modelcontextprotocol/sdk/shared/stdio.js");
+    const readBuffer = new stdio.ReadBuffer();
+    this.serializeMessage = stdio.serializeMessage;
 
     await new Promise<void>((resolve, reject) => {
       const child = spawn(this.params.resolvedCommand, this.params.args, {
@@ -88,15 +96,15 @@ export class StdioChildTransport implements Transport {
       });
 
       child.stdout?.on("data", (chunk: Buffer) => {
-        this.readBuffer.append(chunk);
-        this.drainMessages();
+        readBuffer.append(chunk);
+        this.drainMessages(readBuffer);
       });
       child.stderr?.on("data", (chunk: Buffer) => this.stderrTail.push(chunk));
 
       child.on("close", (code, signal) => {
         this.exitInfo = { code, signal };
         this.child = null;
-        this.readBuffer.clear();
+        readBuffer.clear();
         this.onclose?.();
       });
     });
@@ -105,7 +113,8 @@ export class StdioChildTransport implements Transport {
   send(message: JSONRPCMessage): Promise<void> {
     return new Promise((resolve, reject) => {
       const stdin = this.child?.stdin;
-      if (!stdin) {
+      const serializeMessage = this.serializeMessage;
+      if (!stdin || !serializeMessage) {
         reject(new Error("Not connected"));
         return;
       }
@@ -143,11 +152,11 @@ export class StdioChildTransport implements Transport {
     this.child?.kill("SIGKILL");
   }
 
-  private drainMessages(): void {
+  private drainMessages(readBuffer: ReadBuffer): void {
     for (;;) {
       let message: JSONRPCMessage | null;
       try {
-        message = this.readBuffer.readMessage();
+        message = readBuffer.readMessage();
       } catch (err) {
         this.onerror?.(err instanceof Error ? err : new Error(String(err)));
         continue;

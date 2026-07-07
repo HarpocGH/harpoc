@@ -1,12 +1,5 @@
 import { createHash } from "node:crypto";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
-import {
-  CallToolResultSchema,
-  McpError,
-  ErrorCode as McpErrorCode,
-} from "@modelcontextprotocol/sdk/types.js";
 import type { InjectionPolicy, McpAction, McpResult, McpServerConfig } from "@harpoc/shared";
 import {
   DEFAULT_MCP_TIMEOUT_MS,
@@ -26,6 +19,41 @@ import { validateUrl } from "./url-validator.js";
 
 /** Hard ceiling on a per-invocation timeout override (parity with http/process). */
 const MAX_TIMEOUT_MS = 300_000;
+
+type McpSdkClientModule = typeof import("@modelcontextprotocol/sdk/client/index.js");
+type McpSdkHttpModule = typeof import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+type McpSdkTypesModule = typeof import("@modelcontextprotocol/sdk/types.js");
+
+/** The slice of the MCP SDK the injector uses at runtime. */
+interface McpSdk {
+  Client: McpSdkClientModule["Client"];
+  StreamableHTTPClientTransport: McpSdkHttpModule["StreamableHTTPClientTransport"];
+  CallToolResultSchema: McpSdkTypesModule["CallToolResultSchema"];
+  McpError: McpSdkTypesModule["McpError"];
+  McpErrorCode: McpSdkTypesModule["ErrorCode"];
+}
+
+/**
+ * The MCP SDK is imported lazily (dependency confinement, §5.2): a process
+ * embedding core that never executes an MCP action — the REST API among
+ * them — must not load SDK code. Same seam as the db-adapters driver
+ * imports; the ESM module registry caches, so only the first MCP action
+ * pays the load cost.
+ */
+async function loadMcpSdk(): Promise<McpSdk> {
+  const [client, http, types] = await Promise.all([
+    import("@modelcontextprotocol/sdk/client/index.js"),
+    import("@modelcontextprotocol/sdk/client/streamableHttp.js"),
+    import("@modelcontextprotocol/sdk/types.js"),
+  ]);
+  return {
+    Client: client.Client,
+    StreamableHTTPClientTransport: http.StreamableHTTPClientTransport,
+    CallToolResultSchema: types.CallToolResultSchema,
+    McpError: types.McpError,
+    McpErrorCode: types.ErrorCode,
+  };
+}
 
 /**
  * MCP proxy injector (thesis §4.5.4). The vault interposes between the agent
@@ -87,6 +115,7 @@ export class McpInjector {
       throw err;
     }
 
+    const sdk = await loadMcpSdk();
     const valueStr = Buffer.from(secretValue).toString("utf8");
     const credentialFingerprint = sha256Hex(secretValue);
     const configFingerprint = sha256Hex(Buffer.from(JSON.stringify(config), "utf8"));
@@ -106,7 +135,7 @@ export class McpInjector {
     let entry: McpConnectionEntry;
     try {
       entry = await this.registry.acquire(secretId, () =>
-        this.establish(secretId, config, resolvedCommand, valueStr, policy, {
+        this.establish(sdk, secretId, config, resolvedCommand, valueStr, policy, {
           credentialFingerprint,
           configFingerprint,
         }),
@@ -123,11 +152,11 @@ export class McpInjector {
     try {
       rawResult = (await entry.client.callTool(
         { name: action.tool, arguments: action.arguments ?? {} },
-        CallToolResultSchema,
+        sdk.CallToolResultSchema,
         { timeout },
       )) as { content?: unknown; structuredContent?: unknown; isError?: unknown };
     } catch (err) {
-      const vaultErr = this.mapCallError(err, entry, config.server_name, valueStr);
+      const vaultErr = this.mapCallError(sdk, err, entry, config.server_name, valueStr);
       this.audit(action, secretId, config, { error: vaultErr.code }, false);
       throw vaultErr;
     }
@@ -145,6 +174,7 @@ export class McpInjector {
 
   /** Factory for a fresh downstream connection — the only injection moment. */
   private async establish(
+    sdk: McpSdk,
     secretId: string,
     config: McpServerConfig,
     resolvedCommand: string | undefined,
@@ -152,7 +182,7 @@ export class McpInjector {
     policy: InjectionPolicy,
     fingerprints: { credentialFingerprint: string; configFingerprint: string },
   ): Promise<McpConnectionEntry> {
-    const client = new Client({ name: "harpoc-vault", version: VAULT_VERSION });
+    const client = new sdk.Client({ name: "harpoc-vault", version: VAULT_VERSION });
 
     let stdioTransport: StdioChildTransport | undefined;
     if (config.transport === McpTransport.STDIO) {
@@ -164,7 +194,7 @@ export class McpInjector {
       });
       await client.connect(stdioTransport, { timeout: MCP_INIT_TIMEOUT_MS });
     } else {
-      const transport = new StreamableHTTPClientTransport(new URL(config.url as string), {
+      const transport = new sdk.StreamableHTTPClientTransport(new URL(config.url as string), {
         fetch: this.validatingAuthFetch(valueStr),
         reconnectionOptions: {
           // A lost connection must fail visibly (no-auto-respawn semantics),
@@ -220,20 +250,21 @@ export class McpInjector {
 
   /** Map SDK call failures to structured vault errors — never secret material. */
   private mapCallError(
+    sdk: McpSdk,
     err: unknown,
     entry: McpConnectionEntry,
     server: string,
     valueStr: string,
   ): VaultError {
-    if (err instanceof McpError) {
-      if (err.code === (McpErrorCode.ConnectionClosed as number)) {
+    if (err instanceof sdk.McpError) {
+      if (err.code === (sdk.McpErrorCode.ConnectionClosed as number)) {
         if (entry.crashed) {
           const exit = entry.stdioTransport?.exitInfo ?? null;
           return VaultError.mcpServerCrashed(server, exit?.code ?? null, exit?.signal ?? null);
         }
         return VaultError.mcpConnectFailed(server, "connection closed");
       }
-      if (err.code === (McpErrorCode.RequestTimeout as number)) {
+      if (err.code === (sdk.McpErrorCode.RequestTimeout as number)) {
         // A slow tool is not a crash: the server stays alive and the agent may retry.
         return VaultError.mcpTimeout(server);
       }
