@@ -4,6 +4,7 @@ import type {
   CreateSecretResponse,
   InjectionConfig,
   InjectionPolicy,
+  InjectionPolicyInput,
   McpServerConfig,
   Permission,
   PrincipalType,
@@ -46,7 +47,7 @@ export interface VaultClient {
   useSecret(handle: string, action: UseSecretAction): Promise<UseSecretResponse>;
   setInjectionPolicy(
     handle: string,
-    policy: InjectionPolicy,
+    policy: InjectionPolicyInput,
     options?: SetInjectionPolicyOptions,
   ): Promise<void>;
   getInjectionPolicy(handle: string): Promise<InjectionPolicy>;

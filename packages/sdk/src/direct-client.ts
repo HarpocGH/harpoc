@@ -4,6 +4,7 @@ import type {
   ConnectionConfig,
   CreateSecretResponse,
   InjectionPolicy,
+  InjectionPolicyInput,
   McpServerConfig,
   SetInjectionPolicyOptions,
   UseSecretAction,
@@ -51,7 +52,7 @@ export class DirectClient implements VaultClient {
 
   async setInjectionPolicy(
     handle: string,
-    policy: InjectionPolicy,
+    policy: InjectionPolicyInput,
     options?: SetInjectionPolicyOptions,
   ): Promise<void> {
     return this.engine.setInjectionPolicy(handle, policy, options);

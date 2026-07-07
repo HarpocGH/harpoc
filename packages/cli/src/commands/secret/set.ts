@@ -72,5 +72,5 @@ function buildInjectionConfig(
     const msg = result.error.issues.map((i) => i.message).join(", ");
     throw new Error(`Invalid injection config: ${msg}`);
   }
-  return result.data as InjectionConfig;
+  return result.data;
 }

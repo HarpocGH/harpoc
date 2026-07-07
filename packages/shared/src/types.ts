@@ -134,8 +134,6 @@ export const VaultState = {
 } as const;
 export type VaultState = (typeof VaultState)[keyof typeof VaultState];
 
-export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD";
-
 // ---------------------------------------------------------------------------
 // OAuth & Certificate enums (v1.1)
 // ---------------------------------------------------------------------------
@@ -217,31 +215,6 @@ export interface AuditEvent {
   success: boolean;
 }
 
-/** How the session file's `session_key` is protected at rest (thesis §4.6 off-host hardening). */
-export type SessionKeyProtectionScheme = "none" | "dpapi";
-
-/** Session file persisted at ~/.harpoc/session.json (all binary values base64-encoded). */
-export interface SessionFile {
-  version: 1;
-  session_id: string;
-  vault_id: string;
-  created_at: number;
-  expires_at: number;
-  max_expires_at: number;
-  /** Scheme wrapping `session_key`; absent means "none" (files written before this field existed). */
-  key_protection?: SessionKeyProtectionScheme;
-  session_key: string;
-  wrapped_kek: string;
-  wrapped_kek_iv: string;
-  wrapped_kek_tag: string;
-  wrapped_jwt_key: string;
-  wrapped_jwt_key_iv: string;
-  wrapped_jwt_key_tag: string;
-  wrapped_audit_key: string;
-  wrapped_audit_key_iv: string;
-  wrapped_audit_key_tag: string;
-}
-
 /** JWT claims for vault API tokens. */
 export interface VaultApiToken {
   sub: string;
@@ -253,116 +226,6 @@ export interface VaultApiToken {
   project?: string;
   /** Secret-name patterns (`*` wildcards, thesis §4.7); absent = unrestricted. */
   secrets?: string[];
-}
-
-/** How a secret value is injected into an HTTP request. */
-export interface InjectionConfig {
-  type: InjectionType;
-  header_name?: string;
-  query_param?: string;
-}
-
-/**
- * HTTP action — request-mediated injection. The vault assembles an outbound
- * HTTP request with the credential placed in a structured field.
- */
-export interface HttpAction {
-  type: typeof ActionType.HTTP;
-  method: HttpMethod;
-  url: string;
-  headers?: Record<string, string>;
-  body?: string;
-  injection: InjectionConfig;
-  follow_redirects?: FollowRedirects;
-  timeout_ms?: number;
-  response_mode?: ResponseMode;
-}
-
-/**
- * Process action — process-mediated injection. The vault spawns a subprocess
- * with the credential placed in its environment under `env_var`. The command
- * and args are passed as data; no shell interpretation is performed.
- */
-export interface ProcessAction {
-  type: typeof ActionType.PROCESS;
-  command: string;
-  args?: string[];
-  working_directory?: string;
-  env_var: string;
-  timeout_ms?: number;
-}
-
-/**
- * MCP action — the vault acts as a transparent MCP proxy, forwarding a single
- * tool call to the downstream MCP server named by `server`. The transport and
- * launch/endpoint configuration come from the secret's McpServerConfig (trusted
- * admin path), never from the action.
- */
-export interface McpAction {
-  type: typeof ActionType.MCP;
-  server: string;
-  tool: string;
-  arguments?: Record<string, unknown>;
-  timeout_ms?: number;
-}
-
-/**
- * Database action — request-mediated injection. The vault assembles the
- * connection string in-process (the credential is the secret, `user:password`),
- * connects with TLS by default, executes the query and returns the result set.
- * `host` may embed a port (`host:port`); an explicit `port` overrides it.
- */
-export interface DatabaseAction {
-  type: typeof ActionType.DATABASE;
-  engine: DatabaseEngine;
-  host: string;
-  port?: number;
-  database: string;
-  query: string;
-  params?: unknown[];
-  timeout_ms?: number;
-}
-
-/**
- * Git action — request-mediated over HTTPS (credential helper) or process-mediated
- * over SSH (ephemeral ssh-agent), selected by the `repository` transport. The
- * credential never appears in the command output or the agent's context.
- */
-export interface GitAction {
-  type: typeof ActionType.GIT;
-  operation: GitOperation;
-  repository: string;
-  args?: string[];
-  working_directory?: string;
-  timeout_ms?: number;
-}
-
-/**
- * SSH action — process-mediated injection. The vault spawns `ssh` with the
- * private key served through an ephemeral ssh-agent (signatures only, key never
- * on disk) and strict host-key verification against the pinned known_hosts.
- */
-export interface SshAction {
-  type: typeof ActionType.SSH;
-  host: string;
-  user: string;
-  command: string;
-  timeout_ms?: number;
-}
-
-/** Discriminated union of context-specific use_secret action specifications. */
-export type UseSecretAction =
-  | HttpAction
-  | ProcessAction
-  | McpAction
-  | DatabaseAction
-  | GitAction
-  | SshAction;
-
-/** Request to use a secret via a context-specific action. */
-export interface UseSecretRequest {
-  handle: string;
-  action: UseSecretAction;
 }
 
 /** Result of a request-mediated (HTTP) use_secret invocation. */
@@ -442,27 +305,6 @@ export type UseSecretResponse =
   | SshResult;
 
 /**
- * Per-secret injection policy: allowlists constraining where a credential may
- * be used (thesis §4.7 target allowlisting). `url_allowlist` bounds URL targets
- * (HTTP, Git-over-HTTPS, MCP-over-HTTP); `host_allowlist` bounds host and
- * host:port targets (SSH, Git-over-SSH, database); `command_allowlist` bounds
- * process-mediated binaries; `env_allowlist` names additional environment
- * variables passed through to a spawned subprocess. `response_mode` is the
- * HTTP response shaping floor (default `filtered`; per-invocation overrides
- * may only tighten it, thesis §4.5.2); `response_header_allowlist` names the
- * headers still returned under `status_only`. Both are optional — absent on
- * older policy blobs — and defaulted by the loader.
- */
-export interface InjectionPolicy {
-  url_allowlist: string[];
-  command_allowlist: string[];
-  env_allowlist: string[];
-  host_allowlist: string[];
-  response_mode?: ResponseMode;
-  response_header_allowlist?: string[];
-}
-
-/**
  * Options for the trusted-admin injection-policy set path.
  * `acknowledge_interpreters` is the thesis §4.5.3 acknowledgement flag: adding
  * a known interpreter binary to `command_allowlist` collapses the L2/L3
@@ -472,49 +314,6 @@ export interface InjectionPolicy {
  */
 export interface SetInjectionPolicyOptions {
   acknowledge_interpreters?: boolean;
-}
-
-/**
- * Database endpoint-authentication config. TLS is required by default; `disable`
- * is the audited per-secret opt-out for trusted local sockets (thesis §4.5.5).
- */
-export interface DatabaseConnectionConfig {
-  tls_mode?: "require" | "disable";
-  ca_pem?: string;
-  servername?: string;
-}
-
-/** SSH endpoint-authentication config: host keys pinned at secret creation. */
-export interface SshConnectionConfig {
-  known_hosts: string[];
-}
-
-/**
- * Per-secret endpoint-authentication pins (KEK-encrypted at rest), the §4.7
- * "authenticated target connections" counterpart to the target allowlist. Set
- * only via the trusted admin path (CLI/REST) — never via an MCP tool. `ssh` is
- * shared by the SSH and Git-over-SSH contexts.
- */
-export interface ConnectionConfig {
-  database?: DatabaseConnectionConfig;
-  ssh?: SshConnectionConfig;
-}
-
-/**
- * Per-secret downstream MCP server configuration (KEK-encrypted at rest).
- * Set only via the trusted admin path (CLI/REST) — never via an MCP tool.
- * stdio: `command` + `env_var` required; the launch command is validated
- * against the secret's command allowlist (fail-safe deny) at every use.
- * http: `url` required; validated against the URL allowlist and SSRF checks.
- */
-export interface McpServerConfig {
-  server_name: string;
-  transport: McpTransport;
-  command?: string;
-  args?: string[];
-  env_var?: string;
-  working_directory?: string;
-  url?: string;
 }
 
 /** Argon2id key derivation parameters — stored in vault header. */
@@ -552,20 +351,6 @@ export interface CreateSecretResponse {
 // ---------------------------------------------------------------------------
 // OAuth & Certificate interfaces (v1.1)
 // ---------------------------------------------------------------------------
-
-/** OAuth provider configuration (stored alongside secret). */
-export interface OAuthProviderConfig {
-  provider: OAuthProviderPreset;
-  grant_type: OAuthGrantType;
-  token_endpoint: string;
-  auth_endpoint?: string;
-  device_authorization_endpoint?: string;
-  client_id: string;
-  client_secret?: string;
-  scopes?: string[];
-  redirect_uri?: string;
-  pkce_method?: "S256";
-}
 
 /** OAuth token state stored in vault (encrypted). */
 export interface OAuthTokenRecord {

@@ -3,6 +3,7 @@ import type {
   ConnectionConfig,
   CreateSecretResponse,
   InjectionPolicy,
+  InjectionPolicyInput,
   McpServerConfig,
   SetInjectionPolicyOptions,
   UseSecretAction,
@@ -84,7 +85,7 @@ export class RestClient implements VaultClient {
 
   async setInjectionPolicy(
     handle: string,
-    policy: InjectionPolicy,
+    policy: InjectionPolicyInput,
     options?: SetInjectionPolicyOptions,
   ): Promise<void> {
     await this.request<{ updated: boolean }>(

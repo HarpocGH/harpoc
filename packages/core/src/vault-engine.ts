@@ -6,6 +6,7 @@ import type {
   HttpResult,
   InjectionConfig,
   InjectionPolicy,
+  InjectionPolicyInput,
   McpServerConfig,
   OAuthProviderConfig,
   OAuthTokenStatus,
@@ -650,7 +651,7 @@ export class VaultEngine {
    */
   async setInjectionPolicy(
     handle: string,
-    policy: InjectionPolicy,
+    policy: InjectionPolicyInput,
     options?: SetInjectionPolicyOptions,
   ): Promise<void> {
     const s = this.assertUnlocked();

@@ -21,6 +21,8 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     command_allowlist: [],
     env_allowlist: [],
     host_allowlist: [],
+    response_mode: "filtered",
+    response_header_allowlist: [],
     ...overrides,
   };
 }

@@ -77,6 +77,9 @@ const POLICY: InjectionPolicy = {
   url_allowlist: [],
   command_allowlist: [NODE],
   env_allowlist: [],
+  host_allowlist: [],
+  response_mode: "filtered",
+  response_header_allowlist: [],
 };
 
 function mcpAction(tool: string, overrides: Partial<McpAction> = {}): McpAction {

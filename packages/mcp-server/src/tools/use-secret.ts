@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { VaultEngine } from "@harpoc/core";
 import { sanitizeUseSecretResult } from "@harpoc/core";
-import type { Permission, UseSecretAction } from "@harpoc/shared";
+import type { Permission } from "@harpoc/shared";
 import { parseHandle, useSecretActionSchema } from "@harpoc/shared";
 import { InjectionGuard } from "../guards/injection-guard.js";
 import type { RateLimiter } from "../guards/rate-limiter.js";
@@ -33,7 +33,7 @@ export function registerUseSecret(
       const secretId = await engine.resolveSecretId(args.handle);
       rateLimiter.checkLimit(secretId, true);
 
-      const response = await engine.useSecret(args.handle, args.action as UseSecretAction);
+      const response = await engine.useSecret(args.handle, args.action);
 
       // Defense-in-depth response sanitization (pattern-based, atop engine redaction)
       sanitizeUseSecretResult(response, injectionGuard);

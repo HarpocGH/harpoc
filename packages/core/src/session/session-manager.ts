@@ -132,7 +132,7 @@ export class SessionManager {
       return null; // Invalid schema
     }
 
-    const session = result.data as SessionFile;
+    const session = result.data;
 
     // Check expiry
     if (Date.now() > session.expires_at) {

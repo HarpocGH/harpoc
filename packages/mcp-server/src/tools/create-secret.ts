@@ -1,7 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { VaultEngine } from "@harpoc/core";
-import type { InjectionConfig, Permission, SecretType } from "@harpoc/shared";
+import type { Permission } from "@harpoc/shared";
+import { injectionConfigSchema, secretTypeSchema } from "@harpoc/shared";
 import { collectValueFromTty } from "../elicitation/tty-prompt.js";
 import { collectValueViaUrlElicitation } from "../elicitation/value-collector.js";
 import type { RateLimiter } from "../guards/rate-limiter.js";
@@ -24,20 +25,17 @@ export function registerCreateSecret(
         .string()
         .regex(/^[a-zA-Z0-9_-]+$/)
         .describe("Secret name (alphanumeric, hyphens, underscores)"),
-      type: z.enum(["api_key", "oauth_token", "certificate"]).describe("Secret type"),
+      type: secretTypeSchema.describe("Secret type"),
       project: z
         .string()
         .regex(/^[a-zA-Z0-9_-]+$/)
         .optional()
         .describe("Project namespace"),
-      injection: z
-        .object({
-          type: z.enum(["header", "query", "basic_auth", "bearer"]).describe("Injection method"),
-          header_name: z.string().optional().describe("Header name (for type=header)"),
-          query_param: z.string().optional().describe("Query parameter name (for type=query)"),
-        })
+      injection: injectionConfigSchema
         .optional()
-        .describe("Default injection configuration"),
+        .describe(
+          "Default injection configuration: {type:'bearer'|'basic_auth'} | {type:'header', header_name} | {type:'query', query_param}",
+        ),
     },
     async (args) => {
       scopeGuard.checkAccess(PERMISSION, args.project);
@@ -49,9 +47,9 @@ export function registerCreateSecret(
       // deferred (CLI: harpoc secret set).
       const result = await engine.createSecret({
         name: args.name,
-        type: args.type as SecretType,
+        type: args.type,
         project: args.project,
-        injection: args.injection as InjectionConfig | undefined,
+        injection: args.injection,
       });
 
       let status: string = result.status;

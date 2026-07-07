@@ -1,6 +1,5 @@
 import type { Command } from "commander";
 import { useSecretActionSchema } from "@harpoc/shared";
-import type { UseSecretAction } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson } from "../../utils/output.js";
 
@@ -91,7 +90,7 @@ export function registerSecretUseCommand(secret: Command): void {
 
         const engine = await loadUnlockedEngine(vaultDir);
         try {
-          const result = await engine.useSecret(handle, parsed.data as UseSecretAction);
+          const result = await engine.useSecret(handle, parsed.data);
           printJson(result);
         } finally {
           await engine.destroy();

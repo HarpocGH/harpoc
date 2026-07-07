@@ -9,7 +9,6 @@ import {
   setInjectionPolicyRequestSchema,
   useSecretActionSchema,
 } from "@harpoc/shared";
-import type { InjectionConfig } from "@harpoc/shared";
 import { InjectionGuard, sanitizeUseSecretResult } from "@harpoc/core";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
@@ -71,7 +70,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
       type: parsed.data.type,
       project: parsed.data.project,
       value: body.value ? new Uint8Array(Buffer.from(body.value as string, "base64")) : undefined,
-      injection: parsed.data.injection as InjectionConfig | undefined,
+      injection: parsed.data.injection,
       expiresAt,
     });
 
