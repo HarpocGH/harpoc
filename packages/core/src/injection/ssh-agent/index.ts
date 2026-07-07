@@ -4,11 +4,9 @@ import { createServer } from "node:net";
 import type { Server, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import ssh2 from "ssh2";
-import type { ParsedKey } from "ssh2";
 import { VaultError } from "@harpoc/shared";
-
-const { AgentProtocol, utils } = ssh2;
+import { createAgentResponder } from "./agent-protocol.js";
+import { loadPrivateKey } from "./key-loader.js";
 
 /**
  * An ephemeral, in-process ssh-agent (thesis §4.5.7). The private key is parsed
@@ -18,6 +16,10 @@ const { AgentProtocol, utils } = ssh2;
  * releases signatures only, never key material; the key never touches disk. The
  * socket and directory are removed on `dispose()`, confining the socket-hijack
  * window to the single command.
+ *
+ * The agent protocol, private-key parsing and signing are the vault's own code
+ * over `node:crypto` — no third-party cryptographic dependency runs in the vault
+ * process (thesis §5.1.1). See `agent-protocol.ts`, `key-loader.ts`, `ssh-wire.ts`.
  */
 export class EphemeralSshAgent {
   private constructor(
@@ -29,11 +31,15 @@ export class EphemeralSshAgent {
   ) {}
 
   static start(privateKeyPem: string): Promise<EphemeralSshAgent> {
-    const parsed = utils.parseKey(privateKeyPem);
-    if (parsed instanceof Error) {
-      return Promise.reject(VaultError.sshAgentFailed(`invalid private key: ${parsed.message}`));
+    let key: ReturnType<typeof loadPrivateKey>;
+    try {
+      key = loadPrivateKey(privateKeyPem);
+    } catch (err) {
+      const message = err instanceof VaultError ? err.message : "invalid private key";
+      return Promise.reject(
+        err instanceof VaultError ? err : VaultError.sshAgentFailed(message),
+      );
     }
-    const key: ParsedKey = Array.isArray(parsed) ? parsed[0] : parsed;
 
     let authSock: string;
     let tempDir: string | null = null;
@@ -53,26 +59,15 @@ export class EphemeralSshAgent {
           /* per-connection transport error — ignore, the command will fail visibly */
         });
 
-        const agent = new AgentProtocol(false);
-        agent.on("identities", (req) => {
+        const respond = createAgentResponder(key);
+        stream.on("data", (chunk: Buffer) => {
           try {
-            agent.getIdentitiesReply(req, [key]);
+            const reply = respond(chunk);
+            if (reply.length > 0) stream.write(reply);
           } catch {
-            agent.failureReply(req);
+            stream.destroy();
           }
         });
-        agent.on("sign", (req, _pubKey, data, options) => {
-          try {
-            agent.signReply(req, key.sign(data, options.hash));
-          } catch {
-            agent.failureReply(req);
-          }
-        });
-        agent.on("error", () => {
-          /* malformed agent request — ignore */
-        });
-
-        stream.pipe(agent).pipe(stream);
       });
 
       server.on("error", (err) => {

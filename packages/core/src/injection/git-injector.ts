@@ -12,7 +12,7 @@ import {
   resolveExecutable,
 } from "./allowlist.js";
 import { spawnCaptured } from "./spawn-captured.js";
-import { EphemeralSshAgent } from "./ssh-agent.js";
+import { EphemeralSshAgent } from "./ssh-agent/index.js";
 import { buildSshEnv, isHostKeyFailure, sshHardeningArgs, writeKnownHosts } from "./ssh-common.js";
 import { validateUrl } from "./url-validator.js";
 

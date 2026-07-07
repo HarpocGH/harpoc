@@ -3,7 +3,7 @@ import { DEFAULT_SSH_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, matchesHostAllowlist, resolveAndMatchCommand } from "./allowlist.js";
 import { spawnCaptured } from "./spawn-captured.js";
-import { EphemeralSshAgent } from "./ssh-agent.js";
+import { EphemeralSshAgent } from "./ssh-agent/index.js";
 import { buildSshEnv, isHostKeyFailure, sshHardeningArgs, writeKnownHosts } from "./ssh-common.js";
 
 /**

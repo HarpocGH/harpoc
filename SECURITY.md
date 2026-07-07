@@ -28,6 +28,7 @@ Harpoc is a zero-knowledge secret vault designed so that secrets are never expos
 
 - **Encryption**: All secrets are encrypted at rest using AES-256-GCM with unique per-secret Data Encryption Keys (DEK)
 - **Key hierarchy**: 3-tier hierarchy — Master Key (derived via Argon2id) wraps a KEK, which wraps individual DEKs
+- **Minimal in-process cryptography**: All cryptographic operations run on Node's built-in `node:crypto`, with Argon2id (a native KDF) the only exception — no third-party cryptographic library is loaded into the vault process. The SSH context's ephemeral in-process agent parses keys and generates signatures on `node:crypto` (unencrypted Ed25519/RSA/ECDSA keys); the private key stays in the vault process and only signatures cross the agent socket
 - **SSRF prevention**: Pre-flight DNS lookup with IP pinning blocks requests to private/internal network addresses
 - **Audit trail**: Immutable append-only audit log records every vault mutation
 - **Execution-layer injection**: Secrets are injected at the execution layer — into an HTTP request (request-mediated) or a spawned subprocess's environment (process-mediated) — and never returned to the LLM context. Per-secret allowlists bound where a credential may be injected: an optional URL allowlist for HTTP, and a fail-safe command allowlist for process execution

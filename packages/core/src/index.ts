@@ -82,7 +82,7 @@ export type {
   DbQueryResult,
 } from "./injection/db-adapters.js";
 export { SshInjector } from "./injection/ssh-injector.js";
-export { EphemeralSshAgent } from "./injection/ssh-agent.js";
+export { EphemeralSshAgent } from "./injection/ssh-agent/index.js";
 export { GitInjector } from "./injection/git-injector.js";
 export {
   matchesUrlAllowlist,
