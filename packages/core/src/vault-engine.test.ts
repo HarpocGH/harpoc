@@ -740,6 +740,27 @@ describe("URL allowlist enforcement (HTTP)", () => {
   });
 });
 
+describe("use_secret action dispatch", () => {
+  it("rejects an unknown action type at runtime (never-typed default arm)", async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "dispatch",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+    try {
+      await engine.useSecret(
+        "secret://dispatch",
+        { type: "ftp" } as unknown as Parameters<VaultEngine["useSecret"]>[1],
+      );
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
+      expect((e as VaultError).message).toContain("Unsupported action type: ftp");
+    }
+  });
+});
+
 describe("response mode enforcement (HTTP)", () => {
   const secretValue = "rm-secret-value-2026";
 

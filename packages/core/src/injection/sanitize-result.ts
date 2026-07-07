@@ -1,4 +1,5 @@
 import type { UseSecretResponse } from "@harpoc/shared";
+import { assertNever } from "../assert-never.js";
 import type { InjectionGuard } from "./injection-guard.js";
 import { mapStringLeaves } from "./output-sanitizer.js";
 
@@ -6,8 +7,9 @@ import { mapStringLeaves } from "./output-sanitizer.js";
  * Defense-in-depth, pattern-based sanitization of a use_secret result at the
  * interface boundary (MCP tool / REST route), applied atop the engine's
  * exact-value redaction. Exhaustive over every result type in the
- * UseSecretResponse union — a new execution context must be handled here, not
- * fall through to another context's shape.
+ * UseSecretResponse union — the never-typed default makes an unhandled new
+ * context a compile error, and a shape unknown at runtime is rejected rather
+ * than passed through unsanitized.
  */
 export function sanitizeUseSecretResult(result: UseSecretResponse, guard: InjectionGuard): void {
   switch (result.type) {
@@ -48,5 +50,8 @@ export function sanitizeUseSecretResult(result: UseSecretResponse, guard: Inject
       if (result.error) result.error = guard.sanitize(result.error);
       return;
     }
+
+    default:
+      return assertNever(result, "result type");
   }
 }

@@ -58,6 +58,7 @@ import {
   unlockVault,
   wrapKeyWithKek,
 } from "./crypto/key-hierarchy.js";
+import { assertNever } from "./assert-never.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
 import { matchesUrlAllowlist } from "./injection/allowlist.js";
 import { DatabaseInjector } from "./injection/database-injector.js";
@@ -477,100 +478,110 @@ export class VaultEngine {
     }
 
     try {
-      if (action.type === "process") {
-        return await s.processInjector.executeWithSecret(action, value, policy, secret.id);
-      }
+      // Exhaustive dispatch over the action union (thesis §5.3.1): every
+      // context has an explicit arm and the default funnels into the
+      // never-typed assertNever — a seventh action type without an arm is a
+      // compile error, not a runtime fall-through.
+      switch (action.type) {
+        case "process":
+          return await s.processInjector.executeWithSecret(action, value, policy, secret.id);
 
-      if (action.type === "mcp") {
-        const config = this.loadMcpServerConfig(s, secret.id);
-        if (!config) {
-          throw VaultError.mcpServerNotConfigured(handle);
-        }
-        return await s.mcpInjector.executeWithSecret(action, value, policy, config, secret.id);
-      }
-
-      if (action.type === "http") {
-        // Request-mediated (HTTP): enforce the per-secret URL allowlist before injection.
-        if (!matchesUrlAllowlist(action.url, policy.url_allowlist)) {
-          s.auditLogger.log({
-            eventType: AuditEventType.SECRET_USE,
-            secretId: secret.id,
-            detail: { context: "http", url: action.url, error: ErrorCode.URL_NOT_ALLOWED },
-            success: false,
-            sessionId: this.sessionId ?? undefined,
-          });
-          throw VaultError.urlNotAllowed(action.url);
-        }
-
-        // Tighten-only response-mode override (thesis §4.5.2): a loosening
-        // override would reopen the echo channel — rejected before the
-        // request executes.
-        const policyMode = policy.response_mode ?? "filtered";
-        if (action.response_mode && !isResponseModeAllowed(policyMode, action.response_mode)) {
-          s.auditLogger.log({
-            eventType: AuditEventType.SECRET_USE,
-            secretId: secret.id,
-            detail: {
-              context: "http",
-              url: action.url,
-              requested_mode: action.response_mode,
-              policy_mode: policyMode,
-              error: ErrorCode.RESPONSE_MODE_NOT_ALLOWED,
-            },
-            success: false,
-            sessionId: this.sessionId ?? undefined,
-          });
-          throw VaultError.responseModeNotAllowed(action.response_mode, policyMode);
-        }
-        const responseMode = action.response_mode ?? policyMode;
-
-        const response = await s.httpInjector.executeWithSecret(
-          {
-            method: action.method,
-            url: action.url,
-            headers: action.headers,
-            body: action.body,
-            timeoutMs: action.timeout_ms,
-            responseMode,
-            responseHeaderAllowlist: policy.response_header_allowlist ?? [],
-            urlAllowlist: policy.url_allowlist,
-          },
-          value,
-          action.injection,
-          action.follow_redirects,
-          secret.id,
-        );
-
-        // Value + encodings redaction (I2a) — skipped only under the
-        // policy-gated `full` opt-out.
-        if (responseMode !== "full") {
-          const valueStr = Buffer.from(value).toString("utf8");
-          if (valueStr.length > 0) {
-            this.redactHttpResult(response, valueStr);
+        case "mcp": {
+          const config = this.loadMcpServerConfig(s, secret.id);
+          if (!config) {
+            throw VaultError.mcpServerNotConfigured(handle);
           }
+          return await s.mcpInjector.executeWithSecret(action, value, policy, config, secret.id);
         }
 
-        return response;
-      }
+        case "http": {
+          // Request-mediated (HTTP): enforce the per-secret URL allowlist before injection.
+          if (!matchesUrlAllowlist(action.url, policy.url_allowlist)) {
+            s.auditLogger.log({
+              eventType: AuditEventType.SECRET_USE,
+              secretId: secret.id,
+              detail: { context: "http", url: action.url, error: ErrorCode.URL_NOT_ALLOWED },
+              success: false,
+              sessionId: this.sessionId ?? undefined,
+            });
+            throw VaultError.urlNotAllowed(action.url);
+          }
 
-      if (action.type === "database") {
-        const config = this.loadConnectionConfig(s, secret.id);
-        return await s.databaseInjector.executeWithSecret(action, value, policy, config, secret.id);
-      }
+          // Tighten-only response-mode override (thesis §4.5.2): a loosening
+          // override would reopen the echo channel — rejected before the
+          // request executes.
+          const policyMode = policy.response_mode ?? "filtered";
+          if (action.response_mode && !isResponseModeAllowed(policyMode, action.response_mode)) {
+            s.auditLogger.log({
+              eventType: AuditEventType.SECRET_USE,
+              secretId: secret.id,
+              detail: {
+                context: "http",
+                url: action.url,
+                requested_mode: action.response_mode,
+                policy_mode: policyMode,
+                error: ErrorCode.RESPONSE_MODE_NOT_ALLOWED,
+              },
+              success: false,
+              sessionId: this.sessionId ?? undefined,
+            });
+            throw VaultError.responseModeNotAllowed(action.response_mode, policyMode);
+          }
+          const responseMode = action.response_mode ?? policyMode;
 
-      if (action.type === "ssh") {
-        const config = this.loadConnectionConfig(s, secret.id);
-        return await s.sshInjector.executeWithSecret(action, value, policy, config, secret.id);
-      }
+          const response = await s.httpInjector.executeWithSecret(
+            {
+              method: action.method,
+              url: action.url,
+              headers: action.headers,
+              body: action.body,
+              timeoutMs: action.timeout_ms,
+              responseMode,
+              responseHeaderAllowlist: policy.response_header_allowlist ?? [],
+              urlAllowlist: policy.url_allowlist,
+            },
+            value,
+            action.injection,
+            action.follow_redirects,
+            secret.id,
+          );
 
-      if (action.type === "git") {
-        const config = this.loadConnectionConfig(s, secret.id);
-        return await s.gitInjector.executeWithSecret(action, value, policy, config, secret.id);
-      }
+          // Value + encodings redaction (I2a) — skipped only under the
+          // policy-gated `full` opt-out.
+          if (responseMode !== "full") {
+            const valueStr = Buffer.from(value).toString("utf8");
+            if (valueStr.length > 0) {
+              this.redactHttpResult(response, valueStr);
+            }
+          }
 
-      throw VaultError.invalidInput(
-        `Unsupported action type: ${(action as { type: string }).type}`,
-      );
+          return response;
+        }
+
+        case "database": {
+          const config = this.loadConnectionConfig(s, secret.id);
+          return await s.databaseInjector.executeWithSecret(
+            action,
+            value,
+            policy,
+            config,
+            secret.id,
+          );
+        }
+
+        case "ssh": {
+          const config = this.loadConnectionConfig(s, secret.id);
+          return await s.sshInjector.executeWithSecret(action, value, policy, config, secret.id);
+        }
+
+        case "git": {
+          const config = this.loadConnectionConfig(s, secret.id);
+          return await s.gitInjector.executeWithSecret(action, value, policy, config, secret.id);
+        }
+
+        default:
+          return assertNever(action, "action type");
+      }
     } finally {
       wipeBuffer(value);
     }
