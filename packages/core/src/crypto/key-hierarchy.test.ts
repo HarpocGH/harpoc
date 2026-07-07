@@ -66,7 +66,6 @@ describe("unlockVault", () => {
       created.wrappedKek,
       created.wrappedKekIv,
       created.wrappedKekTag,
-      created.vaultId,
       created.wrappedJwtKey,
       created.wrappedAuditKey,
     );
@@ -76,24 +75,26 @@ describe("unlockVault", () => {
     expect(Buffer.from(unlocked.auditKey).equals(Buffer.from(created.auditKey))).toBe(true);
   });
 
-  it("falls back to HKDF when no wrapped keys provided (legacy)", async () => {
+  it("rejects tampered wrapped JWT/audit keys instead of deriving a fallback", async () => {
     const password = "my-secure-password";
     const created = await createVaultKeys(password);
 
-    // Omit wrapped keys — should still unlock (HKDF fallback)
-    const unlocked = await unlockVault(
-      password,
-      created.salt,
-      created.wrappedKek,
-      created.wrappedKekIv,
-      created.wrappedKekTag,
-      created.vaultId,
-    );
+    const tamperedJwt = {
+      ...created.wrappedJwtKey,
+      tag: new Uint8Array(created.wrappedJwtKey.tag.map((b) => b ^ 0xff)),
+    };
 
-    expect(Buffer.from(unlocked.kek).equals(Buffer.from(created.kek))).toBe(true);
-    // HKDF-derived keys will differ from random keys
-    expect(unlocked.jwtKey).toBeInstanceOf(Uint8Array);
-    expect(unlocked.auditKey).toBeInstanceOf(Uint8Array);
+    await expect(
+      unlockVault(
+        password,
+        created.salt,
+        created.wrappedKek,
+        created.wrappedKekIv,
+        created.wrappedKekTag,
+        tamperedJwt,
+        created.wrappedAuditKey,
+      ),
+    ).rejects.toThrow(VaultError);
   });
 
   it("fails with wrong password", async () => {
@@ -106,7 +107,6 @@ describe("unlockVault", () => {
         created.wrappedKek,
         created.wrappedKekIv,
         created.wrappedKekTag,
-        created.vaultId,
         created.wrappedJwtKey,
         created.wrappedAuditKey,
       ),
@@ -119,7 +119,6 @@ describe("unlockVault", () => {
         created.wrappedKek,
         created.wrappedKekIv,
         created.wrappedKekTag,
-        created.vaultId,
         created.wrappedJwtKey,
         created.wrappedAuditKey,
       );
@@ -266,7 +265,6 @@ describe("changePassword", () => {
       changed.newWrappedKek,
       changed.newWrappedKekIv,
       changed.newWrappedKekTag,
-      created.vaultId,
       created.wrappedJwtKey,
       created.wrappedAuditKey,
     );
@@ -296,7 +294,8 @@ describe("changePassword", () => {
         changed.newWrappedKek,
         changed.newWrappedKekIv,
         changed.newWrappedKekTag,
-        created.vaultId,
+        created.wrappedJwtKey,
+        created.wrappedAuditKey,
       ),
     ).rejects.toThrow(VaultError);
   });
@@ -349,7 +348,6 @@ describe("changePassword", () => {
       changed.newWrappedKek,
       changed.newWrappedKekIv,
       changed.newWrappedKekTag,
-      created.vaultId,
       created.wrappedJwtKey,
       created.wrappedAuditKey,
     );
@@ -415,7 +413,6 @@ describe("full key hierarchy lifecycle", () => {
       vault.wrappedKek,
       vault.wrappedKekIv,
       vault.wrappedKekTag,
-      vault.vaultId,
       vault.wrappedJwtKey,
       vault.wrappedAuditKey,
     );

@@ -23,8 +23,6 @@ import {
   DEFAULT_HTTP_TIMEOUT_MS,
   DEFAULT_SESSION_TTL_MS,
   MAX_NAME_LENGTH,
-  HKDF_INFO_AUDIT,
-  HKDF_INFO_JWT_SIGNING,
   HKDF_INFO_SYNC,
   LOCKOUT_DURATIONS_MS,
   LOCKOUT_MAX_ATTEMPTS,
@@ -296,16 +294,8 @@ describe("SQLite pragmas", () => {
 // ---------------------------------------------------------------------------
 
 describe("HKDF info strings", () => {
-  it("HKDF_INFO_JWT_SIGNING", () => {
-    expect(HKDF_INFO_JWT_SIGNING).toBe("api-token-signing-v1");
-  });
-
   it("HKDF_INFO_SYNC", () => {
     expect(HKDF_INFO_SYNC).toBe("sync-key-v1");
-  });
-
-  it("HKDF_INFO_AUDIT", () => {
-    expect(HKDF_INFO_AUDIT).toBe("audit-key-v1");
   });
 });
 

@@ -7,8 +7,6 @@ import {
   AAD_WRAPPED_AUDIT_KEY,
   AAD_WRAPPED_JWT_KEY,
   AES_KEY_LENGTH,
-  HKDF_INFO_AUDIT,
-  HKDF_INFO_JWT_SIGNING,
   HKDF_INFO_NAME_INDEX,
 } from "@harpoc/shared";
 import { decrypt, encrypt } from "./aes-gcm.js";
@@ -105,10 +103,10 @@ export async function createVaultKeys(password: string): Promise<VaultKeys> {
 }
 
 /**
- * Unlock vault: derive master key from password, unwrap KEK, recover JWT/audit keys.
- *
- * If wrappedJwtKey/wrappedAuditKey are provided, unwraps them from KEK.
- * Otherwise falls back to HKDF derivation from master key (legacy vault support).
+ * Unlock vault: derive master key from password, unwrap KEK, then unwrap the
+ * random JWT/audit keys from the KEK — the key hierarchy is instantiated
+ * exactly as specified, with no derivation fallback. A vault missing the
+ * wrapped keys fails closed at the engine (VAULT_CORRUPTED) before this runs.
  */
 export async function unlockVault(
   password: string,
@@ -116,39 +114,28 @@ export async function unlockVault(
   wrappedKek: Uint8Array,
   wrappedKekIv: Uint8Array,
   wrappedKekTag: Uint8Array,
-  vaultId: string,
-  wrappedJwtKey?: WrappedKey,
-  wrappedAuditKey?: WrappedKey,
+  wrappedJwtKey: WrappedKey,
+  wrappedAuditKey: WrappedKey,
 ): Promise<UnlockedKeys> {
   const masterKey = await deriveKey(password, salt);
 
   try {
     const kek = decrypt(masterKey, wrappedKek, wrappedKekIv, wrappedKekTag, AAD_VAULT_KEK);
 
-    let jwtKey: Uint8Array;
-    let auditKey: Uint8Array;
-
-    if (wrappedJwtKey && wrappedAuditKey) {
-      // New path: unwrap from KEK
-      jwtKey = decrypt(
-        kek,
-        wrappedJwtKey.ciphertext,
-        wrappedJwtKey.iv,
-        wrappedJwtKey.tag,
-        AAD_WRAPPED_JWT_KEY,
-      );
-      auditKey = decrypt(
-        kek,
-        wrappedAuditKey.ciphertext,
-        wrappedAuditKey.iv,
-        wrappedAuditKey.tag,
-        AAD_WRAPPED_AUDIT_KEY,
-      );
-    } else {
-      // Legacy path: derive from master key via HKDF
-      jwtKey = await deriveSubkey(masterKey, vaultId, HKDF_INFO_JWT_SIGNING);
-      auditKey = await deriveSubkey(masterKey, vaultId, HKDF_INFO_AUDIT);
-    }
+    const jwtKey = decrypt(
+      kek,
+      wrappedJwtKey.ciphertext,
+      wrappedJwtKey.iv,
+      wrappedJwtKey.tag,
+      AAD_WRAPPED_JWT_KEY,
+    );
+    const auditKey = decrypt(
+      kek,
+      wrappedAuditKey.ciphertext,
+      wrappedAuditKey.iv,
+      wrappedAuditKey.tag,
+      AAD_WRAPPED_AUDIT_KEY,
+    );
 
     return { kek, jwtKey, auditKey };
   } finally {

@@ -27,9 +27,7 @@ export const AES_TAG_LENGTH = 16; // 128 bits
 
 // -- HKDF info strings -------------------------------------------------------
 
-export const HKDF_INFO_JWT_SIGNING = "api-token-signing-v1";
 export const HKDF_INFO_SYNC = "sync-key-v1";
-export const HKDF_INFO_AUDIT = "audit-key-v1";
 
 // -- AAD (Additional Authenticated Data) strings -----------------------------
 

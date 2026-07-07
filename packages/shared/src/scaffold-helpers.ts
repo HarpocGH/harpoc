@@ -49,7 +49,10 @@ export function describeBuildOutput(distDir: string, options?: { shebang?: boole
 export function describeCrossPackageImports(specifiers: string[]): void {
   describe("cross-package imports", () => {
     for (const specifier of specifiers) {
-      it(`can import ${specifier}`, async () => {
+      // The first import of @harpoc/core loads native addons (better-sqlite3,
+      // argon2) and large dependency graphs; under a fully parallel suite run
+      // that regularly exceeds the 5 s default timeout.
+      it(`can import ${specifier}`, { timeout: 30_000 }, async () => {
         const mod = await import(specifier);
         expect(mod).toBeDefined();
       });

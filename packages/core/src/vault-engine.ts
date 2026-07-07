@@ -27,8 +27,6 @@ import {
   AAD_SESSION_AUDIT,
   AAD_SESSION_JWT,
   AAD_SESSION_KEK,
-  AAD_WRAPPED_AUDIT_KEY,
-  AAD_WRAPPED_JWT_KEY,
   AES_KEY_LENGTH,
   AuditEventType,
   ErrorCode,
@@ -54,12 +52,7 @@ import { AuditQuery } from "./audit/audit-query.js";
 import type { AuditQueryOptions, DecryptedAuditEvent } from "./audit/audit-query.js";
 import { decrypt, encrypt } from "./crypto/aes-gcm.js";
 import type { WrappedKey } from "./crypto/key-hierarchy.js";
-import {
-  changePassword,
-  createVaultKeys,
-  unlockVault,
-  wrapKeyWithKek,
-} from "./crypto/key-hierarchy.js";
+import { changePassword, createVaultKeys, unlockVault } from "./crypto/key-hierarchy.js";
 import { assertNever } from "./assert-never.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
 import { matchesUrlAllowlist } from "./injection/allowlist.js";
@@ -221,18 +214,19 @@ export class VaultEngine {
     const wrappedKekIv = this.loadBase64Meta(store, "wrapped_kek_iv");
     const wrappedKekTag = this.loadBase64Meta(store, "wrapped_kek_tag");
 
-    // Load optional wrapped JWT/audit keys from vault_meta
-    const wrappedJwtKey = this.loadOptionalWrappedKey(store, "wrapped_jwt_key");
-    const wrappedAuditKey = this.loadOptionalWrappedKey(store, "wrapped_audit_key");
-
     try {
+      // Wrapped JWT/audit keys are mandatory — the key hierarchy has exactly
+      // one instantiation (random keys wrapped with the KEK); a vault without
+      // them is corrupted, never a candidate for a derivation fallback.
+      const wrappedJwtKey = this.loadWrappedKey(store, "wrapped_jwt_key");
+      const wrappedAuditKey = this.loadWrappedKey(store, "wrapped_audit_key");
+
       const keys = await unlockVault(
         password,
         salt,
         wrappedKek,
         wrappedKekIv,
         wrappedKekTag,
-        vaultId,
         wrappedJwtKey,
         wrappedAuditKey,
       );
@@ -243,14 +237,6 @@ export class VaultEngine {
       this.jwtKey = keys.jwtKey;
       this.auditKey = keys.auditKey;
       this.state = VaultState.UNLOCKED;
-
-      // One-time migration: if no wrapped keys in meta, generate and store them
-      if (!wrappedJwtKey || !wrappedAuditKey) {
-        const wJwt = wrapKeyWithKek(keys.kek, keys.jwtKey, AAD_WRAPPED_JWT_KEY);
-        const wAudit = wrapKeyWithKek(keys.kek, keys.auditKey, AAD_WRAPPED_AUDIT_KEY);
-        this.storeWrappedKey(store, "wrapped_jwt_key", wJwt);
-        this.storeWrappedKey(store, "wrapped_audit_key", wAudit);
-      }
 
       // Reset lockout on success
       store.setMeta("failed_attempts", "0");
@@ -1805,11 +1791,13 @@ export class VaultEngine {
     }
   }
 
-  private loadOptionalWrappedKey(store: SqliteStore, prefix: string): WrappedKey | undefined {
+  private loadWrappedKey(store: SqliteStore, prefix: string): WrappedKey {
     const ct = store.getMeta(`${prefix}`);
     const iv = store.getMeta(`${prefix}_iv`);
     const tag = store.getMeta(`${prefix}_tag`);
-    if (!ct || !iv || !tag) return undefined;
+    if (!ct || !iv || !tag) {
+      throw VaultError.vaultCorrupted(`Missing ${prefix}`);
+    }
     return {
       ciphertext: new Uint8Array(Buffer.from(ct, "base64")),
       iv: new Uint8Array(Buffer.from(iv, "base64")),

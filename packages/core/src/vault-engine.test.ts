@@ -3,6 +3,7 @@ import type { Server } from "node:http";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, VaultError, VaultState } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
@@ -1548,9 +1549,12 @@ describe("JWT edge cases", () => {
   it("rejects token with tampered signature", () => {
     const token = engine.createToken("user-1", ["read"]);
     const parts = token.split(".");
-    // Flip last character of signature
+    // Flip the FIRST signature character — all six of its bits are
+    // significant. The last character is not a safe tamper target: it carries
+    // only four significant bits (43 base64url chars for 32 bytes), so a
+    // canonical trailing "A" tampered to "B" decodes to the same signature.
     const sig = parts[2] as string;
-    const tampered = `${parts[0]}.${parts[1]}.${sig.slice(0, -1)}${sig.endsWith("A") ? "B" : "A"}`;
+    const tampered = `${parts[0]}.${parts[1]}.${sig.startsWith("A") ? "B" : "A"}${sig.slice(1)}`;
 
     try {
       engine.verifyToken(tampered);
@@ -1824,6 +1828,31 @@ describe("session TTL sliding (use-driven, thesis §5.4.7)", () => {
 
     expect(engine.getState()).toBe(VaultState.SEALED);
     expect(() => engine.listSecrets()).toThrow();
+  });
+});
+
+describe("key hierarchy instantiation (thesis §5.3.2)", () => {
+  it("refuses to unlock a vault missing the wrapped JWT/audit keys — no derivation fallback", async () => {
+    await engine.initVault("password");
+    await engine.destroy();
+
+    const db = new Database(dbPath);
+    db.prepare(
+      "DELETE FROM vault_meta WHERE key IN ('wrapped_jwt_key', 'wrapped_jwt_key_iv', 'wrapped_jwt_key_tag')",
+    ).run();
+    db.close();
+
+    const engine2 = new VaultEngine({ dbPath, sessionPath });
+    try {
+      await engine2.unlock("password");
+      expect.fail("should throw VAULT_CORRUPTED");
+    } catch (e) {
+      expect(e).toBeInstanceOf(VaultError);
+      expect((e as VaultError).code).toBe(ErrorCode.VAULT_CORRUPTED);
+    } finally {
+      await engine2.destroy();
+    }
+    expect(engine2.getState()).toBe(VaultState.SEALED);
   });
 });
 
