@@ -1,5 +1,5 @@
 import { basename, dirname, join } from "node:path";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
@@ -193,6 +193,7 @@ const describeWindows = process.platform === "win32" ? describe : describe.skip;
 
 describeWindows("Windows batch file exclusion", () => {
   let dir: string;
+  let symlinkToBatch: string | null = null;
 
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), "harpoc-batch-"));
@@ -202,6 +203,13 @@ describeWindows("Windows batch file exclusion", () => {
     writeFileSync(join(dir, "batchonly.cmd"), "@echo off\r\n");
     writeFileSync(join(dir, "batchonly.bat"), "@echo off\r\n");
     writeFileSync(join(dir, "UPPER.CMD"), "@echo off\r\n");
+    try {
+      // File symlinks need Developer Mode or elevation on Windows.
+      symlinkSync(join(dir, "tool.cmd"), join(dir, "looks-safe.exe"), "file");
+      symlinkToBatch = join(dir, "looks-safe.exe");
+    } catch {
+      symlinkToBatch = null;
+    }
   });
 
   afterAll(() => {
@@ -226,6 +234,17 @@ describeWindows("Windows batch file exclusion", () => {
     const cmd = join(dir, "tool.cmd");
     try {
       resolveAndMatchCommand(cmd, [cmd], []);
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
+    }
+  });
+
+  it("rejects a symlink whose resolved target is a batch file", (ctx) => {
+    if (!symlinkToBatch) return ctx.skip();
+    expect(resolveExecutable(symlinkToBatch, [])).toBeNull();
+    try {
+      resolveAndMatchCommand(symlinkToBatch, [symlinkToBatch], []);
       expect.fail("should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
