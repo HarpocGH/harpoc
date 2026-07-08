@@ -17,6 +17,7 @@ import {
   ResponseMode,
   SecretStatus,
   SecretType,
+  VaultState,
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -57,6 +58,9 @@ export const followRedirectsSchema = z.enum(followRedirectsValues);
 
 const responseModeValues = Object.values(ResponseMode) as [ResponseMode, ...ResponseMode[]];
 export const responseModeSchema = z.enum(responseModeValues);
+
+const vaultStateValues = Object.values(VaultState) as [VaultState, ...VaultState[]];
+export const vaultStateSchema = z.enum(vaultStateValues);
 
 // ---------------------------------------------------------------------------
 // Handle schema
@@ -101,7 +105,15 @@ export const createSecretInputSchema = z.object({
   type: secretTypeSchema,
   project: namePattern.optional(),
   injection: injectionConfigSchema.optional(),
+  value: z.string().base64().optional(),
+  expires_at: z.number().int().positive().optional(),
 });
+
+/**
+ * Create-secret request body (wire shape): the binary secret value travels
+ * base64-encoded; `expires_at` is epoch milliseconds.
+ */
+export type CreateSecretRequest = z.infer<typeof createSecretInputSchema>;
 
 export const httpMethodSchema = z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]);
 
@@ -430,6 +442,9 @@ export const accessPolicyInputSchema = z.object({
   expires_at: z.number().int().positive().optional(),
 });
 
+/** Access-policy grant request body (principal + permissions). */
+export type AccessPolicyInput = z.infer<typeof accessPolicyInputSchema>;
+
 export const auditQuerySchema = z.object({
   secret_id: z.string().uuid().optional(),
   event_type: auditEventTypeSchema.optional(),
@@ -437,6 +452,14 @@ export const auditQuerySchema = z.object({
   until: z.number().int().nonnegative().optional(),
   limit: z.number().int().positive().max(1000).optional(),
 });
+
+export const healthResponseSchema = z.object({
+  state: vaultStateSchema,
+  version: z.string().min(1),
+});
+
+/** GET /health response (also the SDK VaultClient.getHealth result). */
+export type HealthResponse = z.infer<typeof healthResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // Session file schema (for deserializing session.json)

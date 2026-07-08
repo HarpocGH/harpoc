@@ -105,6 +105,21 @@ describe("DirectClient", () => {
     expect(engine.createSecret).toHaveBeenCalled();
   });
 
+  it("createSecret maps the wire shape to the engine input", async () => {
+    const engine = createMockEngine();
+    const client = new DirectClient(engine as never);
+
+    await client.createSecret({ name: "k", type: "api_key", expires_at: 123 });
+    expect(engine.createSecret).toHaveBeenCalledWith({
+      name: "k",
+      type: "api_key",
+      project: undefined,
+      value: undefined,
+      injection: undefined,
+      expiresAt: 123,
+    });
+  });
+
   it("rotateSecret delegates to engine", async () => {
     const engine = createMockEngine();
     const client = new DirectClient(engine as never);
@@ -216,8 +231,8 @@ describe("DirectClient", () => {
     const client = new DirectClient(engine as never);
 
     const policy = await client.grantPolicy("secret://key", {
-      principalType: "agent",
-      principalId: "a1",
+      principal_type: "agent",
+      principal_id: "a1",
       permissions: ["read"],
     });
 

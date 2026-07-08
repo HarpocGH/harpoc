@@ -86,7 +86,7 @@ describe("RestClient", () => {
       const response = { handle: "secret://k", status: "created", message: "OK" };
       mockFetchResponse(response);
 
-      const result = await client.createSecret({ name: "k", type: "api_key" });
+      const result = await client.createSecret({ name: "k", type: "api_key", expires_at: 123 });
       expect(result).toEqual(response);
 
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];
@@ -94,6 +94,7 @@ describe("RestClient", () => {
       expect(call[1].method).toBe("POST");
       const body = JSON.parse(call[1].body as string);
       expect(body.name).toBe("k");
+      expect(body.expires_at).toBe(123);
     });
 
     it("encodes value as base64", async () => {
@@ -261,8 +262,8 @@ describe("RestClient", () => {
     it("grantPolicy sends POST", async () => {
       mockFetchResponse({ id: "p1" });
       await client.grantPolicy("secret://k", {
-        principalType: "agent",
-        principalId: "a1",
+        principal_type: "agent",
+        principal_id: "a1",
         permissions: ["read"],
       });
 

@@ -51,12 +51,8 @@ export class RestClient implements VaultClient {
 
   async createSecret(input: CreateSecretInput): Promise<CreateSecretResponse> {
     return this.request<CreateSecretResponse>("POST", "/api/v1/secrets", {
-      name: input.name,
-      type: input.type,
-      project: input.project,
+      ...input,
       value: input.value ? Buffer.from(input.value).toString("base64") : undefined,
-      injection: input.injection,
-      expires_at: input.expiresAt,
     });
   }
 
@@ -154,12 +150,7 @@ export class RestClient implements VaultClient {
     return this.request<AccessPolicy>(
       "POST",
       `/api/v1/secrets/${this.encodeHandle(handle)}/policies`,
-      {
-        principal_type: input.principalType,
-        principal_id: input.principalId,
-        permissions: input.permissions,
-        expires_at: input.expiresAt,
-      },
+      input,
     );
   }
 

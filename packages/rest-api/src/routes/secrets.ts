@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import { z } from "zod";
 import { VaultError } from "@harpoc/shared";
 import {
   connectionConfigSchema,
@@ -56,22 +55,15 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     checkTokenScope(token, "create", parsed.data.project, parsed.data.name);
 
-    let expiresAt: number | undefined;
-    if (body.expires_at !== undefined) {
-      const expParsed = z.number().int().positive().safeParse(body.expires_at);
-      if (!expParsed.success) {
-        throw VaultError.schemaValidation("expires_at must be a positive integer (epoch ms)");
-      }
-      expiresAt = expParsed.data;
-    }
-
     const result = await engine.createSecret({
       name: parsed.data.name,
       type: parsed.data.type,
       project: parsed.data.project,
-      value: body.value ? new Uint8Array(Buffer.from(body.value as string, "base64")) : undefined,
+      value: parsed.data.value
+        ? new Uint8Array(Buffer.from(parsed.data.value, "base64"))
+        : undefined,
       injection: parsed.data.injection,
-      expiresAt,
+      expiresAt: parsed.data.expires_at,
     });
 
     return c.json({ data: result }, 201);

@@ -1,41 +1,31 @@
 import type {
   AccessPolicy,
+  AccessPolicyInput,
   ConnectionConfig,
+  CreateSecretRequest,
   CreateSecretResponse,
-  InjectionConfig,
+  HealthResponse,
   InjectionPolicy,
   InjectionPolicyInput,
   McpServerConfig,
-  Permission,
-  PrincipalType,
-  SecretType,
   SetInjectionPolicyOptions,
   UseSecretAction,
   UseSecretResponse,
-  VaultState,
 } from "@harpoc/shared";
 import type { AuditQueryOptions, DecryptedAuditEvent, SecretInfo } from "@harpoc/core";
 
-export interface CreateSecretInput {
-  name: string;
-  type: SecretType;
-  project?: string;
+/**
+ * The wire shape (createSecretInputSchema), with the binary value as bytes —
+ * the REST client base64-encodes it in transit.
+ */
+export type CreateSecretInput = Omit<CreateSecretRequest, "value"> & {
   value?: Uint8Array;
-  injection?: InjectionConfig;
-  expiresAt?: number;
-}
+};
 
-export interface GrantPolicyInput {
-  principalType: PrincipalType;
-  principalId: string;
-  permissions: Permission[];
-  expiresAt?: number;
-}
+/** The wire shape (accessPolicyInputSchema). */
+export type GrantPolicyInput = AccessPolicyInput;
 
-export interface HealthResponse {
-  state: VaultState;
-  version: string;
-}
+export type { HealthResponse };
 
 export interface VaultClient {
   listSecrets(project?: string): Promise<SecretInfo[]>;

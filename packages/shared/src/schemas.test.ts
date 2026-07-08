@@ -8,6 +8,7 @@ import {
   createSecretInputSchema,
   followRedirectsSchema,
   handleSchema,
+  healthResponseSchema,
   httpActionSchema,
   httpMethodSchema,
   injectionConfigSchema,
@@ -30,6 +31,7 @@ import {
   startOAuthFlowInputSchema,
   useSecretActionSchema,
   useSecretRequestSchema,
+  vaultStateSchema,
 } from "./schemas.js";
 
 // ---------------------------------------------------------------------------
@@ -113,6 +115,15 @@ describe("enum schemas", () => {
 
   it("responseModeSchema rejects unknown values", () => {
     expect(() => responseModeSchema.parse("raw")).toThrow();
+  });
+
+  it("vaultStateSchema accepts valid values", () => {
+    expect(vaultStateSchema.parse("sealed")).toBe("sealed");
+    expect(vaultStateSchema.parse("unlocked")).toBe("unlocked");
+  });
+
+  it("vaultStateSchema rejects unknown values", () => {
+    expect(() => vaultStateSchema.parse("open")).toThrow();
   });
 });
 
@@ -272,6 +283,36 @@ describe("createSecretInputSchema", () => {
   it("accepts name of exactly 255 characters", () => {
     const result = createSecretInputSchema.parse({ name: "a".repeat(255), type: "api_key" });
     expect(result.name).toBe("a".repeat(255));
+  });
+
+  it("accepts a base64 value and expires_at", () => {
+    const value = Buffer.from("hunter2secret").toString("base64");
+    const result = createSecretInputSchema.parse({
+      name: "key",
+      type: "api_key",
+      value,
+      expires_at: 1_700_000_000_000,
+    });
+    expect(result.value).toBe(value);
+    expect(result.expires_at).toBe(1_700_000_000_000);
+  });
+
+  it("rejects a non-base64 value", () => {
+    expect(() =>
+      createSecretInputSchema.parse({ name: "key", type: "api_key", value: "not base64!!" }),
+    ).toThrow();
+  });
+
+  it("rejects a non-integer expires_at", () => {
+    expect(() =>
+      createSecretInputSchema.parse({ name: "key", type: "api_key", expires_at: 1.5 }),
+    ).toThrow();
+  });
+
+  it("rejects a non-positive expires_at", () => {
+    expect(() =>
+      createSecretInputSchema.parse({ name: "key", type: "api_key", expires_at: 0 }),
+    ).toThrow();
   });
 });
 
@@ -787,6 +828,26 @@ describe("accessPolicyInputSchema", () => {
         expires_at: -1,
       }),
     ).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// healthResponseSchema
+// ---------------------------------------------------------------------------
+
+describe("healthResponseSchema", () => {
+  it("accepts a valid health response", () => {
+    const result = healthResponseSchema.parse({ state: "unlocked", version: "1.0.0" });
+    expect(result.state).toBe("unlocked");
+    expect(result.version).toBe("1.0.0");
+  });
+
+  it("rejects an unknown state", () => {
+    expect(() => healthResponseSchema.parse({ state: "open", version: "1.0.0" })).toThrow();
+  });
+
+  it("rejects a missing version", () => {
+    expect(() => healthResponseSchema.parse({ state: "sealed" })).toThrow();
   });
 });
 

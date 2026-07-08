@@ -35,7 +35,14 @@ export class DirectClient implements VaultClient {
   }
 
   async createSecret(input: CreateSecretInput): Promise<CreateSecretResponse> {
-    return this.engine.createSecret(input);
+    return this.engine.createSecret({
+      name: input.name,
+      type: input.type,
+      project: input.project,
+      value: input.value,
+      injection: input.injection,
+      expiresAt: input.expires_at,
+    });
   }
 
   async rotateSecret(handle: string, newValue: Uint8Array): Promise<void> {
@@ -87,10 +94,10 @@ export class DirectClient implements VaultClient {
     return this.engine.grantPolicy(
       {
         secretId,
-        principalType: input.principalType,
-        principalId: input.principalId,
+        principalType: input.principal_type,
+        principalId: input.principal_id,
         permissions: input.permissions,
-        expiresAt: input.expiresAt,
+        expiresAt: input.expires_at,
       },
       "sdk-direct",
     );

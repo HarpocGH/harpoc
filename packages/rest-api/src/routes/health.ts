@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { VAULT_VERSION, VaultState } from "@harpoc/shared";
+import type { HealthResponse } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 
 export function createHealthRoutes(): Hono<HarpocEnv> {
@@ -7,12 +8,11 @@ export function createHealthRoutes(): Hono<HarpocEnv> {
 
   router.get("/", (c) => {
     const engine = c.get("engine");
-    return c.json({
-      data: {
-        state: engine.getState(),
-        version: VAULT_VERSION,
-      },
-    });
+    const health: HealthResponse = {
+      state: engine.getState(),
+      version: VAULT_VERSION,
+    };
+    return c.json({ data: health });
   });
 
   return router;
