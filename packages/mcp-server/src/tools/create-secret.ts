@@ -38,7 +38,7 @@ export function registerCreateSecret(
         ),
     },
     async (args) => {
-      scopeGuard.checkAccess(PERMISSION, args.project);
+      scopeGuard.checkAccess(PERMISSION, args.project, args.name);
       rateLimiter.checkLimit();
 
       // Create secret without a value — it starts in "pending" status. The

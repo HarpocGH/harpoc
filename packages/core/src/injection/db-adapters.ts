@@ -1,3 +1,4 @@
+import { createConnection as netConnect } from "node:net";
 import type { DatabaseEngine } from "@harpoc/shared";
 
 /**
@@ -12,8 +13,16 @@ import type { DatabaseEngine } from "@harpoc/shared";
 export type DbTlsOptions = false | { ca?: string };
 
 export interface DbConnectOptions {
+  /** Logical target host as requested — TLS identity is verified against this name. */
   host: string;
   port: number;
+  /**
+   * Network address to dial: the SSRF-validated address from the pre-flight DNS
+   * lookup when `host` is a hostname, otherwise `host` itself. Adapters must
+   * connect to this address — never re-resolve `host` — so DNS rebinding cannot
+   * retarget the connection between validation and connect.
+   */
+  address: string;
   user: string;
   password: string;
   database: string;
@@ -40,13 +49,24 @@ export interface DbEngineAdapter {
 class PostgresAdapter implements DbEngineAdapter {
   async connect(opts: DbConnectOptions): Promise<DbConnection> {
     const { default: pg } = await import("pg");
+    // Dial the pinned address; `servername` keeps SNI + certificate hostname
+    // verification on the logical host (pg self-derives servername only for
+    // hostname dials, so it must be explicit when connecting by IP).
+    const pinned = opts.address !== opts.host;
     const client = new pg.Client({
-      host: opts.host,
+      host: opts.address,
       port: opts.port,
       user: opts.user,
       password: opts.password,
       database: opts.database,
-      ssl: opts.tls === false ? false : { rejectUnauthorized: true, ca: opts.tls.ca },
+      ssl:
+        opts.tls === false
+          ? false
+          : {
+              rejectUnauthorized: true,
+              ca: opts.tls.ca,
+              ...(pinned ? { servername: opts.host } : {}),
+            },
       connectionTimeoutMillis: opts.timeoutMs,
       statement_timeout: opts.timeoutMs,
       query_timeout: opts.timeoutMs,
@@ -72,14 +92,36 @@ class PostgresAdapter implements DbEngineAdapter {
 class MysqlAdapter implements DbEngineAdapter {
   async connect(opts: DbConnectOptions): Promise<DbConnection> {
     const mysql = await import("mysql2/promise");
+    // mysql2 derives the TLS servername from `host` and offers no override, so
+    // `host` stays the logical name and the pinned address goes in through a
+    // custom socket factory. `verifyIdentity` must be explicit: without it
+    // mysql2 swaps checkServerIdentity for a no-op and never verifies the
+    // certificate hostname.
+    const pinned = opts.address !== opts.host;
     const conn = await mysql.createConnection({
       host: opts.host,
       port: opts.port,
       user: opts.user,
       password: opts.password,
       database: opts.database,
-      ssl: opts.tls === false ? undefined : { rejectUnauthorized: true, ca: opts.tls.ca },
+      ssl:
+        opts.tls === false
+          ? undefined
+          : {
+              rejectUnauthorized: true,
+              ca: opts.tls.ca,
+              ...(pinned ? { verifyIdentity: true } : {}),
+            },
       connectTimeout: opts.timeoutMs,
+      ...(pinned
+        ? {
+            stream: () => {
+              const socket = netConnect(opts.port, opts.address);
+              socket.setNoDelay(true);
+              return socket;
+            },
+          }
+        : {}),
     });
     return {
       async query(sql: string, params?: unknown[]): Promise<DbQueryResult> {

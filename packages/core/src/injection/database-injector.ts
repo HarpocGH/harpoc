@@ -21,7 +21,8 @@ import { validateHostPort } from "./url-validator.js";
  *
  * Security controls realized here:
  *  - Host:port target allowlist (optional layer atop the mandatory SSRF floor).
- *  - SSRF: private/internal targets rejected before any connection.
+ *  - SSRF: private/internal targets rejected before any connection; the
+ *    connection is pinned to the pre-flight-validated address (DNS rebinding).
  *  - TLS by default; a non-TLS connection requires the audited per-secret opt-out.
  *  - Result + error sanitization: the credential and its encodings are redacted.
  */
@@ -56,9 +57,14 @@ export class DatabaseInjector {
       throw VaultError.hostNotAllowed(`${host}:${port}`);
     }
 
-    // SSRF: reject private/internal targets (mandatory floor).
+    // SSRF: reject private/internal targets (mandatory floor). The connection
+    // is then pinned to the address validated here — the driver dials the IP
+    // and never re-resolves the hostname, closing the DNS-rebinding TOCTOU
+    // window (parity with the HTTP injector's pinned lookup).
+    let pinnedAddress: string;
     try {
-      await validateHostPort(host, port);
+      const validated = await validateHostPort(host, port);
+      pinnedAddress = validated.resolvedAddress;
     } catch (err) {
       if (err instanceof VaultError) {
         this.audit(action, secretId, { host, port, error: err.code }, false);
@@ -79,6 +85,7 @@ export class DatabaseInjector {
       connection = await adapter.connect({
         host,
         port,
+        address: pinnedAddress,
         user,
         password,
         database: action.database,

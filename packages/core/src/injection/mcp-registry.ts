@@ -20,6 +20,11 @@ export interface McpConnectionEntry {
   client: Client;
   /** Set for stdio entries — the vault-spawned child transport. */
   stdioTransport?: StdioChildTransport;
+  /**
+   * Optional transport-resource teardown (the HTTP entries' pinned dispatcher).
+   * Idempotent; called on every teardown path — terminate, crash, seal.
+   */
+  dispose?: () => void;
   state: McpEntryState;
   /** Set when the connection closed without a deliberate terminate. */
   crashed: boolean;
@@ -119,6 +124,7 @@ export class McpConnectionRegistry {
       entry.state = "closing";
       entry.stdioTransport?.killSync();
       void entry.client.close().catch(() => undefined);
+      entry.dispose?.();
     }
     this.live.clear();
     this.connections.clear();
@@ -144,6 +150,7 @@ export class McpConnectionRegistry {
       this.live.delete(secretId);
     }
     this.connections.delete(secretId);
+    entry.dispose?.();
 
     if (entry.state === "closing") return;
 
@@ -190,6 +197,8 @@ export class McpConnectionRegistry {
       await entry.client.close();
     } catch {
       entry.stdioTransport?.killSync();
+    } finally {
+      entry.dispose?.();
     }
   }
 

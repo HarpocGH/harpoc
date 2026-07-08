@@ -540,5 +540,60 @@ describe("MCP Tools", () => {
       expect(result.isError).toBe(true);
       expect(getToolText(result)).toContain("Access denied");
     });
+
+    it("denies create_secret for a name outside the token's name patterns", async () => {
+      const token = {
+        sub: "test",
+        vault_id: "v",
+        scope: ["create"] as const,
+        secrets: ["api-*"],
+        iat: 0,
+        exp: 9999999999,
+        jti: "j",
+      };
+      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      registerCreateSecret(srv, engine, new ScopeGuard(token), rateLimiter);
+
+      const denied = await callTool(srv, "create_secret", {
+        name: "admin-backdoor",
+        type: "api_key",
+      });
+      expect(denied.isError).toBe(true);
+      expect(getToolText(denied)).toContain("Access denied");
+      expect(engine.createSecret).not.toHaveBeenCalled();
+
+      const allowed = await callTool(srv, "create_secret", { name: "api-new", type: "api_key" });
+      expect(allowed.isError).not.toBe(true);
+      expect(engine.createSecret).toHaveBeenCalledWith(expect.objectContaining({ name: "api-new" }));
+    });
+
+    it("denies global create_secret for a project-scoped token", async () => {
+      const token = {
+        sub: "test",
+        vault_id: "v",
+        scope: ["create"] as const,
+        project: "prod",
+        iat: 0,
+        exp: 9999999999,
+        jti: "j",
+      };
+      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      registerCreateSecret(srv, engine, new ScopeGuard(token), rateLimiter);
+
+      const denied = await callTool(srv, "create_secret", { name: "x", type: "api_key" });
+      expect(denied.isError).toBe(true);
+      expect(getToolText(denied)).toContain("Access denied");
+      expect(engine.createSecret).not.toHaveBeenCalled();
+
+      const allowed = await callTool(srv, "create_secret", {
+        name: "x",
+        type: "api_key",
+        project: "prod",
+      });
+      expect(allowed.isError).not.toBe(true);
+      expect(engine.createSecret).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "x", project: "prod" }),
+      );
+    });
   });
 });

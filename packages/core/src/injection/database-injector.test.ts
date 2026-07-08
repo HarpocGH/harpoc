@@ -108,6 +108,7 @@ describe("DatabaseInjector", () => {
     );
     expect(mock.lastConnect?.host).toBe("8.8.8.8");
     expect(mock.lastConnect?.port).toBe(5432);
+    expect(mock.lastConnect?.address).toBe("8.8.8.8");
   });
 
   it("blocks SSRF to a private target before connecting", async () => {

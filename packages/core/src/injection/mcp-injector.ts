@@ -3,15 +3,19 @@ import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { InjectionPolicy, McpAction, McpResult, McpServerConfig } from "@harpoc/shared";
 import {
   DEFAULT_MCP_TIMEOUT_MS,
+  ErrorCode,
   MAX_MCP_RESULT_BYTES,
   MCP_INIT_TIMEOUT_MS,
   McpTransport,
   VAULT_VERSION,
   VaultError,
 } from "@harpoc/shared";
+import { Agent, fetch as undiciFetch } from "undici";
+import type { RequestInit as UndiciRequestInit } from "undici";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, matchesUrlAllowlist, resolveAndMatchCommand } from "./allowlist.js";
 import { buildCleanEnv } from "./clean-env.js";
+import { createPinnedLookup } from "./http-injector.js";
 import type { McpConnectionEntry, McpConnectionRegistry } from "./mcp-registry.js";
 import { StdioChildTransport } from "./mcp-stdio-transport.js";
 import { mapStringLeaves, redactSecretEncodings } from "./output-sanitizer.js";
@@ -65,7 +69,9 @@ async function loadMcpSdk(): Promise<McpSdk> {
  *    absolute path) on EVERY call.
  *  - Streamable HTTP (request-mediated): the credential is injected as an
  *    `Authorization: Bearer` header; the endpoint is validated against the
- *    secret's URL allowlist and SSRF checks on every outbound request.
+ *    secret's URL allowlist and SSRF checks on every outbound request, the
+ *    connection is pinned to the validated addresses (DNS rebinding), and
+ *    redirects are refused.
  *
  * Lifecycle: spawn on first use, reuse across calls, terminate on session end
  * (McpConnectionRegistry). Crashes fail visibly with a structured error and
@@ -141,6 +147,13 @@ export class McpInjector {
         }),
       );
     } catch (err) {
+      // A structured refusal from the outbound-request guards (SSRF, redirect
+      // policy) keeps its own code — flattening it to a generic connect
+      // failure would hide the security decision from the caller and audit.
+      if (err instanceof VaultError) {
+        this.audit(action, secretId, config, { error: err.code }, false);
+        throw err;
+      }
       const detail = err instanceof Error ? redactSecretEncodings(err.message, valueStr) : undefined;
       const vaultErr = VaultError.mcpConnectFailed(config.server_name, detail);
       this.audit(action, secretId, config, { error: vaultErr.code }, false);
@@ -185,6 +198,7 @@ export class McpInjector {
     const client = new sdk.Client({ name: "harpoc-vault", version: VAULT_VERSION });
 
     let stdioTransport: StdioChildTransport | undefined;
+    let dispose: (() => void) | undefined;
     if (config.transport === McpTransport.STDIO) {
       stdioTransport = new StdioChildTransport({
         resolvedCommand: resolvedCommand as string,
@@ -194,8 +208,14 @@ export class McpInjector {
       });
       await client.connect(stdioTransport, { timeout: MCP_INIT_TIMEOUT_MS });
     } else {
+      // DNS-rebinding TOCTOU protection (parity with the HTTP injector): every
+      // outbound request connects through a dispatcher whose connection-time
+      // lookup serves only the addresses the per-request validateUrl approved.
+      const pins = new Map<string, readonly string[]>();
+      const dispatcher = new Agent({ connect: { lookup: createPinnedLookup(pins) } });
+      dispose = (): void => void dispatcher.close().catch(() => undefined);
       const transport = new sdk.StreamableHTTPClientTransport(new URL(config.url as string), {
-        fetch: this.validatingAuthFetch(valueStr),
+        fetch: this.validatingAuthFetch(valueStr, pins, dispatcher),
         reconnectionOptions: {
           // A lost connection must fail visibly (no-auto-respawn semantics),
           // not be silently re-established mid-call.
@@ -205,7 +225,12 @@ export class McpInjector {
           reconnectionDelayGrowFactor: 1.5,
         },
       });
-      await client.connect(transport, { timeout: MCP_INIT_TIMEOUT_MS });
+      try {
+        await client.connect(transport, { timeout: MCP_INIT_TIMEOUT_MS });
+      } catch (err) {
+        dispose();
+        throw err;
+      }
     }
 
     this.auditLogger?.log({
@@ -227,6 +252,7 @@ export class McpInjector {
       transportKind: config.transport,
       client,
       stdioTransport,
+      dispose,
       state: "connecting",
       crashed: false,
       ...fingerprints,
@@ -235,16 +261,41 @@ export class McpInjector {
   }
 
   /**
-   * Every outbound request (POST send, GET stream, DELETE terminate, and any
-   * redirect the SDK follows) is re-validated against SSRF/DNS-rebinding rules
-   * and carries the bearer credential — injected here, never visible upstream.
+   * Every outbound request (POST send, GET stream, DELETE terminate) is
+   * re-validated against SSRF rules, pinned at the socket layer to the
+   * addresses that validation resolved (the driver-level lookup serves only
+   * pinned addresses, closing the DNS-rebinding TOCTOU window), and carries
+   * the bearer credential — injected here, never visible upstream. Redirects
+   * are refused outright (fail closed): the downstream endpoint is
+   * admin-configured and exact, and a followed hop would silently escape both
+   * the URL allowlist and SSRF validation.
    */
-  private validatingAuthFetch(valueStr: string): FetchLike {
+  private validatingAuthFetch(
+    valueStr: string,
+    pins: Map<string, readonly string[]>,
+    dispatcher: Agent,
+  ): FetchLike {
     return async (url, init) => {
-      await validateUrl(String(url));
+      const validated = await validateUrl(String(url));
+      if (validated.resolvedAddresses) {
+        pins.set(validated.url.hostname.toLowerCase(), validated.resolvedAddresses);
+      }
       const headers = new Headers(init?.headers);
       headers.set("Authorization", `Bearer ${valueStr}`);
-      return fetch(url, { ...init, headers });
+      const response = await undiciFetch(String(url), {
+        ...(init as UndiciRequestInit | undefined),
+        headers: [...headers.entries()],
+        redirect: "manual",
+        dispatcher,
+      });
+      if (response.status >= 300 && response.status < 400) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new VaultError(
+          ErrorCode.REDIRECT_POLICY_VIOLATION,
+          `Downstream MCP server redirected (${response.status}); redirects are refused — configure the final endpoint URL`,
+        );
+      }
+      return response as unknown as Response;
     };
   }
 
