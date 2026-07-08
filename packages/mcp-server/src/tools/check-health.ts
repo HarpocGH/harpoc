@@ -24,7 +24,7 @@ export function registerCheckHealth(
       scopeGuard.checkAccess(PERMISSION);
       rateLimiter.checkLimit();
 
-      const secrets = engine.listSecrets();
+      const secrets = scopeGuard.filterByScope(engine.listSecrets());
       const filtered = args.handle ? secrets.filter((s) => s.handle === args.handle) : secrets;
 
       const byStatus: Record<string, number> = {};

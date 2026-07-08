@@ -146,9 +146,22 @@ export class VaultEngine {
   async initVault(password: string): Promise<{ vaultId: string }> {
     this.validatePassword(password);
 
-    const keys = await createVaultKeys(password);
+    const store = this.store ?? new SqliteStore(this.options.dbPath);
+    let keys: Awaited<ReturnType<typeof createVaultKeys>>;
+    try {
+      // Re-initializing rewraps the KEK; every existing secret's DEK would
+      // become permanently undecryptable. Refuse instead of destroying data.
+      if (store.getMeta("vault_id") !== undefined) {
+        throw VaultError.vaultAlreadyExists();
+      }
+      keys = await createVaultKeys(password);
+    } catch (err) {
+      if (this.store === null) {
+        store.close();
+      }
+      throw err;
+    }
 
-    const store = new SqliteStore(this.options.dbPath);
     store.setMeta("vault_id", keys.vaultId);
     store.setMeta("vault_version", VAULT_VERSION);
 

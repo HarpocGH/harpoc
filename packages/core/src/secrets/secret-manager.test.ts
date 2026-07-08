@@ -114,6 +114,48 @@ describe("createSecret", () => {
     expect(result.handle).toBe("secret://header-inj");
     expect(result.status).toBe("created");
   });
+
+  it("rejects an invalid name before inserting any row", async () => {
+    for (const name of ["bad.name", "has space", "a".repeat(256)]) {
+      try {
+        await manager.createSecret({
+          name,
+          type: "api_key",
+          value: new Uint8Array(Buffer.from("v")),
+        });
+        expect.fail("Should throw");
+      } catch (e) {
+        expect((e as VaultError).code).toBe(ErrorCode.INVALID_SECRET_NAME);
+      }
+    }
+
+    // No phantom row: listing still works and shows nothing
+    expect(manager.listSecrets()).toEqual([]);
+  });
+
+  it("rejects an invalid project before inserting any row", async () => {
+    try {
+      await manager.createSecret({
+        name: "good-name",
+        type: "api_key",
+        project: "bad/project",
+        value: new Uint8Array(Buffer.from("v")),
+      });
+      expect.fail("Should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.INVALID_PROJECT_NAME);
+    }
+
+    expect(manager.listSecrets()).toEqual([]);
+
+    // The name is not squatted by a phantom row — a valid create succeeds
+    const result = await manager.createSecret({
+      name: "good-name",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+    expect(result.handle).toBe("secret://good-name");
+  });
 });
 
 describe("setSecretValue", () => {

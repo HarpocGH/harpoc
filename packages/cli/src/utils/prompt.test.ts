@@ -99,4 +99,28 @@ describe("promptHidden", () => {
     expect(seen).toContain("Secret value: ");
     expect(seen).not.toContain("super-hidden");
   });
+
+  it("never echoes typed characters when the output is a TTY", async () => {
+    const input = new PassThrough() as PassThrough & {
+      isTTY: boolean;
+      setRawMode: (mode: boolean) => unknown;
+    };
+    input.isTTY = true;
+    input.setRawMode = () => input;
+    const out = sink() as PassThrough & { isTTY: boolean };
+    out.isTTY = true;
+    let seen = "";
+    out.on("data", (d: Buffer) => {
+      seen += d.toString("utf8");
+    });
+    const p = promptHidden("Password: ", input, out);
+    for (const ch of ["h", "u", "n", "t", "e", "r", "2"]) {
+      input.write(ch);
+    }
+    input.write("\r");
+    await expect(p).resolves.toBe("hunter2");
+    expect(seen).toContain("Password: ");
+    expect(seen).not.toContain("hunter2");
+    expect(seen.replace("Password: ", "").replace(/\r?\n/g, "")).toBe("");
+  });
 });

@@ -6,6 +6,7 @@ export enum ErrorCode {
   // Vault state
   VAULT_LOCKED = "VAULT_LOCKED",
   VAULT_NOT_FOUND = "VAULT_NOT_FOUND",
+  VAULT_ALREADY_EXISTS = "VAULT_ALREADY_EXISTS",
   VAULT_CORRUPTED = "VAULT_CORRUPTED",
 
   // Auth
@@ -116,6 +117,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   // Vault state
   [ErrorCode.VAULT_LOCKED]: 423,
   [ErrorCode.VAULT_NOT_FOUND]: 404,
+  [ErrorCode.VAULT_ALREADY_EXISTS]: 409,
   [ErrorCode.VAULT_CORRUPTED]: 500,
 
   // Auth
@@ -241,6 +243,13 @@ export class VaultError extends Error {
 
   static vaultNotFound(): VaultError {
     return new VaultError(ErrorCode.VAULT_NOT_FOUND, "Vault not found");
+  }
+
+  static vaultAlreadyExists(): VaultError {
+    return new VaultError(
+      ErrorCode.VAULT_ALREADY_EXISTS,
+      "A vault already exists at this location; use unlock instead",
+    );
   }
 
   static secretNotFound(handle?: string): VaultError {

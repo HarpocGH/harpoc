@@ -85,6 +85,10 @@ export class SecretManager {
   async createSecret(input: CreateSecretInput): Promise<CreateSecretResponse> {
     const { name, type, project, value, expiresAt } = input;
 
+    // Validates name and project before any row is written — a post-insert
+    // failure would leave an unaddressable row that breaks every listSecrets.
+    const handle = formatHandle(name, project);
+
     // Check for duplicate name+project
     await this.assertNoDuplicate(name, project ?? null);
 
@@ -153,7 +157,6 @@ export class SecretManager {
 
     this.store.insertSecret(secret);
 
-    const handle = formatHandle(name, project);
     return {
       handle,
       status: value ? "created" : "pending",

@@ -34,6 +34,7 @@ describe("HTTP status mapping", () => {
     // Vault state
     [ErrorCode.VAULT_LOCKED, 423],
     [ErrorCode.VAULT_NOT_FOUND, 404],
+    [ErrorCode.VAULT_ALREADY_EXISTS, 409],
     [ErrorCode.VAULT_CORRUPTED, 500],
     // Auth
     [ErrorCode.INVALID_PASSWORD, 401],
@@ -116,7 +117,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(82);
+    expect(members).toHaveLength(83);
   });
 });
 
@@ -174,6 +175,13 @@ describe("factory methods", () => {
     expect(err.code).toBe(ErrorCode.VAULT_NOT_FOUND);
     expect(err.statusCode).toBe(404);
     expect(err.message).toBe("Vault not found");
+  });
+
+  it("vaultAlreadyExists()", () => {
+    const err = VaultError.vaultAlreadyExists();
+    expect(err.code).toBe(ErrorCode.VAULT_ALREADY_EXISTS);
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toBe("A vault already exists at this location; use unlock instead");
   });
 
   it("invalidPassword()", () => {

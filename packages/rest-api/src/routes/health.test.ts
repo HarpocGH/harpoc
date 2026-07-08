@@ -18,17 +18,23 @@ const MOCK_TOKEN: VaultApiToken = {
 
 function createTestApp(
   state: string,
-  secrets: Array<{ expiresAt: number | null; status: string }> = [],
+  secrets: Array<{
+    expiresAt: number | null;
+    status: string;
+    name?: string;
+    project?: string | null;
+  }> = [],
+  token: VaultApiToken = MOCK_TOKEN,
 ) {
   const engine = {
     getState: vi.fn().mockReturnValue(state),
-    verifyToken: vi.fn().mockReturnValue(MOCK_TOKEN),
+    verifyToken: vi.fn().mockReturnValue(token),
     listSecrets: vi.fn().mockReturnValue(
       secrets.map((s, i) => ({
-        handle: `secret://key${i}`,
-        name: `key${i}`,
+        handle: `secret://${s.name ?? `key${i}`}`,
+        name: s.name ?? `key${i}`,
         type: "api_key",
-        project: null,
+        project: s.project ?? null,
         status: s.status,
         version: 1,
         createdAt: Date.now(),
@@ -134,5 +140,61 @@ describe("health routes", () => {
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
     const body = await res.json();
     expect(body.data).toHaveLength(0);
+  });
+
+  it("GET /api/v1/health/expiring denies tokens without list permission", async () => {
+    const now = Date.now();
+    const { app } = createTestApp(
+      VaultState.UNLOCKED,
+      [{ expiresAt: now + 1000, status: "active" }],
+      { ...MOCK_TOKEN, scope: ["use"] },
+    );
+
+    const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
+    expect(res.status).toBe(403);
+  });
+
+  it("GET /api/v1/health/expiring filters by token secret-name scope", async () => {
+    const now = Date.now();
+    const threeDays = now + 3 * 24 * 60 * 60 * 1000;
+
+    const { app } = createTestApp(
+      VaultState.UNLOCKED,
+      [
+        { expiresAt: threeDays, status: "active", name: "db-prod" },
+        { expiresAt: threeDays, status: "active", name: "api-key" },
+      ],
+      { ...MOCK_TOKEN, scope: ["list"], secrets: ["db-*"] },
+    );
+
+    const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].name).toBe("db-prod");
+  });
+
+  it("GET /api/v1/health/expiring scopes the listing to the token's project", async () => {
+    const { app, engine } = createTestApp(VaultState.UNLOCKED, [], {
+      ...MOCK_TOKEN,
+      scope: ["list"],
+      project: "proj-a",
+    });
+
+    const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
+    expect(res.status).toBe(200);
+    expect(engine.listSecrets).toHaveBeenCalledWith("proj-a");
+  });
+
+  it("GET /api/v1/health/expiring rejects out-of-range and malformed days", async () => {
+    const { app } = createTestApp(VaultState.UNLOCKED, []);
+
+    for (const days of ["99999999", "366", "0", "-1", "abc", "7.5"]) {
+      const res = await app.request(`/api/v1/health/expiring?days=${days}`, { headers: AUTH });
+      expect(res.status).toBe(400);
+    }
+
+    const ok = await app.request("/api/v1/health/expiring?days=365", { headers: AUTH });
+    expect(ok.status).toBe(200);
   });
 });

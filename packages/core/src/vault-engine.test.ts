@@ -163,6 +163,38 @@ describe("lifecycle", () => {
       expect((e as VaultError).code).toBe(ErrorCode.WEAK_PASSWORD);
     }
   });
+
+  it("refuses to re-init an existing vault and preserves its secrets", async () => {
+    await engine.initVault("original1");
+    await engine.createSecret({
+      name: "survivor",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("still-here")),
+    });
+    await engine.lock();
+
+    const engine2 = new VaultEngine({ dbPath, sessionPath });
+    try {
+      await engine2.initVault("newpass1");
+      expect.fail("Should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.VAULT_ALREADY_EXISTS);
+    }
+    expect(engine2.getState()).toBe(VaultState.SEALED);
+
+    await engine2.unlock("original1");
+    const value = await engine2.getSecretValue("secret://survivor");
+    expect(Buffer.from(value).toString()).toBe("still-here");
+    await engine2.destroy();
+  });
+
+  it("refuses initVault on an already-unlocked engine", async () => {
+    await engine.initVault("original1");
+    await expect(engine.initVault("original1")).rejects.toMatchObject({
+      code: ErrorCode.VAULT_ALREADY_EXISTS,
+    });
+    expect(engine.getState()).toBe(VaultState.UNLOCKED);
+  });
 });
 
 describe("secrets", () => {

@@ -41,6 +41,9 @@ export async function promptConfirm(message: string): Promise<boolean> {
  * the stream for the next prompt. EOF terminates the line (callers treat an
  * empty value as an error), so a closed stdin can no longer leave the promise
  * dangling and the process exiting 0 without having run the command.
+ *
+ * No readline interface may be attached here: with a TTY output, readline
+ * runs in terminal mode and echoes every keypress, printing the secret.
  */
 export function promptHidden(
   message: string,
@@ -53,8 +56,6 @@ export function promptHidden(
       resolve("");
       return;
     }
-
-    const rl = createInterface({ input, output });
 
     output.write(message);
     const wasRaw = input.isRaw;
@@ -71,7 +72,6 @@ export function promptHidden(
       input.removeListener("data", onData);
       input.removeListener("end", onEnd);
       input.removeListener("error", onError);
-      rl.close();
       // Pausing lets the process exit with stdin still open and keeps any
       // pushed-back input buffered until the next prompt resumes the stream.
       input.pause();

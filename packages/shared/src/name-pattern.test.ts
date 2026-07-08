@@ -48,6 +48,41 @@ describe("matchesSecretNamePattern", () => {
     expect(matchesSecretNamePattern("[a]", "[a]")).toBe(true);
     expect(matchesSecretNamePattern("dbdb", "(db)+")).toBe(false);
   });
+
+  it("does not let prefix and suffix anchors overlap", () => {
+    expect(matchesSecretNamePattern("aba", "ab*ba")).toBe(false);
+    expect(matchesSecretNamePattern("abba", "ab*ba")).toBe(true);
+    expect(matchesSecretNamePattern("abXba", "ab*ba")).toBe(true);
+  });
+
+  it("collapses consecutive wildcards", () => {
+    expect(matchesSecretNamePattern("ab", "a**b")).toBe(true);
+    expect(matchesSecretNamePattern("aXb", "a**b")).toBe(true);
+    expect(matchesSecretNamePattern("aX", "a**b")).toBe(false);
+    expect(matchesSecretNamePattern("anything", "**")).toBe(true);
+    expect(matchesSecretNamePattern("", "*")).toBe(true);
+  });
+
+  it("requires middle segments in order", () => {
+    expect(matchesSecretNamePattern("a-b-c", "a*b*c")).toBe(true);
+    expect(matchesSecretNamePattern("bc", "*b*c*")).toBe(true);
+    expect(matchesSecretNamePattern("cb", "*b*c*")).toBe(false);
+  });
+
+  it("does not let a middle segment borrow from the suffix anchor", () => {
+    expect(matchesSecretNamePattern("ab", "*ab*b")).toBe(false);
+    expect(matchesSecretNamePattern("abb", "*ab*b")).toBe(true);
+  });
+
+  it("handles adversarial many-wildcard patterns without backtracking (ReDoS)", () => {
+    const nonMatching = "a".repeat(254) + "b";
+    const start = performance.now();
+    expect(matchesSecretNamePattern(nonMatching, "*a".repeat(20))).toBe(false);
+    expect(matchesSecretNamePattern("a".repeat(255), "*a".repeat(20) + "*")).toBe(true);
+    expect(matchesSecretNamePattern(nonMatching, "*a".repeat(126) + "*")).toBe(true);
+    expect(matchesSecretNamePattern(nonMatching, "*ab".repeat(84) + "*")).toBe(false);
+    expect(performance.now() - start).toBeLessThan(200);
+  });
 });
 
 // ---------------------------------------------------------------------------

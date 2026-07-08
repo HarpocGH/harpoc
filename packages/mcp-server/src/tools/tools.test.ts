@@ -451,6 +451,75 @@ describe("MCP Tools", () => {
       expect(data.expiring_soon).toHaveLength(1);
       expect(data.expiring_soon[0].handle).toBe("secret://expiring");
     });
+
+    it("excludes out-of-scope secrets for a name-pattern-scoped token", async () => {
+      const now = Date.now();
+      const expiresAt = now + 3 * 24 * 60 * 60 * 1000;
+      (engine.listSecrets as ReturnType<typeof vi.fn>).mockReturnValue([
+        {
+          handle: "secret://db-prod",
+          name: "db-prod",
+          type: "api_key",
+          project: null,
+          status: "active",
+          version: 1,
+          createdAt: 1000,
+          updatedAt: 2000,
+          expiresAt,
+          rotatedAt: null,
+        },
+        {
+          handle: "secret://api-key",
+          name: "api-key",
+          type: "api_key",
+          project: null,
+          status: "revoked",
+          version: 1,
+          createdAt: 1000,
+          updatedAt: 2000,
+          expiresAt,
+          rotatedAt: null,
+        },
+      ]);
+      const token = {
+        sub: "test",
+        vault_id: "v",
+        scope: ["list"] as const,
+        secrets: ["db-*"],
+        iat: 0,
+        exp: 9999999999,
+        jti: "j",
+      };
+      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
+
+      const result = await callTool(srv, "check_secret_health", {});
+      const data = JSON.parse(getToolText(result));
+      expect(data.total_secrets).toBe(1);
+      expect(data.by_status).toEqual({ active: 1 });
+      expect(data.expiring_soon).toHaveLength(1);
+      expect(data.expiring_soon[0].handle).toBe("secret://db-prod");
+      expect(getToolText(result)).not.toContain("api-key");
+    });
+
+    it("excludes out-of-scope secrets for a project-scoped token", async () => {
+      const token = {
+        sub: "test",
+        vault_id: "v",
+        scope: ["list"] as const,
+        project: "prod",
+        iat: 0,
+        exp: 9999999999,
+        jti: "j",
+      };
+      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
+
+      const result = await callTool(srv, "check_secret_health", {});
+      const data = JSON.parse(getToolText(result));
+      expect(data.total_secrets).toBe(1);
+      expect(getToolText(result)).not.toContain("my-key");
+    });
   });
 
   describe("scope enforcement", () => {
