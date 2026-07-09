@@ -11,6 +11,7 @@ import type {
   OAuthProviderConfig,
   OAuthTokenStatus,
   Permission,
+  Secret,
   SetInjectionPolicyOptions,
   UseSecretAction,
   UseSecretResponse,
@@ -404,7 +405,13 @@ export class VaultEngine {
 
   async getSecretInfo(handle: string): Promise<SecretInfo> {
     const s = this.assertUnlocked();
-    const info = await s.secretManager.getSecretInfo(handle);
+    let info: SecretInfo;
+    try {
+      info = await s.secretManager.getSecretInfo(handle);
+    } catch (err) {
+      this.auditDenied(s, AuditEventType.SECRET_READ, err, { handle });
+      throw err;
+    }
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_READ,
@@ -417,7 +424,13 @@ export class VaultEngine {
 
   async getSecretValue(handle: string): Promise<Uint8Array> {
     const s = this.assertUnlocked();
-    const value = await s.secretManager.getSecretValue(handle);
+    let value: Uint8Array;
+    try {
+      value = await s.secretManager.getSecretValue(handle);
+    } catch (err) {
+      this.auditDenied(s, AuditEventType.SECRET_READ, err, { handle, action: "get_value" });
+      throw err;
+    }
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_READ,
@@ -435,7 +448,12 @@ export class VaultEngine {
 
   async setSecretValue(handle: string, value: Uint8Array): Promise<void> {
     const s = this.assertUnlocked();
-    await s.secretManager.setSecretValue(handle, value);
+    try {
+      await s.secretManager.setSecretValue(handle, value);
+    } catch (err) {
+      this.auditDenied(s, AuditEventType.SECRET_CREATE, err, { handle, action: "set_value" });
+      throw err;
+    }
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_CREATE,
@@ -446,7 +464,12 @@ export class VaultEngine {
 
   async rotateSecret(handle: string, newValue: Uint8Array): Promise<void> {
     const s = this.assertUnlocked();
-    await s.secretManager.rotateSecret(handle, newValue);
+    try {
+      await s.secretManager.rotateSecret(handle, newValue);
+    } catch (err) {
+      this.auditDenied(s, AuditEventType.SECRET_ROTATE, err, { handle });
+      throw err;
+    }
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_ROTATE,
@@ -457,7 +480,12 @@ export class VaultEngine {
 
   async revokeSecret(handle: string): Promise<void> {
     const s = this.assertUnlocked();
-    await s.secretManager.revokeSecret(handle);
+    try {
+      await s.secretManager.revokeSecret(handle);
+    } catch (err) {
+      this.auditDenied(s, AuditEventType.SECRET_REVOKE, err, { handle });
+      throw err;
+    }
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_REVOKE,
@@ -488,15 +516,32 @@ export class VaultEngine {
   ): Promise<UseSecretResponse> {
     const s = this.assertUnlocked();
 
-    const secret = await s.secretManager.resolveHandle(handle);
+    let secret: Secret;
+    try {
+      secret = await s.secretManager.resolveHandle(handle);
+    } catch (err) {
+      this.auditDenied(s, AuditEventType.SECRET_USE, err, { handle, context: action.type });
+      throw err;
+    }
     const policy = this.loadInjectionPolicy(s, secret.id);
 
     let value: Uint8Array;
-    if (secret.type === SecretType.OAUTH_TOKEN) {
-      const accessToken = await this.getOAuthAccessToken(secret.id);
-      value = new Uint8Array(Buffer.from(accessToken, "utf8"));
-    } else {
-      value = await s.secretManager.getSecretValue(handle);
+    try {
+      if (secret.type === SecretType.OAUTH_TOKEN) {
+        const accessToken = await this.getOAuthAccessToken(secret.id);
+        value = new Uint8Array(Buffer.from(accessToken, "utf8"));
+      } else {
+        value = await s.secretManager.getSecretValue(handle);
+      }
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.SECRET_USE,
+        err,
+        { handle, context: action.type },
+        secret.id,
+      );
+      throw err;
     }
 
     try {
@@ -1246,27 +1291,43 @@ export class VaultEngine {
     const s = this.assertUnlocked();
 
     const secret = s.store.getSecret(secretId);
-    if (!secret) throw VaultError.secretNotFound();
-    if (secret.type !== SecretType.OAUTH_TOKEN) {
-      throw VaultError.oauthNotConfigured();
-    }
+    try {
+      if (!secret) throw VaultError.secretNotFound();
+      if (secret.type !== SecretType.OAUTH_TOKEN) {
+        throw VaultError.oauthNotConfigured();
+      }
 
-    // Lazy expiry check
-    if (
-      secret.status !== SecretStatus.EXPIRED &&
-      secret.expires_at !== null &&
-      secret.expires_at <= Date.now()
-    ) {
-      s.store.updateSecret(secretId, {
-        status: SecretStatus.EXPIRED,
-        updated_at: Date.now(),
-      });
-      throw VaultError.secretExpired();
-    }
-    if (secret.status === SecretStatus.EXPIRED) throw VaultError.secretExpired();
-    if (secret.status === SecretStatus.REVOKED) throw VaultError.secretRevoked();
-    if (secret.status === SecretStatus.PENDING) {
-      throw VaultError.oauthNotConfigured("OAuth flow not completed");
+      // Lazy expiry check
+      if (
+        secret.status !== SecretStatus.EXPIRED &&
+        secret.expires_at !== null &&
+        secret.expires_at <= Date.now()
+      ) {
+        s.store.updateSecret(secretId, {
+          status: SecretStatus.EXPIRED,
+          updated_at: Date.now(),
+        });
+        s.auditLogger.log({
+          eventType: AuditEventType.SECRET_EXPIRE,
+          secretId,
+          sessionId: this.sessionId ?? undefined,
+        });
+        throw VaultError.secretExpired();
+      }
+      if (secret.status === SecretStatus.EXPIRED) throw VaultError.secretExpired();
+      if (secret.status === SecretStatus.REVOKED) throw VaultError.secretRevoked();
+      if (secret.status === SecretStatus.PENDING) {
+        throw VaultError.oauthNotConfigured("OAuth flow not completed");
+      }
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.SECRET_READ,
+        err,
+        { action: "oauth_access_token" },
+        secretId,
+      );
+      throw err;
     }
 
     const oauthRow = s.store.getOAuthToken(secretId);
@@ -1534,6 +1595,29 @@ export class VaultEngine {
   // Private: state management
   // ---------------------------------------------------------------------------
 
+  /**
+   * Audit a denied operation (`success: false`, error code in detail) without
+   * altering the thrown error. Denied access must be as visible in the trail
+   * as granted access — a scoped token probing revoked/expired secrets is
+   * exactly what the audit trail exists to catch.
+   */
+  private auditDenied(
+    s: UnlockedState,
+    eventType: AuditEventType,
+    err: unknown,
+    detail: Record<string, unknown>,
+    secretId?: string,
+  ): void {
+    if (!(err instanceof VaultError)) return;
+    s.auditLogger.log({
+      eventType,
+      secretId,
+      detail: { ...detail, error: err.code },
+      success: false,
+      sessionId: this.sessionId ?? undefined,
+    });
+  }
+
   private assertUnlocked(): UnlockedState {
     if (this.state !== VaultState.UNLOCKED) {
       throw VaultError.vaultLocked();
@@ -1566,7 +1650,16 @@ export class VaultEngine {
     const kek = this.kek as Uint8Array;
     const auditKey = this.auditKey as Uint8Array;
 
-    this.secretManager = new SecretManager(store, kek);
+    // The lazy-expiry hook runs on secret access, long after initManagers
+    // completes — this.auditLogger (assigned below) is always set by then.
+    this.secretManager = new SecretManager(store, kek, (secretId, handle) => {
+      this.auditLogger?.log({
+        eventType: AuditEventType.SECRET_EXPIRE,
+        secretId,
+        detail: { handle },
+        sessionId: this.sessionId ?? undefined,
+      });
+    });
     this.policyEngine = new PolicyEngine(store);
     this.auditLogger = new AuditLogger(store, auditKey);
     this.auditQuery = new AuditQuery(store, auditKey);

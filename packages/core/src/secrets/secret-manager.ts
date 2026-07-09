@@ -54,6 +54,12 @@ export class SecretManager {
   constructor(
     private readonly store: SqliteStore,
     private readonly kek: Uint8Array,
+    /**
+     * Fired when a lazy-expiry check transitions a secret to EXPIRED — the
+     * status write is a vault mutation and must reach the audit trail, which
+     * lives at the engine layer.
+     */
+    private readonly onLazyExpire: (secretId: string, handle: string) => void = (): void => {},
   ) {}
 
   /**
@@ -391,6 +397,7 @@ export class SecretManager {
         status: SecretStatus.EXPIRED,
         updated_at: Date.now(),
       });
+      this.onLazyExpire(secret.id, handle);
       throw VaultError.secretExpired(handle);
     }
 

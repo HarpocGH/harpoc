@@ -375,6 +375,17 @@ describe("getOAuthAccessToken", () => {
     });
   });
 
+  it("logs a denied access-token read with success=false", async () => {
+    await expect(engine.getOAuthAccessToken(secretId)).rejects.toThrow();
+
+    const denied = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_READ })
+      .filter((e) => !e.success);
+    expect(denied).toHaveLength(1);
+    expect(denied[0]?.detail?.error).toBe(ErrorCode.OAUTH_NOT_CONFIGURED);
+    expect(denied[0]?.secret_id).toBe(secretId);
+  });
+
   it("throws for non-OAuth secrets", async () => {
     await engine.createSecret({
       name: "regular-key",

@@ -1732,6 +1732,118 @@ describe("audit trail for failed useSecret", () => {
   });
 });
 
+describe("audit trail for denied access and lazy expiry", () => {
+  const VALUE = new Uint8Array(Buffer.from("v"));
+
+  beforeEach(async () => {
+    await engine.initVault("password");
+  });
+
+  it("emits secret.expire exactly once on the lazy-expiry transition", async () => {
+    await engine.createSecret({
+      name: "exp-once",
+      type: "api_key",
+      value: VALUE,
+      expiresAt: Date.now() - 1000,
+    });
+
+    await expect(engine.getSecretValue("secret://exp-once")).rejects.toMatchObject({
+      code: ErrorCode.SECRET_EXPIRED,
+    });
+    expect(engine.queryAudit({ eventType: AuditEventType.SECRET_EXPIRE })).toHaveLength(1);
+
+    // A second denied read is not a new transition — no second expire event.
+    await expect(engine.getSecretValue("secret://exp-once")).rejects.toMatchObject({
+      code: ErrorCode.SECRET_EXPIRED,
+    });
+    expect(engine.queryAudit({ eventType: AuditEventType.SECRET_EXPIRE })).toHaveLength(1);
+  });
+
+  it("logs a denied read of an expired secret with success=false", async () => {
+    await engine.createSecret({
+      name: "exp-read",
+      type: "api_key",
+      value: VALUE,
+      expiresAt: Date.now() - 1000,
+    });
+
+    await expect(engine.getSecretValue("secret://exp-read")).rejects.toThrow();
+
+    const denied = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_READ })
+      .filter((e) => !e.success);
+    expect(denied).toHaveLength(1);
+    expect(denied[0]?.detail?.error).toBe(ErrorCode.SECRET_EXPIRED);
+    expect(denied[0]?.detail?.handle).toBe("secret://exp-read");
+  });
+
+  it("logs denied rotate and revoke of a revoked secret with success=false", async () => {
+    await engine.createSecret({ name: "rev-mut", type: "api_key", value: VALUE });
+    await engine.revokeSecret("secret://rev-mut");
+
+    await expect(engine.rotateSecret("secret://rev-mut", VALUE)).rejects.toMatchObject({
+      code: ErrorCode.SECRET_REVOKED,
+    });
+    await expect(engine.revokeSecret("secret://rev-mut")).rejects.toMatchObject({
+      code: ErrorCode.SECRET_REVOKED,
+    });
+
+    const rotates = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_ROTATE })
+      .filter((e) => !e.success);
+    expect(rotates).toHaveLength(1);
+    expect(rotates[0]?.detail?.error).toBe(ErrorCode.SECRET_REVOKED);
+
+    const revokes = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_REVOKE })
+      .filter((e) => !e.success);
+    expect(revokes).toHaveLength(1);
+    expect(revokes[0]?.detail?.error).toBe(ErrorCode.SECRET_REVOKED);
+  });
+
+  it("logs a denied useSecret value resolution with success=false", async () => {
+    await engine.createSecret({ name: "use-denied", type: "api_key", value: VALUE });
+    await engine.revokeSecret("secret://use-denied");
+
+    await expect(
+      engine.useSecret("secret://use-denied", {
+        type: "http",
+        method: "GET",
+        url: "https://api.example.com/x",
+        injection: { type: "bearer" },
+      }),
+    ).rejects.toMatchObject({ code: ErrorCode.SECRET_REVOKED });
+
+    const denied = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_USE })
+      .filter((e) => !e.success);
+    expect(denied).toHaveLength(1);
+    expect(denied[0]?.detail?.error).toBe(ErrorCode.SECRET_REVOKED);
+    expect(denied[0]?.detail?.context).toBe("http");
+  });
+
+  it("logs a probe of a nonexistent secret with success=false", async () => {
+    await expect(engine.getSecretValue("secret://no-such-secret")).rejects.toMatchObject({
+      code: ErrorCode.SECRET_NOT_FOUND,
+    });
+
+    const denied = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_READ })
+      .filter((e) => !e.success);
+    expect(denied).toHaveLength(1);
+    expect(denied[0]?.detail?.error).toBe(ErrorCode.SECRET_NOT_FOUND);
+  });
+
+  it("successful operations still log success=true only", async () => {
+    await engine.createSecret({ name: "ok-secret", type: "api_key", value: VALUE });
+    await engine.getSecretValue("secret://ok-secret");
+
+    const reads = engine.queryAudit({ eventType: AuditEventType.SECRET_READ });
+    expect(reads.filter((e) => !e.success)).toHaveLength(0);
+    expect(engine.queryAudit({ eventType: AuditEventType.SECRET_EXPIRE })).toHaveLength(0);
+  });
+});
+
 describe("session loading", () => {
   it("loads session after restart", async () => {
     await engine.initVault("password");
