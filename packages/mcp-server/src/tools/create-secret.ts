@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
-import { injectionConfigSchema, secretTypeSchema } from "@harpoc/shared";
+import { secretTypeSchema } from "@harpoc/shared";
 import { collectValueFromTty } from "../elicitation/tty-prompt.js";
 import { collectValueViaUrlElicitation } from "../elicitation/value-collector.js";
 import type { RateLimiter } from "../guards/rate-limiter.js";
@@ -31,11 +31,6 @@ export function registerCreateSecret(
         .regex(/^[a-zA-Z0-9_-]+$/)
         .optional()
         .describe("Project namespace"),
-      injection: injectionConfigSchema
-        .optional()
-        .describe(
-          "Default injection configuration: {type:'bearer'|'basic_auth'} | {type:'header', header_name} | {type:'query', query_param}",
-        ),
     },
     async (args) => {
       scopeGuard.checkAccess(PERMISSION, args.project, args.name);
@@ -49,7 +44,6 @@ export function registerCreateSecret(
         name: args.name,
         type: args.type,
         project: args.project,
-        injection: args.injection,
       });
 
       let status: string = result.status;

@@ -91,30 +91,6 @@ describe("createSecret", () => {
     ).resolves.not.toThrow();
   });
 
-  it("accepts bearer injection config", async () => {
-    const result = await manager.createSecret({
-      name: "bearer-inj",
-      type: "api_key",
-      value: new Uint8Array(Buffer.from("token-val")),
-      injection: { type: "bearer" },
-    });
-
-    expect(result.handle).toBe("secret://bearer-inj");
-    expect(result.status).toBe("created");
-  });
-
-  it("accepts header injection config", async () => {
-    const result = await manager.createSecret({
-      name: "header-inj",
-      type: "api_key",
-      value: new Uint8Array(Buffer.from("key-val")),
-      injection: { type: "header", header_name: "X-Api-Key" },
-    });
-
-    expect(result.handle).toBe("secret://header-inj");
-    expect(result.status).toBe("created");
-  });
-
   it("rejects an invalid name before inserting any row", async () => {
     for (const name of ["bad.name", "has space", "a".repeat(256)]) {
       try {
@@ -532,32 +508,6 @@ describe("rotateSecret on non-active secrets", () => {
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.SECRET_VALUE_REQUIRED);
     }
-  });
-});
-
-describe("injection config types", () => {
-  it("accepts query injection config", async () => {
-    const result = await manager.createSecret({
-      name: "query-inj",
-      type: "api_key",
-      value: new Uint8Array(Buffer.from("token")),
-      injection: { type: "query", query_param: "api_key" },
-    });
-
-    expect(result.handle).toBe("secret://query-inj");
-    expect(result.status).toBe("created");
-  });
-
-  it("accepts basic_auth injection config", async () => {
-    const result = await manager.createSecret({
-      name: "basic-inj",
-      type: "api_key",
-      value: new Uint8Array(Buffer.from("user:pass")),
-      injection: { type: "basic_auth" },
-    });
-
-    expect(result.handle).toBe("secret://basic-inj");
-    expect(result.status).toBe("created");
   });
 });
 

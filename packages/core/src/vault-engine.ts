@@ -4,7 +4,6 @@ import type {
   ConnectionConfig,
   CreateSecretResponse,
   HttpResult,
-  InjectionConfig,
   InjectionPolicy,
   InjectionPolicyInput,
   McpServerConfig,
@@ -388,7 +387,6 @@ export class VaultEngine {
     type: SecretType;
     project?: string;
     value?: Uint8Array;
-    injection?: InjectionConfig;
     expiresAt?: number;
   }): Promise<CreateSecretResponse> {
     const s = this.assertUnlocked();

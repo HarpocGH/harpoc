@@ -115,7 +115,6 @@ describe("DirectClient", () => {
       type: "api_key",
       project: undefined,
       value: undefined,
-      injection: undefined,
       expiresAt: 123,
     });
   });

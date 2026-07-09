@@ -62,7 +62,6 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
       value: parsed.data.value
         ? new Uint8Array(Buffer.from(parsed.data.value, "base64"))
         : undefined,
-      injection: parsed.data.injection,
       expiresAt: parsed.data.expires_at,
     });
 

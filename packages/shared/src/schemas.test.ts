@@ -226,7 +226,6 @@ describe("createSecretInputSchema", () => {
     expect(result.name).toBe("github-token");
     expect(result.type).toBe("api_key");
     expect(result.project).toBeUndefined();
-    expect(result.injection).toBeUndefined();
   });
 
   it("accepts input with all optional fields", () => {
@@ -234,11 +233,20 @@ describe("createSecretInputSchema", () => {
       name: "github-token",
       type: "api_key",
       project: "my-api",
-      injection: { type: "bearer" as const },
     };
     const result = createSecretInputSchema.parse(input);
     expect(result.project).toBe("my-api");
-    expect(result.injection).toEqual({ type: "bearer" });
+  });
+
+  it("strips a legacy create-time injection config instead of storing or rejecting it", () => {
+    // The field was accepted-and-discarded before its removal; old clients
+    // sending it must not start failing, but nothing may pretend to store it.
+    const result = createSecretInputSchema.parse({
+      name: "github-token",
+      type: "api_key",
+      injection: { type: "bearer" },
+    });
+    expect(result).not.toHaveProperty("injection");
   });
 
   it("rejects missing name", () => {

@@ -79,7 +79,6 @@ describe("Memory Wiping", () => {
       name: "wipe-test-secret",
       type: SecretType.API_KEY,
       value: new Uint8Array(Buffer.from(secretValue)),
-      injection: { type: InjectionType.BEARER },
     });
 
     // useSecret should complete without error (value decrypted, injected, then wiped)
@@ -128,7 +127,6 @@ describe("Memory Wiping", () => {
         name: `sequential-secret-${i}`,
         type: SecretType.API_KEY,
         value: new Uint8Array(Buffer.from(`value-${i}`)),
-        injection: { type: InjectionType.BEARER },
       });
       expect(result.handle).toBe(`secret://sequential-secret-${i}`);
     }
@@ -151,7 +149,6 @@ describe("Error Message Sanitization", () => {
       name: "sanitization-test",
       type: SecretType.API_KEY,
       value: new Uint8Array(Buffer.from("sk-super-secret-12345")),
-      injection: { type: InjectionType.BEARER },
     });
     handle = result.handle;
   });
@@ -177,7 +174,6 @@ describe("Error Message Sanitization", () => {
       name: "revoke-test",
       type: SecretType.API_KEY,
       value: new Uint8Array(Buffer.from("sk-revoke-value")),
-      injection: { type: InjectionType.BEARER },
     });
     await vault.engine.revokeSecret(revokeResult.handle);
 
@@ -197,7 +193,6 @@ describe("Error Message Sanitization", () => {
       name: "expire-test",
       type: SecretType.API_KEY,
       value: new Uint8Array(Buffer.from("sk-expire-value")),
-      injection: { type: InjectionType.BEARER },
       expiresAt: Date.now() - 1000, // already expired
     });
 
@@ -233,7 +228,6 @@ describe("Error Message Sanitization", () => {
         name: "sanitization-test", // already exists
         type: SecretType.API_KEY,
         value: new Uint8Array(Buffer.from("another-value")),
-        injection: { type: InjectionType.BEARER },
       });
       expect.fail("Should throw");
     } catch (e) {
@@ -347,7 +341,6 @@ describe("IV Uniqueness", () => {
         name: `iv-test-${i}`,
         type: SecretType.API_KEY,
         value: new Uint8Array(Buffer.from("same-value")),
-        injection: { type: InjectionType.BEARER },
       });
     }
 
@@ -373,7 +366,6 @@ describe("IV Uniqueness", () => {
       name: "rotation-iv-test",
       type: SecretType.API_KEY,
       value: new Uint8Array(Buffer.from("original-value")),
-      injection: { type: InjectionType.BEARER },
     });
 
     // Get original IV from DB
@@ -449,13 +441,11 @@ describe("Timing Attack Protection", () => {
       name: "timing-a",
       type: SecretType.API_KEY,
       value: new Uint8Array(Buffer.from("val-a")),
-      injection: { type: InjectionType.BEARER },
     });
     await vault.engine.createSecret({
       name: "timing-b",
       type: SecretType.API_KEY,
       value: new Uint8Array(Buffer.from("val-b")),
-      injection: { type: InjectionType.BEARER },
     });
 
     // Both resolve quickly (bounded time, not scanning all secrets)
@@ -807,7 +797,6 @@ describe("SSRF E2E via useSecret", () => {
       name: "ssrf-test-secret",
       type: SecretType.API_KEY,
       value: new Uint8Array(Buffer.from("sk-ssrf-test-value")),
-      injection: { type: InjectionType.BEARER },
     });
     handle = result.handle;
 

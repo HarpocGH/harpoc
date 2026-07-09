@@ -48,7 +48,6 @@ describe("Session Sharing", () => {
       name: SECRET_NAME,
       type: SecretType.API_KEY,
       value: new Uint8Array(Buffer.from(SECRET_VALUE)),
-      injection: { type: InjectionType.BEARER },
     });
     handle = result.handle;
 

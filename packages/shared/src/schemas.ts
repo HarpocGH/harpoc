@@ -104,7 +104,6 @@ export const createSecretInputSchema = z.object({
   name: namePattern,
   type: secretTypeSchema,
   project: namePattern.optional(),
-  injection: injectionConfigSchema.optional(),
   value: z.string().base64().optional(),
   expires_at: z.number().int().positive().optional(),
 });

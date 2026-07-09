@@ -40,7 +40,6 @@ export class DirectClient implements VaultClient {
       type: input.type,
       project: input.project,
       value: input.value,
-      injection: input.injection,
       expiresAt: input.expires_at,
     });
   }

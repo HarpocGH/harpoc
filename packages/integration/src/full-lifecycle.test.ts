@@ -6,7 +6,7 @@ import { VaultEngine } from "@harpoc/core";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { DirectClient, RestClient } from "@harpoc/sdk";
-import { AuditEventType, InjectionType, SecretType, VaultState } from "@harpoc/shared";
+import { AuditEventType, SecretType, VaultState } from "@harpoc/shared";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
@@ -53,7 +53,6 @@ describe("Full Lifecycle", () => {
       name: SECRET_NAME,
       type: SecretType.API_KEY,
       value: new Uint8Array(Buffer.from(SECRET_VALUE)),
-      injection: { type: InjectionType.BEARER },
     });
     handle = result.handle;
 

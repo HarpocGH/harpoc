@@ -1,6 +1,5 @@
 import type {
   CreateSecretResponse,
-  InjectionConfig,
   ParsedHandle,
   Secret,
   SecretType,
@@ -30,7 +29,6 @@ export interface CreateSecretInput {
   type: SecretType;
   project?: string;
   value?: Uint8Array;
-  injection?: InjectionConfig;
   expiresAt?: number;
 }
 

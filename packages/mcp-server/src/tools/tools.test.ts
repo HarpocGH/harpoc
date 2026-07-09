@@ -351,7 +351,7 @@ describe("MCP Tools", () => {
       expect(data.message).toContain("harpoc secret set");
     });
 
-    it("passes project and injection to engine", async () => {
+    it("passes project to engine and drops a legacy injection config", async () => {
       await callTool(server, "create_secret", {
         name: "new-key",
         type: "api_key",
@@ -360,13 +360,11 @@ describe("MCP Tools", () => {
       });
 
       expect(engine.createSecret).toHaveBeenCalledWith(
-        expect.objectContaining({
-          name: "new-key",
-          type: "api_key",
-          project: "prod",
-          injection: { type: "bearer" },
-        }),
+        expect.objectContaining({ name: "new-key", type: "api_key", project: "prod" }),
       );
+      const calls = (engine.createSecret as ReturnType<typeof vi.fn>).mock.calls;
+      const call = (calls[0] as [Record<string, unknown>])[0];
+      expect(call).not.toHaveProperty("injection");
     });
 
     it("has no value parameter", async () => {

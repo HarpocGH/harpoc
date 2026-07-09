@@ -2299,18 +2299,6 @@ describe("secrets through VaultEngine — additional coverage", () => {
     await engine.initVault("password");
   });
 
-  it("creates a secret with injection config", async () => {
-    const result = await engine.createSecret({
-      name: "injected-key",
-      type: "api_key",
-      value: new Uint8Array(Buffer.from("v")),
-      injection: { type: "header", header_name: "X-Api-Key" },
-    });
-
-    expect(result.handle).toBe("secret://injected-key");
-    expect(result.status).toBe("created");
-  });
-
   it("lists secrets filtered by project", async () => {
     await engine.createSecret({
       name: "a",
