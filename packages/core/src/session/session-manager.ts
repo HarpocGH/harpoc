@@ -18,9 +18,11 @@ export interface SessionManagerOptions {
   /** Session-key protector (default: platform-selected — DPAPI on Windows, none elsewhere). */
   protector?: SessionKeyProtector;
   /**
-   * Invoked when keystore wrapping fails at write time and the file falls back
-   * to `key_protection: "none"`. Default: silent — core never logs; interactive
-   * entry points (the CLI) supply a callback that surfaces the downgrade.
+   * Invoked when session-file protection degrades at write time: keystore
+   * wrapping failed (the file falls back to `key_protection: "none"`) or the
+   * POSIX owner-only permission repair failed. The error message is
+   * self-descriptive. Default: silent — core never logs; interactive entry
+   * points (the CLI) supply a callback that surfaces the downgrade.
    */
   onProtectionFallback?: (error: Error) => void;
 }
@@ -68,7 +70,11 @@ export class SessionManager {
           key_protection: this.protector.scheme,
         };
       } catch (err) {
-        this.onProtectionFallback(err instanceof Error ? err : new Error(String(err)));
+        this.onProtectionFallback(
+          new Error(
+            `platform keystore unavailable — session file protected by file permissions only (${err instanceof Error ? err.message : String(err)})`,
+          ),
+        );
       }
     }
 
@@ -206,10 +212,13 @@ export class SessionManager {
   }
 
   /**
-   * Write the session file exactly as given, atomically, with 0o600 permissions.
-   * The temp name is unique per write (pid + counter), so overlapping writers —
-   * a use-driven expiry slide racing a session rewrite — never share a temp
-   * file; last rename wins.
+   * Write the session file exactly as given, atomically. The temp file is
+   * created with mode 0o600 (POSIX: applied at creation and preserved by the
+   * rename, so the raw session key is never readable by other users at any
+   * instant — the trailing chmod is only a repair, and its failure fires the
+   * fallback callback). The temp name is unique per write (pid + counter), so
+   * overlapping writers — a use-driven expiry slide racing a session rewrite —
+   * never share a temp file; last rename wins.
    */
   private async writeStoredSession(session: SessionFile): Promise<void> {
     const tmpPath = join(
@@ -219,7 +228,7 @@ export class SessionManager {
 
     try {
       const data = JSON.stringify(session, null, 2);
-      writeFileSync(tmpPath, data, "utf8");
+      writeFileSync(tmpPath, data, { encoding: "utf8", mode: 0o600 });
 
       // fsync the temp file
       const fd = openSync(tmpPath, "r+");
@@ -243,7 +252,13 @@ export class SessionManager {
           // Best-effort: icacls may not be available
         }
       } else {
-        await chmod(this.sessionPath, 0o600).catch(() => {});
+        await chmod(this.sessionPath, 0o600).catch((err: unknown) => {
+          this.onProtectionFallback(
+            new Error(
+              `failed to restrict session file permissions to owner-only (${err instanceof Error ? err.message : String(err)})`,
+            ),
+          );
+        });
       }
     } catch (err) {
       // Clean up temp file on failure

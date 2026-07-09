@@ -26,9 +26,7 @@ export function createEngine(vaultDir: string): VaultEngine {
     dbPath,
     sessionPath,
     onSessionKeyProtectionFallback: (error) => {
-      console.error(
-        `Warning: platform keystore unavailable — session file protected by file permissions only (${error.message})`,
-      );
+      console.error(`Warning: ${error.message}`);
     },
   });
 }

@@ -78,7 +78,7 @@ export interface VaultEngineOptions {
   sessionPath: string;
   /** Override the session-key protector (default: platform keystore — DPAPI on Windows, none elsewhere). */
   sessionKeyProtector?: SessionKeyProtector;
-  /** Surface session-key keystore fallback events (default: silent — core never logs). */
+  /** Surface session-file protection downgrades — keystore fallback or failed permission repair (default: silent — core never logs). */
   onSessionKeyProtectionFallback?: (error: Error) => void;
 }
 
