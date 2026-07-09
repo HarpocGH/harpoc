@@ -42,14 +42,61 @@ describe("GitInjector enforcement (no git binary required)", () => {
     },
   );
 
-  it.each(["-c", "--config", "--upload-pack=/x", "--receive-pack=/y", "--exec=/z"])(
-    "rejects dangerous git argument %s",
+  it.each([
+    "-c",
+    "--config",
+    "--upload-pack=/x",
+    "--receive-pack=/y",
+    "--exec=/z",
+    "--template=/tmp/evil",
+    "--separate-git-dir=/tmp/evil",
+  ])("rejects dangerous git argument %s", async (arg) => {
+    await expect(
+      injector.executeWithSecret(gitAction({ args: [arg] }), SECRET, policy(), undefined),
+    ).rejects.toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
+  });
+
+  it("rejects --template in its space-separated form (value arg alone is inert)", async () => {
+    await expect(
+      injector.executeWithSecret(
+        gitAction({ args: ["--template", "/tmp/evil"] }),
+        SECRET,
+        policy(),
+        undefined,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
+  });
+
+  it.each(["-u", "-u/tmp/evil"])(
+    "rejects the clone upload-pack shorthand %s",
     async (arg) => {
       await expect(
-        injector.executeWithSecret(gitAction({ args: [arg] }), SECRET, policy(), undefined),
+        injector.executeWithSecret(
+          gitAction({ operation: "clone", args: [arg] }),
+          SECRET,
+          policy(),
+          undefined,
+        ),
       ).rejects.toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
     },
   );
+
+  it("allows push -u (--set-upstream) — the shorthand is clone-only dangerous", async () => {
+    // -u is benign for push; args pass the safety filter and enforcement proceeds
+    // past it to the command allowlist (deny-by-default here), not INVALID_GIT_CONFIG.
+    await expect(
+      injector.executeWithSecret(
+        gitAction({
+          operation: "push",
+          repository: "git@github.com:org/repo.git",
+          args: ["-u", "origin", "main"],
+        }),
+        SECRET,
+        policy(),
+        undefined,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+  });
 
   it("denies git by default when no command allowlist is set", async () => {
     await expect(

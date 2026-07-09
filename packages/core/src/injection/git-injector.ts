@@ -16,7 +16,10 @@ import { EphemeralSshAgent } from "./ssh-agent/index.js";
 import { buildSshEnv, isHostKeyFailure, sshHardeningArgs, writeKnownHosts } from "./ssh-common.js";
 import { validateUrl } from "./url-validator.js";
 
-/** git args that turn data into an instruction vehicle (config/hook/transport execution). */
+/** git args that turn data into an instruction vehicle (config/hook/transport execution).
+ *  Matched by name prefix, so both `--template=<dir>` and `--template <dir>` are caught
+ *  (the value arg on its own is inert). `--template`/`--separate-git-dir` run hooks /
+ *  relocate the git dir at clone time — clone-time local code execution vectors. */
 const DANGEROUS_ARG_PREFIXES = [
   "-c",
   "--config",
@@ -24,7 +27,14 @@ const DANGEROUS_ARG_PREFIXES = [
   "--upload-pack",
   "--receive-pack",
   "--exec",
+  "--template",
+  "--separate-git-dir",
 ];
+
+/** Shorthands dangerous only for specific operations. `-u` is `--upload-pack` for
+ *  `clone` (transport-program execution) but `--set-upstream` for `push` (benign),
+ *  so it is blocked per-operation rather than globally. */
+const CLONE_DANGEROUS_ARG_PREFIXES = ["-u"];
 
 /** Repository transports that can execute local commands — never allowed. */
 const FORBIDDEN_REPO_PREFIXES = ["ext::", "fd::", "file:", "git+"];
@@ -66,7 +76,7 @@ export class GitInjector {
       throw VaultError.gitUnsupportedTransport(action.repository);
     }
 
-    assertSafeArgs(action.args);
+    assertSafeArgs(action.operation, action.args);
     if (action.working_directory && action.working_directory.startsWith("-")) {
       throw VaultError.invalidGitConfig("working_directory must not start with '-'");
     }
@@ -212,10 +222,14 @@ function detectTransport(repository: string): "https" | "ssh" | null {
   return null;
 }
 
-function assertSafeArgs(args: string[] | undefined): void {
+function assertSafeArgs(operation: GitAction["operation"], args: string[] | undefined): void {
+  const prefixes =
+    operation === "clone"
+      ? [...DANGEROUS_ARG_PREFIXES, ...CLONE_DANGEROUS_ARG_PREFIXES]
+      : DANGEROUS_ARG_PREFIXES;
   for (const arg of args ?? []) {
     const a = arg.trim();
-    if (DANGEROUS_ARG_PREFIXES.some((p) => a === p || a.startsWith(p))) {
+    if (prefixes.some((p) => a === p || a.startsWith(p))) {
       throw VaultError.invalidGitConfig(`disallowed git argument: ${arg}`);
     }
   }
