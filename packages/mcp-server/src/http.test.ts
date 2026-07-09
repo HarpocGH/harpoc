@@ -292,6 +292,47 @@ describe("startMcpHttpServer", () => {
     expect(body.error.code).toBe(-32700);
   });
 
+  it("rejects an oversized initialize body with 413", async () => {
+    const { port } = await start(mockEngine());
+
+    const oversized = JSON.stringify({
+      ...INIT_BODY,
+      params: { ...INIT_BODY.params, padding: "x".repeat(4 * 1024 * 1024) },
+    });
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: rpcHeaders({ authorization: `Bearer ${TOKEN}` }),
+      body: oversized,
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it("rejects an oversized body on an established session with 413", async () => {
+    const engine = mockEngine();
+    const { port } = await start(engine);
+
+    const { client, transport } = await connectClient(port, TOKEN);
+    clients.push(client);
+    const sessionId = transport.sessionId as string;
+
+    const oversized = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "list_secrets", arguments: { padding: "x".repeat(4 * 1024 * 1024) } },
+    });
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: rpcHeaders({ authorization: `Bearer ${TOKEN}`, "mcp-session-id": sessionId }),
+      body: oversized,
+    });
+    expect(res.status).toBe(413);
+    expect(engine.listSecrets).not.toHaveBeenCalled();
+
+    const { tools } = await client.listTools();
+    expect(tools).toHaveLength(7);
+  });
+
   it("rejects unknown paths with 404", async () => {
     const { port } = await start(mockEngine());
 

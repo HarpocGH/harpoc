@@ -95,7 +95,13 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
         sendAuthError(res, err);
         return;
       }
-      await session.transport.handleRequest(req, res);
+      if (req.method === "POST") {
+        const read = await readJsonBodyOrRespond(req, res);
+        if (!read.ok) return;
+        await session.transport.handleRequest(req, res, read.body);
+      } else {
+        await session.transport.handleRequest(req, res);
+      }
       return;
     }
 
@@ -104,17 +110,9 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
       return;
     }
 
-    let body: unknown;
-    try {
-      body = await readJsonBody(req);
-    } catch (err) {
-      if (err instanceof VaultError) {
-        sendJsonRpcError(res, 413, err.message);
-      } else {
-        sendJsonRpcError(res, 400, "Parse error: invalid JSON", -32700);
-      }
-      return;
-    }
+    const read = await readJsonBodyOrRespond(req, res);
+    if (!read.ok) return;
+    const body = read.body;
 
     if (!isInitializeRequest(body)) {
       sendJsonRpcError(res, 400, "Bad Request: expected an initialize request (no session ID)");
@@ -234,18 +232,65 @@ function fingerprint(token: string): Buffer {
   return createHash("sha256").update(token, "utf8").digest();
 }
 
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of req) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
-    total += buf.length;
-    if (total > MAX_BODY_BYTES) {
-      throw new VaultError(ErrorCode.INVALID_INPUT, "Request body too large");
+type BodyReadResult = { ok: true; body: unknown } | { ok: false };
+
+/**
+ * Read and parse a request body with the MAX_BODY_BYTES cap, answering 413
+ * (too large) or 400 (malformed JSON) directly on failure. Every request path
+ * that carries a body must go through this: the SDK transport's own body read
+ * (`await req.json()`) is unbounded, so handing it an unread request reopens
+ * the memory-exhaustion hole.
+ */
+async function readJsonBodyOrRespond(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<BodyReadResult> {
+  try {
+    return { ok: true, body: await readJsonBody(req) };
+  } catch (err) {
+    if (err instanceof VaultError) {
+      sendJsonRpcError(res, 413, err.message);
+    } else {
+      sendJsonRpcError(res, 400, "Parse error: invalid JSON", -32700);
     }
-    chunks.push(buf);
+    return { ok: false };
   }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+}
+
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  const raw = await new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
+    // Listener-based (not `for await`): exiting a stream's async iterator
+    // destroys the socket, which would reset the connection before the 413
+    // response reaches the client. Past the cap the remainder is drained and
+    // discarded instead (bounded by Node's server request timeout), keeping
+    // the socket healthy for the error response.
+    req.on("data", (chunk: Buffer | string) => {
+      if (settled) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
+      total += buf.length;
+      if (total > MAX_BODY_BYTES) {
+        settled = true;
+        chunks.length = 0;
+        reject(new VaultError(ErrorCode.INVALID_INPUT, "Request body too large"));
+        return;
+      }
+      chunks.push(buf);
+    });
+    req.on("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks));
+    });
+    req.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+  });
+  return JSON.parse(raw.toString("utf8")) as unknown;
 }
 
 function sendJsonRpcError(
