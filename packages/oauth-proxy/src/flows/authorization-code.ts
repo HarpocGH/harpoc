@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { validateUrl } from "@harpoc/core";
 import { VaultError } from "@harpoc/shared";
 import type { OAuthProviderConfig } from "@harpoc/shared";
 import { generateCodeChallenge, generateCodeVerifier } from "../pkce.js";
@@ -69,6 +70,8 @@ export class AuthorizationCodeFlow {
     if (config.client_secret) {
       params.set("client_secret", config.client_secret);
     }
+
+    await validateUrl(config.token_endpoint);
 
     let response: Response;
     try {

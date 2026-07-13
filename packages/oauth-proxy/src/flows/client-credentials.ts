@@ -1,3 +1,4 @@
+import { validateUrl } from "@harpoc/core";
 import { VaultError } from "@harpoc/shared";
 import type { OAuthProviderConfig } from "@harpoc/shared";
 import { getScopesSeparator } from "../providers.js";
@@ -27,6 +28,8 @@ export class ClientCredentialsFlow {
       const separator = getScopesSeparator(config.provider);
       params.set("scope", config.scopes.join(separator));
     }
+
+    await validateUrl(config.token_endpoint);
 
     let response: Response;
     try {

@@ -15,6 +15,7 @@ export class TokenRefreshScheduler {
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private checkIntervalMs: number;
   private initialRetryDelayMs: number;
+  private tickInProgress = false;
 
   constructor(engine: VaultEngine, options?: TokenRefreshSchedulerOptions) {
     this.engine = engine;
@@ -25,14 +26,26 @@ export class TokenRefreshScheduler {
   /**
    * Start the background refresh scheduler.
    * Periodically checks for expiring OAuth tokens and refreshes them.
+   *
+   * A tick that outlives the interval (slow provider, many retrying tokens)
+   * must not overlap the next one: overlapping ticks POST the same
+   * refresh_token twice, which rotation-detecting providers punish by
+   * revoking the token family. Overlapped firings are skipped — the next
+   * tick re-discovers still-expiring tokens.
    */
   start(): void {
     if (this.intervalId) return;
 
     this.intervalId = setInterval(() => {
-      this.tick().catch(() => {
-        // Errors are handled per-token in tick()
-      });
+      if (this.tickInProgress) return;
+      this.tickInProgress = true;
+      this.tick()
+        .catch(() => {
+          // Errors are handled per-token in tick()
+        })
+        .finally(() => {
+          this.tickInProgress = false;
+        });
     }, this.checkIntervalMs);
   }
 

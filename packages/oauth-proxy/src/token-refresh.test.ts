@@ -158,4 +158,41 @@ describe("TokenRefreshScheduler", () => {
       vi.useRealTimers();
     }
   });
+
+  it("skips interval firings while a previous tick is still running", async () => {
+    vi.useFakeTimers();
+    try {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const engine = {
+        getExpiringOAuthTokens: vi.fn().mockReturnValue([{ secret_id: "slow-token" }]),
+        refreshOAuthToken: vi.fn().mockImplementation(async () => {
+          await gate;
+          return Date.now() + 3600_000;
+        }),
+      };
+
+      scheduler = new TokenRefreshScheduler(engine as never, {
+        checkIntervalMs: 100,
+        initialRetryDelayMs: 0,
+      });
+      scheduler.start();
+
+      // Three interval firings while the first tick is blocked on the slow refresh
+      await vi.advanceTimersByTimeAsync(350);
+      expect(engine.getExpiringOAuthTokens).toHaveBeenCalledTimes(1);
+      expect(engine.refreshOAuthToken).toHaveBeenCalledTimes(1);
+
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Once the slow tick settles, the next firing runs a fresh tick
+      await vi.advanceTimersByTimeAsync(100);
+      expect(engine.getExpiringOAuthTokens).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

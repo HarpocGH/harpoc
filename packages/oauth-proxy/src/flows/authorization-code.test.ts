@@ -158,4 +158,26 @@ describe("AuthorizationCodeFlow.handleCallback", () => {
       flow.handleCallback("code", makeConfig(), redirectUri, "v"),
     ).rejects.toMatchObject({ code: ErrorCode.OAUTH_TOKEN_EXCHANGE_FAILED });
   });
+
+  it("rejects a private-address token_endpoint before the client_secret is sent", async () => {
+    await expect(
+      flow.handleCallback(
+        "code",
+        makeConfig({ token_endpoint: "https://192.168.1.1/token" }),
+        redirectUri,
+        "v",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.SSRF_BLOCKED });
+  });
+
+  it("rejects a non-loopback plain-HTTP token_endpoint", async () => {
+    await expect(
+      flow.handleCallback(
+        "code",
+        makeConfig({ token_endpoint: "http://169.254.169.254/token" }),
+        redirectUri,
+        "v",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.URL_HTTPS_REQUIRED });
+  });
 });

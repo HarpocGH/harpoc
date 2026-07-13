@@ -66,6 +66,12 @@ beforeAll(async () => {
       return;
     }
 
+    if (url.pathname === "/redirect-private") {
+      res.writeHead(302, { Location: "https://10.0.0.1/steal" });
+      res.end();
+      return;
+    }
+
     if (url.pathname === "/slow") {
       // Don't respond — simulate timeout
       return;
@@ -179,6 +185,20 @@ describe("HttpInjector", () => {
       );
 
       expect(response.status).toBe(302);
+    });
+
+    it("rejects a redirect to a private-network target (per-hop SSRF re-validation)", async () => {
+      const before = requestPaths.length;
+      await expect(
+        injector.executeWithSecret(
+          { method: "GET", url: `${baseUrl}/redirect-private` },
+          new Uint8Array(Buffer.from("token")),
+          { type: "bearer" },
+          "any",
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.REDIRECT_POLICY_VIOLATION });
+      // Only the redirecting response itself was fetched — the private hop never executed.
+      expect(requestPaths.slice(before)).toEqual(["/redirect-private"]);
     });
   });
 

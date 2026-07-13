@@ -1,3 +1,4 @@
+import { validateUrl } from "@harpoc/core";
 import { VaultError } from "@harpoc/shared";
 import type { OAuthProviderConfig } from "@harpoc/shared";
 import { getScopesSeparator } from "../providers.js";
@@ -36,6 +37,8 @@ export class DeviceCodeFlow {
       const separator = getScopesSeparator(config.provider);
       params.set("scope", config.scopes.join(separator));
     }
+
+    await validateUrl(config.device_authorization_endpoint);
 
     let response: Response;
     try {
@@ -96,6 +99,8 @@ export class DeviceCodeFlow {
     expiresIn: number,
     signal?: AbortSignal,
   ): Promise<DeviceCodeTokenResult> {
+    await validateUrl(config.token_endpoint);
+
     let currentInterval = interval;
     const deadline = Date.now() + expiresIn * 1000;
 

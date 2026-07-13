@@ -282,6 +282,84 @@ describe("refreshOAuthToken", () => {
     expect(events.length).toBe(1);
     expect(events[0]?.detail).toHaveProperty("new_expires_at");
   });
+
+  it("coalesces concurrent refreshes onto a single token-endpoint POST", async () => {
+    await engine.completeOAuthFlow(secretId, "old-access", "old-refresh", Date.now() - 1000);
+
+    let hits = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    tokenEndpointHandler = (_req, res) => {
+      hits++;
+      void gate.then(() => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            access_token: "coalesced-access-token",
+            refresh_token: "rotated-refresh-token",
+            expires_in: 3600,
+          }),
+        );
+      });
+    };
+
+    const first = engine.refreshOAuthToken(secretId);
+    const second = engine.refreshOAuthToken(secretId);
+    release();
+    const [expiryA, expiryB] = await Promise.all([first, second]);
+
+    expect(hits).toBe(1);
+    expect(expiryA).toBe(expiryB);
+  });
+
+  it("coalesces an on-use auto-refresh with an explicit refresh", async () => {
+    await engine.completeOAuthFlow(secretId, "old-access", "old-refresh", Date.now() - 1000);
+
+    let hits = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    tokenEndpointHandler = (_req, res) => {
+      hits++;
+      void gate.then(() => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            access_token: "coalesced-access-token",
+            refresh_token: "rotated-refresh-token",
+            expires_in: 3600,
+          }),
+        );
+      });
+    };
+
+    const explicitRefresh = engine.refreshOAuthToken(secretId);
+    const onUseRead = engine.getOAuthAccessToken(secretId);
+    release();
+    const [, token] = await Promise.all([explicitRefresh, onUseRead]);
+
+    expect(hits).toBe(1);
+    expect(token).toBe("coalesced-access-token");
+  });
+
+  it("starts a fresh refresh once a prior one has settled", async () => {
+    await engine.completeOAuthFlow(secretId, "old-access", "old-refresh", Date.now() - 1000);
+
+    let hits = 0;
+    const defaultHandler = tokenEndpointHandler;
+    tokenEndpointHandler = (req, res) => {
+      hits++;
+      defaultHandler(req, res);
+    };
+
+    await engine.refreshOAuthToken(secretId);
+    await engine.refreshOAuthToken(secretId);
+
+    expect(hits).toBe(2);
+  });
 });
 
 // ---------------------------------------------------------------------------

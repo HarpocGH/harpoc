@@ -167,5 +167,24 @@ describe("policy routes", () => {
       const body = await res.json();
       expect(body.error).toBe("POLICY_NOT_FOUND");
     });
+
+    it("requires admin scope", async () => {
+      engine = createMockEngine(READ_TOKEN);
+      app = new Hono<HarpocEnv>();
+      app.onError(errorHandler);
+      app.use("*", async (c, next) => {
+        c.set("engine", engine as never);
+        await next();
+      });
+      app.use("/api/v1/secrets/*", authMiddleware);
+      app.route("/api/v1/secrets", createPolicyRoutes());
+
+      const res = await app.request("/api/v1/secrets/test-key/policies/policy-1", {
+        method: "DELETE",
+        headers: AUTH,
+      });
+      expect(res.status).toBe(403);
+      expect(engine.revokePolicy).not.toHaveBeenCalled();
+    });
   });
 });

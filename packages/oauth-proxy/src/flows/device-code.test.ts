@@ -106,6 +106,20 @@ describe("DeviceCodeFlow.startFlow", () => {
       code: ErrorCode.OAUTH_FLOW_FAILED,
     });
   });
+
+  it("rejects a private-address device_authorization_endpoint", async () => {
+    await expect(
+      flow.startFlow(makeConfig({ device_authorization_endpoint: "https://192.168.1.1/device" })),
+    ).rejects.toMatchObject({ code: ErrorCode.SSRF_BLOCKED });
+  });
+
+  it("rejects a non-loopback plain-HTTP device_authorization_endpoint", async () => {
+    await expect(
+      flow.startFlow(
+        makeConfig({ device_authorization_endpoint: "http://169.254.169.254/device" }),
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.URL_HTTPS_REQUIRED });
+  });
 });
 
 describe("DeviceCodeFlow.pollForToken", () => {
@@ -175,5 +189,22 @@ describe("DeviceCodeFlow.pollForToken", () => {
     await expect(
       flow.pollForToken("DC-abort", 0, makeConfig(), 30, controller.signal),
     ).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+  });
+
+  it("rejects a private-address token_endpoint before polling starts", async () => {
+    await expect(
+      flow.pollForToken("DC", 0, makeConfig({ token_endpoint: "https://192.168.1.1/token" }), 30),
+    ).rejects.toMatchObject({ code: ErrorCode.SSRF_BLOCKED });
+  });
+
+  it("rejects a non-loopback plain-HTTP token_endpoint before polling starts", async () => {
+    await expect(
+      flow.pollForToken(
+        "DC",
+        0,
+        makeConfig({ token_endpoint: "http://169.254.169.254/token" }),
+        30,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.URL_HTTPS_REQUIRED });
   });
 });

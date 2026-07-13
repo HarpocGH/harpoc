@@ -732,4 +732,203 @@ describe("secret routes", () => {
       expect(res2.status).toBe(201);
     });
   });
+
+  describe("scope denial on sensitive routes", () => {
+    const JSON_HEADERS = { ...AUTH, "content-type": "application/json" };
+    const withoutScope = (missing: string) => MOCK_TOKEN.scope.filter((s) => s !== missing);
+
+    const cases: {
+      title: string;
+      missing: string;
+      engineFn: keyof ReturnType<typeof createMockEngine>;
+      request: () => Promise<Response>;
+    }[] = [
+      {
+        title: "GET /:handle requires read",
+        missing: "read",
+        engineFn: "getSecretInfo",
+        request: () => app.request("/api/v1/secrets/test-key", { headers: AUTH }),
+      },
+      {
+        title: "GET /:handle/value requires read",
+        missing: "read",
+        engineFn: "getSecretValue",
+        request: () => app.request("/api/v1/secrets/test-key/value", { headers: AUTH }),
+      },
+      {
+        title: "POST /:handle/rotate requires rotate",
+        missing: "rotate",
+        engineFn: "rotateSecret",
+        request: () =>
+          app.request("/api/v1/secrets/test-key/rotate", {
+            method: "POST",
+            headers: JSON_HEADERS,
+            body: JSON.stringify({ value: Buffer.from("new").toString("base64") }),
+          }),
+      },
+      {
+        title: "POST /:handle/use requires use",
+        missing: "use",
+        engineFn: "useSecret",
+        request: () =>
+          app.request("/api/v1/secrets/test-key/use", {
+            method: "POST",
+            headers: JSON_HEADERS,
+            body: JSON.stringify({
+              action: {
+                type: "http",
+                method: "GET",
+                url: "https://api.example.com/data",
+                injection: { type: "bearer" },
+              },
+            }),
+          }),
+      },
+      {
+        title: "GET /:handle/injection-policy requires read",
+        missing: "read",
+        engineFn: "getInjectionPolicy",
+        request: () => app.request("/api/v1/secrets/test-key/injection-policy", { headers: AUTH }),
+      },
+      {
+        title: "PUT /:handle/injection-policy requires rotate",
+        missing: "rotate",
+        engineFn: "setInjectionPolicy",
+        request: () =>
+          app.request("/api/v1/secrets/test-key/injection-policy", {
+            method: "PUT",
+            headers: JSON_HEADERS,
+            body: JSON.stringify({ url_allowlist: ["https://api.example.com/*"] }),
+          }),
+      },
+      {
+        title: "GET /:handle/mcp-server requires read",
+        missing: "read",
+        engineFn: "getMcpServerConfig",
+        request: () => app.request("/api/v1/secrets/test-key/mcp-server", { headers: AUTH }),
+      },
+      {
+        title: "PUT /:handle/mcp-server requires rotate",
+        missing: "rotate",
+        engineFn: "setMcpServerConfig",
+        request: () =>
+          app.request("/api/v1/secrets/test-key/mcp-server", {
+            method: "PUT",
+            headers: JSON_HEADERS,
+            body: JSON.stringify({}),
+          }),
+      },
+      {
+        title: "DELETE /:handle/mcp-server requires rotate",
+        missing: "rotate",
+        engineFn: "deleteMcpServerConfig",
+        request: () =>
+          app.request("/api/v1/secrets/test-key/mcp-server", { method: "DELETE", headers: AUTH }),
+      },
+      {
+        title: "GET /:handle/connection-config requires read",
+        missing: "read",
+        engineFn: "getConnectionConfig",
+        request: () => app.request("/api/v1/secrets/test-key/connection-config", { headers: AUTH }),
+      },
+      {
+        title: "PUT /:handle/connection-config requires rotate",
+        missing: "rotate",
+        engineFn: "setConnectionConfig",
+        request: () =>
+          app.request("/api/v1/secrets/test-key/connection-config", {
+            method: "PUT",
+            headers: JSON_HEADERS,
+            body: JSON.stringify({}),
+          }),
+      },
+      {
+        title: "DELETE /:handle/connection-config requires rotate",
+        missing: "rotate",
+        engineFn: "deleteConnectionConfig",
+        request: () =>
+          app.request("/api/v1/secrets/test-key/connection-config", {
+            method: "DELETE",
+            headers: AUTH,
+          }),
+      },
+    ];
+
+    for (const tc of cases) {
+      it(`${tc.title} (403, engine untouched)`, async () => {
+        engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: withoutScope(tc.missing) });
+        const res = await tc.request();
+        expect(res.status).toBe(403);
+        expect(engine[tc.engineFn]).not.toHaveBeenCalled();
+      });
+    }
+
+    const patternCases: {
+      title: string;
+      engineFn: keyof ReturnType<typeof createMockEngine>;
+      request: () => Promise<Response>;
+    }[] = [
+      {
+        title: "GET /:handle/value",
+        engineFn: "getSecretValue",
+        request: () => app.request("/api/v1/secrets/test-key/value", { headers: AUTH }),
+      },
+      {
+        title: "POST /:handle/use",
+        engineFn: "useSecret",
+        request: () =>
+          app.request("/api/v1/secrets/test-key/use", {
+            method: "POST",
+            headers: JSON_HEADERS,
+            body: JSON.stringify({
+              action: {
+                type: "http",
+                method: "GET",
+                url: "https://api.example.com/data",
+                injection: { type: "bearer" },
+              },
+            }),
+          }),
+      },
+      {
+        title: "PUT /:handle/injection-policy",
+        engineFn: "setInjectionPolicy",
+        request: () =>
+          app.request("/api/v1/secrets/test-key/injection-policy", {
+            method: "PUT",
+            headers: JSON_HEADERS,
+            body: JSON.stringify({ url_allowlist: ["https://api.example.com/*"] }),
+          }),
+      },
+      {
+        title: "PUT /:handle/mcp-server",
+        engineFn: "setMcpServerConfig",
+        request: () =>
+          app.request("/api/v1/secrets/test-key/mcp-server", {
+            method: "PUT",
+            headers: JSON_HEADERS,
+            body: JSON.stringify({}),
+          }),
+      },
+      {
+        title: "PUT /:handle/connection-config",
+        engineFn: "setConnectionConfig",
+        request: () =>
+          app.request("/api/v1/secrets/test-key/connection-config", {
+            method: "PUT",
+            headers: JSON_HEADERS,
+            body: JSON.stringify({}),
+          }),
+      },
+    ];
+
+    for (const tc of patternCases) {
+      it(`${tc.title} enforces token name patterns (403, engine untouched)`, async () => {
+        engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["db-*"] });
+        const res = await tc.request();
+        expect(res.status).toBe(403);
+        expect(engine[tc.engineFn]).not.toHaveBeenCalled();
+      });
+    }
+  });
 });

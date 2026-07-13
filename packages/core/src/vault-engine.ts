@@ -128,6 +128,7 @@ export class VaultEngine {
   private sessionMonitorInterval: ReturnType<typeof setInterval> | null = null;
   private lastSessionSlideAt = 0;
   private sessionSlide: Promise<void> | null = null;
+  private readonly oauthRefreshInFlight = new Map<string, Promise<number | null>>();
 
   constructor(private readonly options: VaultEngineOptions) {
     this.sessionManager = new SessionManager(options.sessionPath, {
@@ -1088,8 +1089,25 @@ export class VaultEngine {
   /**
    * Refresh an OAuth token: decrypt refresh_token, call token endpoint, encrypt new tokens.
    * Returns the new access_token expiry timestamp (or null if no expires_in in response).
+   *
+   * Concurrent callers for the same secret coalesce onto one in-flight refresh:
+   * the refresh_token must be POSTed exactly once — providers with refresh-token
+   * rotation treat a replay as theft and revoke the whole token family.
    */
   async refreshOAuthToken(secretId: string): Promise<number | null> {
+    const existing = this.oauthRefreshInFlight.get(secretId);
+    if (existing) return existing;
+
+    const refresh = this.doRefreshOAuthToken(secretId);
+    this.oauthRefreshInFlight.set(secretId, refresh);
+    try {
+      return await refresh;
+    } finally {
+      this.oauthRefreshInFlight.delete(secretId);
+    }
+  }
+
+  private async doRefreshOAuthToken(secretId: string): Promise<number | null> {
     const s = this.assertUnlocked();
 
     const oauthRow = s.store.getOAuthToken(secretId);
@@ -1687,6 +1705,7 @@ export class VaultEngine {
     // Every seal path funnels through here: no downstream MCP child may
     // outlive the keys that authorized it.
     this.mcpRegistry?.killAllSync();
+    this.oauthRefreshInFlight.clear();
 
     this.secretManager = null;
     this.policyEngine = null;
