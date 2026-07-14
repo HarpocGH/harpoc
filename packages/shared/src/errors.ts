@@ -71,6 +71,8 @@ export enum ErrorCode {
   GIT_OPERATION_FAILED = "GIT_OPERATION_FAILED",
   GIT_UNSUPPORTED_TRANSPORT = "GIT_UNSUPPORTED_TRANSPORT",
   INVALID_GIT_CONFIG = "INVALID_GIT_CONFIG",
+  KEY_PASSPHRASE_INVALID = "KEY_PASSPHRASE_INVALID",
+  ENCRYPTED_KEY_UNSUPPORTED = "ENCRYPTED_KEY_UNSUPPORTED",
 
   // Validation
   INVALID_INPUT = "INVALID_INPUT",
@@ -182,6 +184,8 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.GIT_OPERATION_FAILED]: 502,
   [ErrorCode.GIT_UNSUPPORTED_TRANSPORT]: 400,
   [ErrorCode.INVALID_GIT_CONFIG]: 400,
+  [ErrorCode.KEY_PASSPHRASE_INVALID]: 400,
+  [ErrorCode.ENCRYPTED_KEY_UNSUPPORTED]: 400,
 
   // Validation
   [ErrorCode.INVALID_INPUT]: 400,
@@ -571,5 +575,23 @@ export class VaultError extends Error {
 
   static invalidGitConfig(message: string): VaultError {
     return new VaultError(ErrorCode.INVALID_GIT_CONFIG, message);
+  }
+
+  static keyPassphraseInvalid(): VaultError {
+    return new VaultError(
+      ErrorCode.KEY_PASSPHRASE_INVALID,
+      "Could not decrypt the private key: wrong passphrase or corrupted key material",
+    );
+  }
+
+  static encryptedKeyUnsupported(): VaultError {
+    return new VaultError(
+      ErrorCode.ENCRYPTED_KEY_UNSUPPORTED,
+      "Encrypted OpenSSH-format keys are not supported (bcrypt-pbkdf is outside node:crypto). " +
+        "RSA/ECDSA: convert in place with `ssh-keygen -p -f <keyfile> -m PKCS8` (the passphrase " +
+        "is kept), then re-import — the vault decrypts at import. Ed25519: ssh-keygen cannot " +
+        "write PKCS#8 — strip the passphrase with `ssh-keygen -p -f <keyfile> -N ''` and " +
+        "re-import (the vault stores the key under its own encryption either way)",
+    );
   }
 }

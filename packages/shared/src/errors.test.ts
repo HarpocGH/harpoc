@@ -117,7 +117,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(83);
+    expect(members).toHaveLength(85);
   });
 });
 
@@ -552,5 +552,22 @@ describe("factory methods", () => {
     expect(err.code).toBe(ErrorCode.MCP_TIMEOUT);
     expect(err.statusCode).toBe(504);
     expect(err.details).toEqual({ server: "github-mcp" });
+  });
+
+  it("keyPassphraseInvalid()", () => {
+    const err = VaultError.keyPassphraseInvalid();
+    expect(err.code).toBe(ErrorCode.KEY_PASSPHRASE_INVALID);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toBe(
+      "Could not decrypt the private key: wrong passphrase or corrupted key material",
+    );
+  });
+
+  it("encryptedKeyUnsupported()", () => {
+    const err = VaultError.encryptedKeyUnsupported();
+    expect(err.code).toBe(ErrorCode.ENCRYPTED_KEY_UNSUPPORTED);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toContain("ssh-keygen -p -f <keyfile> -m PKCS8");
+    expect(err.message).toContain("decrypts at import");
   });
 });

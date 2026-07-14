@@ -99,13 +99,36 @@ describe("loadPrivateKey — traditional PEM format", () => {
 });
 
 describe("loadPrivateKey — rejections (no secret material in messages)", () => {
-  it("rejects an encrypted OpenSSH key with a clear message", () => {
+  it("rejects an encrypted OpenSSH key pointing at the PKCS#8 conversion", () => {
     try {
       loadPrivateKey(readFixture("ed25519_enc"));
       expect.fail("should throw");
     } catch (e) {
       expect((e as { code: string }).code).toBe(ErrorCode.SSH_AGENT_FAILED);
       expect((e as Error).message).toContain("encrypted private keys are not supported");
+      expect((e as Error).message).toContain("ssh-keygen -p -f <keyfile> -m PKCS8");
+      expect((e as Error).message).toContain("secret set --from-file");
+    }
+  });
+
+  it("rejects a stored encrypted PKCS#8 key pointing at re-import", () => {
+    const { privateKey } = generateKeyPairSync("ed25519", {
+      privateKeyEncoding: {
+        type: "pkcs8",
+        format: "pem",
+        cipher: "aes-256-cbc",
+        passphrase: "some-passphrase",
+      },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    try {
+      loadPrivateKey(privateKey as string);
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as { code: string }).code).toBe(ErrorCode.SSH_AGENT_FAILED);
+      expect((e as Error).message).toContain("stored key is encrypted");
+      expect((e as Error).message).toContain("secret set --from-file");
+      expect((e as Error).message).not.toContain("some-passphrase");
     }
   });
 

@@ -59,6 +59,11 @@ export function loadPrivateKey(pem: string): LoadedKey {
 }
 
 function keyObjectFromPem(pem: string): KeyObject {
+  if (pem.includes("BEGIN ENCRYPTED PRIVATE KEY") || /Proc-Type:\s*4\s*,\s*ENCRYPTED/i.test(pem)) {
+    throw VaultError.sshAgentFailed(
+      "stored key is encrypted; re-import it with `harpoc secret set --from-file` so the vault can decrypt it at import",
+    );
+  }
   try {
     return createPrivateKey(pem);
   } catch (err) {
@@ -70,7 +75,8 @@ function keyObjectFromPem(pem: string): KeyObject {
 
 // --- OpenSSH container → JWK → KeyObject ------------------------------------
 
-function keyObjectFromOpenssh(pem: string): KeyObject {
+/** Strip the OpenSSH armor, verify the magic, and position a reader at the cipher name. */
+function openOpensshContainer(pem: string): SshReader {
   const body = pem
     .replace(/-----BEGIN OPENSSH PRIVATE KEY-----/, "")
     .replace(/-----END OPENSSH PRIVATE KEY-----/, "")
@@ -82,7 +88,16 @@ function keyObjectFromOpenssh(pem: string): KeyObject {
     throw VaultError.sshAgentFailed("malformed OpenSSH private key (bad magic)");
   }
 
-  const r = new SshReader(raw.subarray(OPENSSH_MAGIC.length));
+  return new SshReader(raw.subarray(OPENSSH_MAGIC.length));
+}
+
+/** Cipher name of an OpenSSH-container key ("none" = unencrypted). */
+export function opensshKeyCipher(pem: string): string {
+  return openOpensshContainer(pem).readCString();
+}
+
+function keyObjectFromOpenssh(pem: string): KeyObject {
+  const r = openOpensshContainer(pem);
   const cipher = r.readCString();
   r.readString(); // kdfname
   r.readString(); // kdfoptions
@@ -90,7 +105,10 @@ function keyObjectFromOpenssh(pem: string): KeyObject {
 
   if (cipher !== "none") {
     throw VaultError.sshAgentFailed(
-      "encrypted private keys are not supported; provide an unencrypted key (the vault provides encryption at rest)",
+      "encrypted private keys are not supported; convert with `ssh-keygen -p -f <keyfile> -m PKCS8` " +
+        "(RSA/ECDSA, passphrase kept) or strip the passphrase with `ssh-keygen -p -f <keyfile> -N ''` " +
+        "(ed25519), then re-import via `harpoc secret set --from-file` — the vault stores the key " +
+        "under its own encryption",
     );
   }
   if (nkeys !== 1) {
