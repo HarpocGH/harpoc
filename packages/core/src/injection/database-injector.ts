@@ -80,6 +80,13 @@ export class DatabaseInjector {
     const { user, password } = parseUserPassword(secretValue);
     const timeoutMs = action.timeout_ms ?? DEFAULT_DB_TIMEOUT_MS;
 
+    // The username half of the credential is redacted alongside the password;
+    // a 1–2 char username would shred unrelated output, so it stays unredacted.
+    const redactCredential = (s: string): string => {
+      const redacted = redactSecretEncodings(s, password);
+      return user.length >= 3 ? redactSecretEncodings(redacted, user) : redacted;
+    };
+
     let connection;
     try {
       connection = await adapter.connect({
@@ -93,7 +100,7 @@ export class DatabaseInjector {
         timeoutMs,
       });
     } catch (err) {
-      const detail = redactSecretEncodings(errMessage(err), password);
+      const detail = redactCredential(errMessage(err));
       this.audit(action, secretId, { host, port, error: "DB_CONNECTION_FAILED" }, false);
       throw VaultError.dbConnectionFailed(detail);
     }
@@ -104,7 +111,7 @@ export class DatabaseInjector {
       const result: DatabaseResult = {
         type: "database",
         row_count: res.rowCount ?? rows.length,
-        rows: mapStringLeaves(rows, (s) => redactSecretEncodings(s, password)) as unknown[],
+        rows: mapStringLeaves(rows, redactCredential) as unknown[],
         fields: res.fields,
         command: res.command,
         truncated: truncated ? true : undefined,
@@ -117,7 +124,7 @@ export class DatabaseInjector {
       );
       return result;
     } catch (err) {
-      const detail = redactSecretEncodings(errMessage(err), password);
+      const detail = redactCredential(errMessage(err));
       this.audit(action, secretId, { host, port, error: "DB_QUERY_FAILED" }, false);
       throw VaultError.dbQueryFailed(detail);
     } finally {
@@ -152,7 +159,11 @@ function parseHostPort(
 ): { host: string; port: number } {
   const m = /^(.*):(\d+)$/.exec(hostField);
   if (m && m[1] !== undefined && m[2] !== undefined) {
-    return { host: m[1], port: portField ?? parseInt(m[2], 10) };
+    const embedded = parseInt(m[2], 10);
+    if (embedded < 1 || embedded > 65_535) {
+      throw VaultError.invalidDatabaseConfig("embedded port out of range (1-65535)");
+    }
+    return { host: m[1], port: portField ?? embedded };
   }
   return { host: hostField, port: portField ?? fallback };
 }

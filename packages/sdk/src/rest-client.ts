@@ -21,15 +21,21 @@ import type {
 export interface RestClientOptions {
   baseUrl: string;
   token: string;
+  /** Per-request timeout in milliseconds (default 30 000). */
+  timeoutMs?: number;
 }
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 export class RestClient implements VaultClient {
   private readonly baseUrl: string;
   private readonly token: string;
+  private readonly timeoutMs: number;
 
   constructor(options: RestClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.token = options.token;
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
   async listSecrets(project?: string): Promise<SecretInfo[]> {
@@ -196,14 +202,29 @@ export class RestClient implements VaultClient {
       authorization: `Bearer ${this.token}`,
     };
 
-    const init: RequestInit = { method, headers };
+    const init: RequestInit = {
+      method,
+      headers,
+      signal: AbortSignal.timeout(this.timeoutMs),
+    };
 
     if (body !== undefined) {
       headers["content-type"] = "application/json";
       init.body = JSON.stringify(body);
     }
 
-    const response = await fetch(url, init);
+    let response: Response;
+    try {
+      response = await fetch(url, init);
+    } catch (err) {
+      if (err instanceof Error && err.name === "TimeoutError") {
+        throw new VaultError(
+          ErrorCode.INTERNAL_ERROR,
+          `Request timed out after ${this.timeoutMs}ms (${method} ${path})`,
+        );
+      }
+      throw err;
+    }
 
     let json: { data?: T; error?: string; message?: string };
     try {

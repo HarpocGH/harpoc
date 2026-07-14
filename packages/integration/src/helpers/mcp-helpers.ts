@@ -6,7 +6,10 @@ interface ToolResult {
 }
 
 /**
- * Call an MCP tool via the low-level _requestHandlers hack.
+ * Call an MCP tool via the low-level _requestHandlers hack — for tests about
+ * TOOL LOGIC only. This bypasses the real transport entirely (no Bearer auth,
+ * no session fingerprint pinning); transport-level behavior is covered by
+ * mcp-http-transport.test.ts against the real Streamable HTTP wire.
  * Same pattern used in @harpoc/mcp-server unit tests.
  */
 export async function callTool(

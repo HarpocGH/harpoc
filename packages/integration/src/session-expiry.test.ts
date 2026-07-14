@@ -34,9 +34,11 @@ describe("Session Expiry", () => {
   });
 
   // ---- Test 1: Session monitor detects expired session --------------------
-  // Also covers MCP, REST, SDK behavior after monitor-induced seal.
-  // We mock readStoredSession to return null (simulating expiry) because vitest's
-  // fake timers don't properly await async file I/O inside setInterval callbacks.
+  // Also covers MCP, REST, SDK behavior after monitor-induced seal. Real
+  // machinery end to end: the session file carries a real past expires_at and
+  // the monitor's real file read notices it. The interval is fired with fake
+  // timers; the tick's file I/O resolves on the real event loop, so the
+  // timers go back to real before polling for the sealed state.
   it("session monitor detects expired session — MCP/REST/SDK all fail", async () => {
     const engine1 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
     await engine1.unlock(PASSWORD);
@@ -44,11 +46,11 @@ describe("Session Expiry", () => {
     await engine1.destroy();
 
     vi.useFakeTimers();
+    const engine2 = new VaultEngine({
+      dbPath: vault.dbPath,
+      sessionPath: vault.sessionPath,
+    });
     try {
-      const engine2 = new VaultEngine({
-        dbPath: vault.dbPath,
-        sessionPath: vault.sessionPath,
-      });
       const loaded = await engine2.loadSession();
       expect(loaded).toBe(true);
       expect(engine2.getState()).toBe(VaultState.UNLOCKED);
@@ -58,14 +60,14 @@ describe("Session Expiry", () => {
       const app = createApp(engine2);
       const client = new DirectClient(engine2);
 
-      // Mock readStoredSession to return null — simulates expired session without file I/O
-      const spy = vi.spyOn(SessionManager.prototype, "readStoredSession").mockResolvedValue(null);
+      // The stored session expires mid-flight (real file, real past timestamp)
+      tamperSessionExpiry(vault.sessionPath, -1);
 
-      // Advance past monitor interval — callback calls extendSession → readStoredSession (mocked) → null → seal
       await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS + 1_000);
-
-      expect(engine2.getState()).toBe(VaultState.SEALED);
-      expect(spy).toHaveBeenCalled();
+      vi.useRealTimers();
+      await vi.waitFor(() => {
+        expect(engine2.getState()).toBe(VaultState.SEALED);
+      });
 
       // MCP tool should error
       const mcpResult = await callTool(mcpServer, "list_secrets", {});
@@ -80,7 +82,6 @@ describe("Session Expiry", () => {
       // SDK DirectClient should throw VAULT_LOCKED
       await expect(client.listSecrets()).rejects.toThrow("Vault is locked");
 
-      spy.mockRestore();
       await engine2.destroy();
     } finally {
       vi.useRealTimers();

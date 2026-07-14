@@ -58,10 +58,16 @@ export class RateLimiter {
       bucket.lastRefill = now;
     }
 
-    // Evict idle secret buckets that are fully refilled
+    // Evict idle secret buckets once the map is large. A bucket whose idle
+    // time would fully refill it carries no state worth keeping — and the
+    // refill must be computed: stored tokens never reach the limit (every
+    // access decrements after refill) and idle buckets are never refilled,
+    // so testing the stored value alone would evict nothing, ever.
     if (this.secretBuckets.size > 1000) {
       for (const [id, b] of this.secretBuckets) {
-        if (b.tokens >= this.perSecretLimit) {
+        if (b === bucket) continue; // the in-flight bucket is decremented next
+        const idleRefill = Math.floor(((now - b.lastRefill) / 60_000) * this.perSecretLimit);
+        if (b.tokens + idleRefill >= this.perSecretLimit) {
           this.secretBuckets.delete(id);
         }
       }

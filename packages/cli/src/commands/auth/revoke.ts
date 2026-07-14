@@ -18,13 +18,17 @@ export function registerAuthRevokeCommand(auth: Command): void {
   auth
     .command("revoke <jti>")
     .description("Revoke an API token by its JTI")
-    .option("--token <jwt>", "Full JWT token (used to extract expiry for accurate revocation)")
+    .option(
+      "--token <jwt>",
+      "Full JWT token (used to extract expiry for accurate revocation); prefer the HARPOC_TOKEN environment variable — command-line arguments are visible to other local processes",
+    )
     .action(async (jti: string, options: { token?: string }, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
         const engine = await loadUnlockedEngine(vaultDir);
         try {
-          const expiresAt = options.token ? decodeTokenExp(options.token) : undefined;
+          const token = options.token ?? process.env.HARPOC_TOKEN;
+          const expiresAt = token ? decodeTokenExp(token) : undefined;
           engine.revokeToken(jti, expiresAt);
           printSuccess(`Token revoked (${jti})`);
         } finally {

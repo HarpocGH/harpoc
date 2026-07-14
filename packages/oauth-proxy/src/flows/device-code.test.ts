@@ -208,3 +208,54 @@ describe("DeviceCodeFlow.pollForToken", () => {
     ).rejects.toMatchObject({ code: ErrorCode.URL_HTTPS_REQUIRED });
   });
 });
+
+describe("DeviceCodeFlow poll client authentication (code review Low O5)", () => {
+  const flow = new DeviceCodeFlow();
+
+  function capturingHandler(): { auth: () => string | undefined; body: () => string } {
+    let auth: string | undefined;
+    let body = "";
+    tokenHandler = (req, res) => {
+      auth = req.headers.authorization;
+      let data = "";
+      req.on("data", (c: Buffer) => (data += c.toString()));
+      req.on("end", () => {
+        body = data;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ access_token: "dev-tok" }));
+      });
+    };
+    return { auth: () => auth, body: () => body };
+  }
+
+  it("includes client_secret in the poll body under client_secret_post (google-style confidential device client)", async () => {
+    const captured = capturingHandler();
+    const result = await flow.pollForToken(
+      "dev-code",
+      0,
+      makeConfig({ client_secret: "device-secret" }),
+      5,
+    );
+    expect(result.access_token).toBe("dev-tok");
+    expect(captured.body()).toContain("client_id=device-client");
+    expect(captured.body()).toContain("client_secret=device-secret");
+    expect(captured.auth()).toBeUndefined();
+  });
+
+  it("uses Authorization: Basic at the poll under client_secret_basic", async () => {
+    const captured = capturingHandler();
+    const result = await flow.pollForToken(
+      "dev-code",
+      0,
+      makeConfig({
+        client_secret: "device-secret",
+        token_endpoint_auth_method: "client_secret_basic",
+      }),
+      5,
+    );
+    expect(result.access_token).toBe("dev-tok");
+    const expected = `Basic ${Buffer.from("device-client:device-secret", "utf8").toString("base64")}`;
+    expect(captured.auth()).toBe(expected);
+    expect(captured.body()).not.toContain("client_secret");
+  });
+});

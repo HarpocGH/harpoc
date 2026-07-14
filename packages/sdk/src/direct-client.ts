@@ -17,7 +17,7 @@ import type {
   HealthResponse,
   VaultClient,
 } from "./client.js";
-import { VAULT_VERSION } from "@harpoc/shared";
+import { ErrorCode, VAULT_VERSION, VaultError } from "@harpoc/shared";
 
 export class DirectClient implements VaultClient {
   constructor(private readonly engine: VaultEngine) {}
@@ -102,7 +102,14 @@ export class DirectClient implements VaultClient {
     );
   }
 
-  async revokePolicy(_handle: string, policyId: string): Promise<void> {
+  async revokePolicy(handle: string, policyId: string): Promise<void> {
+    // Verify the policy belongs to this secret (cross-secret IDOR guard) —
+    // REST-path parity: the two client modes must enforce the same contract.
+    const secretId = await this.engine.resolveSecretId(handle);
+    const policies = this.engine.listPolicies(secretId);
+    if (!policies.some((p) => p.id === policyId)) {
+      throw new VaultError(ErrorCode.POLICY_NOT_FOUND, "Policy not found for this secret");
+    }
     this.engine.revokePolicy(policyId);
   }
 

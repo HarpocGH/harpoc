@@ -2,6 +2,7 @@ import { validateUrl } from "@harpoc/core";
 import { VaultError } from "@harpoc/shared";
 import type { OAuthProviderConfig } from "@harpoc/shared";
 import { getScopesSeparator } from "../providers.js";
+import { applyTokenEndpointAuth } from "../token-endpoint-auth.js";
 
 export interface ClientCredentialsResult {
   access_token: string;
@@ -20,9 +21,12 @@ export class ClientCredentialsFlow {
 
     const params = new URLSearchParams({
       grant_type: "client_credentials",
-      client_id: config.client_id,
-      client_secret: config.client_secret,
     });
+    const headers: Record<string, string> = {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    };
+    applyTokenEndpointAuth(config, params, headers);
 
     if (config.scopes && config.scopes.length > 0) {
       const separator = getScopesSeparator(config.provider);
@@ -35,10 +39,7 @@ export class ClientCredentialsFlow {
     try {
       response = await fetch(config.token_endpoint, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          Accept: "application/json",
-        },
+        headers,
         body: params.toString(),
         signal: AbortSignal.timeout(30_000),
       });

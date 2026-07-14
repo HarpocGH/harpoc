@@ -62,3 +62,15 @@ describe("deriveKey", () => {
     expect(key.length).toBe(ARGON2_HASH_LENGTH);
   });
 });
+
+describe("deriveKey known-answer (drift tripwire)", () => {
+  it("matches the pinned Argon2id output for fixed password + salt", async () => {
+    // Computed with the production parameters (argon2id, 64 MiB, t=3, p=4,
+    // v1.3, 32 bytes). Any parameter or algorithm drift changes this value.
+    const salt = new Uint8Array(16).fill(0xa5);
+    const key = await deriveKey("harpoc-kat-password", salt);
+    expect(Buffer.from(key).toString("hex")).toBe(
+      "f828258bca45d7f572c6d407d3a6a579526298fdceb04062487378e3f4aa535e",
+    );
+  });
+});

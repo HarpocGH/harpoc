@@ -27,6 +27,13 @@ export class SshInjector {
     config: ConnectionConfig | undefined,
     secretId?: string,
   ): Promise<SshResult> {
+    // Defense in depth beside the schema's first-character anchor: host and
+    // user reach ssh's argv, so a leading dash must never parse as an option.
+    if (action.host.startsWith("-") || action.user.startsWith("-")) {
+      this.audit(action, secretId, { error: "INVALID_SSH_CONFIG" }, false);
+      throw VaultError.invalidSshConfig("host and user must not start with '-'");
+    }
+
     // Host target allowlist — fail-safe deny (process-mediated posture).
     if (
       policy.host_allowlist.length === 0 ||
@@ -70,6 +77,7 @@ export class SshInjector {
         ...sshHardeningArgs(kh.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
         "-l",
         action.user,
+        "--",
         action.host,
         action.command,
       ];

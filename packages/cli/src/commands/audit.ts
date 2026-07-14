@@ -32,10 +32,15 @@ export function registerAuditCommand(program: Command): void {
               throw new Error("--limit must be a positive number");
             }
 
+            const since = options.since ? new Date(options.since).getTime() : undefined;
+            if (since !== undefined && Number.isNaN(since)) {
+              throw new Error("--since must be a valid date (e.g. 2026-07-01 or 2026-07-01T12:00:00Z)");
+            }
+
             const events = engine.queryAudit({
               secretId: options.secret,
               eventType: options.event as AuditEventType | undefined,
-              since: options.since ? new Date(options.since).getTime() : undefined,
+              since,
               limit,
             });
 

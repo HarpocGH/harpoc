@@ -7,6 +7,7 @@ export interface ProviderPreset {
   device_authorization_endpoint?: string;
   scopes_separator?: string;
   default_scopes?: string[];
+  token_endpoint_auth_method?: "client_secret_post" | "client_secret_basic";
 }
 
 export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
@@ -19,6 +20,7 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
   google: {
     auth_endpoint: "https://accounts.google.com/o/oauth2/v2/auth",
     token_endpoint: "https://oauth2.googleapis.com/token",
+    device_authorization_endpoint: "https://oauth2.googleapis.com/device/code",
     default_scopes: ["openid", "email", "profile"],
   },
   microsoft: {
@@ -57,6 +59,8 @@ export function resolveProvider(config: OAuthProviderConfig): OAuthProviderConfi
     device_authorization_endpoint:
       config.device_authorization_endpoint ?? preset.device_authorization_endpoint,
     scopes: config.scopes ?? preset.default_scopes,
+    token_endpoint_auth_method:
+      config.token_endpoint_auth_method ?? preset.token_endpoint_auth_method,
   };
 }
 

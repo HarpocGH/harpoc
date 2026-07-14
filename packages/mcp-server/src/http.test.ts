@@ -403,4 +403,51 @@ describe("startMcpHttpServer", () => {
       }),
     ).rejects.toThrow();
   });
+
+  it("caps concurrent sessions at 128 and frees the slot when a session closes", async () => {
+    const { port } = await start(mockEngine());
+
+    const rawWithHeaders = (
+      method: string,
+      headers: Record<string, string>,
+      body?: string,
+    ): Promise<{ status: number; sessionId?: string }> =>
+      new Promise((resolve, reject) => {
+        const req = httpRequest({ host: "127.0.0.1", port, path: "/mcp", method, headers }, (res) => {
+          res.resume();
+          res.on("end", () =>
+            resolve({
+              status: res.statusCode ?? 0,
+              sessionId: res.headers["mcp-session-id"] as string | undefined,
+            }),
+          );
+        });
+        req.on("error", reject);
+        req.end(body);
+      });
+
+    const initialize = (): Promise<{ status: number; sessionId?: string }> =>
+      rawWithHeaders("POST", rpcHeaders({ authorization: `Bearer ${TOKEN}` }), JSON.stringify(INIT_BODY));
+
+    const ids: string[] = [];
+    for (let i = 0; i < 128; i++) {
+      const r = await initialize();
+      expect(r.status).toBe(200);
+      expect(r.sessionId).toBeTruthy();
+      ids.push(r.sessionId as string);
+    }
+
+    const overflow = await initialize();
+    expect(overflow.status).toBe(429);
+
+    // Terminating one session frees its slot.
+    const del = await rawWithHeaders("DELETE", {
+      authorization: `Bearer ${TOKEN}`,
+      "mcp-session-id": ids[0] as string,
+    });
+    expect(del.status).toBeLessThan(300);
+
+    const refill = await initialize();
+    expect(refill.status).toBe(200);
+  }, 30_000);
 });

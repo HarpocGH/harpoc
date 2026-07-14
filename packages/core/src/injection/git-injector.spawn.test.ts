@@ -82,8 +82,30 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
     expect(args.every((a) => !a.includes("s3cret-token-value") && !a.includes("git-user"))).toBe(
       true,
     );
-    // The password is redacted from any captured output.
+    // Both credential halves are redacted from any captured output.
     expect(opts.redact).toContain("s3cret-token-value");
+    expect(opts.redact).toContain("git-user");
+  });
+
+  it("skips a 1-2 char username in the redaction set (would shred output)", async () => {
+    const action: GitAction = {
+      type: "git",
+      operation: "clone",
+      repository: "https://8.8.8.8/org/repo.git",
+    };
+    await injector.executeWithSecret(
+      action,
+      new Uint8Array(Buffer.from("ab:s3cret-token-value")),
+      policy({
+        command_allowlist: [GIT as string],
+        url_allowlist: ["https://8.8.8.8/*"],
+      }),
+      undefined,
+    );
+
+    const [, , opts] = vi.mocked(spawnCaptured).mock.calls[0] as SpawnCall;
+    expect(opts.redact).toContain("s3cret-token-value");
+    expect(opts.redact).not.toContain("ab");
   });
 });
 

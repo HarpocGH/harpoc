@@ -19,9 +19,29 @@ export class CallbackServer {
   private callbackPromise: Promise<CallbackResult> | null = null;
   private resolve: ((result: CallbackResult) => void) | null = null;
   private reject: ((err: Error) => void) | null = null;
+  private settled = false;
 
   constructor(port: number = DEFAULT_PORT) {
     this.requestedPort = port;
+  }
+
+  /**
+   * Settle the callback promise exactly once and clear the timeout. Every
+   * terminal branch funnels through here so a standalone CallbackServer can
+   * never leave the 5-minute timer live after the flow has been decided.
+   */
+  private settle(outcome: { result: CallbackResult } | { err: Error }): void {
+    if (this.settled) return;
+    this.settled = true;
+    if (this.timeoutId) {
+      clearTimeout(this.timeoutId);
+      this.timeoutId = null;
+    }
+    if ("result" in outcome) {
+      this.resolve?.(outcome.result);
+    } else {
+      this.reject?.(outcome.err);
+    }
   }
 
   /**
@@ -33,6 +53,7 @@ export class CallbackServer {
       throw VaultError.oauthFlowFailed("Callback server already running");
     }
 
+    this.settled = false;
     this.callbackPromise = new Promise<CallbackResult>((resolve, reject) => {
       this.resolve = resolve;
       this.reject = reject;
@@ -54,11 +75,13 @@ export class CallbackServer {
       });
     });
 
-    // Set timeout
+    // Set timeout; unref'd so a pending flow never blocks process exit —
+    // the settle path, not the event loop, owns its lifetime.
     this.timeoutId = setTimeout(() => {
-      this.reject?.(VaultError.oauthCallbackTimeout());
+      this.settle({ err: VaultError.oauthCallbackTimeout() });
       this.stop().catch(() => {});
     }, timeoutMs);
+    this.timeoutId.unref();
   }
 
   /**
@@ -76,7 +99,9 @@ export class CallbackServer {
     res: ServerResponse,
     expectedStateBuffer: Buffer,
   ): void {
-    const url = new URL(req.url ?? "/", `http://127.0.0.1:${this.boundPort}`);
+    // Constant base: only path + query matter, and boundPort may already be
+    // nulled by the post-settle stop() when a second in-flight request lands.
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
     if (url.pathname !== "/oauth/callback") {
       res.writeHead(404, { "Content-Type": "text/plain" });
@@ -90,18 +115,20 @@ export class CallbackServer {
 
     if (error) {
       const description = url.searchParams.get("error_description") ?? error;
-      this.reject?.(VaultError.oauthFlowFailed(description));
-      res.writeHead(400, { "Content-Type": "text/html" });
-      res.end(
+      this.settle({ err: VaultError.oauthFlowFailed(description) });
+      this.respondAndStop(
+        res,
+        400,
         "<html><body><h1>Authorization Failed</h1><p>You can close this window.</p></body></html>",
       );
       return;
     }
 
     if (!code || !state) {
-      this.reject?.(VaultError.oauthFlowFailed("Missing code or state in callback"));
-      res.writeHead(400, { "Content-Type": "text/html" });
-      res.end(
+      this.settle({ err: VaultError.oauthFlowFailed("Missing code or state in callback") });
+      this.respondAndStop(
+        res,
+        400,
         "<html><body><h1>Invalid Callback</h1><p>Missing parameters.</p></body></html>",
       );
       return;
@@ -113,19 +140,29 @@ export class CallbackServer {
       stateBuffer.length !== expectedStateBuffer.length ||
       !timingSafeEqual(stateBuffer, expectedStateBuffer)
     ) {
-      this.reject?.(VaultError.oauthInvalidState());
-      res.writeHead(400, { "Content-Type": "text/html" });
-      res.end(
+      this.settle({ err: VaultError.oauthInvalidState() });
+      this.respondAndStop(
+        res,
+        400,
         "<html><body><h1>Invalid State</h1><p>CSRF protection triggered.</p></body></html>",
       );
       return;
     }
 
-    this.resolve?.({ code, state });
-    res.writeHead(200, { "Content-Type": "text/html" });
-    res.end(
+    this.settle({ result: { code, state } });
+    this.respondAndStop(
+      res,
+      200,
       "<html><body><h1>Authorization Successful</h1><p>You can close this window and return to the terminal.</p></body></html>",
     );
+  }
+
+  /** Answer the browser, then close the server once the response is flushed. */
+  private respondAndStop(res: ServerResponse, status: number, html: string): void {
+    res.writeHead(status, { "Content-Type": "text/html" });
+    res.end(html, () => {
+      this.stop().catch(() => {});
+    });
   }
 
   /**
@@ -141,7 +178,9 @@ export class CallbackServer {
       const srv = this.server;
       this.server = null;
       this.boundPort = null;
-      this.callbackPromise = null;
+      // callbackPromise deliberately survives: the callback handler stops the
+      // server right after settling, and a caller must still be able to await
+      // the settled result. start() replaces the promise for a fresh flow.
       await new Promise<void>((resolve) => {
         srv.close(() => resolve());
       });

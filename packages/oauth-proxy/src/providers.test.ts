@@ -115,3 +115,29 @@ describe("getScopesSeparator", () => {
     expect(getScopesSeparator("custom")).toBe(" ");
   });
 });
+
+describe("provider preset completeness (code review Low O5)", () => {
+  it("google preset resolves a device_authorization_endpoint for device_code", () => {
+    const resolved = resolveProvider({
+      provider: "google",
+      grant_type: "device_code",
+      token_endpoint: undefined as unknown as string,
+      client_id: "id",
+    });
+    expect(resolved.device_authorization_endpoint).toBe(
+      "https://oauth2.googleapis.com/device/code",
+    );
+    expect(resolved.token_endpoint).toBe("https://oauth2.googleapis.com/token");
+  });
+
+  it("a user-supplied token_endpoint_auth_method survives preset resolution", () => {
+    const resolved = resolveProvider({
+      provider: "github",
+      grant_type: "authorization_code",
+      token_endpoint: undefined as unknown as string,
+      client_id: "id",
+      token_endpoint_auth_method: "client_secret_basic",
+    });
+    expect(resolved.token_endpoint_auth_method).toBe("client_secret_basic");
+  });
+});

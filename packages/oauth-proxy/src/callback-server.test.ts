@@ -139,3 +139,56 @@ describe("CallbackServer", () => {
     await callbackPromise;
   });
 });
+
+describe("CallbackServer terminal-branch cleanup (code review Low O2)", () => {
+  it("clears the timeout and stops the server after a successful callback", async () => {
+    const srv = new CallbackServer(0);
+    await srv.start("st-ok", 60_000);
+    const port = srv.listenPort;
+
+    const res = await fetch(`http://127.0.0.1:${port}/oauth/callback?code=x&state=st-ok`);
+    expect(res.status).toBe(200);
+    await expect(srv.waitForCallback()).resolves.toMatchObject({ code: "x" });
+
+    // The server closes itself once the response is flushed...
+    await new Promise((r) => setTimeout(r, 50));
+    expect(srv.isRunning).toBe(false);
+    // ...and the 5-minute timer is gone, not merely orphaned.
+    expect((srv as unknown as { timeoutId: unknown }).timeoutId).toBeNull();
+    await expect(
+      fetch(`http://127.0.0.1:${port}/oauth/callback?code=y&state=st-ok`),
+    ).rejects.toThrow();
+  });
+
+  it("clears the timeout and stops the server after an invalid-state callback", async () => {
+    const srv = new CallbackServer(0);
+    await srv.start("st-good", 60_000);
+    const port = srv.listenPort;
+    const pending = srv.waitForCallback();
+    // Prevent Node.js from treating this as unhandled
+    pending.catch(() => {});
+
+    await fetch(`http://127.0.0.1:${port}/oauth/callback?code=x&state=st-evil`);
+    await expect(pending).rejects.toMatchObject({ code: ErrorCode.OAUTH_INVALID_STATE });
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(srv.isRunning).toBe(false);
+    expect((srv as unknown as { timeoutId: unknown }).timeoutId).toBeNull();
+  });
+
+  it("settles exactly once when a second callback races in", async () => {
+    const srv = new CallbackServer(0);
+    await srv.start("st-race", 60_000);
+    const port = srv.listenPort;
+
+    const first = fetch(`http://127.0.0.1:${port}/oauth/callback?code=one&state=st-race`);
+    const second = fetch(`http://127.0.0.1:${port}/oauth/callback?code=two&state=st-race`).catch(
+      () => null,
+    );
+    await Promise.all([first, second]);
+
+    const result = await srv.waitForCallback();
+    expect(["one", "two"]).toContain(result.code);
+    await srv.stop();
+  });
+});

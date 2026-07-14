@@ -163,6 +163,62 @@ describe("server start", () => {
     });
   });
 
+  // ── HARPOC_TOKEN environment variable ───────────────────────────
+
+  describe("HARPOC_TOKEN environment variable", () => {
+    const savedEnv = process.env.HARPOC_TOKEN;
+
+    beforeEach(() => {
+      delete process.env.HARPOC_TOKEN;
+    });
+
+    afterEach(() => {
+      if (savedEnv === undefined) {
+        delete process.env.HARPOC_TOKEN;
+      } else {
+        process.env.HARPOC_TOKEN = savedEnv;
+      }
+    });
+
+    it("resolves the launch token from HARPOC_TOKEN with --mcp", async () => {
+      const { createMcpServer } = await import("@harpoc/mcp-server");
+      process.env.HARPOC_TOKEN = "env.jwt.token";
+
+      await run(["--mcp"]);
+
+      expect(createMcpServer).toHaveBeenCalledWith({
+        engine: mockEngine,
+        launchToken: "env.jwt.token",
+        enableTtyPrompt: true,
+      });
+    });
+
+    it("an explicit --token wins over HARPOC_TOKEN", async () => {
+      const { createMcpServer } = await import("@harpoc/mcp-server");
+      process.env.HARPOC_TOKEN = "env.jwt.token";
+
+      await run(["--mcp", "--token", "flag.jwt.token"]);
+
+      expect(createMcpServer).toHaveBeenCalledWith({
+        engine: mockEngine,
+        launchToken: "flag.jwt.token",
+        enableTtyPrompt: true,
+      });
+    });
+
+    it("an ambient HARPOC_TOKEN without --mcp is ignored, not an error", async () => {
+      const { createMcpServer } = await import("@harpoc/mcp-server");
+      const { startServer } = await import("@harpoc/rest-api");
+      process.env.HARPOC_TOKEN = "env.jwt.token";
+
+      await run(["--rest"]);
+
+      expect(startServer).toHaveBeenCalled();
+      expect(createMcpServer).not.toHaveBeenCalled();
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+  });
+
   // ── MCP Streamable HTTP mode ────────────────────────────────────
 
   it("starts MCP Streamable HTTP server with --mcp-http", async () => {

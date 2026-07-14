@@ -267,3 +267,104 @@ describe("OAuthManager.startDeviceCode", () => {
     ).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
   });
 });
+
+describe("OAuthManager device-code background poll lifecycle (code review Low O3)", () => {
+  function pendingDeviceHandlers(): { tokenHits: () => number; release: () => void } {
+    let hits = 0;
+    let released = false;
+    deviceHandler = (_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          device_code: "dc-1",
+          user_code: "USER-1",
+          verification_uri: "https://example.com/device",
+          interval: 0,
+          expires_in: 60,
+        }),
+      );
+    };
+    tokenHandler = (_req, res) => {
+      hits++;
+      if (released) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ access_token: "dev-access", expires_in: 3600 }));
+      } else {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "authorization_pending" }));
+      }
+    };
+    return {
+      tokenHits: () => hits,
+      release: () => {
+        released = true;
+      },
+    };
+  }
+
+  it("cancelFlow aborts a pending background poll and the endpoint hit count freezes", async () => {
+    const handlers = pendingDeviceHandlers();
+    const manager = new OAuthManager(engine);
+
+    const result = await manager.startDeviceCode("dev-cancel", makeDeviceCodeConfig());
+    expect(result.status).toBe("pending_authorization");
+    const secretId = await engine.resolveSecretId(result.handle);
+
+    await vi.waitFor(() => {
+      expect(handlers.tokenHits()).toBeGreaterThan(0);
+    });
+    expect(manager.cancelFlow(secretId)).toBe(true);
+
+    // The poll promise settles and clears itself from the pending map...
+    await vi.waitFor(() => {
+      expect(manager.cancelFlow(secretId)).toBe(false);
+    });
+    // ...and no further polling reaches the endpoint.
+    const frozen = handlers.tokenHits();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(handlers.tokenHits()).toBe(frozen);
+  });
+
+  it("surfaces a background completion failure via onBackgroundFlowError (sealed engine)", async () => {
+    const handlers = pendingDeviceHandlers();
+    const errors: { secretId: string; err: unknown }[] = [];
+    const manager = new OAuthManager(engine, {
+      onBackgroundFlowError: (secretId, err) => {
+        errors.push({ secretId, err });
+      },
+    });
+
+    const result = await manager.startDeviceCode("dev-fail", makeDeviceCodeConfig());
+    const secretId = await engine.resolveSecretId(result.handle);
+
+    await engine.lock(); // completeOAuthFlow will fail against a sealed engine
+    handlers.release();
+
+    await vi.waitFor(() => {
+      expect(errors.length).toBeGreaterThanOrEqual(1);
+    });
+    expect(errors[0]?.secretId).toBe(secretId);
+  });
+
+  it("an aborted poll is not reported as a background error", async () => {
+    const handlers = pendingDeviceHandlers();
+    const errors: unknown[] = [];
+    const manager = new OAuthManager(engine, {
+      onBackgroundFlowError: (_secretId, err) => {
+        errors.push(err);
+      },
+    });
+
+    const result = await manager.startDeviceCode("dev-silent", makeDeviceCodeConfig());
+    const secretId = await engine.resolveSecretId(result.handle);
+    await vi.waitFor(() => {
+      expect(handlers.tokenHits()).toBeGreaterThan(0);
+    });
+
+    manager.cancelPendingFlows();
+    await vi.waitFor(() => {
+      expect(manager.cancelFlow(secretId)).toBe(false);
+    });
+    expect(errors).toHaveLength(0);
+  });
+});

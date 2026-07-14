@@ -4,6 +4,7 @@ import { VaultError } from "@harpoc/shared";
 import type { OAuthProviderConfig } from "@harpoc/shared";
 import { generateCodeChallenge, generateCodeVerifier } from "../pkce.js";
 import { getScopesSeparator } from "../providers.js";
+import { applyTokenEndpointAuth } from "../token-endpoint-auth.js";
 
 export interface AuthCodeFlowStartResult {
   auth_url: string;
@@ -64,12 +65,13 @@ export class AuthorizationCodeFlow {
       grant_type: "authorization_code",
       code,
       redirect_uri: redirectUri,
-      client_id: config.client_id,
       code_verifier: codeVerifier,
     });
-    if (config.client_secret) {
-      params.set("client_secret", config.client_secret);
-    }
+    const headers: Record<string, string> = {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    };
+    applyTokenEndpointAuth(config, params, headers);
 
     await validateUrl(config.token_endpoint);
 
@@ -77,10 +79,7 @@ export class AuthorizationCodeFlow {
     try {
       response = await fetch(config.token_endpoint, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          Accept: "application/json",
-        },
+        headers,
         body: params.toString(),
         signal: AbortSignal.timeout(30_000),
       });

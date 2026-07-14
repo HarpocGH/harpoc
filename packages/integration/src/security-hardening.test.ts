@@ -393,10 +393,38 @@ describe("IV Uniqueness", () => {
 // 4. Timing Attack Protection
 // ---------------------------------------------------------------------------
 describe("Timing Attack Protection", () => {
-  it("vault-engine.ts imports and uses timingSafeEqual", () => {
-    const source = readFileSync(join(REPO_ROOT, "packages/core/src/vault-engine.ts"), "utf8");
-    expect(source).toContain("import { createHmac, timingSafeEqual }");
-    expect(source).toContain("timingSafeEqual(expectedSig, actualSig)");
+  it("equal-length wrong signatures are rejected without an error-detail oracle", async () => {
+    // Behavioral replacement for the old source-grep "test": an equal-length
+    // signature mismatch (the case a timing-safe compare exists for) must be
+    // rejected exactly like any other invalid signature — same error, no
+    // detail distinguishing how close the guess was.
+    const vault = createTestVault();
+    await vault.engine.initVault(PASSWORD);
+
+    const token = vault.engine.createToken("test-agent", ["admin"]);
+    const parts = token.split(".");
+    const sigLength = Buffer.from(parts[2] as string, "base64url").length;
+    const zeroSig = Buffer.alloc(sigLength).toString("base64url");
+
+    let equalLengthError: Error | undefined;
+    try {
+      vault.engine.verifyToken(`${parts[0]}.${parts[1]}.${zeroSig}`);
+    } catch (e) {
+      equalLengthError = e as Error;
+    }
+    let shortError: Error | undefined;
+    try {
+      vault.engine.verifyToken(`${parts[0]}.${parts[1]}.${"AA"}`);
+    } catch (e) {
+      shortError = e as Error;
+    }
+
+    expect(equalLengthError).toBeDefined();
+    expect(shortError).toBeDefined();
+    expect(equalLengthError?.message).toBe(shortError?.message);
+
+    await vault.engine.destroy();
+    destroyTestVault(vault).catch(() => {});
   });
 
   it("JWT with single-bit signature flip is rejected", async () => {
@@ -432,32 +460,32 @@ describe("Timing Attack Protection", () => {
     destroyTestVault(vault).catch(() => {});
   });
 
-  it("HMAC name lookup uses database index for O(1) resolution", async () => {
+  it("HMAC name lookup goes through an index (query plan, not wall clock)", async () => {
     const vault = createTestVault();
     await vault.engine.initVault(PASSWORD);
 
-    // Create two secrets
     await vault.engine.createSecret({
       name: "timing-a",
       type: SecretType.API_KEY,
       value: new Uint8Array(Buffer.from("val-a")),
     });
-    await vault.engine.createSecret({
-      name: "timing-b",
-      type: SecretType.API_KEY,
-      value: new Uint8Array(Buffer.from("val-b")),
-    });
 
-    // Both resolve quickly (bounded time, not scanning all secrets)
-    const start = performance.now();
     const infoA = await vault.engine.getSecretInfo("secret://timing-a");
-    const infoB = await vault.engine.getSecretInfo("secret://timing-b");
-    const elapsed = performance.now() - start;
-
     expect(infoA.name).toBe("timing-a");
-    expect(infoB.name).toBe("timing-b");
-    // Should resolve in < 1s even on slow CI (O(1) index lookup)
-    expect(elapsed).toBeLessThan(1000);
+
+    // Deterministic replacement for the old flaky `< 1000 ms` assertion:
+    // ask SQLite how it would execute the name_hmac lookup.
+    const db = (
+      vault.engine as unknown as {
+        store: { db: import("better-sqlite3").Database };
+      }
+    ).store.db;
+    const plan = db
+      .prepare("EXPLAIN QUERY PLAN SELECT id FROM secrets WHERE name_hmac = ?")
+      .all("probe") as { detail: string }[];
+    expect(plan.some((row) => /USING (COVERING )?INDEX idx_secrets_name_hmac/i.test(row.detail))).toBe(
+      true,
+    );
 
     await vault.engine.destroy();
     destroyTestVault(vault).catch(() => {});

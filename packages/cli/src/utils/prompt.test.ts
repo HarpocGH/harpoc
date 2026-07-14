@@ -1,6 +1,6 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { promptHidden } from "./prompt.js";
+import { promptConfirm, promptHidden } from "./prompt.js";
 
 function sink(): PassThrough {
   return new PassThrough();
@@ -122,5 +122,82 @@ describe("promptHidden", () => {
     expect(seen).toContain("Password: ");
     expect(seen).not.toContain("hunter2");
     expect(seen.replace("Password: ", "").replace(/\r?\n/g, "")).toBe("");
+  });
+});
+
+describe("promptConfirm", () => {
+  it("resolves true for a newline-terminated y", async () => {
+    const input = new PassThrough();
+    const p = promptConfirm("Delete?", input, sink());
+    input.write("y\n");
+    await expect(p).resolves.toBe(true);
+  });
+
+  it("is case-insensitive and trims whitespace", async () => {
+    const input = new PassThrough();
+    const p = promptConfirm("Delete?", input, sink());
+    input.write(" Y \r\n");
+    await expect(p).resolves.toBe(true);
+  });
+
+  it("resolves false for n and for an empty line", async () => {
+    const input = new PassThrough();
+    const first = promptConfirm("1?", input, sink());
+    input.write("n\n\n");
+    await expect(first).resolves.toBe(false);
+    const second = promptConfirm("2?", input, sink());
+    await expect(second).resolves.toBe(false);
+  });
+
+  it("treats EOF as the line terminator: piped y without newline confirms", async () => {
+    const input = new PassThrough();
+    const p = promptConfirm("Delete?", input, sink());
+    input.end("y");
+    await expect(p).resolves.toBe(true);
+  });
+
+  it("settles false on immediate EOF instead of dangling", async () => {
+    const input = new PassThrough();
+    const p = promptConfirm("Delete?", input, sink());
+    input.end();
+    await expect(p).resolves.toBe(false);
+  });
+
+  it("a prompt after EOF resolves false instead of hanging", async () => {
+    const input = new PassThrough();
+    const first = promptConfirm("1?", input, sink());
+    input.end("y\n");
+    await expect(first).resolves.toBe(true);
+    const second = promptConfirm("2?", input, sink());
+    await expect(second).resolves.toBe(false);
+  });
+
+  it("pushes back input after the terminator for the next prompt", async () => {
+    const input = new PassThrough();
+    const confirm = promptConfirm("Sure?", input, sink());
+    input.write("y\nleftover\n");
+    await expect(confirm).resolves.toBe(true);
+    const next = promptHidden("pw: ", input, sink());
+    await expect(next).resolves.toBe("leftover");
+  });
+
+  it("rejects on a stream error", async () => {
+    const input = new PassThrough();
+    const p = promptConfirm("Delete?", input, sink());
+    input.destroy(new Error("boom"));
+    await expect(p).rejects.toThrow("boom");
+  });
+
+  it("writes the prompt with the [y/N] hint to the output stream", async () => {
+    const input = new PassThrough();
+    const out = sink();
+    let seen = "";
+    out.on("data", (d: Buffer) => {
+      seen += d.toString("utf8");
+    });
+    const p = promptConfirm("Delete secret x?", input, out);
+    input.write("y\n");
+    await p;
+    expect(seen).toContain("Delete secret x? [y/N] ");
   });
 });

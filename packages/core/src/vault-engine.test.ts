@@ -1792,6 +1792,40 @@ describe("JWT tokens", () => {
     expect(ttlSeconds).toBeLessThanOrEqual(24 * 60 * 60);
   });
 
+  // The verifier recomputes HMAC-SHA256 and ignores the header entirely —
+  // these pin that property so a future alg-honoring JWT library cannot
+  // silently reintroduce alg:none / algorithm-confusion acceptance.
+  it("rejects an alg:none header substitution, with and without a signature", () => {
+    const token = engine.createToken("user-1", ["read"]);
+    const [, payload, sig] = token.split(".");
+    const noneHeader = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString(
+      "base64url",
+    );
+
+    expect(() => engine.verifyToken(`${noneHeader}.${payload}.`)).toThrow(VaultError);
+    expect(() => engine.verifyToken(`${noneHeader}.${payload}.${sig}`)).toThrow(VaultError);
+  });
+
+  it("rejects an alg:RS256 header substitution (algorithm confusion)", () => {
+    const token = engine.createToken("user-1", ["read"]);
+    const [, payload, sig] = token.split(".");
+    const rsHeader = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString(
+      "base64url",
+    );
+
+    expect(() => engine.verifyToken(`${rsHeader}.${payload}.${sig}`)).toThrow(VaultError);
+  });
+
+  it("rejects a garbage header segment on an otherwise valid token", () => {
+    const token = engine.createToken("user-1", ["read"]);
+    const [, payload, sig] = token.split(".");
+
+    expect(() => engine.verifyToken(`not-base64url!.${payload}.${sig}`)).toThrow(VaultError);
+    expect(() =>
+      engine.verifyToken(`${Buffer.from("[]").toString("base64url")}.${payload}.${sig}`),
+    ).toThrow(VaultError);
+  });
+
   it("revocation with explicit expiresAt uses that value", () => {
     const token = engine.createToken("user-1", ["read"]);
     const decoded = engine.verifyToken(token);

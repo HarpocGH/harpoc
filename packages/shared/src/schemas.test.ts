@@ -6,6 +6,7 @@ import {
   auditQuerySchema,
   certificateImportSchema,
   createSecretInputSchema,
+  databaseActionSchema,
   followRedirectsSchema,
   handleSchema,
   healthResponseSchema,
@@ -28,6 +29,7 @@ import {
   secretTypeSchema,
   sessionFileSchema,
   setInjectionPolicyRequestSchema,
+  sshActionSchema,
   startOAuthFlowInputSchema,
   useSecretActionSchema,
   useSecretRequestSchema,
@@ -1323,5 +1325,144 @@ describe("certificateImportSchema", () => {
         certificate_pem: "not-pem",
       }),
     ).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Input-validation hardening (code review 2026-07-07, Low group 3)
+// ---------------------------------------------------------------------------
+
+describe("sshActionSchema argv hardening", () => {
+  const validSsh = { type: "ssh" as const, host: "deploy.example.com", user: "deploy", command: "whoami" };
+
+  it("accepts a normal host and user", () => {
+    expect(sshActionSchema.parse(validSsh).host).toBe("deploy.example.com");
+  });
+
+  it.each(["-evil", "-oProxyCommand.x", ".evil", "-l"])(
+    "rejects host %s (leading dash/dot)",
+    (host) => {
+      expect(() => sshActionSchema.parse({ ...validSsh, host })).toThrow();
+    },
+  );
+
+  it.each(["-root", ".hidden"])("rejects user %s (leading dash/dot)", (user) => {
+    expect(() => sshActionSchema.parse({ ...validSsh, user })).toThrow();
+  });
+});
+
+describe("databaseActionSchema host:port range", () => {
+  const validDb = {
+    type: "database" as const,
+    engine: "postgresql" as const,
+    host: "db.example.com",
+    database: "app",
+    query: "SELECT 1",
+  };
+
+  it("accepts a host with an in-range embedded port", () => {
+    expect(databaseActionSchema.parse({ ...validDb, host: "db.example.com:65535" }).host).toBe(
+      "db.example.com:65535",
+    );
+  });
+
+  it.each(["db.example.com:70000", "db.example.com:0", "db.example.com:99999"])(
+    "rejects %s (embedded port out of range)",
+    (host) => {
+      expect(() => databaseActionSchema.parse({ ...validDb, host })).toThrow();
+    },
+  );
+
+  it("still accepts a bare host without a port", () => {
+    expect(databaseActionSchema.parse(validDb).host).toBe("db.example.com");
+  });
+});
+
+describe("URL scheme boundary validation", () => {
+  const validHttp = {
+    type: "http" as const,
+    method: "GET" as const,
+    url: "https://api.github.com/user",
+    injection: { type: "bearer" as const },
+  };
+
+  it.each(["javascript:alert(1)", "file:///etc/passwd", "ftp://host/x"])(
+    "httpActionSchema rejects %s",
+    (url) => {
+      expect(() => httpActionSchema.parse({ ...validHttp, url })).toThrow();
+    },
+  );
+
+  it("httpActionSchema accepts loopback http (core validateUrl allows it)", () => {
+    expect(httpActionSchema.parse({ ...validHttp, url: "http://127.0.0.1:8080/x" }).url).toBe(
+      "http://127.0.0.1:8080/x",
+    );
+  });
+
+  it("mcpServerConfigSchema rejects a non-http(s) downstream URL", () => {
+    expect(() =>
+      mcpServerConfigSchema.parse({
+        server_name: "downstream",
+        transport: "http",
+        url: "ftp://host/mcp",
+      }),
+    ).toThrow();
+  });
+
+  it("mcpServerConfigSchema accepts an https downstream URL", () => {
+    const parsed = mcpServerConfigSchema.parse({
+      server_name: "downstream",
+      transport: "http",
+      url: "https://mcp.example.com/mcp",
+    });
+    expect(parsed.url).toBe("https://mcp.example.com/mcp");
+  });
+});
+
+describe("httpActionSchema headers validation", () => {
+  const validHttp = {
+    type: "http" as const,
+    method: "GET" as const,
+    url: "https://api.github.com/user",
+    injection: { type: "bearer" as const },
+  };
+
+  it("accepts normal headers", () => {
+    const parsed = httpActionSchema.parse({
+      ...validHttp,
+      headers: { Accept: "application/json", "X-Request-Id": "abc-123" },
+    });
+    expect(parsed.headers?.Accept).toBe("application/json");
+  });
+
+  it("rejects a header name with invalid characters", () => {
+    expect(() =>
+      httpActionSchema.parse({ ...validHttp, headers: { "Bad Name:": "x" } }),
+    ).toThrow();
+  });
+
+  it("rejects a header value smuggling CR/LF", () => {
+    expect(() =>
+      httpActionSchema.parse({ ...validHttp, headers: { "X-Test": "a\r\nInjected: 1" } }),
+    ).toThrow();
+  });
+
+  it("rejects a header value containing NUL", () => {
+    expect(() =>
+      httpActionSchema.parse({ ...validHttp, headers: { "X-Test": "a\0b" } }),
+    ).toThrow();
+  });
+
+  it("rejects an oversized header value", () => {
+    expect(() =>
+      httpActionSchema.parse({ ...validHttp, headers: { "X-Test": "v".repeat(8193) } }),
+    ).toThrow();
+  });
+
+  it("rejects more than 64 headers", () => {
+    const headers = Object.fromEntries(
+      Array.from({ length: 65 }, (_, i) => [`X-H${i}`, "v"]),
+    );
+    expect(() => httpActionSchema.parse({ ...validHttp, headers })).toThrow();
   });
 });

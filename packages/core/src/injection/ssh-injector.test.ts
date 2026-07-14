@@ -74,4 +74,26 @@ describe("SshInjector enforcement", () => {
       ),
     ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
   });
+
+  it("refuses a host starting with '-' before any other work (argv option smuggling)", async () => {
+    await expect(
+      injector.executeWithSecret(
+        { ...ACTION, host: "-oProxyCommand.evil" },
+        SECRET,
+        policy({ host_allowlist: ["-oProxyCommand.evil"] }),
+        SSH_CONFIG,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.INVALID_SSH_CONFIG });
+  });
+
+  it("refuses a user starting with '-'", async () => {
+    await expect(
+      injector.executeWithSecret(
+        { ...ACTION, user: "-l" },
+        SECRET,
+        policy({ host_allowlist: ["deploy.example.com"] }),
+        SSH_CONFIG,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.INVALID_SSH_CONFIG });
+  });
 });

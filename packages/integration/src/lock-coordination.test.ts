@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { VaultEngine, SessionManager } from "@harpoc/core";
+import { VaultEngine } from "@harpoc/core";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { DirectClient } from "@harpoc/sdk";
@@ -10,6 +10,21 @@ import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool } from "./helpers/mcp-helpers.js";
 
 const PASSWORD = "lock-coord-test-pw";
+
+/**
+ * Fire engine B's session monitor and wait for the real seal. The interval
+ * callback is driven by fake timers; the tick itself does real file I/O, which
+ * resolves on the event loop — so the timers go back to real before polling
+ * for the sealed state. This runs the actual cross-process detection path the
+ * suite is named for (no readStoredSession stubbing).
+ */
+async function advanceMonitorAndAwaitSeal(engine: VaultEngine): Promise<void> {
+  await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS + 1_000);
+  vi.useRealTimers();
+  await vi.waitFor(() => {
+    expect(engine.getState()).toBe(VaultState.SEALED);
+  });
+}
 
 describe("Lock Coordination", () => {
   let vault: TestVault;
@@ -25,35 +40,28 @@ describe("Lock Coordination", () => {
   });
 
   // ---- Test 1: Engine2 detects Engine1's lock via monitor -----------------
-  // Uses mocked readStoredSession (returns null after lock erases session) with fake timers,
-  // same pattern as session-expiry test 1.
+  // Real machinery end to end: Engine1's lock() erases the actual session
+  // file, and Engine2's monitor notices on its next real read.
   it("Engine2 detects Engine1's lock within one monitor interval", async () => {
     const engine1 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
     await engine1.unlock(PASSWORD);
-    await engine1.destroy();
 
+    // Engine2's monitor interval must be scheduled under fake timers.
     vi.useFakeTimers();
+    const engine2 = new VaultEngine({
+      dbPath: vault.dbPath,
+      sessionPath: vault.sessionPath,
+    });
     try {
-      const engine2 = new VaultEngine({
-        dbPath: vault.dbPath,
-        sessionPath: vault.sessionPath,
-      });
       await engine2.loadSession();
       expect(engine2.getState()).toBe(VaultState.UNLOCKED);
 
-      // Simulate Engine1 locking (session file erased) by mocking readStoredSession to return null
-      const spy = vi.spyOn(SessionManager.prototype, "readStoredSession").mockResolvedValue(null);
-
-      // Advance past monitor interval
-      await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS + 1_000);
-
-      expect(engine2.getState()).toBe(VaultState.SEALED);
-      expect(spy).toHaveBeenCalled();
-
-      spy.mockRestore();
-      await engine2.destroy();
+      await engine1.lock();
+      await advanceMonitorAndAwaitSeal(engine2);
     } finally {
       vi.useRealTimers();
+      await engine1.destroy();
+      await engine2.destroy();
     }
   });
 
@@ -62,29 +70,27 @@ describe("Lock Coordination", () => {
     const engine1 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
     await engine1.unlock(PASSWORD);
     const token = engine1.createToken("test-agent", ["admin"]);
-    await engine1.destroy();
 
     vi.useFakeTimers();
+    const engine2 = new VaultEngine({
+      dbPath: vault.dbPath,
+      sessionPath: vault.sessionPath,
+    });
     try {
-      const engine2 = new VaultEngine({
-        dbPath: vault.dbPath,
-        sessionPath: vault.sessionPath,
-      });
       await engine2.loadSession();
       const app = createApp(engine2);
 
-      const spy = vi.spyOn(SessionManager.prototype, "readStoredSession").mockResolvedValue(null);
-      await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS + 1_000);
+      await engine1.lock();
+      await advanceMonitorAndAwaitSeal(engine2);
 
       const res = await app.request("/api/v1/secrets", {
         headers: { authorization: `Bearer ${token}` },
       });
       expect(res.status).toBe(503);
-
-      spy.mockRestore();
-      await engine2.destroy();
     } finally {
       vi.useRealTimers();
+      await engine1.destroy();
+      await engine2.destroy();
     }
   });
 
@@ -92,27 +98,25 @@ describe("Lock Coordination", () => {
   it("MCP tool on Engine2 returns error after Engine1 locks", async () => {
     const engine1 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
     await engine1.unlock(PASSWORD);
-    await engine1.destroy();
 
     vi.useFakeTimers();
+    const engine2 = new VaultEngine({
+      dbPath: vault.dbPath,
+      sessionPath: vault.sessionPath,
+    });
     try {
-      const engine2 = new VaultEngine({
-        dbPath: vault.dbPath,
-        sessionPath: vault.sessionPath,
-      });
       await engine2.loadSession();
       const mcpServer: McpServer = createMcpServer({ engine: engine2 });
 
-      const spy = vi.spyOn(SessionManager.prototype, "readStoredSession").mockResolvedValue(null);
-      await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS + 1_000);
+      await engine1.lock();
+      await advanceMonitorAndAwaitSeal(engine2);
 
       const result = await callTool(mcpServer, "list_secrets", {});
       expect(result.isError).toBe(true);
-
-      spy.mockRestore();
-      await engine2.destroy();
     } finally {
       vi.useRealTimers();
+      await engine1.destroy();
+      await engine2.destroy();
     }
   });
 
@@ -120,26 +124,24 @@ describe("Lock Coordination", () => {
   it("SDK DirectClient fails with VAULT_LOCKED after Engine1 locks", async () => {
     const engine1 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
     await engine1.unlock(PASSWORD);
-    await engine1.destroy();
 
     vi.useFakeTimers();
+    const engine2 = new VaultEngine({
+      dbPath: vault.dbPath,
+      sessionPath: vault.sessionPath,
+    });
     try {
-      const engine2 = new VaultEngine({
-        dbPath: vault.dbPath,
-        sessionPath: vault.sessionPath,
-      });
       await engine2.loadSession();
       const client = new DirectClient(engine2);
 
-      const spy = vi.spyOn(SessionManager.prototype, "readStoredSession").mockResolvedValue(null);
-      await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS + 1_000);
+      await engine1.lock();
+      await advanceMonitorAndAwaitSeal(engine2);
 
       await expect(client.listSecrets()).rejects.toThrow("Vault is locked");
-
-      spy.mockRestore();
-      await engine2.destroy();
     } finally {
       vi.useRealTimers();
+      await engine1.destroy();
+      await engine2.destroy();
     }
   });
 
@@ -147,30 +149,27 @@ describe("Lock Coordination", () => {
   it("seal happens after one interval, not before", async () => {
     const engine1 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
     await engine1.unlock(PASSWORD);
-    await engine1.destroy();
 
     vi.useFakeTimers();
+    const engine2 = new VaultEngine({
+      dbPath: vault.dbPath,
+      sessionPath: vault.sessionPath,
+    });
     try {
-      const engine2 = new VaultEngine({
-        dbPath: vault.dbPath,
-        sessionPath: vault.sessionPath,
-      });
       await engine2.loadSession();
 
-      const spy = vi.spyOn(SessionManager.prototype, "readStoredSession").mockResolvedValue(null);
+      await engine1.lock();
 
-      // Advance halfway — monitor should NOT have fired yet
+      // Halfway through the interval the monitor has not fired: still unlocked.
       await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS / 2);
       expect(engine2.getState()).toBe(VaultState.UNLOCKED);
 
-      // Advance past the interval — monitor fires and seals
-      await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS / 2 + 1_000);
-      expect(engine2.getState()).toBe(VaultState.SEALED);
-
-      spy.mockRestore();
-      await engine2.destroy();
+      // Past the interval the monitor fires and the real file read seals it.
+      await advanceMonitorAndAwaitSeal(engine2);
     } finally {
       vi.useRealTimers();
+      await engine1.destroy();
+      await engine2.destroy();
     }
   });
 

@@ -196,3 +196,120 @@ describe("TokenRefreshScheduler", () => {
     }
   });
 });
+
+describe("TokenRefreshScheduler failure quarantine (code review Low O4)", () => {
+  let scheduler: TokenRefreshScheduler;
+
+  afterEach(() => {
+    scheduler?.stop();
+    vi.useRealTimers();
+  });
+
+  function failingEngine() {
+    return {
+      getExpiringOAuthTokens: vi.fn().mockReturnValue([{ secret_id: "broken" }]),
+      refreshOAuthToken: vi.fn().mockRejectedValue(new Error("provider offline")),
+    };
+  }
+
+  it("skips a failed token until its backoff window elapses, then retries with doubled backoff", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const base = 1_700_000_000_000;
+    vi.setSystemTime(base);
+
+    const engine = failingEngine();
+    scheduler = new TokenRefreshScheduler(engine as never, {
+      checkIntervalMs: 1000,
+      initialRetryDelayMs: 0,
+    });
+
+    await scheduler.tick(); // 3 in-call attempts, then quarantined for 1000*2^1 = 2s
+    expect(engine.refreshOAuthToken).toHaveBeenCalledTimes(3);
+
+    await scheduler.tick(); // still inside the window: skipped entirely
+    expect(engine.refreshOAuthToken).toHaveBeenCalledTimes(3);
+
+    vi.setSystemTime(base + 2001); // past the first backoff
+    await scheduler.tick(); // retried: 3 more attempts, backoff now 4s
+    expect(engine.refreshOAuthToken).toHaveBeenCalledTimes(6);
+
+    vi.setSystemTime(base + 2001 + 3000); // inside the 4s window
+    await scheduler.tick();
+    expect(engine.refreshOAuthToken).toHaveBeenCalledTimes(6);
+
+    vi.setSystemTime(base + 2001 + 4001); // past it
+    await scheduler.tick();
+    expect(engine.refreshOAuthToken).toHaveBeenCalledTimes(9);
+  });
+
+  it("a successful refresh clears the quarantine", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const base = 1_700_000_000_000;
+    vi.setSystemTime(base);
+
+    let fail = true;
+    const engine = {
+      getExpiringOAuthTokens: vi.fn().mockReturnValue([{ secret_id: "flaky" }]),
+      refreshOAuthToken: vi.fn().mockImplementation(async () => {
+        if (fail) throw new Error("transient");
+        return Date.now() + 3600_000;
+      }),
+    };
+    scheduler = new TokenRefreshScheduler(engine as never, {
+      checkIntervalMs: 1000,
+      initialRetryDelayMs: 0,
+    });
+
+    await scheduler.tick(); // quarantined
+    fail = false;
+    vi.setSystemTime(base + 2001);
+    await scheduler.tick(); // succeeds, quarantine cleared
+    const after = engine.refreshOAuthToken.mock.calls.length;
+
+    await scheduler.tick(); // no window: refreshed again immediately
+    expect(engine.refreshOAuthToken.mock.calls.length).toBe(after + 1);
+  });
+
+  it("refreshNow bypasses the quarantine (explicit operator action)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(1_700_000_000_000);
+
+    const engine = failingEngine();
+    scheduler = new TokenRefreshScheduler(engine as never, {
+      checkIntervalMs: 1000,
+      initialRetryDelayMs: 0,
+    });
+
+    await scheduler.tick(); // quarantined
+    expect(engine.refreshOAuthToken).toHaveBeenCalledTimes(3);
+
+    await expect(scheduler.refreshNow("broken")).rejects.toThrow("provider offline");
+    expect(engine.refreshOAuthToken).toHaveBeenCalledTimes(6);
+  });
+
+  it("one quarantined token does not block others", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(1_700_000_000_000);
+
+    const engine = {
+      getExpiringOAuthTokens: vi
+        .fn()
+        .mockReturnValue([{ secret_id: "broken" }, { secret_id: "healthy" }]),
+      refreshOAuthToken: vi.fn().mockImplementation(async (id: string) => {
+        if (id === "broken") throw new Error("dead");
+        return Date.now() + 3600_000;
+      }),
+    };
+    scheduler = new TokenRefreshScheduler(engine as never, {
+      checkIntervalMs: 1000,
+      initialRetryDelayMs: 0,
+    });
+
+    await scheduler.tick(); // broken: 3 attempts + quarantine; healthy: 1
+    await scheduler.tick(); // broken skipped; healthy again
+    const healthyCalls = engine.refreshOAuthToken.mock.calls.filter((c) => c[0] === "healthy");
+    const brokenCalls = engine.refreshOAuthToken.mock.calls.filter((c) => c[0] === "broken");
+    expect(healthyCalls.length).toBe(2);
+    expect(brokenCalls.length).toBe(3);
+  });
+});

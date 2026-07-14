@@ -11,6 +11,12 @@ export interface OAuthManagerOptions {
   openBrowser?: (url: string) => Promise<void>;
   callbackPort?: number;
   callbackTimeoutMs?: number;
+  /**
+   * Called when a background device-code flow fails after the initial
+   * response has been returned (the secret stays PENDING). Default: no-op —
+   * the package stays console-free; the host decides how to report.
+   */
+  onBackgroundFlowError?: (secretId: string, err: unknown) => void;
 }
 
 export class OAuthManager {
@@ -18,12 +24,30 @@ export class OAuthManager {
   private openBrowser: (url: string) => Promise<void>;
   private callbackPort: number;
   private callbackTimeoutMs: number;
+  private onBackgroundFlowError?: (secretId: string, err: unknown) => void;
+  private readonly pendingFlows = new Map<string, AbortController>();
 
   constructor(engine: VaultEngine, options?: OAuthManagerOptions) {
     this.engine = engine;
     this.openBrowser = options?.openBrowser ?? OAuthManager.defaultOpenBrowser;
     this.callbackPort = options?.callbackPort ?? 19876;
     this.callbackTimeoutMs = options?.callbackTimeoutMs ?? 5 * 60 * 1000;
+    this.onBackgroundFlowError = options?.onBackgroundFlowError;
+  }
+
+  /** Abort one pending background device-code poll. */
+  cancelFlow(secretId: string): boolean {
+    const controller = this.pendingFlows.get(secretId);
+    if (!controller) return false;
+    controller.abort();
+    return true;
+  }
+
+  /** Abort every pending background device-code poll (owner dispose path). */
+  cancelPendingFlows(): void {
+    for (const controller of this.pendingFlows.values()) {
+      controller.abort();
+    }
   }
 
   /**
@@ -193,8 +217,10 @@ export class OAuthManager {
     expiresIn: number,
     secretId: string,
   ): void {
+    const controller = new AbortController();
+    this.pendingFlows.set(secretId, controller);
     flow
-      .pollForToken(deviceCode, interval, config, expiresIn)
+      .pollForToken(deviceCode, interval, config, expiresIn, controller.signal)
       .then(async (tokens) => {
         const expiresAt = tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined;
         await this.engine.completeOAuthFlow(
@@ -204,9 +230,16 @@ export class OAuthManager {
           expiresAt,
         );
       })
-      .catch(() => {
-        // Device code flow failed or timed out.
-        // Secret remains in PENDING state.
+      .catch((err: unknown) => {
+        // An abort is an expected cancellation; anything else (poll failure,
+        // timeout, completeOAuthFlow on a sealed engine) is surfaced — the
+        // secret stays PENDING either way.
+        if (!controller.signal.aborted) {
+          this.onBackgroundFlowError?.(secretId, err);
+        }
+      })
+      .finally(() => {
+        this.pendingFlows.delete(secretId);
       });
   }
 

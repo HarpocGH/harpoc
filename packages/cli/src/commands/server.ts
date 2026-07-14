@@ -23,7 +23,10 @@ export function registerServerCommand(program: Command): void {
     .option("--rest", "Start REST API server")
     .option("--port <port>", "REST API port", "3000")
     .option("--host <address>", "REST API bind address (loopback by default)", "127.0.0.1")
-    .option("--token <jwt>", "Launch token for MCP scope enforcement (stdio only)")
+    .option(
+      "--token <jwt>",
+      "Launch token for MCP scope enforcement (stdio only); prefer the HARPOC_TOKEN environment variable — command-line arguments are visible to other local processes",
+    )
     .action(
       async (
         opts: {
@@ -92,9 +95,12 @@ export function registerServerCommand(program: Command): void {
             const { createMcpServer } = await import("@harpoc/mcp-server");
             const { StdioServerTransport } =
               await import("@modelcontextprotocol/sdk/server/stdio.js");
+            // An ambient HARPOC_TOKEN only applies to the stdio launch token; an
+            // explicit --token wins. (A profile-set variable must not error out
+            // --rest-only starts, so the env var is never checked without --mcp.)
             const server = createMcpServer({
               engine,
-              launchToken: opts.token,
+              launchToken: opts.token ?? process.env.HARPOC_TOKEN,
               enableTtyPrompt: true,
             });
             const transport = new StdioServerTransport();

@@ -153,6 +153,58 @@ describe("DatabaseInjector", () => {
     ).rejects.toMatchObject({ code: ErrorCode.DB_CONNECTION_FAILED });
   });
 
+  it("redacts the username half from the result rows", async () => {
+    const mock = new MockAdapter({ rows: [{ note: "logged in as admin just now" }] });
+    const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
+    expect(JSON.stringify(res.rows)).not.toContain("admin");
+    expect(JSON.stringify(res.rows)).toContain("[REDACTED]");
+  });
+
+  it("redacts the username half from a query error", async () => {
+    const mock = new MockAdapter({ queryError: new Error("permission denied for role admin") });
+    try {
+      await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
+      expect.fail("should throw");
+    } catch (e) {
+      const err = e as VaultError;
+      expect(err.code).toBe(ErrorCode.DB_QUERY_FAILED);
+      expect(err.message).not.toContain("admin");
+    }
+  });
+
+  it("redacts the username half from a connection error", async () => {
+    const mock = new MockAdapter({
+      connectError: new Error('password authentication failed for user "admin"'),
+    });
+    try {
+      await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
+      expect.fail("should throw");
+    } catch (e) {
+      const err = e as VaultError;
+      expect(err.code).toBe(ErrorCode.DB_CONNECTION_FAILED);
+      expect(err.message).not.toContain("admin");
+    }
+  });
+
+  it("leaves a 1-2 char username unredacted (would shred unrelated output)", async () => {
+    const mock = new MockAdapter({ rows: [{ note: "a value about nothing" }] });
+    const res = await injector(mock).executeWithSecret(
+      action(),
+      new Uint8Array(Buffer.from("ab:s3cr3t")),
+      policy(),
+      undefined,
+    );
+    expect(JSON.stringify(res.rows)).toContain("a value about nothing");
+  });
+
+  it("refuses an out-of-range embedded port before any connection work", async () => {
+    const mock = new MockAdapter({ rows: [] });
+    await expect(
+      injector(mock).executeWithSecret(action({ host: "8.8.8.8:70000" }), SECRET, policy(), undefined),
+    ).rejects.toMatchObject({ code: ErrorCode.INVALID_DATABASE_CONFIG });
+    expect(mock.lastConnect).toBeUndefined();
+  });
+
   it("throws for a secret that is not username:password", async () => {
     const mock = new MockAdapter({ rows: [] });
     await expect(

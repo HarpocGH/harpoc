@@ -1,9 +1,12 @@
-import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 
 type HiddenPromptInput = Readable & {
   isRaw?: boolean;
   setRawMode?: (mode: boolean) => unknown;
+};
+
+type ConfirmPromptInput = Readable & {
+  isTTY?: boolean;
 };
 
 /**
@@ -21,15 +24,77 @@ export async function promptSecret(message = "Secret value: "): Promise<string> 
 }
 
 /**
- * Prompt for confirmation (y/N).
+ * Prompt for confirmation (y/N). Reads one line with the same chunk-independent
+ * scanning as promptHidden, minus raw mode — confirmation input is not secret,
+ * so a TTY's canonical line editing and native echo are fine, and Ctrl+C stays
+ * an ordinary SIGINT. EOF acts as the line terminator, so a closed stdin
+ * resolves (an empty answer is the default No) instead of leaving the promise
+ * dangling and the process exiting 0 without running the guarded command.
  */
-export async function promptConfirm(message: string): Promise<boolean> {
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  return new Promise((resolve) => {
-    rl.question(`${message} [y/N] `, (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase() === "y");
-    });
+export function promptConfirm(
+  message: string,
+  input: ConfirmPromptInput = process.stdin,
+  output: NodeJS.WritableStream = process.stderr,
+): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const toAnswer = (value: string): boolean => value.trim().toLowerCase() === "y";
+
+    if (input.readableEnded) {
+      output.write(`${message} [y/N] \n`);
+      resolve(false);
+      return;
+    }
+
+    output.write(`${message} [y/N] `);
+
+    let value = "";
+
+    const finish = (remainder: string): void => {
+      input.removeListener("data", onData);
+      input.removeListener("end", onEnd);
+      input.removeListener("error", onError);
+      input.pause();
+      if (remainder.length > 0) {
+        input.unshift(Buffer.from(remainder, "utf8"));
+      }
+      // A TTY echoes the typed Enter itself; piped input echoes nothing, so
+      // terminate the prompt line before the command's next output.
+      if (!input.isTTY) {
+        output.write("\n");
+      }
+    };
+
+    const onData = (data: Buffer): void => {
+      const chunk = data.toString("utf8");
+      for (let i = 0; i < chunk.length; i++) {
+        const char = chunk.charAt(i);
+        if (char === "\n" || char === "\r") {
+          let rest = chunk.slice(i + 1);
+          if (char === "\r" && rest.startsWith("\n")) {
+            rest = rest.slice(1);
+          }
+          finish(rest);
+          resolve(toAnswer(value));
+          return;
+        }
+        value += char;
+      }
+    };
+
+    const onEnd = (): void => {
+      finish("");
+      resolve(toAnswer(value));
+    };
+
+    const onError = (err: Error): void => {
+      finish("");
+      reject(err);
+    };
+
+    input.on("data", onData);
+    input.once("end", onEnd);
+    input.once("error", onError);
+    input.resume();
   });
 }
 

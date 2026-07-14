@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { OAuthProviderConfig } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import { AuthorizationCodeFlow } from "./authorization-code.js";
+import { generateCodeChallenge } from "../pkce.js";
 
 let tokenServer: Server;
 let tokenServerUrl: string;
@@ -179,5 +180,36 @@ describe("AuthorizationCodeFlow.handleCallback", () => {
         "v",
       ),
     ).rejects.toMatchObject({ code: ErrorCode.URL_HTTPS_REQUIRED });
+  });
+});
+
+describe("PKCE code_verifier at token exchange (code review Low T5)", () => {
+  const flow = new AuthorizationCodeFlow();
+  const redirectUri = "http://localhost:19876/oauth/callback";
+
+  it("sends the exact verifier whose S256 challenge went out in the auth URL", async () => {
+    const start = flow.startFlow(makeConfig(), redirectUri);
+    const challengeInUrl = new URL(start.auth_url).searchParams.get("code_challenge");
+
+    let body = "";
+    tokenHandler = (req, res) => {
+      let data = "";
+      req.on("data", (c: Buffer) => (data += c.toString()));
+      req.on("end", () => {
+        body = data;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ access_token: "tok" }));
+      });
+    };
+
+    await flow.handleCallback("auth-code", makeConfig(), redirectUri, start.code_verifier);
+
+    const params = new URLSearchParams(body);
+    // The verifier is transmitted at exchange — a silent PKCE downgrade
+    // (verifier generated but never sent) fails here.
+    expect(params.get("code_verifier")).toBe(start.code_verifier);
+    // And it is the verifier behind the challenge the browser saw.
+    expect(generateCodeChallenge(start.code_verifier)).toBe(challengeInUrl);
+    expect(params.get("grant_type")).toBe("authorization_code");
   });
 });

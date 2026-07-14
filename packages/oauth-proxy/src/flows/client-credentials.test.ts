@@ -115,3 +115,51 @@ describe("ClientCredentialsFlow", () => {
     ).rejects.toMatchObject({ code: ErrorCode.URL_HTTPS_REQUIRED });
   });
 });
+
+describe("ClientCredentialsFlow token endpoint auth methods (code review Low O5)", () => {
+  const flow = new ClientCredentialsFlow();
+
+  it("client_secret_basic sends Authorization: Basic and keeps credentials out of the body", async () => {
+    let auth: string | undefined;
+    let body = "";
+    tokenHandler = (req, res) => {
+      auth = req.headers.authorization;
+      let data = "";
+      req.on("data", (c: Buffer) => (data += c.toString()));
+      req.on("end", () => {
+        body = data;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ access_token: "tok" }));
+      });
+    };
+
+    await flow.authenticate(makeConfig({ token_endpoint_auth_method: "client_secret_basic" }));
+
+    const expected = `Basic ${Buffer.from("service-client:service-secret", "utf8").toString("base64")}`;
+    expect(auth).toBe(expected);
+    expect(body).toContain("grant_type=client_credentials");
+    expect(body).not.toContain("client_secret");
+    expect(body).not.toContain("service-secret");
+  });
+
+  it("client_secret_post (the default) keeps credentials in the body with no auth header", async () => {
+    let auth: string | undefined;
+    let body = "";
+    tokenHandler = (req, res) => {
+      auth = req.headers.authorization;
+      let data = "";
+      req.on("data", (c: Buffer) => (data += c.toString()));
+      req.on("end", () => {
+        body = data;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ access_token: "tok" }));
+      });
+    };
+
+    await flow.authenticate(makeConfig());
+
+    expect(auth).toBeUndefined();
+    expect(body).toContain("client_id=service-client");
+    expect(body).toContain("client_secret=service-secret");
+  });
+});

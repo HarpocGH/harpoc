@@ -95,4 +95,36 @@ describe("RateLimiter", () => {
     }
     expect(() => limiter.checkLimit()).toThrow();
   });
+
+  it("evicts idle fully-refillable secret buckets past the 1000-bucket bound", () => {
+    const limiter = new RateLimiter(1_000_000, 5);
+    for (let i = 0; i < 1001; i++) {
+      limiter.checkLimit(`s-${i}`);
+    }
+    const buckets = (limiter as unknown as { secretBuckets: Map<string, unknown> }).secretBuckets;
+    expect(buckets.size).toBe(1001);
+
+    // A minute of idleness makes every bucket fully refillable; the next
+    // access past the bound sweeps them out instead of growing forever.
+    vi.advanceTimersByTime(60_000);
+    limiter.checkLimit("s-0");
+    expect(buckets.size).toBeLessThanOrEqual(2);
+
+    // Evicted secrets simply get fresh buckets on their next use.
+    expect(() => limiter.checkLimit("s-999")).not.toThrow();
+  });
+
+  it("does not evict buckets that are still partially drained", () => {
+    const limiter = new RateLimiter(1_000_000, 5);
+    for (let i = 0; i < 1001; i++) {
+      limiter.checkLimit(`s-${i}`);
+      limiter.checkLimit(`s-${i}`);
+      limiter.checkLimit(`s-${i}`);
+    }
+    // Only ~12s of idleness: one refilled token, still below the limit.
+    vi.advanceTimersByTime(12_000);
+    const buckets = (limiter as unknown as { secretBuckets: Map<string, unknown> }).secretBuckets;
+    limiter.checkLimit("s-0");
+    expect(buckets.size).toBe(1001);
+  });
 });

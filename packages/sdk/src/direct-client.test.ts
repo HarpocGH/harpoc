@@ -249,12 +249,26 @@ describe("DirectClient", () => {
     );
   });
 
-  it("revokePolicy delegates to engine", async () => {
+  it("revokePolicy verifies ownership before revoking (REST parity)", async () => {
     const engine = createMockEngine();
+    engine.listPolicies.mockReturnValue([{ id: "p1" }]);
     const client = new DirectClient(engine as never);
 
     await client.revokePolicy("secret://key", "p1");
+    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://key");
+    expect(engine.listPolicies).toHaveBeenCalledWith("uuid-1");
     expect(engine.revokePolicy).toHaveBeenCalledWith("p1");
+  });
+
+  it("revokePolicy refuses a policy belonging to another secret (IDOR guard)", async () => {
+    const engine = createMockEngine();
+    engine.listPolicies.mockReturnValue([{ id: "other-policy" }]);
+    const client = new DirectClient(engine as never);
+
+    await expect(client.revokePolicy("secret://key", "p1")).rejects.toMatchObject({
+      code: "POLICY_NOT_FOUND",
+    });
+    expect(engine.revokePolicy).not.toHaveBeenCalled();
   });
 
   it("listPolicies resolves secret ID and delegates", async () => {

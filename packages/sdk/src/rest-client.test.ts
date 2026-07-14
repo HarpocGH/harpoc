@@ -385,3 +385,34 @@ describe("RestClient", () => {
     });
   });
 });
+
+describe("request timeout (code review Low O0)", () => {
+  it("aborts a request against a server that never responds", async () => {
+    vi.unstubAllGlobals(); // this test needs the real fetch against a real hung server
+
+    const { createServer } = await import("node:http");
+    const hung = createServer(() => {
+      // never respond
+    });
+    await new Promise<void>((resolve) => {
+      hung.listen(0, "127.0.0.1", () => resolve());
+    });
+    const { port } = hung.address() as { port: number };
+
+    const slowClient = new RestClient({
+      baseUrl: `http://127.0.0.1:${port}`,
+      token: "t",
+      timeoutMs: 250,
+    });
+
+    try {
+      await expect(slowClient.listSecrets()).rejects.toMatchObject({
+        code: ErrorCode.INTERNAL_ERROR,
+        message: expect.stringContaining("timed out"),
+      });
+    } finally {
+      hung.closeAllConnections();
+      hung.close();
+    }
+  });
+});

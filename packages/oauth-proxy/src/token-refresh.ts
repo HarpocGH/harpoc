@@ -4,6 +4,12 @@ const DEFAULT_CHECK_INTERVAL_MS = 60_000; // 60 seconds
 const EXPIRING_WITHIN_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_RETRIES = 3;
 const DEFAULT_INITIAL_RETRY_DELAY_MS = 1_000;
+const MAX_QUARANTINE_MS = 60 * 60 * 1000; // 1 hour backoff cap
+
+interface QuarantineEntry {
+  failures: number;
+  nextAttemptAt: number;
+}
 
 export interface TokenRefreshSchedulerOptions {
   checkIntervalMs?: number;
@@ -16,6 +22,12 @@ export class TokenRefreshScheduler {
   private checkIntervalMs: number;
   private initialRetryDelayMs: number;
   private tickInProgress = false;
+  /**
+   * Per-secret failure quarantine: a broken token (revoked grant, offline
+   * provider) is re-discovered by every tick's expiring query forever — the
+   * backoff lives here, in memory (a restart retries immediately; acceptable).
+   */
+  private readonly quarantine = new Map<string, QuarantineEntry>();
 
   constructor(engine: VaultEngine, options?: TokenRefreshSchedulerOptions) {
     this.engine = engine;
@@ -60,19 +72,25 @@ export class TokenRefreshScheduler {
   }
 
   /**
-   * Force an immediate refresh of a specific token.
+   * Force an immediate refresh of a specific token. Bypasses the failure
+   * quarantine (an explicit operator action), but updates it on the outcome.
    */
   async refreshNow(secretId: string): Promise<number | null> {
     return this.refreshWithRetry(secretId);
   }
 
   /**
-   * Run one tick: find expiring tokens and refresh them.
+   * Run one tick: find expiring tokens and refresh them. Tokens inside their
+   * quarantine window are skipped — without the backoff, a permanently broken
+   * token is retried every tick, forever.
    */
   async tick(): Promise<void> {
     const expiringTokens = this.engine.getExpiringOAuthTokens(EXPIRING_WITHIN_MS);
+    const now = Date.now();
 
     for (const token of expiringTokens) {
+      const entry = this.quarantine.get(token.secret_id);
+      if (entry && now < entry.nextAttemptAt) continue;
       try {
         await this.refreshWithRetry(token.secret_id);
       } catch {
@@ -86,7 +104,9 @@ export class TokenRefreshScheduler {
     let lastError: unknown;
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
-        return await this.engine.refreshOAuthToken(secretId);
+        const result = await this.engine.refreshOAuthToken(secretId);
+        this.quarantine.delete(secretId);
+        return result;
       } catch (err) {
         lastError = err;
         if (attempt < MAX_RETRIES - 1) {
@@ -95,7 +115,15 @@ export class TokenRefreshScheduler {
         }
       }
     }
+    this.recordFailure(secretId);
     throw lastError;
+  }
+
+  /** Exponential backoff on the check interval, capped at one hour. */
+  private recordFailure(secretId: string): void {
+    const failures = (this.quarantine.get(secretId)?.failures ?? 0) + 1;
+    const backoffMs = Math.min(this.checkIntervalMs * Math.pow(2, failures), MAX_QUARANTINE_MS);
+    this.quarantine.set(secretId, { failures, nextAttemptAt: Date.now() + backoffMs });
   }
 
   get isRunning(): boolean {

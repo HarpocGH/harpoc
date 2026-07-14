@@ -123,7 +123,10 @@ export class GitInjector {
       env.GIT_TERMINAL_PROMPT = "0";
       env.HARPOC_GIT_USERNAME = user;
       env.HARPOC_GIT_PASSWORD = password;
-      const r = await spawnCaptured(gitPath, args, { env, cwd, timeoutMs, redact: [password] });
+      // The username is credential material too; a 1–2 char username would
+      // shred unrelated output, so such fragments stay unredacted.
+      const redact = user.length >= 3 ? [password, user] : [password];
+      const r = await spawnCaptured(gitPath, args, { env, cwd, timeoutMs, redact });
       const result = toGitResult(action, r);
       this.audit(action, secretId, { transport: "https", exit_code: r.exit_code }, result.error === undefined);
       return result;

@@ -123,14 +123,53 @@ export type HttpMethod = z.infer<typeof httpMethodSchema>;
 // ---------------------------------------------------------------------------
 
 /**
+ * URL whose scheme must be http(s). Not https-only at the schema layer:
+ * core's validateUrl legitimately allows loopback HTTP and the schema must
+ * never be stricter than the enforcement layer it fronts — but javascript:,
+ * file:, ftp: et al. are rejected at the boundary instead of one layer down.
+ */
+const httpishUrlSchema = z
+  .string()
+  .url()
+  .refine((value) => /^https?:\/\//i.test(value), {
+    message: "URL scheme must be http or https",
+  });
+
+const MAX_HTTP_HEADER_COUNT = 64;
+const MAX_HTTP_HEADER_VALUE_LENGTH = 8192;
+
+/**
+ * Caller-supplied HTTP headers: names share the injection header_name charset,
+ * values are capped and must not smuggle CR/LF/NUL (header-injection defense
+ * at the boundary, even though undici also refuses them).
+ */
+const httpHeadersSchema = z
+  .record(
+    z
+      .string()
+      .min(1)
+      .max(256)
+      .regex(/^[a-zA-Z0-9\-_]+$/, "Invalid header name characters"),
+    z
+      .string()
+      .max(MAX_HTTP_HEADER_VALUE_LENGTH)
+      .refine((value) => !/[\r\n\0]/.test(value), {
+        message: "Header value must not contain CR, LF or NUL",
+      }),
+  )
+  .refine((headers) => Object.keys(headers).length <= MAX_HTTP_HEADER_COUNT, {
+    message: `At most ${MAX_HTTP_HEADER_COUNT} headers are allowed`,
+  });
+
+/**
  * HTTP action — request-mediated injection. The vault assembles an outbound
  * HTTP request with the credential placed in a structured field.
  */
 export const httpActionSchema = z.object({
   type: z.literal(ActionType.HTTP),
   method: httpMethodSchema,
-  url: z.string().url(),
-  headers: z.record(z.string()).optional(),
+  url: httpishUrlSchema,
+  headers: httpHeadersSchema.optional(),
   body: z.string().optional(),
   injection: injectionConfigSchema,
   follow_redirects: followRedirectsSchema.optional(),
@@ -189,7 +228,16 @@ const hostPattern = z
   .string()
   .min(1)
   .max(2048)
-  .regex(/^[a-zA-Z0-9._-]+(:\d{1,5})?$/, "Invalid host format");
+  .regex(/^[a-zA-Z0-9._-]+(:\d{1,5})?$/, "Invalid host format")
+  .refine(
+    (value) => {
+      const colon = value.lastIndexOf(":");
+      if (colon < 0) return true;
+      const port = parseInt(value.slice(colon + 1), 10);
+      return port >= 1 && port <= 65_535;
+    },
+    { message: "Port must be between 1 and 65535" },
+  );
 
 /**
  * Database action — request-mediated injection. The vault assembles the
@@ -241,12 +289,12 @@ export const sshActionSchema = z.object({
     .string()
     .min(1)
     .max(255)
-    .regex(/^[a-zA-Z0-9._-]+$/, "Invalid host format"),
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, "Invalid host format"),
   user: z
     .string()
     .min(1)
     .max(255)
-    .regex(/^[a-zA-Z0-9._-]+$/, "Invalid user format"),
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, "Invalid user format"),
   command: z.string().min(1).max(65_536),
   timeout_ms: z.number().int().positive().max(300_000).optional(),
 });
@@ -397,7 +445,7 @@ export const mcpServerConfigSchema = z
       .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Invalid environment variable name")
       .optional(),
     working_directory: z.string().min(1).max(4096).optional(),
-    url: z.string().url().optional(),
+    url: httpishUrlSchema.optional(),
   })
   .superRefine((data, ctx) => {
     if (data.transport === McpTransport.STDIO) {
@@ -519,6 +567,7 @@ export const oauthProviderConfigSchema = z
     device_authorization_endpoint: httpsUrlSchema.optional(),
     client_id: z.string().min(1),
     client_secret: z.string().min(1).optional(),
+    token_endpoint_auth_method: z.enum(["client_secret_post", "client_secret_basic"]).optional(),
     scopes: z.array(z.string().min(1)).optional(),
     redirect_uri: z.string().url().optional(),
     pkce_method: z.literal("S256").optional(),
@@ -549,6 +598,7 @@ export const startOAuthFlowInputSchema = z.object({
   grant_type: oauthGrantTypeSchema,
   client_id: z.string().min(1),
   client_secret: z.string().min(1).optional(),
+  token_endpoint_auth_method: z.enum(["client_secret_post", "client_secret_basic"]).optional(),
   scopes: z.array(z.string().min(1)).optional(),
   project: namePattern.optional(),
   auth_endpoint: httpsUrlSchema.optional(),

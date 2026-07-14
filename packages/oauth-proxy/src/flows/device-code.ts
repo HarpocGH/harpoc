@@ -2,6 +2,7 @@ import { validateUrl } from "@harpoc/core";
 import { VaultError } from "@harpoc/shared";
 import type { OAuthProviderConfig } from "@harpoc/shared";
 import { getScopesSeparator } from "../providers.js";
+import { applyTokenEndpointAuth } from "../token-endpoint-auth.js";
 
 export interface DeviceCodeStartResult {
   device_code: string;
@@ -109,7 +110,7 @@ export class DeviceCodeFlow {
         throw VaultError.oauthFlowFailed("Polling aborted");
       }
 
-      await this.sleep(currentInterval * 1000);
+      await this.sleep(currentInterval * 1000, signal);
 
       if (signal?.aborted) {
         throw VaultError.oauthFlowFailed("Polling aborted");
@@ -118,17 +119,18 @@ export class DeviceCodeFlow {
       const params = new URLSearchParams({
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
         device_code: deviceCode,
-        client_id: config.client_id,
       });
+      const headers: Record<string, string> = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      };
+      applyTokenEndpointAuth(config, params, headers);
 
       let response: Response;
       try {
         response = await fetch(config.token_endpoint, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-            Accept: "application/json",
-          },
+          headers,
           body: params.toString(),
           signal: AbortSignal.timeout(30_000),
         });
@@ -171,7 +173,27 @@ export class DeviceCodeFlow {
     throw VaultError.oauthCallbackTimeout();
   }
 
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  /**
+   * Abort-aware, unref'd sleep: a pending device flow must never block
+   * process exit, and an abort ends the wait immediately (the caller's
+   * post-sleep abort check turns it into the abort error).
+   */
+  private sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve) => {
+      if (signal?.aborted) {
+        resolve();
+        return;
+      }
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      timer.unref();
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
   }
 }

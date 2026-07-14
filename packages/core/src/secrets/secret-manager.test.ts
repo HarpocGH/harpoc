@@ -383,8 +383,7 @@ describe("resolveHandle", () => {
     expect(secret.status).toBe("revoked");
   });
 
-  it("throws AMBIGUOUS_HANDLE when multiple non-revoked secrets match", async () => {
-    // Create first, revoke, create second, revoke, then create two more
+  it("resolves the single active secret among revoked same-name rows", async () => {
     await manager.createSecret({
       name: "ambig",
       type: "api_key",
@@ -399,17 +398,39 @@ describe("resolveHandle", () => {
     });
     await manager.revokeSecret("secret://ambig");
 
-    // Two revoked — should not be ambiguous, but we need two non-revoked
-    // Insert directly to test ambiguity (create 3rd, revoke old, create 4th)
     await manager.createSecret({
       name: "ambig",
       type: "api_key",
       value: new Uint8Array(Buffer.from("v3")),
     });
 
-    // At this point: 2 revoked + 1 active = resolves to active
+    // 2 revoked + 1 active = resolves to the active one, no ambiguity
     const secret = await manager.resolveHandle("secret://ambig");
     expect(secret.status).toBe("active");
+  });
+
+  it("throws AMBIGUOUS_HANDLE when multiple live rows share a name (guard behind the unique index)", async () => {
+    // Since migration 009's partial unique index, two live same-name rows
+    // cannot be produced through any supported path — the resolve-time guard
+    // is defense in depth. Pin it by disabling the index and cloning the row
+    // raw, the only way the state can arise (e.g. a hand-edited DB).
+    await manager.createSecret({
+      name: "truly-ambig",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v1")),
+    });
+
+    const db = (store as unknown as { db: import("better-sqlite3").Database }).db;
+    db.exec("DROP INDEX idx_secrets_name_hmac_live");
+    db.exec(
+      "CREATE TEMPORARY TABLE clone AS SELECT * FROM secrets LIMIT 1;" +
+        "UPDATE clone SET id = 'cloned-row-id';" +
+        "INSERT INTO secrets SELECT * FROM clone;",
+    );
+
+    await expect(manager.resolveHandle("secret://truly-ambig")).rejects.toMatchObject({
+      code: ErrorCode.AMBIGUOUS_HANDLE,
+    });
   });
 });
 

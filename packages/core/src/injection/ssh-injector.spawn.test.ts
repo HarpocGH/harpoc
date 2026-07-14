@@ -93,7 +93,8 @@ describeSsh("SshInjector spawn hardening (ssh resolvable)", () => {
     expect(args).toContain("PasswordAuthentication=no");
     expect(args.some((a) => a.startsWith("UserKnownHostsFile="))).toBe(true);
     expect(args.some((a) => a.startsWith("ConnectTimeout="))).toBe(true);
-    expect(args.slice(-4)).toEqual(["-l", "deploy", "deploy.example.com", "whoami"]);
+    // "--" ends option parsing so the host positional can never read as a flag.
+    expect(args.slice(-5)).toEqual(["-l", "deploy", "--", "deploy.example.com", "whoami"]);
 
     // The private key reaches ssh only through the ephemeral agent socket:
     expect(opts.env.SSH_AUTH_SOCK).toBeTruthy();

@@ -1,6 +1,6 @@
 import type { Command } from "commander";
-import type { Permission, PrincipalType } from "@harpoc/shared";
-import { permissionSchema } from "@harpoc/shared";
+import type { Permission } from "@harpoc/shared";
+import { permissionSchema, principalTypeSchema } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printSuccess, printJson, printRecord } from "../../utils/output.js";
 
@@ -43,6 +43,13 @@ export function registerPolicyGrantCommand(policy: Command): void {
             }
             const permissions = permStrings as Permission[];
 
+            const parsedType = principalTypeSchema.safeParse(options.principalType);
+            if (!parsedType.success) {
+              throw new Error(
+                `Invalid principal type: "${options.principalType}". Valid: agent, tool, project, user`,
+              );
+            }
+
             const expiresMinutes = options.expires ? parseInt(options.expires, 10) : undefined;
             if (expiresMinutes !== undefined && (isNaN(expiresMinutes) || expiresMinutes <= 0)) {
               throw new Error("--expires must be a positive number of minutes");
@@ -53,7 +60,7 @@ export function registerPolicyGrantCommand(policy: Command): void {
             const policyResult = engine.grantPolicy(
               {
                 secretId,
-                principalType: options.principalType as PrincipalType,
+                principalType: parsedType.data,
                 principalId: options.principalId,
                 permissions,
                 expiresAt,
