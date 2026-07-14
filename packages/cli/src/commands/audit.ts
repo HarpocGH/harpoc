@@ -4,7 +4,7 @@ import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError, printTable, printJson, formatTimestamp } from "../utils/output.js";
 
 export function registerAuditCommand(program: Command): void {
-  program
+  const audit = program
     .command("audit")
     .description("Query the audit log")
     .option("--secret <id>", "Filter by secret ID")
@@ -60,4 +60,37 @@ export function registerAuditCommand(program: Command): void {
         }
       },
     );
+
+  audit
+    .command("verify")
+    .description("Verify the audit log tamper-evidence chain")
+    .option("--json", "Output as JSON")
+    .action(async (options: { json?: boolean }, cmd: Command) => {
+      const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
+      try {
+        const engine = await loadUnlockedEngine(vaultDir);
+        try {
+          const result = engine.verifyAuditChain();
+          if (options.json) {
+            printJson(result);
+          } else if (result.valid) {
+            console.log(
+              `Audit chain OK — ${result.checked} row(s) verified, ${result.legacy} legacy row(s) skipped.`,
+            );
+          } else {
+            console.error(
+              `Audit chain BROKEN at row ${result.firstBrokenId ?? "?"} — ` +
+                `${result.checked} verified, ${result.legacy} legacy.`,
+            );
+          }
+          if (!result.valid) {
+            process.exitCode = 1;
+          }
+        } finally {
+          await engine.destroy();
+        }
+      } catch (err) {
+        handleError(err, options.json);
+      }
+    });
 }

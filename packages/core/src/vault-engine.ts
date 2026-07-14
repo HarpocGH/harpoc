@@ -29,11 +29,14 @@ import {
   AAD_SESSION_KEK,
   AES_KEY_LENGTH,
   AuditEventType,
+  DEFAULT_SESSION_TTL_MS,
   ErrorCode,
   findKnownInterpreters,
   isValidSecretNamePattern,
+  isVaultVersionSupported,
   LOCKOUT_DURATIONS_MS,
   LOCKOUT_MAX_ATTEMPTS,
+  MAX_SESSION_TTL_MS,
   MAX_TOKEN_TTL_MS,
   MIN_PASSWORD_LENGTH,
   OAuthProviderPreset,
@@ -49,7 +52,11 @@ import { PolicyEngine } from "./access/policy-engine.js";
 import type { GrantPolicyInput } from "./access/policy-engine.js";
 import { AuditLogger } from "./audit/audit-logger.js";
 import { AuditQuery } from "./audit/audit-query.js";
-import type { AuditQueryOptions, DecryptedAuditEvent } from "./audit/audit-query.js";
+import type {
+  AuditChainVerification,
+  AuditQueryOptions,
+  DecryptedAuditEvent,
+} from "./audit/audit-query.js";
 import { decrypt, encrypt } from "./crypto/aes-gcm.js";
 import type { WrappedKey } from "./crypto/key-hierarchy.js";
 import { changePassword, createVaultKeys, unlockVault } from "./crypto/key-hierarchy.js";
@@ -80,6 +87,8 @@ export interface VaultEngineOptions {
   sessionKeyProtector?: SessionKeyProtector;
   /** Surface session-file protection downgrades — keystore fallback or failed permission repair (default: silent — core never logs). */
   onSessionKeyProtectionFallback?: (error: Error) => void;
+  /** Sliding session TTL in ms (default DEFAULT_SESSION_TTL_MS, capped at MAX_SESSION_TTL_MS). Operator knob / test seam. */
+  sessionTtlMs?: number;
 }
 
 interface UnlockedState {
@@ -128,6 +137,11 @@ export class VaultEngine {
   private sessionMonitorInterval: ReturnType<typeof setInterval> | null = null;
   private lastSessionSlideAt = 0;
   private sessionSlide: Promise<void> | null = null;
+  // In-memory mirror of the session file's expiry, so every authenticated
+  // operation enforces the TTL synchronously — the monitor (loadSession only,
+  // ≤30 s granularity) is the backstop, not the sole enforcer.
+  private sessionExpiresAt: number | null = null;
+  private readonly sessionTtlMs: number;
   private readonly oauthRefreshInFlight = new Map<string, Promise<number | null>>();
 
   constructor(private readonly options: VaultEngineOptions) {
@@ -135,6 +149,10 @@ export class VaultEngine {
       protector: options.sessionKeyProtector,
       onProtectionFallback: options.onSessionKeyProtectionFallback,
     });
+    this.sessionTtlMs = Math.min(
+      options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS,
+      MAX_SESSION_TTL_MS,
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -188,6 +206,9 @@ export class VaultEngine {
 
     // Write session
     await this.writeNewSession();
+    // Enforce the session TTL for long-lived engines too (SDK direct mode),
+    // not only loadSession-created ones.
+    this.startSessionMonitor();
 
     const logger = this.auditLogger as AuditLogger;
     logger.log({
@@ -207,28 +228,31 @@ export class VaultEngine {
 
     const vaultId = store.getMeta("vault_id");
     if (!vaultId) {
-      store.close();
+      if (isNewStore) store.close();
       throw VaultError.vaultNotFound();
     }
 
-    // Version check
+    // Version check — numeric per-component compare; a lexicographic string
+    // compare orders "1.10.0" before "1.2.0" and defeats this guard. Fails
+    // closed on malformed version strings.
     const vaultVersion = store.getMeta("vault_version");
-    if (vaultVersion && vaultVersion > VAULT_VERSION) {
-      store.close();
+    if (vaultVersion && !isVaultVersionSupported(vaultVersion, VAULT_VERSION)) {
+      if (isNewStore) store.close();
       throw VaultError.vaultCorrupted(
         `Vault version ${vaultVersion} is newer than supported ${VAULT_VERSION}`,
       );
     }
 
-    // Check lockout
-    this.checkLockout(store);
-
-    const salt = this.loadBase64Meta(store, "kdf_salt");
-    const wrappedKek = this.loadBase64Meta(store, "wrapped_kek");
-    const wrappedKekIv = this.loadBase64Meta(store, "wrapped_kek_iv");
-    const wrappedKekTag = this.loadBase64Meta(store, "wrapped_kek_tag");
-
     try {
+      // Lockout and meta reads live inside the try so any throw (lockout
+      // active, corrupted meta) closes the store we opened in this call.
+      this.checkLockout(store);
+
+      const salt = this.loadBase64Meta(store, "kdf_salt");
+      const wrappedKek = this.loadBase64Meta(store, "wrapped_kek");
+      const wrappedKekIv = this.loadBase64Meta(store, "wrapped_kek_iv");
+      const wrappedKekTag = this.loadBase64Meta(store, "wrapped_kek_tag");
+
       // Wrapped JWT/audit keys are mandatory — the key hierarchy has exactly
       // one instantiation (random keys wrapped with the KEK); a vault without
       // them is corrupted, never a candidate for a derivation fallback.
@@ -245,6 +269,14 @@ export class VaultEngine {
         wrappedAuditKey,
       );
 
+      // Re-unlock over a live engine: wipe the old key buffers before they
+      // are overwritten. Success-path only — a failed re-unlock must not
+      // seal a working engine.
+      if (this.state === VaultState.UNLOCKED) {
+        this.wipeKeys();
+        this.stopSessionMonitor();
+      }
+
       this.store = store;
       this.vaultId = vaultId;
       this.kek = keys.kek;
@@ -257,6 +289,9 @@ export class VaultEngine {
 
       this.initManagers();
       await this.writeNewSession();
+      // Enforce the session TTL for long-lived engines too (SDK direct mode),
+      // not only loadSession-created ones.
+      this.startSessionMonitor();
 
       const logger = this.auditLogger as AuditLogger;
       logger.log({
@@ -265,8 +300,10 @@ export class VaultEngine {
       });
     } catch (err) {
       if (err instanceof VaultError && err.code === ErrorCode.ENCRYPTION_ERROR) {
-        // Wrong password — increment lockout counter
+        // Wrong password — increment lockout counter (persisted synchronously)
+        // before closing the store we opened in this call.
         this.incrementLockout(store);
+        if (isNewStore) store.close();
         throw VaultError.invalidPassword();
       }
       // Non-password error: close store if we opened it in this call
@@ -318,12 +355,21 @@ export class VaultEngine {
         AAD_SESSION_AUDIT,
       );
 
+      // Session load over a live engine: wipe the old key buffers before
+      // they are overwritten. Success-path only — a failed load must not
+      // seal a working engine.
+      if (this.state === VaultState.UNLOCKED) {
+        this.wipeKeys();
+        this.stopSessionMonitor();
+      }
+
       this.store = store;
       this.vaultId = vaultId;
       this.kek = kek;
       this.jwtKey = jwtKey;
       this.auditKey = auditKey;
       this.sessionId = session.session_id;
+      this.sessionExpiresAt = session.expires_at;
       this.state = VaultState.UNLOCKED;
 
       this.initManagers();
@@ -1462,6 +1508,12 @@ export class VaultEngine {
     return s.auditQuery.query(options);
   }
 
+  /** Verify the tamper-evidence HMAC chain over the audit log. */
+  verifyAuditChain(): AuditChainVerification {
+    const s = this.assertUnlocked();
+    return s.auditQuery.verifyChain();
+  }
+
   // ---------------------------------------------------------------------------
   // JWT Auth
   // ---------------------------------------------------------------------------
@@ -1568,24 +1620,44 @@ export class VaultEngine {
 
     const s = this.assertUnlocked();
 
+    // A wrong old password is a master-password guess — subject to the same
+    // lockout as unlock() (shared counter: they are one guessing surface).
+    this.checkLockout(s.store);
+
     const salt = this.loadBase64Meta(s.store, "kdf_salt");
     const wrappedKek = this.loadBase64Meta(s.store, "wrapped_kek");
     const wrappedKekIv = this.loadBase64Meta(s.store, "wrapped_kek_iv");
     const wrappedKekTag = this.loadBase64Meta(s.store, "wrapped_kek_tag");
 
-    const result = await changePassword(
-      oldPassword,
-      newPassword,
-      salt,
-      wrappedKek,
-      wrappedKekIv,
-      wrappedKekTag,
-    );
+    let result: Awaited<ReturnType<typeof changePassword>>;
+    try {
+      result = await changePassword(
+        oldPassword,
+        newPassword,
+        salt,
+        wrappedKek,
+        wrappedKekIv,
+        wrappedKekTag,
+      );
+    } catch (err) {
+      // The KEK unwrap fails with ENCRYPTION_ERROR on a wrong old password —
+      // map it to INVALID_PASSWORD and feed the lockout counter, as unlock does.
+      if (err instanceof VaultError && err.code === ErrorCode.ENCRYPTION_ERROR) {
+        this.incrementLockout(s.store);
+        const invalid = VaultError.invalidPassword();
+        this.auditDenied(s, AuditEventType.VAULT_PASSWORD_CHANGE, invalid, {});
+        throw invalid;
+      }
+      throw err;
+    }
 
     s.store.setMeta("kdf_salt", Buffer.from(result.newSalt).toString("base64"));
     s.store.setMeta("wrapped_kek", Buffer.from(result.newWrappedKek).toString("base64"));
     s.store.setMeta("wrapped_kek_iv", Buffer.from(result.newWrappedKekIv).toString("base64"));
     s.store.setMeta("wrapped_kek_tag", Buffer.from(result.newWrappedKekTag).toString("base64"));
+
+    // Successful re-auth clears the shared lockout counter, as unlock does.
+    s.store.setMeta("failed_attempts", "0");
 
     // JWT and audit keys are unchanged — they're wrapped with KEK, not derived from master key
 
@@ -1635,6 +1707,16 @@ export class VaultEngine {
   }
 
   private assertUnlocked(): UnlockedState {
+    // Synchronous TTL enforcement: an engine kept alive past its session
+    // expiry (SDK direct mode never ran the monitor before) seals here on the
+    // next authenticated operation — the monitor stays the ≤30 s backstop.
+    if (
+      this.state === VaultState.UNLOCKED &&
+      this.sessionExpiresAt !== null &&
+      Date.now() > this.sessionExpiresAt
+    ) {
+      this.sealExpired();
+    }
     if (this.state !== VaultState.UNLOCKED) {
       throw VaultError.vaultLocked();
     }
@@ -1717,6 +1799,7 @@ export class VaultEngine {
     this.mcpRegistry = null;
     this.sessionId = null;
     this.vaultId = null;
+    this.sessionExpiresAt = null;
   }
 
   // ---------------------------------------------------------------------------
@@ -1757,9 +1840,11 @@ export class VaultEngine {
         Buffer.from(wrappedAudit.ciphertext).toString("base64"),
         Buffer.from(wrappedAudit.iv).toString("base64"),
         Buffer.from(wrappedAudit.tag).toString("base64"),
+        this.sessionTtlMs,
       );
 
       await this.sessionManager.writeSession(session);
+      this.sessionExpiresAt = session.expires_at;
     } finally {
       wipeBuffer(sessionKey);
     }
@@ -1797,6 +1882,20 @@ export class VaultEngine {
   }
 
   /**
+   * Synchronous seal on lazily-detected TTL expiry (from assertUnlocked). The
+   * async monitor tick does a graceful downstream close; here wipeKeys()'s
+   * killAllSync suffices — the operation that tripped this is about to throw.
+   */
+  private sealExpired(): void {
+    this.wipeKeys();
+    this.store?.close();
+    this.store = null;
+    this.state = VaultState.SEALED;
+    this.sessionExpiresAt = null;
+    this.stopSessionMonitor();
+  }
+
+  /**
    * Slide the session's expiry window on authenticated use, throttled to one
    * write per SESSION_SLIDE_INTERVAL_MS per process — the same file-write
    * cadence the monitor produced when it did the sliding. Called from
@@ -1815,8 +1914,12 @@ export class VaultEngine {
     }
     this.lastSessionSlideAt = now;
     this.sessionSlide = this.sessionManager
-      .extendSession()
-      .then(() => undefined)
+      .extendSession(this.sessionTtlMs, true)
+      .then((updated) => {
+        // Track the new expiry; a null result means the file is gone (another
+        // process locked/erased it) — mark expired so the next op seals.
+        this.sessionExpiresAt = updated ? updated.expires_at : 0;
+      })
       .catch(() => undefined)
       .finally(() => {
         this.sessionSlide = null;

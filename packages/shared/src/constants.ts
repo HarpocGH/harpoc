@@ -37,6 +37,25 @@ export const AAD_SESSION_JWT = "session-jwt";
 export const AAD_SESSION_AUDIT = "session-audit";
 export const AAD_AUDIT_DETAIL = "audit-detail";
 
+/**
+ * Row-bound AAD for audit detail (v2): binds the ciphertext to the row's
+ * identity so a detail blob moved to another row fails authentication. All
+ * inputs are known before the row is written.
+ */
+export function AAD_AUDIT_DETAIL_V2(
+  eventType: string,
+  timestamp: number,
+  secretId: string | null,
+): string {
+  return `harpoc:audit-detail:v2|${eventType}|${timestamp}|${secretId ?? "-"}`;
+}
+
+/** Domain-separation label deriving the audit chain HMAC key from the audit key. */
+export const AUDIT_CHAIN_KEY_LABEL = "harpoc:audit-chain-key";
+
+/** Fixed genesis value seeding the first row's HMAC chain link. */
+export const AUDIT_CHAIN_GENESIS = "harpoc:audit-chain:genesis:v1";
+
 export function AAD_DEK_WRAP(secretId: string): string {
   return `dek-wrap:${secretId}`;
 }

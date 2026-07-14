@@ -114,8 +114,17 @@ describe("schema creation", () => {
     expect(row?.name).toBe("connection_configs");
   });
 
-  it("sets schema_version to 8", () => {
-    expect(store.getMeta("schema_version")).toBe("8");
+  it("sets schema_version to 10", () => {
+    expect(store.getMeta("schema_version")).toBe("10");
+  });
+
+  it("creates the live-name unique index", () => {
+    const row = store.db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_secrets_name_hmac_live'",
+      )
+      .get() as { name: string } | undefined;
+    expect(row?.name).toBe("idx_secrets_name_hmac_live");
   });
 });
 

@@ -22,6 +22,7 @@ import {
   wrapDek,
 } from "../crypto/key-hierarchy.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "../crypto/random.js";
+import { isUniqueConstraintError } from "../storage/sqlite-store.js";
 import type { SqliteStore } from "../storage/sqlite-store.js";
 
 export interface CreateSecretInput {
@@ -93,45 +94,49 @@ export class SecretManager {
     // failure would leave an unaddressable row that breaks every listSecrets.
     const handle = formatHandle(name, project);
 
-    // Check for duplicate name+project
-    await this.assertNoDuplicate(name, project ?? null);
+    await this.ensureNameHmacBackfill();
 
     const id = generateUUIDv7();
     const now = Date.now();
 
-    // Compute name HMAC for O(1) lookup
+    // Compute name HMAC for O(1) lookup (also drives the duplicate check).
     const nameHmac = await computeNameHmac(this.kek, name, project ?? null);
 
     // Encrypt name with KEK
     const nameEnc = encryptName(this.kek, name, id);
 
-    // Generate DEK and wrap it
+    // Generate DEK and wrap it — wiped in a finally like the other DEK users,
+    // so a throwing wrap/encrypt cannot leave the plaintext DEK live.
     const dek = generateRandomBytes(AES_KEY_LENGTH);
-    const wrapped = wrapDek(this.kek, dek, id);
 
+    let wrapped: ReturnType<typeof wrapDek>;
     let status: typeof SecretStatus.ACTIVE | typeof SecretStatus.PENDING;
     let ciphertext: Uint8Array;
     let ctIv: Uint8Array;
     let ctTag: Uint8Array;
 
-    if (value) {
-      // Encrypt the value
-      const encrypted = encryptSecretValue(dek, value, id, 1);
-      ciphertext = encrypted.ciphertext;
-      ctIv = encrypted.iv;
-      ctTag = encrypted.tag;
-      status = SecretStatus.ACTIVE;
-    } else {
-      // Pending secret — store empty encrypted payload
-      const encrypted = encryptSecretValue(dek, new Uint8Array(0), id, 1);
-      ciphertext = encrypted.ciphertext;
-      ctIv = encrypted.iv;
-      ctTag = encrypted.tag;
-      status = SecretStatus.PENDING;
-    }
+    try {
+      wrapped = wrapDek(this.kek, dek, id);
 
-    // Wipe DEK from memory
-    wipeBuffer(dek);
+      if (value) {
+        // Encrypt the value
+        const encrypted = encryptSecretValue(dek, value, id, 1);
+        ciphertext = encrypted.ciphertext;
+        ctIv = encrypted.iv;
+        ctTag = encrypted.tag;
+        status = SecretStatus.ACTIVE;
+      } else {
+        // Pending secret — store empty encrypted payload
+        const encrypted = encryptSecretValue(dek, new Uint8Array(0), id, 1);
+        ciphertext = encrypted.ciphertext;
+        ctIv = encrypted.iv;
+        ctTag = encrypted.tag;
+        status = SecretStatus.PENDING;
+      }
+    } finally {
+      // Wipe DEK from memory
+      wipeBuffer(dek);
+    }
 
     const secret: Secret = {
       id,
@@ -159,7 +164,21 @@ export class SecretManager {
       name_hmac: nameHmac,
     };
 
-    this.store.insertSecret(secret);
+    // Duplicate check and insert run in one transaction with no await between
+    // them, so two concurrent creates in this process cannot interleave; the
+    // partial unique index (migration 009) is the cross-process backstop and
+    // surfaces as a UNIQUE constraint, mapped to DUPLICATE_SECRET here.
+    try {
+      this.store.transaction(() => {
+        this.assertNoDuplicateByHmac(nameHmac, name);
+        this.store.insertSecret(secret);
+      });
+    } catch (err) {
+      if (isUniqueConstraintError(err)) {
+        throw VaultError.duplicateSecret(name);
+      }
+      throw err;
+    }
 
     return {
       handle,
@@ -372,12 +391,13 @@ export class SecretManager {
     return secret.status;
   }
 
-  private async assertNoDuplicate(name: string, project: string | null): Promise<void> {
-    await this.ensureNameHmacBackfill();
-
-    const nameHmac = await computeNameHmac(this.kek, name, project);
+  /**
+   * Synchronous duplicate check by precomputed name HMAC — runs inside the
+   * create transaction so it cannot be separated from the insert by an await.
+   * A non-revoked match blocks; revoked rows never do.
+   */
+  private assertNoDuplicateByHmac(nameHmac: string, name: string): void {
     const matches = this.store.getSecretsByNameHmac(nameHmac);
-
     for (const secret of matches) {
       if (secret.status === SecretStatus.REVOKED) continue;
       throw VaultError.duplicateSecret(name);

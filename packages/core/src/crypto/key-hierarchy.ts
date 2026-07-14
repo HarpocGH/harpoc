@@ -67,36 +67,50 @@ export async function createVaultKeys(password: string): Promise<VaultKeys> {
     // Generate random KEK
     const kek = generateRandomBytes(AES_KEY_LENGTH);
 
-    // Wrap KEK with master key
-    const {
-      ciphertext: wrappedKek,
-      iv: wrappedKekIv,
-      tag: wrappedKekTag,
-    } = encrypt(masterKey, kek, AAD_VAULT_KEK);
+    // Keys generated so far must not be abandoned live if a later step throws.
+    let jwtKey: Uint8Array | null = null;
+    let auditKey: Uint8Array | null = null;
+    try {
+      // Wrap KEK with master key
+      const {
+        ciphertext: wrappedKek,
+        iv: wrappedKekIv,
+        tag: wrappedKekTag,
+      } = encrypt(masterKey, kek, AAD_VAULT_KEK);
 
-    // Generate vault ID
-    const vaultId = generateUUIDv7();
+      // Generate vault ID
+      const vaultId = generateUUIDv7();
 
-    // Generate RANDOM JWT and audit keys (not HKDF-derived)
-    const jwtKey = generateRandomBytes(AES_KEY_LENGTH);
-    const auditKey = generateRandomBytes(AES_KEY_LENGTH);
+      // Generate RANDOM JWT and audit keys (not HKDF-derived)
+      jwtKey = generateRandomBytes(AES_KEY_LENGTH);
+      auditKey = generateRandomBytes(AES_KEY_LENGTH);
 
-    // Wrap JWT and audit keys with KEK for persistent storage
-    const wrappedJwtKey = wrapKeyWithKek(kek, jwtKey, AAD_WRAPPED_JWT_KEY);
-    const wrappedAuditKey = wrapKeyWithKek(kek, auditKey, AAD_WRAPPED_AUDIT_KEY);
+      // Wrap JWT and audit keys with KEK for persistent storage
+      const wrappedJwtKey = wrapKeyWithKek(kek, jwtKey, AAD_WRAPPED_JWT_KEY);
+      const wrappedAuditKey = wrapKeyWithKek(kek, auditKey, AAD_WRAPPED_AUDIT_KEY);
 
-    return {
-      salt,
-      wrappedKek,
-      wrappedKekIv,
-      wrappedKekTag,
-      kek,
-      jwtKey,
-      auditKey,
-      vaultId,
-      wrappedJwtKey,
-      wrappedAuditKey,
-    };
+      return {
+        salt,
+        wrappedKek,
+        wrappedKekIv,
+        wrappedKekTag,
+        kek,
+        jwtKey,
+        auditKey,
+        vaultId,
+        wrappedJwtKey,
+        wrappedAuditKey,
+      };
+    } catch (err) {
+      wipeBuffer(kek);
+      if (jwtKey) {
+        wipeBuffer(jwtKey);
+      }
+      if (auditKey) {
+        wipeBuffer(auditKey);
+      }
+      throw err;
+    }
   } finally {
     wipeBuffer(masterKey);
   }
@@ -122,22 +136,33 @@ export async function unlockVault(
   try {
     const kek = decrypt(masterKey, wrappedKek, wrappedKekIv, wrappedKekTag, AAD_VAULT_KEK);
 
-    const jwtKey = decrypt(
-      kek,
-      wrappedJwtKey.ciphertext,
-      wrappedJwtKey.iv,
-      wrappedJwtKey.tag,
-      AAD_WRAPPED_JWT_KEY,
-    );
-    const auditKey = decrypt(
-      kek,
-      wrappedAuditKey.ciphertext,
-      wrappedAuditKey.iv,
-      wrappedAuditKey.tag,
-      AAD_WRAPPED_AUDIT_KEY,
-    );
+    // On success, key ownership passes to the caller; on a later unwrap
+    // failure the keys derived so far must not be abandoned live in memory.
+    let jwtKey: Uint8Array | null = null;
+    try {
+      jwtKey = decrypt(
+        kek,
+        wrappedJwtKey.ciphertext,
+        wrappedJwtKey.iv,
+        wrappedJwtKey.tag,
+        AAD_WRAPPED_JWT_KEY,
+      );
+      const auditKey = decrypt(
+        kek,
+        wrappedAuditKey.ciphertext,
+        wrappedAuditKey.iv,
+        wrappedAuditKey.tag,
+        AAD_WRAPPED_AUDIT_KEY,
+      );
 
-    return { kek, jwtKey, auditKey };
+      return { kek, jwtKey, auditKey };
+    } catch (err) {
+      wipeBuffer(kek);
+      if (jwtKey) {
+        wipeBuffer(jwtKey);
+      }
+      throw err;
+    }
   } finally {
     wipeBuffer(masterKey);
   }
@@ -245,20 +270,25 @@ export async function changePassword(
     wipeBuffer(oldMasterKey);
   }
 
-  // Re-wrap KEK with new password
-  const newSalt = generateSalt();
-  const newMasterKey = await deriveKey(newPassword, newSalt);
-
+  // The unwrapped KEK must be wiped on every exit — including a failing
+  // new-master-key derivation, which the previous narrower try leaked past.
   try {
-    const {
-      ciphertext: newWrappedKek,
-      iv: newWrappedKekIv,
-      tag: newWrappedKekTag,
-    } = encrypt(newMasterKey, kek, AAD_VAULT_KEK);
+    // Re-wrap KEK with new password
+    const newSalt = generateSalt();
+    const newMasterKey = await deriveKey(newPassword, newSalt);
 
-    return { newSalt, newWrappedKek, newWrappedKekIv, newWrappedKekTag };
+    try {
+      const {
+        ciphertext: newWrappedKek,
+        iv: newWrappedKekIv,
+        tag: newWrappedKekTag,
+      } = encrypt(newMasterKey, kek, AAD_VAULT_KEK);
+
+      return { newSalt, newWrappedKek, newWrappedKekIv, newWrappedKekTag };
+    } finally {
+      wipeBuffer(newMasterKey);
+    }
   } finally {
-    wipeBuffer(newMasterKey);
     wipeBuffer(kek);
   }
 }

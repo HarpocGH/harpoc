@@ -17,6 +17,17 @@ import { migration005 } from "./migrations/005-certificates.js";
 import { migration006 } from "./migrations/006-injection-policies.js";
 import { migration007 } from "./migrations/007-mcp-servers.js";
 import { migration008 } from "./migrations/008-connection-configs.js";
+import { migration009 } from "./migrations/009-name-hmac-unique.js";
+import { migration010 } from "./migrations/010-audit-row-hmac.js";
+
+/** True for a better-sqlite3 UNIQUE/PRIMARY-KEY constraint violation. */
+export function isUniqueConstraintError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    "code" in err &&
+    (err.code === "SQLITE_CONSTRAINT_UNIQUE" || err.code === "SQLITE_CONSTRAINT_PRIMARYKEY")
+  );
+}
 
 /** Filters for querying secrets. */
 export interface SecretFilter {
@@ -32,6 +43,23 @@ export interface AuditFilter {
   since?: number;
   until?: number;
   limit?: number;
+}
+
+/** Raw audit row plus its chain link, for tamper-evidence verification. */
+export interface AuditChainRow {
+  id: number;
+  timestamp: number;
+  event_type: string;
+  secret_id: string | null;
+  principal_type: string | null;
+  principal_id: string | null;
+  detail_encrypted: Uint8Array | null;
+  detail_iv: Uint8Array | null;
+  detail_tag: Uint8Array | null;
+  ip_address: string | null;
+  session_id: string | null;
+  success: boolean;
+  row_hmac: Uint8Array | null;
 }
 
 /** OAuth token record for DB storage (encrypted fields as Buffer/Uint8Array). */
@@ -150,7 +178,14 @@ export class SqliteStore {
     }
 
     this.setPragmas();
-    this.runMigrations();
+    try {
+      this.runMigrations();
+    } catch (err) {
+      // A failed migration (e.g. the 009 duplicate-name abort) must not leak
+      // the open handle, which would lock the file on Windows.
+      this.db.close();
+      throw err;
+    }
   }
 
   private setPragmas(): void {
@@ -208,6 +243,41 @@ export class SqliteStore {
         this.db.exec(migration008.up);
         this.setMeta("schema_version", "8");
       })();
+    }
+    if (currentVersion < 9) {
+      this.db.transaction(() => {
+        // The unique index cannot be built while live duplicates exist (a
+        // pre-fix TOCTOU-race artifact). Surface a clear, actionable error
+        // instead of a raw "UNIQUE constraint failed" from the index build.
+        this.assertNoLiveDuplicateNames();
+        this.db.exec(migration009.up);
+        this.setMeta("schema_version", "9");
+      })();
+    }
+    if (currentVersion < 10) {
+      this.db.transaction(() => {
+        this.db.exec(migration010.up);
+        this.setMeta("schema_version", "10");
+      })();
+    }
+  }
+
+  /** Reject an upgrade when two non-revoked secrets share a name_hmac. */
+  private assertNoLiveDuplicateNames(): void {
+    const duplicates = this.db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM (
+           SELECT name_hmac FROM secrets
+           WHERE status != 'revoked' AND name_hmac IS NOT NULL
+           GROUP BY name_hmac HAVING COUNT(*) > 1
+         )`,
+      )
+      .get() as { c: number };
+    if (duplicates.c > 0) {
+      throw VaultError.vaultCorrupted(
+        `Cannot upgrade vault: ${duplicates.c} secret name(s) have multiple active entries. ` +
+          `Revoke the duplicate secret(s) and retry.`,
+      );
     }
   }
 
@@ -292,6 +362,9 @@ export class SqliteStore {
           secret.name_hmac,
         );
     } catch (err) {
+      // Preserve a UNIQUE-constraint violation so the caller can map it to
+      // DUPLICATE_SECRET (it knows the plaintext name); other failures wrap.
+      if (isUniqueConstraintError(err)) throw err;
       throw VaultError.databaseError(
         `Failed to insert secret: ${err instanceof Error ? err.message : "unknown"}`,
       );
@@ -446,15 +519,15 @@ export class SqliteStore {
   // audit_log
   // ---------------------------------------------------------------------------
 
-  insertAuditEvent(event: Omit<AuditEvent, "id">): number {
+  insertAuditEvent(event: Omit<AuditEvent, "id">, rowHmac: Uint8Array | null = null): number {
     const result = this.db
       .prepare(
         `INSERT INTO audit_log (
           timestamp, event_type, secret_id,
           principal_type, principal_id,
           detail_encrypted, detail_iv, detail_tag,
-          ip_address, session_id, success
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ip_address, session_id, success, row_hmac
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         event.timestamp,
@@ -468,8 +541,44 @@ export class SqliteStore {
         event.ip_address,
         event.session_id,
         event.success ? 1 : 0,
+        rowHmac ? Buffer.from(rowHmac) : null,
       );
     return Number(result.lastInsertRowid);
+  }
+
+  /** The most recent row's chain link, or null if none / the last row is legacy. */
+  getLastAuditRowHmac(): Uint8Array | null {
+    const row = this.db.prepare("SELECT row_hmac FROM audit_log ORDER BY id DESC LIMIT 1").get() as
+      | { row_hmac: Buffer | null }
+      | undefined;
+    return row?.row_hmac ? new Uint8Array(row.row_hmac) : null;
+  }
+
+  /** All audit rows in insertion order, with the fields the chain HMAC covers. */
+  getAuditChainRows(): AuditChainRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, timestamp, event_type, secret_id, principal_type, principal_id,
+                detail_encrypted, detail_iv, detail_tag, ip_address, session_id,
+                success, row_hmac
+         FROM audit_log ORDER BY id ASC`,
+      )
+      .all() as Record<string, unknown>[];
+    return rows.map((row) => ({
+      id: row.id as number,
+      timestamp: row.timestamp as number,
+      event_type: row.event_type as string,
+      secret_id: (row.secret_id as string) ?? null,
+      principal_type: (row.principal_type as string) ?? null,
+      principal_id: (row.principal_id as string) ?? null,
+      detail_encrypted: row.detail_encrypted ? new Uint8Array(row.detail_encrypted as Buffer) : null,
+      detail_iv: row.detail_iv ? new Uint8Array(row.detail_iv as Buffer) : null,
+      detail_tag: row.detail_tag ? new Uint8Array(row.detail_tag as Buffer) : null,
+      ip_address: (row.ip_address as string) ?? null,
+      session_id: (row.session_id as string) ?? null,
+      success: row.success === 1,
+      row_hmac: row.row_hmac ? new Uint8Array(row.row_hmac as Buffer) : null,
+    }));
   }
 
   queryAuditLog(filter?: AuditFilter): AuditEvent[] {

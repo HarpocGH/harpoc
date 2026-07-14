@@ -1,5 +1,13 @@
 import { execSync } from "node:child_process";
-import { openSync, closeSync, fsyncSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  openSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { readFile, chmod } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomFillSync } from "node:crypto";
@@ -60,10 +68,12 @@ export class SessionManager {
     let stored: SessionFile = { ...session, key_protection: "none" };
 
     if (this.protector.scheme !== "none") {
+      // The raw key copy must be wiped on the failure path too — a throwing
+      // protector must not leave it live in memory.
+      let rawKey: Uint8Array | null = null;
       try {
-        const rawKey = new Uint8Array(Buffer.from(session.session_key, "base64"));
+        rawKey = new Uint8Array(Buffer.from(session.session_key, "base64"));
         const blob = await this.protector.protect(rawKey);
-        wipeBuffer(rawKey);
         stored = {
           ...session,
           session_key: Buffer.from(blob).toString("base64"),
@@ -75,6 +85,10 @@ export class SessionManager {
             `platform keystore unavailable — session file protected by file permissions only (${err instanceof Error ? err.message : String(err)})`,
           ),
         );
+      } finally {
+        if (rawKey) {
+          wipeBuffer(rawKey);
+        }
       }
     }
 
@@ -157,7 +171,10 @@ export class SessionManager {
    * carried over untouched, so the frequent monitor path never does a keystore
    * roundtrip. The returned file is the stored form.
    */
-  async extendSession(ttlMs: number = DEFAULT_SESSION_TTL_MS): Promise<SessionFile | null> {
+  async extendSession(
+    ttlMs: number = DEFAULT_SESSION_TTL_MS,
+    requireExisting = false,
+  ): Promise<SessionFile | null> {
     const session = await this.readStoredSession();
     if (!session) return null;
 
@@ -174,8 +191,11 @@ export class SessionManager {
       expires_at: newExpiresAt,
     };
 
-    await this.writeStoredSession(updated);
-    return updated;
+    // requireExisting closes the slide/lock race: if a concurrent lock erased
+    // the file between the read above and the rename below, the slide must not
+    // resurrect it.
+    const wrote = await this.writeStoredSession(updated, requireExisting);
+    return wrote ? updated : null;
   }
 
   /**
@@ -219,8 +239,16 @@ export class SessionManager {
    * fallback callback). The temp name is unique per write (pid + counter), so
    * overlapping writers — a use-driven expiry slide racing a session rewrite —
    * never share a temp file; last rename wins.
+   *
+   * With `requireExisting`, the rename is skipped (and the temp file removed)
+   * if the session file has vanished — a concurrent lock erased it — so an
+   * expiry slide can never resurrect a locked session. Returns whether the
+   * file was written.
    */
-  private async writeStoredSession(session: SessionFile): Promise<void> {
+  private async writeStoredSession(
+    session: SessionFile,
+    requireExisting = false,
+  ): Promise<boolean> {
     const tmpPath = join(
       dirname(this.sessionPath),
       `.session.json.tmp.${process.pid}.${SessionManager.nextWriteId++}`,
@@ -236,6 +264,14 @@ export class SessionManager {
         fsyncSync(fd);
       } finally {
         closeSync(fd);
+      }
+
+      // Checked as close to the rename as possible: if the session file is
+      // gone, do not recreate it. A microsecond check→rename window remains
+      // (no cross-platform conditional rename exists) — the monitor backstops.
+      if (requireExisting && !existsSync(this.sessionPath)) {
+        unlinkSync(tmpPath);
+        return false;
       }
 
       // Atomic rename
@@ -260,6 +296,8 @@ export class SessionManager {
           );
         });
       }
+
+      return true;
     } catch (err) {
       // Clean up temp file on failure
       try {

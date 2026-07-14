@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuditEventType, ErrorCode, VaultError, VaultState } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, VaultError, VaultState, VAULT_VERSION } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
+import { SqliteStore } from "./storage/sqlite-store.js";
 import { DpapiSessionKeyProtector } from "./session/session-key-protector.js";
 import type { SessionKeyProtector } from "./session/session-key-protector.js";
 
@@ -82,6 +83,209 @@ afterEach(async () => {
   } catch {
     // Ignore
   }
+});
+
+describe("vault version guard", () => {
+  const setVaultVersion = (version: string): void => {
+    const db = new Database(dbPath);
+    db.prepare("UPDATE vault_meta SET value = ? WHERE key = 'vault_version'").run(version);
+    db.close();
+  };
+
+  const expectUnlockCorrupted = async (): Promise<void> => {
+    const engine2 = new VaultEngine({ dbPath, sessionPath });
+    try {
+      await engine2.unlock("password");
+      expect.fail("unlock should have refused the vault version");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.VAULT_CORRUPTED);
+    } finally {
+      await engine2.destroy();
+    }
+  };
+
+  it("refuses a vault stamped with a numerically newer version", async () => {
+    await engine.initVault("password");
+    await engine.lock();
+    const major = parseInt(VAULT_VERSION.split(".")[0] as string, 10);
+    setVaultVersion(`${major + 1}.0.0`);
+    await expectUnlockCorrupted();
+  });
+
+  it("refuses a newer multi-digit minor version", async () => {
+    await engine.initVault("password");
+    await engine.lock();
+    const major = parseInt(VAULT_VERSION.split(".")[0] as string, 10);
+    setVaultVersion(`${major}.10.0`);
+    await expectUnlockCorrupted();
+  });
+
+  it("refuses a malformed stored version (fail closed)", async () => {
+    await engine.initVault("password");
+    await engine.lock();
+    setVaultVersion("banana");
+    await expectUnlockCorrupted();
+  });
+
+  it("opens a vault stamped with an older version", async () => {
+    await engine.initVault("password");
+    await engine.lock();
+    setVaultVersion("0.9.0");
+
+    const engine2 = new VaultEngine({ dbPath, sessionPath });
+    await engine2.unlock("password");
+    expect(engine2.getState()).toBe(VaultState.UNLOCKED);
+    await engine2.destroy();
+  });
+});
+
+describe("session TTL enforcement for long-lived engines", () => {
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  it("seals an initVault() engine once its session TTL expires", async () => {
+    const eng = new VaultEngine({ dbPath, sessionPath, sessionTtlMs: 300 });
+    await eng.initVault("password");
+
+    // Works immediately after unlock (not sealed prematurely).
+    expect(eng.listSecrets()).toEqual([]);
+
+    await sleep(500);
+
+    expect(() => eng.listSecrets()).toThrow(VaultError);
+    try {
+      eng.listSecrets();
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.VAULT_LOCKED);
+    }
+    expect(eng.getState()).toBe(VaultState.SEALED);
+    await eng.destroy();
+  });
+
+  it("seals an unlock() engine (not initVault) once its session TTL expires", async () => {
+    await engine.initVault("password");
+    await engine.lock();
+
+    const eng = new VaultEngine({ dbPath, sessionPath, sessionTtlMs: 300 });
+    await eng.unlock("password");
+    expect(eng.getState()).toBe(VaultState.UNLOCKED);
+
+    await sleep(500);
+
+    expect(() => eng.listSecrets()).toThrow(VaultError);
+    expect(eng.getState()).toBe(VaultState.SEALED);
+    await eng.destroy();
+  });
+});
+
+describe("unlock() store handle on failure paths", () => {
+  it("closes the freshly opened store on wrong password", async () => {
+    await engine.initVault("correct1");
+    await engine.lock();
+
+    const closeSpy = vi.spyOn(SqliteStore.prototype, "close");
+    const eng = new VaultEngine({ dbPath, sessionPath });
+    closeSpy.mockClear();
+    await expect(eng.unlock("wrong123")).rejects.toMatchObject({
+      code: ErrorCode.INVALID_PASSWORD,
+    });
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    closeSpy.mockRestore();
+    await eng.destroy();
+  });
+
+  it("closes the freshly opened store when lockout is active", async () => {
+    await engine.initVault("correct1");
+    await engine.lock();
+    for (let i = 0; i < 5; i++) {
+      const e = new VaultEngine({ dbPath, sessionPath });
+      await expect(e.unlock("wrong123")).rejects.toBeInstanceOf(VaultError);
+      await e.destroy();
+    }
+
+    const closeSpy = vi.spyOn(SqliteStore.prototype, "close");
+    const eng = new VaultEngine({ dbPath, sessionPath });
+    closeSpy.mockClear();
+    await expect(eng.unlock("correct1")).rejects.toMatchObject({
+      code: ErrorCode.LOCKOUT_ACTIVE,
+    });
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    closeSpy.mockRestore();
+    await eng.destroy();
+  });
+
+  it("closes the freshly opened store on corrupted meta", async () => {
+    await engine.initVault("correct1");
+    await engine.lock();
+    const db = new Database(dbPath);
+    db.prepare("DELETE FROM vault_meta WHERE key = 'kdf_salt'").run();
+    db.close();
+
+    const closeSpy = vi.spyOn(SqliteStore.prototype, "close");
+    const eng = new VaultEngine({ dbPath, sessionPath });
+    closeSpy.mockClear();
+    await expect(eng.unlock("correct1")).rejects.toBeInstanceOf(VaultError);
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    closeSpy.mockRestore();
+    await eng.destroy();
+  });
+
+  it("does not close a live engine's store on a failed re-unlock", async () => {
+    await engine.initVault("correct1");
+
+    const closeSpy = vi.spyOn(SqliteStore.prototype, "close");
+    closeSpy.mockClear();
+    await expect(engine.unlock("wrong123")).rejects.toMatchObject({
+      code: ErrorCode.INVALID_PASSWORD,
+    });
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(engine.getState()).toBe(VaultState.UNLOCKED);
+    closeSpy.mockRestore();
+  });
+});
+
+describe("key-buffer wiping on re-unlock / re-load", () => {
+  const allZero = (buf: Uint8Array): boolean => buf.every((b) => b === 0);
+
+  it("wipes the old KEK/JWT/audit buffers when unlock() runs over a live engine", async () => {
+    await engine.initVault("password");
+    const oldKek = (engine as unknown as { kek: Uint8Array }).kek;
+    const oldJwt = (engine as unknown as { jwtKey: Uint8Array }).jwtKey;
+    const oldAudit = (engine as unknown as { auditKey: Uint8Array }).auditKey;
+    expect(allZero(oldKek)).toBe(false);
+
+    await engine.unlock("password");
+
+    // Old buffers zeroed, and the engine is a working vault afterwards.
+    expect(allZero(oldKek)).toBe(true);
+    expect(allZero(oldJwt)).toBe(true);
+    expect(allZero(oldAudit)).toBe(true);
+    expect(engine.getState()).toBe(VaultState.UNLOCKED);
+    await engine.createSecret({ name: "still-works", type: "api_key" });
+    expect(engine.listSecrets().map((s) => s.name)).toContain("still-works");
+  });
+
+  it("wipes the old key buffers when loadSession() runs over a live engine", async () => {
+    await engine.initVault("password");
+    const oldKek = (engine as unknown as { kek: Uint8Array }).kek;
+    expect(allZero(oldKek)).toBe(false);
+
+    const loaded = await engine.loadSession();
+    expect(loaded).toBe(true);
+
+    expect(allZero(oldKek)).toBe(true);
+    expect(engine.getState()).toBe(VaultState.UNLOCKED);
+  });
+
+  it("does not seal a working engine when a re-unlock fails (wrong password)", async () => {
+    await engine.initVault("password");
+    const kek = (engine as unknown as { kek: Uint8Array }).kek;
+
+    await expect(engine.unlock("wrong-password")).rejects.toThrow(VaultError);
+
+    // The live keys survive a failed re-unlock.
+    expect(allZero(kek)).toBe(false);
+    expect(engine.getState()).toBe(VaultState.UNLOCKED);
+  });
 });
 
 describe("lifecycle", () => {
@@ -534,6 +738,30 @@ describe("injection policy", () => {
     expect(events.length).toBeGreaterThanOrEqual(1);
     expect(events[0]?.detail?.policy).toBe("injection");
     expect(events[0]?.detail?.response_mode).toBe("filtered");
+  });
+
+  it("verifies the audit chain and detects DB tampering", async () => {
+    await engine.createSecret({
+      name: "chained",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+
+    const clean = engine.verifyAuditChain();
+    expect(clean.valid).toBe(true);
+    expect(clean.checked).toBeGreaterThan(0);
+
+    // Tamper directly in the DB (attacker with write access, no audit key).
+    const db = new Database(dbPath);
+    const target = db.prepare("SELECT id FROM audit_log ORDER BY id LIMIT 1").get() as {
+      id: number;
+    };
+    db.prepare("UPDATE audit_log SET success = 0 WHERE id = ?").run(target.id);
+    db.close();
+
+    const tampered = engine.verifyAuditChain();
+    expect(tampered.valid).toBe(false);
+    expect(tampered.firstBrokenId).toBe(target.id);
   });
 });
 
@@ -2059,15 +2287,93 @@ describe("password change", () => {
     await engine2.destroy();
   });
 
-  it("rejects change with wrong old password", async () => {
+  it("rejects change with wrong old password as INVALID_PASSWORD", async () => {
     await engine.initVault("correct-pass");
 
     try {
       await engine.changePassword("wrong-pass", "new-pass1");
       expect.fail("Should throw");
     } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.ENCRYPTION_ERROR);
+      expect((e as VaultError).code).toBe(ErrorCode.INVALID_PASSWORD);
     }
+  });
+
+  it("wrong-old-password changePassword feeds the shared lockout counter", async () => {
+    await engine.initVault("correct-pass");
+
+    // 5 wrong changePassword attempts trip the lockout (same counter as unlock).
+    for (let i = 0; i < 5; i++) {
+      await expect(engine.changePassword("wrong-pass", "new-pass1")).rejects.toMatchObject({
+        code: ErrorCode.INVALID_PASSWORD,
+      });
+    }
+
+    await expect(engine.changePassword("wrong-pass", "new-pass1")).rejects.toMatchObject({
+      code: ErrorCode.LOCKOUT_ACTIVE,
+    });
+  });
+
+  it("changePassword and unlock share one lockout counter", async () => {
+    await engine.initVault("correct-pass");
+
+    // 3 wrong changePassword attempts + 2 wrong unlock attempts = 5 → lockout.
+    for (let i = 0; i < 3; i++) {
+      await expect(engine.changePassword("wrong", "new-pass1")).rejects.toMatchObject({
+        code: ErrorCode.INVALID_PASSWORD,
+      });
+    }
+    for (let i = 0; i < 2; i++) {
+      await expect(engine.unlock("wrong")).rejects.toMatchObject({
+        code: ErrorCode.INVALID_PASSWORD,
+      });
+    }
+
+    await expect(engine.unlock("correct-pass")).rejects.toMatchObject({
+      code: ErrorCode.LOCKOUT_ACTIVE,
+    });
+  });
+
+  it("successful changePassword resets the lockout counter and leaves data intact", async () => {
+    await engine.initVault("correct-pass");
+    await engine.createSecret({
+      name: "keep",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("secret-val")),
+    });
+
+    // A few wrong attempts, then a correct change.
+    for (let i = 0; i < 3; i++) {
+      await expect(engine.changePassword("wrong", "new-pass1")).rejects.toBeInstanceOf(VaultError);
+    }
+    // Data survived the failed attempts (wrapped KEK untouched).
+    const before = await engine.getSecretValue("secret://keep");
+    expect(Buffer.from(before).toString()).toBe("secret-val");
+
+    await engine.changePassword("correct-pass", "new-pass1");
+
+    // Counter reset: 4 wrong unlocks after the reset must NOT lock out.
+    await engine.lock();
+    for (let i = 0; i < 4; i++) {
+      const eng = new VaultEngine({ dbPath, sessionPath });
+      await expect(eng.unlock("still-wrong")).rejects.toMatchObject({
+        code: ErrorCode.INVALID_PASSWORD,
+      });
+      await eng.destroy();
+    }
+  });
+
+  it("audits a wrong-old-password changePassword as success:false", async () => {
+    await engine.initVault("correct-pass");
+    await expect(engine.changePassword("wrong-pass", "new-pass1")).rejects.toBeInstanceOf(
+      VaultError,
+    );
+
+    const events = engine.queryAudit();
+    const denied = events.find(
+      (e) => e.event_type === AuditEventType.VAULT_PASSWORD_CHANGE && e.success === false,
+    );
+    expect(denied).toBeDefined();
+    expect(denied?.detail?.error).toBe(ErrorCode.INVALID_PASSWORD);
   });
 
   it("old password no longer works after change", async () => {

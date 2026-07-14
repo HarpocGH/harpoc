@@ -81,6 +81,11 @@ CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log (timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_secret_id ON audit_log (secret_id);
 `;
 
+/** Tamper-evidence chain link over each audit row (migration 010). */
+export const ALTER_AUDIT_LOG_ADD_ROW_HMAC = `
+ALTER TABLE audit_log ADD COLUMN row_hmac BLOB;
+`;
+
 export const CREATE_REVOKED_TOKENS = `
 CREATE TABLE IF NOT EXISTS revoked_tokens (
   jti        TEXT PRIMARY KEY,
@@ -99,6 +104,18 @@ ALTER TABLE secrets ADD COLUMN name_hmac TEXT;
 
 export const CREATE_NAME_HMAC_INDEX = `
 CREATE INDEX IF NOT EXISTS idx_secrets_name_hmac ON secrets (name_hmac);
+`;
+
+/**
+ * Enforce name uniqueness among live (non-revoked) secrets at the storage
+ * layer, closing the create-time check-then-insert TOCTOU. Partial index:
+ * revoked rows are excluded (recreating a revoked name stays legal) and NULL
+ * name_hmac (pre-backfill legacy rows) are distinct in SQLite, so they never
+ * collide.
+ */
+export const CREATE_NAME_HMAC_UNIQUE_INDEX = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_secrets_name_hmac_live
+  ON secrets (name_hmac) WHERE status != 'revoked';
 `;
 
 export const CREATE_OAUTH_TOKENS = `

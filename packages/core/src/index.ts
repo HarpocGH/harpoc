@@ -55,7 +55,11 @@ export type {
 export { AuditLogger } from "./audit/audit-logger.js";
 export type { AuditLogOptions } from "./audit/audit-logger.js";
 export { AuditQuery } from "./audit/audit-query.js";
-export type { AuditQueryOptions, DecryptedAuditEvent } from "./audit/audit-query.js";
+export type {
+  AuditChainVerification,
+  AuditQueryOptions,
+  DecryptedAuditEvent,
+} from "./audit/audit-query.js";
 
 // Access
 export { PolicyEngine } from "./access/policy-engine.js";
