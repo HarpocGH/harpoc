@@ -27,6 +27,7 @@ pnpm test
 | `@harpoc/mcp-server`  | `packages/mcp-server`  | MCP server with tools, resources, and guards        |
 | `@harpoc/rest-api`    | `packages/rest-api`    | Hono HTTP API with JWT auth and rate limiting       |
 | `@harpoc/sdk`         | `packages/sdk`         | VaultClient with direct and REST modes              |
+| `@harpoc/oauth-proxy` | `packages/oauth-proxy` | OAuth 2.1 proxy: PKCE flows, provider presets, token refresh |
 | `@harpoc/integration` | `packages/integration` | Cross-package integration tests                     |
 
 ## Code Style

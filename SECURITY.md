@@ -30,11 +30,11 @@ Harpoc is a zero-knowledge secret vault designed so that secrets are never expos
 - **Key hierarchy**: 3-tier hierarchy — Master Key (derived via Argon2id) wraps a KEK, which wraps individual DEKs
 - **Minimal in-process cryptography**: All cryptographic operations run on Node's built-in `node:crypto`, with Argon2id (a native KDF) the only exception — no third-party cryptographic library is loaded into the vault process. The SSH context's ephemeral in-process agent parses keys and generates signatures on `node:crypto` (unencrypted Ed25519/RSA/ECDSA keys); the private key stays in the vault process and only signatures cross the agent socket
 - **SSRF prevention**: Pre-flight DNS lookup with IP pinning blocks requests to private/internal network addresses
-- **Audit trail**: Immutable append-only audit log records every vault mutation
-- **Execution-layer injection**: Secrets are injected at the execution layer — into an HTTP request (request-mediated) or a spawned subprocess's environment (process-mediated) — and never returned to the LLM context. Per-secret allowlists bound where a credential may be injected: an optional URL allowlist for HTTP, and a fail-safe command allowlist for process execution
+- **Audit trail**: Immutable append-only audit log records every vault mutation; detail fields are encrypted and bound to their row, and rows are HMAC-chained — `harpoc audit verify` detects tampering
+- **Execution-layer injection**: Secrets are injected at the execution layer across six contexts — an HTTP request, a spawned subprocess's environment, a downstream MCP server, a database connection, a Git operation, or an SSH session — and never returned to the LLM context. Per-secret allowlists bound where a credential may be injected: an optional URL allowlist for HTTP, a fail-safe command allowlist for process execution (with an explicit acknowledgement gate for known interpreter binaries), and a host allowlist for database/SSH/Git targets (fail-safe for SSH and Git-over-SSH). Endpoint authentication is pinned per secret: database TLS/CA policy and SSH host keys
 - **HTTP response mode**: A per-secret `response_mode` bounds what an HTTP invocation returns. `status_only` returns only the status code (plus an admin-allowlisted header set) and never reads the response body — the response-echo channel is removed structurally, not filtered. The default `filtered` redacts the credential and its base64/base64url/hex/percent encodings; per-invocation overrides may only tighten the policy mode, never loosen it
 
-For full architectural details, see [docs/architecture.md](https://github.com/HarpocGH/harpoc/blob/main/docs/architecture.md).
+For a summary of the security model, see the [Security Model](README.md#security-model) section of the README.
 
 ## Known Accepted Risks
 
