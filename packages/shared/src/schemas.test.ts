@@ -993,13 +993,12 @@ describe("sessionFileSchema", () => {
     ).toThrow();
   });
 
-  it("accepts key_protection none and dpapi", () => {
-    expect(sessionFileSchema.parse({ ...validSession, key_protection: "none" }).key_protection).toBe(
-      "none",
-    );
-    expect(
-      sessionFileSchema.parse({ ...validSession, key_protection: "dpapi" }).key_protection,
-    ).toBe("dpapi");
+  it("accepts every key_protection scheme", () => {
+    for (const scheme of ["none", "dpapi", "keychain", "secret-service", "keyring"] as const) {
+      expect(
+        sessionFileSchema.parse({ ...validSession, key_protection: scheme }).key_protection,
+      ).toBe(scheme);
+    }
   });
 
   it("treats key_protection as optional (legacy files)", () => {
@@ -1007,9 +1006,7 @@ describe("sessionFileSchema", () => {
   });
 
   it("rejects unknown key_protection values", () => {
-    expect(() =>
-      sessionFileSchema.parse({ ...validSession, key_protection: "keychain" }),
-    ).toThrow();
+    expect(() => sessionFileSchema.parse({ ...validSession, key_protection: "tpm" })).toThrow();
   });
 });
 
@@ -1392,7 +1389,12 @@ describe("certificateImportSchema", () => {
 // ---------------------------------------------------------------------------
 
 describe("sshActionSchema argv hardening", () => {
-  const validSsh = { type: "ssh" as const, host: "deploy.example.com", user: "deploy", command: "whoami" };
+  const validSsh = {
+    type: "ssh" as const,
+    host: "deploy.example.com",
+    user: "deploy",
+    command: "whoami",
+  };
 
   it("accepts a normal host and user", () => {
     expect(sshActionSchema.parse(validSsh).host).toBe("deploy.example.com");
@@ -1495,9 +1497,7 @@ describe("httpActionSchema headers validation", () => {
   });
 
   it("rejects a header name with invalid characters", () => {
-    expect(() =>
-      httpActionSchema.parse({ ...validHttp, headers: { "Bad Name:": "x" } }),
-    ).toThrow();
+    expect(() => httpActionSchema.parse({ ...validHttp, headers: { "Bad Name:": "x" } })).toThrow();
   });
 
   it("rejects a header value smuggling CR/LF", () => {
@@ -1507,9 +1507,7 @@ describe("httpActionSchema headers validation", () => {
   });
 
   it("rejects a header value containing NUL", () => {
-    expect(() =>
-      httpActionSchema.parse({ ...validHttp, headers: { "X-Test": "a\0b" } }),
-    ).toThrow();
+    expect(() => httpActionSchema.parse({ ...validHttp, headers: { "X-Test": "a\0b" } })).toThrow();
   });
 
   it("rejects an oversized header value", () => {
@@ -1519,9 +1517,7 @@ describe("httpActionSchema headers validation", () => {
   });
 
   it("rejects more than 64 headers", () => {
-    const headers = Object.fromEntries(
-      Array.from({ length: 65 }, (_, i) => [`X-H${i}`, "v"]),
-    );
+    const headers = Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`X-H${i}`, "v"]));
     expect(() => httpActionSchema.parse({ ...validHttp, headers })).toThrow();
   });
 });

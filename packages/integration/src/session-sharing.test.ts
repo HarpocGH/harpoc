@@ -1,11 +1,22 @@
+import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { DpapiSessionKeyProtector, VaultEngine } from "@harpoc/core";
+import {
+  DpapiSessionKeyProtector,
+  KeychainWrappingKeyStore,
+  KeyringWrappingKeyStore,
+  KeystoreWrappedSessionKeyProtector,
+  SecretServiceWrappingKeyStore,
+  VaultEngine,
+  findLinuxKeystoreBinary,
+} from "@harpoc/core";
+import type { SessionKeyProtector } from "@harpoc/core";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { InjectionType, PrincipalType, SecretType, VaultState } from "@harpoc/shared";
@@ -199,36 +210,153 @@ describe("Session Sharing", () => {
 // explicit DPAPI protectors and therefore only runs on Windows.
 describe.runIf(process.platform === "win32")("DPAPI-protected session sharing (Windows)", () => {
   it("shares a DPAPI-wrapped session file between engines", async () => {
-    const tmpDir = mkdtempSync(join(tmpdir(), "harpoc-dpapi-"));
-    const dbPath = join(tmpDir, "default.vault.db");
-    const sessionPath = join(tmpDir, "session.json");
-
-    const engineA = new VaultEngine({
-      dbPath,
-      sessionPath,
-      sessionKeyProtector: new DpapiSessionKeyProtector(),
-    });
-    try {
-      await engineA.initVault("dpapi-integ-pw");
-
-      const file = JSON.parse(readFileSync(sessionPath, "utf8")) as { key_protection?: string };
-      expect(file.key_protection).toBe("dpapi");
-
-      const engineB = new VaultEngine({
-        dbPath,
-        sessionPath,
-        sessionKeyProtector: new DpapiSessionKeyProtector(),
-      });
-      try {
-        expect(await engineB.loadSession()).toBe(true);
-        expect(engineB.getState()).toBe(VaultState.UNLOCKED);
-        expect(engineB.listSecrets()).toEqual([]);
-      } finally {
-        await engineB.destroy();
-      }
-    } finally {
-      await engineA.destroy();
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
+    await expectSharedWrappedSession(
+      () => new DpapiSessionKeyProtector(),
+      "dpapi",
+      "dpapi-integ-pw",
+    );
   });
 });
+
+/**
+ * Init a vault with engine A under the given protector, assert the on-disk
+ * scheme tag, and load the session with a fresh engine B (the DPAPI-suite
+ * body, generalized for the keychain/secret-service/keyring schemes).
+ */
+async function expectSharedWrappedSession(
+  makeProtector: () => SessionKeyProtector,
+  expectedScheme: string,
+  password: string,
+): Promise<void> {
+  const tmpDir = mkdtempSync(join(tmpdir(), `harpoc-${expectedScheme}-`));
+  const dbPath = join(tmpDir, "default.vault.db");
+  const sessionPath = join(tmpDir, "session.json");
+
+  const engineA = new VaultEngine({
+    dbPath,
+    sessionPath,
+    sessionKeyProtector: makeProtector(),
+  });
+  try {
+    await engineA.initVault(password);
+
+    const file = JSON.parse(readFileSync(sessionPath, "utf8")) as { key_protection?: string };
+    expect(file.key_protection).toBe(expectedScheme);
+
+    const engineB = new VaultEngine({
+      dbPath,
+      sessionPath,
+      sessionKeyProtector: makeProtector(),
+    });
+    try {
+      expect(await engineB.loadSession()).toBe(true);
+      expect(engineB.getState()).toBe(VaultState.UNLOCKED);
+      expect(engineB.listSecrets()).toEqual([]);
+    } finally {
+      await engineB.destroy();
+    }
+  } finally {
+    await engineA.destroy();
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+/** Probe a protector roundtrip; skip (never fail) where the keystore is unusable. */
+async function probeProtector(makeProtector: () => SessionKeyProtector): Promise<boolean> {
+  try {
+    const protector = makeProtector();
+    const key = new Uint8Array(32).fill(7);
+    const blob = await protector.protect(key);
+    const unwrapped = await protector.unprotect(blob);
+    return Buffer.from(unwrapped).equals(Buffer.from(key));
+  } catch {
+    return false;
+  }
+}
+
+const execFileAsync = promisify(execFile);
+
+describe.runIf(process.platform === "darwin")("Keychain-protected session sharing (macOS)", () => {
+  const service = `harpoc.test-share.${process.pid}.${Date.now()}`;
+  const keychain = process.env["HARPOC_TEST_KEYCHAIN"];
+  const makeProtector = (): SessionKeyProtector =>
+    new KeystoreWrappedSessionKeyProtector(
+      new KeychainWrappingKeyStore({ service, ...(keychain ? { keychain } : {}) }),
+    );
+  let available = false;
+
+  beforeAll(async () => {
+    available = await probeProtector(makeProtector);
+  });
+
+  afterAll(async () => {
+    await execFileAsync("/usr/bin/security", [
+      "delete-generic-password",
+      "-s",
+      service,
+      "-a",
+      "harpoc",
+      ...(keychain ? [keychain] : []),
+    ]).catch(() => {});
+  });
+
+  it("shares a keychain-wrapped session file between engines", async (ctx) => {
+    if (!available) return ctx.skip();
+    await expectSharedWrappedSession(makeProtector, "keychain", "keychain-integ-pw");
+  });
+});
+
+describe.runIf(process.platform === "linux")("Keyring-protected session sharing (Linux)", () => {
+  const description = `harpoc:test-share:${process.pid}:${Date.now()}`;
+  const executablePath = findLinuxKeystoreBinary("keyctl");
+  const makeProtector = (): SessionKeyProtector =>
+    new KeystoreWrappedSessionKeyProtector(
+      new KeyringWrappingKeyStore({ executablePath: executablePath as string, description }),
+    );
+  let available = false;
+
+  beforeAll(async () => {
+    if (!executablePath) return;
+    available = await probeProtector(makeProtector);
+  });
+
+  afterAll(async () => {
+    if (!executablePath) return;
+    await execFileAsync(executablePath, ["purge", "user", description]).catch(() => {});
+  });
+
+  it("shares a keyring-wrapped session file between engines", async (ctx) => {
+    if (!available) return ctx.skip();
+    await expectSharedWrappedSession(makeProtector, "keyring", "keyring-integ-pw");
+  });
+});
+
+describe.runIf(process.platform === "linux")(
+  "Secret-Service-protected session sharing (Linux)",
+  () => {
+    const service = `harpoc.test-share.${process.pid}.${Date.now()}`;
+    const executablePath = findLinuxKeystoreBinary("secret-tool");
+    const makeProtector = (): SessionKeyProtector =>
+      new KeystoreWrappedSessionKeyProtector(
+        new SecretServiceWrappingKeyStore({ executablePath: executablePath as string, service }),
+      );
+    let available = false;
+
+    beforeAll(async () => {
+      if (!executablePath || (process.env["DBUS_SESSION_BUS_ADDRESS"] ?? "") === "") return;
+      available = await probeProtector(makeProtector);
+    });
+
+    afterAll(async () => {
+      if (!executablePath) return;
+      await execFileAsync(executablePath, ["clear", "service", service, "account", "harpoc"]).catch(
+        () => {},
+      );
+    });
+
+    it("shares a secret-service-wrapped session file between engines", async (ctx) => {
+      if (!available) return ctx.skip();
+      await expectSharedWrappedSession(makeProtector, "secret-service", "secretsvc-integ-pw");
+    });
+  },
+);

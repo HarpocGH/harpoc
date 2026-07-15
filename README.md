@@ -42,16 +42,16 @@ Storage     SQLite (WAL mode, encrypted payloads)
 
 ## Packages
 
-| Package              | Description                                                  | Status   |
-| -------------------- | ------------------------------------------------------------ | -------- |
-| `@harpoc/shared`     | Types, Zod schemas, error codes, constants                   | Complete |
-| `@harpoc/core`       | VaultEngine, crypto, storage, secrets, audit, access control, six-context injection (HTTP, process, MCP, database, Git, SSH) | Complete |
-| `@harpoc/cli`        | `harpoc` CLI (Commander.js)                                  | Complete |
-| `@harpoc/mcp-server` | MCP tools, resources, guards (stdio + Streamable HTTP transports) | Complete |
-| `@harpoc/rest-api`   | Hono HTTP API, JWT auth, rate limiting, audit middleware     | Complete |
-| `@harpoc/sdk`        | TypeScript client (REST + in-process modes)                  | Complete |
+| Package               | Description                                                                                                                                                     | Status   |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| `@harpoc/shared`      | Types, Zod schemas, error codes, constants                                                                                                                      | Complete |
+| `@harpoc/core`        | VaultEngine, crypto, storage, secrets, audit, access control, six-context injection (HTTP, process, MCP, database, Git, SSH)                                    | Complete |
+| `@harpoc/cli`         | `harpoc` CLI (Commander.js)                                                                                                                                     | Complete |
+| `@harpoc/mcp-server`  | MCP tools, resources, guards (stdio + Streamable HTTP transports)                                                                                               | Complete |
+| `@harpoc/rest-api`    | Hono HTTP API, JWT auth, rate limiting, audit middleware                                                                                                        | Complete |
+| `@harpoc/sdk`         | TypeScript client (REST + in-process modes)                                                                                                                     | Complete |
 | `@harpoc/oauth-proxy` | OAuth 2.1 proxy — PKCE, provider presets, callback server, token refresh scheduler (CLI: `harpoc oauth connect/status/refresh`, `server start --oauth-refresh`) | Complete |
-| `@harpoc/integration` | Cross-package integration tests                             | Complete |
+| `@harpoc/integration` | Cross-package integration tests                                                                                                                                 | Complete |
 
 ## Quick Start
 
@@ -212,7 +212,7 @@ pnpm format          # Fix formatting
 - **Injection allowlisting** (per-secret, KEK-encrypted): a URL allowlist bounds request-mediated targets (optional; re-validated on each redirect hop), a command allowlist bounds process-mediated binaries (fail-safe deny, pinned to a resolved absolute path; known interpreter binaries like `sh`, `python`, `node` require explicit acknowledgement), and a host allowlist bounds database/SSH/Git targets (fail-safe for SSH and Git-over-SSH). Endpoint authentication is pinned per secret: database TLS/CA policy and SSH host keys. Process execution spawns with no shell, a clean environment, and best-effort output sanitization of the credential and its common encodings.
 - **HTTP response shaping**: a per-secret `response_mode` (`full` / `filtered` / `status_only`, default `filtered`) bounds what an HTTP invocation returns; `status_only` never reads the response body, and per-invocation overrides may only tighten the policy, never loosen it.
 - **Tamper-evident audit log**: detail fields are encrypted and bound to their row, and rows are HMAC-chained — `harpoc audit verify` detects modification or deletion. Deleting the newest rows leaves a valid shorter chain, so `harpoc audit anchor` exports the tail link for comparison with `verify --anchor` — the anchor must be stored **off-host** (another machine, a sync target, or paper); the vault cannot supply that independent trust domain itself.
-- **Session-file protection**: the session key is DPAPI-wrapped at rest on Windows (fail-closed reads; `HARPOC_SESSION_KEYSTORE=off` opts out), and the session file is created owner-only (0600) on POSIX.
+- **Session-file protection**: the session key is wrapped at rest with an OS-user-bound key store — DPAPI on Windows, the Keychain on macOS, Secret Service or the kernel keyring on Linux (desktop/headless tiers; kernel-keyring keys die at reboot, forcing a fresh unlock) — so a session file copied off the host is inert. Reads fail closed on tampering, a foreign user, or a scheme mismatch; a write-time keystore failure falls back to file permissions with a CLI warning; `HARPOC_SESSION_KEYSTORE=off` opts out. The session file is created owner-only (0600) on POSIX either way.
 - **Secret names encrypted** with vault-level KEK — database inspection reveals nothing about stored services. HMAC-SHA256 name index enables O(1) handle resolution without decrypting all names.
 - **Lazy secret expiry**: secrets with an `expires_at` timestamp are checked on access and automatically transitioned to expired status.
 - **JWT sessions** with sliding window TTL (15 min default, 24 h maximum), store-based token revocation with automatic pruning of expired entries.

@@ -515,7 +515,13 @@ export type HealthResponse = z.infer<typeof healthResponseSchema>;
 const base64Pattern = z.string().min(1).base64();
 
 /** How the session file's `session_key` is protected at rest (thesis §4.6 off-host hardening). */
-export const sessionKeyProtectionSchemeSchema = z.enum(["none", "dpapi"]);
+export const sessionKeyProtectionSchemeSchema = z.enum([
+  "none",
+  "dpapi",
+  "keychain",
+  "secret-service",
+  "keyring",
+]);
 
 export type SessionKeyProtectionScheme = z.infer<typeof sessionKeyProtectionSchemeSchema>;
 

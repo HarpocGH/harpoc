@@ -1,8 +1,16 @@
-import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionKeyProtectionScheme } from "@harpoc/shared";
 import { VaultError } from "@harpoc/shared";
 import { wipeBuffer } from "../crypto/random.js";
+import { runKeystoreHelper } from "./keystore-helper.js";
+import { KeychainWrappingKeyStore } from "./keychain-store.js";
+import {
+  KeyringWrappingKeyStore,
+  SecretServiceWrappingKeyStore,
+  findLinuxKeystoreBinary,
+} from "./linux-keystores.js";
+import { KeystoreWrappedSessionKeyProtector } from "./wrapping-key-store.js";
 
 /**
  * Wraps the session key with an OS-user-bound secret from the platform key
@@ -70,9 +78,6 @@ function defaultPowershellPath(): string {
   return join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
 
-const DEFAULT_TIMEOUT_MS = 15_000;
-const MAX_STDOUT_BYTES = 64 * 1024;
-const MAX_STDERR_BYTES = 4 * 1024;
 const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
 
 export interface DpapiSessionKeyProtectorOptions {
@@ -91,11 +96,11 @@ export interface DpapiSessionKeyProtectorOptions {
 export class DpapiSessionKeyProtector implements SessionKeyProtector {
   readonly scheme = "dpapi" as const;
   private readonly executablePath: string;
-  private readonly timeoutMs: number;
+  private readonly timeoutMs: number | undefined;
 
   constructor(options: DpapiSessionKeyProtectorOptions = {}) {
     this.executablePath = options.executablePath ?? defaultPowershellPath();
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.timeoutMs = options.timeoutMs;
   }
 
   async protect(key: Uint8Array): Promise<Uint8Array> {
@@ -106,110 +111,76 @@ export class DpapiSessionKeyProtector implements SessionKeyProtector {
     return this.run("Unprotect", blob);
   }
 
-  private run(method: "Protect" | "Unprotect", input: Uint8Array): Promise<Uint8Array> {
+  private async run(method: "Protect" | "Unprotect", input: Uint8Array): Promise<Uint8Array> {
     if (input.length === 0) {
-      return Promise.reject(VaultError.sessionFileError(`DPAPI ${method} requires non-empty input`));
+      throw VaultError.sessionFileError(`DPAPI ${method} requires non-empty input`);
     }
 
-    return new Promise<Uint8Array>((resolve, reject) => {
-      const child = spawn(
-        this.executablePath,
-        ["-NoProfile", "-NonInteractive", "-Command", dpapiScript(method)],
-        { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
-      );
+    const inputCopy = Buffer.from(input);
+    const payload = inputCopy.toString("base64");
+    wipeBuffer(inputCopy);
 
-      const stdoutChunks: Buffer[] = [];
-      const stderrChunks: Buffer[] = [];
-      let stdoutBytes = 0;
-      let stderrBytes = 0;
-      let settled = false;
+    const options: Parameters<typeof runKeystoreHelper>[3] = { label: `DPAPI ${method}` };
+    if (this.timeoutMs !== undefined) {
+      options.timeoutMs = this.timeoutMs;
+    }
+    const result = await runKeystoreHelper(
+      this.executablePath,
+      ["-NoProfile", "-NonInteractive", "-Command", dpapiScript(method)],
+      payload,
+      options,
+    );
 
-      const finish = (error: Error | null, output?: Uint8Array): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (error) {
-          child.kill();
-          reject(error);
-        } else {
-          resolve(output as Uint8Array);
-        }
-      };
-
-      const timer = setTimeout(() => {
-        finish(VaultError.sessionFileError(`DPAPI ${method} timed out after ${this.timeoutMs}ms`));
-      }, this.timeoutMs);
-
-      child.on("error", (err) => {
-        finish(VaultError.sessionFileError(`DPAPI helper failed to start: ${err.message}`));
-      });
-
-      child.stdout.on("data", (chunk: Buffer) => {
-        stdoutBytes += chunk.length;
-        if (stdoutBytes > MAX_STDOUT_BYTES) {
-          finish(VaultError.sessionFileError(`DPAPI ${method} produced oversized output`));
-          return;
-        }
-        stdoutChunks.push(chunk);
-      });
-
-      child.stderr.on("data", (chunk: Buffer) => {
-        if (stderrBytes < MAX_STDERR_BYTES) {
-          stderrChunks.push(chunk);
-          stderrBytes += chunk.length;
-        }
-      });
-
-      child.on("close", (code) => {
-        if (settled) return;
-        if (code !== 0) {
-          const detail = Buffer.concat(stderrChunks)
-            .toString("utf8")
-            .replace(/\s+/g, " ")
-            .trim()
-            .slice(0, 200);
-          finish(
-            VaultError.sessionFileError(
-              `DPAPI ${method} failed (exit ${code ?? "unknown"})${detail ? `: ${detail}` : ""}`,
-            ),
-          );
-          return;
-        }
-        const buffer = Buffer.concat(stdoutChunks);
-        const text = buffer.toString("ascii").trim();
-        wipeBuffer(buffer);
-        if (!BASE64_PATTERN.test(text)) {
-          finish(VaultError.sessionFileError(`DPAPI ${method} returned malformed output`));
-          return;
-        }
-        finish(null, new Uint8Array(Buffer.from(text, "base64")));
-      });
-
-      // EPIPE when the child dies before reading stdin — the close handler reports it.
-      child.stdin.on("error", () => {});
-      const inputCopy = Buffer.from(input);
-      child.stdin.end(inputCopy.toString("base64"));
-      wipeBuffer(inputCopy);
-    });
+    const text = result.stdout.trim();
+    if (!BASE64_PATTERN.test(text)) {
+      throw VaultError.sessionFileError(`DPAPI ${method} returned malformed output`);
+    }
+    return new Uint8Array(Buffer.from(text, "base64"));
   }
 }
 
 /**
- * Select the platform protector: DPAPI on Windows, none elsewhere (thesis §4.6
- * file-permission fallback; Keychain/Secret Service are future work).
+ * Select the platform protector (thesis §4.6): DPAPI on Windows, Keychain on
+ * macOS, Secret Service or the kernel keyring on Linux (two tiers, picked once
+ * at construction — see below), none elsewhere (file-permission fallback).
  * `HARPOC_SESSION_KEYSTORE=off` disables keystore wrapping for new session
  * writes (operational opt-out; an already-wrapped file then fails closed and
  * requires a fresh unlock).
+ *
+ * Linux tier selection is factory-time and synchronous: Secret Service iff a
+ * D-Bus session address is present AND `secret-tool` exists at a fixed
+ * candidate path; else the kernel keyring iff `keyctl` exists; else none. A
+ * runtime failure of the selected tier degrades through the existing
+ * write-fallback — never a mid-write cascade to the other tier.
  */
 export function createSessionKeyProtector(
   platform: NodeJS.Platform = process.platform,
   env: Record<string, string | undefined> = process.env,
+  probeBinary: (path: string) => boolean = existsSync,
 ): SessionKeyProtector {
   if ((env["HARPOC_SESSION_KEYSTORE"] ?? "").toLowerCase() === "off") {
     return new NoneSessionKeyProtector();
   }
   if (platform === "win32") {
     return new DpapiSessionKeyProtector();
+  }
+  if (platform === "darwin") {
+    return new KeystoreWrappedSessionKeyProtector(new KeychainWrappingKeyStore());
+  }
+  if (platform === "linux") {
+    const secretTool = findLinuxKeystoreBinary("secret-tool", probeBinary);
+    if ((env["DBUS_SESSION_BUS_ADDRESS"] ?? "") !== "" && secretTool) {
+      return new KeystoreWrappedSessionKeyProtector(
+        new SecretServiceWrappingKeyStore({ executablePath: secretTool }),
+      );
+    }
+    const keyctl = findLinuxKeystoreBinary("keyctl", probeBinary);
+    if (keyctl) {
+      return new KeystoreWrappedSessionKeyProtector(
+        new KeyringWrappingKeyStore({ executablePath: keyctl }),
+      );
+    }
+    return new NoneSessionKeyProtector();
   }
   return new NoneSessionKeyProtector();
 }

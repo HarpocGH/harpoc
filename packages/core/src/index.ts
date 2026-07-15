@@ -50,6 +50,22 @@ export type {
   SessionKeyProtector,
   DpapiSessionKeyProtectorOptions,
 } from "./session/session-key-protector.js";
+export {
+  KeystoreWrappedSessionKeyProtector,
+  WRAPPING_KEY_LENGTH,
+} from "./session/wrapping-key-store.js";
+export type { WrappingKeyStore } from "./session/wrapping-key-store.js";
+export { KeychainWrappingKeyStore } from "./session/keychain-store.js";
+export type { KeychainWrappingKeyStoreOptions } from "./session/keychain-store.js";
+export {
+  KeyringWrappingKeyStore,
+  SecretServiceWrappingKeyStore,
+  findLinuxKeystoreBinary,
+} from "./session/linux-keystores.js";
+export type {
+  KeyringWrappingKeyStoreOptions,
+  SecretServiceWrappingKeyStoreOptions,
+} from "./session/linux-keystores.js";
 
 // Audit
 export { AuditLogger } from "./audit/audit-logger.js";
@@ -73,7 +89,12 @@ export { SecretManager } from "./secrets/secret-manager.js";
 export type { CreateSecretInput, SecretInfo } from "./secrets/secret-manager.js";
 
 // Injection
-export { validateUrl, validateHostPort, isPrivateIp, isLoopback } from "./injection/url-validator.js";
+export {
+  validateUrl,
+  validateHostPort,
+  isPrivateIp,
+  isLoopback,
+} from "./injection/url-validator.js";
 export type { ValidatedHostPort } from "./injection/url-validator.js";
 export { HttpInjector } from "./injection/http-injector.js";
 export type { HttpInjectorRequest } from "./injection/http-injector.js";
