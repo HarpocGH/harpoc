@@ -1155,7 +1155,18 @@ export class VaultEngine {
 
   private async doRefreshOAuthToken(secretId: string): Promise<number | null> {
     const s = this.assertUnlocked();
+    try {
+      return await this.doRefreshOAuthTokenInner(s, secretId);
+    } catch (err) {
+      this.auditDenied(s, AuditEventType.OAUTH_REFRESH, err, { action: "refresh" }, secretId);
+      throw err;
+    }
+  }
 
+  private async doRefreshOAuthTokenInner(
+    s: UnlockedState,
+    secretId: string,
+  ): Promise<number | null> {
     const oauthRow = s.store.getOAuthToken(secretId);
     if (!oauthRow) throw VaultError.oauthNotConfigured();
 

@@ -27,6 +27,7 @@
     "@harpoc/shared": "workspace:*",
     "@harpoc/core": "workspace:*",
     "@harpoc/mcp-server": "workspace:*",
+    "@harpoc/oauth-proxy": "workspace:*",
     "@harpoc/rest-api": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "commander": "^13.1.0"

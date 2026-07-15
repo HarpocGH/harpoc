@@ -50,7 +50,7 @@ Storage     SQLite (WAL mode, encrypted payloads)
 | `@harpoc/mcp-server` | MCP tools, resources, guards (stdio + Streamable HTTP transports) | Complete |
 | `@harpoc/rest-api`   | Hono HTTP API, JWT auth, rate limiting, audit middleware     | Complete |
 | `@harpoc/sdk`        | TypeScript client (REST + in-process modes)                  | Complete |
-| `@harpoc/oauth-proxy` | OAuth 2.1 proxy — PKCE, provider presets, callback server, token refresh scheduler | Complete (standalone) |
+| `@harpoc/oauth-proxy` | OAuth 2.1 proxy — PKCE, provider presets, callback server, token refresh scheduler (CLI: `harpoc oauth connect/status/refresh`, `server start --oauth-refresh`) | Complete |
 | `@harpoc/integration` | Cross-package integration tests                             | Complete |
 
 ## Quick Start
@@ -169,6 +169,28 @@ Flags:
 - `--project` — Project scope
 - `--secrets` — Comma-separated secret-name patterns the token can access (`*` wildcards, e.g. `db-*`; full-anchored, case-sensitive)
 - `--ttl` — Token lifetime in minutes (default: 60)
+
+## OAuth Secrets
+
+Connect an OAuth provider interactively — the vault runs the flow and stores the tokens; the agent only ever sees the `secret://` handle:
+
+```bash
+# Authorization code + PKCE (prints the authorization URL; --open also launches the browser)
+npx harpoc oauth connect github-token --provider github --client-id <CLIENT_ID>
+
+# Headless device-code flow
+npx harpoc oauth connect gh-headless --provider github --client-id <CLIENT_ID> --device
+
+# Machine-to-machine client credentials
+npx harpoc oauth connect m2m-token --provider custom --client-id <CLIENT_ID> \
+  --token-endpoint https://auth.example.com/token --client-credentials
+```
+
+The client secret is never passed via argv: set `HARPOC_OAUTH_CLIENT_SECRET` or enter it at the hidden prompt (leave empty for a public client). Inspect and maintain tokens with `harpoc oauth status <handle>` and `harpoc oauth refresh <handle>`, or refresh them continuously in a long-lived server:
+
+```bash
+npx harpoc server start --rest --oauth-refresh   # or --oauth-refresh alone as a refresh daemon
+```
 
 ## Development
 

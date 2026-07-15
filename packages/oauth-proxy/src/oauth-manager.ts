@@ -19,6 +19,23 @@ export interface OAuthManagerOptions {
   onBackgroundFlowError?: (secretId: string, err: unknown) => void;
 }
 
+/**
+ * Result of starting a device-code flow. `completion` settles when the
+ * background poll finishes: resolves once the secret is ACTIVE, rejects on
+ * poll failure/timeout/abort. Safe to ignore (rejections are marked handled
+ * internally and routed to onBackgroundFlowError). Never serialize this into
+ * wire output — the promise serializes as `{}`; hosts build their own shape.
+ */
+export interface DeviceCodeFlowResult extends OAuthFlowResult {
+  completion: Promise<void>;
+}
+
+/** System-browser opener (the constructor default); exported so hosts can gate it behind a flag. */
+export async function defaultOpenBrowser(url: string): Promise<void> {
+  const openModule = await import("open");
+  await openModule.default(url);
+}
+
 export class OAuthManager {
   private engine: VaultEngine;
   private openBrowser: (url: string) => Promise<void>;
@@ -29,7 +46,7 @@ export class OAuthManager {
 
   constructor(engine: VaultEngine, options?: OAuthManagerOptions) {
     this.engine = engine;
-    this.openBrowser = options?.openBrowser ?? OAuthManager.defaultOpenBrowser;
+    this.openBrowser = options?.openBrowser ?? defaultOpenBrowser;
     this.callbackPort = options?.callbackPort ?? 19876;
     this.callbackTimeoutMs = options?.callbackTimeoutMs ?? 5 * 60 * 1000;
     this.onBackgroundFlowError = options?.onBackgroundFlowError;
@@ -183,7 +200,7 @@ export class OAuthManager {
     name: string,
     config: OAuthProviderConfig,
     project?: string,
-  ): Promise<OAuthFlowResult> {
+  ): Promise<DeviceCodeFlowResult> {
     const resolved = resolveProvider(config);
     const { handle, secretId } = await this.engine.createOAuthSecret(name, resolved, project);
 
@@ -191,7 +208,7 @@ export class OAuthManager {
     const deviceResult = await flow.startFlow(resolved);
 
     // Start polling in the background (non-blocking)
-    this.pollDeviceCodeInBackground(
+    const completion = this.pollDeviceCodeInBackground(
       flow,
       deviceResult.device_code,
       deviceResult.interval,
@@ -206,6 +223,7 @@ export class OAuthManager {
       auth_url: deviceResult.verification_uri,
       user_code: deviceResult.user_code,
       message: `Please visit ${deviceResult.verification_uri} and enter code: ${deviceResult.user_code}`,
+      completion,
     };
   }
 
@@ -216,10 +234,10 @@ export class OAuthManager {
     config: OAuthProviderConfig,
     expiresIn: number,
     secretId: string,
-  ): void {
+  ): Promise<void> {
     const controller = new AbortController();
     this.pendingFlows.set(secretId, controller);
-    flow
+    const completion = flow
       .pollForToken(deviceCode, interval, config, expiresIn, controller.signal)
       .then(async (tokens) => {
         const expiresAt = tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined;
@@ -229,7 +247,11 @@ export class OAuthManager {
           tokens.refresh_token,
           expiresAt,
         );
-      })
+      });
+    // Derived chain: keeps onBackgroundFlowError semantics AND marks the
+    // rejection handled, so an unawaited `completion` never becomes an
+    // unhandled rejection.
+    completion
       .catch((err: unknown) => {
         // An abort is an expected cancellation; anything else (poll failure,
         // timeout, completeOAuthFlow on a sealed engine) is surfaced — the
@@ -241,10 +263,6 @@ export class OAuthManager {
       .finally(() => {
         this.pendingFlows.delete(secretId);
       });
-  }
-
-  private static async defaultOpenBrowser(url: string): Promise<void> {
-    const openModule = await import("open");
-    await openModule.default(url);
+    return completion;
   }
 }

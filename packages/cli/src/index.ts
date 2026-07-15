@@ -24,6 +24,9 @@ import { registerAuthRevokeCommand } from "./commands/auth/revoke.js";
 import { registerPolicyGrantCommand } from "./commands/policy/grant.js";
 import { registerPolicyRevokeCommand } from "./commands/policy/revoke.js";
 import { registerPolicyListCommand } from "./commands/policy/list.js";
+import { registerOAuthConnectCommand } from "./commands/oauth/connect.js";
+import { registerOAuthStatusCommand } from "./commands/oauth/status.js";
+import { registerOAuthRefreshCommand } from "./commands/oauth/refresh.js";
 import { registerServerCommand } from "./commands/server.js";
 
 const program = new Command();
@@ -63,5 +66,11 @@ const policy = program.command("policy").description("Manage access policies");
 registerPolicyGrantCommand(policy);
 registerPolicyRevokeCommand(policy);
 registerPolicyListCommand(policy);
+
+// oauth subcommands
+const oauth = program.command("oauth").description("Connect and manage OAuth provider secrets");
+registerOAuthConnectCommand(oauth);
+registerOAuthStatusCommand(oauth);
+registerOAuthRefreshCommand(oauth);
 
 program.parse();

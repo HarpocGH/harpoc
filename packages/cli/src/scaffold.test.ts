@@ -16,12 +16,14 @@ describe("cli", () => {
     "@harpoc/shared",
     "@harpoc/core",
     "@harpoc/mcp-server",
+    "@harpoc/oauth-proxy",
     "@harpoc/rest-api",
   ]);
   describeWorkspaceDeps(pkgRoot, [
     "@harpoc/shared",
     "@harpoc/core",
     "@harpoc/mcp-server",
+    "@harpoc/oauth-proxy",
     "@harpoc/rest-api",
   ]);
 });

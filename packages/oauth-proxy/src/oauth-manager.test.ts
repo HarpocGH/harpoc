@@ -346,6 +346,52 @@ describe("OAuthManager device-code background poll lifecycle (code review Low O3
     expect(errors[0]?.secretId).toBe(secretId);
   });
 
+  it("completion resolves after the user grant and the secret becomes ACTIVE", async () => {
+    const handlers = pendingDeviceHandlers();
+    const manager = new OAuthManager(engine);
+
+    const result = await manager.startDeviceCode("dev-complete", makeDeviceCodeConfig());
+    expect(result.status).toBe("pending_authorization");
+
+    handlers.release();
+    await result.completion;
+
+    const info = await engine.getSecretInfo(result.handle);
+    expect(info.status).toBe("active");
+  });
+
+  it("completion rejects when background completion fails (sealed engine)", async () => {
+    const handlers = pendingDeviceHandlers();
+    const manager = new OAuthManager(engine);
+
+    const result = await manager.startDeviceCode("dev-reject", makeDeviceCodeConfig());
+
+    await engine.lock();
+    handlers.release();
+
+    await expect(result.completion).rejects.toMatchObject({ code: ErrorCode.VAULT_LOCKED });
+  });
+
+  it("completion rejects after cancelFlow and onBackgroundFlowError stays silent", async () => {
+    const handlers = pendingDeviceHandlers();
+    const errors: unknown[] = [];
+    const manager = new OAuthManager(engine, {
+      onBackgroundFlowError: (_secretId, err) => {
+        errors.push(err);
+      },
+    });
+
+    const result = await manager.startDeviceCode("dev-cancel-reject", makeDeviceCodeConfig());
+    const secretId = await engine.resolveSecretId(result.handle);
+    await vi.waitFor(() => {
+      expect(handlers.tokenHits()).toBeGreaterThan(0);
+    });
+
+    expect(manager.cancelFlow(secretId)).toBe(true);
+    await expect(result.completion).rejects.toBeDefined();
+    expect(errors).toHaveLength(0);
+  });
+
   it("an aborted poll is not reported as a background error", async () => {
     const handlers = pendingDeviceHandlers();
     const errors: unknown[] = [];

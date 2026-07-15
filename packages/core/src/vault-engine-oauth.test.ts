@@ -283,6 +283,35 @@ describe("refreshOAuthToken", () => {
     expect(events[0]?.detail).toHaveProperty("new_expires_at");
   });
 
+  it("audits a failed refresh with success=false and the error code", async () => {
+    tokenEndpointHandler = (_req, res) => {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "invalid_grant" }));
+    };
+
+    await engine.completeOAuthFlow(secretId, "old-access", "old-refresh", Date.now() - 1000);
+    await expect(engine.refreshOAuthToken(secretId)).rejects.toMatchObject({
+      code: ErrorCode.OAUTH_REFRESH_FAILED,
+    });
+
+    const events = engine.queryAudit({ eventType: AuditEventType.OAUTH_REFRESH });
+    const denied = events.find((e) => e.success === false);
+    expect(denied).toBeDefined();
+    expect(denied?.secret_id).toBe(secretId);
+    expect(denied?.detail).toMatchObject({
+      action: "refresh",
+      error: ErrorCode.OAUTH_REFRESH_FAILED,
+    });
+  });
+
+  it("a successful refresh logs no success=false OAUTH_REFRESH event", async () => {
+    await engine.completeOAuthFlow(secretId, "old-access", "old-refresh", Date.now() - 1000);
+    await engine.refreshOAuthToken(secretId);
+
+    const events = engine.queryAudit({ eventType: AuditEventType.OAUTH_REFRESH });
+    expect(events.filter((e) => !e.success)).toHaveLength(0);
+  });
+
   it("coalesces concurrent refreshes onto a single token-endpoint POST", async () => {
     await engine.completeOAuthFlow(secretId, "old-access", "old-refresh", Date.now() - 1000);
 

@@ -14,6 +14,13 @@ interface QuarantineEntry {
 export interface TokenRefreshSchedulerOptions {
   checkIntervalMs?: number;
   initialRetryDelayMs?: number;
+  /**
+   * Called when a scheduled per-token refresh fails after all retries (once
+   * per quarantine escalation, not per skipped tick). Default: no-op — the
+   * package stays console-free; the host decides how to report. `refreshNow`
+   * rethrows to its caller instead.
+   */
+  onRefreshError?: (secretId: string, err: unknown) => void;
 }
 
 export class TokenRefreshScheduler {
@@ -21,6 +28,7 @@ export class TokenRefreshScheduler {
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private checkIntervalMs: number;
   private initialRetryDelayMs: number;
+  private onRefreshError?: (secretId: string, err: unknown) => void;
   private tickInProgress = false;
   /**
    * Per-secret failure quarantine: a broken token (revoked grant, offline
@@ -33,6 +41,7 @@ export class TokenRefreshScheduler {
     this.engine = engine;
     this.checkIntervalMs = options?.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
     this.initialRetryDelayMs = options?.initialRetryDelayMs ?? DEFAULT_INITIAL_RETRY_DELAY_MS;
+    this.onRefreshError = options?.onRefreshError;
   }
 
   /**
@@ -93,9 +102,10 @@ export class TokenRefreshScheduler {
       if (entry && now < entry.nextAttemptAt) continue;
       try {
         await this.refreshWithRetry(token.secret_id);
-      } catch {
-        // Individual token refresh failure is logged by VaultEngine.
-        // We continue to process remaining tokens.
+      } catch (err) {
+        // One broken token must not halt the loop; the host is notified,
+        // remaining tokens are still processed.
+        this.onRefreshError?.(token.secret_id, err);
       }
     }
   }

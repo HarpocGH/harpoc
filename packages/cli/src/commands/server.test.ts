@@ -2,26 +2,37 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Hoisted mocks (available inside vi.mock factories) ─────────────
 
-const { mockEngine, mockMcpServer, mockMcpHttpServer, mockTransport, mockRestServer } = vi.hoisted(
-  () => ({
-    mockEngine: {
-      destroy: vi.fn().mockResolvedValue(undefined),
-    },
-    mockMcpServer: {
-      connect: vi.fn().mockResolvedValue(undefined),
-      close: vi.fn().mockResolvedValue(undefined),
-    },
-    mockMcpHttpServer: {
-      port: 3001,
-      endpoint: "/mcp",
-      close: vi.fn().mockResolvedValue(undefined),
-    },
-    mockTransport: {},
-    mockRestServer: {
-      close: vi.fn(),
-    },
-  }),
-);
+const {
+  mockEngine,
+  mockMcpServer,
+  mockMcpHttpServer,
+  mockTransport,
+  mockRestServer,
+  mockScheduler,
+  schedulerCtorCalls,
+} = vi.hoisted(() => ({
+  mockEngine: {
+    destroy: vi.fn().mockResolvedValue(undefined),
+  },
+  mockMcpServer: {
+    connect: vi.fn().mockResolvedValue(undefined),
+    close: vi.fn().mockResolvedValue(undefined),
+  },
+  mockMcpHttpServer: {
+    port: 3001,
+    endpoint: "/mcp",
+    close: vi.fn().mockResolvedValue(undefined),
+  },
+  mockTransport: {},
+  mockRestServer: {
+    close: vi.fn(),
+  },
+  mockScheduler: {
+    start: vi.fn(),
+    stop: vi.fn(),
+  },
+  schedulerCtorCalls: [] as { engine: unknown; options: Record<string, unknown> }[],
+}));
 
 // ── Module mocks ───────────────────────────────────────────────────
 
@@ -41,6 +52,15 @@ vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
 
 vi.mock("@harpoc/rest-api", () => ({
   startServer: vi.fn().mockReturnValue(mockRestServer),
+}));
+
+vi.mock("@harpoc/oauth-proxy", () => ({
+  TokenRefreshScheduler: vi
+    .fn()
+    .mockImplementation((engine: unknown, options: unknown) => {
+      schedulerCtorCalls.push({ engine, options: options as Record<string, unknown> });
+      return mockScheduler;
+    }),
 }));
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -67,9 +87,14 @@ async function run(args: string[]): Promise<void> {
 describe("server start", () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
   let errorSpy: ReturnType<typeof vi.spyOn>;
+  let priorSigintListeners: NodeJS.SignalsListener[];
+  let priorSigtermListeners: NodeJS.SignalsListener[];
 
   beforeEach(() => {
     vi.clearAllMocks();
+    schedulerCtorCalls.length = 0;
+    priorSigintListeners = process.listeners("SIGINT");
+    priorSigtermListeners = process.listeners("SIGTERM");
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit");
     });
@@ -77,6 +102,14 @@ describe("server start", () => {
   });
 
   afterEach(() => {
+    // Each run() registers shutdown handlers on the real process; drop only
+    // the ones this test added so they don't accumulate across the suite.
+    for (const listener of process.listeners("SIGINT")) {
+      if (!priorSigintListeners.includes(listener)) process.removeListener("SIGINT", listener);
+    }
+    for (const listener of process.listeners("SIGTERM")) {
+      if (!priorSigtermListeners.includes(listener)) process.removeListener("SIGTERM", listener);
+    }
     exitSpy.mockRestore();
     errorSpy.mockRestore();
   });
@@ -87,7 +120,7 @@ describe("server start", () => {
     await expect(run([])).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(errorSpy).toHaveBeenCalledWith(
-      "Error: At least one of --mcp, --mcp-http or --rest is required.",
+      "Error: At least one of --mcp, --mcp-http, --rest or --oauth-refresh is required.",
     );
   });
 
@@ -308,6 +341,74 @@ describe("server start", () => {
 
     // Restore for other tests
     console.log = originalLog;
+  });
+
+  // ── OAuth refresh scheduler ─────────────────────────────────────
+
+  it("--oauth-refresh alone is a valid start mode and starts the scheduler", async () => {
+    const { TokenRefreshScheduler } = await import("@harpoc/oauth-proxy");
+
+    await run(["--oauth-refresh"]);
+
+    expect(TokenRefreshScheduler).toHaveBeenCalledTimes(1);
+    expect(schedulerCtorCalls[0]?.engine).toBe(mockEngine);
+    expect(mockScheduler.start).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("OAuth token refresh scheduler running"),
+    );
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it("--rest --oauth-refresh starts both", async () => {
+    const { startServer } = await import("@harpoc/rest-api");
+
+    await run(["--rest", "--oauth-refresh"]);
+
+    expect(startServer).toHaveBeenCalled();
+    expect(mockScheduler.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("--rest alone does not construct a scheduler (negative control)", async () => {
+    const { TokenRefreshScheduler } = await import("@harpoc/oauth-proxy");
+
+    await run(["--rest"]);
+
+    expect(TokenRefreshScheduler).not.toHaveBeenCalled();
+    expect(mockScheduler.start).not.toHaveBeenCalled();
+  });
+
+  it("onRefreshError prints a Warning: line to stderr", async () => {
+    await run(["--oauth-refresh"]);
+
+    const options = schedulerCtorCalls[0]?.options as {
+      onRefreshError: (secretId: string, err: unknown) => void;
+    };
+    options.onRefreshError("secret-1", new Error("provider offline"));
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Warning: OAuth token refresh failed (secret-1): provider offline",
+    );
+  });
+
+  it("SIGINT shutdown stops the scheduler before destroying the engine", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    exitSpy.mockImplementation(() => undefined as never);
+
+    await run(["--oauth-refresh"]);
+
+    const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
+    expect(sigintCall).toBeDefined();
+    (sigintCall?.[1] as () => void)();
+
+    await vi.waitFor(() => {
+      expect(exitSpy).toHaveBeenCalledWith(0);
+    });
+    expect(mockScheduler.stop).toHaveBeenCalledTimes(1);
+    const stopOrder = mockScheduler.stop.mock.invocationCallOrder[0] as number;
+    const destroyOrder = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+    expect(stopOrder).toBeLessThan(destroyOrder);
+
+    onSpy.mockRestore();
   });
 
   // ── Shutdown ────────────────────────────────────────────────────

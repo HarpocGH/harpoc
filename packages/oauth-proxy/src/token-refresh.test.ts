@@ -197,6 +197,84 @@ describe("TokenRefreshScheduler", () => {
   });
 });
 
+describe("TokenRefreshScheduler onRefreshError", () => {
+  let scheduler: TokenRefreshScheduler;
+
+  afterEach(() => {
+    scheduler?.stop();
+    vi.useRealTimers();
+  });
+
+  it("invokes onRefreshError with secretId and error after retries are exhausted", async () => {
+    const refreshError = new Error("provider offline");
+    const { engine } = createMockEngine({
+      expiringTokens: [{ secret_id: "broken" }],
+      refreshError,
+    });
+    const reported: { secretId: string; err: unknown }[] = [];
+
+    scheduler = new TokenRefreshScheduler(engine as never, {
+      initialRetryDelayMs: 0,
+      onRefreshError: (secretId, err) => {
+        reported.push({ secretId, err });
+      },
+    });
+    await scheduler.tick();
+
+    expect(reported).toEqual([{ secretId: "broken", err: refreshError }]);
+  });
+
+  it("does not invoke onRefreshError on successful refresh", async () => {
+    const { engine } = createMockEngine({
+      expiringTokens: [{ secret_id: "healthy" }],
+    });
+    const onRefreshError = vi.fn();
+
+    scheduler = new TokenRefreshScheduler(engine as never, {
+      initialRetryDelayMs: 0,
+      onRefreshError,
+    });
+    await scheduler.tick();
+
+    expect(engine.refreshOAuthToken).toHaveBeenCalledOnce();
+    expect(onRefreshError).not.toHaveBeenCalled();
+  });
+
+  it("does not re-invoke onRefreshError for a token skipped by quarantine", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(1_700_000_000_000);
+
+    const { engine } = createMockEngine({
+      expiringTokens: [{ secret_id: "broken" }],
+      refreshError: new Error("dead"),
+    });
+    const onRefreshError = vi.fn();
+
+    scheduler = new TokenRefreshScheduler(engine as never, {
+      checkIntervalMs: 1000,
+      initialRetryDelayMs: 0,
+      onRefreshError,
+    });
+
+    await scheduler.tick(); // fails after retries → reported once, quarantined
+    await scheduler.tick(); // inside the window → skipped, no second report
+    expect(onRefreshError).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshNow rethrows to the caller without invoking onRefreshError", async () => {
+    const { engine } = createMockEngine({ refreshError: new Error("still dead") });
+    const onRefreshError = vi.fn();
+
+    scheduler = new TokenRefreshScheduler(engine as never, {
+      initialRetryDelayMs: 0,
+      onRefreshError,
+    });
+
+    await expect(scheduler.refreshNow("manual")).rejects.toThrow("still dead");
+    expect(onRefreshError).not.toHaveBeenCalled();
+  });
+});
+
 describe("TokenRefreshScheduler failure quarantine (code review Low O4)", () => {
   let scheduler: TokenRefreshScheduler;
 

@@ -556,15 +556,31 @@ const oauthProviderPresetValues = Object.values(OAuthProviderPreset) as [
 ];
 export const oauthProviderPresetSchema = z.enum(oauthProviderPresetValues);
 
-const httpsUrlSchema = z.string().url().startsWith("https://", "URL must use HTTPS");
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+// Mirrors core's validateUrl SSRF policy: HTTPS anywhere, plain HTTP for loopback only.
+const oauthEndpointUrlSchema = z
+  .string()
+  .url()
+  .refine((value) => {
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      return false;
+    }
+    return (
+      url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname))
+    );
+  }, "URL must use HTTPS (plain HTTP is allowed for loopback only)");
 
 export const oauthProviderConfigSchema = z
   .object({
     provider: oauthProviderPresetSchema,
     grant_type: oauthGrantTypeSchema,
-    token_endpoint: httpsUrlSchema,
-    auth_endpoint: httpsUrlSchema.optional(),
-    device_authorization_endpoint: httpsUrlSchema.optional(),
+    token_endpoint: oauthEndpointUrlSchema,
+    auth_endpoint: oauthEndpointUrlSchema.optional(),
+    device_authorization_endpoint: oauthEndpointUrlSchema.optional(),
     client_id: z.string().min(1),
     client_secret: z.string().min(1).optional(),
     token_endpoint_auth_method: z.enum(["client_secret_post", "client_secret_basic"]).optional(),
@@ -601,9 +617,9 @@ export const startOAuthFlowInputSchema = z.object({
   token_endpoint_auth_method: z.enum(["client_secret_post", "client_secret_basic"]).optional(),
   scopes: z.array(z.string().min(1)).optional(),
   project: namePattern.optional(),
-  auth_endpoint: httpsUrlSchema.optional(),
-  token_endpoint: httpsUrlSchema.optional(),
-  device_authorization_endpoint: httpsUrlSchema.optional(),
+  auth_endpoint: oauthEndpointUrlSchema.optional(),
+  token_endpoint: oauthEndpointUrlSchema.optional(),
+  device_authorization_endpoint: oauthEndpointUrlSchema.optional(),
 });
 
 // ---------------------------------------------------------------------------

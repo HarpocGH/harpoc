@@ -41,6 +41,9 @@ importers:
       '@harpoc/mcp-server':
         specifier: workspace:*
         version: link:../mcp-server
+      '@harpoc/oauth-proxy':
+        specifier: workspace:*
+        version: link:../oauth-proxy
       '@harpoc/rest-api':
         specifier: workspace:*
         version: link:../rest-api

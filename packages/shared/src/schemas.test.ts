@@ -1124,6 +1124,41 @@ describe("oauthProviderConfigSchema", () => {
     ).toThrow();
   });
 
+  it("accepts loopback HTTP endpoints (dev/test providers)", () => {
+    const result = oauthProviderConfigSchema.parse({
+      ...baseConfig,
+      token_endpoint: "http://127.0.0.1:8080/token",
+      auth_endpoint: "http://localhost:8080/authorize",
+    });
+    expect(result.token_endpoint).toBe("http://127.0.0.1:8080/token");
+  });
+
+  it("accepts IPv6 loopback HTTP token_endpoint", () => {
+    const result = oauthProviderConfigSchema.parse({
+      ...baseConfig,
+      token_endpoint: "http://[::1]:8080/token",
+    });
+    expect(result.token_endpoint).toBe("http://[::1]:8080/token");
+  });
+
+  it("rejects non-loopback HTTP token_endpoint (private-range IP)", () => {
+    expect(() =>
+      oauthProviderConfigSchema.parse({
+        ...baseConfig,
+        token_endpoint: "http://192.168.1.10:8080/token",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects non-loopback HTTP auth_endpoint", () => {
+    expect(() =>
+      oauthProviderConfigSchema.parse({
+        ...baseConfig,
+        auth_endpoint: "http://example.com/authorize",
+      }),
+    ).toThrow();
+  });
+
   it("rejects empty client_id", () => {
     expect(() =>
       oauthProviderConfigSchema.parse({
@@ -1214,6 +1249,29 @@ describe("startOAuthFlowInputSchema", () => {
         grant_type: "authorization_code",
         client_id: "client-123",
         token_endpoint: "http://insecure.example.com/token",
+      }),
+    ).toThrow();
+  });
+
+  it("accepts loopback HTTP endpoints", () => {
+    const result = startOAuthFlowInputSchema.parse({
+      name: "token",
+      provider: "custom",
+      grant_type: "client_credentials",
+      client_id: "client-123",
+      token_endpoint: "http://127.0.0.1:9999/token",
+    });
+    expect(result.token_endpoint).toBe("http://127.0.0.1:9999/token");
+  });
+
+  it("rejects non-loopback HTTP device_authorization_endpoint", () => {
+    expect(() =>
+      startOAuthFlowInputSchema.parse({
+        name: "token",
+        provider: "custom",
+        grant_type: "device_code",
+        client_id: "client-123",
+        device_authorization_endpoint: "http://10.0.0.5/device",
       }),
     ).toThrow();
   });

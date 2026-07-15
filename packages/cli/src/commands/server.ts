@@ -27,6 +27,7 @@ export function registerServerCommand(program: Command): void {
       "--token <jwt>",
       "Launch token for MCP scope enforcement (stdio only); prefer the HARPOC_TOKEN environment variable — command-line arguments are visible to other local processes",
     )
+    .option("--oauth-refresh", "Refresh expiring OAuth tokens in the background (60s interval)")
     .action(
       async (
         opts: {
@@ -37,13 +38,16 @@ export function registerServerCommand(program: Command): void {
           port: string;
           host: string;
           token?: string;
+          oauthRefresh?: boolean;
         },
         cmd: Command,
       ) => {
         let engine: Awaited<ReturnType<typeof loadUnlockedEngine>> | undefined;
         try {
-          if (!opts.mcp && !opts.mcpHttp && !opts.rest) {
-            console.error("Error: At least one of --mcp, --mcp-http or --rest is required.");
+          if (!opts.mcp && !opts.mcpHttp && !opts.rest && !opts.oauthRefresh) {
+            console.error(
+              "Error: At least one of --mcp, --mcp-http, --rest or --oauth-refresh is required.",
+            );
             process.exit(1);
           }
 
@@ -70,11 +74,13 @@ export function registerServerCommand(program: Command): void {
           let mcpServer: { close(): Promise<void> } | undefined;
           let mcpHttpServer: { close(): Promise<void> } | undefined;
           let restServer: { close(): void } | undefined;
+          let refreshScheduler: { stop(): void } | undefined;
           let shuttingDown = false;
 
           const shutdown = async (): Promise<void> => {
             if (shuttingDown) return;
             shuttingDown = true;
+            refreshScheduler?.stop();
             if (mcpServer) await mcpServer.close();
             if (mcpHttpServer) await mcpHttpServer.close();
             if (restServer) restServer.close();
@@ -121,6 +127,22 @@ export function registerServerCommand(program: Command): void {
           if (opts.rest) {
             const { startServer } = await import("@harpoc/rest-api");
             restServer = startServer({ engine, port, hostname: opts.host });
+          }
+
+          if (opts.oauthRefresh) {
+            const { TokenRefreshScheduler } = await import("@harpoc/oauth-proxy");
+            const scheduler = new TokenRefreshScheduler(engine, {
+              onRefreshError: (secretId, err) => {
+                // A refresh racing shutdown fails with vaultLocked — not operator-actionable.
+                if (shuttingDown) return;
+                console.error(
+                  `Warning: OAuth token refresh failed (${secretId}): ${err instanceof Error ? err.message : String(err)}`,
+                );
+              },
+            });
+            scheduler.start();
+            refreshScheduler = scheduler;
+            console.error("[harpoc] OAuth token refresh scheduler running (60s interval)");
           }
         } catch (err: unknown) {
           await engine?.destroy();
