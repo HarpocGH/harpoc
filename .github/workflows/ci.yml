@@ -32,6 +32,24 @@ jobs:
           echo 746573746b6579 | keyctl padd user harpoc-ci-probe @u || echo "::warning::kernel keyring probe failed"
           keyctl search @u user harpoc-ci-probe || true
           keyctl purge user harpoc-ci-probe || true
+      - name: Probe network isolation (diagnostic)
+        if: runner.os == 'Linux'
+        # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor
+        # (apparmor_restrict_unprivileged_userns). The suite's live probe
+        # skips gracefully either way; this step surfaces the real error so
+        # a skipped leg is diagnosable from the log. If it reports denial,
+        # relax the restriction for the runner:
+        #   sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: |
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true
+          unshare -rn -- /bin/true && echo "unshare -rn OK" || {
+            echo "::warning::unshare -rn probe failed — relaxing AppArmor userns restriction"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+            unshare -rn -- /bin/true && echo "unshare -rn OK after sysctl" || echo "::warning::unshare -rn still failing"
+          }
+      - name: Probe network isolation (diagnostic)
+        if: runner.os == 'macOS'
+        run: /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)' /usr/bin/true && echo "sandbox-exec OK" || echo "::warning::sandbox-exec probe failed"
       - name: Provision disposable unlocked macOS test keychain
         if: runner.os == 'macOS'
         run: |
