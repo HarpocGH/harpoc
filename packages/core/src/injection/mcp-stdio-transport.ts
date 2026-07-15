@@ -101,6 +101,13 @@ export class StdioChildTransport implements Transport {
       });
       child.stderr?.on("data", (chunk: Buffer) => this.stderrTail.push(chunk));
 
+      // EPIPE lands on the stdin stream (not the ChildProcess) when the child
+      // dies mid-write — without a listener it crashes the process as an
+      // unhandled 'error' event (observed on macOS, where a fast-exiting child
+      // races the initialize write). The write failure itself is surfaced by
+      // send()'s callback; exit forensics arrive via 'close'.
+      child.stdin?.on("error", () => {});
+
       child.on("close", (code, signal) => {
         this.exitInfo = { code, signal };
         this.child = null;
@@ -118,12 +125,12 @@ export class StdioChildTransport implements Transport {
         reject(new Error("Not connected"));
         return;
       }
-      const json = serializeMessage(message);
-      if (stdin.write(json)) {
-        resolve();
-      } else {
-        stdin.once("drain", resolve);
-      }
+      // The write callback fires on flush or failure — a dead pipe rejects
+      // instead of waiting forever for a 'drain' that never comes.
+      stdin.write(serializeMessage(message), (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
     });
   }
 

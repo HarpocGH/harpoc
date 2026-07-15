@@ -110,9 +110,9 @@ describe("StdioChildTransport — teardown", () => {
     await transport.start();
     await transport.close();
 
-    await expect(
-      transport.send({ jsonrpc: "2.0", id: 1, method: "ping" }),
-    ).rejects.toThrow("Not connected");
+    await expect(transport.send({ jsonrpc: "2.0", id: 1, method: "ping" })).rejects.toThrow(
+      "Not connected",
+    );
   });
 
   it("start() rejects when the binary cannot be spawned", async () => {
@@ -122,5 +122,32 @@ describe("StdioChildTransport — teardown", () => {
       env: {},
     });
     await expect(transport.start()).rejects.toThrow();
+  });
+});
+
+describe("StdioChildTransport — dead stdin pipe", () => {
+  // Regression (macOS CI): a child dying mid-write emitted EPIPE on the stdin
+  // stream, which had no 'error' listener — an unhandled 'error' event that
+  // crashed the whole test process — and send() could wait forever on a
+  // 'drain' that never comes. Destroying the parent-side stream with an EPIPE
+  // error reproduces both halves deterministically on every platform: the
+  // stream emits 'error' (swallowed by the fix's listener, fatal without it)
+  // and the next write must reject through the send() callback.
+  it("send() rejects on a dead stdin pipe instead of hanging or crashing", async () => {
+    const transport = makeTransport(`setInterval(() => {}, 1000);`);
+    await transport.start();
+
+    try {
+      const child = (transport as unknown as { child: { stdin: { destroy(e?: Error): void } } })
+        .child;
+      child.stdin.destroy(new Error("write EPIPE"));
+      // Let the destroy's 'error' event fire — unhandled, it would crash here.
+      await new Promise((r) => setTimeout(r, 20));
+
+      await expect(transport.send({ jsonrpc: "2.0", id: 1, method: "ping" })).rejects.toThrow();
+    } finally {
+      transport.killSync();
+      await transport.close();
+    }
   });
 });

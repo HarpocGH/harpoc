@@ -56,10 +56,7 @@ afterAll(() => {
 });
 
 beforeEach(async () => {
-  tempDir = join(
-    tmpdir(),
-    `harpoc-oauth-mgr-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-  );
+  tempDir = join(tmpdir(), `harpoc-oauth-mgr-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
   engine = new VaultEngine({
     dbPath: join(tempDir, "test.vault.db"),
@@ -319,9 +316,13 @@ describe("OAuthManager device-code background poll lifecycle (code review Low O3
     await vi.waitFor(() => {
       expect(manager.cancelFlow(secretId)).toBe(false);
     });
-    // ...and no further polling reaches the endpoint.
-    const frozen = handlers.tokenHits();
+    // ...and no further polling reaches the endpoint. One request may already
+    // be on the wire when the abort lands — let it drain before snapshotting,
+    // then hold the freeze over a window spanning many 0-interval poll
+    // iterations (a live poll would add dozens of hits here).
     await new Promise((r) => setTimeout(r, 150));
+    const frozen = handlers.tokenHits();
+    await new Promise((r) => setTimeout(r, 300));
     expect(handlers.tokenHits()).toBe(frozen);
   });
 

@@ -140,16 +140,23 @@ describe("vault version guard", () => {
 });
 
 describe("session TTL enforcement for long-lived engines", () => {
-  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  // Fake timers freeze Date.now(), so the pre-expiry assertion cannot flake
+  // under load (a real 300 ms TTL legitimately elapsed mid-test on slow CI
+  // runners) and the expiry jump needs no real sleep — the synchronous
+  // assertUnlocked seal path is what's under test, not the monitor.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   it("seals an initVault() engine once its session TTL expires", async () => {
+    vi.useFakeTimers();
     const eng = new VaultEngine({ dbPath, sessionPath, sessionTtlMs: 300 });
     await eng.initVault("password");
 
-    // Works immediately after unlock (not sealed prematurely).
+    // Works at unlock time (not sealed prematurely) — clock is frozen.
     expect(eng.listSecrets()).toEqual([]);
 
-    await sleep(500);
+    vi.setSystemTime(Date.now() + 500);
 
     expect(() => eng.listSecrets()).toThrow(VaultError);
     try {
@@ -165,11 +172,12 @@ describe("session TTL enforcement for long-lived engines", () => {
     await engine.initVault("password");
     await engine.lock();
 
+    vi.useFakeTimers();
     const eng = new VaultEngine({ dbPath, sessionPath, sessionTtlMs: 300 });
     await eng.unlock("password");
     expect(eng.getState()).toBe(VaultState.UNLOCKED);
 
-    await sleep(500);
+    vi.setSystemTime(Date.now() + 500);
 
     expect(() => eng.listSecrets()).toThrow(VaultError);
     expect(eng.getState()).toBe(VaultState.SEALED);
@@ -783,9 +791,10 @@ describe("audit-chain anchor (tail truncation)", () => {
     expect(anchor?.row_hmac).toMatch(/^[0-9a-f]{64}$/);
 
     const db = new Database(dbPath);
-    const row = db
-      .prepare("SELECT id, row_hmac FROM audit_log ORDER BY id DESC LIMIT 1")
-      .get() as { id: number; row_hmac: Buffer };
+    const row = db.prepare("SELECT id, row_hmac FROM audit_log ORDER BY id DESC LIMIT 1").get() as {
+      id: number;
+      row_hmac: Buffer;
+    };
     db.close();
     expect(anchor?.last_id).toBe(row.id);
     expect(anchor?.row_hmac).toBe(row.row_hmac.toString("hex"));
@@ -1099,10 +1108,9 @@ describe("use_secret action dispatch", () => {
       value: new Uint8Array(Buffer.from("v")),
     });
     try {
-      await engine.useSecret(
-        "secret://dispatch",
-        { type: "ftp" } as unknown as Parameters<VaultEngine["useSecret"]>[1],
-      );
+      await engine.useSecret("secret://dispatch", { type: "ftp" } as unknown as Parameters<
+        VaultEngine["useSecret"]
+      >[1]);
       expect.fail("should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
@@ -1409,7 +1417,9 @@ describe("useSecret (ssh) — engine dispatch", () => {
     await engine.createSecret({
       name: "sshkey",
       type: "api_key",
-      value: new Uint8Array(Buffer.from("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----")),
+      value: new Uint8Array(
+        Buffer.from("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----"),
+      ),
     });
   });
 
