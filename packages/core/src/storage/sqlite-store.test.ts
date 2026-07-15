@@ -114,8 +114,8 @@ describe("schema creation", () => {
     expect(row?.name).toBe("connection_configs");
   });
 
-  it("sets schema_version to 10", () => {
-    expect(store.getMeta("schema_version")).toBe("10");
+  it("sets schema_version to 11", () => {
+    expect(store.getMeta("schema_version")).toBe("11");
   });
 
   it("creates the live-name unique index", () => {
@@ -642,6 +642,7 @@ function makeOAuthToken(secretId: string, overrides: Partial<OAuthTokenRow> = {}
     access_token_expires_at: null,
     redirect_uri: null,
     pkce_method: "S256",
+    token_endpoint_auth_method: null,
     ...overrides,
   };
 }
@@ -695,6 +696,22 @@ describe("oauth_tokens CRUD", () => {
 
   it("returns undefined for missing OAuth token", () => {
     expect(store.getOAuthToken("nonexistent")).toBeUndefined();
+  });
+
+  it("roundtrips token_endpoint_auth_method and defaults it to null", () => {
+    const basicSecret = makeSecret({ type: SecretType.OAUTH_TOKEN });
+    store.insertSecret(basicSecret);
+    store.insertOAuthToken(
+      makeOAuthToken(basicSecret.id, { token_endpoint_auth_method: "client_secret_basic" }),
+    );
+    expect(store.getOAuthToken(basicSecret.id)?.token_endpoint_auth_method).toBe(
+      "client_secret_basic",
+    );
+
+    const legacySecret = makeSecret({ type: SecretType.OAUTH_TOKEN });
+    store.insertSecret(legacySecret);
+    store.insertOAuthToken(makeOAuthToken(legacySecret.id));
+    expect(store.getOAuthToken(legacySecret.id)?.token_endpoint_auth_method).toBeNull();
   });
 
   it("stores and retrieves encrypted client_id blob", () => {

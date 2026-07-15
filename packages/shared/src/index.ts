@@ -5,4 +5,5 @@ export * from "./handle.js";
 export * from "./interpreters.js";
 export * from "./name-pattern.js";
 export * from "./schemas.js";
+export * from "./token-endpoint-auth.js";
 export * from "./version.js";

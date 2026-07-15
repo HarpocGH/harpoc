@@ -21,6 +21,7 @@ import {
   AAD_CONNECTION_CONFIG,
   AAD_INJECTION_POLICY,
   AAD_MCP_SERVER_CONFIG,
+  applyTokenEndpointAuth,
   AUDIT_CHAIN_ANCHOR_FORMAT,
   AAD_OAUTH_ACCESS_TOKEN,
   AAD_OAUTH_CLIENT_ID,
@@ -1060,6 +1061,7 @@ export class VaultEngine {
       access_token_expires_at: null,
       redirect_uri: providerConfig.redirect_uri ?? null,
       pkce_method: providerConfig.pkce_method ?? "S256",
+      token_endpoint_auth_method: providerConfig.token_endpoint_auth_method ?? null,
     });
 
     s.auditLogger.log({
@@ -1228,21 +1230,32 @@ export class VaultEngine {
     // Validate token endpoint (SSRF protection)
     await validateUrl(oauthRow.token_endpoint);
 
-    // POST to token endpoint
+    // POST to token endpoint. Client authentication follows the stored
+    // token_endpoint_auth_method (migration 011); anything other than
+    // "client_secret_basic" — including NULL on legacy rows — degrades to
+    // client_secret_post, the pre-migration wire shape.
+    const authMethod =
+      oauthRow.token_endpoint_auth_method === "client_secret_basic"
+        ? ("client_secret_basic" as const)
+        : ("client_secret_post" as const);
     const params = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
-      client_id: clientId,
     });
-    if (clientSecret) {
-      params.set("client_secret", clientSecret);
-    }
+    const headers: Record<string, string> = {
+      "Content-Type": "application/x-www-form-urlencoded",
+    };
+    applyTokenEndpointAuth(
+      { client_id: clientId, client_secret: clientSecret, token_endpoint_auth_method: authMethod },
+      params,
+      headers,
+    );
 
     let response: Response;
     try {
       response = await fetch(oauthRow.token_endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers,
         body: params.toString(),
         signal: AbortSignal.timeout(30_000),
       });
@@ -1360,6 +1373,11 @@ export class VaultEngine {
       has_refresh_token: hasRefreshToken,
       last_refreshed_at: secret?.updated_at ?? null,
       refresh_status: refreshStatus,
+      token_endpoint_auth_method:
+        oauthRow.token_endpoint_auth_method === "client_secret_basic" ||
+        oauthRow.token_endpoint_auth_method === "client_secret_post"
+          ? oauthRow.token_endpoint_auth_method
+          : null,
     };
   }
 

@@ -186,7 +186,7 @@ npx harpoc oauth connect m2m-token --provider custom --client-id <CLIENT_ID> \
   --token-endpoint https://auth.example.com/token --client-credentials
 ```
 
-The client secret is never passed via argv: set `HARPOC_OAUTH_CLIENT_SECRET` or enter it at the hidden prompt (leave empty for a public client). Inspect and maintain tokens with `harpoc oauth status <handle>` and `harpoc oauth refresh <handle>`, or refresh them continuously in a long-lived server:
+The client secret is never passed via argv: set `HARPOC_OAUTH_CLIENT_SECRET` or enter it at the hidden prompt (leave empty for a public client). The token-endpoint auth method chosen at connect time (`--auth-method client_secret_basic` sends credentials in the `Authorization` header, never the request body) is stored with the secret and honored by every later refresh. Inspect and maintain tokens with `harpoc oauth status <handle>` and `harpoc oauth refresh <handle>`, or refresh them continuously in a long-lived server:
 
 ```bash
 npx harpoc server start --rest --oauth-refresh   # or --oauth-refresh alone as a refresh daemon

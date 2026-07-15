@@ -1,10 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { validateUrl } from "@harpoc/core";
-import { VaultError } from "@harpoc/shared";
+import { VaultError, applyTokenEndpointAuth } from "@harpoc/shared";
 import type { OAuthProviderConfig } from "@harpoc/shared";
 import { generateCodeChallenge, generateCodeVerifier } from "../pkce.js";
 import { getScopesSeparator } from "../providers.js";
-import { applyTokenEndpointAuth } from "../token-endpoint-auth.js";
 
 export interface AuthCodeFlowStartResult {
   auth_url: string;

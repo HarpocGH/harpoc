@@ -144,6 +144,15 @@ CREATE TABLE oauth_tokens (
 ) STRICT;
 `;
 
+/**
+ * Client authentication method at the token endpoint (migration 011). Plain
+ * provider metadata like token_endpoint/pkce_method — nothing secret. NULL
+ * (legacy rows) means client_secret_post, preserving pre-migration behavior.
+ */
+export const ALTER_OAUTH_TOKENS_ADD_AUTH_METHOD = `
+ALTER TABLE oauth_tokens ADD COLUMN token_endpoint_auth_method TEXT;
+`;
+
 export const CREATE_CERTIFICATES = `
 CREATE TABLE certificates (
   secret_id                TEXT PRIMARY KEY REFERENCES secrets(id) ON DELETE CASCADE,

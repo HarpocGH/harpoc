@@ -19,6 +19,7 @@ import { migration007 } from "./migrations/007-mcp-servers.js";
 import { migration008 } from "./migrations/008-connection-configs.js";
 import { migration009 } from "./migrations/009-name-hmac-unique.js";
 import { migration010 } from "./migrations/010-audit-row-hmac.js";
+import { migration011 } from "./migrations/011-oauth-auth-method.js";
 
 /** True for a better-sqlite3 UNIQUE/PRIMARY-KEY constraint violation. */
 export function isUniqueConstraintError(err: unknown): boolean {
@@ -85,6 +86,7 @@ export interface OAuthTokenRow {
   access_token_expires_at: number | null;
   redirect_uri: string | null;
   pkce_method: string;
+  token_endpoint_auth_method: string | null;
 }
 
 /** Certificate record for DB storage (encrypted fields as Buffer/Uint8Array). */
@@ -258,6 +260,12 @@ export class SqliteStore {
       this.db.transaction(() => {
         this.db.exec(migration010.up);
         this.setMeta("schema_version", "10");
+      })();
+    }
+    if (currentVersion < 11) {
+      this.db.transaction(() => {
+        this.db.exec(migration011.up);
+        this.setMeta("schema_version", "11");
       })();
     }
   }
@@ -669,7 +677,8 @@ export class SqliteStore {
             scopes,
             refresh_token_encrypted, refresh_token_iv, refresh_token_tag,
             access_token_encrypted, access_token_iv, access_token_tag,
-            access_token_expires_at, redirect_uri, pkce_method
+            access_token_expires_at, redirect_uri, pkce_method,
+            token_endpoint_auth_method
           ) VALUES (
             ?, ?, ?, ?, ?,
             ?, ?, ?,
@@ -677,7 +686,8 @@ export class SqliteStore {
             ?,
             ?, ?, ?,
             ?, ?, ?,
-            ?, ?, ?
+            ?, ?, ?,
+            ?
           )`,
         )
         .run(
@@ -702,6 +712,7 @@ export class SqliteStore {
           record.access_token_expires_at,
           record.redirect_uri,
           record.pkce_method,
+          record.token_endpoint_auth_method,
         );
     } catch (err) {
       throw VaultError.databaseError(
@@ -1171,6 +1182,7 @@ export class SqliteStore {
       access_token_expires_at: (row.access_token_expires_at as number) ?? null,
       redirect_uri: (row.redirect_uri as string) ?? null,
       pkce_method: (row.pkce_method as string) ?? "S256",
+      token_endpoint_auth_method: (row.token_endpoint_auth_method as string) ?? null,
     };
   }
 

@@ -51,6 +51,7 @@ describe("oauth status / oauth refresh", () => {
       has_refresh_token: true,
       last_refreshed_at: null,
       refresh_status: "ok",
+      token_endpoint_auth_method: "client_secret_basic",
     });
     mockEngine.refreshOAuthToken.mockResolvedValue(1_800_000_000_000);
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
@@ -81,6 +82,30 @@ describe("oauth status / oauth refresh", () => {
     const printed = JSON.parse(logSpy.mock.calls[0]?.[0] as string) as Record<string, unknown>;
     expect(printed.refresh_status).toBe("ok");
     expect(printed.provider).toBe("github");
+    expect(printed.token_endpoint_auth_method).toBe("client_secret_basic");
+  });
+
+  it("status prints the configured token-endpoint auth method", async () => {
+    await run(["status", "secret://gh-token"]);
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("client_secret_basic"));
+  });
+
+  it("status renders a legacy null auth method as client_secret_post", async () => {
+    mockEngine.getOAuthTokenStatus.mockReturnValue({
+      secret_id: "secret-id-1",
+      provider: "github",
+      has_access_token: true,
+      access_token_expires_at: 1_800_000_000_000,
+      has_refresh_token: true,
+      last_refreshed_at: null,
+      refresh_status: "ok",
+      token_endpoint_auth_method: null,
+    });
+
+    await run(["status", "secret://gh-token"]);
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("client_secret_post"));
   });
 
   it("refresh calls engine.refreshOAuthToken and prints the new expiry", async () => {

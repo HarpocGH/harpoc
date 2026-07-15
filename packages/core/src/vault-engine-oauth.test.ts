@@ -3,6 +3,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import type { OAuthProviderConfig } from "@harpoc/shared";
@@ -392,6 +393,190 @@ describe("refreshOAuthToken", () => {
 });
 
 // ---------------------------------------------------------------------------
+// refreshOAuthToken — token-endpoint auth methods (migration 011)
+// ---------------------------------------------------------------------------
+
+describe("refreshOAuthToken token-endpoint auth methods", () => {
+  interface CapturedTokenRequest {
+    authorization: string | undefined;
+    body: URLSearchParams;
+  }
+
+  let captured: CapturedTokenRequest[];
+
+  /** Record every token-endpoint request (auth header + parsed form body), respond 200. */
+  function captureTokenRequests(): void {
+    captured = [];
+    tokenEndpointHandler = (req, res) => {
+      let data = "";
+      req.on("data", (chunk: Buffer) => {
+        data += chunk.toString("utf8");
+      });
+      req.on("end", () => {
+        captured.push({
+          authorization: req.headers.authorization,
+          body: new URLSearchParams(data),
+        });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            access_token: "refreshed-access-token",
+            refresh_token: "refreshed-refresh-token",
+            expires_in: 3600,
+          }),
+        );
+      });
+    };
+  }
+
+  async function createActiveOAuthSecret(
+    name: string,
+    overrides?: Partial<OAuthProviderConfig>,
+  ): Promise<string> {
+    const { secretId } = await engine.createOAuthSecret(name, defaultProviderConfig(overrides));
+    await engine.completeOAuthFlow(secretId, "old-access", "old-refresh", Date.now() - 1000);
+    return secretId;
+  }
+
+  beforeEach(async () => {
+    await engine.initVault("password");
+    captureTokenRequests();
+  });
+
+  it("client_secret_basic sends Authorization: Basic and keeps credentials out of the body", async () => {
+    const secretId = await createActiveOAuthSecret("basic-refresh", {
+      token_endpoint_auth_method: "client_secret_basic",
+    });
+
+    await engine.refreshOAuthToken(secretId);
+
+    expect(captured).toHaveLength(1);
+    const request = captured[0] as CapturedTokenRequest;
+    // Expected header computed inline with the RFC 6749 §2.3.1 recipe — not
+    // via the shared helper, which is the implementation under test.
+    const expected = `Basic ${Buffer.from(
+      `${encodeURIComponent("my-client-id")}:${encodeURIComponent("my-client-secret")}`,
+      "utf8",
+    ).toString("base64")}`;
+    expect(request.authorization).toBe(expected);
+    expect(request.body.get("grant_type")).toBe("refresh_token");
+    expect(request.body.get("refresh_token")).toBe("old-refresh");
+    expect(request.body.has("client_id")).toBe(false);
+    expect(request.body.has("client_secret")).toBe(false);
+
+    expect(await engine.getOAuthAccessToken(secretId)).toBe("refreshed-access-token");
+  });
+
+  it("form-urlencodes credential halves through the full encrypt-store-refresh stack", async () => {
+    const clientId = "cid:with/reserved%chars+";
+    const clientSecret = "se:cret%20+/?";
+    const secretId = await createActiveOAuthSecret("encoding-refresh", {
+      client_id: clientId,
+      client_secret: clientSecret,
+      token_endpoint_auth_method: "client_secret_basic",
+    });
+
+    await engine.refreshOAuthToken(secretId);
+
+    const authorization = (captured[0] as CapturedTokenRequest).authorization as string;
+    const pair = Buffer.from(authorization.replace(/^Basic /, ""), "base64").toString("utf8");
+    const separator = pair.indexOf(":");
+    expect(decodeURIComponent(pair.slice(0, separator))).toBe(clientId);
+    expect(decodeURIComponent(pair.slice(separator + 1))).toBe(clientSecret);
+  });
+
+  it("no stored method refreshes with credentials in the body (legacy wire shape)", async () => {
+    const secretId = await createActiveOAuthSecret("legacy-refresh");
+
+    await engine.refreshOAuthToken(secretId);
+
+    const request = captured[0] as CapturedTokenRequest;
+    expect(request.authorization).toBeUndefined();
+    expect(request.body.get("client_id")).toBe("my-client-id");
+    expect(request.body.get("client_secret")).toBe("my-client-secret");
+    expect(request.body.get("refresh_token")).toBe("old-refresh");
+  });
+
+  it("explicit client_secret_post refreshes with credentials in the body", async () => {
+    const secretId = await createActiveOAuthSecret("post-refresh", {
+      token_endpoint_auth_method: "client_secret_post",
+    });
+
+    await engine.refreshOAuthToken(secretId);
+
+    const request = captured[0] as CapturedTokenRequest;
+    expect(request.authorization).toBeUndefined();
+    expect(request.body.get("client_id")).toBe("my-client-id");
+    expect(request.body.get("client_secret")).toBe("my-client-secret");
+  });
+
+  it("a NULL column and an unknown stored value both degrade to client_secret_post", async () => {
+    const secretId = await createActiveOAuthSecret("degrade-refresh", {
+      token_endpoint_auth_method: "client_secret_basic",
+    });
+
+    const db = new Database(dbPath);
+    db.prepare("UPDATE oauth_tokens SET token_endpoint_auth_method = NULL WHERE secret_id = ?").run(
+      secretId,
+    );
+    db.close();
+    await engine.refreshOAuthToken(secretId);
+
+    let request = captured[0] as CapturedTokenRequest;
+    expect(request.authorization).toBeUndefined();
+    expect(request.body.get("client_id")).toBe("my-client-id");
+
+    const db2 = new Database(dbPath);
+    db2
+      .prepare("UPDATE oauth_tokens SET token_endpoint_auth_method = ? WHERE secret_id = ?")
+      .run("private_key_jwt", secretId);
+    db2.close();
+    await engine.refreshOAuthToken(secretId);
+
+    request = captured[1] as CapturedTokenRequest;
+    expect(request.authorization).toBeUndefined();
+    expect(request.body.get("client_id")).toBe("my-client-id");
+    expect(request.body.get("client_secret")).toBe("my-client-secret");
+  });
+
+  it("client_secret_basic without a stored secret falls back to client_id in the body", async () => {
+    const secretId = await createActiveOAuthSecret("public-refresh", {
+      client_secret: undefined,
+      token_endpoint_auth_method: "client_secret_basic",
+    });
+
+    await engine.refreshOAuthToken(secretId);
+
+    const request = captured[0] as CapturedTokenRequest;
+    expect(request.authorization).toBeUndefined();
+    expect(request.body.get("client_id")).toBe("my-client-id");
+    expect(request.body.has("client_secret")).toBe(false);
+  });
+
+  it("createOAuthSecret persists the method to the row, defaulting to NULL", async () => {
+    const { secretId: basicId } = await engine.createOAuthSecret(
+      "persist-basic",
+      defaultProviderConfig({ token_endpoint_auth_method: "client_secret_basic" }),
+    );
+    const { secretId: defaultId } = await engine.createOAuthSecret(
+      "persist-default",
+      defaultProviderConfig(),
+    );
+
+    const db = new Database(dbPath, { readonly: true });
+    const rows = db
+      .prepare("SELECT secret_id, token_endpoint_auth_method FROM oauth_tokens")
+      .all() as { secret_id: string; token_endpoint_auth_method: string | null }[];
+    db.close();
+
+    expect(rows.find((r) => r.secret_id === basicId)?.token_endpoint_auth_method).toBe(
+      "client_secret_basic",
+    );
+    expect(rows.find((r) => r.secret_id === defaultId)?.token_endpoint_auth_method).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // getOAuthTokenStatus
 // ---------------------------------------------------------------------------
 
@@ -410,6 +595,26 @@ describe("getOAuthTokenStatus", () => {
 
     const status = engine.getOAuthTokenStatus(secretId);
     expect(status.refresh_status).toBe("expiring_soon");
+  });
+
+  it("surfaces the configured token-endpoint auth method, null for legacy rows", async () => {
+    expect(engine.getOAuthTokenStatus(secretId).token_endpoint_auth_method).toBeNull();
+
+    const basic = await engine.createOAuthSecret(
+      "status-basic",
+      defaultProviderConfig({ token_endpoint_auth_method: "client_secret_basic" }),
+    );
+    expect(engine.getOAuthTokenStatus(basic.secretId).token_endpoint_auth_method).toBe(
+      "client_secret_basic",
+    );
+
+    const post = await engine.createOAuthSecret(
+      "status-post",
+      defaultProviderConfig({ token_endpoint_auth_method: "client_secret_post" }),
+    );
+    expect(engine.getOAuthTokenStatus(post.secretId).token_endpoint_auth_method).toBe(
+      "client_secret_post",
+    );
   });
 
   it("returns expired when token has expired", async () => {

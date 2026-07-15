@@ -29,6 +29,7 @@ export function registerOAuthStatusCommand(oauth: Command): void {
               "Refresh token": status.has_refresh_token ? "yes" : "no",
               "Last refreshed": formatTimestamp(status.last_refreshed_at),
               "Refresh status": status.refresh_status,
+              "Token endpoint auth": status.token_endpoint_auth_method ?? "client_secret_post",
             });
           }
         } finally {
