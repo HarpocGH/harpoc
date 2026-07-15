@@ -1,11 +1,14 @@
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { auditChainAnchorSchema, VAULT_DB_NAME } from "@harpoc/shared";
+import { SqliteStore } from "@harpoc/core";
+import type { AuditChainAnchor } from "@harpoc/shared";
 
 const CLI_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js");
 const MASTER_PASSWORD = "smoke-master-pw-1";
@@ -147,4 +150,45 @@ describe("compiled binary smoke: oauth connect (client_credentials)", () => {
     }
     expect(capturedOutputs.length).toBeGreaterThan(0);
   });
+});
+
+describe("compiled binary smoke: audit anchor / verify --anchor", () => {
+  it("anchor prints schema-valid JSON to stdout and the off-host guidance to stderr", async () => {
+    const result = await runCli(["audit", "anchor"]);
+    expect(result.code).toBe(0);
+    const anchor = auditChainAnchorSchema.parse(JSON.parse(result.stdout));
+    expect(anchor.last_id).toBeGreaterThan(0);
+    expect(result.stderr).toContain("OFF-HOST");
+    expect(result.stdout).not.toContain("OFF-HOST");
+  }, 30_000);
+
+  it("anchor --out, verify --anchor roundtrip, truncation detection", async () => {
+    const anchorPath = join(vaultDir, "smoke.anchor");
+    const anchored = await runCli(["audit", "anchor", "--out", anchorPath]);
+    expect(anchored.code).toBe(0);
+    const anchor = auditChainAnchorSchema.parse(
+      JSON.parse(readFileSync(anchorPath, "utf8")),
+    ) as AuditChainAnchor;
+
+    const clean = await runCli(["audit", "verify", "--anchor", anchorPath]);
+    expect(clean.code).toBe(0);
+    expect(clean.stdout).toContain(`Anchor OK — row ${anchor.last_id} intact`);
+    expect(clean.stdout).toContain("Tail link: row");
+
+    // Attacker deletes the anchored tail row directly in the DB.
+    const store = new SqliteStore(join(vaultDir, VAULT_DB_NAME));
+    try {
+      store.db.prepare("DELETE FROM audit_log WHERE id >= ?").run(anchor.last_id);
+    } finally {
+      store.close();
+    }
+
+    // The plain verify stays blind to the truncation — the pinned vulnerability.
+    const plain = await runCli(["audit", "verify"]);
+    expect(plain.code).toBe(0);
+
+    const detected = await runCli(["audit", "verify", "--anchor", anchorPath]);
+    expect(detected.code).toBe(1);
+    expect(detected.stderr).toContain("FAILS the anchor check");
+  }, 30_000);
 });

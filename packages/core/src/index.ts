@@ -56,6 +56,9 @@ export { AuditLogger } from "./audit/audit-logger.js";
 export type { AuditLogOptions } from "./audit/audit-logger.js";
 export { AuditQuery } from "./audit/audit-query.js";
 export type {
+  AuditAnchorStatus,
+  AuditChainAnchorInput,
+  AuditChainTailLink,
   AuditChainVerification,
   AuditQueryOptions,
   DecryptedAuditEvent,
@@ -108,4 +111,4 @@ export type { ChildExitInfo, StdioChildParams } from "./injection/mcp-stdio-tran
 
 // VaultEngine
 export { VaultEngine } from "./vault-engine.js";
-export type { VaultEngineOptions } from "./vault-engine.js";
+export type { AuditChainVerificationReport, VaultEngineOptions } from "./vault-engine.js";

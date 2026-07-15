@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   accessPolicyInputSchema,
+  auditChainAnchorSchema,
   auditEventTypeSchema,
   auditQuerySchema,
   certificateImportSchema,
@@ -1522,5 +1523,76 @@ describe("httpActionSchema headers validation", () => {
       Array.from({ length: 65 }, (_, i) => [`X-H${i}`, "v"]),
     );
     expect(() => httpActionSchema.parse({ ...validHttp, headers })).toThrow();
+  });
+});
+
+describe("auditChainAnchorSchema", () => {
+  const validAnchor = {
+    format: "harpoc-audit-anchor/1",
+    vault_id: "9f1c2e34-0000-4000-8000-000000000000",
+    last_id: 4213,
+    timestamp: 1784306411000,
+    row_hmac: "a".repeat(64),
+  };
+
+  it("parses a valid anchor", () => {
+    expect(auditChainAnchorSchema.parse(validAnchor)).toEqual(validAnchor);
+  });
+
+  it("round-trips through JSON", () => {
+    const parsed = auditChainAnchorSchema.parse(JSON.parse(JSON.stringify(validAnchor)));
+    expect(parsed).toEqual(validAnchor);
+  });
+
+  it("rejects a wrong format literal", () => {
+    expect(() =>
+      auditChainAnchorSchema.parse({ ...validAnchor, format: "harpoc-audit-anchor/2" }),
+    ).toThrow();
+    expect(() => auditChainAnchorSchema.parse({ ...validAnchor, format: "anchor" })).toThrow();
+  });
+
+  it.each(["format", "vault_id", "last_id", "timestamp", "row_hmac"] as const)(
+    "rejects a missing %s field",
+    (field) => {
+      const partial = Object.fromEntries(
+        Object.entries(validAnchor).filter(([key]) => key !== field),
+      );
+      expect(() => auditChainAnchorSchema.parse(partial)).toThrow();
+    },
+  );
+
+  it("rejects unknown extra keys (strict)", () => {
+    expect(() => auditChainAnchorSchema.parse({ ...validAnchor, extra: 1 })).toThrow();
+  });
+
+  it("rejects an uppercase row_hmac", () => {
+    expect(() =>
+      auditChainAnchorSchema.parse({ ...validAnchor, row_hmac: "A".repeat(64) }),
+    ).toThrow();
+  });
+
+  it("rejects a short or long row_hmac", () => {
+    expect(() =>
+      auditChainAnchorSchema.parse({ ...validAnchor, row_hmac: "a".repeat(63) }),
+    ).toThrow();
+    expect(() =>
+      auditChainAnchorSchema.parse({ ...validAnchor, row_hmac: "a".repeat(65) }),
+    ).toThrow();
+  });
+
+  it("rejects non-hex characters in row_hmac", () => {
+    expect(() =>
+      auditChainAnchorSchema.parse({ ...validAnchor, row_hmac: "g".repeat(64) }),
+    ).toThrow();
+  });
+
+  it("rejects a non-integer or non-positive last_id", () => {
+    expect(() => auditChainAnchorSchema.parse({ ...validAnchor, last_id: 1.5 })).toThrow();
+    expect(() => auditChainAnchorSchema.parse({ ...validAnchor, last_id: 0 })).toThrow();
+    expect(() => auditChainAnchorSchema.parse({ ...validAnchor, last_id: "4213" })).toThrow();
+  });
+
+  it("rejects an empty vault_id", () => {
+    expect(() => auditChainAnchorSchema.parse({ ...validAnchor, vault_id: "" })).toThrow();
   });
 });

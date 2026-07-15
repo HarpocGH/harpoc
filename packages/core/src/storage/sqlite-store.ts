@@ -554,6 +554,21 @@ export class SqliteStore {
     return row?.row_hmac ? new Uint8Array(row.row_hmac) : null;
   }
 
+  /**
+   * The newest chained audit row (the anchorable chain tail), skipping trailing
+   * legacy rows. Distinct from getLastAuditRowHmac, which intentionally looks
+   * only at the very last row (insert-time chain semantics).
+   */
+  getLastChainedAuditRow(): { id: number; timestamp: number; row_hmac: Uint8Array } | null {
+    const row = this.db
+      .prepare(
+        "SELECT id, timestamp, row_hmac FROM audit_log WHERE row_hmac IS NOT NULL ORDER BY id DESC LIMIT 1",
+      )
+      .get() as { id: number; timestamp: number; row_hmac: Buffer } | undefined;
+    if (!row) return null;
+    return { id: row.id, timestamp: row.timestamp, row_hmac: new Uint8Array(row.row_hmac) };
+  }
+
   /** All audit rows in insertion order, with the fields the chain HMAC covers. */
   getAuditChainRows(): AuditChainRow[] {
     const rows = this.db

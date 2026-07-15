@@ -544,6 +544,32 @@ export const sessionFileSchema = z.object({
 export type SessionFile = z.infer<typeof sessionFileSchema>;
 
 // ---------------------------------------------------------------------------
+// Audit-chain anchor
+// ---------------------------------------------------------------------------
+
+export const AUDIT_CHAIN_ANCHOR_FORMAT = "harpoc-audit-anchor/1";
+
+/**
+ * Exportable audit-chain tail link. Comparing a stored anchor against the
+ * live chain detects tail truncation and database rollback — attacks the
+ * chain HMACs alone cannot see, since a shorter chain is still valid.
+ * The anchor holds no sensitive material (`row_hmac` is stored in plaintext
+ * in the database); its value comes entirely from being stored OFF-HOST.
+ */
+export const auditChainAnchorSchema = z
+  .object({
+    format: z.literal(AUDIT_CHAIN_ANCHOR_FORMAT),
+    vault_id: z.string().min(1),
+    last_id: z.number().int().positive(),
+    /** Informational — the row's chain HMAC already covers its timestamp; verification compares only `row_hmac`. */
+    timestamp: z.number().int().positive(),
+    row_hmac: z.string().regex(/^[0-9a-f]{64}$/, "must be 64 lowercase hex characters"),
+  })
+  .strict();
+
+export type AuditChainAnchor = z.infer<typeof auditChainAnchorSchema>;
+
+// ---------------------------------------------------------------------------
 // OAuth schemas (v1.1)
 // ---------------------------------------------------------------------------
 

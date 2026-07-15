@@ -19,9 +19,25 @@ export interface DecryptedAuditEvent extends Omit<
   detail_unreadable?: boolean;
 }
 
+/** Outcome of checking a supplied anchor against the live chain. */
+export type AuditAnchorStatus = "ok" | "row_missing" | "hmac_mismatch";
+
+/** Anchor supplied to verifyChain: the tail link an operator exported earlier. */
+export interface AuditChainAnchorInput {
+  lastId: number;
+  rowHmac: Uint8Array;
+}
+
+/** The newest chained row's link — what an anchor is taken from. */
+export interface AuditChainTailLink {
+  lastId: number;
+  timestamp: number;
+  rowHmac: Uint8Array;
+}
+
 /** Result of verifying the audit HMAC chain. */
 export interface AuditChainVerification {
-  /** All chained rows link correctly. */
+  /** All chained rows link correctly AND (when an anchor was supplied) the anchored row is intact. */
   valid: boolean;
   /** Number of chained (post-migration) rows checked. */
   checked: number;
@@ -29,6 +45,8 @@ export interface AuditChainVerification {
   legacy: number;
   /** Id of the first row whose link failed, if any. */
   firstBrokenId: number | null;
+  /** Present only when an anchor was supplied. */
+  anchor?: { lastId: number; status: AuditAnchorStatus };
 }
 
 export interface AuditQueryOptions {
@@ -61,11 +79,23 @@ export class AuditQuery {
     return events.map((event) => this.decryptEvent(event));
   }
 
+  /** The newest chained row's link (the anchorable tail), or null if none exists. */
+  chainTail(): AuditChainTailLink | null {
+    const row = this.store.getLastChainedAuditRow();
+    if (!row) return null;
+    return { lastId: row.id, timestamp: row.timestamp, rowHmac: row.row_hmac };
+  }
+
   /**
    * Verify the audit HMAC chain. Legacy (pre-migration) rows carry no link and
    * are counted but not checked; the chain's genesis is the first chained row.
+   *
+   * With an anchor, additionally assert the anchored row still exists with
+   * exactly that link — a valid-but-shorter chain (tail truncation, database
+   * rollback) is invisible to the link HMACs alone. Rows appended after the
+   * anchor do not affect the anchor check.
    */
-  verifyChain(): AuditChainVerification {
+  verifyChain(anchor?: AuditChainAnchorInput): AuditChainVerification {
     const rows = this.store.getAuditChainRows();
     const chainKey = this.auditKey ? deriveAuditChainKey(this.auditKey) : null;
 
@@ -74,8 +104,17 @@ export class AuditQuery {
     let legacy = 0;
     let firstBrokenId: number | null = null;
     let valid = true;
+    let anchorStatus: AuditAnchorStatus = "row_missing";
 
     for (const row of rows) {
+      if (anchor && row.id === anchor.lastId) {
+        // A legacy row at the anchored id counts as a mismatch: a genuine
+        // anchor is always taken from a chained row.
+        anchorStatus =
+          row.row_hmac !== null && auditHmacEqual(row.row_hmac, anchor.rowHmac)
+            ? "ok"
+            : "hmac_mismatch";
+      }
       if (row.row_hmac === null) {
         // Legacy row — reset prev to genesis, mirroring insert-time behavior.
         legacy++;
@@ -97,7 +136,16 @@ export class AuditQuery {
       checked++;
     }
 
-    return { valid, checked, legacy, firstBrokenId };
+    if (!anchor) {
+      return { valid, checked, legacy, firstBrokenId };
+    }
+    return {
+      valid: valid && anchorStatus === "ok",
+      checked,
+      legacy,
+      firstBrokenId,
+      anchor: { lastId: anchor.lastId, status: anchorStatus },
+    };
   }
 
   private decryptEvent(event: AuditEvent): DecryptedAuditEvent {

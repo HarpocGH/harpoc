@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type {
   AccessPolicy,
+  AuditChainAnchor,
   ConnectionConfig,
   CreateSecretResponse,
   HttpResult,
@@ -20,6 +21,7 @@ import {
   AAD_CONNECTION_CONFIG,
   AAD_INJECTION_POLICY,
   AAD_MCP_SERVER_CONFIG,
+  AUDIT_CHAIN_ANCHOR_FORMAT,
   AAD_OAUTH_ACCESS_TOKEN,
   AAD_OAUTH_CLIENT_ID,
   AAD_OAUTH_CLIENT_SECRET,
@@ -89,6 +91,11 @@ export interface VaultEngineOptions {
   onSessionKeyProtectionFallback?: (error: Error) => void;
   /** Sliding session TTL in ms (default DEFAULT_SESSION_TTL_MS, capped at MAX_SESSION_TTL_MS). Operator knob / test seam. */
   sessionTtlMs?: number;
+}
+
+/** Chain verification plus the current tail (for printing/comparison and re-anchoring). */
+export interface AuditChainVerificationReport extends AuditChainVerification {
+  tail: AuditChainAnchor | null;
 }
 
 interface UnlockedState {
@@ -1519,10 +1526,46 @@ export class VaultEngine {
     return s.auditQuery.query(options);
   }
 
-  /** Verify the tamper-evidence HMAC chain over the audit log. */
-  verifyAuditChain(): AuditChainVerification {
+  /**
+   * The current audit-chain tail as an exportable anchor, or null when no
+   * chained rows exist yet. The anchor contains nothing sensitive — its value
+   * against tail truncation and rollback comes entirely from the operator
+   * storing it OFF-HOST (the vault cannot supply that trust domain itself).
+   */
+  getAuditChainTail(): AuditChainAnchor | null {
     const s = this.assertUnlocked();
-    return s.auditQuery.verifyChain();
+    const tail = s.auditQuery.chainTail();
+    if (!tail) return null;
+    return {
+      format: AUDIT_CHAIN_ANCHOR_FORMAT,
+      vault_id: s.vaultId,
+      last_id: tail.lastId,
+      timestamp: tail.timestamp,
+      row_hmac: Buffer.from(tail.rowHmac).toString("hex"),
+    };
+  }
+
+  /**
+   * Verify the tamper-evidence HMAC chain over the audit log. With an anchor,
+   * additionally assert the anchored row still exists with exactly that link —
+   * detecting tail truncation and rollback, which the chain alone cannot see.
+   * The result always carries the current tail for comparison/re-anchoring.
+   */
+  verifyAuditChain(options?: { anchor?: AuditChainAnchor }): AuditChainVerificationReport {
+    const s = this.assertUnlocked();
+    const anchor = options?.anchor;
+    if (anchor && anchor.vault_id !== s.vaultId) {
+      throw new VaultError(
+        ErrorCode.INVALID_INPUT,
+        `Anchor was taken from a different vault (anchor ${anchor.vault_id}, this vault ${s.vaultId})`,
+      );
+    }
+    const verification = s.auditQuery.verifyChain(
+      anchor
+        ? { lastId: anchor.last_id, rowHmac: new Uint8Array(Buffer.from(anchor.row_hmac, "hex")) }
+        : undefined,
+    );
+    return { ...verification, tail: this.getAuditChainTail() };
   }
 
   // ---------------------------------------------------------------------------

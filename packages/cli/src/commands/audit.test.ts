@@ -1,8 +1,13 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
     queryAudit: vi.fn().mockReturnValue([]),
+    getAuditChainTail: vi.fn(),
+    verifyAuditChain: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),
   },
 }));
@@ -63,5 +68,148 @@ describe("audit --since validation", () => {
     expect(mockEngine.queryAudit).toHaveBeenCalledWith(
       expect.objectContaining({ since: undefined }),
     );
+  });
+});
+
+const validAnchor = {
+  format: "harpoc-audit-anchor/1",
+  vault_id: "vault-a",
+  last_id: 42,
+  timestamp: 1784306411000,
+  row_hmac: "ab".repeat(32),
+};
+
+describe("audit anchor / verify --anchor", () => {
+  let tempDir: string;
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tempDir = mkdtempSync(join(tmpdir(), "harpoc-anchor-test-"));
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    process.exitCode = undefined;
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+    process.exitCode = undefined;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  function stderrText(): string {
+    return errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+  }
+
+  function stdoutText(): string {
+    return logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+  }
+
+  it("prints the anchor JSON to stdout and the off-host guidance to stderr", async () => {
+    mockEngine.getAuditChainTail.mockReturnValue(validAnchor);
+    await run(["anchor"]);
+    expect(JSON.parse(stdoutText())).toEqual(validAnchor);
+    expect(stderrText()).toContain("OFF-HOST");
+    expect(stdoutText()).not.toContain("OFF-HOST");
+  });
+
+  it("writes the anchor to --out and keeps stdout clean", async () => {
+    mockEngine.getAuditChainTail.mockReturnValue(validAnchor);
+    const out = join(tempDir, "vault.anchor");
+    await run(["anchor", "--out", out]);
+    expect(JSON.parse(readFileSync(out, "utf8"))).toEqual(validAnchor);
+    expect(logSpy).not.toHaveBeenCalled();
+    expect(stderrText()).toContain("Anchor written to");
+    expect(stderrText()).toContain("OFF-HOST");
+  });
+
+  it("exits non-zero when there are no chained rows to anchor", async () => {
+    mockEngine.getAuditChainTail.mockReturnValue(null);
+    await expect(run(["anchor"])).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(stderrText()).toContain("No chained audit rows to anchor yet");
+  });
+
+  it("verify always prints the current tail link, without and with --json", async () => {
+    mockEngine.verifyAuditChain.mockReturnValue({
+      valid: true,
+      checked: 3,
+      legacy: 0,
+      firstBrokenId: null,
+      tail: validAnchor,
+    });
+    await run(["verify"]);
+    expect(stdoutText()).toContain(`Tail link: row ${validAnchor.last_id}`);
+    expect(stdoutText()).toContain(validAnchor.row_hmac);
+
+    logSpy.mockClear();
+    await run(["verify", "--json"]);
+    const json = JSON.parse(stdoutText()) as { tail?: { last_id: number } };
+    expect(json.tail?.last_id).toBe(validAnchor.last_id);
+  });
+
+  it("verify --anchor parses the file and passes the anchor to the engine", async () => {
+    mockEngine.verifyAuditChain.mockReturnValue({
+      valid: true,
+      checked: 3,
+      legacy: 0,
+      firstBrokenId: null,
+      tail: validAnchor,
+      anchor: { lastId: validAnchor.last_id, status: "ok" },
+    });
+    const file = join(tempDir, "a.anchor");
+    writeFileSync(file, JSON.stringify(validAnchor), "utf8");
+    await run(["verify", "--anchor", file]);
+    expect(mockEngine.verifyAuditChain).toHaveBeenCalledWith({ anchor: validAnchor });
+    expect(stdoutText()).toContain(`Anchor OK — row ${validAnchor.last_id} intact`);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("verify --anchor reports truncation and exits 1", async () => {
+    mockEngine.verifyAuditChain.mockReturnValue({
+      valid: false,
+      checked: 2,
+      legacy: 0,
+      firstBrokenId: null,
+      tail: { ...validAnchor, last_id: 40 },
+      anchor: { lastId: validAnchor.last_id, status: "row_missing" },
+    });
+    const file = join(tempDir, "a.anchor");
+    writeFileSync(file, JSON.stringify(validAnchor), "utf8");
+    await run(["verify", "--anchor", file]);
+    expect(stderrText()).toContain("FAILS the anchor check");
+    expect(stderrText()).toContain("deleted or the database was rolled back");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("rejects a missing anchor file with a clean error before calling the engine", async () => {
+    await expect(run(["verify", "--anchor", join(tempDir, "nope.anchor")])).rejects.toThrow(
+      "process.exit",
+    );
+    expect(stderrText()).toContain("Cannot read anchor file");
+    expect(mockEngine.verifyAuditChain).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-JSON anchor file with a clean error", async () => {
+    const file = join(tempDir, "bad.anchor");
+    writeFileSync(file, "not json {", "utf8");
+    await expect(run(["verify", "--anchor", file])).rejects.toThrow("process.exit");
+    expect(stderrText()).toContain("not valid JSON");
+    expect(mockEngine.verifyAuditChain).not.toHaveBeenCalled();
+  });
+
+  it("rejects JSON that is not a harpoc anchor with a clean error", async () => {
+    const file = join(tempDir, "wrong.anchor");
+    writeFileSync(file, JSON.stringify({ hello: "world" }), "utf8");
+    await expect(run(["verify", "--anchor", file])).rejects.toThrow("process.exit");
+    expect(stderrText()).toContain("Not a valid harpoc audit anchor");
+    expect(mockEngine.verifyAuditChain).not.toHaveBeenCalled();
   });
 });

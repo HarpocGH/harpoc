@@ -765,6 +765,95 @@ describe("injection policy", () => {
   });
 });
 
+describe("audit-chain anchor (tail truncation)", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "anchored",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+  });
+
+  it("exports the tail as a complete anchor whose hex hmac matches the stored link", () => {
+    const anchor = engine.getAuditChainTail();
+    expect(anchor).not.toBeNull();
+    expect(anchor?.format).toBe("harpoc-audit-anchor/1");
+    expect(anchor?.vault_id).toBeTruthy();
+    expect(anchor?.row_hmac).toMatch(/^[0-9a-f]{64}$/);
+
+    const db = new Database(dbPath);
+    const row = db
+      .prepare("SELECT id, row_hmac FROM audit_log ORDER BY id DESC LIMIT 1")
+      .get() as { id: number; row_hmac: Buffer };
+    db.close();
+    expect(anchor?.last_id).toBe(row.id);
+    expect(anchor?.row_hmac).toBe(row.row_hmac.toString("hex"));
+  });
+
+  it("verifies against its own fresh anchor and after appends, always reporting the tail", async () => {
+    const anchor = engine.getAuditChainTail();
+    expect(anchor).not.toBeNull();
+
+    const fresh = engine.verifyAuditChain({ anchor: anchor ?? undefined });
+    expect(fresh.valid).toBe(true);
+    expect(fresh.anchor?.status).toBe("ok");
+    expect(fresh.tail?.last_id).toBe(anchor?.last_id);
+
+    await engine.createSecret({
+      name: "later",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("w")),
+    });
+    const appended = engine.verifyAuditChain({ anchor: anchor ?? undefined });
+    expect(appended.valid).toBe(true);
+    expect(appended.anchor?.status).toBe("ok");
+    expect(appended.tail?.last_id).toBeGreaterThan(anchor?.last_id ?? Infinity);
+
+    const plain = engine.verifyAuditChain();
+    expect(plain.anchor).toBeUndefined();
+    expect(plain.tail?.last_id).toBe(appended.tail?.last_id);
+  });
+
+  it("detects tail truncation the plain verify cannot see", async () => {
+    const anchor = engine.getAuditChainTail();
+    await engine.createSecret({
+      name: "victim",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("x")),
+    });
+    const later = engine.getAuditChainTail();
+
+    // Attacker deletes everything after the first anchor — including `later`'s rows.
+    const db = new Database(dbPath);
+    db.prepare("DELETE FROM audit_log WHERE id > ?").run(anchor?.last_id ?? 0);
+    db.close();
+
+    const plain = engine.verifyAuditChain();
+    expect(plain.valid).toBe(true);
+
+    const oldAnchorResult = engine.verifyAuditChain({ anchor: anchor ?? undefined });
+    expect(oldAnchorResult.valid).toBe(true);
+
+    const newAnchorResult = engine.verifyAuditChain({ anchor: later ?? undefined });
+    expect(newAnchorResult.valid).toBe(false);
+    expect(newAnchorResult.anchor?.status).toBe("row_missing");
+  });
+
+  it("rejects an anchor taken from a different vault before touching any rows", () => {
+    const anchor = engine.getAuditChainTail();
+    expect(anchor).not.toBeNull();
+    const foreign = { ...(anchor as NonNullable<typeof anchor>), vault_id: "someone-elses-vault" };
+    try {
+      engine.verifyAuditChain({ anchor: foreign });
+      expect.fail("should throw");
+    } catch (e) {
+      expect((e as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
+      expect((e as VaultError).message).toContain("different vault");
+    }
+  });
+});
+
 describe("interpreter acknowledgement (thesis §4.5.3)", () => {
   beforeEach(async () => {
     await engine.initVault("password");
