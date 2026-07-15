@@ -7,6 +7,7 @@ import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import { forceNetworkIsolationUnavailableForTests, requireNetworkIsolation } from "@harpoc/core";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { assertTierAvailable } from "./helpers/platform-tiers.js";
 
 /**
  * Network isolation e2e (thesis §4.5.3 layer 4).
@@ -65,12 +66,15 @@ describe.skipIf(!posixWithIsolation)("network isolation — real kernel (Linux/m
   let available = false;
 
   beforeAll(async () => {
+    let probeError: unknown;
     try {
       await requireNetworkIsolation("/bin/true", []);
       available = true;
-    } catch {
+    } catch (err) {
+      probeError = err;
       available = false;
     }
+    assertTierAvailable("isolation", available, probeError);
     server = createServer((_req, res) => {
       hits++;
       res.writeHead(200);
@@ -109,9 +113,11 @@ describe.skipIf(!posixWithIsolation)("network isolation — real kernel (Linux/m
     try {
       const res = await vault.engine.useSecret(handle, fetchAction(port));
       if (res.type !== "process") throw new Error("expected process result");
-      // The fetch failed inside the namespace/sandbox — the child ran (the
-      // wrapper exec'd it) but its socket never reached the listener.
-      expect(res.exit_code).not.toBe(0);
+      // Exactly 7 pins BOTH halves: the wrapper exec'd the payload in place
+      // (exit-code semantics unchanged — a broken wrapper would exit with
+      // its own code without ever running the payload), and the fetch
+      // failed inside the namespace/sandbox (review fix T4).
+      expect(res.exit_code).toBe(7);
       expect(hits).toBe(0);
 
       // The spawn is audited as isolated, with the live mechanism.

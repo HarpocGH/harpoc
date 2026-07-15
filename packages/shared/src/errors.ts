@@ -74,6 +74,7 @@ export enum ErrorCode {
   INVALID_GIT_CONFIG = "INVALID_GIT_CONFIG",
   KEY_PASSPHRASE_INVALID = "KEY_PASSPHRASE_INVALID",
   ENCRYPTED_KEY_UNSUPPORTED = "ENCRYPTED_KEY_UNSUPPORTED",
+  KEY_BUNDLE_UNSUPPORTED = "KEY_BUNDLE_UNSUPPORTED",
 
   // Validation
   INVALID_INPUT = "INVALID_INPUT",
@@ -188,6 +189,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.INVALID_GIT_CONFIG]: 400,
   [ErrorCode.KEY_PASSPHRASE_INVALID]: 400,
   [ErrorCode.ENCRYPTED_KEY_UNSUPPORTED]: 400,
+  [ErrorCode.KEY_BUNDLE_UNSUPPORTED]: 400,
 
   // Validation
   [ErrorCode.INVALID_INPUT]: 400,
@@ -605,6 +607,16 @@ export class VaultError extends Error {
         "is kept), then re-import — the vault decrypts at import. Ed25519: ssh-keygen cannot " +
         "write PKCS#8 — strip the passphrase with `ssh-keygen -p -f <keyfile> -N ''` and " +
         "re-import (the vault stores the key under its own encryption either way)",
+    );
+  }
+
+  static keyBundleUnsupported(): VaultError {
+    return new VaultError(
+      ErrorCode.KEY_BUNDLE_UNSUPPORTED,
+      "The file contains additional PEM blocks alongside an encrypted private key (a " +
+        "certificate bundle). Decrypt-at-import would silently drop everything but the key — " +
+        "import the key alone, or use --no-decrypt to store the bundle verbatim (the key then " +
+        "stays encrypted and is unusable for SSH until re-imported on its own)",
     );
   }
 }

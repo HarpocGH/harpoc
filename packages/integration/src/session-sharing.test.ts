@@ -24,6 +24,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool } from "./helpers/mcp-helpers.js";
+import { assertTierAvailable } from "./helpers/platform-tiers.js";
 
 const PASSWORD = "session-sharing-pw";
 const SECRET_NAME = "shared-key";
@@ -290,6 +291,7 @@ describe.runIf(process.platform === "darwin")("Keychain-protected session sharin
 
   beforeAll(async () => {
     available = await probeProtector(makeProtector);
+    assertTierAvailable("keychain", available);
   });
 
   afterAll(async () => {
@@ -319,8 +321,10 @@ describe.runIf(process.platform === "linux")("Keyring-protected session sharing 
   let available = false;
 
   beforeAll(async () => {
-    if (!executablePath) return;
-    available = await probeProtector(makeProtector);
+    if (executablePath) {
+      available = await probeProtector(makeProtector);
+    }
+    assertTierAvailable("keyring", available, executablePath ? undefined : "keyctl not found");
   });
 
   afterAll(async () => {
@@ -346,8 +350,15 @@ describe.runIf(process.platform === "linux")(
     let available = false;
 
     beforeAll(async () => {
-      if (!executablePath || (process.env["DBUS_SESSION_BUS_ADDRESS"] ?? "") === "") return;
-      available = await probeProtector(makeProtector);
+      const blocked = !executablePath
+        ? "secret-tool not found"
+        : (process.env["DBUS_SESSION_BUS_ADDRESS"] ?? "") === ""
+          ? "no DBUS_SESSION_BUS_ADDRESS"
+          : undefined;
+      if (blocked === undefined) {
+        available = await probeProtector(makeProtector);
+      }
+      assertTierAvailable("secret-service", available, blocked);
     });
 
     afterAll(async () => {

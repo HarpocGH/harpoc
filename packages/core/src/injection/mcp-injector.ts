@@ -106,6 +106,11 @@ export class McpInjector {
     // cannot keep serving either. HTTP-transport downstreams are
     // request-mediated from the vault process (no child) and unaffected.
     if (policy.network_isolation === true && config.transport === McpTransport.STDIO) {
+      // A live child predating the isolation demand still holds the
+      // credential with full egress — terminate it before refusing, so a
+      // policy tightened from a separate process (unreachable registry)
+      // takes effect on the next invocation attempt at the latest.
+      await this.registry.terminate(secretId, "network_isolation_enabled");
       const err = VaultError.networkIsolationUnavailable(
         "MCP stdio downstream servers cannot be network-isolated yet",
       );

@@ -51,23 +51,50 @@ describe("Linux store construction", () => {
   });
 });
 
+// A CI leg that provisions a tier exports HARPOC_REQUIRE_PLATFORM_TESTS with
+// that tier's name: the probe failing is then a FAILURE, not a skip — a
+// regressed provisioning step (missing keyutils/libsecret-tools, lost keyring
+// possession, dead D-Bus) must not silently drop real-path coverage to zero
+// while the leg stays green (review T3). Local dev (var unset) skips.
+function tierRequired(tier: string): boolean {
+  return (process.env["HARPOC_REQUIRE_PLATFORM_TESTS"] ?? "")
+    .split(",")
+    .map((t) => t.trim())
+    .includes(tier);
+}
+
+function assertTierAvailable(tier: string, available: boolean, probeError: unknown): void {
+  if (!available && tierRequired(tier)) {
+    throw new Error(
+      `HARPOC_REQUIRE_PLATFORM_TESTS demands the "${tier}" tier but its probe failed` +
+        (probeError ? `: ${String(probeError)}` : ""),
+    );
+  }
+}
+
 // Thesis §4.6 real platform paths. Each tier probes its own availability —
 // keyutils may be uninstalled, a Secret Service may not answer on headless
-// hosts — and skips (never fails) where the facility is absent.
+// hosts — and skips where the facility is absent, unless the tier is
+// required via HARPOC_REQUIRE_PLATFORM_TESTS.
 describe.runIf(process.platform === "linux")("KeyringWrappingKeyStore (Linux)", () => {
   const description = `harpoc:test-wrap:${process.pid}:${Date.now()}`;
   const executablePath = findLinuxKeystoreBinary("keyctl");
   let available = false;
 
   beforeAll(async () => {
-    if (!executablePath) return;
-    try {
-      const probe = new KeyringWrappingKeyStore({ executablePath, description });
-      await probe.storeWrappingKey(new Uint8Array(randomBytes(32)));
-      available = (await probe.loadWrappingKey()) !== null;
-    } catch {
-      available = false;
+    let probeError: unknown = executablePath ? undefined : "keyctl binary not found";
+    if (executablePath) {
+      try {
+        const probe = new KeyringWrappingKeyStore({ executablePath, description });
+        await probe.storeWrappingKey(new Uint8Array(randomBytes(32)));
+        available = (await probe.loadWrappingKey()) !== null;
+        if (!available) probeError = "read-back returned null";
+      } catch (err) {
+        probeError = err;
+        available = false;
+      }
     }
+    assertTierAvailable("keyring", available, probeError);
   });
 
   afterAll(async () => {
@@ -142,14 +169,23 @@ describe.runIf(process.platform === "linux")("SecretServiceWrappingKeyStore (Lin
   let available = false;
 
   beforeAll(async () => {
-    if (!executablePath || (process.env["DBUS_SESSION_BUS_ADDRESS"] ?? "") === "") return;
-    try {
-      const probe = new SecretServiceWrappingKeyStore({ executablePath, service });
-      await probe.storeWrappingKey(new Uint8Array(randomBytes(32)));
-      available = (await probe.loadWrappingKey()) !== null;
-    } catch {
-      available = false;
+    let probeError: unknown = !executablePath
+      ? "secret-tool binary not found"
+      : (process.env["DBUS_SESSION_BUS_ADDRESS"] ?? "") === ""
+        ? "no DBUS_SESSION_BUS_ADDRESS"
+        : undefined;
+    if (executablePath && probeError === undefined) {
+      try {
+        const probe = new SecretServiceWrappingKeyStore({ executablePath, service });
+        await probe.storeWrappingKey(new Uint8Array(randomBytes(32)));
+        available = (await probe.loadWrappingKey()) !== null;
+        if (!available) probeError = "read-back returned null";
+      } catch (err) {
+        probeError = err;
+        available = false;
+      }
     }
+    assertTierAvailable("secret-service", available, probeError);
   });
 
   afterAll(async () => {

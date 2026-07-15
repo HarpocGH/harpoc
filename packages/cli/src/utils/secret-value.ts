@@ -75,6 +75,12 @@ export async function resolveSecretValue(options: ResolveSecretValueOptions): Pr
     wipeBuffer(value);
     throw VaultError.encryptedKeyUnsupported();
   }
+  if (kind === "encrypted-key-bundle") {
+    // Refused before the passphrase prompt: decrypting would store only the
+    // key and silently drop the certificate blocks (review fix F3).
+    wipeBuffer(value);
+    throw VaultError.keyBundleUnsupported();
+  }
   if (kind === "encrypted-pkcs8" || kind === "encrypted-legacy-pem") {
     const passphrase = await promptHidden("Key passphrase: ", options.input, options.output);
     if (!passphrase) {

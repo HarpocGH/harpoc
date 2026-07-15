@@ -32,9 +32,21 @@ describe("KeychainWrappingKeyStore construction", () => {
   });
 });
 
+// A CI leg that provisions a tier exports HARPOC_REQUIRE_PLATFORM_TESTS with
+// that tier's name: the probe failing is then a FAILURE, not a skip — a
+// regressed provisioning step must not silently drop real-path coverage to
+// zero while the leg stays green (review T3). Local dev (var unset) skips.
+function tierRequired(tier: string): boolean {
+  return (process.env["HARPOC_REQUIRE_PLATFORM_TESTS"] ?? "")
+    .split(",")
+    .map((t) => t.trim())
+    .includes(tier);
+}
+
 // Thesis §4.6 real platform path. Runs on macOS only, and only where a usable
 // keychain answers (CI provisions a disposable unlocked keychain and exports
-// HARPOC_TEST_KEYCHAIN; a locked/headless keychain skips, never fails).
+// HARPOC_TEST_KEYCHAIN; a locked/headless keychain skips — unless the tier is
+// required via HARPOC_REQUIRE_PLATFORM_TESTS).
 describe.runIf(process.platform === "darwin")("KeychainWrappingKeyStore (macOS)", () => {
   const service = `harpoc.test-wrap.${process.pid}.${Date.now()}`;
   const keychain = process.env["HARPOC_TEST_KEYCHAIN"];
@@ -45,12 +57,20 @@ describe.runIf(process.platform === "darwin")("KeychainWrappingKeyStore (macOS)"
   let available = false;
 
   beforeAll(async () => {
+    let probeError: unknown;
     try {
       const probe = new KeychainWrappingKeyStore(storeOptions());
       await probe.storeWrappingKey(new Uint8Array(randomBytes(32)));
       available = (await probe.loadWrappingKey()) !== null;
-    } catch {
+    } catch (err) {
+      probeError = err;
       available = false;
+    }
+    if (!available && tierRequired("keychain")) {
+      throw new Error(
+        `HARPOC_REQUIRE_PLATFORM_TESTS demands the "keychain" tier but its probe failed` +
+          (probeError ? `: ${String(probeError)}` : " (read-back returned null)"),
+      );
     }
   });
 

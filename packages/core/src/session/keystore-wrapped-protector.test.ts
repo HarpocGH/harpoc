@@ -153,6 +153,26 @@ describe("KeystoreWrappedSessionKeyProtector", () => {
     await expectSessionFileError(protector.protect(new Uint8Array(randomBytes(32))));
   });
 
+  it("resolves toward the stored winner when a concurrent creation displaces the fresh key (review T8)", async () => {
+    // Another process's key wins the first-creation race: the store keeps
+    // ITS key, not the one this protector just generated. The wrap must land
+    // under the winner — returning the displaced local candidate would
+    // produce a blob nothing can ever unwrap.
+    const store = new InMemoryWrappingKeyStore();
+    const winner = new Uint8Array(randomBytes(32));
+    store.storeWrappingKey = async () => {
+      store.stores++;
+      store.key = new Uint8Array(winner);
+    };
+    const protector = new KeystoreWrappedSessionKeyProtector(store);
+    const sessionKey = new Uint8Array(randomBytes(32));
+
+    const blob = await protector.protect(sessionKey);
+
+    const unwrapped = await new KeystoreWrappedSessionKeyProtector(store).unprotect(blob);
+    expect(Buffer.from(unwrapped).equals(Buffer.from(sessionKey))).toBe(true);
+  });
+
   it("rejects a keystore item of unexpected length", async () => {
     const store = new InMemoryWrappingKeyStore();
     store.key = new Uint8Array(randomBytes(16));

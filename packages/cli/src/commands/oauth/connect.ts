@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { OAuthGrantType } from "@harpoc/shared";
+import { ErrorCode, OAuthGrantType, VaultError } from "@harpoc/shared";
 import type { OAuthFlowResult } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
@@ -109,7 +109,18 @@ export function registerOAuthConnectCommand(oauth: Command): void {
               openBrowser: async (url) => {
                 console.error(`Open this URL in your browser to authorize:\n\n  ${url}\n`);
                 console.error("Waiting for the authorization callback...");
-                if (options.open) await defaultOpenBrowser(url);
+                if (options.open) {
+                  // A failed launch (headless host, WSL, no xdg-open) must
+                  // not abort a flow the printed URL can still complete —
+                  // the callback server keeps waiting (review fix F9).
+                  try {
+                    await defaultOpenBrowser(url);
+                  } catch {
+                    console.error(
+                      "Warning: could not open a browser automatically - open the URL above manually.",
+                    );
+                  }
+                }
               },
             });
 
@@ -128,7 +139,29 @@ export function registerOAuthConnectCommand(oauth: Command): void {
               console.error(`To authorize, visit: ${device.auth_url ?? ""}`);
               console.error(`and enter code: ${device.user_code ?? ""}`);
               console.error("Waiting for authorization...");
-              await device.completion;
+              // --timeout bounds the device wait too, not only the auth-code
+              // callback — a scripted connect must be boundable instead of
+              // blocking until the provider's expires_in (review fix F7).
+              // On timeout the poll is cancelled; the secret stays PENDING
+              // and a re-run resumes it.
+              let deviceTimer: NodeJS.Timeout | undefined;
+              const timedOut = new Promise<never>((_, reject) => {
+                deviceTimer = setTimeout(() => {
+                  manager.cancelPendingFlows();
+                  reject(
+                    new VaultError(
+                      ErrorCode.OAUTH_CALLBACK_TIMEOUT,
+                      `Device authorization timed out after ${timeoutSeconds}s - the secret remains pending; re-run 'oauth connect' to retry`,
+                    ),
+                  );
+                }, timeoutSeconds * 1000);
+                if (deviceTimer.unref) deviceTimer.unref();
+              });
+              try {
+                await Promise.race([device.completion, timedOut]);
+              } finally {
+                if (deviceTimer) clearTimeout(deviceTimer);
+              }
               result = {
                 handle: device.handle,
                 status: "authorized",

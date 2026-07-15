@@ -30,37 +30,41 @@ export function registerSecretSetCommand(secret: Command): void {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       const json = "json" in options;
       try {
-        const value = await resolveSecretValue({
-          fromFile: options.fromFile,
-          noDecrypt: options.decrypt === false,
-        });
-
         const typeStr = options.type ?? "api_key";
         const typeResult = secretTypeSchema.safeParse(typeStr);
         if (!typeResult.success) {
-          wipeBuffer(value);
           throw new Error(
             `Invalid secret type: "${typeStr}". Valid: api_key, oauth_token, certificate`,
           );
         }
         const secretType = typeResult.data as SecretType;
 
+        // Engine first: a sealed vault must fail before the user types a
+        // value or key passphrase, and the resolved plaintext must never
+        // exist outside a wiping finally.
         const engine = await loadUnlockedEngine(vaultDir);
         try {
-          const result = await engine.createSecret({
-            name,
-            type: secretType,
-            project: options.project,
-            value,
+          const value = await resolveSecretValue({
+            fromFile: options.fromFile,
+            noDecrypt: options.decrypt === false,
           });
+          try {
+            const result = await engine.createSecret({
+              name,
+              type: secretType,
+              project: options.project,
+              value,
+            });
 
-          if (json) {
-            printJson(result);
-          } else {
-            printSuccess(`Secret '${name}' created (${result.handle})`);
+            if (json) {
+              printJson(result);
+            } else {
+              printSuccess(`Secret '${name}' created (${result.handle})`);
+            }
+          } finally {
+            wipeBuffer(value);
           }
         } finally {
-          wipeBuffer(value);
           await engine.destroy();
         }
       } catch (err) {

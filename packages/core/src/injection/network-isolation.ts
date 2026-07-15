@@ -146,10 +146,16 @@ async function resolveIsolation(seams?: NetworkIsolationSeams): Promise<Resolved
 }
 
 /**
- * The resolution (capability probe included) is cached for the process
- * lifetime — a rejected resolution is cached too, since platform capability
- * does not change under the vault. Tests reset via the hook below; the cache
- * captures the first caller's seams, so tests must reset between seam configs.
+ * A successful resolution (capability probe included) is cached for the
+ * process lifetime — genuine platform capability does not change under the
+ * vault. A REJECTED resolution is deliberately NOT cached: a probe can fail
+ * transiently (5 s timeout under load, fork pressure), and caching that
+ * would permanently disable every isolation-demanding spawn in a long-lived
+ * server. Re-probing on genuinely incapable hosts is cheap (unshare exits
+ * non-zero immediately; unsupported platforms throw before probing).
+ * Concurrent callers still coalesce on the in-flight promise. Tests reset
+ * via the hook below; the cache captures the first caller's seams, so tests
+ * must reset between seam configs.
  */
 let cachedResolution: Promise<ResolvedIsolation> | null = null;
 let forcedUnavailableForTests: string | null = null;
@@ -167,7 +173,14 @@ export async function requireNetworkIsolation(
   if (forcedUnavailableForTests !== null) {
     throw VaultError.networkIsolationUnavailable(forcedUnavailableForTests);
   }
-  cachedResolution ??= resolveIsolation(seams);
+  if (!cachedResolution) {
+    const attempt: Promise<ResolvedIsolation> = resolveIsolation(seams).catch((err: unknown) => {
+      // Only success is cached — a rejection may be load, not capability.
+      if (cachedResolution === attempt) cachedResolution = null;
+      throw err;
+    });
+    cachedResolution = attempt;
+  }
   const resolved = await cachedResolution;
   return {
     command: resolved.wrapper,

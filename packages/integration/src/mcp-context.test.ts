@@ -193,6 +193,63 @@ describe("MCP proxy context — stdio transport (thesis §4.5.4)", () => {
     expect(terminates[0]?.detail?.reason).toBe("vault_lock");
   });
 
+  it("enabling network_isolation terminates the live un-isolated child (mcp.terminate audited)", async () => {
+    await vault.engine.useSecret(handle, mcpAction("echo"));
+    const spawns = vault.engine.queryAudit({ eventType: AuditEventType.MCP_SPAWN });
+    const pid = spawns[0]?.detail?.pid as number;
+    expect(pid).toBeGreaterThan(0);
+
+    await vault.engine.setInjectionPolicy(handle, {
+      url_allowlist: [],
+      command_allowlist: [NODE],
+      env_allowlist: [],
+      network_isolation: true,
+    });
+
+    // The credential-holding child must not survive the isolation demand.
+    await expect
+      .poll(
+        () => {
+          try {
+            process.kill(pid, 0);
+            return "alive";
+          } catch {
+            return "dead";
+          }
+        },
+        { timeout: 5_000 },
+      )
+      .toBe("dead");
+
+    const terminates = vault.engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
+    expect(terminates).toHaveLength(1);
+    expect(terminates[0]?.detail?.reason).toBe("network_isolation_enabled");
+
+    // Fail-closed follow-through: the next invocation is refused outright.
+    await expect(vault.engine.useSecret(handle, mcpAction("echo"))).rejects.toMatchObject({
+      code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+    });
+  });
+
+  it("control: re-asserting the policy without the flag leaves the child alive", async () => {
+    await vault.engine.useSecret(handle, mcpAction("echo"));
+    const pid = vault.engine.queryAudit({ eventType: AuditEventType.MCP_SPAWN })[0]?.detail
+      ?.pid as number;
+    expect(pid).toBeGreaterThan(0);
+
+    await vault.engine.setInjectionPolicy(handle, {
+      url_allowlist: [],
+      command_allowlist: [NODE],
+      env_allowlist: [],
+    });
+
+    expect(vault.engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE })).toHaveLength(0);
+    // Reused, not respawned: still a single spawn event after another call.
+    await vault.engine.useSecret(handle, mcpAction("echo"));
+    expect(vault.engine.queryAudit({ eventType: AuditEventType.MCP_SPAWN })).toHaveLength(1);
+    process.kill(pid, 0);
+  });
+
   it("rotation terminates the stale child and respawns with the new credential", async () => {
     await vault.engine.useSecret(handle, mcpAction("echo"));
     await vault.engine.rotateSecret(handle, new Uint8Array(Buffer.from("sk-rotated-000111")));

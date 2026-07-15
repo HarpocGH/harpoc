@@ -118,7 +118,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(86);
+    expect(members).toHaveLength(87);
   });
 });
 

@@ -97,6 +97,63 @@ describe("analyzeKeyMaterial — classification", () => {
   });
 });
 
+const FAKE_CERT = "-----BEGIN CERTIFICATE-----\nMIIBfakecertbody\n-----END CERTIFICATE-----\n";
+
+describe("analyzeKeyMaterial — bundles (review fix F3)", () => {
+  it("classifies cert + encrypted PKCS#8 as encrypted-key-bundle (either order)", () => {
+    const { privateKey } = encryptedPkcs8("rsa");
+    expect(analyzeKeyMaterial(`${FAKE_CERT}${privateKey}`)).toBe("encrypted-key-bundle");
+    expect(analyzeKeyMaterial(`${privateKey}${FAKE_CERT}`)).toBe("encrypted-key-bundle");
+  });
+
+  it("classifies cert + encrypted legacy PEM as encrypted-key-bundle", () => {
+    const { privateKey } = encryptedLegacyPem();
+    expect(analyzeKeyMaterial(`${FAKE_CERT}${privateKey}`)).toBe("encrypted-key-bundle");
+  });
+
+  it("two encrypted keys in one file are a bundle too", () => {
+    const a = encryptedPkcs8("rsa").privateKey;
+    const b = encryptedPkcs8("ed25519").privateKey;
+    expect(analyzeKeyMaterial(`${a}${b}`)).toBe("encrypted-key-bundle");
+  });
+
+  it("control: a lone encrypted key is NOT a bundle", () => {
+    expect(analyzeKeyMaterial(encryptedPkcs8("rsa").privateKey)).toBe("encrypted-pkcs8");
+    expect(analyzeKeyMaterial(encryptedLegacyPem().privateKey)).toBe("encrypted-legacy-pem");
+  });
+
+  it("control: cert + unencrypted key stays unencrypted-key (imports verbatim)", () => {
+    const plain = generateKeyPairSync("ed25519", {
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    }).privateKey;
+    expect(analyzeKeyMaterial(`${FAKE_CERT}${plain}`)).toBe("unencrypted-key");
+  });
+});
+
+describe("import classifier and use-time loader guard agree (review fix F10)", () => {
+  it("every encrypted-classified PEM specimen is refused by loadPrivateKey with the re-import recovery", () => {
+    const specimens = [
+      encryptedPkcs8("rsa").privateKey,
+      encryptedPkcs8("ed25519").privateKey,
+      encryptedPkcs8("ec").privateKey,
+      encryptedLegacyPem().privateKey,
+    ];
+    for (const pem of specimens) {
+      expect(analyzeKeyMaterial(pem)).toMatch(/^encrypted-/);
+      expect(() => loadPrivateKey(pem)).toThrowError(/re-import/);
+    }
+  });
+
+  it("every unencrypted specimen loads (no drift on the accept side)", () => {
+    for (const name of ["rsa_pem", "ecdsa256_pem", "ed25519_openssh", "rsa_openssh"]) {
+      const pem = readFixture(name);
+      expect(analyzeKeyMaterial(pem)).toBe("unencrypted-key");
+      expect(() => loadPrivateKey(pem)).not.toThrow();
+    }
+  });
+});
+
 describe("decryptKeyForImport — roundtrip", () => {
   it.each(["rsa", "ed25519", "ec"] as const)(
     "decrypts an encrypted PKCS#8 %s key to a use-time-loadable PEM",

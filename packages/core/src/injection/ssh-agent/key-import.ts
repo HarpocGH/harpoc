@@ -1,6 +1,14 @@
 import { createPrivateKey } from "node:crypto";
 import { VaultError } from "@harpoc/shared";
 import { wipeBuffer } from "../../crypto/random.js";
+import {
+  ANY_KEY_ARMOR,
+  LEGACY_ENCRYPTED_HEADER,
+  LEGACY_KEY_ARMOR,
+  OPENSSH_ARMOR,
+  PKCS8_ENCRYPTED_ARMOR,
+  hasCompanionPemBlocks,
+} from "./key-detection.js";
 import { opensshKeyCipher } from "./key-loader.js";
 
 /**
@@ -13,20 +21,18 @@ export type KeyMaterialKind =
   | "encrypted-pkcs8"
   | "encrypted-legacy-pem"
   | "encrypted-openssh"
+  | "encrypted-key-bundle"
   | "unencrypted-key"
   | "not-a-key";
-
-const PKCS8_ENCRYPTED_ARMOR = "-----BEGIN ENCRYPTED PRIVATE KEY-----";
-const OPENSSH_ARMOR = "-----BEGIN OPENSSH PRIVATE KEY-----";
-const LEGACY_ARMOR = /-----BEGIN (?:RSA|EC|DSA) PRIVATE KEY-----/;
-const ANY_KEY_ARMOR = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
-const LEGACY_ENCRYPTED_HEADER = /Proc-Type:\s*4\s*,\s*ENCRYPTED/i;
 
 export function analyzeKeyMaterial(material: string): KeyMaterialKind {
   const trimmed = material.trim();
 
   if (trimmed.includes(PKCS8_ENCRYPTED_ARMOR)) {
-    return "encrypted-pkcs8";
+    // A cert-chain + encrypted-key bundle must not reach the decrypt path:
+    // decryptKeyForImport returns only the key, silently dropping the
+    // companion blocks from the stored value.
+    return hasCompanionPemBlocks(trimmed) ? "encrypted-key-bundle" : "encrypted-pkcs8";
   }
 
   if (trimmed.includes(OPENSSH_ARMOR)) {
@@ -37,8 +43,11 @@ export function analyzeKeyMaterial(material: string): KeyMaterialKind {
     }
   }
 
-  if (LEGACY_ARMOR.test(trimmed)) {
-    return LEGACY_ENCRYPTED_HEADER.test(trimmed) ? "encrypted-legacy-pem" : "unencrypted-key";
+  if (LEGACY_KEY_ARMOR.test(trimmed)) {
+    if (LEGACY_ENCRYPTED_HEADER.test(trimmed)) {
+      return hasCompanionPemBlocks(trimmed) ? "encrypted-key-bundle" : "encrypted-legacy-pem";
+    }
+    return "unencrypted-key";
   }
 
   if (ANY_KEY_ARMOR.test(trimmed)) {

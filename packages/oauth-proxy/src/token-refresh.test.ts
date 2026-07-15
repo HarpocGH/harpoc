@@ -196,6 +196,74 @@ describe("TokenRefreshScheduler", () => {
   });
 });
 
+describe("TokenRefreshScheduler stop() drain (review fix F2)", () => {
+  let scheduler: TokenRefreshScheduler;
+
+  afterEach(async () => {
+    await scheduler?.stop(0);
+  });
+
+  it("stop() resolves only after the in-flight tick persisted the rotated token", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let persisted = false;
+    const engine = {
+      getExpiringOAuthTokens: vi.fn().mockReturnValue([{ secret_id: "s1" }]),
+      refreshOAuthToken: vi.fn().mockImplementation(async () => {
+        await gate;
+        persisted = true;
+        return Date.now() + 3600_000;
+      }),
+    };
+    scheduler = new TokenRefreshScheduler(engine as never, { checkIntervalMs: 10 });
+    scheduler.start();
+    await vi.waitFor(() => expect(engine.refreshOAuthToken).toHaveBeenCalled());
+
+    const stopPromise = scheduler.stop();
+    let stopResolved = false;
+    void stopPromise.then(() => {
+      stopResolved = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The drain holds while the provider round-trip is still in flight —
+    // pre-fix, stop() returned synchronously and the rotated token was lost.
+    expect(stopResolved).toBe(false);
+    expect(persisted).toBe(false);
+
+    release();
+    await stopPromise;
+    expect(persisted).toBe(true);
+  });
+
+  it("the drain is bounded — a hung provider cannot block shutdown", async () => {
+    const engine = {
+      getExpiringOAuthTokens: vi.fn().mockReturnValue([{ secret_id: "s1" }]),
+      refreshOAuthToken: vi.fn().mockImplementation(() => new Promise(() => {})),
+    };
+    scheduler = new TokenRefreshScheduler(engine as never, { checkIntervalMs: 10 });
+    scheduler.start();
+    await vi.waitFor(() => expect(engine.refreshOAuthToken).toHaveBeenCalled());
+
+    const start = Date.now();
+    await scheduler.stop(200);
+    expect(Date.now() - start).toBeLessThan(5_000);
+    expect(scheduler.isRunning).toBe(false);
+  });
+
+  it("stop() with no tick in flight resolves immediately", async () => {
+    const engine = {
+      getExpiringOAuthTokens: vi.fn().mockReturnValue([]),
+      refreshOAuthToken: vi.fn(),
+    };
+    scheduler = new TokenRefreshScheduler(engine as never);
+    scheduler.start();
+    await scheduler.stop();
+    expect(scheduler.isRunning).toBe(false);
+  });
+});
+
 describe("TokenRefreshScheduler onRefreshError", () => {
   let scheduler: TokenRefreshScheduler;
 

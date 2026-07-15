@@ -35,6 +35,7 @@ import {
   DEFAULT_SESSION_TTL_MS,
   ErrorCode,
   findKnownInterpreters,
+  formatHandle,
   isValidSecretNamePattern,
   isVaultVersionSupported,
   LOCKOUT_DURATIONS_MS,
@@ -840,6 +841,16 @@ export class VaultEngine {
         sessionId: this.sessionId ?? undefined,
       });
     }
+
+    // Thesis §4.5.3 layer 4: a live stdio downstream child predates the
+    // isolation demand and holds the credential with full egress — refusing
+    // only new invocations would leave it running until seal. Idempotent
+    // no-op when nothing is live; the use-time refusal in McpInjector is the
+    // backstop for a policy tightened from a separate process, whose engine
+    // cannot reach this registry.
+    if (policy.network_isolation === true) {
+      await s.mcpRegistry.terminate(secret.id, "network_isolation_enabled");
+    }
   }
 
   /** Read a secret's injection policy (empty allowlists when unset). */
@@ -1014,6 +1025,12 @@ export class VaultEngine {
   /**
    * Create an OAuth secret with provider configuration.
    * Status is PENDING until completeOAuthFlow is called.
+   *
+   * A name collision with an existing PENDING OAuth secret resumes it: the
+   * aborted flow's provider row is replaced wholesale with the fresh config
+   * and the same secretId proceeds — so re-running `oauth connect` after a
+   * cancelled/failed flow works. ACTIVE or non-OAuth collisions stay
+   * DUPLICATE_SECRET.
    */
   async createOAuthSecret(
     name: string,
@@ -1022,13 +1039,34 @@ export class VaultEngine {
   ): Promise<{ handle: string; secretId: string }> {
     const s = this.assertUnlocked();
 
-    const result = await s.secretManager.createSecret({
-      name,
-      type: SecretType.OAUTH_TOKEN,
-      project,
-    });
+    let handle: string;
+    let resumed = false;
+    try {
+      const result = await s.secretManager.createSecret({
+        name,
+        type: SecretType.OAUTH_TOKEN,
+        project,
+      });
+      handle = result.handle;
+    } catch (createErr) {
+      if (!(createErr instanceof VaultError) || createErr.code !== ErrorCode.DUPLICATE_SECRET) {
+        throw createErr;
+      }
+      handle = formatHandle(name, project);
+      let existing: Awaited<ReturnType<typeof s.secretManager.resolveHandle>>;
+      try {
+        existing = await s.secretManager.resolveHandle(handle);
+      } catch {
+        throw createErr;
+      }
+      if (existing.type !== SecretType.OAUTH_TOKEN || existing.status !== SecretStatus.PENDING) {
+        throw createErr;
+      }
+      s.store.deleteOAuthToken(existing.id);
+      resumed = true;
+    }
 
-    const secret = await s.secretManager.resolveHandle(result.handle);
+    const secret = await s.secretManager.resolveHandle(handle);
 
     // Encrypt client_id with KEK
     const clientIdBytes = new Uint8Array(Buffer.from(providerConfig.client_id, "utf8"));
@@ -1070,14 +1108,15 @@ export class VaultEngine {
       eventType: AuditEventType.OAUTH_AUTHORIZE,
       secretId: secret.id,
       detail: {
-        handle: result.handle,
+        handle,
         provider: providerConfig.provider,
         grant_type: providerConfig.grant_type,
+        ...(resumed ? { resumed: true } : {}),
       },
       sessionId: this.sessionId ?? undefined,
     });
 
-    return { handle: result.handle, secretId: secret.id };
+    return { handle, secretId: secret.id };
   }
 
   /**

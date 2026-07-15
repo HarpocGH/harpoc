@@ -237,7 +237,20 @@ export class GitInjector {
       }
 
       if (isHostKeyFailure(r.stderr)) {
-        this.audit(action, secretId, { host, error: "SSH_HOST_KEY_MISMATCH" }, false);
+        // Security-rejection rows carry the isolation posture like every
+        // other post-spawn row — filtering the trail on it must not miss
+        // exactly the denials (review fix F8).
+        this.audit(
+          action,
+          secretId,
+          {
+            transport: "ssh",
+            host,
+            error: "SSH_HOST_KEY_MISMATCH",
+            network_isolation: networkIsolation,
+          },
+          false,
+        );
         throw VaultError.sshHostKeyMismatch(host);
       }
 

@@ -105,7 +105,14 @@ export class SshInjector {
 
       // A pinned-key mismatch (or unknown host) is a security rejection, not a result.
       if (isHostKeyFailure(r.stderr)) {
-        this.audit(action, secretId, { error: "SSH_HOST_KEY_MISMATCH" }, false);
+        // Carries the isolation posture like every other post-spawn row —
+        // filtering the trail on it must not miss the denials (review fix F8).
+        this.audit(
+          action,
+          secretId,
+          { error: "SSH_HOST_KEY_MISMATCH", network_isolation: networkIsolation },
+          false,
+        );
         throw VaultError.sshHostKeyMismatch(action.host);
       }
 

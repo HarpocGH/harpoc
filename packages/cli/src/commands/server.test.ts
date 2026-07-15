@@ -389,6 +389,28 @@ describe("server start", () => {
     );
   });
 
+  it("onRefreshError is suppressed once shutdown began (review T6)", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    exitSpy.mockImplementation(() => undefined as never);
+
+    await run(["--oauth-refresh"]);
+    const options = schedulerCtorCalls[0]?.options as {
+      onRefreshError: (secretId: string, err: unknown) => void;
+    };
+
+    const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
+    (sigintCall?.[1] as () => void)();
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+
+    errorSpy.mockClear();
+    // A drain-window failure (e.g. vaultLocked racing the teardown) must not
+    // print a spurious warning while the process is already exiting.
+    options.onRefreshError("secret-1", new Error("vault locked"));
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Warning:"));
+
+    onSpy.mockRestore();
+  });
+
   it("SIGINT shutdown stops the scheduler before destroying the engine", async () => {
     const onSpy = vi.spyOn(process, "on");
     exitSpy.mockImplementation(() => undefined as never);
@@ -406,6 +428,33 @@ describe("server start", () => {
     const stopOrder = mockScheduler.stop.mock.invocationCallOrder[0] as number;
     const destroyOrder = mockEngine.destroy.mock.invocationCallOrder[0] as number;
     expect(stopOrder).toBeLessThan(destroyOrder);
+
+    onSpy.mockRestore();
+  });
+
+  it("shutdown awaits the scheduler drain before destroying the engine (review fix F2)", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    exitSpy.mockImplementation(() => undefined as never);
+    let releaseDrain: () => void = () => {};
+    mockScheduler.stop.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        releaseDrain = resolve;
+      }),
+    );
+
+    await run(["--oauth-refresh"]);
+    const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
+    (sigintCall?.[1] as () => void)();
+
+    await vi.waitFor(() => expect(mockScheduler.stop).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The store must stay open while a rotated token may still arrive —
+    // pre-fix, shutdown fired stop() without awaiting the drain.
+    expect(mockEngine.destroy).not.toHaveBeenCalled();
+
+    releaseDrain();
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
 
     onSpy.mockRestore();
   });

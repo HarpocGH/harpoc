@@ -730,6 +730,12 @@ export class SqliteStore {
     return row ? this.rowToOAuthToken(row) : undefined;
   }
 
+  /** Remove a secret's OAuth provider row (resume replaces it wholesale). */
+  deleteOAuthToken(secretId: string): boolean {
+    const result = this.db.prepare("DELETE FROM oauth_tokens WHERE secret_id = ?").run(secretId);
+    return result.changes > 0;
+  }
+
   updateOAuthToken(
     secretId: string,
     fields: Partial<

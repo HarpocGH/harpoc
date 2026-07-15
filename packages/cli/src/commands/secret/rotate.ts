@@ -21,18 +21,23 @@ export function registerSecretRotateCommand(secret: Command): void {
     .action(async (handle: string, options: SecretRotateOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
-        const newValue = await resolveSecretValue({
-          fromFile: options.fromFile,
-          noDecrypt: options.decrypt === false,
-          promptMessage: "New secret value: ",
-        });
-
+        // Engine first: a sealed vault must fail before the user types a
+        // value or key passphrase, and the resolved plaintext must never
+        // exist outside a wiping finally.
         const engine = await loadUnlockedEngine(vaultDir);
         try {
-          await engine.rotateSecret(handle, newValue);
-          printSuccess(`Secret rotated (${handle})`);
+          const newValue = await resolveSecretValue({
+            fromFile: options.fromFile,
+            noDecrypt: options.decrypt === false,
+            promptMessage: "New secret value: ",
+          });
+          try {
+            await engine.rotateSecret(handle, newValue);
+            printSuccess(`Secret rotated (${handle})`);
+          } finally {
+            wipeBuffer(newValue);
+          }
         } finally {
-          wipeBuffer(newValue);
           await engine.destroy();
         }
       } catch (err) {

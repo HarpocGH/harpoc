@@ -293,12 +293,29 @@ describe("McpInjector — lifecycle (thesis §4.5.4)", () => {
 });
 
 describe("McpInjector — network isolation (§4.5.3 layer 4)", () => {
-  it("refuses a stdio downstream fail-closed before the registry is touched", async () => {
+  it("refuses a stdio downstream fail-closed before any acquire", async () => {
     const acquireSpy = vi.spyOn(registry, "acquire");
     await expect(
       run(mcpAction("echo"), { policy: { ...POLICY, network_isolation: true } }),
     ).rejects.toMatchObject({ code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE });
     expect(acquireSpy).not.toHaveBeenCalled();
+  });
+
+  it("terminates a live un-isolated child before refusing (policy tightened elsewhere)", async () => {
+    await run(mcpAction("echo"));
+    expect(registry.get("secret-1")).toBeDefined();
+    await expect(
+      run(mcpAction("echo"), { policy: { ...POLICY, network_isolation: true } }),
+    ).rejects.toMatchObject({ code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE });
+    expect(registry.get("secret-1")).toBeUndefined();
+  });
+
+  it("leaves the live child alone when the policy does not demand isolation", async () => {
+    await run(mcpAction("echo"));
+    const entry = registry.get("secret-1");
+    expect(entry).toBeDefined();
+    await run(mcpAction("echo"));
+    expect(registry.get("secret-1")).toBe(entry);
   });
 
   it("audits the stdio refusal with the error code", async () => {

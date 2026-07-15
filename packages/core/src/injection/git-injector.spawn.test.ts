@@ -266,3 +266,142 @@ describeGit("GitInjector network isolation (§4.5.3 layer 4)", () => {
     );
   });
 });
+
+// The SSH transport has its own isolation wiring (flag hand-off, refusal
+// catch, success/denial audit rows) — per-callsite, so it needs its own pin:
+// pre-fix only 3 of the 4 spawnCaptured callsites were covered (review T1).
+describeGitSsh("GitInjector SSH-transport network isolation (review fixes T1/F8)", () => {
+  const spawnMock = vi.mocked(spawnCaptured);
+
+  const { privateKey: sshKeyPem } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  const sshConfig: ConnectionConfig = {
+    ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] },
+  };
+  const sshAction: GitAction = {
+    type: "git",
+    operation: "clone",
+    repository: "git@github.com:org/repo.git",
+  };
+  const isolatedSshPolicy = () =>
+    policy({
+      command_allowlist: [GIT as string],
+      host_allowlist: ["github.com"],
+      network_isolation: true,
+    });
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it("passes the policy flag into the spawn seam and audits mechanism + state", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({ ...OK_RESULT, isolation_mechanism: "unshare" });
+    await audited.executeWithSecret(
+      sshAction,
+      new Uint8Array(Buffer.from(sshKeyPem)),
+      isolatedSshPolicy(),
+      sshConfig,
+      "secret-1",
+    );
+    const [, , opts] = spawnMock.mock.calls[0] as [
+      string,
+      string[],
+      { networkIsolation?: boolean },
+    ];
+    expect(opts.networkIsolation).toBe(true);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        detail: expect.objectContaining({
+          transport: "ssh",
+          network_isolation: true,
+          isolation_mechanism: "unshare",
+        }),
+      }),
+    );
+  });
+
+  it("audits and rethrows the fail-closed refusal from the seam (transport ssh)", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockRejectedValue(VaultError.networkIsolationUnavailable("mocked"));
+    await expect(
+      audited.executeWithSecret(
+        sshAction,
+        new Uint8Array(Buffer.from(sshKeyPem)),
+        isolatedSshPolicy(),
+        sshConfig,
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        detail: expect.objectContaining({
+          transport: "ssh",
+          error: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+          network_isolation: true,
+        }),
+      }),
+    );
+  });
+
+  it("defaults to an un-isolated spawn and audits network_isolation: false", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue(OK_RESULT);
+    await audited.executeWithSecret(
+      sshAction,
+      new Uint8Array(Buffer.from(sshKeyPem)),
+      policy({ command_allowlist: [GIT as string], host_allowlist: ["github.com"] }),
+      sshConfig,
+      "secret-1",
+    );
+    const [, , opts] = spawnMock.mock.calls[0] as [
+      string,
+      string[],
+      { networkIsolation?: boolean },
+    ];
+    expect(opts.networkIsolation).toBe(false);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        detail: expect.objectContaining({ transport: "ssh", network_isolation: false }),
+      }),
+    );
+  });
+
+  it("the host-key-mismatch denial carries the isolation posture (review fix F8)", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({
+      ...OK_RESULT,
+      exit_code: 128,
+      stderr: "Host key verification failed.",
+    });
+    await expect(
+      audited.executeWithSecret(
+        sshAction,
+        new Uint8Array(Buffer.from(sshKeyPem)),
+        isolatedSshPolicy(),
+        sshConfig,
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.SSH_HOST_KEY_MISMATCH });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        detail: expect.objectContaining({
+          transport: "ssh",
+          error: "SSH_HOST_KEY_MISMATCH",
+          network_isolation: true,
+        }),
+      }),
+    );
+  });
+});

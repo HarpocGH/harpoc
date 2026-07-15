@@ -173,4 +173,60 @@ describeSsh("SshInjector network isolation (§4.5.3 layer 4)", () => {
       }),
     );
   });
+
+  it("the host-key-mismatch denial carries the isolation posture (review fix F8)", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({
+      ...OK_RESULT,
+      exit_code: 255,
+      stderr: "Host key verification failed.",
+    });
+    await expect(
+      audited.executeWithSecret(
+        ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        isolatedPolicy(),
+        SSH_CONFIG,
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.SSH_HOST_KEY_MISMATCH });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        detail: expect.objectContaining({
+          error: "SSH_HOST_KEY_MISMATCH",
+          network_isolation: true,
+        }),
+      }),
+    );
+  });
+
+  it("control: the host-key denial reports false under a non-isolating policy", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({
+      ...OK_RESULT,
+      exit_code: 255,
+      stderr: "Host key verification failed.",
+    });
+    await expect(
+      audited.executeWithSecret(
+        ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        policy({ host_allowlist: ["deploy.example.com"], command_allowlist: [SSH as string] }),
+        SSH_CONFIG,
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.SSH_HOST_KEY_MISMATCH });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        detail: expect.objectContaining({
+          error: "SSH_HOST_KEY_MISMATCH",
+          network_isolation: false,
+        }),
+      }),
+    );
+  });
 });

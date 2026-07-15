@@ -1,6 +1,7 @@
 import { createPrivateKey, createPublicKey, sign as cryptoSign } from "node:crypto";
 import type { KeyObject } from "node:crypto";
 import { VaultError } from "@harpoc/shared";
+import { hasEncryptedPemMarker } from "./key-detection.js";
 import {
   SshReader,
   ecdsaPublicKeyBlob,
@@ -59,7 +60,7 @@ export function loadPrivateKey(pem: string): LoadedKey {
 }
 
 function keyObjectFromPem(pem: string): KeyObject {
-  if (pem.includes("BEGIN ENCRYPTED PRIVATE KEY") || /Proc-Type:\s*4\s*,\s*ENCRYPTED/i.test(pem)) {
+  if (hasEncryptedPemMarker(pem)) {
     throw VaultError.sshAgentFailed(
       "stored key is encrypted; re-import it with `harpoc secret set --from-file` so the vault can decrypt it at import",
     );

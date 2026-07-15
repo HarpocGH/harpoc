@@ -5,6 +5,7 @@ const EXPIRING_WITHIN_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_RETRIES = 3;
 const DEFAULT_INITIAL_RETRY_DELAY_MS = 1_000;
 const MAX_QUARANTINE_MS = 60 * 60 * 1000; // 1 hour backoff cap
+const DEFAULT_STOP_DRAIN_TIMEOUT_MS = 10_000;
 
 interface QuarantineEntry {
   failures: number;
@@ -30,6 +31,7 @@ export class TokenRefreshScheduler {
   private initialRetryDelayMs: number;
   private onRefreshError?: (secretId: string, err: unknown) => void;
   private tickInProgress = false;
+  private currentTick: Promise<void> | null = null;
   /**
    * Per-secret failure quarantine: a broken token (revoked grant, offline
    * provider) is re-discovered by every tick's expiring query forever — the
@@ -60,24 +62,41 @@ export class TokenRefreshScheduler {
     this.intervalId = setInterval(() => {
       if (this.tickInProgress) return;
       this.tickInProgress = true;
-      this.tick()
+      this.currentTick = this.tick()
         .catch(() => {
           // Errors are handled per-token in tick()
         })
         .finally(() => {
           this.tickInProgress = false;
+          this.currentTick = null;
         });
     }, this.checkIntervalMs);
   }
 
   /**
-   * Stop the background refresh scheduler.
+   * Stop the background refresh scheduler, draining an in-flight tick.
+   *
+   * A rotation-enforcing provider invalidates the old refresh_token the
+   * moment it issues a new one — abandoning the tick mid-flight loses the
+   * rotated token permanently. The drain is bounded so a hung provider
+   * cannot block shutdown; a response arriving after the bound is lost
+   * (accepted residual — the caller chose to stop). Fire-and-forget callers
+   * may ignore the returned promise.
    */
-  stop(): void {
+  async stop(drainTimeoutMs: number = DEFAULT_STOP_DRAIN_TIMEOUT_MS): Promise<void> {
     if (this.intervalId) {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
+    const inFlight = this.currentTick;
+    if (!inFlight) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, drainTimeoutMs);
+      if (timer.unref) timer.unref();
+    });
+    await Promise.race([inFlight, bound]);
+    if (timer) clearTimeout(timer);
   }
 
   /**

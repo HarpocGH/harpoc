@@ -151,6 +151,56 @@ describe("createOAuthSecret", () => {
       grant_type: "authorization_code",
     });
   });
+
+  it("resumes a PENDING OAuth secret of the same name with the fresh config (review fix F6)", async () => {
+    const first = await engine.createOAuthSecret("resume-me", defaultProviderConfig());
+    // Pre-fix this threw DUPLICATE_SECRET — the printed "re-run 'oauth
+    // connect'" recovery was dead.
+    const second = await engine.createOAuthSecret(
+      "resume-me",
+      defaultProviderConfig({ provider: "google" }),
+    );
+
+    expect(second.secretId).toBe(first.secretId);
+    expect(second.handle).toBe("secret://resume-me");
+    expect(engine.getOAuthTokenStatus(second.secretId).provider).toBe("google");
+
+    // queryAudit returns newest-first: [0] is the resume, [1] the original.
+    const events = engine.queryAudit({ eventType: AuditEventType.OAUTH_AUTHORIZE });
+    expect(events).toHaveLength(2);
+    expect(events[0]?.detail?.resumed).toBe(true);
+    expect(events[1]?.detail?.resumed).toBeUndefined();
+  });
+
+  it("the resumed flow completes against the reused secretId", async () => {
+    await engine.createOAuthSecret("resume-complete", defaultProviderConfig());
+    const second = await engine.createOAuthSecret("resume-complete", defaultProviderConfig());
+    await engine.completeOAuthFlow(second.secretId, "resumed-access-token");
+
+    const info = await engine.getSecretInfo("secret://resume-complete");
+    expect(info.status).toBe("active");
+  });
+
+  it("an ACTIVE OAuth secret of the same name still collides (negative control)", async () => {
+    const { secretId } = await engine.createOAuthSecret("active-col", defaultProviderConfig());
+    await engine.completeOAuthFlow(secretId, "access-tok");
+
+    await expect(
+      engine.createOAuthSecret("active-col", defaultProviderConfig()),
+    ).rejects.toMatchObject({ code: ErrorCode.DUPLICATE_SECRET });
+  });
+
+  it("a non-OAuth secret of the same name still collides (negative control)", async () => {
+    await engine.createSecret({
+      name: "api-col",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("plain-value", "utf8")),
+    });
+
+    await expect(
+      engine.createOAuthSecret("api-col", defaultProviderConfig()),
+    ).rejects.toMatchObject({ code: ErrorCode.DUPLICATE_SECRET });
+  });
 });
 
 // ---------------------------------------------------------------------------

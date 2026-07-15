@@ -21,6 +21,13 @@ vi.mock("argon2", () => ({
   },
 }));
 
+// Only defaultOpenBrowser is replaced (F9 tests); everything else stays real.
+const openBrowserMock = vi.hoisted(() => vi.fn());
+vi.mock("@harpoc/oauth-proxy", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@harpoc/oauth-proxy")>();
+  return { ...original, defaultOpenBrowser: openBrowserMock };
+});
+
 let tempDir: string;
 let tokenServer: Server;
 let tokenServerUrl: string;
@@ -82,6 +89,7 @@ describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provi
   const savedEnv = process.env.HARPOC_OAUTH_CLIENT_SECRET;
 
   beforeEach(() => {
+    openBrowserMock.mockReset();
     process.env.HARPOC_OAUTH_CLIENT_SECRET = "e2e-client-secret";
     tokenHandler = (_req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -279,5 +287,171 @@ describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provi
     expect(exitSpy).toHaveBeenCalledWith(1);
     const stderrText = errorSpy.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
     expect(stderrText).toContain("OAUTH_CALLBACK_TIMEOUT");
+  });
+
+  it("re-running connect after a failed flow resumes the PENDING secret (review fix F6)", async () => {
+    tokenHandler = (_req, res) => {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "invalid_client" }));
+    };
+    await expect(
+      run([
+        "e2e-resume",
+        "--provider",
+        "custom",
+        "--client-id",
+        "e2e-client",
+        "--token-endpoint",
+        tokenServerUrl,
+        "--client-credentials",
+      ]),
+    ).rejects.toThrow("process.exit");
+
+    // Pre-fix, this re-run died on DUPLICATE_SECRET before any flow started.
+    tokenHandler = (_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ access_token: "resumed-access-token", expires_in: 3600 }));
+    };
+    await run([
+      "e2e-resume",
+      "--provider",
+      "custom",
+      "--client-id",
+      "e2e-client",
+      "--token-endpoint",
+      tokenServerUrl,
+      "--client-credentials",
+      "--json",
+    ]);
+
+    const printed = JSON.parse(logSpy.mock.calls.at(-1)?.[0] as string) as Record<string, unknown>;
+    expect(printed.status).toBe("authorized");
+    expect(printed.handle).toBe("secret://e2e-resume");
+
+    const verify = await loadUnlockedEngine(tempDir);
+    try {
+      const info = await verify.getSecretInfo("secret://e2e-resume");
+      expect(info.status).toBe("active");
+    } finally {
+      await verify.destroy();
+    }
+  });
+
+  it("--timeout bounds the device wait: exit 1, poll cancelled, secret PENDING (review fix F7)", async () => {
+    deviceHandler = (_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          device_code: "e2e-hang-code",
+          user_code: "E2E-HANG",
+          verification_uri: "https://example.com/device",
+          expires_in: 900,
+          interval: 0,
+        }),
+      );
+    };
+    let polls = 0;
+    tokenHandler = (_req, res) => {
+      polls++;
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "authorization_pending" }));
+    };
+
+    // Pre-fix this hung until the provider's expires_in (900 s here) — the
+    // user's --timeout only fed the auth-code callback server.
+    await expect(
+      run([
+        "e2e-device-timeout",
+        "--provider",
+        "custom",
+        "--client-id",
+        "e2e-client",
+        "--token-endpoint",
+        tokenServerUrl,
+        "--device-endpoint",
+        deviceServerUrl,
+        "--device",
+        "--timeout",
+        "1",
+      ]),
+    ).rejects.toThrow("process.exit");
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const stderrText = errorSpy.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+    expect(stderrText).toContain("OAUTH_CALLBACK_TIMEOUT");
+
+    // The background poll was cancelled: the endpoint hit count settles.
+    // A request dispatched before the abort may still land, so wait for
+    // quiescence — a full zero-hit window (the cancelFlow suite's pattern).
+    await vi.waitFor(
+      async () => {
+        const before = polls;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(polls).toBe(before);
+      },
+      { timeout: 5_000, interval: 10 },
+    );
+
+    const verify = await loadUnlockedEngine(tempDir);
+    try {
+      const info = await verify.getSecretInfo("secret://e2e-device-timeout");
+      expect(info.status).toBe("pending");
+    } finally {
+      await verify.destroy();
+    }
+  }, 15_000);
+
+  it("--open browser failure warns and the flow still completes (review fix F9)", async () => {
+    openBrowserMock.mockRejectedValue(new Error("xdg-open missing"));
+
+    await run([
+      "e2e-open-fail",
+      "--provider",
+      "custom",
+      "--client-id",
+      "e2e-client",
+      "--token-endpoint",
+      tokenServerUrl,
+      "--auth-endpoint",
+      "https://example.com/auth",
+      "--callback-port",
+      "0",
+      "--open",
+      "--json",
+    ]);
+
+    expect(openBrowserMock).toHaveBeenCalledOnce();
+    const stderrText = errorSpy.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+    expect(stderrText).toContain("could not open a browser automatically");
+
+    const printed = JSON.parse(logSpy.mock.calls.at(-1)?.[0] as string) as Record<string, unknown>;
+    expect(printed.status).toBe("authorized");
+  });
+
+  it("control: a successful --open launch prints no warning", async () => {
+    openBrowserMock.mockResolvedValue(undefined);
+
+    await run([
+      "e2e-open-ok",
+      "--provider",
+      "custom",
+      "--client-id",
+      "e2e-client",
+      "--token-endpoint",
+      tokenServerUrl,
+      "--auth-endpoint",
+      "https://example.com/auth",
+      "--callback-port",
+      "0",
+      "--open",
+      "--json",
+    ]);
+
+    expect(openBrowserMock).toHaveBeenCalledOnce();
+    const stderrText = errorSpy.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+    expect(stderrText).not.toContain("could not open a browser");
+
+    const printed = JSON.parse(logSpy.mock.calls.at(-1)?.[0] as string) as Record<string, unknown>;
+    expect(printed.status).toBe("authorized");
   });
 });

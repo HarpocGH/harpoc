@@ -74,13 +74,16 @@ export function registerServerCommand(program: Command): void {
           let mcpServer: { close(): Promise<void> } | undefined;
           let mcpHttpServer: { close(): Promise<void> } | undefined;
           let restServer: { close(): void } | undefined;
-          let refreshScheduler: { stop(): void } | undefined;
+          let refreshScheduler: { stop(): Promise<void> } | undefined;
           let shuttingDown = false;
 
           const shutdown = async (): Promise<void> => {
             if (shuttingDown) return;
             shuttingDown = true;
-            refreshScheduler?.stop();
+            // Drain an in-flight refresh tick before the store closes — a
+            // rotated refresh_token arriving on a closed database is lost
+            // permanently (the provider already invalidated the old one).
+            if (refreshScheduler) await refreshScheduler.stop();
             if (mcpServer) await mcpServer.close();
             if (mcpHttpServer) await mcpHttpServer.close();
             if (restServer) restServer.close();

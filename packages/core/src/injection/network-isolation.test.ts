@@ -161,7 +161,21 @@ describe("requireNetworkIsolation", () => {
     expect(runProbe).toHaveBeenCalledTimes(2);
   });
 
-  it("caches a failed resolution too (capability does not change under the vault)", async () => {
+  it("does NOT cache a failed probe — a transient failure self-heals (review fix F5)", async () => {
+    // Pre-fix, the first rejection was cached for the process lifetime: one
+    // loaded-host probe timeout permanently disabled every isolation-
+    // demanding spawn until the vault restarted.
+    const runProbe = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+    const seams = { platform: "linux" as const, probeBinary: () => true, runProbe };
+    await expect(requireNetworkIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(
+      VaultError,
+    );
+    const wrap = await requireNetworkIsolation("/usr/bin/tool", [], seams);
+    expect(wrap.mechanism).toBe("unshare");
+    expect(runProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it("a persistently failing probe still refuses every call (fail closed, re-probed)", async () => {
     const runProbe = vi.fn().mockResolvedValue(false);
     const seams = { platform: "linux" as const, probeBinary: () => true, runProbe };
     await expect(requireNetworkIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(
@@ -170,6 +184,18 @@ describe("requireNetworkIsolation", () => {
     await expect(requireNetworkIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(
       VaultError,
     );
+    expect(runProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it("concurrent callers coalesce on one in-flight probe even when it fails", async () => {
+    const runProbe = vi.fn().mockResolvedValue(false);
+    const seams = { platform: "linux" as const, probeBinary: () => true, runProbe };
+    const [a, b] = await Promise.allSettled([
+      requireNetworkIsolation("/usr/bin/one", [], seams),
+      requireNetworkIsolation("/usr/bin/two", [], seams),
+    ]);
+    expect(a.status).toBe("rejected");
+    expect(b.status).toBe("rejected");
     expect(runProbe).toHaveBeenCalledTimes(1);
   });
 

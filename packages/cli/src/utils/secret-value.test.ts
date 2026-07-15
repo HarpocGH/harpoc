@@ -215,6 +215,43 @@ describe("resolveSecretValue — decrypt at import", () => {
     expect(value.toString("utf8")).toBe(privateKey);
   });
 
+  it("refuses a cert + encrypted-key bundle before any passphrase prompt (review fix F3)", async () => {
+    const { privateKey } = encryptedPkcs8Ed25519();
+    const bundle = `-----BEGIN CERTIFICATE-----\nMIIBfakecertbody\n-----END CERTIFICATE-----\n${privateKey}`;
+    const path = writeTemp("bundle.pem", bundle);
+
+    // An ended input would turn a passphrase prompt into the empty-passphrase
+    // error, so getting KEY_BUNDLE_UNSUPPORTED proves no prompt happened —
+    // pre-fix, this decrypted the key and silently dropped the certificate.
+    const p = resolveSecretValue({ fromFile: path, input: endedInput(), output: sink() });
+    await expect(p).rejects.toMatchObject({ code: ErrorCode.KEY_BUNDLE_UNSUPPORTED });
+    await expect(p).rejects.toThrow(/--no-decrypt/);
+  });
+
+  it("stores a bundle byte-exact under --no-decrypt", async () => {
+    const { privateKey } = encryptedPkcs8Ed25519();
+    const bundle = `-----BEGIN CERTIFICATE-----\nMIIBfakecertbody\n-----END CERTIFICATE-----\n${privateKey}`;
+    const path = writeTemp("bundle.pem", bundle);
+    const value = await resolveSecretValue({
+      fromFile: path,
+      noDecrypt: true,
+      input: endedInput(),
+      output: sink(),
+    });
+    expect(value.toString("utf8")).toBe(bundle);
+  });
+
+  it("control: cert + unencrypted key passes through byte-exact (no refusal, no prompt)", async () => {
+    const plain = generateKeyPairSync("ed25519", {
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    }).privateKey;
+    const bundle = `-----BEGIN CERTIFICATE-----\nMIIBfakecertbody\n-----END CERTIFICATE-----\n${plain}`;
+    const path = writeTemp("plain-bundle.pem", bundle);
+    const value = await resolveSecretValue({ fromFile: path, input: endedInput(), output: sink() });
+    expect(value.toString("utf8")).toBe(bundle);
+  });
+
   it("never leaks the passphrase into the thrown error", async () => {
     const { privateKey } = encryptedPkcs8Ed25519();
     const path = writeTemp("enc.pem", privateKey);
