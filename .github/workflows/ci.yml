@@ -62,12 +62,23 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       - name: Test
-        if: runner.os != 'Linux'
+        if: runner.os == 'Windows'
         run: pnpm test
-      - name: Test (Linux, D-Bus session with unlocked keyring — best-effort Secret Service)
+      # HARPOC_REQUIRE_PLATFORM_TESTS turns a failed availability probe on a
+      # provisioned tier into a test FAILURE instead of a silent skip — a
+      # regressed provisioning step above must not drop real-path coverage to
+      # zero while the leg stays green (review T3).
+      - name: Test (macOS, keychain + sandbox-exec tiers required)
+        if: runner.os == 'macOS'
+        env:
+          HARPOC_REQUIRE_PLATFORM_TESTS: keychain,isolation
+        run: pnpm test
+      - name: Test (Linux, D-Bus session with unlocked keyring — required Secret Service/keyring/isolation)
         if: runner.os == 'Linux'
         # keyctl link @u @s grants the CI shell possession of the user keyring
         # (non-login processes lack the pam_keyinit link, so @u operations get
         # EACCES without it); gnome-keyring provides the Secret Service.
+        env:
+          HARPOC_REQUIRE_PLATFORM_TESTS: secret-service,keyring,isolation
         run: dbus-run-session -- sh -c 'echo harpoc-ci | gnome-keyring-daemon --unlock; keyctl link @u @s || true; pnpm test'
       - run: pnpm format:check
