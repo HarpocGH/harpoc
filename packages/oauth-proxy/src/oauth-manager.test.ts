@@ -316,14 +316,19 @@ describe("OAuthManager device-code background poll lifecycle (code review Low O3
     await vi.waitFor(() => {
       expect(manager.cancelFlow(secretId)).toBe(false);
     });
-    // ...and no further polling reaches the endpoint. One request may already
-    // be on the wire when the abort lands — let it drain before snapshotting,
-    // then hold the freeze over a window spanning many 0-interval poll
-    // iterations (a live poll would add dozens of hits here).
-    await new Promise((r) => setTimeout(r, 150));
-    const frozen = handlers.tokenHits();
-    await new Promise((r) => setTimeout(r, 300));
-    expect(handlers.tokenHits()).toBe(frozen);
+    // ...and no further polling reaches the endpoint. A request already on
+    // the wire when the abort landed can arrive arbitrarily late on a loaded
+    // runner, so wait for the endpoint to go quiet instead of a fixed drain:
+    // the freeze is proven by a 200 ms window with no new hits — many
+    // 0-interval poll iterations — which a live poll can never satisfy.
+    await vi.waitFor(
+      async () => {
+        const before = handlers.tokenHits();
+        await new Promise((r) => setTimeout(r, 200));
+        expect(handlers.tokenHits()).toBe(before);
+      },
+      { timeout: 15_000, interval: 50 },
+    );
   });
 
   it("surfaces a background completion failure via onBackgroundFlowError (sealed engine)", async () => {

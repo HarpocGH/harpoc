@@ -2907,11 +2907,15 @@ describe("session keystore protection", () => {
   });
 
   describe.runIf(process.platform === "win32")("DPAPI end-to-end (Windows)", () => {
+    // Generous helper timeout (test budget raised to match): a cold
+    // PowerShell + BCL load on a thrashed CI runner has exceeded the 15 s
+    // default, tripping the write-time fallback and failing the scheme
+    // assertion with key_protection "none".
     it("wraps the session key via DPAPI and shares it across engines", async () => {
       const engineA = new VaultEngine({
         dbPath,
         sessionPath,
-        sessionKeyProtector: new DpapiSessionKeyProtector(),
+        sessionKeyProtector: new DpapiSessionKeyProtector({ timeoutMs: 45_000 }),
       });
       await engineA.initVault("password");
 
@@ -2926,12 +2930,12 @@ describe("session keystore protection", () => {
       const engineB = new VaultEngine({
         dbPath,
         sessionPath,
-        sessionKeyProtector: new DpapiSessionKeyProtector(),
+        sessionKeyProtector: new DpapiSessionKeyProtector({ timeoutMs: 45_000 }),
       });
       expect(await engineB.loadSession()).toBe(true);
       expect(engineB.getState()).toBe(VaultState.UNLOCKED);
       await engineB.destroy();
       await engineA.destroy();
-    });
+    }, 120_000);
   });
 });

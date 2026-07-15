@@ -210,8 +210,11 @@ describe("Session Sharing", () => {
 // explicit DPAPI protectors and therefore only runs on Windows.
 describe.runIf(process.platform === "win32")("DPAPI-protected session sharing (Windows)", () => {
   it("shares a DPAPI-wrapped session file between engines", async () => {
+    // Generous helper timeout: a cold PowerShell + BCL load on a thrashed CI
+    // runner has exceeded the 15 s default, tripping writeSession's fallback
+    // and failing the scheme assertion with key_protection "none".
     await expectSharedWrappedSession(
-      () => new DpapiSessionKeyProtector(),
+      () => new DpapiSessionKeyProtector({ timeoutMs: 45_000 }),
       "dpapi",
       "dpapi-integ-pw",
     );
