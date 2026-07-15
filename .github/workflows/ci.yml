@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
@@ -21,9 +21,24 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
+      - name: Enable Linux keystore tiers (keyutils + Secret Service)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y keyutils gnome-keyring dbus-x11
+      - name: Provision disposable unlocked macOS test keychain
+        if: runner.os == 'macOS'
+        run: |
+          security create-keychain -p harpoc-ci harpoc-ci.keychain
+          security unlock-keychain -p harpoc-ci harpoc-ci.keychain
+          security set-keychain-settings harpoc-ci.keychain
+          echo "HARPOC_TEST_KEYCHAIN=$HOME/Library/Keychains/harpoc-ci.keychain-db" >> "$GITHUB_ENV"
       - run: pnpm install
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm lint
-      - run: pnpm test
+      - name: Test
+        if: runner.os != 'Linux'
+        run: pnpm test
+      - name: Test (Linux, D-Bus session with unlocked keyring — best-effort Secret Service)
+        if: runner.os == 'Linux'
+        run: dbus-run-session -- sh -c 'echo harpoc-ci | gnome-keyring-daemon --unlock; pnpm test'
       - run: pnpm format:check
