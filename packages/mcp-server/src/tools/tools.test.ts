@@ -562,7 +562,9 @@ describe("MCP Tools", () => {
 
       const allowed = await callTool(srv, "create_secret", { name: "api-new", type: "api_key" });
       expect(allowed.isError).not.toBe(true);
-      expect(engine.createSecret).toHaveBeenCalledWith(expect.objectContaining({ name: "api-new" }));
+      expect(engine.createSecret).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "api-new" }),
+      );
     });
 
     it("denies global create_secret for a project-scoped token", async () => {

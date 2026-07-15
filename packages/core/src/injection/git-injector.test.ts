@@ -67,19 +67,16 @@ describe("GitInjector enforcement (no git binary required)", () => {
     ).rejects.toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
   });
 
-  it.each(["-u", "-u/tmp/evil"])(
-    "rejects the clone upload-pack shorthand %s",
-    async (arg) => {
-      await expect(
-        injector.executeWithSecret(
-          gitAction({ operation: "clone", args: [arg] }),
-          SECRET,
-          policy(),
-          undefined,
-        ),
-      ).rejects.toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
-    },
-  );
+  it.each(["-u", "-u/tmp/evil"])("rejects the clone upload-pack shorthand %s", async (arg) => {
+    await expect(
+      injector.executeWithSecret(
+        gitAction({ operation: "clone", args: [arg] }),
+        SECRET,
+        policy(),
+        undefined,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
+  });
 
   it("allows push -u (--set-upstream) — the shorthand is clone-only dangerous", async () => {
     // -u is benign for push; args pass the safety filter and enforcement proceeds

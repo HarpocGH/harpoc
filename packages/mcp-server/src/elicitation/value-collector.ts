@@ -219,7 +219,9 @@ function sendHtml(res: ServerResponse, status: number, statusText: string, body:
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
     Connection: "close",
   });
-  res.end(`<!doctype html><html><head><meta charset="utf-8"><title>Harpoc</title>${STYLE}</head><body>${body}</body></html>`);
+  res.end(
+    `<!doctype html><html><head><meta charset="utf-8"><title>Harpoc</title>${STYLE}</head><body>${body}</body></html>`,
+  );
 }
 
 const STYLE =
@@ -229,7 +231,8 @@ const STYLE =
 
 function formPage(options: ValueCollectorOptions, actionPath: string): string {
   const subject = escapeHtml(options.subject);
-  const heading = options.operation === "create" ? "Provide secret value" : "Provide new secret value";
+  const heading =
+    options.operation === "create" ? "Provide secret value" : "Provide new secret value";
   return (
     `<h1>${heading}</h1>` +
     `<p>Secret: <code>${subject}</code></p>` +

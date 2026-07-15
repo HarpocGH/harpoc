@@ -166,9 +166,9 @@ describe("DeviceCodeFlow.pollForToken", () => {
       res.end(JSON.stringify({ error: "access_denied" }));
     };
 
-    await expect(
-      flow.pollForToken("DC-denied", 0, makeConfig(), 30),
-    ).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+    await expect(flow.pollForToken("DC-denied", 0, makeConfig(), 30)).rejects.toMatchObject({
+      code: ErrorCode.OAUTH_FLOW_FAILED,
+    });
   });
 
   it("throws on expired_token", async () => {
@@ -177,9 +177,9 @@ describe("DeviceCodeFlow.pollForToken", () => {
       res.end(JSON.stringify({ error: "expired_token" }));
     };
 
-    await expect(
-      flow.pollForToken("DC-expired", 0, makeConfig(), 30),
-    ).rejects.toMatchObject({ code: ErrorCode.OAUTH_CALLBACK_TIMEOUT });
+    await expect(flow.pollForToken("DC-expired", 0, makeConfig(), 30)).rejects.toMatchObject({
+      code: ErrorCode.OAUTH_CALLBACK_TIMEOUT,
+    });
   });
 
   it("respects abort signal", async () => {

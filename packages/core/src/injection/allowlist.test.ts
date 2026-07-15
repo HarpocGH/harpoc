@@ -48,10 +48,12 @@ describe("matchesHostPortAllowlist", () => {
   });
 
   it("supports a subdomain wildcard with a port", () => {
-    expect(matchesHostPortAllowlist("primary.db.example.com", 5432, ["*.db.example.com:5432"])).toBe(
-      true,
+    expect(
+      matchesHostPortAllowlist("primary.db.example.com", 5432, ["*.db.example.com:5432"]),
+    ).toBe(true);
+    expect(matchesHostPortAllowlist("evil.example.com", 5432, ["*.db.example.com:5432"])).toBe(
+      false,
     );
-    expect(matchesHostPortAllowlist("evil.example.com", 5432, ["*.db.example.com:5432"])).toBe(false);
   });
 });
 
@@ -65,9 +67,9 @@ describe("matchesUrlAllowlist", () => {
   });
 
   it("matches an exact URL", () => {
-    expect(matchesUrlAllowlist("https://api.github.com/user", ["https://api.github.com/user"])).toBe(
-      true,
-    );
+    expect(
+      matchesUrlAllowlist("https://api.github.com/user", ["https://api.github.com/user"]),
+    ).toBe(true);
   });
 
   it("matches a path wildcard", () => {
@@ -88,13 +90,15 @@ describe("matchesUrlAllowlist", () => {
   });
 
   it("rejects a scheme mismatch", () => {
-    expect(matchesUrlAllowlist("http://api.github.com/x", ["https://api.github.com/*"])).toBe(false);
+    expect(matchesUrlAllowlist("http://api.github.com/x", ["https://api.github.com/*"])).toBe(
+      false,
+    );
   });
 
   it("rejects a port mismatch", () => {
-    expect(
-      matchesUrlAllowlist("https://api.github.com:8443/x", ["https://api.github.com/*"]),
-    ).toBe(false);
+    expect(matchesUrlAllowlist("https://api.github.com:8443/x", ["https://api.github.com/*"])).toBe(
+      false,
+    );
   });
 
   it("supports a subdomain wildcard", () => {

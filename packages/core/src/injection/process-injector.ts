@@ -49,7 +49,14 @@ export class ProcessInjector {
     const args = action.args ?? [];
     const timeoutMs = action.timeout_ms ?? DEFAULT_PROCESS_TIMEOUT_MS;
 
-    const result = await this.runProcess(resolvedPath, args, env, action.working_directory, timeoutMs, valueStr);
+    const result = await this.runProcess(
+      resolvedPath,
+      args,
+      env,
+      action.working_directory,
+      timeoutMs,
+      valueStr,
+    );
 
     this.audit(
       action,

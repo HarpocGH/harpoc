@@ -68,7 +68,9 @@ export function registerAuditCommand(program: Command): void {
 
             const since = options.since ? new Date(options.since).getTime() : undefined;
             if (since !== undefined && Number.isNaN(since)) {
-              throw new Error("--since must be a valid date (e.g. 2026-07-01 or 2026-07-01T12:00:00Z)");
+              throw new Error(
+                "--since must be a valid date (e.g. 2026-07-01 or 2026-07-01T12:00:00Z)",
+              );
             }
 
             const events = engine.queryAudit({

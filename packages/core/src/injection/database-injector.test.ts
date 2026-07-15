@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import type { ConnectionConfig, DatabaseAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { DatabaseInjector } from "./database-injector.js";
-import type { DbConnectOptions, DbConnection, DbEngineAdapter, DbQueryResult } from "./db-adapters.js";
+import type {
+  DbConnectOptions,
+  DbConnection,
+  DbEngineAdapter,
+  DbQueryResult,
+} from "./db-adapters.js";
 
 interface MockBehavior {
   rows?: unknown[];
@@ -93,7 +98,12 @@ describe("DatabaseInjector", () => {
   it("rejects a host:port outside the allowlist before connecting", async () => {
     const mock = new MockAdapter({ rows: [] });
     await expect(
-      injector(mock).executeWithSecret(action(), SECRET, policy({ host_allowlist: ["9.9.9.9"] }), undefined),
+      injector(mock).executeWithSecret(
+        action(),
+        SECRET,
+        policy({ host_allowlist: ["9.9.9.9"] }),
+        undefined,
+      ),
     ).rejects.toMatchObject({ code: ErrorCode.HOST_NOT_ALLOWED });
     expect(mock.lastConnect).toBeUndefined();
   });
@@ -200,7 +210,12 @@ describe("DatabaseInjector", () => {
   it("refuses an out-of-range embedded port before any connection work", async () => {
     const mock = new MockAdapter({ rows: [] });
     await expect(
-      injector(mock).executeWithSecret(action({ host: "8.8.8.8:70000" }), SECRET, policy(), undefined),
+      injector(mock).executeWithSecret(
+        action({ host: "8.8.8.8:70000" }),
+        SECRET,
+        policy(),
+        undefined,
+      ),
     ).rejects.toMatchObject({ code: ErrorCode.INVALID_DATABASE_CONFIG });
     expect(mock.lastConnect).toBeUndefined();
   });

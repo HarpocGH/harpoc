@@ -2,7 +2,11 @@ import type { AuditEventType, PrincipalType } from "@harpoc/shared";
 import { AAD_AUDIT_DETAIL_V2 } from "@harpoc/shared";
 import { encrypt } from "../crypto/aes-gcm.js";
 import type { SqliteStore } from "../storage/sqlite-store.js";
-import { AUDIT_CHAIN_GENESIS_BYTES, computeAuditRowHmac, deriveAuditChainKey } from "./audit-chain.js";
+import {
+  AUDIT_CHAIN_GENESIS_BYTES,
+  computeAuditRowHmac,
+  deriveAuditChainKey,
+} from "./audit-chain.js";
 
 export interface AuditLogOptions {
   eventType: AuditEventType;

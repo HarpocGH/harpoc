@@ -105,11 +105,7 @@ export function rsaPublicKeyBlob(e: Buffer, n: Buffer): Buffer {
 
 /** `curve` is the SSH id ("nistp256"/"nistp384"/"nistp521"); `q` is the uncompressed point (0x04‖x‖y). */
 export function ecdsaPublicKeyBlob(curve: string, q: Buffer): Buffer {
-  return Buffer.concat([
-    writeString(`ecdsa-sha2-${curve}`),
-    writeString(curve),
-    writeString(q),
-  ]);
+  return Buffer.concat([writeString(`ecdsa-sha2-${curve}`), writeString(curve), writeString(q)]);
 }
 
 // --- Signature blobs --------------------------------------------------------

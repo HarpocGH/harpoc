@@ -11,10 +11,7 @@ export type { AuthCodeFlowStartResult, TokenExchangeResult } from "./flows/autho
 export { ClientCredentialsFlow } from "./flows/client-credentials.js";
 export type { ClientCredentialsResult } from "./flows/client-credentials.js";
 export { DeviceCodeFlow } from "./flows/device-code.js";
-export type {
-  DeviceCodeStartResult,
-  DeviceCodeTokenResult,
-} from "./flows/device-code.js";
+export type { DeviceCodeStartResult, DeviceCodeTokenResult } from "./flows/device-code.js";
 
 // Callback server
 export { CallbackServer } from "./callback-server.js";

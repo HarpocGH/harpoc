@@ -68,9 +68,7 @@ describe("MCP Streamable HTTP transport (real engine, real tokens)", () => {
 
   function textOf(result: { content?: unknown }): string {
     const content = result.content as { type: string; text?: string }[] | undefined;
-    return (content ?? [])
-      .map((c) => c.text ?? "")
-      .join("\n");
+    return (content ?? []).map((c) => c.text ?? "").join("\n");
   }
 
   it("a real admin token initializes a session and lists secrets through the wire", async () => {

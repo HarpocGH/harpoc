@@ -243,9 +243,9 @@ describe("MCP proxy context — stdio transport (thesis §4.5.4)", () => {
       args: ["-e", DOWNSTREAM_SERVER],
       env_var: "TOKEN",
     });
-    await expect(
-      vault.engine.useSecret(created.handle, mcpAction("echo")),
-    ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+    await expect(vault.engine.useSecret(created.handle, mcpAction("echo"))).rejects.toMatchObject({
+      code: ErrorCode.COMMAND_NOT_ALLOWED,
+    });
   });
 
   it("rejects an action naming a server other than the configured one", async () => {
@@ -260,9 +260,9 @@ describe("MCP proxy context — stdio transport (thesis §4.5.4)", () => {
       type: "api_key",
       value: new Uint8Array(Buffer.from(SECRET, "utf8")),
     });
-    await expect(
-      vault.engine.useSecret(created.handle, mcpAction("echo")),
-    ).rejects.toMatchObject({ code: ErrorCode.MCP_SERVER_NOT_CONFIGURED });
+    await expect(vault.engine.useSecret(created.handle, mcpAction("echo"))).rejects.toMatchObject({
+      code: ErrorCode.MCP_SERVER_NOT_CONFIGURED,
+    });
   });
 });
 

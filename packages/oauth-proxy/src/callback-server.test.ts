@@ -128,9 +128,7 @@ describe("CallbackServer", () => {
     const callbackPromise = server.waitForCallback();
 
     const port = server.listenPort;
-    const res = await fetch(
-      `http://127.0.0.1:${port}/oauth/callback?code=ok&state=${state}`,
-    );
+    const res = await fetch(`http://127.0.0.1:${port}/oauth/callback?code=ok&state=${state}`);
     const html = await res.text();
 
     expect(res.status).toBe(200);

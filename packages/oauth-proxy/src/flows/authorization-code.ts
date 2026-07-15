@@ -89,9 +89,7 @@ export class AuthorizationCodeFlow {
     }
 
     if (!response.ok) {
-      throw VaultError.oauthTokenExchangeFailed(
-        `Token endpoint returned HTTP ${response.status}`,
-      );
+      throw VaultError.oauthTokenExchangeFailed(`Token endpoint returned HTTP ${response.status}`);
     }
 
     let body: Record<string, unknown>;

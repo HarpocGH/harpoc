@@ -36,9 +36,7 @@ export class EphemeralSshAgent {
       key = loadPrivateKey(privateKeyPem);
     } catch (err) {
       const message = err instanceof VaultError ? err.message : "invalid private key";
-      return Promise.reject(
-        err instanceof VaultError ? err : VaultError.sshAgentFailed(message),
-      );
+      return Promise.reject(err instanceof VaultError ? err : VaultError.sshAgentFailed(message));
     }
 
     let authSock: string;

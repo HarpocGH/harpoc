@@ -159,7 +159,14 @@ describe("oauth connect", () => {
   it("--client-credentials runs the client-credentials flow", async () => {
     process.env.HARPOC_OAUTH_CLIENT_SECRET = "cc-secret";
 
-    await run(["cc-token", "--provider", "github", "--client-id", "client-1", "--client-credentials"]);
+    await run([
+      "cc-token",
+      "--provider",
+      "github",
+      "--client-id",
+      "client-1",
+      "--client-credentials",
+    ]);
 
     expect(mockManager.startClientCredentials).toHaveBeenCalledTimes(1);
     expect(mockManager.startAuthorizationCode).not.toHaveBeenCalled();
@@ -182,7 +189,15 @@ describe("oauth connect", () => {
 
   it("--device and --client-credentials are mutually exclusive", async () => {
     await expect(
-      run(["x-token", "--provider", "github", "--client-id", "c", "--device", "--client-credentials"]),
+      run([
+        "x-token",
+        "--provider",
+        "github",
+        "--client-id",
+        "c",
+        "--device",
+        "--client-credentials",
+      ]),
     ).rejects.toThrow("process.exit");
 
     expect(exitSpy).toHaveBeenCalledWith(1);

@@ -1033,9 +1033,7 @@ export class VaultEngine {
     // Encrypt client_secret with KEK (if provided)
     let clientSecretEnc: { ciphertext: Uint8Array; iv: Uint8Array; tag: Uint8Array } | null = null;
     if (providerConfig.client_secret) {
-      const clientSecretBytes = new Uint8Array(
-        Buffer.from(providerConfig.client_secret, "utf8"),
-      );
+      const clientSecretBytes = new Uint8Array(Buffer.from(providerConfig.client_secret, "utf8"));
       clientSecretEnc = encrypt(s.kek, clientSecretBytes, AAD_OAUTH_CLIENT_SECRET(secret.id));
     }
 
@@ -1111,11 +1109,7 @@ export class VaultEngine {
 
     if (refreshToken) {
       const refreshTokenBytes = new Uint8Array(Buffer.from(refreshToken, "utf8"));
-      const refreshTokenEnc = encrypt(
-        s.kek,
-        refreshTokenBytes,
-        AAD_OAUTH_REFRESH_TOKEN(secretId),
-      );
+      const refreshTokenEnc = encrypt(s.kek, refreshTokenBytes, AAD_OAUTH_REFRESH_TOKEN(secretId));
       s.store.updateOAuthToken(secretId, {
         ...accessUpdate,
         refresh_token_encrypted: refreshTokenEnc.ciphertext,
@@ -1260,15 +1254,11 @@ export class VaultEngine {
         signal: AbortSignal.timeout(30_000),
       });
     } catch (err) {
-      throw VaultError.oauthRefreshFailed(
-        err instanceof Error ? err.message : "Network error",
-      );
+      throw VaultError.oauthRefreshFailed(err instanceof Error ? err.message : "Network error");
     }
 
     if (!response.ok) {
-      throw VaultError.oauthRefreshFailed(
-        `Token endpoint returned HTTP ${response.status}`,
-      );
+      throw VaultError.oauthRefreshFailed(`Token endpoint returned HTTP ${response.status}`);
     }
 
     let tokenResponse: {
@@ -1287,14 +1277,8 @@ export class VaultEngine {
     }
 
     // Encrypt new access token
-    const newAccessTokenBytes = new Uint8Array(
-      Buffer.from(tokenResponse.access_token, "utf8"),
-    );
-    const newAccessTokenEnc = encrypt(
-      s.kek,
-      newAccessTokenBytes,
-      AAD_OAUTH_ACCESS_TOKEN(secretId),
-    );
+    const newAccessTokenBytes = new Uint8Array(Buffer.from(tokenResponse.access_token, "utf8"));
+    const newAccessTokenEnc = encrypt(s.kek, newAccessTokenBytes, AAD_OAUTH_ACCESS_TOKEN(secretId));
 
     const newExpiresAt = tokenResponse.expires_in
       ? Date.now() + tokenResponse.expires_in * 1000
@@ -1308,14 +1292,8 @@ export class VaultEngine {
     };
 
     if (tokenResponse.refresh_token) {
-      const newRefreshBytes = new Uint8Array(
-        Buffer.from(tokenResponse.refresh_token, "utf8"),
-      );
-      const newRefreshEnc = encrypt(
-        s.kek,
-        newRefreshBytes,
-        AAD_OAUTH_REFRESH_TOKEN(secretId),
-      );
+      const newRefreshBytes = new Uint8Array(Buffer.from(tokenResponse.refresh_token, "utf8"));
+      const newRefreshEnc = encrypt(s.kek, newRefreshBytes, AAD_OAUTH_REFRESH_TOKEN(secretId));
       s.store.updateOAuthToken(secretId, {
         ...accessUpdate,
         refresh_token_encrypted: newRefreshEnc.ciphertext,
@@ -1458,16 +1436,12 @@ export class VaultEngine {
           }
         } catch (err) {
           if (oauthRow.access_token_expires_at <= Date.now()) {
-            throw err instanceof VaultError
-              ? err
-              : VaultError.oauthRefreshFailed("Refresh failed");
+            throw err instanceof VaultError ? err : VaultError.oauthRefreshFailed("Refresh failed");
           }
           // Token not yet expired — fall through to return current token
         }
       } else if (oauthRow.access_token_expires_at <= Date.now()) {
-        throw VaultError.oauthRefreshFailed(
-          "Access token expired and no refresh token available",
-        );
+        throw VaultError.oauthRefreshFailed("Access token expired and no refresh token available");
       }
     }
 

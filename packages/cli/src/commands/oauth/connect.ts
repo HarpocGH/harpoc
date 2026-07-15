@@ -28,7 +28,10 @@ export function registerOAuthConnectCommand(oauth: Command): void {
     .option("--token-endpoint <url>", "Token endpoint (custom provider)")
     .option("--device-endpoint <url>", "Device authorization endpoint (custom provider)")
     .option("--redirect-uri <url>", "Redirect URI override (default: loopback callback)")
-    .option("--auth-method <method>", "Token endpoint auth (client_secret_post | client_secret_basic)")
+    .option(
+      "--auth-method <method>",
+      "Token endpoint auth (client_secret_post | client_secret_basic)",
+    )
     .option("-p, --project <project>", "Project scope for the new secret")
     .option("--callback-port <port>", "Loopback callback port (0 = OS-assigned)", "19876")
     .option("--timeout <seconds>", "Authorization wait timeout in seconds", "300")

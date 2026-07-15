@@ -128,7 +128,12 @@ export class GitInjector {
       const redact = user.length >= 3 ? [password, user] : [password];
       const r = await spawnCaptured(gitPath, args, { env, cwd, timeoutMs, redact });
       const result = toGitResult(action, r);
-      this.audit(action, secretId, { transport: "https", exit_code: r.exit_code }, result.error === undefined);
+      this.audit(
+        action,
+        secretId,
+        { transport: "https", exit_code: r.exit_code },
+        result.error === undefined,
+      );
       return result;
     } finally {
       askpass.dispose();
@@ -192,7 +197,12 @@ export class GitInjector {
       }
 
       const result = toGitResult(action, r);
-      this.audit(action, secretId, { transport: "ssh", host, exit_code: r.exit_code }, result.error === undefined);
+      this.audit(
+        action,
+        secretId,
+        { transport: "ssh", host, exit_code: r.exit_code },
+        result.error === undefined,
+      );
       return result;
     } finally {
       agent.dispose();
@@ -329,7 +339,10 @@ function toCommandString(parts: string[]): string {
   return parts.map((p) => (/\s/.test(p) ? `"${p}"` : p)).join(" ");
 }
 
-function toGitResult(action: GitAction, r: import("./spawn-captured.js").SpawnCapturedResult): GitResult {
+function toGitResult(
+  action: GitAction,
+  r: import("./spawn-captured.js").SpawnCapturedResult,
+): GitResult {
   return {
     type: "git",
     operation: action.operation,

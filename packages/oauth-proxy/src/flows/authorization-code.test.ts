@@ -96,9 +96,7 @@ describe("AuthorizationCodeFlow.startFlow", () => {
   });
 
   it("throws when auth_endpoint is missing", () => {
-    expect(() =>
-      flow.startFlow(makeConfig({ auth_endpoint: undefined }), redirectUri),
-    ).toThrow();
+    expect(() => flow.startFlow(makeConfig({ auth_endpoint: undefined }), redirectUri)).toThrow();
   });
 });
 
@@ -155,9 +153,9 @@ describe("AuthorizationCodeFlow.handleCallback", () => {
       res.end(JSON.stringify({ token_type: "bearer" }));
     };
 
-    await expect(
-      flow.handleCallback("code", makeConfig(), redirectUri, "v"),
-    ).rejects.toMatchObject({ code: ErrorCode.OAUTH_TOKEN_EXCHANGE_FAILED });
+    await expect(flow.handleCallback("code", makeConfig(), redirectUri, "v")).rejects.toMatchObject(
+      { code: ErrorCode.OAUTH_TOKEN_EXCHANGE_FAILED },
+    );
   });
 
   it("rejects a private-address token_endpoint before the client_secret is sent", async () => {

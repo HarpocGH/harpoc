@@ -49,7 +49,12 @@ describe("SshInjector enforcement", () => {
 
   it("denies a host outside the allowlist", async () => {
     await expect(
-      injector.executeWithSecret(ACTION, SECRET, policy({ host_allowlist: ["other.example.com"] }), SSH_CONFIG),
+      injector.executeWithSecret(
+        ACTION,
+        SECRET,
+        policy({ host_allowlist: ["other.example.com"] }),
+        SSH_CONFIG,
+      ),
     ).rejects.toMatchObject({ code: ErrorCode.HOST_NOT_ALLOWED });
   });
 

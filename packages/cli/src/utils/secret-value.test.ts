@@ -113,7 +113,9 @@ describe("resolveSecretValue — acquisition", () => {
   it("pins the gap --from-file closes: the prompt path keeps only the first PEM line", async () => {
     const input = new PassThrough();
     const p = resolveSecretValue({ input, output: sink() });
-    input.write("-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n-----END PRIVATE KEY-----\n");
+    input.write(
+      "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n-----END PRIVATE KEY-----\n",
+    );
     expect((await p).toString("utf8")).toBe("-----BEGIN PRIVATE KEY-----");
   });
 

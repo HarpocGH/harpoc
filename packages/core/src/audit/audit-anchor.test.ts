@@ -122,7 +122,7 @@ describe("anchored chain verification (tail truncation)", () => {
     store.db.prepare("DELETE FROM audit_log WHERE id >= ?").run(ids[2]);
     store.db
       .prepare("UPDATE sqlite_sequence SET seq = ? WHERE name = 'audit_log'")
-      .run((ids[1] as number));
+      .run(ids[1] as number);
 
     logRows(3);
     const reminted = store.db

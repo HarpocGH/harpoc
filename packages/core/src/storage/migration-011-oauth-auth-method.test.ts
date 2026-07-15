@@ -186,9 +186,7 @@ describe("migration 011 upgrade (v10 → v11)", () => {
     const store = new SqliteStore(dbPath);
     expect(store.getMeta("schema_version")).toBe("11");
 
-    const columns = store.db
-      .prepare("PRAGMA table_info(oauth_tokens)")
-      .all() as { name: string }[];
+    const columns = store.db.prepare("PRAGMA table_info(oauth_tokens)").all() as { name: string }[];
     expect(columns.map((c) => c.name)).toContain("token_endpoint_auth_method");
     store.close();
   });

@@ -121,10 +121,7 @@ describe("collectValueFromTty", () => {
 
   it("closes the terminal even when the prompt is cancelled", async () => {
     const fake = fakeTerminal();
-    const promise = collectValueFromTty(
-      { subject: "k", operation: "create" },
-      () => fake.terminal,
-    );
+    const promise = collectValueFromTty({ subject: "k", operation: "create" }, () => fake.terminal);
     fake.emit("\x03");
     expect(await promise).toBe(null);
     expect(fake.close).toHaveBeenCalled();

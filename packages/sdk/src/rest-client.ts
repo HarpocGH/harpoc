@@ -11,12 +11,7 @@ import type {
 } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditQueryOptions, DecryptedAuditEvent, SecretInfo } from "@harpoc/core";
-import type {
-  CreateSecretInput,
-  GrantPolicyInput,
-  HealthResponse,
-  VaultClient,
-} from "./client.js";
+import type { CreateSecretInput, GrantPolicyInput, HealthResponse, VaultClient } from "./client.js";
 
 export interface RestClientOptions {
   baseUrl: string;

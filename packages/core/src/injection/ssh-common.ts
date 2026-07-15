@@ -55,7 +55,9 @@ export function sshHardeningArgs(knownHostsFile: string, connectTimeoutSec = 15)
 
 /** Detect an ssh host-key verification failure (pinned-key mismatch or unknown host). */
 export function isHostKeyFailure(text: string): boolean {
-  return /host key verification failed/i.test(text) || /host identification has changed/i.test(text);
+  return (
+    /host key verification failed/i.test(text) || /host identification has changed/i.test(text)
+  );
 }
 
 /**

@@ -65,9 +65,9 @@ describe("ClientCredentialsFlow", () => {
   });
 
   it("throws when client_secret is missing", async () => {
-    await expect(
-      flow.authenticate(makeConfig({ client_secret: undefined })),
-    ).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+    await expect(flow.authenticate(makeConfig({ client_secret: undefined }))).rejects.toMatchObject(
+      { code: ErrorCode.OAUTH_FLOW_FAILED },
+    );
   });
 
   it("throws OAUTH_TOKEN_EXCHANGE_FAILED on HTTP error", async () => {

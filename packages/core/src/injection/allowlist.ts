@@ -105,7 +105,10 @@ export function matchesHostPortAllowlist(host: string, port: number, patterns: s
 
 /** Full-anchored glob where `*` matches any run of characters. */
 function globMatch(pattern: string, value: string): boolean {
-  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").split("*").join(".*");
+  const escaped = pattern
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .split("*")
+    .join(".*");
   return new RegExp(`^${escaped}$`).test(value);
 }
 

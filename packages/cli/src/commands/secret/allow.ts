@@ -57,9 +57,24 @@ export function registerSecretAllowCommand(secret: Command): void {
     .description(
       "Set or show a secret's injection policy (URL/host/command allowlists, HTTP response mode); omitted flags keep their stored values",
     )
-    .option("--command <name>", "Allowlisted command for process execution (repeatable)", collect, [])
-    .option("--url <pattern>", "Allowlisted URL pattern for HTTP injection (repeatable)", collect, [])
-    .option("--host <pattern>", "Allowlisted host or host:port for database/SSH/Git-SSH (repeatable)", collect, [])
+    .option(
+      "--command <name>",
+      "Allowlisted command for process execution (repeatable)",
+      collect,
+      [],
+    )
+    .option(
+      "--url <pattern>",
+      "Allowlisted URL pattern for HTTP injection (repeatable)",
+      collect,
+      [],
+    )
+    .option(
+      "--host <pattern>",
+      "Allowlisted host or host:port for database/SSH/Git-SSH (repeatable)",
+      collect,
+      [],
+    )
     .option("--env <name>", "Env var passed through to spawned processes (repeatable)", collect, [])
     .option(
       "--response-mode <mode>",

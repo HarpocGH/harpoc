@@ -65,10 +65,9 @@ describe("TokenRefreshScheduler", () => {
   it("tick continues after individual token refresh failure", async () => {
     let callCount = 0;
     const engine = {
-      getExpiringOAuthTokens: vi.fn().mockReturnValue([
-        { secret_id: "fail-token" },
-        { secret_id: "ok-token" },
-      ]),
+      getExpiringOAuthTokens: vi
+        .fn()
+        .mockReturnValue([{ secret_id: "fail-token" }, { secret_id: "ok-token" }]),
       refreshOAuthToken: vi.fn().mockImplementation(async (id: string) => {
         callCount++;
         if (id === "fail-token") throw new Error("Refresh failed");

@@ -11,12 +11,7 @@ import type {
   UseSecretResponse,
 } from "@harpoc/shared";
 import type { AuditQueryOptions, DecryptedAuditEvent, SecretInfo } from "@harpoc/core";
-import type {
-  CreateSecretInput,
-  GrantPolicyInput,
-  HealthResponse,
-  VaultClient,
-} from "./client.js";
+import type { CreateSecretInput, GrantPolicyInput, HealthResponse, VaultClient } from "./client.js";
 import { ErrorCode, VAULT_VERSION, VaultError } from "@harpoc/shared";
 
 export class DirectClient implements VaultClient {

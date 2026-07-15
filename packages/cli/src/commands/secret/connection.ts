@@ -31,7 +31,12 @@ export function registerSecretConnectionCommand(secret: Command): void {
     .option("--db-tls <mode>", "Database TLS mode: require | disable")
     .option("--db-ca-file <path>", "Path to a CA certificate PEM (database TLS)")
     .option("--db-servername <name>", "TLS servername override (database)")
-    .option("--known-host <line>", "Pinned SSH known_hosts line (repeatable, replaces the stored list)", collect, [])
+    .option(
+      "--known-host <line>",
+      "Pinned SSH known_hosts line (repeatable, replaces the stored list)",
+      collect,
+      [],
+    )
     .option("--known-hosts-file <path>", "Path to a known_hosts file to pin (SSH)")
     .option("--clear", "Reset the whole config to empty before applying the other flags")
     .option("--show", "Show the current config instead of setting it")

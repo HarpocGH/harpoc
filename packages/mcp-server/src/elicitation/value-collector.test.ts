@@ -59,7 +59,11 @@ describe("startValueCollector", () => {
     try {
       const base = new URL(collector.url);
       const wrong = `${base.origin}/collect/${"A".repeat(43)}`;
-      const res = await fetch(wrong, { method: "POST", headers: FORM_HEADERS, body: postBody("x") });
+      const res = await fetch(wrong, {
+        method: "POST",
+        headers: FORM_HEADERS,
+        body: postBody("x"),
+      });
       expect(res.status).toBe(404);
 
       const ok = await fetch(collector.url, {

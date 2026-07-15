@@ -444,9 +444,7 @@ export class VaultError extends Error {
   }
 
   static oauthTokenExchangeFailed(detail?: string): VaultError {
-    const msg = detail
-      ? `OAuth token exchange failed: ${detail}`
-      : "OAuth token exchange failed";
+    const msg = detail ? `OAuth token exchange failed: ${detail}` : "OAuth token exchange failed";
     return new VaultError(ErrorCode.OAUTH_TOKEN_EXCHANGE_FAILED, msg);
   }
 
@@ -526,7 +524,10 @@ export class VaultError extends Error {
   }
 
   static unsupportedDbEngine(engine: string): VaultError {
-    return new VaultError(ErrorCode.UNSUPPORTED_DB_ENGINE, `Unsupported database engine: ${engine}`);
+    return new VaultError(
+      ErrorCode.UNSUPPORTED_DB_ENGINE,
+      `Unsupported database engine: ${engine}`,
+    );
   }
 
   static invalidDatabaseConfig(message: string): VaultError {

@@ -106,7 +106,9 @@ describe("MysqlAdapter connection config", () => {
   });
 
   it("uses the driver's own dialer when the target was not pinned (literal IP)", async () => {
-    await defaultDbAdapters().mysql.connect(opts({ host: "8.8.8.8", address: "8.8.8.8", port: 3306 }));
+    await defaultDbAdapters().mysql.connect(
+      opts({ host: "8.8.8.8", address: "8.8.8.8", port: 3306 }),
+    );
     const cfg = mysqlConfigs[0] as MysqlConfig;
     expect(cfg.host).toBe("8.8.8.8");
     expect(cfg).not.toHaveProperty("stream");

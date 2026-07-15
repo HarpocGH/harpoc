@@ -800,9 +800,9 @@ describe("oauth_tokens CRUD", () => {
     store.insertSecret(secret);
     store.insertOAuthToken(makeOAuthToken(secret.id));
 
-    expect(() =>
-      store.updateOAuthToken(secret.id, { "DROP TABLE; --": "x" } as never),
-    ).toThrow("Invalid column name");
+    expect(() => store.updateOAuthToken(secret.id, { "DROP TABLE; --": "x" } as never)).toThrow(
+      "Invalid column name",
+    );
   });
 
   it("cascades delete when secret is deleted", () => {
@@ -950,9 +950,9 @@ describe("certificates CRUD", () => {
     store.insertSecret(secret);
     store.insertCertificate(makeCertificate(secret.id));
 
-    expect(() =>
-      store.updateCertificate(secret.id, { "DROP TABLE; --": "x" } as never),
-    ).toThrow("Invalid column name");
+    expect(() => store.updateCertificate(secret.id, { "DROP TABLE; --": "x" } as never)).toThrow(
+      "Invalid column name",
+    );
   });
 
   it("cascades delete when secret is deleted", () => {
@@ -974,13 +974,9 @@ describe("certificates CRUD", () => {
 
     const dayMs = 86_400_000;
     // Expiring in 10 days
-    store.insertCertificate(
-      makeCertificate(s1.id, { not_after: Date.now() + 10 * dayMs }),
-    );
+    store.insertCertificate(makeCertificate(s1.id, { not_after: Date.now() + 10 * dayMs }));
     // Expiring in 60 days
-    store.insertCertificate(
-      makeCertificate(s2.id, { not_after: Date.now() + 60 * dayMs }),
-    );
+    store.insertCertificate(makeCertificate(s2.id, { not_after: Date.now() + 60 * dayMs }));
     // No expiry
     store.insertCertificate(makeCertificate(s3.id, { not_after: null }));
 
@@ -993,9 +989,7 @@ describe("certificates CRUD", () => {
   it("getExpiringCertificates excludes revoked secrets", () => {
     const secret = makeSecret({ type: SecretType.CERTIFICATE, status: SecretStatus.REVOKED });
     store.insertSecret(secret);
-    store.insertCertificate(
-      makeCertificate(secret.id, { not_after: Date.now() + 86_400_000 }),
-    );
+    store.insertCertificate(makeCertificate(secret.id, { not_after: Date.now() + 86_400_000 }));
 
     const expiring = store.getExpiringCertificates(30);
     expect(expiring).toHaveLength(0);
@@ -1044,9 +1038,9 @@ describe("injection_policies CRUD", () => {
     const retrieved = store.getInjectionPolicy(secret.id);
     expect(retrieved).toBeDefined();
     expect(retrieved?.secret_id).toBe(secret.id);
-    expect(Buffer.from(retrieved?.policy_encrypted ?? []).equals(Buffer.from(row.policy_encrypted))).toBe(
-      true,
-    );
+    expect(
+      Buffer.from(retrieved?.policy_encrypted ?? []).equals(Buffer.from(row.policy_encrypted)),
+    ).toBe(true);
   });
 
   it("returns undefined for missing policy", () => {
@@ -1070,7 +1064,9 @@ describe("injection_policies CRUD", () => {
     const retrieved = store.getInjectionPolicy(secret.id);
     expect(retrieved?.created_at).toBe(1000);
     expect(retrieved?.updated_at).toBe(5000);
-    expect(Buffer.from(retrieved?.policy_encrypted ?? []).equals(Buffer.from([9, 9, 9]))).toBe(true);
+    expect(Buffer.from(retrieved?.policy_encrypted ?? []).equals(Buffer.from([9, 9, 9]))).toBe(
+      true,
+    );
   });
 
   it("deletes a policy", () => {

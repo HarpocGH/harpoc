@@ -483,9 +483,9 @@ describe("Timing Attack Protection", () => {
     const plan = db
       .prepare("EXPLAIN QUERY PLAN SELECT id FROM secrets WHERE name_hmac = ?")
       .all("probe") as { detail: string }[];
-    expect(plan.some((row) => /USING (COVERING )?INDEX idx_secrets_name_hmac/i.test(row.detail))).toBe(
-      true,
-    );
+    expect(
+      plan.some((row) => /USING (COVERING )?INDEX idx_secrets_name_hmac/i.test(row.detail)),
+    ).toBe(true);
 
     await vault.engine.destroy();
     destroyTestVault(vault).catch(() => {});

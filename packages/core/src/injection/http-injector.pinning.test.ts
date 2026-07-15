@@ -92,10 +92,7 @@ describe("HTTP DNS-rebinding IP pinning", () => {
     );
 
     expect(result.status).toBe(200);
-    expect(requests.map((r) => r.host)).toEqual([
-      `a.pinned.test:${port}`,
-      `b.pinned.test:${port}`,
-    ]);
+    expect(requests.map((r) => r.host)).toEqual([`a.pinned.test:${port}`, `b.pinned.test:${port}`]);
     expect(requests.at(1)?.url).toBe("/final");
   });
 });

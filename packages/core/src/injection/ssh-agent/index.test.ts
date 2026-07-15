@@ -44,7 +44,12 @@ async function listIdentities(authSock: string): Promise<Buffer> {
   return r.readString(); // key blob
 }
 
-async function signWith(authSock: string, keyBlob: Buffer, data: Buffer, flags: number): Promise<Buffer> {
+async function signWith(
+  authSock: string,
+  keyBlob: Buffer,
+  data: Buffer,
+  flags: number,
+): Promise<Buffer> {
   const body = Buffer.concat([
     writeByte(SSH_AGENTC_SIGN_REQUEST),
     writeString(keyBlob),
@@ -61,7 +66,10 @@ function ed25519PubFromBlob(blob: Buffer) {
   const r = new SshReader(blob);
   r.readCString();
   const a = r.readString();
-  return createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: a.toString("base64url") }, format: "jwk" });
+  return createPublicKey({
+    key: { kty: "OKP", crv: "Ed25519", x: a.toString("base64url") },
+    format: "jwk",
+  });
 }
 
 const CHALLENGE = Buffer.from("agent-socket challenge");

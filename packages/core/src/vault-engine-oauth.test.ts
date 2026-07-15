@@ -196,9 +196,9 @@ describe("completeOAuthFlow", () => {
   });
 
   it("rejects non-existent secrets", async () => {
-    await expect(
-      engine.completeOAuthFlow("non-existent-id", "token"),
-    ).rejects.toMatchObject({ code: ErrorCode.SECRET_NOT_FOUND });
+    await expect(engine.completeOAuthFlow("non-existent-id", "token")).rejects.toMatchObject({
+      code: ErrorCode.SECRET_NOT_FOUND,
+    });
   });
 
   it("rejects non-OAuth secrets", async () => {
@@ -209,9 +209,9 @@ describe("completeOAuthFlow", () => {
     });
     const apiKeyId = await engine.resolveSecretId("secret://api-key");
 
-    await expect(
-      engine.completeOAuthFlow(apiKeyId, "token"),
-    ).rejects.toMatchObject({ code: ErrorCode.OAUTH_NOT_CONFIGURED });
+    await expect(engine.completeOAuthFlow(apiKeyId, "token")).rejects.toMatchObject({
+      code: ErrorCode.OAUTH_NOT_CONFIGURED,
+    });
   });
 
   it("logs OAUTH_CALLBACK audit event", async () => {
@@ -726,7 +726,12 @@ describe("useSecret with OAuth", () => {
   });
 
   it("uses OAuth access token for HTTP injection (bearer)", async () => {
-    await engine.completeOAuthFlow(secretId, "bearer-token-value", "refresh", Date.now() + 3600_000);
+    await engine.completeOAuthFlow(
+      secretId,
+      "bearer-token-value",
+      "refresh",
+      Date.now() + 3600_000,
+    );
 
     const response = await engine.useSecret("secret://use-test", {
       type: "http",

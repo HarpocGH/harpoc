@@ -154,7 +154,8 @@ export class McpInjector {
         this.audit(action, secretId, config, { error: err.code }, false);
         throw err;
       }
-      const detail = err instanceof Error ? redactSecretEncodings(err.message, valueStr) : undefined;
+      const detail =
+        err instanceof Error ? redactSecretEncodings(err.message, valueStr) : undefined;
       const vaultErr = VaultError.mcpConnectFailed(config.server_name, detail);
       this.audit(action, secretId, config, { error: vaultErr.code }, false);
       throw vaultErr;

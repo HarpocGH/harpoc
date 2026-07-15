@@ -108,7 +108,12 @@ export class SshInjector {
         signal: r.signal ?? undefined,
         error,
       };
-      this.audit(action, secretId, { exit_code: r.exit_code, timed_out: r.timed_out }, error === undefined);
+      this.audit(
+        action,
+        secretId,
+        { exit_code: r.exit_code, timed_out: r.timed_out },
+        error === undefined,
+      );
       return result;
     } finally {
       agent.dispose();

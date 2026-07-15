@@ -70,14 +70,11 @@ function rawRequest(
   method = "POST",
 ): Promise<RawResponse> {
   return new Promise((resolve, reject) => {
-    const req = httpRequest(
-      { host: "127.0.0.1", port, path: "/mcp", method, headers },
-      (res) => {
-        let data = "";
-        res.on("data", (chunk: Buffer) => (data += chunk.toString("utf8")));
-        res.on("end", () => resolve({ status: res.statusCode ?? 0, body: data }));
-      },
-    );
+    const req = httpRequest({ host: "127.0.0.1", port, path: "/mcp", method, headers }, (res) => {
+      let data = "";
+      res.on("data", (chunk: Buffer) => (data += chunk.toString("utf8")));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, body: data }));
+    });
     req.on("error", reject);
     req.end(body);
   });
@@ -413,21 +410,28 @@ describe("startMcpHttpServer", () => {
       body?: string,
     ): Promise<{ status: number; sessionId?: string }> =>
       new Promise((resolve, reject) => {
-        const req = httpRequest({ host: "127.0.0.1", port, path: "/mcp", method, headers }, (res) => {
-          res.resume();
-          res.on("end", () =>
-            resolve({
-              status: res.statusCode ?? 0,
-              sessionId: res.headers["mcp-session-id"] as string | undefined,
-            }),
-          );
-        });
+        const req = httpRequest(
+          { host: "127.0.0.1", port, path: "/mcp", method, headers },
+          (res) => {
+            res.resume();
+            res.on("end", () =>
+              resolve({
+                status: res.statusCode ?? 0,
+                sessionId: res.headers["mcp-session-id"] as string | undefined,
+              }),
+            );
+          },
+        );
         req.on("error", reject);
         req.end(body);
       });
 
     const initialize = (): Promise<{ status: number; sessionId?: string }> =>
-      rawWithHeaders("POST", rpcHeaders({ authorization: `Bearer ${TOKEN}` }), JSON.stringify(INIT_BODY));
+      rawWithHeaders(
+        "POST",
+        rpcHeaders({ authorization: `Bearer ${TOKEN}` }),
+        JSON.stringify(INIT_BODY),
+      );
 
     const ids: string[] = [];
     for (let i = 0; i < 128; i++) {

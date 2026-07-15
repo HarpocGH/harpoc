@@ -170,7 +170,11 @@ describe("DirectClient", () => {
     const engine = createMockEngine();
     const client = new DirectClient(engine as never);
 
-    const policy = { url_allowlist: ["https://api.github.com/*"], command_allowlist: ["gh"], env_allowlist: [] };
+    const policy = {
+      url_allowlist: ["https://api.github.com/*"],
+      command_allowlist: ["gh"],
+      env_allowlist: [],
+    };
     await client.setInjectionPolicy("secret://key", policy);
     expect(engine.setInjectionPolicy).toHaveBeenCalledWith("secret://key", policy, undefined);
 

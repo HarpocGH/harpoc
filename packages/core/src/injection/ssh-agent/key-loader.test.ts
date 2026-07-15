@@ -77,9 +77,9 @@ describe("loadPrivateKey — traditional PEM format", () => {
     const key = loadPrivateKey(readFixture("rsa_pem"));
     expect(key.publicKeyBlob).toEqual(pubBlob("rsa_pem"));
     const sig = splitSig(key.sign(CHALLENGE, 2));
-    expect(cryptoVerify("sha256", CHALLENGE, pubKeyObjectFromBlob(pubBlob("rsa_pem")), sig.inner)).toBe(
-      true,
-    );
+    expect(
+      cryptoVerify("sha256", CHALLENGE, pubKeyObjectFromBlob(pubBlob("rsa_pem")), sig.inner),
+    ).toBe(true);
   });
 
   it("loads a SEC1 EC PEM and matches its .pub blob", () => {
@@ -151,7 +151,10 @@ function pubKeyObjectFromBlob(blob: Buffer) {
   const type = r.readCString();
   if (type === "ssh-ed25519") {
     const a = r.readString();
-    return createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: a.toString("base64url") }, format: "jwk" });
+    return createPublicKey({
+      key: { kty: "OKP", crv: "Ed25519", x: a.toString("base64url") },
+      format: "jwk",
+    });
   }
   if (type === "ssh-rsa") {
     const e = r.readMpint();
@@ -165,9 +168,9 @@ function pubKeyObjectFromBlob(blob: Buffer) {
   const curveId = r.readCString();
   const point = r.readString();
   const sizes: Record<string, [string, number]> = {
-    "nistp256": ["P-256", 32],
-    "nistp384": ["P-384", 48],
-    "nistp521": ["P-521", 66],
+    nistp256: ["P-256", 32],
+    nistp384: ["P-384", 48],
+    nistp521: ["P-521", 66],
   };
   const [crv, size] = sizes[curveId] as [string, number];
   const x = point.subarray(1, 1 + size).toString("base64url");

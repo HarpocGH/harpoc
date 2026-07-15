@@ -594,7 +594,9 @@ export class SqliteStore {
       secret_id: (row.secret_id as string) ?? null,
       principal_type: (row.principal_type as string) ?? null,
       principal_id: (row.principal_id as string) ?? null,
-      detail_encrypted: row.detail_encrypted ? new Uint8Array(row.detail_encrypted as Buffer) : null,
+      detail_encrypted: row.detail_encrypted
+        ? new Uint8Array(row.detail_encrypted as Buffer)
+        : null,
       detail_iv: row.detail_iv ? new Uint8Array(row.detail_iv as Buffer) : null,
       detail_tag: row.detail_tag ? new Uint8Array(row.detail_tag as Buffer) : null,
       ip_address: (row.ip_address as string) ?? null,
@@ -840,9 +842,9 @@ export class SqliteStore {
   }
 
   getCertificate(secretId: string): CertificateRow | undefined {
-    const row = this.db
-      .prepare("SELECT * FROM certificates WHERE secret_id = ?")
-      .get(secretId) as Record<string, unknown> | undefined;
+    const row = this.db.prepare("SELECT * FROM certificates WHERE secret_id = ?").get(secretId) as
+      | Record<string, unknown>
+      | undefined;
     return row ? this.rowToCertificate(row) : undefined;
   }
 
@@ -1173,9 +1175,7 @@ export class SqliteStore {
       access_token_encrypted: row.access_token_encrypted
         ? new Uint8Array(row.access_token_encrypted as Buffer)
         : null,
-      access_token_iv: row.access_token_iv
-        ? new Uint8Array(row.access_token_iv as Buffer)
-        : null,
+      access_token_iv: row.access_token_iv ? new Uint8Array(row.access_token_iv as Buffer) : null,
       access_token_tag: row.access_token_tag
         ? new Uint8Array(row.access_token_tag as Buffer)
         : null,
@@ -1205,9 +1205,7 @@ export class SqliteStore {
       acme_account_encrypted: row.acme_account_encrypted
         ? new Uint8Array(row.acme_account_encrypted as Buffer)
         : null,
-      acme_account_iv: row.acme_account_iv
-        ? new Uint8Array(row.acme_account_iv as Buffer)
-        : null,
+      acme_account_iv: row.acme_account_iv ? new Uint8Array(row.acme_account_iv as Buffer) : null,
       acme_account_tag: row.acme_account_tag
         ? new Uint8Array(row.acme_account_tag as Buffer)
         : null,

@@ -45,7 +45,8 @@ export function createPinnedLookup(pins: ReadonlyMap<string, readonly string[]>)
     const entries = pinned
       .map((address) => ({ address, family: isIP(address) }))
       .filter(
-        (entry) => entry.family !== 0 && (requestedFamily === 0 || entry.family === requestedFamily),
+        (entry) =>
+          entry.family !== 0 && (requestedFamily === 0 || entry.family === requestedFamily),
       );
     if (entries.length === 0) {
       const err: NodeJS.ErrnoException = new Error(

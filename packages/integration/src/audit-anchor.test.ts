@@ -44,14 +44,16 @@ const DB_SIDECARS = ["", "-wal", "-shm"];
 
 function snapshotDb(dir: string): void {
   for (const suffix of DB_SIDECARS) {
-    if (existsSync(vault.dbPath + suffix)) copyFileSync(vault.dbPath + suffix, join(dir, `db${suffix}`));
+    if (existsSync(vault.dbPath + suffix))
+      copyFileSync(vault.dbPath + suffix, join(dir, `db${suffix}`));
   }
 }
 
 function restoreDb(dir: string): void {
   for (const suffix of DB_SIDECARS) {
     if (existsSync(vault.dbPath + suffix)) unlinkSync(vault.dbPath + suffix);
-    if (existsSync(join(dir, `db${suffix}`))) copyFileSync(join(dir, `db${suffix}`), vault.dbPath + suffix);
+    if (existsSync(join(dir, `db${suffix}`)))
+      copyFileSync(join(dir, `db${suffix}`), vault.dbPath + suffix);
   }
 }
 

@@ -49,7 +49,14 @@ describe("sdk", () => {
   describeRuntimeDependencyConfinement({
     entryUrl: pathToFileURL(resolve(distDir, "index.js")).href,
     cwd: pkgRoot,
-    forbidden: ["@harpoc/core", "@modelcontextprotocol", "argon2", "better-sqlite3", "pg", "mysql2"],
+    forbidden: [
+      "@harpoc/core",
+      "@modelcontextprotocol",
+      "argon2",
+      "better-sqlite3",
+      "pg",
+      "mysql2",
+    ],
     control: "@harpoc/core",
   });
 });

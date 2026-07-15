@@ -55,12 +55,10 @@ vi.mock("@harpoc/rest-api", () => ({
 }));
 
 vi.mock("@harpoc/oauth-proxy", () => ({
-  TokenRefreshScheduler: vi
-    .fn()
-    .mockImplementation((engine: unknown, options: unknown) => {
-      schedulerCtorCalls.push({ engine, options: options as Record<string, unknown> });
-      return mockScheduler;
-    }),
+  TokenRefreshScheduler: vi.fn().mockImplementation((engine: unknown, options: unknown) => {
+    schedulerCtorCalls.push({ engine, options: options as Record<string, unknown> });
+    return mockScheduler;
+  }),
 }));
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -161,8 +159,9 @@ describe("server start", () => {
   });
 
   it("exits with error when REST and MCP HTTP ports collide", async () => {
-    await expect(run(["--rest", "--mcp-http", "--port", "4000", "--mcp-http-port", "4000"]))
-      .rejects.toThrow("process.exit");
+    await expect(
+      run(["--rest", "--mcp-http", "--port", "4000", "--mcp-http-port", "4000"]),
+    ).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("must differ"));
   });

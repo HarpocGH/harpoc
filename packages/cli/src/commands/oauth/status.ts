@@ -1,9 +1,5 @@
 import type { Command } from "commander";
-import {
-  resolveVaultDir,
-  loadUnlockedEngine,
-  resolveSecretId,
-} from "../../utils/vault-loader.js";
+import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord, formatTimestamp } from "../../utils/output.js";
 
 export function registerOAuthStatusCommand(oauth: Command): void {

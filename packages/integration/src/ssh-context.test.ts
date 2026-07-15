@@ -65,9 +65,11 @@ describe("SSH context (process-mediated, §4.5.7)", () => {
     await vault.engine.setConnectionConfig(handle, {
       ssh: { known_hosts: ["deploy.example.com ssh-ed25519 AAAA"] },
     });
-    await expect(client.useSecret(handle, sshAction("attacker.example.com"))).rejects.toMatchObject({
-      code: ErrorCode.HOST_NOT_ALLOWED,
-    });
+    await expect(client.useSecret(handle, sshAction("attacker.example.com"))).rejects.toMatchObject(
+      {
+        code: ErrorCode.HOST_NOT_ALLOWED,
+      },
+    );
   });
 
   it("requires pinned host keys (no trust-on-first-use)", async () => {

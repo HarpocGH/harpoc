@@ -1,9 +1,4 @@
-import type {
-  CreateSecretResponse,
-  ParsedHandle,
-  Secret,
-  SecretType,
-} from "@harpoc/shared";
+import type { CreateSecretResponse, ParsedHandle, Secret, SecretType } from "@harpoc/shared";
 import {
   AES_KEY_LENGTH,
   ErrorCode,

@@ -100,8 +100,7 @@ export class OAuthManager {
 
       // Build the final redirect URI with the actual bound port
       const actualPort = callbackServer.listenPort;
-      const redirectUri =
-        resolved.redirect_uri ?? `http://localhost:${actualPort}/oauth/callback`;
+      const redirectUri = resolved.redirect_uri ?? `http://localhost:${actualPort}/oauth/callback`;
 
       // Construct the auth URL manually using the SAME state and PKCE verifier
       const authUrl = new URL(resolved.auth_endpoint as string);
@@ -114,7 +113,10 @@ export class OAuthManager {
       authUrl.searchParams.set("code_challenge_method", "S256");
       if (resolved.scopes && resolved.scopes.length > 0) {
         const { getScopesSeparator } = await import("./providers.js");
-        authUrl.searchParams.set("scope", resolved.scopes.join(getScopesSeparator(resolved.provider)));
+        authUrl.searchParams.set(
+          "scope",
+          resolved.scopes.join(getScopesSeparator(resolved.provider)),
+        );
       }
 
       // Open the browser
@@ -124,12 +126,7 @@ export class OAuthManager {
       const { code } = await callbackServer.waitForCallback();
 
       // Exchange code for tokens
-      const tokens = await flow.handleCallback(
-        code,
-        resolved,
-        redirectUri,
-        code_verifier,
-      );
+      const tokens = await flow.handleCallback(code, resolved, redirectUri, code_verifier);
 
       // Complete the flow in VaultEngine
       const expiresAt = tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined;

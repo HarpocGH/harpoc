@@ -32,7 +32,9 @@ function run(
 describe("ProcessInjector — env injection & output", () => {
   it("injects the credential as an environment variable", async () => {
     // Child writes a marker proving the env var is set (without echoing the value).
-    const result = await run(nodeAction(`process.stdout.write(process.env.SECRET ? "SET" : "UNSET")`));
+    const result = await run(
+      nodeAction(`process.stdout.write(process.env.SECRET ? "SET" : "UNSET")`),
+    );
     expect(result.type).toBe("process");
     expect(result.exit_code).toBe(0);
     expect(result.stdout).toBe("SET");
@@ -72,7 +74,11 @@ describe("ProcessInjector — no shell (L2/L3 separation)", () => {
     // If a shell ran, $(...) would expand. With shell:false it stays literal.
     const result = await run(
       nodeAction(`process.stdout.write(process.argv[process.argv.length - 1])`, {
-        args: ["-e", `process.stdout.write(process.argv[process.argv.length - 1])`, "$(echo pwned)"],
+        args: [
+          "-e",
+          `process.stdout.write(process.argv[process.argv.length - 1])`,
+          "$(echo pwned)",
+        ],
       }),
     );
     expect(result.stdout).toBe("$(echo pwned)");
@@ -104,7 +110,9 @@ describe("ProcessInjector — clean environment", () => {
   });
 
   it("always provides PATH for command resolution", async () => {
-    const result = await run(nodeAction(`process.stdout.write(process.env.PATH ? "HASPATH" : "NOPATH")`));
+    const result = await run(
+      nodeAction(`process.stdout.write(process.env.PATH ? "HASPATH" : "NOPATH")`),
+    );
     expect(result.stdout).toBe("HASPATH");
   });
 });

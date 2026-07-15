@@ -1,4 +1,9 @@
-import type { ConnectionConfig, DatabaseAction, DatabaseResult, InjectionPolicy } from "@harpoc/shared";
+import type {
+  ConnectionConfig,
+  DatabaseAction,
+  DatabaseResult,
+  InjectionPolicy,
+} from "@harpoc/shared";
 import {
   DEFAULT_DB_TIMEOUT_MS,
   MAX_DB_RESULT_BYTES,
@@ -186,7 +191,10 @@ function capRows(rows: unknown[]): { rows: unknown[]; truncated: boolean } {
     capped = capped.slice(0, MAX_DB_ROWS);
     truncated = true;
   }
-  while (capped.length > 0 && Buffer.byteLength(JSON.stringify(capped), "utf8") > MAX_DB_RESULT_BYTES) {
+  while (
+    capped.length > 0 &&
+    Buffer.byteLength(JSON.stringify(capped), "utf8") > MAX_DB_RESULT_BYTES
+  ) {
     capped = capped.slice(0, Math.ceil(capped.length / 2));
     truncated = true;
   }

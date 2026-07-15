@@ -170,7 +170,9 @@ describe("migration 009 upgrade (v8 → v9)", () => {
     ]) {
       db.exec(m.up);
     }
-    db.prepare("INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('schema_version', '8')").run();
+    db.prepare(
+      "INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('schema_version', '8')",
+    ).run();
     const cols = Object.keys(dummySecret("active", "x"));
     const insert = db.prepare(
       `INSERT INTO secrets (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,

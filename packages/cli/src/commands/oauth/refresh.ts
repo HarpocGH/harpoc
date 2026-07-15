@@ -1,9 +1,5 @@
 import type { Command } from "commander";
-import {
-  resolveVaultDir,
-  loadUnlockedEngine,
-  resolveSecretId,
-} from "../../utils/vault-loader.js";
+import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess, formatTimestamp } from "../../utils/output.js";
 
 export function registerOAuthRefreshCommand(oauth: Command): void {
@@ -23,7 +19,9 @@ export function registerOAuthRefreshCommand(oauth: Command): void {
           } else if (newExpiresAt === null) {
             printSuccess(`Token refreshed for ${handle} (provider returned no expiry)`);
           } else {
-            printSuccess(`Token refreshed for ${handle} (expires ${formatTimestamp(newExpiresAt)})`);
+            printSuccess(
+              `Token refreshed for ${handle} (expires ${formatTimestamp(newExpiresAt)})`,
+            );
           }
         } finally {
           await engine.destroy();
