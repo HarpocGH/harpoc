@@ -200,6 +200,19 @@ describe("RestClient", () => {
       expect(body.response_header_allowlist).toEqual(["Content-Type"]);
     });
 
+    it("setInjectionPolicy forwards network_isolation in the body", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", {
+        url_allowlist: [],
+        command_allowlist: [],
+        env_allowlist: [],
+        network_isolation: true,
+      });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(call[1].body as string);
+      expect(body.network_isolation).toBe(true);
+    });
+
     it("setInjectionPolicy defaults acknowledge_interpreters to false in the body", async () => {
       mockFetchResponse({ updated: true });
       await client.setInjectionPolicy("secret://k", {

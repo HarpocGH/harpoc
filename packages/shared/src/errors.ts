@@ -47,6 +47,7 @@ export enum ErrorCode {
   PROCESS_OUTPUT_LIMIT = "PROCESS_OUTPUT_LIMIT",
   INVALID_PROCESS_CONFIG = "INVALID_PROCESS_CONFIG",
   INTERPRETER_NOT_ACKNOWLEDGED = "INTERPRETER_NOT_ACKNOWLEDGED",
+  NETWORK_ISOLATION_UNAVAILABLE = "NETWORK_ISOLATION_UNAVAILABLE",
 
   // MCP proxy
   MCP_SERVER_NOT_CONFIGURED = "MCP_SERVER_NOT_CONFIGURED",
@@ -160,6 +161,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.PROCESS_OUTPUT_LIMIT]: 413,
   [ErrorCode.INVALID_PROCESS_CONFIG]: 400,
   [ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED]: 400,
+  [ErrorCode.NETWORK_ISOLATION_UNAVAILABLE]: 501,
 
   // MCP proxy
   [ErrorCode.MCP_SERVER_NOT_CONFIGURED]: 400,
@@ -358,6 +360,16 @@ export class VaultError extends Error {
       ? `Command not in secret allowlist: ${command}`
       : "Command not in secret allowlist";
     return new VaultError(ErrorCode.COMMAND_NOT_ALLOWED, msg);
+  }
+
+  static networkIsolationUnavailable(reason: string): VaultError {
+    return new VaultError(
+      ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+      `Network isolation is required by this secret's policy but unavailable: ${reason}. ` +
+        "Linux needs unprivileged user namespaces (unshare); macOS needs sandbox-exec; " +
+        "Windows is unsupported by design. Remove the requirement via the admin path: " +
+        "secret allow <handle> --no-network-isolation",
+    );
   }
 
   static interpreterNotAcknowledged(entries: string[]): VaultError {

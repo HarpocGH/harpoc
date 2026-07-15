@@ -70,6 +70,7 @@ describe("HTTP status mapping", () => {
     [ErrorCode.PROCESS_OUTPUT_LIMIT, 413],
     [ErrorCode.INVALID_PROCESS_CONFIG, 400],
     [ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED, 400],
+    [ErrorCode.NETWORK_ISOLATION_UNAVAILABLE, 501],
     // MCP proxy
     [ErrorCode.MCP_SERVER_NOT_CONFIGURED, 400],
     [ErrorCode.MCP_SERVER_MISMATCH, 400],
@@ -117,7 +118,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(85);
+    expect(members).toHaveLength(86);
   });
 });
 
@@ -476,6 +477,14 @@ describe("factory methods", () => {
     expect(err.statusCode).toBe(400);
     expect(err.message).toContain("python, /usr/bin/node");
     expect(err.message).toContain("--acknowledge-interpreter");
+  });
+
+  it("networkIsolationUnavailable()", () => {
+    const err = VaultError.networkIsolationUnavailable("unsupported platform: win32");
+    expect(err.code).toBe(ErrorCode.NETWORK_ISOLATION_UNAVAILABLE);
+    expect(err.statusCode).toBe(501);
+    expect(err.message).toContain("unsupported platform: win32");
+    expect(err.message).toContain("--no-network-isolation");
   });
 
   it("processSpawnFailed() without detail", () => {

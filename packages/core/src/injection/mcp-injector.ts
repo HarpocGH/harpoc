@@ -97,6 +97,22 @@ export class McpInjector {
       throw err;
     }
 
+    // Network isolation (thesis §4.5.3 layer 4) — fail closed: the stdio
+    // downstream server is a credential-holding child, but it is spawned by
+    // the connection lifecycle (StdioChildTransport), not the spawnCaptured
+    // seam where the isolation wrapper lives. Until that transport can
+    // isolate, a policy demanding isolation refuses the spawn outright —
+    // before any registry acquire/reuse, so a live un-isolated connection
+    // cannot keep serving either. HTTP-transport downstreams are
+    // request-mediated from the vault process (no child) and unaffected.
+    if (policy.network_isolation === true && config.transport === McpTransport.STDIO) {
+      const err = VaultError.networkIsolationUnavailable(
+        "MCP stdio downstream servers cannot be network-isolated yet",
+      );
+      this.audit(action, secretId, config, { error: err.code, network_isolation: true }, false);
+      throw err;
+    }
+
     // Target validation on every call — complete mediation, independent of
     // whether a live connection is reused.
     let resolvedCommand: string | undefined;

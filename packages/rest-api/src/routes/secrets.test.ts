@@ -68,6 +68,7 @@ function createMockEngine() {
       host_allowlist: [],
       response_mode: "filtered",
       response_header_allowlist: [],
+      network_isolation: false,
     }),
     setMcpServerConfig: vi.fn().mockResolvedValue(undefined),
     getMcpServerConfig: vi.fn().mockResolvedValue(undefined),
@@ -476,6 +477,7 @@ describe("secret routes", () => {
         host_allowlist: [],
         response_mode: "filtered",
         response_header_allowlist: [],
+        network_isolation: false,
       });
     });
 
@@ -508,6 +510,37 @@ describe("secret routes", () => {
       expect(res.status).toBe(200);
       const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
       expect((call[1] as { response_mode: string }).response_mode).toBe("filtered");
+    });
+
+    it("PUT forwards network_isolation: true to the engine", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ command_allowlist: ["gh"], network_isolation: true }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+      expect((call[1] as { network_isolation: boolean }).network_isolation).toBe(true);
+    });
+
+    it("PUT omitting network_isolation resets it to false (whole-policy replace)", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ url_allowlist: ["https://api.github.com/*"] }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+      expect((call[1] as { network_isolation: boolean }).network_isolation).toBe(false);
+    });
+
+    it("PUT rejects a non-boolean network_isolation", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ network_isolation: "yes" }),
+      });
+      expect(res.status).toBe(400);
     });
 
     it("PUT rejects an invalid env var name", async () => {

@@ -102,6 +102,17 @@ export { InjectionGuard } from "./injection/injection-guard.js";
 export { ProcessInjector } from "./injection/process-injector.js";
 export { spawnCaptured } from "./injection/spawn-captured.js";
 export type { SpawnCapturedResult, SpawnCapturedOptions } from "./injection/spawn-captured.js";
+export {
+  requireNetworkIsolation,
+  resetNetworkIsolationProbeForTests,
+  forceNetworkIsolationUnavailableForTests,
+  SANDBOX_EXEC_DENY_NETWORK_PROFILE,
+} from "./injection/network-isolation.js";
+export type {
+  NetworkIsolationMechanism,
+  NetworkIsolationWrap,
+  NetworkIsolationSeams,
+} from "./injection/network-isolation.js";
 export { DatabaseInjector } from "./injection/database-injector.js";
 export type {
   DbEngineAdapter,

@@ -344,6 +344,7 @@ export const injectionPolicyInputSchema = z.object({
     .max(100)
     .optional()
     .default([]),
+  network_isolation: z.boolean().optional().default(false),
 });
 
 /**
@@ -355,7 +356,10 @@ export const injectionPolicyInputSchema = z.object({
  * variables passed through to a spawned subprocess. `response_mode` is the
  * HTTP response shaping floor (default `filtered`; per-invocation overrides
  * may only tighten it, thesis §4.5.2); `response_header_allowlist` names the
- * headers still returned under `status_only`. The schema's output type: all
+ * headers still returned under `status_only`. `network_isolation` (thesis
+ * §4.5.3 layer 4, default `false`) demands that every child process spawned
+ * with this secret runs without network access — fail-closed: platforms that
+ * cannot deliver it refuse the use. The schema's output type: all
  * defaults applied, every field present — the shape the vault loads and
  * returns.
  */

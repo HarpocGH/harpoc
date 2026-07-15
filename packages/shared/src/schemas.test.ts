@@ -630,7 +630,31 @@ describe("injectionPolicyInputSchema", () => {
       host_allowlist: [],
       response_mode: "filtered",
       response_header_allowlist: [],
+      network_isolation: false,
     });
+  });
+
+  it("defaults network_isolation to false and round-trips true", () => {
+    expect(injectionPolicyInputSchema.parse({}).network_isolation).toBe(false);
+    const enabled = injectionPolicyInputSchema.parse({ network_isolation: true });
+    expect(enabled.network_isolation).toBe(true);
+    expect(
+      injectionPolicyInputSchema.parse(JSON.parse(JSON.stringify(enabled))).network_isolation,
+    ).toBe(true);
+  });
+
+  it("accepts a legacy body without network_isolation (REST back-compat)", () => {
+    const result = injectionPolicyInputSchema.parse({
+      url_allowlist: ["https://api.github.com/*"],
+      response_mode: "status_only",
+    });
+    expect(result.network_isolation).toBe(false);
+    expect(result.response_mode).toBe("status_only");
+  });
+
+  it("rejects a non-boolean network_isolation", () => {
+    expect(() => injectionPolicyInputSchema.parse({ network_isolation: "yes" })).toThrow();
+    expect(() => injectionPolicyInputSchema.parse({ network_isolation: 1 })).toThrow();
   });
 
   it("accepts populated allowlists", () => {

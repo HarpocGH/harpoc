@@ -95,6 +95,7 @@ export class RestClient implements VaultClient {
         host_allowlist: policy.host_allowlist,
         response_mode: policy.response_mode,
         response_header_allowlist: policy.response_header_allowlist,
+        network_isolation: policy.network_isolation,
         acknowledge_interpreters: options?.acknowledge_interpreters ?? false,
       },
     );

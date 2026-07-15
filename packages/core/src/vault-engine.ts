@@ -737,6 +737,7 @@ export class VaultEngine {
         host_allowlist: [],
         response_mode: "filtered",
         response_header_allowlist: [],
+        network_isolation: false,
       };
     }
     const bytes = decrypt(
@@ -754,6 +755,7 @@ export class VaultEngine {
       host_allowlist: parsed.host_allowlist ?? [],
       response_mode: parsed.response_mode ?? "filtered",
       response_header_allowlist: parsed.response_header_allowlist ?? [],
+      network_isolation: parsed.network_isolation ?? false,
     };
   }
 
@@ -797,6 +799,7 @@ export class VaultEngine {
       host_allowlist: policy.host_allowlist ?? [],
       response_mode: policy.response_mode ?? "filtered",
       response_header_allowlist: policy.response_header_allowlist ?? [],
+      network_isolation: policy.network_isolation ?? false,
     });
     const enc = encrypt(
       s.kek,
@@ -824,6 +827,7 @@ export class VaultEngine {
         host_count: policy.host_allowlist?.length ?? 0,
         response_mode: policy.response_mode ?? "filtered",
         response_header_count: policy.response_header_allowlist?.length ?? 0,
+        network_isolation: policy.network_isolation ?? false,
       },
       sessionId: this.sessionId ?? undefined,
     });

@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InjectionPolicy, McpAction, McpServerConfig } from "@harpoc/shared";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
+import type { AuditLogger } from "../audit/audit-logger.js";
 import { McpInjector } from "./mcp-injector.js";
 import { McpConnectionRegistry } from "./mcp-registry.js";
 
@@ -80,6 +81,7 @@ const POLICY: InjectionPolicy = {
   host_allowlist: [],
   response_mode: "filtered",
   response_header_allowlist: [],
+  network_isolation: false,
 };
 
 function mcpAction(tool: string, overrides: Partial<McpAction> = {}): McpAction {
@@ -287,5 +289,49 @@ describe("McpInjector — lifecycle (thesis §4.5.4)", () => {
     // The failed connect did not poison the registry: a good config works.
     const result = await run(mcpAction("echo"));
     expect(result.type).toBe("mcp");
+  });
+});
+
+describe("McpInjector — network isolation (§4.5.3 layer 4)", () => {
+  it("refuses a stdio downstream fail-closed before the registry is touched", async () => {
+    const acquireSpy = vi.spyOn(registry, "acquire");
+    await expect(
+      run(mcpAction("echo"), { policy: { ...POLICY, network_isolation: true } }),
+    ).rejects.toMatchObject({ code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE });
+    expect(acquireSpy).not.toHaveBeenCalled();
+  });
+
+  it("audits the stdio refusal with the error code", async () => {
+    const log = vi.fn();
+    const auditedInjector = new McpInjector({ log } as unknown as AuditLogger, registry);
+    await expect(
+      auditedInjector.executeWithSecret(
+        mcpAction("echo"),
+        new Uint8Array(Buffer.from(SECRET, "utf8")),
+        { ...POLICY, network_isolation: true },
+        STDIO_CONFIG,
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        detail: expect.objectContaining({
+          error: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+          network_isolation: true,
+        }),
+      }),
+    );
+  });
+
+  it("does not gate an HTTP downstream on the flag (request-mediated, no child)", async () => {
+    // The connect itself fails (nothing listens on the port) — the point is
+    // that the failure is NOT the isolation refusal: the D1/D2 boundary.
+    const err = await run(mcpAction("echo"), {
+      config: { server_name: "test-mcp", transport: "http", url: "http://127.0.0.1:9/mcp" },
+      policy: { ...POLICY, network_isolation: true },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(VaultError);
+    expect((err as VaultError).code).not.toBe(ErrorCode.NETWORK_ISOLATION_UNAVAILABLE);
   });
 });

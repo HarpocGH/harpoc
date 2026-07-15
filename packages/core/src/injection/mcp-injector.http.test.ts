@@ -38,6 +38,7 @@ const POLICY: InjectionPolicy = {
   host_allowlist: [],
   response_mode: "filtered",
   response_header_allowlist: [],
+  network_isolation: false,
 };
 
 function mcpAction(tool: string): McpAction {

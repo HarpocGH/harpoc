@@ -82,7 +82,26 @@ export class SshInjector {
         action.command,
       ];
       const env = buildSshEnv(agent.authSock, policy.env_allowlist);
-      const r = await spawnCaptured(sshPath, args, { env, timeoutMs, redact: [keyPem] });
+      const networkIsolation = policy.network_isolation === true;
+      let r: import("./spawn-captured.js").SpawnCapturedResult;
+      try {
+        r = await spawnCaptured(sshPath, args, {
+          env,
+          timeoutMs,
+          redact: [keyPem],
+          networkIsolation,
+        });
+      } catch (err) {
+        if (err instanceof VaultError) {
+          this.audit(
+            action,
+            secretId,
+            { error: err.code, network_isolation: networkIsolation },
+            false,
+          );
+        }
+        throw err;
+      }
 
       // A pinned-key mismatch (or unknown host) is a security rejection, not a result.
       if (isHostKeyFailure(r.stderr)) {
@@ -111,7 +130,12 @@ export class SshInjector {
       this.audit(
         action,
         secretId,
-        { exit_code: r.exit_code, timed_out: r.timed_out },
+        {
+          exit_code: r.exit_code,
+          timed_out: r.timed_out,
+          network_isolation: networkIsolation,
+          ...(r.isolation_mechanism ? { isolation_mechanism: r.isolation_mechanism } : {}),
+        },
         error === undefined,
       );
       return result;

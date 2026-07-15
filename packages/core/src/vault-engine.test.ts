@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, VaultError, VaultState, VAULT_VERSION } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
+import { forceNetworkIsolationUnavailableForTests } from "./injection/network-isolation.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
 import { DpapiSessionKeyProtector } from "./session/session-key-protector.js";
 import type { SessionKeyProtector } from "./session/session-key-protector.js";
@@ -722,6 +723,7 @@ describe("injection policy", () => {
       host_allowlist: [],
       response_mode: "filtered",
       response_header_allowlist: [],
+      network_isolation: false,
     });
   });
 
@@ -746,6 +748,27 @@ describe("injection policy", () => {
     expect(events.length).toBeGreaterThanOrEqual(1);
     expect(events[0]?.detail?.policy).toBe("injection");
     expect(events[0]?.detail?.response_mode).toBe("filtered");
+    expect(events[0]?.detail?.network_isolation).toBe(false);
+  });
+
+  it("round-trips network_isolation and defaults it to false when omitted", async () => {
+    await engine.setInjectionPolicy("secret://pol", { network_isolation: true });
+    expect((await engine.getInjectionPolicy("secret://pol")).network_isolation).toBe(true);
+
+    // Re-set without the field: the write-side default is false (the read-side
+    // `?? false` for pre-feature blobs follows the response_mode precedent).
+    await engine.setInjectionPolicy("secret://pol", { url_allowlist: [] });
+    expect((await engine.getInjectionPolicy("secret://pol")).network_isolation).toBe(false);
+  });
+
+  it("audits network_isolation in the POLICY_GRANT detail both ways", async () => {
+    await engine.setInjectionPolicy("secret://pol", { network_isolation: true });
+    await engine.setInjectionPolicy("secret://pol", {});
+    const flags = engine
+      .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
+      .map((e) => e.detail?.network_isolation);
+    expect(flags).toContain(true);
+    expect(flags).toContain(false);
   });
 
   it("verifies the audit chain and detects DB tampering", async () => {
@@ -1355,6 +1378,54 @@ describe("useSecret (process injection)", () => {
       expect.fail("should throw");
     } catch (e) {
       expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
+    }
+  });
+
+  it("refuses fail-closed when policy demands isolation the platform cannot deliver", async () => {
+    forceNetworkIsolationUnavailableForTests("forced for test");
+    try {
+      await engine.setInjectionPolicy(
+        "secret://proc",
+        { command_allowlist: [process.execPath], network_isolation: true },
+        { acknowledge_interpreters: true },
+      );
+      await expect(
+        engine.useSecret("secret://proc", {
+          type: "process",
+          command: process.execPath,
+          args: ["-e", `process.stdout.write("ran")`],
+          env_var: "TOKEN",
+        }),
+      ).rejects.toMatchObject({ code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE });
+
+      // The refusal is audited with the error code — no silent degrade,
+      // no invisible denial (the M8 posture).
+      const useEvents = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
+      expect(useEvents.some((e) => e.detail?.error === "NETWORK_ISOLATION_UNAVAILABLE")).toBe(true);
+    } finally {
+      forceNetworkIsolationUnavailableForTests(null);
+    }
+  });
+
+  it("control: the same use without the isolation flag executes", async () => {
+    forceNetworkIsolationUnavailableForTests("forced for test");
+    try {
+      await engine.setInjectionPolicy(
+        "secret://proc",
+        { command_allowlist: [process.execPath] },
+        { acknowledge_interpreters: true },
+      );
+      const res = await engine.useSecret("secret://proc", {
+        type: "process",
+        command: process.execPath,
+        args: ["-e", `process.stdout.write("ran")`],
+        env_var: "TOKEN",
+      });
+      if (res.type !== "process") throw new Error("expected process result");
+      expect(res.exit_code).toBe(0);
+      expect(res.stdout).toBe("ran");
+    } finally {
+      forceNetworkIsolationUnavailableForTests(null);
     }
   });
 });

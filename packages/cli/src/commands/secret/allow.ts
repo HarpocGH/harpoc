@@ -16,6 +16,8 @@ export interface AllowOptions {
   host?: string[];
   responseMode?: string;
   responseHeader?: string[];
+  /** Tri-state: true (--network-isolation), false (--no-network-isolation), undefined (keep stored). */
+  networkIsolation?: boolean;
   acknowledgeInterpreter?: boolean;
   clear?: boolean;
   show?: boolean;
@@ -29,13 +31,15 @@ const EMPTY_POLICY: InjectionPolicy = {
   host_allowlist: [],
   response_mode: "filtered",
   response_header_allowlist: [],
+  network_isolation: false,
 };
 
 /**
  * Merge the provided flag groups into the current policy. Groups the caller
  * omits keep their stored values — so e.g. `--url` alone cannot silently reset
- * a `status_only` response mode back to `filtered`. `--clear` starts from an
- * empty default policy instead of the stored one.
+ * a `status_only` response mode back to `filtered`, or drop a stored
+ * `network_isolation` requirement. `--clear` starts from an empty default
+ * policy instead of the stored one.
  */
 export function mergePolicy(current: InjectionPolicy, options: AllowOptions): InjectionPolicy {
   const base = options.clear ? EMPTY_POLICY : current;
@@ -48,6 +52,7 @@ export function mergePolicy(current: InjectionPolicy, options: AllowOptions): In
     response_header_allowlist: options.responseHeader?.length
       ? options.responseHeader
       : base.response_header_allowlist,
+    network_isolation: options.networkIsolation ?? base.network_isolation,
   };
 }
 
@@ -87,6 +92,11 @@ export function registerSecretAllowCommand(secret: Command): void {
       [],
     )
     .option(
+      "--network-isolation",
+      "Require every child process spawned with this secret to run without network access (Linux: unshare user+net namespaces; macOS: sandbox-exec deny-network; Windows: unsupported — uses are refused fail-closed)",
+    )
+    .option("--no-network-isolation", "Remove a stored network-isolation requirement")
+    .option(
       "--acknowledge-interpreter",
       "Explicitly acknowledge allowlisting a known interpreter (sh, bash, python, node, ...) — collapses the capability ladder for this secret; refused and audited otherwise",
     )
@@ -105,6 +115,7 @@ export function registerSecretAllowCommand(secret: Command): void {
             (options.env?.length ?? 0) +
             (options.responseHeader?.length ?? 0) +
             (options.responseMode !== undefined ? 1 : 0) +
+            (options.networkIsolation !== undefined ? 1 : 0) +
             (options.clear ? 1 : 0);
 
           if (options.show || setCount === 0) {

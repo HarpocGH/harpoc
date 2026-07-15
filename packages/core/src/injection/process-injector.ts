@@ -25,7 +25,7 @@ export class ProcessInjector {
   async executeWithSecret(
     action: ProcessAction,
     secretValue: Uint8Array,
-    policy: { command_allowlist: string[]; env_allowlist: string[] },
+    policy: { command_allowlist: string[]; env_allowlist: string[]; network_isolation?: boolean },
     secretId?: string,
   ): Promise<ProcessResult> {
     const pathDirs = controlledPathDirs();
@@ -48,15 +48,33 @@ export class ProcessInjector {
     const env = buildCleanEnv(action.env_var, valueStr, policy.env_allowlist);
     const args = action.args ?? [];
     const timeoutMs = action.timeout_ms ?? DEFAULT_PROCESS_TIMEOUT_MS;
+    const networkIsolation = policy.network_isolation === true;
 
-    const result = await this.runProcess(
-      resolvedPath,
-      args,
-      env,
-      action.working_directory,
-      timeoutMs,
-      valueStr,
-    );
+    let run: { result: ProcessResult; isolationMechanism?: string };
+    try {
+      run = await this.runProcess(
+        resolvedPath,
+        args,
+        env,
+        action.working_directory,
+        timeoutMs,
+        valueStr,
+        networkIsolation,
+      );
+    } catch (err) {
+      // Fail-closed refusal from the spawn seam (NETWORK_ISOLATION_UNAVAILABLE):
+      // no process was spawned; audit the denial like an allowlist rejection.
+      if (err instanceof VaultError) {
+        this.audit(
+          action,
+          secretId,
+          { error: err.code, network_isolation: networkIsolation },
+          false,
+        );
+      }
+      throw err;
+    }
+    const result = run.result;
 
     this.audit(
       action,
@@ -65,6 +83,8 @@ export class ProcessInjector {
         exit_code: result.exit_code,
         timed_out: result.timed_out ?? false,
         truncated: result.truncated ?? false,
+        network_isolation: networkIsolation,
+        ...(run.isolationMechanism ? { isolation_mechanism: run.isolationMechanism } : {}),
       },
       result.error === undefined,
     );
@@ -79,26 +99,31 @@ export class ProcessInjector {
     cwd: string | undefined,
     timeoutMs: number,
     secretStr: string,
-  ): Promise<ProcessResult> {
+    networkIsolation: boolean,
+  ): Promise<{ result: ProcessResult; isolationMechanism?: string }> {
     const r = await spawnCaptured(command, args, {
       env,
       cwd,
       timeoutMs,
       redact: [secretStr],
+      networkIsolation,
     });
     return {
-      type: "process",
-      exit_code: r.exit_code,
-      stdout: r.stdout,
-      stderr: r.stderr,
-      timed_out: r.timed_out ? true : undefined,
-      truncated: r.truncated ? true : undefined,
-      signal: r.signal ?? undefined,
-      error: r.spawn_failed
-        ? ErrorCode.PROCESS_SPAWN_FAILED
-        : r.timed_out
-          ? ErrorCode.PROCESS_TIMEOUT
-          : undefined,
+      result: {
+        type: "process",
+        exit_code: r.exit_code,
+        stdout: r.stdout,
+        stderr: r.stderr,
+        timed_out: r.timed_out ? true : undefined,
+        truncated: r.truncated ? true : undefined,
+        signal: r.signal ?? undefined,
+        error: r.spawn_failed
+          ? ErrorCode.PROCESS_SPAWN_FAILED
+          : r.timed_out
+            ? ErrorCode.PROCESS_TIMEOUT
+            : undefined,
+      },
+      isolationMechanism: r.isolation_mechanism,
     };
   }
 

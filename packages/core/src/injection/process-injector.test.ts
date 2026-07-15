@@ -1,6 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProcessAction, ProcessResult } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
+import type { AuditLogger } from "../audit/audit-logger.js";
+import { forceNetworkIsolationUnavailableForTests } from "./network-isolation.js";
 import { ProcessInjector } from "./process-injector.js";
 
 const NODE = process.execPath;
@@ -155,5 +157,51 @@ describe("ProcessInjector — config validation", () => {
     await expect(
       run(nodeAction(`process.stdout.write("x")`, { working_directory: "/no/such/dir/xyz123" })),
     ).rejects.toMatchObject({ code: ErrorCode.INVALID_PROCESS_CONFIG });
+  });
+});
+
+describe("ProcessInjector — network isolation (§4.5.3 layer 4)", () => {
+  afterEach(() => forceNetworkIsolationUnavailableForTests(null));
+
+  it("refuses fail-closed and audits when the platform cannot deliver isolation", async () => {
+    forceNetworkIsolationUnavailableForTests("forced for test");
+    const log = vi.fn();
+    const audited = new ProcessInjector({ log } as unknown as AuditLogger);
+    await expect(
+      audited.executeWithSecret(
+        nodeAction(`process.stdout.write("ran")`),
+        new Uint8Array(Buffer.from(SECRET, "utf8")),
+        { command_allowlist: [NODE], env_allowlist: [], network_isolation: true },
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "secret.use",
+        success: false,
+        detail: expect.objectContaining({
+          error: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+          network_isolation: true,
+        }),
+      }),
+    );
+  });
+
+  it("audits network_isolation: false on an ordinary spawn", async () => {
+    const log = vi.fn();
+    const audited = new ProcessInjector({ log } as unknown as AuditLogger);
+    const result = await audited.executeWithSecret(
+      nodeAction(`process.exit(0)`),
+      new Uint8Array(Buffer.from(SECRET, "utf8")),
+      { command_allowlist: [NODE], env_allowlist: [] },
+      "secret-1",
+    );
+    expect(result.exit_code).toBe(0);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        detail: expect.objectContaining({ network_isolation: false }),
+      }),
+    );
   });
 });

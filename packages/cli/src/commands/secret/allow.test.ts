@@ -24,6 +24,7 @@ const current: InjectionPolicy = {
   host_allowlist: ["db.example.com:5432"],
   response_mode: "status_only",
   response_header_allowlist: ["Content-Type"],
+  network_isolation: true,
 };
 
 describe("mergePolicy", () => {
@@ -35,6 +36,21 @@ describe("mergePolicy", () => {
     expect(merged.host_allowlist).toEqual(["db.example.com:5432"]);
     expect(merged.response_mode).toBe("status_only");
     expect(merged.response_header_allowlist).toEqual(["Content-Type"]);
+    expect(merged.network_isolation).toBe(true);
+  });
+
+  it("keeps a stored network_isolation when both flags are absent", () => {
+    const merged = mergePolicy(current, { command: ["git"] });
+    expect(merged.network_isolation).toBe(true);
+  });
+
+  it("sets and clears network_isolation via the tri-state option", () => {
+    const off = mergePolicy(current, { networkIsolation: false });
+    expect(off.network_isolation).toBe(false);
+    expect(off.response_mode).toBe("status_only");
+
+    const on = mergePolicy({ ...current, network_isolation: false }, { networkIsolation: true });
+    expect(on.network_isolation).toBe(true);
   });
 
   it("replaces a provided group wholesale", () => {
@@ -65,6 +81,7 @@ describe("mergePolicy", () => {
       host_allowlist: [],
       response_mode: "filtered",
       response_header_allowlist: [],
+      network_isolation: false,
     });
   });
 
@@ -88,6 +105,7 @@ describe("secret allow command — interpreter acknowledgement pass-through", ()
       host_allowlist: [],
       response_mode: "filtered",
       response_header_allowlist: [],
+      network_isolation: false,
     });
     errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
@@ -120,6 +138,65 @@ describe("secret allow command — interpreter acknowledgement pass-through", ()
     expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
       "secret://k",
       expect.objectContaining({ command_allowlist: ["gh"] }),
+      { acknowledge_interpreters: false },
+    );
+  });
+});
+
+describe("secret allow command — network isolation flags", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.getInjectionPolicy.mockResolvedValue({
+      url_allowlist: [],
+      command_allowlist: ["gh"],
+      env_allowlist: [],
+      host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: true,
+    });
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  async function run(args: string[]): Promise<void> {
+    const program = new Command();
+    program.option("--vault-dir <path>", "Path to vault directory");
+    const secret = program.command("secret");
+    registerSecretAllowCommand(secret);
+    program.exitOverride();
+    program.configureOutput({ writeErr: () => {} });
+    await program.parseAsync(["node", "harpoc", "secret", "allow", ...args]);
+  }
+
+  it("--network-isolation alone is a set (not a show) and lands as true", async () => {
+    await run(["secret://k", "--network-isolation"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ network_isolation: true }),
+      { acknowledge_interpreters: false },
+    );
+  });
+
+  it("--no-network-isolation clears the stored requirement", async () => {
+    await run(["secret://k", "--no-network-isolation"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ network_isolation: false }),
+      { acknowledge_interpreters: false },
+    );
+  });
+
+  it("keeps the stored true when neither spelling is passed (commander tri-state pin)", async () => {
+    await run(["secret://k", "--url", "https://api.example.com/*"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ network_isolation: true }),
       { acknowledge_interpreters: false },
     );
   });

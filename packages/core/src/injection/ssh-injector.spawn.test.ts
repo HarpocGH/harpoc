@@ -1,6 +1,8 @@
 import { generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, InjectionPolicy, SshAction } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
+import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
@@ -38,6 +40,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     host_allowlist: [],
     response_mode: "filtered",
     response_header_allowlist: [],
+    network_isolation: false,
     ...overrides,
   };
 }
@@ -102,5 +105,72 @@ describeSsh("SshInjector spawn hardening (ssh resolvable)", () => {
     expect(Object.values(opts.env).every((v) => !v.includes("PRIVATE KEY"))).toBe(true);
     // and it is redacted from any captured output.
     expect(opts.redact).toContain(keyPem);
+  });
+});
+
+describeSsh("SshInjector network isolation (§4.5.3 layer 4)", () => {
+  const spawnMock = vi.mocked(spawnCaptured);
+
+  const isolatedPolicy = () =>
+    policy({
+      host_allowlist: ["deploy.example.com"],
+      command_allowlist: [SSH as string],
+      network_isolation: true,
+    });
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it("passes the policy flag into the spawn seam and audits mechanism + state", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({ ...OK_RESULT, isolation_mechanism: "unshare" });
+    await audited.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      isolatedPolicy(),
+      SSH_CONFIG,
+      "secret-1",
+    );
+    const [, , opts] = spawnMock.mock.calls[0] as [
+      string,
+      string[],
+      { networkIsolation?: boolean },
+    ];
+    expect(opts.networkIsolation).toBe(true);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        detail: expect.objectContaining({
+          network_isolation: true,
+          isolation_mechanism: "unshare",
+        }),
+      }),
+    );
+  });
+
+  it("audits and rethrows the fail-closed refusal from the seam", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockRejectedValue(VaultError.networkIsolationUnavailable("mocked"));
+    await expect(
+      audited.executeWithSecret(
+        ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        isolatedPolicy(),
+        SSH_CONFIG,
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        detail: expect.objectContaining({
+          error: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+          network_isolation: true,
+        }),
+      }),
+    );
   });
 });

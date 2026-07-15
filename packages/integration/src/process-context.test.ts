@@ -114,8 +114,10 @@ describe("Process execution context (I2b / output-channel leakage)", () => {
 
   it("L3-L4 residual: an indirect file write leaks via the filesystem channel", async () => {
     // Output sanitization covers stdout/stderr only. A spawned process can write
-    // the credential to a file the agent later reads. Network isolation (deferred)
-    // is the mitigation for this channel.
+    // the credential to a file the agent later reads. Network isolation (§4.5.3
+    // layer 4, network-isolation.test.ts) closes the child's OWN network egress;
+    // this file channel remains a documented residual — the reader is the agent,
+    // not the child, so no child-side control can close it.
     const leakPath = join(vault.tmpDir, "leak.txt");
     const res = await vault.engine.useSecret(
       handle,

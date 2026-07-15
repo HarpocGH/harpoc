@@ -126,12 +126,37 @@ export class GitInjector {
       // The username is credential material too; a 1–2 char username would
       // shred unrelated output, so such fragments stay unredacted.
       const redact = user.length >= 3 ? [password, user] : [password];
-      const r = await spawnCaptured(gitPath, args, { env, cwd, timeoutMs, redact });
+      const networkIsolation = policy.network_isolation === true;
+      let r: import("./spawn-captured.js").SpawnCapturedResult;
+      try {
+        r = await spawnCaptured(gitPath, args, {
+          env,
+          cwd,
+          timeoutMs,
+          redact,
+          networkIsolation,
+        });
+      } catch (err) {
+        if (err instanceof VaultError) {
+          this.audit(
+            action,
+            secretId,
+            { transport: "https", error: err.code, network_isolation: networkIsolation },
+            false,
+          );
+        }
+        throw err;
+      }
       const result = toGitResult(action, r);
       this.audit(
         action,
         secretId,
-        { transport: "https", exit_code: r.exit_code },
+        {
+          transport: "https",
+          exit_code: r.exit_code,
+          network_isolation: networkIsolation,
+          ...(r.isolation_mechanism ? { isolation_mechanism: r.isolation_mechanism } : {}),
+        },
         result.error === undefined,
       );
       return result;
@@ -189,7 +214,27 @@ export class GitInjector {
         ...sshHardeningArgs(kh.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
       ]);
       env.GIT_TERMINAL_PROMPT = "0";
-      const r = await spawnCaptured(gitPath, args, { env, cwd, timeoutMs, redact: [keyPem] });
+      const networkIsolation = policy.network_isolation === true;
+      let r: import("./spawn-captured.js").SpawnCapturedResult;
+      try {
+        r = await spawnCaptured(gitPath, args, {
+          env,
+          cwd,
+          timeoutMs,
+          redact: [keyPem],
+          networkIsolation,
+        });
+      } catch (err) {
+        if (err instanceof VaultError) {
+          this.audit(
+            action,
+            secretId,
+            { transport: "ssh", host, error: err.code, network_isolation: networkIsolation },
+            false,
+          );
+        }
+        throw err;
+      }
 
       if (isHostKeyFailure(r.stderr)) {
         this.audit(action, secretId, { host, error: "SSH_HOST_KEY_MISMATCH" }, false);
@@ -200,7 +245,13 @@ export class GitInjector {
       this.audit(
         action,
         secretId,
-        { transport: "ssh", host, exit_code: r.exit_code },
+        {
+          transport: "ssh",
+          host,
+          exit_code: r.exit_code,
+          network_isolation: networkIsolation,
+          ...(r.isolation_mechanism ? { isolation_mechanism: r.isolation_mechanism } : {}),
+        },
         result.error === undefined,
       );
       return result;

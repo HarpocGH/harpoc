@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { MAX_PROCESS_OUTPUT_BYTES } from "@harpoc/shared";
 import { CappedOutput } from "./capped-output.js";
+import type { NetworkIsolationMechanism } from "./network-isolation.js";
+import { requireNetworkIsolation } from "./network-isolation.js";
 import { redactSecretEncodings } from "./output-sanitizer.js";
 
 /**
@@ -16,6 +18,8 @@ export interface SpawnCapturedResult {
   truncated: boolean;
   signal: string | null;
   spawn_failed: boolean;
+  /** Set when the spawn ran inside the network-isolation wrapper. */
+  isolation_mechanism?: NetworkIsolationMechanism;
 }
 
 export interface SpawnCapturedOptions {
@@ -25,6 +29,12 @@ export interface SpawnCapturedOptions {
   /** Secret strings whose raw value and common encodings are stripped from output. */
   redact?: string[];
   maxOutputBytes?: number;
+  /**
+   * Wrap the spawn in the platform network-isolation prefix (thesis §4.5.3
+   * layer 4). Fail closed: an unavailable platform throws
+   * NETWORK_ISOLATION_UNAVAILABLE before any process is spawned.
+   */
+  networkIsolation?: boolean;
 }
 
 /**
@@ -32,12 +42,25 @@ export interface SpawnCapturedOptions {
  * capped buffers, enforce a timeout (SIGKILL on exceed) and redact injected
  * credential strings from the captured output. Shared by the process, Git and
  * SSH contexts so the process-mediated capture discipline is defined once.
+ *
+ * Network isolation is applied here — at the single spawn seam, after the
+ * caller's allowlist resolution — so no process-mediated context can forget
+ * it: the vault-authored wrapper prefixes the argv, and the resolved pinned
+ * command stays the audited payload. The wrapper execs the payload in-place
+ * (no fork), so PID, kill and exit-code semantics are unchanged.
  */
-export function spawnCaptured(
+export async function spawnCaptured(
   command: string,
   args: string[],
   opts: SpawnCapturedOptions,
 ): Promise<SpawnCapturedResult> {
+  let isolationMechanism: NetworkIsolationMechanism | undefined;
+  if (opts.networkIsolation) {
+    const wrapped = await requireNetworkIsolation(command, args);
+    command = wrapped.command;
+    args = wrapped.args;
+    isolationMechanism = wrapped.mechanism;
+  }
   const cap = opts.maxOutputBytes ?? MAX_PROCESS_OUTPUT_BYTES;
   const stdout = new CappedOutput(cap);
   const stderr = new CappedOutput(cap);
@@ -67,6 +90,7 @@ export function spawnCaptured(
         truncated: false,
         signal: null,
         spawn_failed: true,
+        isolation_mechanism: isolationMechanism,
       });
       return;
     }
@@ -91,6 +115,7 @@ export function spawnCaptured(
         truncated: stdout.truncated || stderr.truncated,
         signal: null,
         spawn_failed: true,
+        isolation_mechanism: isolationMechanism,
       });
     });
 
@@ -104,6 +129,7 @@ export function spawnCaptured(
         truncated: stdout.truncated || stderr.truncated,
         signal: signal ?? null,
         spawn_failed: false,
+        isolation_mechanism: isolationMechanism,
       });
     });
   });

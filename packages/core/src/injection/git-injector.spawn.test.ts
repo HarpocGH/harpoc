@@ -1,6 +1,8 @@
 import { generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
+import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
@@ -31,6 +33,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     host_allowlist: [],
     response_mode: "filtered",
     response_header_allowlist: [],
+    network_isolation: false,
     ...overrides,
   };
 }
@@ -162,5 +165,104 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
     expect(args.every((a) => !a.includes("PRIVATE KEY"))).toBe(true);
     expect(Object.values(opts.env).every((v) => !v.includes("PRIVATE KEY"))).toBe(true);
     expect(opts.redact).toContain(keyPem);
+  });
+});
+
+describeGit("GitInjector network isolation (§4.5.3 layer 4)", () => {
+  const spawnMock = vi.mocked(spawnCaptured);
+
+  const cloneAction: GitAction = {
+    type: "git",
+    operation: "clone",
+    repository: "https://8.8.8.8/org/repo.git",
+  };
+
+  const isolatedPolicy = () =>
+    policy({
+      command_allowlist: [GIT as string],
+      url_allowlist: ["https://8.8.8.8/*"],
+      network_isolation: true,
+    });
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it("passes the policy flag into the spawn seam and audits mechanism + state", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({ ...OK_RESULT, isolation_mechanism: "unshare" });
+    await audited.executeWithSecret(
+      cloneAction,
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      isolatedPolicy(),
+      undefined,
+      "secret-1",
+    );
+    const [, , opts] = spawnMock.mock.calls[0] as [
+      string,
+      string[],
+      { networkIsolation?: boolean },
+    ];
+    expect(opts.networkIsolation).toBe(true);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        detail: expect.objectContaining({
+          transport: "https",
+          network_isolation: true,
+          isolation_mechanism: "unshare",
+        }),
+      }),
+    );
+  });
+
+  it("audits and rethrows the fail-closed refusal from the seam", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockRejectedValue(VaultError.networkIsolationUnavailable("mocked"));
+    await expect(
+      audited.executeWithSecret(
+        cloneAction,
+        new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+        isolatedPolicy(),
+        undefined,
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        detail: expect.objectContaining({
+          error: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+          network_isolation: true,
+        }),
+      }),
+    );
+  });
+
+  it("defaults to an un-isolated spawn and audits network_isolation: false", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue(OK_RESULT);
+    await audited.executeWithSecret(
+      cloneAction,
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] }),
+      undefined,
+      "secret-1",
+    );
+    const [, , opts] = spawnMock.mock.calls[0] as [
+      string,
+      string[],
+      { networkIsolation?: boolean },
+    ];
+    expect(opts.networkIsolation).toBe(false);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        detail: expect.objectContaining({ network_isolation: false }),
+      }),
+    );
   });
 });

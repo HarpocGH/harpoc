@@ -42,6 +42,7 @@ const POLICY: InjectionPolicy = {
   host_allowlist: [],
   response_mode: "filtered",
   response_header_allowlist: [],
+  network_isolation: false,
 };
 
 function action(overrides: Partial<DatabaseAction> = {}): DatabaseAction {
