@@ -61,8 +61,10 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm lint
-      - name: Test
+      - name: Test (Windows, native OpenSSH client required for the ssh-live tier)
         if: runner.os == 'Windows'
+        env:
+          HARPOC_REQUIRE_PLATFORM_TESTS: ssh-live
         run: pnpm test
       # HARPOC_REQUIRE_PLATFORM_TESTS turns a failed availability probe on a
       # provisioned tier into a test FAILURE instead of a silent skip — a
@@ -71,7 +73,7 @@ jobs:
       - name: Test (macOS, keychain + sandbox-exec tiers required)
         if: runner.os == 'macOS'
         env:
-          HARPOC_REQUIRE_PLATFORM_TESTS: keychain,isolation
+          HARPOC_REQUIRE_PLATFORM_TESTS: keychain,isolation,ssh-live
         run: pnpm test
       - name: Test (Linux, D-Bus session with unlocked keyring — required Secret Service/keyring/isolation)
         if: runner.os == 'Linux'
@@ -79,6 +81,6 @@ jobs:
         # (non-login processes lack the pam_keyinit link, so @u operations get
         # EACCES without it); gnome-keyring provides the Secret Service.
         env:
-          HARPOC_REQUIRE_PLATFORM_TESTS: secret-service,keyring,isolation
+          HARPOC_REQUIRE_PLATFORM_TESTS: secret-service,keyring,isolation,ssh-live
         run: dbus-run-session -- sh -c 'echo harpoc-ci | gnome-keyring-daemon --unlock; keyctl link @u @s || true; pnpm test'
       - run: pnpm format:check
