@@ -4,7 +4,13 @@ import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, matchesHostAllowlist, resolveAndMatchCommand } from "./allowlist.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
-import { buildSshEnv, isHostKeyFailure, sshHardeningArgs, writeKnownHosts } from "./ssh-common.js";
+import {
+  buildSshEnv,
+  isHostKeyFailure,
+  sshHardeningArgs,
+  writeIdentityFile,
+  writeKnownHosts,
+} from "./ssh-common.js";
 
 /**
  * Executes a remote command over SSH with the private key served through an
@@ -72,9 +78,11 @@ export class SshInjector {
       throw err;
     }
 
+    let identity: import("./ssh-common.js").TempSshFile | null = null;
     try {
+      identity = writeIdentityFile(agent.publicKeyOpenssh);
       const args = [
-        ...sshHardeningArgs(kh.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
+        ...sshHardeningArgs(kh.file, identity.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
         "-l",
         action.user,
         "--",
@@ -149,6 +157,7 @@ export class SshInjector {
     } finally {
       agent.dispose();
       kh.dispose();
+      identity?.dispose();
     }
   }
 

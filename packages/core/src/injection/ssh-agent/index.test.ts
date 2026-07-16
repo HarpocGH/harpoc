@@ -92,6 +92,19 @@ describe("EphemeralSshAgent", () => {
     }
   });
 
+  it("exposes the identity's authorized_keys line, byte-identical to the served blob", async () => {
+    const agent = await EphemeralSshAgent.start(readFixture("ed25519_openssh"));
+    try {
+      const m = /^ssh-ed25519 ([A-Za-z0-9+/=]+) harpoc-ephemeral$/.exec(agent.publicKeyOpenssh);
+      expect(m).not.toBeNull();
+      const blob = await listIdentities(agent.authSock);
+      const lineBlob = Buffer.from((m as RegExpExecArray)[1] as string, "base64");
+      expect(lineBlob.equals(blob)).toBe(true);
+    } finally {
+      agent.dispose();
+    }
+  });
+
   it("returns SSH_AGENT_FAILURE for a sign request naming an unknown key", async () => {
     const agent = await EphemeralSshAgent.start(readFixture("ed25519_openssh"));
     try {

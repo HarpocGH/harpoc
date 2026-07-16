@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, InjectionPolicy, SshAction } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
@@ -96,6 +97,11 @@ describeSsh("SshInjector spawn hardening (ssh resolvable)", () => {
     expect(args).toContain("PasswordAuthentication=no");
     expect(args.some((a) => a.startsWith("UserKnownHostsFile="))).toBe(true);
     expect(args.some((a) => a.startsWith("ConnectTimeout="))).toBe(true);
+    // IdentitiesOnly restricts ssh to file-backed identities, so the vault-written
+    // .pub of the ephemeral key must ride along or the agent key is never offered.
+    const iIdx = args.indexOf("-i");
+    expect(iIdx).toBeGreaterThan(-1);
+    expect(args[iIdx + 1]).toMatch(/identity\.pub$/);
     // "--" ends option parsing so the host positional can never read as a flag.
     expect(args.slice(-5)).toEqual(["-l", "deploy", "--", "deploy.example.com", "whoami"]);
 
@@ -106,6 +112,54 @@ describeSsh("SshInjector spawn hardening (ssh resolvable)", () => {
     // and it is redacted from any captured output.
     expect(opts.redact).toContain(keyPem);
   });
+
+  it("backs the agent identity with a vault-written .pub, removed after the invocation", async () => {
+    let identityPath = "";
+    let identityContentAtSpawn = "";
+    spawnMock.mockImplementation((_cmd, args) => {
+      identityPath = args[args.indexOf("-i") + 1] as string;
+      identityContentAtSpawn = readFileSync(identityPath, "utf8");
+      return Promise.resolve(OK_RESULT);
+    });
+
+    await injector.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      policy({
+        host_allowlist: ["deploy.example.com"],
+        command_allowlist: [SSH as string],
+      }),
+      SSH_CONFIG,
+    );
+
+    // At spawn time the file exists and holds exactly the public line —
+    // never any private key material.
+    expect(identityContentAtSpawn).toMatch(/^ssh-rsa [A-Za-z0-9+/=]+ harpoc-ephemeral\n$/);
+    expect(identityContentAtSpawn).not.toContain("PRIVATE KEY");
+    // The per-invocation temp file is gone once the call completes.
+    expect(existsSync(identityPath)).toBe(false);
+  });
+
+  it.runIf(process.platform === "win32")(
+    "passes ProgramData through to ssh.exe (Win32-OpenSSH exits 255 silently without it)",
+    async () => {
+      await injector.executeWithSecret(
+        ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        policy({
+          host_allowlist: ["deploy.example.com"],
+          command_allowlist: [SSH as string],
+        }),
+        SSH_CONFIG,
+      );
+      const [, , opts] = spawnMock.mock.calls[0] as [
+        string,
+        string[],
+        { env: Record<string, string> },
+      ];
+      expect(opts.env.ProgramData).toBe(process.env.ProgramData);
+    },
+  );
 });
 
 describeSsh("SshInjector network isolation (§4.5.3 layer 4)", () => {

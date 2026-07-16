@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
@@ -158,6 +159,9 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
     expect(sshCommand).toContain("BatchMode=yes");
     expect(sshCommand).toContain("UserKnownHostsFile=");
     expect(sshCommand).toContain("IdentitiesOnly=yes");
+    // IdentitiesOnly restricts ssh to file-backed identities — the vault-written
+    // .pub must ride along in GIT_SSH_COMMAND or the agent key is never offered.
+    expect(sshCommand).toMatch(/ -i "?[^"]*identity\.pub"?/);
     expect(opts.env.SSH_AUTH_SOCK).toBeTruthy();
     expect(opts.env.GIT_TERMINAL_PROMPT).toBe("0");
 
@@ -165,6 +169,41 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
     expect(args.every((a) => !a.includes("PRIVATE KEY"))).toBe(true);
     expect(Object.values(opts.env).every((v) => !v.includes("PRIVATE KEY"))).toBe(true);
     expect(opts.redact).toContain(keyPem);
+  });
+
+  it("backs the agent identity with a vault-written .pub, removed after the invocation", async () => {
+    const { privateKey: keyPem } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: "pkcs1", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    let identityPath = "";
+    let identityContentAtSpawn = "";
+    spawnMock.mockImplementation((_cmd, _args, opts) => {
+      const sshCommand = (opts as { env?: Record<string, string> }).env?.GIT_SSH_COMMAND ?? "";
+      const m = / -i (?:"([^"]+)"|(\S+))/.exec(sshCommand);
+      identityPath = (m?.[1] ?? m?.[2]) as string;
+      identityContentAtSpawn = readFileSync(identityPath, "utf8");
+      return Promise.resolve(OK_RESULT);
+    });
+
+    await injector.executeWithSecret(
+      {
+        type: "git",
+        operation: "clone",
+        repository: "git@github.com:org/repo.git",
+      },
+      new Uint8Array(Buffer.from(keyPem)),
+      policy({
+        command_allowlist: [GIT as string],
+        host_allowlist: ["github.com"],
+      }),
+      { ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] } },
+    );
+
+    expect(identityContentAtSpawn).toMatch(/^ssh-rsa [A-Za-z0-9+/=]+ harpoc-ephemeral\n$/);
+    expect(identityContentAtSpawn).not.toContain("PRIVATE KEY");
+    expect(existsSync(identityPath)).toBe(false);
   });
 });
 

@@ -59,6 +59,18 @@ export function loadPrivateKey(pem: string): LoadedKey {
   return { publicKeyBlob, sign: signerFor(keyObject) };
 }
 
+/**
+ * authorized_keys-style public line ("<algo> <base64-blob> <comment>") for a
+ * loaded key. Written to disk as the ssh IdentityFile: under IdentitiesOnly=yes
+ * ssh offers only identities backed by a configured file — an agent-only key is
+ * never attempted — and with the private half absent locally ssh obtains the
+ * signature from the agent (ssh_config(5), IdentityFile).
+ */
+export function opensshPublicKeyLine(key: LoadedKey, comment: string): string {
+  const algo = new SshReader(key.publicKeyBlob).readCString();
+  return `${algo} ${key.publicKeyBlob.toString("base64")} ${comment}`;
+}
+
 function keyObjectFromPem(pem: string): KeyObject {
   if (hasEncryptedPemMarker(pem)) {
     throw VaultError.sshAgentFailed(

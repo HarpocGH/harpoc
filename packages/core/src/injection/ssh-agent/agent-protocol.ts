@@ -7,6 +7,9 @@ import type { LoadedKey } from "./key-loader.js";
  * Only identity listing and signing are served; every other request, key
  * mismatch or parse error yields SSH_AGENT_FAILURE. Fail-closed by construction.
  */
+/** Comment naming the vault's single agent identity (also the IdentityFile .pub comment). */
+export const IDENTITY_COMMENT = "harpoc-ephemeral";
+
 const SSH_AGENT_FAILURE = 5;
 const SSH_AGENTC_REQUEST_IDENTITIES = 11;
 const SSH_AGENT_IDENTITIES_ANSWER = 12;
@@ -33,7 +36,7 @@ function handleMessage(message: Buffer, key: LoadedKey): Buffer {
         writeByte(SSH_AGENT_IDENTITIES_ANSWER),
         writeUint32(1),
         writeString(key.publicKeyBlob),
-        writeString("harpoc-ephemeral"),
+        writeString(IDENTITY_COMMENT),
       ]);
       return frame(body);
     }

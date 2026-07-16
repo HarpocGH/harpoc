@@ -5,8 +5,8 @@ import type { Server, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { VaultError } from "@harpoc/shared";
-import { createAgentResponder } from "./agent-protocol.js";
-import { loadPrivateKey } from "./key-loader.js";
+import { IDENTITY_COMMENT, createAgentResponder } from "./agent-protocol.js";
+import { loadPrivateKey, opensshPublicKeyLine } from "./key-loader.js";
 
 /**
  * An ephemeral, in-process ssh-agent (thesis §4.5.7). The private key is parsed
@@ -25,6 +25,14 @@ export class EphemeralSshAgent {
   private constructor(
     /** Value to place in the spawned process's SSH_AUTH_SOCK. */
     readonly authSock: string,
+    /**
+     * authorized_keys-style line of the served identity. Written to a temp file
+     * and passed as ssh's IdentityFile: IdentitiesOnly=yes restricts ssh to
+     * file-backed identities, so an agent-only key would never be offered —
+     * the public half on disk is what makes the ephemeral key eligible (and
+     * the only identity ssh will attempt). The private key stays in memory.
+     */
+    readonly publicKeyOpenssh: string,
     private server: Server | null,
     private readonly sockets: Set<Socket>,
     private tempDir: string | null,
@@ -80,7 +88,15 @@ export class EphemeralSshAgent {
       });
 
       server.listen(authSock, () => {
-        resolvePromise(new EphemeralSshAgent(authSock, server, sockets, tempDir));
+        resolvePromise(
+          new EphemeralSshAgent(
+            authSock,
+            opensshPublicKeyLine(key, IDENTITY_COMMENT),
+            server,
+            sockets,
+            tempDir,
+          ),
+        );
       });
     });
   }

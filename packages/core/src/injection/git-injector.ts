@@ -13,7 +13,13 @@ import {
 } from "./allowlist.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
-import { buildSshEnv, isHostKeyFailure, sshHardeningArgs, writeKnownHosts } from "./ssh-common.js";
+import {
+  buildSshEnv,
+  isHostKeyFailure,
+  sshHardeningArgs,
+  writeIdentityFile,
+  writeKnownHosts,
+} from "./ssh-common.js";
 import { validateUrl } from "./url-validator.js";
 
 /** git args that turn data into an instruction vehicle (config/hook/transport execution).
@@ -207,11 +213,13 @@ export class GitInjector {
       throw err;
     }
 
+    let identity: import("./ssh-common.js").TempSshFile | null = null;
     try {
+      identity = writeIdentityFile(agent.publicKeyOpenssh);
       const env = buildSshEnv(agent.authSock, policy.env_allowlist);
       env.GIT_SSH_COMMAND = toCommandString([
         sshPath,
-        ...sshHardeningArgs(kh.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
+        ...sshHardeningArgs(kh.file, identity.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
       ]);
       env.GIT_TERMINAL_PROMPT = "0";
       const networkIsolation = policy.network_isolation === true;
@@ -271,6 +279,7 @@ export class GitInjector {
     } finally {
       agent.dispose();
       kh.dispose();
+      identity?.dispose();
     }
   }
 
