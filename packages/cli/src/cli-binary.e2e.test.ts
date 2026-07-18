@@ -193,6 +193,32 @@ describe("compiled binary smoke: audit anchor / verify --anchor", () => {
   }, 30_000);
 });
 
+describe("compiled binary smoke: transactional audit writes (NM3)", () => {
+  it("audit verify exits 0 after a lifecycle incl. an acknowledged-interpreter grant", async () => {
+    const set = await runCli(["secret", "set", "atomic-smoke"], { stdin: "smoke-value\n" });
+    expect(set.code).toBe(0);
+
+    // Grant + interpreter acknowledgement commit as one multi-row transaction.
+    const allow = await runCli([
+      "secret",
+      "allow",
+      "secret://atomic-smoke",
+      "--command",
+      process.execPath,
+      "--acknowledge-interpreter",
+    ]);
+    expect(allow.code).toBe(0);
+
+    const rotate = await runCli(["secret", "rotate", "secret://atomic-smoke"], {
+      stdin: "smoke-value-2\n",
+    });
+    expect(rotate.code).toBe(0);
+
+    const verify = await runCli(["audit", "verify"]);
+    expect(verify.code).toBe(0);
+  }, 60_000);
+});
+
 // Windows is the platform where isolation is unsupported by design, so the
 // compiled binary exercises the REAL fail-closed refusal path — no test
 // hook, no mock (review T2: the third pinning level for the refusal).

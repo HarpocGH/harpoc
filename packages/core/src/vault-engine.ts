@@ -446,15 +446,16 @@ export class VaultEngine {
     expiresAt?: number;
   }): Promise<CreateSecretResponse> {
     const s = this.assertUnlocked();
-    const result = await s.secretManager.createSecret(input);
-
-    s.auditLogger.log({
-      eventType: AuditEventType.SECRET_CREATE,
-      detail: { handle: result.handle, status: result.status },
-      sessionId: this.sessionId ?? undefined,
+    // Audit row committed in the same transaction as the secret row (NM3):
+    // a crash cannot yield a created-but-unaudited secret, and an unwritable
+    // audit log rolls the create back.
+    return s.secretManager.createSecret(input, (result) => {
+      s.auditLogger.log({
+        eventType: AuditEventType.SECRET_CREATE,
+        detail: { handle: result.handle, status: result.status },
+        sessionId: this.sessionId ?? undefined,
+      });
     });
-
-    return result;
   }
 
   async getSecretInfo(handle: string): Promise<SecretInfo> {
@@ -503,49 +504,49 @@ export class VaultEngine {
   async setSecretValue(handle: string, value: Uint8Array): Promise<void> {
     const s = this.assertUnlocked();
     try {
-      await s.secretManager.setSecretValue(handle, value);
+      await s.secretManager.setSecretValue(handle, value, () => {
+        s.auditLogger.log({
+          eventType: AuditEventType.SECRET_CREATE,
+          detail: { handle, action: "set_value" },
+          sessionId: this.sessionId ?? undefined,
+        });
+      });
     } catch (err) {
       this.auditDenied(s, AuditEventType.SECRET_CREATE, err, { handle, action: "set_value" });
       throw err;
     }
-
-    s.auditLogger.log({
-      eventType: AuditEventType.SECRET_CREATE,
-      detail: { handle, action: "set_value" },
-      sessionId: this.sessionId ?? undefined,
-    });
   }
 
   async rotateSecret(handle: string, newValue: Uint8Array): Promise<void> {
     const s = this.assertUnlocked();
     try {
-      await s.secretManager.rotateSecret(handle, newValue);
+      await s.secretManager.rotateSecret(handle, newValue, () => {
+        s.auditLogger.log({
+          eventType: AuditEventType.SECRET_ROTATE,
+          detail: { handle },
+          sessionId: this.sessionId ?? undefined,
+        });
+      });
     } catch (err) {
       this.auditDenied(s, AuditEventType.SECRET_ROTATE, err, { handle });
       throw err;
     }
-
-    s.auditLogger.log({
-      eventType: AuditEventType.SECRET_ROTATE,
-      detail: { handle },
-      sessionId: this.sessionId ?? undefined,
-    });
   }
 
   async revokeSecret(handle: string): Promise<void> {
     const s = this.assertUnlocked();
     try {
-      await s.secretManager.revokeSecret(handle);
+      await s.secretManager.revokeSecret(handle, () => {
+        s.auditLogger.log({
+          eventType: AuditEventType.SECRET_REVOKE,
+          detail: { handle },
+          sessionId: this.sessionId ?? undefined,
+        });
+      });
     } catch (err) {
       this.auditDenied(s, AuditEventType.SECRET_REVOKE, err, { handle });
       throw err;
     }
-
-    s.auditLogger.log({
-      eventType: AuditEventType.SECRET_REVOKE,
-      detail: { handle },
-      sessionId: this.sessionId ?? undefined,
-    });
   }
 
   /**
@@ -808,39 +809,43 @@ export class VaultEngine {
       AAD_INJECTION_POLICY(secret.id),
     );
     const now = Date.now();
-    s.store.upsertInjectionPolicy({
-      secret_id: secret.id,
-      policy_encrypted: enc.ciphertext,
-      policy_iv: enc.iv,
-      policy_tag: enc.tag,
-      created_at: now,
-      updated_at: now,
-    });
+    // Policy write + audit row(s) in one transaction (NM3): the acknowledged-
+    // interpreter row commits with the grant it acknowledges.
+    s.store.transaction(() => {
+      s.store.upsertInjectionPolicy({
+        secret_id: secret.id,
+        policy_encrypted: enc.ciphertext,
+        policy_iv: enc.iv,
+        policy_tag: enc.tag,
+        created_at: now,
+        updated_at: now,
+      });
 
-    s.auditLogger.log({
-      eventType: AuditEventType.POLICY_GRANT,
-      secretId: secret.id,
-      detail: {
-        policy: "injection",
-        url_count: policy.url_allowlist?.length ?? 0,
-        command_count: policy.command_allowlist?.length ?? 0,
-        env_count: policy.env_allowlist?.length ?? 0,
-        host_count: policy.host_allowlist?.length ?? 0,
-        response_mode: policy.response_mode ?? "filtered",
-        response_header_count: policy.response_header_allowlist?.length ?? 0,
-        network_isolation: policy.network_isolation ?? false,
-      },
-      sessionId: this.sessionId ?? undefined,
-    });
-
-    if (addedInterpreters.length > 0) {
       s.auditLogger.log({
-        eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED,
+        eventType: AuditEventType.POLICY_GRANT,
         secretId: secret.id,
-        detail: { policy: "injection", interpreters: addedInterpreters },
+        detail: {
+          policy: "injection",
+          url_count: policy.url_allowlist?.length ?? 0,
+          command_count: policy.command_allowlist?.length ?? 0,
+          env_count: policy.env_allowlist?.length ?? 0,
+          host_count: policy.host_allowlist?.length ?? 0,
+          response_mode: policy.response_mode ?? "filtered",
+          response_header_count: policy.response_header_allowlist?.length ?? 0,
+          network_isolation: policy.network_isolation ?? false,
+        },
         sessionId: this.sessionId ?? undefined,
       });
-    }
+
+      if (addedInterpreters.length > 0) {
+        s.auditLogger.log({
+          eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED,
+          secretId: secret.id,
+          detail: { policy: "injection", interpreters: addedInterpreters },
+          sessionId: this.sessionId ?? undefined,
+        });
+      }
+    });
 
     // Thesis §4.5.3 layer 4: a live stdio downstream child predates the
     // isolation demand and holds the credential with full egress — refusing
@@ -891,24 +896,26 @@ export class VaultEngine {
       AAD_MCP_SERVER_CONFIG(secret.id),
     );
     const now = Date.now();
-    s.store.upsertMcpServer({
-      secret_id: secret.id,
-      config_encrypted: enc.ciphertext,
-      config_iv: enc.iv,
-      config_tag: enc.tag,
-      created_at: now,
-      updated_at: now,
-    });
+    s.store.transaction(() => {
+      s.store.upsertMcpServer({
+        secret_id: secret.id,
+        config_encrypted: enc.ciphertext,
+        config_iv: enc.iv,
+        config_tag: enc.tag,
+        created_at: now,
+        updated_at: now,
+      });
 
-    s.auditLogger.log({
-      eventType: AuditEventType.POLICY_GRANT,
-      secretId: secret.id,
-      detail: {
-        policy: "mcp_server",
-        server_name: config.server_name,
-        transport: config.transport,
-      },
-      sessionId: this.sessionId ?? undefined,
+      s.auditLogger.log({
+        eventType: AuditEventType.POLICY_GRANT,
+        secretId: secret.id,
+        detail: {
+          policy: "mcp_server",
+          server_name: config.server_name,
+          transport: config.transport,
+        },
+        sessionId: this.sessionId ?? undefined,
+      });
     });
 
     await s.mcpRegistry.terminate(secret.id, "config_changed");
@@ -926,16 +933,18 @@ export class VaultEngine {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
     await s.mcpRegistry.terminate(secret.id, "config_removed");
-    const deleted = s.store.deleteMcpServer(secret.id);
-    if (deleted) {
-      s.auditLogger.log({
-        eventType: AuditEventType.POLICY_REVOKE,
-        secretId: secret.id,
-        detail: { policy: "mcp_server" },
-        sessionId: this.sessionId ?? undefined,
-      });
-    }
-    return deleted;
+    return s.store.transaction(() => {
+      const deleted = s.store.deleteMcpServer(secret.id);
+      if (deleted) {
+        s.auditLogger.log({
+          eventType: AuditEventType.POLICY_REVOKE,
+          secretId: secret.id,
+          detail: { policy: "mcp_server" },
+          sessionId: this.sessionId ?? undefined,
+        });
+      }
+      return deleted;
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -972,26 +981,28 @@ export class VaultEngine {
       AAD_CONNECTION_CONFIG(secret.id),
     );
     const now = Date.now();
-    s.store.upsertConnectionConfig({
-      secret_id: secret.id,
-      config_encrypted: enc.ciphertext,
-      config_iv: enc.iv,
-      config_tag: enc.tag,
-      created_at: now,
-      updated_at: now,
-    });
+    s.store.transaction(() => {
+      s.store.upsertConnectionConfig({
+        secret_id: secret.id,
+        config_encrypted: enc.ciphertext,
+        config_iv: enc.iv,
+        config_tag: enc.tag,
+        created_at: now,
+        updated_at: now,
+      });
 
-    s.auditLogger.log({
-      eventType: AuditEventType.POLICY_GRANT,
-      secretId: secret.id,
-      detail: {
-        policy: "connection",
-        has_database: config.database !== undefined,
-        has_ssh: config.ssh !== undefined,
-        database_tls: config.database?.tls_mode,
-        known_hosts_count: config.ssh?.known_hosts.length ?? 0,
-      },
-      sessionId: this.sessionId ?? undefined,
+      s.auditLogger.log({
+        eventType: AuditEventType.POLICY_GRANT,
+        secretId: secret.id,
+        detail: {
+          policy: "connection",
+          has_database: config.database !== undefined,
+          has_ssh: config.ssh !== undefined,
+          database_tls: config.database?.tls_mode,
+          known_hosts_count: config.ssh?.known_hosts.length ?? 0,
+        },
+        sessionId: this.sessionId ?? undefined,
+      });
     });
   }
 
@@ -1006,16 +1017,18 @@ export class VaultEngine {
   async deleteConnectionConfig(handle: string): Promise<boolean> {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
-    const deleted = s.store.deleteConnectionConfig(secret.id);
-    if (deleted) {
-      s.auditLogger.log({
-        eventType: AuditEventType.POLICY_REVOKE,
-        secretId: secret.id,
-        detail: { policy: "connection" },
-        sessionId: this.sessionId ?? undefined,
-      });
-    }
-    return deleted;
+    return s.store.transaction(() => {
+      const deleted = s.store.deleteConnectionConfig(secret.id);
+      if (deleted) {
+        s.auditLogger.log({
+          eventType: AuditEventType.POLICY_REVOKE,
+          secretId: secret.id,
+          detail: { policy: "connection" },
+          sessionId: this.sessionId ?? undefined,
+        });
+      }
+      return deleted;
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1079,41 +1092,48 @@ export class VaultEngine {
       clientSecretEnc = encrypt(s.kek, clientSecretBytes, AAD_OAUTH_CLIENT_SECRET(secret.id));
     }
 
-    s.store.insertOAuthToken({
-      secret_id: secret.id,
-      provider: providerConfig.provider,
-      grant_type: providerConfig.grant_type,
-      token_endpoint: providerConfig.token_endpoint,
-      auth_endpoint: providerConfig.auth_endpoint ?? null,
-      client_id_encrypted: clientIdEnc.ciphertext,
-      client_id_iv: clientIdEnc.iv,
-      client_id_tag: clientIdEnc.tag,
-      client_secret_encrypted: clientSecretEnc?.ciphertext ?? null,
-      client_secret_iv: clientSecretEnc?.iv ?? null,
-      client_secret_tag: clientSecretEnc?.tag ?? null,
-      scopes: providerConfig.scopes ? JSON.stringify(providerConfig.scopes) : null,
-      refresh_token_encrypted: null,
-      refresh_token_iv: null,
-      refresh_token_tag: null,
-      access_token_encrypted: null,
-      access_token_iv: null,
-      access_token_tag: null,
-      access_token_expires_at: null,
-      redirect_uri: providerConfig.redirect_uri ?? null,
-      pkce_method: providerConfig.pkce_method ?? "S256",
-      token_endpoint_auth_method: providerConfig.token_endpoint_auth_method ?? null,
-    });
-
-    s.auditLogger.log({
-      eventType: AuditEventType.OAUTH_AUTHORIZE,
-      secretId: secret.id,
-      detail: {
-        handle,
+    // OAuth row + audit in one transaction (NM3). The base secret row committed
+    // in the manager's own transaction above — a crash between the two leaves a
+    // visibly incomplete PENDING secret without an OAuth row, which re-running
+    // `oauth connect` resumes (fresh config, same secretId); not a completed-
+    // but-unaudited operation.
+    s.store.transaction(() => {
+      s.store.insertOAuthToken({
+        secret_id: secret.id,
         provider: providerConfig.provider,
         grant_type: providerConfig.grant_type,
-        ...(resumed ? { resumed: true } : {}),
-      },
-      sessionId: this.sessionId ?? undefined,
+        token_endpoint: providerConfig.token_endpoint,
+        auth_endpoint: providerConfig.auth_endpoint ?? null,
+        client_id_encrypted: clientIdEnc.ciphertext,
+        client_id_iv: clientIdEnc.iv,
+        client_id_tag: clientIdEnc.tag,
+        client_secret_encrypted: clientSecretEnc?.ciphertext ?? null,
+        client_secret_iv: clientSecretEnc?.iv ?? null,
+        client_secret_tag: clientSecretEnc?.tag ?? null,
+        scopes: providerConfig.scopes ? JSON.stringify(providerConfig.scopes) : null,
+        refresh_token_encrypted: null,
+        refresh_token_iv: null,
+        refresh_token_tag: null,
+        access_token_encrypted: null,
+        access_token_iv: null,
+        access_token_tag: null,
+        access_token_expires_at: null,
+        redirect_uri: providerConfig.redirect_uri ?? null,
+        pkce_method: providerConfig.pkce_method ?? "S256",
+        token_endpoint_auth_method: providerConfig.token_endpoint_auth_method ?? null,
+      });
+
+      s.auditLogger.log({
+        eventType: AuditEventType.OAUTH_AUTHORIZE,
+        secretId: secret.id,
+        detail: {
+          handle,
+          provider: providerConfig.provider,
+          grant_type: providerConfig.grant_type,
+          ...(resumed ? { resumed: true } : {}),
+        },
+        sessionId: this.sessionId ?? undefined,
+      });
     });
 
     return { handle, secretId: secret.id };
@@ -1150,31 +1170,35 @@ export class VaultEngine {
       access_token_expires_at: expiresAt ?? null,
     };
 
+    let tokenUpdate: Parameters<typeof s.store.updateOAuthToken>[1] = accessUpdate;
     if (refreshToken) {
       const refreshTokenBytes = new Uint8Array(Buffer.from(refreshToken, "utf8"));
       const refreshTokenEnc = encrypt(s.kek, refreshTokenBytes, AAD_OAUTH_REFRESH_TOKEN(secretId));
-      s.store.updateOAuthToken(secretId, {
+      tokenUpdate = {
         ...accessUpdate,
         refresh_token_encrypted: refreshTokenEnc.ciphertext,
         refresh_token_iv: refreshTokenEnc.iv,
         refresh_token_tag: refreshTokenEnc.tag,
-      });
-    } else {
-      s.store.updateOAuthToken(secretId, accessUpdate);
+      };
     }
 
-    // Transition secret to ACTIVE
-    s.store.updateSecret(secretId, {
-      status: SecretStatus.ACTIVE,
-      updated_at: Date.now(),
-    });
+    // Token write, ACTIVE transition and audit row in one transaction (NM3) —
+    // previously a crash between them could leave tokens on a PENDING secret.
+    s.store.transaction(() => {
+      s.store.updateOAuthToken(secretId, tokenUpdate);
 
-    s.auditLogger.log({
-      eventType: AuditEventType.OAUTH_CALLBACK,
-      secretId,
-      detail: { has_refresh_token: !!refreshToken, expires_at: expiresAt ?? null },
-      sessionId: this.sessionId ?? undefined,
-      success: true,
+      s.store.updateSecret(secretId, {
+        status: SecretStatus.ACTIVE,
+        updated_at: Date.now(),
+      });
+
+      s.auditLogger.log({
+        eventType: AuditEventType.OAUTH_CALLBACK,
+        secretId,
+        detail: { has_refresh_token: !!refreshToken, expires_at: expiresAt ?? null },
+        sessionId: this.sessionId ?? undefined,
+        success: true,
+      });
     });
   }
 
@@ -1334,27 +1358,32 @@ export class VaultEngine {
       access_token_expires_at: newExpiresAt,
     };
 
+    let tokenUpdate: Parameters<typeof s.store.updateOAuthToken>[1] = accessUpdate;
     if (tokenResponse.refresh_token) {
       const newRefreshBytes = new Uint8Array(Buffer.from(tokenResponse.refresh_token, "utf8"));
       const newRefreshEnc = encrypt(s.kek, newRefreshBytes, AAD_OAUTH_REFRESH_TOKEN(secretId));
-      s.store.updateOAuthToken(secretId, {
+      tokenUpdate = {
         ...accessUpdate,
         refresh_token_encrypted: newRefreshEnc.ciphertext,
         refresh_token_iv: newRefreshEnc.iv,
         refresh_token_tag: newRefreshEnc.tag,
-      });
-    } else {
-      s.store.updateOAuthToken(secretId, accessUpdate);
+      };
     }
 
-    s.store.updateSecret(secretId, { updated_at: Date.now() });
+    // Rotated tokens and their audit row commit together (NM3): a possibly
+    // rotated-away refresh_token is never stored unaudited.
+    s.store.transaction(() => {
+      s.store.updateOAuthToken(secretId, tokenUpdate);
 
-    s.auditLogger.log({
-      eventType: AuditEventType.OAUTH_REFRESH,
-      secretId,
-      detail: { new_expires_at: newExpiresAt },
-      sessionId: this.sessionId ?? undefined,
-      success: true,
+      s.store.updateSecret(secretId, { updated_at: Date.now() });
+
+      s.auditLogger.log({
+        eventType: AuditEventType.OAUTH_REFRESH,
+        secretId,
+        detail: { new_expires_at: newExpiresAt },
+        sessionId: this.sessionId ?? undefined,
+        success: true,
+      });
     });
 
     return newExpiresAt;
@@ -1416,20 +1445,22 @@ export class VaultEngine {
         throw VaultError.oauthNotConfigured();
       }
 
-      // Lazy expiry check
+      // Lazy expiry check — status write + audit row in one transaction (NM3)
       if (
         secret.status !== SecretStatus.EXPIRED &&
         secret.expires_at !== null &&
         secret.expires_at <= Date.now()
       ) {
-        s.store.updateSecret(secretId, {
-          status: SecretStatus.EXPIRED,
-          updated_at: Date.now(),
-        });
-        s.auditLogger.log({
-          eventType: AuditEventType.SECRET_EXPIRE,
-          secretId,
-          sessionId: this.sessionId ?? undefined,
+        s.store.transaction(() => {
+          s.store.updateSecret(secretId, {
+            status: SecretStatus.EXPIRED,
+            updated_at: Date.now(),
+          });
+          s.auditLogger.log({
+            eventType: AuditEventType.SECRET_EXPIRE,
+            secretId,
+            sessionId: this.sessionId ?? undefined,
+          });
         });
         throw VaultError.secretExpired();
       }
@@ -1521,29 +1552,33 @@ export class VaultEngine {
 
   grantPolicy(input: Omit<GrantPolicyInput, "createdBy">, createdBy: string): AccessPolicy {
     const s = this.assertUnlocked();
-    const policy = s.policyEngine.grantPolicy({ ...input, createdBy });
+    return s.store.transaction(() => {
+      const policy = s.policyEngine.grantPolicy({ ...input, createdBy });
 
-    s.auditLogger.log({
-      eventType: AuditEventType.POLICY_GRANT,
-      secretId: input.secretId,
-      detail: {
-        policy_id: policy.id,
-        principal: `${input.principalType}:${input.principalId}`,
-      },
-      sessionId: this.sessionId ?? undefined,
+      s.auditLogger.log({
+        eventType: AuditEventType.POLICY_GRANT,
+        secretId: input.secretId,
+        detail: {
+          policy_id: policy.id,
+          principal: `${input.principalType}:${input.principalId}`,
+        },
+        sessionId: this.sessionId ?? undefined,
+      });
+
+      return policy;
     });
-
-    return policy;
   }
 
   revokePolicy(policyId: string): void {
     const s = this.assertUnlocked();
-    s.policyEngine.revokePolicy(policyId);
+    s.store.transaction(() => {
+      s.policyEngine.revokePolicy(policyId);
 
-    s.auditLogger.log({
-      eventType: AuditEventType.POLICY_REVOKE,
-      detail: { policy_id: policyId },
-      sessionId: this.sessionId ?? undefined,
+      s.auditLogger.log({
+        eventType: AuditEventType.POLICY_REVOKE,
+        detail: { policy_id: policyId },
+        sessionId: this.sessionId ?? undefined,
+      });
     });
   }
 
@@ -1691,12 +1726,14 @@ export class VaultEngine {
     // Fallback: MAX_TOKEN_TTL_MS from now ensures the revocation entry always
     // outlives any token (since createToken caps TTL at MAX_TOKEN_TTL_MS).
     const fallback = Math.floor(Date.now() / 1000) + Math.floor(MAX_TOKEN_TTL_MS / 1000);
-    s.store.insertRevokedToken(jti, expiresAt ?? fallback);
+    s.store.transaction(() => {
+      s.store.insertRevokedToken(jti, expiresAt ?? fallback);
 
-    s.auditLogger.log({
-      eventType: AuditEventType.TOKEN_REVOKE,
-      detail: { jti },
-      sessionId: this.sessionId ?? undefined,
+      s.auditLogger.log({
+        eventType: AuditEventType.TOKEN_REVOKE,
+        detail: { jti },
+        sessionId: this.sessionId ?? undefined,
+      });
     });
   }
 
@@ -1740,19 +1777,25 @@ export class VaultEngine {
       throw err;
     }
 
-    s.store.setMeta("kdf_salt", Buffer.from(result.newSalt).toString("base64"));
-    s.store.setMeta("wrapped_kek", Buffer.from(result.newWrappedKek).toString("base64"));
-    s.store.setMeta("wrapped_kek_iv", Buffer.from(result.newWrappedKekIv).toString("base64"));
-    s.store.setMeta("wrapped_kek_tag", Buffer.from(result.newWrappedKekTag).toString("base64"));
+    // Salt, wrapped-KEK triple, lockout reset and the audit row commit in one
+    // transaction (NM3) — a crash between the salt and wrapped-KEK writes would
+    // otherwise leave them from different generations, bricking master-password
+    // unlock for both the old and the new password.
+    s.store.transaction(() => {
+      s.store.setMeta("kdf_salt", Buffer.from(result.newSalt).toString("base64"));
+      s.store.setMeta("wrapped_kek", Buffer.from(result.newWrappedKek).toString("base64"));
+      s.store.setMeta("wrapped_kek_iv", Buffer.from(result.newWrappedKekIv).toString("base64"));
+      s.store.setMeta("wrapped_kek_tag", Buffer.from(result.newWrappedKekTag).toString("base64"));
 
-    // Successful re-auth clears the shared lockout counter, as unlock does.
-    s.store.setMeta("failed_attempts", "0");
+      // Successful re-auth clears the shared lockout counter, as unlock does.
+      s.store.setMeta("failed_attempts", "0");
 
-    // JWT and audit keys are unchanged — they're wrapped with KEK, not derived from master key
+      // JWT and audit keys are unchanged — they're wrapped with KEK, not derived from master key
 
-    s.auditLogger.log({
-      eventType: AuditEventType.VAULT_PASSWORD_CHANGE,
-      sessionId: this.sessionId ?? undefined,
+      s.auditLogger.log({
+        eventType: AuditEventType.VAULT_PASSWORD_CHANGE,
+        sessionId: this.sessionId ?? undefined,
+      });
     });
 
     // Write new session with updated keys

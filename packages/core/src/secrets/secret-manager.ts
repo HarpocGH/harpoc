@@ -81,8 +81,16 @@ export class SecretManager {
 
   /**
    * Create a new secret. If no value is provided, status is PENDING.
+   *
+   * `onCommit` runs synchronously inside the insert transaction (receiving the
+   * response the caller will get) so the engine's audit row commits atomically
+   * with the secret row — a crash cannot yield a created-but-unaudited secret,
+   * and a failed audit write rolls the create back.
    */
-  async createSecret(input: CreateSecretInput): Promise<CreateSecretResponse> {
+  async createSecret(
+    input: CreateSecretInput,
+    onCommit?: (result: CreateSecretResponse) => void,
+  ): Promise<CreateSecretResponse> {
     const { name, type, project, value, expiresAt } = input;
 
     // Validates name and project before any row is written — a post-insert
@@ -159,6 +167,14 @@ export class SecretManager {
       name_hmac: nameHmac,
     };
 
+    const response: CreateSecretResponse = {
+      handle,
+      status: value ? "created" : "pending",
+      message: value
+        ? `Secret ${handle} created`
+        : `Secret ${handle} created with pending status — set value via CLI`,
+    };
+
     // Duplicate check and insert run in one transaction with no await between
     // them, so two concurrent creates in this process cannot interleave; the
     // partial unique index (migration 009) is the cross-process backstop and
@@ -167,6 +183,7 @@ export class SecretManager {
       this.store.transaction(() => {
         this.assertNoDuplicateByHmac(nameHmac, name);
         this.store.insertSecret(secret);
+        onCommit?.(response);
       });
     } catch (err) {
       if (isUniqueConstraintError(err)) {
@@ -175,19 +192,14 @@ export class SecretManager {
       throw err;
     }
 
-    return {
-      handle,
-      status: value ? "created" : "pending",
-      message: value
-        ? `Secret ${handle} created`
-        : `Secret ${handle} created with pending status — set value via CLI`,
-    };
+    return response;
   }
 
   /**
    * Set the value for a PENDING secret (transitions to ACTIVE).
+   * `onCommit` runs inside the update transaction (see createSecret).
    */
-  async setSecretValue(handle: string, value: Uint8Array): Promise<void> {
+  async setSecretValue(handle: string, value: Uint8Array, onCommit?: () => void): Promise<void> {
     const secret = await this.resolveHandleToSecret(handle);
 
     if (secret.status !== SecretStatus.PENDING) {
@@ -203,12 +215,15 @@ export class SecretManager {
     try {
       const encrypted = encryptSecretValue(dek, value, secret.id, secret.version);
 
-      this.store.updateSecret(secret.id, {
-        ciphertext: encrypted.ciphertext,
-        ct_iv: encrypted.iv,
-        ct_tag: encrypted.tag,
-        status: SecretStatus.ACTIVE,
-        updated_at: Date.now(),
+      this.store.transaction(() => {
+        this.store.updateSecret(secret.id, {
+          ciphertext: encrypted.ciphertext,
+          ct_iv: encrypted.iv,
+          ct_tag: encrypted.tag,
+          status: SecretStatus.ACTIVE,
+          updated_at: Date.now(),
+        });
+        onCommit?.();
       });
     } finally {
       wipeBuffer(dek);
@@ -290,8 +305,9 @@ export class SecretManager {
 
   /**
    * Rotate a secret: new DEK, new ciphertext, version incremented.
+   * `onCommit` runs inside the update transaction (see createSecret).
    */
-  async rotateSecret(handle: string, newValue: Uint8Array): Promise<void> {
+  async rotateSecret(handle: string, newValue: Uint8Array, onCommit?: () => void): Promise<void> {
     const secret = await this.resolveHandleToSecret(handle);
     this.assertUsable(secret, handle);
 
@@ -302,16 +318,19 @@ export class SecretManager {
       const wrapped = wrapDek(this.kek, newDek, secret.id);
       const encrypted = encryptSecretValue(newDek, newValue, secret.id, newVersion);
 
-      this.store.updateSecret(secret.id, {
-        wrapped_dek: wrapped.wrappedDek,
-        dek_iv: wrapped.dekIv,
-        dek_tag: wrapped.dekTag,
-        ciphertext: encrypted.ciphertext,
-        ct_iv: encrypted.iv,
-        ct_tag: encrypted.tag,
-        version: newVersion,
-        rotated_at: Date.now(),
-        updated_at: Date.now(),
+      this.store.transaction(() => {
+        this.store.updateSecret(secret.id, {
+          wrapped_dek: wrapped.wrappedDek,
+          dek_iv: wrapped.dekIv,
+          dek_tag: wrapped.dekTag,
+          ciphertext: encrypted.ciphertext,
+          ct_iv: encrypted.iv,
+          ct_tag: encrypted.tag,
+          version: newVersion,
+          rotated_at: Date.now(),
+          updated_at: Date.now(),
+        });
+        onCommit?.();
       });
     } finally {
       wipeBuffer(newDek);
@@ -320,17 +339,21 @@ export class SecretManager {
 
   /**
    * Revoke a secret (sets status to REVOKED).
+   * `onCommit` runs inside the update transaction (see createSecret).
    */
-  async revokeSecret(handle: string): Promise<void> {
+  async revokeSecret(handle: string, onCommit?: () => void): Promise<void> {
     const secret = await this.resolveHandleToSecret(handle);
 
     if (secret.status === SecretStatus.REVOKED) {
       throw VaultError.secretRevoked(handle);
     }
 
-    this.store.updateSecret(secret.id, {
-      status: SecretStatus.REVOKED,
-      updated_at: Date.now(),
+    this.store.transaction(() => {
+      this.store.updateSecret(secret.id, {
+        status: SecretStatus.REVOKED,
+        updated_at: Date.now(),
+      });
+      onCommit?.();
     });
   }
 
@@ -400,17 +423,21 @@ export class SecretManager {
   }
 
   private assertUsable(secret: Secret, handle: string): void {
-    // Lazy expiry: if expires_at is set and past, transition to EXPIRED
+    // Lazy expiry: if expires_at is set and past, transition to EXPIRED. The
+    // status write and the engine's audit row (via onLazyExpire) commit in one
+    // transaction; the expiry then persists even though the access is denied.
     if (
       secret.status !== SecretStatus.EXPIRED &&
       secret.expires_at !== null &&
       secret.expires_at <= Date.now()
     ) {
-      this.store.updateSecret(secret.id, {
-        status: SecretStatus.EXPIRED,
-        updated_at: Date.now(),
+      this.store.transaction(() => {
+        this.store.updateSecret(secret.id, {
+          status: SecretStatus.EXPIRED,
+          updated_at: Date.now(),
+        });
+        this.onLazyExpire(secret.id, handle);
       });
-      this.onLazyExpire(secret.id, handle);
       throw VaultError.secretExpired(handle);
     }
 
