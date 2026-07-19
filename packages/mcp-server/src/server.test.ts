@@ -29,10 +29,50 @@ function mockEngine(overrides: Record<string, unknown> = {}): VaultEngine {
 }
 
 describe("createMcpServer", () => {
-  it("creates server without token (full access)", () => {
+  it("throws TOKEN_REQUIRED without token and without allowTokenless", () => {
     const engine = mockEngine();
-    const server = createMcpServer({ engine });
-    expect(server).toBeDefined();
+    expect(() => createMcpServer({ engine })).toThrow(
+      expect.objectContaining({ code: ErrorCode.TOKEN_REQUIRED }),
+    );
+  });
+
+  it("TOKEN_REQUIRED message names both recovery paths", () => {
+    const engine = mockEngine();
+    try {
+      createMcpServer({ engine });
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      const message = (err as Error).message;
+      expect(message).toContain("harpoc auth token");
+      expect(message).toContain("HARPOC_TOKEN");
+      expect(message).toContain("--allow-tokenless");
+    }
+  });
+
+  it("creates server without token when allowTokenless is set, warning on stderr", () => {
+    const engine = mockEngine();
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      const server = createMcpServer({ engine, allowTokenless: true });
+      expect(server).toBeDefined();
+      const written = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(written).toContain("WARNING");
+      expect(written).toContain("unrestricted");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("emits no warning on the token path", () => {
+    const engine = mockEngine();
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      createMcpServer({ engine, launchToken: "valid.jwt.token" });
+      const written = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(written).not.toContain("WARNING");
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 
   it("creates server with valid token", () => {
@@ -68,7 +108,7 @@ describe("createMcpServer", () => {
 
   it("registers all 7 tools", () => {
     const engine = mockEngine();
-    const server = createMcpServer({ engine });
+    const server = createMcpServer({ engine, allowTokenless: true });
 
     // Access internal tool registry
     const lowLevel = (server as unknown as { server: { _requestHandlers: Map<string, unknown> } })

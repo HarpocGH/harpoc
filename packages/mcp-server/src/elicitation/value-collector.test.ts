@@ -230,7 +230,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
     engine: VaultEngine,
     clientOptions: ConstructorParameters<typeof Client>[1],
   ): Promise<{ client: Client; close: () => Promise<void> }> {
-    const mcpServer = createMcpServer({ engine });
+    const mcpServer = createMcpServer({ engine, allowTokenless: true });
     const client = new Client({ name: "e2e-client", version: "1.0.0" }, clientOptions);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await mcpServer.connect(serverTransport);

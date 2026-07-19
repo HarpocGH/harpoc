@@ -60,7 +60,7 @@ describe("Full Lifecycle", () => {
     token = vault.engine.createToken("test-agent", ["admin"]);
 
     // 4. Create MCP server
-    mcpServer = createMcpServer({ engine: vault.engine });
+    mcpServer = createMcpServer({ engine: vault.engine, allowTokenless: true });
 
     // 5. Start real HTTP server for REST API (SDK RestClient)
     restServer = startTestServer(vault.engine);

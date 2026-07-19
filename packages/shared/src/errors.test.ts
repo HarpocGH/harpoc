@@ -41,6 +41,7 @@ describe("HTTP status mapping", () => {
     [ErrorCode.INVALID_TOKEN, 401],
     [ErrorCode.TOKEN_EXPIRED, 401],
     [ErrorCode.TOKEN_REVOKED, 401],
+    [ErrorCode.TOKEN_REQUIRED, 401],
     [ErrorCode.ACCESS_DENIED, 403],
     [ErrorCode.LOCKOUT_ACTIVE, 429],
     // Secrets
@@ -118,7 +119,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(87);
+    expect(members).toHaveLength(88);
   });
 });
 
@@ -285,6 +286,15 @@ describe("factory methods", () => {
     expect(err.code).toBe(ErrorCode.TOKEN_REVOKED);
     expect(err.statusCode).toBe(401);
     expect(err.message).toBe("Token revoked");
+  });
+
+  it("tokenRequired() names both recovery paths", () => {
+    const err = VaultError.tokenRequired();
+    expect(err.code).toBe(ErrorCode.TOKEN_REQUIRED);
+    expect(err.statusCode).toBe(401);
+    expect(err.message).toContain("harpoc auth token");
+    expect(err.message).toContain("HARPOC_TOKEN");
+    expect(err.message).toContain("--allow-tokenless");
   });
 
   it("sessionFileError() without detail", () => {

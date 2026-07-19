@@ -152,6 +152,27 @@ describe("server start", () => {
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--token requires --mcp"));
   });
 
+  it("exits with error when --allow-tokenless is used without --mcp", async () => {
+    await expect(run(["--rest", "--allow-tokenless"])).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--allow-tokenless requires --mcp"),
+    );
+  });
+
+  it("exits with error when --allow-tokenless is combined with --token", async () => {
+    const { createMcpServer } = await import("@harpoc/mcp-server");
+
+    await expect(run(["--mcp", "--allow-tokenless", "--token", "jwt"])).rejects.toThrow(
+      "process.exit",
+    );
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--allow-tokenless conflicts with a launch token"),
+    );
+    expect(createMcpServer).not.toHaveBeenCalled();
+  });
+
   it("exits with error for an invalid --mcp-http-port", async () => {
     await expect(run(["--mcp-http", "--mcp-http-port", "abc"])).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
@@ -177,10 +198,37 @@ describe("server start", () => {
     expect(createMcpServer).toHaveBeenCalledWith({
       engine: mockEngine,
       launchToken: undefined,
+      allowTokenless: undefined,
       enableTtyPrompt: true,
     });
     expect(StdioServerTransport).toHaveBeenCalled();
     expect(mockMcpServer.connect).toHaveBeenCalledWith(mockTransport);
+  });
+
+  it("passes allowTokenless with --mcp --allow-tokenless", async () => {
+    const { createMcpServer } = await import("@harpoc/mcp-server");
+
+    await run(["--mcp", "--allow-tokenless"]);
+
+    expect(createMcpServer).toHaveBeenCalledWith({
+      engine: mockEngine,
+      launchToken: undefined,
+      allowTokenless: true,
+      enableTtyPrompt: true,
+    });
+  });
+
+  it("a TOKEN_REQUIRED throw from createMcpServer exits 1 with the guidance", async () => {
+    const { createMcpServer } = await import("@harpoc/mcp-server");
+    const { VaultError } = await import("@harpoc/shared");
+    (createMcpServer as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw VaultError.tokenRequired();
+    });
+
+    await expect(run(["--mcp"])).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--allow-tokenless"));
+    expect(mockEngine.destroy).toHaveBeenCalled();
   });
 
   it("passes launch token to MCP server with --mcp --token", async () => {
@@ -236,6 +284,18 @@ describe("server start", () => {
         launchToken: "flag.jwt.token",
         enableTtyPrompt: true,
       });
+    });
+
+    it("exits with error when --allow-tokenless meets an ambient HARPOC_TOKEN", async () => {
+      const { createMcpServer } = await import("@harpoc/mcp-server");
+      process.env.HARPOC_TOKEN = "env.jwt.token";
+
+      await expect(run(["--mcp", "--allow-tokenless"])).rejects.toThrow("process.exit");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("--allow-tokenless conflicts with a launch token"),
+      );
+      expect(createMcpServer).not.toHaveBeenCalled();
     });
 
     it("an ambient HARPOC_TOKEN without --mcp is ignored, not an error", async () => {

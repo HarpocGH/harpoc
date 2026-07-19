@@ -56,7 +56,7 @@ describe("Session Expiry", () => {
       expect(engine2.getState()).toBe(VaultState.UNLOCKED);
 
       // Set up MCP, REST, SDK before expiry
-      const mcpServer: McpServer = createMcpServer({ engine: engine2 });
+      const mcpServer: McpServer = createMcpServer({ engine: engine2, allowTokenless: true });
       const app = createApp(engine2);
       const client = new DirectClient(engine2);
 
@@ -100,7 +100,7 @@ describe("Session Expiry", () => {
     expect(loaded).toBe(false);
     expect(engine2.getState()).toBe(VaultState.SEALED);
 
-    const mcpServer: McpServer = createMcpServer({ engine: engine2 });
+    const mcpServer: McpServer = createMcpServer({ engine: engine2, allowTokenless: true });
     const result = await callTool(mcpServer, "list_secrets", {});
     expect(result.isError).toBe(true);
     await engine2.destroy();

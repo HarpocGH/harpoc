@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { VaultEngine } from "@harpoc/core";
 import type { AccessInterface } from "@harpoc/shared";
+import { VaultError } from "@harpoc/shared";
 import { InjectionGuard } from "./guards/injection-guard.js";
 import { RateLimiter } from "./guards/rate-limiter.js";
 import { ScopeGuard } from "./guards/scope-guard.js";
@@ -19,6 +20,16 @@ import { registerSecretsResource } from "./resources/secrets.js";
 export interface CreateMcpServerOptions {
   engine: VaultEngine;
   launchToken?: string;
+  /**
+   * Explicitly accept the unrestricted local full-access mode when no launch
+   * token is provided (thesis alignment V3: the handle+token pair is the
+   * access model, so tokenless operation must be a deliberate operator
+   * decision, never a silent default). Without a token and without this flag,
+   * construction throws TOKEN_REQUIRED. Set only by the stdio entry points'
+   * --allow-tokenless flag — the Streamable HTTP transport always carries a
+   * per-request token and never sets it.
+   */
+  allowTokenless?: boolean;
   /** Shared across per-session servers (Streamable HTTP) so limits span sessions. */
   rateLimiter?: RateLimiter;
   injectionGuard?: InjectionGuard;
@@ -41,23 +52,26 @@ export interface CreateMcpServerOptions {
 /**
  * Create and configure the Harpoc MCP server with all tools and resources.
  * If a launch token is provided, it is verified and used for scope enforcement.
- * If no token, full access mode is used.
+ * Without a token, construction is refused (TOKEN_REQUIRED) unless the caller
+ * explicitly opts into the unrestricted local full-access mode via
+ * `allowTokenless`.
  */
 export function createMcpServer(options: CreateMcpServerOptions): McpServer {
   const { engine, launchToken } = options;
 
   const accessInterface = options.accessInterface ?? "mcp";
 
-  // Validate launch token if provided
   let scopeGuard: ScopeGuard;
   if (launchToken) {
     const token = engine.verifyToken(launchToken);
     scopeGuard = new ScopeGuard(token, accessInterface);
-  } else {
+  } else if (options.allowTokenless) {
     process.stderr.write(
-      "[harpoc] WARNING: No launch token provided — all tools and resources are unrestricted\n",
+      "[harpoc] WARNING: --allow-tokenless — all tools and resources are unrestricted (no launch token)\n",
     );
     scopeGuard = new ScopeGuard(null, accessInterface);
+  } else {
+    throw VaultError.tokenRequired();
   }
 
   const rateLimiter = options.rateLimiter ?? new RateLimiter();

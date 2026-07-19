@@ -75,7 +75,7 @@ describe("Session Sharing", () => {
     expect(loaded).toBe(true);
 
     // MCP server running on Engine2
-    mcpServer = createMcpServer({ engine: engine2 });
+    mcpServer = createMcpServer({ engine: engine2, allowTokenless: true });
   });
 
   afterAll(async () => {

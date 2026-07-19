@@ -106,7 +106,7 @@ describe("Lock Coordination", () => {
     });
     try {
       await engine2.loadSession();
-      const mcpServer: McpServer = createMcpServer({ engine: engine2 });
+      const mcpServer: McpServer = createMcpServer({ engine: engine2, allowTokenless: true });
 
       await engine1.lock();
       await advanceMonitorAndAwaitSeal(engine2);

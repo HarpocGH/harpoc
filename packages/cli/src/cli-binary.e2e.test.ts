@@ -232,6 +232,51 @@ describe("compiled binary smoke: audit table attribution (V2)", () => {
   }, 30_000);
 });
 
+describe("compiled binary smoke: stdio MCP token gate (V3)", () => {
+  it("server start --mcp without a token exits 1 with the TOKEN_REQUIRED guidance", async () => {
+    const result = await runCli(["server", "start", "--mcp"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("TOKEN_REQUIRED");
+    expect(result.stderr).toContain("harpoc auth token");
+    expect(result.stderr).toContain("--allow-tokenless");
+  }, 30_000);
+
+  it("server start --mcp --allow-tokenless starts with the unrestricted warning", async () => {
+    const child = spawn(
+      process.execPath,
+      [CLI_PATH, "--vault-dir", vaultDir, "server", "start", "--mcp", "--allow-tokenless"],
+      { windowsHide: true },
+    );
+    let stderr = "";
+    try {
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        const timer = setTimeout(() => {
+          rejectPromise(new Error(`server never reported ready: ${stderr}`));
+        }, 25_000);
+        child.stderr.on("data", (chunk: Buffer) => {
+          stderr += chunk.toString("utf8");
+          if (stderr.includes("MCP server running on stdio")) {
+            clearTimeout(timer);
+            resolvePromise();
+          }
+        });
+        child.on("error", (err) => {
+          clearTimeout(timer);
+          rejectPromise(err);
+        });
+        child.on("close", (code) => {
+          clearTimeout(timer);
+          rejectPromise(new Error(`exited early (${String(code)}): ${stderr}`));
+        });
+      });
+      expect(stderr).toContain("WARNING");
+      expect(stderr).toContain("unrestricted");
+    } finally {
+      child.kill();
+    }
+  }, 30_000);
+});
+
 // Windows is the platform where isolation is unsupported by design, so the
 // compiled binary exercises the REAL fail-closed refusal path — no test
 // hook, no mock (review T2: the third pinning level for the refusal).

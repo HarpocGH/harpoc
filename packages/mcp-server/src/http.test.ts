@@ -178,6 +178,11 @@ describe("startMcpHttpServer", () => {
     });
     expect(res.status).toBe(401);
     expect(res.headers.get("www-authenticate")).toContain("Bearer");
+    // The rejection happens at bearer extraction — HTTP has no tokenless mode,
+    // so the stdio-only allowTokenless gate is never reachable on this path.
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toContain("Authorization");
+    expect(body.error.message).not.toContain("--allow-tokenless");
   });
 
   it("rejects tokens the engine does not verify with 401", async () => {

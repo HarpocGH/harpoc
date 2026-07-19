@@ -29,6 +29,7 @@ async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
       token: { type: "string" },
+      "allow-tokenless": { type: "boolean" },
       "vault-dir": { type: "string" },
       http: { type: "boolean" },
       port: { type: "string" },
@@ -40,6 +41,20 @@ async function main(): Promise<void> {
   if (values.http && values.token !== undefined) {
     process.stderr.write(
       "Error: --token is not supported with --http. HTTP clients authenticate per request via Authorization: Bearer.\n",
+    );
+    process.exit(1);
+  }
+
+  if (values.http && values["allow-tokenless"]) {
+    process.stderr.write(
+      "Error: --allow-tokenless is not supported with --http. The Streamable HTTP transport has no tokenless mode.\n",
+    );
+    process.exit(1);
+  }
+
+  if (values["allow-tokenless"] && (values.token !== undefined || process.env.HARPOC_TOKEN)) {
+    process.stderr.write(
+      "Error: --allow-tokenless conflicts with a launch token (--token / HARPOC_TOKEN). Provide one or the other.\n",
     );
     process.exit(1);
   }
@@ -72,9 +87,14 @@ async function main(): Promise<void> {
       `Harpoc MCP server listening on http://${host}:${httpServer.port}${httpServer.endpoint} (Streamable HTTP)\n`,
     );
   } else {
+    // An ambient HARPOC_TOKEN is the preferred non-argv channel for the stdio
+    // launch token; an explicit --token wins. It is only read for stdio — a
+    // profile-set variable must not affect --http, which authenticates per
+    // request.
     const server = createMcpServer({
       engine,
-      launchToken: values.token as string | undefined,
+      launchToken: (values.token as string | undefined) ?? (process.env.HARPOC_TOKEN || undefined),
+      allowTokenless: values["allow-tokenless"] as boolean | undefined,
       enableTtyPrompt: true,
     });
     const transport = new StdioServerTransport();

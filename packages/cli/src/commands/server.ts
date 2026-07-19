@@ -27,6 +27,10 @@ export function registerServerCommand(program: Command): void {
       "--token <jwt>",
       "Launch token for MCP scope enforcement (stdio only); prefer the HARPOC_TOKEN environment variable — command-line arguments are visible to other local processes",
     )
+    .option(
+      "--allow-tokenless",
+      "Explicitly run the stdio MCP server without a launch token — all tools and resources are unrestricted (local full-access mode)",
+    )
     .option("--oauth-refresh", "Refresh expiring OAuth tokens in the background (60s interval)")
     .action(
       async (
@@ -38,6 +42,7 @@ export function registerServerCommand(program: Command): void {
           port: string;
           host: string;
           token?: string;
+          allowTokenless?: boolean;
           oauthRefresh?: boolean;
         },
         cmd: Command,
@@ -57,6 +62,20 @@ export function registerServerCommand(program: Command): void {
           if (opts.token && !opts.mcp) {
             console.error(
               "Error: --token requires --mcp. The Streamable HTTP transport authenticates per request via Authorization: Bearer.",
+            );
+            process.exit(1);
+          }
+
+          if (opts.allowTokenless && !opts.mcp) {
+            console.error(
+              "Error: --allow-tokenless requires --mcp. The Streamable HTTP transport has no tokenless mode.",
+            );
+            process.exit(1);
+          }
+
+          if (opts.allowTokenless && (opts.token ?? process.env.HARPOC_TOKEN)) {
+            console.error(
+              "Error: --allow-tokenless conflicts with a launch token (--token / HARPOC_TOKEN). Provide one or the other.",
             );
             process.exit(1);
           }
@@ -110,6 +129,7 @@ export function registerServerCommand(program: Command): void {
             const server = createMcpServer({
               engine,
               launchToken: opts.token ?? process.env.HARPOC_TOKEN,
+              allowTokenless: opts.allowTokenless,
               enableTtyPrompt: true,
             });
             const transport = new StdioServerTransport();

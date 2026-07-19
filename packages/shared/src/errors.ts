@@ -15,6 +15,7 @@ export enum ErrorCode {
   INVALID_TOKEN = "INVALID_TOKEN",
   TOKEN_EXPIRED = "TOKEN_EXPIRED",
   TOKEN_REVOKED = "TOKEN_REVOKED",
+  TOKEN_REQUIRED = "TOKEN_REQUIRED",
   ACCESS_DENIED = "ACCESS_DENIED",
   LOCKOUT_ACTIVE = "LOCKOUT_ACTIVE",
 
@@ -130,6 +131,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.INVALID_TOKEN]: 401,
   [ErrorCode.TOKEN_EXPIRED]: 401,
   [ErrorCode.TOKEN_REVOKED]: 401,
+  [ErrorCode.TOKEN_REQUIRED]: 401,
   [ErrorCode.ACCESS_DENIED]: 403,
   [ErrorCode.LOCKOUT_ACTIVE]: 429,
 
@@ -331,6 +333,13 @@ export class VaultError extends Error {
 
   static tokenRevoked(): VaultError {
     return new VaultError(ErrorCode.TOKEN_REVOKED, "Token revoked");
+  }
+
+  static tokenRequired(): VaultError {
+    return new VaultError(
+      ErrorCode.TOKEN_REQUIRED,
+      "A launch token is required: issue one with `harpoc auth token` and pass it via the HARPOC_TOKEN environment variable (or --token), or start with --allow-tokenless to explicitly accept unrestricted local full access",
+    );
   }
 
   static sessionFileError(detail?: string): VaultError {
