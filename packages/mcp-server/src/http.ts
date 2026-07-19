@@ -126,7 +126,13 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
 
     let server: McpServer;
     try {
-      server = createMcpServer({ engine, launchToken: token, rateLimiter, injectionGuard });
+      server = createMcpServer({
+        engine,
+        launchToken: token,
+        rateLimiter,
+        injectionGuard,
+        accessInterface: "mcp-http",
+      });
     } catch (err) {
       sendAuthError(res, err);
       return;

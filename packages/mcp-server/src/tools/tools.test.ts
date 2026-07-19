@@ -613,7 +613,12 @@ describe("token-derived caller wiring (engine-level policy enforcement)", () => 
     principal_type: "tool" as const,
     project: "api",
   };
-  const EXPECTED_CALLER = { principal_type: "tool", principal_id: "agent-7", project: "api" };
+  const EXPECTED_CALLER = {
+    principal_type: "tool",
+    principal_id: "agent-7",
+    project: "api",
+    interface: "mcp",
+  };
 
   let server: McpServer;
   let engine: VaultEngine;

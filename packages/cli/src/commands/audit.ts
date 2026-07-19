@@ -83,11 +83,18 @@ export function registerAuditCommand(program: Command): void {
             if (options.json) {
               printJson(events);
             } else {
+              // NULL principal columns render "-", never "local": rows written
+              // before attribution shipped are NULL regardless of caller, so
+              // NULL ⇒ trusted-local holds only for post-upgrade rows.
               const rows = events.map((e) => ({
                 ID: e.id,
                 Time: formatTimestamp(e.timestamp),
                 Event: e.event_type,
                 Secret: e.secret_id ?? "-",
+                Principal:
+                  e.principal_type && e.principal_id
+                    ? `${e.principal_type}:${e.principal_id}`
+                    : "-",
                 Session: e.session_id ? e.session_id.slice(0, 8) + "..." : "-",
                 Success: e.success ? "yes" : "no",
               }));

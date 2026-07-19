@@ -11,6 +11,8 @@ import type {
 import { DEFAULT_HTTP_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
 import { Agent, fetch as undiciFetch } from "undici";
 import type { Response as UndiciResponse } from "undici";
+import type { AuditAttribution } from "../audit/attribution.js";
+import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { matchesUrlAllowlist } from "./allowlist.js";
 import { validateUrl } from "./url-validator.js";
@@ -95,6 +97,7 @@ export class HttpInjector {
     injection: InjectionConfig,
     followRedirects: FollowRedirects = "same-origin",
     secretId?: string,
+    attribution?: AuditAttribution,
   ): Promise<HttpResult> {
     try {
       // Validate URL (includes DNS rebinding check)
@@ -169,33 +172,43 @@ export class HttpInjector {
         await dispatcher.close();
       }
 
-      this.auditLogger?.log({
-        eventType: "secret.use",
-        secretId,
-        detail: {
-          method: request.method,
-          url: request.url,
-          status: response.status,
-          injection_type: injection.type,
-          response_mode: request.responseMode ?? "filtered",
-        },
-      });
+      this.auditLogger?.log(
+        withAttribution(
+          {
+            eventType: "secret.use",
+            secretId,
+            detail: {
+              method: request.method,
+              url: request.url,
+              status: response.status,
+              injection_type: injection.type,
+              response_mode: request.responseMode ?? "filtered",
+            },
+          },
+          attribution,
+        ),
+      );
 
       return response;
     } catch (err) {
       if (err instanceof VaultError) {
-        this.auditLogger?.log({
-          eventType: "secret.use",
-          secretId,
-          detail: {
-            method: request.method,
-            url: request.url,
-            error: err.code,
-            injection_type: injection.type,
-            response_mode: request.responseMode ?? "filtered",
-          },
-          success: false,
-        });
+        this.auditLogger?.log(
+          withAttribution(
+            {
+              eventType: "secret.use",
+              secretId,
+              detail: {
+                method: request.method,
+                url: request.url,
+                error: err.code,
+                injection_type: injection.type,
+                response_mode: request.responseMode ?? "filtered",
+              },
+              success: false,
+            },
+            attribution,
+          ),
+        );
 
         // DNS resolution failures are operational errors — return as response, don't throw
         if (err.code === ErrorCode.DNS_RESOLUTION_FAILED) {
@@ -207,18 +220,23 @@ export class HttpInjector {
 
       const errorCode = this.classifyFetchError(err);
 
-      this.auditLogger?.log({
-        eventType: "secret.use",
-        secretId,
-        detail: {
-          method: request.method,
-          url: request.url,
-          error: errorCode,
-          injection_type: injection.type,
-          response_mode: request.responseMode ?? "filtered",
-        },
-        success: false,
-      });
+      this.auditLogger?.log(
+        withAttribution(
+          {
+            eventType: "secret.use",
+            secretId,
+            detail: {
+              method: request.method,
+              url: request.url,
+              error: errorCode,
+              injection_type: injection.type,
+              response_mode: request.responseMode ?? "filtered",
+            },
+            success: false,
+          },
+          attribution,
+        ),
+      );
 
       return {
         type: "http",

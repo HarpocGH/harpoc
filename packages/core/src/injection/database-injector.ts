@@ -10,6 +10,8 @@ import {
   MAX_DB_ROWS,
   VaultError,
 } from "@harpoc/shared";
+import type { AuditAttribution } from "../audit/attribution.js";
+import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { matchesHostPortAllowlist } from "./allowlist.js";
 import type { DbEngineAdapter, DbTlsOptions } from "./db-adapters.js";
@@ -47,10 +49,11 @@ export class DatabaseInjector {
     policy: InjectionPolicy,
     config: ConnectionConfig | undefined,
     secretId?: string,
+    attribution?: AuditAttribution,
   ): Promise<DatabaseResult> {
     const adapter = this.adapters[action.engine];
     if (!adapter) {
-      this.audit(action, secretId, { error: "UNSUPPORTED_DB_ENGINE" }, false);
+      this.audit(action, secretId, { error: "UNSUPPORTED_DB_ENGINE" }, false, attribution);
       throw VaultError.unsupportedDbEngine(action.engine);
     }
 
@@ -58,7 +61,7 @@ export class DatabaseInjector {
 
     // Target allowlist (optional) — reject a redirected host:port before connecting.
     if (!matchesHostPortAllowlist(host, port, policy.host_allowlist)) {
-      this.audit(action, secretId, { host, port, error: "HOST_NOT_ALLOWED" }, false);
+      this.audit(action, secretId, { host, port, error: "HOST_NOT_ALLOWED" }, false, attribution);
       throw VaultError.hostNotAllowed(`${host}:${port}`);
     }
 
@@ -72,7 +75,7 @@ export class DatabaseInjector {
       pinnedAddress = validated.resolvedAddress;
     } catch (err) {
       if (err instanceof VaultError) {
-        this.audit(action, secretId, { host, port, error: err.code }, false);
+        this.audit(action, secretId, { host, port, error: err.code }, false, attribution);
       }
       throw err;
     }
@@ -106,7 +109,13 @@ export class DatabaseInjector {
       });
     } catch (err) {
       const detail = redactCredential(errMessage(err));
-      this.audit(action, secretId, { host, port, error: "DB_CONNECTION_FAILED" }, false);
+      this.audit(
+        action,
+        secretId,
+        { host, port, error: "DB_CONNECTION_FAILED" },
+        false,
+        attribution,
+      );
       throw VaultError.dbConnectionFailed(detail);
     }
 
@@ -126,11 +135,12 @@ export class DatabaseInjector {
         secretId,
         { host, port, row_count: result.row_count, truncated: truncated ? true : false },
         true,
+        attribution,
       );
       return result;
     } catch (err) {
       const detail = redactCredential(errMessage(err));
-      this.audit(action, secretId, { host, port, error: "DB_QUERY_FAILED" }, false);
+      this.audit(action, secretId, { host, port, error: "DB_QUERY_FAILED" }, false, attribution);
       throw VaultError.dbQueryFailed(detail);
     } finally {
       try {
@@ -146,13 +156,24 @@ export class DatabaseInjector {
     secretId: string | undefined,
     detail: Record<string, unknown>,
     success: boolean,
+    attribution?: AuditAttribution,
   ): void {
-    this.auditLogger?.log({
-      eventType: "secret.use",
-      secretId,
-      detail: { context: "database", engine: action.engine, database: action.database, ...detail },
-      success,
-    });
+    this.auditLogger?.log(
+      withAttribution(
+        {
+          eventType: "secret.use",
+          secretId,
+          detail: {
+            context: "database",
+            engine: action.engine,
+            database: action.database,
+            ...detail,
+          },
+          success,
+        },
+        attribution,
+      ),
+    );
   }
 }
 

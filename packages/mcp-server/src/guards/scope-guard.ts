@@ -1,4 +1,4 @@
-import type { CallerContext, Permission, VaultApiToken } from "@harpoc/shared";
+import type { AccessInterface, CallerContext, Permission, VaultApiToken } from "@harpoc/shared";
 import { callerFromToken, matchesSecretNameScope, VaultError } from "@harpoc/shared";
 
 /**
@@ -7,9 +7,15 @@ import { callerFromToken, matchesSecretNameScope, VaultError } from "@harpoc/sha
  * 2. Project — if token specifies a project, only that project's secrets are accessible
  * 3. Secrets — if token specifies secret-name patterns (`*` wildcards, thesis
  *    §4.7), only secrets with matching names are accessible
+ *
+ * The interface tag ("mcp" for stdio, "mcp-http" for Streamable HTTP) rides on
+ * the derived caller for audit attribution only — never scope enforcement.
  */
 export class ScopeGuard {
-  constructor(private readonly token: VaultApiToken | null) {}
+  constructor(
+    private readonly token: VaultApiToken | null,
+    private readonly accessInterface: AccessInterface = "mcp",
+  ) {}
 
   /**
    * Check whether the current token grants access for the given operation.
@@ -75,6 +81,6 @@ export class ScopeGuard {
    * the trusted path and is not subject to per-secret policies.
    */
   get caller(): CallerContext | undefined {
-    return this.token ? callerFromToken(this.token) : undefined;
+    return this.token ? callerFromToken(this.token, this.accessInterface) : undefined;
   }
 }

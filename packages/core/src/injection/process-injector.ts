@@ -1,6 +1,8 @@
 import { statSync } from "node:fs";
 import type { ProcessAction, ProcessResult } from "@harpoc/shared";
 import { DEFAULT_PROCESS_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
+import type { AuditAttribution } from "../audit/attribution.js";
+import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveAndMatchCommand } from "./allowlist.js";
 import { buildCleanEnv } from "./clean-env.js";
@@ -27,6 +29,7 @@ export class ProcessInjector {
     secretValue: Uint8Array,
     policy: { command_allowlist: string[]; env_allowlist: string[]; network_isolation?: boolean },
     secretId?: string,
+    attribution?: AuditAttribution,
   ): Promise<ProcessResult> {
     const pathDirs = controlledPathDirs();
 
@@ -38,7 +41,7 @@ export class ProcessInjector {
       }
     } catch (err) {
       if (err instanceof VaultError) {
-        this.audit(action, secretId, { error: err.code }, false);
+        this.audit(action, secretId, { error: err.code }, false, attribution);
         throw err;
       }
       throw err;
@@ -70,6 +73,7 @@ export class ProcessInjector {
           secretId,
           { error: err.code, network_isolation: networkIsolation },
           false,
+          attribution,
         );
       }
       throw err;
@@ -87,6 +91,7 @@ export class ProcessInjector {
         ...(run.isolationMechanism ? { isolation_mechanism: run.isolationMechanism } : {}),
       },
       result.error === undefined,
+      attribution,
     );
 
     return result;
@@ -143,17 +148,23 @@ export class ProcessInjector {
     secretId: string | undefined,
     detail: Record<string, unknown>,
     success: boolean,
+    attribution?: AuditAttribution,
   ): void {
-    this.auditLogger?.log({
-      eventType: "secret.use",
-      secretId,
-      detail: {
-        context: "process",
-        command: action.command,
-        args_count: action.args?.length ?? 0,
-        ...detail,
-      },
-      success,
-    });
+    this.auditLogger?.log(
+      withAttribution(
+        {
+          eventType: "secret.use",
+          secretId,
+          detail: {
+            context: "process",
+            command: action.command,
+            args_count: action.args?.length ?? 0,
+            ...detail,
+          },
+          success,
+        },
+        attribution,
+      ),
+    );
   }
 }

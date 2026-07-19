@@ -43,4 +43,17 @@ describe("callerFromToken", () => {
     expect(Object.values(TokenPrincipalType)).toHaveLength(3);
     expect(Object.values(TokenPrincipalType)).not.toContain("project");
   });
+
+  it("carries the access interface through when provided", () => {
+    for (const iface of ["rest", "mcp", "mcp-http"] as const) {
+      const caller = callerFromToken(baseToken(), iface);
+      expect(caller.interface).toBe(iface);
+      expect(caller.principal_id).toBe("alice");
+    }
+  });
+
+  it("omits the interface key entirely when no interface is given", () => {
+    const caller = callerFromToken(baseToken());
+    expect("interface" in caller).toBe(false);
+  });
 });

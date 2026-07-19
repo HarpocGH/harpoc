@@ -58,6 +58,7 @@ import {
 } from "@harpoc/shared";
 import { PolicyEngine } from "./access/policy-engine.js";
 import type { GrantPolicyInput } from "./access/policy-engine.js";
+import { attributionFromCaller, callerInterfaceDetail } from "./audit/attribution.js";
 import { AuditLogger } from "./audit/audit-logger.js";
 import { AuditQuery } from "./audit/audit-query.js";
 import type {
@@ -479,7 +480,7 @@ export class VaultEngine {
       eventType: AuditEventType.SECRET_READ,
       principalType: caller?.principal_type,
       principalId: caller?.principal_id,
-      detail: { handle },
+      detail: { handle, ...callerInterfaceDetail(caller) },
       sessionId: this.sessionId ?? undefined,
     });
 
@@ -511,7 +512,7 @@ export class VaultEngine {
       eventType: AuditEventType.SECRET_READ,
       principalType: caller?.principal_type,
       principalId: caller?.principal_id,
-      detail: { handle, action: "get_value" },
+      detail: { handle, action: "get_value", ...callerInterfaceDetail(caller) },
       sessionId: this.sessionId ?? undefined,
     });
 
@@ -535,7 +536,7 @@ export class VaultEngine {
           eventType: AuditEventType.SECRET_CREATE,
           principalType: caller?.principal_type,
           principalId: caller?.principal_id,
-          detail: { handle, action: "set_value" },
+          detail: { handle, action: "set_value", ...callerInterfaceDetail(caller) },
           sessionId: this.sessionId ?? undefined,
         });
       });
@@ -563,7 +564,7 @@ export class VaultEngine {
           eventType: AuditEventType.SECRET_ROTATE,
           principalType: caller?.principal_type,
           principalId: caller?.principal_id,
-          detail: { handle },
+          detail: { handle, ...callerInterfaceDetail(caller) },
           sessionId: this.sessionId ?? undefined,
         });
       });
@@ -584,7 +585,7 @@ export class VaultEngine {
           eventType: AuditEventType.SECRET_REVOKE,
           principalType: caller?.principal_type,
           principalId: caller?.principal_id,
-          detail: { handle },
+          detail: { handle, ...callerInterfaceDetail(caller) },
           sessionId: this.sessionId ?? undefined,
         });
       });
@@ -643,6 +644,10 @@ export class VaultEngine {
       context: action.type,
     });
 
+    // Attribution for the injector-written audit rows ("by whom" / "through
+    // which interface", thesis §4.3.4) — per invocation, never injector state.
+    const attribution = attributionFromCaller(caller, this.sessionId);
+
     const policy = this.loadInjectionPolicy(s, secret.id);
 
     let value: Uint8Array;
@@ -672,14 +677,27 @@ export class VaultEngine {
       // compile error, not a runtime fall-through.
       switch (action.type) {
         case "process":
-          return await s.processInjector.executeWithSecret(action, value, policy, secret.id);
+          return await s.processInjector.executeWithSecret(
+            action,
+            value,
+            policy,
+            secret.id,
+            attribution,
+          );
 
         case "mcp": {
           const config = this.loadMcpServerConfig(s, secret.id);
           if (!config) {
             throw VaultError.mcpServerNotConfigured(handle);
           }
-          return await s.mcpInjector.executeWithSecret(action, value, policy, config, secret.id);
+          return await s.mcpInjector.executeWithSecret(
+            action,
+            value,
+            policy,
+            config,
+            secret.id,
+            attribution,
+          );
         }
 
         case "http": {
@@ -690,7 +708,12 @@ export class VaultEngine {
               secretId: secret.id,
               principalType: caller?.principal_type,
               principalId: caller?.principal_id,
-              detail: { context: "http", url: action.url, error: ErrorCode.URL_NOT_ALLOWED },
+              detail: {
+                context: "http",
+                url: action.url,
+                error: ErrorCode.URL_NOT_ALLOWED,
+                ...callerInterfaceDetail(caller),
+              },
               success: false,
               sessionId: this.sessionId ?? undefined,
             });
@@ -713,6 +736,7 @@ export class VaultEngine {
                 requested_mode: action.response_mode,
                 policy_mode: policyMode,
                 error: ErrorCode.RESPONSE_MODE_NOT_ALLOWED,
+                ...callerInterfaceDetail(caller),
               },
               success: false,
               sessionId: this.sessionId ?? undefined,
@@ -736,6 +760,7 @@ export class VaultEngine {
             action.injection,
             action.follow_redirects,
             secret.id,
+            attribution,
           );
 
           // Value + encodings redaction (I2a) — skipped only under the
@@ -758,17 +783,32 @@ export class VaultEngine {
             policy,
             config,
             secret.id,
+            attribution,
           );
         }
 
         case "ssh": {
           const config = this.loadConnectionConfig(s, secret.id);
-          return await s.sshInjector.executeWithSecret(action, value, policy, config, secret.id);
+          return await s.sshInjector.executeWithSecret(
+            action,
+            value,
+            policy,
+            config,
+            secret.id,
+            attribution,
+          );
         }
 
         case "git": {
           const config = this.loadConnectionConfig(s, secret.id);
-          return await s.gitInjector.executeWithSecret(action, value, policy, config, secret.id);
+          return await s.gitInjector.executeWithSecret(
+            action,
+            value,
+            policy,
+            config,
+            secret.id,
+            attribution,
+          );
         }
 
         default:
@@ -1927,7 +1967,7 @@ export class VaultEngine {
       secretId,
       principalType: caller?.principal_type,
       principalId: caller?.principal_id,
-      detail: { ...detail, error: err.code },
+      detail: { ...detail, error: err.code, ...callerInterfaceDetail(caller) },
       success: false,
       sessionId: this.sessionId ?? undefined,
     });
@@ -1978,7 +2018,12 @@ export class VaultEngine {
       secretId,
       principalType: caller.principal_type,
       principalId: caller.principal_id,
-      detail: { ...detail, required_permission: permission, error: ErrorCode.ACCESS_DENIED },
+      detail: {
+        ...detail,
+        required_permission: permission,
+        error: ErrorCode.ACCESS_DENIED,
+        ...callerInterfaceDetail(caller),
+      },
       success: false,
       sessionId: this.sessionId ?? undefined,
     });

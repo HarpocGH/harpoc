@@ -12,6 +12,8 @@ import {
 } from "@harpoc/shared";
 import { Agent, fetch as undiciFetch } from "undici";
 import type { RequestInit as UndiciRequestInit } from "undici";
+import type { AuditAttribution } from "../audit/attribution.js";
+import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, matchesUrlAllowlist, resolveAndMatchCommand } from "./allowlist.js";
 import { buildCleanEnv } from "./clean-env.js";
@@ -90,10 +92,11 @@ export class McpInjector {
     policy: InjectionPolicy,
     config: McpServerConfig,
     secretId: string,
+    attribution?: AuditAttribution,
   ): Promise<McpResult> {
     if (action.server !== config.server_name) {
       const err = VaultError.mcpServerMismatch(action.server, config.server_name);
-      this.audit(action, secretId, config, { error: err.code }, false);
+      this.audit(action, secretId, config, { error: err.code }, false, attribution);
       throw err;
     }
 
@@ -114,7 +117,14 @@ export class McpInjector {
       const err = VaultError.networkIsolationUnavailable(
         "MCP stdio downstream servers cannot be network-isolated yet",
       );
-      this.audit(action, secretId, config, { error: err.code, network_isolation: true }, false);
+      this.audit(
+        action,
+        secretId,
+        config,
+        { error: err.code, network_isolation: true },
+        false,
+        attribution,
+      );
       throw err;
     }
 
@@ -137,7 +147,7 @@ export class McpInjector {
       }
     } catch (err) {
       if (err instanceof VaultError) {
-        this.audit(action, secretId, config, { error: err.code }, false);
+        this.audit(action, secretId, config, { error: err.code }, false, attribution);
       }
       throw err;
     }
@@ -162,23 +172,32 @@ export class McpInjector {
     let entry: McpConnectionEntry;
     try {
       entry = await this.registry.acquire(secretId, () =>
-        this.establish(sdk, secretId, config, resolvedCommand, valueStr, policy, {
-          credentialFingerprint,
-          configFingerprint,
-        }),
+        this.establish(
+          sdk,
+          secretId,
+          config,
+          resolvedCommand,
+          valueStr,
+          policy,
+          {
+            credentialFingerprint,
+            configFingerprint,
+          },
+          attribution,
+        ),
       );
     } catch (err) {
       // A structured refusal from the outbound-request guards (SSRF, redirect
       // policy) keeps its own code — flattening it to a generic connect
       // failure would hide the security decision from the caller and audit.
       if (err instanceof VaultError) {
-        this.audit(action, secretId, config, { error: err.code }, false);
+        this.audit(action, secretId, config, { error: err.code }, false, attribution);
         throw err;
       }
       const detail =
         err instanceof Error ? redactSecretEncodings(err.message, valueStr) : undefined;
       const vaultErr = VaultError.mcpConnectFailed(config.server_name, detail);
-      this.audit(action, secretId, config, { error: vaultErr.code }, false);
+      this.audit(action, secretId, config, { error: vaultErr.code }, false, attribution);
       throw vaultErr;
     }
 
@@ -192,7 +211,7 @@ export class McpInjector {
       )) as { content?: unknown; structuredContent?: unknown; isError?: unknown };
     } catch (err) {
       const vaultErr = this.mapCallError(sdk, err, entry, config.server_name, valueStr);
-      this.audit(action, secretId, config, { error: vaultErr.code }, false);
+      this.audit(action, secretId, config, { error: vaultErr.code }, false, attribution);
       throw vaultErr;
     }
 
@@ -203,6 +222,7 @@ export class McpInjector {
       config,
       { is_error: result.is_error ?? false, truncated: result.truncated ?? false },
       true,
+      attribution,
     );
     return result;
   }
@@ -216,6 +236,7 @@ export class McpInjector {
     valueStr: string,
     policy: InjectionPolicy,
     fingerprints: { credentialFingerprint: string; configFingerprint: string },
+    attribution?: AuditAttribution,
   ): Promise<McpConnectionEntry> {
     const client = new sdk.Client({ name: "harpoc-vault", version: VAULT_VERSION });
 
@@ -255,18 +276,26 @@ export class McpInjector {
       }
     }
 
-    this.auditLogger?.log({
-      eventType: "mcp.spawn",
-      secretId,
-      detail: {
-        server: config.server_name,
-        transport: config.transport,
-        ...(config.transport === McpTransport.STDIO
-          ? { command: config.command, pid: stdioTransport?.pid ?? null }
-          : { url: config.url }),
-      },
-      success: true,
-    });
+    // The spawn is the credential-injection moment — attributed to the
+    // invocation that triggered it (D5). Crash/terminate rows stay
+    // unattributed: no requesting principal exists for those paths.
+    this.auditLogger?.log(
+      withAttribution(
+        {
+          eventType: "mcp.spawn",
+          secretId,
+          detail: {
+            server: config.server_name,
+            transport: config.transport,
+            ...(config.transport === McpTransport.STDIO
+              ? { command: config.command, pid: stdioTransport?.pid ?? null }
+              : { url: config.url }),
+          },
+          success: true,
+        },
+        attribution,
+      ),
+    );
 
     return {
       secretId,
@@ -392,19 +421,25 @@ export class McpInjector {
     config: McpServerConfig,
     detail: Record<string, unknown>,
     success: boolean,
+    attribution?: AuditAttribution,
   ): void {
-    this.auditLogger?.log({
-      eventType: "secret.use",
-      secretId,
-      detail: {
-        context: "mcp",
-        server: action.server,
-        tool: action.tool,
-        transport: config.transport,
-        ...detail,
-      },
-      success,
-    });
+    this.auditLogger?.log(
+      withAttribution(
+        {
+          eventType: "secret.use",
+          secretId,
+          detail: {
+            context: "mcp",
+            server: action.server,
+            tool: action.tool,
+            transport: config.transport,
+            ...detail,
+          },
+          success,
+        },
+        attribution,
+      ),
+    );
   }
 }
 

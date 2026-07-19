@@ -204,6 +204,7 @@ describe("secret routes", () => {
       expect(engine.getSecretInfo).toHaveBeenCalledWith("secret://test-key", {
         principal_type: "agent",
         principal_id: "test-agent",
+        interface: "rest",
       });
     });
 
@@ -233,6 +234,7 @@ describe("secret routes", () => {
       expect(engine.revokeSecret).toHaveBeenCalledWith("secret://test-key", {
         principal_type: "agent",
         principal_id: "test-agent",
+        interface: "rest",
       });
     });
 
@@ -973,7 +975,11 @@ describe("secret routes", () => {
 });
 
 describe("engine-level policy enforcement wiring (thesis §4.6)", () => {
-  const EXPECTED_CALLER = { principal_type: "agent", principal_id: "test-agent" };
+  const EXPECTED_CALLER = {
+    principal_type: "agent",
+    principal_id: "test-agent",
+    interface: "rest",
+  };
 
   it("GET /:handle passes the token-derived caller to getSecretInfo", async () => {
     await app.request("/api/v1/secrets/test-key", { headers: AUTH });

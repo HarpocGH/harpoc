@@ -200,9 +200,13 @@ describe("ScopeGuard", () => {
 });
 
 describe("caller (engine-level policy enforcement)", () => {
-  it("derives the caller from the token, defaulting principal_type to agent", () => {
+  it("derives the caller from the token, defaulting principal_type to agent and interface to mcp (stdio)", () => {
     const guard = new ScopeGuard(makeToken({ sub: "alice" }));
-    expect(guard.caller).toEqual({ principal_type: "agent", principal_id: "alice" });
+    expect(guard.caller).toEqual({
+      principal_type: "agent",
+      principal_id: "alice",
+      interface: "mcp",
+    });
   });
 
   it("carries the principal_type claim and project claim through", () => {
@@ -211,11 +215,25 @@ describe("caller (engine-level policy enforcement)", () => {
       principal_type: "tool",
       principal_id: "ci",
       project: "api",
+      interface: "mcp",
     });
+  });
+
+  it("stamps mcp-http when constructed for a Streamable HTTP session", () => {
+    const guard = new ScopeGuard(makeToken({ sub: "alice" }), "mcp-http");
+    expect(guard.caller?.interface).toBe("mcp-http");
   });
 
   it("is undefined without a token — the local full-access mode is the trusted path", () => {
     const guard = new ScopeGuard(null);
     expect(guard.caller).toBeUndefined();
+  });
+
+  it("the interface tag never affects scope enforcement", () => {
+    const stdio = new ScopeGuard(makeToken({ scope: ["use"] }), "mcp");
+    const http = new ScopeGuard(makeToken({ scope: ["use"] }), "mcp-http");
+    expect(stdio.checkAccess("use")).toBe(http.checkAccess("use"));
+    expect(() => stdio.checkAccess("create")).toThrow();
+    expect(() => http.checkAccess("create")).toThrow();
   });
 });

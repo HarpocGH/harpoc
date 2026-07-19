@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { VaultEngine } from "@harpoc/core";
+import type { AccessInterface } from "@harpoc/shared";
 import { InjectionGuard } from "./guards/injection-guard.js";
 import { RateLimiter } from "./guards/rate-limiter.js";
 import { ScopeGuard } from "./guards/scope-guard.js";
@@ -28,6 +29,13 @@ export interface CreateMcpServerOptions {
    * remote from the vault host's terminal.
    */
   enableTtyPrompt?: boolean;
+  /**
+   * Which MCP transport this server serves — stamped on the token-derived
+   * caller for audit attribution ("through which interface", thesis §4.3.4).
+   * Stdio entry points keep the default; the Streamable HTTP listener passes
+   * "mcp-http" per session.
+   */
+  accessInterface?: Extract<AccessInterface, "mcp" | "mcp-http">;
 }
 
 /**
@@ -38,16 +46,18 @@ export interface CreateMcpServerOptions {
 export function createMcpServer(options: CreateMcpServerOptions): McpServer {
   const { engine, launchToken } = options;
 
+  const accessInterface = options.accessInterface ?? "mcp";
+
   // Validate launch token if provided
   let scopeGuard: ScopeGuard;
   if (launchToken) {
     const token = engine.verifyToken(launchToken);
-    scopeGuard = new ScopeGuard(token);
+    scopeGuard = new ScopeGuard(token, accessInterface);
   } else {
     process.stderr.write(
       "[harpoc] WARNING: No launch token provided — all tools and resources are unrestricted\n",
     );
-    scopeGuard = new ScopeGuard(null);
+    scopeGuard = new ScopeGuard(null, accessInterface);
   }
 
   const rateLimiter = options.rateLimiter ?? new RateLimiter();

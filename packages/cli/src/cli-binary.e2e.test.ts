@@ -219,6 +219,19 @@ describe("compiled binary smoke: transactional audit writes (NM3)", () => {
   }, 60_000);
 });
 
+describe("compiled binary smoke: audit table attribution (V2)", () => {
+  it("the audit table carries a Principal column; trusted-local rows render '-'", async () => {
+    const audit = await runCli(["audit", "--limit", "5"]);
+    expect(audit.code).toBe(0);
+    const [header, , ...rows] = audit.stdout.split("\n");
+    expect(header).toContain("Principal");
+    // Every row of this CLI-only lifecycle is the trusted local path (D4):
+    // NULL principal columns render "-", never a fabricated "local".
+    expect(rows.length).toBeGreaterThan(0);
+    expect(audit.stdout).not.toContain("local");
+  }, 30_000);
+});
+
 // Windows is the platform where isolation is unsupported by design, so the
 // compiled binary exercises the REAL fail-closed refusal path — no test
 // hook, no mock (review T2: the third pinning level for the refusal).

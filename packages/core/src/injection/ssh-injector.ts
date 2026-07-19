@@ -1,5 +1,7 @@
 import type { ConnectionConfig, InjectionPolicy, SshAction, SshResult } from "@harpoc/shared";
 import { DEFAULT_SSH_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
+import type { AuditAttribution } from "../audit/attribution.js";
+import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, matchesHostAllowlist, resolveAndMatchCommand } from "./allowlist.js";
 import { spawnCaptured } from "./spawn-captured.js";
@@ -32,11 +34,12 @@ export class SshInjector {
     policy: InjectionPolicy,
     config: ConnectionConfig | undefined,
     secretId?: string,
+    attribution?: AuditAttribution,
   ): Promise<SshResult> {
     // Defense in depth beside the schema's first-character anchor: host and
     // user reach ssh's argv, so a leading dash must never parse as an option.
     if (action.host.startsWith("-") || action.user.startsWith("-")) {
-      this.audit(action, secretId, { error: "INVALID_SSH_CONFIG" }, false);
+      this.audit(action, secretId, { error: "INVALID_SSH_CONFIG" }, false, attribution);
       throw VaultError.invalidSshConfig("host and user must not start with '-'");
     }
 
@@ -45,14 +48,14 @@ export class SshInjector {
       policy.host_allowlist.length === 0 ||
       !matchesHostAllowlist(action.host, policy.host_allowlist)
     ) {
-      this.audit(action, secretId, { error: "HOST_NOT_ALLOWED" }, false);
+      this.audit(action, secretId, { error: "HOST_NOT_ALLOWED" }, false, attribution);
       throw VaultError.hostNotAllowed(action.host);
     }
 
     // Pinned host keys are required — no trust-on-first-use.
     const knownHosts = config?.ssh?.known_hosts;
     if (!knownHosts || knownHosts.length === 0) {
-      this.audit(action, secretId, { error: "SSH_NOT_CONFIGURED" }, false);
+      this.audit(action, secretId, { error: "SSH_NOT_CONFIGURED" }, false, attribution);
       throw VaultError.sshNotConfigured();
     }
 
@@ -61,7 +64,8 @@ export class SshInjector {
     try {
       sshPath = resolveAndMatchCommand("ssh", policy.command_allowlist, controlledPathDirs());
     } catch (err) {
-      if (err instanceof VaultError) this.audit(action, secretId, { error: err.code }, false);
+      if (err instanceof VaultError)
+        this.audit(action, secretId, { error: err.code }, false, attribution);
       throw err;
     }
 
@@ -74,7 +78,8 @@ export class SshInjector {
       agent = await EphemeralSshAgent.start(keyPem);
     } catch (err) {
       kh.dispose();
-      if (err instanceof VaultError) this.audit(action, secretId, { error: err.code }, false);
+      if (err instanceof VaultError)
+        this.audit(action, secretId, { error: err.code }, false, attribution);
       throw err;
     }
 
@@ -106,6 +111,7 @@ export class SshInjector {
             secretId,
             { error: err.code, network_isolation: networkIsolation },
             false,
+            attribution,
           );
         }
         throw err;
@@ -120,6 +126,7 @@ export class SshInjector {
           secretId,
           { error: "SSH_HOST_KEY_MISMATCH", network_isolation: networkIsolation },
           false,
+          attribution,
         );
         throw VaultError.sshHostKeyMismatch(action.host);
       }
@@ -152,6 +159,7 @@ export class SshInjector {
           ...(r.isolation_mechanism ? { isolation_mechanism: r.isolation_mechanism } : {}),
         },
         error === undefined,
+        attribution,
       );
       return result;
     } finally {
@@ -166,12 +174,18 @@ export class SshInjector {
     secretId: string | undefined,
     detail: Record<string, unknown>,
     success: boolean,
+    attribution?: AuditAttribution,
   ): void {
-    this.auditLogger?.log({
-      eventType: "secret.use",
-      secretId,
-      detail: { context: "ssh", host: action.host, user: action.user, ...detail },
-      success,
-    });
+    this.auditLogger?.log(
+      withAttribution(
+        {
+          eventType: "secret.use",
+          secretId,
+          detail: { context: "ssh", host: action.host, user: action.user, ...detail },
+          success,
+        },
+        attribution,
+      ),
+    );
   }
 }

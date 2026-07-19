@@ -243,6 +243,13 @@ export interface VaultApiToken {
 }
 
 /**
+ * Access interface a token-authenticated request arrived through — the
+ * "through which interface" dimension of the audit trail (thesis §4.3.4).
+ * Forensic attribution only; never consulted by policy matching.
+ */
+export type AccessInterface = "rest" | "mcp" | "mcp-http";
+
+/**
  * Token-derived caller identity threaded from an interface layer into the
  * engine for per-secret access-policy enforcement (thesis §4.6). An absent
  * caller marks the trusted local path (CLI, in-process SDK) — administrative
@@ -253,6 +260,8 @@ export interface CallerContext {
   principal_id: string;
   /** Token project claim; derives an additional (project, <claim>) principal. */
   project?: string;
+  /** Interface the request arrived through; audit attribution only. */
+  interface?: AccessInterface;
 }
 
 /** Result of a request-mediated (HTTP) use_secret invocation. */

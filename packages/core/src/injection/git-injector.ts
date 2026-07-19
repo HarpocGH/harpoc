@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ConnectionConfig, GitAction, GitResult, InjectionPolicy } from "@harpoc/shared";
 import { DEFAULT_GIT_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
+import type { AuditAttribution } from "../audit/attribution.js";
+import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import {
   controlledPathDirs,
@@ -75,10 +77,11 @@ export class GitInjector {
     policy: InjectionPolicy,
     config: ConnectionConfig | undefined,
     secretId?: string,
+    attribution?: AuditAttribution,
   ): Promise<GitResult> {
     const transport = detectTransport(action.repository);
     if (!transport) {
-      this.audit(action, secretId, { error: "GIT_UNSUPPORTED_TRANSPORT" }, false);
+      this.audit(action, secretId, { error: "GIT_UNSUPPORTED_TRANSPORT" }, false, attribution);
       throw VaultError.gitUnsupportedTransport(action.repository);
     }
 
@@ -91,13 +94,14 @@ export class GitInjector {
     try {
       gitPath = resolveAndMatchCommand("git", policy.command_allowlist, controlledPathDirs());
     } catch (err) {
-      if (err instanceof VaultError) this.audit(action, secretId, { error: err.code }, false);
+      if (err instanceof VaultError)
+        this.audit(action, secretId, { error: err.code }, false, attribution);
       throw err;
     }
 
     return transport === "https"
-      ? this.runHttps(action, gitPath, secretValue, policy, secretId)
-      : this.runSsh(action, gitPath, secretValue, policy, config, secretId);
+      ? this.runHttps(action, gitPath, secretValue, policy, secretId, attribution)
+      : this.runSsh(action, gitPath, secretValue, policy, config, secretId, attribution);
   }
 
   private async runHttps(
@@ -106,16 +110,18 @@ export class GitInjector {
     secretValue: Uint8Array,
     policy: InjectionPolicy,
     secretId: string | undefined,
+    attribution: AuditAttribution | undefined,
   ): Promise<GitResult> {
     // Mandatory floor: HTTPS + SSRF. Optional layer: per-secret URL allowlist.
     try {
       await validateUrl(action.repository);
     } catch (err) {
-      if (err instanceof VaultError) this.audit(action, secretId, { error: err.code }, false);
+      if (err instanceof VaultError)
+        this.audit(action, secretId, { error: err.code }, false, attribution);
       throw err;
     }
     if (!matchesUrlAllowlist(action.repository, policy.url_allowlist)) {
-      this.audit(action, secretId, { error: "URL_NOT_ALLOWED" }, false);
+      this.audit(action, secretId, { error: "URL_NOT_ALLOWED" }, false, attribution);
       throw VaultError.urlNotAllowed(action.repository);
     }
 
@@ -149,6 +155,7 @@ export class GitInjector {
             secretId,
             { transport: "https", error: err.code, network_isolation: networkIsolation },
             false,
+            attribution,
           );
         }
         throw err;
@@ -164,6 +171,7 @@ export class GitInjector {
           ...(r.isolation_mechanism ? { isolation_mechanism: r.isolation_mechanism } : {}),
         },
         result.error === undefined,
+        attribution,
       );
       return result;
     } finally {
@@ -178,20 +186,21 @@ export class GitInjector {
     policy: InjectionPolicy,
     config: ConnectionConfig | undefined,
     secretId: string | undefined,
+    attribution: AuditAttribution | undefined,
   ): Promise<GitResult> {
     const host = parseSshHost(action.repository);
     if (!host) {
-      this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false);
+      this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
       throw VaultError.invalidGitConfig("could not parse SSH host from repository");
     }
     // Host allowlist — fail-safe deny (process-mediated posture).
     if (policy.host_allowlist.length === 0 || !matchesHostAllowlist(host, policy.host_allowlist)) {
-      this.audit(action, secretId, { host, error: "HOST_NOT_ALLOWED" }, false);
+      this.audit(action, secretId, { host, error: "HOST_NOT_ALLOWED" }, false, attribution);
       throw VaultError.hostNotAllowed(host);
     }
     const knownHosts = config?.ssh?.known_hosts;
     if (!knownHosts || knownHosts.length === 0) {
-      this.audit(action, secretId, { host, error: "SSH_NOT_CONFIGURED" }, false);
+      this.audit(action, secretId, { host, error: "SSH_NOT_CONFIGURED" }, false, attribution);
       throw VaultError.sshNotConfigured();
     }
     const sshPath = resolveExecutable("ssh", controlledPathDirs());
@@ -209,7 +218,8 @@ export class GitInjector {
       agent = await EphemeralSshAgent.start(keyPem);
     } catch (err) {
       kh.dispose();
-      if (err instanceof VaultError) this.audit(action, secretId, { host, error: err.code }, false);
+      if (err instanceof VaultError)
+        this.audit(action, secretId, { host, error: err.code }, false, attribution);
       throw err;
     }
 
@@ -239,6 +249,7 @@ export class GitInjector {
             secretId,
             { transport: "ssh", host, error: err.code, network_isolation: networkIsolation },
             false,
+            attribution,
           );
         }
         throw err;
@@ -258,6 +269,7 @@ export class GitInjector {
             network_isolation: networkIsolation,
           },
           false,
+          attribution,
         );
         throw VaultError.sshHostKeyMismatch(host);
       }
@@ -274,6 +286,7 @@ export class GitInjector {
           ...(r.isolation_mechanism ? { isolation_mechanism: r.isolation_mechanism } : {}),
         },
         result.error === undefined,
+        attribution,
       );
       return result;
     } finally {
@@ -288,13 +301,19 @@ export class GitInjector {
     secretId: string | undefined,
     detail: Record<string, unknown>,
     success: boolean,
+    attribution?: AuditAttribution,
   ): void {
-    this.auditLogger?.log({
-      eventType: "secret.use",
-      secretId,
-      detail: { context: "git", operation: action.operation, ...detail },
-      success,
-    });
+    this.auditLogger?.log(
+      withAttribution(
+        {
+          eventType: "secret.use",
+          secretId,
+          detail: { context: "git", operation: action.operation, ...detail },
+          success,
+        },
+        attribution,
+      ),
+    );
   }
 }
 

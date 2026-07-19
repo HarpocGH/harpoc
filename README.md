@@ -15,7 +15,7 @@ The MCP specification has no built-in credential management. In practice, 79% of
 - **Process secret injection** — run a command with the credential in its environment: no shell, clean environment, output sanitization, fail-safe per-secret command allowlisting, an acknowledgement gate for interpreter binaries, and opt-in per-secret network isolation (the spawned child gets no network, loopback included — Linux `unshare`, macOS `sandbox-exec`; unsupported platforms refuse fail-closed)
 - **MCP proxy injection** — forward a tool call to a downstream MCP server that the vault spawns (stdio) or reaches over HTTP, authenticating it with the credential
 - **Database, Git & SSH injection** — in-vault PostgreSQL/MySQL connections (TLS by default), Git over HTTPS or SSH, and SSH sessions via an in-process ephemeral key agent — the private key never touches disk
-- **Audit trail** — every vault operation logged, detail fields encrypted at rest, rows HMAC-chained (`harpoc audit verify`); `harpoc audit anchor` exports the chain tail for off-host storage so tail truncation and rollback are detectable (`verify --anchor`)
+- **Audit trail** — every vault operation logged, detail fields encrypted at rest, rows HMAC-chained (`harpoc audit verify`); `harpoc audit anchor` exports the chain tail for off-host storage so tail truncation and rollback are detectable (`verify --anchor`). Token-authenticated accesses — every `use_secret` invocation included — are attributed to the requesting principal and access interface (REST / MCP stdio / MCP HTTP); trusted-local (CLI/SDK) rows stay principal-less by design
 - **Access control** — per-secret policies and scoped tokens with wildcard secret-name patterns
 - **Multiple interfaces** — MCP server, REST API, TypeScript SDK, CLI
 

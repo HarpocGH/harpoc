@@ -71,6 +71,64 @@ describe("audit --since validation", () => {
   });
 });
 
+describe("audit table Principal column (by whom, thesis §4.3.4)", () => {
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  function tableText(): string {
+    return logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+  }
+
+  it("renders type:id for attributed rows and '-' for NULL principal columns (never 'local')", async () => {
+    mockEngine.queryAudit.mockReturnValue([
+      {
+        id: 1,
+        timestamp: 1784306411000,
+        event_type: "secret.use",
+        secret_id: "s-1",
+        principal_type: "agent",
+        principal_id: "alice",
+        detail: { context: "process", interface: "rest" },
+        session_id: "sess-1234567890",
+        success: true,
+      },
+      {
+        id: 2,
+        timestamp: 1784306412000,
+        event_type: "secret.use",
+        secret_id: "s-1",
+        principal_type: null,
+        principal_id: null,
+        detail: { context: "process" },
+        session_id: "sess-1234567890",
+        success: true,
+      },
+    ]);
+
+    await run([]);
+    const text = tableText();
+    expect(text).toContain("Principal");
+    expect(text).toContain("agent:alice");
+    expect(text).not.toContain("local");
+  });
+});
+
 const validAnchor = {
   format: "harpoc-audit-anchor/1",
   vault_id: "vault-a",

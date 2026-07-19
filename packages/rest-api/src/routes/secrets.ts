@@ -79,7 +79,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const handle = buildHandle(c.req.param("handle"));
     const secretId = await engine.resolveSecretId(handle);
     c.get("limiter").checkSecret(secretId);
-    const info = await engine.getSecretInfo(handle, callerFromToken(token));
+    const info = await engine.getSecretInfo(handle, callerFromToken(token, "rest"));
 
     return c.json({ data: info });
   });
@@ -94,7 +94,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const handle = buildHandle(c.req.param("handle"));
     const secretId = await engine.resolveSecretId(handle);
     c.get("limiter").checkSecret(secretId);
-    const value = await engine.getSecretValue(handle, callerFromToken(token));
+    const value = await engine.getSecretValue(handle, callerFromToken(token, "rest"));
 
     return c.json({ data: { value: Buffer.from(value).toString("base64") } });
   });
@@ -114,7 +114,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const handle = buildHandle(c.req.param("handle"));
     const secretId = await engine.resolveSecretId(handle);
     c.get("limiter").checkSecret(secretId);
-    await engine.revokeSecret(handle, callerFromToken(token));
+    await engine.revokeSecret(handle, callerFromToken(token, "rest"));
 
     return c.json({ data: { revoked: true } });
   });
@@ -136,7 +136,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const secretId = await engine.resolveSecretId(handle);
     c.get("limiter").checkSecret(secretId);
     const newValue = new Uint8Array(Buffer.from(body.value, "base64"));
-    await engine.rotateSecret(handle, newValue, callerFromToken(token));
+    await engine.rotateSecret(handle, newValue, callerFromToken(token, "rest"));
 
     return c.json({ data: { rotated: true } });
   });
@@ -158,7 +158,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const handle = buildHandle(c.req.param("handle"));
     const secretId = await engine.resolveSecretId(handle);
     c.get("limiter").checkSecret(secretId, true);
-    const result = await engine.useSecret(handle, parsed.data, callerFromToken(token));
+    const result = await engine.useSecret(handle, parsed.data, callerFromToken(token, "rest"));
 
     // Sanitize response to prevent credential leakage (parity across interfaces)
     sanitizeUseSecretResult(result, injectionGuard);
