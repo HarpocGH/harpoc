@@ -201,7 +201,10 @@ describe("secret routes", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.data.name).toBe("test-key");
-      expect(engine.getSecretInfo).toHaveBeenCalledWith("secret://test-key");
+      expect(engine.getSecretInfo).toHaveBeenCalledWith("secret://test-key", {
+        principal_type: "agent",
+        principal_id: "test-agent",
+      });
     });
 
     it("returns 404 for unknown secret", async () => {
@@ -227,7 +230,10 @@ describe("secret routes", () => {
         headers: AUTH,
       });
       expect(res.status).toBe(200);
-      expect(engine.revokeSecret).toHaveBeenCalledWith("secret://test-key");
+      expect(engine.revokeSecret).toHaveBeenCalledWith("secret://test-key", {
+        principal_type: "agent",
+        principal_id: "test-agent",
+      });
     });
 
     it("rejects without confirm=true", async () => {
@@ -963,5 +969,79 @@ describe("secret routes", () => {
         expect(engine[tc.engineFn]).not.toHaveBeenCalled();
       });
     }
+  });
+});
+
+describe("engine-level policy enforcement wiring (thesis §4.6)", () => {
+  const EXPECTED_CALLER = { principal_type: "agent", principal_id: "test-agent" };
+
+  it("GET /:handle passes the token-derived caller to getSecretInfo", async () => {
+    await app.request("/api/v1/secrets/test-key", { headers: AUTH });
+    expect(engine.getSecretInfo).toHaveBeenCalledWith("secret://test-key", EXPECTED_CALLER);
+  });
+
+  it("GET /:handle/value passes the caller to getSecretValue", async () => {
+    await app.request("/api/v1/secrets/test-key/value", { headers: AUTH });
+    expect(engine.getSecretValue).toHaveBeenCalledWith("secret://test-key", EXPECTED_CALLER);
+  });
+
+  it("DELETE /:handle passes the caller to revokeSecret", async () => {
+    await app.request("/api/v1/secrets/test-key?confirm=true", {
+      method: "DELETE",
+      headers: AUTH,
+    });
+    expect(engine.revokeSecret).toHaveBeenCalledWith("secret://test-key", EXPECTED_CALLER);
+  });
+
+  it("POST /:handle/rotate passes the caller to rotateSecret", async () => {
+    await app.request("/api/v1/secrets/test-key/rotate", {
+      method: "POST",
+      headers: { ...AUTH, "content-type": "application/json" },
+      body: JSON.stringify({ value: Buffer.from("new").toString("base64") }),
+    });
+    expect(engine.rotateSecret).toHaveBeenCalledWith(
+      "secret://test-key",
+      expect.any(Uint8Array),
+      EXPECTED_CALLER,
+    );
+  });
+
+  it("POST /:handle/use passes the caller to useSecret", async () => {
+    await app.request("/api/v1/secrets/test-key/use", {
+      method: "POST",
+      headers: { ...AUTH, "content-type": "application/json" },
+      body: JSON.stringify({
+        action: {
+          type: "http",
+          method: "GET",
+          url: "https://api.example.com/data",
+          injection: { type: "bearer" },
+        },
+      }),
+    });
+    expect(engine.useSecret).toHaveBeenCalledWith(
+      "secret://test-key",
+      expect.objectContaining({ type: "http" }),
+      EXPECTED_CALLER,
+    );
+  });
+
+  it("a project-scoped token derives a caller carrying the project claim", async () => {
+    engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, project: "myproj" });
+    await app.request("/api/v1/secrets/myproj%2Ftest-key", { headers: AUTH });
+    expect(engine.getSecretInfo).toHaveBeenCalledWith("secret://myproj/test-key", {
+      ...EXPECTED_CALLER,
+      project: "myproj",
+    });
+  });
+
+  it("an engine ACCESS_DENIED policy denial maps to 403", async () => {
+    engine.getSecretValue.mockRejectedValue(
+      VaultError.accessDenied("Principal lacks 'read' permission on this secret"),
+    );
+    const res = await app.request("/api/v1/secrets/test-key/value", { headers: AUTH });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe(ErrorCode.ACCESS_DENIED);
   });
 });

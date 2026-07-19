@@ -43,7 +43,7 @@ export function registerRotateSecret(
 
       if (value) {
         try {
-          await engine.rotateSecret(args.handle, value);
+          await engine.rotateSecret(args.handle, value, scopeGuard.caller);
         } finally {
           value.fill(0);
         }

@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type {
   AccessPolicy,
   AuditChainAnchor,
+  CallerContext,
   ConnectionConfig,
   CreateSecretResponse,
   HttpResult,
@@ -13,6 +14,7 @@ import type {
   Permission,
   Secret,
   SetInjectionPolicyOptions,
+  TokenPrincipalType,
   UseSecretAction,
   UseSecretResponse,
   VaultApiToken,
@@ -44,9 +46,11 @@ import {
   MAX_TOKEN_TTL_MS,
   MIN_PASSWORD_LENGTH,
   OAuthProviderPreset,
+  PrincipalType,
   SecretStatus,
   SecretType,
   SESSION_CLEANUP_INTERVAL_MS,
+  TokenPrincipalType as TokenPrincipalTypeValues,
   SESSION_SLIDE_INTERVAL_MS,
   VaultError,
   VaultState,
@@ -458,18 +462,23 @@ export class VaultEngine {
     });
   }
 
-  async getSecretInfo(handle: string): Promise<SecretInfo> {
+  async getSecretInfo(handle: string, caller?: CallerContext): Promise<SecretInfo> {
     const s = this.assertUnlocked();
+    await this.enforceCallerPolicy(s, handle, caller, "read", AuditEventType.SECRET_READ, {
+      handle,
+    });
     let info: SecretInfo;
     try {
       info = await s.secretManager.getSecretInfo(handle);
     } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_READ, err, { handle });
+      this.auditDenied(s, AuditEventType.SECRET_READ, err, { handle }, undefined, caller);
       throw err;
     }
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_READ,
+      principalType: caller?.principal_type,
+      principalId: caller?.principal_id,
       detail: { handle },
       sessionId: this.sessionId ?? undefined,
     });
@@ -477,18 +486,31 @@ export class VaultEngine {
     return info;
   }
 
-  async getSecretValue(handle: string): Promise<Uint8Array> {
+  async getSecretValue(handle: string, caller?: CallerContext): Promise<Uint8Array> {
     const s = this.assertUnlocked();
+    await this.enforceCallerPolicy(s, handle, caller, "read", AuditEventType.SECRET_READ, {
+      handle,
+      action: "get_value",
+    });
     let value: Uint8Array;
     try {
       value = await s.secretManager.getSecretValue(handle);
     } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_READ, err, { handle, action: "get_value" });
+      this.auditDenied(
+        s,
+        AuditEventType.SECRET_READ,
+        err,
+        { handle, action: "get_value" },
+        undefined,
+        caller,
+      );
       throw err;
     }
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_READ,
+      principalType: caller?.principal_type,
+      principalId: caller?.principal_id,
       detail: { handle, action: "get_value" },
       sessionId: this.sessionId ?? undefined,
     });
@@ -501,50 +523,73 @@ export class VaultEngine {
     return s.secretManager.listSecrets(project);
   }
 
-  async setSecretValue(handle: string, value: Uint8Array): Promise<void> {
+  async setSecretValue(handle: string, value: Uint8Array, caller?: CallerContext): Promise<void> {
     const s = this.assertUnlocked();
+    await this.enforceCallerPolicy(s, handle, caller, "rotate", AuditEventType.SECRET_CREATE, {
+      handle,
+      action: "set_value",
+    });
     try {
       await s.secretManager.setSecretValue(handle, value, () => {
         s.auditLogger.log({
           eventType: AuditEventType.SECRET_CREATE,
+          principalType: caller?.principal_type,
+          principalId: caller?.principal_id,
           detail: { handle, action: "set_value" },
           sessionId: this.sessionId ?? undefined,
         });
       });
     } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_CREATE, err, { handle, action: "set_value" });
+      this.auditDenied(
+        s,
+        AuditEventType.SECRET_CREATE,
+        err,
+        { handle, action: "set_value" },
+        undefined,
+        caller,
+      );
       throw err;
     }
   }
 
-  async rotateSecret(handle: string, newValue: Uint8Array): Promise<void> {
+  async rotateSecret(handle: string, newValue: Uint8Array, caller?: CallerContext): Promise<void> {
     const s = this.assertUnlocked();
+    await this.enforceCallerPolicy(s, handle, caller, "rotate", AuditEventType.SECRET_ROTATE, {
+      handle,
+    });
     try {
       await s.secretManager.rotateSecret(handle, newValue, () => {
         s.auditLogger.log({
           eventType: AuditEventType.SECRET_ROTATE,
+          principalType: caller?.principal_type,
+          principalId: caller?.principal_id,
           detail: { handle },
           sessionId: this.sessionId ?? undefined,
         });
       });
     } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_ROTATE, err, { handle });
+      this.auditDenied(s, AuditEventType.SECRET_ROTATE, err, { handle }, undefined, caller);
       throw err;
     }
   }
 
-  async revokeSecret(handle: string): Promise<void> {
+  async revokeSecret(handle: string, caller?: CallerContext): Promise<void> {
     const s = this.assertUnlocked();
+    await this.enforceCallerPolicy(s, handle, caller, "revoke", AuditEventType.SECRET_REVOKE, {
+      handle,
+    });
     try {
       await s.secretManager.revokeSecret(handle, () => {
         s.auditLogger.log({
           eventType: AuditEventType.SECRET_REVOKE,
+          principalType: caller?.principal_type,
+          principalId: caller?.principal_id,
           detail: { handle },
           sessionId: this.sessionId ?? undefined,
         });
       });
     } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_REVOKE, err, { handle });
+      this.auditDenied(s, AuditEventType.SECRET_REVOKE, err, { handle }, undefined, caller);
       throw err;
     }
   }
@@ -555,9 +600,13 @@ export class VaultEngine {
    * The secret plaintext is resolved inside the vault, injected, and wiped
    * before return; it never crosses the vault-to-agent boundary.
    */
-  async useSecret(handle: string, action: UseSecretAction): Promise<UseSecretResponse> {
+  async useSecret(
+    handle: string,
+    action: UseSecretAction,
+    caller?: CallerContext,
+  ): Promise<UseSecretResponse> {
     try {
-      return await this.useSecretInner(handle, action);
+      return await this.useSecretInner(handle, action, caller);
     } finally {
       // Completion slide (throttled): a long-running action ends with a fresh
       // idle window instead of one aged by the action's own runtime.
@@ -568,6 +617,7 @@ export class VaultEngine {
   private async useSecretInner(
     handle: string,
     action: UseSecretAction,
+    caller?: CallerContext,
   ): Promise<UseSecretResponse> {
     const s = this.assertUnlocked();
 
@@ -575,9 +625,24 @@ export class VaultEngine {
     try {
       secret = await s.secretManager.resolveHandle(handle);
     } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_USE, err, { handle, context: action.type });
+      this.auditDenied(
+        s,
+        AuditEventType.SECRET_USE,
+        err,
+        { handle, context: action.type },
+        undefined,
+        caller,
+      );
       throw err;
     }
+
+    // Per-secret policy enforcement (thesis §4.6) — before the injection
+    // policy is read, any OAuth refresh runs, or the value is decrypted.
+    this.checkResolvedCallerPolicy(s, secret.id, caller, "use", AuditEventType.SECRET_USE, {
+      handle,
+      context: action.type,
+    });
+
     const policy = this.loadInjectionPolicy(s, secret.id);
 
     let value: Uint8Array;
@@ -595,6 +660,7 @@ export class VaultEngine {
         err,
         { handle, context: action.type },
         secret.id,
+        caller,
       );
       throw err;
     }
@@ -622,6 +688,8 @@ export class VaultEngine {
             s.auditLogger.log({
               eventType: AuditEventType.SECRET_USE,
               secretId: secret.id,
+              principalType: caller?.principal_type,
+              principalId: caller?.principal_id,
               detail: { context: "http", url: action.url, error: ErrorCode.URL_NOT_ALLOWED },
               success: false,
               sessionId: this.sessionId ?? undefined,
@@ -637,6 +705,8 @@ export class VaultEngine {
             s.auditLogger.log({
               eventType: AuditEventType.SECRET_USE,
               secretId: secret.id,
+              principalType: caller?.principal_type,
+              principalId: caller?.principal_id,
               detail: {
                 context: "http",
                 url: action.url,
@@ -1648,12 +1718,17 @@ export class VaultEngine {
    * `options.secrets` entries are secret-name patterns (thesis §4.7): literal
    * names or `*` wildcards (`db-*`). Each entry is validated against the
    * pattern grammar — name characters plus `*`, no other meta-characters.
+   *
+   * `options.principalType` sets the token's principal identity for
+   * per-secret policy matching (thesis §4.6): agent, tool or user — absent =
+   * agent. `project` is not issuable; project principals derive from the
+   * token's project claim.
    */
   createToken(
     subject: string,
     scope: Permission[],
     ttlMs: number = 3600_000,
-    options?: { project?: string; secrets?: string[] },
+    options?: { project?: string; secrets?: string[]; principalType?: TokenPrincipalType },
   ): string {
     const s = this.assertUnlocked();
 
@@ -1664,6 +1739,16 @@ export class VaultEngine {
           `Invalid secret name pattern: "${pattern}" — letters, digits, "_", "-" and "*" wildcards only`,
         );
       }
+    }
+
+    if (
+      options?.principalType !== undefined &&
+      !Object.values(TokenPrincipalTypeValues).includes(options.principalType)
+    ) {
+      throw new VaultError(
+        ErrorCode.INVALID_INPUT,
+        `Invalid principal type: "${options.principalType as string}". Valid: agent, tool, user`,
+      );
     }
 
     const effectiveTtl = Math.min(Math.max(ttlMs, 0), MAX_TOKEN_TTL_MS);
@@ -1679,12 +1764,19 @@ export class VaultEngine {
 
     if (options?.project) payload.project = options.project;
     if (options?.secrets?.length) payload.secrets = options.secrets;
+    if (options?.principalType) payload.principal_type = options.principalType;
 
     const token = this.signJwt(payload);
 
     s.auditLogger.log({
       eventType: AuditEventType.TOKEN_CREATE,
-      detail: { subject, jti: payload.jti, scope, project: options?.project },
+      detail: {
+        subject,
+        jti: payload.jti,
+        scope,
+        project: options?.project,
+        principal_type: options?.principalType ?? "agent",
+      },
       sessionId: this.sessionId ?? undefined,
     });
 
@@ -1827,15 +1919,96 @@ export class VaultEngine {
     err: unknown,
     detail: Record<string, unknown>,
     secretId?: string,
+    caller?: CallerContext,
   ): void {
     if (!(err instanceof VaultError)) return;
     s.auditLogger.log({
       eventType,
       secretId,
+      principalType: caller?.principal_type,
+      principalId: caller?.principal_id,
       detail: { ...detail, error: err.code },
       success: false,
       sessionId: this.sessionId ?? undefined,
     });
+  }
+
+  /**
+   * Per-secret access-policy enforcement on an already-resolved secret
+   * (thesis §4.6). Presence-gated restriction: a secret with at least one
+   * active policy row requires the token-derived caller to hold a matching
+   * grant — checked against the caller's principal set (the token subject
+   * under its issued principal type, plus a derived project principal when
+   * the token is project-scoped; `admin` implies every permission). A secret
+   * without policy rows stays governed by token scope alone. An absent
+   * caller is the trusted local path (thesis §4.7) and is never checked.
+   * Denials are audited under the operation's event type with the requesting
+   * principal before anything is decrypted, injected or mutated.
+   */
+  private checkResolvedCallerPolicy(
+    s: UnlockedState,
+    secretId: string,
+    caller: CallerContext | undefined,
+    permission: Permission,
+    eventType: AuditEventType,
+    detail: Record<string, unknown>,
+  ): void {
+    if (!caller) return;
+    if (!s.policyEngine.hasActivePolicies(secretId)) return;
+
+    const granted =
+      s.policyEngine.checkPermission(
+        secretId,
+        caller.principal_type,
+        caller.principal_id,
+        permission,
+      ) ||
+      (caller.project !== undefined &&
+        s.policyEngine.checkPermission(
+          secretId,
+          PrincipalType.PROJECT,
+          caller.project,
+          permission,
+        ));
+
+    if (granted) return;
+
+    s.auditLogger.log({
+      eventType,
+      secretId,
+      principalType: caller.principal_type,
+      principalId: caller.principal_id,
+      detail: { ...detail, required_permission: permission, error: ErrorCode.ACCESS_DENIED },
+      success: false,
+      sessionId: this.sessionId ?? undefined,
+    });
+    throw VaultError.accessDenied(`Principal lacks '${permission}' permission on this secret`);
+  }
+
+  /**
+   * Handle-resolving wrapper around checkResolvedCallerPolicy for engine
+   * methods whose secret manager call resolves internally. With no caller
+   * (trusted local path) this is a no-op — no extra handle resolution, byte
+   * -identical behavior; with a caller, a resolution failure is audited as
+   * the denied operation (with the requesting principal) and rethrown.
+   */
+  private async enforceCallerPolicy(
+    s: UnlockedState,
+    handle: string,
+    caller: CallerContext | undefined,
+    permission: Permission,
+    eventType: AuditEventType,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    if (!caller) return;
+    let secret: Secret;
+    try {
+      secret = await s.secretManager.resolveHandle(handle);
+    } catch (err) {
+      this.auditDenied(s, eventType, err, detail, undefined, caller);
+      throw err;
+    }
+    this.checkResolvedCallerPolicy(s, secret.id, caller, permission, eventType, detail);
   }
 
   private assertUnlocked(): UnlockedState {

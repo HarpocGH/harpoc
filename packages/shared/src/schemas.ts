@@ -17,6 +17,7 @@ import {
   ResponseMode,
   SecretStatus,
   SecretType,
+  TokenPrincipalType,
   VaultState,
 } from "./types.js";
 
@@ -46,6 +47,12 @@ export const auditEventTypeSchema = z.enum(auditEventTypeValues);
 
 const principalTypeValues = Object.values(PrincipalType) as [PrincipalType, ...PrincipalType[]];
 export const principalTypeSchema = z.enum(principalTypeValues);
+
+const tokenPrincipalTypeValues = Object.values(TokenPrincipalType) as [
+  TokenPrincipalType,
+  ...TokenPrincipalType[],
+];
+export const tokenPrincipalTypeSchema = z.enum(tokenPrincipalTypeValues);
 
 const injectionTypeValues = Object.values(InjectionType) as [InjectionType, ...InjectionType[]];
 export const injectionTypeSchema = z.enum(injectionTypeValues);

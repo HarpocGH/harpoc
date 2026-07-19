@@ -15,8 +15,14 @@ export interface GrantPolicyInput {
 /**
  * Manages access policies for secrets.
  *
- * v1.0: Policies are stored and queryable but NOT enforced by VaultEngine for MCP stdio.
- * REST API enforces via JWT scopes. Infrastructure is forward-compatible for v2.0+ per-agent enforcement.
+ * Policies are enforced at the engine level (thesis §4.6): every credential
+ * operation arriving with a token-derived caller checks the secret's stored
+ * policy entries before proceeding. Semantics are presence-gated restriction —
+ * a secret with at least one active policy row requires the caller to hold a
+ * matching grant; a secret with none is governed by token scope alone. The
+ * trusted local path (CLI, in-process SDK — master-password/session
+ * authenticated) carries no caller and is not subject to per-secret policies
+ * (thesis §4.7 administration-versus-operation split).
  */
 export class PolicyEngine {
   constructor(private readonly store: SqliteStore) {}
@@ -50,6 +56,15 @@ export class PolicyEngine {
     // Filter out expired policies
     const now = Date.now();
     return policies.filter((p) => p.expires_at === null || p.expires_at > now);
+  }
+
+  /**
+   * Whether the secret has at least one active (non-expired) policy row —
+   * the presence gate: only then do per-secret policies restrict
+   * token-authenticated callers.
+   */
+  hasActivePolicies(secretId: string): boolean {
+    return this.listPolicies(secretId).length > 0;
   }
 
   /**

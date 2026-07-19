@@ -69,6 +69,18 @@ export const PrincipalType = {
 } as const;
 export type PrincipalType = (typeof PrincipalType)[keyof typeof PrincipalType];
 
+/**
+ * Principal types a token can be issued to (thesis §4.6 access control).
+ * `project` is deliberately absent: a project principal is derived from the
+ * token's `project` claim, never issued as an identity of its own.
+ */
+export const TokenPrincipalType = {
+  AGENT: "agent",
+  TOOL: "tool",
+  USER: "user",
+} as const;
+export type TokenPrincipalType = (typeof TokenPrincipalType)[keyof typeof TokenPrincipalType];
+
 export const InjectionType = {
   HEADER: "header",
   QUERY: "query",
@@ -226,6 +238,21 @@ export interface VaultApiToken {
   project?: string;
   /** Secret-name patterns (`*` wildcards, thesis §4.7); absent = unrestricted. */
   secrets?: string[];
+  /** Principal type for per-secret policy matching; absent = "agent". */
+  principal_type?: TokenPrincipalType;
+}
+
+/**
+ * Token-derived caller identity threaded from an interface layer into the
+ * engine for per-secret access-policy enforcement (thesis §4.6). An absent
+ * caller marks the trusted local path (CLI, in-process SDK) — administrative
+ * access that is not subject to per-secret policies (thesis §4.7 split).
+ */
+export interface CallerContext {
+  principal_type: TokenPrincipalType;
+  principal_id: string;
+  /** Token project claim; derives an additional (project, <claim>) principal. */
+  project?: string;
 }
 
 /** Result of a request-mediated (HTTP) use_secret invocation. */

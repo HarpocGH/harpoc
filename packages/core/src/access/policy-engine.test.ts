@@ -236,3 +236,35 @@ describe("checkPermission", () => {
     expect(engine.checkPermission("s1", "agent", "unknown", "read")).toBe(false);
   });
 });
+
+describe("hasActivePolicies", () => {
+  it("is false for a secret with no policy rows", () => {
+    expect(engine.hasActivePolicies("s1")).toBe(false);
+  });
+
+  it("is true once an active row exists, and scoped to that secret", () => {
+    engine.grantPolicy({
+      secretId: "s1",
+      principalType: "agent",
+      principalId: "agent-1",
+      permissions: ["use"],
+      createdBy: "user",
+    });
+
+    expect(engine.hasActivePolicies("s1")).toBe(true);
+    expect(engine.hasActivePolicies("s2")).toBe(false);
+  });
+
+  it("is false when every row is expired (the gate reopens)", () => {
+    engine.grantPolicy({
+      secretId: "s1",
+      principalType: "agent",
+      principalId: "agent-1",
+      permissions: ["use"],
+      expiresAt: Date.now() - 1000,
+      createdBy: "user",
+    });
+
+    expect(engine.hasActivePolicies("s1")).toBe(false);
+  });
+});

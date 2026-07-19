@@ -14,6 +14,13 @@ import type { AuditQueryOptions, DecryptedAuditEvent, SecretInfo } from "@harpoc
 import type { CreateSecretInput, GrantPolicyInput, HealthResponse, VaultClient } from "./client.js";
 import { ErrorCode, VAULT_VERSION, VaultError } from "@harpoc/shared";
 
+/**
+ * In-process VaultClient over a constructed VaultEngine — the trusted local
+ * path (thesis §4.7): calls carry no token-derived caller, so per-secret
+ * access policies do not apply (unlike RestClient, whose server enforces
+ * them). Embedders exposing DirectClient to untrusted principals must gate
+ * access themselves.
+ */
 export class DirectClient implements VaultClient {
   constructor(private readonly engine: VaultEngine) {}
 

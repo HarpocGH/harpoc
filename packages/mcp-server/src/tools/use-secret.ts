@@ -33,7 +33,7 @@ export function registerUseSecret(
       const secretId = await engine.resolveSecretId(args.handle);
       rateLimiter.checkLimit(secretId, true);
 
-      const response = await engine.useSecret(args.handle, args.action);
+      const response = await engine.useSecret(args.handle, args.action, scopeGuard.caller);
 
       // Defense-in-depth response sanitization (pattern-based, atop engine redaction)
       sanitizeUseSecretResult(response, injectionGuard);

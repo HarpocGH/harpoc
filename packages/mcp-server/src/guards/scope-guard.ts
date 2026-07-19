@@ -1,5 +1,5 @@
-import type { Permission, VaultApiToken } from "@harpoc/shared";
-import { matchesSecretNameScope, VaultError } from "@harpoc/shared";
+import type { CallerContext, Permission, VaultApiToken } from "@harpoc/shared";
+import { callerFromToken, matchesSecretNameScope, VaultError } from "@harpoc/shared";
 
 /**
  * 3-dimensional launch-token scope enforcement:
@@ -67,5 +67,14 @@ export class ScopeGuard {
   /** Get the principal ID without performing access checks. */
   get principal(): string {
     return this.token?.sub ?? "local";
+  }
+
+  /**
+   * Token-derived caller identity for engine-level policy enforcement
+   * (thesis §4.6). Undefined without a token — the local full-access mode is
+   * the trusted path and is not subject to per-secret policies.
+   */
+  get caller(): CallerContext | undefined {
+    return this.token ? callerFromToken(this.token) : undefined;
   }
 }

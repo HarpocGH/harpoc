@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import type { Permission } from "@harpoc/shared";
-import { MAX_TOKEN_TTL_MS, permissionSchema } from "@harpoc/shared";
+import { MAX_TOKEN_TTL_MS, permissionSchema, tokenPrincipalTypeSchema } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord } from "../../utils/output.js";
 
@@ -14,6 +14,11 @@ export function registerAuthTokenCommand(auth: Command): void {
     )
     .option("--ttl <minutes>", "Token TTL in minutes", "60")
     .option("--agent <name>", "Agent name (sets JWT subject)")
+    .option(
+      "--principal-type <type>",
+      "Principal type for per-secret policy matching (agent, tool, user)",
+      "agent",
+    )
     .option("--project <name>", "Project scope for the token")
     .option(
       "--secrets <patterns>",
@@ -26,6 +31,7 @@ export function registerAuthTokenCommand(auth: Command): void {
           scope?: string;
           ttl?: string;
           agent?: string;
+          principalType?: string;
           project?: string;
           secrets?: string;
           json?: boolean;
@@ -50,6 +56,16 @@ export function registerAuthTokenCommand(auth: Command): void {
             const scope = scopeStrings as Permission[];
 
             const subject = options.agent ?? "cli-user";
+
+            const parsedPrincipalType = tokenPrincipalTypeSchema.safeParse(
+              options.principalType ?? "agent",
+            );
+            if (!parsedPrincipalType.success) {
+              throw new Error(
+                `Invalid principal type: "${options.principalType}". Valid: agent, tool, user`,
+              );
+            }
+            const principalType = parsedPrincipalType.data;
             const maxTtlMinutes = Math.floor(MAX_TOKEN_TTL_MS / 60_000);
             const ttlMinutes = parseInt(options.ttl ?? "60", 10);
             if (isNaN(ttlMinutes) || ttlMinutes <= 0) {
@@ -66,12 +82,17 @@ export function registerAuthTokenCommand(auth: Command): void {
             const secrets = options.secrets
               ? options.secrets.split(",").map((s) => s.trim())
               : undefined;
-            const token = engine.createToken(subject, scope, ttlMs, { project, secrets });
+            const token = engine.createToken(subject, scope, ttlMs, {
+              project,
+              secrets,
+              principalType,
+            });
 
             if (options.json) {
               printJson({
                 token,
                 subject,
+                principal_type: principalType,
                 scope,
                 ttl_minutes: parseInt(options.ttl ?? "60", 10),
                 project: options.project ?? null,
@@ -81,6 +102,7 @@ export function registerAuthTokenCommand(auth: Command): void {
               printRecord({
                 Token: token,
                 Subject: subject,
+                "Principal type": principalType,
                 Scope: scope.join(", "),
                 TTL: `${options.ttl ?? "60"} minutes`,
                 Project: options.project ?? "-",

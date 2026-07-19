@@ -198,3 +198,24 @@ describe("ScopeGuard", () => {
     });
   });
 });
+
+describe("caller (engine-level policy enforcement)", () => {
+  it("derives the caller from the token, defaulting principal_type to agent", () => {
+    const guard = new ScopeGuard(makeToken({ sub: "alice" }));
+    expect(guard.caller).toEqual({ principal_type: "agent", principal_id: "alice" });
+  });
+
+  it("carries the principal_type claim and project claim through", () => {
+    const guard = new ScopeGuard(makeToken({ sub: "ci", principal_type: "tool", project: "api" }));
+    expect(guard.caller).toEqual({
+      principal_type: "tool",
+      principal_id: "ci",
+      project: "api",
+    });
+  });
+
+  it("is undefined without a token — the local full-access mode is the trusted path", () => {
+    const guard = new ScopeGuard(null);
+    expect(guard.caller).toBeUndefined();
+  });
+});

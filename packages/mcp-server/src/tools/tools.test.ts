@@ -243,6 +243,8 @@ describe("MCP Tools", () => {
         },
       });
 
+      // Tokenless (local full-access) mode passes no caller — the engine's
+      // trusted local path, exempt from per-secret policies.
       expect(engine.useSecret).toHaveBeenCalledWith(
         "secret://my-key",
         expect.objectContaining({
@@ -254,6 +256,7 @@ describe("MCP Tools", () => {
           follow_redirects: "none",
           response_mode: "status_only",
         }),
+        undefined,
       );
     });
 
@@ -311,6 +314,7 @@ describe("MCP Tools", () => {
       expect(engine.useSecret).toHaveBeenCalledWith(
         "secret://my-key",
         expect.objectContaining({ type: "mcp", server: "github-mcp", tool: "list_repositories" }),
+        undefined,
       );
     });
 
@@ -404,7 +408,7 @@ describe("MCP Tools", () => {
 
     it("calls engine.revokeSecret", async () => {
       await callTool(server, "revoke_secret", { handle: "secret://my-key" });
-      expect(engine.revokeSecret).toHaveBeenCalledWith("secret://my-key");
+      expect(engine.revokeSecret).toHaveBeenCalledWith("secret://my-key", undefined);
     });
 
     it("returns confirmation", async () => {
@@ -595,5 +599,72 @@ describe("MCP Tools", () => {
         expect.objectContaining({ name: "x", project: "prod" }),
       );
     });
+  });
+});
+
+describe("token-derived caller wiring (engine-level policy enforcement)", () => {
+  const TOKEN = {
+    sub: "agent-7",
+    vault_id: "vault-1",
+    scope: ["use", "read", "rotate", "revoke"] as ("use" | "read" | "rotate" | "revoke")[],
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    jti: "jti-caller",
+    principal_type: "tool" as const,
+    project: "api",
+  };
+  const EXPECTED_CALLER = { principal_type: "tool", principal_id: "agent-7", project: "api" };
+
+  let server: McpServer;
+  let engine: VaultEngine;
+
+  beforeEach(() => {
+    server = new McpServer({ name: "test", version: "0.0.0" });
+    engine = mockEngine();
+    (engine.getSecretInfo as ReturnType<typeof vi.fn>).mockResolvedValue({
+      handle: "secret://api/my-key",
+      name: "my-key",
+      type: "api_key",
+      project: "api",
+      status: "active",
+      version: 1,
+      createdAt: 1000,
+      updatedAt: 2000,
+      expiresAt: null,
+      rotatedAt: null,
+    });
+    const scopeGuard = new ScopeGuard(TOKEN);
+    const rateLimiter = new RateLimiter();
+    const injectionGuard = new InjectionGuard();
+    registerUseSecret(server, engine, scopeGuard, rateLimiter, injectionGuard);
+    registerGetSecretInfo(server, engine, scopeGuard, rateLimiter);
+    registerRevokeSecret(server, engine, scopeGuard, rateLimiter);
+  });
+
+  it("use_secret passes the token-derived caller to the engine", async () => {
+    await callTool(server, "use_secret", {
+      handle: "secret://api/my-key",
+      action: {
+        type: "http",
+        method: "GET",
+        url: "https://api.example.com/data",
+        injection: { type: "bearer" },
+      },
+    });
+    expect(engine.useSecret).toHaveBeenCalledWith(
+      "secret://api/my-key",
+      expect.objectContaining({ type: "http" }),
+      EXPECTED_CALLER,
+    );
+  });
+
+  it("get_secret_info passes the caller to the engine", async () => {
+    await callTool(server, "get_secret_info", { handle: "secret://api/my-key" });
+    expect(engine.getSecretInfo).toHaveBeenCalledWith("secret://api/my-key", EXPECTED_CALLER);
+  });
+
+  it("revoke_secret passes the caller to the engine", async () => {
+    await callTool(server, "revoke_secret", { handle: "secret://api/my-key" });
+    expect(engine.revokeSecret).toHaveBeenCalledWith("secret://api/my-key", EXPECTED_CALLER);
   });
 });
