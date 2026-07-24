@@ -1,5 +1,11 @@
 import { Hono } from "hono";
-import { matchesSecretNameScope, VAULT_VERSION, VaultError, VaultState } from "@harpoc/shared";
+import {
+  callerFromToken,
+  matchesSecretNameScope,
+  VAULT_VERSION,
+  VaultError,
+  VaultState,
+} from "@harpoc/shared";
 import type { HealthResponse } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope } from "../middleware/scope.js";
@@ -42,7 +48,7 @@ export function createExpiringSecretsRoute(): Hono<HarpocEnv> {
     }
     const threshold = Date.now() + days * 24 * 60 * 60 * 1000;
 
-    let secrets = engine.listSecrets(token.project);
+    let secrets = engine.listSecrets(token.project, callerFromToken(token, "rest"));
     if (token.secrets?.length) {
       secrets = secrets.filter((s) => matchesSecretNameScope(s.name, token.secrets));
     }

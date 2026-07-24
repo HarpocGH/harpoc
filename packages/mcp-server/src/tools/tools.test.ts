@@ -134,7 +134,7 @@ describe("MCP Tools", () => {
 
     it("filters by project", async () => {
       await callTool(server, "list_secrets", { project: "prod" });
-      expect(engine.listSecrets).toHaveBeenCalledWith("prod");
+      expect(engine.listSecrets).toHaveBeenCalledWith("prod", undefined);
     });
 
     it("filters by type", async () => {

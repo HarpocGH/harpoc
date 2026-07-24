@@ -13,6 +13,17 @@ export interface GrantPolicyInput {
 }
 
 /**
+ * One identity a caller acts under: the token subject under its issued
+ * principal type, plus the derived project principal for project-scoped
+ * tokens. Built once by the engine and shared by the point check and the
+ * enumeration filter, so the two can never disagree about who a caller is.
+ */
+export interface PolicyPrincipal {
+  type: PrincipalType;
+  id: string;
+}
+
+/**
  * Manages access policies for secrets.
  *
  * Policies are enforced at the engine level (thesis §4.6): every credential
@@ -23,6 +34,10 @@ export interface GrantPolicyInput {
  * `rotate`, and granting or revoking a policy row itself `admin`. Otherwise a
  * principal denied `rotate` on a secret could still rewrite the allowlists
  * that bound where its credential may be injected.
+ * Enumeration is governed too: every listing surface filters through
+ * {@link filterPermitted} with the `list` permission, so a secret whose
+ * `read` is denied cannot be recovered from a list, health summary or project
+ * census — the same metadata row by another name.
  * Semantics are presence-gated restriction —
  * a secret with at least one active policy row requires the caller to hold a
  * matching grant; a secret with none is governed by token scope alone. The
@@ -71,6 +86,52 @@ export class PolicyEngine {
    */
   hasActivePolicies(secretId: string): boolean {
     return this.listPolicies(secretId).length > 0;
+  }
+
+  /**
+   * Batch form of {@link checkPermission} for enumeration (thesis §4.6
+   * `list`): given the secret ids a caller would see under token scope alone,
+   * return those its principals may act on under the same presence-gated
+   * semantics — an id with no active policy row passes, an id with rows
+   * passes only on a matching grant (or `admin`).
+   *
+   * One policy read for the whole page: a per-secret check would issue two
+   * queries per row on every enumeration, and every enumeration surface
+   * (list, health, projects) calls this.
+   */
+  filterPermitted(
+    secretIds: readonly string[],
+    principals: readonly PolicyPrincipal[],
+    permission: Permission,
+  ): Set<string> {
+    const wanted = new Set(secretIds);
+    const gated = new Set<string>();
+    const granted = new Set<string>();
+    const now = Date.now();
+
+    for (const p of this.store.listPolicies()) {
+      if (!wanted.has(p.secret_id)) continue;
+      if (p.expires_at !== null && p.expires_at <= now) continue;
+
+      gated.add(p.secret_id);
+
+      if (
+        !principals.some(
+          (principal) => principal.type === p.principal_type && principal.id === p.principal_id,
+        )
+      ) {
+        continue;
+      }
+      if (p.permissions.includes("admin" as Permission) || p.permissions.includes(permission)) {
+        granted.add(p.secret_id);
+      }
+    }
+
+    const permitted = new Set<string>();
+    for (const id of wanted) {
+      if (!gated.has(id) || granted.has(id)) permitted.add(id);
+    }
+    return permitted;
   }
 
   /**

@@ -31,7 +31,7 @@ export function registerListSecrets(
       scopeGuard.checkAccess(PERMISSION, args.project);
       rateLimiter.checkLimit();
 
-      let secrets = engine.listSecrets(args.project);
+      let secrets = engine.listSecrets(args.project, scopeGuard.caller);
 
       // Filter by token's secret-name scope
       secrets = scopeGuard.filterByScope(secrets);

@@ -31,7 +31,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     }
     const effectiveProject = project ?? token.project;
 
-    let secrets = engine.listSecrets(effectiveProject);
+    let secrets = engine.listSecrets(effectiveProject, callerFromToken(token, "rest"));
 
     // If token is secret-name-scoped, filter results (name patterns, thesis §4.7)
     if (token.secrets?.length) {

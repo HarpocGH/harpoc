@@ -112,7 +112,19 @@ describe("secret routes", () => {
 
     it("passes project query param to engine", async () => {
       await app.request("/api/v1/secrets?project=myproj", { headers: AUTH });
-      expect(engine.listSecrets).toHaveBeenCalledWith("myproj");
+      expect(engine.listSecrets).toHaveBeenCalledWith("myproj", expect.anything());
+    });
+
+    // W2: enumeration is engine-gated by the `list` permission, so the route
+    // must hand over the caller — without it a policy-gated secret's metadata
+    // row stays enumerable to any list-scoped token.
+    it("passes the token-derived caller to listSecrets", async () => {
+      await app.request("/api/v1/secrets", { headers: AUTH });
+      expect(engine.listSecrets).toHaveBeenCalledWith(undefined, {
+        principal_type: "agent",
+        principal_id: "test-agent",
+        interface: "rest",
+      });
     });
 
     it("rejects without auth", async () => {

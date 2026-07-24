@@ -28,6 +28,17 @@ export interface CreateSecretInput {
   expiresAt?: number;
 }
 
+/**
+ * A listed secret together with its internal id. The id stays inside the
+ * engine — per-secret access policies are keyed by it, so enumeration cannot
+ * be policy-filtered without it, while `SecretInfo` (which crosses the REST
+ * and MCP boundaries verbatim) deliberately carries no internal identifier.
+ */
+export interface SecretListEntry {
+  id: string;
+  info: SecretInfo;
+}
+
 /** Info about a secret without its value (safe to return to LLM). */
 export interface SecretInfo {
   handle: string;
@@ -284,21 +295,32 @@ export class SecretManager {
    * List all secrets (metadata only).
    */
   listSecrets(project?: string): SecretInfo[] {
+    return this.listSecretsWithIds(project).map((entry) => entry.info);
+  }
+
+  /**
+   * List all secrets with their internal ids, for callers that must evaluate
+   * per-secret access policies over the result (thesis §4.6 `list`).
+   */
+  listSecretsWithIds(project?: string): SecretListEntry[] {
     const secrets = this.store.listSecrets(project ? { project } : undefined);
 
     return secrets.map((s) => {
       const name = decryptName(this.kek, s.name_encrypted, s.name_iv, s.name_tag, s.id);
       return {
-        handle: formatHandle(name, s.project ?? undefined),
-        name,
-        type: s.type,
-        project: s.project,
-        status: this.effectiveStatus(s),
-        version: s.version,
-        createdAt: s.created_at,
-        updatedAt: s.updated_at,
-        expiresAt: s.expires_at,
-        rotatedAt: s.rotated_at,
+        id: s.id,
+        info: {
+          handle: formatHandle(name, s.project ?? undefined),
+          name,
+          type: s.type,
+          project: s.project,
+          status: this.effectiveStatus(s),
+          version: s.version,
+          createdAt: s.created_at,
+          updatedAt: s.updated_at,
+          expiresAt: s.expires_at,
+          rotatedAt: s.rotated_at,
+        },
       };
     });
   }

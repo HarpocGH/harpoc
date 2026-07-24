@@ -79,6 +79,19 @@ describe("DirectClient", () => {
     expect(engine.listSecrets).toHaveBeenCalledWith("proj");
   });
 
+  // W2: the in-process client is the trusted local path — it must forward no
+  // caller, or enumeration would start filtering for embedders that never
+  // authenticated through a token in the first place.
+  it("listSecrets forwards no caller (trusted local path)", async () => {
+    const engine = createMockEngine();
+    const client = new DirectClient(engine as never);
+
+    await client.listSecrets();
+    const call = engine.listSecrets.mock.calls[0] as unknown[];
+    expect(call.length).toBeLessThanOrEqual(1);
+    expect(call[1]).toBeUndefined();
+  });
+
   it("getSecretInfo delegates to engine", async () => {
     const engine = createMockEngine();
     const client = new DirectClient(engine as never);

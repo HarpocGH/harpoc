@@ -57,7 +57,7 @@ import {
   VAULT_VERSION,
 } from "@harpoc/shared";
 import { PolicyEngine } from "./access/policy-engine.js";
-import type { GrantPolicyInput } from "./access/policy-engine.js";
+import type { GrantPolicyInput, PolicyPrincipal } from "./access/policy-engine.js";
 import { attributionFromCaller, callerInterfaceDetail } from "./audit/attribution.js";
 import { AuditLogger } from "./audit/audit-logger.js";
 import { AuditQuery } from "./audit/audit-query.js";
@@ -519,9 +519,25 @@ export class VaultEngine {
     return value;
   }
 
-  listSecrets(project?: string): SecretInfo[] {
+  /**
+   * List secrets (metadata only). A token-derived caller sees only what its
+   * principals may enumerate (thesis §4.6 `list`): a secret carrying active
+   * policy rows is omitted unless a grant matches, so a read-gated secret's
+   * metadata row cannot be recovered from the listing. Filtering is silent —
+   * enumeration writes no audit row, here as before. An absent caller is the
+   * trusted local path (CLI, in-process SDK) and sees everything.
+   */
+  listSecrets(project?: string, caller?: CallerContext): SecretInfo[] {
     const s = this.assertUnlocked();
-    return s.secretManager.listSecrets(project);
+    if (!caller) return s.secretManager.listSecrets(project);
+
+    const entries = s.secretManager.listSecretsWithIds(project);
+    const permitted = s.policyEngine.filterPermitted(
+      entries.map((entry) => entry.id),
+      this.callerPrincipals(caller),
+      "list",
+    );
+    return entries.filter((entry) => permitted.has(entry.id)).map((entry) => entry.info);
   }
 
   async setSecretValue(handle: string, value: Uint8Array, caller?: CallerContext): Promise<void> {
@@ -1748,12 +1764,21 @@ export class VaultEngine {
    * grant itself one. The first grant on a secret is ungated by construction
    * (no active rows yet ⇒ the presence gate is off); the trusted local path
    * (CLI, in-process SDK) is never checked and is always the recovery.
+   *
+   * `create` is refused: a policy row is keyed by an existing secret, so the
+   * permission to *add* secrets has no per-secret referent and is enforced
+   * where it is decidable — the token's own scope at the interface layer.
    */
   grantPolicy(
     input: Omit<GrantPolicyInput, "createdBy">,
     createdBy: string,
     caller?: CallerContext,
   ): AccessPolicy {
+    if (input.permissions.includes("create" as Permission)) {
+      throw VaultError.invalidInput(
+        "'create' cannot be granted per secret: a policy attaches to an existing secret. Use token scope (harpoc auth token --permissions create) instead",
+      );
+    }
     const s = this.assertUnlocked();
     this.checkResolvedCallerPolicy(
       s,
@@ -2105,6 +2130,24 @@ export class VaultEngine {
   }
 
   /**
+   * The identities a caller acts under: the token subject under its issued
+   * principal type, plus the derived project principal when the token is
+   * project-scoped (a grant to `(project, api)` covers every token issued
+   * `--project api`). Single source for the point check and the enumeration
+   * filter — two derivations of "who is this caller" would eventually let a
+   * listing show what a gate denies, or the reverse.
+   */
+  private callerPrincipals(caller: CallerContext): PolicyPrincipal[] {
+    const principals: PolicyPrincipal[] = [
+      { type: caller.principal_type, id: caller.principal_id },
+    ];
+    if (caller.project !== undefined) {
+      principals.push({ type: PrincipalType.PROJECT, id: caller.project });
+    }
+    return principals;
+  }
+
+  /**
    * Per-secret access-policy enforcement on an already-resolved secret
    * (thesis §4.6). Presence-gated restriction: a secret with at least one
    * active policy row requires the token-derived caller to hold a matching
@@ -2127,20 +2170,9 @@ export class VaultEngine {
     if (!caller) return;
     if (!s.policyEngine.hasActivePolicies(secretId)) return;
 
-    const granted =
-      s.policyEngine.checkPermission(
-        secretId,
-        caller.principal_type,
-        caller.principal_id,
-        permission,
-      ) ||
-      (caller.project !== undefined &&
-        s.policyEngine.checkPermission(
-          secretId,
-          PrincipalType.PROJECT,
-          caller.project,
-          permission,
-        ));
+    const granted = this.callerPrincipals(caller).some((principal) =>
+      s.policyEngine.checkPermission(secretId, principal.type, principal.id, permission),
+    );
 
     if (granted) return;
 

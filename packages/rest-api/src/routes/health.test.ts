@@ -183,7 +183,14 @@ describe("health routes", () => {
 
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
     expect(res.status).toBe(200);
-    expect(engine.listSecrets).toHaveBeenCalledWith("proj-a");
+    // W2: the caller rides along so the engine can drop policy-gated secrets
+    // the token may not enumerate; the project stays the token-scope floor.
+    expect(engine.listSecrets).toHaveBeenCalledWith("proj-a", {
+      principal_type: "agent",
+      principal_id: "test-agent",
+      project: "proj-a",
+      interface: "rest",
+    });
   });
 
   it("GET /api/v1/health/expiring rejects out-of-range and malformed days", async () => {

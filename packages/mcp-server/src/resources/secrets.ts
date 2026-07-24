@@ -18,7 +18,7 @@ export function registerSecretsResource(
     },
     async (uri) => {
       scopeGuard.checkAccess("list");
-      const secrets = scopeGuard.filterByScope(engine.listSecrets());
+      const secrets = scopeGuard.filterByScope(engine.listSecrets(undefined, scopeGuard.caller));
       const result = secrets.map((s) => ({
         handle: s.handle,
         name: s.name,
@@ -41,7 +41,7 @@ export function registerSecretsResource(
     new ResourceTemplate("secret://vault/secrets/{name}", {
       list: async () => {
         scopeGuard.checkAccess("list");
-        const secrets = scopeGuard.filterByScope(engine.listSecrets());
+        const secrets = scopeGuard.filterByScope(engine.listSecrets(undefined, scopeGuard.caller));
         return {
           resources: secrets.map((s) => ({
             uri: `secret://vault/secrets/${s.name}`,
@@ -59,9 +59,15 @@ export function registerSecretsResource(
     async (uri, variables) => {
       const name = variables.name as string;
       scopeGuard.checkAccess("read", undefined, name);
-      const secrets = engine.listSecrets();
-      const secret = secrets.find((s) => s.name === name);
-      if (!secret) {
+
+      // The template variable is a bare name, which does not resolve to a
+      // handle for project-scoped secrets — so the listing (unfiltered, no
+      // caller) is used only to map name → handle. Nothing from it is
+      // returned: the metadata comes from getSecretInfo, which applies the
+      // per-secret `read` gate this resource used to sidestep by answering
+      // straight out of the list.
+      const located = engine.listSecrets().find((s) => s.name === name);
+      if (!located) {
         return {
           contents: [
             {
@@ -72,6 +78,8 @@ export function registerSecretsResource(
           ],
         };
       }
+
+      const secret = await engine.getSecretInfo(located.handle, scopeGuard.caller);
       return {
         contents: [
           {

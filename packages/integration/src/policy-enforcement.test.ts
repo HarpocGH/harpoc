@@ -325,4 +325,120 @@ describe("per-secret access policy enforcement end-to-end", () => {
       expect(names.filter((n) => /policy|allowlist|connection|mcp_server/.test(n))).toEqual([]);
     });
   });
+
+  /**
+   * W2: enumeration was outside the gate — `db-prod` is read-denied to
+   * `other-agent` (403 above), yet its complete metadata row still came back
+   * from every listing surface, which is the payload `get_secret_info`
+   * refuses. Enumeration now follows the `list` permission.
+   */
+  describe("enumeration under the gate (W2)", () => {
+    let w2GatedId: string;
+
+    beforeAll(async () => {
+      await vault.engine.createSecret({
+        name: "w2-gated",
+        type: SecretType.API_KEY,
+        value: new Uint8Array(Buffer.from("w2-value")),
+        expiresAt: Date.now() + 2 * 24 * 60 * 60 * 1000,
+      });
+      await vault.engine.createSecret({
+        name: "w2-open",
+        type: SecretType.API_KEY,
+        value: new Uint8Array(Buffer.from("w2-open-value")),
+      });
+      w2GatedId = await vault.engine.resolveSecretId("secret://w2-gated");
+      vault.engine.grantPolicy(
+        {
+          secretId: w2GatedId,
+          principalType: "agent",
+          principalId: "w2-lister",
+          permissions: ["list"],
+        },
+        "it-admin",
+      );
+    });
+
+    async function restList(token: string): Promise<string[]> {
+      const res = await app.request("/api/v1/secrets", {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { data: Array<{ name: string }> };
+      return body.data.map((s) => s.name);
+    }
+
+    it("REST: the read-denied secret is no longer enumerable, the open one still is", async () => {
+      const other = vault.engine.createToken("other-agent", ["read", "list"]);
+
+      const info = await app.request("/api/v1/secrets/db-prod", {
+        headers: { authorization: `Bearer ${other}` },
+      });
+      expect(info.status).toBe(403);
+
+      const names = await restList(other);
+      expect(names).not.toContain("db-prod");
+      expect(names).not.toContain("w2-gated");
+      expect(names).toContain("w2-open");
+    });
+
+    it("REST: the `list` grant — and only it — restores the row", async () => {
+      const lister = vault.engine.createToken("w2-lister", ["read", "list"]);
+      expect(await restList(lister)).toContain("w2-gated");
+
+      // allowed-agent holds read+use on db-prod but never `list`.
+      const readUse = vault.engine.createToken("allowed-agent", ["read", "list"]);
+      expect(await restList(readUse)).not.toContain("db-prod");
+    });
+
+    it("REST: /health/expiring drops the gated secret for an ungranted principal", async () => {
+      const other = vault.engine.createToken("other-agent", ["list"]);
+      const res = await app.request("/api/v1/health/expiring?days=7", {
+        headers: { authorization: `Bearer ${other}` },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { data: Array<{ name: string }> };
+      expect(body.data.map((s) => s.name)).not.toContain("w2-gated");
+
+      const lister = vault.engine.createToken("w2-lister", ["list"]);
+      const ok = await app.request("/api/v1/health/expiring?days=7", {
+        headers: { authorization: `Bearer ${lister}` },
+      });
+      const okBody = (await ok.json()) as { data: Array<{ name: string }> };
+      expect(okBody.data.map((s) => s.name)).toContain("w2-gated");
+    });
+
+    it("MCP wire: list_secrets and check_secret_health follow the same gate", async () => {
+      const deniedClient = await connectMcp(vault.engine.createToken("other-agent", ["list"]));
+      const listed = textOf(await deniedClient.callTool({ name: "list_secrets", arguments: {} }));
+      expect(listed).not.toContain("w2-gated");
+      expect(listed).not.toContain("db-prod");
+      expect(listed).toContain("w2-open");
+
+      const health = textOf(
+        await deniedClient.callTool({ name: "check_secret_health", arguments: {} }),
+      );
+      expect(health).not.toContain("w2-gated");
+
+      const listerClient = await connectMcp(vault.engine.createToken("w2-lister", ["list"]));
+      const granted = textOf(await listerClient.callTool({ name: "list_secrets", arguments: {} }));
+      expect(granted).toContain("w2-gated");
+    });
+
+    it("the trusted local path still enumerates everything, silently and with a valid chain", async () => {
+      // Minted first: token creation is itself an audited mutation.
+      const other = vault.engine.createToken("other-agent", ["list"]);
+      const before = vault.engine.queryAudit({}).length;
+
+      const local = vault.engine.listSecrets().map((s) => s.name);
+      expect(local).toContain("w2-gated");
+      expect(local).toContain("db-prod");
+
+      await restList(other);
+
+      // Enumeration — permitted or filtered — writes no audit row.
+      expect(vault.engine.queryAudit({}).length).toBe(before);
+      expect(vault.engine.verifyAuditChain().valid).toBe(true);
+    });
+  });
 });

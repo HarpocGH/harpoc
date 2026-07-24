@@ -16,7 +16,7 @@ export function registerHealthResource(
     async (uri) => {
       scopeGuard.checkAccess("list");
 
-      const secrets = scopeGuard.filterByScope(engine.listSecrets());
+      const secrets = scopeGuard.filterByScope(engine.listSecrets(undefined, scopeGuard.caller));
       const byStatus: Record<string, number> = {};
       const expiringSoon: Array<{ handle: string; expires_at: number }> = [];
       const now = Date.now();

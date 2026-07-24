@@ -10,34 +10,43 @@ import { registerHealthResource } from "./health.js";
 import { registerAuditResource } from "./audit.js";
 import { registerProjectsResource } from "./projects.js";
 
+const LISTED_SECRETS: SecretInfo[] = [
+  {
+    handle: "secret://my-key",
+    name: "my-key",
+    type: "api_key",
+    project: null,
+    status: "active",
+    version: 1,
+    createdAt: 1000,
+    updatedAt: 2000,
+    expiresAt: null,
+    rotatedAt: null,
+  },
+  {
+    handle: "secret://prod/db-pass",
+    name: "db-pass",
+    type: "api_key",
+    project: "prod",
+    status: "active",
+    version: 2,
+    createdAt: 1000,
+    updatedAt: 3000,
+    expiresAt: null,
+    rotatedAt: 2000,
+  },
+];
+
 function mockEngine(): VaultEngine {
   return {
-    listSecrets: vi.fn().mockReturnValue([
-      {
-        handle: "secret://my-key",
-        name: "my-key",
-        type: "api_key",
-        project: null,
-        status: "active",
-        version: 1,
-        createdAt: 1000,
-        updatedAt: 2000,
-        expiresAt: null,
-        rotatedAt: null,
-      },
-      {
-        handle: "secret://prod/db-pass",
-        name: "db-pass",
-        type: "api_key",
-        project: "prod",
-        status: "active",
-        version: 2,
-        createdAt: 1000,
-        updatedAt: 3000,
-        expiresAt: null,
-        rotatedAt: 2000,
-      },
-    ] satisfies SecretInfo[]),
+    // W2/D5: the by-name resource reads through getSecretInfo (per-secret
+    // `read` gate) instead of answering out of the listing.
+    getSecretInfo: vi.fn(async (handle: string) => {
+      const found = LISTED_SECRETS.find((s) => s.handle === handle);
+      if (!found) throw new Error(`unexpected handle: ${handle}`);
+      return found;
+    }),
+    listSecrets: vi.fn().mockReturnValue(LISTED_SECRETS),
     getState: vi.fn().mockReturnValue("unlocked"),
     queryAudit: vi.fn().mockReturnValue([
       {
