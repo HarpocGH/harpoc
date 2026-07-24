@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 import type { VaultApiToken, AccessPolicy } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 import { authMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { createPolicyRoutes } from "./policies.js";
@@ -145,7 +146,10 @@ describe("policy routes", () => {
         headers: AUTH,
       });
       expect(res.status).toBe(200);
-      expect(engine.revokePolicy).toHaveBeenCalledWith("policy-1");
+      expect(engine.revokePolicy).toHaveBeenCalledWith(
+        "policy-1",
+        expect.objectContaining({ principal_id: "admin-agent" }),
+      );
     });
 
     it("returns 404 for unknown policy", async () => {
@@ -185,6 +189,48 @@ describe("policy routes", () => {
       });
       expect(res.status).toBe(403);
       expect(engine.revokePolicy).not.toHaveBeenCalled();
+    });
+  });
+
+  // W1: the policy surface itself is engine-gated (read for the listing,
+  // admin for grant/revoke) — the routes must therefore hand over the caller.
+  describe("engine-level policy enforcement wiring", () => {
+    const EXPECTED_CALLER = {
+      principal_type: "agent",
+      principal_id: "admin-agent",
+      interface: "rest",
+    };
+
+    it("GET passes the token-derived caller to listPolicies", async () => {
+      await app.request("/api/v1/secrets/test-key/policies", { headers: AUTH });
+      expect(engine.listPolicies).toHaveBeenCalledWith("secret-uuid-1", EXPECTED_CALLER);
+    });
+
+    it("POST passes the caller to grantPolicy", async () => {
+      await app.request("/api/v1/secrets/test-key/policies", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          principal_type: "agent",
+          principal_id: "agent-1",
+          permissions: ["read"],
+        }),
+      });
+      expect(engine.grantPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ secretId: "secret-uuid-1" }),
+        "admin-agent",
+        EXPECTED_CALLER,
+      );
+    });
+
+    it("an engine ACCESS_DENIED maps to 403", async () => {
+      engine.listPolicies.mockImplementation(() => {
+        throw VaultError.accessDenied("Principal lacks 'read' permission on this secret");
+      });
+      const res = await app.request("/api/v1/secrets/test-key/policies", { headers: AUTH });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe(ErrorCode.ACCESS_DENIED);
     });
   });
 });

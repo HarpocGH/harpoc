@@ -208,4 +208,121 @@ describe("per-secret access policy enforcement end-to-end", () => {
     });
     expect(open.status).toBe(200);
   });
+
+  /**
+   * W1: secret-scoped *configuration* was outside the gate — `allowed-agent`
+   * holds read+use on db-prod (never rotate), so V1 already denies its rotate;
+   * before this fix the same principal could still rewrite the allowlist that
+   * bounds where the credential may be sent, and read the policy rows.
+   */
+  describe("secret-scoped configuration under the gate (W1)", () => {
+    it("REST: a policy-denied-rotate principal cannot rewrite the allowlist", async () => {
+      await vault.engine.setInjectionPolicy("secret://db-prod", {
+        url_allowlist: ["https://api.example.com/*"],
+      });
+
+      // Token scope says rotate; the secret's policy row does not.
+      const token = vault.engine.createToken("allowed-agent", ["read", "rotate", "list"]);
+      const res = await app.request("/api/v1/secrets/db-prod/injection-policy", {
+        method: "PUT",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          url_allowlist: ["https://evil.example/*"],
+          response_mode: "full",
+        }),
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
+
+      // Read back through the trusted path: nothing was written.
+      const stored = await vault.engine.getInjectionPolicy("secret://db-prod");
+      expect(stored.url_allowlist).toEqual(["https://api.example.com/*"]);
+      expect(stored.response_mode).toBe("filtered");
+
+      const denial = vault.engine
+        .queryAudit({ eventType: AuditEventType.POLICY_GRANT, secretId: dbProdId })
+        .find((r) => !r.success && r.principal_id === "allowed-agent");
+      expect(denial?.detail?.policy).toBe("injection");
+      expect(denial?.detail?.required_permission).toBe("rotate");
+      expect(denial?.detail?.interface).toBe("rest");
+      expect(vault.engine.verifyAuditChain().valid).toBe(true);
+    });
+
+    it("REST: config and policy reads follow the read grant", async () => {
+      const granted = vault.engine.createToken("allowed-agent", ["read", "list"]);
+      const other = vault.engine.createToken("other-agent", ["read", "list"]);
+
+      for (const path of ["injection-policy", "mcp-server", "connection-config", "policies"]) {
+        const ok = await app.request(`/api/v1/secrets/db-prod/${path}`, {
+          headers: { authorization: `Bearer ${granted}` },
+        });
+        expect(ok.status, `granted ${path}`).toBe(200);
+
+        const denied = await app.request(`/api/v1/secrets/db-prod/${path}`, {
+          headers: { authorization: `Bearer ${other}` },
+        });
+        expect(denied.status, `denied ${path}`).toBe(403);
+      }
+    });
+
+    it("REST: a rotate grant opens the config mutation for that principal only", async () => {
+      await vault.engine.createSecret({
+        name: "cfg-gated",
+        type: SecretType.API_KEY,
+        value: new Uint8Array(Buffer.from("cfg-value")),
+      });
+      const secretId = await vault.engine.resolveSecretId("secret://cfg-gated");
+      vault.engine.grantPolicy(
+        { secretId, principalType: "agent", principalId: "cfg-admin", permissions: ["rotate"] },
+        "it-admin",
+      );
+
+      const admin = vault.engine.createToken("cfg-admin", ["rotate", "list"]);
+      const ok = await app.request("/api/v1/secrets/cfg-gated/connection-config", {
+        method: "PUT",
+        headers: { authorization: `Bearer ${admin}`, "content-type": "application/json" },
+        body: JSON.stringify({ database: { tls_mode: "require" } }),
+      });
+      expect(ok.status).toBe(200);
+      expect(await vault.engine.getConnectionConfig("secret://cfg-gated")).toMatchObject({
+        database: { tls_mode: "require" },
+      });
+
+      const outsider = vault.engine.createToken("other-agent", ["rotate", "list"]);
+      const denied = await app.request("/api/v1/secrets/cfg-gated/connection-config", {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${outsider}` },
+      });
+      expect(denied.status).toBe(403);
+      expect(await vault.engine.getConnectionConfig("secret://cfg-gated")).toBeDefined();
+    });
+
+    it("REST: policy administration on a gated secret requires an admin grant", async () => {
+      const token = vault.engine.createToken("other-agent", ["admin", "list"]);
+      const res = await app.request("/api/v1/secrets/db-prod/policies", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          principal_type: "agent",
+          principal_id: "other-agent",
+          permissions: ["use"],
+        }),
+      });
+      expect(res.status).toBe(403);
+      expect(
+        vault.engine.listPolicies(dbProdId).some((p) => p.principal_id === "other-agent"),
+      ).toBe(false);
+    });
+
+    it("MCP wire: no configuration tool exists on the agent surface", async () => {
+      const client = await connectMcp(vault.engine.createToken("allowed-agent", ["admin", "list"]));
+      const names = (await client.listTools()).tools.map((t) => t.name);
+
+      // Configuration stays on the trusted admin path (CLI/REST) — the agent
+      // interface never gained a surface for it, so the engine gate above is
+      // the whole story for MCP.
+      expect(names).not.toContain("set_injection_policy");
+      expect(names.filter((n) => /policy|allowlist|connection|mcp_server/.test(n))).toEqual([]);
+    });
+  });
 });

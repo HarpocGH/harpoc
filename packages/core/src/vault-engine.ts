@@ -886,9 +886,18 @@ export class VaultEngine {
     handle: string,
     policy: InjectionPolicyInput,
     options?: SetInjectionPolicyOptions,
+    caller?: CallerContext,
   ): Promise<void> {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
+    // Configuration of a gated secret is itself gated (W1): the allowlists
+    // bound where the credential may go, so loosening them must require the
+    // same grant as replacing the value. Before the stored policy is
+    // decrypted, before the interpreter gate, before any registry terminate.
+    this.checkResolvedCallerPolicy(s, secret.id, caller, "rotate", AuditEventType.POLICY_GRANT, {
+      policy: "injection",
+      handle,
+    });
 
     const stored = new Set(this.loadInjectionPolicy(s, secret.id).command_allowlist);
     const addedInterpreters = findKnownInterpreters(
@@ -898,7 +907,13 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_INTERPRETER_REFUSED,
         secretId: secret.id,
-        detail: { policy: "injection", interpreters: addedInterpreters },
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
+        detail: {
+          policy: "injection",
+          interpreters: addedInterpreters,
+          ...callerInterfaceDetail(caller),
+        },
         sessionId: this.sessionId ?? undefined,
       });
       throw VaultError.interpreterNotAcknowledged(addedInterpreters);
@@ -934,6 +949,8 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_GRANT,
         secretId: secret.id,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
         detail: {
           policy: "injection",
           url_count: policy.url_allowlist?.length ?? 0,
@@ -943,6 +960,7 @@ export class VaultEngine {
           response_mode: policy.response_mode ?? "filtered",
           response_header_count: policy.response_header_allowlist?.length ?? 0,
           network_isolation: policy.network_isolation ?? false,
+          ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
       });
@@ -951,7 +969,13 @@ export class VaultEngine {
         s.auditLogger.log({
           eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED,
           secretId: secret.id,
-          detail: { policy: "injection", interpreters: addedInterpreters },
+          principalType: caller?.principal_type,
+          principalId: caller?.principal_id,
+          detail: {
+            policy: "injection",
+            interpreters: addedInterpreters,
+            ...callerInterfaceDetail(caller),
+          },
           sessionId: this.sessionId ?? undefined,
         });
       }
@@ -969,9 +993,13 @@ export class VaultEngine {
   }
 
   /** Read a secret's injection policy (empty allowlists when unset). */
-  async getInjectionPolicy(handle: string): Promise<InjectionPolicy> {
+  async getInjectionPolicy(handle: string, caller?: CallerContext): Promise<InjectionPolicy> {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
+    this.checkResolvedCallerPolicy(s, secret.id, caller, "read", AuditEventType.SECRET_READ, {
+      handle,
+      config: "injection",
+    });
     return this.loadInjectionPolicy(s, secret.id);
   }
 
@@ -995,9 +1023,19 @@ export class VaultEngine {
    * is encrypted under the KEK. A live downstream connection for this secret
    * is terminated so the next invocation connects with the new config.
    */
-  async setMcpServerConfig(handle: string, config: McpServerConfig): Promise<void> {
+  async setMcpServerConfig(
+    handle: string,
+    config: McpServerConfig,
+    caller?: CallerContext,
+  ): Promise<void> {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
+    // Before the terminate below: a denied caller must not be able to kill
+    // another principal's live downstream child by calling this repeatedly.
+    this.checkResolvedCallerPolicy(s, secret.id, caller, "rotate", AuditEventType.POLICY_GRANT, {
+      policy: "mcp_server",
+      handle,
+    });
 
     const json = JSON.stringify(config);
     const enc = encrypt(
@@ -1019,10 +1057,13 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_GRANT,
         secretId: secret.id,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
         detail: {
           policy: "mcp_server",
           server_name: config.server_name,
           transport: config.transport,
+          ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
       });
@@ -1032,16 +1073,28 @@ export class VaultEngine {
   }
 
   /** Read a secret's downstream MCP server config (undefined when unset). */
-  async getMcpServerConfig(handle: string): Promise<McpServerConfig | undefined> {
+  async getMcpServerConfig(
+    handle: string,
+    caller?: CallerContext,
+  ): Promise<McpServerConfig | undefined> {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
+    this.checkResolvedCallerPolicy(s, secret.id, caller, "read", AuditEventType.SECRET_READ, {
+      handle,
+      config: "mcp_server",
+    });
     return this.loadMcpServerConfig(s, secret.id);
   }
 
   /** Remove a secret's downstream MCP server config, terminating any live connection. */
-  async deleteMcpServerConfig(handle: string): Promise<boolean> {
+  async deleteMcpServerConfig(handle: string, caller?: CallerContext): Promise<boolean> {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
+    // Before the terminate: a denied caller must not reach the registry.
+    this.checkResolvedCallerPolicy(s, secret.id, caller, "rotate", AuditEventType.POLICY_REVOKE, {
+      policy: "mcp_server",
+      handle,
+    });
     await s.mcpRegistry.terminate(secret.id, "config_removed");
     return s.store.transaction(() => {
       const deleted = s.store.deleteMcpServer(secret.id);
@@ -1049,7 +1102,9 @@ export class VaultEngine {
         s.auditLogger.log({
           eventType: AuditEventType.POLICY_REVOKE,
           secretId: secret.id,
-          detail: { policy: "mcp_server" },
+          principalType: caller?.principal_type,
+          principalId: caller?.principal_id,
+          detail: { policy: "mcp_server", ...callerInterfaceDetail(caller) },
           sessionId: this.sessionId ?? undefined,
         });
       }
@@ -1080,9 +1135,19 @@ export class VaultEngine {
    * policy / SSH pinned host keys). Trusted administrative operation (CLI/REST
    * only — never an MCP tool); encrypted under the KEK.
    */
-  async setConnectionConfig(handle: string, config: ConnectionConfig): Promise<void> {
+  async setConnectionConfig(
+    handle: string,
+    config: ConnectionConfig,
+    caller?: CallerContext,
+  ): Promise<void> {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
+    // Endpoint-authentication pins (DB TLS/CA, SSH host keys) bound the
+    // allowlist decision — dropping them is a rotate-class change.
+    this.checkResolvedCallerPolicy(s, secret.id, caller, "rotate", AuditEventType.POLICY_GRANT, {
+      policy: "connection",
+      handle,
+    });
 
     const json = JSON.stringify(config);
     const enc = encrypt(
@@ -1104,12 +1169,15 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_GRANT,
         secretId: secret.id,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
         detail: {
           policy: "connection",
           has_database: config.database !== undefined,
           has_ssh: config.ssh !== undefined,
           database_tls: config.database?.tls_mode,
           known_hosts_count: config.ssh?.known_hosts.length ?? 0,
+          ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
       });
@@ -1117,23 +1185,36 @@ export class VaultEngine {
   }
 
   /** Read a secret's endpoint-authentication config (undefined when unset). */
-  async getConnectionConfig(handle: string): Promise<ConnectionConfig | undefined> {
+  async getConnectionConfig(
+    handle: string,
+    caller?: CallerContext,
+  ): Promise<ConnectionConfig | undefined> {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
+    this.checkResolvedCallerPolicy(s, secret.id, caller, "read", AuditEventType.SECRET_READ, {
+      handle,
+      config: "connection",
+    });
     return this.loadConnectionConfig(s, secret.id);
   }
 
   /** Remove a secret's endpoint-authentication config. */
-  async deleteConnectionConfig(handle: string): Promise<boolean> {
+  async deleteConnectionConfig(handle: string, caller?: CallerContext): Promise<boolean> {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
+    this.checkResolvedCallerPolicy(s, secret.id, caller, "rotate", AuditEventType.POLICY_REVOKE, {
+      policy: "connection",
+      handle,
+    });
     return s.store.transaction(() => {
       const deleted = s.store.deleteConnectionConfig(secret.id);
       if (deleted) {
         s.auditLogger.log({
           eventType: AuditEventType.POLICY_REVOKE,
           secretId: secret.id,
-          detail: { policy: "connection" },
+          principalType: caller?.principal_type,
+          principalId: caller?.principal_id,
+          detail: { policy: "connection", ...callerInterfaceDetail(caller) },
           sessionId: this.sessionId ?? undefined,
         });
       }
@@ -1660,17 +1741,40 @@ export class VaultEngine {
   // Policies
   // ---------------------------------------------------------------------------
 
-  grantPolicy(input: Omit<GrantPolicyInput, "createdBy">, createdBy: string): AccessPolicy {
+  /**
+   * Grant a per-secret access policy. Administrative operation: on a secret
+   * that already carries active policy rows, a token-derived caller needs an
+   * `admin` grant — otherwise a principal denied every other permission could
+   * grant itself one. The first grant on a secret is ungated by construction
+   * (no active rows yet ⇒ the presence gate is off); the trusted local path
+   * (CLI, in-process SDK) is never checked and is always the recovery.
+   */
+  grantPolicy(
+    input: Omit<GrantPolicyInput, "createdBy">,
+    createdBy: string,
+    caller?: CallerContext,
+  ): AccessPolicy {
     const s = this.assertUnlocked();
+    this.checkResolvedCallerPolicy(
+      s,
+      input.secretId,
+      caller,
+      "admin",
+      AuditEventType.POLICY_GRANT,
+      { policy: "access", principal: `${input.principalType}:${input.principalId}` },
+    );
     return s.store.transaction(() => {
       const policy = s.policyEngine.grantPolicy({ ...input, createdBy });
 
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_GRANT,
         secretId: input.secretId,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
         detail: {
           policy_id: policy.id,
           principal: `${input.principalType}:${input.principalId}`,
+          ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
       });
@@ -1679,21 +1783,48 @@ export class VaultEngine {
     });
   }
 
-  revokePolicy(policyId: string): void {
+  revokePolicy(policyId: string, caller?: CallerContext): void {
     const s = this.assertUnlocked();
+    // Resolved up front for the caller check; the lookup also lets the audit
+    // row name the secret the revoked grant belonged to.
+    const existing = s.store.getPolicy(policyId);
+    if (!existing) {
+      throw new VaultError(ErrorCode.POLICY_NOT_FOUND, `Policy not found: ${policyId}`);
+    }
+    this.checkResolvedCallerPolicy(
+      s,
+      existing.secret_id,
+      caller,
+      "admin",
+      AuditEventType.POLICY_REVOKE,
+      { policy: "access", policy_id: policyId },
+    );
     s.store.transaction(() => {
       s.policyEngine.revokePolicy(policyId);
 
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_REVOKE,
-        detail: { policy_id: policyId },
+        secretId: existing.secret_id,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
+        detail: { policy_id: policyId, ...callerInterfaceDetail(caller) },
         sessionId: this.sessionId ?? undefined,
       });
     });
   }
 
-  listPolicies(secretId?: string): AccessPolicy[] {
+  listPolicies(secretId?: string, caller?: CallerContext): AccessPolicy[] {
     const s = this.assertUnlocked();
+    // A token-derived caller must name the secret it is asking about: the
+    // vault-wide listing cannot be checked against a single secret's policies.
+    if (caller && !secretId) {
+      throw VaultError.invalidInput("A secret id is required to list access policies");
+    }
+    if (secretId) {
+      this.checkResolvedCallerPolicy(s, secretId, caller, "read", AuditEventType.SECRET_READ, {
+        config: "access_policies",
+      });
+    }
     return s.policyEngine.listPolicies(secretId);
   }
 

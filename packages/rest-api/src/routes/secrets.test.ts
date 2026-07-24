@@ -684,7 +684,10 @@ describe("secret routes", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.data.deleted).toBe(true);
-      expect(engine.deleteMcpServerConfig).toHaveBeenCalledWith("secret://test-key");
+      expect(engine.deleteMcpServerConfig).toHaveBeenCalledWith(
+        "secret://test-key",
+        expect.objectContaining({ principal_id: "test-agent" }),
+      );
     });
   });
 
@@ -730,7 +733,10 @@ describe("secret routes", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.data.deleted).toBe(true);
-      expect(engine.deleteConnectionConfig).toHaveBeenCalledWith("secret://test-key");
+      expect(engine.deleteConnectionConfig).toHaveBeenCalledWith(
+        "secret://test-key",
+        expect.objectContaining({ principal_id: "test-agent" }),
+      );
     });
   });
 
@@ -980,6 +986,7 @@ describe("engine-level policy enforcement wiring (thesis §4.6)", () => {
     principal_id: "test-agent",
     interface: "rest",
   };
+  const JSON_HEADERS = { ...AUTH, "content-type": "application/json" };
 
   it("GET /:handle passes the token-derived caller to getSecretInfo", async () => {
     await app.request("/api/v1/secrets/test-key", { headers: AUTH });
@@ -1046,6 +1053,123 @@ describe("engine-level policy enforcement wiring (thesis §4.6)", () => {
       VaultError.accessDenied("Principal lacks 'read' permission on this secret"),
     );
     const res = await app.request("/api/v1/secrets/test-key/value", { headers: AUTH });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe(ErrorCode.ACCESS_DENIED);
+  });
+
+  // W1: the secret-scoped configuration routes sat outside the policy layer —
+  // a policy-denied-rotate principal could still rewrite the allowlists.
+  const configCallerCases: {
+    title: string;
+    engineFn: keyof typeof engine;
+    request: () => Promise<Response>;
+    args: unknown[];
+  }[] = [
+    {
+      title: "GET /:handle/injection-policy",
+      engineFn: "getInjectionPolicy",
+      request: () => app.request("/api/v1/secrets/test-key/injection-policy", { headers: AUTH }),
+      args: ["secret://test-key", EXPECTED_CALLER],
+    },
+    {
+      title: "PUT /:handle/injection-policy",
+      engineFn: "setInjectionPolicy",
+      request: () =>
+        app.request("/api/v1/secrets/test-key/injection-policy", {
+          method: "PUT",
+          headers: JSON_HEADERS,
+          body: JSON.stringify({ url_allowlist: ["https://api.example.com/*"] }),
+        }),
+      args: [
+        "secret://test-key",
+        expect.objectContaining({ url_allowlist: ["https://api.example.com/*"] }),
+        expect.anything(),
+        EXPECTED_CALLER,
+      ],
+    },
+    {
+      title: "GET /:handle/mcp-server",
+      engineFn: "getMcpServerConfig",
+      request: () => app.request("/api/v1/secrets/test-key/mcp-server", { headers: AUTH }),
+      args: ["secret://test-key", EXPECTED_CALLER],
+    },
+    {
+      title: "PUT /:handle/mcp-server",
+      engineFn: "setMcpServerConfig",
+      request: () =>
+        app.request("/api/v1/secrets/test-key/mcp-server", {
+          method: "PUT",
+          headers: JSON_HEADERS,
+          body: JSON.stringify({
+            server_name: "docs",
+            transport: "http",
+            url: "https://mcp.example.com/mcp",
+            auth: { type: "bearer" },
+          }),
+        }),
+      args: [
+        "secret://test-key",
+        expect.objectContaining({ server_name: "docs" }),
+        EXPECTED_CALLER,
+      ],
+    },
+    {
+      title: "DELETE /:handle/mcp-server",
+      engineFn: "deleteMcpServerConfig",
+      request: () =>
+        app.request("/api/v1/secrets/test-key/mcp-server", { method: "DELETE", headers: AUTH }),
+      args: ["secret://test-key", EXPECTED_CALLER],
+    },
+    {
+      title: "GET /:handle/connection-config",
+      engineFn: "getConnectionConfig",
+      request: () => app.request("/api/v1/secrets/test-key/connection-config", { headers: AUTH }),
+      args: ["secret://test-key", EXPECTED_CALLER],
+    },
+    {
+      title: "PUT /:handle/connection-config",
+      engineFn: "setConnectionConfig",
+      request: () =>
+        app.request("/api/v1/secrets/test-key/connection-config", {
+          method: "PUT",
+          headers: JSON_HEADERS,
+          body: JSON.stringify({ database: { tls_mode: "require" } }),
+        }),
+      args: [
+        "secret://test-key",
+        expect.objectContaining({ database: expect.anything() }),
+        EXPECTED_CALLER,
+      ],
+    },
+    {
+      title: "DELETE /:handle/connection-config",
+      engineFn: "deleteConnectionConfig",
+      request: () =>
+        app.request("/api/v1/secrets/test-key/connection-config", {
+          method: "DELETE",
+          headers: AUTH,
+        }),
+      args: ["secret://test-key", EXPECTED_CALLER],
+    },
+  ];
+
+  for (const tc of configCallerCases) {
+    it(`${tc.title} passes the token-derived caller to ${String(tc.engineFn)}`, async () => {
+      await tc.request();
+      expect(engine[tc.engineFn]).toHaveBeenCalledWith(...tc.args);
+    });
+  }
+
+  it("a config-route ACCESS_DENIED maps to 403", async () => {
+    engine.setInjectionPolicy.mockRejectedValue(
+      VaultError.accessDenied("Principal lacks 'rotate' permission on this secret"),
+    );
+    const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+      method: "PUT",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ url_allowlist: [] }),
+    });
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe(ErrorCode.ACCESS_DENIED);

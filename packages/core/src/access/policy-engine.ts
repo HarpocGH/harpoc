@@ -17,7 +17,13 @@ export interface GrantPolicyInput {
  *
  * Policies are enforced at the engine level (thesis §4.6): every credential
  * operation arriving with a token-derived caller checks the secret's stored
- * policy entries before proceeding. Semantics are presence-gated restriction —
+ * policy entries before proceeding, and so does every secret-scoped
+ * configuration operation — reading a secret's injection policy, MCP-server
+ * config, connection config or policy rows requires `read`, changing them
+ * `rotate`, and granting or revoking a policy row itself `admin`. Otherwise a
+ * principal denied `rotate` on a secret could still rewrite the allowlists
+ * that bound where its credential may be injected.
+ * Semantics are presence-gated restriction —
  * a secret with at least one active policy row requires the caller to hold a
  * matching grant; a secret with none is governed by token scope alone. The
  * trusted local path (CLI, in-process SDK — master-password/session

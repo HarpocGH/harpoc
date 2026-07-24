@@ -174,7 +174,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const policy = await engine.getInjectionPolicy(handle);
+    const policy = await engine.getInjectionPolicy(handle, callerFromToken(token, "rest"));
     return c.json({ data: policy });
   });
 
@@ -193,7 +193,12 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const handle = buildHandle(c.req.param("handle"));
     const { acknowledge_interpreters, ...policy } = parsed.data;
-    await engine.setInjectionPolicy(handle, policy, { acknowledge_interpreters });
+    await engine.setInjectionPolicy(
+      handle,
+      policy,
+      { acknowledge_interpreters },
+      callerFromToken(token, "rest"),
+    );
     return c.json({ data: { updated: true } });
   });
 
@@ -205,7 +210,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const config = await engine.getMcpServerConfig(handle);
+    const config = await engine.getMcpServerConfig(handle, callerFromToken(token, "rest"));
     return c.json({ data: config ?? null });
   });
 
@@ -223,7 +228,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     }
 
     const handle = buildHandle(c.req.param("handle"));
-    await engine.setMcpServerConfig(handle, parsed.data);
+    await engine.setMcpServerConfig(handle, parsed.data, callerFromToken(token, "rest"));
     return c.json({ data: { updated: true } });
   });
 
@@ -235,7 +240,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const deleted = await engine.deleteMcpServerConfig(handle);
+    const deleted = await engine.deleteMcpServerConfig(handle, callerFromToken(token, "rest"));
     return c.json({ data: { deleted } });
   });
 
@@ -247,7 +252,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const config = await engine.getConnectionConfig(handle);
+    const config = await engine.getConnectionConfig(handle, callerFromToken(token, "rest"));
     return c.json({ data: config ?? null });
   });
 
@@ -265,7 +270,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     }
 
     const handle = buildHandle(c.req.param("handle"));
-    await engine.setConnectionConfig(handle, parsed.data);
+    await engine.setConnectionConfig(handle, parsed.data, callerFromToken(token, "rest"));
     return c.json({ data: { updated: true } });
   });
 
@@ -277,7 +282,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const deleted = await engine.deleteConnectionConfig(handle);
+    const deleted = await engine.deleteConnectionConfig(handle, callerFromToken(token, "rest"));
     return c.json({ data: { deleted } });
   });
 

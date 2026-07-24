@@ -229,6 +229,26 @@ describe("DirectClient", () => {
     expect(deleted).toBe(true);
   });
 
+  it("passes no caller on the config and policy operations (trusted local path)", async () => {
+    const engine = createMockEngine();
+    const client = new DirectClient(engine as never);
+
+    // In-process SDK callers authenticate by master password / session file
+    // and are exempt from per-secret policies (thesis §4.7). A caller argument
+    // appearing here would silently subject them to the engine's gate.
+    await client.getInjectionPolicy("secret://key");
+    await client.getMcpServerConfig("secret://key");
+    await client.getConnectionConfig("secret://key");
+    await client.deleteConnectionConfig("secret://key");
+    await client.listPolicies("secret://key");
+
+    expect(engine.getInjectionPolicy).toHaveBeenCalledWith("secret://key");
+    expect(engine.getMcpServerConfig).toHaveBeenCalledWith("secret://key");
+    expect(engine.getConnectionConfig).toHaveBeenCalledWith("secret://key");
+    expect(engine.deleteConnectionConfig).toHaveBeenCalledWith("secret://key");
+    expect(engine.listPolicies).toHaveBeenCalledWith("uuid-1");
+  });
+
   it("grantPolicy resolves secret ID and delegates", async () => {
     const engine = createMockEngine();
     const client = new DirectClient(engine as never);
