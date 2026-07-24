@@ -16,6 +16,7 @@ function mockEngine(overrides: Record<string, unknown> = {}): VaultEngine {
     resolveSecretId: vi.fn().mockResolvedValue("uuid-123"),
     getState: vi.fn().mockReturnValue("unlocked"),
     queryAudit: vi.fn().mockReturnValue([]),
+    auditServerStart: vi.fn(),
     verifyToken: vi.fn().mockReturnValue({
       sub: "agent",
       vault_id: "v",
@@ -58,6 +59,59 @@ describe("createMcpServer", () => {
       const written = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
       expect(written).toContain("WARNING");
       expect(written).toContain("unrestricted");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("audits the tokenless waiver exactly once (W6)", () => {
+    const engine = mockEngine();
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      createMcpServer({ engine, allowTokenless: true, enableTtyPrompt: true });
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    expect(engine.auditServerStart).toHaveBeenCalledTimes(1);
+    expect(engine.auditServerStart).toHaveBeenCalledWith({
+      transport: "stdio",
+      tokenless: true,
+      ttyPrompt: true,
+    });
+  });
+
+  it("writes no server.start row on the token path (D2 pin)", () => {
+    const engine = mockEngine();
+    createMcpServer({ engine, launchToken: "valid.jwt.token" });
+
+    expect(engine.auditServerStart).not.toHaveBeenCalled();
+  });
+
+  it("writes no server.start row when the token gate refuses", () => {
+    const engine = mockEngine();
+    expect(() => createMcpServer({ engine })).toThrow(
+      expect.objectContaining({ code: ErrorCode.TOKEN_REQUIRED }),
+    );
+
+    expect(engine.auditServerStart).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the waiver cannot be recorded — no warning, no server (D4)", () => {
+    const engine = mockEngine({
+      auditServerStart: vi.fn().mockImplementation(() => {
+        throw new Error("audit log unwritable");
+      }),
+    });
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      expect(() => createMcpServer({ engine, allowTokenless: true })).toThrow(
+        "audit log unwritable",
+      );
+      // Ordering is load-bearing: the row precedes the warning, so a failed
+      // write leaves no trace of an unrestricted server having been offered.
+      const written = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(written).not.toContain("WARNING");
     } finally {
       stderrSpy.mockRestore();
     }

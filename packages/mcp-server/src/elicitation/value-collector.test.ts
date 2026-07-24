@@ -222,6 +222,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       queryAudit: vi.fn().mockReturnValue([]),
       listSecrets: vi.fn().mockReturnValue([]),
       resolveSecretId: vi.fn().mockResolvedValue("uuid-123"),
+      auditServerStart: vi.fn(),
       ...overrides,
     } as unknown as VaultEngine;
   }

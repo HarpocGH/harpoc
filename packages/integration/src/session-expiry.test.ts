@@ -88,10 +88,19 @@ describe("Session Expiry", () => {
     }
   });
 
-  // ---- Test 2: MCP fails when session expired before load -----------------
-  it("MCP tool calls fail when session is already expired", async () => {
+  // ---- Test 2: MCP refuses to be built on an already-expired session ------
+  // Both construction paths now touch the sealed engine: the token path
+  // verifies the launch token, the tokenless path writes its server.start
+  // waiver row (W6). So a server can no longer be built at all against a
+  // session that expired before load — it fails earlier than the tool call.
+  // The "tool calls fail once the session expires" property is covered by
+  // test 1, which builds while unlocked and expires mid-flight (the realistic
+  // long-running-server case). Neither shipped stdio entry point can reach
+  // here: both refuse to start on a locked vault.
+  it("MCP server construction is refused when the session is already expired", async () => {
     const engine1 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
     await engine1.unlock(PASSWORD);
+    const token = engine1.createToken("test-agent", ["admin"]);
     await engine1.destroy();
     tamperSessionExpiry(vault.sessionPath, -1); // already expired
 
@@ -100,9 +109,15 @@ describe("Session Expiry", () => {
     expect(loaded).toBe(false);
     expect(engine2.getState()).toBe(VaultState.SEALED);
 
-    const mcpServer: McpServer = createMcpServer({ engine: engine2, allowTokenless: true });
-    const result = await callTool(mcpServer, "list_secrets", {});
-    expect(result.isError).toBe(true);
+    expect(() => createMcpServer({ engine: engine2, allowTokenless: true })).toThrow(
+      "Vault is locked",
+    );
+    expect(() => createMcpServer({ engine: engine2, launchToken: token })).toThrow(
+      "Vault is locked",
+    );
+    // (That a refused construction writes no waiver row is pinned at the unit
+    // level; this vault is shared across the file's tests, so a count here
+    // would measure test 1's legitimate row.)
     await engine2.destroy();
   });
 

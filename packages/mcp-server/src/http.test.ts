@@ -34,6 +34,7 @@ function mockEngine(overrides: Record<string, unknown> = {}): VaultEngine {
     getState: vi.fn().mockReturnValue("unlocked"),
     queryAudit: vi.fn().mockReturnValue([]),
     verifyToken: vi.fn().mockReturnValue(tokenPayload()),
+    auditServerStart: vi.fn(),
     ...overrides,
   } as unknown as VaultEngine;
 }
@@ -151,6 +152,19 @@ describe("startMcpHttpServer", () => {
     };
     expect(result.content).toBeDefined();
     expect(engine.listSecrets).toHaveBeenCalled();
+  });
+
+  it("writes no server.start row per HTTP session (W6/D2 pin)", async () => {
+    const engine = mockEngine();
+    const { port } = await start(engine);
+
+    const { client } = await connectClient(port, TOKEN);
+    clients.push(client);
+
+    // Every HTTP session constructs its own McpServer; logging each one would
+    // put up to 128 rows per client into the trail for a mode that already
+    // authenticates every request. Only the stdio tokenless waiver is audited.
+    expect(engine.auditServerStart).not.toHaveBeenCalled();
   });
 
   it("enforces token scope across the HTTP transport", async () => {

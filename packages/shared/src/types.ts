@@ -58,6 +58,13 @@ export const AuditEventType = {
   MCP_SPAWN: "mcp.spawn",
   MCP_CRASH: "mcp.crash",
   MCP_TERMINATE: "mcp.terminate",
+  /**
+   * An unrestricted (tokenless) MCP server start — the `--allow-tokenless`
+   * waiver, on the record. Token-bearing starts write no row: their operations
+   * are attributed per access. Absence of this event therefore means no
+   * unrestricted server started.
+   */
+  SERVER_START: "server.start",
 } as const;
 export type AuditEventType = (typeof AuditEventType)[keyof typeof AuditEventType];
 

@@ -28,6 +28,9 @@ export interface CreateMcpServerOptions {
    * construction throws TOKEN_REQUIRED. Set only by the stdio entry points'
    * --allow-tokenless flag — the Streamable HTTP transport always carries a
    * per-request token and never sets it.
+   *
+   * Taking this branch writes a `server.start` audit row (W6) and fails closed
+   * if that row cannot be written.
    */
   allowTokenless?: boolean;
   /** Shared across per-session servers (Streamable HTTP) so limits span sessions. */
@@ -54,7 +57,7 @@ export interface CreateMcpServerOptions {
  * If a launch token is provided, it is verified and used for scope enforcement.
  * Without a token, construction is refused (TOKEN_REQUIRED) unless the caller
  * explicitly opts into the unrestricted local full-access mode via
- * `allowTokenless`.
+ * `allowTokenless` — which is audited as `server.start`, fail-closed.
  */
 export function createMcpServer(options: CreateMcpServerOptions): McpServer {
   const { engine, launchToken } = options;
@@ -66,6 +69,14 @@ export function createMcpServer(options: CreateMcpServerOptions): McpServer {
     const token = engine.verifyToken(launchToken);
     scopeGuard = new ScopeGuard(token, accessInterface);
   } else if (options.allowTokenless) {
+    // The waiver goes into the tamper-evident trail before anything else
+    // happens (W6): a failed write must leave neither a warning on stderr nor
+    // a constructed server behind — no record, no unrestricted server.
+    engine.auditServerStart({
+      transport: "stdio",
+      tokenless: true,
+      ttyPrompt: options.enableTtyPrompt ?? false,
+    });
     process.stderr.write(
       "[harpoc] WARNING: --allow-tokenless — all tools and resources are unrestricted (no launch token)\n",
     );

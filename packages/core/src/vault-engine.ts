@@ -1863,6 +1863,33 @@ export class VaultEngine {
   }
 
   /**
+   * Record an unrestricted (tokenless) MCP server start — the `--allow-tokenless`
+   * waiver, in the tamper-evident trail (review finding W6). Only that waiver
+   * reaches this method: a token-bearing start writes no row, because every
+   * operation it serves is attributed to the requesting principal instead.
+   *
+   * Deliberately unattributed (NULL principal columns, `vault.unlock` shape):
+   * the operator at the console is the trusted local path, not a requesting
+   * principal. No state mutation accompanies it, so no outer transaction is
+   * needed — chain linearity is handled inside the logger.
+   *
+   * Fail-closed by omission: this method does not swallow write failures, so a
+   * caller that cannot record the waiver must not proceed to serve.
+   */
+  auditServerStart(options: { transport: "stdio"; tokenless: boolean; ttyPrompt?: boolean }): void {
+    const s = this.assertUnlocked();
+    s.auditLogger.log({
+      eventType: AuditEventType.SERVER_START,
+      detail: {
+        transport: options.transport,
+        tokenless: options.tokenless,
+        tty_prompt: options.ttyPrompt ?? false,
+      },
+      sessionId: this.sessionId ?? undefined,
+    });
+  }
+
+  /**
    * The current audit-chain tail as an exportable anchor, or null when no
    * chained rows exist yet. The anchor contains nothing sensitive — its value
    * against tail truncation and rollback comes entirely from the operator

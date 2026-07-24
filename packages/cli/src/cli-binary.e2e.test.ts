@@ -275,6 +275,33 @@ describe("compiled binary smoke: stdio MCP token gate (V3)", () => {
       child.kill();
     }
   }, 30_000);
+
+  // W6: the waiver the previous test triggered must survive the process that
+  // made it — stderr is a log pipe, the chain is the record.
+  it("the tokenless start left a verifiable server.start row in the audit trail", async () => {
+    const audit = await runCli(["audit", "--json", "--event", "server.start"]);
+    expect(audit.code).toBe(0);
+    const rows = JSON.parse(audit.stdout) as Array<{
+      event_type: string;
+      success: boolean;
+      principal_type: string | null;
+      detail: { tokenless?: boolean; transport?: string } | null;
+    }>;
+    expect(rows.length).toBeGreaterThan(0);
+    const row = rows[0];
+    expect(row?.event_type).toBe("server.start");
+    expect(row?.success).toBe(true);
+    expect(row?.detail?.tokenless).toBe(true);
+    expect(row?.detail?.transport).toBe("stdio");
+    expect(row?.principal_type).toBeNull();
+
+    const table = await runCli(["audit", "--limit", "50"]);
+    expect(table.code).toBe(0);
+    expect(table.stdout).toContain("server.start");
+
+    const verify = await runCli(["audit", "verify"]);
+    expect(verify.code).toBe(0);
+  }, 30_000);
 });
 
 // Windows is the platform where isolation is unsupported by design, so the
