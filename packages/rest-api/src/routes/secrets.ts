@@ -23,7 +23,11 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     checkTokenScope(token, "list");
 
     const engine = c.get("engine");
-    const project = c.req.query("project");
+    // `?project=` arrives as the empty string, which is falsy but NOT nullish:
+    // it slipped past the cross-project check below and then survived `??`, so a
+    // project-scoped token enumerated the whole vault (H4). Absent and empty are
+    // the same request.
+    const project = c.req.query("project") || undefined;
 
     // If token is project-scoped, enforce it
     if (token.project && project && project !== token.project) {

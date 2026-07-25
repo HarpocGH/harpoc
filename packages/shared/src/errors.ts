@@ -76,6 +76,7 @@ export enum ErrorCode {
   KEY_PASSPHRASE_INVALID = "KEY_PASSPHRASE_INVALID",
   ENCRYPTED_KEY_UNSUPPORTED = "ENCRYPTED_KEY_UNSUPPORTED",
   KEY_BUNDLE_UNSUPPORTED = "KEY_BUNDLE_UNSUPPORTED",
+  DEDICATED_CONTEXT_REQUIRED = "DEDICATED_CONTEXT_REQUIRED",
 
   // Validation
   INVALID_INPUT = "INVALID_INPUT",
@@ -192,6 +193,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.KEY_PASSPHRASE_INVALID]: 400,
   [ErrorCode.ENCRYPTED_KEY_UNSUPPORTED]: 400,
   [ErrorCode.KEY_BUNDLE_UNSUPPORTED]: 400,
+  [ErrorCode.DEDICATED_CONTEXT_REQUIRED]: 403,
 
   // Validation
   [ErrorCode.INVALID_INPUT]: 400,
@@ -616,6 +618,15 @@ export class VaultError extends Error {
         "is kept), then re-import — the vault decrypts at import. Ed25519: ssh-keygen cannot " +
         "write PKCS#8 — strip the passphrase with `ssh-keygen -p -f <keyfile> -N ''` and " +
         "re-import (the vault stores the key under its own encryption either way)",
+    );
+  }
+
+  static dedicatedContextRequired(binary: string, context: string): VaultError {
+    return new VaultError(
+      ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+      `'${binary}' has a dedicated injection context and cannot be run through the process ` +
+        `context: its command allowlist entry exists so the '${context}' context can spawn it ` +
+        `under vault-authored arguments. Use action.type '${context}' instead`,
     );
   }
 

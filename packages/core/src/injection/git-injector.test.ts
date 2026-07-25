@@ -57,6 +57,50 @@ describe("GitInjector enforcement (no git binary required)", () => {
     ).rejects.toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
   });
 
+  // H1: git resolves any unambiguous prefix of a long option, so name matching
+  // against the full option let `--templ=` reach --template (clone-time hook
+  // execution) and `--conf=` reach --config. Verified against real git 2.51:
+  // `git clone --templ=<dir>` installs hooks from <dir> and runs post-checkout.
+  it.each([
+    "--templ=/tmp/evil",
+    "--templa=/tmp/evil",
+    "--temp=/tmp/evil",
+    "--conf=core.hooksPath=/tmp/evil",
+    "--config-en=X=Y",
+    "--upload-pa=/x",
+    "--receive-pa=/y",
+    "--exe=/z",
+    "--separate-git-di=/tmp/evil",
+    "--templ",
+  ])("rejects the abbreviated form %s (git expands unambiguous prefixes)", async (arg) => {
+    await expect(
+      injector.executeWithSecret(gitAction({ args: [arg] }), SECRET, policy(), undefined),
+    ).rejects.toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
+  });
+
+  // Negative controls: the prefix rule must not swallow legitimate arguments
+  // that merely share a leading substring with a denied option.
+  it.each([
+    ["--tags", "clone"],
+    ["--depth=1", "clone"],
+    ["--single-branch", "clone"],
+    ["--set-upstream", "push"],
+    ["--force", "push"],
+    ["--rebase", "pull"],
+    ["--exclude=x", "clone"],
+  ] as const)("allows the legitimate argument %s on %s", async (arg, operation) => {
+    // Passes the safety filter, so enforcement proceeds to the command allowlist
+    // (deny-by-default here) rather than rejecting the argument itself.
+    await expect(
+      injector.executeWithSecret(
+        gitAction({ operation: operation as GitAction["operation"], args: [arg] }),
+        SECRET,
+        policy(),
+        undefined,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+  });
+
   it("rejects --template in its space-separated form (value arg alone is inert)", async () => {
     await expect(
       injector.executeWithSecret(

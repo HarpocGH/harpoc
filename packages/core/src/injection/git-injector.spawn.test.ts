@@ -1,5 +1,7 @@
+import { spawnSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
@@ -75,7 +77,12 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
     const [command, args, opts] = spawnMock.mock.calls[0] as SpawnCall;
 
     expect(command).toBe(GIT);
-    expect(args).toEqual(["clone", "https://8.8.8.8/org/repo.git"]);
+    expect(args).toEqual([
+      "-c",
+      "http.followRedirects=false",
+      "clone",
+      "https://8.8.8.8/org/repo.git",
+    ]);
 
     expect(opts.env.GIT_ASKPASS).toBeTruthy();
     expect(opts.env.HARPOC_GIT_USERNAME).toBe("git-user");
@@ -111,6 +118,123 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
     expect(opts.redact).toContain("s3cret-token-value");
     expect(opts.redact).not.toContain("ab");
   });
+});
+
+// H6: target control for Git-over-HTTPS must survive past the initially supplied
+// URL string. git asks askpass for whatever host it ends up talking to (after a
+// 3xx, or for a submodule URL the cloned repo chose), so the credential is bound
+// to the validated host and redirect following is turned off.
+describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () => {
+  const injector = new GitInjector(null);
+  const spawnMock = vi.mocked(spawnCaptured);
+
+  const REPO = "https://8.8.8.8/org/repo.git";
+
+  function httpsPolicy(): InjectionPolicy {
+    return policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] });
+  }
+
+  /** Run the vault-authored askpass helper the way its launcher does. */
+  function askpass(env: Record<string, string>, prompt: string): { out: string; status: number } {
+    const helper = join(dirname(env.GIT_ASKPASS as string), "askpass.mjs");
+    const r = spawnSync(process.execPath, [helper, prompt], { env, encoding: "utf8" });
+    return { out: r.stdout ?? "", status: r.status ?? -1 };
+  }
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+    spawnMock.mockResolvedValue(OK_RESULT);
+  });
+
+  it("forces http.followRedirects=false ahead of the subcommand", async () => {
+    await injector.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      undefined,
+    );
+    const [, args] = spawnMock.mock.calls[0] as SpawnCall;
+    expect(args.slice(0, 2)).toEqual(["-c", "http.followRedirects=false"]);
+    // The forced config must precede the subcommand or git ignores it.
+    expect(args.indexOf("clone")).toBeGreaterThan(args.indexOf("http.followRedirects=false"));
+  });
+
+  it("binds the credential to the validated host", async () => {
+    await injector.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      undefined,
+    );
+    const [, , opts] = spawnMock.mock.calls[0] as SpawnCall;
+    expect(opts.env.HARPOC_GIT_HOST).toBe("8.8.8.8");
+  });
+
+  it("the askpass helper answers for the validated host and refuses any other", async () => {
+    let captured: Record<string, string> | undefined;
+    let answered: { out: string; status: number } | undefined;
+    let refused: { out: string; status: number } | undefined;
+    let refusedNoUrl: { out: string; status: number } | undefined;
+
+    // The launcher only exists for the duration of the spawn, so exercise it here.
+    spawnMock.mockImplementation((_cmd, _args, opts) => {
+      captured = (opts as { env: Record<string, string> }).env;
+      answered = askpass(captured, "Password for 'https://git-user@8.8.8.8': ");
+      refused = askpass(captured, "Password for 'https://8.8.8.8.attacker.tld/leak': ");
+      refusedNoUrl = askpass(captured, "Password: ");
+      return Promise.resolve(OK_RESULT);
+    });
+
+    await injector.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      undefined,
+    );
+
+    expect(answered?.out.trim()).toBe("s3cret-token-value");
+    expect(answered?.status).toBe(0);
+    // A redirect or submodule target must get nothing, and the helper must fail.
+    expect(refused?.out).not.toContain("s3cret-token-value");
+    expect(refused?.out.trim()).toBe("");
+    expect(refused?.status).toBe(1);
+    // Fail closed when the prompt names no recognizable URL.
+    expect(refusedNoUrl?.out.trim()).toBe("");
+    expect(refusedNoUrl?.status).toBe(1);
+  });
+
+  it("answers the username prompt for the validated host too", async () => {
+    let answered: { out: string; status: number } | undefined;
+    spawnMock.mockImplementation((_cmd, _args, opts) => {
+      answered = askpass(
+        (opts as { env: Record<string, string> }).env,
+        "Username for 'https://8.8.8.8': ",
+      );
+      return Promise.resolve(OK_RESULT);
+    });
+    await injector.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      undefined,
+    );
+    expect(answered?.out.trim()).toBe("git-user");
+  });
+
+  it.each(["--recurse-submodules", "--recursive", "--recurse-sub"])(
+    "refuses %s — submodule URLs come from the repository, not the vault",
+    async (arg) => {
+      await expect(
+        injector.executeWithSecret(
+          { type: "git", operation: "clone", repository: REPO, args: [arg] },
+          new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+          httpsPolicy(),
+          undefined,
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
+      expect(spawnMock).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () => {

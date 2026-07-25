@@ -1,6 +1,12 @@
 import { statSync } from "node:fs";
 import type { ProcessAction, ProcessResult } from "@harpoc/shared";
-import { DEFAULT_PROCESS_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
+import {
+  DEFAULT_PROCESS_TIMEOUT_MS,
+  ErrorCode,
+  VaultError,
+  dedicatedContextForBinary,
+  normalizeBinaryBasename,
+} from "@harpoc/shared";
 import type { AuditAttribution } from "../audit/attribution.js";
 import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
@@ -36,6 +42,14 @@ export class ProcessInjector {
     let resolvedPath: string;
     try {
       resolvedPath = resolveAndMatchCommand(action.command, policy.command_allowlist, pathDirs);
+      // A binary with its own injection context is only in the allowlist so that
+      // context can spawn it under vault-authored arguments; running it here,
+      // where no argument is inspected, would hand the credential to an
+      // instruction vehicle. Checked against the resolved, symlink-followed path.
+      const dedicated = dedicatedContextForBinary(resolvedPath);
+      if (dedicated !== null) {
+        throw VaultError.dedicatedContextRequired(normalizeBinaryBasename(resolvedPath), dedicated);
+      }
       if (action.working_directory !== undefined) {
         this.assertDirectory(action.working_directory);
       }

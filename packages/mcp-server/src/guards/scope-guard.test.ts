@@ -237,3 +237,58 @@ describe("caller (engine-level policy enforcement)", () => {
     expect(() => http.checkAccess("create")).toThrow();
   });
 });
+
+// H7 + T5: the stdio transport verifies its launch token once, at construction.
+// Both mid-session rechecks — expiry and revocation — therefore live here, and
+// each must be able to stop a call on a running server.
+describe("ScopeGuard mid-session token rechecks", () => {
+  it("refuses an expired token even when the permission is granted", () => {
+    const guard = new ScopeGuard(makeToken({ exp: Math.floor(Date.now() / 1000) - 1 }));
+    expect(() => guard.checkAccess("use")).toThrow(
+      expect.objectContaining({ code: ErrorCode.TOKEN_EXPIRED }),
+    );
+  });
+
+  it("checks expiry before the permission — an expired admin token does not pass", () => {
+    const guard = new ScopeGuard(
+      makeToken({ scope: ["admin"], exp: Math.floor(Date.now() / 1000) - 1 }),
+    );
+    expect(() => guard.checkAccess("create")).toThrow(
+      expect.objectContaining({ code: ErrorCode.TOKEN_EXPIRED }),
+    );
+  });
+
+  it("refuses a revoked token", () => {
+    const guard = new ScopeGuard(makeToken(), "mcp", (jti) => jti === "jti-123");
+    expect(() => guard.checkAccess("use")).toThrow(
+      expect.objectContaining({ code: ErrorCode.TOKEN_REVOKED }),
+    );
+  });
+
+  it("checks revocation before the permission — a revoked admin token does not pass", () => {
+    const guard = new ScopeGuard(makeToken({ scope: ["admin"] }), "mcp", () => true);
+    expect(() => guard.checkAccess("create")).toThrow(
+      expect.objectContaining({ code: ErrorCode.TOKEN_REVOKED }),
+    );
+  });
+
+  it("consults the store on every call, not once", () => {
+    let revoked = false;
+    const guard = new ScopeGuard(makeToken(), "mcp", () => revoked);
+    expect(guard.checkAccess("use")).toBe("test-agent");
+    revoked = true;
+    expect(() => guard.checkAccess("use")).toThrow(
+      expect.objectContaining({ code: ErrorCode.TOKEN_REVOKED }),
+    );
+  });
+
+  it("negative control: an unrevoked token passes", () => {
+    const guard = new ScopeGuard(makeToken(), "mcp", (jti) => jti === "some-other-jti");
+    expect(guard.checkAccess("use")).toBe("test-agent");
+  });
+
+  it("negative control: the tokenless local path is unaffected", () => {
+    const guard = new ScopeGuard(null, "mcp", () => true);
+    expect(guard.checkAccess("admin")).toBe("local");
+  });
+});

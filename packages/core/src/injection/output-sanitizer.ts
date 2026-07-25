@@ -1,3 +1,5 @@
+import { VaultError } from "@harpoc/shared";
+
 const REDACTION = "[REDACTED]";
 
 /**
@@ -15,6 +17,12 @@ const REDACTION = "[REDACTED]";
  * Recursively apply `fn` to every string leaf of a JSON-shaped value, returning
  * a new structure. Used to sanitize structured MCP tool results (content blocks
  * and structuredContent) without corrupting their shape.
+ *
+ * Object **keys** are mapped as well as values: a downstream MCP server (or a
+ * database column alias) chooses its own key names, and a result whose key is
+ * the credential reaches the model verbatim if only values are redacted (H3).
+ * Redaction can collapse two distinct keys onto one name, so a collision keeps
+ * the later entry under a suffixed key rather than silently dropping it.
  */
 export function mapStringLeaves(value: unknown, fn: (s: string) => string): unknown {
   if (typeof value === "string") return fn(value);
@@ -22,7 +30,13 @@ export function mapStringLeaves(value: unknown, fn: (s: string) => string): unkn
   if (value !== null && typeof value === "object") {
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
-      result[key] = mapStringLeaves(val, fn);
+      let mappedKey = fn(key);
+      if (mappedKey !== key && Object.prototype.hasOwnProperty.call(result, mappedKey)) {
+        let suffix = 2;
+        while (Object.prototype.hasOwnProperty.call(result, `${mappedKey}_${suffix}`)) suffix++;
+        mappedKey = `${mappedKey}_${suffix}`;
+      }
+      result[mappedKey] = mapStringLeaves(val, fn);
     }
     return result;
   }
@@ -54,4 +68,22 @@ export function redactSecretEncodings(text: string, secret: string): string {
     }
   }
   return result;
+}
+
+/**
+ * Redact the credential from a thrown error's message, preserving its type,
+ * code and details.
+ *
+ * A thrown error is a model-visible channel that no result-shaped redaction
+ * layer touches: the MCP SDK turns a thrown handler error into the tool result
+ * text, and the REST error handler returns `err.message`. An injector error
+ * message can carry attacker-authored text — a redirect target the receiving
+ * endpoint chose, a driver message quoting the connection string — so the value
+ * is stripped on the way out regardless of which code wrote the message (H2).
+ */
+export function redactErrorMessage(err: unknown, secret: string): unknown {
+  if (!(err instanceof VaultError)) return err;
+  const redacted = redactSecretEncodings(err.message, secret);
+  if (redacted === err.message) return err;
+  return new VaultError(err.code, redacted, err.details);
 }

@@ -37,6 +37,11 @@ const DANGEROUS_ARG_PREFIXES = [
   "--exec",
   "--template",
   "--separate-git-dir",
+  // Submodule URLs come from the cloned repository, not from the vault: fetching
+  // them makes git authenticate to hosts that never passed validateUrl or the
+  // URL allowlist. Blocked on every operation.
+  "--recurse-submodules",
+  "--recursive",
 ];
 
 /** Shorthands dangerous only for specific operations. `-u` is `--upload-pack` for
@@ -47,12 +52,45 @@ const CLONE_DANGEROUS_ARG_PREFIXES = ["-u"];
 /** Repository transports that can execute local commands — never allowed. */
 const FORBIDDEN_REPO_PREFIXES = ["ext::", "fd::", "file:", "git+"];
 
-/** The bundled askpass helper: prints the username or token from the environment. */
-const ASKPASS_HELPER_SRC = `const prompt = (process.argv[2] || "").toLowerCase();
-const isUser = prompt.includes("user");
+/**
+ * The bundled askpass helper: prints the username or token from the environment,
+ * but only when git is asking about the host the vault validated.
+ *
+ * git asks askpass for whatever host it ends up talking to — after a 3xx
+ * redirect, or for a submodule URL the cloned repository chose. A host-blind
+ * helper therefore hands the credential to targets that never passed
+ * `validateUrl` or the URL allowlist, which is how target control was reduced to
+ * a check on the initially supplied string. The host git names in the prompt is
+ * compared against the validated one; anything else is refused (fail closed,
+ * including a prompt with no recognizable URL).
+ */
+const ASKPASS_HELPER_SRC = `const prompt = process.argv[2] || "";
+const expected = (process.env.HARPOC_GIT_HOST || "").toLowerCase();
+const match = /https?:\\/\\/[^\\s'"]+/i.exec(prompt);
+let host = "";
+if (match) {
+  try { host = new URL(match[0]).hostname.toLowerCase(); } catch { host = ""; }
+}
+if (!expected || host !== expected) {
+  process.stderr.write("harpoc: refusing to supply the credential for an unexpected host\\n");
+  process.exit(1);
+}
+// Classified on the prompt's leading word, not a substring search: git's
+// password prompt embeds the username ("Password for 'https://git-user@host': "),
+// so an includes("user") test answers a password prompt with the username
+// whenever the username itself contains "user".
+const isUser = /^\\s*username\\b/i.test(prompt);
 const out = isUser ? (process.env.HARPOC_GIT_USERNAME || "") : (process.env.HARPOC_GIT_PASSWORD || "");
 process.stdout.write(out + "\\n");
 `;
+
+/**
+ * Config the vault forces on every HTTPS invocation. `http.followRedirects=false`
+ * keeps git on the validated host: git's default (`initial`) follows a 3xx on the
+ * initial request, moving the base URL — and with it the credential prompt — to a
+ * host the vault never resolved, validated or allowlisted.
+ */
+const HTTPS_FORCED_CONFIG = ["-c", "http.followRedirects=false"];
 
 /**
  * Executes a Git operation, authenticating over HTTPS (request-mediated, via a
@@ -126,7 +164,9 @@ export class GitInjector {
     }
 
     const { user, password } = parseGitCredential(secretValue);
-    const { args, cwd } = buildGitArgs(action);
+    const built = buildGitArgs(action);
+    const args = [...HTTPS_FORCED_CONFIG, ...built.args];
+    const cwd = built.cwd;
     const timeoutMs = action.timeout_ms ?? DEFAULT_GIT_TIMEOUT_MS;
     const askpass = writeAskpass();
     try {
@@ -135,6 +175,8 @@ export class GitInjector {
       env.GIT_TERMINAL_PROMPT = "0";
       env.HARPOC_GIT_USERNAME = user;
       env.HARPOC_GIT_PASSWORD = password;
+      // Binds the credential to the validated host (see ASKPASS_HELPER_SRC).
+      env.HARPOC_GIT_HOST = new URL(action.repository).hostname.toLowerCase();
       // The username is credential material too; a 1–2 char username would
       // shred unrelated output, so such fragments stay unredacted.
       const redact = user.length >= 3 ? [password, user] : [password];
@@ -327,14 +369,33 @@ function detectTransport(repository: string): "https" | "ssh" | null {
   return null;
 }
 
+/**
+ * Whether `arg` reaches one of the denied options.
+ *
+ * Name matching alone is not enough: git resolves any *unambiguous prefix* of a
+ * long option, so `--templ=<dir>` reaches `--template` and `--conf=k=v` reaches
+ * `--config` while starting with neither string (verified against git 2.51).
+ * An argument is therefore denied when it starts with a denied option (the
+ * exact and `--opt=value` forms) *or* when its option name is a prefix of one —
+ * the same rule git itself applies when expanding it.
+ */
+function reachesDeniedOption(arg: string, denied: readonly string[]): boolean {
+  const a = arg.trim();
+  if (denied.some((p) => a === p || a.startsWith(p))) return true;
+
+  const eq = a.indexOf("=");
+  const name = eq >= 0 ? a.slice(0, eq) : a;
+  if (!name.startsWith("--") || name.length <= 2) return false;
+  return denied.some((p) => p.startsWith("--") && p.startsWith(name));
+}
+
 function assertSafeArgs(operation: GitAction["operation"], args: string[] | undefined): void {
-  const prefixes =
+  const denied =
     operation === "clone"
       ? [...DANGEROUS_ARG_PREFIXES, ...CLONE_DANGEROUS_ARG_PREFIXES]
       : DANGEROUS_ARG_PREFIXES;
   for (const arg of args ?? []) {
-    const a = arg.trim();
-    if (prefixes.some((p) => a === p || a.startsWith(p))) {
+    if (reachesDeniedOption(arg, denied)) {
       throw VaultError.invalidGitConfig(`disallowed git argument: ${arg}`);
     }
   }

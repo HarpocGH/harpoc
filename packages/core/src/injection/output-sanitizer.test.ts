@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { redactSecretEncodings } from "./output-sanitizer.js";
+import { mapStringLeaves, redactSecretEncodings } from "./output-sanitizer.js";
 
 const SECRET = "sk-topsecretvalue-123456";
 
@@ -64,5 +64,54 @@ describe("redactSecretEncodings", () => {
     const chunked = SECRET.split("").join("|");
     const out = redactSecretEncodings(chunked, SECRET);
     expect(out).toContain(chunked);
+  });
+});
+
+// H3: the walker feeds both redaction layers for MCP and database results, and
+// the party choosing the key names is the downstream server (or a SQL column
+// alias) — a value-only walk hands the credential to the model in key position.
+describe("mapStringLeaves — key positions", () => {
+  const redact = (s: string): string => redactSecretEncodings(s, SECRET);
+
+  it("redacts the credential in an object key", () => {
+    const out = mapStringLeaves({ [SECRET]: 1 }, redact);
+    expect(JSON.stringify(out)).not.toContain(SECRET);
+    expect(Object.keys(out as object)).toEqual(["[REDACTED]"]);
+  });
+
+  it("redacts key and value positions alike", () => {
+    const out = mapStringLeaves({ [SECRET]: SECRET }, redact) as Record<string, unknown>;
+    expect(JSON.stringify(out)).not.toContain(SECRET);
+    expect(out["[REDACTED]"]).toBe("[REDACTED]");
+  });
+
+  it("redacts an encoded credential in a key", () => {
+    const b64 = Buffer.from(SECRET, "utf8").toString("base64");
+    const out = mapStringLeaves({ [b64]: "x" }, redact);
+    expect(JSON.stringify(out)).not.toContain(b64);
+  });
+
+  it("reaches keys nested in objects and arrays", () => {
+    const out = mapStringLeaves(
+      { outer: [{ inner: { [SECRET]: "v" } }], [`pre-${SECRET}-post`]: 2 },
+      redact,
+    );
+    expect(JSON.stringify(out)).not.toContain(SECRET);
+  });
+
+  it("keeps both entries when redaction collapses two keys onto one name", () => {
+    const b64 = Buffer.from(SECRET, "utf8").toString("base64");
+    const out = mapStringLeaves({ [SECRET]: "first", [b64]: "second" }, redact) as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(out)).toHaveLength(2);
+    expect(Object.values(out)).toEqual(expect.arrayContaining(["first", "second"]));
+    expect(JSON.stringify(out)).not.toContain(SECRET);
+  });
+
+  it("leaves unrelated keys and the structure untouched", () => {
+    const out = mapStringLeaves({ note: "hello", n: 1, list: [1, "two", null] }, redact);
+    expect(out).toEqual({ note: "hello", n: 1, list: [1, "two", null] });
   });
 });

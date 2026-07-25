@@ -15,6 +15,13 @@ export class ScopeGuard {
   constructor(
     private readonly token: VaultApiToken | null,
     private readonly accessInterface: AccessInterface = "mcp",
+    /**
+     * Revocation lookup, consulted on every check. The stdio transport verifies
+     * its launch token once at construction, so without this a revoked token
+     * kept its full scope for the life of the server (H7). The HTTP transport
+     * re-verifies per request anyway, where this is a redundant second line.
+     */
+    private readonly isRevoked?: (jti: string) => boolean,
   ) {}
 
   /**
@@ -29,6 +36,12 @@ export class ScopeGuard {
     // 0. Token expiry recheck (long-running MCP server may outlive token TTL)
     if (this.token.exp <= Math.floor(Date.now() / 1000)) {
       throw VaultError.tokenExpired();
+    }
+
+    // 0b. Revocation recheck — the launch token was verified once, at
+    // construction, and revocation must take effect on the running server.
+    if (this.isRevoked?.(this.token.jti) === true) {
+      throw VaultError.tokenRevoked();
     }
 
     // 1. Permission check

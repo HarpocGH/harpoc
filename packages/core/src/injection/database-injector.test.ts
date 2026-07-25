@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ConnectionConfig, DatabaseAction, InjectionPolicy } from "@harpoc/shared";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode, MAX_DB_RESULT_BYTES, VaultError } from "@harpoc/shared";
 import { DatabaseInjector } from "./database-injector.js";
 import type {
   DbConnectOptions,
@@ -239,5 +239,47 @@ describe("DatabaseInjector", () => {
     const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
     expect(res.truncated).toBe(true);
     expect(res.rows.length).toBeLessThanOrEqual(10_000);
+  });
+
+  // H5: the byte-cap loop halved with Math.ceil, so a single row larger than the
+  // cap never shrank and the loop spun forever. It is synchronous, so this hung
+  // the whole vault process — reachable with one agent-chosen query.
+  describe("byte cap always terminates (H5)", () => {
+    const oversized = (n: number): string => "x".repeat(MAX_DB_RESULT_BYTES + n);
+
+    it("drops a single row that exceeds the byte cap on its own", async () => {
+      const mock = new MockAdapter({ rows: [{ blob: oversized(1000) }] });
+      const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
+      expect(res.truncated).toBe(true);
+      expect(res.rows).toEqual([]);
+    });
+
+    it("drops the last row when halving bottoms out at one oversized row", async () => {
+      const mock = new MockAdapter({
+        rows: [{ blob: oversized(1000) }, { blob: oversized(1000) }, { i: 3 }],
+      });
+      const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
+      expect(res.truncated).toBe(true);
+      expect(res.rows).toEqual([]);
+    });
+
+    it("still returns as many rows as fit under the cap", async () => {
+      // 40 rows of ~64 KiB: some fit, so the result must not be emptied.
+      const rows = Array.from({ length: 40 }, (_, i) => ({ i, pad: "y".repeat(64 * 1024) }));
+      const mock = new MockAdapter({ rows });
+      const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
+      expect(res.truncated).toBe(true);
+      expect(res.rows.length).toBeGreaterThan(0);
+      expect(Buffer.byteLength(JSON.stringify(res.rows), "utf8")).toBeLessThanOrEqual(
+        MAX_DB_RESULT_BYTES,
+      );
+    });
+
+    it("negative control: a small result set is returned untruncated", async () => {
+      const mock = new MockAdapter({ rows: [{ i: 1 }, { i: 2 }] });
+      const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
+      expect(res.truncated).toBeFalsy();
+      expect(res.rows).toHaveLength(2);
+    });
   });
 });

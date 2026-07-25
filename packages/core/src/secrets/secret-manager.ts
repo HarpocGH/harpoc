@@ -303,7 +303,10 @@ export class SecretManager {
    * per-secret access policies over the result (thesis §4.6 `list`).
    */
   listSecretsWithIds(project?: string): SecretListEntry[] {
-    const secrets = this.store.listSecrets(project ? { project } : undefined);
+    // Fail closed on an explicit empty project: a truthiness test here turned
+    // `""` into "no filter at all" — the widest possible result — for any caller
+    // that let an empty query parameter through (H4).
+    const secrets = this.store.listSecrets(project !== undefined ? { project } : undefined);
 
     return secrets.map((s) => {
       const name = decryptName(this.kek, s.name_encrypted, s.name_iv, s.name_tag, s.id);

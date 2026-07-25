@@ -216,7 +216,11 @@ function capRows(rows: unknown[]): { rows: unknown[]; truncated: boolean } {
     capped.length > 0 &&
     Buffer.byteLength(JSON.stringify(capped), "utf8") > MAX_DB_RESULT_BYTES
   ) {
-    capped = capped.slice(0, Math.ceil(capped.length / 2));
+    // Every iteration must strictly shrink the set. `Math.ceil(1/2) === 1` left a
+    // single oversized row unchanged and the loop spun forever — synchronously,
+    // so one agent-chosen query (`SELECT repeat('x', 2000000)`) hung the whole
+    // vault process. A row that cannot fit on its own is dropped instead.
+    capped = capped.length === 1 ? [] : capped.slice(0, Math.floor(capped.length / 2));
     truncated = true;
   }
   return { rows: capped, truncated };

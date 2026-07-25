@@ -2034,6 +2034,20 @@ export class VaultEngine {
   }
 
   /**
+   * Whether a token JTI has been revoked.
+   *
+   * The stdio MCP transport verifies its launch token once, at construction —
+   * there is no per-request re-verification as on the HTTP transport — so a
+   * long-lived server needs a cheap way to re-consult the revocation store on
+   * every call. Without it `harpoc auth revoke` could not restrain the server
+   * its token launched (H7).
+   */
+  isTokenRevoked(jti: string): boolean {
+    const s = this.assertUnlocked();
+    return s.store.isTokenRevoked(jti);
+  }
+
+  /**
    * Revoke a JWT token by JTI.
    */
   revokeToken(jti: string, expiresAt?: number): void {

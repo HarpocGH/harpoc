@@ -240,6 +240,27 @@ describe("listSecrets", () => {
     expect(list.length).toBe(1);
     expect(list[0]?.project).toBe("p1");
   });
+
+  // H4: an explicit empty project must not degrade to "no filter", which is the
+  // widest possible result — that is how an empty `?project=` enumerated the
+  // whole vault for a project-scoped token.
+  it("treats an explicit empty project as a filter that matches nothing", async () => {
+    await manager.createSecret({
+      name: "a",
+      type: "api_key",
+      project: "p1",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+    await manager.createSecret({
+      name: "global",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+
+    expect(manager.listSecrets("")).toEqual([]);
+    // Negative control: absent still means "everything".
+    expect(manager.listSecrets().length).toBe(2);
+  });
 });
 
 describe("rotateSecret", () => {

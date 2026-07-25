@@ -1187,3 +1187,48 @@ describe("engine-level policy enforcement wiring (thesis §4.6)", () => {
     expect(body.error).toBe(ErrorCode.ACCESS_DENIED);
   });
 });
+
+// H4 + the untested project dimension of checkTokenScope: `?project=` arrives as
+// the empty string, which is falsy but not nullish — it skipped the cross-project
+// check and then survived `??`, so the engine was asked for every project.
+describe("GET /secrets — project scope", () => {
+  it("an empty ?project= does not widen a project-scoped token to the whole vault", async () => {
+    engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, project: "myproj" });
+    const res = await app.request("/api/v1/secrets?project=", { headers: AUTH });
+    expect(res.status).toBe(200);
+    expect(engine.listSecrets).toHaveBeenCalledWith("myproj", expect.anything());
+  });
+
+  it("a whitespace-free absent parameter behaves identically", async () => {
+    engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, project: "myproj" });
+    await app.request("/api/v1/secrets", { headers: AUTH });
+    expect(engine.listSecrets).toHaveBeenCalledWith("myproj", expect.anything());
+  });
+
+  it("refuses an explicit cross-project request (403, engine untouched)", async () => {
+    engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, project: "myproj" });
+    const res = await app.request("/api/v1/secrets?project=other", { headers: AUTH });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe(ErrorCode.ACCESS_DENIED);
+    expect(engine.listSecrets).not.toHaveBeenCalled();
+  });
+
+  it("honours the token's own project when it matches", async () => {
+    engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, project: "myproj" });
+    const res = await app.request("/api/v1/secrets?project=myproj", { headers: AUTH });
+    expect(res.status).toBe(200);
+    expect(engine.listSecrets).toHaveBeenCalledWith("myproj", expect.anything());
+  });
+
+  it("negative control: an unscoped token may still request a project", async () => {
+    const res = await app.request("/api/v1/secrets?project=anything", { headers: AUTH });
+    expect(res.status).toBe(200);
+    expect(engine.listSecrets).toHaveBeenCalledWith("anything", expect.anything());
+  });
+
+  it("negative control: an unscoped token with no parameter lists everything", async () => {
+    await app.request("/api/v1/secrets", { headers: AUTH });
+    expect(engine.listSecrets).toHaveBeenCalledWith(undefined, expect.anything());
+  });
+});

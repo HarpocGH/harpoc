@@ -15,6 +15,7 @@ import type { AuditAttribution } from "../audit/attribution.js";
 import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { matchesUrlAllowlist } from "./allowlist.js";
+import { redactErrorMessage } from "./output-sanitizer.js";
 import { validateUrl } from "./url-validator.js";
 
 type PinnedLookup = (
@@ -190,7 +191,12 @@ export class HttpInjector {
       );
 
       return response;
-    } catch (err) {
+    } catch (rawErr) {
+      // No injector-thrown message may carry the credential to the agent (H2):
+      // redirect targets and driver messages are attacker-influenced text, and
+      // a thrown message reaches the model through the MCP tool result and the
+      // REST error body without passing any result-shaped redaction.
+      const err = redactErrorMessage(rawErr, Buffer.from(secretValue).toString("utf8"));
       if (err instanceof VaultError) {
         this.auditLogger?.log(
           withAttribution(
@@ -314,9 +320,12 @@ export class HttpInjector {
             pins.set(redirectUrl.hostname.toLowerCase(), redirectValidated.resolvedAddresses);
           }
         } catch {
+          // Origin only, never the full URL: the hop is authored by the endpoint
+          // that just received the credential, so its path and query are
+          // attacker-controlled and can carry the value back (H2).
           throw new VaultError(
             ErrorCode.REDIRECT_POLICY_VIOLATION,
-            `Redirect target blocked: ${redirectUrl.toString()}`,
+            `Redirect target blocked: ${redirectUrl.origin}`,
           );
         }
 
@@ -325,7 +334,7 @@ export class HttpInjector {
         // request to a non-allowlisted target, whichever follow_redirects mode
         // is active. Checked before the hop executes.
         if (!matchesUrlAllowlist(redirectUrl.toString(), urlAllowlist)) {
-          throw VaultError.urlNotAllowed(redirectUrl.toString());
+          throw VaultError.urlNotAllowed(redirectUrl.origin);
         }
 
         const originalUrl = new URL(currentUrl);

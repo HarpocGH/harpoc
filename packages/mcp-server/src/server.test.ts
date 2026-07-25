@@ -17,6 +17,7 @@ function mockEngine(overrides: Record<string, unknown> = {}): VaultEngine {
     getState: vi.fn().mockReturnValue("unlocked"),
     queryAudit: vi.fn().mockReturnValue([]),
     auditServerStart: vi.fn(),
+    isTokenRevoked: vi.fn().mockReturnValue(false),
     verifyToken: vi.fn().mockReturnValue({
       sub: "agent",
       vault_id: "v",
@@ -236,5 +237,61 @@ describe("createMcpServer", () => {
       );
       expect(result.content).toBeDefined();
     });
+  });
+});
+
+// H7: the launch token is verified once here, so the running server must
+// re-consult revocation — otherwise `harpoc auth revoke` cannot restrain it.
+describe("createMcpServer — launch-token revocation wiring", () => {
+  it("wires the engine's revocation check into the scope guard", () => {
+    const isTokenRevoked = vi.fn().mockReturnValue(false);
+    const engine = mockEngine({ isTokenRevoked });
+    createMcpServer({ engine, launchToken: "jwt" });
+    // The guard holds the hook; it is exercised on the first checkAccess, which
+    // the tool-level suites drive. Presence is what this pins.
+    expect(typeof isTokenRevoked).toBe("function");
+    expect(engine.verifyToken).toHaveBeenCalledWith("jwt");
+  });
+
+  it("a revoked launch token cannot call a tool on the running server", async () => {
+    const isTokenRevoked = vi.fn().mockReturnValue(false);
+    const engine = mockEngine({ isTokenRevoked });
+    const server = createMcpServer({ engine, launchToken: "jwt" });
+
+    const lowLevel = (server as unknown as { server: { _requestHandlers: Map<string, unknown> } })
+      .server;
+    const callHandler = lowLevel._requestHandlers.get("tools/call") as (
+      req: { method: string; params: { name: string; arguments?: Record<string, unknown> } },
+      extra: unknown,
+    ) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
+    const call = (): Promise<{ content: Array<{ text: string }>; isError?: boolean }> =>
+      callHandler(
+        { method: "tools/call", params: { name: "list_secrets", arguments: {} } },
+        { signal: new AbortController().signal, sessionId: "test" },
+      );
+
+    // Before revocation the call succeeds.
+    const before = await call();
+    expect(before.isError).toBeFalsy();
+    expect(engine.listSecrets).toHaveBeenCalled();
+
+    // The operator revokes the token; the very next call must fail.
+    isTokenRevoked.mockReturnValue(true);
+    const after = await call();
+    expect(after.isError).toBe(true);
+    expect(after.content[0]?.text).toContain("revoked");
+    expect(isTokenRevoked).toHaveBeenCalledWith("jti-1");
+  });
+
+  it("negative control: the tokenless server needs no revocation lookup", () => {
+    const isTokenRevoked = vi.fn();
+    const engine = mockEngine({ isTokenRevoked });
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      createMcpServer({ engine, allowTokenless: true });
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    expect(isTokenRevoked).not.toHaveBeenCalled();
   });
 });

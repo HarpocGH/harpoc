@@ -1,7 +1,11 @@
+import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProcessAction, ProcessResult } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
+import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { forceNetworkIsolationUnavailableForTests } from "./network-isolation.js";
 import { ProcessInjector } from "./process-injector.js";
 
@@ -203,5 +207,103 @@ describe("ProcessInjector — network isolation (§4.5.3 layer 4)", () => {
         detail: expect.objectContaining({ network_isolation: false }),
       }),
     );
+  });
+});
+
+describe("ProcessInjector — dedicated-context binaries (C1)", () => {
+  // The Git and SSH contexts must allowlist their binary, and command_allowlist
+  // is context-agnostic — so the process context, which inspects no argument,
+  // could re-spawn git/ssh and bypass the vault's own hardening for them.
+  const tmpRoot = mkdtempSync(join(tmpdir(), "harpoc-dedicated-"));
+
+  afterEach(() => {
+    rmSync(join(tmpRoot, "marker"), { recursive: true, force: true });
+  });
+
+  it("refuses git in the process context and audits the denial", async () => {
+    const log = vi.fn();
+    const audited = new ProcessInjector({ log } as unknown as AuditLogger);
+    await expect(
+      audited.executeWithSecret(
+        { type: "process", command: "git", args: ["--version"], env_var: "SECRET" },
+        new Uint8Array(Buffer.from(SECRET, "utf8")),
+        { command_allowlist: ["git"], env_allowlist: [] },
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.DEDICATED_CONTEXT_REQUIRED, statusCode: 403 });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "secret.use",
+        success: false,
+        detail: expect.objectContaining({
+          context: "process",
+          error: ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+        }),
+      }),
+    );
+  });
+
+  it("names the context the caller must use instead", async () => {
+    await expect(
+      run(
+        { type: "process", command: "git", args: [], env_var: "SECRET" },
+        { command_allowlist: ["git"], env_allowlist: [] },
+      ),
+    ).rejects.toThrow(/action\.type 'git'/);
+  });
+
+  // Permanent pin of the C1 exploit shape: `git -c alias.x=!<command>` executes
+  // an arbitrary command with the credential in its environment. The refusal must
+  // land BEFORE any spawn — the absent marker directory is the proof.
+  it("refuses the git alias-alias exploit shape without spawning anything", async () => {
+    const marker = join(tmpRoot, "marker");
+    await expect(
+      run(
+        {
+          type: "process",
+          command: "git",
+          args: ["-c", `alias.x=!mkdir "${marker}"`, "x"],
+          env_var: "SECRET",
+        },
+        { command_allowlist: ["git"], env_allowlist: [] },
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.DEDICATED_CONTEXT_REQUIRED });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("refuses a symlink that resolves to git (resolved path is what is classified)", async () => {
+    if (process.platform === "win32") return; // symlink creation needs privileges
+    const gitPath = resolveExecutable("git", controlledPathDirs());
+    if (!gitPath) return; // no git on this host — nothing to alias
+    const link = join(tmpRoot, "not-git");
+    rmSync(link, { force: true });
+    symlinkSync(gitPath, link);
+    try {
+      await expect(
+        run(
+          { type: "process", command: link, args: ["--version"], env_var: "SECRET" },
+          { command_allowlist: [link], env_allowlist: [] },
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.DEDICATED_CONTEXT_REQUIRED });
+    } finally {
+      rmSync(link, { force: true });
+    }
+  });
+
+  it("negative control: an ordinary allowlisted binary still runs", async () => {
+    const result = await run(nodeAction(`process.stdout.write("ran")`));
+    expect(result.exit_code).toBe(0);
+    expect(result.stdout).toBe("ran");
+  });
+
+  it("negative control: the allowlist check still runs first", async () => {
+    // git not in the allowlist -> COMMAND_NOT_ALLOWED, not the dedicated-context
+    // refusal: the gate must not leak which binaries exist on the host.
+    await expect(
+      run(
+        { type: "process", command: "git", args: [], env_var: "SECRET" },
+        { command_allowlist: [NODE], env_allowlist: [] },
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
   });
 });

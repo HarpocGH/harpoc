@@ -21,6 +21,8 @@
  * for on-disk binaries is L4/L5 territory.
  */
 
+import { normalizeBinaryBasename } from "./binary-name.js";
+
 /** Basenames of known interpreter binaries (matched after normalization). */
 export const KNOWN_INTERPRETERS: ReadonlySet<string> = new Set([
   // POSIX shells
@@ -69,28 +71,13 @@ export const KNOWN_INTERPRETERS: ReadonlySet<string> = new Set([
   "env",
 ]);
 
-/** Executable extensions stripped before comparison (mirrors the resolver's probe set). */
-const EXECUTABLE_EXTENSIONS = [".exe", ".cmd", ".bat", ".com"];
-
-/** Trailing version suffix: `python3`, `python3.12`, `php-8.2`, `perl5.36.0`. */
-const VERSION_SUFFIX = /[-_.]?\d+(?:\.\d+)*$/;
-
 /**
  * The normalized interpreter name a command-allowlist entry resolves to, or
  * null when the entry does not name a known interpreter. Accepts bare command
  * names and absolute paths (POSIX or Windows separators).
  */
 export function knownInterpreterName(entry: string): string | null {
-  const basename = entry.trim().split(/[/\\]/).pop() ?? "";
-  let name = basename.toLowerCase().replace(/[\s.]+$/, "");
-  for (const ext of EXECUTABLE_EXTENSIONS) {
-    if (name.endsWith(ext)) {
-      name = name.slice(0, -ext.length);
-      break;
-    }
-  }
-  const unversioned = name.replace(VERSION_SUFFIX, "");
-  const candidate = unversioned.length > 0 ? unversioned : name;
+  const candidate = normalizeBinaryBasename(entry);
   return KNOWN_INTERPRETERS.has(candidate) ? candidate : null;
 }
 
