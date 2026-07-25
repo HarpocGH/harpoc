@@ -15,8 +15,8 @@ vi.mock("../../utils/vault-loader.js", () => ({
 import { Command } from "commander";
 import { registerAuthRevokeCommand } from "./revoke.js";
 
-function jwtWithExp(exp: number): string {
-  const payload = Buffer.from(JSON.stringify({ exp })).toString("base64url");
+function jwtWithExp(exp: number, jti = "some-jti"): string {
+  const payload = Buffer.from(JSON.stringify({ exp, jti })).toString("base64url");
   return `header.${payload}.signature`;
 }
 
@@ -33,11 +33,13 @@ async function run(args: string[]): Promise<void> {
 describe("auth revoke token sources", () => {
   const savedEnv = process.env.HARPOC_TOKEN;
   let logSpy: ReturnType<typeof vi.spyOn>;
+  let errSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.HARPOC_TOKEN;
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -47,6 +49,7 @@ describe("auth revoke token sources", () => {
       process.env.HARPOC_TOKEN = savedEnv;
     }
     logSpy.mockRestore();
+    errSpy.mockRestore();
   });
 
   it("extracts the expiry from HARPOC_TOKEN when --token is not given", async () => {
@@ -63,6 +66,29 @@ describe("auth revoke token sources", () => {
 
   it("revokes without an expiry when no token is available anywhere", async () => {
     await run(["some-jti"]);
+    expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti", undefined);
+  });
+
+  // M1: HARPOC_TOKEN authenticates other commands too, so it is routinely a
+  // token OTHER than the revocation target. Forwarding its (earlier) expiry
+  // shortened or nullified the revocation entry.
+  it("ignores the expiry of a token whose jti is not the revocation target", async () => {
+    process.env.HARPOC_TOKEN = jwtWithExp(12345, "other-jti");
+    await run(["some-jti"]);
+    expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti", undefined);
+  });
+
+  it("warns when the supplied token is not the revocation target", async () => {
+    await run(["some-jti", "--token", jwtWithExp(12345, "other-jti")]);
+    const warned = errSpy.mock.calls.some(
+      (call) => typeof call[0] === "string" && call[0].startsWith("Warning:"),
+    );
+    expect(warned).toBe(true);
+  });
+
+  it("ignores a matching-jti token that carries no numeric exp", async () => {
+    const payload = Buffer.from(JSON.stringify({ jti: "some-jti" })).toString("base64url");
+    await run(["some-jti", "--token", `header.${payload}.signature`]);
     expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti", undefined);
   });
 });

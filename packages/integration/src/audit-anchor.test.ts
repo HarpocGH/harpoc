@@ -40,6 +40,16 @@ function truncateTail(fromId: number): void {
   }
 }
 
+/** Same attacker, erasing the chain links instead of the rows (M2). */
+function nullLinks(fromId: number): void {
+  const store = new SqliteStore(vault.dbPath);
+  try {
+    store.db.prepare("UPDATE audit_log SET row_hmac = NULL WHERE id >= ?").run(fromId);
+  } finally {
+    store.close();
+  }
+}
+
 const DB_SIDECARS = ["", "-wal", "-shm"];
 
 function snapshotDb(dir: string): void {
@@ -85,6 +95,32 @@ describe("audit-chain anchor across the real database file", () => {
     const detected = vault.engine.verifyAuditChain({ anchor: later });
     expect(detected.valid).toBe(false);
     expect(detected.anchor).toEqual({ lastId: later.last_id, status: "row_missing" });
+  });
+
+  // M2: the same DB-write attacker can also erase the LINKS instead of the
+  // rows. Nulling row_hmac made rows read as pre-migration legacy, which
+  // verification skipped — so the suffix could then be rewritten at will and
+  // `harpoc audit verify` still exited 0. No anchor is needed to catch this.
+  it("detects erased chain links without any anchor", async () => {
+    await createSecrets(["alpha", "beta", "gamma"]);
+    const anchor = vault.engine.getAuditChainTail() as AuditChainAnchor;
+    expect(vault.engine.verifyAuditChain().valid).toBe(true);
+
+    await createSecrets(["delta"]);
+    nullLinks(anchor.last_id + 1);
+
+    const plain = vault.engine.verifyAuditChain();
+    expect(plain.valid).toBe(false);
+    expect(plain.firstBrokenId).toBe(anchor.last_id + 1);
+  });
+
+  it("detects a wholly erased chain", async () => {
+    await createSecrets(["alpha", "beta"]);
+    nullLinks(0);
+
+    const plain = vault.engine.verifyAuditChain();
+    expect(plain.valid).toBe(false);
+    expect(plain.checked).toBe(0);
   });
 
   it("a fresh anchor keeps verifying as rows are appended", async () => {

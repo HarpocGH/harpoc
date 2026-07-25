@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { join } from "node:path";
 import { MAX_PROCESS_OUTPUT_BYTES } from "@harpoc/shared";
 import { CappedOutput } from "./capped-output.js";
 import type { NetworkIsolationMechanism } from "./network-isolation.js";
@@ -38,10 +40,69 @@ export interface SpawnCapturedOptions {
 }
 
 /**
+ * Grace period after the child's own exit for its stdio streams to flush. A
+ * grandchild that inherited stdout/stderr keeps them open, so `'close'` may
+ * never arrive; past this the captured output is returned as-is.
+ */
+const STREAM_FLUSH_GRACE_MS = 1_000;
+
+/** Backstop after a timeout kill: settle even if neither exit nor close lands. */
+const KILL_SETTLE_MS = 2_000;
+
+/**
+ * Terminate the child AND anything it spawned. Killing only the direct child
+ * leaves a grandchild holding the inherited stdio — and, since the child is a
+ * process-group leader (POSIX `detached`), the group signal is what reaches
+ * the whole tree. On Windows the same job is done by the OS-shipped `taskkill
+ * /T`, pinned to System32 and given nothing but a numeric pid.
+ */
+function killTree(child: ChildProcess): void {
+  const pid = child.pid;
+  const killDirect = (): void => {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // The child is already gone.
+    }
+  };
+  if (pid === undefined) {
+    killDirect();
+    return;
+  }
+  if (process.platform === "win32") {
+    try {
+      const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+      const killer = spawn(taskkill, ["/pid", String(pid), "/T", "/F"], {
+        shell: false,
+        windowsHide: true,
+        stdio: "ignore",
+      });
+      killer.on("error", killDirect);
+    } catch {
+      killDirect();
+    }
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    killDirect();
+  }
+}
+
+/**
  * Spawn a subprocess with no shell (`shell:false`), capture stdout/stderr into
  * capped buffers, enforce a timeout (SIGKILL on exceed) and redact injected
  * credential strings from the captured output. Shared by the process, Git and
  * SSH contexts so the process-mediated capture discipline is defined once.
+ *
+ * The returned promise always settles: the timeout kills the child's whole
+ * process group, settlement is driven by the child's own `'exit'` with a
+ * bounded flush grace (not by `'close'`, which a surviving grandchild holding
+ * the inherited stdio can withhold forever), and a post-kill backstop settles
+ * even if the kill itself does not take. A pending promise here would strand
+ * the caller's `finally` — the plaintext wipe, the ephemeral ssh-agent socket
+ * and the identity/known-hosts temp files all hang off it.
  *
  * Network isolation is applied here — at the single spawn seam, after the
  * caller's allowlist resolution — so no process-mediated context can forget
@@ -80,6 +141,10 @@ export async function spawnCaptured(
         env: opts.env,
         cwd: opts.cwd,
         windowsHide: true,
+        // POSIX: own process group, so the timeout can signal the whole tree.
+        // Windows has no equivalent (detached opens a console there) and uses
+        // taskkill /T instead.
+        detached: process.platform !== "win32",
       });
     } catch {
       resolvePromise({
@@ -96,9 +161,43 @@ export async function spawnCaptured(
     }
 
     let timedOut = false;
+    let settled = false;
+    let flushTimer: NodeJS.Timeout | undefined;
+    let backstopTimer: NodeJS.Timeout | undefined;
+
+    const settle = (result: SpawnCapturedResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (flushTimer) clearTimeout(flushTimer);
+      if (backstopTimer) clearTimeout(backstopTimer);
+      resolvePromise(result);
+    };
+
+    const finish = (code: number | null, signal: string | null, spawnFailed: boolean): void => {
+      settle({
+        // A timed-out child was killed by the vault, so it reports as killed on
+        // every platform: Windows has no signals and surfaces the taskkill as
+        // an ordinary non-zero exit, which would otherwise read as the payload
+        // having chosen that status.
+        exit_code: timedOut ? null : code,
+        stdout: redactAll(stdout.toString()),
+        stderr: redactAll(stderr.toString()),
+        timed_out: timedOut,
+        truncated: stdout.truncated || stderr.truncated,
+        signal: timedOut ? (signal ?? "SIGKILL") : signal,
+        spawn_failed: spawnFailed,
+        isolation_mechanism: isolationMechanism,
+      });
+    };
+
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      killTree(child);
+      // A kill that does not take (an unkillable state, a failed taskkill)
+      // must not strand the caller: settle with what was captured.
+      backstopTimer = setTimeout(() => finish(null, "SIGKILL", false), KILL_SETTLE_MS);
+      if (backstopTimer.unref) backstopTimer.unref();
     }, opts.timeoutMs);
     if (timer.unref) timer.unref();
 
@@ -106,31 +205,21 @@ export async function spawnCaptured(
     child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
 
     child.on("error", () => {
-      clearTimeout(timer);
-      resolvePromise({
-        exit_code: null,
-        stdout: redactAll(stdout.toString()),
-        stderr: redactAll(stderr.toString()),
-        timed_out: false,
-        truncated: stdout.truncated || stderr.truncated,
-        signal: null,
-        spawn_failed: true,
-        isolation_mechanism: isolationMechanism,
-      });
+      finish(null, null, true);
+    });
+
+    // 'close' waits for every stdio stream to end — a grandchild that inherited
+    // them can hold it back indefinitely, so the child's own 'exit' starts a
+    // bounded flush window instead. On the normal path 'close' follows within
+    // microseconds and settles immediately with the complete output.
+    child.on("exit", (code, signal) => {
+      if (settled || flushTimer) return;
+      flushTimer = setTimeout(() => finish(code, signal ?? null, false), STREAM_FLUSH_GRACE_MS);
+      if (flushTimer.unref) flushTimer.unref();
     });
 
     child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      resolvePromise({
-        exit_code: code,
-        stdout: redactAll(stdout.toString()),
-        stderr: redactAll(stderr.toString()),
-        timed_out: timedOut,
-        truncated: stdout.truncated || stderr.truncated,
-        signal: signal ?? null,
-        spawn_failed: false,
-        isolation_mechanism: isolationMechanism,
-      });
+      finish(code, signal ?? null, false);
     });
   });
 }

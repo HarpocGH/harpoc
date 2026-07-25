@@ -34,7 +34,11 @@ export function registerCreateSecret(
     },
     async (args) => {
       scopeGuard.checkAccess(PERMISSION, args.project, args.name);
-      rateLimiter.checkLimit();
+      // Bucketed by name, not just globally: this tool opens a URL-mode value
+      // collector (a loopback listener plus a timer) per call, and the global
+      // tier alone is far too generous a ceiling on that. No secret id exists
+      // yet, so the requested name is the stable key.
+      rateLimiter.checkLimit(`create:${args.project ?? ""}/${args.name}`);
 
       // Create secret without a value — it starts in "pending" status. The
       // value is then collected out-of-band, per the thesis's channel

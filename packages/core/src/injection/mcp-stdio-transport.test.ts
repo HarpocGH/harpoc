@@ -151,3 +151,148 @@ describe("StdioChildTransport — dead stdin pipe", () => {
     }
   });
 });
+
+/**
+ * M5. Downstream stdout was buffered with no size cap (stderr has one, results
+ * have one), and the drain loop `continue`d on a readMessage failure — so a
+ * failure thrown BEFORE the buffer advanced (a line too large to even
+ * stringify) spun a synchronous loop inside the 'data' handler and blocked the
+ * vault's event loop permanently. A single malformed or oversized line from a
+ * downstream server — hostile, or merely buggy — was enough.
+ */
+describe("StdioChildTransport — untrusted downstream stdout framing", () => {
+  /** Wait for a condition rather than a fixed delay — CI load is not bounded. */
+  const settle = async (until: () => boolean, timeoutMs = 5_000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && !until()) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  };
+
+  it("keeps the event loop responsive while a huge unframed line streams in", async () => {
+    // 6 MiB with no newline: past the 4 MiB cap, so the connection must fail
+    // rather than buffer the stream in the vault's memory.
+    const transport = makeTransport(
+      `process.stdout.write("x".repeat(6 * 1024 * 1024)); setInterval(() => {}, 1000);`,
+    );
+    const errors: Error[] = [];
+    transport.onerror = (err) => errors.push(err);
+    const closed = new Promise<void>((resolve) => {
+      transport.onclose = () => resolve();
+    });
+
+    await transport.start();
+
+    // A timer that must still fire proves the event loop was never blocked.
+    let ticked = false;
+    const ticker = setTimeout(() => {
+      ticked = true;
+    }, 10);
+    await closed;
+    clearTimeout(ticker);
+
+    expect(ticked).toBe(true);
+    expect(errors.some((e) => /unframed stdout/.test(e.message))).toBe(true);
+    expect(transport.exitInfo).not.toBeNull();
+  }, 20_000);
+
+  it("a malformed line is reported and the stream keeps working", async () => {
+    const transport = makeTransport(
+      `process.stdout.write("not json at all\\n");
+       process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }) + "\\n");
+       setInterval(() => {}, 1000);`,
+    );
+    const errors: Error[] = [];
+    const messages: unknown[] = [];
+    transport.onerror = (err) => errors.push(err);
+    transport.onmessage = (msg) => messages.push(msg);
+
+    await transport.start();
+    await settle(() => errors.length > 0 && messages.length > 0);
+
+    try {
+      expect(errors.length).toBe(1);
+      // The good line after the bad one still arrives — the drain loop advanced
+      // past the malformed line instead of retrying it forever.
+      expect(messages).toEqual([{ jsonrpc: "2.0", id: 1, result: {} }]);
+    } finally {
+      transport.killSync();
+      await transport.close();
+    }
+  }, 20_000);
+
+  it("a parse failure cannot spin the drain loop: the line is consumed first", async () => {
+    const transport = makeTransport(`setInterval(() => {}, 1000);`);
+    await transport.start();
+
+    try {
+      const internals = transport as unknown as {
+        deserializeMessage: (line: string) => unknown;
+        stdoutBuffer: Buffer;
+        onStdout(chunk: Buffer): void;
+      };
+      // A parser that throws on every line stands in for the case that made the
+      // old loop non-terminating: a line so large it cannot even be stringified
+      // threw BEFORE the buffer had advanced, and the `continue` retried it
+      // forever. If the fix regresses, this call never returns — the drain runs
+      // synchronously inside the 'data' handler, so no test timeout can fire.
+      internals.deserializeMessage = () => {
+        throw new Error("cannot parse");
+      };
+      const errors: Error[] = [];
+      transport.onerror = (err) => errors.push(err);
+
+      internals.onStdout(Buffer.from("one\ntwo\nthree\n"));
+
+      expect(internals.stdoutBuffer.length).toBe(0);
+      expect(errors.length).toBe(3);
+    } finally {
+      transport.killSync();
+      await transport.close();
+    }
+  }, 20_000);
+
+  it("control: messages split across chunk boundaries still reassemble", async () => {
+    const transport = makeTransport(
+      `const msg = JSON.stringify({ jsonrpc: "2.0", id: 42, result: { ok: true } }) + "\\n";
+       let i = 0;
+       const t = setInterval(() => {
+         process.stdout.write(msg[i]);
+         if (++i === msg.length) clearInterval(t);
+       }, 1);
+       setInterval(() => {}, 1000);`,
+    );
+    const messages: unknown[] = [];
+    transport.onmessage = (msg) => messages.push(msg);
+
+    await transport.start();
+    await settle(() => messages.length > 0);
+
+    try {
+      expect(messages).toEqual([{ jsonrpc: "2.0", id: 42, result: { ok: true } }]);
+    } finally {
+      transport.killSync();
+      await transport.close();
+    }
+  }, 20_000);
+
+  it("control: a line just under the cap is still delivered", async () => {
+    const transport = makeTransport(
+      `const pad = "y".repeat(1024 * 1024);
+       process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: 9, result: { pad } }) + "\\n");
+       setInterval(() => {}, 1000);`,
+    );
+    const messages: { id?: number }[] = [];
+    transport.onmessage = (msg) => messages.push(msg as { id?: number });
+
+    await transport.start();
+    await settle(() => messages.length > 0);
+
+    try {
+      expect(messages.map((m) => m.id)).toEqual([9]);
+    } finally {
+      transport.killSync();
+      await transport.close();
+    }
+  }, 20_000);
+});

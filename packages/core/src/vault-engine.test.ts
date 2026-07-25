@@ -1996,12 +1996,51 @@ describe("JWT tokens", () => {
     ).toThrow(VaultError);
   });
 
-  it("revocation with explicit expiresAt uses that value", () => {
+  it("revocation with explicit expiresAt still revokes the token", () => {
     const token = engine.createToken("user-1", ["read"]);
     const decoded = engine.verifyToken(token);
 
     engine.revokeToken(decoded.jti, decoded.exp);
     expect(() => engine.verifyToken(token)).toThrow("revoked");
+  });
+
+  // M1: verifyToken prunes revocation entries whose expires_at has passed
+  // *before* consulting them, so an expiry earlier than the token's own
+  // silently un-revoked it. The stored lifetime is clamped to the maximum
+  // token TTL, which no token can outlive.
+  it("clamps a past expiresAt so the revocation still holds", () => {
+    const token = engine.createToken("user-1", ["read"]);
+    const decoded = engine.verifyToken(token);
+
+    engine.revokeToken(decoded.jti, Math.floor(Date.now() / 1000) - 60);
+
+    expect(() => engine.verifyToken(token)).toThrow("revoked");
+  });
+
+  it("clamps an expiresAt that falls short of the token's own expiry", () => {
+    const token = engine.createToken("user-1", ["read"]);
+    const decoded = engine.verifyToken(token);
+
+    engine.revokeToken(decoded.jti, decoded.exp - 3600);
+
+    const db = new Database(dbPath, { readonly: true });
+    const row = db
+      .prepare("SELECT expires_at FROM revoked_tokens WHERE jti = ?")
+      .get(decoded.jti) as { expires_at: number } | undefined;
+    db.close();
+    expect(row?.expires_at).toBeGreaterThanOrEqual(decoded.exp);
+  });
+
+  it("honors an expiresAt beyond the clamp floor", () => {
+    const farFuture = Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60;
+    engine.revokeToken("manual-jti", farFuture);
+
+    const db = new Database(dbPath, { readonly: true });
+    const row = db
+      .prepare("SELECT expires_at FROM revoked_tokens WHERE jti = ?")
+      .get("manual-jti") as { expires_at: number } | undefined;
+    db.close();
+    expect(row?.expires_at).toBe(farFuture);
   });
 });
 

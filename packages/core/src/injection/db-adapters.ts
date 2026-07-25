@@ -1,4 +1,7 @@
 import { createConnection as netConnect } from "node:net";
+import type { Socket } from "node:net";
+import { checkServerIdentity } from "node:tls";
+import type { PeerCertificate } from "node:tls";
 import type { DatabaseEngine } from "@harpoc/shared";
 
 /**
@@ -46,12 +49,41 @@ export interface DbEngineAdapter {
   connect(opts: DbConnectOptions): Promise<DbConnection>;
 }
 
+/**
+ * TLS server-identity check bound to the LOGICAL host, whatever address the
+ * socket ended up dialing. Node derives the name to verify as
+ * `servername || options.host || socket._host || "localhost"`, and neither
+ * driver supplies a servername for an IP-literal target (SNI forbids it), so
+ * without this the check runs against the wrong name.
+ */
+function identityCheckerFor(host: string) {
+  return (_derivedHost: string, cert: PeerCertificate): Error | undefined =>
+    checkServerIdentity(host, cert);
+}
+
+/**
+ * Dial the pinned address while presenting the logical host as the socket's
+ * name, so a driver that leaves the TLS identity to Node's own derivation
+ * verifies against the target the vault validated rather than the "localhost"
+ * default. `_host` is exactly the field Node consults; `net.connect` sets it
+ * for hostname dials but returns early — leaving it unset — for IP literals.
+ * Empirically verified against Node v24.13.1.
+ */
+function dialPinned(opts: DbConnectOptions): Socket {
+  const socket = netConnect(opts.port, opts.address);
+  socket.setNoDelay(true);
+  (socket as Socket & { _host?: string })._host = opts.host;
+  return socket;
+}
+
 class PostgresAdapter implements DbEngineAdapter {
   async connect(opts: DbConnectOptions): Promise<DbConnection> {
     const { default: pg } = await import("pg");
     // Dial the pinned address; `servername` keeps SNI + certificate hostname
     // verification on the logical host (pg self-derives servername only for
-    // hostname dials, so it must be explicit when connecting by IP).
+    // hostname dials, so it must be explicit when connecting by IP). For an
+    // IP-literal target there is no servername at all, so the identity check
+    // is bound explicitly — pg forwards unknown ssl keys to tls.connect.
     const pinned = opts.address !== opts.host;
     const client = new pg.Client({
       host: opts.address,
@@ -65,6 +97,7 @@ class PostgresAdapter implements DbEngineAdapter {
           : {
               rejectUnauthorized: true,
               ca: opts.tls.ca,
+              checkServerIdentity: identityCheckerFor(opts.host),
               ...(pinned ? { servername: opts.host } : {}),
             },
       connectionTimeoutMillis: opts.timeoutMs,
@@ -93,11 +126,14 @@ class MysqlAdapter implements DbEngineAdapter {
   async connect(opts: DbConnectOptions): Promise<DbConnection> {
     const mysql = await import("mysql2/promise");
     // mysql2 derives the TLS servername from `host` and offers no override, so
-    // `host` stays the logical name and the pinned address goes in through a
-    // custom socket factory. `verifyIdentity` must be explicit: without it
+    // `host` stays the logical name and the address is dialed through a custom
+    // socket factory. `verifyIdentity` must be set UNCONDITIONALLY: without it
     // mysql2 swaps checkServerIdentity for a no-op and never verifies the
-    // certificate hostname.
-    const pinned = opts.address !== opts.host;
+    // certificate hostname at all, so any certificate from any trusted CA —
+    // for any name — is accepted and a pinned `ca_pem` degrades from "this
+    // endpoint" to "anything holding a cert from this CA". mysql2 ignores an
+    // ssl.checkServerIdentity of ours (it picks the function itself), hence
+    // the socket-side binding in dialPinned.
     const conn = await mysql.createConnection({
       host: opts.host,
       port: opts.port,
@@ -110,18 +146,10 @@ class MysqlAdapter implements DbEngineAdapter {
           : {
               rejectUnauthorized: true,
               ca: opts.tls.ca,
-              ...(pinned ? { verifyIdentity: true } : {}),
+              verifyIdentity: true,
             },
       connectTimeout: opts.timeoutMs,
-      ...(pinned
-        ? {
-            stream: () => {
-              const socket = netConnect(opts.port, opts.address);
-              socket.setNoDelay(true);
-              return socket;
-            },
-          }
-        : {}),
+      stream: () => dialPinned(opts),
     });
     return {
       async query(sql: string, params?: unknown[]): Promise<DbQueryResult> {

@@ -2,11 +2,24 @@ import type { Command } from "commander";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printSuccess } from "../../utils/output.js";
 
-function decodeTokenExp(token: string): number | undefined {
+/**
+ * Expiry of the supplied JWT — but only when it is the token being revoked.
+ * `HARPOC_TOKEN` is ambient (it authenticates other commands too), so an
+ * unrelated token's `exp` must never become the revocation entry's lifetime:
+ * an earlier expiry would prune the entry while the revoked token still
+ * validates. On mismatch the caller falls back to the engine's floor.
+ */
+function decodeTokenExp(token: string, jti: string): number | undefined {
   const parts = token.split(".");
   if (parts.length !== 3 || !parts[1]) return undefined;
   try {
     const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    if (payload.jti !== jti) {
+      console.error(
+        `Warning: the supplied token is not '${jti}' — revoking with the maximum token lifetime instead of its expiry`,
+      );
+      return undefined;
+    }
     if (typeof payload.exp === "number") return payload.exp;
   } catch {
     // Ignore decode errors
@@ -28,7 +41,7 @@ export function registerAuthRevokeCommand(auth: Command): void {
         const engine = await loadUnlockedEngine(vaultDir);
         try {
           const token = options.token ?? process.env.HARPOC_TOKEN;
-          const expiresAt = token ? decodeTokenExp(token) : undefined;
+          const expiresAt = token ? decodeTokenExp(token, jti) : undefined;
           engine.revokeToken(jti, expiresAt);
           printSuccess(`Token revoked (${jti})`);
         } finally {

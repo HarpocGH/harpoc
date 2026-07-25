@@ -7,6 +7,16 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_FORM_BODY_BYTES = 128 * 1024;
 const TOKEN_BYTES = 32;
+/**
+ * Live collectors allowed at once across the process. Each pins a loopback
+ * listener and a five-minute timer, and nothing else bounds how many
+ * create_secret/rotate_secret calls a client may have in flight — so without a
+ * ceiling an agent could hold arbitrarily many open. Reaching it degrades
+ * gracefully: the caller falls back to the terminal prompt or deferred entry.
+ */
+const MAX_CONCURRENT_COLLECTORS = 8;
+
+let liveCollectors = 0;
 
 export interface ValueCollectorOptions {
   /** Secret name shown on the form (display only, HTML-escaped). */
@@ -31,6 +41,9 @@ export interface ValueCollector {
  * single-use token (timing-safe compared) and expires after `timeoutMs`.
  */
 export async function startValueCollector(options: ValueCollectorOptions): Promise<ValueCollector> {
+  if (liveCollectors >= MAX_CONCURRENT_COLLECTORS) {
+    throw new Error("Too many concurrent value collectors");
+  }
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const token = randomBytes(TOKEN_BYTES).toString("base64url");
   const tokenBuffer = Buffer.from(token, "utf8");
@@ -61,7 +74,27 @@ export async function startValueCollector(options: ValueCollectorOptions): Promi
     return candidate.length === tokenBuffer.length && timingSafeEqual(candidate, tokenBuffer);
   }
 
+  /**
+   * node:http calls this synchronously: a throw escaping it is an unhandled
+   * exception that takes the whole vault process down. Nothing below is
+   * expected to throw — the token length guard in matchesToken is what keeps
+   * timingSafeEqual from raising ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH on a
+   * short token — but that is one guard away from a remote crash, so the
+   * boundary is explicit.
+   */
   function handleRequest(req: IncomingMessage, res: ServerResponse): void {
+    try {
+      route(req, res);
+    } catch {
+      try {
+        sendHtml(res, 500, "Internal Server Error", "<h1>Request failed</h1>");
+      } catch {
+        res.destroy();
+      }
+    }
+  }
+
+  function route(req: IncomingMessage, res: ServerResponse): void {
     const requestPath = (req.url ?? "/").split("?")[0] ?? "/";
 
     if (!matchesToken(requestPath)) {
@@ -114,6 +147,8 @@ export async function startValueCollector(options: ValueCollectorOptions): Promi
       resolve();
     });
   });
+  liveCollectors++;
+  let released = false;
 
   const port = (server.address() as AddressInfo).port;
   const url = `http://127.0.0.1:${port}${path}`;
@@ -122,10 +157,15 @@ export async function startValueCollector(options: ValueCollectorOptions): Promi
     settle(() => rejectValue(new Error("Value collection timed out")));
     void close();
   }, timeoutMs);
+  if (timeoutId.unref) timeoutId.unref();
 
   async function close(): Promise<void> {
     clearTimeout(timeoutId);
     settle(() => rejectValue(new Error("Value collector closed")));
+    if (!released) {
+      released = true;
+      liveCollectors--;
+    }
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
       server.closeIdleConnections();

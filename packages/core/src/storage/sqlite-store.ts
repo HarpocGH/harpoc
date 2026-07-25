@@ -1071,8 +1071,23 @@ export class SqliteStore {
   // Transaction helper
   // ---------------------------------------------------------------------------
 
+  /**
+   * Run `fn` in a write transaction.
+   *
+   * `BEGIN IMMEDIATE`, not the plain deferred `BEGIN`: every transaction here
+   * writes, and several — AuditLogger.log (SELECT the last chain link, then
+   * INSERT) and SecretManager.createSecret (duplicate SELECT, then INSERT) —
+   * read first. A deferred BEGIN takes a WAL read snapshot on that first SELECT
+   * and only then tries to upgrade to a write; if another connection committed
+   * in between, SQLite answers SQLITE_BUSY_SNAPSHOT, which `busy_timeout`
+   * deliberately does NOT retry. With multi-process access (a `server start`
+   * daemon plus CLI commands — the documented deployment) that surfaced as a
+   * spurious failure, and under the atomic-audit semantics it rolls the whole
+   * operation back. Taking the write lock up front is what the read-then-write
+   * pattern needs; nested calls still run as savepoints.
+   */
   transaction<T>(fn: () => T): T {
-    return this.db.transaction(fn)();
+    return this.db.transaction(fn).immediate();
   }
 
   // ---------------------------------------------------------------------------

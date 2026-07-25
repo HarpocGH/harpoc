@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { InjectionPolicy, McpAction, McpResult, McpServerConfig } from "@harpoc/shared";
 import {
@@ -242,6 +243,48 @@ export class McpInjector {
 
     let stdioTransport: StdioChildTransport | undefined;
     let dispose: (() => void) | undefined;
+    try {
+      return await this.establishInner(
+        sdk,
+        client,
+        secretId,
+        config,
+        resolvedCommand,
+        valueStr,
+        policy,
+        fingerprints,
+        attribution,
+        (t) => (stdioTransport = t),
+        (d) => (dispose = d),
+      );
+    } catch (err) {
+      // The child already holds the plaintext credential in its environment, so
+      // ANY failure after the spawn — a failed handshake, a refused audit write
+      // (audit is fail-closed), a thrown mapper — must take it down here. It is
+      // not in the registry yet, so no seal, terminate or crash path can ever
+      // reach it afterwards.
+      stdioTransport?.killSync();
+      void client.close().catch(() => undefined);
+      dispose?.();
+      throw err;
+    }
+  }
+
+  private async establishInner(
+    sdk: McpSdk,
+    client: Client,
+    secretId: string,
+    config: McpServerConfig,
+    resolvedCommand: string | undefined,
+    valueStr: string,
+    policy: InjectionPolicy,
+    fingerprints: { credentialFingerprint: string; configFingerprint: string },
+    attribution: AuditAttribution | undefined,
+    setStdioTransport: (t: StdioChildTransport) => void,
+    setDispose: (d: () => void) => void,
+  ): Promise<McpConnectionEntry> {
+    let stdioTransport: StdioChildTransport | undefined;
+    let dispose: (() => void) | undefined;
     if (config.transport === McpTransport.STDIO) {
       stdioTransport = new StdioChildTransport({
         resolvedCommand: resolvedCommand as string,
@@ -249,6 +292,7 @@ export class McpInjector {
         env: buildCleanEnv(config.env_var as string, valueStr, policy.env_allowlist),
         cwd: config.working_directory,
       });
+      setStdioTransport(stdioTransport);
       await client.connect(stdioTransport, { timeout: MCP_INIT_TIMEOUT_MS });
     } else {
       // DNS-rebinding TOCTOU protection (parity with the HTTP injector): every
@@ -257,6 +301,7 @@ export class McpInjector {
       const pins = new Map<string, readonly string[]>();
       const dispatcher = new Agent({ connect: { lookup: createPinnedLookup(pins) } });
       dispose = (): void => void dispatcher.close().catch(() => undefined);
+      setDispose(dispose);
       const transport = new sdk.StreamableHTTPClientTransport(new URL(config.url as string), {
         fetch: this.validatingAuthFetch(valueStr, pins, dispatcher),
         reconnectionOptions: {
@@ -268,12 +313,7 @@ export class McpInjector {
           reconnectionDelayGrowFactor: 1.5,
         },
       });
-      try {
-        await client.connect(transport, { timeout: MCP_INIT_TIMEOUT_MS });
-      } catch (err) {
-        dispose();
-        throw err;
-      }
+      await client.connect(transport, { timeout: MCP_INIT_TIMEOUT_MS });
     }
 
     // The spawn is the credential-injection moment — attributed to the
@@ -305,6 +345,9 @@ export class McpInjector {
       stdioTransport,
       dispose,
       state: "connecting",
+      // The crash path records a downstream stderr tail; only the injector
+      // knows the value that went into this child's environment.
+      redact: valueStr,
       crashed: false,
       ...fingerprints,
       spawnedAt: Date.now(),

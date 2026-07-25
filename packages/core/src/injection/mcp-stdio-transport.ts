@@ -1,8 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import type { ReadBuffer } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
-import { MAX_MCP_STDERR_BYTES } from "@harpoc/shared";
+import { MAX_MCP_STDERR_BYTES, MAX_MCP_STDOUT_BUFFER_BYTES } from "@harpoc/shared";
 import { CappedOutput } from "./capped-output.js";
 
 /** Exit code/signal of a terminated downstream MCP server child. */
@@ -40,6 +39,13 @@ type McpStdioModule = typeof import("@modelcontextprotocol/sdk/shared/stdio.js")
  * stderr is captured into a capped buffer (never inherited, never returned to
  * the agent); it may contain the credential and is only ever used
  * pattern-sanitized in audit detail.
+ *
+ * Line framing is the vault's own rather than the SDK's ReadBuffer: the
+ * downstream server is untrusted output, so the pending buffer is capped (an
+ * unframed stream would otherwise grow without bound) and every line is
+ * consumed BEFORE it is parsed, so a line the parser cannot even stringify
+ * cannot leave the drain loop spinning on an unchanged buffer — which, being
+ * synchronous, would block the vault's event loop permanently.
  */
 export class StdioChildTransport implements Transport {
   onclose?: () => void;
@@ -51,7 +57,10 @@ export class StdioChildTransport implements Transport {
 
   private child: ChildProcess | null = null;
   private serializeMessage: McpStdioModule["serializeMessage"] | null = null;
+  private deserializeMessage: McpStdioModule["deserializeMessage"] | null = null;
   private started = false;
+  private stdoutBuffer: Buffer = Buffer.alloc(0);
+  private framingFailed = false;
 
   constructor(private readonly params: StdioChildParams) {}
 
@@ -68,8 +77,8 @@ export class StdioChildTransport implements Transport {
     // Lazy SDK import (dependency confinement, §5.2): SDK code enters the
     // process only once a downstream server is actually spawned.
     const stdio = await import("@modelcontextprotocol/sdk/shared/stdio.js");
-    const readBuffer = new stdio.ReadBuffer();
     this.serializeMessage = stdio.serializeMessage;
+    this.deserializeMessage = stdio.deserializeMessage;
 
     await new Promise<void>((resolve, reject) => {
       const child = spawn(this.params.resolvedCommand, this.params.args, {
@@ -95,10 +104,7 @@ export class StdioChildTransport implements Transport {
         }
       });
 
-      child.stdout?.on("data", (chunk: Buffer) => {
-        readBuffer.append(chunk);
-        this.drainMessages(readBuffer);
-      });
+      child.stdout?.on("data", (chunk: Buffer) => this.onStdout(chunk));
       child.stderr?.on("data", (chunk: Buffer) => this.stderrTail.push(chunk));
 
       // EPIPE lands on the stdin stream (not the ChildProcess) when the child
@@ -111,7 +117,7 @@ export class StdioChildTransport implements Transport {
       child.on("close", (code, signal) => {
         this.exitInfo = { code, signal };
         this.child = null;
-        readBuffer.clear();
+        this.stdoutBuffer = Buffer.alloc(0);
         this.onclose?.();
       });
     });
@@ -159,17 +165,47 @@ export class StdioChildTransport implements Transport {
     this.child?.kill("SIGKILL");
   }
 
-  private drainMessages(readBuffer: ReadBuffer): void {
+  private onStdout(chunk: Buffer): void {
+    if (this.framingFailed) return;
+    if (this.stdoutBuffer.length + chunk.length > MAX_MCP_STDOUT_BUFFER_BYTES) {
+      // One oversized or never-terminated line would otherwise buffer the whole
+      // stream in the vault's memory. Fail the connection visibly instead: the
+      // registry sees the close as a crash, audits it, and never auto-respawns.
+      this.failFraming(
+        `Downstream MCP server exceeded ${String(MAX_MCP_STDOUT_BUFFER_BYTES)} bytes of unframed stdout`,
+      );
+      return;
+    }
+    this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, chunk]);
+    this.drainMessages();
+  }
+
+  private drainMessages(): void {
+    const deserialize = this.deserializeMessage;
+    if (!deserialize) return;
     for (;;) {
-      let message: JSONRPCMessage | null;
+      const index = this.stdoutBuffer.indexOf(0x0a);
+      if (index === -1) return;
+      const line = this.stdoutBuffer.subarray(0, index);
+      // Consume before parsing: progress is then structural, so no parse
+      // failure — not even one thrown before a line can be stringified — can
+      // spin this loop on an unchanged buffer.
+      this.stdoutBuffer = this.stdoutBuffer.subarray(index + 1);
+      let message: JSONRPCMessage;
       try {
-        message = readBuffer.readMessage();
+        message = deserialize(line.toString("utf8").replace(/\r$/, ""));
       } catch (err) {
         this.onerror?.(err instanceof Error ? err : new Error(String(err)));
         continue;
       }
-      if (message === null) return;
       this.onmessage?.(message);
     }
+  }
+
+  private failFraming(reason: string): void {
+    this.framingFailed = true;
+    this.stdoutBuffer = Buffer.alloc(0);
+    this.onerror?.(new Error(reason));
+    this.child?.kill("SIGKILL");
   }
 }

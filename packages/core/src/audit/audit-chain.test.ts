@@ -161,3 +161,101 @@ describe("audit HMAC chain verification", () => {
     expect(result.legacy).toBe(1);
   });
 });
+
+/**
+ * M2. `row_hmac IS NULL` marks a pre-migration-010 row, which verification
+ * counts and skips. Nothing enforced that such rows may only be a PREFIX, so a
+ * database-writing attacker (the exact adversary the chain exists for — they
+ * hold no audit key) could null the column on any suffix and then insert,
+ * delete and edit those rows with `harpoc audit verify` reporting OK.
+ */
+describe("audit chain: NULL links are not a free pass", () => {
+  function nullLinks(fromId: number): void {
+    store.db.prepare("UPDATE audit_log SET row_hmac = NULL WHERE id >= ?").run(fromId);
+  }
+
+  it("pins the vulnerability: nulling a suffix then rewriting it is detected", () => {
+    const ids: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      ids.push(logger.log({ eventType: AuditEventType.SECRET_READ, detail: { i } }));
+    }
+    const from = ids[2] as number;
+    nullLinks(from);
+    // With the links gone the attacker edits the plaintext columns freely.
+    store.db.prepare("UPDATE audit_log SET success = 0 WHERE id >= ?").run(from);
+    store.db.prepare("DELETE FROM audit_log WHERE id = ?").run(ids[4]);
+
+    const result = query.verifyChain();
+    expect(result.valid).toBe(false);
+    expect(result.firstBrokenId).toBe(from);
+  });
+
+  it("detects a single nulled link in the middle of the chain", () => {
+    const ids: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      ids.push(logger.log({ eventType: AuditEventType.SECRET_READ, detail: { i } }));
+    }
+    store.db.prepare("UPDATE audit_log SET row_hmac = NULL WHERE id = ?").run(ids[1]);
+
+    const result = query.verifyChain();
+    expect(result.valid).toBe(false);
+    expect(result.firstBrokenId).toBe(ids[1]);
+  });
+
+  it("detects a nulled tail (the whole log after the first row)", () => {
+    const ids: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      ids.push(logger.log({ eventType: AuditEventType.SECRET_READ, detail: { i } }));
+    }
+    nullLinks(ids[1] as number);
+
+    const result = query.verifyChain();
+    expect(result.valid).toBe(false);
+    expect(result.firstBrokenId).toBe(ids[1]);
+  });
+
+  it("detects a wholly nulled log, which the prefix rule alone would allow", () => {
+    const ids: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      ids.push(logger.log({ eventType: AuditEventType.SECRET_READ, detail: { i } }));
+    }
+    nullLinks(ids[0] as number);
+
+    const result = query.verifyChain();
+    expect(result.valid).toBe(false);
+    expect(result.checked).toBe(0);
+    expect(result.legacy).toBe(3);
+    expect(result.firstBrokenId).toBe(ids[0]);
+  });
+
+  it("control: a genuine legacy PREFIX followed by chained rows stays valid", () => {
+    store.db
+      .prepare(
+        `INSERT INTO audit_log (timestamp, event_type, secret_id, principal_type, principal_id,
+           detail_encrypted, detail_iv, detail_tag, ip_address, session_id, success, row_hmac)
+         VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, NULL)`,
+      )
+      .run(Date.now(), AuditEventType.VAULT_UNLOCK);
+    logger.log({ eventType: AuditEventType.SECRET_READ, detail: { a: 1 } });
+    logger.log({ eventType: AuditEventType.SECRET_USE, detail: { b: 2 } });
+
+    const result = query.verifyChain();
+    expect(result.valid).toBe(true);
+    expect(result.legacy).toBe(1);
+    expect(result.checked).toBe(2);
+    expect(result.firstBrokenId).toBeNull();
+  });
+
+  it("control: an empty log and an untampered chain stay valid", () => {
+    expect(query.verifyChain()).toEqual({
+      valid: true,
+      checked: 0,
+      legacy: 0,
+      firstBrokenId: null,
+    });
+
+    logger.log({ eventType: AuditEventType.SECRET_READ, detail: { a: 1 } });
+    logger.log({ eventType: AuditEventType.SECRET_USE, detail: { b: 2 } });
+    expect(query.verifyChain().valid).toBe(true);
+  });
+});

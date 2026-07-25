@@ -1,8 +1,9 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { AuditEventType, MCP_SHUTDOWN_TIMEOUT_MS } from "@harpoc/shared";
+import { AuditEventType, MCP_SHUTDOWN_TIMEOUT_MS, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { InjectionGuard } from "./injection-guard.js";
 import type { StdioChildTransport } from "./mcp-stdio-transport.js";
+import { redactSecretEncodings } from "./output-sanitizer.js";
 
 /** Max bytes of pattern-sanitized downstream stderr recorded in a crash audit entry. */
 const CRASH_STDERR_TAIL_BYTES = 2_048;
@@ -26,6 +27,12 @@ export interface McpConnectionEntry {
    */
   dispose?: () => void;
   state: McpEntryState;
+  /**
+   * The plaintext credential injected into this connection, kept so the crash
+   * path can redact it out of the downstream stderr tail it records. Held for
+   * exactly as long as the child that already has it in its environment.
+   */
+  redact?: string;
   /** Set when the connection closed without a deliberate terminate. */
   crashed: boolean;
   credentialFingerprint: string;
@@ -44,6 +51,14 @@ export class McpConnectionRegistry {
   private readonly connections = new Map<string, Promise<McpConnectionEntry>>();
   /** Ready entries, synchronously accessible for staleness checks and seal paths. */
   private readonly live = new Map<string, McpConnectionEntry>();
+  /**
+   * Bumped whenever the registry is cleared wholesale (session end, seal). A
+   * connect that started before the clear must not publish into the registry
+   * afterwards: the seal has already walked the table, so that entry — a child
+   * holding the plaintext credential — would outlive the keys that authorized
+   * it with no teardown path left.
+   */
+  private generation = 0;
 
   constructor(private readonly auditLogger: AuditLogger | null) {}
 
@@ -91,6 +106,7 @@ export class McpConnectionRegistry {
 
   /** Graceful session-end teardown (lock/destroy): close all within a budget. */
   async closeAll(reason = "session_end"): Promise<void> {
+    this.generation++;
     const entries = [...this.live.values()];
     this.connections.clear();
 
@@ -120,6 +136,7 @@ export class McpConnectionRegistry {
    * (wipeKeys covers lock, destroy and the session-monitor expiry seal).
    */
   killAllSync(): void {
+    this.generation++;
     for (const entry of this.live.values()) {
       entry.state = "closing";
       entry.stdioTransport?.killSync();
@@ -134,7 +151,19 @@ export class McpConnectionRegistry {
     secretId: string,
     factory: () => Promise<McpConnectionEntry>,
   ): Promise<McpConnectionEntry> {
+    const generation = this.generation;
     const entry = await factory();
+    if (this.generation !== generation) {
+      // The vault sealed (or the session ended) while this connect was in
+      // flight. Tear the child down here — the same hard teardown the seal path
+      // performs — instead of publishing it into a registry nothing will walk
+      // again.
+      entry.state = "closing";
+      entry.stdioTransport?.killSync();
+      void entry.client.close().catch(() => undefined);
+      entry.dispose?.();
+      throw VaultError.mcpConnectFailed(entry.serverName, "vault session ended while connecting");
+    }
     entry.state = "ready";
     this.live.set(secretId, entry);
 
@@ -203,15 +232,21 @@ export class McpConnectionRegistry {
   }
 
   /**
-   * Downstream stderr may contain the credential (a server can log its own
-   * env). Exact-value redaction is impossible at crash time without retaining
-   * plaintext, so the tail recorded in the audit detail is pattern-sanitized
-   * and capped — and never reaches the agent-visible error.
+   * Downstream stderr may contain the credential — a server logging its own
+   * environment is a common debug accident, and the audit detail is durable
+   * and served to admin-scoped MCP clients, which otherwise have no path to
+   * any secret value. Pattern sanitization alone does not recognize an
+   * arbitrary credential, so the tail is first passed through exact-value
+   * redaction against the value that was injected into this very child
+   * (`redact`, supplied by the injector that holds it), exactly as the result
+   * path does; the pattern pass and the cap then still apply.
    */
   private sanitizedStderrTail(entry: McpConnectionEntry): string | undefined {
     const raw = entry.stdioTransport?.stderrTail.toString();
     if (!raw) return undefined;
+    const tail = raw.slice(-CRASH_STDERR_TAIL_BYTES);
+    const exact = entry.redact ? redactSecretEncodings(tail, entry.redact) : tail;
     const guard = new InjectionGuard();
-    return guard.sanitize(raw.slice(-CRASH_STDERR_TAIL_BYTES));
+    return guard.sanitize(exact);
   }
 }

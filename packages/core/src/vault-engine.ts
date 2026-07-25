@@ -2052,11 +2052,16 @@ export class VaultEngine {
    */
   revokeToken(jti: string, expiresAt?: number): void {
     const s = this.assertUnlocked();
-    // Fallback: MAX_TOKEN_TTL_MS from now ensures the revocation entry always
+    // Floor: MAX_TOKEN_TTL_MS from now ensures the revocation entry always
     // outlives any token (since createToken caps TTL at MAX_TOKEN_TTL_MS).
-    const fallback = Math.floor(Date.now() / 1000) + Math.floor(MAX_TOKEN_TTL_MS / 1000);
+    // Clamped, never merely defaulted — verifyToken prunes entries whose
+    // expires_at has passed *before* consulting them, so a supplied expiry
+    // that is too early (a caller decoding the wrong JWT) would silently
+    // un-revoke the token. A larger supplied expiry is still honored.
+    const floor = Math.floor(Date.now() / 1000) + Math.floor(MAX_TOKEN_TTL_MS / 1000);
+    const effectiveExpiresAt = Math.max(expiresAt ?? 0, floor);
     s.store.transaction(() => {
-      s.store.insertRevokedToken(jti, expiresAt ?? fallback);
+      s.store.insertRevokedToken(jti, effectiveExpiresAt);
 
       s.auditLogger.log({
         eventType: AuditEventType.TOKEN_REVOKE,

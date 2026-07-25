@@ -127,6 +127,7 @@ export const MCP_INIT_TIMEOUT_MS = 15_000; // connect + initialize handshake
 export const MCP_SHUTDOWN_TIMEOUT_MS = 5_000; // graceful close budget on session end
 export const MAX_MCP_RESULT_BYTES = 1_048_576; // 1 MiB serialized tool result
 export const MAX_MCP_STDERR_BYTES = 65_536; // capped downstream stderr ring (audit only)
+export const MAX_MCP_STDOUT_BUFFER_BYTES = 4_194_304; // 4 MiB unframed downstream stdout
 
 // -- Database / Git / SSH / use_secret defaults -------------------------------
 

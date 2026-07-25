@@ -116,7 +116,15 @@ export class AuditQuery {
             : "hmac_mismatch";
       }
       if (row.row_hmac === null) {
-        // Legacy row — reset prev to genesis, mirroring insert-time behavior.
+        // Legacy rows may only be a PREFIX: on a migrated vault every row
+        // written since carries a link, so a NULL link after a chained row is
+        // not history, it is an erased link. Treating it as legacy would let a
+        // database-writing attacker null the column on a suffix and then
+        // insert, delete and edit those rows with `audit verify` still green.
+        if (checked > 0) {
+          valid = false;
+          if (firstBrokenId === null) firstBrokenId = row.id;
+        }
         legacy++;
         prev = AUDIT_CHAIN_GENESIS_BYTES;
         continue;
@@ -134,6 +142,16 @@ export class AuditQuery {
       }
       prev = row.row_hmac;
       checked++;
+    }
+
+    // Nulling EVERY link satisfies the prefix rule above and would report
+    // {valid:true, checked:0}. A key-holding verifier that finds no linked row
+    // at all in a non-empty log is looking at an erased chain: since migration
+    // 010 every audited operation writes one, and reaching this code requires
+    // an unlocked vault, whose own vault.unlock row is linked.
+    if (chainKey && checked === 0 && legacy > 0) {
+      valid = false;
+      if (firstBrokenId === null) firstBrokenId = rows[0]?.id ?? null;
     }
 
     if (!anchor) {

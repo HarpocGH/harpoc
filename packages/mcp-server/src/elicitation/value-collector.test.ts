@@ -127,6 +127,97 @@ describe("startValueCollector", () => {
   });
 });
 
+/**
+ * M10. (a) `timingSafeEqual` throws ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH on
+ * unequal lengths, and the length guard in matchesToken was the only thing
+ * standing between a short URL token and an unhandled throw out of a
+ * synchronous node:http handler — which takes the whole vault process down.
+ * (b) Nothing bounded how many collectors could be live at once, each pinning
+ * a loopback listener and a five-minute timer.
+ */
+describe("startValueCollector — request-handler robustness (M10a)", () => {
+  const tokenLengths = [0, 1, 20, 42, 44, 200];
+
+  it("answers 404 for every wrong token length and stays serving", async () => {
+    const collector = await startValueCollector({ subject: "k", operation: "create" });
+    try {
+      const base = new URL(collector.url).origin;
+      for (const len of tokenLengths) {
+        const res = await fetch(`${base}/collect/${"A".repeat(len)}`);
+        expect(res.status).toBe(404);
+      }
+
+      // Still healthy: neither the process nor the listener went down.
+      const ok = await fetch(collector.url, {
+        method: "POST",
+        headers: FORM_HEADERS,
+        body: postBody("still-working"),
+      });
+      expect(ok.status).toBe(200);
+      expect(Buffer.from(await collector.waitForValue()).toString("utf8")).toBe("still-working");
+    } finally {
+      await collector.close();
+    }
+  });
+
+  it("answers 404 for a path outside the collect prefix", async () => {
+    const collector = await startValueCollector({ subject: "k", operation: "create" });
+    try {
+      const base = new URL(collector.url).origin;
+      expect((await fetch(`${base}/`)).status).toBe(404);
+      expect((await fetch(`${base}/collect`)).status).toBe(404);
+    } finally {
+      await collector.close();
+    }
+  });
+});
+
+describe("startValueCollector — concurrency ceiling (M10b)", () => {
+  it("refuses to open more collectors than the ceiling, and recovers as they close", async () => {
+    const open: Awaited<ReturnType<typeof startValueCollector>>[] = [];
+    try {
+      for (let i = 0; i < 8; i++) {
+        open.push(await startValueCollector({ subject: `k${String(i)}`, operation: "create" }));
+      }
+
+      await expect(
+        startValueCollector({ subject: "overflow", operation: "create" }),
+      ).rejects.toThrow(/concurrent value collectors/);
+
+      // Closing one frees exactly one slot.
+      await (open.pop() as Awaited<ReturnType<typeof startValueCollector>>).close();
+      const refilled = await startValueCollector({ subject: "refill", operation: "create" });
+      open.push(refilled);
+    } finally {
+      for (const collector of open) await collector.close();
+    }
+  }, 20_000);
+
+  it("a caller degrades gracefully when the ceiling is reached", async () => {
+    const open: Awaited<ReturnType<typeof startValueCollector>>[] = [];
+    try {
+      for (let i = 0; i < 8; i++) {
+        open.push(await startValueCollector({ subject: `k${String(i)}`, operation: "create" }));
+      }
+
+      // The elicitation caller must fall through to the next channel rather
+      // than surfacing an error to the agent.
+      const mcp = {
+        server: {
+          getClientCapabilities: () => ({ elicitation: { url: true } }),
+          elicitInput: vi.fn(),
+        },
+      } as unknown as McpServer;
+
+      await expect(
+        collectValueViaUrlElicitation(mcp, { subject: "x", operation: "create" }),
+      ).resolves.toBeNull();
+    } finally {
+      for (const collector of open) await collector.close();
+    }
+  }, 20_000);
+});
+
 describe("collectValueViaUrlElicitation", () => {
   interface FakeServerParts {
     caps: Record<string, unknown> | undefined;

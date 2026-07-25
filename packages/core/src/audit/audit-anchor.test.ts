@@ -151,8 +151,10 @@ describe("anchored chain verification (tail truncation)", () => {
   });
 
   it("treats a legacy row at the anchored id as a mismatch", () => {
-    logRows(2);
+    // Legacy row FIRST so the chain itself stays valid (a legacy link after a
+    // chained one is tampering, M2) — this pins the anchor status alone.
     const legacyId = insertLegacyRow();
+    logRows(2);
     const anchor: AuditChainAnchorInput = {
       lastId: legacyId,
       rowHmac: generateRandomBytes(32),

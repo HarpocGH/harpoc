@@ -17,12 +17,35 @@ const DEFAULT_ENDPOINT = "/mcp";
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_SESSIONS = 128;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+/** A session untouched for this long is abandoned — its client is gone. */
+const SESSION_IDLE_TTL_MS = 10 * 60 * 1000;
+/** Cadence of the background reclamation sweep. */
+const SESSION_SWEEP_INTERVAL_MS = 60 * 1000;
+/**
+ * At capacity, the least-recently-used session is reclaimed rather than the new
+ * client refused — but only once it has been quiet this long, so a busy fleet
+ * of legitimate clients is never churned.
+ */
+const SESSION_EVICTION_GRACE_MS = 30 * 1000;
+
+/** Session-lifecycle limits. Defaults suit a normal deployment. */
+export interface McpHttpSessionLimits {
+  /** Concurrent sessions the server holds (default 128). */
+  max?: number;
+  /** Idle time after which a session is reclaimed (default 10 min). */
+  idleTtlMs?: number;
+  /** Reclamation sweep cadence (default 1 min). */
+  sweepIntervalMs?: number;
+  /** Quiet time before a session may be evicted to admit a new one (default 30 s). */
+  evictionGraceMs?: number;
+}
 
 export interface McpHttpServerOptions {
   engine: VaultEngine;
   port?: number;
   host?: string;
   endpoint?: string;
+  sessionLimits?: McpHttpSessionLimits;
 }
 
 export interface McpHttpServer {
@@ -36,6 +59,11 @@ interface McpHttpSession {
   transport: StreamableHTTPServerTransport;
   server: McpServer;
   tokenFingerprint: Buffer;
+  /** Unix seconds, from the pinned token — a session cannot outlive its token. */
+  tokenExp: number;
+  tokenJti: string;
+  /** Epoch ms of the last request served on this session. */
+  lastSeen: number;
 }
 
 /**
@@ -60,8 +88,62 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
   const rateLimiter = new RateLimiter();
   const injectionGuard = new InjectionGuard();
 
+  const maxSessions = options.sessionLimits?.max ?? MAX_SESSIONS;
+  const idleTtlMs = options.sessionLimits?.idleTtlMs ?? SESSION_IDLE_TTL_MS;
+  const sweepIntervalMs = options.sessionLimits?.sweepIntervalMs ?? SESSION_SWEEP_INTERVAL_MS;
+  const evictionGraceMs = options.sessionLimits?.evictionGraceMs ?? SESSION_EVICTION_GRACE_MS;
+
   let allowedHosts: string[] = [];
   let allowedOrigins: string[] = [];
+
+  function dropSession(id: string, session: McpHttpSession): void {
+    sessions.delete(id);
+    void session.server.close().catch(() => undefined);
+  }
+
+  /**
+   * Reclaim sessions no client can still be using. Without this a session left
+   * the map only on an explicit `DELETE /mcp` or on shutdown, so every client
+   * that died without one (crash, sleep, network drop) leaked a slot — and the
+   * least-privileged token in the deployment could deliberately consume all
+   * MAX_SESSIONS with cheap initializes and lock out every other principal,
+   * `admin` included, until the daemon restarted.
+   */
+  function sweepSessions(): void {
+    const now = Date.now();
+    const nowSeconds = Math.floor(now / 1000);
+    for (const [id, session] of [...sessions.entries()]) {
+      if (now - session.lastSeen > idleTtlMs || session.tokenExp <= nowSeconds) {
+        dropSession(id, session);
+        continue;
+      }
+      try {
+        if (engine.isTokenRevoked(session.tokenJti)) dropSession(id, session);
+      } catch {
+        // A sealed vault cannot answer; the idle TTL still reclaims the slot.
+      }
+    }
+  }
+
+  /** Last resort at capacity: reclaim the quietest session, or refuse. */
+  function evictLeastRecentlyUsed(): boolean {
+    let oldestId: string | undefined;
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const [id, session] of sessions) {
+      if (session.lastSeen < oldest) {
+        oldest = session.lastSeen;
+        oldestId = id;
+      }
+    }
+    if (oldestId === undefined || Date.now() - oldest < evictionGraceMs) return false;
+    const session = sessions.get(oldestId);
+    if (!session) return false;
+    dropSession(oldestId, session);
+    return true;
+  }
+
+  const sweepTimer = setInterval(sweepSessions, sweepIntervalMs);
+  if (sweepTimer.unref) sweepTimer.unref();
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const path = (req.url ?? "/").split("?")[0];
@@ -95,6 +177,7 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
         sendAuthError(res, err);
         return;
       }
+      session.lastSeen = Date.now();
       if (req.method === "POST") {
         const read = await readJsonBodyOrRespond(req, res);
         if (!read.ok) return;
@@ -119,13 +202,25 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
       return;
     }
 
-    if (sessions.size >= MAX_SESSIONS) {
-      sendJsonRpcError(res, 429, "Too many concurrent MCP sessions");
-      return;
+    if (sessions.size >= maxSessions) {
+      sweepSessions();
+      if (sessions.size >= maxSessions && !evictLeastRecentlyUsed()) {
+        sendJsonRpcError(res, 429, "Too many concurrent MCP sessions");
+        return;
+      }
     }
 
+    // Verified here as well as inside createMcpServer: the session must record
+    // its token's expiry and jti so the sweep can reclaim it once the token it
+    // is pinned to can no longer authorize anything (only the fingerprint is
+    // kept, and a hash cannot be re-verified).
+    let tokenExp: number;
+    let tokenJti: string;
     let server: McpServer;
     try {
+      const payload = engine.verifyToken(token);
+      tokenExp = payload.exp;
+      tokenJti = payload.jti;
       server = createMcpServer({
         engine,
         launchToken: token,
@@ -145,7 +240,14 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
       allowedHosts: rebindingProtection ? allowedHosts : undefined,
       allowedOrigins: rebindingProtection ? allowedOrigins : undefined,
       onsessioninitialized: (id) => {
-        sessions.set(id, { transport, server, tokenFingerprint });
+        sessions.set(id, {
+          transport,
+          server,
+          tokenFingerprint,
+          tokenExp,
+          tokenJti,
+          lastSeen: Date.now(),
+        });
       },
       onsessionclosed: (id) => {
         sessions.delete(id);
@@ -208,6 +310,7 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
     port: boundPort,
     endpoint,
     close: async (): Promise<void> => {
+      clearInterval(sweepTimer);
       for (const session of [...sessions.values()]) {
         try {
           await session.server.close();

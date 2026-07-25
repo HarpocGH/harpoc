@@ -105,14 +105,22 @@ describe("MysqlAdapter connection config", () => {
     expect(setNoDelay).toHaveBeenCalledWith(true);
   });
 
-  it("uses the driver's own dialer when the target was not pinned (literal IP)", async () => {
+  // M3: an IP-literal target used to skip both the stream factory and
+  // `verifyIdentity` — and without the latter mysql2 replaces
+  // checkServerIdentity with a no-op, so the certificate name was never checked
+  // at all. Identity verification is unconditional now, and the socket carries
+  // the logical host so Node checks against the actual target.
+  it("verifies the certificate identity for a literal-IP target too", async () => {
     await defaultDbAdapters().mysql.connect(
       opts({ host: "8.8.8.8", address: "8.8.8.8", port: 3306 }),
     );
     const cfg = mysqlConfigs[0] as MysqlConfig;
     expect(cfg.host).toBe("8.8.8.8");
-    expect(cfg).not.toHaveProperty("stream");
-    expect(cfg.ssl).not.toHaveProperty("verifyIdentity");
+    expect(cfg.ssl).toMatchObject({ rejectUnauthorized: true, verifyIdentity: true });
+    expect(typeof cfg.stream).toBe("function");
+
+    (cfg.stream as () => unknown)();
+    expect(netConnectCalls[0]).toEqual([3306, "8.8.8.8"]);
   });
 
   it("still dials the pinned address with TLS disabled", async () => {

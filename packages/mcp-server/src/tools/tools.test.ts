@@ -381,6 +381,31 @@ describe("MCP Tools", () => {
       const call = (calls[0] as [Record<string, unknown>])[0];
       expect(call).not.toHaveProperty("value");
     });
+
+    // M10b: every call opens a URL-mode value collector (a loopback listener
+    // plus a timer). Only the very generous global tier applied, so the
+    // per-secret tier is now bucketed by the requested name.
+    it("is bucketed by name in the per-secret rate-limit tier", () => {
+      const spy = vi.spyOn(rateLimiter, "checkLimit");
+      return callTool(server, "create_secret", { name: "new-key", type: "api_key" }).then(() => {
+        expect(spy).toHaveBeenCalledWith(expect.stringContaining("new-key"));
+      });
+    });
+
+    it("refuses once the per-secret tier is exhausted", async () => {
+      const limiter = new RateLimiter(10_000, 3);
+      const limited = new McpServer({ name: "t", version: "0.0.0" });
+      registerCreateSecret(limited, engine, scopeGuard, limiter);
+
+      for (let i = 0; i < 3; i++) {
+        await callTool(limited, "create_secret", { name: "same-key", type: "api_key" });
+      }
+      const result = await callTool(limited, "create_secret", {
+        name: "same-key",
+        type: "api_key",
+      });
+      expect(getToolText(result)).toContain("rate limit");
+    });
   });
 
   describe("rotate_secret", () => {

@@ -475,3 +475,175 @@ describe("startMcpHttpServer", () => {
     expect(refill.status).toBe(200);
   }, 30_000);
 });
+
+/**
+ * M6. A session left the map only on an explicit `DELETE /mcp` or on shutdown:
+ * no idle TTL, and sessions whose pinned token had expired or been revoked were
+ * refused per request but never evicted. Clients that die without a DELETE
+ * (crash, sleep, network drop) leaked a slot each, and the least-privileged
+ * token in the deployment could deliberately consume all of them with cheap
+ * initializes and lock out every other principal — `admin` included — until the
+ * daemon was restarted.
+ */
+describe("startMcpHttpServer — session reclamation (M6)", () => {
+  let server: McpHttpServer | undefined;
+
+  afterEach(async () => {
+    await server?.close();
+    server = undefined;
+  });
+
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  function raw(
+    port: number,
+    method: string,
+    headers: Record<string, string>,
+    body?: string,
+  ): Promise<{ status: number; sessionId?: string }> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({ host: "127.0.0.1", port, path: "/mcp", method, headers }, (res) => {
+        res.resume();
+        res.on("end", () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            sessionId: res.headers["mcp-session-id"] as string | undefined,
+          }),
+        );
+      });
+      req.on("error", reject);
+      req.end(body);
+    });
+  }
+
+  const initialize = (
+    port: number,
+    token = TOKEN,
+  ): Promise<{ status: number; sessionId?: string }> =>
+    raw(port, "POST", rpcHeaders({ authorization: `Bearer ${token}` }), JSON.stringify(INIT_BODY));
+
+  const ping = (port: number, sessionId: string): Promise<{ status: number }> =>
+    raw(
+      port,
+      "POST",
+      rpcHeaders({ authorization: `Bearer ${TOKEN}`, "mcp-session-id": sessionId }),
+      JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" }),
+    );
+
+  it("reclaims a session abandoned without a DELETE", async () => {
+    server = await startMcpHttpServer({
+      engine: mockEngine(),
+      port: 0,
+      sessionLimits: { idleTtlMs: 150, sweepIntervalMs: 40 },
+    });
+
+    const created = await initialize(server.port);
+    expect(created.status).toBe(200);
+
+    await sleep(400);
+
+    // The client is gone; the slot must be gone with it.
+    const after = await ping(server.port, created.sessionId as string);
+    expect(after.status).toBe(404);
+  }, 20_000);
+
+  it("keeps a session that is still being used", async () => {
+    server = await startMcpHttpServer({
+      engine: mockEngine(),
+      port: 0,
+      sessionLimits: { idleTtlMs: 250, sweepIntervalMs: 40 },
+    });
+
+    const created = await initialize(server.port);
+    const sessionId = created.sessionId as string;
+
+    // Well past the idle TTL in total, but never idle for it.
+    for (let i = 0; i < 5; i++) {
+      await sleep(100);
+      expect((await ping(server.port, sessionId)).status).toBeLessThan(400);
+    }
+  }, 20_000);
+
+  it("reclaims a session whose pinned token has expired", async () => {
+    const engine = mockEngine({
+      verifyToken: vi.fn().mockReturnValue({
+        ...tokenPayload(),
+        exp: Math.floor(Date.now() / 1000) - 1,
+      }),
+    });
+    server = await startMcpHttpServer({
+      engine,
+      port: 0,
+      sessionLimits: { idleTtlMs: 600_000, sweepIntervalMs: 40 },
+    });
+
+    const created = await initialize(server.port);
+    expect(created.status).toBe(200);
+
+    await sleep(200);
+    expect((await ping(server.port, created.sessionId as string)).status).toBe(404);
+  }, 20_000);
+
+  it("reclaims a session whose pinned token has been revoked", async () => {
+    const isTokenRevoked = vi.fn().mockReturnValue(false);
+    const engine = mockEngine({ isTokenRevoked });
+    server = await startMcpHttpServer({
+      engine,
+      port: 0,
+      sessionLimits: { idleTtlMs: 600_000, sweepIntervalMs: 40 },
+    });
+
+    const created = await initialize(server.port);
+    expect(created.status).toBe(200);
+
+    isTokenRevoked.mockReturnValue(true);
+    await sleep(200);
+    expect((await ping(server.port, created.sessionId as string)).status).toBe(404);
+  }, 20_000);
+
+  it("admits a new client by reclaiming the quietest session at capacity", async () => {
+    server = await startMcpHttpServer({
+      engine: mockEngine(),
+      port: 0,
+      // No sweep and no idle expiry in play: the admission path itself has to
+      // give up the least-recently-used slot.
+      sessionLimits: {
+        max: 2,
+        idleTtlMs: 600_000,
+        sweepIntervalMs: 600_000,
+        evictionGraceMs: 100,
+      },
+    });
+
+    const first = await initialize(server.port);
+    const second = await initialize(server.port);
+    expect(second.status).toBe(200);
+    await sleep(150);
+
+    const third = await initialize(server.port);
+    expect(third.status).toBe(200);
+    // The oldest slot was the one given up.
+    expect((await ping(server.port, first.sessionId as string)).status).toBe(404);
+    expect((await ping(server.port, third.sessionId as string)).status).toBeLessThan(400);
+  }, 20_000);
+
+  it("control: a fleet of busy sessions is refused, not churned", async () => {
+    server = await startMcpHttpServer({
+      engine: mockEngine(),
+      port: 0,
+      sessionLimits: {
+        max: 2,
+        idleTtlMs: 600_000,
+        sweepIntervalMs: 600_000,
+        evictionGraceMs: 30_000,
+      },
+    });
+
+    const first = await initialize(server.port);
+    const second = await initialize(server.port);
+
+    expect((await initialize(server.port)).status).toBe(429);
+    expect((await ping(server.port, first.sessionId as string)).status).toBeLessThan(400);
+    expect((await ping(server.port, second.sessionId as string)).status).toBeLessThan(400);
+  }, 20_000);
+});

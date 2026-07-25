@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createServer } from "node:net";
+import type { AddressInfo, Server, Socket } from "node:net";
+import type { PeerCertificate } from "node:tls";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseAction, InjectionPolicy } from "@harpoc/shared";
 import { DatabaseInjector } from "./database-injector.js";
 
@@ -76,7 +79,16 @@ function action(overrides: Partial<DatabaseAction> = {}): DatabaseAction {
 }
 
 interface TlsConfig {
-  ssl?: false | { rejectUnauthorized?: boolean; ca?: string };
+  ssl?:
+    | false
+    | {
+        rejectUnauthorized?: boolean;
+        ca?: string;
+        verifyIdentity?: boolean;
+        servername?: string;
+        checkServerIdentity?: (host: string, cert: PeerCertificate) => Error | undefined;
+      };
+  stream?: () => Socket;
 }
 
 describe("DatabaseInjector default TLS posture through the real adapters", () => {
@@ -124,5 +136,108 @@ describe("DatabaseInjector default TLS posture through the real adapters", () =>
 
     const cfg = mysqlConfigs[0] as TlsConfig;
     expect(cfg.ssl).toMatchObject({ rejectUnauthorized: true, ca: CA_PEM });
+  });
+});
+
+/**
+ * M3. Server-identity verification was conditional on the target being a
+ * hostname (`opts.address !== opts.host`). For an IP-literal target mysql2
+ * received no `verifyIdentity`, swapped `checkServerIdentity` for a no-op and
+ * never verified the certificate name — so any certificate from any trusted CA
+ * was accepted and a pinned `ca_pem` degraded from "this endpoint" to "anything
+ * holding a cert from this CA". `rejectUnauthorized` alone only checks the
+ * chain, never the name.
+ */
+describe("database TLS server-identity binding (M3)", () => {
+  const injector = new DatabaseInjector(null);
+  let echo: Server;
+  let echoPort: number;
+
+  beforeAll(async () => {
+    // A real listener so the mysql stream factory can be exercised.
+    echo = createServer((s) => s.end());
+    await new Promise<void>((r) => echo.listen(0, "127.0.0.1", () => r()));
+    echoPort = (echo.address() as AddressInfo).port;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((r) => echo.close(() => r()));
+  });
+
+  beforeEach(() => {
+    pgClientConfigs.length = 0;
+    mysqlConfigs.length = 0;
+  });
+
+  it("mysql: an IP-literal target still verifies the certificate identity", async () => {
+    await injector.executeWithSecret(
+      action({ engine: "mysql", host: "8.8.8.8" }),
+      SECRET,
+      policy(),
+    );
+
+    const cfg = mysqlConfigs[0] as TlsConfig;
+    expect(cfg.ssl).toMatchObject({ rejectUnauthorized: true, verifyIdentity: true });
+  });
+
+  it("mysql: the socket presents the logical host, so Node checks the right name", async () => {
+    await injector.executeWithSecret(
+      action({ engine: "mysql", host: `127.0.0.1:${echoPort}` }),
+      SECRET,
+      policy(),
+    );
+
+    const cfg = mysqlConfigs[0] as TlsConfig;
+    expect(typeof cfg.stream).toBe("function");
+    const socket = (cfg.stream as () => Socket)();
+    try {
+      // Node derives the verified name as
+      // `servername || options.host || socket._host || "localhost"`, and mysql2
+      // supplies no servername for an IP literal. Without this binding the
+      // check would run against "localhost" — net.connect leaves `_host` unset
+      // when dialing an IP (verified against Node v24.13.1).
+      expect((socket as Socket & { _host?: string })._host).toBe("127.0.0.1");
+    } finally {
+      socket.destroy();
+    }
+  });
+
+  it("pg: the identity check is bound to the logical host, not Node's default", async () => {
+    await injector.executeWithSecret(action({ host: "8.8.8.8" }), SECRET, policy());
+
+    const cfg = pgClientConfigs[0] as TlsConfig;
+    const ssl = cfg.ssl as {
+      checkServerIdentity: (h: string, c: PeerCertificate) => Error | undefined;
+    };
+    expect(typeof ssl.checkServerIdentity).toBe("function");
+
+    // A certificate for an unrelated name must be refused even though Node's
+    // own derivation for an IP-literal dial would have said "localhost".
+    const foreign = { subject: { CN: "localhost" }, subjectaltname: "DNS:localhost" };
+    expect(
+      ssl.checkServerIdentity("localhost", foreign as unknown as PeerCertificate),
+    ).toBeInstanceOf(Error);
+
+    const matching = { subject: { CN: "8.8.8.8" }, subjectaltname: "IP Address:8.8.8.8" };
+    expect(
+      ssl.checkServerIdentity("localhost", matching as unknown as PeerCertificate),
+    ).toBeUndefined();
+  });
+
+  it("control: tls_mode disable still opts out entirely", async () => {
+    await injector.executeWithSecret(
+      action({ engine: "mysql", host: "8.8.8.8" }),
+      SECRET,
+      policy(),
+      {
+        database: { tls_mode: "disable" },
+      },
+    );
+    expect((mysqlConfigs[0] as TlsConfig).ssl).toBeUndefined();
+
+    await injector.executeWithSecret(action({ host: "8.8.8.8" }), SECRET, policy(), {
+      database: { tls_mode: "disable" },
+    });
+    expect((pgClientConfigs[0] as TlsConfig).ssl).toBe(false);
   });
 });
