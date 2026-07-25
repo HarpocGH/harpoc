@@ -12,6 +12,26 @@ afterEach(async () => {
 });
 
 describe("CallbackServer", () => {
+  /**
+   * T15: the loopback-only bind — what keeps an in-flight OAuth authorization
+   * code (and the PKCE-completing redirect) off the LAN — was asserted by
+   * nothing. Dropping the hostname argument makes Node bind every interface
+   * while every existing test, which talks to 127.0.0.1, stays green.
+   */
+  it("binds loopback only, never every interface", async () => {
+    server = new CallbackServer(0);
+    await server.start("state-for-bind-check", 5000);
+
+    const underlying = (server as unknown as { server: { address(): unknown } }).server;
+    const address = underlying.address() as { address: string; family: string; port: number };
+
+    expect(address.address).toBe("127.0.0.1");
+    expect(address.family).toBe("IPv4");
+    // "0.0.0.0" and "::" are the wildcard binds an omitted hostname produces.
+    expect(["0.0.0.0", "::"]).not.toContain(address.address);
+    expect(address.port).toBe(server.listenPort);
+  });
+
   it("starts and stops cleanly", async () => {
     server = new CallbackServer(0);
     const state = "abc123";

@@ -1,5 +1,6 @@
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -228,6 +229,36 @@ describe("file permissions", () => {
 });
 
 describe("secure erase", () => {
+  /**
+   * T11: both cases below assert only that the file is gone, so replacing the
+   * random-byte overwrite with a bare `unlinkSync` stayed green while `harpoc
+   * lock` left the raw session key recoverable from the freed blocks — the one
+   * property the erase exists for.
+   *
+   * A second hard link to the same inode survives the unlink, so the bytes the
+   * erase actually wrote to disk can be read back without mocking `node:fs`.
+   */
+  it("overwrites the key material before unlinking", async () => {
+    const marker = Buffer.from("harpoc-t11-session-key-material").toString("base64");
+    const session = makeValidSession({ session_key: marker });
+    await manager.writeSession(session);
+
+    const before = readFileSync(sessionPath);
+    expect(before.toString("utf8")).toContain(marker);
+
+    const inodeAlias = join(sessionDir, "inode-alias");
+    linkSync(sessionPath, inodeAlias);
+
+    await manager.eraseSession();
+
+    expect(existsSync(sessionPath)).toBe(false);
+    const after = readFileSync(inodeAlias);
+    expect(after.length).toBe(before.length);
+    expect(after.toString("utf8")).not.toContain(marker);
+    expect(after.toString("binary")).not.toContain("session_key");
+    expect(after.equals(before)).toBe(false);
+  });
+
   it("file is deleted after eraseSession", async () => {
     const session = makeValidSession();
     await manager.writeSession(session);

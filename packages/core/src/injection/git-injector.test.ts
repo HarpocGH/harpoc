@@ -145,6 +145,51 @@ describe("GitInjector enforcement (no git binary required)", () => {
       injector.executeWithSecret(gitAction(), SECRET, policy(), undefined),
     ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
   });
+
+  // T6: the dangerous-argument matrix above only ever feeds `args`, but
+  // `working_directory` reaches git's argv too — as the clone destination —
+  // so without its own guard it is a second smuggling channel for exactly the
+  // options that matrix rejects. Deny-by-default on the command allowlist is
+  // the discriminator: rejection on the argument's *shape* happens first.
+  describe("working_directory is not an argument-smuggling channel", () => {
+    it.each([
+      "-c",
+      "--template=/tmp/evil",
+      "--upload-pack=/tmp/evil",
+      "--separate-git-dir=/tmp/evil",
+      "--templ=/tmp/evil",
+      "-",
+    ])("rejects the dangerous-prefix working_directory %s", async (working_directory) => {
+      const err = await injector
+        .executeWithSecret(gitAction({ working_directory }), SECRET, policy(), undefined)
+        .catch((e: unknown) => e as Error);
+
+      expect(err).toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
+      expect(err.message).toContain("must not start with '-'");
+    });
+
+    it("rejects it on pull too, where it becomes the working directory", async () => {
+      await expect(
+        injector.executeWithSecret(
+          gitAction({ operation: "pull", working_directory: "--exec=/tmp/evil" }),
+          SECRET,
+          policy(),
+          undefined,
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
+    });
+
+    it("control: an ordinary path passes the shape check and reaches the allowlist", async () => {
+      await expect(
+        injector.executeWithSecret(
+          gitAction({ working_directory: "./checkout-dir" }),
+          SECRET,
+          policy(),
+          undefined,
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+    });
+  });
 });
 
 describeGit("GitInjector target enforcement (git resolvable)", () => {

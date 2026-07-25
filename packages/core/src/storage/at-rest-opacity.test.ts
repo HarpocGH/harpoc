@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -79,6 +80,80 @@ describe("at-rest opacity (thesis: encrypted at rest)", () => {
     for (const sentinel of [SENTINEL_NAME, SENTINEL_VALUE]) {
       for (const needle of encodings(sentinel)) {
         expect(combined.includes(needle)).toBe(false);
+      }
+    }
+  });
+
+  /**
+   * T17: the secret value/name path was scanned, the OAuth path never — yet
+   * `oauth_tokens` holds the longest-lived material in the vault (a refresh
+   * token mints access tokens indefinitely) plus the client secret. Storing a
+   * rotated refresh_token verbatim would have kept every test green.
+   */
+  it("no OAuth client secret, access token or refresh token reaches the vault files", async () => {
+    const CLIENT_SECRET = "SENTINEL-CLIENT-SECRET-4h8n2j6k";
+    const ACCESS_TOKEN = "SENTINEL-ACCESS-TOKEN-9p3q7r1s";
+    const REFRESH_TOKEN = "SENTINEL-REFRESH-TOKEN-5t2u8v4w";
+    const ROTATED_REFRESH = "SENTINEL-ROTATED-REFRESH-6x9y3z7a";
+    const ROTATED_ACCESS = "SENTINEL-ROTATED-ACCESS-1b4c8d2e";
+
+    // Token endpoint that hands back a rotated pair, so the refresh write path
+    // — not just the initial store — is covered.
+    const tokenServer = createServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          access_token: ROTATED_ACCESS,
+          refresh_token: ROTATED_REFRESH,
+          expires_in: 3600,
+        }),
+      );
+    });
+    await new Promise<void>((resolve) => tokenServer.listen(0, "127.0.0.1", () => resolve()));
+    const port = (tokenServer.address() as { port: number }).port;
+
+    const dbPath = join(tempDir, "oauth.vault.db");
+    const engine = new VaultEngine({ dbPath, sessionPath: join(tempDir, "session.json") });
+
+    try {
+      await engine.initVault("at-rest-oauth-password");
+      const { secretId } = await engine.createOAuthSecret("oauth-sentinel", {
+        provider: "github",
+        grant_type: "authorization_code",
+        token_endpoint: `http://127.0.0.1:${port}`,
+        auth_endpoint: "https://github.com/login/oauth/authorize",
+        client_id: "sentinel-client-id",
+        client_secret: CLIENT_SECRET,
+        scopes: ["repo"],
+      });
+
+      await engine.completeOAuthFlow(secretId, ACCESS_TOKEN, REFRESH_TOKEN, Date.now() - 1_000);
+      // Expired above, so this exercises the refresh + re-store path.
+      await engine.refreshOAuthToken(secretId);
+      await engine.getOAuthTokenStatus(secretId);
+    } finally {
+      await engine.destroy();
+      await new Promise<void>((resolve) => tokenServer.close(() => resolve()));
+    }
+
+    const haystacks: Buffer[] = [readFileSync(dbPath)];
+    for (const suffix of ["-wal", "-shm"]) {
+      if (existsSync(dbPath + suffix)) haystacks.push(readFileSync(dbPath + suffix));
+    }
+    const combined = Buffer.concat(haystacks);
+
+    // Positive control: the OAuth row exists and its non-secret parts are there.
+    expect(combined.includes(Buffer.from("oauth_tokens", "utf8"))).toBe(true);
+
+    for (const sentinel of [
+      CLIENT_SECRET,
+      ACCESS_TOKEN,
+      REFRESH_TOKEN,
+      ROTATED_REFRESH,
+      ROTATED_ACCESS,
+    ]) {
+      for (const needle of encodings(sentinel)) {
+        expect(combined.includes(needle), `${sentinel} found at rest`).toBe(false);
       }
     }
   });

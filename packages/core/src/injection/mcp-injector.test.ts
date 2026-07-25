@@ -159,6 +159,43 @@ describe("McpInjector — validation", () => {
       }),
     ).rejects.toMatchObject({ code: ErrorCode.URL_HTTPS_REQUIRED });
   });
+
+  /**
+   * T9: every denial case above starts from a cold registry, so moving target
+   * validation into `establish()` — a plausible optimization, since that is
+   * where the command is used — would keep a *live* connection serving calls
+   * whose target the policy no longer allows. Complete mediation means the
+   * check runs on the reuse path too.
+   */
+  describe("target validation runs on a warm connection (complete mediation)", () => {
+    it("a command dropped from the allowlist stops serving an already-spawned server", async () => {
+      const before = await run(mcpAction("pid"));
+      expect(registry.get("secret-1")).toBeDefined();
+
+      await expect(
+        run(mcpAction("echo"), { policy: { ...POLICY, command_allowlist: [] } }),
+      ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+
+      // Control: the refusal is the policy's, not a dead connection's — the
+      // same live server still answers when the allowlist permits it.
+      const after = await run(mcpAction("pid"));
+      expect(after.content).toEqual(before.content);
+    });
+
+    it("the check is not skipped for a server that answered a moment ago", async () => {
+      await run(mcpAction("echo"));
+      const live = registry.get("secret-1");
+      expect(live).toBeDefined();
+
+      await expect(
+        run(mcpAction("echo"), { policy: { ...POLICY, command_allowlist: ["/usr/bin/other"] } }),
+      ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+
+      // The connection was not torn down by the refusal — it is the *call*
+      // that is refused, so the next permitted call still reuses it.
+      expect(registry.get("secret-1")).toBe(live);
+    });
+  });
 });
 
 describe("McpInjector — tool call forwarding", () => {

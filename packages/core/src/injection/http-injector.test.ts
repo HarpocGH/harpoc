@@ -72,6 +72,19 @@ beforeAll(async () => {
       return;
     }
 
+    // Cross-origin hop that carries the incoming query string along, the way a
+    // real endpoint preserving its parameters across a redirect would. Without
+    // it the injected query parameter is dropped by the hop's own Location and
+    // the strip at http-injector.ts:353 is never exercised (T1).
+    if (url.pathname === "/redirect-keep-query") {
+      const port = (server.address() as { port: number }).port;
+      res.writeHead(302, {
+        Location: `http://localhost:${port}/echo?${url.searchParams.toString()}`,
+      });
+      res.end();
+      return;
+    }
+
     // Hostile endpoint: reflects the credential it just received back into the
     // Location header of a hop it knows the vault will refuse (H2).
     if (url.pathname === "/redirect-echo-credential") {
@@ -408,6 +421,98 @@ describe("HttpInjector", () => {
       );
 
       expect(response.status).toBe(200);
+    });
+  });
+
+  /**
+   * T1: the strip itself was pinned only by the `redirect_warning` string, so
+   * deleting all three statements while keeping the assignment left the suite
+   * green while the wire delivered the credential to the cross-origin hop.
+   * These assertions read what the second server actually received.
+   */
+  describe("cross-origin redirects strip the injected credential (same-origin mode)", () => {
+    const CREDENTIAL = "sk-live-t1-4c8e1a90fb27d635";
+    const echoed = (response: { body?: string }) =>
+      JSON.parse(response.body ?? "{}") as Record<string, string>;
+
+    it("the Authorization header does not reach the cross-origin hop", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/redirect` },
+        new Uint8Array(Buffer.from(CREDENTIAL)),
+        { type: "bearer" },
+        "same-origin",
+      );
+
+      expect(response.status).toBe(200);
+      expect(echoed(response).authorization).toBe("");
+      expect(response.body).not.toContain(CREDENTIAL);
+      expect(response.redirect_warning).toContain("credentials stripped");
+    });
+
+    it("the injected custom header does not reach the cross-origin hop", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/redirect` },
+        new Uint8Array(Buffer.from(CREDENTIAL)),
+        { type: "header", header_name: "X-Api-Key" },
+        "same-origin",
+      );
+
+      expect(response.status).toBe(200);
+      expect(echoed(response).custom_header).toBe("");
+      expect(response.body).not.toContain(CREDENTIAL);
+    });
+
+    // basic_auth shares the Authorization header with bearer but encodes the
+    // value, so a redaction-shaped defence would not catch it — only the strip.
+    it("basic_auth credentials do not reach the cross-origin hop", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/redirect` },
+        new Uint8Array(Buffer.from(`user:${CREDENTIAL}`)),
+        { type: "basic_auth" },
+        "same-origin",
+      );
+
+      expect(echoed(response).authorization).toBe("");
+      expect(response.body).not.toContain(Buffer.from(`user:${CREDENTIAL}`).toString("base64"));
+    });
+
+    it("the injected query parameter does not survive the cross-origin hop", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/redirect-keep-query` },
+        new Uint8Array(Buffer.from(CREDENTIAL)),
+        { type: "query", query_param: "api_key" },
+        "same-origin",
+      );
+
+      expect(response.status).toBe(200);
+      expect(echoed(response).query_key).toBe("");
+      expect(response.body).not.toContain(CREDENTIAL);
+    });
+
+    // Controls: stripping is scoped to cross-origin hops under same-origin
+    // policy — it must not fire on a same-origin hop, and `any` is the mode
+    // that deliberately carries the credential across origins.
+    it("control: a same-origin hop still receives the credential", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/redirect-same` },
+        new Uint8Array(Buffer.from(CREDENTIAL)),
+        { type: "bearer" },
+        "same-origin",
+      );
+
+      expect(echoed(response).authorization).toBe(`Bearer ${CREDENTIAL}`);
+      expect(response.redirect_warning).toBeUndefined();
+    });
+
+    it("control: `any` carries the credential across origins by design", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/redirect` },
+        new Uint8Array(Buffer.from(CREDENTIAL)),
+        { type: "bearer" },
+        "any",
+      );
+
+      expect(echoed(response).authorization).toBe(`Bearer ${CREDENTIAL}`);
     });
   });
 

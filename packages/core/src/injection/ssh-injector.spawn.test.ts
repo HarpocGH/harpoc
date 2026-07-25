@@ -140,6 +140,45 @@ describeSsh("SshInjector spawn hardening (ssh resolvable)", () => {
     expect(existsSync(identityPath)).toBe(false);
   });
 
+  // T14: §4.5.3 layer 3 for the SSH context — the child gets a built
+  // environment, never the vault process's own.
+  it("spawns ssh with a built environment, not the vault's own", async () => {
+    process.env.HARPOC_T14_SSH_AMBIENT = "ambient-value";
+    process.env.HARPOC_T14_SSH_ALLOWED = "allowed-value";
+    try {
+      await injector.executeWithSecret(
+        ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        policy({
+          host_allowlist: ["deploy.example.com"],
+          command_allowlist: [SSH as string],
+          env_allowlist: ["HARPOC_T14_SSH_ALLOWED"],
+        }),
+        SSH_CONFIG,
+      );
+
+      const [, , opts] = spawnMock.mock.calls[0] as [
+        string,
+        string[],
+        { env: Record<string, string> },
+      ];
+      expect(opts.env.HARPOC_T14_SSH_AMBIENT).toBeUndefined();
+      expect(opts.env.HARPOC_T14_SSH_ALLOWED).toBe("allowed-value");
+
+      const expected = new Set([
+        "PATH",
+        "SystemRoot",
+        "ProgramData",
+        "SSH_AUTH_SOCK",
+        "HARPOC_T14_SSH_ALLOWED",
+      ]);
+      expect(Object.keys(opts.env).filter((k) => !expected.has(k))).toEqual([]);
+    } finally {
+      delete process.env.HARPOC_T14_SSH_AMBIENT;
+      delete process.env.HARPOC_T14_SSH_ALLOWED;
+    }
+  });
+
   it.runIf(process.platform === "win32")(
     "passes ProgramData through to ssh.exe (Win32-OpenSSH exits 255 silently without it)",
     async () => {

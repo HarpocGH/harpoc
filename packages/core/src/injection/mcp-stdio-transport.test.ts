@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { MAX_MCP_STDERR_BYTES } from "@harpoc/shared";
 import { StdioChildTransport } from "./mcp-stdio-transport.js";
 
 const NODE = process.execPath;
@@ -88,6 +89,23 @@ describe("StdioChildTransport — exit forensics", () => {
       transport.onclose = () => resolve();
     });
     expect(transport.stderrTail.toString()).toContain("diagnostic noise");
+  });
+
+  // T16: the case above writes a handful of bytes, so the cap itself never
+  // ran — a downstream server streaming stderr could grow the buffer without
+  // bound in the vault process.
+  it("bounds the stderr ring at MAX_MCP_STDERR_BYTES", async () => {
+    const transport = makeTransport(
+      `process.stderr.write("y".repeat(200000)); setTimeout(() => process.exit(1), 50)`,
+    );
+    await transport.start();
+    await new Promise<void>((resolve) => {
+      transport.onclose = () => resolve();
+    });
+
+    const captured = transport.stderrTail.toString();
+    expect(captured.length).toBeLessThanOrEqual(MAX_MCP_STDERR_BYTES);
+    expect(transport.stderrTail.truncated).toBe(true);
   });
 });
 

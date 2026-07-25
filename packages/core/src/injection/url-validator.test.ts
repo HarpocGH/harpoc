@@ -90,15 +90,39 @@ describe("isPrivateIp", () => {
     },
   );
 
-  it("IPv6 expanded loopback 0000:0000:0000:0000:0000:0000:0000:0001 is treated as private", () => {
-    // The expanded form may not match the simple string check "::1",
-    // but we test the behavior
-    const expanded = "0000:0000:0000:0000:0000:0000:0000:0001";
-    // Note: isPrivateIp checks for "::1" literally — expanded form may not match.
-    // This documents the boundary behavior.
-    const result = isPrivateIp(expanded);
-    // If it doesn't match, this is a known limitation (expanded form not normalized)
-    expect(typeof result).toBe("boolean");
+  /**
+   * T20: this case used to assert `typeof result === "boolean"` — true for
+   * every possible implementation, so it pinned nothing. The real question is
+   * whether the un-normalized expanded form is *reachable*: it is not, because
+   * every path into `isPrivateIp` hands it an address already normalized (the
+   * WHATWG URL parser compresses IPv6 literals; `dns.lookup` returns the
+   * compressed form). Both halves are now asserted — the helper's literal
+   * behavior, and the end-to-end refusal that makes it harmless.
+   */
+  it("does not normalize an expanded IPv6 literal on its own (known limitation)", () => {
+    expect(isPrivateIp("0000:0000:0000:0000:0000:0000:0000:0001")).toBe(false);
+    // The compressed form every caller actually supplies is recognized.
+    expect(isPrivateIp("::1")).toBe(true);
+  });
+
+  it.each([
+    ["fd00:0000:0000:0000:0000:0000:0000:0001", "fd00::1"],
+    ["fe80:0000:0000:0000:0000:0000:0000:0001", "fe80::1"],
+  ])("URL parsing compresses %s to %s before the SSRF check sees it", (expanded, compressed) => {
+    expect(new URL(`https://[${expanded}]/api`).hostname).toBe(`[${compressed}]`);
+    expect(isPrivateIp(compressed)).toBe(true);
+  });
+
+  it("an expanded private IPv6 literal is still refused end to end", async () => {
+    await expect(
+      validateUrl("https://[fd00:0000:0000:0000:0000:0000:0000:0001]/api"),
+    ).rejects.toMatchObject({ code: ErrorCode.SSRF_BLOCKED });
+  });
+
+  it("an expanded loopback literal is treated exactly like ::1", async () => {
+    await expect(
+      validateUrl("http://[0000:0000:0000:0000:0000:0000:0000:0001]:8080/api"),
+    ).resolves.toBeDefined();
   });
 
   it.each(["fcff:ffff::1", "fdff:ffff::1"])("IPv6 ULA expanded %s is private", (ip) => {

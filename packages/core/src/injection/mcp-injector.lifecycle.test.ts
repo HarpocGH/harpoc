@@ -138,6 +138,64 @@ describe("McpInjector — crash audit detail redaction (M9)", () => {
     expect(tail).not.toContain(SECRET);
     expect(tail).not.toContain(Buffer.from(SECRET).toString("base64"));
   }, 20_000);
+
+  /**
+   * T16: the 2 KiB cap on the recorded tail had never executed — both crash
+   * cases used a downstream writing a handful of bytes — so a chatty (or
+   * deliberately verbose) downstream could push an unbounded blob into a
+   * durable audit row that admin-scoped MCP clients read.
+   */
+  it("keeps only the last 2 KiB of a large stderr burst", async () => {
+    const { logger, events } = recordingLogger();
+    registry = new McpConnectionRegistry(logger);
+    const injector = new McpInjector(logger, registry);
+
+    const noisy: McpServerConfig = {
+      ...CONFIG,
+      args: [
+        "-e",
+        `
+const readline = require("node:readline");
+const rl = readline.createInterface({ input: process.stdin });
+function send(msg) { process.stdout.write(JSON.stringify(msg) + "\\n"); }
+rl.on("line", (line) => {
+  let m; try { m = JSON.parse(line); } catch { return; }
+  if (m.method === "initialize") {
+    send({ jsonrpc: "2.0", id: m.id, result: {
+      protocolVersion: m.params.protocolVersion,
+      capabilities: { tools: {} },
+      serverInfo: { name: "noisy-downstream", version: "1.0.0" },
+    }});
+  } else if (m.method === "tools/call") {
+    process.stderr.write("HEAD_MARKER_ONLY_AT_THE_START\\n");
+    process.stderr.write("x".repeat(20000) + "\\n");
+    process.stderr.write("TAIL_MARKER_AT_THE_END\\n");
+    setTimeout(() => process.exit(7), 30);
+  }
+});
+`,
+      ],
+    };
+
+    await expect(
+      injector.executeWithSecret(
+        action("crash"),
+        new Uint8Array(Buffer.from(SECRET, "utf8")),
+        POLICY,
+        noisy,
+        "secret-noisy",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.MCP_SERVER_CRASHED });
+
+    const crash = events.find((e) => e.eventType === AuditEventType.MCP_CRASH);
+    const tail = String(crash?.detail?.stderr_tail ?? "");
+
+    expect(tail.length).toBeGreaterThan(0);
+    expect(tail.length).toBeLessThanOrEqual(2048);
+    // It is the *tail*: the newest lines survive, the oldest are dropped.
+    expect(tail).toContain("TAIL_MARKER_AT_THE_END");
+    expect(tail).not.toContain("HEAD_MARKER_ONLY_AT_THE_START");
+  }, 20_000);
 });
 
 describe("McpConnectionRegistry — connect racing a seal (M8)", () => {

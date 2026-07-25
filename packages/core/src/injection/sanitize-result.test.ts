@@ -54,6 +54,106 @@ describe("sanitizeUseSecretResult", () => {
     expect(JSON.stringify(result.rows)).not.toContain(bearerish);
   });
 
+  /**
+   * T10: three of the six context branches were unpinned — replacing the
+   * `database`, `git` and `ssh` cases with a bare `return;` kept the whole
+   * suite green, so the boundary layer (the last one before the result is
+   * stringified for the model) could silently stop covering half the contexts.
+   */
+  describe("every context shape is sanitized (T10)", () => {
+    const BEARERISH = "Bearer abcdefghijklmnopqrstuvwxyz012345";
+
+    it("database: row values, error text and the echoed command", () => {
+      const result: UseSecretResponse = {
+        type: "database",
+        rows: [{ note: `token=${BEARERISH}` }],
+        fields: [{ name: "note" }],
+        row_count: 1,
+        truncated: false,
+        error: `query failed for ${BEARERISH}`,
+      };
+      sanitizeUseSecretResult(result, guard);
+
+      expect(JSON.stringify(result.rows)).not.toContain(BEARERISH);
+      expect(result.error).not.toContain(BEARERISH);
+      expect(result.error).toContain("[REDACTED]");
+    });
+
+    it("git: stdout, stderr and error", () => {
+      const result: UseSecretResponse = {
+        type: "git",
+        stdout: `remote: ${BEARERISH}`,
+        stderr: `fatal: could not read ${BEARERISH}`,
+        exit_code: 1,
+        error: `auth failed: ${BEARERISH}`,
+      };
+      sanitizeUseSecretResult(result, guard);
+
+      expect(result.stdout).not.toContain(BEARERISH);
+      expect(result.stderr).not.toContain(BEARERISH);
+      expect(result.error).not.toContain(BEARERISH);
+      expect(result.stdout).toContain("[REDACTED]");
+    });
+
+    it("ssh: stdout, stderr and error", () => {
+      const result: UseSecretResponse = {
+        type: "ssh",
+        stdout: `printed ${BEARERISH}`,
+        stderr: `warning about ${BEARERISH}`,
+        exit_code: 0,
+        error: `channel error ${BEARERISH}`,
+      };
+      sanitizeUseSecretResult(result, guard);
+
+      expect(result.stdout).not.toContain(BEARERISH);
+      expect(result.stderr).not.toContain(BEARERISH);
+      expect(result.error).not.toContain(BEARERISH);
+      expect(result.stderr).toContain("[REDACTED]");
+    });
+
+    it("process: stdout, stderr and error", () => {
+      const result: UseSecretResponse = {
+        type: "process",
+        stdout: `env dump ${BEARERISH}`,
+        stderr: `stderr ${BEARERISH}`,
+        exit_code: 0,
+        error: `spawn error ${BEARERISH}`,
+      };
+      sanitizeUseSecretResult(result, guard);
+
+      expect(result.stdout).not.toContain(BEARERISH);
+      expect(result.stderr).not.toContain(BEARERISH);
+      expect(result.error).not.toContain(BEARERISH);
+    });
+
+    it("http: body, headers and error", () => {
+      const result: UseSecretResponse = {
+        type: "http",
+        status: 401,
+        body: `denied ${BEARERISH}`,
+        headers: { "x-echo": BEARERISH },
+        error: `HTTP error ${BEARERISH}`,
+      };
+      sanitizeUseSecretResult(result, guard);
+
+      expect(result.body).not.toContain(BEARERISH);
+      expect(result.headers?.["x-echo"]).not.toContain(BEARERISH);
+      expect(result.error).not.toContain(BEARERISH);
+    });
+
+    it("control: text carrying no credential pattern is left byte-identical", () => {
+      const result: UseSecretResponse = {
+        type: "ssh",
+        stdout: "total 0\ndrwxr-xr-x 2 user user 4096 Jan  1 00:00 .",
+        stderr: "",
+        exit_code: 0,
+      };
+      const before = result.stdout;
+      sanitizeUseSecretResult(result, guard);
+      expect(result.stdout).toBe(before);
+    });
+  });
+
   it("rejects an unknown result type instead of passing it through unsanitized", () => {
     const bogus = { type: "ftp", payload: "x" } as unknown as UseSecretResponse;
     try {

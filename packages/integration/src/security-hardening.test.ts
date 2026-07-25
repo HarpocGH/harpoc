@@ -786,6 +786,31 @@ describe("No-Logging Static Audit", () => {
     }
   });
 
+  /**
+   * T18: the audit covered core, mcp-server and rest-api but skipped the three
+   * remaining library packages — including `oauth-proxy`, the one package that
+   * holds plaintext client secrets, authorization codes and refresh tokens in
+   * memory. A `console.error("tokens", body)` added to a flow kept the suite
+   * green. All three are console-free today, so they carry the strict rule
+   * (any diagnostic they need goes through an injected callback, as core does
+   * with `onSessionKeyProtectionFallback`).
+   */
+  it.each(["oauth-proxy", "sdk", "shared"])("%s/src/ has zero console calls", (pkg) => {
+    const files = collectTsFiles(join(REPO_ROOT, "packages", pkg, "src"));
+    expect(files.length).toBeGreaterThan(0);
+
+    const consolePattern = /\bconsole\.(log|warn|error|info|debug)\s*\(/;
+    for (const filePath of files) {
+      const lines = readFileSync(filePath, "utf8").split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i] as string;
+        if (consolePattern.test(line)) {
+          expect.fail(`Found console call in ${filePath}:${i + 1}: ${line.trim()}`);
+        }
+      }
+    }
+  });
+
   it("rest-api/ console calls do not reference secret, value, password, or key", () => {
     const restDir = join(REPO_ROOT, "packages/rest-api/src");
     const files = collectTsFiles(restDir);

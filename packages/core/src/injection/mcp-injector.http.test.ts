@@ -98,6 +98,34 @@ describe("MCP Streamable HTTP DNS-rebinding pinning", () => {
     expect(seenHosts.length).toBeGreaterThan(0);
     expect(seenHosts.every((h) => h === `mcp.pinned.test:${port}`)).toBe(true);
   });
+
+  /**
+   * T9 (HTTP half): the allowlist denial cases elsewhere all start cold, so a
+   * check moved into `establish()` would keep an already-connected downstream
+   * endpoint reachable after it left the allowlist. Here the first call really
+   * does leave a live session in the registry.
+   */
+  it("re-checks the URL allowlist on a live session", async () => {
+    const injector = new McpInjector(null, registry);
+    const config = httpConfig(`http://mcp.pinned.test:${port}/mcp`);
+
+    await run(injector, config);
+    expect(registry.get("secret-http-1")).toBeDefined();
+
+    await expect(
+      injector.executeWithSecret(
+        mcpAction("echo"),
+        new Uint8Array(Buffer.from(SECRET, "utf8")),
+        { ...POLICY, url_allowlist: ["https://elsewhere.example.com/*"] },
+        config,
+        "secret-http-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
+
+    // Control: with the endpoint allowlisted again the same session serves.
+    const after = await run(injector, config);
+    expect(JSON.stringify(after.content)).toContain("pinned-ok");
+  });
 });
 
 describe("MCP Streamable HTTP redirect refusal", () => {

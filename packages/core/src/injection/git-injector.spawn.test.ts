@@ -98,6 +98,46 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
     expect(opts.redact).toContain("git-user");
   });
 
+  // T14: the child environment is built, not inherited (§4.5.3 layer 3). Both
+  // git transports were unpinned here, so `{ ...process.env }` in either
+  // initializer would have handed the vault process's whole environment —
+  // proxy settings, operator-exported tokens, GIT_* overrides — to git.
+  it("hands git a built environment, not the vault's own", async () => {
+    process.env.HARPOC_T14_GIT_AMBIENT = "ambient-value";
+    process.env.HARPOC_T14_GIT_ALLOWED = "allowed-value";
+    try {
+      await injector.executeWithSecret(
+        { type: "git", operation: "clone", repository: "https://8.8.8.8/org/repo.git" },
+        new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+        policy({
+          command_allowlist: [GIT as string],
+          url_allowlist: ["https://8.8.8.8/*"],
+          env_allowlist: ["HARPOC_T14_GIT_ALLOWED"],
+        }),
+        undefined,
+      );
+
+      const [, , opts] = spawnMock.mock.calls[0] as SpawnCall;
+      expect(opts.env.HARPOC_T14_GIT_AMBIENT).toBeUndefined();
+      expect(opts.env.HARPOC_T14_GIT_ALLOWED).toBe("allowed-value");
+
+      const expected = new Set([
+        "PATH",
+        "SystemRoot",
+        "GIT_ASKPASS",
+        "GIT_TERMINAL_PROMPT",
+        "HARPOC_GIT_USERNAME",
+        "HARPOC_GIT_PASSWORD",
+        "HARPOC_GIT_HOST",
+        "HARPOC_T14_GIT_ALLOWED",
+      ]);
+      expect(Object.keys(opts.env).filter((k) => !expected.has(k))).toEqual([]);
+    } finally {
+      delete process.env.HARPOC_T14_GIT_AMBIENT;
+      delete process.env.HARPOC_T14_GIT_ALLOWED;
+    }
+  });
+
   it("skips a 1-2 char username in the redaction set (would shred output)", async () => {
     const action: GitAction = {
       type: "git",

@@ -29,19 +29,22 @@ export function createApp(engine: VaultEngine): Hono<HarpocEnv> {
   // Health routes (no auth required, exempt from rate limiting)
   app.route("/api/v1/health", createHealthRoutes());
 
+  // `/api/v1/secrets/*` already matches the bare collection path, so a second
+  // registration for `/api/v1/secrets` runs every middleware twice on it: the
+  // limiter charged two tokens per request (halving the collection route's
+  // effective allowance), the audit middleware wrote the line twice and the
+  // token was verified twice. One pattern per middleware.
+
   // Rate limiter for all non-health API routes
-  app.use("/api/v1/secrets", createRateLimitMiddleware(limiter));
   app.use("/api/v1/secrets/*", createRateLimitMiddleware(limiter));
   app.use("/api/v1/audit", createRateLimitMiddleware(limiter));
   app.use("/api/v1/health/expiring", createRateLimitMiddleware(limiter));
 
   // Audit logging (runs after handler via await next())
-  app.use("/api/v1/secrets", auditMiddleware);
   app.use("/api/v1/secrets/*", auditMiddleware);
   app.use("/api/v1/audit", auditMiddleware);
 
   // Auth middleware for protected routes
-  app.use("/api/v1/secrets", authMiddleware);
   app.use("/api/v1/secrets/*", authMiddleware);
   app.use("/api/v1/audit", authMiddleware);
   app.use("/api/v1/health/expiring", authMiddleware);
