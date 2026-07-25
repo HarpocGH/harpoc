@@ -1,4 +1,9 @@
-import type { AccessInterface, CallerContext, VaultApiToken } from "./types.js";
+import type {
+  AccessInterface,
+  AuditVisibilityScope,
+  CallerContext,
+  VaultApiToken,
+} from "./types.js";
 import { TokenPrincipalType } from "./types.js";
 
 /**
@@ -22,4 +27,25 @@ export function callerFromToken(token: VaultApiToken, iface?: AccessInterface): 
     caller.interface = iface;
   }
   return caller;
+}
+
+/**
+ * The token's non-permission scope dimensions, for surfaces that return rows
+ * about *other* secrets than the one addressed — today the audit log. The audit
+ * surfaces checked the permission dimension only, so a project- or name-scoped
+ * admin token read audit detail (handles, principals, config changes) for every
+ * secret in the vault, with `?secret_id=` as a targeted oracle (L10).
+ *
+ * Returns undefined when the token is unrestricted in both dimensions — the
+ * engine then does no filtering work at all.
+ */
+export function auditScopeFromToken(token: VaultApiToken): AuditVisibilityScope | undefined {
+  const scope: AuditVisibilityScope = {};
+  if (token.project) {
+    scope.project = token.project;
+  }
+  if (token.secrets?.length) {
+    scope.secrets = token.secrets;
+  }
+  return scope.project === undefined && scope.secrets === undefined ? undefined : scope;
 }

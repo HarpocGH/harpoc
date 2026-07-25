@@ -1,5 +1,16 @@
-import type { AccessInterface, CallerContext, Permission, VaultApiToken } from "@harpoc/shared";
-import { callerFromToken, matchesSecretNameScope, VaultError } from "@harpoc/shared";
+import type {
+  AccessInterface,
+  AuditVisibilityScope,
+  CallerContext,
+  Permission,
+  VaultApiToken,
+} from "@harpoc/shared";
+import {
+  auditScopeFromToken,
+  callerFromToken,
+  matchesSecretNameScope,
+  VaultError,
+} from "@harpoc/shared";
 
 /**
  * 3-dimensional launch-token scope enforcement:
@@ -95,5 +106,15 @@ export class ScopeGuard {
    */
   get caller(): CallerContext | undefined {
     return this.token ? callerFromToken(this.token, this.accessInterface) : undefined;
+  }
+
+  /**
+   * The token's project / secret-name dimensions for surfaces that return rows
+   * about secrets other than the one addressed — the audit resource, which
+   * enforced the permission dimension alone (L10). Undefined without a token
+   * (trusted local mode) and for a token unrestricted in both dimensions.
+   */
+  get auditScope(): AuditVisibilityScope | undefined {
+    return this.token ? auditScopeFromToken(this.token) : undefined;
   }
 }

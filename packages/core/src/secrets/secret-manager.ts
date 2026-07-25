@@ -94,13 +94,14 @@ export class SecretManager {
    * Create a new secret. If no value is provided, status is PENDING.
    *
    * `onCommit` runs synchronously inside the insert transaction (receiving the
-   * response the caller will get) so the engine's audit row commits atomically
+   * response the caller will get, plus the new secret's id so the audit row can
+   * be addressed by `secret_id`) so the engine's audit row commits atomically
    * with the secret row — a crash cannot yield a created-but-unaudited secret,
    * and a failed audit write rolls the create back.
    */
   async createSecret(
     input: CreateSecretInput,
-    onCommit?: (result: CreateSecretResponse) => void,
+    onCommit?: (result: CreateSecretResponse, secretId: string) => void,
   ): Promise<CreateSecretResponse> {
     const { name, type, project, value, expiresAt } = input;
 
@@ -194,7 +195,7 @@ export class SecretManager {
       this.store.transaction(() => {
         this.assertNoDuplicateByHmac(nameHmac, name);
         this.store.insertSecret(secret);
-        onCommit?.(response);
+        onCommit?.(response, id);
       });
     } catch (err) {
       if (isUniqueConstraintError(err)) {
@@ -210,7 +211,11 @@ export class SecretManager {
    * Set the value for a PENDING secret (transitions to ACTIVE).
    * `onCommit` runs inside the update transaction (see createSecret).
    */
-  async setSecretValue(handle: string, value: Uint8Array, onCommit?: () => void): Promise<void> {
+  async setSecretValue(
+    handle: string,
+    value: Uint8Array,
+    onCommit?: (secretId: string) => void,
+  ): Promise<void> {
     const secret = await this.resolveHandleToSecret(handle);
 
     if (secret.status !== SecretStatus.PENDING) {
@@ -234,7 +239,7 @@ export class SecretManager {
           status: SecretStatus.ACTIVE,
           updated_at: Date.now(),
         });
-        onCommit?.();
+        onCommit?.(secret.id);
       });
     } finally {
       wipeBuffer(dek);
@@ -243,9 +248,17 @@ export class SecretManager {
 
   /**
    * Get secret info (metadata only, no value) — safe to return to LLM.
+   *
+   * `onResolved` reports the resolved secret id (before any further step can
+   * throw) so the engine can address its audit row by `secret_id` without a
+   * second handle resolution — the read-side counterpart of `onCommit`.
    */
-  async getSecretInfo(handle: string): Promise<SecretInfo> {
+  async getSecretInfo(
+    handle: string,
+    onResolved?: (secretId: string) => void,
+  ): Promise<SecretInfo> {
     const secret = await this.resolveHandleToSecret(handle);
+    onResolved?.(secret.id);
     const name = decryptName(
       this.kek,
       secret.name_encrypted,
@@ -270,9 +283,16 @@ export class SecretManager {
 
   /**
    * Get the decrypted secret value. NEVER return this to the LLM.
+   *
+   * `onResolved` reports the resolved secret id (see getSecretInfo) — it fires
+   * before the usability check, so a denial row can carry the id too.
    */
-  async getSecretValue(handle: string): Promise<Uint8Array> {
+  async getSecretValue(
+    handle: string,
+    onResolved?: (secretId: string) => void,
+  ): Promise<Uint8Array> {
     const secret = await this.resolveHandleToSecret(handle);
+    onResolved?.(secret.id);
     this.assertUsable(secret, handle);
 
     const dek = unwrapDek(this.kek, secret.wrapped_dek, secret.dek_iv, secret.dek_tag, secret.id);
@@ -332,7 +352,11 @@ export class SecretManager {
    * Rotate a secret: new DEK, new ciphertext, version incremented.
    * `onCommit` runs inside the update transaction (see createSecret).
    */
-  async rotateSecret(handle: string, newValue: Uint8Array, onCommit?: () => void): Promise<void> {
+  async rotateSecret(
+    handle: string,
+    newValue: Uint8Array,
+    onCommit?: (secretId: string) => void,
+  ): Promise<void> {
     const secret = await this.resolveHandleToSecret(handle);
     this.assertUsable(secret, handle);
 
@@ -355,7 +379,7 @@ export class SecretManager {
           rotated_at: Date.now(),
           updated_at: Date.now(),
         });
-        onCommit?.();
+        onCommit?.(secret.id);
       });
     } finally {
       wipeBuffer(newDek);
@@ -366,7 +390,7 @@ export class SecretManager {
    * Revoke a secret (sets status to REVOKED).
    * `onCommit` runs inside the update transaction (see createSecret).
    */
-  async revokeSecret(handle: string, onCommit?: () => void): Promise<void> {
+  async revokeSecret(handle: string, onCommit?: (secretId: string) => void): Promise<void> {
     const secret = await this.resolveHandleToSecret(handle);
 
     if (secret.status === SecretStatus.REVOKED) {
@@ -378,7 +402,7 @@ export class SecretManager {
         status: SecretStatus.REVOKED,
         updated_at: Date.now(),
       });
-      onCommit?.();
+      onCommit?.(secret.id);
     });
   }
 

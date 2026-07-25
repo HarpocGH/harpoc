@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type {
   AccessPolicy,
   AuditChainAnchor,
+  AuditVisibilityScope,
   CallerContext,
   ConnectionConfig,
   CreateSecretResponse,
@@ -13,6 +14,7 @@ import type {
   OAuthTokenStatus,
   Permission,
   Secret,
+  SessionFile,
   SetInjectionPolicyOptions,
   TokenPrincipalType,
   UseSecretAction,
@@ -42,6 +44,7 @@ import {
   isVaultVersionSupported,
   LOCKOUT_DURATIONS_MS,
   LOCKOUT_MAX_ATTEMPTS,
+  matchesSecretNameScope,
   MAX_SESSION_TTL_MS,
   MAX_TOKEN_TTL_MS,
   MIN_PASSWORD_LENGTH,
@@ -341,6 +344,19 @@ export class VaultEngine {
       return false;
     }
 
+    // The same fail-closed guard `unlock` enforces. Without it, every entry
+    // path that reuses a session file — i.e. all of them except init/unlock —
+    // let an older binary open and write a newer-format vault (L5). Thrown
+    // rather than reported as "no session": falling through would prompt for a
+    // password and then raise this very error from `unlock`.
+    const vaultVersion = store.getMeta("vault_version");
+    if (vaultVersion && !isVaultVersionSupported(vaultVersion, VAULT_VERSION)) {
+      if (isNewStore) store.close();
+      throw VaultError.vaultCorrupted(
+        `Vault version ${vaultVersion} is newer than supported ${VAULT_VERSION}`,
+      );
+    }
+
     // Unwrap KEK and JWT key from session
     const sessionKeyBytes = new Uint8Array(Buffer.from(session.session_key, "base64"));
 
@@ -443,21 +459,33 @@ export class VaultEngine {
   // Secrets
   // ---------------------------------------------------------------------------
 
-  async createSecret(input: {
-    name: string;
-    type: SecretType;
-    project?: string;
-    value?: Uint8Array;
-    expiresAt?: number;
-  }): Promise<CreateSecretResponse> {
+  /**
+   * Create a secret. `caller` is attribution only — `create` is not grantable
+   * per secret (there is no secret to carry the row yet, W2), so token scope
+   * governs it; without the caller every REST/MCP create wrote a NULL-principal
+   * row, which is the documented marker for the *trusted local path* (L3).
+   */
+  async createSecret(
+    input: {
+      name: string;
+      type: SecretType;
+      project?: string;
+      value?: Uint8Array;
+      expiresAt?: number;
+    },
+    caller?: CallerContext,
+  ): Promise<CreateSecretResponse> {
     const s = this.assertUnlocked();
     // Audit row committed in the same transaction as the secret row (NM3):
     // a crash cannot yield a created-but-unaudited secret, and an unwritable
     // audit log rolls the create back.
-    return s.secretManager.createSecret(input, (result) => {
+    return s.secretManager.createSecret(input, (result, secretId) => {
       s.auditLogger.log({
         eventType: AuditEventType.SECRET_CREATE,
-        detail: { handle: result.handle, status: result.status },
+        secretId,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
+        detail: { handle: result.handle, status: result.status, ...callerInterfaceDetail(caller) },
         sessionId: this.sessionId ?? undefined,
       });
     });
@@ -468,16 +496,21 @@ export class VaultEngine {
     await this.enforceCallerPolicy(s, handle, caller, "read", AuditEventType.SECRET_READ, {
       handle,
     });
+    // The resolved id, reported by the manager's read hook: without it the
+    // success rows left `audit_log.secret_id` NULL, so `audit --secret <id>`
+    // omitted exactly the successful reads of that secret (L4).
+    let secretId: string | undefined;
     let info: SecretInfo;
     try {
-      info = await s.secretManager.getSecretInfo(handle);
+      info = await s.secretManager.getSecretInfo(handle, (id) => (secretId = id));
     } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_READ, err, { handle }, undefined, caller);
+      this.auditDenied(s, AuditEventType.SECRET_READ, err, { handle }, secretId, caller);
       throw err;
     }
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_READ,
+      secretId,
       principalType: caller?.principal_type,
       principalId: caller?.principal_id,
       detail: { handle, ...callerInterfaceDetail(caller) },
@@ -493,16 +526,17 @@ export class VaultEngine {
       handle,
       action: "get_value",
     });
+    let secretId: string | undefined;
     let value: Uint8Array;
     try {
-      value = await s.secretManager.getSecretValue(handle);
+      value = await s.secretManager.getSecretValue(handle, (id) => (secretId = id));
     } catch (err) {
       this.auditDenied(
         s,
         AuditEventType.SECRET_READ,
         err,
         { handle, action: "get_value" },
-        undefined,
+        secretId,
         caller,
       );
       throw err;
@@ -510,6 +544,7 @@ export class VaultEngine {
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_READ,
+      secretId,
       principalType: caller?.principal_type,
       principalId: caller?.principal_id,
       detail: { handle, action: "get_value", ...callerInterfaceDetail(caller) },
@@ -547,9 +582,10 @@ export class VaultEngine {
       action: "set_value",
     });
     try {
-      await s.secretManager.setSecretValue(handle, value, () => {
+      await s.secretManager.setSecretValue(handle, value, (secretId) => {
         s.auditLogger.log({
           eventType: AuditEventType.SECRET_CREATE,
+          secretId,
           principalType: caller?.principal_type,
           principalId: caller?.principal_id,
           detail: { handle, action: "set_value", ...callerInterfaceDetail(caller) },
@@ -575,9 +611,10 @@ export class VaultEngine {
       handle,
     });
     try {
-      await s.secretManager.rotateSecret(handle, newValue, () => {
+      await s.secretManager.rotateSecret(handle, newValue, (secretId) => {
         s.auditLogger.log({
           eventType: AuditEventType.SECRET_ROTATE,
+          secretId,
           principalType: caller?.principal_type,
           principalId: caller?.principal_id,
           detail: { handle, ...callerInterfaceDetail(caller) },
@@ -595,10 +632,13 @@ export class VaultEngine {
     await this.enforceCallerPolicy(s, handle, caller, "revoke", AuditEventType.SECRET_REVOKE, {
       handle,
     });
+    let revokedId: string | undefined;
     try {
-      await s.secretManager.revokeSecret(handle, () => {
+      await s.secretManager.revokeSecret(handle, (secretId) => {
+        revokedId = secretId;
         s.auditLogger.log({
           eventType: AuditEventType.SECRET_REVOKE,
+          secretId,
           principalType: caller?.principal_type,
           principalId: caller?.principal_id,
           detail: { handle, ...callerInterfaceDetail(caller) },
@@ -608,6 +648,15 @@ export class VaultEngine {
     } catch (err) {
       this.auditDenied(s, AuditEventType.SECRET_REVOKE, err, { handle }, undefined, caller);
       throw err;
+    }
+
+    // A downstream stdio MCP child spawned with this credential outlives the
+    // revocation otherwise — it keeps running with the revoked plaintext in its
+    // environment until lock/destroy/TTL-seal, and use-driven slides push that
+    // out indefinitely (L2). Terminated after the revoke commits, so a failed
+    // teardown cannot roll the revocation back.
+    if (revokedId) {
+      await s.mcpRegistry.terminate(revokedId, "secret_revoked");
     }
   }
 
@@ -683,6 +732,11 @@ export class VaultEngine {
         secret.id,
         caller,
       );
+      // Backstop for the out-of-process case (L2): a CLI `secret revoke`, or a
+      // lazy expiry detected in another process, cannot reach this process's
+      // registry. The credential is no longer usable here, so any downstream
+      // child still holding it is torn down before the refusal returns.
+      await s.mcpRegistry.terminate(secret.id, "secret_unusable");
       throw err;
     }
 
@@ -1857,9 +1911,35 @@ export class VaultEngine {
   // Audit
   // ---------------------------------------------------------------------------
 
-  queryAudit(options?: AuditQueryOptions): DecryptedAuditEvent[] {
+  /**
+   * Query the audit log. `scope` carries the requesting token's non-permission
+   * scope dimensions (project, secret-name patterns): rows about a secret the
+   * token may not address are dropped, so a project- or name-scoped admin token
+   * can no longer read every secret's audit detail — nor use `secret_id` as a
+   * targeted oracle (L10). Rows without a `secret_id` (vault lifecycle, token
+   * issuance, server start) carry no per-secret metadata and stay visible.
+   *
+   * Filtering happens after the query's own `limit`, so a scoped token can see
+   * fewer rows than it asked for — the same property W2's list filter has. An
+   * absent scope is the unrestricted case: no filtering work is done at all.
+   */
+  queryAudit(options?: AuditQueryOptions, scope?: AuditVisibilityScope): DecryptedAuditEvent[] {
     const s = this.assertUnlocked();
-    return s.auditQuery.query(options);
+    const events = s.auditQuery.query(options);
+    if (!scope || (scope.project === undefined && !scope.secrets?.length)) return events;
+
+    const visible = new Set(
+      s.secretManager
+        .listSecretsWithIds()
+        .filter(
+          (entry) =>
+            (scope.project === undefined || entry.info.project === scope.project) &&
+            matchesSecretNameScope(entry.info.name, scope.secrets),
+        )
+        .map((entry) => entry.id),
+    );
+
+    return events.filter((event) => event.secret_id === null || visible.has(event.secret_id));
   }
 
   /**
@@ -2316,6 +2396,13 @@ export class VaultEngine {
         detail: { handle },
         sessionId: this.sessionId ?? undefined,
       });
+      // An expired credential must not stay live in a downstream child (L2).
+      // Queued rather than awaited: this hook runs inside the status-write
+      // transaction (NM3), so the terminate — which writes its own audit row —
+      // runs after that transaction has committed.
+      queueMicrotask(() => {
+        void this.mcpRegistry?.terminate(secretId, "secret_expired").catch(() => undefined);
+      });
     });
     this.policyEngine = new PolicyEngine(store);
     this.auditLogger = new AuditLogger(store, auditKey);
@@ -2429,7 +2516,16 @@ export class VaultEngine {
    * keeping the session alive to the absolute ceiling by mere liveness.
    */
   private async sessionMonitorTick(): Promise<void> {
-    const session = await this.sessionManager.readStoredSession();
+    let session: SessionFile | null;
+    try {
+      session = await this.sessionManager.readStoredSession();
+    } catch {
+      // The session file exists but could not be read (EMFILE, EIO, …). That
+      // is not evidence the session ended — skip this tick rather than seal a
+      // live vault on a transient filesystem failure (L6). Expiry is still
+      // enforced synchronously by assertUnlocked and by the next tick.
+      return;
+    }
     if (session) return;
     // Session expired or removed — close store and seal
     await this.mcpRegistry?.closeAll("session_expired");

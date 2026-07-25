@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -357,4 +357,43 @@ describeWindows("compiled binary smoke: network-isolation refusal (Windows)", ()
     expect(denied?.detail?.network_isolation).toBe(true);
     expect(Boolean(denied?.success)).toBe(false);
   }, 60_000);
+});
+
+// L11: the vault directory and database were created with no explicit mode —
+// on POSIX umask-dependent, typically world-readable — while the session file
+// beside them is deliberately 0600. Walked through the real binary, which is
+// the only place the directory is created.
+describe("compiled binary smoke: vault directory and database modes (L11)", () => {
+  it.runIf(process.platform !== "win32")(
+    "init creates 0700 dir and 0600 database",
+    async () => {
+      const freshDir = join(
+        tmpdir(),
+        `harpoc-modes-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      );
+
+      const init = await new Promise<CliResult>((resolvePromise, rejectPromise) => {
+        const child = spawn(process.execPath, [CLI_PATH, "--vault-dir", freshDir, "init"], {
+          windowsHide: true,
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (c: Buffer) => (stdout += c.toString("utf8")));
+        child.stderr.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
+        child.on("error", rejectPromise);
+        child.on("close", (code) => resolvePromise({ code, stdout, stderr }));
+        child.stdin.write(`${MASTER_PASSWORD}\n${MASTER_PASSWORD}\n`);
+        child.stdin.end();
+      });
+
+      try {
+        expect(init.code).toBe(0);
+        expect(statSync(freshDir).mode & 0o777).toBe(0o700);
+        expect(statSync(join(freshDir, VAULT_DB_NAME)).mode & 0o777).toBe(0o600);
+      } finally {
+        rmSync(freshDir, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
 });

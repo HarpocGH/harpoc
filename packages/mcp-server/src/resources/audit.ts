@@ -14,7 +14,8 @@ export function registerAuditResource(
     async (uri) => {
       scopeGuard.checkAccess("admin");
 
-      const events = engine.queryAudit({ limit: 50 });
+      // Scoped admin tokens see only rows about secrets they can address (L10).
+      const events = engine.queryAudit({ limit: 50 }, scopeGuard.auditScope);
       const result = events.map((e) => ({
         id: e.id,
         timestamp: e.timestamp,

@@ -230,6 +230,31 @@ describe("MCP Resources", () => {
       expect(data[0].project).toBe("prod");
     });
 
+    // L10: the audit resource enforced the permission dimension alone, so a
+    // project- or name-scoped admin token read every secret's audit detail.
+    it("audit resource passes the token's project/name scope to the engine", async () => {
+      const scoped = new ScopeGuard(makeScopedToken({ project: "prod", secrets: ["db-*"] }));
+      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      registerAuditResource(srv, engine, scoped);
+
+      await readResource(srv, "secret://vault/audit/recent");
+
+      expect(engine.queryAudit).toHaveBeenCalledWith(expect.anything(), {
+        project: "prod",
+        secrets: ["db-*"],
+      });
+    });
+
+    it("audit resource passes no scope for an unrestricted admin token", async () => {
+      const unrestricted = new ScopeGuard(makeScopedToken());
+      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      registerAuditResource(srv, engine, unrestricted);
+
+      await readResource(srv, "secret://vault/audit/recent");
+
+      expect(engine.queryAudit).toHaveBeenCalledWith(expect.anything(), undefined);
+    });
+
     it("audit resource requires admin permission", async () => {
       const listOnly = new ScopeGuard(makeScopedToken({ scope: ["list"] }));
       const srv = new McpServer({ name: "test", version: "0.0.0" });

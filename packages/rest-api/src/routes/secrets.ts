@@ -6,6 +6,7 @@ import {
   createSecretInputSchema,
   matchesSecretNameScope,
   mcpServerConfigSchema,
+  rotateSecretInputSchema,
   setInjectionPolicyRequestSchema,
   useSecretActionSchema,
 } from "@harpoc/shared";
@@ -60,15 +61,18 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     checkTokenScope(token, "create", parsed.data.project, parsed.data.name);
 
-    const result = await engine.createSecret({
-      name: parsed.data.name,
-      type: parsed.data.type,
-      project: parsed.data.project,
-      value: parsed.data.value
-        ? new Uint8Array(Buffer.from(parsed.data.value, "base64"))
-        : undefined,
-      expiresAt: parsed.data.expires_at,
-    });
+    const result = await engine.createSecret(
+      {
+        name: parsed.data.name,
+        type: parsed.data.type,
+        project: parsed.data.project,
+        value: parsed.data.value
+          ? new Uint8Array(Buffer.from(parsed.data.value, "base64"))
+          : undefined,
+        expiresAt: parsed.data.expires_at,
+      },
+      callerFromToken(token, "rest"),
+    );
 
     return c.json({ data: result }, 201);
   });
@@ -130,16 +134,20 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     checkTokenScope(token, "rotate", project, name);
 
     const engine = c.get("engine");
-    const body = await c.req.json<{ value: string }>();
+    const body = await c.req.json<Record<string, unknown>>();
 
-    if (!body.value) {
-      throw VaultError.invalidInput("value (base64) is required");
+    // Validated, not merely truthy: Buffer.from(x, "base64") drops invalid
+    // characters silently, so a malformed value rotated the credential to
+    // garbage — irreversibly — and the route answered 200 (L7).
+    const parsedBody = rotateSecretInputSchema.safeParse(body);
+    if (!parsedBody.success) {
+      throw VaultError.schemaValidation(parsedBody.error.issues.map((i) => i.message).join(", "));
     }
 
     const handle = buildHandle(c.req.param("handle"));
     const secretId = await engine.resolveSecretId(handle);
     c.get("limiter").checkSecret(secretId);
-    const newValue = new Uint8Array(Buffer.from(body.value, "base64"));
+    const newValue = new Uint8Array(Buffer.from(parsedBody.data.value, "base64"));
     await engine.rotateSecret(handle, newValue, callerFromToken(token, "rest"));
 
     return c.json({ data: { rotated: true } });

@@ -294,6 +294,31 @@ describe("secret routes", () => {
       });
       expect(res.status).toBe(400);
     });
+
+    // L7: `Buffer.from(x, "base64")` discards invalid characters silently, so a
+    // malformed value irreversibly rotated the credential to garbage while the
+    // route answered 200 {rotated:true}. The create route validated; this did not.
+    it("rejects a non-base64 value before the engine is touched", async () => {
+      for (const value of ["not base64!!", "***", "AA=A"]) {
+        const res = await app.request("/api/v1/secrets/test-key/rotate", {
+          method: "POST",
+          headers: { ...AUTH, "content-type": "application/json" },
+          body: JSON.stringify({ value }),
+        });
+        expect(res.status).toBe(400);
+      }
+      expect(engine.rotateSecret).not.toHaveBeenCalled();
+    });
+
+    it("rejects a non-string value", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/rotate", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ value: 42 }),
+      });
+      expect(res.status).toBe(400);
+      expect(engine.rotateSecret).not.toHaveBeenCalled();
+    });
   });
 
   describe("POST /api/v1/secrets/:handle/use", () => {

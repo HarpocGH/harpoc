@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { auditQuerySchema } from "@harpoc/shared";
+import { auditQuerySchema, auditScopeFromToken } from "@harpoc/shared";
 import { VaultError } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope } from "../middleware/scope.js";
@@ -32,13 +32,19 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
       throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
     }
 
-    const events = engine.queryAudit({
-      secretId: parsed.data.secret_id,
-      eventType: parsed.data.event_type,
-      since: parsed.data.since,
-      until: parsed.data.until,
-      limit: parsed.data.limit,
-    });
+    // The permission dimension alone is not the token's scope: a project- or
+    // name-pattern-scoped admin token must not read audit detail for secrets it
+    // cannot address (L10).
+    const events = engine.queryAudit(
+      {
+        secretId: parsed.data.secret_id,
+        eventType: parsed.data.event_type,
+        since: parsed.data.since,
+        until: parsed.data.until,
+        limit: parsed.data.limit,
+      },
+      auditScopeFromToken(token),
+    );
 
     return c.json({ data: events });
   });

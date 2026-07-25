@@ -44,11 +44,14 @@ export function registerCreateSecret(
       // value is then collected out-of-band, per the thesis's channel
       // priority: URL-mode elicitation > controlling-terminal prompt >
       // deferred (CLI: harpoc secret set).
-      const result = await engine.createSecret({
-        name: args.name,
-        type: args.type,
-        project: args.project,
-      });
+      const result = await engine.createSecret(
+        {
+          name: args.name,
+          type: args.type,
+          project: args.project,
+        },
+        scopeGuard.caller,
+      );
 
       let status: string = result.status;
       let message =

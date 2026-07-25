@@ -73,13 +73,17 @@ describe("audit routes", () => {
       { headers: AUTH },
     );
 
-    expect(engine.queryAudit).toHaveBeenCalledWith({
-      secretId: uuid,
-      eventType: "secret.read",
-      since: 1000,
-      until: 2000,
-      limit: 10,
-    });
+    expect(engine.queryAudit).toHaveBeenCalledWith(
+      {
+        secretId: uuid,
+        eventType: "secret.read",
+        since: 1000,
+        until: 2000,
+        limit: 10,
+      },
+      // Unrestricted admin token: no scope filter is applied (L10).
+      undefined,
+    );
   });
 
   it("requires admin scope", async () => {
@@ -100,12 +104,54 @@ describe("audit routes", () => {
   it("handles omitted query params", async () => {
     await app.request("/api/v1/audit", { headers: AUTH });
 
-    expect(engine.queryAudit).toHaveBeenCalledWith({
-      secretId: undefined,
-      eventType: undefined,
-      since: undefined,
-      until: undefined,
-      limit: undefined,
+    expect(engine.queryAudit).toHaveBeenCalledWith(
+      {
+        secretId: undefined,
+        eventType: undefined,
+        since: undefined,
+        until: undefined,
+        limit: undefined,
+      },
+      undefined,
+    );
+  });
+
+  // L10: the route enforced the permission dimension only, so a project- or
+  // name-pattern-scoped admin token read audit detail for every secret in the
+  // vault — with `?secret_id=` as a targeted oracle.
+  it("passes a name-pattern-scoped token's scope to the engine", async () => {
+    const scoped: VaultApiToken = { ...ADMIN_TOKEN, secrets: ["db-*"] };
+    engine = createMockEngine(scoped);
+    app = new Hono<HarpocEnv>();
+    app.onError(errorHandler);
+    app.use("*", async (c, next) => {
+      c.set("engine", engine as never);
+      await next();
     });
+    app.use("/api/v1/audit", authMiddleware);
+    app.route("/api/v1/audit", createAuditRoutes());
+
+    await app.request("/api/v1/audit", { headers: AUTH });
+
+    expect(engine.queryAudit).toHaveBeenCalledWith(expect.anything(), { secrets: ["db-*"] });
+  });
+
+  it("passes a project-scoped token's scope to the engine", async () => {
+    const scoped: VaultApiToken = { ...ADMIN_TOKEN, project: "finance" };
+    engine = createMockEngine(scoped);
+    app = new Hono<HarpocEnv>();
+    app.onError(errorHandler);
+    app.use("*", async (c, next) => {
+      c.set("engine", engine as never);
+      await next();
+    });
+    app.use("/api/v1/audit", authMiddleware);
+    app.route("/api/v1/audit", createAuditRoutes());
+
+    await app.request("/api/v1/audit?secret_id=01234567-89ab-cdef-0123-456789abcdef", {
+      headers: AUTH,
+    });
+
+    expect(engine.queryAudit).toHaveBeenCalledWith(expect.anything(), { project: "finance" });
   });
 });

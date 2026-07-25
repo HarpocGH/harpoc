@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { readFile, chmod } from "node:fs/promises";
+import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { randomFillSync } from "node:crypto";
 import type { SessionFile } from "@harpoc/shared";
@@ -33,6 +34,12 @@ export interface SessionManagerOptions {
    * points (the CLI) supply a callback that surfaces the downgrade.
    */
   onProtectionFallback?: (error: Error) => void;
+}
+
+/** Does this read failure mean the session file is genuinely absent? */
+function isMissingFileError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
 }
 
 /**
@@ -102,7 +109,15 @@ export class SessionManager {
    * a fresh unlock is the recovery path.
    */
   async readSession(): Promise<SessionFile | null> {
-    const stored = await this.readStoredSession();
+    // A load attempt tears nothing down, so a transient read failure degrades
+    // to "no session" here — unlike the monitor and the slide, which must not
+    // read an EMFILE as proof the session is gone (L6).
+    let stored: SessionFile | null;
+    try {
+      stored = await this.readStoredSession();
+    } catch {
+      return null;
+    }
     if (!stored) return null;
 
     const scheme = stored.key_protection ?? "none";
@@ -130,13 +145,22 @@ export class SessionManager {
    * missing, expired, or corrupted. `session_key` is returned as stored — it
    * may be keystore-wrapped (see `key_protection`); use readSession() for the
    * raw key.
+   *
+   * Throws `SESSION_FILE_ERROR` when the file exists but could not be read
+   * (EMFILE, EIO, EACCES, EBUSY, …). Only an ENOENT-class failure means the
+   * session is gone: both consumers treat null as proof of that and tear the
+   * engine down — a transient error used to seal a live vault, wipe the KEK
+   * and kill downstream children while the on-disk session was intact (L6).
    */
   async readStoredSession(): Promise<SessionFile | null> {
     let raw: string;
     try {
       raw = await readFile(this.sessionPath, "utf8");
-    } catch {
-      return null; // File doesn't exist
+    } catch (err) {
+      if (isMissingFileError(err)) return null;
+      throw VaultError.sessionFileError(
+        `Failed to read session: ${err instanceof Error ? err.message : "unknown"}`,
+      );
     }
 
     // Parse JSON
@@ -279,14 +303,7 @@ export class SessionManager {
 
       // Set file permissions: owner-only access
       if (process.platform === "win32") {
-        try {
-          execSync(`icacls "${this.sessionPath}" /inheritance:r /grant:r "%USERNAME%:F"`, {
-            stdio: "ignore",
-            windowsHide: true,
-          });
-        } catch {
-          // Best-effort: icacls may not be available
-        }
+        this.restrictWindowsAcl();
       } else {
         await chmod(this.sessionPath, 0o600).catch((err: unknown) => {
           this.onProtectionFallback(
@@ -309,6 +326,45 @@ export class SessionManager {
       if (err instanceof VaultError) throw err;
       throw VaultError.sessionFileError(
         `Failed to write session: ${err instanceof Error ? err.message : "unknown"}`,
+      );
+    }
+  }
+
+  /**
+   * Reduce the session file's ACL to the current user (the Windows counterpart
+   * of the POSIX 0600 chmod).
+   *
+   * `icacls` is invoked through the pinned System32 path with `shell:false` and
+   * the vault path as an *argument* — the previous `execSync` built a cmd.exe
+   * string with the path interpolated into it, against the project's own
+   * "never a shell; args are data" doctrine, and swallowed every failure while
+   * the POSIX sibling reported through the fallback callback. That matters
+   * precisely on the DPAPI write-failure path, whose stated protection *is*
+   * file permissions. `%USERNAME%` was a cmd.exe expansion and cannot survive
+   * the shell's removal, so the account name comes from the process itself.
+   */
+  private restrictWindowsAcl(): void {
+    const icacls = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "icacls.exe");
+    try {
+      const account = userInfo().username;
+      if (!account) throw new Error("could not determine the current account name");
+      const res = spawnSync(
+        icacls,
+        [this.sessionPath, "/inheritance:r", "/grant:r", `${account}:F`],
+        { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], timeout: 15_000 },
+      );
+      if (res.error) throw res.error;
+      if (res.status !== 0) {
+        const detail = (res.stderr?.toString() || res.stdout?.toString() || "")
+          .trim()
+          .slice(0, 200);
+        throw new Error(`icacls exited ${String(res.status)}${detail ? `: ${detail}` : ""}`);
+      }
+    } catch (err) {
+      this.onProtectionFallback(
+        new Error(
+          `failed to restrict session file permissions to owner-only (${err instanceof Error ? err.message : String(err)})`,
+        ),
       );
     }
   }

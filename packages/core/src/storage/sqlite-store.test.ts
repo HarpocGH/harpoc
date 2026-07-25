@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -1312,5 +1312,52 @@ describe("concurrent file-based WAL access", () => {
     const retrieved = fileStore2.getSecret(secret.id);
     expect(retrieved).toBeDefined();
     expect(retrieved?.id).toBe(secret.id);
+  });
+});
+
+// L11: the database was created with no explicit mode, so on POSIX its
+// permissions were umask-dependent — typically world-readable — while the
+// session file beside it is deliberately 0600. Contents are KEK-encrypted, so
+// this is hardening consistency, not a confidentiality fix.
+describe("database file permissions (L11)", () => {
+  let dir: string;
+  let store: SqliteStore;
+
+  beforeEach(() => {
+    dir = join(tmpdir(), `harpoc-dbmode-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+  });
+
+  afterEach(() => {
+    store.close();
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Ignore
+    }
+  });
+
+  it.runIf(process.platform !== "win32")("creates the database owner-only", () => {
+    const dbPath = join(dir, "modes.vault.db");
+    store = new SqliteStore(dbPath);
+    store.setMeta("k", "v"); // force the WAL sidecars into existence
+
+    expect(statSync(dbPath).mode & 0o777).toBe(0o600);
+    for (const sidecar of [`${dbPath}-wal`, `${dbPath}-shm`]) {
+      if (existsSync(sidecar)) {
+        // The sidecars are created by SQLite after the constructor ran, so they
+        // follow the umask; the finding is about the database file itself.
+        expect(statSync(sidecar).isFile()).toBe(true);
+      }
+    }
+  });
+
+  it("opens a pre-existing database whose mode cannot be changed", () => {
+    const dbPath = join(dir, "readonly-mode.vault.db");
+    store = new SqliteStore(dbPath);
+    store.close();
+    // Best-effort by design: re-opening must never fail on a mode problem.
+    store = new SqliteStore(dbPath);
+    expect(store.db.open).toBe(true);
   });
 });

@@ -271,6 +271,18 @@ export interface CallerContext {
   interface?: AccessInterface;
 }
 
+/**
+ * A token's non-permission scope dimensions, carried into the engine by
+ * surfaces that return rows about secrets other than the one addressed (the
+ * audit log). Absent = unrestricted; the trusted local path never supplies one.
+ */
+export interface AuditVisibilityScope {
+  /** Token project claim; rows about other projects' secrets are dropped. */
+  project?: string;
+  /** Token secret-name patterns (thesis §4.7); non-matching rows are dropped. */
+  secrets?: string[];
+}
+
 /** Result of a request-mediated (HTTP) use_secret invocation. */
 export interface HttpResult {
   type: typeof ActionType.HTTP;

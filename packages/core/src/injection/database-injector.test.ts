@@ -12,6 +12,7 @@ import type {
 interface MockBehavior {
   rows?: unknown[];
   fields?: { name: string }[];
+  command?: string;
   connectError?: Error;
   queryError?: Error;
 }
@@ -35,7 +36,7 @@ class MockAdapter implements DbEngineAdapter {
           rows,
           fields: b.fields ?? [],
           rowCount: rows.length,
-          command: "SELECT",
+          command: b.command ?? "SELECT",
         });
       },
       end: (): Promise<void> => Promise.resolve(),
@@ -143,6 +144,41 @@ describe("DatabaseInjector", () => {
     const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
     expect(JSON.stringify(res.rows)).not.toContain("s3cr3t");
     expect(JSON.stringify(res.rows)).toContain("[REDACTED]");
+  });
+
+  // L1: column names and the command tag are endpoint-authored, so an alias
+  // (`SELECT 1 AS "<credential>"`) put the value where no redactor looked while
+  // the same string in a row value was redacted.
+  it("redacts the credential from a column name", async () => {
+    const mock = new MockAdapter({ rows: [{ x: 1 }], fields: [{ name: "s3cr3t" }] });
+    const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
+    expect(JSON.stringify(res.fields)).not.toContain("s3cr3t");
+    expect(JSON.stringify(res.fields)).toContain("[REDACTED]");
+  });
+
+  it("redacts an encoded credential from a column name", async () => {
+    const encoded = Buffer.from("s3cr3t", "utf8").toString("base64");
+    const mock = new MockAdapter({ rows: [], fields: [{ name: `alias_${encoded}` }] });
+    const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
+    expect(JSON.stringify(res.fields)).not.toContain(encoded);
+  });
+
+  it("redacts the credential from the command tag", async () => {
+    const mock = new MockAdapter({ rows: [], command: "SELECT s3cr3t" });
+    const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
+    expect(res.command).not.toContain("s3cr3t");
+    expect(res.command).toContain("[REDACTED]");
+  });
+
+  it("leaves ordinary column names and command tags untouched", async () => {
+    const mock = new MockAdapter({
+      rows: [{ id: 1 }],
+      fields: [{ name: "id" }, { name: "created_at" }],
+      command: "SELECT",
+    });
+    const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
+    expect(res.fields).toEqual([{ name: "id" }, { name: "created_at" }]);
+    expect(res.command).toBe("SELECT");
   });
 
   it("redacts the credential from a query error and maps to DB_QUERY_FAILED", async () => {

@@ -122,12 +122,15 @@ export class DatabaseInjector {
     try {
       const res = await connection.query(action.query, action.params);
       const { rows, truncated } = capRows(res.rows);
+      // Column names and the command tag are endpoint-authored too: an alias
+      // (`SELECT 1 AS "<credential>"`) put the value in a position no redactor
+      // saw, while the same string in a row value was redacted (L1).
       const result: DatabaseResult = {
         type: "database",
         row_count: res.rowCount ?? rows.length,
         rows: mapStringLeaves(rows, redactCredential) as unknown[],
-        fields: res.fields,
-        command: res.command,
+        fields: res.fields.map((f) => ({ name: redactCredential(f.name) })),
+        command: res.command === undefined ? undefined : redactCredential(res.command),
         truncated: truncated ? true : undefined,
       };
       this.audit(

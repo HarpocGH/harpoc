@@ -121,6 +121,18 @@ export const createSecretInputSchema = z.object({
  */
 export type CreateSecretRequest = z.infer<typeof createSecretInputSchema>;
 
+/**
+ * Rotate-secret request body. The value is validated exactly like the create
+ * route's: `Buffer.from(value, "base64")` silently discards invalid characters,
+ * so a truthiness check alone let a malformed value irreversibly rotate the
+ * credential to garbage while the API answered 200 (L7).
+ */
+export const rotateSecretInputSchema = z.object({
+  value: z.string().base64(),
+});
+
+export type RotateSecretRequest = z.infer<typeof rotateSecretInputSchema>;
+
 export const httpMethodSchema = z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]);
 
 export type HttpMethod = z.infer<typeof httpMethodSchema>;

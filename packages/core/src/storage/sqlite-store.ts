@@ -1,3 +1,4 @@
+import { chmodSync, existsSync } from "node:fs";
 import Database from "better-sqlite3";
 import type {
   AccessPolicy,
@@ -179,6 +180,7 @@ export class SqliteStore {
       );
     }
 
+    restrictDatabasePermissions(path);
     this.setPragmas();
     try {
       this.runMigrations();
@@ -1264,5 +1266,27 @@ export class SqliteStore {
       created_at: row.created_at as number,
       updated_at: row.updated_at as number,
     };
+  }
+}
+
+/**
+ * Restrict the vault database (and its WAL sidecars) to the owner on POSIX.
+ *
+ * The database was created with no explicit mode, so its permissions were
+ * umask-dependent — typically world-readable — while the session file beside it
+ * is deliberately 0600 (L11). Contents are KEK-encrypted, so this is hardening
+ * consistency rather than a confidentiality fix: it keeps encrypted blobs,
+ * timestamps and row counts off other local accounts. Best-effort by design —
+ * a foreign-owned or read-only vault file must still open. No-op on Windows,
+ * where ACL inheritance is the mechanism (see the session file's ACL step).
+ */
+function restrictDatabasePermissions(path: string): void {
+  if (process.platform === "win32") return;
+  for (const candidate of [path, `${path}-wal`, `${path}-shm`]) {
+    try {
+      if (existsSync(candidate)) chmodSync(candidate, 0o600);
+    } catch {
+      // Best-effort: the vault stays usable regardless of file mode.
+    }
   }
 }

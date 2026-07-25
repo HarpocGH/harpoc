@@ -365,6 +365,9 @@ describe("MCP Tools", () => {
 
       expect(engine.createSecret).toHaveBeenCalledWith(
         expect.objectContaining({ name: "new-key", type: "api_key", project: "prod" }),
+        // Tokenless guard in this suite: the trusted local path passes no
+        // caller, so the row stays NULL-principal (L3 control).
+        undefined,
       );
       const calls = (engine.createSecret as ReturnType<typeof vi.fn>).mock.calls;
       const call = (calls[0] as [Record<string, unknown>])[0];
@@ -591,8 +594,11 @@ describe("MCP Tools", () => {
 
       const allowed = await callTool(srv, "create_secret", { name: "api-new", type: "api_key" });
       expect(allowed.isError).not.toBe(true);
+      // L3: the create row is attributed to the requesting principal — it read
+      // as a NULL-principal trusted-local operation before.
       expect(engine.createSecret).toHaveBeenCalledWith(
         expect.objectContaining({ name: "api-new" }),
+        expect.objectContaining({ principal_id: "test", interface: "mcp" }),
       );
     });
 
@@ -622,6 +628,7 @@ describe("MCP Tools", () => {
       expect(allowed.isError).not.toBe(true);
       expect(engine.createSecret).toHaveBeenCalledWith(
         expect.objectContaining({ name: "x", project: "prod" }),
+        expect.objectContaining({ principal_id: "test", project: "prod" }),
       );
     });
   });

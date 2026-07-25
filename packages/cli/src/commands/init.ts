@@ -1,4 +1,4 @@
-import { mkdirSync, existsSync } from "node:fs";
+import { chmodSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Command } from "commander";
 import { VAULT_DB_NAME } from "@harpoc/shared";
@@ -22,8 +22,21 @@ export function registerInitCommand(program: Command): void {
           process.exit(1);
         }
 
+        // 0700, like the session file's 0600: the directory was created with no
+        // explicit mode, so on POSIX it was umask-dependent — typically
+        // world-readable and traversable (L11). Applied at creation (umask can
+        // only tighten it) with a chmod repair for a pre-existing directory.
         if (!existsSync(vaultDir)) {
-          mkdirSync(vaultDir, { recursive: true });
+          mkdirSync(vaultDir, { recursive: true, mode: 0o700 });
+        }
+        if (process.platform !== "win32") {
+          try {
+            chmodSync(vaultDir, 0o700);
+          } catch (err) {
+            console.error(
+              `Warning: could not restrict ${vaultDir} to owner-only access (${err instanceof Error ? err.message : String(err)})`,
+            );
+          }
         }
 
         const password = await promptPassword("Choose a master password: ");
