@@ -1,0 +1,43 @@
+name: e2e
+# The end-to-end evaluation harness runs apart from CI: it needs Docker and is
+# Linux-only, whereas the CI suite is hermetic and runs on three platforms.
+# Merging them would make the fast suite slow and the cross-platform suite
+# platform-bound.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  harness:
+    name: End-to-end evaluation harness (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Bring up the backend fleet
+        run: pnpm --filter @harpoc/e2e up
+      - name: Run the harness
+        # A missing backend fails loudly inside the suite (assertFleetUp), so a
+        # provisioning failure can never present as a green run.
+        run: pnpm --filter @harpoc/e2e test:e2e
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-evidence
+          path: packages/e2e/evidence/run.jsonl
+          if-no-files-found: warn
+      - name: Fleet logs on failure
+        if: failure()
+        run: cd packages/e2e && docker compose logs --no-color
+      - name: Tear down
+        if: always()
+        run: pnpm --filter @harpoc/e2e down
