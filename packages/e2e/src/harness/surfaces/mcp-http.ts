@@ -1,0 +1,65 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { startMcpHttpServer } from "@harpoc/mcp-server";
+import type { McpHttpServer } from "@harpoc/mcp-server";
+import type { Permission } from "@harpoc/shared";
+import type { HarnessVault } from "../vault.js";
+
+export interface CallOutcome {
+  ok: boolean;
+  result?: unknown;
+  errorText?: string;
+}
+
+export interface McpHttpSurface {
+  name: "mcp-http";
+  callUseSecret(handle: string, action: unknown): Promise<CallOutcome>;
+  close(): Promise<void>;
+}
+
+function textOf(result: { content?: unknown }): string {
+  const content = result.content as Array<{ type: string; text?: string }> | undefined;
+  return (content ?? []).map((c) => c.text ?? "").join("\n");
+}
+
+/**
+ * The surface the thesis names for Tier-1 evidence: Harpoc's own MCP server
+ * over the real Streamable HTTP wire, reached by a scripted client carrying a
+ * scoped, vault-signed Bearer token (C-1, C-2). Never `--allow-tokenless`: a
+ * tokenless run skips token expiry, the revocation recheck, per-secret policy,
+ * configuration gating, enumeration filtering and audit scope filtering, and
+ * would report passes that say nothing about the deployed posture.
+ */
+export async function startMcpHttpSurface(
+  vault: HarnessVault,
+  principal: string,
+  scopes: Permission[],
+): Promise<McpHttpSurface> {
+  const server: McpHttpServer = await startMcpHttpServer({ engine: vault.engine, port: 0 });
+  const token = vault.engine.createToken(principal, scopes);
+
+  const transport = new StreamableHTTPClientTransport(
+    new URL(`http://127.0.0.1:${server.port}${server.endpoint}`),
+    { requestInit: { headers: { Authorization: `Bearer ${token}` } } },
+  );
+  const client = new Client({ name: "harpoc-e2e-client", version: "1.0.0" });
+  await client.connect(transport);
+
+  return {
+    name: "mcp-http",
+    async callUseSecret(handle, action) {
+      const raw = (await client.callTool({
+        name: "use_secret",
+        arguments: { handle, action },
+      })) as { isError?: boolean; content?: unknown };
+
+      const text = textOf(raw);
+      if (raw.isError === true) return { ok: false, result: raw, errorText: text };
+      return { ok: true, result: raw };
+    },
+    async close() {
+      await client.close();
+      await server.close();
+    },
+  };
+}

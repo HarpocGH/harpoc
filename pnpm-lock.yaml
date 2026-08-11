@@ -32,6 +32,12 @@ importers:
         specifier: ^3.2.1
         version: 3.2.4(@types/node@22.19.13)
 
+  packages/benchmarks:
+    dependencies:
+      "@harpoc/core":
+        specifier: workspace:*
+        version: link:../core
+
   packages/cli:
     dependencies:
       "@harpoc/core":
@@ -99,6 +105,21 @@ importers:
       ssh2:
         specifier: ^1.17.0
         version: 1.17.0
+
+  packages/e2e:
+    dependencies:
+      "@harpoc/core":
+        specifier: workspace:*
+        version: link:../core
+      "@harpoc/mcp-server":
+        specifier: workspace:*
+        version: link:../mcp-server
+      "@harpoc/shared":
+        specifier: workspace:*
+        version: link:../shared
+      "@modelcontextprotocol/sdk":
+        specifier: ^1.27.1
+        version: 1.27.1(zod@3.25.76)
 
   packages/integration:
     dependencies:

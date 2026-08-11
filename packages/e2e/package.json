@@ -1,0 +1,25 @@
+{
+  "name": "@harpoc/e2e",
+  "version": "1.0.0",
+  "description": "End-to-end evaluation harness: live backends, real surfaces, evidence emission",
+  "license": "BUSL-1.1",
+  "author": "Stefan Gönitzer",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@harpoc/shared": "workspace:*",
+    "@harpoc/core": "workspace:*",
+    "@harpoc/mcp-server": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.27.1"
+  },
+  "scripts": {
+    "pki": "bash fixtures/pki/generate.sh",
+    "up": "pnpm pki && docker compose up -d --wait",
+    "down": "docker compose down -v",
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "vitest run"
+  }
+}

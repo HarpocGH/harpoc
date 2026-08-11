@@ -1,0 +1,37 @@
+[
+  {
+    "scenario": "machinery-selfcheck",
+    "context": "process",
+    "surface": "engine",
+    "arm": "harpoc",
+    "expected": "OPAQUE"
+  },
+  {
+    "scenario": "database-happy-path",
+    "context": "database",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "database-ip-literal-identity",
+    "context": "database",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "REJECTED"
+  },
+  {
+    "scenario": "database-plaintext-target",
+    "context": "database",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "REJECTED"
+  },
+  {
+    "scenario": "database-happy-path-mysql",
+    "context": "database",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  }
+]

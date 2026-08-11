@@ -1,0 +1,74 @@
+# Backend fleet for the E2E evaluation harness.
+# Ports are offset into 55xxx and bound to loopback so a developer's own
+# database is never reached — a green run must come from this fleet.
+name: harpoc-e2e
+
+services:
+  postgres-tls:
+    image: postgres:16
+    user: root
+    environment:
+      POSTGRES_USER: harpoc
+      POSTGRES_PASSWORD: harpoc-e2e-pw
+      POSTGRES_DB: app
+    volumes:
+      - ./fixtures/pki/out:/pki:ro
+    # PostgreSQL refuses a key file that is group- or world-readable, and a
+    # bind mount carries the host's ownership. Copy it to a private path with
+    # the right mode, then hand off to the official entrypoint, which drops
+    # privileges itself.
+    command: >
+      bash -c "install -o postgres -g postgres -m 600 /pki/postgres-tls.key /etc/pg-server.key &&
+               install -o postgres -g postgres -m 644 /pki/postgres-tls.crt /etc/pg-server.crt &&
+               exec docker-entrypoint.sh postgres
+                 -c ssl=on
+                 -c ssl_cert_file=/etc/pg-server.crt
+                 -c ssl_key_file=/etc/pg-server.key"
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U harpoc -d app"]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+
+  postgres-plain:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: harpoc
+      POSTGRES_PASSWORD: harpoc-e2e-pw
+      POSTGRES_DB: app
+    ports:
+      - "127.0.0.1:55433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U harpoc -d app"]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+
+  mysql-tls:
+    image: mysql:8.4
+    user: root
+    environment:
+      MYSQL_ROOT_PASSWORD: harpoc-e2e-root
+      MYSQL_USER: harpoc
+      MYSQL_PASSWORD: harpoc-e2e-pw
+      MYSQL_DATABASE: app
+    volumes:
+      - ./fixtures/pki/out:/pki:ro
+    command: >
+      bash -c "install -o mysql -g mysql -m 600 /pki/mysql-tls.key /etc/mysql-server.key &&
+               install -o mysql -g mysql -m 644 /pki/mysql-tls.crt /etc/mysql-server.crt &&
+               install -o mysql -g mysql -m 644 /pki/ca.crt /etc/mysql-ca.crt &&
+               exec docker-entrypoint.sh mysqld
+                 --require_secure_transport=ON
+                 --ssl-ca=/etc/mysql-ca.crt
+                 --ssl-cert=/etc/mysql-server.crt
+                 --ssl-key=/etc/mysql-server.key"
+    ports:
+      - "127.0.0.1:55306:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -pharpoc-e2e-root --silent"]
+      interval: 3s
+      timeout: 5s
+      retries: 45

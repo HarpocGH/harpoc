@@ -29,6 +29,8 @@ pnpm test
 | `@harpoc/sdk`         | `packages/sdk`         | VaultClient with direct and REST modes                        |
 | `@harpoc/oauth-proxy` | `packages/oauth-proxy` | OAuth 2.1 proxy: PKCE flows, provider presets, token refresh  |
 | `@harpoc/integration` | `packages/integration` | Cross-package integration tests                               |
+| `@harpoc/e2e`         | `packages/e2e`         | End-to-end evaluation harness (Linux + Docker; `test:e2e`)    |
+| `@harpoc/benchmarks`  | `packages/benchmarks`  | Baseline latency benchmarks (`pnpm bench`; real Argon2id)     |
 
 ## Code Style
 
@@ -44,6 +46,11 @@ pnpm test
 - Passwords in tests must be at least 8 characters (`MIN_PASSWORD_LENGTH`)
 - Mock Argon2 in unit tests for performance (see existing test suites for examples)
 - Run all tests: `pnpm test`
+- The E2E evaluation harness is **not** part of `pnpm test`. It needs Docker and is Linux-only, so its
+  script is `test:e2e` rather than `test` — `turbo run test` therefore skips it and a contributor
+  without Docker gets a green run. To run it: `pnpm --filter @harpoc/e2e up`, then
+  `pnpm --filter @harpoc/e2e test:e2e`, then `pnpm --filter @harpoc/e2e down`. A missing backend fails
+  loudly rather than skipping, so a provisioning failure can never present as a pass.
 
 ## Security Rules
 

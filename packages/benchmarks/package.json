@@ -1,0 +1,19 @@
+{
+  "name": "@harpoc/benchmarks",
+  "version": "1.0.0",
+  "description": "Baseline latency benchmarks: per-use_secret overhead, unlock, end-to-end, session load",
+  "license": "BUSL-1.1",
+  "author": "Stefan Gönitzer",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@harpoc/core": "workspace:*"
+  },
+  "scripts": {
+    "bench": "node run-all.mjs",
+    "bench:selftest": "node lib/harness.selftest.mjs"
+  }
+}
