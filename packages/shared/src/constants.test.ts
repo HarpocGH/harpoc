@@ -128,12 +128,12 @@ describe("static AAD strings", () => {
 // ---------------------------------------------------------------------------
 
 describe("Argon2id constants", () => {
-  it("ARGON2_MEMORY_COST is 65536 (64 MB)", () => {
-    expect(ARGON2_MEMORY_COST).toBe(65_536);
+  it("ARGON2_MEMORY_COST is 2097152 (2 GiB, RFC 9106 high-security profile)", () => {
+    expect(ARGON2_MEMORY_COST).toBe(2_097_152);
   });
 
-  it("ARGON2_TIME_COST is 3", () => {
-    expect(ARGON2_TIME_COST).toBe(3);
+  it("ARGON2_TIME_COST is 1", () => {
+    expect(ARGON2_TIME_COST).toBe(1);
   });
 
   it("ARGON2_PARALLELISM is 4", () => {

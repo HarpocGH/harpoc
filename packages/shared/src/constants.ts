@@ -12,8 +12,12 @@ export const AUDIT_DIR_NAME = "audit";
 
 // -- Crypto: Argon2id --------------------------------------------------------
 
-export const ARGON2_MEMORY_COST = 65_536; // 64 MB
-export const ARGON2_TIME_COST = 3;
+// RFC 9106 first recommended (high-security) profile: 2 GiB, t=1, p=4.
+// The only adversary who ever faces the KDF is the offline at-rest attacker,
+// and memory per guess is the entire margin; the latency cost is paid once
+// per session under the 24 h ceiling.
+export const ARGON2_MEMORY_COST = 2_097_152; // 2 GiB in KiB
+export const ARGON2_TIME_COST = 1;
 export const ARGON2_PARALLELISM = 4;
 export const ARGON2_HASH_LENGTH = 32; // 256 bits
 export const ARGON2_VERSION = 0x13; // v1.3

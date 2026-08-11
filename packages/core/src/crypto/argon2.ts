@@ -20,7 +20,8 @@ export function generateSalt(): Uint8Array {
 
 /**
  * Derive a 256-bit key from a password using Argon2id.
- * Uses OWASP-recommended parameters: 64 MB memory, 3 iterations, 4 parallelism.
+ * Uses the RFC 9106 first recommended (high-security) profile:
+ * 2 GiB memory, 1 iteration, 4 lanes.
  */
 export async function deriveKey(password: string, salt: Uint8Array): Promise<Uint8Array> {
   try {
