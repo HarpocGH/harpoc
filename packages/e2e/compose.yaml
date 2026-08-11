@@ -17,13 +17,22 @@ services:
     # bind mount carries the host's ownership. Copy it to a private path with
     # the right mode, then hand off to the official entrypoint, which drops
     # privileges itself.
-    command: >
-      bash -c "install -o postgres -g postgres -m 600 /pki/postgres-tls.key /etc/pg-server.key &&
-               install -o postgres -g postgres -m 644 /pki/postgres-tls.crt /etc/pg-server.crt &&
-               exec docker-entrypoint.sh postgres
-                 -c ssl=on
-                 -c ssl_cert_file=/etc/pg-server.crt
-                 -c ssl_key_file=/etc/pg-server.key"
+    #
+    # List form with a uniformly indented ">-" scalar, deliberately: in a folded
+    # scalar, MORE-indented continuation lines keep their literal newlines, and
+    # a newline after "exec ... postgres" hands the server ZERO flags — run
+    # 31534116926 started this container without TLS that way. Keep every line
+    # of the script at the same indentation so folding joins them with spaces.
+    command:
+      - bash
+      - -c
+      - >-
+        install -o postgres -g postgres -m 600 /pki/postgres-tls.key /etc/pg-server.key &&
+        install -o postgres -g postgres -m 644 /pki/postgres-tls.crt /etc/pg-server.crt &&
+        exec docker-entrypoint.sh postgres
+        -c ssl=on
+        -c ssl_cert_file=/etc/pg-server.crt
+        -c ssl_key_file=/etc/pg-server.key
     ports:
       - "127.0.0.1:55432:5432"
     healthcheck:
@@ -56,15 +65,21 @@ services:
       MYSQL_DATABASE: app
     volumes:
       - ./fixtures/pki/out:/pki:ro
-    command: >
-      bash -c "install -o mysql -g mysql -m 600 /pki/mysql-tls.key /etc/mysql-server.key &&
-               install -o mysql -g mysql -m 644 /pki/mysql-tls.crt /etc/mysql-server.crt &&
-               install -o mysql -g mysql -m 644 /pki/ca.crt /etc/mysql-ca.crt &&
-               exec docker-entrypoint.sh mysqld
-                 --require_secure_transport=ON
-                 --ssl-ca=/etc/mysql-ca.crt
-                 --ssl-cert=/etc/mysql-server.crt
-                 --ssl-key=/etc/mysql-server.key"
+    # Same folding rule as postgres-tls: equal indentation or the flags after
+    # "exec ... mysqld" become dead text and the server runs on its
+    # auto-generated certificates.
+    command:
+      - bash
+      - -c
+      - >-
+        install -o mysql -g mysql -m 600 /pki/mysql-tls.key /etc/mysql-server.key &&
+        install -o mysql -g mysql -m 644 /pki/mysql-tls.crt /etc/mysql-server.crt &&
+        install -o mysql -g mysql -m 644 /pki/ca.crt /etc/mysql-ca.crt &&
+        exec docker-entrypoint.sh mysqld
+        --require_secure_transport=ON
+        --ssl-ca=/etc/mysql-ca.crt
+        --ssl-cert=/etc/mysql-server.crt
+        --ssl-key=/etc/mysql-server.key
     ports:
       - "127.0.0.1:55306:3306"
     healthcheck:
