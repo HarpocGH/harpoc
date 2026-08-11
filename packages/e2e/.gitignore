@@ -1,2 +1,5 @@
-fixtures/pki/out/
-evidence/
+# Anchored to the package root: unanchored patterns would also swallow
+# src/evidence/ — which is exactly how the evidence pipeline sources went
+# uncommitted in 7fc6095 (review 2026-08-11, C1).
+/fixtures/pki/out/
+/evidence/

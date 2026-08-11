@@ -48,9 +48,11 @@ pnpm test
 - Run all tests: `pnpm test`
 - The E2E evaluation harness is **not** part of `pnpm test`. It needs Docker and is Linux-only, so its
   script is `test:e2e` rather than `test` — `turbo run test` therefore skips it and a contributor
-  without Docker gets a green run. To run it: `pnpm --filter @harpoc/e2e up`, then
-  `pnpm --filter @harpoc/e2e test:e2e`, then `pnpm --filter @harpoc/e2e down`. A missing backend fails
-  loudly rather than skipping, so a provisioning failure can never present as a pass.
+  without Docker gets a green run. To run it: `pnpm --filter @harpoc/e2e fleet:up`, then
+  `pnpm --filter @harpoc/e2e test:e2e`, then `pnpm --filter @harpoc/e2e fleet:down`. (The scripts are
+  named `fleet:*` because `up` is a builtin pnpm alias for `pnpm update`, which silently shadows a
+  package script of the same name.) A missing backend fails loudly rather than skipping, so a
+  provisioning failure can never present as a pass.
 
 ## Security Rules
 

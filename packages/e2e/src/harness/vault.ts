@@ -1,19 +1,10 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import { VaultEngine } from "@harpoc/core";
 import { VAULT_DB_NAME, SESSION_FILE_NAME, SecretType } from "@harpoc/shared";
 
-/**
- * Where every scenario appends its record, and the committed expectations it is
- * checked against. `fileURLToPath`, never `URL.pathname`: the latter yields
- * "/C:/..." on Windows, which the fs layer resolves to "C:\C:\...".
- */
-export const EVIDENCE_FILE = fileURLToPath(new URL("../../evidence/run.jsonl", import.meta.url));
-export const PREREGISTRATION_FILE = fileURLToPath(
-  new URL("../../preregistration.json", import.meta.url),
-);
+export { EVIDENCE_FILE, PREREGISTRATION_FILE } from "../evidence/paths.js";
 
 export interface HarnessVault {
   engine: VaultEngine;

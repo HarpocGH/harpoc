@@ -1,10 +1,18 @@
 import { describe, it, expect } from "vitest";
-import { connect as tlsConnect } from "node:tls";
+import { connect as netConnect } from "node:net";
 import { PG, MYSQL, assertFleetUp } from "./backends.js";
 
-function canOpenTls(host: string, port: number): Promise<boolean> {
+/**
+ * Plain TCP, deliberately NOT a TLS handshake: PostgreSQL 16 only starts TLS
+ * after an in-protocol SSLRequest (TLS-first is a PostgreSQL 17 feature) and
+ * MySQL greets in plaintext before negotiating, so a raw TLS client is
+ * answered with non-TLS bytes and would read a healthy server as down. These
+ * probes claim reachability only; the verified TLS handshakes belong to the
+ * database arms, which drive the real driver stacks.
+ */
+function canOpenTcp(host: string, port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = tlsConnect({ host, port, rejectUnauthorized: false }, () => {
+    const socket = netConnect({ host, port }, () => {
       socket.destroy();
       resolve(true);
     });
@@ -32,11 +40,11 @@ describe("backend fleet", () => {
 
   it("reaches the postgres container", async () => {
     assertFleetUp("postgres-tls");
-    expect(await canOpenTls(PG.ip, PG.port)).toBe(true);
+    expect(await canOpenTcp(PG.ip, PG.port)).toBe(true);
   });
 
   it("reaches the mysql container", async () => {
     assertFleetUp("mysql-tls");
-    expect(await canOpenTls(MYSQL.ip, MYSQL.port)).toBe(true);
+    expect(await canOpenTcp(MYSQL.ip, MYSQL.port)).toBe(true);
   });
 });

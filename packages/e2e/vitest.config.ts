@@ -11,6 +11,8 @@ export default defineConfig({
     // design.
     testTimeout: 120_000,
     hookTimeout: 180_000,
+    // One run, one evidence file: emit() appends, the reset truncates.
+    globalSetup: ["./src/evidence/reset.ts"],
     env: {
       // Keystore session wrapping off, as in every other package's suite: the
       // harness measures credential opacity, not the platform keystore.

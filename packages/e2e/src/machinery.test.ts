@@ -60,9 +60,11 @@ describe("harness machinery, proven against the process context", () => {
 
     // Criteria 1 and 2 across every channel the caller can observe.
     assertOpaque(SECRET, observation);
-    // Negative control: redaction must be targeted, not blanket. The child
-    // genuinely ran and genuinely received both variables.
-    assertPresent(MARKER, observation);
+    // Negative control: redaction must be targeted, not blanket. Scoped to the
+    // result alone — the broad observation includes parentEnv, where this test
+    // itself planted the marker, which would satisfy the check vacuously even
+    // if the vault had scrubbed the child's entire stdout.
+    assertPresent(MARKER, { result });
 
     const expected = expectationFor(loadExpectations(PREREGISTRATION_FILE), {
       scenario: "machinery-selfcheck",

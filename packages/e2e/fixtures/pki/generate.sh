@@ -26,6 +26,8 @@ mkdir -p "$OUT"
 openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
   -keyout "$OUT/ca.key" -out "$OUT/ca.crt" \
   -subj "/CN=Harpoc E2E Test CA" 2>/dev/null
+chmod 644 "$OUT/ca.crt"
+chmod 600 "$OUT/ca.key"
 
 issue() {
   local name="$1"

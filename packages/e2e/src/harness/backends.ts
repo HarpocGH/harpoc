@@ -47,14 +47,17 @@ export function assertFleetUp(service: FleetService): void {
   } catch (cause) {
     throw new Error(
       "cannot query the fleet — is Docker running? Start it with:\n" +
-        "  pnpm --filter @harpoc/e2e up",
+        "  pnpm --filter @harpoc/e2e fleet:up",
       { cause },
     );
   }
-  if (!running.split("\n").includes(service)) {
+  // \r?\n, not \n: on a Windows host `docker compose ps` emits CRLF line
+  // endings, and "postgres-tls\r" would read a healthy fleet as down.
+  const services = running.split(/\r?\n/).map((line) => line.trim());
+  if (!services.includes(service)) {
     throw new Error(
       `backend "${service}" is not running. Start the fleet with:\n` +
-        "  pnpm --filter @harpoc/e2e up",
+        "  pnpm --filter @harpoc/e2e fleet:up",
     );
   }
 }
