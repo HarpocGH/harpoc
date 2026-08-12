@@ -504,8 +504,15 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
     let identityContentAtSpawn = "";
     spawnMock.mockImplementation((_cmd, _args, opts) => {
       const sshCommand = (opts as { env?: Record<string, string> }).env?.GIT_SSH_COMMAND ?? "";
-      const m = / -i (?:"([^"]+)"|(\S+))/.exec(sshCommand);
-      identityPath = (m?.[1] ?? m?.[2]) as string;
+      // The identity path may be single-quoted for sh, double-quoted, or bare —
+      // `toGitSshCommand` quotes only the parts that are not shell-neutral. A
+      // CI runner's temp path contains `~` (C:\Users\RUNNER~1\...), so it IS
+      // quoted there while a plain developer path is not: matching double
+      // quotes alone captured the surrounding quotes as part of the filename
+      // and read a path that does not exist.
+      const m = / -i (?:"([^"]+)"|'((?:[^']|'\\'')+)'|(\S+))/.exec(sshCommand);
+      const raw = (m?.[1] ?? m?.[2] ?? m?.[3]) as string;
+      identityPath = raw.replaceAll("'\\''", "'");
       identityContentAtSpawn = readFileSync(identityPath, "utf8");
       return Promise.resolve(OK_RESULT);
     });
