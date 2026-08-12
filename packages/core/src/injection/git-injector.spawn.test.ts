@@ -1,6 +1,7 @@
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/shared";
@@ -17,6 +18,35 @@ const GIT = resolveExecutable("git", controlledPathDirs());
 const SSH = resolveExecutable("ssh", controlledPathDirs());
 const describeGit = GIT ? describe : describe.skip;
 const describeGitSsh = GIT && SSH ? describe : describe.skip;
+
+/** Redirect the temp dir os.tmpdir() reads (TEMP/TMP on win32, TMPDIR on POSIX). */
+function overrideTempEnv(dir: string): { TMPDIR?: string; TMP?: string; TEMP?: string } {
+  const saved = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
+  process.env.TMPDIR = dir;
+  process.env.TMP = dir;
+  process.env.TEMP = dir;
+  return saved;
+}
+
+function restoreTempEnv(saved: { TMPDIR?: string; TMP?: string; TEMP?: string }): void {
+  if (saved.TMPDIR === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = saved.TMPDIR;
+  if (saved.TMP === undefined) delete process.env.TMP;
+  else process.env.TMP = saved.TMP;
+  if (saved.TEMP === undefined) delete process.env.TEMP;
+  else process.env.TEMP = saved.TEMP;
+}
+
+/** The sh git would run GIT_SSH_COMMAND through: /bin/sh, or Git-for-Windows'. */
+function findRoundtripSh(): string | null {
+  if (process.platform !== "win32") return "/bin/sh";
+  const candidates = [
+    ...(GIT ? [join(dirname(dirname(GIT)), "usr", "bin", "sh.exe")] : []),
+    "C:\\Program Files\\Git\\usr\\bin\\sh.exe",
+    "C:\\Program Files\\Git\\bin\\sh.exe",
+  ];
+  return candidates.find((c) => existsSync(c)) ?? null;
+}
 
 const OK_RESULT: SpawnCapturedResult = {
   exit_code: 0,
@@ -366,8 +396,103 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
     // assertion holds on every platform and guards the win32 fix from regressing.
     expect(sshCommand).not.toContain("\\");
     expect(sshCommand).toContain("UserKnownHostsFile=");
-    expect(sshCommand).toMatch(/ -i "?[^"]*identity\.pub"?/);
+    expect(sshCommand).toMatch(/ -i "?'?[^"']*identity\.pub'?"?/);
   });
+
+  // Review 2026-08-12: the win32 forward-slash fix still broke for paths sh or
+  // ssh re-split — sh word-splits unquoted whitespace and expands `$`/backtick
+  // even inside double quotes, and ssh's readconf re-tokenizes the
+  // UserKnownHostsFile VALUE on whitespace after sh has built the argv. Parts
+  // are now single-quoted for sh, the known_hosts value additionally
+  // double-quoted for readconf.
+  it("single-quotes GIT_SSH_COMMAND parts sh would split or expand; known_hosts value stays readconf-quoted", async () => {
+    const spaced = mkdtempSync(join(tmpdir(), "harpoc sh $probe-"));
+    const saved = overrideTempEnv(spaced);
+    try {
+      const { privateKey: keyPem } = generateKeyPairSync("rsa", {
+        modulusLength: 2048,
+        privateKeyEncoding: { type: "pkcs1", format: "pem" },
+        publicKeyEncoding: { type: "spki", format: "pem" },
+      });
+      await injector.executeWithSecret(
+        { type: "git", operation: "clone", repository: "git@github.com:org/repo.git" },
+        new Uint8Array(Buffer.from(keyPem)),
+        policy({ command_allowlist: [GIT as string], host_allowlist: ["github.com"] }),
+        { ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] } },
+      );
+
+      const [, , opts] = spawnMock.mock.calls[0] as SpawnCall;
+      const sshCommand = opts.env.GIT_SSH_COMMAND ?? "";
+      const spacedFwd = spaced.replace(/\\/g, "/");
+
+      // known_hosts part: single quotes for sh around a readconf-quoted value.
+      const kh = /'UserKnownHostsFile="([^"]+)"'/.exec(sshCommand);
+      expect(kh, sshCommand).toBeTruthy();
+      expect((kh as RegExpExecArray)[1]).toContain(spacedFwd);
+      // identity part: one single-quoted sh word after -i.
+      const id = / -i '([^']+identity\.pub)'/.exec(sshCommand);
+      expect(id, sshCommand).toBeTruthy();
+      expect((id as RegExpExecArray)[1]).toContain(spacedFwd);
+      // Nothing space-bearing or expandable survives outside single quotes.
+      const outsideQuotes = sshCommand.replace(/'[^']*'/g, "");
+      expect(outsideQuotes).not.toContain(spacedFwd);
+      expect(outsideQuotes).not.toContain("$");
+    } finally {
+      restoreTempEnv(saved);
+      rmSync(spaced, { recursive: true, force: true });
+    }
+  });
+
+  // Real-sh round trip: the composed string must split back into exactly the
+  // intended argv under the same shell git uses. POSIX always has /bin/sh; on
+  // Windows the Git-for-Windows sh is probed (attempt-and-skip when absent).
+  (findRoundtripSh() ? it : it.skip)(
+    "composes a GIT_SSH_COMMAND real sh splits back into the intended argv",
+    async () => {
+      const sh = findRoundtripSh() as string;
+      const spaced = mkdtempSync(join(tmpdir(), "harpoc sh $probe-"));
+      const saved = overrideTempEnv(spaced);
+      try {
+        const { privateKey: keyPem } = generateKeyPairSync("rsa", {
+          modulusLength: 2048,
+          privateKeyEncoding: { type: "pkcs1", format: "pem" },
+          publicKeyEncoding: { type: "spki", format: "pem" },
+        });
+        await injector.executeWithSecret(
+          { type: "git", operation: "clone", repository: "git@github.com:org/repo.git" },
+          new Uint8Array(Buffer.from(keyPem)),
+          policy({ command_allowlist: [GIT as string], host_allowlist: ["github.com"] }),
+          { ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] } },
+        );
+
+        const [, , opts] = spawnMock.mock.calls[0] as SpawnCall;
+        const sshCommand = opts.env.GIT_SSH_COMMAND ?? "";
+        const out = execFileSync(sh, ["-c", `printf '%s\n' ${sshCommand}`], {
+          encoding: "utf8",
+        });
+        const words = out.split("\n").filter((l) => l.length > 0);
+        const spacedFwd = spaced.replace(/\\/g, "/");
+
+        // First word execs the ssh binary (forward-slashed on win32).
+        expect(words[0]).toBe((SSH as string).replace(/\\/g, "/"));
+        // The known_hosts option value survives as ONE argv element with its
+        // readconf quotes intact, spaces and all.
+        const khWord = words.find((w) => w.startsWith("UserKnownHostsFile="));
+        expect(khWord, out).toMatch(/^UserKnownHostsFile="[^"]*known_hosts"$/);
+        expect(khWord).toContain(spacedFwd);
+        // The identity path survives as ONE argv element right after -i.
+        const iIdx = words.indexOf("-i");
+        expect(iIdx).toBeGreaterThan(-1);
+        expect(words[iIdx + 1]).toMatch(/identity\.pub$/);
+        expect(words[iIdx + 1]).toContain(spacedFwd);
+        // sh performed no $-expansion: the literal $probe survives.
+        expect(words[iIdx + 1]).toContain("$probe");
+      } finally {
+        restoreTempEnv(saved);
+        rmSync(spaced, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("backs the agent identity with a vault-written .pub, removed after the invocation", async () => {
     const { privateKey: keyPem } = generateKeyPairSync("rsa", {

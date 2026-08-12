@@ -96,6 +96,12 @@ describeSsh("SshInjector spawn hardening (ssh resolvable)", () => {
     expect(args).toContain("BatchMode=yes");
     expect(args).toContain("PasswordAuthentication=no");
     expect(args.some((a) => a.startsWith("UserKnownHostsFile="))).toBe(true);
+    // The VALUE is double-quoted for ssh's readconf, which re-splits option
+    // values on whitespace after argv: an unquoted path with a space (e.g. a
+    // "C:/Users/Stefan G/…" temp dir) reads as two known_hosts files and strict
+    // checking refuses a correctly pinned host.
+    const khArg = args.find((a) => a.startsWith("UserKnownHostsFile=")) as string;
+    expect(khArg).toMatch(/^UserKnownHostsFile="[^"]+known_hosts"$/);
     expect(args.some((a) => a.startsWith("ConnectTimeout="))).toBe(true);
     // IdentitiesOnly restricts ssh to file-backed identities, so the vault-written
     // .pub of the ephemeral key must ride along or the agent key is never offered.

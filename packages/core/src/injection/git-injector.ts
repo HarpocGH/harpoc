@@ -487,19 +487,32 @@ function writeAskpass(): { launcher: string; dispose: () => void } {
   };
 }
 
+/** Characters sh passes through verbatim outside any quoting. */
+const SH_NEUTRAL_PART = /^[A-Za-z0-9%+,\-./:=@_]+$/;
+
 /**
- * Build the GIT_SSH_COMMAND string: join the parts, double-quoting any that
- * carry whitespace. On Windows the backslashes are converted to forward slashes
- * first, because git runs this string through its bundled sh, which treats a
+ * Build the GIT_SSH_COMMAND string git hands to its bundled sh. On Windows the
+ * backslashes are converted to forward slashes first, because sh treats a
  * backslash as an escape — an unconverted "C:\Windows\System32\OpenSSH\ssh.exe"
  * arrives as "C:WindowsSystem32OpenSSHssh.exe" and fails to exec, taking the -i
- * identity and UserKnownHostsFile paths down with it. git accepts forward-slash
- * paths in every one of those positions; POSIX paths carry no backslashes and
- * are unaffected.
+ * identity and UserKnownHostsFile paths down with it. git and ssh accept
+ * forward-slash paths in every one of those positions; POSIX paths carry no
+ * backslashes and are unaffected.
+ *
+ * Every part that is not entirely shell-neutral is single-quoted for sh: single
+ * quotes make whitespace, `$`, backtick and embedded double quotes all literal,
+ * where double quotes would still let sh expand `$` and backticks inside (a
+ * profile path like C:/Users/svc$deploy would arrive mangled). A literal `'`
+ * in a part becomes the standard '\'' sequence. This composes with the readconf
+ * double-quoting sshHardeningArgs applies to the UserKnownHostsFile VALUE: sh
+ * strips the single quotes and hands ssh one argv element whose embedded double
+ * quotes then survive for ssh's own whitespace re-tokenization of option values.
  */
 function toGitSshCommand(parts: string[]): string {
   const normalized = process.platform === "win32" ? parts.map((p) => p.replace(/\\/g, "/")) : parts;
-  return normalized.map((p) => (/\s/.test(p) ? `"${p}"` : p)).join(" ");
+  return normalized
+    .map((p) => (SH_NEUTRAL_PART.test(p) ? p : `'${p.replaceAll("'", "'\\''")}'`))
+    .join(" ");
 }
 
 function toGitResult(

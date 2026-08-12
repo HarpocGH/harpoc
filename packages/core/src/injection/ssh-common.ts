@@ -55,6 +55,22 @@ export function writeIdentityFile(publicKeyLine: string): TempSshFile {
 }
 
 /**
+ * Double-quote an ssh option VALUE for readconf. ssh re-tokenizes option values
+ * on whitespace after argv is already split — a space in an unquoted
+ * UserKnownHostsFile path yields two filenames, so a pinned known_hosts under
+ * "C:/Users/Stefan G/…" silently stops matching and strict checking refuses a
+ * correctly pinned host. Double quotes are readconf's documented grouping
+ * mechanism; backslashes stay literal inside them and `$` is never expanded
+ * (verified live on Win32-OpenSSH 9.5p2 and OpenSSH 10.0p2). A value containing
+ * a double quote itself is unrepresentable at this layer (readconf has no
+ * escape), but `"` cannot appear in an NTFS path and the value is always a
+ * vault-authored temp path.
+ */
+function quoteSshOptionValue(value: string): string {
+  return `"${value}"`;
+}
+
+/**
  * Hardened ssh options (thesis §4.5.7): strict host-key verification against the
  * pinned known_hosts (no TOFU), agent-only auth, and no user ssh config. Shared
  * verbatim by the SSH context (as argv) and the Git-over-SSH context (folded
@@ -76,7 +92,7 @@ export function sshHardeningArgs(
     "-o",
     "StrictHostKeyChecking=yes",
     "-o",
-    `UserKnownHostsFile=${knownHostsFile}`,
+    `UserKnownHostsFile=${quoteSshOptionValue(knownHostsFile)}`,
     "-o",
     "IdentitiesOnly=yes",
     "-i",
