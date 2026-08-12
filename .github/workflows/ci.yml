@@ -70,11 +70,20 @@ jobs:
       # provisioned tier into a test FAILURE instead of a silent skip — a
       # regressed provisioning step above must not drop real-path coverage to
       # zero while the leg stays green (review T3).
+      # --concurrency=1 serializes the per-package test suites: the macOS
+      # runners have 7 GB against 16 GB on ubuntu/windows, and the real-Argon2id
+      # suites (integration at maxWorkers 2 = 4 GiB peak, the cli compiled-binary
+      # smoke, core's KAT) running concurrently across packages under turbo
+      # swamp the host — per-package maxWorkers caps do not compose across
+      # packages. The starvation showed up as roaming collateral timeouts
+      # (oauth-proxy hooks, scaffold imports, rest-api rate-limit timing).
       - name: Test (macOS, keychain + sandbox-exec tiers required)
         if: runner.os == 'macOS'
         env:
           HARPOC_REQUIRE_PLATFORM_TESTS: keychain,isolation,ssh-live
-        run: pnpm test
+        # No "--" before the flag: pnpm's arg separator would route it through
+        # turbo's pass-through to vitest, which rejects it.
+        run: pnpm test --concurrency=1
       - name: Test (Linux, D-Bus session with unlocked keyring — required Secret Service/keyring/isolation)
         if: runner.os == 'Linux'
         # keyctl link @u @s grants the CI shell possession of the user keyring
