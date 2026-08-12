@@ -269,7 +269,7 @@ export class GitInjector {
     try {
       identity = writeIdentityFile(agent.publicKeyOpenssh);
       const env = buildSshEnv(agent.authSock, policy.env_allowlist);
-      env.GIT_SSH_COMMAND = toCommandString([
+      env.GIT_SSH_COMMAND = toGitSshCommand([
         sshPath,
         ...sshHardeningArgs(kh.file, identity.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
       ]);
@@ -487,9 +487,19 @@ function writeAskpass(): { launcher: string; dispose: () => void } {
   };
 }
 
-/** Join command parts into a GIT_SSH_COMMAND string, double-quoting parts with whitespace. */
-function toCommandString(parts: string[]): string {
-  return parts.map((p) => (/\s/.test(p) ? `"${p}"` : p)).join(" ");
+/**
+ * Build the GIT_SSH_COMMAND string: join the parts, double-quoting any that
+ * carry whitespace. On Windows the backslashes are converted to forward slashes
+ * first, because git runs this string through its bundled sh, which treats a
+ * backslash as an escape — an unconverted "C:\Windows\System32\OpenSSH\ssh.exe"
+ * arrives as "C:WindowsSystem32OpenSSHssh.exe" and fails to exec, taking the -i
+ * identity and UserKnownHostsFile paths down with it. git accepts forward-slash
+ * paths in every one of those positions; POSIX paths carry no backslashes and
+ * are unaffected.
+ */
+function toGitSshCommand(parts: string[]): string {
+  const normalized = process.platform === "win32" ? parts.map((p) => p.replace(/\\/g, "/")) : parts;
+  return normalized.map((p) => (/\s/.test(p) ? `"${p}"` : p)).join(" ");
 }
 
 function toGitResult(

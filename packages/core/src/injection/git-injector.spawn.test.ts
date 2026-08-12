@@ -335,6 +335,40 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
     expect(opts.redact).toContain(keyPem);
   });
 
+  it("normalizes GIT_SSH_COMMAND to forward-slash paths git's bundled sh can exec", async () => {
+    const { privateKey: keyPem } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: "pkcs1", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    const config: ConnectionConfig = {
+      ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] },
+    };
+    const action: GitAction = {
+      type: "git",
+      operation: "clone",
+      repository: "git@github.com:org/repo.git",
+    };
+
+    await injector.executeWithSecret(
+      action,
+      new Uint8Array(Buffer.from(keyPem)),
+      policy({ command_allowlist: [GIT as string], host_allowlist: ["github.com"] }),
+      config,
+    );
+
+    const [, , opts] = spawnMock.mock.calls[0] as SpawnCall;
+    const sshCommand = opts.env.GIT_SSH_COMMAND ?? "";
+    // Git-for-Windows runs GIT_SSH_COMMAND through sh, which treats a backslash
+    // as an escape: on win32 the real ssh binary and the temp identity /
+    // known_hosts paths are backslashed and must be normalized or the command
+    // fails to exec (harness-discovered, Phase 2). POSIX paths have none, so the
+    // assertion holds on every platform and guards the win32 fix from regressing.
+    expect(sshCommand).not.toContain("\\");
+    expect(sshCommand).toContain("UserKnownHostsFile=");
+    expect(sshCommand).toMatch(/ -i "?[^"]*identity\.pub"?/);
+  });
+
   it("backs the agent identity with a vault-written .pub, removed after the invocation", async () => {
     const { privateKey: keyPem } = generateKeyPairSync("rsa", {
       modulusLength: 2048,
