@@ -397,3 +397,134 @@ describe("compiled binary smoke: vault directory and database modes (L11)", () =
     60_000,
   );
 });
+
+// Phase 3 D1: `secret use` accepts a scoped token, so the CLI is no longer
+// exempt from the token checks every other interface applies. Walked through
+// the real binary — the surface the e2e demonstration matrix drives.
+describe("compiled binary smoke: token-scoped secret use (D1)", () => {
+  let scopedToken: string;
+  let foreignToken: string;
+
+  beforeAll(async () => {
+    const set = await runCli(["secret", "set", "token-scoped"], { stdin: "tok-secret-value\n" });
+    expect(set.code).toBe(0);
+
+    const allow = await runCli([
+      "secret",
+      "allow",
+      "secret://token-scoped",
+      "--command",
+      process.execPath,
+      "--acknowledge-interpreter",
+    ]);
+    expect(allow.code).toBe(0);
+
+    const minted = await runCli([
+      "auth",
+      "token",
+      "--scope",
+      "use",
+      "--secrets",
+      "token-scoped",
+      "--agent",
+      "demo-agent",
+      "--json",
+    ]);
+    expect(minted.code).toBe(0);
+    scopedToken = (JSON.parse(minted.stdout) as { token: string }).token;
+
+    const other = await runCli([
+      "auth",
+      "token",
+      "--scope",
+      "use",
+      "--secrets",
+      "other-*",
+      "--json",
+    ]);
+    expect(other.code).toBe(0);
+    foreignToken = (JSON.parse(other.stdout) as { token: string }).token;
+  }, 60_000);
+
+  function useArgs(): string[] {
+    return [
+      "secret",
+      "use",
+      "secret://token-scoped",
+      "--action",
+      "process",
+      "--command",
+      process.execPath,
+      "--arg=-e",
+      "--arg=process.exit(0)",
+      "--env-var",
+      "TOKEN",
+    ];
+  }
+
+  it("an in-scope token completes the injection and attributes it to the cli interface", async () => {
+    const use = await runCli([...useArgs(), "--token", scopedToken, "--json"]);
+    expect(use.code).toBe(0);
+    const result = JSON.parse(use.stdout) as { type: string; exit_code: number };
+    expect(result.type).toBe("process");
+    expect(result.exit_code).toBe(0);
+
+    const audit = await runCli(["audit", "--json", "--limit", "20"]);
+    expect(audit.code).toBe(0);
+    const rows = JSON.parse(audit.stdout) as Array<{
+      event_type: string;
+      success?: boolean | number;
+      principal_id: string | null;
+      principal_type: string | null;
+      detail?: Record<string, unknown> | null;
+    }>;
+    const attributed = rows.find(
+      (r) => r.event_type === "secret.use" && r.principal_id === "demo-agent",
+    );
+    expect(attributed).toBeDefined();
+    expect(attributed?.principal_type).toBe("agent");
+    expect(attributed?.detail?.interface).toBe("cli");
+    expect(Boolean(attributed?.success)).toBe(true);
+
+    const verify = await runCli(["audit", "verify"]);
+    expect(verify.code).toBe(0);
+  }, 60_000);
+
+  it("an out-of-scope token is refused before the child ever runs", async () => {
+    const use = await runCli([...useArgs(), "--token", foreignToken, "--json"]);
+    expect(use.code).toBe(1);
+    expect(use.stderr).toContain("ACCESS_DENIED");
+    expect(use.stdout).not.toContain("exit_code");
+  }, 60_000);
+
+  // D9: the default output is the human summary; --json is the machine shape.
+  it("prints a readable summary by default and exact JSON under --json", async () => {
+    const human = await runCli([...useArgs(), "--token", scopedToken]);
+    expect(human.code).toBe(0);
+    expect(() => JSON.parse(human.stdout)).toThrow();
+    expect(human.stdout).toContain("exit_code");
+
+    const json = await runCli([...useArgs(), "--token", scopedToken, "--json"]);
+    expect(json.code).toBe(0);
+    expect((JSON.parse(json.stdout) as { type: string }).type).toBe("process");
+  }, 60_000);
+
+  it("the ambient HARPOC_TOKEN is honored when no flag is given (D8)", async () => {
+    const child = await new Promise<CliResult>((resolvePromise, rejectPromise) => {
+      const proc = spawn(process.execPath, [CLI_PATH, "--vault-dir", vaultDir, ...useArgs()], {
+        env: { ...process.env, HARPOC_TOKEN: foreignToken },
+        windowsHide: true,
+      });
+      let stdout = "";
+      let stderr = "";
+      proc.stdout.on("data", (c: Buffer) => (stdout += c.toString("utf8")));
+      proc.stderr.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
+      proc.on("error", rejectPromise);
+      proc.on("close", (code) => resolvePromise({ code, stdout, stderr }));
+      proc.stdin.end();
+    });
+    capturedOutputs.push(child.stdout, child.stderr);
+    expect(child.code).toBe(1);
+    expect(child.stderr).toContain("ACCESS_DENIED");
+  }, 60_000);
+});
