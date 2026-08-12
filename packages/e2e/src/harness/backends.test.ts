@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { connect as netConnect } from "node:net";
-import { PG, MYSQL, assertFleetUp } from "./backends.js";
+import { PG, MYSQL, SSHD_PINNED, SSHD_ROGUE, GIT_HTTP, assertFleetUp } from "./backends.js";
 
 /**
  * Plain TCP, deliberately NOT a TLS handshake: PostgreSQL 16 only starts TLS
@@ -38,6 +38,21 @@ describe("backend fleet", () => {
     expect(PG.host).toBe("localhost");
   });
 
+  it("addresses the two sshd servers at distinct loopback aliases on port 22", () => {
+    // The ssh context cannot speak any port but 22 (F-1), so the pinned and
+    // rogue servers must live at different addresses, not different ports.
+    expect(SSHD_PINNED.host).toBe("127.0.0.2");
+    expect(SSHD_ROGUE.host).toBe("127.0.0.3");
+    expect(SSHD_PINNED.port).toBe(22);
+    expect(SSHD_ROGUE.port).toBe(22);
+    expect(SSHD_PINNED.host).not.toBe(SSHD_ROGUE.host);
+  });
+
+  it("keeps the git-http credential distinct from the database password", () => {
+    expect(GIT_HTTP.port).toBe(55080);
+    expect(GIT_HTTP.password).not.toBe(PG.password);
+  });
+
   it("reaches the postgres container", async () => {
     assertFleetUp("postgres-tls");
     expect(await canOpenTcp(PG.ip, PG.port)).toBe(true);
@@ -46,5 +61,17 @@ describe("backend fleet", () => {
   it("reaches the mysql container", async () => {
     assertFleetUp("mysql-tls");
     expect(await canOpenTcp(MYSQL.ip, MYSQL.port)).toBe(true);
+  });
+
+  it("reaches the pinned and rogue sshd containers on their aliases", async () => {
+    assertFleetUp("sshd-pinned");
+    assertFleetUp("sshd-rogue");
+    expect(await canOpenTcp(SSHD_PINNED.host, SSHD_PINNED.port)).toBe(true);
+    expect(await canOpenTcp(SSHD_ROGUE.host, SSHD_ROGUE.port)).toBe(true);
+  });
+
+  it("reaches the git-http container", async () => {
+    assertFleetUp("git-http");
+    expect(await canOpenTcp(GIT_HTTP.host, GIT_HTTP.port)).toBe(true);
   });
 });

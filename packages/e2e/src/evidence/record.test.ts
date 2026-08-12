@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { emit, commitSha } from "./record.js";
+import { emit, commitSha, hostOs, type EvidenceRecord } from "./record.js";
 
 describe("evidence records", () => {
   let dir: string;
@@ -25,6 +25,23 @@ describe("evidence records", () => {
     expect(rec.match).toBe(true);
     expect(rec.commit).toMatch(/^[0-9a-f]{40}$|^unknown$/);
     expect(() => new Date(rec.at).toISOString()).not.toThrow();
+  });
+
+  it("stamps the host OS so a cross-OS run stays distinguishable (R-1)", () => {
+    const rec = emit(join(dir, "run.jsonl"), {
+      scenario: "s",
+      context: "ssh",
+      surface: "mcp-http",
+      arm: "harpoc",
+      expected: "SUCCEEDED",
+      observed: "SUCCEEDED",
+    });
+    expect(rec.host_os).toBe(process.platform);
+    expect(hostOs()).toBe(process.platform);
+    const written = JSON.parse(
+      readFileSync(join(dir, "run.jsonl"), "utf8").trim(),
+    ) as EvidenceRecord;
+    expect(written.host_os).toBe(process.platform);
   });
 
   it("marks a divergence", () => {

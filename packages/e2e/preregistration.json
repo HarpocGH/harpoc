@@ -33,5 +33,54 @@
     "surface": "mcp-http",
     "arm": "harpoc",
     "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "ssh-happy-path",
+    "context": "ssh",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "ssh-host-key-mismatch",
+    "context": "ssh",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "REJECTED"
+  },
+  {
+    "scenario": "ssh-host-not-allowed",
+    "context": "ssh",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "REJECTED"
+  },
+  {
+    "scenario": "git-http-happy-path",
+    "context": "git",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "git-ssh-happy-path",
+    "context": "git",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "git-http-redirect-refused",
+    "context": "git",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "git-http-submodule-denied",
+    "context": "git",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "REJECTED"
   }
 ]

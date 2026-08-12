@@ -87,3 +87,87 @@ services:
       interval: 3s
       timeout: 5s
       retries: 45
+
+  # sshd-pinned serves both the `ssh` context and git-over-ssh. Published on the
+  # loopback ALIAS 127.0.0.2:22 because the ssh context is port-22-only (the
+  # SshAction schema has no port field and forbids ":" in the host), so the two
+  # sshd containers cannot share one address — each takes a distinct 127.x.
+  sshd-pinned:
+    build:
+      context: ./fixtures/sshd
+    image: harpoc-e2e-sshd
+    volumes:
+      - ./fixtures/keys/out/hostkey_pinned_ed25519:/hostkey:ro
+      - ./fixtures/keys/out/authorized_keys:/authorized_keys:ro
+      - ./fixtures/repos/out/clean.git:/srv-src/repo.git:ro
+    # Same folding rule as the database services: uniform indentation so the
+    # folded scalar joins the lines with spaces. A newline before a flag would
+    # hand sshd dead text.
+    command:
+      - bash
+      - -c
+      - >-
+        install -o root -g root -m 600 /hostkey /etc/ssh/ssh_host_ed25519_key &&
+        install -D -o harpoc -g harpoc -m 600 /authorized_keys /home/harpoc/.ssh/authorized_keys &&
+        rm -rf /srv/repo.git &&
+        cp -r /srv-src/repo.git /srv/repo.git &&
+        chown -R harpoc:harpoc /srv &&
+        exec /usr/sbin/sshd -D -e -p 2222 -o UsePAM=no -o PasswordAuthentication=no
+    ports:
+      - "127.0.0.2:22:2222"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/2222"]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+
+  # sshd-rogue answers at a DIFFERENT loopback alias with a DIFFERENT host key.
+  # The mismatch arm pins the pinned server's key but connects here, so rogue's
+  # real key fails host-key verification (no TOFU). Reuses the pinned image;
+  # pull_policy:never keeps compose from trying to fetch the local-only tag.
+  sshd-rogue:
+    image: harpoc-e2e-sshd
+    pull_policy: never
+    volumes:
+      - ./fixtures/keys/out/hostkey_rogue_ed25519:/hostkey:ro
+      - ./fixtures/keys/out/authorized_keys:/authorized_keys:ro
+    command:
+      - bash
+      - -c
+      - >-
+        install -o root -g root -m 600 /hostkey /etc/ssh/ssh_host_ed25519_key &&
+        install -D -o harpoc -g harpoc -m 600 /authorized_keys /home/harpoc/.ssh/authorized_keys &&
+        exec /usr/sbin/sshd -D -e -p 2222 -o UsePAM=no -o PasswordAuthentication=no
+    ports:
+      - "127.0.0.3:22:2222"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/2222"]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+
+  # git smart-HTTP over loopback with basic auth (D2: no TLS on the git path —
+  # criterion 3's handshake is the database services' job; the git arms test
+  # redirect refusal, submodule denial and askpass host-binding, none of which
+  # need TLS). Repos are copied out of the read-only mount and handed to www-data.
+  git-http:
+    build:
+      context: ./fixtures/git-http
+    image: harpoc-e2e-git-http
+    volumes:
+      - ./fixtures/repos/out:/srv-src:ro
+    command:
+      - bash
+      - -c
+      - >-
+        rm -rf /srv/git &&
+        cp -r /srv-src /srv/git &&
+        chown -R www-data:www-data /srv/git &&
+        exec apache2ctl -D FOREGROUND
+    ports:
+      - "127.0.0.1:55080:80"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/80"]
+      interval: 2s
+      timeout: 5s
+      retries: 45

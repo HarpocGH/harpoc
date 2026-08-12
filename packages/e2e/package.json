@@ -17,7 +17,9 @@
   },
   "scripts": {
     "pki": "bash fixtures/pki/generate.sh",
-    "fleet:up": "pnpm pki && docker compose up -d --wait",
+    "keys": "bash fixtures/keys/generate.sh",
+    "repos": "bash fixtures/repos/generate.sh",
+    "fleet:up": "pnpm pki && pnpm keys && pnpm repos && docker compose up -d --wait --build",
     "fleet:down": "docker compose down -v",
     "typecheck": "tsc --noEmit",
     "test:e2e": "vitest run"
