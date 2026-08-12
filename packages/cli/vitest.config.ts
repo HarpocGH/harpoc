@@ -10,6 +10,9 @@ export default defineConfig({
       reporter: ["text-summary"],
     },
     testTimeout: 30_000,
+    // Engine-building beforeEach fixtures sporadically blow the 10 s vitest
+    // default on loaded CI runners — same ceiling as the tests themselves.
+    hookTimeout: 30_000,
     env: {
       // Keystore session wrapping off in tests — command handlers construct
       // engines internally and would spawn a DPAPI helper per session on Windows.

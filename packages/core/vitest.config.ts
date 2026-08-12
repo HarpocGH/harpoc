@@ -10,6 +10,9 @@ export default defineConfig({
       reporter: ["text-summary"],
     },
     testTimeout: 30_000,
+    // Engine-building beforeEach fixtures sporadically blow the 10 s vitest
+    // default on loaded CI runners — same ceiling as the tests themselves.
+    hookTimeout: 30_000,
     env: {
       // Keystore session wrapping stays off in tests: on Windows every engine
       // session write/read would otherwise spawn a PowerShell DPAPI helper.
