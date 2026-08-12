@@ -2,9 +2,12 @@ import type {
   AccessInterface,
   AuditVisibilityScope,
   CallerContext,
+  Permission,
   VaultApiToken,
 } from "./types.js";
 import { TokenPrincipalType } from "./types.js";
+import { VaultError } from "./errors.js";
+import { matchesSecretNameScope } from "./name-pattern.js";
 
 /**
  * Map a verified token to the engine's caller identity — the single
@@ -27,6 +30,42 @@ export function callerFromToken(token: VaultApiToken, iface?: AccessInterface): 
     caller.interface = iface;
   }
   return caller;
+}
+
+/**
+ * Enforce 3-dimensional token scope (permission, project, secret-name
+ * patterns — `*` wildcards, thesis §4.7). The single scope predicate shared by
+ * every token-bearing interface that checks scope outside a ScopeGuard: the
+ * REST middleware and the CLI token path both call it (relocated here from
+ * rest-api so the CLI can enforce identical semantics without a Hono
+ * dependency — the `applyTokenEndpointAuth` precedent). Mirrors
+ * ScopeGuard.checkAccess() from mcp-server, which adds the per-call
+ * revocation recheck the long-lived MCP transports need.
+ */
+export function checkTokenScope(
+  token: VaultApiToken,
+  permission: Permission,
+  project?: string,
+  secretName?: string,
+): void {
+  // 1. Permission check
+  if (!token.scope.includes(permission) && !token.scope.includes("admin")) {
+    throw VaultError.accessDenied(`Token lacks permission: ${permission}`);
+  }
+
+  // 2. Project scope check
+  if (token.project && project !== undefined && project !== token.project) {
+    throw VaultError.accessDenied(`Token is scoped to project: ${token.project}`);
+  }
+  // Deny individual access to global (project-less) secrets for project-scoped tokens
+  if (token.project && secretName !== undefined && project === undefined) {
+    throw VaultError.accessDenied(`Token is scoped to project: ${token.project}`);
+  }
+
+  // 3. Secret name scope check (name patterns, thesis §4.7)
+  if (secretName !== undefined && !matchesSecretNameScope(secretName, token.secrets)) {
+    throw VaultError.accessDenied("Token does not grant access to this secret");
+  }
 }
 
 /**

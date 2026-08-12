@@ -1,37 +1,11 @@
-import type { Permission, VaultApiToken } from "@harpoc/shared";
-import { matchesSecretNameScope, VaultError } from "@harpoc/shared";
 import { parseHandle } from "@harpoc/shared";
 
 /**
- * Enforce 3-dimensional token scope (permission, project, secret-name
- * patterns — `*` wildcards, thesis §4.7).
- * Mirrors ScopeGuard.checkAccess() from mcp-server.
+ * The 3-dimensional token scope predicate lives in shared (`checkTokenScope`)
+ * so the CLI token path enforces identical semantics; re-exported here to keep
+ * this middleware the import point for every route.
  */
-export function checkTokenScope(
-  token: VaultApiToken,
-  permission: Permission,
-  project?: string,
-  secretName?: string,
-): void {
-  // 1. Permission check
-  if (!token.scope.includes(permission) && !token.scope.includes("admin")) {
-    throw VaultError.accessDenied(`Token lacks permission: ${permission}`);
-  }
-
-  // 2. Project scope check
-  if (token.project && project !== undefined && project !== token.project) {
-    throw VaultError.accessDenied(`Token is scoped to project: ${token.project}`);
-  }
-  // Deny individual access to global (project-less) secrets for project-scoped tokens
-  if (token.project && secretName !== undefined && project === undefined) {
-    throw VaultError.accessDenied(`Token is scoped to project: ${token.project}`);
-  }
-
-  // 3. Secret name scope check (name patterns, thesis §4.7)
-  if (secretName !== undefined && !matchesSecretNameScope(secretName, token.secrets)) {
-    throw VaultError.accessDenied("Token does not grant access to this secret");
-  }
-}
+export { checkTokenScope } from "@harpoc/shared";
 
 /**
  * Build a full secret handle URI from a route parameter.

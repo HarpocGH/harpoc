@@ -252,15 +252,18 @@ export interface VaultApiToken {
 /**
  * Access interface a token-authenticated request arrived through — the
  * "through which interface" dimension of the audit trail (thesis §4.3.4).
- * Forensic attribution only; never consulted by policy matching.
+ * Forensic attribution only; never consulted by policy matching. `cli` marks
+ * the token-scoped CLI path (`secret use --token`); a tokenless CLI call
+ * remains the trusted local path and carries no interface at all.
  */
-export type AccessInterface = "rest" | "mcp" | "mcp-http";
+export type AccessInterface = "rest" | "mcp" | "mcp-http" | "cli";
 
 /**
  * Token-derived caller identity threaded from an interface layer into the
  * engine for per-secret access-policy enforcement (thesis §4.6). An absent
- * caller marks the trusted local path (CLI, in-process SDK) — administrative
- * access that is not subject to per-secret policies (thesis §4.7 split).
+ * caller marks the trusted local path (tokenless CLI, in-process SDK) —
+ * administrative access that is not subject to per-secret policies (thesis
+ * §4.7 split).
  */
 export interface CallerContext {
   principal_type: TokenPrincipalType;
