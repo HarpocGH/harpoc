@@ -1,0 +1,11 @@
+{
+  "name": "harpoc-e2e-mcp-downstream",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Downstream MCP server fixture: real Streamable HTTP transport, records the Authorization values it receives",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.27.1",
+    "zod": "3.25.76"
+  }
+}

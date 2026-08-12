@@ -108,15 +108,27 @@ importers:
 
   packages/e2e:
     dependencies:
+      "@harpoc/cli":
+        specifier: workspace:*
+        version: link:../cli
       "@harpoc/core":
         specifier: workspace:*
         version: link:../core
       "@harpoc/mcp-server":
         specifier: workspace:*
         version: link:../mcp-server
+      "@harpoc/rest-api":
+        specifier: workspace:*
+        version: link:../rest-api
+      "@harpoc/sdk":
+        specifier: workspace:*
+        version: link:../sdk
       "@harpoc/shared":
         specifier: workspace:*
         version: link:../shared
+      "@hono/node-server":
+        specifier: ^1.14.0
+        version: 1.19.10(hono@4.12.5)
       "@modelcontextprotocol/sdk":
         specifier: ^1.27.1
         version: 1.27.1(zod@3.25.76)

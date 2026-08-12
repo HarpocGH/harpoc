@@ -1,6 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { connect as netConnect } from "node:net";
-import { PG, MYSQL, SSHD_PINNED, SSHD_ROGUE, GIT_HTTP, assertFleetUp } from "./backends.js";
+import {
+  PG,
+  MYSQL,
+  SSHD_PINNED,
+  SSHD_ROGUE,
+  GIT_HTTP,
+  ECHO_HTTPS,
+  MCP_DOWNSTREAM,
+  assertFleetUp,
+} from "./backends.js";
 
 /**
  * Plain TCP, deliberately NOT a TLS handshake: PostgreSQL 16 only starts TLS
@@ -73,5 +82,18 @@ describe("backend fleet", () => {
   it("reaches the git-http container", async () => {
     assertFleetUp("git-http");
     expect(await canOpenTcp(GIT_HTTP.host, GIT_HTTP.port)).toBe(true);
+  });
+
+  it("reaches the echo-https container on its own offset port", async () => {
+    expect(ECHO_HTTPS.port).toBe(55443);
+    assertFleetUp("echo-https");
+    expect(await canOpenTcp(ECHO_HTTPS.ip, ECHO_HTTPS.port)).toBe(true);
+  });
+
+  it("reaches the mcp-downstream container on its own offset port", async () => {
+    expect(MCP_DOWNSTREAM.port).toBe(55090);
+    expect(MCP_DOWNSTREAM.endpoint).toContain(String(MCP_DOWNSTREAM.port));
+    assertFleetUp("mcp-downstream");
+    expect(await canOpenTcp(MCP_DOWNSTREAM.host, MCP_DOWNSTREAM.port)).toBe(true);
   });
 });

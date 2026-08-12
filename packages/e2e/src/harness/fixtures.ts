@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { controlledPathDirs, resolveExecutable } from "@harpoc/core";
 
 const isWin = process.platform === "win32";
@@ -71,6 +72,32 @@ export function resolveGit(): string {
   const p = resolveExecutable("git", controlledPathDirs());
   if (!p) throw new Error("no git binary found on PATH — install git");
   return p;
+}
+
+/**
+ * The compiled entry points the out-of-process surfaces spawn. Both are build
+ * artifacts, so a missing one is a setup error with an actionable recovery, not
+ * a skip: a silently skipped surface would drop a third of the demonstration
+ * matrix while the suite stayed green.
+ *
+ * The MCP server path must keep its `…/mcp-server/dist/index.js` tail — the
+ * bin's direct-run guard matches on exactly that suffix and would otherwise
+ * load the module without starting a server.
+ */
+function packageArtifact(pkg: string, relative: string, recovery: string): string {
+  const path = fileURLToPath(new URL(`../../../${pkg}/${relative}`, import.meta.url));
+  if (!existsSync(path)) {
+    throw new Error(`${pkg} is not built (${path} missing)\n  run: ${recovery}`);
+  }
+  return path;
+}
+
+export function resolveMcpServerEntry(): string {
+  return packageArtifact("mcp-server", "dist/index.js", "npx pnpm build");
+}
+
+export function resolveCliEntry(): string {
+  return packageArtifact("cli", "dist/index.js", "npx pnpm build");
 }
 
 /**

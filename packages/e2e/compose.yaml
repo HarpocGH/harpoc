@@ -149,6 +149,58 @@ services:
       timeout: 5s
       retries: 45
 
+  # TLS echo backend for the `http` context's demonstration cell — the first
+  # real TLS handshake on the http path (until Phase 3 only the database arms
+  # shook hands). Reflects the injected credential in several encodings, in the
+  # body and in a response header, so a clean caller-visible result proves the
+  # vault redacted rather than that the backend never saw the credential.
+  # Phase 4's response-channel-echo scenario reuses this service.
+  echo-https:
+    build:
+      context: ./fixtures/echo-https
+    image: harpoc-e2e-echo-https
+    volumes:
+      - ./fixtures/pki/out:/pki:ro
+    ports:
+      - "127.0.0.1:55443:8443"
+    # No bash in the alpine image: probe the port with node itself.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('node:net').connect(8443,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+
+  # Downstream MCP server over Streamable HTTP — the `mcp` context's target for
+  # the http-transport variant (D10). Its `reveal` tool reflects the
+  # Authorization the vault injected, and /recorded lets the harness confirm
+  # out of band that the downstream really received the credential while the
+  # caller-visible result stayed clean. Plain loopback HTTP: a supported vault
+  # target (url-validator permits loopback http), and MCP-over-TLS trust would
+  # ride the same NODE_EXTRA_CA_CERTS lever the http context already proves.
+  mcp-downstream:
+    build:
+      context: ./fixtures/mcp-downstream
+    image: harpoc-e2e-mcp-downstream
+    ports:
+      - "127.0.0.1:55090:8090"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('node:net').connect(8090,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+
   # git smart-HTTP over loopback with basic auth (D2: no TLS on the git path —
   # criterion 3's handshake is the database services' job; the git arms test
   # redirect refusal, submodule denial and askpass host-binding, none of which

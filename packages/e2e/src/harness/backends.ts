@@ -60,13 +60,46 @@ export const GIT_HTTP = {
   password: "git-e2e-pw",
 } as const;
 
+/**
+ * TLS echo backend for the `http` context. `host` is the SAN-covered name the
+ * cells connect to; the certificate also carries an IP SAN for 127.0.0.1, so
+ * addressing the literal stays available if a host resolves localhost to ::1
+ * ahead of the bound address. Trust comes from the fixture CA via
+ * NODE_EXTRA_CA_CERTS, which `test:e2e` sets before vitest starts (the variable
+ * is read once per process, at first use of the default root store).
+ */
+export const ECHO_HTTPS = {
+  host: "localhost",
+  ip: "127.0.0.1",
+  port: 55443,
+  markerHeader: "x-harpoc-marker",
+} as const;
+
+/**
+ * Downstream MCP server over Streamable HTTP. `endpoint` is what the secret's
+ * server config points at; `recordedUrl` is the harness-only side channel that
+ * reports which Authorization values the downstream actually received — read
+ * directly, never through the vault, so it can corroborate the half of the
+ * claim a redacted result cannot.
+ */
+export const MCP_DOWNSTREAM = {
+  host: "127.0.0.1",
+  port: 55090,
+  serverName: "e2e-downstream",
+  endpoint: "http://127.0.0.1:55090/mcp",
+  recordedUrl: "http://127.0.0.1:55090/recorded",
+  tool: "reveal",
+} as const;
+
 export type FleetService =
   | "postgres-tls"
   | "postgres-plain"
   | "mysql-tls"
   | "sshd-pinned"
   | "sshd-rogue"
-  | "git-http";
+  | "git-http"
+  | "echo-https"
+  | "mcp-downstream";
 
 const COMPOSE_DIR = fileURLToPath(new URL("../..", import.meta.url));
 

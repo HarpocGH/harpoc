@@ -82,5 +82,250 @@
     "surface": "mcp-http",
     "arm": "harpoc",
     "expected": "REJECTED"
+  },
+  {
+    "scenario": "demo-http",
+    "context": "http",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-http",
+    "context": "http",
+    "surface": "mcp-stdio",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-http",
+    "context": "http",
+    "surface": "rest",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-http",
+    "context": "http",
+    "surface": "sdk",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-http",
+    "context": "http",
+    "surface": "cli",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-process",
+    "context": "process",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-process",
+    "context": "process",
+    "surface": "mcp-stdio",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-process",
+    "context": "process",
+    "surface": "rest",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-process",
+    "context": "process",
+    "surface": "sdk",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-process",
+    "context": "process",
+    "surface": "cli",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp",
+    "context": "mcp",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp",
+    "context": "mcp",
+    "surface": "mcp-stdio",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp",
+    "context": "mcp",
+    "surface": "rest",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp",
+    "context": "mcp",
+    "surface": "sdk",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp",
+    "context": "mcp",
+    "surface": "cli",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp-stdio-downstream",
+    "context": "mcp",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp-stdio-downstream",
+    "context": "mcp",
+    "surface": "mcp-stdio",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp-stdio-downstream",
+    "context": "mcp",
+    "surface": "rest",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp-stdio-downstream",
+    "context": "mcp",
+    "surface": "sdk",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp-stdio-downstream",
+    "context": "mcp",
+    "surface": "cli",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-database",
+    "context": "database",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-database",
+    "context": "database",
+    "surface": "mcp-stdio",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-database",
+    "context": "database",
+    "surface": "rest",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-database",
+    "context": "database",
+    "surface": "sdk",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-database",
+    "context": "database",
+    "surface": "cli",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-git",
+    "context": "git",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-git",
+    "context": "git",
+    "surface": "mcp-stdio",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-git",
+    "context": "git",
+    "surface": "rest",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-git",
+    "context": "git",
+    "surface": "sdk",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-git",
+    "context": "git",
+    "surface": "cli",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-ssh",
+    "context": "ssh",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-ssh",
+    "context": "ssh",
+    "surface": "mcp-stdio",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-ssh",
+    "context": "ssh",
+    "surface": "rest",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-ssh",
+    "context": "ssh",
+    "surface": "sdk",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-ssh",
+    "context": "ssh",
+    "surface": "cli",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
   }
 ]

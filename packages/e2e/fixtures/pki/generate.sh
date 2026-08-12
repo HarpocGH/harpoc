@@ -16,9 +16,34 @@ export MSYS2_ARG_CONV_EXCL='/CN='
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$DIR/out"
 
-if [ -f "$OUT/ca.crt" ]; then
+# The sentinel checks EVERY artifact, not just the CA: a run killed mid-issuance
+# — or an out/ dir produced by an earlier revision that issued fewer certificates
+# — must not read as complete, or a service silently starts on a missing or
+# stale certificate. A partial set is wiped and regenerated.
+required=(
+  ca.crt ca.key
+  postgres-tls.crt postgres-tls.key
+  mysql-tls.crt mysql-tls.key
+  echo-https.crt echo-https.key
+)
+complete=1
+for f in "${required[@]}"; do
+  [ -f "$OUT/$f" ] || complete=0
+done
+if [ "$complete" = 1 ]; then
   echo "pki: already generated at $OUT"
   exit 0
+fi
+if [ -d "$OUT" ] && [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
+  echo "pki: incomplete artifact set at $OUT — regenerating" >&2
+  # A NEW CA invalidates the certificates the running services installed at
+  # their own startup: `docker compose up` leaves an unchanged service running,
+  # so the fleet would keep serving the previous CA's certificates while the
+  # harness verifies against this one. Every TLS arm then fails — loudly, but
+  # for a reason that reads like a vault defect.
+  echo "pki: services holding old certificates must be recreated:" >&2
+  echo "     pnpm --filter @harpoc/e2e fleet:recreate" >&2
+  rm -rf "$OUT"
 fi
 
 mkdir -p "$OUT"
@@ -31,11 +56,14 @@ chmod 600 "$OUT/ca.key"
 
 issue() {
   local name="$1"
+  local extra_san="${2:-}"
   local ext="$OUT/$name.ext"
+  local san="DNS:$name,DNS:localhost"
+  [ -n "$extra_san" ] && san="$san,$extra_san"
 
   # A real file, not a process substitution: /dev/fd paths are not readable by
   # a native openssl running under MSYS on a development host.
-  printf 'subjectAltName=DNS:%s,DNS:localhost\nbasicConstraints=CA:FALSE\n' "$name" > "$ext"
+  printf 'subjectAltName=%s\nbasicConstraints=CA:FALSE\n' "$san" > "$ext"
 
   openssl req -newkey rsa:2048 -nodes \
     -keyout "$OUT/$name.key" -out "$OUT/$name.csr" \
@@ -52,5 +80,9 @@ issue() {
 
 issue postgres-tls
 issue mysql-tls
+# echo-https carries an IP SAN as well: the http context pins the pre-flight
+# resolved address, and the demonstration cell must stay reachable whether it
+# addresses the service as localhost or as the literal the container is bound to.
+issue echo-https "IP:127.0.0.1"
 
 echo "pki: generated CA and server certificates in $OUT"

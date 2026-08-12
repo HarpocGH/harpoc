@@ -4,24 +4,15 @@ import { startMcpHttpServer } from "@harpoc/mcp-server";
 import type { McpHttpServer } from "@harpoc/mcp-server";
 import type { Permission } from "@harpoc/shared";
 import type { HarnessVault } from "../vault.js";
+import type { CallOutcome, Surface } from "./surface.js";
 
-export interface CallOutcome {
-  ok: boolean;
-  result?: unknown;
-  /** The joined text content of the tool result — on ok results this is the
-   * JSON-serialized use_secret response, so arms parse it instead of
-   * re-implementing the content-joining locally. */
-  text: string;
-  errorText?: string;
-}
+export type { CallOutcome } from "./surface.js";
 
-export interface McpHttpSurface {
+export interface McpHttpSurface extends Surface {
   name: "mcp-http";
-  callUseSecret(handle: string, action: unknown): Promise<CallOutcome>;
-  close(): Promise<void>;
 }
 
-function textOf(result: { content?: unknown }): string {
+export function textOf(result: { content?: unknown }): string {
   const content = result.content as Array<{ type: string; text?: string }> | undefined;
   return (content ?? []).map((c) => c.text ?? "").join("\n");
 }
@@ -51,7 +42,10 @@ export async function startMcpHttpSurface(
 
   return {
     name: "mcp-http",
-    async callUseSecret(handle, action) {
+    interfaceId: "mcp",
+    auditInterface: "mcp-http",
+    principal,
+    async callUseSecret(handle, action): Promise<CallOutcome> {
       const raw = (await client.callTool({
         name: "use_secret",
         arguments: { handle, action },
