@@ -551,15 +551,17 @@ describe("startMcpHttpServer — session reclamation (M6)", () => {
     server = await startMcpHttpServer({
       engine: mockEngine(),
       port: 0,
-      sessionLimits: { idleTtlMs: 250, sweepIntervalMs: 40 },
+      sessionLimits: { idleTtlMs: 1_000, sweepIntervalMs: 40 },
     });
 
     const created = await initialize(server.port);
     const sessionId = created.sessionId as string;
 
-    // Well past the idle TTL in total, but never idle for it.
-    for (let i = 0; i < 5; i++) {
-      await sleep(100);
+    // Well past the idle TTL in total, but never idle for it. The gap must
+    // stay far under the TTL: with 250/100 the 150 ms margin was breached by
+    // loaded-runner scheduling jitter (windows leg, run 31591341443).
+    for (let i = 0; i < 10; i++) {
+      await sleep(200);
       expect((await ping(server.port, sessionId)).status).toBeLessThan(400);
     }
   }, 20_000);
