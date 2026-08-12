@@ -16,9 +16,27 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$DIR/out"
 
-if [ -f "$OUT/client_ed25519" ]; then
+# The sentinel checks EVERY artifact, not just the first one generated: a run
+# killed mid-generation must not read as complete (docker would bind-mount the
+# missing host-key path as a directory and the sshd container crash-loops with
+# nothing pointing here). A partial set is wiped and regenerated.
+required=(
+  client_ed25519 client_ed25519.pub
+  hostkey_pinned_ed25519 hostkey_pinned_ed25519.pub
+  hostkey_rogue_ed25519 hostkey_rogue_ed25519.pub
+  authorized_keys
+)
+complete=1
+for f in "${required[@]}"; do
+  [ -f "$OUT/$f" ] || complete=0
+done
+if [ "$complete" = 1 ]; then
   echo "keys: already generated at $OUT"
   exit 0
+fi
+if [ -d "$OUT" ] && [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
+  echo "keys: incomplete artifact set at $OUT — regenerating" >&2
+  rm -rf "$OUT"
 fi
 
 mkdir -p "$OUT"

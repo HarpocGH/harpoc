@@ -4,17 +4,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Permission } from "@harpoc/shared";
 import { assertOpaque } from "./assert/opacity.js";
-import { emit } from "./evidence/record.js";
-import { loadExpectations, expectationFor } from "./evidence/preregistration.js";
-import {
-  createHarnessVault,
-  storeSecret,
-  EVIDENCE_FILE,
-  PREREGISTRATION_FILE,
-} from "./harness/vault.js";
+import { createHarnessVault, storeSecret } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
+import { expectAttributedSuccess } from "./harness/audit.js";
+import { recordArm } from "./harness/evidence.js";
 import { startMcpHttpSurface } from "./harness/surfaces/mcp-http.js";
-import type { McpHttpSurface } from "./harness/surfaces/mcp-http.js";
+import type { CallOutcome, McpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import { preferNativeSsh, resolveGit } from "./harness/fixtures.js";
 import { clientKeyPem, knownHostPin } from "./harness/ssh.js";
 import { GIT_HTTP, SSHD_PINNED, assertFleetUp } from "./harness/backends.js";
@@ -23,27 +18,13 @@ const PASSWORD = "e2e-git-pw";
 const GIT_HTTP_SECRET = `${GIT_HTTP.user}:${GIT_HTTP.password}`;
 const BASE = `http://${GIT_HTTP.host}:${GIT_HTTP.port}`;
 
-interface AuditRow {
-  success: boolean;
-  detail: Record<string, unknown> | null;
-}
-
-function detailString(row: AuditRow, key: string): string | undefined {
-  const value = (row.detail ?? {})[key];
-  return typeof value === "string" ? value : undefined;
-}
-
-/** The GitResult carried inside the MCP tool response's text content. */
-function gitResult(result: unknown): { exit_code?: number; stderr?: string } {
-  const content = (result as { content?: Array<{ text?: string }> }).content ?? [];
-  try {
-    return JSON.parse(content.map((c) => c.text ?? "").join("\n")) as {
-      exit_code?: number;
-      stderr?: string;
-    };
-  } catch {
-    return {};
-  }
+/**
+ * The GitResult carried in the tool response's text content (already joined by
+ * the surface). A malformed payload throws — a silent `{}` fallback made every
+ * `.not.toBe(0)` assertion vacuously true on an unparsable result.
+ */
+function gitResult(outcome: CallOutcome): { exit_code?: number; stderr?: string } {
+  return JSON.parse(outcome.text) as { exit_code?: number; stderr?: string };
 }
 
 /**
@@ -56,9 +37,11 @@ function gitResult(result: unknown): { exit_code?: number; stderr?: string } {
  * git-http runs over loopback http with basic auth (D2: no TLS on the git path —
  * criterion 3's handshake is the database arms' job). The ambient credential
  * helpers are neutralized (GIT_CONFIG_NOSYSTEM + an empty GIT_CONFIG_GLOBAL,
- * forwarded through env_allowlist) so the vault's askpass is the sole credential
- * source and the arm behaves identically on Linux CI and a Windows dev host,
- * where Git-for-Windows would otherwise inject credential.helper=manager.
+ * forwarded through env_allowlist on BOTH handles — the ssh clone reads ambient
+ * gitconfig too, where a url.*.insteadOf rewrite would divert it) so the vault's
+ * askpass is the sole credential source and the arm behaves identically on Linux
+ * CI and a Windows dev host, where Git-for-Windows would otherwise inject
+ * credential.helper=manager.
  */
 describe("git context — live clones over http and ssh", () => {
   let vault: HarnessVault;
@@ -107,7 +90,7 @@ describe("git context — live clones over http and ssh", () => {
     await vault.engine.setInjectionPolicy(sshHandle, {
       url_allowlist: [],
       command_allowlist: [gitBin],
-      env_allowlist: [],
+      env_allowlist: ["GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"],
       host_allowlist: [SSHD_PINNED.host],
     });
     await vault.engine.setConnectionConfig(sshHandle, {
@@ -138,7 +121,7 @@ describe("git context — live clones over http and ssh", () => {
     });
 
     expect(outcome.ok).toBe(true);
-    expect(gitResult(outcome.result).exit_code).toBe(0);
+    expect(gitResult(outcome).exit_code).toBe(0);
     // The clone really completed — the working tree carries the repo's file.
     expect(existsSync(join(dest, "README.md"))).toBe(true);
 
@@ -147,29 +130,15 @@ describe("git context — live clones over http and ssh", () => {
     assertOpaque(GIT_HTTP_SECRET, observation);
     assertOpaque(GIT_HTTP.password, observation);
 
-    const expected = expectationFor(loadExpectations(PREREGISTRATION_FILE), {
-      scenario: "git-http-happy-path",
-      context: "git",
-      surface: "mcp-http",
-      arm: "harpoc",
-    });
-    const record = emit(EVIDENCE_FILE, {
-      scenario: "git-http-happy-path",
-      context: "git",
-      surface: "mcp-http",
-      arm: "harpoc",
-      expected,
-      observed: "SUCCEEDED",
-    });
+    const record = recordArm(
+      { scenario: "git-http-happy-path", context: "git", surface: "mcp-http", arm: "harpoc" },
+      "SUCCEEDED",
+    );
     expect(record.match).toBe(true);
   });
 
   it("writes a successful git audit row attributed to the mcp-http interface", () => {
-    const rows = vault.engine.queryAudit({ eventType: "secret.use" }) as unknown as AuditRow[];
-    const success = rows.find((r) => r.success === true && detailString(r, "context") === "git");
-    expect(success).toBeDefined();
-    expect(success && detailString(success, "interface")).toBe("mcp-http");
-    expect(vault.engine.verifyAuditChain().valid).toBe(true);
+    expectAttributedSuccess(vault, "git");
   });
 
   it("clones over ssh with the pinned host key, leaking no key material", async () => {
@@ -182,26 +151,16 @@ describe("git context — live clones over http and ssh", () => {
     });
 
     expect(outcome.ok).toBe(true);
-    expect(gitResult(outcome.result).exit_code).toBe(0);
+    expect(gitResult(outcome).exit_code).toBe(0);
     expect(existsSync(join(dest, "README.md"))).toBe(true);
 
     const auditRows = vault.engine.queryAudit({ eventType: "secret.use" });
     assertOpaque(sshKey, { result: outcome.result, auditRows, parentEnv: process.env });
 
-    const expected = expectationFor(loadExpectations(PREREGISTRATION_FILE), {
-      scenario: "git-ssh-happy-path",
-      context: "git",
-      surface: "mcp-http",
-      arm: "harpoc",
-    });
-    const record = emit(EVIDENCE_FILE, {
-      scenario: "git-ssh-happy-path",
-      context: "git",
-      surface: "mcp-http",
-      arm: "harpoc",
-      expected,
-      observed: "SUCCEEDED",
-    });
+    const record = recordArm(
+      { scenario: "git-ssh-happy-path", context: "git", surface: "mcp-http", arm: "harpoc" },
+      "SUCCEEDED",
+    );
     expect(record.match).toBe(true);
   });
 
@@ -217,28 +176,27 @@ describe("git context — live clones over http and ssh", () => {
     // The git process runs (no VaultError), but http.followRedirects=false stops
     // it before the redirect target is reached: a non-zero exit, no working tree.
     expect(outcome.ok).toBe(true);
-    expect(gitResult(outcome.result).exit_code).not.toBe(0);
+    const r = gitResult(outcome);
+    expect(r.exit_code).not.toBe(0);
     expect(existsSync(join(dest, "README.md"))).toBe(false);
+    // The DISCRIMINATING signal (live-pinned against git 2.51): with the guard
+    // active, curl reports the refused redirect at the origin — "The requested
+    // URL returned error: 302". With the guard dropped, git follows the 302
+    // off-box and dies at DNS instead ("Could not resolve host"), which the
+    // exit-code and working-tree assertions above cannot tell apart.
+    expect(r.stderr ?? "").toMatch(/returned error: 302/);
+    // The off-box target was never contacted or even named.
+    expect(r.stderr ?? "").not.toMatch(/attacker\.example|Could not resolve host/);
 
     const auditRows = vault.engine.queryAudit({ eventType: "secret.use" });
     const observation = { result: outcome.result, auditRows, parentEnv: process.env };
     assertOpaque(GIT_HTTP_SECRET, observation);
     assertOpaque(GIT_HTTP.password, observation);
 
-    const expected = expectationFor(loadExpectations(PREREGISTRATION_FILE), {
-      scenario: "git-http-redirect-refused",
-      context: "git",
-      surface: "mcp-http",
-      arm: "harpoc",
-    });
-    const record = emit(EVIDENCE_FILE, {
-      scenario: "git-http-redirect-refused",
-      context: "git",
-      surface: "mcp-http",
-      arm: "harpoc",
-      expected,
-      observed: "BLOCKED",
-    });
+    const record = recordArm(
+      { scenario: "git-http-redirect-refused", context: "git", surface: "mcp-http", arm: "harpoc" },
+      "BLOCKED",
+    );
     expect(record.match).toBe(true);
   });
 
@@ -253,8 +211,11 @@ describe("git context — live clones over http and ssh", () => {
     });
 
     // The denied argument is rejected as a VaultError before git is spawned, so
-    // the hostile submodule URL is never contacted and nothing is cloned.
+    // the hostile submodule URL is never contacted and nothing is cloned. The
+    // refusal REASON is asserted so an unrelated pre-spawn failure cannot
+    // satisfy this arm.
     expect(outcome.ok).toBe(false);
+    expect(outcome.errorText ?? "").toContain("disallowed git argument: --recurse-submodules");
     expect(existsSync(join(dest, "README.md"))).toBe(false);
 
     const auditRows = vault.engine.queryAudit({ eventType: "secret.use" });
@@ -269,20 +230,10 @@ describe("git context — live clones over http and ssh", () => {
       auditRows,
     });
 
-    const expected = expectationFor(loadExpectations(PREREGISTRATION_FILE), {
-      scenario: "git-http-submodule-denied",
-      context: "git",
-      surface: "mcp-http",
-      arm: "harpoc",
-    });
-    const record = emit(EVIDENCE_FILE, {
-      scenario: "git-http-submodule-denied",
-      context: "git",
-      surface: "mcp-http",
-      arm: "harpoc",
-      expected,
-      observed: "REJECTED",
-    });
+    const record = recordArm(
+      { scenario: "git-http-submodule-denied", context: "git", surface: "mcp-http", arm: "harpoc" },
+      "REJECTED",
+    );
     expect(record.match).toBe(true);
   });
 });

@@ -1,15 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Permission } from "@harpoc/shared";
 import { assertOpaque } from "./assert/opacity.js";
-import { emit } from "./evidence/record.js";
-import { loadExpectations, expectationFor } from "./evidence/preregistration.js";
-import {
-  createHarnessVault,
-  storeSecret,
-  EVIDENCE_FILE,
-  PREREGISTRATION_FILE,
-} from "./harness/vault.js";
+import { createHarnessVault, storeSecret } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
+import { recordArm } from "./harness/evidence.js";
 import { startMcpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import type { McpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import { caPem } from "./harness/pki.js";
@@ -68,20 +62,15 @@ describe("database context — live MySQL over fixture TLS", () => {
     assertOpaque(DB_SECRET, observation);
     assertOpaque(MYSQL.password, observation);
 
-    const expected = expectationFor(loadExpectations(PREREGISTRATION_FILE), {
-      scenario: "database-happy-path-mysql",
-      context: "database",
-      surface: "mcp-http",
-      arm: "harpoc",
-    });
-    const record = emit(EVIDENCE_FILE, {
-      scenario: "database-happy-path-mysql",
-      context: "database",
-      surface: "mcp-http",
-      arm: "harpoc",
-      expected,
-      observed: "SUCCEEDED",
-    });
+    const record = recordArm(
+      {
+        scenario: "database-happy-path-mysql",
+        context: "database",
+        surface: "mcp-http",
+        arm: "harpoc",
+      },
+      "SUCCEEDED",
+    );
     expect(record.match).toBe(true);
   });
 });

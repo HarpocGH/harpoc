@@ -43,6 +43,9 @@ describe("mcp-http surface", () => {
     expect(outcome.ok).toBe(true);
     // The credential reached the child and came back redacted, over the wire.
     expect(JSON.stringify(outcome.result)).toContain("[REDACTED]");
+    // `text` carries the JSON-serialized use_secret response on ok outcomes —
+    // arms parse it instead of re-joining the content parts themselves.
+    expect((JSON.parse(outcome.text) as { type?: string }).type).toBe("process");
     assertOpaque(SECRET, { result: outcome.result });
   });
 

@@ -92,6 +92,9 @@ services:
   # loopback ALIAS 127.0.0.2:22 because the ssh context is port-22-only (the
   # SshAction schema has no port field and forbids ":" in the host), so the two
   # sshd containers cannot share one address — each takes a distinct 127.x.
+  # Stock macOS configures only 127.0.0.1 on lo0: fleet:up's preflight
+  # (scripts/fleet-preflight.mjs) fails loudly with the `sudo ifconfig lo0
+  # alias` recovery before this bind can take the whole bring-up down.
   sshd-pinned:
     build:
       context: ./fixtures/sshd

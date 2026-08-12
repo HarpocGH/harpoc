@@ -1,15 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Permission } from "@harpoc/shared";
 import { assertOpaque } from "./assert/opacity.js";
-import { emit } from "./evidence/record.js";
-import { loadExpectations, expectationFor } from "./evidence/preregistration.js";
-import {
-  createHarnessVault,
-  storeSecret,
-  EVIDENCE_FILE,
-  PREREGISTRATION_FILE,
-} from "./harness/vault.js";
+import { createHarnessVault, storeSecret } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
+import { expectAttributedSuccess } from "./harness/audit.js";
+import { recordArm } from "./harness/evidence.js";
 import { startMcpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import type { McpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import { caPem } from "./harness/pki.js";
@@ -17,16 +12,6 @@ import { PG, assertFleetUp } from "./harness/backends.js";
 
 const PASSWORD = "e2e-database-pw";
 const DB_SECRET = `${PG.user}:${PG.password}`;
-
-interface AuditRow {
-  success: boolean;
-  detail: Record<string, unknown> | null;
-}
-
-function detailString(row: AuditRow, key: string): string | undefined {
-  const value = (row.detail ?? {})[key];
-  return typeof value === "string" ? value : undefined;
-}
 
 describe("database context — live PostgreSQL over fixture TLS", () => {
   let vault: HarnessVault;
@@ -76,31 +61,15 @@ describe("database context — live PostgreSQL over fixture TLS", () => {
     // Both halves: the password alone must not survive either.
     assertOpaque(PG.password, observation);
 
-    const expected = expectationFor(loadExpectations(PREREGISTRATION_FILE), {
-      scenario: "database-happy-path",
-      context: "database",
-      surface: "mcp-http",
-      arm: "harpoc",
-    });
-    const record = emit(EVIDENCE_FILE, {
-      scenario: "database-happy-path",
-      context: "database",
-      surface: "mcp-http",
-      arm: "harpoc",
-      expected,
-      observed: "SUCCEEDED",
-    });
+    const record = recordArm(
+      { scenario: "database-happy-path", context: "database", surface: "mcp-http", arm: "harpoc" },
+      "SUCCEEDED",
+    );
     expect(record.match).toBe(true);
   });
 
   it("writes a successful audit row attributed to the mcp-http interface", () => {
-    const rows = vault.engine.queryAudit({ eventType: "secret.use" }) as unknown as AuditRow[];
-    const success = rows.find(
-      (r) => r.success === true && detailString(r, "context") === "database",
-    );
-    expect(success).toBeDefined();
-    expect(success && detailString(success, "interface")).toBe("mcp-http");
-    expect(vault.engine.verifyAuditChain().valid).toBe(true);
+    expectAttributedSuccess(vault, "database");
   });
 });
 
@@ -151,20 +120,15 @@ describe("database context — M3: IP-literal targets have no name to verify", (
     assertOpaque(DB_SECRET, observation);
     assertOpaque(PG.password, observation);
 
-    const expected = expectationFor(loadExpectations(PREREGISTRATION_FILE), {
-      scenario: "database-ip-literal-identity",
-      context: "database",
-      surface: "mcp-http",
-      arm: "harpoc",
-    });
-    const record = emit(EVIDENCE_FILE, {
-      scenario: "database-ip-literal-identity",
-      context: "database",
-      surface: "mcp-http",
-      arm: "harpoc",
-      expected,
-      observed: "REJECTED",
-    });
+    const record = recordArm(
+      {
+        scenario: "database-ip-literal-identity",
+        context: "database",
+        surface: "mcp-http",
+        arm: "harpoc",
+      },
+      "REJECTED",
+    );
     expect(record.match).toBe(true);
   });
 });
@@ -211,20 +175,15 @@ describe("database context — a plaintext target is refused by default", () => 
     assertOpaque(DB_SECRET, observation);
     assertOpaque(PG.password, observation);
 
-    const expected = expectationFor(loadExpectations(PREREGISTRATION_FILE), {
-      scenario: "database-plaintext-target",
-      context: "database",
-      surface: "mcp-http",
-      arm: "harpoc",
-    });
-    const record = emit(EVIDENCE_FILE, {
-      scenario: "database-plaintext-target",
-      context: "database",
-      surface: "mcp-http",
-      arm: "harpoc",
-      expected,
-      observed: "REJECTED",
-    });
+    const record = recordArm(
+      {
+        scenario: "database-plaintext-target",
+        context: "database",
+        surface: "mcp-http",
+        arm: "harpoc",
+      },
+      "REJECTED",
+    );
     expect(record.match).toBe(true);
   });
 });

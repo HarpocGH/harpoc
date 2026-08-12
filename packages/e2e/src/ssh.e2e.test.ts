@@ -1,31 +1,31 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Permission } from "@harpoc/shared";
 import { assertOpaque } from "./assert/opacity.js";
-import { emit } from "./evidence/record.js";
-import { loadExpectations, expectationFor } from "./evidence/preregistration.js";
-import {
-  createHarnessVault,
-  storeSecret,
-  EVIDENCE_FILE,
-  PREREGISTRATION_FILE,
-} from "./harness/vault.js";
+import { createHarnessVault, storeSecret } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
+import { expectAttributedSuccess } from "./harness/audit.js";
+import { recordArm } from "./harness/evidence.js";
 import { startMcpHttpSurface } from "./harness/surfaces/mcp-http.js";
-import type { McpHttpSurface } from "./harness/surfaces/mcp-http.js";
+import type { CallOutcome, McpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import { preferNativeSsh, resolveSsh } from "./harness/fixtures.js";
 import { clientKeyPem, knownHostPin } from "./harness/ssh.js";
 import { SSHD_PINNED, SSHD_ROGUE, assertFleetUp } from "./harness/backends.js";
 
 const PASSWORD = "e2e-ssh-pw";
 
-interface AuditRow {
-  success: boolean;
-  detail: Record<string, unknown> | null;
-}
-
-function detailString(row: AuditRow, key: string): string | undefined {
-  const value = (row.detail ?? {})[key];
-  return typeof value === "string" ? value : undefined;
+/** The SshResult carried in the tool response's text (already surface-joined). */
+function sshResult(outcome: CallOutcome): {
+  exit_code?: number;
+  stdout?: string;
+  stderr?: string;
+  error?: string;
+} {
+  return JSON.parse(outcome.text) as {
+    exit_code?: number;
+    stdout?: string;
+    stderr?: string;
+    error?: string;
+  };
 }
 
 /**
@@ -111,36 +111,28 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
     });
 
     expect(outcome.ok).toBe(true);
-    // The remote shell really ran — `id -un` returns the authenticated user.
-    // This is a completed ssh injection, not a rejection short of the backend.
-    expect(JSON.stringify(outcome.result)).toContain(SSHD_PINNED.user);
+    // The remote shell really ran: exit 0, no in-band error, and `id -un` put
+    // the authenticated user on STDOUT. The ssh-injector reports auth failures
+    // in-band (exit 255, error: SSH_CONNECT_FAILED, ok still true) with the
+    // user echoed in ssh's own stderr ("harpoc@…: Permission denied"), so a
+    // whole-result substring match would pass on a failed authentication.
+    const r = sshResult(outcome);
+    expect(r.exit_code, outcome.text).toBe(0);
+    expect(r.error).toBeUndefined();
+    expect(r.stdout ?? "").toContain(SSHD_PINNED.user);
 
     const auditRows = vault.engine.queryAudit({ eventType: "secret.use" });
     assertOpaque(sshKey, { result: outcome.result, auditRows, parentEnv: process.env });
 
-    const expected = expectationFor(loadExpectations(PREREGISTRATION_FILE), {
-      scenario: "ssh-happy-path",
-      context: "ssh",
-      surface: "mcp-http",
-      arm: "harpoc",
-    });
-    const record = emit(EVIDENCE_FILE, {
-      scenario: "ssh-happy-path",
-      context: "ssh",
-      surface: "mcp-http",
-      arm: "harpoc",
-      expected,
-      observed: "SUCCEEDED",
-    });
+    const record = recordArm(
+      { scenario: "ssh-happy-path", context: "ssh", surface: "mcp-http", arm: "harpoc" },
+      "SUCCEEDED",
+    );
     expect(record.match).toBe(true);
   });
 
   it("writes a successful ssh audit row attributed to the mcp-http interface", () => {
-    const rows = vault.engine.queryAudit({ eventType: "secret.use" }) as unknown as AuditRow[];
-    const success = rows.find((r) => r.success === true && detailString(r, "context") === "ssh");
-    expect(success).toBeDefined();
-    expect(success && detailString(success, "interface")).toBe("mcp-http");
-    expect(vault.engine.verifyAuditChain().valid).toBe(true);
+    expectAttributedSuccess(vault, "ssh");
   });
 
   it("refuses a server whose host key does not match the pin (no TOFU)", async () => {
@@ -152,26 +144,20 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
     });
 
     expect(outcome.ok).toBe(false);
+    // The refusal REASON is the host-key mismatch — an agent-start failure or
+    // allowlist drift would also produce ok === false and must not satisfy the
+    // arm that certifies no-TOFU pinning.
+    expect(outcome.errorText ?? "").toContain("host key does not match the pinned key");
     // The rogue shell never ran: no authenticated user in the result.
     expect(JSON.stringify(outcome.result ?? "")).not.toContain(SSHD_ROGUE.user);
 
     const auditRows = vault.engine.queryAudit({ eventType: "secret.use" });
     assertOpaque(sshKey, { result: outcome.result, error: outcome.errorText, auditRows });
 
-    const expected = expectationFor(loadExpectations(PREREGISTRATION_FILE), {
-      scenario: "ssh-host-key-mismatch",
-      context: "ssh",
-      surface: "mcp-http",
-      arm: "harpoc",
-    });
-    const record = emit(EVIDENCE_FILE, {
-      scenario: "ssh-host-key-mismatch",
-      context: "ssh",
-      surface: "mcp-http",
-      arm: "harpoc",
-      expected,
-      observed: "REJECTED",
-    });
+    const record = recordArm(
+      { scenario: "ssh-host-key-mismatch", context: "ssh", surface: "mcp-http", arm: "harpoc" },
+      "REJECTED",
+    );
     expect(record.match).toBe(true);
   });
 
@@ -184,25 +170,18 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
     });
 
     expect(outcome.ok).toBe(false);
+    // The refusal REASON is the host allowlist — this is what makes the arm
+    // evidence for allowlist enforcement rather than any pre-spawn failure.
+    expect(outcome.errorText ?? "").toContain("Host not in secret allowlist");
     expect(JSON.stringify(outcome.result ?? "")).not.toContain(SSHD_PINNED.user);
 
     const auditRows = vault.engine.queryAudit({ eventType: "secret.use" });
     assertOpaque(sshKey, { result: outcome.result, error: outcome.errorText, auditRows });
 
-    const expected = expectationFor(loadExpectations(PREREGISTRATION_FILE), {
-      scenario: "ssh-host-not-allowed",
-      context: "ssh",
-      surface: "mcp-http",
-      arm: "harpoc",
-    });
-    const record = emit(EVIDENCE_FILE, {
-      scenario: "ssh-host-not-allowed",
-      context: "ssh",
-      surface: "mcp-http",
-      arm: "harpoc",
-      expected,
-      observed: "REJECTED",
-    });
+    const record = recordArm(
+      { scenario: "ssh-host-not-allowed", context: "ssh", surface: "mcp-http", arm: "harpoc" },
+      "REJECTED",
+    );
     expect(record.match).toBe(true);
   });
 });

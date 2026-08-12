@@ -1,5 +1,6 @@
-import { existsSync, realpathSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { existsSync } from "node:fs";
+import { delimiter, dirname, join } from "node:path";
+import { controlledPathDirs, resolveExecutable } from "@harpoc/core";
 
 const isWin = process.platform === "win32";
 
@@ -49,39 +50,92 @@ export function preferNativeSsh(): void {
   );
 }
 
-function resolveOnPath(name: string): string | null {
-  const exts = isWin ? ["", ".exe", ".com"] : [""];
-  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
-    if (!dir) continue;
-    for (const ext of exts) {
-      const candidate = join(dir, name + ext);
-      if (existsSync(candidate)) {
-        try {
-          return realpathSync(candidate);
-        } catch {
-          return candidate;
-        }
-      }
-    }
-  }
-  return null;
-}
-
 /**
  * The absolute ssh/git path to pin in the secret's command_allowlist. Resolved
- * through the same PATH the injector uses so the allowlist entry and the
- * injector's own resolution land on one real file (F-6); the injector realpaths
- * both sides, so returning the realpath here keeps the match exact.
+ * with the injector's OWN resolver against the same PATH (F-6): a hand-rolled
+ * walk here previously accepted directories and non-regular files (existsSync
+ * is true for a PATH entry's subdirectory named `git`), pinning a path the
+ * injector's resolution would never produce and failing every arm with a
+ * misleading COMMAND_NOT_ALLOWED. `resolveExecutable` stats for a regular
+ * file, excludes batch files and realpaths — the allowlist entry and the
+ * injector land on one real file by construction.
  */
 export function resolveSsh(): string {
   preferNativeSsh();
-  const p = resolveOnPath("ssh");
+  const p = resolveExecutable("ssh", controlledPathDirs());
   if (!p) throw new Error("no ssh binary found on PATH — install OpenSSH");
   return p;
 }
 
 export function resolveGit(): string {
-  const p = resolveOnPath("git");
+  const p = resolveExecutable("git", controlledPathDirs());
   if (!p) throw new Error("no git binary found on PATH — install git");
   return p;
+}
+
+/**
+ * The openssl the PKI fixture tests inspect certificates with. Rarely on the
+ * Windows PATH; Git-for-Windows bundles one under usr\bin, resolved the same
+ * way resolveBash finds its bash.
+ */
+export function resolveOpenssl(): string {
+  const onPath = resolveExecutable("openssl", controlledPathDirs());
+  if (onPath) return onPath;
+  if (isWin) {
+    const candidates: string[] = [];
+    const git = resolveExecutable("git", controlledPathDirs());
+    if (git) {
+      for (const root of [dirname(dirname(git)), dirname(dirname(dirname(git)))]) {
+        candidates.push(join(root, "usr", "bin", "openssl.exe"));
+      }
+    }
+    candidates.push("C:\\Program Files\\Git\\usr\\bin\\openssl.exe");
+    for (const c of candidates) {
+      const p = resolveExecutable(c, []);
+      if (p) return p;
+    }
+  }
+  throw new Error("no openssl found — install OpenSSL (Git for Windows bundles one)");
+}
+
+/**
+ * The bash that runs the fixture generators. On POSIX this is PATH bash. On a
+ * Windows dev host `bash` on PATH may resolve to the System32 WSL launcher,
+ * which forwards the Windows script path verbatim into the Linux environment
+ * ("No such file or directory") — so Git-for-Windows' own bash is derived from
+ * the resolved git binary (…\Git\{cmd,mingw64\bin,bin}\git.exe →
+ * …\Git\bin\bash.exe) with the standard install locations as fallback; a PATH
+ * bash is accepted only when it is not under System32. `bin\bash.exe` — the
+ * launcher that bootstraps the MSYS PATH — deliberately precedes
+ * `usr\bin\bash.exe`, which runs the script with the ambient Windows PATH and
+ * dies on the first coreutil (`dirname: command not found`, live-verified).
+ * Dist-free twin for provisioning: scripts/generate-fixtures.mjs — keep the
+ * candidate order in sync.
+ */
+export function resolveBash(): string {
+  if (!isWin) {
+    const p = resolveExecutable("bash", controlledPathDirs());
+    if (!p) throw new Error("no bash found on PATH — install bash");
+    return p;
+  }
+  const candidates: string[] = [];
+  const git = resolveExecutable("git", controlledPathDirs());
+  if (git) {
+    for (const root of [dirname(dirname(git)), dirname(dirname(dirname(git)))]) {
+      candidates.push(join(root, "bin", "bash.exe"), join(root, "usr", "bin", "bash.exe"));
+    }
+  }
+  candidates.push(
+    "C:\\Program Files\\Git\\bin\\bash.exe",
+    "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+  );
+  for (const c of candidates) {
+    const p = resolveExecutable(c, []);
+    if (p) return p;
+  }
+  const onPath = resolveExecutable("bash", controlledPathDirs());
+  if (onPath && !/\\windows\\system32\\/i.test(onPath)) return onPath;
+  throw new Error(
+    `no usable bash found — the WSL launcher cannot run Windows script paths; install Git for Windows (looked in:\n${candidates.map((c) => `  ${c}`).join("\n")})`,
+  );
 }

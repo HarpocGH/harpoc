@@ -16,10 +16,10 @@
     "@modelcontextprotocol/sdk": "^1.27.1"
   },
   "scripts": {
-    "pki": "bash fixtures/pki/generate.sh",
-    "keys": "bash fixtures/keys/generate.sh",
-    "repos": "bash fixtures/repos/generate.sh",
-    "fleet:up": "pnpm pki && pnpm keys && pnpm repos && docker compose up -d --wait --build",
+    "pki": "node scripts/generate-fixtures.mjs pki",
+    "keys": "node scripts/generate-fixtures.mjs keys",
+    "repos": "node scripts/generate-fixtures.mjs repos",
+    "fleet:up": "node scripts/fleet-preflight.mjs && pnpm pki && pnpm keys && pnpm repos && docker compose up -d --wait --build",
     "fleet:down": "docker compose down -v",
     "typecheck": "tsc --noEmit",
     "test:e2e": "vitest run"

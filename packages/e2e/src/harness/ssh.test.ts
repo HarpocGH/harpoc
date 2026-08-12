@@ -2,11 +2,18 @@ import { describe, it, expect, beforeAll } from "vitest";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { resolveBash } from "./fixtures.js";
 import { KEYS_DIR, clientKeyPem, keysReady, knownHostPin } from "./ssh.js";
+
+// resolveBash, not bare "bash": on a Windows dev host PATH bash may be the
+// System32 WSL launcher, which cannot open the absolute Windows script path.
+// Forward slashes because the argument crosses into an MSYS program.
+const BASH = resolveBash();
+const GENERATE = join(KEYS_DIR, "generate.sh").replace(/\\/g, "/");
 
 describe("fixture ssh keys", () => {
   beforeAll(() => {
-    execFileSync("bash", [join(KEYS_DIR, "generate.sh")], { stdio: "inherit" });
+    execFileSync(BASH, [GENERATE], { stdio: "inherit" });
   });
 
   it("generates the client identity and both host keypairs", () => {
@@ -24,11 +31,30 @@ describe("fixture ssh keys", () => {
     }
   });
 
-  it("stores the client private key in an unencrypted OpenSSH format the loader accepts", () => {
+  it("stores the client private key in an unencrypted OpenSSH container (cipher and kdf `none`)", () => {
     const pem = clientKeyPem();
     expect(pem).toMatch(/^-----BEGIN OPENSSH PRIVATE KEY-----/);
-    // Cipher `none` — an encrypted container would carry a bcrypt kdf marker.
-    expect(pem).not.toMatch(/bcrypt/i);
+    // The cipher and kdf names live only inside the base64 payload — an
+    // encrypted container never carries a literal "bcrypt" in the armor, so a
+    // grep of the PEM text is vacuous. Decode the container and read the two
+    // length-prefixed fields after the "openssh-key-v1\0" magic directly: a
+    // passphrase-protected key reports aes256-ctr/bcrypt here.
+    const body = pem
+      .replace(/-----(?:BEGIN|END) OPENSSH PRIVATE KEY-----/g, "")
+      .replace(/\s+/g, "");
+    const blob = Buffer.from(body, "base64");
+    const magic = "openssh-key-v1\0";
+    expect(blob.subarray(0, magic.length).toString("latin1")).toBe(magic);
+    let off = magic.length;
+    const readString = (): string => {
+      const len = blob.readUInt32BE(off);
+      off += 4;
+      const s = blob.subarray(off, off + len).toString("latin1");
+      off += len;
+      return s;
+    };
+    expect(readString()).toBe("none"); // ciphername
+    expect(readString()).toBe("none"); // kdfname
   });
 
   it("authorizes exactly the client public key, nothing else", () => {
@@ -57,7 +83,7 @@ describe("fixture ssh keys", () => {
 
   it("is idempotent — a second run does not regenerate the client key", () => {
     const before = readFileSync(join(KEYS_DIR, "out", "client_ed25519"), "utf8");
-    execFileSync("bash", [join(KEYS_DIR, "generate.sh")], { stdio: "inherit" });
+    execFileSync(BASH, [GENERATE], { stdio: "inherit" });
     expect(readFileSync(join(KEYS_DIR, "out", "client_ed25519"), "utf8")).toBe(before);
   });
 });

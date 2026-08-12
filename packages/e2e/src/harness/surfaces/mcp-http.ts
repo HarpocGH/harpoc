@@ -8,6 +8,10 @@ import type { HarnessVault } from "../vault.js";
 export interface CallOutcome {
   ok: boolean;
   result?: unknown;
+  /** The joined text content of the tool result — on ok results this is the
+   * JSON-serialized use_secret response, so arms parse it instead of
+   * re-implementing the content-joining locally. */
+  text: string;
   errorText?: string;
 }
 
@@ -54,8 +58,8 @@ export async function startMcpHttpSurface(
       })) as { isError?: boolean; content?: unknown };
 
       const text = textOf(raw);
-      if (raw.isError === true) return { ok: false, result: raw, errorText: text };
-      return { ok: true, result: raw };
+      if (raw.isError === true) return { ok: false, result: raw, text, errorText: text };
+      return { ok: true, result: raw, text };
     },
     async close() {
       await client.close();

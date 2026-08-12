@@ -13,9 +13,21 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$DIR/out"
 
-if [ -d "$OUT/clean.git" ]; then
+# The sentinel checks the LAST artifact of each repo (info/refs is written by
+# the final update-server-info step), not just clean.git's existence: a run
+# killed mid-generation must not read as complete. A partial set is wiped and
+# regenerated.
+complete=1
+for p in clean.git/info/refs submodule.git/info/refs; do
+  [ -f "$OUT/$p" ] || complete=0
+done
+if [ "$complete" = 1 ]; then
   echo "repos: already generated at $OUT"
   exit 0
+fi
+if [ -d "$OUT" ] && [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
+  echo "repos: incomplete artifact set at $OUT — regenerating" >&2
+  rm -rf "$OUT"
 fi
 
 mkdir -p "$OUT"

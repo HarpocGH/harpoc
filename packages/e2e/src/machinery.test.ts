@@ -1,15 +1,9 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { assertOpaque, assertPresent } from "./assert/opacity.js";
-import { emit } from "./evidence/record.js";
-import { loadExpectations, expectationFor } from "./evidence/preregistration.js";
-import {
-  createHarnessVault,
-  storeSecret,
-  EVIDENCE_FILE,
-  PREREGISTRATION_FILE,
-} from "./harness/vault.js";
+import { createHarnessVault, storeSecret, EVIDENCE_FILE } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
+import { recordArm } from "./harness/evidence.js";
 import { resolvePrintenv } from "./harness/fixtures.js";
 
 const PASSWORD = "e2e-machinery-pw";
@@ -66,20 +60,10 @@ describe("harness machinery, proven against the process context", () => {
     // if the vault had scrubbed the child's entire stdout.
     assertPresent(MARKER, { result });
 
-    const expected = expectationFor(loadExpectations(PREREGISTRATION_FILE), {
-      scenario: "machinery-selfcheck",
-      context: "process",
-      surface: "engine",
-      arm: "harpoc",
-    });
-    const record = emit(EVIDENCE_FILE, {
-      scenario: "machinery-selfcheck",
-      context: "process",
-      surface: "engine",
-      arm: "harpoc",
-      expected,
-      observed: "OPAQUE",
-    });
+    const record = recordArm(
+      { scenario: "machinery-selfcheck", context: "process", surface: "engine", arm: "harpoc" },
+      "OPAQUE",
+    );
 
     expect(record.match).toBe(true);
     expect(readFileSync(EVIDENCE_FILE, "utf8")).toContain("machinery-selfcheck");
