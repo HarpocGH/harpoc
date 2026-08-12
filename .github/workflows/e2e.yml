@@ -24,6 +24,18 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - name: Release host port 22 for the ssh backends
+        # The `ssh` context is port-22-only (SshAction has no port field), so the
+        # sshd containers publish on loopback aliases at :22. GitHub-hosted runners
+        # keep an sshd on port 22 (socket-activated on recent Ubuntu), which the
+        # alias binds collide with; the runner does not use inbound ssh for the
+        # job, so releasing it is safe and scoped to this ephemeral VM.
+        run: |
+          echo "port 22 before:"; sudo ss -tlnp 'sport = :22' || true
+          sudo systemctl stop ssh.socket ssh.service 2>/dev/null || true
+          sudo fuser -k 22/tcp 2>/dev/null || true
+          sleep 1
+          echo "port 22 after:"; sudo ss -tlnp 'sport = :22' || true
       - name: Bring up the backend fleet
         # `fleet:up`, never `up`: `up` is a builtin pnpm alias for `pnpm update`,
         # which shadows a package script of the same name (review 2026-08-11, C2).
