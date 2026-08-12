@@ -217,10 +217,55 @@ describe("HttpInjector attribution", () => {
       expect(result.status).toBe(200);
       const [row] = rows(log);
       expect(row?.detail?.status).toBe(200);
+      expect(row?.detail?.context).toBe("http");
       expectAttributed(row as AuditLogOptions);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+
+  // D3 (Phase 3 plan): the http context must stamp detail.context on every row it
+  // writes, like the other five injectors — success and both failure paths.
+  it("stamps context on the VaultError failure row", async () => {
+    const { log, logger } = captureLogger();
+    const injector = new HttpInjector(logger);
+    await expect(
+      injector.executeWithSecret(
+        { method: "GET", url: "https://10.0.0.1/" },
+        SECRET,
+        { type: "bearer" },
+        "same-origin",
+        "secret-1",
+        ATTRIBUTION,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.SSRF_BLOCKED });
+    const [row] = rows(log);
+    expect(row?.success).toBe(false);
+    expect(row?.detail?.context).toBe("http");
+    expectAttributed(row as AuditLogOptions);
+  });
+
+  it("stamps context on the classified-fetch-error failure row", async () => {
+    const server = createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+
+    const { log, logger } = captureLogger();
+    const injector = new HttpInjector(logger);
+    const result = await injector.executeWithSecret(
+      { method: "GET", url: `http://127.0.0.1:${port}/` },
+      SECRET,
+      { type: "bearer" },
+      "same-origin",
+      "secret-1",
+      ATTRIBUTION,
+    );
+    expect(result.status).toBeNull();
+    expect(result.error).toBeDefined();
+    const [row] = rows(log);
+    expect(row?.success).toBe(false);
+    expect(row?.detail?.context).toBe("http");
   });
 });
 

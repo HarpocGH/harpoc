@@ -179,6 +179,7 @@ export class HttpInjector {
             eventType: "secret.use",
             secretId,
             detail: {
+              context: "http",
               method: request.method,
               url: request.url,
               status: response.status,
@@ -204,6 +205,7 @@ export class HttpInjector {
               eventType: "secret.use",
               secretId,
               detail: {
+                context: "http",
                 method: request.method,
                 url: request.url,
                 error: err.code,
@@ -232,6 +234,7 @@ export class HttpInjector {
             eventType: "secret.use",
             secretId,
             detail: {
+              context: "http",
               method: request.method,
               url: request.url,
               error: errorCode,
