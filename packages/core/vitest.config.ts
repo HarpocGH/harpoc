@@ -16,9 +16,10 @@ export default defineConfig({
     // A dozen suites call initVault/unlock/changePassword with the real
     // Argon2id (2 GiB per derivation under the RFC 9106 profile); at the
     // default worker count the 7 GB macOS runners swap and marginal suites
-    // blow even the 30 s ceiling. Two workers cap peak KDF memory at 4 GiB —
-    // the same bound integration uses.
-    maxWorkers: 2,
+    // blow even the 30 s ceiling. Two workers (4 GiB peak) still sat at the
+    // paging edge there — run 31592644014 lost a single deriveKey to >30 s —
+    // so darwin gets one. The 16 GB ubuntu/windows runners keep two.
+    maxWorkers: process.platform === "darwin" ? 1 : 2,
     env: {
       // Keystore session wrapping stays off in tests: on Windows every engine
       // session write/read would otherwise spawn a PowerShell DPAPI helper.
