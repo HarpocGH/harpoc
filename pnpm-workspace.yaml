@@ -1,2 +1,18 @@
 packages:
   - "packages/*"
+
+# pnpm 10.x (the pinned packageManager) reads onlyBuiltDependencies; pnpm 11 removed
+# that key for allowBuilds and turns an undecided build script into a failed install
+# (ERR_PNPM_IGNORED_BUILDS), so every package with an install script needs a verdict.
+# The three false entries have had their scripts skipped since v1.0 with CI green:
+# esbuild gets its binary from the platform package, cpu-features and ssh2 (a core
+# test-only dependency) are optional native accelerators with pure-JS fallbacks.
+onlyBuiltDependencies:
+  - argon2
+  - better-sqlite3
+allowBuilds:
+  argon2: true
+  better-sqlite3: true
+  cpu-features: false
+  esbuild: false
+  ssh2: false

@@ -55,7 +55,7 @@ Storage     SQLite (WAL mode, encrypted payloads)
 
 ## Quick Start
 
-**Prerequisites:** Node.js 22+, pnpm 10+
+**Prerequisites:** Node.js 22+, pnpm 10 or 11 (the repository pins `packageManager`)
 
 ```bash
 git clone https://github.com/HarpocGH/harpoc.git

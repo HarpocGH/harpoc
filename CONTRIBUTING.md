@@ -5,7 +5,9 @@ Thank you for your interest in contributing to Harpoc! This document provides gu
 ## Prerequisites
 
 - Node.js 22+
-- pnpm 10+
+- pnpm 10 or 11 — the repository pins `packageManager` (pnpm 10.11.0), which both `pnpm/action-setup` in CI and pnpm's own version management honour, so `npx pnpm` on a pnpm 11 host still runs the pinned version
+
+Approval for the two native build scripts (`argon2`, `better-sqlite3`) lives in `pnpm-workspace.yaml`, which carries the pnpm 10 (`onlyBuiltDependencies`) and pnpm 11 (`allowBuilds`) forms side by side. A package added later that ships an install script needs a verdict in `allowBuilds`, or pnpm 11 fails the install with `ERR_PNPM_IGNORED_BUILDS`.
 
 ## Setup
 
