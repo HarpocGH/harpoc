@@ -13,6 +13,12 @@ export default defineConfig({
     // Engine-building beforeEach fixtures sporadically blow the 10 s vitest
     // default on loaded CI runners — same ceiling as the tests themselves.
     hookTimeout: 30_000,
+    // A dozen suites call initVault/unlock/changePassword with the real
+    // Argon2id (2 GiB per derivation under the RFC 9106 profile); at the
+    // default worker count the 7 GB macOS runners swap and marginal suites
+    // blow even the 30 s ceiling. Two workers cap peak KDF memory at 4 GiB —
+    // the same bound integration uses.
+    maxWorkers: 2,
     env: {
       // Keystore session wrapping stays off in tests: on Windows every engine
       // session write/read would otherwise spawn a PowerShell DPAPI helper.
