@@ -113,6 +113,45 @@ describe("secret use — token-scoped path (D1)", () => {
     expect(mockEngine.verifyToken).toHaveBeenCalledWith("flag-jwt");
     expect(mockEngine.verifyToken).toHaveBeenCalledTimes(1);
   });
+
+  // A present-but-empty token must not degrade into the MORE privileged path.
+  it("refuses an empty --token instead of silently using the trusted local path", async () => {
+    await expect(run(["secret://api-key", ...HTTP_ARGS, "--token", ""])).rejects.toThrow(
+      "process.exit",
+    );
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("supplied but empty"));
+    expect(mockEngine.verifyToken).not.toHaveBeenCalled();
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+  });
+
+  it("refuses an empty ambient HARPOC_TOKEN the same way", async () => {
+    process.env.HARPOC_TOKEN = "";
+    await expect(run(["secret://api-key", ...HTTP_ARGS])).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("HARPOC_TOKEN"));
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+  });
+
+  it("an absent HARPOC_TOKEN is still the trusted local path (the control)", async () => {
+    delete process.env.HARPOC_TOKEN;
+    await run(["secret://api-key", ...HTTP_ARGS]);
+    expect(mockEngine.useSecret).toHaveBeenCalledWith(
+      "secret://api-key",
+      expect.anything(),
+      undefined,
+    );
+  });
+
+  it("documents the argv exposure its sibling token flags document", () => {
+    const program = new Command();
+    const secret = program.command("secret");
+    registerSecretUseCommand(secret);
+    const use = secret.commands.find((c) => c.name() === "use");
+    const tokenOption = use?.options.find((o) => o.long === "--token");
+    expect(tokenOption?.description).toMatch(/HARPOC_TOKEN/);
+    expect(tokenOption?.description).toMatch(/visible to other local processes/i);
+  });
 });
 
 describe("secret use — token denials refuse before the injection runs", () => {
