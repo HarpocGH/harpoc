@@ -36,6 +36,26 @@ jobs:
           sudo fuser -k 22/tcp 2>/dev/null || true
           sleep 1
           echo "port 22 after:"; sudo ss -tlnp 'sport = :22' || true
+      - name: Relax the AppArmor userns restriction for network isolation
+        # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor, so
+        # `unshare -rn` fails and the vault's live isolation probe reports the
+        # platform cannot deliver. That is correct fail-closed behaviour — and
+        # it is why the §6.2.6 network-isolation arm, which pre-registers
+        # BLOCKED on Linux, observed REFUSED_UNAVAILABLE on every run of this
+        # workflow before 2026-08-13 and took the leg down with it.
+        #
+        # ci.yml already relaxes the restriction for the integration suite; the
+        # harness needs the same, or this leg measures the runner's hardening
+        # rather than the vault. A warning rather than a failure: the arm itself
+        # fails loudly against its pre-registration if isolation is still
+        # unavailable, which is the honest place for that to surface.
+        run: |
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true
+          unshare -rn -- /bin/true && echo "unshare -rn OK" || {
+            echo "::warning::unshare -rn probe failed — relaxing AppArmor userns restriction"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+            unshare -rn -- /bin/true && echo "unshare -rn OK after sysctl" || echo "::warning::unshare -rn still failing"
+          }
       - name: Bring up the backend fleet
         # `fleet:up`, never `up`: `up` is a builtin pnpm alias for `pnpm update`,
         # which shadows a package script of the same name (review 2026-08-11, C2).
