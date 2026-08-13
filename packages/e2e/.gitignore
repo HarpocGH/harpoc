@@ -5,3 +5,6 @@
 /fixtures/keys/out/
 /fixtures/repos/out/
 /evidence/
+# Generated Chapter 6 tables. The citable copies live in docs/thesis/generated/
+# — code here, artifacts there.
+/out/

@@ -29,6 +29,7 @@
     "fleet:recreate": "node scripts/fleet-preflight.mjs && pnpm pki && pnpm keys && pnpm repos && docker compose up -d --wait --build --force-recreate",
     "fleet:down": "docker compose down -v",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "node scripts/run-e2e.mjs"
+    "test:e2e": "node scripts/run-e2e.mjs",
+    "tables": "node scripts/generate-tables.mjs"
   }
 }
