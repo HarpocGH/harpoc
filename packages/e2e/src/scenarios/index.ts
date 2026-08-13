@@ -4,6 +4,9 @@ import { URL_MANIPULATION_ARMS } from "./url-manipulation.js";
 import { SHADOW_ESCAPE_ARMS } from "./shadow-escape.js";
 import { OUTPUT_CHANNEL_ARMS } from "./output-channel.js";
 import { RESPONSE_CHANNEL_ARMS } from "./response-channel.js";
+import { TOOL_POISONING_ARMS } from "./tool-poisoning.js";
+import { LOG_TO_LEAK_ARMS } from "./log-to-leak.js";
+import { TARGETED_ARMS, BASELINE_COUNTERPART_ARMS } from "./targeted.js";
 
 /**
  * Every §6.2 attack arm, as data.
@@ -20,7 +23,11 @@ export const SCENARIO_ARMS: ScenarioArm[] = [
   ...SHADOW_ESCAPE_ARMS,
   ...OUTPUT_CHANNEL_ARMS,
   ...RESPONSE_CHANNEL_ARMS,
+  ...TOOL_POISONING_ARMS,
+  ...LOG_TO_LEAK_ARMS,
+  ...TARGETED_ARMS,
+  ...BASELINE_COUNTERPART_ARMS,
 ];
 
-export { Outcome } from "./scenario.js";
+export { Outcome, armsOf } from "./scenario.js";
 export type { ScenarioArm, ScenarioSetup, OutcomeValue } from "./scenario.js";

@@ -23,6 +23,15 @@ import type { Arm } from "../arms/arm.js";
 export const Outcome = {
   OPAQUE: "OPAQUE",
   LEAKED: "LEAKED",
+  /**
+   * The operation completed. Shared with the Phase 1–3 demonstration cells,
+   * which emit it as a literal; the baseline counterparts of the targeted
+   * refusals need it as a scenario outcome, because what they show is precisely
+   * that the status quo does not stop the call — not that anything hostile
+   * received the credential. Rounding those up to EXFILTRATED would overstate
+   * the row, and the four cells of a paired row are read together.
+   */
+  SUCCEEDED: "SUCCEEDED",
   EXFILTRATED: "EXFILTRATED",
   BLOCKED: "BLOCKED",
   BYPASSED: "BYPASSED",
@@ -63,7 +72,22 @@ export interface ScenarioArm {
    * pre-registration key; absent is its own key, never a wildcard.
    */
   variant?: string;
+  /**
+   * Which sides to run; both by default.
+   *
+   * The Phase 1–2 targeted refusals already emit their Harpoc half from the
+   * context suites that own them (`git.e2e.test.ts` and friends), so Phase 4B
+   * supplies only the missing baseline. Re-running the Harpoc side here would
+   * write a second evidence record under a key that already has one, and the
+   * generated table would then have two observations for one cell.
+   */
+  arms?: ReadonlyArray<"baseline" | "harpoc">;
   services?: FleetService[];
   setup(vault: HarnessVault): Promise<ScenarioSetup>;
   observe(arm: Arm, setup: ScenarioSetup): Promise<OutcomeValue>;
+}
+
+/** The sides a scenario arm runs, defaulted once so callers cannot disagree. */
+export function armsOf(arm: ScenarioArm): ReadonlyArray<"baseline" | "harpoc"> {
+  return arm.arms ?? ["baseline", "harpoc"];
 }

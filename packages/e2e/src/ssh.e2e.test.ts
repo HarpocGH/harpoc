@@ -10,6 +10,7 @@ import type { CallOutcome, McpHttpSurface } from "./harness/surfaces/mcp-http.js
 import { preferNativeSsh, resolveSsh } from "./harness/fixtures.js";
 import { clientKeyPem, knownHostPin } from "./harness/ssh.js";
 import { SSHD_PINNED, SSHD_ROGUE, assertFleetUp } from "./harness/backends.js";
+import { SSH_PINNED_PAYLOAD, SSH_ROGUE_PAYLOAD } from "./harness/payloads.js";
 
 const PASSWORD = "e2e-ssh-pw";
 
@@ -142,12 +143,7 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
   });
 
   it("refuses a server whose host key does not match the pin (no TOFU)", async () => {
-    const outcome = await surface.callUseSecret(mismatchHandle, {
-      type: "ssh",
-      host: SSHD_ROGUE.host,
-      user: SSHD_ROGUE.user,
-      command: "id -un",
-    });
+    const outcome = await surface.callUseSecret(mismatchHandle, SSH_ROGUE_PAYLOAD);
 
     expect(outcome.ok).toBe(false);
     // The refusal REASON is the host-key mismatch — an agent-start failure or
@@ -174,12 +170,7 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
   });
 
   it("refuses a host outside the allowlist before any connection", async () => {
-    const outcome = await surface.callUseSecret(notAllowedHandle, {
-      type: "ssh",
-      host: SSHD_PINNED.host,
-      user: SSHD_PINNED.user,
-      command: "id -un",
-    });
+    const outcome = await surface.callUseSecret(notAllowedHandle, SSH_PINNED_PAYLOAD);
 
     expect(outcome.ok).toBe(false);
     // The refusal REASON is the host allowlist — this is what makes the arm

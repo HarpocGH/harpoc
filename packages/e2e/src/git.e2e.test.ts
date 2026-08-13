@@ -13,10 +13,17 @@ import type { CallOutcome, McpHttpSurface } from "./harness/surfaces/mcp-http.js
 import { preferNativeSsh, resolveGit } from "./harness/fixtures.js";
 import { clientKeyPem, knownHostPin } from "./harness/ssh.js";
 import { GIT_HTTP, SSHD_PINNED, assertFleetUp } from "./harness/backends.js";
+import { resetSink, sinkRequests } from "./harness/attacker.js";
+import {
+  GIT_HTTP_BASE,
+  GIT_HTTP_CREDENTIAL,
+  gitRedirectPayload,
+  gitSubmodulePayload,
+} from "./harness/payloads.js";
 
 const PASSWORD = "e2e-git-pw";
-const GIT_HTTP_SECRET = `${GIT_HTTP.user}:${GIT_HTTP.password}`;
-const BASE = `http://${GIT_HTTP.host}:${GIT_HTTP.port}`;
+const GIT_HTTP_SECRET = GIT_HTTP_CREDENTIAL;
+const BASE = GIT_HTTP_BASE;
 
 /**
  * The GitResult carried in the tool response's text content (already joined by
@@ -62,6 +69,10 @@ describe("git context — live clones over http and ssh", () => {
   beforeAll(async () => {
     assertFleetUp("git-http");
     assertFleetUp("sshd-pinned");
+    // The H6a redirect and the H6b .gitmodules both point at the sink, and both
+    // arms read it back: a missing sink must fail loudly, never silently turn
+    // "nothing arrived" into a tautology.
+    assertFleetUp("attacker");
     preferNativeSsh();
     const gitBin = resolveGit();
 
@@ -178,12 +189,11 @@ describe("git context — live clones over http and ssh", () => {
 
   it("refuses to follow a redirect off-box, withholding the credential (H6a)", async () => {
     const dest = freshCloneDir();
-    const outcome = await surface.callUseSecret(httpHandle, {
-      type: "git",
-      operation: "clone",
-      repository: `${BASE}/redirect/clean.git`,
-      working_directory: dest,
-    });
+    // Emptied immediately before the call, so "the sink stayed empty" is this
+    // arm's own property rather than a statement about the container's whole
+    // lifetime.
+    await resetSink();
+    const outcome = await surface.callUseSecret(httpHandle, gitRedirectPayload(dest));
 
     // The git process runs (no VaultError), but http.followRedirects=false stops
     // it before the redirect target is reached: a non-zero exit, no working tree.
@@ -194,11 +204,15 @@ describe("git context — live clones over http and ssh", () => {
     // The DISCRIMINATING signal (live-pinned against git 2.51): with the guard
     // active, curl reports the refused redirect at the origin — "The requested
     // URL returned error: 302". With the guard dropped, git follows the 302
-    // off-box and dies at DNS instead ("Could not resolve host"), which the
-    // exit-code and working-tree assertions above cannot tell apart.
+    // off-box, which the exit-code and working-tree assertions cannot tell
+    // apart on their own.
     expect(r.stderr ?? "").toMatch(/returned error: 302/);
-    // The off-box target was never contacted or even named.
-    expect(r.stderr ?? "").not.toMatch(/attacker\.example|Could not resolve host/);
+    // The off-box target was never contacted or even named. Since Phase 4B the
+    // redirect points at the LIVE attacker sink (so the baseline half of this
+    // paired row can actually leak), which makes the sink itself the strongest
+    // available evidence: nothing arrived there at all.
+    expect(r.stderr ?? "").not.toMatch(/55444|challenge/);
+    expect(await sinkRequests()).toEqual([]);
 
     const auditRows = vault.engine.queryAudit({ eventType: "secret.use" });
     const observation = { result: outcome.result, auditRows, parentEnv: process.env };
@@ -220,13 +234,8 @@ describe("git context — live clones over http and ssh", () => {
 
   it("denies submodule recursion before any spawn (H6b)", async () => {
     const dest = freshCloneDir();
-    const outcome = await surface.callUseSecret(httpHandle, {
-      type: "git",
-      operation: "clone",
-      repository: `${BASE}/git/submodule.git`,
-      args: ["--recurse-submodules"],
-      working_directory: dest,
-    });
+    await resetSink();
+    const outcome = await surface.callUseSecret(httpHandle, gitSubmodulePayload(dest));
 
     // The denied argument is rejected as a VaultError before git is spawned, so
     // the hostile submodule URL is never contacted and nothing is cloned. The
@@ -235,6 +244,8 @@ describe("git context — live clones over http and ssh", () => {
     expect(outcome.ok).toBe(false);
     expect(outcome.errorText ?? "").toContain("disallowed git argument: --recurse-submodules");
     expect(existsSync(join(dest, "README.md"))).toBe(false);
+    // The .gitmodules URL is a live sink since Phase 4B: nothing reached it.
+    expect(await sinkRequests()).toEqual([]);
 
     const auditRows = vault.engine.queryAudit({ eventType: "secret.use" });
     assertOpaque(GIT_HTTP_SECRET, {

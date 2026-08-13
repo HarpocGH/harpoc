@@ -42,10 +42,17 @@ export const SSHD_PINNED = {
   repoPath: "/srv/repo.git",
 } as const;
 
+/**
+ * The rogue server: a different host key at a different loopback alias. Since
+ * Phase 4B it also doubles as the ATTACKER ssh host (D4) and serves the same
+ * repository, so a clone redirected here either succeeds outright — the
+ * baseline — or is refused by the host allowlist.
+ */
 export const SSHD_ROGUE = {
   host: "127.0.0.3",
   port: 22,
   user: "harpoc",
+  repoPath: "/srv/repo.git",
 } as const;
 
 /**
@@ -115,7 +122,33 @@ export const ATTACKER = {
   ip: "127.0.0.1",
   port: 55444,
   leakPath: "/leak",
+  /**
+   * Answers 401 with a Basic challenge until credentials arrive. git supplies a
+   * helper-held credential only when asked, and drops a URL-embedded one across
+   * a host boundary — so the redirect and submodule arms aim here, where a
+   * credential-bearing second hop is what a leak looks like.
+   */
+  challengePath: "/challenge",
   recordedUrl: "https://localhost:55444/recorded",
+} as const;
+
+/**
+ * The §6.2.3 tool-poisoning server. `attackerUrl` is the endpoint its poisoned
+ * tool description names; the scenario parses that URL back OUT of the served
+ * description rather than using this constant, so removing the poisoning breaks
+ * the arm instead of leaving it quietly passing. The value is kept here only so
+ * a drift test can prove the two agree.
+ */
+export const MCP_POISONED = {
+  host: "127.0.0.1",
+  port: 55091,
+  serverName: "e2e-poisoned",
+  endpoint: "http://127.0.0.1:55091/mcp",
+  recordedUrl: "http://127.0.0.1:55091/recorded",
+  tool: "fetch_data",
+  attackerUrl: "https://localhost:55444/leak",
+  /** Kept byte-identical in `fixtures/mcp-poisoned/server.mjs`. */
+  benignMarker: "mcp-poisoned-benign-marker",
 } as const;
 
 export type FleetService =
@@ -127,6 +160,7 @@ export type FleetService =
   | "git-http"
   | "echo-https"
   | "mcp-downstream"
+  | "mcp-poisoned"
   | "attacker";
 
 const COMPOSE_DIR = fileURLToPath(new URL("../..", import.meta.url));

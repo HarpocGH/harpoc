@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { storeSecret } from "../harness/vault.js";
 import { sightings } from "../assert/opacity.js";
-import { resolvePrintenv, resolveGit } from "../harness/fixtures.js";
+import { resolvePrintenv, resolveGit, resolveSsh } from "../harness/fixtures.js";
 import { ATTACKER } from "../harness/backends.js";
 import { resetSink, sinkRequests, sinkSawCredential } from "../harness/attacker.js";
 import { Outcome } from "./scenario.js";
@@ -25,7 +25,12 @@ const credentialFor = (name: string): string => `p4-oc-${name}:tok/en-${NONCE}`;
 async function setupProcess(
   vault: HarnessVault,
   name: string,
-  opts: { commands: string[]; acknowledge?: boolean; networkIsolation?: boolean },
+  opts: {
+    commands: string[];
+    acknowledge?: boolean;
+    networkIsolation?: boolean;
+    env?: string[];
+  },
 ): Promise<ScenarioSetup> {
   const credential = credentialFor(name);
   const handle = await storeSecret(vault, `p4-oc-${name}-${NONCE}`, credential);
@@ -38,7 +43,7 @@ async function setupProcess(
       // through keeps network isolation the ONLY difference between the arms —
       // otherwise the isolated child would fail on trust and report BLOCKED for
       // a reason that has nothing to do with the defence under test.
-      env_allowlist: ["NODE_EXTRA_CA_CERTS"],
+      env_allowlist: ["NODE_EXTRA_CA_CERTS", ...(opts.env ?? [])],
       host_allowlist: [],
       network_isolation: opts.networkIsolation ?? false,
     },
@@ -327,6 +332,62 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
         type: "process",
         command: resolveGit(),
         args: ["init", setup.marker],
+        env_var: ENV_VAR,
+      });
+      return verdict(arm, existsSync(setup.marker));
+    },
+  },
+  {
+    scenario: "output-channel-leakage",
+    context: "process",
+    variant: "dedicated-context-ssh",
+    async setup(vault) {
+      const base = await setupProcess(vault, "ctxssh", {
+        commands: [resolveSsh()],
+        // Win32-OpenSSH exits 255 immediately, before it opens its own log
+        // file, if ProgramData is missing from the environment — and the
+        // process context builds a clean env, so the marker would be absent
+        // whether the guard refused the spawn or the child died on startup.
+        // The guard-flip caught exactly that: with the C1 check neutralized the
+        // arm stayed green, which is a non-discriminating arm, not a defence.
+        env: ["ProgramData"],
+      });
+      const dir = mkdtempSync(join(tmpdir(), "harpoc-oc-ctxssh-"));
+      return {
+        ...base,
+        marker: join(dir, "ssh.log"),
+        cleanup: () => rmSync(dir, { recursive: true, force: true }),
+      };
+    },
+    async observe(arm, setup) {
+      // C1's other half. Until now the `ssh` side of DEDICATED_CONTEXT_BINARIES
+      // existed only as a pure-function test over the constant — no `ssh` was
+      // ever re-dispatched through the process context and refused. It matters
+      // separately from the git half: the ssh context's protections are a
+      // different set (the ephemeral agent, the pinned host key, the hardening
+      // argv), and free-argv re-invocation discards all of them at once.
+      //
+      // The observable is EXECUTION: `-E` opens its log file at startup, before
+      // the connection is even attempted, so the file exists if and only if ssh
+      // ran. Cleared first — the baseline runs before Harpoc and really does
+      // spawn ssh, so a shared marker would make the Harpoc arm report the
+      // baseline's execution as its own.
+      clearMarker(setup.marker);
+      await arm.invoke(setup.handle, {
+        type: "process",
+        command: resolveSsh(),
+        args: [
+          "-E",
+          setup.marker,
+          "-o",
+          "BatchMode=yes",
+          "-o",
+          "ConnectTimeout=1",
+          "-o",
+          "StrictHostKeyChecking=no",
+          "harpoc@127.0.0.9",
+          "true",
+        ],
         env_var: ENV_VAR,
       });
       return verdict(arm, existsSync(setup.marker));

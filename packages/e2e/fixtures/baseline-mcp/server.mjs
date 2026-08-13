@@ -25,8 +25,22 @@
 //
 // Resource `credentials://env` exposes the same material, since a naive server
 // commonly does.
+//
+// Phase 4B adds the database, git and ssh halves. R-3, stated rather than
+// hidden: for HTTP and process execution the baseline IS the status quo, but
+// these three write the client path a second time, and a second implementation
+// can always be argued to be a straw man. What keeps it honest is that every
+// choice below is the DEFAULT or the documented quick fix — TLS without
+// identity verification (and plaintext when the server offers no TLS), an
+// askpass that answers for whichever host asks, redirects and submodules left
+// on, StrictHostKeyChecking=no and the private key on disk. None of it is
+// invented weakness; all of it is what a working integration looks like when
+// nobody is defending against these specific attacks.
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -90,9 +104,249 @@ function unmediatedProcess(action) {
   });
 }
 
+// The binaries the harness resolved, passed in rather than re-resolved here so
+// both arms drive the same git and the same ssh (F-6).
+const GIT_BIN = process.env.E2E_GIT_PATH ?? "git";
+const SSH_BIN = process.env.E2E_SSH_PATH ?? "ssh";
+// ssh's own null device. The native Win32 client does not read "/dev/null" as
+// one — it appends to a file by that name — so a known_hosts written there
+// would persist across arms.
+const SSH_NULL_HOSTS = process.platform === "win32" ? "NUL" : "/dev/null";
+
+function splitHostPort(host, explicitPort, fallback) {
+  const raw = String(host ?? "");
+  const colon = raw.lastIndexOf(":");
+  if (explicitPort !== undefined) return { host: raw, port: Number(explicitPort) };
+  if (colon > 0) return { host: raw.slice(0, colon), port: Number(raw.slice(colon + 1)) };
+  return { host: raw, port: fallback };
+}
+
+/**
+ * The credential is `user:password`, as it is for the vault's database context.
+ * Split on the FIRST colon so a password containing one survives.
+ */
+function splitCredential() {
+  const colon = CREDENTIAL.indexOf(":");
+  return colon < 0
+    ? { user: CREDENTIAL, password: "" }
+    : { user: CREDENTIAL.slice(0, colon), password: CREDENTIAL.slice(colon + 1) };
+}
+
+async function unmediatedDatabase(action) {
+  const { default: pg } = await import("pg");
+  const { user, password } = splitCredential();
+  const { host, port } = splitHostPort(action.host, action.port, 5432);
+
+  const attempt = async (ssl) => {
+    const client = new pg.Client({ host, port, user, password, database: action.database, ssl });
+    await client.connect();
+    try {
+      const result = await client.query(action.query);
+      return {
+        type: "database",
+        row_count: result.rowCount ?? 0,
+        rows: result.rows,
+        fields: (result.fields ?? []).map((f) => ({ name: f.name })),
+        tls: ssl === false ? "disabled" : "unverified",
+      };
+    } finally {
+      await client.end();
+    }
+  };
+
+  // The status quo in two lines: encrypt if the server offers it, verify
+  // nothing — and if the handshake is refused, turn encryption off and move on.
+  // Both halves are what the documentation of every driver warns against and
+  // what production code does anyway.
+  try {
+    return await attempt({ rejectUnauthorized: false });
+  } catch {
+    return await attempt(false);
+  }
+}
+
+/**
+ * A host-blind askpass, the naive counterpart of the vault's host-BOUND one.
+ *
+ * This is the whole of H6 in four lines: git asks for credentials for whatever
+ * host it ends up talking to — after a redirect, or for a URL a repository's
+ * own .gitmodules chose — and a helper that answers unconditionally hands them
+ * over. The vault's helper refuses any host but the validated one.
+ */
+function writeNaiveAskpass() {
+  const dir = mkdtempSync(join(tmpdir(), "baseline-git-"));
+  const emptyConfig = join(dir, "gitconfig");
+  writeFileSync(emptyConfig, "");
+  const helper = join(dir, "askpass.mjs");
+  writeFileSync(
+    helper,
+    'const isUser = /user|login/i.test(process.argv[2] || "");\n' +
+      'process.stdout.write((isUser ? process.env.NAIVE_GIT_USERNAME : process.env.NAIVE_GIT_PASSWORD) || "");\n',
+    { mode: 0o700 },
+  );
+  const node = process.execPath;
+  const launcher =
+    process.platform === "win32" ? join(dir, "askpass.cmd") : join(dir, "askpass.sh");
+  writeFileSync(
+    launcher,
+    process.platform === "win32"
+      ? `@"${node}" "${helper}" %*\r\n`
+      : `#!/bin/sh\nexec "${node}" "${helper}" "$@"\n`,
+    { mode: 0o700 },
+  );
+  return { launcher, emptyConfig, dispose: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+/** Single-quote for the sh git runs GIT_SSH_COMMAND through. */
+function shQuote(part) {
+  const normalized = process.platform === "win32" ? part.replace(/\\/g, "/") : part;
+  return /^[A-Za-z0-9%+,\-./:=@_]+$/.test(normalized)
+    ? normalized
+    : `'${normalized.replace(/'/g, `'\\''`)}'`;
+}
+
+function unmediatedGit(action) {
+  const { user, password } = splitCredential();
+  const askpass = writeNaiveAskpass();
+  const keyFile = /^ssh:\/\//i.test(String(action.repository)) ? writeNaiveKey() : null;
+
+  const env = {
+    ...process.env,
+    GIT_ASKPASS: askpass.launcher,
+    NAIVE_GIT_USERNAME: user,
+    NAIVE_GIT_PASSWORD: password,
+    GIT_TERMINAL_PROMPT: "0",
+    // Verification off rather than a CA pinned: the naive fix for "SSL
+    // certificate problem" on a self-signed endpoint.
+    GIT_SSL_NO_VERIFY: "true",
+    // Not weakness — hygiene, mirroring the Harpoc arm: without it a developer
+    // host's credential manager answers ahead of the askpass and the two arms
+    // would differ by the ambient configuration rather than by the vault.
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: askpass.emptyConfig,
+  };
+  if (keyFile) {
+    env.GIT_SSH_COMMAND = [
+      shQuote(SSH_BIN),
+      "-i",
+      shQuote(keyFile.path),
+      "-o",
+      "IdentitiesOnly=yes",
+      // The naive quick fix for "Host key verification failed": accept whatever
+      // answers. The vault pins the key and refuses on mismatch.
+      "-o",
+      "StrictHostKeyChecking=no",
+      "-o",
+      `UserKnownHostsFile=${shQuote(SSH_NULL_HOSTS)}`,
+      "-o",
+      "BatchMode=yes",
+    ].join(" ");
+  }
+
+  // Redirects and submodule recursion left exactly as git ships them.
+  const args = [
+    String(action.operation ?? "clone"),
+    ...(action.args ?? []),
+    String(action.repository),
+  ];
+  if (action.working_directory) args.push(String(action.working_directory));
+
+  return new Promise((resolve) => {
+    const child = spawn(GIT_BIN, args, { env, shell: false });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c.toString("utf8")));
+    child.stderr.on("data", (c) => (stderr += c.toString("utf8")));
+    const done = (payload) => {
+      askpass.dispose();
+      keyFile?.dispose();
+      resolve(payload);
+    };
+    child.on("error", (err) => done({ exit_code: -1, stdout, stderr: String(err.message) }));
+    child.on("close", (code) => done({ exit_code: code ?? -1, stdout, stderr }));
+  });
+}
+
+/**
+ * The private key, on disk. The vault serves it from an in-process agent and it
+ * never touches the filesystem; writing it out is the ordinary way to make
+ * `ssh -i` work, and it is the difference the ssh arms are pairing against.
+ */
+function writeNaiveKey() {
+  const dir = mkdtempSync(join(tmpdir(), "baseline-ssh-"));
+  const path = join(dir, "id");
+  writeFileSync(path, CREDENTIAL.endsWith("\n") ? CREDENTIAL : `${CREDENTIAL}\n`, { mode: 0o600 });
+  return { path, dispose: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+function unmediatedSsh(action) {
+  const key = writeNaiveKey();
+  const args = [
+    "-i",
+    key.path,
+    "-o",
+    "IdentitiesOnly=yes",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    `UserKnownHostsFile=${SSH_NULL_HOSTS}`,
+    "-o",
+    "BatchMode=yes",
+    `${String(action.user)}@${String(action.host)}`,
+    String(action.command),
+  ];
+
+  return new Promise((resolve) => {
+    const child = spawn(SSH_BIN, args, { env: { ...process.env }, shell: false });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c.toString("utf8")));
+    child.stderr.on("data", (c) => (stderr += c.toString("utf8")));
+    const done = (payload) => {
+      key.dispose();
+      resolve(payload);
+    };
+    child.on("error", (err) => done({ exit_code: -1, stdout, stderr: String(err.message) }));
+    child.on("close", (code) => done({ exit_code: code ?? -1, stdout, stderr }));
+  });
+}
+
+/**
+ * A naive MCP proxy: the TARGET comes from the call.
+ *
+ * That is the whole of §6.2.3's contrast. A server that forwards wherever the
+ * tool call says can be re-aimed by anything that can influence the call — a
+ * poisoned tool description, for instance. The vault takes the downstream
+ * endpoint from the secret's stored configuration and ignores any target in the
+ * action, so the same poisoned description moves nothing.
+ */
+async function unmediatedMcp(action) {
+  const url = String(action.url ?? action.endpoint ?? "");
+  if (url === "") throw new Error("baseline-mcp: the mcp action named no target");
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${CREDENTIAL}`,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: action.tool, arguments: action.arguments ?? {} },
+    }),
+  });
+  return { type: "mcp", status: response.status, body: await response.text() };
+}
+
 async function dispatch(action) {
   if (action?.type === "http") return unmediatedHttp(action);
   if (action?.type === "process") return unmediatedProcess(action);
+  if (action?.type === "database") return unmediatedDatabase(action);
+  if (action?.type === "git") return unmediatedGit(action);
+  if (action?.type === "ssh") return unmediatedSsh(action);
+  if (action?.type === "mcp") return unmediatedMcp(action);
   // Fail loudly. A silent no-op here would record as "the baseline did not
   // leak", which is exactly the false negative that makes a paired row vacuous.
   throw new Error(`baseline-mcp: unimplemented action type "${String(action?.type)}"`);

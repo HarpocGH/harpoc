@@ -5,9 +5,32 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Arm, CallOutcome } from "./arm.js";
 import { textOf } from "../harness/surfaces/mcp-http.js";
+import { resolveGit, resolveSsh } from "../harness/fixtures.js";
 
 const SERVER = fileURLToPath(new URL("../../fixtures/baseline-mcp/server.mjs", import.meta.url));
 const STARTUP_TIMEOUT_MS = 30_000;
+
+/**
+ * The git and ssh the HARNESS resolved, handed to the baseline rather than
+ * re-resolved inside it, so both arms drive the same binary (F-6). Resolution
+ * failures are tolerated: a host without ssh must still be able to run the
+ * http and process arms, and the ssh arms fail on their own terms when they
+ * spawn a binary that is not there.
+ */
+function resolvedBinaries(): Record<string, string> {
+  const env: Record<string, string> = {};
+  try {
+    env.E2E_GIT_PATH = resolveGit();
+  } catch {
+    /* the git arms will report it */
+  }
+  try {
+    env.E2E_SSH_PATH = resolveSsh();
+  } catch {
+    /* the ssh arms will report it */
+  }
+  return env;
+}
 
 /**
  * Wait for the child's port handshake. A fixed port would race across the
@@ -53,6 +76,7 @@ export async function startBaselineArm(credential: string, secretName?: string):
   const child = spawn(process.execPath, [SERVER], {
     env: {
       ...process.env,
+      ...resolvedBinaries(),
       // The credential enters exactly as Listing 2.1 delivers it.
       API_TOKEN: credential,
       SECRET_NAME: secretName ?? "baseline-secret",

@@ -132,6 +132,9 @@ importers:
       "@modelcontextprotocol/sdk":
         specifier: ^1.27.1
         version: 1.27.1(zod@3.25.76)
+      pg:
+        specifier: ^8.22.0
+        version: 8.22.0
       zod:
         specifier: ^3.25.76
         version: 3.25.76

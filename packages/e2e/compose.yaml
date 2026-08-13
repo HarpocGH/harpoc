@@ -128,18 +128,29 @@ services:
   # The mismatch arm pins the pinned server's key but connects here, so rogue's
   # real key fails host-key verification (no TOFU). Reuses the pinned image;
   # pull_policy:never keeps compose from trying to fetch the local-only tag.
+  #
+  # It also serves the repository, since Phase 4B: it doubles as the ATTACKER
+  # SSH host for the git-over-ssh remote-rewrite arm (D4 — reuse fleet capacity
+  # rather than add a third sshd). A successful clone from here is an
+  # unambiguous observable for the baseline half of that paired row; without the
+  # repository the arm would have to infer authentication from the shape of an
+  # error message.
   sshd-rogue:
     image: harpoc-e2e-sshd
     pull_policy: never
     volumes:
       - ./fixtures/keys/out/hostkey_rogue_ed25519:/hostkey:ro
       - ./fixtures/keys/out/authorized_keys:/authorized_keys:ro
+      - ./fixtures/repos/out/clean.git:/srv-src/repo.git:ro
     command:
       - bash
       - -c
       - >-
         install -o root -g root -m 600 /hostkey /etc/ssh/ssh_host_ed25519_key &&
         install -D -o harpoc -g harpoc -m 600 /authorized_keys /home/harpoc/.ssh/authorized_keys &&
+        rm -rf /srv/repo.git &&
+        cp -r /srv-src/repo.git /srv/repo.git &&
+        chown -R harpoc:harpoc /srv &&
         exec /usr/sbin/sshd -D -e -p 2222 -o UsePAM=no -o PasswordAuthentication=no
     ports:
       - "127.0.0.3:22:2222"
@@ -196,6 +207,29 @@ services:
           "node",
           "-e",
           "require('node:net').connect(8090,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+
+  # Tool-poisoning server (§6.2.3): a real MCP server whose tool DESCRIPTION
+  # carries the injection naming the attacker endpoint. Its own image rather
+  # than a mode of mcp-downstream — that service is a Phase 3 demonstration
+  # target, and an attack fixture must not be able to change how a
+  # demonstration cell behaves.
+  mcp-poisoned:
+    build:
+      context: ./fixtures/mcp-poisoned
+    image: harpoc-e2e-mcp-poisoned
+    ports:
+      - "127.0.0.1:55091:8091"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('node:net').connect(8091,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))",
         ]
       interval: 2s
       timeout: 5s

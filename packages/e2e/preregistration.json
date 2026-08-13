@@ -720,5 +720,143 @@
     "surface": "mcp-http",
     "arm": "harpoc",
     "expected": "BYPASSED"
+  },
+  {
+    "scenario": "tool-poisoning",
+    "context": "http",
+    "variant": "induced-http-exfiltration",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "EXFILTRATED"
+  },
+  {
+    "scenario": "tool-poisoning",
+    "context": "http",
+    "variant": "induced-http-exfiltration",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "tool-poisoning",
+    "context": "mcp",
+    "variant": "downstream-target-fixed",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "EXFILTRATED"
+  },
+  {
+    "scenario": "tool-poisoning",
+    "context": "mcp",
+    "variant": "downstream-target-fixed",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "log-to-leak",
+    "context": "metadata",
+    "variant": "trace",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "CREDENTIAL_CAPTURED"
+  },
+  {
+    "scenario": "log-to-leak",
+    "context": "metadata",
+    "variant": "trace",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "HANDLE_ONLY"
+  },
+  {
+    "scenario": "url-manipulation",
+    "context": "git",
+    "variant": "git-ssh-remote-rewrite",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "EXFILTRATED"
+  },
+  {
+    "scenario": "url-manipulation",
+    "context": "git",
+    "variant": "git-ssh-remote-rewrite",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "url-manipulation",
+    "context": "database",
+    "variant": "database-attacker-host",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "EXFILTRATED"
+  },
+  {
+    "scenario": "url-manipulation",
+    "context": "database",
+    "variant": "database-attacker-host",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "dedicated-context-ssh",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "dedicated-context-ssh",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "git-http-redirect-refused",
+    "context": "git",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "EXFILTRATED"
+  },
+  {
+    "scenario": "git-http-submodule-denied",
+    "context": "git",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "EXFILTRATED"
+  },
+  {
+    "scenario": "database-ip-literal-identity",
+    "context": "database",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "database-plaintext-target",
+    "context": "database",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "ssh-host-key-mismatch",
+    "context": "ssh",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "EXFILTRATED"
+  },
+  {
+    "scenario": "ssh-host-not-allowed",
+    "context": "ssh",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "SUCCEEDED"
   }
 ]

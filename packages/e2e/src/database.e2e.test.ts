@@ -9,9 +9,10 @@ import { startMcpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import type { McpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import { caPem } from "./harness/pki.js";
 import { PG, assertFleetUp } from "./harness/backends.js";
+import { DB_CREDENTIAL, DB_IP_LITERAL_PAYLOAD, DB_PLAINTEXT_PAYLOAD } from "./harness/payloads.js";
 
 const PASSWORD = "e2e-database-pw";
-const DB_SECRET = `${PG.user}:${PG.password}`;
+const DB_SECRET = DB_CREDENTIAL;
 
 describe("database context — live PostgreSQL over fixture TLS", () => {
   let vault: HarnessVault;
@@ -110,13 +111,7 @@ describe("database context — M3: IP-literal targets have no name to verify", (
   });
 
   it("refuses an IP-literal target whose certificate carries no matching name", async () => {
-    const outcome = await surface.callUseSecret(handle, {
-      type: "database",
-      engine: "postgresql",
-      host: `${PG.ip}:${PG.port}`,
-      database: PG.database,
-      query: "SELECT 42 AS answer",
-    });
+    const outcome = await surface.callUseSecret(handle, DB_IP_LITERAL_PAYLOAD);
 
     expect(outcome.ok).toBe(false);
     expect(JSON.stringify(outcome.result)).not.toContain("42");
@@ -166,13 +161,7 @@ describe("database context — a plaintext target is refused by default", () => 
   });
 
   it("does not fall back to an unencrypted connection", async () => {
-    const outcome = await surface.callUseSecret(handle, {
-      type: "database",
-      engine: "postgresql",
-      host: `${PG.host}:${PG.plainPort}`,
-      database: PG.database,
-      query: "SELECT 42 AS answer",
-    });
+    const outcome = await surface.callUseSecret(handle, DB_PLAINTEXT_PAYLOAD);
 
     expect(outcome.ok).toBe(false);
     expect(JSON.stringify(outcome.result)).not.toContain("42");
