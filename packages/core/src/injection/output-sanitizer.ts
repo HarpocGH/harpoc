@@ -53,6 +53,13 @@ export function redactSecretEncodings(text: string, secret: string): string {
     secretBytes.toString("base64url"),
     secretBytes.toString("hex"),
     encodeURIComponent(secret),
+    // A JSON response body escapes quotes and backslashes, so a credential
+    // containing either does not appear in the body as contiguous raw bytes and
+    // would otherwise pass through untouched — recoverable with one JSON.parse.
+    // For a credential without such characters this collapses onto the raw
+    // needle and the Set drops it, which is why the gap stayed invisible: every
+    // credential the suite had ever used was [a-z0-9-].
+    JSON.stringify(secret).slice(1, -1),
   ]);
 
   let result = text;

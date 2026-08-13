@@ -44,6 +44,33 @@ describe("redactSecretEncodings", () => {
     void enc;
   });
 
+  /**
+   * A response body is normally JSON, so an endpoint that echoes the credential
+   * hands it back escaped: a quote becomes \" and a backslash becomes \\. The
+   * raw needle then does not appear in the body as contiguous bytes and the
+   * value survives verbatim, one `JSON.parse` away from the model.
+   *
+   * This went unnoticed because every credential in the suite was
+   * `[a-z0-9-]`, for which the escaped form is byte-identical to the raw one —
+   * the class is invisible unless the value can actually be escaped.
+   */
+  it("redacts the JSON-escaped form", () => {
+    const s = `tok${String.fromCharCode(34)}en${String.fromCharCode(92)}x`;
+    const escaped = JSON.stringify(s).slice(1, -1);
+    expect(escaped).not.toBe(s);
+
+    const body = `{"credential":"${escaped}"}`;
+    const out = redactSecretEncodings(body, s);
+    expect(out).not.toContain(escaped);
+    expect(out).toContain("[REDACTED]");
+  });
+
+  it("leaves a benign neighbour intact while redacting the escaped form", () => {
+    const s = `a${String.fromCharCode(34)}b`;
+    const body = `{"c":"${JSON.stringify(s).slice(1, -1)}","marker":"keep-me"}`;
+    expect(redactSecretEncodings(body, s)).toContain("keep-me");
+  });
+
   it("returns text unchanged when the secret is absent", () => {
     expect(redactSecretEncodings("nothing to see", SECRET)).toBe("nothing to see");
   });
