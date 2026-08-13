@@ -327,5 +327,398 @@
     "surface": "cli",
     "arm": "harpoc",
     "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "prompt-injection",
+    "context": "metadata",
+    "variant": "surface-probe",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "prompt-injection",
+    "context": "metadata",
+    "variant": "surface-probe",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "OPAQUE"
+  },
+  {
+    "scenario": "url-manipulation",
+    "context": "http",
+    "variant": "direct-attacker-url",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "EXFILTRATED"
+  },
+  {
+    "scenario": "url-manipulation",
+    "context": "http",
+    "variant": "direct-attacker-url",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "url-manipulation",
+    "context": "http",
+    "variant": "endpoint-30x-to-attacker",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "EXFILTRATED"
+  },
+  {
+    "scenario": "url-manipulation",
+    "context": "http",
+    "variant": "endpoint-30x-to-attacker",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "url-manipulation",
+    "context": "http",
+    "variant": "refusal-message-opacity",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "EXFILTRATED"
+  },
+  {
+    "scenario": "url-manipulation",
+    "context": "http",
+    "variant": "refusal-message-opacity",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "OPAQUE"
+  },
+  {
+    "scenario": "shadow-escape",
+    "context": "metadata",
+    "variant": "discovery",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "shadow-escape",
+    "context": "metadata",
+    "variant": "discovery",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "OPAQUE"
+  },
+  {
+    "scenario": "shadow-escape",
+    "context": "http",
+    "variant": "exfiltration",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "EXFILTRATED"
+  },
+  {
+    "scenario": "shadow-escape",
+    "context": "http",
+    "variant": "exfiltration",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "naive-echo",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "naive-echo",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "non-interpreter-ladder",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "non-interpreter-ladder",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "encoding-base64",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "encoding-base64",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "encoding-hex",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "encoding-hex",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "encoding-percent",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "encoding-percent",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "chunking",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "chunking",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BYPASSED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "file-write",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "file-write",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BYPASSED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "interpreter-collapse",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "interpreter-collapse",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BYPASSED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "dedicated-context-git",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "dedicated-context-git",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "network-isolation",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "EXFILTRATED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "network-isolation",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "output-channel-leakage",
+    "context": "process",
+    "variant": "network-isolation",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "host_os": "win32",
+    "expected": "REFUSED_UNAVAILABLE"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "encoded-body",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "encoded-body",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "json-escaped",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "json-escaped",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "header-echo",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "header-echo",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "status-reason-phrase",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "status-reason-phrase",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "CHANNEL_ABSENT"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "status-only-closes-body",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "status-only-closes-body",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "partial-first8",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "partial-first8",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BYPASSED"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "partial-last4",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "partial-last4",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BYPASSED"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "partial-alternating",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "response-channel-echo",
+    "context": "http",
+    "variant": "partial-alternating",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "BYPASSED"
   }
 ]

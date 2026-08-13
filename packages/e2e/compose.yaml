@@ -226,3 +226,31 @@ services:
       interval: 2s
       timeout: 5s
       retries: 45
+
+  # Exfiltration sink for the two-arm attack scenarios (C-3). The baseline arm
+  # must genuinely move the credential off-box, or "baseline leaks / Harpoc
+  # blocks" is an assertion rather than a comparison with a visible effect; the
+  # Harpoc arm's discriminating check is that /recorded stayed empty. Served
+  # over TLS with a fixture-CA certificate on purpose: a Harpoc refusal has to
+  # come from the secret's URL allowlist, not from an unreachable host or an
+  # untrusted certificate (P4-R3).
+  attacker:
+    build:
+      context: ./fixtures/attacker
+    image: harpoc-e2e-attacker
+    volumes:
+      - ./fixtures/pki/out:/pki:ro
+    ports:
+      - "127.0.0.1:55444:8444"
+    # No bash in the alpine image: probe the port with node itself.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('node:net').connect(8444,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 45

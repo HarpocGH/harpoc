@@ -25,6 +25,7 @@ required=(
   postgres-tls.crt postgres-tls.key
   mysql-tls.crt mysql-tls.key
   echo-https.crt echo-https.key
+  attacker.crt attacker.key
 )
 complete=1
 for f in "${required[@]}"; do
@@ -84,5 +85,10 @@ issue mysql-tls
 # resolved address, and the demonstration cell must stay reachable whether it
 # addresses the service as localhost or as the literal the container is bound to.
 issue echo-https "IP:127.0.0.1"
+# The exfiltration sink is trusted on purpose: a Harpoc arm must be refused by
+# the secret's URL allowlist, so the refusal cannot be allowed to come from an
+# untrusted certificate instead (P4-R3). IP SAN for the same reason as
+# echo-https — the scenarios address the literal the container is bound to.
+issue attacker "IP:127.0.0.1"
 
 echo "pki: generated CA and server certificates in $OUT"

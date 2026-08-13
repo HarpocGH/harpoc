@@ -5,6 +5,12 @@ import { dirname } from "node:path";
 export interface EvidenceRecord {
   scenario: string;
   context: string;
+  /**
+   * Which arm of a multi-arm scenario this is. Omitted where a scenario has a
+   * single arm, so records emitted before Phase 4 keep their exact shape.
+   * Mirrors `Expectation.variant`, which is part of the pre-registration key.
+   */
+  variant?: string;
   surface: string;
   /**
    * The ACCESS INTERFACE this cell counts toward — the second dimension of the

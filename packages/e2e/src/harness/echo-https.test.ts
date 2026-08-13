@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { connect as tlsConnect } from "node:tls";
-import { ECHO_HTTPS, assertFleetUp } from "./backends.js";
+import { ECHO_HTTPS, ATTACKER, assertFleetUp } from "./backends.js";
 
 /** Handshake against the bound socket under an arbitrary SNI/verification name. */
 function handshakeAs(servername: string): Promise<{ authorized: boolean; error?: string }> {
@@ -69,6 +69,80 @@ describe("echo-https backend", () => {
     assertFleetUp("echo-https");
     const response = await fetch(`https://${ECHO_HTTPS.ip}:${String(ECHO_HTTPS.port)}/health`);
     expect(response.status).toBe(200);
+  });
+
+  /**
+   * Phase 4 channels. They live on their own paths so `/echo` — which the
+   * Phase 3 demonstration cells depend on byte for byte — stays frozen (D7): a
+   * demonstration cell must never fail for a scenario's reason.
+   */
+  describe("phase 4 scenario channels", () => {
+    const credential = "echo-phase4-credential-1";
+
+    it("keeps /echo frozen: no partial or out-of-set forms leak into it", async () => {
+      assertFleetUp("echo-https");
+      const response = await fetch(`${BASE}/echo`, {
+        headers: { authorization: `Bearer ${credential}` },
+      });
+      const body = (await response.json()) as { credential: Record<string, string> };
+      // Exactly the set the vault's `filtered` mode redacts, and nothing else.
+      expect(Object.keys(body.credential).sort()).toEqual([
+        "base64",
+        "base64url",
+        "hex",
+        "hex_upper",
+        "percent",
+        "raw",
+      ]);
+    });
+
+    it("returns substrings of the credential on /echo/partial", async () => {
+      assertFleetUp("echo-https");
+      const response = await fetch(`${BASE}/echo/partial`, {
+        headers: { authorization: `Bearer ${credential}` },
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as Record<string, string>;
+
+      // Contiguous-pattern matching cannot catch these by construction — that
+      // is the §6.2.7 class-2 residual, and it needs a real emitter to measure.
+      expect(body["first8"]).toBe(credential.slice(0, 8));
+      expect(body["last4"]).toBe(credential.slice(-4));
+      expect(body["alternating"]).toBe(
+        credential
+          .split("")
+          .filter((_, i) => i % 2 === 0)
+          .join(""),
+      );
+      // A partial echo must not accidentally contain the whole credential, or
+      // the arm would measure the wrong class.
+      expect(JSON.stringify(body)).not.toContain(credential);
+    });
+
+    it("puts the credential in the status reason phrase on /echo/reason", async () => {
+      assertFleetUp("echo-https");
+      const response = await fetch(`${BASE}/echo/reason`, {
+        headers: { authorization: `Bearer ${credential}` },
+      });
+      expect(response.status).toBe(200);
+      // fetch surfaces the reason phrase as statusText; the vault's HttpResult
+      // has no such field, which is the point of the D9 arm.
+      expect(response.statusText).toContain(credential);
+    });
+
+    it("redirects to the attacker sink, carrying the credential in the target", async () => {
+      assertFleetUp("echo-https");
+      const response = await fetch(`${BASE}/redirect-to-attacker`, {
+        headers: { authorization: `Bearer ${credential}` },
+        redirect: "manual",
+      });
+      expect(response.status).toBe(302);
+      const location = response.headers.get("location") ?? "";
+      // H2: an endpoint-authored redirect target that embeds the credential.
+      // A refusal message quoting this URL would leak it to the model.
+      expect(location).toContain(String(ATTACKER.port));
+      expect(location).toContain(credential);
+    });
   });
 
   it("verifies the certificate by name — an unlisted name is refused", async () => {

@@ -123,4 +123,38 @@ describe("evidence records", () => {
     expect(commitSha()).toBe(commitSha());
     expect(treeDirty()).toBe(treeDirty());
   });
+
+  // Without this the ten output-channel arms land in the artifact
+  // indistinguishable from one another, and the generated table cannot tell
+  // the honest residuals apart from the blocks.
+  it("carries the variant into the written record", () => {
+    const file = join(dir, "run.jsonl");
+    emit(file, {
+      scenario: "output-channel-leakage",
+      context: "process",
+      variant: "chunking",
+      surface: "mcp-http",
+      interface: "mcp",
+      arm: "harpoc",
+      expected: "BYPASSED",
+      observed: "BYPASSED",
+    });
+    const written = JSON.parse(readFileSync(file, "utf8").trim()) as EvidenceRecord;
+    expect(written.variant).toBe("chunking");
+  });
+
+  it("omits variant entirely when an arm has none, keeping pre-Phase-4 records shaped as before", () => {
+    const file = join(dir, "run.jsonl");
+    emit(file, {
+      scenario: "database-happy-path",
+      context: "database",
+      surface: "mcp-http",
+      interface: "mcp",
+      arm: "harpoc",
+      expected: "SUCCEEDED",
+      observed: "SUCCEEDED",
+    });
+    const raw = readFileSync(file, "utf8").trim();
+    expect(raw).not.toContain("variant");
+  });
 });

@@ -99,6 +99,25 @@ export const MCP_DOWNSTREAM = {
   benignMarker: "mcp-downstream-benign-marker",
 } as const;
 
+/**
+ * The exfiltration sink the two-arm scenarios try to move a credential to
+ * (C-3). `recordedUrl` is the harness-only side channel reporting what actually
+ * arrived — read directly, never through the vault, because it answers the half
+ * of the claim a caller-visible result cannot: whether the credential left the
+ * host at all.
+ *
+ * Trusted by the fixture CA on purpose. A Harpoc arm must be refused by the
+ * secret's URL allowlist; a refusal produced by an unreachable host or an
+ * untrusted certificate would prove the wrong thing (P4-R3).
+ */
+export const ATTACKER = {
+  host: "localhost",
+  ip: "127.0.0.1",
+  port: 55444,
+  leakPath: "/leak",
+  recordedUrl: "https://localhost:55444/recorded",
+} as const;
+
 export type FleetService =
   | "postgres-tls"
   | "postgres-plain"
@@ -107,7 +126,8 @@ export type FleetService =
   | "sshd-rogue"
   | "git-http"
   | "echo-https"
-  | "mcp-downstream";
+  | "mcp-downstream"
+  | "attacker";
 
 const COMPOSE_DIR = fileURLToPath(new URL("../..", import.meta.url));
 

@@ -1,4 +1,34 @@
 import { describe, it, expect } from "vitest";
+import { sightings } from "./opacity.js";
+
+/**
+ * A scenario has to CLASSIFY an outcome (LEAKED vs OPAQUE) rather than assert
+ * one, so it needs the same multi-channel, multi-encoding sweep `assertOpaque`
+ * performs without the throw. Re-deriving it per scenario would let the two
+ * drift, and the scenario copy would be the one nobody guard-flips.
+ */
+describe("sightings (non-throwing opacity sweep)", () => {
+  it("reports nothing for a clean observation", () => {
+    expect(sightings("sekret-value", { result: { ok: true, note: "[REDACTED]" } })).toEqual([]);
+  });
+
+  it("finds the credential and names the channel it surfaced in", () => {
+    const hits = sightings("sekret-value", { stderr: "boom: sekret-value" });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.path).toMatch(/^stderr/);
+  });
+
+  it("sweeps every channel assertOpaque covers, encoded forms included", () => {
+    const secret = "sekret-value";
+    const b64 = Buffer.from(secret, "utf8").toString("base64");
+    const hits = sightings(secret, {
+      result: { nested: { deep: b64 } },
+      auditRows: [{ detail: secret }],
+    });
+    // Channel name is the path prefix before any index or member access.
+    expect(hits.map((h) => /^[a-zA-Z]+/.exec(h.path)?.[0]).sort()).toEqual(["audit", "result"]);
+  });
+});
 import { assertOpaque, assertPresent } from "./opacity.js";
 import { serializeError } from "./serialize-error.js";
 

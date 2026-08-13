@@ -10,6 +10,15 @@ export type { CallOutcome } from "./surface.js";
 
 export interface McpHttpSurface extends Surface {
   name: "mcp-http";
+  /**
+   * The connected client, exposed so the Phase 4 Harpoc arm can drive the
+   * metadata surfaces (`list_secrets`, `get_secret_info`, resources) that
+   * §6.2.1 probes alongside `use_secret`. Kept off the base `Surface` type: the
+   * demonstration matrix only ever calls `use_secret`, and widening the
+   * contract every surface must satisfy for one consumer's benefit would force
+   * four other drivers to expose a client they have no use for.
+   */
+  client: Client;
 }
 
 export function textOf(result: { content?: unknown }): string {
@@ -45,6 +54,7 @@ export async function startMcpHttpSurface(
     interfaceId: "mcp",
     auditInterface: "mcp-http",
     principal,
+    client,
     async callUseSecret(handle, action): Promise<CallOutcome> {
       const raw = (await client.callTool({
         name: "use_secret",

@@ -17,7 +17,8 @@
     "@harpoc/sdk": "workspace:*",
     "@harpoc/cli": "workspace:*",
     "@hono/node-server": "^1.14.0",
-    "@modelcontextprotocol/sdk": "^1.27.1"
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "zod": "^3.25.76"
   },
   "scripts": {
     "pki": "node scripts/generate-fixtures.mjs pki",

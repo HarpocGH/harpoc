@@ -24,17 +24,33 @@ function channels(obs: Observation): Array<[string, unknown]> {
 }
 
 /**
- * Success criteria 1 and 2 as one callable check: the credential must not
- * appear in any encoding, at any structural position, in any observable
- * channel — result, thrown error, audit rows, child stdio, parent environment.
+ * Every position the credential surfaced in, across every channel and every
+ * encoding — the sweep behind `assertOpaque`, without the throw.
+ *
+ * Exposed because a two-arm scenario must CLASSIFY its outcome (LEAKED versus
+ * OPAQUE) rather than assert one: the baseline arm is expected to leak, so a
+ * throwing check is the wrong shape there. Sharing this one implementation is
+ * what keeps the scenarios' verdict and the demonstration cells' assertion from
+ * drifting apart — a scenario-local re-derivation would be the copy nobody
+ * guard-flips.
  */
-export function assertOpaque(secret: string, obs: Observation): void {
+export function sightings(secret: string, obs: Observation): Sighting[] {
   const hits: Sighting[] = [];
   for (const [name, node] of channels(obs)) {
     for (const hit of scan(secret, node)) {
       hits.push({ ...hit, path: `${name}${hit.path.slice(1)}` });
     }
   }
+  return hits;
+}
+
+/**
+ * Success criteria 1 and 2 as one callable check: the credential must not
+ * appear in any encoding, at any structural position, in any observable
+ * channel — result, thrown error, audit rows, child stdio, parent environment.
+ */
+export function assertOpaque(secret: string, obs: Observation): void {
+  const hits = sightings(secret, obs);
   if (hits.length === 0) return;
 
   const detail = hits.map((h) => `  ${h.path} (${h.position}, ${h.encoding})`).join("\n");

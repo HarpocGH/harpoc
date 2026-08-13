@@ -8,6 +8,7 @@ import {
   GIT_HTTP,
   ECHO_HTTPS,
   MCP_DOWNSTREAM,
+  ATTACKER,
   assertFleetUp,
   parseComposeRows,
 } from "./backends.js";
@@ -125,5 +126,15 @@ describe("backend fleet", () => {
     expect(MCP_DOWNSTREAM.endpoint).toContain(String(MCP_DOWNSTREAM.port));
     assertFleetUp("mcp-downstream");
     expect(await canOpenTcp(MCP_DOWNSTREAM.host, MCP_DOWNSTREAM.port)).toBe(true);
+  });
+
+  it("reaches the attacker sink on its own offset port", async () => {
+    expect(ATTACKER.port).toBe(55444);
+    // The side channel must address the same service the scenarios exfiltrate
+    // to; a recordedUrl pointing elsewhere would report an empty sink forever
+    // and turn every Harpoc arm's discriminating check into a tautology.
+    expect(ATTACKER.recordedUrl).toContain(String(ATTACKER.port));
+    assertFleetUp("attacker");
+    expect(await canOpenTcp(ATTACKER.ip, ATTACKER.port)).toBe(true);
   });
 });
