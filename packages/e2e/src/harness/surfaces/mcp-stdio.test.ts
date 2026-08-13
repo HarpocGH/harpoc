@@ -51,7 +51,11 @@ describe("mcp-stdio surface", () => {
     expect(outcome.ok).toBe(true);
     expect((JSON.parse(outcome.text) as { type?: string }).type).toBe("process");
     expect(outcome.text).toContain("[REDACTED]");
-    assertOpaque(SECRET, { result: outcome.result });
+    // The child's own stderr is captured and scanned, not merely piped: it is a
+    // channel assertOpaque claims to cover, and an unread pipe would block the
+    // child once the OS buffer filled.
+    expect(typeof outcome.stderr).toBe("string");
+    assertOpaque(SECRET, { result: outcome.result, stderr: outcome.stderr });
 
     // The child holds its own engine over the same vault directory, so the row
     // it wrote is visible to the harness's engine: two processes, one vault.

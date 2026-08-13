@@ -62,7 +62,13 @@ describe("database context — live PostgreSQL over fixture TLS", () => {
     assertOpaque(PG.password, observation);
 
     const record = recordArm(
-      { scenario: "database-happy-path", context: "database", surface: "mcp-http", arm: "harpoc" },
+      {
+        scenario: "database-happy-path",
+        context: "database",
+        surface: "mcp-http",
+        interface: "mcp",
+        arm: "harpoc",
+      },
       "SUCCEEDED",
     );
     expect(record.match).toBe(true);
@@ -125,6 +131,7 @@ describe("database context — M3: IP-literal targets have no name to verify", (
         scenario: "database-ip-literal-identity",
         context: "database",
         surface: "mcp-http",
+        interface: "mcp",
         arm: "harpoc",
       },
       "REJECTED",
@@ -180,6 +187,7 @@ describe("database context — a plaintext target is refused by default", () => 
         scenario: "database-plaintext-target",
         context: "database",
         surface: "mcp-http",
+        interface: "mcp",
         arm: "harpoc",
       },
       "REJECTED",

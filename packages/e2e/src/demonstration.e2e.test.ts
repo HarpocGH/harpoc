@@ -2,8 +2,10 @@ import { rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Permission } from "@harpoc/shared";
-import { createHarnessVault } from "./harness/vault.js";
+import { createHarnessVault, PREREGISTRATION_FILE } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
+import { loadExpectations } from "./evidence/preregistration.js";
+import type { EvidenceRecord } from "./evidence/record.js";
 import { assertFleetUp } from "./harness/backends.js";
 import { preferNativeSsh } from "./harness/fixtures.js";
 import { assertOpaque, assertPresent } from "./assert/opacity.js";
@@ -46,12 +48,19 @@ interface Cell {
   fixture: ContextFixture;
 }
 
+/** The matrix Ch. 1 §1.4 commits to: six contexts × four access interfaces. */
+const MATRIX_CONTEXTS = ["http", "process", "mcp", "database", "git", "ssh"] as const;
+const MATRIX_INTERFACES = ["mcp", "rest", "sdk", "cli"] as const;
+const SURFACE_NAMES = ["mcp-http", "mcp-stdio", "rest", "sdk", "cli"] as const;
+
 describe("demonstration matrix — six contexts × four interfaces", () => {
   let vault: HarnessVault;
   const surfaces: Surface[] = [];
   const fixtures = new Map<string, ContextFixture>();
   const savedEnv: Record<string, string | undefined> = {};
   let gitConfigPath: string | undefined;
+  /** Every record this file emitted, for the closing coverage assertion. */
+  const emitted: EvidenceRecord[] = [];
 
   beforeAll(async () => {
     for (const arm of CONTEXT_ARMS) {
@@ -101,14 +110,18 @@ describe("demonstration matrix — six contexts × four interfaces", () => {
   /** One cell: call, prove the backend was reached, prove nothing leaked. */
   async function runCell(cell: Cell, arm: (typeof CONTEXT_ARMS)[number]): Promise<void> {
     const { surface, fixture } = cell;
-    const outcome = await surface.callUseSecret(fixture.handle, await fixture.action());
+    // The action is held, not rebuilt: the arm's proof may live outside the
+    // result (git's working tree), and it must be THIS call's action that is
+    // verified, never a fixture-remembered last one.
+    const action = await fixture.action();
+    const outcome = await surface.callUseSecret(fixture.handle, action);
 
     if (!outcome.ok) {
       throw new Error(
         `${arm.scenario} via ${surface.name} did not complete: ${outcome.errorText ?? outcome.text}`,
       );
     }
-    await fixture.assertReached(outcome);
+    await fixture.assertReached(outcome, action);
 
     // C-6: every structural position, on every channel this surface exposes —
     // including a real child's own streams for the surfaces that spawn one.
@@ -143,16 +156,18 @@ describe("demonstration matrix — six contexts × four interfaces", () => {
         scenario: arm.scenario,
         context: arm.context,
         surface: surface.name,
+        interface: surface.interfaceId,
         arm: "harpoc",
       },
       "SUCCEEDED",
     );
     expect(record.match).toBe(true);
+    emitted.push(record);
   }
 
   // The loop: every context through every surface. Adding a seventh context
   // costs one fixture, not five tests.
-  for (const surfaceName of ["mcp-http", "mcp-stdio", "rest", "sdk", "cli"] as const) {
+  for (const surfaceName of SURFACE_NAMES) {
     describe(surfaceName, () => {
       for (const arm of CONTEXT_ARMS) {
         it(`${arm.context}: ${arm.scenario}`, async () => {
@@ -169,4 +184,35 @@ describe("demonstration matrix — six contexts × four interfaces", () => {
       });
     });
   }
+
+  /**
+   * The Chapter 1 claim, asserted rather than assumed. Without this the matrix
+   * is only as large as the loop happens to be: deleting a context arm or a
+   * surface driver shrinks it in silence, and pre-registration cannot notice —
+   * `expectationFor` errors on an UNREGISTERED key, never on a registered
+   * expectation that no cell exercised.
+   *
+   * Asserted over the records this file emitted, not over the shared evidence
+   * file, which other suites append to.
+   */
+  it("covers the committed matrix: 24 (context × interface) cells, 35 cells in all", () => {
+    expect(emitted).toHaveLength(CONTEXT_ARMS.length * SURFACE_NAMES.length);
+    expect(emitted.every((r) => r.match)).toBe(true);
+
+    const pairs = new Set(emitted.map((r) => `${r.context}|${r.interface}`));
+    const expectedPairs = new Set(
+      MATRIX_CONTEXTS.flatMap((c) => MATRIX_INTERFACES.map((i) => `${c}|${i}`)),
+    );
+    expect(pairs.size).toBe(24);
+    expect([...expectedPairs].filter((p) => !pairs.has(p))).toEqual([]);
+
+    // Every pre-registered demonstration outcome was actually exercised — the
+    // direction `expectationFor` cannot check.
+    const registered = loadExpectations(PREREGISTRATION_FILE)
+      .filter((e) => e.scenario.startsWith("demo-"))
+      .map((e) => `${e.scenario}|${e.surface}`);
+    const ran = new Set(emitted.map((r) => `${r.scenario}|${r.surface}`));
+    expect(registered.filter((k) => !ran.has(k))).toEqual([]);
+    expect(registered).toHaveLength(emitted.length);
+  });
 });

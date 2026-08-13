@@ -57,6 +57,23 @@ export async function startMcpStdioSurface(
   const client = new Client({ name: "harpoc-e2e-stdio-client", version: "1.0.0" });
   await client.connect(transport);
 
+  // The child's stderr must be READ, for two reasons. It is a channel
+  // `assertOpaque` claims to cover ("stdout and stderr of any spawned child",
+  // design §3.4) and this surface spawns a real vault process, whose warnings
+  // and unhandled errors land there. And `stderr: "pipe"` hands the stream to
+  // the caller rather than draining it, so an unread pipe blocks the child once
+  // the OS buffer fills — a hang instead of a failure.
+  //
+  // The buffer is cumulative (one long-lived child, many calls) and capped from
+  // the FRONT, so the newest output — the part belonging to the call being
+  // asserted — is what survives a trim.
+  const MAX_STDERR_BYTES = 256 * 1024;
+  let stderr = "";
+  transport.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString("utf8");
+    if (stderr.length > MAX_STDERR_BYTES) stderr = stderr.slice(-MAX_STDERR_BYTES);
+  });
+
   return {
     name: "mcp-stdio",
     interfaceId: "mcp",
@@ -71,8 +88,8 @@ export async function startMcpStdioSurface(
       })) as { isError?: boolean; content?: unknown };
 
       const text = textOf(raw);
-      if (raw.isError === true) return { ok: false, result: raw, text, errorText: text };
-      return { ok: true, result: raw, text };
+      if (raw.isError === true) return { ok: false, result: raw, text, errorText: text, stderr };
+      return { ok: true, result: raw, text, stderr };
     },
     async close() {
       await client.close();

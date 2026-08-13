@@ -28,10 +28,23 @@ if (!existsSync(caPath)) {
 const env = { ...process.env };
 if (!env.NODE_EXTRA_CA_CERTS) env.NODE_EXTRA_CA_CERTS = caPath;
 
-const result = spawnSync("npx", ["vitest", "run", ...process.argv.slice(2)], {
+// vitest's own ESM entry, run by this Node — never `npx` behind `shell: true`,
+// which on Windows would hand the operator's filter arguments to cmd.exe for a
+// second round of parsing. Arguments stay data, as everywhere else in the repo.
+const vitestEntry = fileURLToPath(new URL("../node_modules/vitest/vitest.mjs", import.meta.url));
+const vitestBin = existsSync(vitestEntry)
+  ? vitestEntry
+  : fileURLToPath(new URL("../../../node_modules/vitest/vitest.mjs", import.meta.url));
+
+if (!existsSync(vitestBin)) {
+  console.error("run-e2e: vitest is not installed\n  run: npx pnpm install");
+  process.exit(1);
+}
+
+const result = spawnSync(process.execPath, [vitestBin, "run", ...process.argv.slice(2)], {
   stdio: "inherit",
   env,
-  shell: process.platform === "win32",
+  shell: false,
 });
 
 process.exit(result.status ?? 1);

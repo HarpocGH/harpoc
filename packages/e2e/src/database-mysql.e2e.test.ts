@@ -67,6 +67,7 @@ describe("database context — live MySQL over fixture TLS", () => {
         scenario: "database-happy-path-mysql",
         context: "database",
         surface: "mcp-http",
+        interface: "mcp",
         arm: "harpoc",
       },
       "SUCCEEDED",

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { emit, commitSha, hostOs, type EvidenceRecord } from "./record.js";
+import { emit, commitSha, hostOs, treeDirty, type EvidenceRecord } from "./record.js";
 
 describe("evidence records", () => {
   let dir: string;
@@ -18,6 +18,7 @@ describe("evidence records", () => {
       scenario: "url-manipulation",
       context: "database",
       surface: "mcp-http",
+      interface: "mcp",
       arm: "harpoc",
       expected: "HOST_NOT_ALLOWED",
       observed: "HOST_NOT_ALLOWED",
@@ -32,6 +33,7 @@ describe("evidence records", () => {
       scenario: "s",
       context: "ssh",
       surface: "mcp-http",
+      interface: "mcp",
       arm: "harpoc",
       expected: "SUCCEEDED",
       observed: "SUCCEEDED",
@@ -44,11 +46,53 @@ describe("evidence records", () => {
     expect(written.host_os).toBe(process.platform);
   });
 
+  it("carries the access interface, so the matrix dimension is read, not re-derived", () => {
+    // `surface` cannot answer it: mcp-http and mcp-stdio are one interface with
+    // two transports, and a consumer that re-derives the mapping owns a second
+    // copy of the rule.
+    const rec = emit(join(dir, "run.jsonl"), {
+      scenario: "demo-http",
+      context: "http",
+      surface: "mcp-stdio",
+      interface: "mcp",
+      arm: "harpoc",
+      expected: "SUCCEEDED",
+      observed: "SUCCEEDED",
+    });
+    expect(rec.interface).toBe("mcp");
+    const written = JSON.parse(
+      readFileSync(join(dir, "run.jsonl"), "utf8").trim(),
+    ) as EvidenceRecord;
+    expect(written.interface).toBe("mcp");
+    expect(written.surface).toBe("mcp-stdio");
+  });
+
+  it("stamps whether the tree was dirty, so the C-5 pin cannot be defeated in silence", () => {
+    const rec = emit(join(dir, "run.jsonl"), {
+      scenario: "s",
+      context: "http",
+      surface: "mcp-http",
+      interface: "mcp",
+      arm: "harpoc",
+      expected: "SUCCEEDED",
+      observed: "SUCCEEDED",
+    });
+    // The value depends on the checkout, so the assertion is that the record
+    // reports the SAME verdict the helper does — the flag is wired, not faked.
+    expect(rec.dirty).toBe(treeDirty());
+    expect(typeof rec.dirty).toBe("boolean");
+    const written = JSON.parse(
+      readFileSync(join(dir, "run.jsonl"), "utf8").trim(),
+    ) as EvidenceRecord;
+    expect(written.dirty).toBe(rec.dirty);
+  });
+
   it("marks a divergence", () => {
     const rec = emit(join(dir, "run.jsonl"), {
       scenario: "s",
       context: "database",
       surface: "mcp-http",
+      interface: "mcp",
       arm: "harpoc",
       expected: "BLOCKED",
       observed: "SUCCEEDED",
@@ -62,6 +106,7 @@ describe("evidence records", () => {
       scenario: "s",
       context: "database",
       surface: "mcp-http",
+      interface: "mcp",
       arm: "harpoc" as const,
       expected: "X",
       observed: "X",
@@ -74,7 +119,8 @@ describe("evidence records", () => {
     expect(first.scenario).toBe("s");
   });
 
-  it("caches the commit sha", () => {
+  it("caches the commit sha and the dirty verdict", () => {
     expect(commitSha()).toBe(commitSha());
+    expect(treeDirty()).toBe(treeDirty());
   });
 });

@@ -9,6 +9,7 @@ import {
   ECHO_HTTPS,
   MCP_DOWNSTREAM,
   assertFleetUp,
+  parseComposeRows,
 } from "./backends.js";
 
 /**
@@ -36,6 +37,35 @@ function canOpenTcp(host: string, port: number): Promise<boolean> {
 describe("backend fleet", () => {
   it("fails with an actionable message when the service is unknown", () => {
     expect(() => assertFleetUp("does-not-exist" as never)).toThrow(/docker compose|pnpm/i);
+  });
+
+  describe("compose ps output parsing", () => {
+    // The health check must never fail a healthy fleet because a compose
+    // version changed its output shape, so an unreadable format yields no rows
+    // and the verdict falls back to running/not-running.
+    it("reads the JSON-array shape", () => {
+      const rows = parseComposeRows('[{"Service":"postgres-tls","Health":"healthy"}]');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.["Health"]).toBe("healthy");
+    });
+
+    it("reads the NDJSON shape, CRLF included", () => {
+      const rows = parseComposeRows(
+        '{"Service":"a","Health":"starting"}\r\n{"Service":"b","Health":"healthy"}\r\n',
+      );
+      expect(rows.map((r) => r["Service"])).toEqual(["a", "b"]);
+    });
+
+    it("reads a bare single object", () => {
+      expect(parseComposeRows('{"Service":"a"}')).toHaveLength(1);
+    });
+
+    it("yields nothing for empty or unparseable output, never throws", () => {
+      expect(parseComposeRows("")).toEqual([]);
+      expect(parseComposeRows("   ")).toEqual([]);
+      expect(parseComposeRows("NAME STATUS\npostgres-tls Up")).toEqual([]);
+      expect(parseComposeRows("[1,2,3]")).toEqual([]);
+    });
   });
 
   it("exposes the offset loopback ports, never the defaults", () => {

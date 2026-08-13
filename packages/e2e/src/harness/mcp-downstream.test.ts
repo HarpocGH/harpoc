@@ -54,9 +54,13 @@ describe("mcp-downstream backend", () => {
       const payload = JSON.parse(textOf(result)) as {
         authorization: string | null;
         received_credential: string | null;
+        marker: string | null;
       };
       expect(payload.authorization).toBe(`Bearer ${credential}`);
       expect(payload.received_credential).toBe(credential);
+      // The arms' negative control travels in the same payload as the
+      // credential — without it, blanket redaction would read as opacity.
+      expect(payload.marker).toBe(MCP_DOWNSTREAM.benignMarker);
     } finally {
       await close();
     }

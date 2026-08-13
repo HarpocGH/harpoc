@@ -22,6 +22,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 const PORT = Number(process.env.PORT ?? 8090);
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_RECORDED = 100;
+// Returned beside the credential as the harness's negative control: blanket
+// redaction of the tool result would satisfy every opacity assertion, so each
+// arm also pins that a benign string in the SAME payload survived untouched.
+// Kept byte-identical in src/harness/backends.ts (MCP_DOWNSTREAM.benignMarker).
+const BENIGN_MARKER = "mcp-downstream-benign-marker";
 
 /** Every Authorization value this server has been handed. */
 const recorded = [];
@@ -46,6 +51,7 @@ function buildServer(authorization) {
           text: JSON.stringify({
             authorization: authorization ?? null,
             received_credential: bearerOf(authorization),
+            marker: BENIGN_MARKER,
           }),
         },
       ],

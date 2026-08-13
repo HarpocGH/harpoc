@@ -125,7 +125,13 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
     assertOpaque(sshKey, { result: outcome.result, auditRows, parentEnv: process.env });
 
     const record = recordArm(
-      { scenario: "ssh-happy-path", context: "ssh", surface: "mcp-http", arm: "harpoc" },
+      {
+        scenario: "ssh-happy-path",
+        context: "ssh",
+        surface: "mcp-http",
+        interface: "mcp",
+        arm: "harpoc",
+      },
       "SUCCEEDED",
     );
     expect(record.match).toBe(true);
@@ -155,7 +161,13 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
     assertOpaque(sshKey, { result: outcome.result, error: outcome.errorText, auditRows });
 
     const record = recordArm(
-      { scenario: "ssh-host-key-mismatch", context: "ssh", surface: "mcp-http", arm: "harpoc" },
+      {
+        scenario: "ssh-host-key-mismatch",
+        context: "ssh",
+        surface: "mcp-http",
+        interface: "mcp",
+        arm: "harpoc",
+      },
       "REJECTED",
     );
     expect(record.match).toBe(true);
@@ -179,7 +191,13 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
     assertOpaque(sshKey, { result: outcome.result, error: outcome.errorText, auditRows });
 
     const record = recordArm(
-      { scenario: "ssh-host-not-allowed", context: "ssh", surface: "mcp-http", arm: "harpoc" },
+      {
+        scenario: "ssh-host-not-allowed",
+        context: "ssh",
+        surface: "mcp-http",
+        interface: "mcp",
+        arm: "harpoc",
+      },
       "REJECTED",
     );
     expect(record.match).toBe(true);

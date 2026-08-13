@@ -131,7 +131,13 @@ describe("git context — live clones over http and ssh", () => {
     assertOpaque(GIT_HTTP.password, observation);
 
     const record = recordArm(
-      { scenario: "git-http-happy-path", context: "git", surface: "mcp-http", arm: "harpoc" },
+      {
+        scenario: "git-http-happy-path",
+        context: "git",
+        surface: "mcp-http",
+        interface: "mcp",
+        arm: "harpoc",
+      },
       "SUCCEEDED",
     );
     expect(record.match).toBe(true);
@@ -158,7 +164,13 @@ describe("git context — live clones over http and ssh", () => {
     assertOpaque(sshKey, { result: outcome.result, auditRows, parentEnv: process.env });
 
     const record = recordArm(
-      { scenario: "git-ssh-happy-path", context: "git", surface: "mcp-http", arm: "harpoc" },
+      {
+        scenario: "git-ssh-happy-path",
+        context: "git",
+        surface: "mcp-http",
+        interface: "mcp",
+        arm: "harpoc",
+      },
       "SUCCEEDED",
     );
     expect(record.match).toBe(true);
@@ -194,7 +206,13 @@ describe("git context — live clones over http and ssh", () => {
     assertOpaque(GIT_HTTP.password, observation);
 
     const record = recordArm(
-      { scenario: "git-http-redirect-refused", context: "git", surface: "mcp-http", arm: "harpoc" },
+      {
+        scenario: "git-http-redirect-refused",
+        context: "git",
+        surface: "mcp-http",
+        interface: "mcp",
+        arm: "harpoc",
+      },
       "BLOCKED",
     );
     expect(record.match).toBe(true);
@@ -231,7 +249,13 @@ describe("git context — live clones over http and ssh", () => {
     });
 
     const record = recordArm(
-      { scenario: "git-http-submodule-denied", context: "git", surface: "mcp-http", arm: "harpoc" },
+      {
+        scenario: "git-http-submodule-denied",
+        context: "git",
+        surface: "mcp-http",
+        interface: "mcp",
+        arm: "harpoc",
+      },
       "REJECTED",
     );
     expect(record.match).toBe(true);

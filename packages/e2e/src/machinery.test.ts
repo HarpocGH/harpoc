@@ -61,7 +61,13 @@ describe("harness machinery, proven against the process context", () => {
     assertPresent(MARKER, { result });
 
     const record = recordArm(
-      { scenario: "machinery-selfcheck", context: "process", surface: "engine", arm: "harpoc" },
+      {
+        scenario: "machinery-selfcheck",
+        context: "process",
+        surface: "engine",
+        interface: "engine",
+        arm: "harpoc",
+      },
       "OPAQUE",
     );
 

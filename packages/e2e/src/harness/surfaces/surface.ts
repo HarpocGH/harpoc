@@ -21,9 +21,11 @@ export interface CallOutcome {
   text: string;
   errorText?: string;
   /**
-   * Raw child output, for the surfaces that spawn one (`cli`). The credential
-   * has to be absent from a real process's own streams, not merely from the
-   * structured result the harness parsed out of them.
+   * Raw child output, for the surfaces that spawn one — `cli` (both streams,
+   * one process per call) and `mcp-stdio` (stderr; its stdout carries the
+   * JSON-RPC framing the client already parsed). The credential has to be
+   * absent from a real process's own streams, not merely from the structured
+   * result the harness parsed out of them.
    */
   stdout?: string;
   stderr?: string;

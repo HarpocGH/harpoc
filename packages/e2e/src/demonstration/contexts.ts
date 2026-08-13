@@ -44,8 +44,15 @@ export interface ContextFixture {
   /**
    * Proof the backend was reached. Throws with a specific message on failure —
    * `ok: true` alone would pass for a call that never left the vault.
+   *
+   * The action this outcome came from is handed back rather than remembered by
+   * the fixture: an arm whose proof lives on the filesystem (git) must read the
+   * directory THIS call used, and a fixture-held "last one" is only correct
+   * while the loop stays strictly sequential. Since every cell clones the same
+   * repository, reading a neighbouring cell's tree would be a false pass, not
+   * an error.
    */
-  assertReached(outcome: CallOutcome): Promise<void> | void;
+  assertReached(outcome: CallOutcome, action: unknown): Promise<void> | void;
   /** Marker that must survive redaction, proving it is surgical, not blanket. */
   benignMarker?: string;
   cleanup?: () => void;
@@ -186,11 +193,41 @@ const MCP_HTTP_DOWNSTREAM_ARM: ContextArm = {
     return {
       handle,
       opacitySubjects: [secret],
-      action: () => ({
-        type: "mcp",
-        server: MCP_DOWNSTREAM.serverName,
-        tool: MCP_DOWNSTREAM.tool,
-      }),
+      // The downstream returns it beside the credential, so a mutation that
+      // redacted the whole tool result would satisfy every opacity assertion
+      // and fail here — the `mcp` arms had no such control before.
+      benignMarker: MCP_DOWNSTREAM.benignMarker,
+      action: async () => {
+        // The recorder accumulates across the whole run and the fixture's
+        // credential is the same for all five surfaces, so without this reset
+        // the first cell's entry would satisfy every later cell's out-of-band
+        // check — the one assertion whose whole purpose is to be independent
+        // of the vault's own reporting.
+        const cleared = await fetch(MCP_DOWNSTREAM.recordedUrl, { method: "DELETE" });
+        if (!cleared.ok) {
+          throw new Error(
+            `could not reset the downstream recorder: HTTP ${String(cleared.status)}`,
+          );
+        }
+        // Asserted, not assumed: this is what makes the per-cell property
+        // falsifiable. Drop the reset and every cell after the first starts
+        // from a non-empty recorder — the state in which the out-of-band check
+        // passes without this call having reached the downstream at all.
+        const after = (await (await fetch(MCP_DOWNSTREAM.recordedUrl)).json()) as {
+          authorizations: string[];
+        };
+        if (after.authorizations.length !== 0) {
+          throw new Error(
+            `downstream recorder still holds ${String(after.authorizations.length)} entr(ies) ` +
+              "after the reset — this cell's out-of-band check would not be its own",
+          );
+        }
+        return {
+          type: "mcp",
+          server: MCP_DOWNSTREAM.serverName,
+          tool: MCP_DOWNSTREAM.tool,
+        };
+      },
       async assertReached(outcome) {
         const result = parseResult(outcome);
         if (result["type"] !== "mcp") {
@@ -199,6 +236,8 @@ const MCP_HTTP_DOWNSTREAM_ARM: ContextArm = {
         expectRedacted(outcome, "mcp");
         // The other half, read out of band so it cannot be an artifact of the
         // vault's own reporting: the downstream really was handed the bearer.
+        // The recorder was emptied immediately before this call, so a match
+        // here is THIS cell's request, not a neighbour's.
         const response = await fetch(MCP_DOWNSTREAM.recordedUrl);
         const body = (await response.json()) as { authorizations: string[] };
         if (!body.authorizations.includes(`Bearer ${secret}`)) {
@@ -213,6 +252,12 @@ const MCP_HTTP_DOWNSTREAM_ARM: ContextArm = {
 
 /** mcp (stdio downstream) — the D10 variant: real framing, interpreter gate. */
 const STDIO_DOWNSTREAM_SERVER = "e2e-stdio-downstream";
+/**
+ * Kept byte-identical in `fixtures/mcp/downstream-server.mjs`, which cannot
+ * import this module (the vault spawns it as a bare node script). The pin in
+ * `mcp-stdio-fixture.test.ts` fails if the two drift apart.
+ */
+export const STDIO_DOWNSTREAM_MARKER = "stdio-downstream-benign-marker";
 
 const MCP_STDIO_DOWNSTREAM_ARM: ContextArm = {
   scenario: "demo-mcp-stdio-downstream",
@@ -246,6 +291,9 @@ const MCP_STDIO_DOWNSTREAM_ARM: ContextArm = {
     return {
       handle,
       opacitySubjects: [secret],
+      // Same control as the http-downstream arm: the child returns the marker
+      // beside the credential, so blanket redaction cannot pass for surgical.
+      benignMarker: STDIO_DOWNSTREAM_MARKER,
       action: () => ({
         type: "mcp",
         server: STDIO_DOWNSTREAM_SERVER,
@@ -344,16 +392,22 @@ const GIT_ARM: ContextArm = {
           working_directory: dest,
         };
       },
-      assertReached(outcome) {
+      assertReached(outcome, action) {
         const result = parseResult(outcome);
         if (result["exit_code"] !== 0) {
           throw new Error(
             `git exit_code ${String(result["exit_code"])}: ${String(result["stderr"] ?? "")}`,
           );
         }
-        const dest = dirs[dirs.length - 1];
-        if (dest === undefined || !existsSync(join(dest, "README.md"))) {
-          throw new Error("the clone produced no working tree");
+        // From THIS call's action, not from a fixture-held "last one": every
+        // cell clones the same repository, so a neighbour's tree would satisfy
+        // the check and the cell would pass for the wrong reason.
+        const dest = (action as { working_directory?: unknown }).working_directory;
+        if (typeof dest !== "string") {
+          throw new Error("the git action carried no working_directory to verify");
+        }
+        if (!existsSync(join(dest, "README.md"))) {
+          throw new Error(`the clone produced no working tree at ${dest}`);
         }
       },
       cleanup: () => {

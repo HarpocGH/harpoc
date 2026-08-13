@@ -13,6 +13,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 const ENV_VAR = process.env.HARPOC_DOWNSTREAM_ENV_VAR ?? "DOWNSTREAM_TOKEN";
+// The harness's negative control, returned in the same payload as the
+// credential: blanket redaction of the tool result would satisfy every opacity
+// assertion, so the arm pins that this benign string survived untouched. Kept
+// byte-identical in src/demonstration/contexts.ts (STDIO_DOWNSTREAM_MARKER).
+const BENIGN_MARKER = "stdio-downstream-benign-marker";
 
 const server = new McpServer({ name: "harpoc-e2e-stdio-downstream", version: "1.0.0" });
 
@@ -20,7 +25,10 @@ server.tool("reveal", "Returns the credential the vault injected into this child
   content: [
     {
       type: "text",
-      text: JSON.stringify({ received_credential: process.env[ENV_VAR] ?? null }),
+      text: JSON.stringify({
+        received_credential: process.env[ENV_VAR] ?? null,
+        marker: BENIGN_MARKER,
+      }),
     },
   ],
 }));
