@@ -1,6 +1,8 @@
 import { scan } from "./scan.js";
 import type { Sighting } from "./scan.js";
 import { serializeError } from "./serialize-error.js";
+import { encodingsOf } from "./encodings.js";
+import { findEscapeTolerant } from "./json-escape.js";
 
 /** Every channel an agent can observe after a `use_secret` call. */
 export interface Observation {
@@ -57,6 +59,29 @@ export function assertOpaque(secret: string, obs: Observation): void {
   throw new Error(
     `credential plaintext reached the caller in ${hits.length} position(s):\n${detail}`,
   );
+}
+
+/**
+ * A diagnostic excerpt safe to put in a thrown error or a CI log.
+ *
+ * A harness error message is one of the few places the credential can escape
+ * the measurement: the baseline fixture redacts nothing by design, and its
+ * counterpart arms carry an SSH private key, a database password and an HTTP
+ * credential (review 2026-08-14, F10).
+ *
+ * Matches within one encoding are spliced from the end of `out` backward —
+ * `findEscapeTolerant` returns them left-to-right and non-overlapping, so
+ * processing the highest `start` first never invalidates the indices of the
+ * matches still waiting to be spliced.
+ */
+export function redactForDiagnostics(text: string, secret: string): string {
+  let out = text;
+  for (const enc of encodingsOf(secret)) {
+    for (const match of findEscapeTolerant(out, enc.needle).reverse()) {
+      out = out.slice(0, match.start) + "[REDACTED]" + out.slice(match.end);
+    }
+  }
+  return out;
 }
 
 /**

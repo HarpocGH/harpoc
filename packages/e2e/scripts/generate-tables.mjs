@@ -2,6 +2,7 @@
 //
 //   node scripts/generate-tables.mjs [records.jsonl] [--out <dir>]
 //                                    [--allow-dirty] [--allow-divergence]
+//                                    [--allow-multi-commit]
 //
 // Defaults to this package's own evidence/run.jsonl and preregistration.json.
 // Point it at a file in docs/e2e/evidence/ to regenerate the tables for a run
@@ -33,13 +34,14 @@ import {
 const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 function parseArgs(argv) {
-  const options = { allowDirty: false, allowDivergence: false };
+  const options = { allowDirty: false, allowDivergence: false, allowMultiCommit: false };
   let records = null;
   let out = null;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--allow-dirty") options.allowDirty = true;
     else if (arg === "--allow-divergence") options.allowDivergence = true;
+    else if (arg === "--allow-multi-commit") options.allowMultiCommit = true;
     else if (arg === "--out") out = argv[++i];
     else if (arg.startsWith("--")) {
       console.error(`generate-tables: unknown option "${arg}"`);
@@ -53,15 +55,30 @@ function parseArgs(argv) {
   return { records, out, options };
 }
 
+// `interface` is deliberately not required here: pre-Phase-3 records
+// legitimately lack it, and the matrix-cell gate in checkGates() catches
+// exactly the case where its absence matters (review 2026-08-14, F3).
+const REQUIRED_FIELDS = ["scenario", "context", "surface", "arm", "expected", "observed", "commit"];
+
 function readJsonl(path) {
   const text = readFileSync(path, "utf8").trim();
   if (text === "") return [];
   return text.split(/\r?\n/).map((line, i) => {
+    let record;
     try {
-      return JSON.parse(line);
+      record = JSON.parse(line);
     } catch (cause) {
       throw new Error(`malformed evidence record at line ${String(i + 1)} of ${path}`, { cause });
     }
+    for (const field of REQUIRED_FIELDS) {
+      if (typeof record[field] !== "string" || record[field] === "") {
+        throw new Error(
+          `evidence record at line ${String(i + 1)} of ${path} has no ${field}: ` +
+            "a record the generator cannot key is a table cell that silently disappears",
+        );
+      }
+    }
+    return record;
   });
 }
 
@@ -90,7 +107,8 @@ if (problems.length > 0) {
   for (const problem of problems) console.error(`  - ${problem}`);
   console.error(
     "  a table rendered from a compromised record set undoes what pre-registration and the\n" +
-      "  commit stamp buy; --allow-dirty / --allow-divergence stamp the caveat instead",
+      "  commit stamp buy; --allow-dirty / --allow-divergence / --allow-multi-commit stamp\n" +
+      "  the caveat instead",
   );
   process.exit(1);
 }

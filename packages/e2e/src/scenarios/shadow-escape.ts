@@ -2,7 +2,7 @@ import { storeSecret } from "../harness/vault.js";
 import { sightings } from "../assert/opacity.js";
 import { ATTACKER, ECHO_HTTPS } from "../harness/backends.js";
 import { classifyExfiltration, resetSink, sinkRequests } from "../harness/attacker.js";
-import { Outcome } from "./scenario.js";
+import { probeVerdict } from "./scenario.js";
 import type { ScenarioArm } from "./scenario.js";
 
 const NONCE = "p4s5";
@@ -51,7 +51,7 @@ export const SHADOW_ESCAPE_ARMS: ScenarioArm[] = [
         result: outcome.result,
         stderr: outcome.stderr,
       });
-      return hits.length > 0 ? Outcome.LEAKED : Outcome.OPAQUE;
+      return probeVerdict(arm, hits);
     },
   },
   {

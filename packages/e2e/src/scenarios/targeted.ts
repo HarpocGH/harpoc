@@ -22,6 +22,7 @@ import { Outcome } from "./scenario.js";
 import type { OutcomeValue, ScenarioArm, ScenarioSetup } from "./scenario.js";
 import type { Arm, CallOutcome } from "../arms/arm.js";
 import type { HarnessVault } from "../harness/vault.js";
+import { redactForDiagnostics } from "../assert/opacity.js";
 
 const NONCE = "p4b";
 const HOST_REFUSAL = "Host not in secret allowlist";
@@ -58,14 +59,26 @@ function parsed(outcome: CallOutcome): Record<string, unknown> {
  * bought: any pre-connection failure produces `ok === false`, so a bare
  * "refused" would let a broken fixture, a missing binary or an unrelated schema
  * error satisfy an arm that claims to certify target allowlisting.
+ *
+ * Exported ONLY for its redaction wiring pin (`targeted.test.ts`, F10 fix
+ * round 1): the throw branches below are the sole call site of
+ * `redactForDiagnostics` in this module, and a green fleet run never executes
+ * them — they fire exactly when a fixture is broken. Without a direct test a
+ * site that forgot to redact would ship with no falsifiable pin, ever. Do not
+ * "tidy" this export away without replacing what it covers.
  */
-function targetedVerdict(arm: Arm, reached: boolean, outcome: CallOutcome): OutcomeValue {
+export function targetedVerdict(
+  arm: Arm,
+  reached: boolean,
+  outcome: CallOutcome,
+  credential: string,
+): OutcomeValue {
   if (arm.name === "baseline") {
     if (!reached) {
       throw new Error(
         "baseline did not reach the attacker target: the attack path is broken, so the " +
           `paired row would compare nothing (ok=${String(outcome.ok)}, ` +
-          `text=${outcome.text.slice(0, 300)})`,
+          `text=${redactForDiagnostics(outcome.text.slice(0, 300), credential)})`,
       );
     }
     return Outcome.EXFILTRATED;
@@ -75,7 +88,8 @@ function targetedVerdict(arm: Arm, reached: boolean, outcome: CallOutcome): Outc
   if (!outcome.ok && (outcome.errorText ?? "").includes(HOST_REFUSAL)) return Outcome.BLOCKED;
   throw new Error(
     "arm is not discriminating: the target was not reached, but the refusal does not name " +
-      `the host allowlist — ok=${String(outcome.ok)}, error=${outcome.errorText ?? "(none)"}`,
+      `the host allowlist — ok=${String(outcome.ok)}, error=` +
+      redactForDiagnostics(outcome.errorText ?? "(none)", credential),
   );
 }
 
@@ -125,7 +139,7 @@ export const TARGETED_ARMS: ScenarioArm[] = [
       // back. A working tree is unambiguous; an exit code alone would not
       // distinguish "refused" from "authenticated, then failed for some other
       // reason".
-      return targetedVerdict(arm, existsSync(join(dest, "README.md")), outcome);
+      return targetedVerdict(arm, existsSync(join(dest, "README.md")), outcome, setup.credential);
     },
   },
   {
@@ -160,7 +174,7 @@ export const TARGETED_ARMS: ScenarioArm[] = [
         query: DB_QUERY,
       });
       const reached = parsed(outcome)["row_count"] === 1;
-      return targetedVerdict(arm, reached, outcome);
+      return targetedVerdict(arm, reached, outcome, setup.credential);
     },
   },
 ];
@@ -204,16 +218,26 @@ async function counterpartSetup(
   return { handle, credential, marker: `p4b-${name}-marker-${NONCE}` };
 }
 
-/** A baseline counterpart's verdict: the operation must genuinely have happened. */
-function counterpartVerdict(
+/**
+ * A baseline counterpart's verdict: the operation must genuinely have happened.
+ *
+ * Exported ONLY for its redaction wiring pin (`targeted.test.ts`, F10 fix
+ * round 1) — same reason as `targetedVerdict` above: the throw branch is
+ * unreachable from a passing fleet run, so a direct call is the only way to
+ * falsify that this site still redacts. Do not "tidy" this export away
+ * without replacing what it covers.
+ */
+export function counterpartVerdict(
   reached: boolean,
   observed: OutcomeValue,
   outcome: CallOutcome,
+  credential: string,
 ): OutcomeValue {
   if (!reached) {
     throw new Error(
       "baseline counterpart did not complete the operation Harpoc refuses, so the paired row " +
-        `would compare nothing (ok=${String(outcome.ok)}, text=${outcome.text.slice(0, 300)})`,
+        `would compare nothing (ok=${String(outcome.ok)}, text=` +
+        `${redactForDiagnostics(outcome.text.slice(0, 300), credential)})`,
     );
   }
   return observed;
@@ -237,6 +261,7 @@ export const BASELINE_COUNTERPART_ARMS: ScenarioArm[] = [
         sinkSawCredential(setup.credential, arrived),
         Outcome.EXFILTRATED,
         outcome,
+        setup.credential,
       );
     },
   },
@@ -257,6 +282,7 @@ export const BASELINE_COUNTERPART_ARMS: ScenarioArm[] = [
         sinkSawCredential(setup.credential, arrived),
         Outcome.EXFILTRATED,
         outcome,
+        setup.credential,
       );
     },
   },
@@ -270,7 +296,12 @@ export const BASELINE_COUNTERPART_ARMS: ScenarioArm[] = [
       const outcome = await arm.invoke(setup.handle, DB_IP_LITERAL_PAYLOAD);
       // TLS up, identity unverified — the exact posture M3 found in the vault
       // and fixed. The status quo connects and answers the query.
-      return counterpartVerdict(parsed(outcome)["row_count"] === 1, Outcome.SUCCEEDED, outcome);
+      return counterpartVerdict(
+        parsed(outcome)["row_count"] === 1,
+        Outcome.SUCCEEDED,
+        outcome,
+        setup.credential,
+      );
     },
   },
   {
@@ -283,7 +314,12 @@ export const BASELINE_COUNTERPART_ARMS: ScenarioArm[] = [
       const outcome = await arm.invoke(setup.handle, DB_PLAINTEXT_PAYLOAD);
       // No TLS on offer at all: the status quo sends the credential in the
       // clear rather than refusing.
-      return counterpartVerdict(parsed(outcome)["row_count"] === 1, Outcome.SUCCEEDED, outcome);
+      return counterpartVerdict(
+        parsed(outcome)["row_count"] === 1,
+        Outcome.SUCCEEDED,
+        outcome,
+        setup.credential,
+      );
     },
   },
   {
@@ -298,7 +334,7 @@ export const BASELINE_COUNTERPART_ARMS: ScenarioArm[] = [
       // StrictHostKeyChecking=no accepts whatever answers, so the key
       // authenticates to the rogue server and the remote command runs there.
       const reached = r["exit_code"] === 0 && String(r["stdout"] ?? "").includes(SSHD_ROGUE.user);
-      return counterpartVerdict(reached, Outcome.EXFILTRATED, outcome);
+      return counterpartVerdict(reached, Outcome.EXFILTRATED, outcome, setup.credential);
     },
   },
   {
@@ -313,7 +349,7 @@ export const BASELINE_COUNTERPART_ARMS: ScenarioArm[] = [
       // There is no allowlist to consult: the status quo connects wherever the
       // call names.
       const reached = r["exit_code"] === 0 && String(r["stdout"] ?? "").includes(SSHD_PINNED.user);
-      return counterpartVerdict(reached, Outcome.SUCCEEDED, outcome);
+      return counterpartVerdict(reached, Outcome.SUCCEEDED, outcome, setup.credential);
     },
   },
 ];

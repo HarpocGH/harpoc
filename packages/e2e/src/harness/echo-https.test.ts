@@ -143,6 +143,22 @@ describe("echo-https backend", () => {
       expect(location).toContain(String(ATTACKER.port));
       expect(location).toContain(credential);
     });
+
+    it("/echo/jsonesc-alt emits a non-V8 escaping that still parses", async () => {
+      assertFleetUp("echo-https");
+      const credential = 'alt/tok"en-tür';
+      const res = await fetch(`${BASE}/echo/jsonesc-alt`, {
+        headers: { authorization: `Bearer ${credential}` },
+      });
+      const text = await res.text();
+      // The discriminating property: the solidus IS escaped and the non-ASCII
+      // character IS \u-escaped, neither of which JSON.stringify produces.
+      expect(text).toContain("\\/");
+      expect(text).toContain("\\u00fc");
+      expect(text).not.toContain(JSON.stringify(credential).slice(1, -1));
+      // And it is still valid JSON carrying the credential.
+      expect((JSON.parse(text) as { echo: string }).echo).toBe(credential);
+    });
   });
 
   it("verifies the certificate by name — an unlisted name is refused", async () => {

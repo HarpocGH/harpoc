@@ -234,7 +234,7 @@ describe("pre-registration set invariants", () => {
     // A paired table with a missing baseline cell is exactly the failure mode
     // C-3 exists to prevent.
     const problems = validateExpectationSet([row({ variant: "v", arm: "harpoc" })]);
-    expect(problems.join("\n")).toMatch(/both arms/i);
+    expect(problems.join("\n")).toMatch(/no baseline counterpart/i);
   });
 
   it("accepts a well-formed set, OS-keyed override included", () => {
@@ -250,5 +250,118 @@ describe("pre-registration set invariants", () => {
   it("holds for the committed pre-registration file", () => {
     const committed = fileURLToPath(new URL("../../preregistration.json", import.meta.url));
     expect(validateExpectationSet(loadExpectations(committed))).toEqual([]);
+  });
+});
+
+/**
+ * F13: the both-arms check used to `continue` on `variant === undefined`, so
+ * the six variant-less Phase 4B counterpart baselines were covered only by a
+ * hardcoded array in the runner — a new variant-less baseline-only
+ * counterpart forgotten from that array would slip past everything.
+ *
+ * The rule is asymmetric on purpose: every baseline row needs a Harpoc
+ * counterpart regardless of variant (a baseline is only ever half of a
+ * comparison), but the reverse direction stays scoped to variant-bearing
+ * rows, because the 47 variant-less Harpoc rows are single-arm demonstration
+ * cells by construction and predate C-3.
+ */
+describe("pre-registration pairing — variant-less baselines (F13)", () => {
+  it("flags a variant-less baseline with no harpoc counterpart", () => {
+    const problems = validateExpectationSet([
+      {
+        scenario: "new-counterpart",
+        context: "git",
+        surface: "mcp-http",
+        arm: "baseline",
+        expected: "SUCCEEDED",
+      },
+    ]);
+    expect(problems.some((p) => p.includes("new-counterpart"))).toBe(true);
+  });
+
+  it("accepts a variant-less baseline that has one (negative control)", () => {
+    const problems = validateExpectationSet([
+      {
+        scenario: "new-counterpart",
+        context: "git",
+        surface: "mcp-http",
+        arm: "baseline",
+        expected: "SUCCEEDED",
+      },
+      {
+        scenario: "new-counterpart",
+        context: "git",
+        surface: "mcp-http",
+        arm: "harpoc",
+        expected: "BLOCKED",
+      },
+    ]);
+    expect(problems).toEqual([]);
+  });
+
+  it("does not flag the 47 single-arm demonstration rows (negative control)", () => {
+    // Passes trivially under both the pre-fix and the fixed key (a lone
+    // variant-less harpoc row is out of scope for either direction). Kept
+    // anyway: it is the guard against a naive FULLY-symmetric implementation
+    // that would flag every variant-less Harpoc row and make the validator
+    // useless against the real file.
+    const problems = validateExpectationSet([
+      {
+        scenario: "demo-http",
+        context: "http",
+        surface: "rest",
+        arm: "harpoc",
+        expected: "OPAQUE",
+      },
+    ]);
+    expect(problems).toEqual([]);
+  });
+
+  // "keeps the real pre-registration clean" intentionally not repeated here —
+  // it is byte-for-byte the same code path as
+  // "holds for the committed pre-registration file" above (round-1 review,
+  // minor 2); that test already covers this describe block's fix.
+
+  /**
+   * Round-1 review finding (Critical): `pairKey` without `variant` lets ONE
+   * variant's baseline vouch for every sibling variant sharing
+   * scenario+context+surface — the real file has three such families
+   * (url-manipulation/http/mcp-http: 3 variants, output-channel-leakage/
+   * process/mcp-http: 11, response-channel-echo/http/mcp-http: 8). A
+   * variant-bearing Harpoc row with no baseline of its own would be masked by
+   * an unrelated sibling's baseline — the same silent-pass shape as F13
+   * itself. This pins the fix: variant B must be flagged even though variant
+   * A (same scenario+context+surface) is fully paired.
+   */
+  it("flags a variant-bearing harpoc row masked by a sibling variant's baseline (round-1 review)", () => {
+    const problems = validateExpectationSet([
+      {
+        scenario: "output-channel-leakage",
+        context: "process",
+        variant: "variant-a",
+        surface: "mcp-http",
+        arm: "baseline",
+        expected: "LEAKED",
+      },
+      {
+        scenario: "output-channel-leakage",
+        context: "process",
+        variant: "variant-a",
+        surface: "mcp-http",
+        arm: "harpoc",
+        expected: "BLOCKED",
+      },
+      {
+        scenario: "output-channel-leakage",
+        context: "process",
+        variant: "variant-b",
+        surface: "mcp-http",
+        arm: "harpoc",
+        expected: "BLOCKED",
+      },
+    ]);
+    expect(
+      problems.some((p) => p.includes("variant-b") && p.includes("no baseline counterpart")),
+    ).toBe(true);
   });
 });

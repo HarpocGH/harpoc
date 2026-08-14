@@ -55,15 +55,40 @@ function unmediatedHttp(action) {
   const headers = { ...(action.headers ?? {}) };
   // No allowlist, no scheme check, no redirect policy: whatever URL the caller
   // named is where the credential goes.
-  const mode = action.injection?.type ?? "bearer";
+  //
+  // Field names are the VAULT's (`header_name`, `query_param` — shared
+  // injectionConfigSchema), not names of this fixture's own invention: a
+  // paired row must vary the credential-handling layer and nothing else, and a
+  // fixture reading `name` would put the credential in a different position
+  // from the arm it is compared against (review 2026-08-14, F2).
+  const injection = action.injection;
+  if (injection === undefined) {
+    throw new Error("baseline: action carries no injection config");
+  }
+  const mode = injection.type;
+
   if (mode === "bearer") headers["authorization"] = `Bearer ${CREDENTIAL}`;
-  else if (mode === "header") headers[action.injection.name ?? "x-api-key"] = CREDENTIAL;
-  else if (mode === "basic_auth") {
+  else if (mode === "header") {
+    if (typeof injection.header_name !== "string" || injection.header_name === "") {
+      throw new Error("baseline: header injection carries no header_name");
+    }
+    headers[injection.header_name] = CREDENTIAL;
+  } else if (mode === "basic_auth") {
     headers["authorization"] = `Basic ${Buffer.from(CREDENTIAL, "utf8").toString("base64")}`;
+  } else if (mode !== "query") {
+    // Never fall back to bearer: a silent default would send the credential
+    // somewhere the arm did not ask for, and a no-op would record as "the
+    // baseline did not leak" (D7 — the fixture's existing throw doctrine).
+    throw new Error(`baseline: unsupported injection type "${String(mode)}"`);
   }
 
   const url = new URL(action.url);
-  if (mode === "query") url.searchParams.set(action.injection.name ?? "token", CREDENTIAL);
+  if (mode === "query") {
+    if (typeof injection.query_param !== "string" || injection.query_param === "") {
+      throw new Error("baseline: query injection carries no query_param");
+    }
+    url.searchParams.set(injection.query_param, CREDENTIAL);
+  }
 
   return fetch(url, {
     method: action.method ?? "GET",
@@ -437,8 +462,11 @@ const httpServer = createServer((req, res) => {
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     const server = buildServer();
     res.on("close", () => {
-      void transport.close();
-      void server.close();
+      // A client that disconnects before close resolves would otherwise turn a
+      // rejection into an unhandled one — fatal on this long-lived container
+      // (review 2026-08-14, F5).
+      void transport.close().catch(() => undefined);
+      void server.close().catch(() => undefined);
     });
 
     try {

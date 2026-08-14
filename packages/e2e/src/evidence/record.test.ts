@@ -1,8 +1,38 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { emit, commitSha, hostOs, treeDirty, type EvidenceRecord } from "./record.js";
+import { execFileSync } from "node:child_process";
+import {
+  emit,
+  commitSha,
+  hostOs,
+  treeDirty,
+  resetDirtyCacheForTests,
+  type EvidenceRecord,
+} from "./record.js";
+
+// `vi.spyOn` on a bare namespace import of a Node built-in does not work here:
+// node:child_process's ESM export is non-configurable, so spying on it throws
+// "Cannot redefine property: execFileSync" instead of silently failing to
+// intercept (confirmed while writing this suite). `vi.mock` is the pattern the
+// rest of the repo already uses for this (see
+// core/src/injection/spawn-captured.isolation.test.ts and
+// core/src/session/session-manager.permissions.test.ts) — it replaces the
+// module for every importer, record.ts included, and defaults to the real
+// implementation so every other test in this file still talks to real git.
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, execFileSync: vi.fn(actual.execFileSync) };
+});
+
+const execFileSyncMock = vi.mocked(execFileSync);
+
+/** Points the mock back at the real binary once a test is done overriding it. */
+async function restoreRealExecFileSync(): Promise<void> {
+  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+  execFileSyncMock.mockImplementation(actual.execFileSync);
+}
 
 describe("evidence records", () => {
   let dir: string;
@@ -122,6 +152,32 @@ describe("evidence records", () => {
   it("caches the commit sha and the dirty verdict", () => {
     expect(commitSha()).toBe(commitSha());
     expect(treeDirty()).toBe(treeDirty());
+  });
+
+  it("re-probes after a transient git failure instead of caching it (F15)", async () => {
+    resetDirtyCacheForTests();
+    execFileSyncMock.mockImplementationOnce(() => {
+      throw new Error("index.lock exists");
+    });
+    execFileSyncMock.mockImplementation(() => "" as never);
+
+    expect(treeDirty()).toBe(true); // honest answer when it cannot be determined
+    expect(treeDirty()).toBe(false); // the next call re-probes and succeeds
+
+    await restoreRealExecFileSync();
+    resetDirtyCacheForTests();
+  });
+
+  it("caches a successful probe (negative control)", async () => {
+    resetDirtyCacheForTests();
+    execFileSyncMock.mockClear();
+    execFileSyncMock.mockImplementation(() => "" as never);
+    treeDirty();
+    treeDirty();
+    expect(execFileSyncMock).toHaveBeenCalledTimes(1);
+
+    await restoreRealExecFileSync();
+    resetDirtyCacheForTests();
   });
 
   // Without this the ten output-channel arms land in the artifact

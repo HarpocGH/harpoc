@@ -18,7 +18,10 @@ export function encodingsOf(secret: string): Encoding[] {
     { label: "hex", needle: buf.toString("hex") },
     { label: "hexUpper", needle: buf.toString("hex").toUpperCase() },
     { label: "urlEncoded", needle: encodeURIComponent(secret) },
-    { label: "jsonEscaped", needle: JSON.stringify(secret).slice(1, -1) },
+    // No `jsonEscaped` needle: it reproduced V8's convention only, and `scan`
+    // now matches every needle above tolerantly, covering the whole class
+    // (review 2026-08-14, F1). A hit through an escape is labelled
+    // "<encoding>+jsonEscaped", so attribution survives the change.
   ];
 
   const seen = new Set<string>();

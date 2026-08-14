@@ -144,4 +144,27 @@ describe("attacker sink", () => {
     expect(foreign.authorized).toBe(false);
     expect(foreign.error ?? "").toMatch(/altname|hostname|certificate/i);
   });
+
+  it("survives a burst of aborted connections", async () => {
+    // Aborting synchronously right after fetch() most likely lands before
+    // the TLS handshake finishes, not mid-write during /challenge's 401 or
+    // a followed redirect — so this does not pin F5's specific race (GF9
+    // did not reproduce a crash on this host either). What it does
+    // establish: with the new error listeners in place, the sink survives a
+    // burst of aborted connections rather than just one. The fix is kept on
+    // the strength of the missing-handling defect itself (review-rated
+    // CONFIRMED), not on a demonstrated crash (rated PLAUSIBLE).
+    for (let i = 0; i < 20; i++) {
+      const controller = new AbortController();
+      const pending = fetch(`${BASE}${ATTACKER.challengePath}/abort-${String(i)}`, {
+        signal: controller.signal,
+      }).catch(() => undefined);
+      controller.abort();
+      await pending;
+    }
+    // The sink is alive: this throws with connection-refused if the process
+    // died from an unhandled rejection.
+    await expect(recorded()).resolves.toBeInstanceOf(Array);
+    await reset();
+  });
 });

@@ -11,6 +11,7 @@ import { startHarpocArm } from "./arms/harpoc.js";
 import type { Arm } from "./arms/arm.js";
 import { SCENARIO_ARMS, armsOf } from "./scenarios/index.js";
 import type { ScenarioSetup } from "./scenarios/scenario.js";
+import { BASELINE_COUNTERPART_ARMS } from "./scenarios/targeted.js";
 
 /**
  * The §6.2 attack scenarios, in two arms (C-3).
@@ -58,14 +59,13 @@ const PHASE4_SCENARIOS: string[] = [
  * baseline and nothing else. They are listed separately because the coverage
  * assertion below demands that every registered row of a PHASE4_SCENARIOS
  * entry ran HERE, which is false for these by construction.
+ *
+ * Derived from the arm definitions rather than restated: a hardcoded list is a
+ * second source of truth that a new counterpart can be forgotten from, and the
+ * pre-registration's own pairing check would not catch it either (F13).
  */
 const COUNTERPART_SCENARIOS: string[] = [
-  "git-http-redirect-refused",
-  "git-http-submodule-denied",
-  "database-ip-literal-identity",
-  "database-plaintext-target",
-  "ssh-host-key-mismatch",
-  "ssh-host-not-allowed",
+  ...new Set(BASELINE_COUNTERPART_ARMS.map((a) => a.scenario)),
 ];
 
 describe("attack scenarios — baseline versus Harpoc", () => {
@@ -74,8 +74,12 @@ describe("attack scenarios — baseline versus Harpoc", () => {
   const setups = new Map<string, ScenarioSetup>();
   const emitted: EvidenceRecord[] = [];
 
-  const keyOf = (s: { scenario: string; variant?: string }): string =>
-    `${s.scenario}|${s.variant ?? ""}`;
+  // Includes context, matching tables.mjs's rowKeyOf. Without it two arms
+  // sharing scenario+variant across contexts collide, `setups.set` silently
+  // overwrites, and the earlier arm runs against the wrong secret and policy
+  // (review 2026-08-14, F12).
+  const keyOf = (s: { scenario: string; context: string; variant?: string }): string =>
+    `${s.scenario}|${s.context}|${s.variant ?? ""}`;
 
   beforeAll(async () => {
     for (const service of new Set(SCENARIO_ARMS.flatMap((a) => a.services ?? []))) {

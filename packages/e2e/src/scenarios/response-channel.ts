@@ -49,34 +49,13 @@ const fetchAction = (path: string): Record<string, unknown> => ({
 });
 
 /**
- * What the caller can actually recover, at every serialization depth.
- *
- * Scanning only the raw envelope UNDER-DETECTS. The MCP result carries the
- * HttpResult as a serialized string, and inside it the response body is a
- * second serialized string — so a credential that is JSON-escaped on the wire
- * sits at two levels of escaping, and a needle escaped once does not match it.
- * The arm would then report BLOCKED for a value the model recovers with one
- * `JSON.parse`, which is the worst direction to be wrong in.
- *
- * So the envelope, the parsed result and the parsed body are all scanned. That
- * is the consumer's view, and the only one the opacity claim is about.
+ * What the caller can actually recover. `scan` descends into serialized JSON
+ * itself since the 2026-08-14 review (F4), so the envelope and the error text
+ * are the whole view — the deep walk that used to live here is now inherited by
+ * every scenario and every matrix cell, not just this file.
  */
 function callerView(outcome: CallOutcome): unknown[] {
-  const views: unknown[] = [outcome.result, outcome.errorText];
-  try {
-    const parsed = JSON.parse(outcome.text) as { body?: unknown };
-    views.push(parsed);
-    if (typeof parsed.body === "string") {
-      try {
-        views.push(JSON.parse(parsed.body));
-      } catch {
-        views.push(parsed.body);
-      }
-    }
-  } catch {
-    // Not JSON (a refusal message, say) — the envelope scan above covers it.
-  }
-  return views;
+  return [outcome.result, outcome.errorText];
 }
 
 function leakedToCaller(outcome: CallOutcome, credential: string): boolean {
@@ -150,6 +129,20 @@ export const RESPONSE_CHANNEL_ARMS: ScenarioArm[] = [
   {
     scenario: "response-channel-echo",
     context: "http",
+    variant: "json-escaped-non-v8",
+    services: ["echo-https"],
+    // The solidus is routine in base64 tokens and keys, and a non-ASCII
+    // character is routine everywhere. Both are invisible to a needle built with
+    // JSON.stringify, which is V8's convention only (review 2026-08-14, F1).
+    setup: (v) => setupEcho(v, "jsonescalt", `p4-rc-alt:tok/en"ü-${NONCE}`),
+    async observe(arm, setup) {
+      const outcome = await arm.invoke(setup.handle, fetchAction("/echo/jsonesc-alt"));
+      return verdict(arm, leakedToCaller(outcome, setup.credential));
+    },
+  },
+  {
+    scenario: "response-channel-echo",
+    context: "http",
     variant: "header-echo",
     services: ["echo-https"],
     setup: (v) => setupEcho(v, "header", `p4-rc-header-${NONCE}`),
@@ -172,9 +165,21 @@ export const RESPONSE_CHANNEL_ARMS: ScenarioArm[] = [
       if (leakedToCaller(outcome, setup.credential)) {
         return arm.name === "baseline" ? Outcome.LEAKED : Outcome.BYPASSED;
       }
+      const carriesStatusText = /"status_?[tT]ext"/.test(outcome.text);
+      if (arm.name === "baseline") {
+        // The baseline leaks only if the HTTP client preserved the server's
+        // reason phrase, which is version- and platform-dependent. Where it did
+        // not, this arm is not discriminating on this leg — and falling through
+        // would record BLOCKED, a defensive outcome the status quo cannot
+        // legitimately produce, against a pre-registered LEAKED (F8).
+        throw new Error(
+          "baseline did not leak the reason phrase: the HTTP client normalized it, so this " +
+            "arm compares nothing on this platform — add a host_os-keyed expectation if that " +
+            "is the designed outcome here",
+        );
+      }
       // Nothing filtered it — the field does not exist. Distinguished from
       // BLOCKED because the claims differ in strength (D9).
-      const carriesStatusText = /"status_?[tT]ext"/.test(outcome.text);
       return carriesStatusText ? Outcome.BLOCKED : Outcome.CHANNEL_ABSENT;
     },
   },

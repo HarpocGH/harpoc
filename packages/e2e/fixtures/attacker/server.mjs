@@ -59,53 +59,76 @@ function readBody(req) {
   });
 }
 
-const server = createServer({ cert: readFileSync(CERT), key: readFileSync(KEY) }, (req, res) => {
-  void (async () => {
-    const url = new URL(req.url ?? "/", "https://attacker");
+async function handle(req, res) {
+  const url = new URL(req.url ?? "/", "https://attacker");
 
-    if (url.pathname === "/health") {
-      res.writeHead(200, { "content-type": "text/plain" });
-      res.end("ok");
-      return;
-    }
-
-    if (url.pathname === "/recorded") {
-      if (req.method === "DELETE") {
-        recorded.length = 0;
-        res.writeHead(204);
-        res.end();
-        return;
-      }
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ requests: recorded }));
-      return;
-    }
-
-    recorded.push({
-      method: req.method ?? "",
-      path: url.pathname,
-      authorization: req.headers["authorization"] ?? null,
-      headers: req.headers,
-      query: Object.fromEntries(url.searchParams),
-      body: await readBody(req),
-    });
-    if (recorded.length > MAX_RECORDED) recorded.shift();
-
-    // Recorded BEFORE the branch, so the unauthenticated first hop is evidence
-    // too: it proves the client reached the attacker even when it then declines
-    // to authenticate.
-    if (url.pathname.startsWith("/challenge") && !req.headers["authorization"]) {
-      res.writeHead(401, {
-        "www-authenticate": 'Basic realm="attacker"',
-        "content-type": "text/plain",
-      });
-      res.end("unauthorized");
-      return;
-    }
-
+  if (url.pathname === "/health") {
     res.writeHead(200, { "content-type": "text/plain" });
     res.end("ok");
-  })();
+    return;
+  }
+
+  if (url.pathname === "/recorded") {
+    if (req.method === "DELETE") {
+      recorded.length = 0;
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ requests: recorded }));
+    return;
+  }
+
+  recorded.push({
+    method: req.method ?? "",
+    path: url.pathname,
+    authorization: req.headers["authorization"] ?? null,
+    headers: req.headers,
+    query: Object.fromEntries(url.searchParams),
+    body: await readBody(req),
+  });
+  if (recorded.length > MAX_RECORDED) recorded.shift();
+
+  // Recorded BEFORE the branch, so the unauthenticated first hop is evidence
+  // too: it proves the client reached the attacker even when it then declines
+  // to authenticate.
+  if (url.pathname.startsWith("/challenge") && !req.headers["authorization"]) {
+    res.writeHead(401, {
+      "www-authenticate": 'Basic realm="attacker"',
+      "content-type": "text/plain",
+    });
+    res.end("unauthorized");
+    return;
+  }
+
+  res.writeHead(200, { "content-type": "text/plain" });
+  res.end("ok");
+}
+
+const server = createServer({ cert: readFileSync(CERT), key: readFileSync(KEY) }, (req, res) => {
+  // A client that aborts mid-response (git does, on the /challenge 401 flow and
+  // on a followed 302) makes the write throw. Un-caught out of this
+  // fire-and-forget IIFE that is an unhandled rejection, which Node terminates
+  // the process on — and this is a long-lived container, so its death makes
+  // every LATER arm see connection-refused and read like a vault defect
+  // (review 2026-08-14, F5).
+  res.on("error", () => {
+    /* the peer went away; nothing to send and nothing to log */
+  });
+  req.on("error", () => {
+    /* likewise on the request half */
+  });
+
+  void handle(req, res).catch((err) => {
+    process.stderr.write(`attacker: request failed: ${String(err)}\n`);
+    try {
+      if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain" });
+      res.end("error");
+    } catch {
+      /* already destroyed */
+    }
+  });
 });
 
 server.listen(PORT, "0.0.0.0", () => {

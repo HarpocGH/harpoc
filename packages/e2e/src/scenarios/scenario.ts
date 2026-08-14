@@ -1,6 +1,7 @@
 import type { FleetService } from "../harness/backends.js";
 import type { HarnessVault } from "../harness/vault.js";
 import type { Arm } from "../arms/arm.js";
+import type { Sighting } from "../assert/scan.js";
 
 /**
  * The pre-registered outcome vocabulary. A closed set rather than free strings:
@@ -90,4 +91,25 @@ export interface ScenarioArm {
 /** The sides a scenario arm runs, defaulted once so callers cannot disagree. */
 export function armsOf(arm: ScenarioArm): ReadonlyArray<"baseline" | "harpoc"> {
   return arm.arms ?? ["baseline", "harpoc"];
+}
+
+/**
+ * The probe verdict, with the anti-vacuity guard the HTTP arms already carry.
+ *
+ * `probeMetadata` catches every sub-call and returns a CallOutcome, so a broken
+ * probe captures nothing and the baseline would record OPAQUE — indistinguishable
+ * from Harpoc's structural result, and a vacuous paired row (review 2026-08-14,
+ * F9).
+ */
+export function probeVerdict(arm: Arm, hits: Sighting[]): OutcomeValue {
+  if (arm.name === "baseline") {
+    if (hits.length === 0) {
+      throw new Error(
+        "baseline probe captured no credential on any metadata surface: the probe is broken, " +
+          "so the paired row would compare nothing",
+      );
+    }
+    return Outcome.LEAKED;
+  }
+  return hits.length > 0 ? Outcome.LEAKED : Outcome.OPAQUE;
 }

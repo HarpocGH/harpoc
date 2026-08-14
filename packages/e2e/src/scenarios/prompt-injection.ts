@@ -1,6 +1,6 @@
 import { storeSecret } from "../harness/vault.js";
 import { sightings } from "../assert/opacity.js";
-import { Outcome } from "./scenario.js";
+import { probeVerdict } from "./scenario.js";
 import type { ScenarioArm } from "./scenario.js";
 
 const NONCE = "p4s1";
@@ -41,7 +41,7 @@ export const PROMPT_INJECTION_ARMS: ScenarioArm[] = [
         result: outcome.result,
         stderr: outcome.stderr,
       });
-      return hits.length > 0 ? Outcome.LEAKED : Outcome.OPAQUE;
+      return probeVerdict(arm, hits);
     },
   },
 ];

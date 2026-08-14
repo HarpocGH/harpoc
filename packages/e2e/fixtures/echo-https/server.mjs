@@ -12,12 +12,25 @@
 // surviving encoding is the finding; emitting them from `/echo` would make the
 // Phase 3 demonstration cell fail for a reason the cell is not about. So `/echo`
 // is FROZEN (D7) — pinned by two harness tests — and the scenario channels live
-// on their own paths: /echo/partial, /echo/reason, /redirect-to-attacker.
+// on their own paths: /echo/partial, /echo/reason, /echo/jsonesc-alt,
+// /redirect-to-attacker.
 //
 // One §6.2.7 class needs no path of its own: the JSON-escaped echo. This body is
 // JSON, so a credential containing a quote or a backslash is escaped on the wire
 // by ordinary serialization. That is the point of the finding — the channel is
 // not exotic, it appears in any JSON response body.
+//
+// /echo/jsonesc-alt is a related but distinct class: the same JSON body, escaped
+// under a DIFFERENT valid convention than V8's. `JSON.stringify` in Node/V8
+// never escapes a solidus and never \u-escapes non-ASCII by default, but other
+// widely-deployed serializers do — PHP's `json_encode` escapes `/` unless told
+// not to, and Python's `json.dumps` emits `\uXXXX` for every non-ASCII character
+// under its default `ensure_ascii=True`. A credential redaction pass built only
+// against V8's convention (as this vault's used to be — review 2026-08-14, F1)
+// misses both. This endpoint is a Node handler that HAND-SERIALIZES those two
+// escaping conventions to produce the same bytes a PHP or Python backend would;
+// no PHP or Python process is actually involved, and no such runtime was added
+// to the fleet — the substitution is stated here rather than left implied.
 import { createServer } from "node:https";
 import { readFileSync } from "node:fs";
 
@@ -92,6 +105,32 @@ const server = createServer({ cert: readFileSync(CERT), key: readFileSync(KEY) }
       "content-type": "application/json",
     });
     res.end(JSON.stringify({ note: "credential is in the status line" }));
+    return;
+  }
+
+  // A valid JSON body that V8 would never emit: the solidus escaped as PHP's
+  // json_encode does by default, and every non-ASCII character as \uXXXX the way
+  // Python's json.dumps does under ensure_ascii=True.
+  //
+  // Hand-serialized rather than served by a PHP or Python container: the
+  // property under test is that the vault handles JSON escapings other than
+  // V8's, and a second language runtime in the fleet would produce the same
+  // bytes at much greater cost. The substitution is stated, not implied.
+  if (url.pathname === "/echo/jsonesc-alt") {
+    const escaped = [...credential]
+      .map((ch) => {
+        if (ch === "/") return "\\/";
+        if (ch.charCodeAt(0) > 127) {
+          return Array.from(
+            { length: ch.length },
+            (_, i) => `\\u${ch.charCodeAt(i).toString(16).padStart(4, "0")}`,
+          ).join("");
+        }
+        return JSON.stringify(ch).slice(1, -1);
+      })
+      .join("");
+    res.writeHead(200, { "content-type": "application/json", [MARKER_HEADER]: marker ?? "" });
+    res.end(`{"echo":"${escaped}","marker":${JSON.stringify(marker ?? "")}}`);
     return;
   }
 

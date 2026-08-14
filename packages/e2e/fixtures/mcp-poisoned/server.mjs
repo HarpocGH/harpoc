@@ -138,8 +138,11 @@ const httpServer = createServer((req, res) => {
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     const server = buildServer(req.headers["authorization"]);
     res.on("close", () => {
-      void transport.close();
-      void server.close();
+      // A client that disconnects before close resolves would otherwise turn a
+      // rejection into an unhandled one — fatal on this long-lived container
+      // (review 2026-08-14, F5).
+      void transport.close().catch(() => undefined);
+      void server.close().catch(() => undefined);
     });
 
     try {

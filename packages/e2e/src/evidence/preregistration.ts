@@ -88,26 +88,43 @@ export function validateExpectationSet(expectations: Expectation[]): string[] {
     }
   }
 
-  // 3. A paired arm registered for only one side — the failure mode C-3 exists
-  //    to prevent. Scoped to rows carrying a `variant`: those are the two-arm
-  //    attack scenarios, whereas the Phase 1-3 demonstration rows are
-  //    single-arm by construction and predate C-3. A variant-bearing row that
-  //    lacks its pair is worth flagging whenever it appears.
-  const arms = new Map<string, Set<string>>();
+  // 3. Half a comparison — the failure mode C-3 exists to prevent.
+  //
+  //    Two directions, deliberately asymmetric. A BASELINE row always needs its
+  //    Harpoc counterpart: a baseline exists only as one half of a paired row,
+  //    whatever its variant, and the six Phase 4B counterparts are variant-less
+  //    (their Harpoc halves run in the Phase 1-2 context suites). Before the
+  //    2026-08-14 review this direction was skipped for variant-less rows and
+  //    covered only by a hardcoded array in the runner (F13).
+  //
+  //    The reverse direction stays scoped to variant-bearing rows: the 47
+  //    variant-less Harpoc rows are single-arm demonstration cells by
+  //    construction and predate C-3.
+  //
+  //    The key includes `variant` (`?? ""` so a variant-less row keys the same
+  //    on both directions rather than colliding with a different sentinel). A
+  //    scenario family sharing scenario+context+surface across several variants
+  //    — output-channel-leakage runs 11 — would otherwise let ONE variant's
+  //    baseline vouch for every sibling variant, masking a variant-bearing
+  //    Harpoc row that has no baseline of its own (round-1 review finding: a
+  //    variant-less key regressed exactly the class of bug F13 fixed).
+  const pairKey = (e: Expectation): string =>
+    `${e.scenario}|${e.context}|${e.variant ?? ""}|${e.surface}`;
+  const harpocPairs = new Set(
+    expectations.filter((e) => e.arm === "harpoc").map((e) => pairKey(e)),
+  );
   for (const e of expectations) {
-    if (e.variant === undefined) continue;
-    const k = `${e.scenario}|${e.context}|${e.variant}|${e.surface}`;
-    let present = arms.get(k);
-    if (present === undefined) {
-      present = new Set<string>();
-      arms.set(k, present);
+    if (e.arm === "baseline" && !harpocPairs.has(pairKey(e))) {
+      problems.push(`baseline expectation has no Harpoc counterpart: ${keyOf(e)}`);
     }
-    present.add(e.arm);
   }
-  for (const [k, present] of arms) {
-    if (present.size < 2) {
-      const missing = present.has("baseline") ? "harpoc" : "baseline";
-      problems.push(`scenario arm lacks both arms (${missing} missing): ${k}`);
+
+  const baselinePairs = new Set(
+    expectations.filter((e) => e.arm === "baseline").map((e) => pairKey(e)),
+  );
+  for (const e of expectations) {
+    if (e.arm === "harpoc" && e.variant !== undefined && !baselinePairs.has(pairKey(e))) {
+      problems.push(`variant-bearing Harpoc expectation has no baseline counterpart: ${keyOf(e)}`);
     }
   }
 

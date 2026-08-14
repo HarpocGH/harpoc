@@ -8,6 +8,7 @@ import {
   renderProvenance,
   renderScenarioTable,
 } from "../../scripts/tables.mjs";
+import type { EvidenceRecord, Expectation, PairedRow } from "../../scripts/tables.mjs";
 
 /**
  * The §6.2 table generator.
@@ -18,11 +19,19 @@ import {
  * states a real run is designed never to reach. The committed run is exercised
  * separately, by generating from it.
  *
- * JavaScript rather than TypeScript because the module under test is: @harpoc/e2e
- * has no build step, so the generator must be runnable by bare `node` (the
- * generate-fixtures.mjs / run-e2e.mjs precedent).
+ * The module under test stays plain ESM (`tables.mjs`): @harpoc/e2e has no
+ * build step, so the generator must be runnable by bare `node` (the
+ * generate-fixtures.mjs / run-e2e.mjs precedent). Its TEST has no such
+ * constraint — vitest transpiles TypeScript natively — so it is `.ts`, typed
+ * against `../../scripts/tables.d.mts`, so it rejoins typecheck
+ * (review 2026-08-14, F14). Linting the package is a named follow-up, not done
+ * here: `@harpoc/e2e` has no `lint` script at all, so turbo's `lint` task
+ * never reaches it regardless of this file's extension; adding one first
+ * needs 3 pre-existing `@typescript-eslint/no-dynamic-delete` errors fixed
+ * (`demonstration.e2e.test.ts`, `git.e2e.test.ts`, `machinery.test.ts`), or
+ * `pnpm lint` goes red repo-wide the moment the script is added.
  */
-function record(overrides = {}) {
+function record(overrides: Partial<EvidenceRecord> = {}): EvidenceRecord {
   return {
     scenario: "url-manipulation",
     context: "http",
@@ -41,7 +50,7 @@ function record(overrides = {}) {
   };
 }
 
-function expectation(overrides = {}) {
+function expectation(overrides: Partial<Expectation> = {}): Expectation {
   return {
     scenario: "url-manipulation",
     context: "http",
@@ -54,8 +63,14 @@ function expectation(overrides = {}) {
 }
 
 /** One paired row, both arms. */
-const PAIR = [record(), record({ arm: "harpoc", expected: "BLOCKED", observed: "BLOCKED" })];
-const PAIR_EXPECTATIONS = [expectation(), expectation({ arm: "harpoc", expected: "BLOCKED" })];
+const PAIR: [EvidenceRecord, EvidenceRecord] = [
+  record(),
+  record({ arm: "harpoc", expected: "BLOCKED", observed: "BLOCKED" }),
+];
+const PAIR_EXPECTATIONS: [Expectation, Expectation] = [
+  expectation(),
+  expectation({ arm: "harpoc", expected: "BLOCKED" }),
+];
 
 describe("escapeLatex", () => {
   it("escapes every character LaTeX would otherwise consume", () => {
@@ -76,8 +91,9 @@ describe("classify", () => {
   it("pairs a scenario that carries both arms", () => {
     const { paired, matrix, transport, other, unclassified } = classify(PAIR);
     expect(paired).toHaveLength(1);
-    expect(paired[0].baseline.arm).toBe("baseline");
-    expect(paired[0].harpoc.arm).toBe("harpoc");
+    const row = paired[0] as PairedRow;
+    expect(row.baseline?.arm).toBe("baseline");
+    expect(row.harpoc?.arm).toBe("harpoc");
     expect([matrix, transport, other, unclassified].map((b) => b.length)).toEqual([0, 0, 0, 0]);
   });
 
@@ -143,7 +159,7 @@ describe("classify", () => {
       record({ scenario: "orphan", variant: undefined, arm: "baseline" }),
     ]);
     expect(paired).toHaveLength(1);
-    expect(paired[0].harpoc).toBeUndefined();
+    expect((paired[0] as PairedRow).harpoc).toBeUndefined();
     expect(unclassified).toHaveLength(0);
   });
 
@@ -396,7 +412,7 @@ describe("renderScenarioTable", () => {
 });
 
 describe("renderMatrixTable", () => {
-  const cells = [];
+  const cells: EvidenceRecord[] = [];
   for (const context of ["http", "process", "mcp", "database", "git", "ssh"]) {
     for (const iface of ["mcp", "rest", "sdk", "cli"]) {
       cells.push(
@@ -450,6 +466,42 @@ describe("renderMatrixTable", () => {
   });
 });
 
+describe("interface-less demonstration records (review 2026-08-14, F3)", () => {
+  // A synthetic Phase-3-shaped record: predates the `interface` field, so it
+  // carries everything classify() and checkGates() otherwise require but that
+  // one column.
+  const base: Omit<EvidenceRecord, "interface"> = {
+    scenario: "demo-http",
+    context: "http",
+    surface: "rest",
+    arm: "harpoc",
+    expected: "OPAQUE",
+    observed: "OPAQUE",
+    match: true,
+    commit: "abc1234",
+    at: "2026-08-14T00:00:00.000Z",
+    host_os: "linux",
+    dirty: false,
+  };
+
+  it("routes a record with no interface to unclassified, not matrix", () => {
+    const { matrix, unclassified } = classify([{ ...base }]);
+    expect(matrix.length).toBe(0);
+    expect(unclassified.length).toBe(1);
+  });
+
+  it("keeps a record WITH an interface in the matrix (negative control)", () => {
+    const { matrix, unclassified } = classify([{ ...base, interface: "rest" }]);
+    expect(matrix.length).toBe(1);
+    expect(unclassified.length).toBe(0);
+  });
+
+  it("refuses to render, naming the interface as the reason", () => {
+    const problems = checkGates([{ ...base }], []);
+    expect(problems.some((p) => p.includes("interface"))).toBe(true);
+  });
+});
+
 describe("renderProvenance", () => {
   it("states the commit, host, counts and a clean verdict", () => {
     const tex = renderProvenance(PAIR, PAIR_EXPECTATIONS);
@@ -475,5 +527,107 @@ describe("renderProvenance", () => {
       allowDivergence: true,
     });
     expect(tex).toContain("1 record(s) diverged");
+  });
+});
+
+describe("duplicate and multi-commit record sets (review 2026-08-14, F6)", () => {
+  const rec = (over: Partial<EvidenceRecord> = {}): EvidenceRecord => ({
+    scenario: "url-manipulation",
+    context: "http",
+    variant: "direct",
+    surface: "mcp-http",
+    arm: "harpoc",
+    interface: "mcp",
+    expected: "BLOCKED",
+    observed: "BLOCKED",
+    match: true,
+    commit: "aaaa111",
+    at: "2026-08-14T00:00:00.000Z",
+    host_os: "linux",
+    dirty: false,
+    ...over,
+  });
+
+  it("flags a shadowed harpoc record, symmetrically with a shadowed baseline", () => {
+    const records = [
+      rec({ arm: "baseline", observed: "EXFILTRATED", expected: "EXFILTRATED" }),
+      rec(),
+      rec({ observed: "BYPASSED" }),
+    ];
+    const problems = checkGates(records, []);
+    expect(problems.some((p) => p.includes("duplicate"))).toBe(true);
+  });
+
+  it("refuses a record set spanning two commits", () => {
+    const problems = checkGates([rec(), rec({ commit: "bbbb222", variant: "other" })], []);
+    expect(problems.some((p) => p.includes("commit"))).toBe(true);
+  });
+
+  it("allows two commits under the explicit waiver (negative control)", () => {
+    const problems = checkGates([rec(), rec({ commit: "bbbb222", variant: "other" })], [], {
+      allowMultiCommit: true,
+      allowDivergence: true,
+    });
+    expect(!problems.some((p) => p.includes("commit"))).toBe(true);
+  });
+
+  it("stamps the multi-commit waiver into the provenance block", () => {
+    const out = renderProvenance([rec()], [], { allowMultiCommit: true });
+    expect(out.includes("allow-multi-commit")).toBe(true);
+  });
+
+  // checkGates's duplicate-key gate above catches this same pair by raw key
+  // collision, whichever arm is doubled — so it cannot tell whether classify()
+  // itself still routes a shadowed record correctly. Pinned directly against
+  // classify(): before the 2026-08-14 review a shadowed harpoc record silently
+  // overwrote the first and the displaced one fell into `other`, counted as an
+  // ordinary single-arm exclusion rather than surfaced as a dropped duplicate.
+  it("classify() routes a shadowed harpoc record to unclassified, not other", () => {
+    const records = [
+      rec({ arm: "baseline", observed: "EXFILTRATED", expected: "EXFILTRATED" }),
+      rec(),
+      rec({ observed: "BYPASSED" }),
+    ];
+    const { unclassified, other } = classify(records);
+    expect(unclassified).toContain(records[1]);
+    expect(unclassified).toHaveLength(1);
+    expect(other).toHaveLength(0);
+  });
+
+  // The symmetric half of the pin above — but a plain (non-`demo-`) baseline
+  // record is the WRONG shape to prove it: the bucket loop's pre-existing
+  // `arm === "harpoc" ? other : unclassified` tail already sends any baseline
+  // record to `unclassified` on its own, Step 3 or not, so a plain shadowed
+  // baseline can't tell the two apart. A `demo-` scenario can: it hits the
+  // `demo-` branch BEFORE that tail runs, so without the explicit `shadowed`
+  // check a displaced baseline record here is misrouted into `matrix` — a
+  // rendered table cell — instead of surfacing as unclassified. Do not
+  // "simplify" this scenario back to a plain name; that silently disarms the
+  // test (review 2026-08-14, F6 fix round 2).
+  it("classify() routes a shadowed baseline demo- record to unclassified, not the matrix", () => {
+    const records = [
+      rec({
+        arm: "baseline",
+        scenario: "demo-http",
+        context: "http",
+        variant: undefined,
+        interface: "rest",
+        observed: "EXFILTRATED",
+        expected: "EXFILTRATED",
+      }),
+      rec({
+        arm: "baseline",
+        scenario: "demo-http",
+        context: "http",
+        variant: undefined,
+        interface: "rest",
+        observed: "LEAKED",
+        expected: "EXFILTRATED",
+      }),
+    ];
+    const { unclassified, matrix } = classify(records);
+    expect(unclassified).toContain(records[0]);
+    expect(unclassified).toHaveLength(1);
+    expect(matrix).toHaveLength(0);
   });
 });

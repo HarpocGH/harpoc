@@ -38,6 +38,7 @@ export interface EvidenceRecord {
 
 let cached: string | null = null;
 let cachedDirty: boolean | null = null;
+let warnedDirty = false;
 
 /** The artifact pin (C-5). Results that carry their own SHA cannot drift. */
 export function commitSha(): string {
@@ -55,17 +56,33 @@ export function commitSha(): string {
  * Whether the tree the run measured differs from the commit it stamps. A failed
  * git invocation reports `true`: the honest answer to "can this SHA be trusted
  * to describe the code?" when the question cannot be answered is no.
+ *
+ * The failure is NOT cached. A momentary failure — an index.lock held by a
+ * concurrent git operation during the first emit — would otherwise stamp every
+ * later record of a clean checkout dirty, and the table generator would refuse
+ * the whole run until someone passed --allow-dirty (review 2026-08-14, F15).
  */
 export function treeDirty(): boolean {
-  if (cachedDirty === null) {
-    try {
-      cachedDirty =
-        execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "";
-    } catch {
-      cachedDirty = true;
+  if (cachedDirty !== null) return cachedDirty;
+  try {
+    cachedDirty =
+      execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "";
+    return cachedDirty;
+  } catch (err) {
+    if (!warnedDirty) {
+      warnedDirty = true;
+      process.stderr.write(
+        `evidence: git status failed, records stamp dirty until it succeeds: ${String(err)}\n`,
+      );
     }
+    return true;
   }
-  return cachedDirty;
+}
+
+/** Test seam: the module-level cache outlives a single test otherwise. */
+export function resetDirtyCacheForTests(): void {
+  cachedDirty = null;
+  warnedDirty = false;
 }
 
 /**

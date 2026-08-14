@@ -142,3 +142,40 @@ describe("mapStringLeaves — key positions", () => {
     expect(out).toEqual({ note: "hello", n: 1, list: [1, "two", null] });
   });
 });
+
+describe("redactSecretEncodings — JSON escaping conventions (review 2026-08-14, F1)", () => {
+  it("redacts a credential the PHP convention escaped", () => {
+    const secret = "sk-live/abc";
+    const body = `{"echo":"sk-live\\/abc"}`;
+    expect(redactSecretEncodings(body, secret)).not.toContain("sk-live");
+  });
+
+  it("redacts a credential Python's ensure_ascii escaped", () => {
+    const secret = "sk-tür-1";
+    const body = `{"echo":"sk-t\\u00fcr-1"}`;
+    const out = redactSecretEncodings(body, secret);
+    expect(out).not.toContain("\\u00fc");
+    expect(out).toContain("[REDACTED]");
+  });
+
+  it("redacts the BASE64 form when the backend escaped its solidus", () => {
+    // The bypass that survived the 2026-08-13 fix: base64 alphabets contain "/".
+    // (Deviation from the brief's fixture: pure low-ASCII input can only ever
+    // land a "/" in base64 output at a 4th-char position, which requires a "?"
+    // byte at an input offset ≡ 2 (mod 3) — no letter/digit/dash string can hit
+    // it, verified: the brief's original secret's base64 never contains "/".)
+    const secret = "sk?credential-with-slash-in-b64-xyz";
+    const b64 = Buffer.from(secret, "utf8").toString("base64");
+    expect(b64).toContain("/"); // guard: this fixture must actually exercise the case
+    const body = `{"echo":"${b64.replace(/\//g, "\\/")}"}`;
+    expect(redactSecretEncodings(body, secret)).not.toContain(b64.split("/")[0]);
+  });
+
+  it("still redacts the plain raw form (negative control: no regression)", () => {
+    expect(redactSecretEncodings("token=abc123", "abc123")).toBe("token=[REDACTED]");
+  });
+
+  it("leaves a benign marker untouched (negative control: not blanket redaction)", () => {
+    expect(redactSecretEncodings('{"marker":"keep-me"}', "abc123")).toBe('{"marker":"keep-me"}');
+  });
+});

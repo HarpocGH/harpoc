@@ -30,6 +30,22 @@ export function escapeLatex(value) {
     .replace(/\u0000/g, "\\textbackslash{}");
 }
 
+/**
+ * Whether a demonstration record's scenario/context/surface put it on the
+ * matrix's shape — independent of whether it actually carries the
+ * `interface` a rendered cell is keyed on. Shared between `classify` (which
+ * routes on it) and `checkGates` (which explains a refusal by it), so the
+ * routing rule and the refusal message can never drift apart (review
+ * 2026-08-14, F3).
+ */
+function isMatrixShaped(r) {
+  return (
+    r.scenario.startsWith("demo-") &&
+    r.scenario === `demo-${r.context}` &&
+    r.surface !== "mcp-stdio"
+  );
+}
+
 /** The pre-registration key an evidence record belongs to. */
 export function keyOf(r) {
   return [r.scenario, r.context, r.variant ?? "", r.surface, r.arm].join("|");
@@ -86,24 +102,37 @@ export const MATRIX_INTERFACES = ["mcp", "rest", "sdk", "cli"];
  * record is a matrix cell when its scenario is `demo-<its own context>` and its
  * surface is not `mcp-stdio`. Anything else under `demo-` is transport coverage
  * — the stdio surface of a matrix context, or a downstream-transport variant
- * whose scenario id therefore differs from `demo-<context>` (Phase 3 D7).
+ * whose scenario id therefore differs from `demo-<context>` (Phase 3 D7). A
+ * record that would otherwise be a matrix cell but carries no `interface`
+ * (the Phase 3 pairs predate the field) is routed to `unclassified` instead —
+ * a cell the render step cannot key is not a cell (review 2026-08-14, F3).
  */
 export function classify(records) {
+  // `shadowed` catches the record a duplicate row overwrote, on EITHER arm.
+  // Before the 2026-08-14 review only a shadowed baseline was caught (it fell
+  // through to `unclassified`) — a shadowed Harpoc record fell into `other`
+  // and was counted as merely "excluded", a silent drop along exactly the
+  // axis that matters. Both arms are tracked the same way now.
   const byRow = new Map();
+  const shadowed = new Set();
   for (const r of records) {
-    if (r.arm === "baseline") {
-      const entry = byRow.get(rowKeyOf(r)) ?? {};
-      entry.baseline = r;
-      byRow.set(rowKeyOf(r), entry);
-    }
+    if (r.arm !== "baseline") continue;
+    const entry = byRow.get(rowKeyOf(r)) ?? {};
+    if (entry.baseline !== undefined) shadowed.add(entry.baseline);
+    entry.baseline = r;
+    byRow.set(rowKeyOf(r), entry);
   }
   // A row is "paired" only if a baseline record exists for it; the Harpoc half
   // is then attached below. A Harpoc record with no baseline is a single-arm
-  // demonstration, not half of a comparison.
+  // demonstration, not half of a comparison. A SECOND Harpoc record for a row
+  // is a duplicate, tracked in `shadowed` the same way the baseline loop above
+  // does.
   for (const r of records) {
-    if (r.arm !== "baseline" && byRow.has(rowKeyOf(r))) {
-      byRow.get(rowKeyOf(r)).harpoc = r;
-    }
+    if (r.arm === "baseline") continue;
+    const entry = byRow.get(rowKeyOf(r));
+    if (entry === undefined) continue;
+    if (entry.harpoc !== undefined) shadowed.add(entry.harpoc);
+    entry.harpoc = r;
   }
 
   const paired = [];
@@ -120,9 +149,20 @@ export function classify(records) {
   const unclassified = [];
   for (const r of records) {
     if (pairedRecords.has(r)) continue;
+    if (shadowed.has(r)) {
+      unclassified.push(r);
+      continue;
+    }
     if (r.scenario.startsWith("demo-")) {
-      if (r.scenario === `demo-${r.context}` && r.surface !== "mcp-stdio") matrix.push(r);
-      else transport.push(r);
+      // A matrix cell is keyed on `interface` at render time, so a record
+      // without one is not a cell — it would be counted in the provenance block
+      // and then silently miss every lookup, rendering the whole 6x4 table as
+      // "--" (review 2026-08-14, F3).
+      const hasInterface = typeof r.interface === "string" && r.interface !== "";
+      if (isMatrixShaped(r)) {
+        if (hasInterface) matrix.push(r);
+        else unclassified.push(r);
+      } else transport.push(r);
       continue;
     }
     // Single-arm records that are neither a paired row nor a demonstration
@@ -172,9 +212,58 @@ export function checkGates(records, expectations, options = {}) {
     }
   }
 
-  const { unclassified } = classify(records);
+  // One table, one run. A concatenated file (two OS legs, say) renders a
+  // provenance block naming several SHAs and exits 0 — so a Chapter 6 table
+  // could be produced from records no single stamped commit contains, which is
+  // exactly what the C-5 pin exists to prevent. The honest cross-OS workflow is
+  // two files at one commit, generated separately.
+  if (!options.allowMultiCommit) {
+    const commits = new Set(records.map((r) => r.commit));
+    if (commits.size > 1) {
+      problems.push(
+        `records span ${String(commits.size)} commits (${[...commits].sort().join(", ")}) — ` +
+          "point the generator at one run, or pass --allow-multi-commit to stamp the caveat",
+      );
+    }
+  }
+
+  // Duplicate keys, symmetric across arms: a second record for the same key
+  // would silently overwrite the first in `classify`'s row map, so it is
+  // caught here before rendering rather than discovered by counting cells.
+  const seen = new Map();
+  for (const r of records) {
+    const k = keyOf(r);
+    seen.set(k, (seen.get(k) ?? 0) + 1);
+  }
+  for (const [k, n] of seen) {
+    if (n > 1)
+      problems.push(`duplicate evidence record (${String(n)}x), one would be dropped: ${k}`);
+  }
+
+  const { matrix: matrixRecords, unclassified } = classify(records);
+  // Belt and suspenders: `classify` already keeps an interface-less record out
+  // of `matrix`, so this loop is not expected to ever fire — but if a future
+  // change to that routing loosens the rule, this is what stops it rendering
+  // silently instead of refusing loudly (review 2026-08-14, F3).
+  for (const r of matrixRecords) {
+    if (typeof r.interface !== "string" || r.interface === "") {
+      problems.push(
+        `matrix record carries no interface, so its cell cannot be placed: ${keyOf(r)}`,
+      );
+    }
+  }
   for (const r of unclassified) {
-    problems.push(`record fits no table and would be silently dropped: ${keyOf(r)}`);
+    // `classify` diverts a matrix-shaped record here specifically because it
+    // has no `interface` — name that reason instead of the generic one, or
+    // the refusal reads as "malformed record" when it is really "missing one
+    // column" (review 2026-08-14, F3).
+    if (isMatrixShaped(r)) {
+      problems.push(
+        `matrix record carries no interface, so its cell cannot be placed: ${keyOf(r)}`,
+      );
+    } else {
+      problems.push(`record fits no table and would be silently dropped: ${keyOf(r)}`);
+    }
   }
 
   return problems;
@@ -436,6 +525,12 @@ export function renderProvenance(records, expectations, options = {}) {
     caveats.push(
       "generated with \\texttt{--allow-divergence}: an observed outcome differed from its " +
         "pre-registration, or a pre-registered expectation was never exercised",
+    );
+  }
+  if (options.allowMultiCommit) {
+    caveats.push(
+      "generated with \\texttt{--allow-multi-commit}: the records do not all come from one " +
+        "commit, so no single stamped SHA contains the code that produced this table",
     );
   }
   if (caveats.length > 0) {
