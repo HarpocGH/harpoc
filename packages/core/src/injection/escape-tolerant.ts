@@ -34,13 +34,26 @@
  * exponential, and this is a best-effort layer atop structural opacity — not the
  * property the vault's guarantee rests on.
  *
- * Residual, deliberate: nesting depth. This matches one escape layer of the
- * text it is given; it does not parse or descend into JSON structure. A
- * credential inside a JSON document that is itself carried as a string field
- * of another JSON document — a routine webhook `data`/`payload` wrapper — sits
- * behind two escape layers and is not matched. That is characterized, not
- * claimed blocked — the same residual family as the partial-echo and chunking
- * classes (review 2026-08-14, F1 whole-branch follow-up).
+ * Residual, deliberate: nesting depth is now bounded, not unbounded. This
+ * function still matches only one escape layer of the text it is given, and
+ * does not itself parse or descend into JSON structure. Since 2026-08-15,
+ * `redactSecretEncodings` (`output-sanitizer.ts`) wraps it in a structural
+ * pass that parses the surrounding JSON document and descends into string
+ * leaves that are themselves JSON, to at most `MAX_JSON_PARSES` (4) levels of
+ * parse depth — not four `JSON.parse` calls in total; a document with many
+ * sibling leaves at one level costs one parse per leaf, so the actual call
+ * count scales with the document's shape, not a fixed budget. Four levels is
+ * enough to reach a credential in a document wrapped inside as many as four
+ * further envelopes (five JSON documents nested in total). A credential
+ * wrapped a fifth envelope deeper — six documents in total — is still not
+ * matched, nor is one inside a body over the descent's size guard. That is
+ * characterized, not claimed blocked — the same residual family as the
+ * partial-echo and chunking classes — and the
+ * e2e harness deliberately parses to a greater depth still (six `JSON.parse`
+ * calls, `MAX_PARSE_DEPTH` in `packages/e2e/src/assert/scan.ts`), so the
+ * measurement can still observe the band the vault does not cover (review
+ * 2026-08-14, F1 whole-branch follow-up; nested-JSON redaction plan,
+ * decision D2).
  */
 
 const SIMPLE_ESCAPES: Record<string, string> = {

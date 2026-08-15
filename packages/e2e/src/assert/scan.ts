@@ -7,8 +7,15 @@ export interface Sighting {
   position: "value" | "key";
 }
 
-/** Deepest serialization level walked. The MCP shape nests two; four is slack. */
-const MAX_PARSE_DEPTH = 4;
+/**
+ * Deepest serialization level walked. The MCP shape nests two; the vault's own
+ * redaction parses four. Six keeps the measurement strictly deeper than the
+ * product, so a band remains in which the harness can still detect a credential
+ * the vault does not redact — the relation `drift.test.ts` exists to prove.
+ * Symmetric caps would push the shared blind spot to a depth neither side can
+ * observe, which is how the V8-only needle survived four reviews (decision D2).
+ */
+const MAX_PARSE_DEPTH = 6;
 
 /**
  * Walk an arbitrary structure and report every position at which the secret

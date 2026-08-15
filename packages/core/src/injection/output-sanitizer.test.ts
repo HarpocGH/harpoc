@@ -141,6 +141,30 @@ describe("mapStringLeaves — key positions", () => {
     const out = mapStringLeaves({ note: "hello", n: 1, list: [1, "two", null] }, redact);
     expect(out).toEqual({ note: "hello", n: 1, list: [1, "two", null] });
   });
+
+  it("preserves a __proto__ own-property key (not the inherited setter)", () => {
+    // `JSON.parse` builds object properties via CreateDataProperty, which never
+    // consults the prototype chain, so this produces a genuine own property
+    // literally named "__proto__" — the same shape a downstream server's JSON
+    // response arrives in. A literal `{ __proto__: "x" }` object expression
+    // would NOT reproduce the bug (that syntax is grammar-special-cased to set
+    // the prototype instead of creating a property), so the fixture must be
+    // built by parsing, not by writing the key directly in source.
+    const input: unknown = JSON.parse('{"__proto__":"keep-me","note":"hello"}');
+    expect(Object.prototype.hasOwnProperty.call(input as object, "__proto__")).toBe(true);
+
+    const out = mapStringLeaves(input, redact) as Record<string, unknown>;
+
+    // The walker's rebuilt object must still behave like a normal object
+    // everywhere else uses it: unaffected prototype, and the "__proto__"
+    // value reachable as a real own property, not silently dropped or (worse,
+    // for an object-typed value) actually repointing the result's prototype.
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(Object.prototype.hasOwnProperty.call(out, "__proto__")).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(out, "__proto__")?.value).toBe("keep-me");
+    expect(out.note).toBe("hello");
+    expect(JSON.stringify(out)).toBe('{"__proto__":"keep-me","note":"hello"}');
+  });
 });
 
 describe("redactSecretEncodings — JSON escaping conventions (review 2026-08-14, F1)", () => {
@@ -177,5 +201,222 @@ describe("redactSecretEncodings — JSON escaping conventions (review 2026-08-14
 
   it("leaves a benign marker untouched (negative control: not blanket redaction)", () => {
     expect(redactSecretEncodings('{"marker":"keep-me"}', "abc123")).toBe('{"marker":"keep-me"}');
+  });
+});
+
+describe("mapStringLeaves — JSON descent budget", () => {
+  // An EXACT-match mapper, not a substring one. A substring mapper would rewrite
+  // the word wherever it appears, including inside the serialized document at
+  // the outer level — so every descent case would pass without any descent
+  // happening. Requiring the whole leaf to equal the needle makes reaching the
+  // inner leaf the only way these assertions can hold.
+  const shout = (s: string): string => (s === "secret" ? "SHOUTED" : s);
+
+  it("does not descend by default (today's behaviour)", () => {
+    const leaf = JSON.stringify({ inner: "secret" });
+    const out = mapStringLeaves({ payload: leaf }, shout) as { payload: string };
+    expect(out.payload).toBe(leaf);
+  });
+
+  it("descends into a string leaf that is itself JSON", () => {
+    const leaf = JSON.stringify({ inner: "secret" });
+    const out = mapStringLeaves({ payload: leaf }, shout, { descendJson: 1 }) as {
+      payload: string;
+    };
+    expect(JSON.parse(out.payload)).toEqual({ inner: "SHOUTED" });
+  });
+
+  it("descends into a string leaf that is itself a JSON array", () => {
+    // The walker's trim check accepts a leaf trimming to "{" OR "[" — a
+    // top-level array body is a routine API shape (e.g. a bulk-list
+    // endpoint), and until now nothing exercised that second branch.
+    const leaf = JSON.stringify(["secret", "other"]);
+    const out = mapStringLeaves({ payload: leaf }, shout, { descendJson: 1 }) as {
+      payload: string;
+    };
+    expect(JSON.parse(out.payload)).toEqual(["SHOUTED", "other"]);
+  });
+
+  it("stops at the budget", () => {
+    const deep = JSON.stringify({ b: JSON.stringify({ c: "secret" }) });
+    const out = mapStringLeaves({ a: deep }, shout, { descendJson: 1 }) as { a: string };
+    // One descent reaches `b`, whose value is still a serialized document. The
+    // budget is spent, so the leaf inside it is never visited.
+    expect(out.a).toContain("secret");
+  });
+
+  it("descends far enough when the budget allows", () => {
+    const deep = JSON.stringify({ b: JSON.stringify({ c: "secret" }) });
+    const out = mapStringLeaves({ a: deep }, shout, { descendJson: 2 }) as { a: string };
+    expect(out.a).not.toContain("secret");
+  });
+
+  it("keeps a leaf byte-identical when nothing inside it changed", () => {
+    const leaf = '{ "inner" :  "harmless" }'; // deliberately odd whitespace
+    const out = mapStringLeaves({ payload: leaf }, shout, { descendJson: 2 }) as {
+      payload: string;
+    };
+    expect(out.payload).toBe(leaf);
+  });
+
+  it("applies the mapper to a non-JSON leaf and attempts no parse", () => {
+    const out = mapStringLeaves({ payload: "secret" }, shout, { descendJson: 2 }) as {
+      payload: string;
+    };
+    expect(out.payload).toBe("SHOUTED");
+  });
+
+  it("returns a malformed JSON-looking leaf as the mapper left it", () => {
+    const out = mapStringLeaves({ payload: '{"inner": "secret"' }, shout, {
+      descendJson: 2,
+    }) as { payload: string };
+    expect(out.payload).toBe('{"inner": "secret"');
+  });
+
+  it("maps keys at depth, with the collision rule (H3)", () => {
+    // `SHOUTED` FIRST on purpose: the suffix rule only guards a key the mapper
+    // actually changed, so with the other order the unchanged `SHOUTED` would
+    // overwrite the mapped one. That is pre-existing behaviour, pinned as it is.
+    const leaf = JSON.stringify({ SHOUTED: 2, secret: 1 });
+    const out = mapStringLeaves({ payload: leaf }, shout, { descendJson: 1 }) as {
+      payload: string;
+    };
+    const parsed = JSON.parse(out.payload) as Record<string, number>;
+    expect(Object.keys(parsed).sort()).toEqual(["SHOUTED", "SHOUTED_2"]);
+  });
+});
+
+describe("redactSecretEncodings — nested JSON documents", () => {
+  const wrap = (inner: string): string => JSON.stringify({ data: inner });
+  const t1 = (secret: string): string => JSON.stringify({ echo: secret });
+
+  it("redacts a quote-bearing credential behind a webhook envelope", () => {
+    const secret = 'tok"en-x';
+    const body = wrap(t1(secret));
+    const out = redactSecretEncodings(body, secret);
+    expect(out).not.toContain("en-x");
+    expect(JSON.parse(out)).toBeTypeOf("object");
+  });
+
+  it("redacts a backslash-bearing credential behind a webhook envelope", () => {
+    const secret = "dom\\user-pw";
+    const out = redactSecretEncodings(wrap(t1(secret)), secret);
+    expect(out).not.toContain("user-pw");
+  });
+
+  it("redacts a non-ASCII credential escaped by an ensure_ascii encoder", () => {
+    const secret = "passwörd-1";
+    // What Python's json.dumps emits, then wrapped by the outer document.
+    const inner = '{"echo":"passw\\u00f6rd-1"}';
+    const out = redactSecretEncodings(wrap(inner), secret);
+    expect(out).not.toContain("passw");
+  });
+
+  it("redacts through four parses and is blind at five (the D2 boundary)", () => {
+    const secret = 'tok"en-y';
+    const t5 = wrap(wrap(wrap(wrap(t1(secret)))));
+    expect(redactSecretEncodings(t5, secret)).not.toContain("en-y");
+    const t6 = wrap(t5);
+    expect(redactSecretEncodings(t6, secret)).toBe(t6);
+  });
+
+  it("redacts a credential in KEY position at depth", () => {
+    const secret = 'tok"en-k';
+    const body = wrap(JSON.stringify({ [secret]: 1 }));
+    expect(redactSecretEncodings(body, secret)).not.toContain("en-k");
+  });
+
+  it("preserves a __proto__ key while redacting a sibling credential", () => {
+    // A __proto__ own property at the TOP level (the object the structural
+    // descent's outermost JSON.parse produces directly) so the walker's
+    // rebuild of THAT object is what the final output actually returns — not
+    // a deeper rebuild whose result gets discarded because nothing changed at
+    // that level. The `nested` credential is one JSON.stringify layer down
+    // (same shape as `t1`/`wrap` elsewhere in this file), so the flat pass
+    // alone cannot find it and the descent must fire, forcing this object to
+    // be re-serialized and exercising the __proto__ accumulator bug.
+    const secret = 'tok"en-p';
+    const bodyObj: Record<string, unknown> = { ["__proto__"]: "keep-me", nested: t1(secret) };
+    const body = JSON.stringify(bodyObj);
+
+    const out = redactSecretEncodings(body, secret);
+    expect(out).not.toContain("en-p");
+
+    const parsedOut = JSON.parse(out) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(parsedOut, "__proto__")).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(parsedOut, "__proto__")?.value).toBe("keep-me");
+  });
+
+  it("leaves a nested body byte-identical when nothing matches", () => {
+    // This body DOES contain backslashes (nesting escapes the inner quotes), so
+    // the descent runs and finds nothing — the point is that a clean response
+    // is returned verbatim rather than re-serialized.
+    const body = wrap(JSON.stringify({ echo: "harmless" }));
+    expect(redactSecretEncodings(body, 'tok"en-z')).toBe(body);
+  });
+
+  it("returns a non-canonical clean body verbatim rather than re-serializing", () => {
+    // Unlike the case above, this body is hand-written, not produced by
+    // JSON.stringify: odd spacing and a number wide enough that IEEE-754
+    // normalization would visibly change it. A `walked.changed` check that
+    // had been removed would still pass the case above (JSON.stringify output
+    // is already canonical and survives re-serialization byte-identically) —
+    // only a non-canonical fixture can catch that regression.
+    const body = '{ "data": "{\\"echo\\":\\"harmless\\"}", "id": 12345678901234567890 }';
+    expect(body).toContain("\\");
+    expect(redactSecretEncodings(body, 'tok"en-z')).toBe(body);
+  });
+
+  it("never parses a body without a backslash (the short-circuit)", () => {
+    // No escaping anywhere, so no nested occurrence can exist. Pinned because
+    // this is what keeps the common path at the measured 0.32 ms/MiB.
+    const body = '{"data":{"echo":"harmless"},"n":1}';
+    expect(body).not.toContain("\\");
+    expect(redactSecretEncodings(body, 'tok"en-z')).toBe(body);
+  });
+
+  it("falls back to the flat result when the document does not parse", () => {
+    const secret = 'tok"en-m';
+    const truncated = wrap(t1(secret)).slice(0, -3);
+    // No throw, and never weaker than the flat pass alone.
+    expect(() => redactSecretEncodings(truncated, secret)).not.toThrow();
+  });
+
+  it("does not let re-serialization introduce the credential where it wasn't (monotonicity)", () => {
+    // Reviewer-reproduced case (review 2026-08-15 fix wave): the structural
+    // descent re-serializes the WHOLE object once anything inside it changed,
+    // not just the leaf that changed. An untouched SIBLING leaf whose decoded
+    // value holds a real newline character gets re-escaped through V8's
+    // short-escape convention -- backslash followed by the literal letter
+    // "n" -- which is byte-identical to a credential that happens to contain
+    // a literal backslash immediately followed by "n". The sibling has
+    // nothing to do with the credential; only re-serialization introduces
+    // the collision.
+    const secret = "DOMAIN\\name"; // runtime: D O M A I N BACKSLASH n a m e
+    const envelope = JSON.stringify({ echo: secret });
+    const dataField = JSON.stringify(envelope); // needs the descent to reach
+    // Literal JSON text spelling the U+000A unicode escape for a real
+    // newline, deliberately not V8's own short-escape form for it, so
+    // neither the literal nor the escape-tolerant flat pass matches it up
+    // front: its DECODED value has no backslash at all, only an actual
+    // newline byte.
+    const siblingRaw = '"DOMAIN\\u000Aame"';
+    const body = `{"data":${dataField},"sibling":${siblingRaw}}`;
+
+    const out = redactSecretEncodings(body, secret);
+
+    expect(out).not.toContain(secret);
+    const parsedOut = JSON.parse(out) as { data: string };
+    expect(parsedOut.data).toContain("[REDACTED]");
+    expect(JSON.parse(parsedOut.data)).toEqual({ echo: "[REDACTED]" });
+  });
+
+  it("skips the descent above the size guard", () => {
+    const secret = 'tok"en-big';
+    const inner = t1(secret);
+    const padding = "x".repeat(5 * 1024 * 1024);
+    const body = JSON.stringify({ pad: padding, data: inner });
+    // Over the guard: the flat passes still run, the descent does not.
+    expect(redactSecretEncodings(body, secret)).toContain("en-big");
   });
 });

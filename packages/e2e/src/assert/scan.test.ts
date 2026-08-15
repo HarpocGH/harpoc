@@ -113,15 +113,17 @@ describe("scan — escape tolerance and serialized depth (review 2026-08-14, F1/
       return out;
     }
 
-    // +4 wraps = 5 total escape layers, needing exactly 4 JSON.parse calls
-    // (depth 0->1->2->3->4) to reach 1 layer — exactly MAX_PARSE_DEPTH. Found.
-    const atCap = wrapLayers(singlyEscaped, 4);
+    // +6 wraps = 7 total escape layers, needing exactly 6 JSON.parse calls
+    // (depth 0->1->2->3->4->5->6) to reach 1 layer — exactly MAX_PARSE_DEPTH
+    // (raised to 6 in Task 4, nested-json-redaction plan, so the harness stays
+    // strictly deeper than the vault's own 4-parse cap — decision D2). Found.
+    const atCap = wrapLayers(singlyEscaped, 6);
     expect(scan(credential, { body: atCap }).length).toBeGreaterThan(0);
 
-    // +5 wraps = 6 total escape layers, needing a 5th parse from depth 4 —
-    // `depth < MAX_PARSE_DEPTH` refuses it (4 < 4 is false). Not found: the
+    // +7 wraps = 8 total escape layers, needing a 7th parse from depth 6 —
+    // `depth < MAX_PARSE_DEPTH` refuses it (6 < 6 is false). Not found: the
     // cap is doing something, not merely failing to throw.
-    const beyondCap = wrapLayers(singlyEscaped, 5);
+    const beyondCap = wrapLayers(singlyEscaped, 7);
     expect(scan(credential, { body: beyondCap })).toEqual([]);
   });
 

@@ -95,39 +95,41 @@ describe("product/harness drift (decision D2)", () => {
     expect(residual).toEqual([]);
   });
 
-  it("known shared blind spot: nesting depth — pinned directly, not via blindSpots/residual", () => {
-    // `blindSpots` (above) and `residual` (above) are both defined over an
-    // XOR: `vaultRedacted !== harnessSaw`. A case where BOTH sides are blind
-    // to the credential at the envelope level satisfies neither loop's `if`
-    // and is therefore invisible to this file BY CONSTRUCTION unless pinned
-    // as its own case, which is what this test is.
+  it("nesting: the vault redacts to its cap, the harness sees two levels further", () => {
+    // `redactSecretEncodings` (vault, output-sanitizer.ts) structurally
+    // re-parses a string leaf as JSON up to `MAX_JSON_PARSES` (4) levels deep;
+    // `scan` (harness, this file's sibling scan.ts) does the same up to
+    // `MAX_PARSE_DEPTH` (6) — deliberately deeper, per decision D2, so the
+    // measurement can still falsify a leak the vault ships. Measured directly
+    // (Task 4, nested-json-redaction plan): with `wrap(inner) =
+    // JSON.stringify({ data: inner })` and `t1 = JSON.stringify({ echo:
+    // secret })`, the vault redacts through five wraps (t5) and is blind from
+    // six (t6) on; the harness, at its raised budget, detects through seven
+    // (t7) and is blind from eight (t8) on. These numbers match the plan's
+    // own arithmetic exactly.
     //
-    // Both `redactSecretEncodings` (vault, escape-tolerant.ts) and
-    // `findEscapeTolerant` (harness, json-escape.ts) decode exactly ONE escape
-    // layer of the text they scan. A JSON document embedded as a STRING FIELD
-    // of another JSON document — a routine webhook `data`/`payload` wrapper —
-    // puts the credential at two escape layers, past what either matcher's
-    // grammar reaches. The harness's `scan()` still reports this credential as
-    // seen, but not through `findEscapeTolerant` reading two layers at once:
-    // it structurally re-parses a string leaf as JSON when the flat test
-    // misses (see scan.ts, "F4"), and at that shallower depth only ONE escape
-    // layer remains, which its one-layer matcher then reads directly. So the
-    // detection below is not evidence the two matchers still agree — nesting
-    // is a STRUCTURAL limit (does the caller re-parse JSON documents nested
-    // inside JSON documents?), not a GRAMMATICAL one (does the matcher
-    // recognize an escape sequence?), and the vault's flat-text scan does not
-    // do the former at all.
-    //
-    // Pinned in BOTH directions on purpose: if a future change makes the vault
-    // redact this too, the first assertion goes red and must be updated
-    // rather than silently starting to pass; if a future change makes the
-    // harness stop seeing it, the second assertion goes red the same way.
+    // Pinned in BOTH directions: if the vault's cap changes, the first block
+    // goes red; if the harness's does, the second and third do. Neither may
+    // drift silently.
     const secret = 'p4-rc-json:tok"en-x';
-    const inner = JSON.stringify({ echo: secret });
-    const outer = JSON.stringify({ data: inner });
+    const wrap = (inner: string): string => JSON.stringify({ data: inner });
+    const t1 = JSON.stringify({ echo: secret });
 
-    expect(redactSecretEncodings(outer, secret)).toBe(outer); // vault: NOT redacted
-    expect(scan(secret, { body: outer }).length).toBeGreaterThan(0); // harness: detected
+    const t5 = wrap(wrap(wrap(wrap(t1))));
+    expect(redactSecretEncodings(t5, secret)).not.toBe(t5); // vault: redacted
+    expect(scan(secret, { body: t5 }).length).toBeGreaterThan(0); // harness: detected
+
+    const t6 = wrap(t5);
+    expect(redactSecretEncodings(t6, secret)).toBe(t6); // vault: BLIND past its cap
+    expect(scan(secret, { body: t6 }).length).toBeGreaterThan(0); // harness: still sees
+
+    const t7 = wrap(t6);
+    expect(redactSecretEncodings(t7, secret)).toBe(t7); // vault: blind
+    expect(scan(secret, { body: t7 }).length).toBeGreaterThan(0); // harness: still sees
+
+    const t8 = wrap(t7);
+    expect(redactSecretEncodings(t8, secret)).toBe(t8); // vault: blind
+    expect(scan(secret, { body: t8 })).toEqual([]); // harness: its own cap, stated
   });
 
   it("negative control: both are blind to a transform outside the class", () => {

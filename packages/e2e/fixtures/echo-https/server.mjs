@@ -13,7 +13,7 @@
 // Phase 3 demonstration cell fail for a reason the cell is not about. So `/echo`
 // is FROZEN (D7) — pinned by two harness tests — and the scenario channels live
 // on their own paths: /echo/partial, /echo/reason, /echo/jsonesc-alt,
-// /redirect-to-attacker.
+// /echo/nested, /redirect-to-attacker.
 //
 // One §6.2.7 class needs no path of its own: the JSON-escaped echo. This body is
 // JSON, so a credential containing a quote or a backslash is escaped on the wire
@@ -131,6 +131,17 @@ const server = createServer({ cert: readFileSync(CERT), key: readFileSync(KEY) }
       .join("");
     res.writeHead(200, { "content-type": "application/json", [MARKER_HEADER]: marker ?? "" });
     res.end(`{"echo":"${escaped}","marker":${JSON.stringify(marker ?? "")}}`);
+    return;
+  }
+
+  // A webhook-shaped envelope: the reflecting document is carried as a STRING
+  // FIELD of an outer document, so the credential sits two escape layers deep.
+  // Routine in delivery payloads (`data`, `payload`, `body`) and the exact shape
+  // a one-layer matcher cannot reach.
+  if (url.pathname === "/echo/nested") {
+    const inner = JSON.stringify({ echo: credential, marker: marker ?? "" });
+    res.writeHead(200, { "content-type": "application/json", [MARKER_HEADER]: marker ?? "" });
+    res.end(JSON.stringify({ delivery: "webhook", data: inner }));
     return;
   }
 

@@ -143,6 +143,23 @@ export const RESPONSE_CHANNEL_ARMS: ScenarioArm[] = [
   {
     scenario: "response-channel-echo",
     context: "http",
+    variant: "json-nested",
+    services: ["echo-https"],
+    // The credential carries a quote so that wrapping actually escapes it: for
+    // an alphanumeric value the nested rendering is byte-identical to the raw
+    // one and the literal pass catches it at any depth, which is why this class
+    // is invisible unless the value can be escaped.
+    setup: (v) => setupEcho(v, "nested", `p4-rc-nested:tok"en-${NONCE}`),
+    async observe(arm, setup) {
+      // The reflecting document is a string field of the response body, so the
+      // credential is two escape layers down — past a matcher that decodes one.
+      const outcome = await arm.invoke(setup.handle, fetchAction("/echo/nested"));
+      return verdict(arm, leakedToCaller(outcome, setup.credential));
+    },
+  },
+  {
+    scenario: "response-channel-echo",
+    context: "http",
     variant: "header-echo",
     services: ["echo-https"],
     setup: (v) => setupEcho(v, "header", `p4-rc-header-${NONCE}`),
