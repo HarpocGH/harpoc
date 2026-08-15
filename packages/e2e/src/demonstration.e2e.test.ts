@@ -102,7 +102,7 @@ describe("demonstration matrix — six contexts × four interfaces", () => {
       rmSync(dirname(gitConfigPath), { recursive: true, force: true });
     }
     for (const [key, value] of Object.entries(savedEnv)) {
-      if (value === undefined) delete process.env[key];
+      if (value === undefined) Reflect.deleteProperty(process.env, key);
       else process.env[key] = value;
     }
   });

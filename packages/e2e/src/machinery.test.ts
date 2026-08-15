@@ -18,7 +18,7 @@ describe("harness machinery, proven against the process context", () => {
   afterEach(async () => {
     await vault?.destroy();
     vault = undefined;
-    delete process.env[MARKER_VAR];
+    Reflect.deleteProperty(process.env, MARKER_VAR);
   });
 
   it("a spawned child receives the credential while the caller sees only redaction", async () => {

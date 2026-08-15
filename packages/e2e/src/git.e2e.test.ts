@@ -117,7 +117,7 @@ describe("git context — live clones over http and ssh", () => {
     for (const dir of cloneDirs) rmSync(dir, { recursive: true, force: true });
     if (emptyGitConfig) rmSync(join(emptyGitConfig, ".."), { recursive: true, force: true });
     for (const [key, value] of Object.entries(savedEnv)) {
-      if (value === undefined) delete process.env[key];
+      if (value === undefined) Reflect.deleteProperty(process.env, key);
       else process.env[key] = value;
     }
   });

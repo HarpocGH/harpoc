@@ -30,6 +30,7 @@
     "fleet:down": "docker compose down -v",
     "typecheck": "tsc --noEmit",
     "test:e2e": "node scripts/run-e2e.mjs",
-    "tables": "node scripts/generate-tables.mjs"
+    "tables": "node scripts/generate-tables.mjs",
+    "lint": "eslint src/"
   }
 }
