@@ -72,6 +72,7 @@ describe("HTTP status mapping", () => {
     [ErrorCode.INVALID_PROCESS_CONFIG, 400],
     [ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED, 400],
     [ErrorCode.NETWORK_ISOLATION_UNAVAILABLE, 501],
+    [ErrorCode.FS_ISOLATION_UNAVAILABLE, 501],
     // MCP proxy
     [ErrorCode.MCP_SERVER_NOT_CONFIGURED, 400],
     [ErrorCode.MCP_SERVER_MISMATCH, 400],
@@ -119,7 +120,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(89);
+    expect(members).toHaveLength(90);
   });
 });
 
@@ -495,6 +496,14 @@ describe("factory methods", () => {
     expect(err.statusCode).toBe(501);
     expect(err.message).toContain("unsupported platform: win32");
     expect(err.message).toContain("--no-network-isolation");
+  });
+
+  it("fsIsolationUnavailable names the reason, the platforms and the remediation", () => {
+    const err = VaultError.fsIsolationUnavailable("unsupported platform: win32");
+    expect(err.code).toBe(ErrorCode.FS_ISOLATION_UNAVAILABLE);
+    expect(err.message).toContain("unsupported platform: win32");
+    expect(err.message).toContain("--no-fs-isolation");
+    expect(err.message).not.toMatch(/secret value/i);
   });
 
   it("processSpawnFailed() without detail", () => {

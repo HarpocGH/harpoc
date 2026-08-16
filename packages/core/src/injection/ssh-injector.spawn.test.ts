@@ -42,6 +42,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     response_mode: "filtered",
     response_header_allowlist: [],
     network_isolation: false,
+    fs_isolation: false,
     ...overrides,
   };
 }
@@ -325,6 +326,118 @@ describeSsh("SshInjector network isolation (§4.5.3 layer 4)", () => {
           error: "SSH_HOST_KEY_MISMATCH",
           network_isolation: false,
         }),
+      }),
+    );
+  });
+});
+
+describeSsh("SshInjector filesystem isolation (§4.5.3 layer 4)", () => {
+  const spawnMock = vi.mocked(spawnCaptured);
+
+  const fsIsolatedPolicy = () =>
+    policy({
+      host_allowlist: ["deploy.example.com"],
+      command_allowlist: [SSH as string],
+      fs_isolation: true,
+    });
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it("passes the policy flag into the spawn seam and audits mechanism + state", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({ ...OK_RESULT, fs_isolation_mechanism: "landlock" });
+    await audited.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      fsIsolatedPolicy(),
+      SSH_CONFIG,
+      "secret-1",
+    );
+    const [, , opts] = spawnMock.mock.calls[0] as [string, string[], { fsIsolation?: boolean }];
+    expect(opts.fsIsolation).toBe(true);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        detail: expect.objectContaining({
+          fs_isolation: true,
+          fs_isolation_mechanism: "landlock",
+        }),
+      }),
+    );
+  });
+
+  it("audits and rethrows the fail-closed refusal from the seam", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockRejectedValue(VaultError.fsIsolationUnavailable("mocked"));
+    await expect(
+      audited.executeWithSecret(
+        ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        fsIsolatedPolicy(),
+        SSH_CONFIG,
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.FS_ISOLATION_UNAVAILABLE });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        detail: expect.objectContaining({
+          error: ErrorCode.FS_ISOLATION_UNAVAILABLE,
+          fs_isolation: true,
+        }),
+      }),
+    );
+  });
+
+  it("the host-key-mismatch denial carries the filesystem-isolation posture", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({
+      ...OK_RESULT,
+      exit_code: 255,
+      stderr: "Host key verification failed.",
+    });
+    await expect(
+      audited.executeWithSecret(
+        ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        fsIsolatedPolicy(),
+        SSH_CONFIG,
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.SSH_HOST_KEY_MISMATCH });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        detail: expect.objectContaining({
+          error: "SSH_HOST_KEY_MISMATCH",
+          fs_isolation: true,
+        }),
+      }),
+    );
+  });
+
+  it("defaults to an un-isolated spawn and audits fs_isolation: false", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue(OK_RESULT);
+    await audited.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      policy({ host_allowlist: ["deploy.example.com"], command_allowlist: [SSH as string] }),
+      SSH_CONFIG,
+      "secret-1",
+    );
+    const [, , opts] = spawnMock.mock.calls[0] as [string, string[], { fsIsolation?: boolean }];
+    expect(opts.fsIsolation).toBe(false);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        detail: expect.objectContaining({ fs_isolation: false }),
       }),
     );
   });

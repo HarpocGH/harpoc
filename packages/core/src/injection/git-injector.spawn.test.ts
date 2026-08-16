@@ -67,6 +67,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     response_mode: "filtered",
     response_header_allowlist: [],
     network_isolation: false,
+    fs_isolation: false,
     ...overrides,
   };
 }
@@ -636,6 +637,98 @@ describeGit("GitInjector network isolation (§4.5.3 layer 4)", () => {
   });
 });
 
+describeGit("GitInjector filesystem isolation (§4.5.3 layer 4)", () => {
+  const spawnMock = vi.mocked(spawnCaptured);
+
+  const cloneAction: GitAction = {
+    type: "git",
+    operation: "clone",
+    repository: "https://8.8.8.8/org/repo.git",
+  };
+
+  const fsIsolatedPolicy = () =>
+    policy({
+      command_allowlist: [GIT as string],
+      url_allowlist: ["https://8.8.8.8/*"],
+      fs_isolation: true,
+    });
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it("passes the policy flag into the spawn seam and audits mechanism + state", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({ ...OK_RESULT, fs_isolation_mechanism: "landlock" });
+    await audited.executeWithSecret(
+      cloneAction,
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      fsIsolatedPolicy(),
+      undefined,
+      "secret-1",
+    );
+    const [, , opts] = spawnMock.mock.calls[0] as [string, string[], { fsIsolation?: boolean }];
+    expect(opts.fsIsolation).toBe(true);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        detail: expect.objectContaining({
+          transport: "https",
+          fs_isolation: true,
+          fs_isolation_mechanism: "landlock",
+        }),
+      }),
+    );
+  });
+
+  it("audits and rethrows the fail-closed refusal from the seam", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockRejectedValue(VaultError.fsIsolationUnavailable("mocked"));
+    await expect(
+      audited.executeWithSecret(
+        cloneAction,
+        new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+        fsIsolatedPolicy(),
+        undefined,
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.FS_ISOLATION_UNAVAILABLE });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        detail: expect.objectContaining({
+          transport: "https",
+          error: ErrorCode.FS_ISOLATION_UNAVAILABLE,
+          fs_isolation: true,
+        }),
+      }),
+    );
+  });
+
+  it("defaults to an un-isolated spawn and audits fs_isolation: false", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue(OK_RESULT);
+    await audited.executeWithSecret(
+      cloneAction,
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] }),
+      undefined,
+      "secret-1",
+    );
+    const [, , opts] = spawnMock.mock.calls[0] as [string, string[], { fsIsolation?: boolean }];
+    expect(opts.fsIsolation).toBe(false);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        detail: expect.objectContaining({ fs_isolation: false }),
+      }),
+    );
+  });
+});
+
 // The SSH transport has its own isolation wiring (flag hand-off, refusal
 // catch, success/denial audit rows) — per-callsite, so it needs its own pin:
 // pre-fix only 3 of the 4 spawnCaptured callsites were covered (review T1).
@@ -770,6 +863,136 @@ describeGitSsh("GitInjector SSH-transport network isolation (review fixes T1/F8)
           error: "SSH_HOST_KEY_MISMATCH",
           network_isolation: true,
         }),
+      }),
+    );
+  });
+});
+
+// The Git-over-SSH callsite threads filesystem isolation independently of the
+// HTTPS one — same per-callsite reasoning as review T1 above.
+describeGitSsh("GitInjector SSH-transport filesystem isolation (§4.5.3 layer 4)", () => {
+  const spawnMock = vi.mocked(spawnCaptured);
+
+  const { privateKey: fsSshKeyPem } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  const fsSshConfig: ConnectionConfig = {
+    ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] },
+  };
+  const fsSshAction: GitAction = {
+    type: "git",
+    operation: "clone",
+    repository: "git@github.com:org/repo.git",
+  };
+  const fsIsolatedSshPolicy = () =>
+    policy({
+      command_allowlist: [GIT as string],
+      host_allowlist: ["github.com"],
+      fs_isolation: true,
+    });
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it("passes the policy flag into the spawn seam and audits mechanism + state", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({ ...OK_RESULT, fs_isolation_mechanism: "landlock" });
+    await audited.executeWithSecret(
+      fsSshAction,
+      new Uint8Array(Buffer.from(fsSshKeyPem)),
+      fsIsolatedSshPolicy(),
+      fsSshConfig,
+      "secret-1",
+    );
+    const [, , opts] = spawnMock.mock.calls[0] as [string, string[], { fsIsolation?: boolean }];
+    expect(opts.fsIsolation).toBe(true);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        detail: expect.objectContaining({
+          transport: "ssh",
+          fs_isolation: true,
+          fs_isolation_mechanism: "landlock",
+        }),
+      }),
+    );
+  });
+
+  it("audits and rethrows the fail-closed refusal from the seam (transport ssh)", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockRejectedValue(VaultError.fsIsolationUnavailable("mocked"));
+    await expect(
+      audited.executeWithSecret(
+        fsSshAction,
+        new Uint8Array(Buffer.from(fsSshKeyPem)),
+        fsIsolatedSshPolicy(),
+        fsSshConfig,
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.FS_ISOLATION_UNAVAILABLE });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        detail: expect.objectContaining({
+          transport: "ssh",
+          error: ErrorCode.FS_ISOLATION_UNAVAILABLE,
+          fs_isolation: true,
+        }),
+      }),
+    );
+  });
+
+  it("the host-key-mismatch denial carries the filesystem-isolation posture", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({
+      ...OK_RESULT,
+      exit_code: 128,
+      stderr: "Host key verification failed.",
+    });
+    await expect(
+      audited.executeWithSecret(
+        fsSshAction,
+        new Uint8Array(Buffer.from(fsSshKeyPem)),
+        fsIsolatedSshPolicy(),
+        fsSshConfig,
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.SSH_HOST_KEY_MISMATCH });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        detail: expect.objectContaining({
+          transport: "ssh",
+          error: "SSH_HOST_KEY_MISMATCH",
+          fs_isolation: true,
+        }),
+      }),
+    );
+  });
+
+  it("defaults to an un-isolated spawn and audits fs_isolation: false", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue(OK_RESULT);
+    await audited.executeWithSecret(
+      fsSshAction,
+      new Uint8Array(Buffer.from(fsSshKeyPem)),
+      policy({ command_allowlist: [GIT as string], host_allowlist: ["github.com"] }),
+      fsSshConfig,
+      "secret-1",
+    );
+    const [, , opts] = spawnMock.mock.calls[0] as [string, string[], { fsIsolation?: boolean }];
+    expect(opts.fsIsolation).toBe(false);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        detail: expect.objectContaining({ transport: "ssh", fs_isolation: false }),
       }),
     );
   });

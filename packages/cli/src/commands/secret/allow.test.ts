@@ -25,6 +25,7 @@ const current: InjectionPolicy = {
   response_mode: "status_only",
   response_header_allowlist: ["Content-Type"],
   network_isolation: true,
+  fs_isolation: true,
 };
 
 describe("mergePolicy", () => {
@@ -51,6 +52,27 @@ describe("mergePolicy", () => {
 
     const on = mergePolicy({ ...current, network_isolation: false }, { networkIsolation: true });
     expect(on.network_isolation).toBe(true);
+  });
+
+  it("keeps a stored fs_isolation when both flags are absent", () => {
+    const merged = mergePolicy(current, { command: ["git"] });
+    expect(merged.fs_isolation).toBe(true);
+  });
+
+  it("sets and clears fs_isolation via the tri-state option", () => {
+    const off = mergePolicy(current, { fsIsolation: false });
+    expect(off.fs_isolation).toBe(false);
+    expect(off.network_isolation).toBe(true);
+    expect(off.response_mode).toBe("status_only");
+
+    const on = mergePolicy({ ...current, fs_isolation: false }, { fsIsolation: true });
+    expect(on.fs_isolation).toBe(true);
+  });
+
+  it("the two isolation flags move independently", () => {
+    const merged = mergePolicy({ ...current, fs_isolation: false }, { fsIsolation: true });
+    expect(merged.fs_isolation).toBe(true);
+    expect(merged.network_isolation).toBe(true);
   });
 
   it("replaces a provided group wholesale", () => {
@@ -82,6 +104,7 @@ describe("mergePolicy", () => {
       response_mode: "filtered",
       response_header_allowlist: [],
       network_isolation: false,
+      fs_isolation: false,
     });
   });
 
@@ -106,6 +129,7 @@ describe("secret allow command — interpreter acknowledgement pass-through", ()
       response_mode: "filtered",
       response_header_allowlist: [],
       network_isolation: false,
+      fs_isolation: false,
     });
     errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
@@ -156,6 +180,7 @@ describe("secret allow command — network isolation flags", () => {
       response_mode: "filtered",
       response_header_allowlist: [],
       network_isolation: true,
+      fs_isolation: false,
     });
     errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
@@ -197,6 +222,85 @@ describe("secret allow command — network isolation flags", () => {
     expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
       "secret://k",
       expect.objectContaining({ network_isolation: true }),
+      { acknowledge_interpreters: false },
+    );
+  });
+});
+
+describe("secret allow command — filesystem isolation flags", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.getInjectionPolicy.mockResolvedValue({
+      url_allowlist: [],
+      command_allowlist: ["gh"],
+      env_allowlist: [],
+      host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: true,
+    });
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  async function run(args: string[]): Promise<void> {
+    const program = new Command();
+    program.option("--vault-dir <path>", "Path to vault directory");
+    const secret = program.command("secret");
+    registerSecretAllowCommand(secret);
+    program.exitOverride();
+    program.configureOutput({ writeErr: () => {} });
+    await program.parseAsync(["node", "harpoc", "secret", "allow", ...args]);
+  }
+
+  it("--fs-isolation alone is a set (not a show) and lands as true", async () => {
+    mockEngine.getInjectionPolicy.mockResolvedValue({
+      url_allowlist: [],
+      command_allowlist: ["gh"],
+      env_allowlist: [],
+      host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: false,
+    });
+    await run(["secret://k", "--fs-isolation"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ fs_isolation: true }),
+      { acknowledge_interpreters: false },
+    );
+  });
+
+  it("--no-fs-isolation clears the stored requirement", async () => {
+    await run(["secret://k", "--no-fs-isolation"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ fs_isolation: false }),
+      { acknowledge_interpreters: false },
+    );
+  });
+
+  it("keeps the stored true when neither spelling is passed (commander tri-state pin)", async () => {
+    await run(["secret://k", "--url", "https://api.example.com/*"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ fs_isolation: true }),
+      { acknowledge_interpreters: false },
+    );
+  });
+
+  it("--clear resets a stored fs_isolation to false", async () => {
+    await run(["secret://k", "--clear"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ fs_isolation: false }),
       { acknowledge_interpreters: false },
     );
   });

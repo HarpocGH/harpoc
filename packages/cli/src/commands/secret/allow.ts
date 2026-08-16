@@ -18,6 +18,8 @@ export interface AllowOptions {
   responseHeader?: string[];
   /** Tri-state: true (--network-isolation), false (--no-network-isolation), undefined (keep stored). */
   networkIsolation?: boolean;
+  /** Tri-state: true (--fs-isolation), false (--no-fs-isolation), undefined (keep stored). */
+  fsIsolation?: boolean;
   acknowledgeInterpreter?: boolean;
   clear?: boolean;
   show?: boolean;
@@ -32,14 +34,15 @@ const EMPTY_POLICY: InjectionPolicy = {
   response_mode: "filtered",
   response_header_allowlist: [],
   network_isolation: false,
+  fs_isolation: false,
 };
 
 /**
  * Merge the provided flag groups into the current policy. Groups the caller
  * omits keep their stored values — so e.g. `--url` alone cannot silently reset
  * a `status_only` response mode back to `filtered`, or drop a stored
- * `network_isolation` requirement. `--clear` starts from an empty default
- * policy instead of the stored one.
+ * `network_isolation` or `fs_isolation` requirement. `--clear` starts from an
+ * empty default policy instead of the stored one.
  */
 export function mergePolicy(current: InjectionPolicy, options: AllowOptions): InjectionPolicy {
   const base = options.clear ? EMPTY_POLICY : current;
@@ -53,6 +56,7 @@ export function mergePolicy(current: InjectionPolicy, options: AllowOptions): In
       ? options.responseHeader
       : base.response_header_allowlist,
     network_isolation: options.networkIsolation ?? base.network_isolation,
+    fs_isolation: options.fsIsolation ?? base.fs_isolation,
   };
 }
 
@@ -97,6 +101,11 @@ export function registerSecretAllowCommand(secret: Command): void {
     )
     .option("--no-network-isolation", "Remove a stored network-isolation requirement")
     .option(
+      "--fs-isolation",
+      "demand write-denying filesystem isolation for every process-mediated spawn (Linux: setpriv Landlock, util-linux >= 2.40; macOS: sandbox-exec; Windows: unsupported — uses are refused fail-closed)",
+    )
+    .option("--no-fs-isolation", "Remove a stored filesystem-isolation requirement")
+    .option(
       "--acknowledge-interpreter",
       "Explicitly acknowledge allowlisting a known interpreter (sh, bash, python, node, ...) — collapses the capability ladder for this secret; refused and audited otherwise",
     )
@@ -116,6 +125,7 @@ export function registerSecretAllowCommand(secret: Command): void {
             (options.responseHeader?.length ?? 0) +
             (options.responseMode !== undefined ? 1 : 0) +
             (options.networkIsolation !== undefined ? 1 : 0) +
+            (options.fsIsolation !== undefined ? 1 : 0) +
             (options.clear ? 1 : 0);
 
           if (options.show || setCount === 0) {

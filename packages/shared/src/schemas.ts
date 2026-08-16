@@ -364,6 +364,7 @@ export const injectionPolicyInputSchema = z.object({
     .optional()
     .default([]),
   network_isolation: z.boolean().optional().default(false),
+  fs_isolation: z.boolean().optional().default(false),
 });
 
 /**
@@ -378,9 +379,12 @@ export const injectionPolicyInputSchema = z.object({
  * headers still returned under `status_only`. `network_isolation` (thesis
  * §4.5.3 layer 4, default `false`) demands that every child process spawned
  * with this secret runs without network access — fail-closed: platforms that
- * cannot deliver it refuse the use. The schema's output type: all
- * defaults applied, every field present — the shape the vault loads and
- * returns.
+ * cannot deliver it refuse the use. `fs_isolation` (default `false`) demands
+ * write-deny filesystem isolation for every process-mediated child: Linux via
+ * setpriv with Landlock support, macOS via sandbox-exec, Windows refused
+ * fail-closed (unsupported by design); writes to `/dev/null` are exempt. The
+ * schema's output type: all defaults applied, every field present — the
+ * shape the vault loads and returns.
  */
 export type InjectionPolicy = z.output<typeof injectionPolicyInputSchema>;
 

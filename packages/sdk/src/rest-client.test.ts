@@ -213,6 +213,33 @@ describe("RestClient", () => {
       expect(body.network_isolation).toBe(true);
     });
 
+    it("setInjectionPolicy forwards fs_isolation in the body", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", {
+        url_allowlist: [],
+        command_allowlist: [],
+        env_allowlist: [],
+        fs_isolation: true,
+      });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(call[1].body as string);
+      expect(body.fs_isolation).toBe(true);
+    });
+
+    // The client must not invent a value for an omitted flag — REST PUT is a
+    // whole-policy replace and the schema default (false) owns the reset.
+    it("setInjectionPolicy leaves fs_isolation out of the body when the caller omits it", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", {
+        url_allowlist: [],
+        command_allowlist: ["gh"],
+        env_allowlist: [],
+      });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(call[1].body as string) as Record<string, unknown>;
+      expect("fs_isolation" in body).toBe(false);
+    });
+
     it("setInjectionPolicy defaults acknowledge_interpreters to false in the body", async () => {
       mockFetchResponse({ updated: true });
       await client.setInjectionPolicy("secret://k", {

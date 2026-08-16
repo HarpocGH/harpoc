@@ -47,9 +47,33 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
             unshare -rn -- /bin/true && echo "unshare -rn OK after sysctl" || echo "::warning::unshare -rn still failing"
           }
+      - name: Probe filesystem isolation (diagnostic — expected unavailable on ubuntu-24.04)
+        if: runner.os == 'Linux'
+        # ubuntu-24.04 (today's ubuntu-latest image) ships util-linux 2.39,
+        # whose `setpriv` has no `--landlock-*` options, so filesystem
+        # isolation cannot be delivered on this leg: "fs-isolation" is
+        # deliberately ABSENT from this leg's HARPOC_REQUIRE_PLATFORM_TESTS
+        # and the suite's live probe skips the enforcement describe. Add the
+        # tier below once the runner image carries util-linux >= 2.40
+        # (Ubuntu 24.10+/Debian 13+) — the argv is already kernel-verified
+        # (debian trixie, util-linux 2.41). The fail-closed refusal path is
+        # ungated and runs here regardless. Diagnostic only: never fails.
+        run: |
+          setpriv --version || true
+          setpriv --landlock-access fs --landlock-rule path-beneath:execute,read-file,read-dir:/ --landlock-rule path-beneath:write-file:/dev/null -- /bin/true && echo "setpriv Landlock OK" || echo "::notice::setpriv Landlock unavailable (expected on util-linux 2.39)"
       - name: Probe network isolation (diagnostic)
         if: runner.os == 'macOS'
         run: /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)' /usr/bin/true && echo "sandbox-exec OK" || echo "::warning::sandbox-exec probe failed"
+      - name: Probe filesystem isolation (diagnostic)
+        if: runner.os == 'macOS'
+        # Both profiles are byte-identical to SANDBOX_EXEC_DENY_WRITE_PROFILE
+        # and SANDBOX_EXEC_DENY_NETWORK_AND_WRITE_PROFILE in
+        # packages/core/src/injection/fs-isolation.ts — they are what the
+        # vault's own live probes run. The "fs-isolation" tier is REQUIRED on
+        # this leg, so a warning here foretells a test failure below.
+        run: |
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny file-write*)' /usr/bin/true && echo "sandbox-exec deny-write OK" || echo "::warning::sandbox-exec deny-write probe failed"
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)(deny file-write*)' /usr/bin/true && echo "sandbox-exec deny-network+write OK" || echo "::warning::sandbox-exec combined probe failed"
       - name: Provision disposable unlocked macOS test keychain
         if: runner.os == 'macOS'
         run: |
@@ -80,7 +104,7 @@ jobs:
       - name: Test (macOS, keychain + sandbox-exec tiers required)
         if: runner.os == 'macOS'
         env:
-          HARPOC_REQUIRE_PLATFORM_TESTS: keychain,isolation,ssh-live
+          HARPOC_REQUIRE_PLATFORM_TESTS: keychain,isolation,fs-isolation,ssh-live
         # No "--" before the flag: pnpm's arg separator would route it through
         # turbo's pass-through to vitest, which rejects it.
         run: pnpm test --concurrency=1

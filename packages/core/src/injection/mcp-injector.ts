@@ -129,6 +129,26 @@ export class McpInjector {
       throw err;
     }
 
+    // Filesystem isolation (same seam gap, same fail-closed answer): the
+    // isolation wrapper is composed at spawnCaptured, which StdioChildTransport
+    // does not go through. Checked after the network branch, so a policy
+    // demanding both keeps the network refusal's code and reason.
+    if (policy.fs_isolation === true && config.transport === McpTransport.STDIO) {
+      await this.registry.terminate(secretId, "fs_isolation_enabled");
+      const err = VaultError.fsIsolationUnavailable(
+        "MCP stdio downstream servers cannot be fs-isolated yet",
+      );
+      this.audit(
+        action,
+        secretId,
+        config,
+        { error: err.code, fs_isolation: true },
+        false,
+        attribution,
+      );
+      throw err;
+    }
+
     // Target validation on every call — complete mediation, independent of
     // whether a live connection is reused.
     let resolvedCommand: string | undefined;

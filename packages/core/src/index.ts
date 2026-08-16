@@ -113,6 +113,23 @@ export type {
   NetworkIsolationWrap,
   NetworkIsolationSeams,
 } from "./injection/network-isolation.js";
+export {
+  requireFsIsolation,
+  requireCombinedIsolation,
+  resetFsIsolationProbeForTests,
+  forceFsIsolationUnavailableForTests,
+  LANDLOCK_PREFIX_ARGS,
+  LINUX_SETPRIV_CANDIDATES,
+  SANDBOX_EXEC_DENY_WRITE_PROFILE,
+  SANDBOX_EXEC_DENY_NETWORK_AND_WRITE_PROFILE,
+} from "./injection/fs-isolation.js";
+export type {
+  FsIsolationMechanism,
+  FsIsolationWrap,
+  FsIsolationSeams,
+} from "./injection/fs-isolation.js";
+export { requireIsolation } from "./injection/isolation.js";
+export type { IsolationWrap, IsolationDimensions } from "./injection/isolation.js";
 export { DatabaseInjector } from "./injection/database-injector.js";
 export type {
   DbEngineAdapter,

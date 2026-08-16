@@ -6,8 +6,11 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, VaultError, VaultState, VAULT_VERSION } from "@harpoc/shared";
+import { AAD_INJECTION_POLICY } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
+import { encrypt } from "./crypto/aes-gcm.js";
 import { forceNetworkIsolationUnavailableForTests } from "./injection/network-isolation.js";
+import type { McpConnectionEntry, McpConnectionRegistry } from "./injection/mcp-registry.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
 import { DpapiSessionKeyProtector } from "./session/session-key-protector.js";
 import type { SessionKeyProtector } from "./session/session-key-protector.js";
@@ -686,6 +689,32 @@ describe("useSecret (HTTP injection)", () => {
   });
 });
 
+/** The engine's live MCP connection registry (test seam — private field). */
+function registryOf(e: VaultEngine): McpConnectionRegistry {
+  return (e as unknown as { mcpRegistry: McpConnectionRegistry }).mcpRegistry;
+}
+
+/**
+ * Publish a ready stdio entry into the engine's registry without spawning a
+ * child: the terminate-on-enable paths only need something live to tear down.
+ */
+async function seedLiveStdioEntry(secretId: string): Promise<void> {
+  const client = { onclose: undefined, close: () => Promise.resolve() };
+  await registryOf(engine).acquire(secretId, () =>
+    Promise.resolve({
+      secretId,
+      serverName: "docs",
+      transportKind: "stdio",
+      client: client as unknown as McpConnectionEntry["client"],
+      state: "connecting",
+      crashed: false,
+      credentialFingerprint: "cred-fp",
+      configFingerprint: "config-fp",
+      spawnedAt: Date.now(),
+    } satisfies McpConnectionEntry),
+  );
+}
+
 describe("injection policy", () => {
   beforeEach(async () => {
     await engine.initVault("password");
@@ -724,6 +753,7 @@ describe("injection policy", () => {
       response_mode: "filtered",
       response_header_allowlist: [],
       network_isolation: false,
+      fs_isolation: false,
     });
   });
 
@@ -769,6 +799,102 @@ describe("injection policy", () => {
       .map((e) => e.detail?.network_isolation);
     expect(flags).toContain(true);
     expect(flags).toContain(false);
+  });
+
+  it("round-trips fs_isolation and defaults it to false when omitted", async () => {
+    await engine.setInjectionPolicy("secret://pol", { fs_isolation: true });
+    expect((await engine.getInjectionPolicy("secret://pol")).fs_isolation).toBe(true);
+
+    // Re-set without the field: the write-side default is false, mirroring
+    // network_isolation.
+    await engine.setInjectionPolicy("secret://pol", { url_allowlist: [] });
+    expect((await engine.getInjectionPolicy("secret://pol")).fs_isolation).toBe(false);
+  });
+
+  it("decrypts a pre-feature policy blob (no fs_isolation key) as false", async () => {
+    // A blob written before the flag existed: the read path must default it,
+    // not surface `undefined` into the injectors' `=== true` checks.
+    const secretId = await engine.resolveSecretId("secret://pol");
+    const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
+    const legacy = JSON.stringify({
+      url_allowlist: [],
+      command_allowlist: ["gh"],
+      env_allowlist: [],
+      host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+    });
+    const enc = encrypt(
+      kek,
+      new Uint8Array(Buffer.from(legacy, "utf8")),
+      AAD_INJECTION_POLICY(secretId),
+    );
+    const now = Date.now();
+    store.upsertInjectionPolicy({
+      secret_id: secretId,
+      policy_encrypted: enc.ciphertext,
+      policy_iv: enc.iv,
+      policy_tag: enc.tag,
+      created_at: now,
+      updated_at: now,
+    });
+
+    const p = await engine.getInjectionPolicy("secret://pol");
+    expect(p.command_allowlist).toEqual(["gh"]);
+    expect(p.fs_isolation).toBe(false);
+  });
+
+  it("audits fs_isolation in the POLICY_GRANT detail both ways", async () => {
+    await engine.setInjectionPolicy("secret://pol", { fs_isolation: true });
+    await engine.setInjectionPolicy("secret://pol", {});
+    const flags = engine
+      .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
+      .map((e) => e.detail?.fs_isolation);
+    expect(flags).toContain(true);
+    expect(flags).toContain(false);
+  });
+
+  it("terminates a live stdio child when fs_isolation is enabled", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    await seedLiveStdioEntry(secretId);
+    const terminate = vi.spyOn(registryOf(engine), "terminate");
+
+    await engine.setInjectionPolicy("secret://pol", { fs_isolation: true });
+
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(terminate).toHaveBeenCalledWith(secretId, "fs_isolation_enabled");
+    const terminates = engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
+    expect(terminates).toHaveLength(1);
+    expect(terminates[0]?.detail?.reason).toBe("fs_isolation_enabled");
+  });
+
+  it("terminates once with the network reason when both isolation flags are enabled", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    await seedLiveStdioEntry(secretId);
+    const terminate = vi.spyOn(registryOf(engine), "terminate");
+
+    await engine.setInjectionPolicy("secret://pol", {
+      network_isolation: true,
+      fs_isolation: true,
+    });
+
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(terminate).toHaveBeenCalledWith(secretId, "network_isolation_enabled");
+    const terminates = engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
+    expect(terminates).toHaveLength(1);
+    expect(terminates[0]?.detail?.reason).toBe("network_isolation_enabled");
+  });
+
+  it("control: a policy set without either isolation flag leaves the child alive", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    await seedLiveStdioEntry(secretId);
+    const terminate = vi.spyOn(registryOf(engine), "terminate");
+
+    await engine.setInjectionPolicy("secret://pol", { url_allowlist: [] });
+
+    expect(terminate).not.toHaveBeenCalled();
+    expect(engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE })).toHaveLength(0);
   });
 
   it("verifies the audit chain and detects DB tampering", async () => {

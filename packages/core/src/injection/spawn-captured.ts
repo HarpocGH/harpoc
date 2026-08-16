@@ -3,8 +3,9 @@ import type { ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { MAX_PROCESS_OUTPUT_BYTES } from "@harpoc/shared";
 import { CappedOutput } from "./capped-output.js";
+import type { FsIsolationMechanism } from "./fs-isolation.js";
+import { requireIsolation } from "./isolation.js";
 import type { NetworkIsolationMechanism } from "./network-isolation.js";
-import { requireNetworkIsolation } from "./network-isolation.js";
 import { redactSecretEncodings } from "./output-sanitizer.js";
 
 /**
@@ -22,6 +23,8 @@ export interface SpawnCapturedResult {
   spawn_failed: boolean;
   /** Set when the spawn ran inside the network-isolation wrapper. */
   isolation_mechanism?: NetworkIsolationMechanism;
+  /** Set when the spawn ran inside the filesystem-isolation wrapper. */
+  fs_isolation_mechanism?: FsIsolationMechanism;
 }
 
 export interface SpawnCapturedOptions {
@@ -37,6 +40,13 @@ export interface SpawnCapturedOptions {
    * NETWORK_ISOLATION_UNAVAILABLE before any process is spawned.
    */
   networkIsolation?: boolean;
+  /**
+   * Wrap the spawn in the platform filesystem-isolation prefix (thesis §4.5.3
+   * layer 4). Fail closed: an unavailable platform throws
+   * FS_ISOLATION_UNAVAILABLE before any process is spawned. Combines with
+   * `networkIsolation` — the composer nests the two wrappers.
+   */
+  fsIsolation?: boolean;
 }
 
 /**
@@ -104,11 +114,13 @@ function killTree(child: ChildProcess): void {
  * the caller's `finally` — the plaintext wipe, the ephemeral ssh-agent socket
  * and the identity/known-hosts temp files all hang off it.
  *
- * Network isolation is applied here — at the single spawn seam, after the
- * caller's allowlist resolution — so no process-mediated context can forget
- * it: the vault-authored wrapper prefixes the argv, and the resolved pinned
- * command stays the audited payload. The wrapper execs the payload in-place
- * (no fork), so PID, kill and exit-code semantics are unchanged.
+ * Isolation — network, filesystem or both — is applied here, at the single
+ * spawn seam, after the caller's allowlist resolution, so no process-mediated
+ * context can forget it: the vault-authored wrapper prefixes the argv, and the
+ * resolved pinned command stays the audited payload. Composing the two
+ * dimensions belongs to `requireIsolation`; the seam only reports which
+ * mechanisms it got. Each wrapper execs the payload in-place (no fork), so
+ * PID, kill and exit-code semantics are unchanged.
  */
 export async function spawnCaptured(
   command: string,
@@ -116,11 +128,16 @@ export async function spawnCaptured(
   opts: SpawnCapturedOptions,
 ): Promise<SpawnCapturedResult> {
   let isolationMechanism: NetworkIsolationMechanism | undefined;
-  if (opts.networkIsolation) {
-    const wrapped = await requireNetworkIsolation(command, args);
+  let fsIsolationMechanism: FsIsolationMechanism | undefined;
+  if (opts.networkIsolation === true || opts.fsIsolation === true) {
+    const wrapped = await requireIsolation(command, args, {
+      network: opts.networkIsolation === true,
+      fs: opts.fsIsolation === true,
+    });
     command = wrapped.command;
     args = wrapped.args;
-    isolationMechanism = wrapped.mechanism;
+    isolationMechanism = wrapped.networkMechanism;
+    fsIsolationMechanism = wrapped.fsMechanism;
   }
   const cap = opts.maxOutputBytes ?? MAX_PROCESS_OUTPUT_BYTES;
   const stdout = new CappedOutput(cap);
@@ -156,6 +173,7 @@ export async function spawnCaptured(
         signal: null,
         spawn_failed: true,
         isolation_mechanism: isolationMechanism,
+        fs_isolation_mechanism: fsIsolationMechanism,
       });
       return;
     }
@@ -188,6 +206,7 @@ export async function spawnCaptured(
         signal: timedOut ? (signal ?? "SIGKILL") : signal,
         spawn_failed: spawnFailed,
         isolation_mechanism: isolationMechanism,
+        fs_isolation_mechanism: fsIsolationMechanism,
       });
     };
 

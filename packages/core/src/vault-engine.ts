@@ -920,6 +920,7 @@ export class VaultEngine {
         response_mode: "filtered",
         response_header_allowlist: [],
         network_isolation: false,
+        fs_isolation: false,
       };
     }
     const bytes = decrypt(
@@ -938,6 +939,7 @@ export class VaultEngine {
       response_mode: parsed.response_mode ?? "filtered",
       response_header_allowlist: parsed.response_header_allowlist ?? [],
       network_isolation: parsed.network_isolation ?? false,
+      fs_isolation: parsed.fs_isolation ?? false,
     };
   }
 
@@ -997,6 +999,7 @@ export class VaultEngine {
       response_mode: policy.response_mode ?? "filtered",
       response_header_allowlist: policy.response_header_allowlist ?? [],
       network_isolation: policy.network_isolation ?? false,
+      fs_isolation: policy.fs_isolation ?? false,
     });
     const enc = encrypt(
       s.kek,
@@ -1030,6 +1033,7 @@ export class VaultEngine {
           response_mode: policy.response_mode ?? "filtered",
           response_header_count: policy.response_header_allowlist?.length ?? 0,
           network_isolation: policy.network_isolation ?? false,
+          fs_isolation: policy.fs_isolation ?? false,
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
@@ -1052,13 +1056,17 @@ export class VaultEngine {
     });
 
     // Thesis §4.5.3 layer 4: a live stdio downstream child predates the
-    // isolation demand and holds the credential with full egress — refusing
-    // only new invocations would leave it running until seal. Idempotent
-    // no-op when nothing is live; the use-time refusal in McpInjector is the
-    // backstop for a policy tightened from a separate process, whose engine
-    // cannot reach this registry.
-    if (policy.network_isolation === true) {
-      await s.mcpRegistry.terminate(secret.id, "network_isolation_enabled");
+    // isolation demand and holds the credential with full egress (and with
+    // write access to the filesystem) — refusing only new invocations would
+    // leave it running until seal. Idempotent no-op when nothing is live; the
+    // use-time refusal in McpInjector is the backstop for a policy tightened
+    // from a separate process, whose engine cannot reach this registry. One
+    // terminate covers both demands; the network reason keeps precedence.
+    if (policy.network_isolation === true || policy.fs_isolation === true) {
+      await s.mcpRegistry.terminate(
+        secret.id,
+        policy.network_isolation === true ? "network_isolation_enabled" : "fs_isolation_enabled",
+      );
     }
   }
 

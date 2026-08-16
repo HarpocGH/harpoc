@@ -33,7 +33,12 @@ export class ProcessInjector {
   async executeWithSecret(
     action: ProcessAction,
     secretValue: Uint8Array,
-    policy: { command_allowlist: string[]; env_allowlist: string[]; network_isolation?: boolean },
+    policy: {
+      command_allowlist: string[];
+      env_allowlist: string[];
+      network_isolation?: boolean;
+      fs_isolation?: boolean;
+    },
     secretId?: string,
     attribution?: AuditAttribution,
   ): Promise<ProcessResult> {
@@ -66,8 +71,13 @@ export class ProcessInjector {
     const args = action.args ?? [];
     const timeoutMs = action.timeout_ms ?? DEFAULT_PROCESS_TIMEOUT_MS;
     const networkIsolation = policy.network_isolation === true;
+    const fsIsolation = policy.fs_isolation === true;
 
-    let run: { result: ProcessResult; isolationMechanism?: string };
+    let run: {
+      result: ProcessResult;
+      isolationMechanism?: string;
+      fsIsolationMechanism?: string;
+    };
     try {
       run = await this.runProcess(
         resolvedPath,
@@ -77,15 +87,17 @@ export class ProcessInjector {
         timeoutMs,
         valueStr,
         networkIsolation,
+        fsIsolation,
       );
     } catch (err) {
-      // Fail-closed refusal from the spawn seam (NETWORK_ISOLATION_UNAVAILABLE):
-      // no process was spawned; audit the denial like an allowlist rejection.
+      // Fail-closed refusal from the spawn seam (NETWORK_ISOLATION_UNAVAILABLE
+      // or FS_ISOLATION_UNAVAILABLE): no process was spawned; audit the denial
+      // like an allowlist rejection.
       if (err instanceof VaultError) {
         this.audit(
           action,
           secretId,
-          { error: err.code, network_isolation: networkIsolation },
+          { error: err.code, network_isolation: networkIsolation, fs_isolation: fsIsolation },
           false,
           attribution,
         );
@@ -103,6 +115,8 @@ export class ProcessInjector {
         truncated: result.truncated ?? false,
         network_isolation: networkIsolation,
         ...(run.isolationMechanism ? { isolation_mechanism: run.isolationMechanism } : {}),
+        fs_isolation: fsIsolation,
+        ...(run.fsIsolationMechanism ? { fs_isolation_mechanism: run.fsIsolationMechanism } : {}),
       },
       result.error === undefined,
       attribution,
@@ -119,13 +133,19 @@ export class ProcessInjector {
     timeoutMs: number,
     secretStr: string,
     networkIsolation: boolean,
-  ): Promise<{ result: ProcessResult; isolationMechanism?: string }> {
+    fsIsolation: boolean,
+  ): Promise<{
+    result: ProcessResult;
+    isolationMechanism?: string;
+    fsIsolationMechanism?: string;
+  }> {
     const r = await spawnCaptured(command, args, {
       env,
       cwd,
       timeoutMs,
       redact: [secretStr],
       networkIsolation,
+      fsIsolation,
     });
     return {
       result: {
@@ -143,6 +163,7 @@ export class ProcessInjector {
             : undefined,
       },
       isolationMechanism: r.isolation_mechanism,
+      fsIsolationMechanism: r.fs_isolation_mechanism,
     };
   }
 

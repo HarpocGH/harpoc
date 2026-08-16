@@ -6,6 +6,7 @@ import type { ProcessAction, ProcessResult } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { forceFsIsolationUnavailableForTests } from "./fs-isolation.js";
 import { forceNetworkIsolationUnavailableForTests } from "./network-isolation.js";
 import { ProcessInjector } from "./process-injector.js";
 
@@ -205,6 +206,61 @@ describe("ProcessInjector — network isolation (§4.5.3 layer 4)", () => {
       expect.objectContaining({
         success: true,
         detail: expect.objectContaining({ network_isolation: false }),
+      }),
+    );
+  });
+});
+
+describe("ProcessInjector — filesystem isolation (§4.5.3 layer 4)", () => {
+  // The refusal must land BEFORE any process exists — the child here would
+  // create the marker directory, so its absence is the pre-spawn proof.
+  const fsTmpRoot = mkdtempSync(join(tmpdir(), "harpoc-fs-iso-"));
+
+  afterEach(() => {
+    forceFsIsolationUnavailableForTests(null);
+    rmSync(join(fsTmpRoot, "marker"), { recursive: true, force: true });
+  });
+
+  it("refuses fail-closed before any spawn and audits when the platform cannot deliver isolation", async () => {
+    forceFsIsolationUnavailableForTests("forced by test");
+    const marker = join(fsTmpRoot, "marker");
+    const log = vi.fn();
+    const audited = new ProcessInjector({ log } as unknown as AuditLogger);
+    await expect(
+      audited.executeWithSecret(
+        nodeAction(`require("node:fs").mkdirSync(${JSON.stringify(marker)})`),
+        new Uint8Array(Buffer.from(SECRET, "utf8")),
+        { command_allowlist: [NODE], env_allowlist: [], fs_isolation: true },
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.FS_ISOLATION_UNAVAILABLE });
+    expect(existsSync(marker)).toBe(false);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "secret.use",
+        success: false,
+        detail: expect.objectContaining({
+          error: ErrorCode.FS_ISOLATION_UNAVAILABLE,
+          fs_isolation: true,
+        }),
+      }),
+    );
+  });
+
+  it("audits fs_isolation: false on an ordinary spawn", async () => {
+    const log = vi.fn();
+    const audited = new ProcessInjector({ log } as unknown as AuditLogger);
+    const result = await audited.executeWithSecret(
+      nodeAction(`process.exit(0)`),
+      new Uint8Array(Buffer.from(SECRET, "utf8")),
+      { command_allowlist: [NODE], env_allowlist: [] },
+      "secret-1",
+    );
+    expect(result.exit_code).toBe(0);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        detail: expect.objectContaining({ fs_isolation: false }),
       }),
     );
   });

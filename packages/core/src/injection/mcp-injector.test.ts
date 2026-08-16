@@ -82,6 +82,7 @@ const POLICY: InjectionPolicy = {
   response_mode: "filtered",
   response_header_allowlist: [],
   network_isolation: false,
+  fs_isolation: false,
 };
 
 function mcpAction(tool: string, overrides: Partial<McpAction> = {}): McpAction {
@@ -387,5 +388,68 @@ describe("McpInjector — network isolation (§4.5.3 layer 4)", () => {
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(VaultError);
     expect((err as VaultError).code).not.toBe(ErrorCode.NETWORK_ISOLATION_UNAVAILABLE);
+  });
+});
+
+describe("McpInjector — filesystem isolation", () => {
+  it("terminates the live child, refuses and audits the stdio refusal", async () => {
+    await run(mcpAction("echo"));
+    expect(registry.get("secret-1")).toBeDefined();
+
+    const terminateSpy = vi.spyOn(registry, "terminate");
+    const log = vi.fn();
+    const auditedInjector = new McpInjector({ log } as unknown as AuditLogger, registry);
+
+    await expect(
+      auditedInjector.executeWithSecret(
+        mcpAction("echo"),
+        new Uint8Array(Buffer.from(SECRET, "utf8")),
+        { ...POLICY, fs_isolation: true },
+        STDIO_CONFIG,
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.FS_ISOLATION_UNAVAILABLE });
+
+    expect(terminateSpy).toHaveBeenCalledWith("secret-1", "fs_isolation_enabled");
+    expect(registry.get("secret-1")).toBeUndefined();
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        detail: expect.objectContaining({
+          error: ErrorCode.FS_ISOLATION_UNAVAILABLE,
+          fs_isolation: true,
+        }),
+      }),
+    );
+  });
+
+  it("refuses a stdio downstream fail-closed before any acquire", async () => {
+    const acquireSpy = vi.spyOn(registry, "acquire");
+    await expect(
+      run(mcpAction("echo"), { policy: { ...POLICY, fs_isolation: true } }),
+    ).rejects.toMatchObject({ code: ErrorCode.FS_ISOLATION_UNAVAILABLE });
+    expect(acquireSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not gate an HTTP downstream on the flag (request-mediated, no child)", async () => {
+    const terminateSpy = vi.spyOn(registry, "terminate");
+    const err = await run(mcpAction("echo"), {
+      config: { server_name: "test-mcp", transport: "http", url: "http://127.0.0.1:9/mcp" },
+      policy: { ...POLICY, fs_isolation: true },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(VaultError);
+    expect((err as VaultError).code).not.toBe(ErrorCode.FS_ISOLATION_UNAVAILABLE);
+    expect(terminateSpy).not.toHaveBeenCalled();
+  });
+
+  it("yields to the network refusal when both flags are set (one terminate)", async () => {
+    const terminateSpy = vi.spyOn(registry, "terminate");
+    await expect(
+      run(mcpAction("echo"), {
+        policy: { ...POLICY, network_isolation: true, fs_isolation: true },
+      }),
+    ).rejects.toMatchObject({ code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE });
+    expect(terminateSpy).toHaveBeenCalledTimes(1);
+    expect(terminateSpy).toHaveBeenCalledWith("secret-1", "network_isolation_enabled");
   });
 });

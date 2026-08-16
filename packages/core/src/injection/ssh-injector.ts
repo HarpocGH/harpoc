@@ -96,6 +96,7 @@ export class SshInjector {
       ];
       const env = buildSshEnv(agent.authSock, policy.env_allowlist);
       const networkIsolation = policy.network_isolation === true;
+      const fsIsolation = policy.fs_isolation === true;
       let r: import("./spawn-captured.js").SpawnCapturedResult;
       try {
         r = await spawnCaptured(sshPath, args, {
@@ -103,13 +104,14 @@ export class SshInjector {
           timeoutMs,
           redact: [keyPem],
           networkIsolation,
+          fsIsolation,
         });
       } catch (err) {
         if (err instanceof VaultError) {
           this.audit(
             action,
             secretId,
-            { error: err.code, network_isolation: networkIsolation },
+            { error: err.code, network_isolation: networkIsolation, fs_isolation: fsIsolation },
             false,
             attribution,
           );
@@ -124,7 +126,11 @@ export class SshInjector {
         this.audit(
           action,
           secretId,
-          { error: "SSH_HOST_KEY_MISMATCH", network_isolation: networkIsolation },
+          {
+            error: "SSH_HOST_KEY_MISMATCH",
+            network_isolation: networkIsolation,
+            fs_isolation: fsIsolation,
+          },
           false,
           attribution,
         );
@@ -157,6 +163,8 @@ export class SshInjector {
           timed_out: r.timed_out,
           network_isolation: networkIsolation,
           ...(r.isolation_mechanism ? { isolation_mechanism: r.isolation_mechanism } : {}),
+          fs_isolation: fsIsolation,
+          ...(r.fs_isolation_mechanism ? { fs_isolation_mechanism: r.fs_isolation_mechanism } : {}),
         },
         error === undefined,
         attribution,

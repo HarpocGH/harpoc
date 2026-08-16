@@ -631,6 +631,7 @@ describe("injectionPolicyInputSchema", () => {
       response_mode: "filtered",
       response_header_allowlist: [],
       network_isolation: false,
+      fs_isolation: false,
     });
   });
 
@@ -655,6 +656,15 @@ describe("injectionPolicyInputSchema", () => {
   it("rejects a non-boolean network_isolation", () => {
     expect(() => injectionPolicyInputSchema.parse({ network_isolation: "yes" })).toThrow();
     expect(() => injectionPolicyInputSchema.parse({ network_isolation: 1 })).toThrow();
+  });
+
+  it("fs_isolation defaults to false when absent", () => {
+    const parsed = injectionPolicyInputSchema.parse({});
+    expect(parsed.fs_isolation).toBe(false);
+  });
+
+  it("fs_isolation accepts explicit true", () => {
+    expect(injectionPolicyInputSchema.parse({ fs_isolation: true }).fs_isolation).toBe(true);
   });
 
   it("accepts populated allowlists", () => {
@@ -721,6 +731,11 @@ describe("setInjectionPolicyRequestSchema", () => {
     expect(() =>
       setInjectionPolicyRequestSchema.parse({ acknowledge_interpreters: "yes" }),
     ).toThrow();
+  });
+
+  it("legacy bodies without fs_isolation still parse", () => {
+    const parsed = setInjectionPolicyRequestSchema.parse({ url_allowlist: [] });
+    expect(parsed.fs_isolation).toBe(false);
   });
 
   it("still validates the policy fields", () => {

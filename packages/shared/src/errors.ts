@@ -49,6 +49,7 @@ export enum ErrorCode {
   INVALID_PROCESS_CONFIG = "INVALID_PROCESS_CONFIG",
   INTERPRETER_NOT_ACKNOWLEDGED = "INTERPRETER_NOT_ACKNOWLEDGED",
   NETWORK_ISOLATION_UNAVAILABLE = "NETWORK_ISOLATION_UNAVAILABLE",
+  FS_ISOLATION_UNAVAILABLE = "FS_ISOLATION_UNAVAILABLE",
 
   // MCP proxy
   MCP_SERVER_NOT_CONFIGURED = "MCP_SERVER_NOT_CONFIGURED",
@@ -166,6 +167,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.INVALID_PROCESS_CONFIG]: 400,
   [ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED]: 400,
   [ErrorCode.NETWORK_ISOLATION_UNAVAILABLE]: 501,
+  [ErrorCode.FS_ISOLATION_UNAVAILABLE]: 501,
 
   // MCP proxy
   [ErrorCode.MCP_SERVER_NOT_CONFIGURED]: 400,
@@ -382,6 +384,16 @@ export class VaultError extends Error {
         "Linux needs unprivileged user namespaces (unshare); macOS needs sandbox-exec; " +
         "Windows is unsupported by design. Remove the requirement via the admin path: " +
         "secret allow <handle> --no-network-isolation",
+    );
+  }
+
+  static fsIsolationUnavailable(reason: string): VaultError {
+    return new VaultError(
+      ErrorCode.FS_ISOLATION_UNAVAILABLE,
+      `Filesystem isolation was demanded by policy but cannot be delivered: ${reason}. ` +
+        `Linux needs setpriv with Landlock support (util-linux >= 2.40) on a Landlock-enabled kernel; ` +
+        `macOS needs /usr/bin/sandbox-exec; Windows is unsupported by design. ` +
+        `Lift the demand via: secret allow <handle> --no-fs-isolation`,
     );
   }
 
