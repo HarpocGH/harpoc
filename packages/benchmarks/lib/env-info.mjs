@@ -18,6 +18,18 @@ export function captureEnv() {
   } catch {
     // git unavailable — keep "unknown"; the result is still usable, just less traceable
   }
+  // Without this the commit stamp is defeatable in silence: a run against a
+  // modified tree stamps a SHA that does not contain the code it measured and
+  // reads exactly like a clean run. Same reasoning as the evidence records'
+  // `dirty` field (E2E Phase 3 review, F8); an unanswerable question reports
+  // the unsafe answer.
+  let repoDirty = true;
+  try {
+    repoDirty =
+      execSync("git status --porcelain", { cwd: REPO_DIR, encoding: "utf8" }).trim().length > 0;
+  } catch {
+    // git unavailable — keep `true`, the honest answer when it cannot be checked
+  }
   const cpus = os.cpus();
   return {
     timestamp: new Date().toISOString(),
@@ -30,5 +42,6 @@ export function captureEnv() {
     memory_gib: Math.round((os.totalmem() / 2 ** 30) * 10) / 10,
     node: process.version,
     repo_commit: repoCommit,
+    repo_dirty: repoDirty,
   };
 }

@@ -3,9 +3,12 @@
 // 127.0.0.1 is permitted by design (§4.5.2 loopback exception) and removes
 // network RTT — the worst case for the RELATIVE overhead, so the headline
 // figure is the ABSOLUTE delta of medians. Pass --remote-url <https://…> for
-// an additional real-network pair.
+// an additional real-endpoint triple: direct with connection reuse, direct
+// without it, and the vault — three measurements because the vault cannot reuse
+// a connection and a two-way comparison silently charges it for that.
 
 import { createServer } from "node:http";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { randomBytes } from "node:crypto";
 
 import { assertSane, isMain, measure, stats } from "./lib/harness.mjs";
@@ -89,14 +92,55 @@ export async function run({ remoteUrl } = {}) {
         },
         { samples: 30, warmup: 3 },
       );
+      // Control: the same request WITHOUT connection reuse. Without it the
+      // remote comparison is not like-for-like — `fetch` rides Node's global
+      // keep-alive agent, while the injector builds a pinned dispatcher per
+      // call and closes it (http-injector.ts), because the DNS-rebinding fix
+      // pins the resolved address per request. So a naive remote delta charges
+      // the vault for a TLS handshake the direct call never pays, which is
+      // invisible on plaintext loopback and dominant against TLS.
+      const remoteFreshNs = await measure(
+        async () => {
+          const agent = new HttpsAgent({ keepAlive: false });
+          try {
+            await new Promise((resolve, reject) => {
+              const req = httpsRequest(
+                remoteUrl,
+                { agent, headers: { authorization: `Bearer ${token}` } },
+                (res) => {
+                  res.resume();
+                  res.on("end", resolve);
+                  res.on("error", reject);
+                },
+              );
+              req.on("error", reject);
+              req.end();
+            });
+          } finally {
+            agent.destroy();
+          }
+        },
+        { samples: 30, warmup: 3 },
+      );
       const remoteAction = { ...action, url: remoteUrl };
       const remoteVaultNs = await measure(() => fx.engine.useSecret(handle, remoteAction), {
         samples: 30,
         warmup: 3,
       });
-      metrics[`direct fetch (${remoteUrl})`] = stats(remoteDirectNs);
-      metrics[`use_secret http/bearer (${remoteUrl})`] = stats(remoteVaultNs);
-      notes.push("Remote pair uses 30 samples; expect network variance to dominate.");
+      const remoteDirect = stats(remoteDirectNs);
+      const remoteFresh = stats(remoteFreshNs);
+      const remoteVault = stats(remoteVaultNs);
+      metrics[`direct fetch, connection reused (${remoteUrl})`] = remoteDirect;
+      metrics[`direct request, fresh connection (${remoteUrl})`] = remoteFresh;
+      metrics[`use_secret http/bearer (${remoteUrl})`] = remoteVault;
+      const handshakeMs = Math.round((remoteFresh.medianMs - remoteDirect.medianMs) * 1000) / 1000;
+      const vaultOwnMs = Math.round((remoteVault.medianMs - remoteFresh.medianMs) * 1000) / 1000;
+      notes.push(
+        `Remote TLS pair: ${String(handshakeMs)} ms of the vault-vs-reused-connection delta is the TLS handshake ` +
+          `the vault cannot amortize (pinned dispatcher per call, DNS-rebinding defence); ` +
+          `${String(vaultOwnMs)} ms is the vault's own work against the same endpoint on equal connection terms.`,
+      );
+      notes.push("Remote measurements use 30 samples; expect network variance to dominate.");
     }
 
     return {

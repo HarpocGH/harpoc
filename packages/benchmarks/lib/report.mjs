@@ -52,7 +52,7 @@ export function envMarkdown(env) {
     `| CPU | ${env.cpu} (${env.cores} logical cores) |`,
     `| RAM | ${env.memory_gib} GiB |`,
     `| Node | ${env.node} |`,
-    `| repo commit | ${env.repo_commit} |`,
+    `| repo commit | ${env.repo_commit}${env.repo_dirty === true ? " (WORKING TREE DIRTY — the stamp does not contain the measured code)" : ""} |`,
     "",
   ].join("\n");
 }
