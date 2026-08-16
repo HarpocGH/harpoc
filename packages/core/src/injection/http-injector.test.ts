@@ -114,6 +114,26 @@ beforeAll(async () => {
       return;
     }
 
+    // Same-origin redirect chain: /chain/N hops down to /chain/1, which points
+    // at /chain-end. MAX_REDIRECTS is 5, so /chain/6 exhausts the budget and the
+    // hop out of /chain/1 is refused before it executes.
+    const chainStep = /^\/chain\/(\d+)$/.exec(url.pathname);
+    if (chainStep) {
+      const step = parseInt(chainStep[1] as string, 10);
+      const next = step > 1 ? `/chain/${String(step - 1)}` : "/chain-end";
+      res.writeHead(302, {
+        Location: `http://127.0.0.1:${(server.address() as { port: number }).port}${next}`,
+      });
+      res.end();
+      return;
+    }
+
+    if (url.pathname === "/chain-end") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ chain: "end" }));
+      return;
+    }
+
     if (url.pathname === "/slow") {
       // Don't respond — simulate timeout
       return;
@@ -766,6 +786,60 @@ describe("HttpInjector", () => {
 
       expect(response.status).toBe(204);
       expect(response.body === "" || response.body === undefined).toBe(true);
+    });
+  });
+
+  /**
+   * The redirect ceiling (`MAX_REDIRECTS = 5`) had no test: the branch could be
+   * deleted and the suite stayed green. The request log is what pins it — the
+   * refusal must land *before* the sixth hop reaches the wire.
+   */
+  describe("redirect ceiling", () => {
+    it("refuses the sixth hop of a same-origin chain and never executes it", async () => {
+      const before = requestPaths.length;
+
+      await expect(
+        injector.executeWithSecret(
+          { method: "GET", url: `${baseUrl}/chain/6` },
+          new Uint8Array(Buffer.from("token")),
+          { type: "bearer" },
+          "same-origin",
+        ),
+      ).rejects.toMatchObject({
+        code: ErrorCode.REDIRECT_POLICY_VIOLATION,
+        message: "Too many redirects",
+      });
+
+      // Five hops followed, the sixth refused: /chain-end never appears.
+      expect(requestPaths.slice(before)).toEqual([
+        "/chain/6",
+        "/chain/5",
+        "/chain/4",
+        "/chain/3",
+        "/chain/2",
+        "/chain/1",
+      ]);
+    });
+
+    it("control: a five-redirect chain still reaches its target", async () => {
+      const before = requestPaths.length;
+
+      const response = await injector.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/chain/5` },
+        new Uint8Array(Buffer.from("token")),
+        { type: "bearer" },
+        "same-origin",
+      );
+
+      expect(response.status).toBe(200);
+      expect(requestPaths.slice(before)).toEqual([
+        "/chain/5",
+        "/chain/4",
+        "/chain/3",
+        "/chain/2",
+        "/chain/1",
+        "/chain-end",
+      ]);
     });
   });
 });
