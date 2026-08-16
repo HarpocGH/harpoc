@@ -4,6 +4,7 @@ import type { ConnectionConfig } from "@harpoc/shared";
 import { connectionConfigSchema } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
+import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
 
 function collect(value: string, acc: string[]): string[] {
   acc.push(value);
@@ -19,6 +20,7 @@ export interface ConnectionOptions {
   clear?: boolean;
   show?: boolean;
   delete?: boolean;
+  token?: string;
   json?: boolean;
 }
 
@@ -41,14 +43,18 @@ export function registerSecretConnectionCommand(secret: Command): void {
     .option("--clear", "Reset the whole config to empty before applying the other flags")
     .option("--show", "Show the current config instead of setting it")
     .option("--delete", "Remove the config")
+    .option("--token <jwt>", TOKEN_OPTION_DESCRIPTION)
     .option("--json", "Output as JSON")
     .action(async (handle: string, options: ConnectionOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
         const engine = await loadUnlockedEngine(vaultDir);
         try {
+          const tokenValue = options.token ?? process.env.HARPOC_TOKEN;
+
           if (options.delete) {
-            const deleted = await engine.deleteConnectionConfig(handle);
+            const resolved = resolveTokenCallerForHandle(engine, "rotate", handle, tokenValue);
+            const deleted = await engine.deleteConnectionConfig(handle, resolved?.caller);
             printSuccess(
               deleted
                 ? `Connection config removed (${handle})`
@@ -65,11 +71,16 @@ export function registerSecretConnectionCommand(secret: Command): void {
             options.knownHostsFile !== undefined ||
             options.clear === true;
           if (options.show || !hasInput) {
-            const current = await engine.getConnectionConfig(handle);
+            const resolved = resolveTokenCallerForHandle(engine, "read", handle, tokenValue);
+            const current = await engine.getConnectionConfig(handle, resolved?.caller);
             printJson(current ?? null);
             return;
           }
 
+          const resolved = resolveTokenCallerForHandle(engine, "rotate", handle, tokenValue);
+          // The merge read is the command's own mechanics, deliberately
+          // caller-less (its result never reaches the caller); the caller's
+          // gate is the rotate check inside setConnectionConfig.
           const current = await engine.getConnectionConfig(handle);
           const config = mergeConnectionConfig(current, options);
 
@@ -78,7 +89,7 @@ export function registerSecretConnectionCommand(secret: Command): void {
             throw new Error(parsed.error.issues.map((i) => i.message).join(", "));
           }
 
-          await engine.setConnectionConfig(handle, parsed.data);
+          await engine.setConnectionConfig(handle, parsed.data, resolved?.caller);
           printSuccess(`Connection config updated (${handle})`);
         } finally {
           await engine.destroy();

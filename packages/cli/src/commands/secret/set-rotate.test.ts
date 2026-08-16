@@ -28,9 +28,14 @@ const loadEngineMock = vi.mocked(loadUnlockedEngine);
 
 let errorSpy: ReturnType<typeof vi.spyOn>;
 let exitSpy: ReturnType<typeof vi.spyOn>;
+const savedEnvToken = process.env.HARPOC_TOKEN;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // set.ts/rotate.ts now read process.env.HARPOC_TOKEN as a fallback; this
+  // suite's mockEngine has no verifyToken, and none of these tests pass
+  // --token, so an operator's ambient HARPOC_TOKEN must not leak in here.
+  delete process.env.HARPOC_TOKEN;
   loadEngineMock.mockResolvedValue(mockEngine as never);
   mockEngine.createSecret.mockResolvedValue({ handle: "secret://k", name: "k" });
   mockEngine.rotateSecret.mockResolvedValue(undefined);
@@ -42,6 +47,8 @@ beforeEach(() => {
 afterEach(() => {
   errorSpy.mockRestore();
   exitSpy.mockRestore();
+  if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+  else process.env.HARPOC_TOKEN = savedEnvToken;
 });
 
 async function run(args: string[]): Promise<void> {
@@ -80,6 +87,7 @@ describe("secret set/rotate — sealed vault fails before the value is resolved 
     expect(mockResolveSecretValue).toHaveBeenCalledTimes(1);
     expect(mockEngine.createSecret).toHaveBeenCalledWith(
       expect.objectContaining({ name: "k", value: expect.any(Buffer) }),
+      undefined,
     );
     expect(exitSpy).not.toHaveBeenCalled();
   });

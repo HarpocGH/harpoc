@@ -15,10 +15,12 @@ const STORED: ConnectionConfig = {
 };
 
 let tempDir: string;
+const savedEnvToken = process.env.HARPOC_TOKEN;
 
 beforeEach(() => {
   tempDir = join(tmpdir(), `harpoc-conn-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
+  delete process.env.HARPOC_TOKEN;
 });
 
 afterEach(() => {
@@ -27,6 +29,8 @@ afterEach(() => {
   } catch {
     // Ignore
   }
+  if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+  else process.env.HARPOC_TOKEN = savedEnvToken;
 });
 
 describe("mergeConnectionConfig", () => {

@@ -25,8 +25,13 @@ let tempDir: string;
 let dbPath: string;
 let sessionPath: string;
 let engine: VaultEngine;
+const savedEnvToken = process.env.HARPOC_TOKEN;
 
 beforeEach(async () => {
+  // rotate.ts now reads process.env.HARPOC_TOKEN as a fallback; this file
+  // drives rotate against a real engine with no --token, so an operator's
+  // ambient HARPOC_TOKEN would be verified against a foreign JWT and refused.
+  delete process.env.HARPOC_TOKEN;
   tempDir = join(tmpdir(), `harpoc-imp-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
   dbPath = join(tempDir, "test.vault.db");
@@ -42,6 +47,8 @@ afterEach(async () => {
   } catch {
     // Ignore
   }
+  if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+  else process.env.HARPOC_TOKEN = savedEnvToken;
 });
 
 describe("encrypted SSH key import — end to end", () => {

@@ -1,9 +1,10 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import type { Command } from "commander";
 import type { AuditChainAnchor, AuditEventType } from "@harpoc/shared";
-import { auditChainAnchorSchema } from "@harpoc/shared";
+import { auditChainAnchorSchema, auditScopeFromToken } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError, printTable, printJson, formatTimestamp } from "../utils/output.js";
+import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../utils/token-caller.js";
 
 const OFF_HOST_GUIDANCE =
   "Store this anchor OFF-HOST (another machine, a sync target the attacker cannot write, or paper).\n" +
@@ -46,6 +47,7 @@ export function registerAuditCommand(program: Command): void {
     .option("--since <date>", "Filter events after date (ISO 8601)")
     .option("--limit <count>", "Maximum number of events", "50")
     .option("--json", "Output as JSON")
+    .option("--token <jwt>", TOKEN_OPTION_DESCRIPTION)
     .action(
       async (
         options: {
@@ -54,6 +56,7 @@ export function registerAuditCommand(program: Command): void {
           since?: string;
           limit?: string;
           json?: boolean;
+          token?: string;
         },
         cmd: Command,
       ) => {
@@ -73,12 +76,21 @@ export function registerAuditCommand(program: Command): void {
               );
             }
 
-            const events = engine.queryAudit({
-              secretId: options.secret,
-              eventType: options.event as AuditEventType | undefined,
-              since,
-              limit,
-            });
+            const tokenValue =
+              options.token ??
+              (cmd.optsWithGlobals() as { token?: string }).token ??
+              process.env.HARPOC_TOKEN;
+            const resolved = resolveTokenCaller(engine, { permission: "admin" }, tokenValue);
+
+            const events = engine.queryAudit(
+              {
+                secretId: options.secret,
+                eventType: options.event as AuditEventType | undefined,
+                since,
+                limit,
+              },
+              resolved ? auditScopeFromToken(resolved.payload) : undefined,
+            );
 
             if (options.json) {
               printJson(events);
@@ -114,7 +126,8 @@ export function registerAuditCommand(program: Command): void {
     .description("Export the audit-chain tail link for off-host storage")
     .option("--out <file>", "Write the anchor to a file instead of stdout")
     .option("--json", "Output as JSON (the default output is already JSON)")
-    .action(async (options: { out?: string; json?: boolean }, cmd: Command) => {
+    .option("--token <jwt>", TOKEN_OPTION_DESCRIPTION)
+    .action(async (options: { out?: string; json?: boolean; token?: string }, cmd: Command) => {
       // The parent `audit` command declares --json too, and commander binds a
       // post-subcommand --json to the parent — read it through the merged view.
       const json = Boolean(options.json ?? cmd.optsWithGlobals().json);
@@ -122,6 +135,12 @@ export function registerAuditCommand(program: Command): void {
       try {
         const engine = await loadUnlockedEngine(vaultDir);
         try {
+          const tokenValue =
+            options.token ??
+            (cmd.optsWithGlobals() as { token?: string }).token ??
+            process.env.HARPOC_TOKEN;
+          resolveTokenCaller(engine, { permission: "admin" }, tokenValue);
+
           const anchor = engine.getAuditChainTail();
           if (!anchor) {
             throw new Error("No chained audit rows to anchor yet.");
@@ -150,14 +169,21 @@ export function registerAuditCommand(program: Command): void {
       "Also check the chain against a previously exported anchor (detects tail truncation and rollback)",
     )
     .option("--json", "Output as JSON")
-    .action(async (options: { anchor?: string; json?: boolean }, cmd: Command) => {
+    .option("--token <jwt>", TOKEN_OPTION_DESCRIPTION)
+    .action(async (options: { anchor?: string; json?: boolean; token?: string }, cmd: Command) => {
       // Same parent/child --json collision as `audit anchor` — use the merged view.
       const json = Boolean(options.json ?? cmd.optsWithGlobals().json);
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
-        const anchor = options.anchor ? readAnchorFile(options.anchor) : undefined;
         const engine = await loadUnlockedEngine(vaultDir);
         try {
+          const tokenValue =
+            options.token ??
+            (cmd.optsWithGlobals() as { token?: string }).token ??
+            process.env.HARPOC_TOKEN;
+          resolveTokenCaller(engine, { permission: "admin" }, tokenValue);
+
+          const anchor = options.anchor ? readAnchorFile(options.anchor) : undefined;
           const result = engine.verifyAuditChain(anchor ? { anchor } : undefined);
           if (json) {
             printJson(result);

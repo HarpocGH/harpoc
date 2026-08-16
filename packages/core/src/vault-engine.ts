@@ -1479,11 +1479,17 @@ export class VaultEngine {
    * the refresh_token must be POSTed exactly once — providers with refresh-token
    * rotation treat a replay as theft and revoke the whole token family.
    */
-  async refreshOAuthToken(secretId: string): Promise<number | null> {
+  async refreshOAuthToken(secretId: string, caller?: CallerContext): Promise<number | null> {
+    const s = this.assertUnlocked();
+    // Deny before joining an in-flight refresh: a denied caller must neither
+    // trigger a refresh_token POST nor await another principal's result.
+    this.checkResolvedCallerPolicy(s, secretId, caller, "rotate", AuditEventType.OAUTH_REFRESH, {
+      action: "refresh",
+    });
     const existing = this.oauthRefreshInFlight.get(secretId);
     if (existing) return existing;
 
-    const refresh = this.doRefreshOAuthToken(secretId);
+    const refresh = this.doRefreshOAuthToken(secretId, caller);
     this.oauthRefreshInFlight.set(secretId, refresh);
     try {
       return await refresh;
@@ -1492,12 +1498,22 @@ export class VaultEngine {
     }
   }
 
-  private async doRefreshOAuthToken(secretId: string): Promise<number | null> {
+  private async doRefreshOAuthToken(
+    secretId: string,
+    caller?: CallerContext,
+  ): Promise<number | null> {
     const s = this.assertUnlocked();
     try {
-      return await this.doRefreshOAuthTokenInner(s, secretId);
+      return await this.doRefreshOAuthTokenInner(s, secretId, caller);
     } catch (err) {
-      this.auditDenied(s, AuditEventType.OAUTH_REFRESH, err, { action: "refresh" }, secretId);
+      this.auditDenied(
+        s,
+        AuditEventType.OAUTH_REFRESH,
+        err,
+        { action: "refresh" },
+        secretId,
+        caller,
+      );
       throw err;
     }
   }
@@ -1505,6 +1521,7 @@ export class VaultEngine {
   private async doRefreshOAuthTokenInner(
     s: UnlockedState,
     secretId: string,
+    caller?: CallerContext,
   ): Promise<number | null> {
     const oauthRow = s.store.getOAuthToken(secretId);
     if (!oauthRow) throw VaultError.oauthNotConfigured();
@@ -1649,7 +1666,9 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.OAUTH_REFRESH,
         secretId,
-        detail: { new_expires_at: newExpiresAt },
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
+        detail: { new_expires_at: newExpiresAt, ...callerInterfaceDetail(caller) },
         sessionId: this.sessionId ?? undefined,
         success: true,
       });
@@ -1661,8 +1680,11 @@ export class VaultEngine {
   /**
    * Get OAuth token status without decrypting sensitive fields.
    */
-  getOAuthTokenStatus(secretId: string): OAuthTokenStatus {
+  getOAuthTokenStatus(secretId: string, caller?: CallerContext): OAuthTokenStatus {
     const s = this.assertUnlocked();
+    this.checkResolvedCallerPolicy(s, secretId, caller, "read", AuditEventType.SECRET_READ, {
+      config: "oauth_status",
+    });
 
     const oauthRow = s.store.getOAuthToken(secretId);
     if (!oauthRow) throw VaultError.oauthNotConfigured();

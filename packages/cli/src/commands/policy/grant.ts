@@ -3,6 +3,7 @@ import type { Permission } from "@harpoc/shared";
 import { permissionSchema, principalTypeSchema } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printSuccess, printJson, printRecord } from "../../utils/output.js";
+import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
 
 export function registerPolicyGrantCommand(policy: Command): void {
   policy
@@ -12,6 +13,7 @@ export function registerPolicyGrantCommand(policy: Command): void {
     .requiredOption("--principal-id <id>", "Principal identifier")
     .requiredOption("--permissions <perms>", "Comma-separated permissions")
     .option("--expires <minutes>", "Policy TTL in minutes")
+    .option("--token <jwt>", TOKEN_OPTION_DESCRIPTION)
     .option("--json", "Output as JSON")
     .action(
       async (
@@ -21,6 +23,7 @@ export function registerPolicyGrantCommand(policy: Command): void {
           principalId: string;
           permissions: string;
           expires?: string;
+          token?: string;
           json?: boolean;
         },
         cmd: Command,
@@ -29,6 +32,13 @@ export function registerPolicyGrantCommand(policy: Command): void {
         try {
           const engine = await loadUnlockedEngine(vaultDir);
           try {
+            const resolved = resolveTokenCallerForHandle(
+              engine,
+              "admin",
+              handle,
+              options.token ?? process.env.HARPOC_TOKEN,
+            );
+
             // Resolve the handle to get the internal secret UUID
             const secretId = await resolveSecretId(engine, handle);
 
@@ -65,7 +75,8 @@ export function registerPolicyGrantCommand(policy: Command): void {
                 permissions,
                 expiresAt,
               },
-              "cli-user",
+              resolved ? resolved.payload.sub : "cli-user",
+              resolved?.caller,
             );
 
             if (options.json) {

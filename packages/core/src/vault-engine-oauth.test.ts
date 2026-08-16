@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuditEventType, ErrorCode } from "@harpoc/shared";
-import type { OAuthProviderConfig } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, PrincipalType } from "@harpoc/shared";
+import type { OAuthProviderConfig, Permission } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
@@ -816,5 +816,100 @@ describe("useSecret with OAuth", () => {
     // Verify the refresh actually happened by checking the stored token
     const token = await engine.getOAuthAccessToken(secretId);
     expect(token).toBe("refreshed-access-token");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Caller policy enforcement on the OAuth entry points
+// ---------------------------------------------------------------------------
+
+describe("OAuth entry points — caller policy enforcement (token-cli-parity)", () => {
+  let secretId: string;
+
+  beforeEach(async () => {
+    await engine.initVault("password");
+    const result = await engine.createOAuthSecret("refresh-policy", defaultProviderConfig());
+    secretId = result.secretId;
+    await engine.completeOAuthFlow(secretId, "old-access", "old-refresh", Date.now() - 1000);
+    // Presence-gates the secret: any caller now needs a matching grant.
+    engine.grantPolicy(
+      {
+        secretId,
+        principalType: PrincipalType.AGENT,
+        principalId: "deploy-bot",
+        permissions: ["rotate"] as Permission[],
+      },
+      "test-setup",
+    );
+    engine.grantPolicy(
+      {
+        secretId,
+        principalType: PrincipalType.AGENT,
+        principalId: "auditor",
+        permissions: ["read"] as Permission[],
+      },
+      "test-setup",
+    );
+  });
+
+  it("refreshOAuthToken refuses an ungranted caller before any token-endpoint call", async () => {
+    let hits = 0;
+    tokenEndpointHandler = (_req, res) => {
+      hits += 1;
+      res.writeHead(500);
+      res.end();
+    };
+    await expect(
+      engine.refreshOAuthToken(secretId, {
+        principal_type: PrincipalType.AGENT,
+        principal_id: "other-agent",
+        interface: "cli",
+      }),
+    ).rejects.toMatchObject({ code: ErrorCode.ACCESS_DENIED });
+    expect(hits).toBe(0);
+    const denials = engine
+      .queryAudit({ eventType: AuditEventType.OAUTH_REFRESH })
+      .filter((e) => !e.success);
+    expect(denials.length).toBe(1);
+    expect(denials[0]?.principal_id).toBe("other-agent");
+  });
+
+  it("refreshOAuthToken refreshes for a rotate-granted caller and attributes the success row", async () => {
+    const newExpiry = await engine.refreshOAuthToken(secretId, {
+      principal_type: PrincipalType.AGENT,
+      principal_id: "deploy-bot",
+      interface: "cli",
+    });
+    expect(newExpiry).toBeGreaterThan(Date.now());
+    const success = engine
+      .queryAudit({ eventType: AuditEventType.OAUTH_REFRESH })
+      .filter((e) => e.success);
+    expect(success[0]?.principal_id).toBe("deploy-bot");
+  });
+
+  it("refreshOAuthToken without a caller stays the trusted path", async () => {
+    await expect(engine.refreshOAuthToken(secretId)).resolves.toBeGreaterThan(Date.now());
+  });
+
+  it("getOAuthTokenStatus refuses an ungranted caller and allows a read-granted one", () => {
+    let thrown: unknown;
+    try {
+      engine.getOAuthTokenStatus(secretId, {
+        principal_type: PrincipalType.AGENT,
+        principal_id: "other-agent",
+        interface: "cli",
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toMatchObject({ code: ErrorCode.ACCESS_DENIED });
+
+    const status = engine.getOAuthTokenStatus(secretId, {
+      principal_type: PrincipalType.AGENT,
+      principal_id: "auditor",
+      interface: "cli",
+    });
+    expect(status.provider).toBe("github");
+    expect(engine.getOAuthTokenStatus(secretId).provider).toBe("github");
   });
 });

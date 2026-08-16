@@ -3,6 +3,7 @@ import type { InjectionPolicy, ResponseMode } from "@harpoc/shared";
 import { injectionPolicyInputSchema } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
+import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
 
 function collect(value: string, acc: string[]): string[] {
   acc.push(value);
@@ -23,6 +24,7 @@ export interface AllowOptions {
   acknowledgeInterpreter?: boolean;
   clear?: boolean;
   show?: boolean;
+  token?: string;
   json?: boolean;
 }
 
@@ -111,6 +113,7 @@ export function registerSecretAllowCommand(secret: Command): void {
     )
     .option("--clear", "Reset the whole policy to defaults before applying the other flags")
     .option("--show", "Show the current policy instead of setting it")
+    .option("--token <jwt>", TOKEN_OPTION_DESCRIPTION)
     .option("--json", "Output as JSON")
     .action(async (handle: string, options: AllowOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
@@ -128,21 +131,32 @@ export function registerSecretAllowCommand(secret: Command): void {
             (options.fsIsolation !== undefined ? 1 : 0) +
             (options.clear ? 1 : 0);
 
+          const tokenValue = options.token ?? process.env.HARPOC_TOKEN;
+
           if (options.show || setCount === 0) {
-            const policy = await engine.getInjectionPolicy(handle);
+            const resolved = resolveTokenCallerForHandle(engine, "read", handle, tokenValue);
+            const policy = await engine.getInjectionPolicy(handle, resolved?.caller);
             printJson(policy);
             return;
           }
 
+          const resolved = resolveTokenCallerForHandle(engine, "rotate", handle, tokenValue);
+          // The merge read is the command's own mechanics, deliberately
+          // caller-less (its result never reaches the caller); the caller's
+          // gate is the rotate check inside setInjectionPolicy — the REST
+          // membership-check precedent.
           const current = await engine.getInjectionPolicy(handle);
           const parsed = injectionPolicyInputSchema.safeParse(mergePolicy(current, options));
           if (!parsed.success) {
             throw new Error(parsed.error.issues.map((i) => i.message).join(", "));
           }
 
-          await engine.setInjectionPolicy(handle, parsed.data, {
-            acknowledge_interpreters: options.acknowledgeInterpreter === true,
-          });
+          await engine.setInjectionPolicy(
+            handle,
+            parsed.data,
+            { acknowledge_interpreters: options.acknowledgeInterpreter === true },
+            resolved?.caller,
+          );
           printSuccess(`Injection policy updated (${handle})`);
         } finally {
           await engine.destroy();

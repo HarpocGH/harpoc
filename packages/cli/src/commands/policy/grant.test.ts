@@ -36,9 +36,11 @@ describe("policy grant --principal-type validation", () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
+  const savedEnvToken = process.env.HARPOC_TOKEN;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.HARPOC_TOKEN;
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit");
     });
@@ -50,6 +52,8 @@ describe("policy grant --principal-type validation", () => {
     exitSpy.mockRestore();
     errorSpy.mockRestore();
     logSpy.mockRestore();
+    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+    else process.env.HARPOC_TOKEN = savedEnvToken;
   });
 
   it("rejects an invalid principal type with a clean message before reaching the engine", async () => {
@@ -84,6 +88,7 @@ describe("policy grant --principal-type validation", () => {
     expect(mockEngine.grantPolicy).toHaveBeenCalledWith(
       expect.objectContaining({ principalType: type }),
       "cli-user",
+      undefined,
     );
   });
 });

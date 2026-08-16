@@ -29,8 +29,16 @@ interface CliResult {
 
 function runCli(args: string[], options?: { stdin?: string }): Promise<CliResult> {
   return new Promise((resolvePromise, rejectPromise) => {
+    // This helper drives `secret set`/`secret rotate` (which now read
+    // HARPOC_TOKEN as a fallback) with no --token, expecting the trusted
+    // local path — so an operator's ambient HARPOC_TOKEN must not leak into
+    // the spawned child (it would be verified against a foreign JWT and
+    // refused). Tests that need an ambient token (D8) set it explicitly on
+    // their own separate spawn call, not through this helper.
+    const childEnv = { ...process.env, HARPOC_OAUTH_CLIENT_SECRET: CLIENT_SECRET };
+    delete childEnv.HARPOC_TOKEN;
     const child = spawn(process.execPath, [CLI_PATH, "--vault-dir", vaultDir, ...args], {
-      env: { ...process.env, HARPOC_OAUTH_CLIENT_SECRET: CLIENT_SECRET },
+      env: childEnv,
       windowsHide: true,
     });
     let stdout = "";
@@ -242,10 +250,14 @@ describe("compiled binary smoke: stdio MCP token gate (V3)", () => {
   }, 30_000);
 
   it("server start --mcp --allow-tokenless starts with the unrestricted warning", async () => {
+    // An inherited ambient HARPOC_TOKEN would conflict with the documented
+    // refusal rule and make this test env-flaky — strip it, same as runCli.
+    const childEnv = { ...process.env };
+    delete childEnv.HARPOC_TOKEN;
     const child = spawn(
       process.execPath,
       [CLI_PATH, "--vault-dir", vaultDir, "server", "start", "--mcp", "--allow-tokenless"],
-      { windowsHide: true },
+      { env: childEnv, windowsHide: true },
     );
     let stderr = "";
     try {
@@ -526,5 +538,42 @@ describe("compiled binary smoke: token-scoped secret use (D1)", () => {
     capturedOutputs.push(child.stdout, child.stderr);
     expect(child.code).toBe(1);
     expect(child.stderr).toContain("ACCESS_DENIED");
+  }, 60_000);
+});
+
+describe("compiled binary smoke: token-scoped credential commands", () => {
+  it("secret get --value honors read scope and refuses a use-scoped token", async () => {
+    const set = await runCli(["secret", "set", "smoke-token-target"], { stdin: "value-123\n" });
+    expect(set.code).toBe(0);
+
+    const mintRead = await runCli(["auth", "token", "--scope", "read", "--json"]);
+    expect(mintRead.code).toBe(0);
+    const readToken = (JSON.parse(mintRead.stdout) as { token: string }).token;
+
+    const ok = await runCli([
+      "secret",
+      "get",
+      "secret://smoke-token-target",
+      "--value",
+      "--token",
+      readToken,
+    ]);
+    expect(ok.code).toBe(0);
+    expect(ok.stdout).toContain("value-123");
+
+    const mintUse = await runCli(["auth", "token", "--scope", "use", "--json"]);
+    const useToken = (JSON.parse(mintUse.stdout) as { token: string }).token;
+
+    const denied = await runCli([
+      "secret",
+      "get",
+      "secret://smoke-token-target",
+      "--value",
+      "--token",
+      useToken,
+    ]);
+    expect(denied.code).toBe(1);
+    expect(denied.stderr).toContain("Token lacks permission");
+    expect(denied.stdout).not.toContain("value-123");
   }, 60_000);
 });

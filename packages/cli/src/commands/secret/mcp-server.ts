@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { mcpServerConfigSchema } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
+import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
 
 function collect(value: string, acc: string[]): string[] {
   acc.push(value);
@@ -18,6 +19,7 @@ interface McpServerOptions {
   url?: string;
   show?: boolean;
   delete?: boolean;
+  token?: string;
   json?: boolean;
 }
 
@@ -36,14 +38,18 @@ export function registerSecretMcpServerCommand(secret: Command): void {
     .option("--url <url>", "Downstream Streamable HTTP endpoint (http transport)")
     .option("--show", "Show the current config instead of setting it")
     .option("--delete", "Remove the config")
+    .option("--token <jwt>", TOKEN_OPTION_DESCRIPTION)
     .option("--json", "Output as JSON")
     .action(async (handle: string, options: McpServerOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
         const engine = await loadUnlockedEngine(vaultDir);
         try {
+          const tokenValue = options.token ?? process.env.HARPOC_TOKEN;
+
           if (options.delete) {
-            const deleted = await engine.deleteMcpServerConfig(handle);
+            const resolved = resolveTokenCallerForHandle(engine, "rotate", handle, tokenValue);
+            const deleted = await engine.deleteMcpServerConfig(handle, resolved?.caller);
             printSuccess(
               deleted
                 ? `MCP server config removed (${handle})`
@@ -53,10 +59,13 @@ export function registerSecretMcpServerCommand(secret: Command): void {
           }
 
           if (options.show || (!options.name && !options.transport)) {
-            const config = await engine.getMcpServerConfig(handle);
+            const resolved = resolveTokenCallerForHandle(engine, "read", handle, tokenValue);
+            const config = await engine.getMcpServerConfig(handle, resolved?.caller);
             printJson(config ?? null);
             return;
           }
+
+          const resolved = resolveTokenCallerForHandle(engine, "rotate", handle, tokenValue);
 
           const parsed = mcpServerConfigSchema.safeParse({
             server_name: options.name,
@@ -71,7 +80,7 @@ export function registerSecretMcpServerCommand(secret: Command): void {
             throw new Error(parsed.error.issues.map((i) => i.message).join(", "));
           }
 
-          await engine.setMcpServerConfig(handle, parsed.data);
+          await engine.setMcpServerConfig(handle, parsed.data, resolved?.caller);
           printSuccess(`MCP server config updated (${handle})`);
         } finally {
           await engine.destroy();

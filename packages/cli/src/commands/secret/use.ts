@@ -2,14 +2,10 @@ import type { Command } from "commander";
 import type { VaultEngine } from "@harpoc/core";
 import { InjectionGuard, sanitizeUseSecretResult } from "@harpoc/core";
 import type { CallerContext, UseSecretResponse } from "@harpoc/shared";
-import {
-  callerFromToken,
-  checkTokenScope,
-  parseHandle,
-  useSecretActionSchema,
-} from "@harpoc/shared";
+import { useSecretActionSchema } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord } from "../../utils/output.js";
+import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
 
 function collect(value: string, acc: string[]): string[] {
   acc.push(value);
@@ -94,10 +90,7 @@ export function registerSecretUseCommand(secret: Command): void {
     .option("--user <name>", "Remote user (ssh action)")
     // Any action
     .option("--timeout-ms <ms>", "Execution timeout in milliseconds (1..300000)")
-    .option(
-      "--token <jwt>",
-      "Scoped API token: enforces token scope and per-secret access policies, and attributes the call (omit for the trusted local path); prefer the HARPOC_TOKEN environment variable — command-line arguments are visible to other local processes",
-    )
+    .option("--token <jwt>", TOKEN_OPTION_DESCRIPTION)
     .option("--json", "Output the full result as JSON")
     .action(async (handle: string, options: UseOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
@@ -126,35 +119,13 @@ export function registerSecretUseCommand(secret: Command): void {
     });
 }
 
-/**
- * A supplied token *attenuates* the unlocked session (thesis §4.7): its scope is
- * enforced with the same predicate the REST route uses, and the call is
- * attributed to the token's principal, so per-secret access policies apply as
- * they do on every other token-bearing interface. No token = the trusted local
- * path, unchanged: no caller, no policy check, unattributed audit rows.
- *
- * A token that is *present but empty* is refused rather than treated as absent.
- * Every other direction in this codebase fails closed on an unusable token; here
- * the fallback direction is the more privileged one, so silently ignoring an
- * empty `--token ""` or an exported-but-empty `HARPOC_TOKEN` would run the call
- * on the trusted local path — no scope check, no per-secret policy, no
- * attribution — while the operator believes the session was attenuated.
- */
+/** Token semantics live in resolveTokenCallerForHandle (utils/token-caller.ts). */
 export function resolveCaller(
   engine: VaultEngine,
   handle: string,
   token: string | undefined,
 ): CallerContext | undefined {
-  if (token === undefined) return undefined;
-  if (token.trim() === "") {
-    throw new Error(
-      "--token (or HARPOC_TOKEN) was supplied but empty. Provide a token, or omit it entirely to use the trusted local path.",
-    );
-  }
-  const payload = engine.verifyToken(token);
-  const { project, name } = parseHandle(handle);
-  checkTokenScope(payload, "use", project, name);
-  return callerFromToken(payload, "cli");
+  return resolveTokenCallerForHandle(engine, "use", handle, token)?.caller;
 }
 
 /**

@@ -40,9 +40,11 @@ describe("oauth status / oauth refresh", () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
+  const savedEnvToken = process.env.HARPOC_TOKEN;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.HARPOC_TOKEN;
     mockEngine.getOAuthTokenStatus.mockReturnValue({
       secret_id: "secret-id-1",
       provider: "github",
@@ -65,12 +67,14 @@ describe("oauth status / oauth refresh", () => {
     exitSpy.mockRestore();
     errorSpy.mockRestore();
     logSpy.mockRestore();
+    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+    else process.env.HARPOC_TOKEN = savedEnvToken;
   });
 
   it("status prints token health for the resolved secret", async () => {
     await run(["status", "secret://gh-token"]);
 
-    expect(mockEngine.getOAuthTokenStatus).toHaveBeenCalledWith("secret-id-1");
+    expect(mockEngine.getOAuthTokenStatus).toHaveBeenCalledWith("secret-id-1", undefined);
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("github"));
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("ok"));
     expect(mockEngine.destroy).toHaveBeenCalled();
@@ -111,7 +115,7 @@ describe("oauth status / oauth refresh", () => {
   it("refresh calls engine.refreshOAuthToken and prints the new expiry", async () => {
     await run(["refresh", "secret://gh-token"]);
 
-    expect(mockEngine.refreshOAuthToken).toHaveBeenCalledWith("secret-id-1");
+    expect(mockEngine.refreshOAuthToken).toHaveBeenCalledWith("secret-id-1", undefined);
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("OK: Token refreshed"));
     expect(mockEngine.destroy).toHaveBeenCalled();
   });

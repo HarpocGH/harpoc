@@ -17,6 +17,8 @@ vi.mock("../../utils/vault-loader.js", () => ({
 
 import { mergePolicy, registerSecretAllowCommand } from "./allow.js";
 
+const savedEnvToken = process.env.HARPOC_TOKEN;
+
 const current: InjectionPolicy = {
   url_allowlist: ["https://api.github.com/*"],
   command_allowlist: ["gh"],
@@ -121,6 +123,7 @@ describe("secret allow command — interpreter acknowledgement pass-through", ()
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.HARPOC_TOKEN;
     mockEngine.getInjectionPolicy.mockResolvedValue({
       url_allowlist: [],
       command_allowlist: [],
@@ -136,6 +139,8 @@ describe("secret allow command — interpreter acknowledgement pass-through", ()
 
   afterEach(() => {
     errorSpy.mockRestore();
+    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+    else process.env.HARPOC_TOKEN = savedEnvToken;
   });
 
   async function run(args: string[]): Promise<void> {
@@ -154,6 +159,7 @@ describe("secret allow command — interpreter acknowledgement pass-through", ()
       "secret://k",
       expect.objectContaining({ command_allowlist: ["python"] }),
       { acknowledge_interpreters: true },
+      undefined,
     );
   });
 
@@ -163,6 +169,7 @@ describe("secret allow command — interpreter acknowledgement pass-through", ()
       "secret://k",
       expect.objectContaining({ command_allowlist: ["gh"] }),
       { acknowledge_interpreters: false },
+      undefined,
     );
   });
 });
@@ -172,6 +179,7 @@ describe("secret allow command — network isolation flags", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.HARPOC_TOKEN;
     mockEngine.getInjectionPolicy.mockResolvedValue({
       url_allowlist: [],
       command_allowlist: ["gh"],
@@ -187,6 +195,8 @@ describe("secret allow command — network isolation flags", () => {
 
   afterEach(() => {
     errorSpy.mockRestore();
+    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+    else process.env.HARPOC_TOKEN = savedEnvToken;
   });
 
   async function run(args: string[]): Promise<void> {
@@ -205,6 +215,7 @@ describe("secret allow command — network isolation flags", () => {
       "secret://k",
       expect.objectContaining({ network_isolation: true }),
       { acknowledge_interpreters: false },
+      undefined,
     );
   });
 
@@ -214,6 +225,7 @@ describe("secret allow command — network isolation flags", () => {
       "secret://k",
       expect.objectContaining({ network_isolation: false }),
       { acknowledge_interpreters: false },
+      undefined,
     );
   });
 
@@ -223,6 +235,7 @@ describe("secret allow command — network isolation flags", () => {
       "secret://k",
       expect.objectContaining({ network_isolation: true }),
       { acknowledge_interpreters: false },
+      undefined,
     );
   });
 });
@@ -232,6 +245,7 @@ describe("secret allow command — filesystem isolation flags", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.HARPOC_TOKEN;
     mockEngine.getInjectionPolicy.mockResolvedValue({
       url_allowlist: [],
       command_allowlist: ["gh"],
@@ -247,6 +261,8 @@ describe("secret allow command — filesystem isolation flags", () => {
 
   afterEach(() => {
     errorSpy.mockRestore();
+    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+    else process.env.HARPOC_TOKEN = savedEnvToken;
   });
 
   async function run(args: string[]): Promise<void> {
@@ -275,6 +291,7 @@ describe("secret allow command — filesystem isolation flags", () => {
       "secret://k",
       expect.objectContaining({ fs_isolation: true }),
       { acknowledge_interpreters: false },
+      undefined,
     );
   });
 
@@ -284,6 +301,7 @@ describe("secret allow command — filesystem isolation flags", () => {
       "secret://k",
       expect.objectContaining({ fs_isolation: false }),
       { acknowledge_interpreters: false },
+      undefined,
     );
   });
 
@@ -293,6 +311,7 @@ describe("secret allow command — filesystem isolation flags", () => {
       "secret://k",
       expect.objectContaining({ fs_isolation: true }),
       { acknowledge_interpreters: false },
+      undefined,
     );
   });
 
@@ -302,6 +321,7 @@ describe("secret allow command — filesystem isolation flags", () => {
       "secret://k",
       expect.objectContaining({ fs_isolation: false }),
       { acknowledge_interpreters: false },
+      undefined,
     );
   });
 });

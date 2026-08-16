@@ -33,9 +33,11 @@ describe("audit --since validation", () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
+  const savedEnvToken = process.env.HARPOC_TOKEN;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.HARPOC_TOKEN;
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit");
     });
@@ -47,6 +49,8 @@ describe("audit --since validation", () => {
     exitSpy.mockRestore();
     errorSpy.mockRestore();
     logSpy.mockRestore();
+    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+    else process.env.HARPOC_TOKEN = savedEnvToken;
   });
 
   it("rejects an unparseable --since instead of silently returning the full list", async () => {
@@ -60,6 +64,7 @@ describe("audit --since validation", () => {
     await run(["--since", "2026-07-01", "--json"]);
     expect(mockEngine.queryAudit).toHaveBeenCalledWith(
       expect.objectContaining({ since: new Date("2026-07-01").getTime() }),
+      undefined,
     );
   });
 
@@ -67,6 +72,7 @@ describe("audit --since validation", () => {
     await run(["--json"]);
     expect(mockEngine.queryAudit).toHaveBeenCalledWith(
       expect.objectContaining({ since: undefined }),
+      undefined,
     );
   });
 });
@@ -75,9 +81,11 @@ describe("audit table Principal column (by whom, thesis §4.3.4)", () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
+  const savedEnvToken = process.env.HARPOC_TOKEN;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.HARPOC_TOKEN;
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit");
     });
@@ -89,6 +97,8 @@ describe("audit table Principal column (by whom, thesis §4.3.4)", () => {
     exitSpy.mockRestore();
     errorSpy.mockRestore();
     logSpy.mockRestore();
+    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+    else process.env.HARPOC_TOKEN = savedEnvToken;
   });
 
   function tableText(): string {
@@ -142,9 +152,11 @@ describe("audit anchor / verify --anchor", () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
+  const savedEnvToken = process.env.HARPOC_TOKEN;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.HARPOC_TOKEN;
     tempDir = mkdtempSync(join(tmpdir(), "harpoc-anchor-test-"));
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit");
@@ -160,6 +172,8 @@ describe("audit anchor / verify --anchor", () => {
     logSpy.mockRestore();
     process.exitCode = undefined;
     rmSync(tempDir, { recursive: true, force: true });
+    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+    else process.env.HARPOC_TOKEN = savedEnvToken;
   });
 
   function stderrText(): string {

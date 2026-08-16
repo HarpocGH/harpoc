@@ -5,12 +5,14 @@ import { wipeBuffer } from "@harpoc/core";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { resolveSecretValue } from "../../utils/secret-value.js";
 import { handleError, printSuccess, printJson } from "../../utils/output.js";
+import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
 
 interface SecretSetOptions {
   type?: string;
   project?: string;
   fromFile?: string;
   decrypt?: boolean;
+  token?: string;
   json?: boolean;
 }
 
@@ -25,6 +27,7 @@ export function registerSecretSetCommand(secret: Command): void {
       "--no-decrypt",
       "Store encrypted private-key material verbatim instead of decrypting at import",
     )
+    .option("--token <jwt>", TOKEN_OPTION_DESCRIPTION)
     .option("--json", "Output as JSON")
     .action(async (name: string, options: SecretSetOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
@@ -44,17 +47,25 @@ export function registerSecretSetCommand(secret: Command): void {
         // exist outside a wiping finally.
         const engine = await loadUnlockedEngine(vaultDir);
         try {
+          const resolved = resolveTokenCaller(
+            engine,
+            { permission: "create", project: options.project, name },
+            options.token ?? process.env.HARPOC_TOKEN,
+          );
           const value = await resolveSecretValue({
             fromFile: options.fromFile,
             noDecrypt: options.decrypt === false,
           });
           try {
-            const result = await engine.createSecret({
-              name,
-              type: secretType,
-              project: options.project,
-              value,
-            });
+            const result = await engine.createSecret(
+              {
+                name,
+                type: secretType,
+                project: options.project,
+                value,
+              },
+              resolved?.caller,
+            );
 
             if (json) {
               printJson(result);
