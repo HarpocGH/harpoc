@@ -1,8 +1,9 @@
-import type { CreateSecretResponse, ParsedHandle, Secret, SecretType } from "@harpoc/shared";
+import type { CreateSecretResponse, ParsedHandle, Secret } from "@harpoc/shared";
 import {
   AES_KEY_LENGTH,
   ErrorCode,
   SecretStatus,
+  SecretType,
   VaultError,
   formatHandle,
   parseHandle,
@@ -209,14 +210,29 @@ export class SecretManager {
 
   /**
    * Set the value for a PENDING secret (transitions to ACTIVE).
-   * `onCommit` runs inside the update transaction (see createSecret).
+   * `onCommit` runs inside the update transaction (see createSecret);
+   * `onResolved` reports the resolved secret id before any step can throw, so
+   * a denial row can carry it (see getSecretInfo).
    */
   async setSecretValue(
     handle: string,
     value: Uint8Array,
     onCommit?: (secretId: string) => void,
+    onResolved?: (secretId: string) => void,
   ): Promise<void> {
     const secret = await this.resolveHandleToSecret(handle);
+    onResolved?.(secret.id);
+
+    // Same discriminator as getSecretValue: a vault-managed certificate keeps
+    // its material in the certificates table, so the generic value column is
+    // not its credential. Without this refusal a CSR-pending certificate — the
+    // one certificate state that IS pending — could be handed an unrelated
+    // payload and flipped ACTIVE, reporting itself issued while the
+    // certificates row still holds no leaf. Checked before the status test so
+    // an already-active certificate secret gets the same accurate refusal.
+    if (secret.type === SecretType.CERTIFICATE && this.store.getCertificate(secret.id)) {
+      throw VaultError.certValueUnsupported(handle);
+    }
 
     if (secret.status !== SecretStatus.PENDING) {
       throw new VaultError(
@@ -293,6 +309,22 @@ export class SecretManager {
   ): Promise<Uint8Array> {
     const secret = await this.resolveHandleToSecret(handle);
     onResolved?.(secret.id);
+    // A vault-managed certificate's payload column is empty by construction —
+    // the private key lives KEK-encrypted in the certificates table. Without
+    // this refusal every generic value path (secret get, REST read, and every
+    // use_secret injector below the OAuth arm) would hand out or inject a
+    // zero-length credential. Refused here, the narrowest point both the read
+    // and the use path share, so it lands before the DEK is unwrapped and
+    // before any injector work begins.
+    //
+    // The certificates row — not the type alone — is what marks a secret as
+    // vault-managed: `certificate` has always been a legal type on the generic
+    // create paths (`secret set -t certificate`, REST, MCP), and those secrets
+    // carry a real payload. Keying on the type alone would strand them. The
+    // lookup is guarded by the type test, so only cert-typed secrets pay for it.
+    if (secret.type === SecretType.CERTIFICATE && this.store.getCertificate(secret.id)) {
+      throw VaultError.certValueUnsupported(handle);
+    }
     this.assertUsable(secret, handle);
 
     const dek = unwrapDek(this.kek, secret.wrapped_dek, secret.dek_iv, secret.dek_tag, secret.id);
@@ -350,14 +382,28 @@ export class SecretManager {
 
   /**
    * Rotate a secret: new DEK, new ciphertext, version incremented.
-   * `onCommit` runs inside the update transaction (see createSecret).
+   * `onCommit` runs inside the update transaction (see createSecret);
+   * `onResolved` reports the resolved secret id (see setSecretValue).
    */
   async rotateSecret(
     handle: string,
     newValue: Uint8Array,
     onCommit?: (secretId: string) => void,
+    onResolved?: (secretId: string) => void,
   ): Promise<void> {
     const secret = await this.resolveHandleToSecret(handle);
+    onResolved?.(secret.id);
+
+    // A vault-managed certificate is rotated by issuing a new certificate
+    // against the stored key (`updateCertificate`), never by writing the
+    // generic value column: the payload would be unreachable behind
+    // `getSecretValue`'s refusal, while the row gained a `secret.rotate`
+    // entry claiming the credential had changed. Same discriminator as the
+    // read and set paths.
+    if (secret.type === SecretType.CERTIFICATE && this.store.getCertificate(secret.id)) {
+      throw VaultError.certValueUnsupported(handle);
+    }
+
     this.assertUsable(secret, handle);
 
     const newVersion = secret.version + 1;

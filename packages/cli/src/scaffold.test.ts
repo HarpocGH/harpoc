@@ -15,6 +15,7 @@ describe("cli", () => {
   describeCrossPackageImports([
     "@harpoc/shared",
     "@harpoc/core",
+    "@harpoc/cert-manager",
     "@harpoc/mcp-server",
     "@harpoc/oauth-proxy",
     "@harpoc/rest-api",
@@ -22,6 +23,7 @@ describe("cli", () => {
   describeWorkspaceDeps(pkgRoot, [
     "@harpoc/shared",
     "@harpoc/core",
+    "@harpoc/cert-manager",
     "@harpoc/mcp-server",
     "@harpoc/oauth-proxy",
     "@harpoc/rest-api",

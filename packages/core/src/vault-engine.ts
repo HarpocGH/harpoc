@@ -1,12 +1,14 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, createPrivateKey, timingSafeEqual, X509Certificate } from "node:crypto";
 import type {
   AccessPolicy,
   AuditChainAnchor,
   AuditVisibilityScope,
   CallerContext,
+  CertificateStatus,
   ConnectionConfig,
   CreateSecretResponse,
   HttpResult,
+  ImportCertificateOptions,
   InjectionPolicy,
   InjectionPolicyInput,
   McpServerConfig,
@@ -22,6 +24,8 @@ import type {
   VaultApiToken,
 } from "@harpoc/shared";
 import {
+  AAD_CERT_ACME_ACCOUNT,
+  AAD_CERT_PRIVATE_KEY,
   AAD_CONNECTION_CONFIG,
   AAD_INJECTION_POLICY,
   AAD_MCP_SERVER_CONFIG,
@@ -90,7 +94,7 @@ import { SecretManager } from "./secrets/secret-manager.js";
 import { SessionManager } from "./session/session-manager.js";
 import type { SessionKeyProtector } from "./session/session-key-protector.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
-import type { OAuthTokenRow } from "./storage/sqlite-store.js";
+import type { CertificateRow, OAuthTokenRow } from "./storage/sqlite-store.js";
 
 export interface VaultEngineOptions {
   dbPath: string;
@@ -581,24 +585,30 @@ export class VaultEngine {
       handle,
       action: "set_value",
     });
+    let resolvedId: string | undefined;
     try {
-      await s.secretManager.setSecretValue(handle, value, (secretId) => {
-        s.auditLogger.log({
-          eventType: AuditEventType.SECRET_CREATE,
-          secretId,
-          principalType: caller?.principal_type,
-          principalId: caller?.principal_id,
-          detail: { handle, action: "set_value", ...callerInterfaceDetail(caller) },
-          sessionId: this.sessionId ?? undefined,
-        });
-      });
+      await s.secretManager.setSecretValue(
+        handle,
+        value,
+        (secretId) => {
+          s.auditLogger.log({
+            eventType: AuditEventType.SECRET_CREATE,
+            secretId,
+            principalType: caller?.principal_type,
+            principalId: caller?.principal_id,
+            detail: { handle, action: "set_value", ...callerInterfaceDetail(caller) },
+            sessionId: this.sessionId ?? undefined,
+          });
+        },
+        (id) => (resolvedId = id),
+      );
     } catch (err) {
       this.auditDenied(
         s,
         AuditEventType.SECRET_CREATE,
         err,
         { handle, action: "set_value" },
-        undefined,
+        resolvedId,
         caller,
       );
       throw err;
@@ -610,19 +620,25 @@ export class VaultEngine {
     await this.enforceCallerPolicy(s, handle, caller, "rotate", AuditEventType.SECRET_ROTATE, {
       handle,
     });
+    let resolvedId: string | undefined;
     try {
-      await s.secretManager.rotateSecret(handle, newValue, (secretId) => {
-        s.auditLogger.log({
-          eventType: AuditEventType.SECRET_ROTATE,
-          secretId,
-          principalType: caller?.principal_type,
-          principalId: caller?.principal_id,
-          detail: { handle, ...callerInterfaceDetail(caller) },
-          sessionId: this.sessionId ?? undefined,
-        });
-      });
+      await s.secretManager.rotateSecret(
+        handle,
+        newValue,
+        (secretId) => {
+          s.auditLogger.log({
+            eventType: AuditEventType.SECRET_ROTATE,
+            secretId,
+            principalType: caller?.principal_type,
+            principalId: caller?.principal_id,
+            detail: { handle, ...callerInterfaceDetail(caller) },
+            sessionId: this.sessionId ?? undefined,
+          });
+        },
+        (id) => (resolvedId = id),
+      );
     } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_ROTATE, err, { handle }, undefined, caller);
+      this.auditDenied(s, AuditEventType.SECRET_ROTATE, err, { handle }, resolvedId, caller);
       throw err;
     }
   }
@@ -1835,6 +1851,486 @@ export class VaultEngine {
   getExpiringOAuthTokens(withinMs: number): OAuthTokenRow[] {
     const s = this.assertUnlocked();
     return s.store.getExpiringOAuthTokens(withinMs);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Certificates
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Import a certificate: the private key is stored KEK-encrypted, the public
+   * material (cert/chain/CSR) verbatim. With a certificate the key/cert pair is
+   * verified before anything is written and the parsed notAfter becomes the
+   * secret's expiry, so the ordinary expiry machinery covers certificates too;
+   * a CSR-only import (ACME order placed, not yet issued) stays PENDING with no
+   * expiry until the issued certificate arrives.
+   *
+   * Every refusal is audited as a failed `cert.issue`, like `refreshOAuthToken`
+   * audits its own: the pre-write validation is where a mismatched pair or an
+   * unparseable PEM is caught, and those attempts are exactly what a trail
+   * needs to show. The row carries the secret id only once one exists.
+   *
+   * `caller` is attribution only, exactly as on `createSecret`: `create` is not
+   * grantable per secret (there is no secret to carry the row yet, W2), so
+   * token scope governs it — but without the caller a token-bearing import
+   * wrote NULL-principal rows, which is the documented marker for the *trusted
+   * local path* (L3), so a REST/MCP/CLI-token import was indistinguishable from
+   * a local one in the trail (V2 attribution parity).
+   */
+  async importCertificate(
+    name: string,
+    privateKeyPem: string,
+    opts?: ImportCertificateOptions,
+    project?: string,
+    caller?: CallerContext,
+  ): Promise<{ handle: string; secretId: string }> {
+    const s = this.assertUnlocked();
+    let secretId: string | undefined;
+    try {
+      return await this.doImportCertificate(
+        s,
+        name,
+        privateKeyPem,
+        (id) => (secretId = id),
+        opts,
+        project,
+        caller,
+      );
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.CERT_ISSUE,
+        err,
+        { name, action: "import_certificate" },
+        secretId,
+        caller,
+      );
+      throw err;
+    }
+  }
+
+  private async doImportCertificate(
+    s: UnlockedState,
+    name: string,
+    privateKeyPem: string,
+    onResolved: (secretId: string) => void,
+    opts?: ImportCertificateOptions,
+    project?: string,
+    caller?: CallerContext,
+  ): Promise<{ handle: string; secretId: string }> {
+    const o = opts ?? {};
+
+    let keyObj: ReturnType<typeof createPrivateKey>;
+    try {
+      keyObj = createPrivateKey(privateKeyPem);
+    } catch {
+      throw VaultError.certInvalid("private key PEM is not parseable");
+    }
+
+    let subject: string;
+    let issuer: string | null = null;
+    let serial: string | null = null;
+    let notBefore: number | null = null;
+    let notAfter: number | null = null;
+
+    if (o.certificatePem) {
+      let cert: X509Certificate;
+      try {
+        cert = new X509Certificate(o.certificatePem);
+      } catch {
+        throw VaultError.certInvalid("certificate PEM is not parseable");
+      }
+      if (!cert.checkPrivateKey(keyObj)) throw VaultError.certPrivateKeyMismatch();
+      subject = cert.subject;
+      issuer = cert.issuer;
+      serial = cert.serialNumber;
+      notBefore = new Date(cert.validFrom).getTime();
+      notAfter = new Date(cert.validTo).getTime();
+    } else if (o.csrPem && o.subject) {
+      subject = o.subject;
+    } else {
+      throw VaultError.certInvalid("either certificatePem or csrPem+subject is required");
+    }
+
+    // The secret row and its secret.create audit row commit together (NM3),
+    // like every other create path.
+    const { handle } = await s.secretManager.createSecret(
+      {
+        name,
+        type: SecretType.CERTIFICATE,
+        project,
+        expiresAt: notAfter ?? undefined,
+      },
+      (result, id) => {
+        s.auditLogger.log({
+          eventType: AuditEventType.SECRET_CREATE,
+          secretId: id,
+          principalType: caller?.principal_type,
+          principalId: caller?.principal_id,
+          detail: {
+            handle: result.handle,
+            status: result.status,
+            ...callerInterfaceDetail(caller),
+          },
+          sessionId: this.sessionId ?? undefined,
+        });
+      },
+    );
+    const secret = await s.secretManager.resolveHandle(handle);
+    onResolved(secret.id);
+
+    const keyEnc = encrypt(
+      s.kek,
+      new Uint8Array(Buffer.from(privateKeyPem, "utf8")),
+      AAD_CERT_PRIVATE_KEY(secret.id),
+    );
+
+    // Certificate row, the ACTIVE transition and the cert.issue audit row
+    // commit together (NM3) — the row is unconditional, `acme` only records
+    // which path produced it. The base secret row committed in the manager's
+    // own transaction above — a crash between the two leaves a visibly
+    // incomplete PENDING secret with no certificate row, not a completed-but-
+    // unaudited import.
+    s.store.transaction(() => {
+      s.store.insertCertificate({
+        secret_id: secret.id,
+        subject,
+        issuer,
+        serial_number: serial,
+        not_before: notBefore,
+        not_after: notAfter,
+        private_key_encrypted: keyEnc.ciphertext,
+        private_key_iv: keyEnc.iv,
+        private_key_tag: keyEnc.tag,
+        certificate_pem: o.certificatePem ?? null,
+        chain_pem: o.chainPem ?? null,
+        csr_pem: o.csrPem ?? null,
+        auto_renew: o.autoRenew ?? false,
+        renew_before_days: o.renewBeforeDays ?? 30,
+        acme_account_encrypted: null,
+        acme_account_iv: null,
+        acme_account_tag: null,
+      });
+      if (o.certificatePem) {
+        s.store.updateSecret(secret.id, { status: SecretStatus.ACTIVE, updated_at: Date.now() });
+      }
+      s.auditLogger.log({
+        eventType: AuditEventType.CERT_ISSUE,
+        secretId: secret.id,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
+        detail: {
+          handle,
+          action: "import_certificate",
+          subject,
+          not_after: notAfter,
+          acme: o.acmeIssued === true,
+          ...callerInterfaceDetail(caller),
+        },
+        sessionId: this.sessionId ?? undefined,
+      });
+    });
+
+    return { handle, secretId: secret.id };
+  }
+
+  /**
+   * Attach a newly issued certificate to a secret that already holds the
+   * matching private key — the completion half of both flows: a CSR-pending
+   * import receiving its first leaf, and a renewal replacing an existing one.
+   * The key never moves and is never re-supplied: the new leaf is verified
+   * against the stored key before anything is written, so a certificate issued
+   * for someone else's key cannot land on this row. The secret's `expires_at`
+   * follows the new `not_after`, keeping renewed certificates inside the
+   * ordinary expiry machinery.
+   *
+   * A revoked secret is not revivable — renewal completion must not resurrect
+   * a credential an administrator retired.
+   *
+   * Gated like its OAuth counterpart `refreshOAuthToken`: replacing the
+   * material a secret presents is a `rotate`-class change, refused before the
+   * stored key is touched. The internal key read stays caller-less on purpose
+   * — the engine reads it to verify the pair, the caller never sees it. Every
+   * refusal below the gate is audited as a failed row of the same event, so a
+   * rejected renewal is as visible as an accepted one.
+   */
+  async updateCertificate(
+    secretId: string,
+    certificatePem: string,
+    chainPem?: string,
+    opts?: { renewed?: boolean },
+    caller?: CallerContext,
+  ): Promise<void> {
+    const s = this.assertUnlocked();
+    const eventType =
+      opts?.renewed === true ? AuditEventType.CERT_RENEW : AuditEventType.CERT_ISSUE;
+    this.checkResolvedCallerPolicy(s, secretId, caller, "rotate", eventType, {
+      action: "update_certificate",
+    });
+
+    try {
+      await this.doUpdateCertificate(s, secretId, certificatePem, eventType, chainPem, caller);
+    } catch (err) {
+      this.auditDenied(s, eventType, err, { action: "update_certificate" }, secretId, caller);
+      throw err;
+    }
+  }
+
+  private async doUpdateCertificate(
+    s: UnlockedState,
+    secretId: string,
+    certificatePem: string,
+    eventType: AuditEventType,
+    chainPem?: string,
+    caller?: CallerContext,
+  ): Promise<void> {
+    const row = s.store.getCertificate(secretId);
+    if (!row) throw VaultError.certNotConfigured();
+
+    const secret = s.store.getSecret(secretId);
+    if (!secret) throw VaultError.secretNotFound();
+    if (secret.status === SecretStatus.REVOKED) throw VaultError.secretRevoked();
+
+    let cert: X509Certificate;
+    try {
+      cert = new X509Certificate(certificatePem);
+    } catch {
+      throw VaultError.certInvalid("certificate PEM is not parseable");
+    }
+
+    const keyPem = await this.getCertificatePrivateKey(secretId);
+    if (!cert.checkPrivateKey(createPrivateKey(keyPem))) {
+      throw VaultError.certPrivateKeyMismatch();
+    }
+    const notAfter = new Date(cert.validTo).getTime();
+
+    // Certificate row, secret expiry/status and the audit row commit together
+    // (NM3): a crash between them would leave a secret claiming a validity
+    // window its stored certificate does not have. The CSR is kept — renewal
+    // reuses it.
+    s.store.transaction(() => {
+      s.store.updateCertificate(secretId, {
+        subject: cert.subject,
+        issuer: cert.issuer,
+        serial_number: cert.serialNumber,
+        not_before: new Date(cert.validFrom).getTime(),
+        not_after: notAfter,
+        certificate_pem: certificatePem,
+        chain_pem: chainPem ?? row.chain_pem,
+      });
+      s.store.updateSecret(secretId, {
+        status: SecretStatus.ACTIVE,
+        expires_at: notAfter,
+        updated_at: Date.now(),
+      });
+      s.auditLogger.log({
+        eventType,
+        secretId,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
+        detail: {
+          action: "update_certificate",
+          subject: cert.subject,
+          not_after: notAfter,
+          ...callerInterfaceDetail(caller),
+        },
+        sessionId: this.sessionId ?? undefined,
+        success: true,
+      });
+    });
+  }
+
+  /**
+   * Certificate metadata for health checks and UI. The renewal state is derived
+   * from the stored validity window against the per-certificate
+   * `renew_before_days`, so a status read never touches the private key — the
+   * `secret.read` gate still applies, because subject/issuer/validity are the
+   * metadata a policy-gated caller is being gated on.
+   */
+  getCertificateStatus(secretId: string, caller?: CallerContext): CertificateStatus {
+    const s = this.assertUnlocked();
+    this.checkResolvedCallerPolicy(s, secretId, caller, "read", AuditEventType.SECRET_READ, {
+      config: "certificate_status",
+    });
+
+    const row = s.store.getCertificate(secretId);
+    if (!row) throw VaultError.certNotConfigured();
+
+    let renewalStatus: CertificateStatus["renewal_status"];
+    if (!row.certificate_pem || row.not_after === null) {
+      renewalStatus = "no_certificate";
+    } else if (row.not_after <= Date.now()) {
+      renewalStatus = "expired";
+    } else if (row.not_after <= Date.now() + row.renew_before_days * 24 * 60 * 60 * 1000) {
+      renewalStatus = "expiring_soon";
+    } else {
+      renewalStatus = "ok";
+    }
+
+    return {
+      secret_id: secretId,
+      subject: row.subject,
+      issuer: row.issuer,
+      not_before: row.not_before,
+      not_after: row.not_after,
+      auto_renew: row.auto_renew,
+      renewal_status: renewalStatus,
+    };
+  }
+
+  /**
+   * The certificate's public material, stored verbatim: leaf, chain and the
+   * pending CSR. None of it is confidential — a certificate is presented to
+   * every peer that connects — so a granted read deliberately writes no audit
+   * row; the private key is the audited half (`getCertificatePrivateKey`).
+   * The `read` gate still applies: policy enforcement lives in the engine (V1),
+   * so a gated secret cannot have its material read out by an interface that
+   * happens to reach this method, and the refusal is audited like every other.
+   */
+  getCertificatePem(
+    secretId: string,
+    caller?: CallerContext,
+  ): {
+    certificatePem: string | null;
+    chainPem: string | null;
+    csrPem: string | null;
+  } {
+    const s = this.assertUnlocked();
+    this.checkResolvedCallerPolicy(s, secretId, caller, "read", AuditEventType.SECRET_READ, {
+      config: "certificate_pem",
+    });
+
+    const row = s.store.getCertificate(secretId);
+    if (!row) throw VaultError.certNotConfigured();
+    return { certificatePem: row.certificate_pem, chainPem: row.chain_pem, csrPem: row.csr_pem };
+  }
+
+  /**
+   * The decrypted certificate private key — the legitimate read path for key
+   * material a certificate secret keeps out of the generic value accessors
+   * (`CERT_VALUE_UNSUPPORTED`). NEVER return this to the LLM. Every successful
+   * read writes its own `secret.read` row: `checkResolvedCallerPolicy` audits
+   * denials only, so without this the granted reads of the most sensitive
+   * field in the vault would be the ones missing from the trail (V2).
+   */
+  async getCertificatePrivateKey(secretId: string, caller?: CallerContext): Promise<string> {
+    const s = this.assertUnlocked();
+    this.checkResolvedCallerPolicy(s, secretId, caller, "read", AuditEventType.SECRET_READ, {
+      config: "certificate_private_key",
+    });
+
+    const row = s.store.getCertificate(secretId);
+    if (!row) throw VaultError.certNotConfigured();
+
+    const pem = decrypt(
+      s.kek,
+      row.private_key_encrypted,
+      row.private_key_iv,
+      row.private_key_tag,
+      AAD_CERT_PRIVATE_KEY(secretId),
+    );
+
+    s.auditLogger.log({
+      eventType: AuditEventType.SECRET_READ,
+      secretId,
+      principalType: caller?.principal_type,
+      principalId: caller?.principal_id,
+      detail: { config: "certificate_private_key", ...callerInterfaceDetail(caller) },
+      sessionId: this.sessionId ?? undefined,
+      success: true,
+    });
+
+    return Buffer.from(pem).toString("utf8");
+  }
+
+  /**
+   * Certificates whose `not_after` falls inside the window — the renewal
+   * scheduler's input, mirroring `getExpiringOAuthTokens`. Rows without a
+   * certificate (CSR-only) and non-active secrets are excluded by the store.
+   *
+   * Rows carry encrypted private-key/ACME columns — in-process use only;
+   * project to metadata before any REST/MCP serialization (Phase 10 obligation).
+   */
+  getExpiringCertificates(withinDays: number): CertificateRow[] {
+    const s = this.assertUnlocked();
+    return s.store.getExpiringCertificates(withinDays);
+  }
+
+  /**
+   * Store the ACME account (its key pair and account URL, serialised by the
+   * caller) KEK-encrypted under a per-secret AAD, so an account blob lifted
+   * onto another certificate's row fails to decrypt. Internal to the ACME
+   * flow: no caller parameter, no interface reaches it directly.
+   *
+   * The write and its audit row commit together (NM3) — key material never
+   * lands on a certificate row unaudited. `policy.grant` is the event every
+   * other secret-scoped configuration write already uses (injection policy,
+   * MCP server, connection config); the detail names the config and nothing
+   * else — the account blob and its key stay out of the trail.
+   */
+  storeAcmeAccount(secretId: string, accountJson: string): void {
+    const s = this.assertUnlocked();
+    const row = s.store.getCertificate(secretId);
+    if (!row) throw VaultError.certNotConfigured();
+
+    const enc = encrypt(
+      s.kek,
+      new Uint8Array(Buffer.from(accountJson, "utf8")),
+      AAD_CERT_ACME_ACCOUNT(secretId),
+    );
+    s.store.transaction(() => {
+      s.store.updateCertificate(secretId, {
+        acme_account_encrypted: enc.ciphertext,
+        acme_account_iv: enc.iv,
+        acme_account_tag: enc.tag,
+      });
+      s.store.updateSecret(secretId, { updated_at: Date.now() });
+      s.auditLogger.log({
+        eventType: AuditEventType.POLICY_GRANT,
+        secretId,
+        detail: { config: "acme_account" },
+        sessionId: this.sessionId ?? undefined,
+        success: true,
+      });
+    });
+  }
+
+  /**
+   * The stored ACME account, or null when the certificate was never
+   * ACME-issued. The blob carries the account's private key, so it reads under
+   * the same `read` gate and writes the same explicit `secret.read` row as
+   * `getCertificatePrivateKey` (V2) — the absent-account case decrypts nothing
+   * and therefore records nothing.
+   */
+  getAcmeAccount(secretId: string, caller?: CallerContext): string | null {
+    const s = this.assertUnlocked();
+    this.checkResolvedCallerPolicy(s, secretId, caller, "read", AuditEventType.SECRET_READ, {
+      config: "acme_account",
+    });
+
+    const row = s.store.getCertificate(secretId);
+    if (!row) throw VaultError.certNotConfigured();
+    if (!row.acme_account_encrypted || !row.acme_account_iv || !row.acme_account_tag) return null;
+
+    const dec = decrypt(
+      s.kek,
+      row.acme_account_encrypted,
+      row.acme_account_iv,
+      row.acme_account_tag,
+      AAD_CERT_ACME_ACCOUNT(secretId),
+    );
+
+    s.auditLogger.log({
+      eventType: AuditEventType.SECRET_READ,
+      secretId,
+      principalType: caller?.principal_type,
+      principalId: caller?.principal_id,
+      detail: { config: "acme_account", ...callerInterfaceDetail(caller) },
+      sessionId: this.sessionId ?? undefined,
+      success: true,
+    });
+
+    return Buffer.from(dec).toString("utf8");
   }
 
   // ---------------------------------------------------------------------------

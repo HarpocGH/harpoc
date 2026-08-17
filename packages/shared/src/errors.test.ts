@@ -106,6 +106,7 @@ describe("HTTP status mapping", () => {
     [ErrorCode.CERT_ACME_FAILED, 502],
     [ErrorCode.CERT_CSR_FAILED, 500],
     [ErrorCode.CERT_NOT_CONFIGURED, 400],
+    [ErrorCode.CERT_VALUE_UNSUPPORTED, 400],
     // System
     [ErrorCode.INTERNAL_ERROR, 500],
     [ErrorCode.DATABASE_ERROR, 500],
@@ -120,7 +121,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(90);
+    expect(members).toHaveLength(91);
   });
 });
 
@@ -448,6 +449,18 @@ describe("factory methods", () => {
   it("certNotConfigured() with handle", () => {
     const err = VaultError.certNotConfigured("secret://my-cert");
     expect(err.message).toBe("Certificate not configured for secret: secret://my-cert");
+  });
+
+  it("certValueUnsupported() without handle", () => {
+    const err = VaultError.certValueUnsupported();
+    expect(err.code).toBe(ErrorCode.CERT_VALUE_UNSUPPORTED);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toBe("Certificate secrets cannot be used as a raw value");
+  });
+
+  it("certValueUnsupported() with handle", () => {
+    const err = VaultError.certValueUnsupported("secret://my-cert");
+    expect(err.message).toBe("Certificate secrets cannot be used as a raw value: secret://my-cert");
   });
 
   it("urlNotAllowed() without url", () => {

@@ -107,6 +107,7 @@ export enum ErrorCode {
   CERT_ACME_FAILED = "CERT_ACME_FAILED",
   CERT_CSR_FAILED = "CERT_CSR_FAILED",
   CERT_NOT_CONFIGURED = "CERT_NOT_CONFIGURED",
+  CERT_VALUE_UNSUPPORTED = "CERT_VALUE_UNSUPPORTED",
 
   // Rate limiting
   RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED",
@@ -225,6 +226,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.CERT_ACME_FAILED]: 502,
   [ErrorCode.CERT_CSR_FAILED]: 500,
   [ErrorCode.CERT_NOT_CONFIGURED]: 400,
+  [ErrorCode.CERT_VALUE_UNSUPPORTED]: 400,
 
   // Rate limiting
   [ErrorCode.RATE_LIMIT_EXCEEDED]: 429,
@@ -536,6 +538,18 @@ export class VaultError extends Error {
       ? `Certificate not configured for secret: ${handle}`
       : "Certificate not configured for secret";
     return new VaultError(ErrorCode.CERT_NOT_CONFIGURED, msg);
+  }
+
+  /**
+   * A certificate secret carries no raw payload — its private key lives in the
+   * `certificates` table, so the generic value paths would inject an empty
+   * credential. They refuse instead; the certificate accessors are the way in.
+   */
+  static certValueUnsupported(handle?: string): VaultError {
+    const msg = handle
+      ? `Certificate secrets cannot be used as a raw value: ${handle}`
+      : "Certificate secrets cannot be used as a raw value";
+    return new VaultError(ErrorCode.CERT_VALUE_UNSUPPORTED, msg);
   }
 
   static hostNotAllowed(host?: string): VaultError {

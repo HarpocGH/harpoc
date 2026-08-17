@@ -26,6 +26,7 @@
   "dependencies": {
     "@harpoc/shared": "workspace:*",
     "@harpoc/core": "workspace:*",
+    "@harpoc/cert-manager": "workspace:*",
     "@harpoc/mcp-server": "workspace:*",
     "@harpoc/oauth-proxy": "workspace:*",
     "@harpoc/rest-api": "workspace:*",

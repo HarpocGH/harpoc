@@ -5,15 +5,7 @@ import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
 import { promptHidden } from "../../utils/prompt.js";
 import { buildOAuthProviderConfig } from "../../utils/oauth-config.js";
-
-function parseIntOption(value: string, label: string, min: number, max: number): number {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
-    console.error(`Error: Invalid ${label} "${value}". Must be ${min}-${max}.`);
-    process.exit(1);
-  }
-  return parsed;
-}
+import { parseIntOption } from "../../utils/options.js";
 
 export function registerOAuthConnectCommand(oauth: Command): void {
   oauth

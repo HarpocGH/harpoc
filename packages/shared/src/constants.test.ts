@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   AAD_AUDIT_DETAIL,
+  AAD_CERT_ACME_ACCOUNT,
+  AAD_CERT_PRIVATE_KEY,
   AAD_DEK_WRAP,
   AAD_MCP_SERVER_CONFIG,
   AAD_METADATA,
@@ -98,6 +100,20 @@ describe("AAD_METADATA", () => {
 describe("AAD_MCP_SERVER_CONFIG", () => {
   it("returns 'mcp-server-config:<secretId>'", () => {
     expect(AAD_MCP_SERVER_CONFIG("abc-123")).toBe("mcp-server-config:abc-123");
+  });
+});
+
+describe("certificate AADs", () => {
+  it("AAD_CERT_PRIVATE_KEY returns 'cert-private-key:<secretId>'", () => {
+    expect(AAD_CERT_PRIVATE_KEY("abc-123")).toBe("cert-private-key:abc-123");
+  });
+
+  it("AAD_CERT_ACME_ACCOUNT returns 'cert-acme-account:<secretId>'", () => {
+    expect(AAD_CERT_ACME_ACCOUNT("abc-123")).toBe("cert-acme-account:abc-123");
+  });
+
+  it("keeps the two certificate fields in separate AAD domains", () => {
+    expect(AAD_CERT_PRIVATE_KEY("same-id")).not.toBe(AAD_CERT_ACME_ACCOUNT("same-id"));
   });
 });
 

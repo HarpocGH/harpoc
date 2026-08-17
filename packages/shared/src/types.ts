@@ -438,6 +438,19 @@ export interface CertificateRecord {
   renew_before_days: number;
 }
 
+/** Options for VaultEngine.importCertificate. */
+export interface ImportCertificateOptions {
+  certificatePem?: string;
+  chainPem?: string;
+  csrPem?: string;
+  /** Required when no certificatePem is given (the certificates.subject column is NOT NULL). */
+  subject?: string;
+  autoRenew?: boolean;
+  renewBeforeDays?: number;
+  /** Provenance only: the insert always logs cert.issue, this flags its `acme` detail. */
+  acmeIssued?: boolean;
+}
+
 /** Status of an OAuth token (for health checks and UI). */
 export interface OAuthTokenStatus {
   secret_id: string;

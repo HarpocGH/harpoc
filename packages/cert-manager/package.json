@@ -1,0 +1,36 @@
+{
+  "name": "@harpoc/cert-manager",
+  "version": "1.1.0",
+  "description": "Certificate lifecycle manager (PKCS#10, ACME, renewal) for Harpoc",
+  "license": "BUSL-1.1",
+  "author": "Stefan Gönitzer",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HarpocGH/harpoc.git",
+    "directory": "packages/cert-manager"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@harpoc/shared": "workspace:*",
+    "@harpoc/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src/"
+  }
+}

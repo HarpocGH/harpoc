@@ -42,16 +42,17 @@ Storage     SQLite (WAL mode, encrypted payloads)
 
 ## Packages
 
-| Package               | Description                                                                                                                                                     | Status   |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
-| `@harpoc/shared`      | Types, Zod schemas, error codes, constants                                                                                                                      | Complete |
-| `@harpoc/core`        | VaultEngine, crypto, storage, secrets, audit, access control, six-context injection (HTTP, process, MCP, database, Git, SSH)                                    | Complete |
-| `@harpoc/cli`         | `harpoc` CLI (Commander.js)                                                                                                                                     | Complete |
-| `@harpoc/mcp-server`  | MCP tools, resources, guards (stdio + Streamable HTTP transports)                                                                                               | Complete |
-| `@harpoc/rest-api`    | Hono HTTP API, JWT auth, rate limiting, audit middleware                                                                                                        | Complete |
-| `@harpoc/sdk`         | TypeScript client (REST + in-process modes)                                                                                                                     | Complete |
-| `@harpoc/oauth-proxy` | OAuth 2.1 proxy — PKCE, provider presets, callback server, token refresh scheduler (CLI: `harpoc oauth connect/status/refresh`, `server start --oauth-refresh`) | Complete |
-| `@harpoc/integration` | Cross-package integration tests                                                                                                                                 | Complete |
+| Package                | Description                                                                                                                                                                           | Status   |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| `@harpoc/shared`       | Types, Zod schemas, error codes, constants                                                                                                                                            | Complete |
+| `@harpoc/core`         | VaultEngine, crypto, storage, secrets, audit, access control, six-context injection (HTTP, process, MCP, database, Git, SSH)                                                          | Complete |
+| `@harpoc/cli`          | `harpoc` CLI (Commander.js)                                                                                                                                                           | Complete |
+| `@harpoc/mcp-server`   | MCP tools, resources, guards (stdio + Streamable HTTP transports)                                                                                                                     | Complete |
+| `@harpoc/rest-api`     | Hono HTTP API, JWT auth, rate limiting, audit middleware                                                                                                                              | Complete |
+| `@harpoc/sdk`          | TypeScript client (REST + in-process modes)                                                                                                                                           | Complete |
+| `@harpoc/oauth-proxy`  | OAuth 2.1 proxy — PKCE, provider presets, callback server, token refresh scheduler (CLI: `harpoc oauth connect/status/refresh`, `server start --oauth-refresh`)                       | Complete |
+| `@harpoc/cert-manager` | Certificate lifecycle — PKCS#10 CSR builder + RFC 8555 ACME client (`node:crypto` only), http-01/dns-01 solvers, renewal scheduler (CLI: `harpoc cert import/csr/issue/renew/status`) | Complete |
+| `@harpoc/integration`  | Cross-package integration tests                                                                                                                                                       | Complete |
 
 ## Quick Start
 
@@ -201,6 +202,27 @@ The client secret is never passed via argv: set `HARPOC_OAUTH_CLIENT_SECRET` or 
 ```bash
 npx harpoc server start --rest --oauth-refresh   # or --oauth-refresh alone as a refresh daemon
 ```
+
+## Certificates
+
+Import an existing key pair, request a CSR the vault holds the key for, or let the vault run a full ACME order — the private key stays under vault encryption throughout:
+
+```bash
+# Import an existing certificate and its private key
+npx harpoc cert import web-cert --key ./privkey.pem --cert ./fullchain.pem
+
+# Generate a key in-vault and print a PKCS#10 CSR for an external CA
+npx harpoc cert csr web-cert --subject www.example.com --sans www.example.com,example.com
+
+# Issue via ACME (Let's Encrypt); --staging targets the staging directory
+npx harpoc cert issue web-cert --domains www.example.com,example.com --email ops@example.com --staging
+
+# Renew an ACME-issued certificate, and inspect health
+npx harpoc cert renew secret://web-cert
+npx harpoc cert status secret://web-cert
+```
+
+Private keys are stored under the vault's own encryption and never travel via argv — `cert import --key` reads the PEM from a file, and a passphrase-protected key prompts once for the passphrase and is decrypted in memory at import (the same path as `secret set --from-file`). Each certificate gets its own ACME account, stored encrypted alongside it; `--dns` selects dns-01 instead of the http-01 responder and prints the TXT record for you to place manually. `--auto-renew` records the intent but does not renew on its own — no renewal daemon ships yet, so run `harpoc cert renew <handle>` (from cron, a timer, or by hand) until one does.
 
 ## Development
 

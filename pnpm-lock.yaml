@@ -38,8 +38,24 @@ importers:
         specifier: workspace:*
         version: link:../core
 
+  packages/cert-manager:
+    dependencies:
+      "@harpoc/core":
+        specifier: workspace:*
+        version: link:../core
+      "@harpoc/shared":
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      "@types/node":
+        specifier: ^22.15.0
+        version: 22.19.13
+
   packages/cli:
     dependencies:
+      "@harpoc/cert-manager":
+        specifier: workspace:*
+        version: link:../cert-manager
       "@harpoc/core":
         specifier: workspace:*
         version: link:../core

@@ -176,6 +176,16 @@ export function AAD_OAUTH_REFRESH_TOKEN(secretId: string): string {
   return `oauth-refresh-token:${secretId}`;
 }
 
+// -- AAD for certificate encrypted fields (v1.1 Phase 9) ----------------------
+
+export function AAD_CERT_PRIVATE_KEY(secretId: string): string {
+  return `cert-private-key:${secretId}`;
+}
+
+export function AAD_CERT_ACME_ACCOUNT(secretId: string): string {
+  return `cert-acme-account:${secretId}`;
+}
+
 // -- AAD for per-secret injection policy -------------------------------------
 
 export function AAD_INJECTION_POLICY(secretId: string): string {

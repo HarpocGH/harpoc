@@ -27,6 +27,11 @@ import { registerPolicyListCommand } from "./commands/policy/list.js";
 import { registerOAuthConnectCommand } from "./commands/oauth/connect.js";
 import { registerOAuthStatusCommand } from "./commands/oauth/status.js";
 import { registerOAuthRefreshCommand } from "./commands/oauth/refresh.js";
+import { registerCertImportCommand } from "./commands/cert/import.js";
+import { registerCertStatusCommand } from "./commands/cert/status.js";
+import { registerCertCsrCommand } from "./commands/cert/csr.js";
+import { registerCertIssueCommand } from "./commands/cert/issue.js";
+import { registerCertRenewCommand } from "./commands/cert/renew.js";
 import { registerServerCommand } from "./commands/server.js";
 
 const program = new Command();
@@ -72,5 +77,13 @@ const oauth = program.command("oauth").description("Connect and manage OAuth pro
 registerOAuthConnectCommand(oauth);
 registerOAuthStatusCommand(oauth);
 registerOAuthRefreshCommand(oauth);
+
+// cert subcommands
+const cert = program.command("cert").description("Manage certificate secrets");
+registerCertImportCommand(cert);
+registerCertStatusCommand(cert);
+registerCertCsrCommand(cert);
+registerCertIssueCommand(cert);
+registerCertRenewCommand(cert);
 
 program.parse();
