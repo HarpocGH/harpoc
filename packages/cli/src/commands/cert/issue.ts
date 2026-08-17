@@ -7,7 +7,7 @@ import { promptHidden } from "../../utils/prompt.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
 
 const MIN_RENEW_BEFORE_DAYS = 1;
-const MAX_RENEW_BEFORE_DAYS = 3650;
+const MAX_RENEW_BEFORE_DAYS = 365;
 const MIN_PORT = 1;
 const MAX_PORT = 65535;
 

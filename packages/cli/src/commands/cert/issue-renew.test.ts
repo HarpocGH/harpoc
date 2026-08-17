@@ -334,6 +334,26 @@ describe("cert issue", () => {
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
+  it("--renew-before-days above the engine's 365 ceiling is refused before the vault opens", async () => {
+    await expect(
+      run([
+        "issue",
+        "web",
+        "--domains",
+        "example.com",
+        "--email",
+        "ops@example.com",
+        "--renew-before-days",
+        "366",
+      ]),
+    ).rejects.toThrow("process.exit");
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid renew-before-days "366"'),
+    );
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+  });
+
   it("a sealed vault fails before any ACME traffic", async () => {
     vi.mocked(loadUnlockedEngine).mockRejectedValueOnce(VaultError.vaultLocked());
 

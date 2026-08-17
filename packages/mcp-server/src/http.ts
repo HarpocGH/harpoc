@@ -315,6 +315,10 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
     port: boundPort,
     endpoint,
     close: async (): Promise<void> => {
+      // The shared manager owns the in-flight device-code polls; without this
+      // an orphaned poll completes against a destroyed engine (the CLI path
+      // cancels in connect.ts — embedders of this server never exit the process).
+      oauthManager.cancelPendingFlows();
       clearInterval(sweepTimer);
       for (const session of [...sessions.values()]) {
         try {

@@ -3,6 +3,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { VaultEngine } from "@harpoc/core";
+import { OAuthManager } from "@harpoc/oauth-proxy";
 import { VaultError } from "@harpoc/shared";
 import { startMcpHttpServer } from "./http.js";
 import type { McpHttpServer } from "./http.js";
@@ -114,6 +115,21 @@ describe("startMcpHttpServer", () => {
     server = await startMcpHttpServer({ engine, port: 0 });
     return server;
   }
+
+  it("close() cancels the shared manager's pending OAuth flows", async () => {
+    // A device-code poll left running after close() would complete against a
+    // destroyed engine (the CLI path cancels in connect.ts; embedders of
+    // startMcpHttpServer never exit the process, so close() must).
+    const cancelSpy = vi.spyOn(OAuthManager.prototype, "cancelPendingFlows");
+    try {
+      const started = await start(mockEngine());
+      await started.close();
+      server = undefined;
+      expect(cancelSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      cancelSpy.mockRestore();
+    }
+  });
 
   it("reports the actual bound port and endpoint", async () => {
     const { port, endpoint } = await start(mockEngine());

@@ -1,9 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission, StartOAuthFlowInput } from "@harpoc/shared";
-import { oauthGrantTypeSchema, oauthProviderPresetSchema } from "@harpoc/shared";
-import { providerConfigFromFlowInput } from "@harpoc/oauth-proxy";
+import { startOAuthFlowInputSchema } from "@harpoc/shared";
+import { providerConfigFromFlowInput, startOAuthFlowResult } from "@harpoc/oauth-proxy";
 import type { OAuthManager } from "@harpoc/oauth-proxy";
 import { collectValueFromTty } from "../elicitation/tty-prompt.js";
 import { collectValueViaUrlElicitation } from "../elicitation/value-collector.js";
@@ -28,22 +27,21 @@ export function registerStartOauthFlow(
     "start_oauth_flow",
     "Create an OAuth provider secret. No client secret is accepted or returned — a confidential client's secret is collected out-of-band, and the browser authorization leg is completed via the CLI. Tokens never pass through the LLM.",
     {
-      name: z
-        .string()
-        .regex(/^[a-zA-Z0-9_-]+$/)
-        .describe("Secret name"),
-      provider: oauthProviderPresetSchema.describe("Provider preset (or custom)"),
-      grant_type: oauthGrantTypeSchema.describe("OAuth grant type"),
-      client_id: z.string().min(1).describe("OAuth client id (public metadata)"),
-      token_endpoint_auth_method: z.enum(["client_secret_post", "client_secret_basic"]).optional(),
-      scopes: z.array(z.string().min(1)).optional(),
-      project: z
-        .string()
-        .regex(/^[a-zA-Z0-9_-]+$/)
-        .optional(),
-      auth_endpoint: z.string().url().optional(),
-      token_endpoint: z.string().url().optional(),
-      device_authorization_endpoint: z.string().url().optional(),
+      // The shared field schemas, so the advertised contract IS the enforced
+      // one (name-length cap, HTTPS-or-loopback endpoints) — `client_secret`
+      // is deliberately absent (D1: config-then-defer).
+      name: startOAuthFlowInputSchema.shape.name.describe("Secret name"),
+      provider: startOAuthFlowInputSchema.shape.provider.describe("Provider preset (or custom)"),
+      grant_type: startOAuthFlowInputSchema.shape.grant_type.describe("OAuth grant type"),
+      client_id: startOAuthFlowInputSchema.shape.client_id.describe(
+        "OAuth client id (public metadata)",
+      ),
+      token_endpoint_auth_method: startOAuthFlowInputSchema.shape.token_endpoint_auth_method,
+      scopes: startOAuthFlowInputSchema.shape.scopes,
+      project: startOAuthFlowInputSchema.shape.project,
+      auth_endpoint: startOAuthFlowInputSchema.shape.auth_endpoint,
+      token_endpoint: startOAuthFlowInputSchema.shape.token_endpoint,
+      device_authorization_endpoint: startOAuthFlowInputSchema.shape.device_authorization_endpoint,
     },
     async (args) => {
       scopeGuard.checkAccess(PERMISSION, args.project, args.name);
@@ -68,21 +66,8 @@ export function registerStartOauthFlow(
       }
 
       if (args.grant_type === "device_code") {
-        const { config, project } = providerConfigFromFlowInput(input);
-        const device = await oauthManager.startDeviceCode(
-          args.name,
-          config,
-          project,
-          scopeGuard.caller,
-        );
-        // Never serialize `completion` (a Promise) into the result.
-        return text({
-          handle: device.handle,
-          status: device.status,
-          auth_url: device.auth_url,
-          user_code: device.user_code,
-          message: device.message,
-        });
+        // Shared arm (oauth-proxy): the projection never serializes `completion`.
+        return text(await startOAuthFlowResult(oauthManager, input, scopeGuard.caller));
       }
 
       // client_credentials — config-then-collect: the PENDING secret exists either way.
@@ -116,14 +101,13 @@ export function registerStartOauthFlow(
       } finally {
         secretBytes.fill(0);
       }
-      const resolved = providerConfigFromFlowInput({ ...input, client_secret: clientSecret });
-      const result = await oauthManager.startClientCredentials(
-        args.name,
-        resolved.config,
-        resolved.project,
+      // Shared arm (oauth-proxy): projects handle/status/message only.
+      const result = await startOAuthFlowResult(
+        oauthManager,
+        { ...input, client_secret: clientSecret },
         scopeGuard.caller,
       );
-      return text({ handle: result.handle, status: result.status, message: result.message });
+      return text(result);
     },
   );
 }

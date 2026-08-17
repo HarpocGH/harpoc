@@ -29,6 +29,7 @@ import {
   ErrorCode,
   VAULT_VERSION,
   VaultError,
+  certificateImportSchema,
   generateCsrRequestSchema,
   isEncryptedPrivateKeyPem,
 } from "@harpoc/shared";
@@ -43,10 +44,14 @@ type CertManagerT = import("@harpoc/cert-manager").CertManager;
 export interface DirectClientOptions {
   oauthManager?: OAuthManagerT;
   certManager?: CertManagerT;
+  /**
+   * Receives OAuth background-flow failures (the deferred browser leg's
+   * exchange, a device-code poll, an abort from {@link DirectClient.close}).
+   * Default: a stderr warning, mirroring the REST and MCP hosts — a silent
+   * default left direct-mode failures invisible until polled.
+   */
+  onBackgroundFlowError?: (secretId: string, err: unknown) => void;
 }
-
-const PENDING_AUTHORIZATION_MESSAGE =
-  "Authorize in the browser at auth_url; the token is stored automatically when the callback arrives. Poll the status route until refresh_status is ok.";
 
 /**
  * In-process VaultClient over a constructed VaultEngine — the trusted local
@@ -58,6 +63,7 @@ const PENDING_AUTHORIZATION_MESSAGE =
 export class DirectClient implements VaultClient {
   private oauthManagerInstance?: OAuthManagerT;
   private certManagerInstance?: CertManagerT;
+  private readonly onBackgroundFlowError?: (secretId: string, err: unknown) => void;
 
   constructor(
     private readonly engine: VaultEngine,
@@ -65,6 +71,18 @@ export class DirectClient implements VaultClient {
   ) {
     this.oauthManagerInstance = options?.oauthManager;
     this.certManagerInstance = options?.certManager;
+    this.onBackgroundFlowError = options?.onBackgroundFlowError;
+  }
+
+  /**
+   * Abort any pending background OAuth flows (auth-code callback waits,
+   * device-code polls): the callback server otherwise pins the event loop
+   * for the callback timeout, and an orphaned poll would complete against
+   * an engine the embedder has already destroyed. Idempotent; a client that
+   * never touched OAuth has nothing to cancel.
+   */
+  close(): void {
+    this.oauthManagerInstance?.cancelPendingFlows();
   }
 
   async listSecrets(project?: string): Promise<SecretInfo[]> {
@@ -175,40 +193,11 @@ export class DirectClient implements VaultClient {
   }
 
   async startOAuthFlow(input: StartOAuthFlowInput): Promise<OAuthFlowResult> {
-    const { providerConfigFromFlowInput } = await import("@harpoc/oauth-proxy");
+    // The grant dispatch and its wire-safe projections (never secretId, never
+    // a completion promise — D2) live in oauth-proxy, shared with REST.
+    const { startOAuthFlowResult } = await import("@harpoc/oauth-proxy");
     const manager = await this.loadOAuthManager();
-    const { config, project } = providerConfigFromFlowInput(input);
-
-    if (input.grant_type === "client_credentials") {
-      if (!config.client_secret) {
-        throw VaultError.schemaValidation(
-          "client_secret is required for the client_credentials grant",
-        );
-      }
-      const result = await manager.startClientCredentials(input.name, config, project);
-      return { handle: result.handle, status: result.status, message: result.message };
-    }
-    if (input.grant_type === "device_code") {
-      const device = await manager.startDeviceCode(input.name, config, project);
-      // Field by field: `completion` is the background poll's promise, which
-      // the caller neither owns nor awaits.
-      return {
-        handle: device.handle,
-        status: device.status,
-        auth_url: device.auth_url,
-        user_code: device.user_code,
-        message: device.message,
-      };
-    }
-    const start = await manager.startAuthorizationCodeDeferred(input.name, config, project);
-    // Field by field: neither the internal `secretId` nor the `completion`
-    // promise is the caller's (D2 — the browser leg finishes in background).
-    return {
-      handle: start.handle,
-      status: "pending_authorization",
-      auth_url: start.authUrl,
-      message: PENDING_AUTHORIZATION_MESSAGE,
-    };
+    return startOAuthFlowResult(manager, input);
   }
 
   async getOAuthStatus(handle: string): Promise<OAuthTokenStatus> {
@@ -225,6 +214,14 @@ export class DirectClient implements VaultClient {
     name: string,
     input: Omit<CertificateImportRequestInput, "name">,
   ): Promise<CertificateRef> {
+    // Gate only — the parsed output is deliberately discarded so an omitted
+    // auto_renew / renew_before_days stays undefined for the engine to fill
+    // (the schema's defaults would pin them here). generateCsr uses its parsed
+    // data instead because the superRefine pairing rules feed the manager call.
+    const parsed = certificateImportSchema.safeParse({ name, ...input });
+    if (!parsed.success) {
+      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+    }
     if (isEncryptedPrivateKeyPem(input.private_key_pem)) {
       throw VaultError.schemaValidation(
         "private_key_pem is passphrase-protected — decrypt it first or import via 'harpoc cert import', which prompts for the passphrase (D3)",
@@ -289,6 +286,13 @@ export class DirectClient implements VaultClient {
         // Ephemeral per flow, so concurrent or resumed flows cannot
         // EADDRINUSE-collide; the bound port is what the redirect URI carries.
         callbackPort: 0,
+        onBackgroundFlowError:
+          this.onBackgroundFlowError ??
+          ((secretId, err): void => {
+            process.stderr.write(
+              `[harpoc] OAuth background flow failed (${secretId}): ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }),
       });
     }
     return this.oauthManagerInstance;

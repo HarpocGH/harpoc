@@ -224,6 +224,15 @@ describe("POST /api/v1/oauth/authorize — authorization_code (D2: background fl
     );
   });
 
+  it("the pending message points at a reachable completion signal", async () => {
+    // refresh_status "ok" is unreachable for providers that issue no refresh
+    // token; has_access_token flips on every successful flow.
+    const res = await authorize(AUTH_CODE_BODY);
+    const body = (await res.json()) as { data: { message: string } };
+    expect(body.data.message).toContain("has_access_token");
+    expect(body.data.message).not.toContain("refresh_status");
+  });
+
   // The secretId is an internal vault identifier and `completion` a promise:
   // neither belongs on the wire, so the response body is assembled field by
   // field rather than spread from AuthorizationCodeStart.

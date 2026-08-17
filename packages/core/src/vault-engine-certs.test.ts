@@ -147,6 +147,16 @@ function transplantAcmeBlob(fromSecretId: string, toSecretId: string): void {
   }
 }
 
+/** Shrink a stored certificate's expiry out-of-band (idiom: vault-engine-expiring-status.test.ts). */
+function setNotAfter(secretId: string, notAfter: number): void {
+  const db = new Database(dbPath);
+  try {
+    db.prepare("UPDATE certificates SET not_after = ? WHERE secret_id = ?").run(notAfter, secretId);
+  } finally {
+    db.close();
+  }
+}
+
 beforeEach(() => {
   tempDir = join(tmpdir(), `harpoc-certs-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
@@ -236,6 +246,33 @@ describe("importCertificate", () => {
     expect(row.renew_before_days).toBe(30);
     expect(row.acme_account_encrypted).toBeNull();
     expect(row.private_key_encrypted.toString("utf8")).not.toContain("PRIVATE KEY");
+  });
+
+  it("rejects a renewBeforeDays above 365 before any write", async () => {
+    await expect(
+      engine.importCertificate("cap-cert", fx("rsa-key.pem"), {
+        certificatePem: fx("rsa-cert.pem"),
+        renewBeforeDays: 366,
+      }),
+    ).rejects.toMatchObject({ code: ErrorCode.INVALID_INPUT });
+    expect(engine.listSecrets().find((x) => x.name === "cap-cert")).toBeUndefined();
+  });
+
+  it("rejects a non-positive renewBeforeDays", async () => {
+    await expect(
+      engine.importCertificate("cap-zero", fx("rsa-key.pem"), {
+        certificatePem: fx("rsa-cert.pem"),
+        renewBeforeDays: 0,
+      }),
+    ).rejects.toMatchObject({ code: ErrorCode.INVALID_INPUT });
+  });
+
+  it("accepts the 365-day boundary and stores it", async () => {
+    const { secretId } = await engine.importCertificate("cap-max", fx("rsa-key.pem"), {
+      certificatePem: fx("rsa-cert.pem"),
+      renewBeforeDays: 365,
+    });
+    expect((storedCert(secretId) as StoredCertRow).renew_before_days).toBe(365);
   });
 
   it("accepts an EC key/cert pair", async () => {
@@ -709,8 +746,9 @@ describe("certificate accessors", () => {
   it("renewal_status is expiring_soon inside renew_before_days", async () => {
     const { secretId: soonId } = await engine.importCertificate("soon-cert", fx("rsa-key.pem"), {
       certificatePem: fx("rsa-cert.pem"),
-      renewBeforeDays: 4000,
+      renewBeforeDays: 30,
     });
+    setNotAfter(soonId, Date.now() + 10 * 86_400_000);
     expect(engine.getCertificateStatus(soonId).renewal_status).toBe("expiring_soon");
   });
 

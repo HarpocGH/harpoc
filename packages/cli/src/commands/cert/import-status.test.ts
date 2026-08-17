@@ -326,6 +326,17 @@ describe("cert import", () => {
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
+  it("--renew-before-days above the engine's 365 ceiling is refused before the vault is opened", async () => {
+    await expect(
+      run(["import", "web", "--key", KEY_PATH, "--cert", CERT_PATH, "--renew-before-days", "366"]),
+    ).rejects.toThrow("process.exit");
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid renew-before-days "366"'),
+    );
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+  });
+
   it("an empty --key is refused instead of falling through to the hidden prompt", async () => {
     // resolveSecretValue guards on truthiness, so an empty path reads as "no
     // file given" and would silently wait for a human to type the key.

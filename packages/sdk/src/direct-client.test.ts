@@ -91,6 +91,7 @@ function createMockEngine() {
 
 function createFakeOAuthManager() {
   return {
+    cancelPendingFlows: vi.fn(),
     startClientCredentials: vi.fn().mockResolvedValue({
       handle: "secret://cc",
       status: "authorized",
@@ -423,6 +424,24 @@ describe("DirectClient", () => {
       expect(oauthManager.startAuthorizationCodeDeferred).toHaveBeenCalledTimes(1);
     });
 
+    it("the pending message points at a reachable completion signal", async () => {
+      // refresh_status "ok" is unreachable for providers that issue no
+      // refresh token; has_access_token flips on every successful flow.
+      const engine = createMockEngine();
+      const oauthManager = createFakeOAuthManager();
+      const client = new DirectClient(engine as never, { oauthManager: oauthManager as never });
+
+      const result = await client.startOAuthFlow({
+        name: "gh",
+        provider: "github",
+        grant_type: "authorization_code",
+        client_id: "cid",
+      });
+
+      expect(result.message).toContain("has_access_token");
+      expect(result.message).not.toContain("refresh_status");
+    });
+
     // D2 parity with the REST route: the background browser leg's promise and
     // the internal secret ID are the host's, not the caller's.
     it("startOAuthFlow authorization_code exposes neither completion nor secretId", async () => {
@@ -538,6 +557,62 @@ describe("DirectClient", () => {
     });
   });
 
+  describe("close()", () => {
+    it("cancels the injected manager's pending flows", () => {
+      const engine = createMockEngine();
+      const oauthManager = createFakeOAuthManager();
+      const client = new DirectClient(engine as never, { oauthManager: oauthManager as never });
+
+      client.close();
+
+      expect(oauthManager.cancelPendingFlows).toHaveBeenCalledTimes(1);
+    });
+
+    it("is a no-op before any OAuth use", () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      expect(() => client.close()).not.toThrow();
+    });
+
+    it("a background flow failure reaches options.onBackgroundFlowError through the lazily built manager", async () => {
+      // End-to-end through the real OAuthManager: a wrong-state callback (the
+      // CSRF guard) fails the background leg without any outbound network.
+      // Without the option seam the manager's internal .catch swallows it and
+      // the secret stays PENDING with no signal. An abort from close() is
+      // deliberately NOT routed here (expected cancellation, filtered by the
+      // manager) — only genuine failures reach the handler.
+      const events: Array<{ secretId: string; err: unknown }> = [];
+      const engine = createMockEngine();
+      (engine as { createOAuthSecret?: unknown }).createOAuthSecret = vi
+        .fn()
+        .mockResolvedValue({ handle: "secret://gh", secretId: "uuid-gh" });
+      const client = new DirectClient(engine as never, {
+        onBackgroundFlowError: (secretId: string, err: unknown) => events.push({ secretId, err }),
+      });
+
+      try {
+        const result = await client.startOAuthFlow({
+          name: "gh",
+          provider: "github",
+          grant_type: "authorization_code",
+          client_id: "cid",
+        });
+        expect(result.status).toBe("pending_authorization");
+
+        const redirectUri = new URL(result.auth_url as string).searchParams.get("redirect_uri");
+        const res = await fetch(`${redirectUri}?code=x&state=not-the-state`);
+        expect(res.status).toBe(400);
+
+        await vi.waitFor(() => expect(events).toHaveLength(1));
+        expect(events[0]?.secretId).toBe("uuid-gh");
+        expect(events[0]?.err).toBeInstanceOf(VaultError);
+      } finally {
+        client.close();
+      }
+    });
+  });
+
   describe("certificates (injected manager)", () => {
     it("importCertificate maps the wire shape to the manager input", async () => {
       const engine = createMockEngine();
@@ -601,6 +676,28 @@ describe("DirectClient", () => {
         code: ErrorCode.SCHEMA_VALIDATION_ERROR,
         message: expect.stringContaining("passphrase-protected"),
       });
+      expect(certManager.importCertificate).not.toHaveBeenCalled();
+    });
+
+    it("importCertificate refuses a missing private_key_pem with SCHEMA_VALIDATION_ERROR, not a TypeError", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      await expect(
+        client.importCertificate("web", { certificate_pem: LEAF_PEM } as never),
+      ).rejects.toMatchObject({ code: ErrorCode.SCHEMA_VALIDATION_ERROR });
+      expect(certManager.importCertificate).not.toHaveBeenCalled();
+    });
+
+    it("importCertificate refuses a missing certificate_pem with SCHEMA_VALIDATION_ERROR, not a TypeError", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      await expect(
+        client.importCertificate("web", { private_key_pem: PLAIN_KEY_PEM } as never),
+      ).rejects.toMatchObject({ code: ErrorCode.SCHEMA_VALIDATION_ERROR });
       expect(certManager.importCertificate).not.toHaveBeenCalled();
     });
 

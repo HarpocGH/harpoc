@@ -136,9 +136,18 @@ interface UnlockedState {
 const DAY_MS = 86_400_000;
 
 /**
- * The renewal scheduler's wide net (renewal-scheduler.ts): one leap year, so no
- * row can carry a `renew_before_days` wide enough to fall outside the query it
- * is then filtered against.
+ * Engine-enforced ceiling for `renew_before_days`, matching the REST schema's
+ * cap (certificateImportSchema): every import path — REST, SDK, CLI,
+ * cert-manager issuance — funnels through `doImportCertificate`, so no stored
+ * row can exceed it.
+ */
+const MAX_RENEW_BEFORE_DAYS = 365;
+
+/**
+ * The renewal scheduler's wide net (renewal-scheduler.ts): one leap year,
+ * strictly greater than {@link MAX_RENEW_BEFORE_DAYS}, so no row can carry a
+ * `renew_before_days` wide enough to fall outside the query it is then
+ * filtered against.
  */
 const EXPIRING_CERT_QUERY_DAYS = 366;
 
@@ -2018,6 +2027,17 @@ export class VaultEngine {
     caller?: CallerContext,
   ): Promise<{ handle: string; secretId: string }> {
     const o = opts ?? {};
+
+    if (
+      o.renewBeforeDays !== undefined &&
+      (!Number.isInteger(o.renewBeforeDays) ||
+        o.renewBeforeDays < 1 ||
+        o.renewBeforeDays > MAX_RENEW_BEFORE_DAYS)
+    ) {
+      throw VaultError.invalidInput(
+        `renewBeforeDays must be an integer between 1 and ${MAX_RENEW_BEFORE_DAYS}`,
+      );
+    }
 
     let keyObj: ReturnType<typeof createPrivateKey>;
     try {

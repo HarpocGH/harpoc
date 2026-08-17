@@ -9,7 +9,7 @@ import { MAX_SECRET_FILE_BYTES, resolveSecretValue } from "../../utils/secret-va
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
 
 const MIN_RENEW_BEFORE_DAYS = 1;
-const MAX_RENEW_BEFORE_DAYS = 3650;
+const MAX_RENEW_BEFORE_DAYS = 365;
 
 interface CertImportOptions {
   key: string;

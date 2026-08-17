@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { CertManager } from "@harpoc/cert-manager";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
-import { parseHandle } from "@harpoc/shared";
+import { parseHandle, renewCertificateRequestSchema } from "@harpoc/shared";
 import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
 
@@ -21,13 +21,10 @@ export function registerRenewCertificate(
     "Renew a certificate secret via ACME (http-01 only). Returns certificate metadata; never key material.",
     {
       handle: z.string().describe("Secret handle (secret://[project/]name)"),
-      http_port: z
-        .number()
-        .int()
-        .min(1)
-        .max(65535)
-        .optional()
-        .describe("Port for the http-01 challenge responder (default 80)"),
+      // The shared field schema, so the advertised bounds are the enforced ones.
+      http_port: renewCertificateRequestSchema.shape.http_port.describe(
+        "Port for the http-01 challenge responder (default 80)",
+      ),
     },
     async (args) => {
       const parsed = parseHandle(args.handle);

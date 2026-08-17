@@ -8,6 +8,9 @@ export type { ProviderPreset } from "./providers.js";
 // Wire input mapping
 export { providerConfigFromFlowInput } from "./flow-input.js";
 
+// Wire flow dispatch (REST + SDK share it; MCP reuses the arms it can)
+export { PENDING_AUTHORIZATION_MESSAGE, startOAuthFlowResult } from "./start-flow-result.js";
+
 // Flows
 export { AuthorizationCodeFlow } from "./flows/authorization-code.js";
 export type { AuthCodeFlowStartResult, TokenExchangeResult } from "./flows/authorization-code.js";

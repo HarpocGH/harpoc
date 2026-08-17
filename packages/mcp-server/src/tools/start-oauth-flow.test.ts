@@ -155,6 +155,41 @@ describe("start_oauth_flow", () => {
     expect(properties).toEqual(EXPECTED_INPUT_PROPERTIES);
   });
 
+  it("the advertised schema itself rejects a non-loopback plain-HTTP endpoint", async () => {
+    // Contract must match enforcement: the shared oauthEndpointUrlSchema
+    // (HTTPS-or-loopback) refuses at the tool schema, not later inside
+    // providerConfigFromFlowInput with different error text than REST gives.
+    const { server, engine } = harness();
+
+    const result = await callTool(server, "start_oauth_flow", {
+      name: "gh-app",
+      provider: "custom",
+      grant_type: "client_credentials",
+      client_id: "cid",
+      token_endpoint: "http://attacker.example/token",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("-32602");
+    expect(result.content[0]?.text).toContain("HTTPS");
+    expect(engine.createOAuthSecret).not.toHaveBeenCalled();
+  });
+
+  it("the advertised schema itself caps the secret name length", async () => {
+    const { server, engine } = harness();
+
+    const result = await callTool(server, "start_oauth_flow", {
+      name: "a".repeat(256),
+      provider: "github",
+      grant_type: "authorization_code",
+      client_id: "cid",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("-32602");
+    expect(engine.createOAuthSecret).not.toHaveBeenCalled();
+  });
+
   it("authorization_code creates the secret from the preset endpoints and defers the browser leg", async () => {
     const { server, engine } = harness();
 
