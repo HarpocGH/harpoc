@@ -289,7 +289,11 @@ describe("mapStringLeaves — JSON descent budget", () => {
     expect(out.payload).toBe(leaf);
   });
 
-  it("applies the mapper to a non-JSON leaf and attempts no parse", () => {
+  it("applies the mapper to a non-JSON leaf and returns it otherwise untouched", () => {
+    // "Attempts no parse" is the implementation's claim (the `{`/`[`
+    // prefilter), not something this assertion can observe — it cannot
+    // distinguish "not attempted" from "attempted and safely failed", so the
+    // name states only what it pins (2026-08-15 deferred minor).
     const out = mapStringLeaves({ payload: "secret" }, shout, { descendJson: 2 }) as {
       payload: string;
     };
@@ -297,10 +301,18 @@ describe("mapStringLeaves — JSON descent budget", () => {
   });
 
   it("returns a malformed JSON-looking leaf as the mapper left it", () => {
-    const out = mapStringLeaves({ payload: '{"inner": "secret"' }, shout, {
+    // The fixture must make `mapped !== value`, or the assertion cannot
+    // distinguish the catch returning the MAPPED leaf from it returning the
+    // original — and a regression to the original would silently drop the
+    // flat redaction on truncated JSON bodies (2026-08-15 deferred minor:
+    // the previous fixture used the exact-match mapper, for which the two
+    // are identical, so the catch path was verified by reading, pinned by
+    // nothing).
+    const redactish = (s: string): string => s.replace("secret", "[X]");
+    const out = mapStringLeaves({ payload: '{"inner": "secret"' }, redactish, {
       descendJson: 2,
     }) as { payload: string };
-    expect(out.payload).toBe('{"inner": "secret"');
+    expect(out.payload).toBe('{"inner": "[X]"');
   });
 
   it("maps keys at depth, with the collision rule (H3)", () => {

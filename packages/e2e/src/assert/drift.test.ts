@@ -122,8 +122,11 @@ describe("product/harness drift (decision D2)", () => {
     // own arithmetic exactly.
     //
     // Pinned in BOTH directions: if the vault's cap changes, the first block
-    // goes red; if the harness's does, the second and third do. Neither may
-    // drift silently.
+    // goes red; if the harness's cap DROPS, the second and third do; if it
+    // RISES, the t8 blind assertion does — t8 is the only block that catches
+    // an upward drift, load-bearing rather than redundant with t6/t7
+    // (2026-08-15 deferred minor: an earlier version of this comment omitted
+    // it). Neither cap may drift silently.
     const secret = 'p4-rc-json:tok"en-x';
     const wrap = (inner: string): string => JSON.stringify({ data: inner });
     const t1 = JSON.stringify({ echo: secret });
