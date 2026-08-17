@@ -5,6 +5,9 @@ export { generateCodeVerifier, generateCodeChallenge } from "./pkce.js";
 export { PROVIDER_PRESETS, resolveProvider, getScopesSeparator } from "./providers.js";
 export type { ProviderPreset } from "./providers.js";
 
+// Wire input mapping
+export { providerConfigFromFlowInput } from "./flow-input.js";
+
 // Flows
 export { AuthorizationCodeFlow } from "./flows/authorization-code.js";
 export type { AuthCodeFlowStartResult, TokenExchangeResult } from "./flows/authorization-code.js";
@@ -23,4 +26,8 @@ export type { TokenRefreshSchedulerOptions } from "./token-refresh.js";
 
 // OAuth manager
 export { OAuthManager, defaultOpenBrowser } from "./oauth-manager.js";
-export type { OAuthManagerOptions, DeviceCodeFlowResult } from "./oauth-manager.js";
+export type {
+  OAuthManagerOptions,
+  DeviceCodeFlowResult,
+  AuthorizationCodeStart,
+} from "./oauth-manager.js";

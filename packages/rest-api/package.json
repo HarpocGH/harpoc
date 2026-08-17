@@ -23,6 +23,8 @@
   "dependencies": {
     "@harpoc/shared": "workspace:*",
     "@harpoc/core": "workspace:*",
+    "@harpoc/oauth-proxy": "workspace:*",
+    "@harpoc/cert-manager": "workspace:*",
     "hono": "^4.7.0",
     "@hono/node-server": "^1.14.0",
     "zod": "^3.24.0"

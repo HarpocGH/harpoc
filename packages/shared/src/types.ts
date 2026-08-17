@@ -483,3 +483,26 @@ export interface OAuthFlowResult {
   user_code?: string;
   message: string;
 }
+
+/** Metadata-only projection of an expiring OAuth token row (Phase 10, D5). */
+export interface ExpiringOAuthTokenInfo {
+  handle: string;
+  name: string;
+  project: string | null;
+  provider: OAuthProviderPreset;
+  access_token_expires_at: number | null;
+  has_refresh_token: boolean;
+  refresh_status: OAuthTokenStatus["refresh_status"];
+}
+
+/** Metadata-only projection of a certificate inside its renewal window (Phase 10, D5). */
+export interface ExpiringCertificateInfo {
+  handle: string;
+  name: string;
+  project: string | null;
+  subject: string;
+  not_after: number | null;
+  auto_renew: boolean;
+  renew_before_days: number;
+  renewal_status: CertificateStatus["renewal_status"];
+}

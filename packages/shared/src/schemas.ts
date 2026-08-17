@@ -681,6 +681,8 @@ export const startOAuthFlowInputSchema = z.object({
   device_authorization_endpoint: oauthEndpointUrlSchema.optional(),
 });
 
+export type StartOAuthFlowInput = z.infer<typeof startOAuthFlowInputSchema>;
+
 // ---------------------------------------------------------------------------
 // Certificate schemas (v1.1)
 // ---------------------------------------------------------------------------
@@ -693,9 +695,53 @@ const pemPattern = z
 export const certificateImportSchema = z.object({
   name: namePattern,
   private_key_pem: pemPattern,
-  certificate_pem: pemPattern.optional(),
+  certificate_pem: pemPattern,
   chain_pem: pemPattern.optional(),
   project: namePattern.optional(),
   auto_renew: z.boolean().optional().default(false),
   renew_before_days: z.number().int().positive().max(365).optional().default(30),
 });
+
+export type CertificateImportRequest = z.infer<typeof certificateImportSchema>;
+
+/**
+ * The *pre-parse* shape: `auto_renew` and `renew_before_days` carry schema
+ * defaults, so the parsed type has them required while a caller may legitimately
+ * omit them. Client-facing input types take this one; anything reading a parsed
+ * request takes `CertificateImportRequest`.
+ */
+export type CertificateImportRequestInput = z.input<typeof certificateImportSchema>;
+
+export const generateCsrRequestSchema = z
+  .object({
+    name: namePattern,
+    subject: z.string().min(1),
+    sans: z.array(z.string().min(1)).optional(),
+    algorithm: z.enum(["rsa", "ec"]).optional(),
+    bits: z.union([z.literal(2048), z.literal(4096)]).optional(),
+    curve: z.enum(["P-256", "P-384"]).optional(),
+    project: namePattern.optional(),
+  })
+  .superRefine((data, ctx) => {
+    const algorithm = data.algorithm ?? "ec"; // the CLI's default: EC P-256
+    if (data.bits !== undefined && algorithm !== "rsa") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'bits applies only to algorithm "rsa"',
+        path: ["bits"],
+      });
+    }
+    if (data.curve !== undefined && algorithm !== "ec") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'curve applies only to algorithm "ec"',
+        path: ["curve"],
+      });
+    }
+  });
+export type GenerateCsrRequest = z.infer<typeof generateCsrRequestSchema>;
+
+export const renewCertificateRequestSchema = z.object({
+  http_port: z.number().int().min(1).max(65535).optional(),
+});
+export type RenewCertificateRequest = z.infer<typeof renewCertificateRequestSchema>;

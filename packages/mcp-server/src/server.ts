@@ -1,5 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { CertManager } from "@harpoc/cert-manager";
 import type { VaultEngine } from "@harpoc/core";
+import { OAuthManager } from "@harpoc/oauth-proxy";
 import type { AccessInterface } from "@harpoc/shared";
 import { VaultError } from "@harpoc/shared";
 import { InjectionGuard } from "./guards/injection-guard.js";
@@ -9,8 +11,10 @@ import { registerCheckHealth } from "./tools/check-health.js";
 import { registerCreateSecret } from "./tools/create-secret.js";
 import { registerGetSecretInfo } from "./tools/get-secret-info.js";
 import { registerListSecrets } from "./tools/list-secrets.js";
+import { registerRenewCertificate } from "./tools/renew-certificate.js";
 import { registerRevokeSecret } from "./tools/revoke-secret.js";
 import { registerRotateSecret } from "./tools/rotate-secret.js";
+import { registerStartOauthFlow } from "./tools/start-oauth-flow.js";
 import { registerUseSecret } from "./tools/use-secret.js";
 import { registerAuditResource } from "./resources/audit.js";
 import { registerHealthResource } from "./resources/health.js";
@@ -37,6 +41,13 @@ export interface CreateMcpServerOptions {
   rateLimiter?: RateLimiter;
   injectionGuard?: InjectionGuard;
   /**
+   * Shared across per-session servers like `rateLimiter`: the manager owns the
+   * in-flight background flows (device-code polls), so one instance per
+   * transport keeps them cancellable across sessions.
+   */
+  oauthManager?: OAuthManager;
+  certManager?: CertManager;
+  /**
    * Allow create/rotate to fall back to a masked prompt on the controlling
    * terminal (thesis value-collection channel 2). Only stdio entry points
    * enable this — never the Streamable HTTP transport, whose clients are
@@ -50,6 +61,23 @@ export interface CreateMcpServerOptions {
    * "mcp-http" per session.
    */
   accessInterface?: Extract<AccessInterface, "mcp" | "mcp-http">;
+}
+
+/**
+ * The OAuth manager an MCP host runs with: MCP never drives the browser leg
+ * (D1) — the CLI does — and a background flow's failure is reported on stderr,
+ * never through the model's channel. Exported so the Streamable HTTP transport
+ * can share ONE instance across its per-session servers: the manager owns the
+ * in-flight device-code polls, which must stay cancellable across sessions.
+ */
+export function createDefaultOAuthManager(engine: VaultEngine): OAuthManager {
+  return new OAuthManager(engine, {
+    openBrowser: async () => {},
+    onBackgroundFlowError: (secretId, err) =>
+      process.stderr.write(
+        `[harpoc] OAuth background flow failed (${secretId}): ${err instanceof Error ? err.message : String(err)}\n`,
+      ),
+  });
 }
 
 /**
@@ -90,6 +118,8 @@ export function createMcpServer(options: CreateMcpServerOptions): McpServer {
 
   const rateLimiter = options.rateLimiter ?? new RateLimiter();
   const injectionGuard = options.injectionGuard ?? new InjectionGuard();
+  const oauthManager = options.oauthManager ?? createDefaultOAuthManager(engine);
+  const certManager = options.certManager ?? new CertManager(engine);
 
   const server = new McpServer(
     { name: "harpoc", version: "0.0.0" },
@@ -111,6 +141,8 @@ export function createMcpServer(options: CreateMcpServerOptions): McpServer {
   registerRotateSecret(server, engine, scopeGuard, rateLimiter, enableTtyPrompt);
   registerRevokeSecret(server, engine, scopeGuard, rateLimiter);
   registerCheckHealth(server, engine, scopeGuard, rateLimiter);
+  registerStartOauthFlow(server, engine, scopeGuard, rateLimiter, oauthManager, enableTtyPrompt);
+  registerRenewCertificate(server, engine, scopeGuard, rateLimiter, certManager);
 
   // Register resources
   registerSecretsResource(server, engine, scopeGuard);

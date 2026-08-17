@@ -1,6 +1,6 @@
-import { oauthProviderConfigSchema, startOAuthFlowInputSchema } from "@harpoc/shared";
+import { startOAuthFlowInputSchema } from "@harpoc/shared";
 import type { OAuthGrantType, OAuthProviderConfig } from "@harpoc/shared";
-import { PROVIDER_PRESETS } from "@harpoc/oauth-proxy";
+import { providerConfigFromFlowInput } from "@harpoc/oauth-proxy";
 
 export interface OAuthConnectFlags {
   provider?: string;
@@ -19,9 +19,9 @@ function formatIssues(issues: { path: (string | number)[]; message: string }[]):
 }
 
 /**
- * Map `oauth connect` flags to a validated OAuthProviderConfig: input-schema
- * parse, preset endpoint merge (so the final parse's per-grant endpoint
- * requirements can be satisfied by presets), final config-schema parse.
+ * Map `oauth connect` flags to a validated OAuthProviderConfig: flag-level
+ * checks, input-schema parse, then the shared wire-input mapper (preset
+ * endpoint merge + config-schema parse) all surfaces go through.
  */
 export function buildOAuthProviderConfig(
   name: string,
@@ -57,30 +57,6 @@ export function buildOAuthProviderConfig(
   if (!parsedInput.success) {
     throw new Error(formatIssues(parsedInput.error.issues));
   }
-  const input = parsedInput.data;
 
-  const preset = input.provider === "custom" ? undefined : PROVIDER_PRESETS[input.provider];
-  const tokenEndpoint = input.token_endpoint ?? preset?.token_endpoint;
-  if (!tokenEndpoint) {
-    throw new Error('--token-endpoint is required for provider "custom".');
-  }
-
-  const parsedConfig = oauthProviderConfigSchema.safeParse({
-    provider: input.provider,
-    grant_type: input.grant_type,
-    token_endpoint: tokenEndpoint,
-    auth_endpoint: input.auth_endpoint ?? preset?.auth_endpoint,
-    device_authorization_endpoint:
-      input.device_authorization_endpoint ?? preset?.device_authorization_endpoint,
-    client_id: input.client_id,
-    client_secret: input.client_secret,
-    token_endpoint_auth_method: input.token_endpoint_auth_method,
-    scopes: input.scopes,
-    redirect_uri: flags.redirectUri,
-  });
-  if (!parsedConfig.success) {
-    throw new Error(formatIssues(parsedConfig.error.issues));
-  }
-
-  return { config: parsedConfig.data, project: input.project };
+  return providerConfigFromFlowInput(parsedInput.data, { redirect_uri: flags.redirectUri });
 }

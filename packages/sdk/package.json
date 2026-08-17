@@ -24,13 +24,23 @@
     "@harpoc/shared": "workspace:*"
   },
   "devDependencies": {
-    "@harpoc/core": "workspace:*"
+    "@harpoc/core": "workspace:*",
+    "@harpoc/oauth-proxy": "workspace:*",
+    "@harpoc/cert-manager": "workspace:*"
   },
   "peerDependencies": {
-    "@harpoc/core": "^1.0.0"
+    "@harpoc/core": "^1.0.0",
+    "@harpoc/oauth-proxy": "^1.1.0",
+    "@harpoc/cert-manager": "^1.1.0"
   },
   "peerDependenciesMeta": {
     "@harpoc/core": {
+      "optional": true
+    },
+    "@harpoc/oauth-proxy": {
+      "optional": true
+    },
+    "@harpoc/cert-manager": {
       "optional": true
     }
   },

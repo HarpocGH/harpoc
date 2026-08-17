@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
-import type { OAuthProviderConfig } from "@harpoc/shared";
+import type { CallerContext, OAuthProviderConfig } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
 import { OAuthManager } from "./oauth-manager.js";
+import type { OAuthManagerOptions } from "./oauth-manager.js";
 
 // Mock argon2 for speed (same approach as core tests)
 vi.mock("argon2", () => ({
@@ -418,5 +419,272 @@ describe("OAuthManager device-code background poll lifecycle (code review Low O3
       expect(manager.cancelFlow(secretId)).toBe(false);
     });
     expect(errors).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deferred authorization-code start (D9) + caller threading
+// ---------------------------------------------------------------------------
+
+interface FakeEngine {
+  createOAuthSecret: ReturnType<typeof vi.fn>;
+  completeOAuthFlow: ReturnType<typeof vi.fn>;
+}
+
+function makeFakeEngine(): FakeEngine {
+  return {
+    createOAuthSecret: vi.fn(async () => ({ handle: "secret://gh", secretId: "sid-1" })),
+    completeOAuthFlow: vi.fn(async () => undefined),
+  };
+}
+
+function fakeEngineManager(fake: FakeEngine, options?: OAuthManagerOptions): OAuthManager {
+  return new OAuthManager(fake as unknown as VaultEngine, options);
+}
+
+describe("OAuthManager.startAuthorizationCodeDeferred", () => {
+  it("resolves before any callback, with the auth URL bound to the live callback port", async () => {
+    const fake = makeFakeEngine();
+    const openBrowser = vi.fn(async () => undefined);
+    const manager = fakeEngineManager(fake, { callbackPort: 0, openBrowser });
+
+    const start = await manager.startAuthorizationCodeDeferred("gh", makeAuthCodeConfig());
+
+    expect(start.handle).toBe("secret://gh");
+    expect(start.secretId).toBe("sid-1");
+    expect(openBrowser).not.toHaveBeenCalled();
+    expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
+
+    const authUrl = new URL(start.authUrl);
+    expect(authUrl.origin + authUrl.pathname).toBe("https://example.com/auth");
+    expect(authUrl.searchParams.get("state")).toMatch(/^[0-9a-f]{64}$/);
+    expect(authUrl.searchParams.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(authUrl.searchParams.get("code_challenge_method")).toBe("S256");
+
+    const redirectUri = new URL(authUrl.searchParams.get("redirect_uri") as string);
+    expect(redirectUri.pathname).toBe("/oauth/callback");
+    expect(Number(redirectUri.port)).toBeGreaterThan(0);
+    // Proof the port is the actually bound one, not the requested 0: the
+    // callback server answers on it (404 for a non-callback path leaves the
+    // flow undisturbed).
+    const probe = await fetch(`http://127.0.0.1:${redirectUri.port}/not-the-callback`);
+    expect(probe.status).toBe(404);
+
+    expect(manager.cancelFlow(start.secretId)).toBe(true);
+    await expect(start.completion).rejects.toBeDefined();
+  });
+
+  it("completes on callback: completion resolves and the token reaches completeOAuthFlow", async () => {
+    const fake = makeFakeEngine();
+    const manager = fakeEngineManager(fake, { callbackPort: 0 });
+
+    const start = await manager.startAuthorizationCodeDeferred("gh", makeAuthCodeConfig());
+    const authUrl = new URL(start.authUrl);
+    const state = authUrl.searchParams.get("state") as string;
+    const redirectUri = authUrl.searchParams.get("redirect_uri") as string;
+
+    const res = await fetch(`${redirectUri}?code=deferred-code&state=${state}`);
+    expect(res.status).toBe(200);
+
+    await expect(start.completion).resolves.toBeUndefined();
+    expect(fake.completeOAuthFlow).toHaveBeenCalledWith(
+      "sid-1",
+      "mgr-access-token",
+      "mgr-refresh-token",
+      expect.any(Number),
+    );
+  });
+
+  it("cancelFlow rejects completion and stays silent on onBackgroundFlowError", async () => {
+    const fake = makeFakeEngine();
+    const errors: unknown[] = [];
+    const manager = fakeEngineManager(fake, {
+      callbackPort: 0,
+      onBackgroundFlowError: (_secretId, err) => {
+        errors.push(err);
+      },
+    });
+
+    const start = await manager.startAuthorizationCodeDeferred("gh", makeAuthCodeConfig());
+    const redirectUri = new URL(new URL(start.authUrl).searchParams.get("redirect_uri") as string);
+
+    expect(manager.cancelFlow(start.secretId)).toBe(true);
+    await expect(start.completion).rejects.toBeDefined();
+    expect(errors).toHaveLength(0);
+    expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
+
+    // The abort stopped the callback server: nothing answers on the port
+    // (a still-live server would answer the non-callback path with 404).
+    await vi.waitFor(async () => {
+      await expect(
+        fetch(`http://127.0.0.1:${redirectUri.port}/not-the-callback`),
+      ).rejects.toThrow();
+    });
+    await vi.waitFor(() => {
+      expect(manager.cancelFlow(start.secretId)).toBe(false);
+    });
+  });
+
+  it("an unfetched callback times out: completion rejects and onBackgroundFlowError fires", async () => {
+    const fake = makeFakeEngine();
+    const errors: { secretId: string; err: unknown }[] = [];
+    const manager = fakeEngineManager(fake, {
+      callbackPort: 0,
+      callbackTimeoutMs: 100,
+      onBackgroundFlowError: (secretId, err) => {
+        errors.push({ secretId, err });
+      },
+    });
+
+    const start = await manager.startAuthorizationCodeDeferred("gh", makeAuthCodeConfig());
+
+    await expect(start.completion).rejects.toMatchObject({
+      code: ErrorCode.OAUTH_CALLBACK_TIMEOUT,
+    });
+    await vi.waitFor(() => {
+      expect(errors).toHaveLength(1);
+    });
+    expect(errors[0]?.secretId).toBe("sid-1");
+    expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
+  });
+
+  it("a restart for the same secret supersedes the first flow and keeps the second cancellable", async () => {
+    const fake = makeFakeEngine();
+    const errors: unknown[] = [];
+    const manager = fakeEngineManager(fake, {
+      callbackPort: 0,
+      onBackgroundFlowError: (_secretId, err) => {
+        errors.push(err);
+      },
+    });
+
+    // Same name: createOAuthSecret resumes the PENDING secret and returns the
+    // SAME secretId, so both starts land on one pendingFlows key.
+    const first = await manager.startAuthorizationCodeDeferred("gh", makeAuthCodeConfig());
+    const firstPort = new URL(new URL(first.authUrl).searchParams.get("redirect_uri") as string)
+      .port;
+    const second = await manager.startAuthorizationCodeDeferred("gh", makeAuthCodeConfig());
+    const secondPort = new URL(new URL(second.authUrl).searchParams.get("redirect_uri") as string)
+      .port;
+    expect(second.secretId).toBe(first.secretId);
+    expect(secondPort).not.toBe(firstPort);
+
+    // The superseded flow is aborted, not reported as a background failure...
+    await expect(first.completion).rejects.toBeDefined();
+    expect(errors).toHaveLength(0);
+    // ...and its callback server is gone, so its redirect can no longer be
+    // exchanged behind the caller's back.
+    await vi.waitFor(async () => {
+      await expect(fetch(`http://127.0.0.1:${firstPort}/not-the-callback`)).rejects.toThrow();
+    });
+
+    // The survivor is still live and still cancellable (the superseded flow's
+    // cleanup must not delete the successor's registration).
+    const probe = await fetch(`http://127.0.0.1:${secondPort}/not-the-callback`);
+    expect(probe.status).toBe(404);
+    expect(manager.cancelFlow(second.secretId)).toBe(true);
+    await expect(second.completion).rejects.toBeDefined();
+
+    expect(errors).toHaveLength(0);
+    expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
+  });
+});
+
+describe("OAuthManager caller threading (D9)", () => {
+  const caller: CallerContext = {
+    principal_type: "agent",
+    principal_id: "agent-7",
+    project: "api",
+    interface: "rest",
+  };
+
+  it("startDeviceCode forwards the caller as createOAuthSecret's 4th argument", async () => {
+    deviceHandler = (_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          device_code: "dc-caller",
+          user_code: "USER-CALLER",
+          verification_uri: "https://example.com/device",
+          interval: 0,
+          expires_in: 60,
+        }),
+      );
+    };
+
+    const fake = makeFakeEngine();
+    const manager = fakeEngineManager(fake);
+
+    const result = await manager.startDeviceCode("gh", makeDeviceCodeConfig(), undefined, caller);
+    await result.completion;
+
+    expect(fake.createOAuthSecret).toHaveBeenCalledWith(
+      "gh",
+      expect.objectContaining({ client_id: "device-client" }),
+      undefined,
+      caller,
+    );
+  });
+
+  it("startClientCredentials forwards the caller as createOAuthSecret's 4th argument", async () => {
+    const fake = makeFakeEngine();
+    const manager = fakeEngineManager(fake);
+
+    await manager.startClientCredentials("gh", makeClientCredentialsConfig(), "my-project", caller);
+
+    expect(fake.createOAuthSecret).toHaveBeenCalledWith(
+      "gh",
+      expect.objectContaining({ client_id: "cc-client" }),
+      "my-project",
+      caller,
+    );
+  });
+
+  it("startAuthorizationCodeDeferred forwards the caller as createOAuthSecret's 4th argument", async () => {
+    const fake = makeFakeEngine();
+    const manager = fakeEngineManager(fake, { callbackPort: 0 });
+
+    const start = await manager.startAuthorizationCodeDeferred(
+      "gh",
+      makeAuthCodeConfig(),
+      "my-project",
+      caller,
+    );
+
+    expect(fake.createOAuthSecret).toHaveBeenCalledWith(
+      "gh",
+      expect.objectContaining({ client_id: "auth-code-client" }),
+      "my-project",
+      caller,
+    );
+
+    manager.cancelFlow(start.secretId);
+    await expect(start.completion).rejects.toBeDefined();
+  });
+});
+
+describe("OAuthManager.startAuthorizationCode (blocking wrapper over the deferred start)", () => {
+  it("cancels the flow and rethrows a wrapped error when the browser cannot open", async () => {
+    const fake = makeFakeEngine();
+    const errors: unknown[] = [];
+    const manager = fakeEngineManager(fake, {
+      callbackPort: 0,
+      openBrowser: async () => {
+        throw new Error("no display");
+      },
+      onBackgroundFlowError: (_secretId, err) => {
+        errors.push(err);
+      },
+    });
+
+    await expect(manager.startAuthorizationCode("gh", makeAuthCodeConfig())).rejects.toMatchObject({
+      code: ErrorCode.OAUTH_FLOW_FAILED,
+    });
+
+    expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
+    expect(errors).toHaveLength(0);
+    await vi.waitFor(() => {
+      expect(manager.cancelFlow("sid-1")).toBe(false);
+    });
   });
 });

@@ -161,7 +161,7 @@ describe("createMcpServer", () => {
     );
   });
 
-  it("registers all 7 tools", () => {
+  it("registers all 9 tools", async () => {
     const engine = mockEngine();
     const server = createMcpServer({ engine, allowTokenless: true });
 
@@ -174,6 +174,21 @@ describe("createMcpServer", () => {
     ) => Promise<{ tools: Array<{ name: string }> }>;
 
     expect(listHandler).toBeDefined();
+    const result = await listHandler(
+      { method: "tools/list", params: {} },
+      { signal: new AbortController().signal, sessionId: "test" },
+    );
+    expect(result.tools.map((t) => t.name).sort()).toEqual([
+      "check_secret_health",
+      "create_secret",
+      "get_secret_info",
+      "list_secrets",
+      "renew_certificate",
+      "revoke_secret",
+      "rotate_secret",
+      "start_oauth_flow",
+      "use_secret",
+    ]);
   });
 
   describe("scope enforcement e2e", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OAuthGrantType } from "@harpoc/shared";
+import { ErrorCode, OAuthGrantType, VaultError } from "@harpoc/shared";
 import { buildOAuthProviderConfig } from "./oauth-config.js";
 
 describe("buildOAuthProviderConfig", () => {
@@ -64,7 +64,23 @@ describe("buildOAuthProviderConfig", () => {
         { provider: "custom", clientId: "client-1" },
         "secret",
       ),
-    ).toThrow(/--token-endpoint is required for provider "custom"/);
+    ).toThrow(/token_endpoint is required for provider "custom"/);
+  });
+
+  it("surfaces the shared mapper's schema-validation error code", () => {
+    let caught: unknown;
+    try {
+      buildOAuthProviderConfig(
+        "custom-token",
+        OAuthGrantType.CLIENT_CREDENTIALS,
+        { provider: "custom", clientId: "client-1" },
+        "secret",
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(VaultError);
+    expect((caught as VaultError).code).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
   });
 
   it("requires an auth endpoint for authorization_code with a custom provider", () => {

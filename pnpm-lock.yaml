@@ -157,12 +157,18 @@ importers:
 
   packages/integration:
     dependencies:
+      "@harpoc/cert-manager":
+        specifier: workspace:*
+        version: link:../cert-manager
       "@harpoc/core":
         specifier: workspace:*
         version: link:../core
       "@harpoc/mcp-server":
         specifier: workspace:*
         version: link:../mcp-server
+      "@harpoc/oauth-proxy":
+        specifier: workspace:*
+        version: link:../oauth-proxy
       "@harpoc/rest-api":
         specifier: workspace:*
         version: link:../rest-api
@@ -181,9 +187,15 @@ importers:
 
   packages/mcp-server:
     dependencies:
+      "@harpoc/cert-manager":
+        specifier: workspace:*
+        version: link:../cert-manager
       "@harpoc/core":
         specifier: workspace:*
         version: link:../core
+      "@harpoc/oauth-proxy":
+        specifier: workspace:*
+        version: link:../oauth-proxy
       "@harpoc/shared":
         specifier: workspace:*
         version: link:../shared
@@ -208,9 +220,15 @@ importers:
 
   packages/rest-api:
     dependencies:
+      "@harpoc/cert-manager":
+        specifier: workspace:*
+        version: link:../cert-manager
       "@harpoc/core":
         specifier: workspace:*
         version: link:../core
+      "@harpoc/oauth-proxy":
+        specifier: workspace:*
+        version: link:../oauth-proxy
       "@harpoc/shared":
         specifier: workspace:*
         version: link:../shared
@@ -230,9 +248,15 @@ importers:
         specifier: workspace:*
         version: link:../shared
     devDependencies:
+      "@harpoc/cert-manager":
+        specifier: workspace:*
+        version: link:../cert-manager
       "@harpoc/core":
         specifier: workspace:*
         version: link:../core
+      "@harpoc/oauth-proxy":
+        specifier: workspace:*
+        version: link:../oauth-proxy
 
   packages/shared:
     dependencies:

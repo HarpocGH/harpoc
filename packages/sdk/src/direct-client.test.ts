@@ -66,8 +66,77 @@ function createMockEngine() {
     revokePolicy: vi.fn(),
     listPolicies: vi.fn().mockReturnValue([]),
     queryAudit: vi.fn().mockReturnValue([]),
+    getOAuthTokenStatus: vi.fn().mockReturnValue({
+      secret_id: "uuid-1",
+      provider: "github",
+      grant_type: "authorization_code",
+      access_token_expires_at: 4000,
+      has_refresh_token: true,
+      last_refreshed_at: 3000,
+      refresh_status: "ok",
+      token_endpoint_auth_method: "client_secret_post",
+    }),
+    refreshOAuthToken: vi.fn().mockResolvedValue(9999),
+    getCertificateStatus: vi.fn().mockReturnValue({
+      secret_id: "uuid-1",
+      subject: "CN=web.example.com",
+      issuer: "CN=Test CA",
+      not_before: 1000,
+      not_after: 2000,
+      auto_renew: false,
+      renewal_status: "ok",
+    }),
   };
 }
+
+function createFakeOAuthManager() {
+  return {
+    startClientCredentials: vi.fn().mockResolvedValue({
+      handle: "secret://cc",
+      status: "authorized",
+      message: "Client credentials flow completed for github",
+    }),
+    startDeviceCode: vi.fn().mockResolvedValue({
+      handle: "secret://dev",
+      status: "pending_authorization",
+      auth_url: "https://github.com/login/device",
+      user_code: "ABCD-1234",
+      message: "Please visit https://github.com/login/device and enter code: ABCD-1234",
+      completion: Promise.resolve(),
+    }),
+    startAuthorizationCodeDeferred: vi.fn().mockResolvedValue({
+      handle: "secret://ac",
+      secretId: "uuid-ac",
+      authUrl: "https://github.com/login/oauth/authorize?client_id=cid",
+      completion: Promise.resolve(),
+    }),
+  };
+}
+
+function createFakeCertManager() {
+  return {
+    importCertificate: vi.fn().mockResolvedValue({ handle: "secret://web", secretId: "uuid-web" }),
+    generateCsr: vi.fn().mockResolvedValue({
+      handle: "secret://web",
+      secretId: "uuid-web",
+      csrPem: "-----BEGIN CERTIFICATE REQUEST-----\nr\n-----END CERTIFICATE REQUEST-----",
+    }),
+    renewCertificate: vi.fn().mockResolvedValue({
+      secret_id: "uuid-web",
+      subject: "CN=web.example.com",
+      issuer: "CN=Test CA",
+      not_before: 1000,
+      not_after: 5000,
+      auto_renew: true,
+      renewal_status: "ok",
+    }),
+  };
+}
+
+const PLAIN_KEY_PEM = "-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----";
+const ENCRYPTED_KEY_PEM =
+  "-----BEGIN ENCRYPTED PRIVATE KEY-----\nk\n-----END ENCRYPTED PRIVATE KEY-----";
+const LEAF_PEM = "-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----";
 
 describe("DirectClient", () => {
   it("listSecrets delegates to engine", async () => {
@@ -332,6 +401,324 @@ describe("DirectClient", () => {
     const health = await client.getHealth();
     expect(health.state).toBe(VaultState.UNLOCKED);
     expect(health.version).toBe(VAULT_VERSION);
+  });
+
+  describe("oauth flows (injected manager)", () => {
+    it("startOAuthFlow authorization_code returns the deferred start's auth URL", async () => {
+      const engine = createMockEngine();
+      const oauthManager = createFakeOAuthManager();
+      const client = new DirectClient(engine as never, { oauthManager: oauthManager as never });
+
+      const result = await client.startOAuthFlow({
+        name: "gh",
+        provider: "github",
+        grant_type: "authorization_code",
+        client_id: "cid",
+      });
+
+      expect(result.handle).toBe("secret://ac");
+      expect(result.status).toBe("pending_authorization");
+      expect(result.auth_url).toBe("https://github.com/login/oauth/authorize?client_id=cid");
+      expect(result.message).toContain("auth_url");
+      expect(oauthManager.startAuthorizationCodeDeferred).toHaveBeenCalledTimes(1);
+    });
+
+    // D2 parity with the REST route: the background browser leg's promise and
+    // the internal secret ID are the host's, not the caller's.
+    it("startOAuthFlow authorization_code exposes neither completion nor secretId", async () => {
+      const engine = createMockEngine();
+      const oauthManager = createFakeOAuthManager();
+      const client = new DirectClient(engine as never, { oauthManager: oauthManager as never });
+
+      const result = await client.startOAuthFlow({
+        name: "gh",
+        provider: "github",
+        grant_type: "authorization_code",
+        client_id: "cid",
+      });
+
+      expect("completion" in result).toBe(false);
+      expect("secretId" in result).toBe(false);
+      expect(Object.keys(result).sort()).toEqual(["auth_url", "handle", "message", "status"]);
+    });
+
+    it("startOAuthFlow device_code carries the user code but no completion", async () => {
+      const engine = createMockEngine();
+      const oauthManager = createFakeOAuthManager();
+      const client = new DirectClient(engine as never, { oauthManager: oauthManager as never });
+
+      const result = await client.startOAuthFlow({
+        name: "gh",
+        provider: "github",
+        grant_type: "device_code",
+        client_id: "cid",
+      });
+
+      expect(result.user_code).toBe("ABCD-1234");
+      expect(result.auth_url).toBe("https://github.com/login/device");
+      expect("completion" in result).toBe(false);
+    });
+
+    it("startOAuthFlow client_credentials returns the authorized projection", async () => {
+      const engine = createMockEngine();
+      const oauthManager = createFakeOAuthManager();
+      const client = new DirectClient(engine as never, { oauthManager: oauthManager as never });
+
+      const result = await client.startOAuthFlow({
+        name: "gh",
+        provider: "github",
+        grant_type: "client_credentials",
+        client_id: "cid",
+        client_secret: "csec",
+      });
+
+      expect(result).toEqual({
+        handle: "secret://cc",
+        status: "authorized",
+        message: "Client credentials flow completed for github",
+      });
+    });
+
+    it("startOAuthFlow refuses client_credentials without a client secret", async () => {
+      const engine = createMockEngine();
+      const oauthManager = createFakeOAuthManager();
+      const client = new DirectClient(engine as never, { oauthManager: oauthManager as never });
+
+      await expect(
+        client.startOAuthFlow({
+          name: "gh",
+          provider: "github",
+          grant_type: "client_credentials",
+          client_id: "cid",
+        }),
+      ).rejects.toMatchObject({
+        code: ErrorCode.SCHEMA_VALIDATION_ERROR,
+        message: expect.stringContaining("client_secret is required"),
+      });
+      expect(oauthManager.startClientCredentials).not.toHaveBeenCalled();
+    });
+
+    it("startOAuthFlow passes the project but no caller (trusted local path)", async () => {
+      const engine = createMockEngine();
+      const oauthManager = createFakeOAuthManager();
+      const client = new DirectClient(engine as never, { oauthManager: oauthManager as never });
+
+      await client.startOAuthFlow({
+        name: "gh",
+        provider: "github",
+        grant_type: "authorization_code",
+        client_id: "cid",
+        project: "proj",
+      });
+
+      const call = oauthManager.startAuthorizationCodeDeferred.mock.calls[0] as unknown[];
+      expect(call[0]).toBe("gh");
+      expect(call[2]).toBe("proj");
+      expect(call[3]).toBeUndefined();
+    });
+
+    it("getOAuthStatus resolves the handle and passes no caller", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      const status = await client.getOAuthStatus("secret://gh");
+
+      expect(status.refresh_status).toBe("ok");
+      expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://gh");
+      expect(engine.getOAuthTokenStatus).toHaveBeenCalledWith("uuid-1");
+    });
+
+    it("refreshOAuthToken resolves the handle and returns the new expiry", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      expect(await client.refreshOAuthToken("secret://gh")).toBe(9999);
+      expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://gh");
+      expect(engine.refreshOAuthToken).toHaveBeenCalledWith("uuid-1");
+    });
+  });
+
+  describe("certificates (injected manager)", () => {
+    it("importCertificate maps the wire shape to the manager input", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      const ref = await client.importCertificate("web", {
+        private_key_pem: PLAIN_KEY_PEM,
+        certificate_pem: LEAF_PEM,
+        chain_pem: undefined,
+        project: "proj",
+        auto_renew: true,
+        renew_before_days: 14,
+      });
+
+      expect(ref).toEqual({ handle: "secret://web", secretId: "uuid-web" });
+      expect(certManager.importCertificate).toHaveBeenCalledWith("web", {
+        privateKeyPem: PLAIN_KEY_PEM,
+        certificatePem: LEAF_PEM,
+        chainPem: undefined,
+        project: "proj",
+        autoRenew: true,
+        renewBeforeDays: 14,
+      });
+    });
+
+    // The defaulted fields are the schema's / engine's to fill (both say
+    // false / 30), so an omitting caller must reach the manager with them
+    // undefined rather than with values the SDK invented.
+    it("importCertificate leaves the omitted defaults undefined for the engine to fill", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      await client.importCertificate("web", {
+        private_key_pem: PLAIN_KEY_PEM,
+        certificate_pem: LEAF_PEM,
+      });
+
+      expect(certManager.importCertificate).toHaveBeenCalledWith("web", {
+        privateKeyPem: PLAIN_KEY_PEM,
+        certificatePem: LEAF_PEM,
+        chainPem: undefined,
+        project: undefined,
+        autoRenew: undefined,
+        renewBeforeDays: undefined,
+      });
+    });
+
+    it("importCertificate refuses a passphrase-protected key before the manager runs", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      await expect(
+        client.importCertificate("web", {
+          private_key_pem: ENCRYPTED_KEY_PEM,
+          certificate_pem: LEAF_PEM,
+        }),
+      ).rejects.toMatchObject({
+        code: ErrorCode.SCHEMA_VALIDATION_ERROR,
+        message: expect.stringContaining("passphrase-protected"),
+      });
+      expect(certManager.importCertificate).not.toHaveBeenCalled();
+    });
+
+    it("generateCsr maps subject/bits/curve onto the manager input and strips secretId", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      const result = await client.generateCsr("web", {
+        subject: "web.example.com",
+        sans: ["www.example.com"],
+        algorithm: "rsa",
+        bits: 4096,
+        project: "proj",
+      });
+
+      expect(result).toEqual({
+        handle: "secret://web",
+        csrPem: "-----BEGIN CERTIFICATE REQUEST-----\nr\n-----END CERTIFICATE REQUEST-----",
+      });
+      expect(certManager.generateCsr).toHaveBeenCalledWith("web", {
+        commonName: "web.example.com",
+        sans: ["www.example.com"],
+        algorithm: "rsa",
+        modulusLength: 4096,
+        namedCurve: undefined,
+        project: "proj",
+      });
+    });
+
+    // A mismatched key parameter is refused, not ignored (product contract):
+    // EC generation drops modulusLength, so forwarding it would hand back a
+    // P-256 key while the caller believes they asked for RSA-4096.
+    it("generateCsr refuses bits without algorithm rsa, without reaching the manager", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      await expect(
+        client.generateCsr("web", { subject: "web.example.com", bits: 4096 }),
+      ).rejects.toMatchObject({
+        code: ErrorCode.SCHEMA_VALIDATION_ERROR,
+        message: expect.stringContaining('bits applies only to algorithm "rsa"'),
+      });
+      expect(certManager.generateCsr).not.toHaveBeenCalled();
+    });
+
+    it("generateCsr refuses curve with algorithm rsa, without reaching the manager", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      await expect(
+        client.generateCsr("web", {
+          subject: "web.example.com",
+          algorithm: "rsa",
+          curve: "P-384",
+        }),
+      ).rejects.toMatchObject({
+        code: ErrorCode.SCHEMA_VALIDATION_ERROR,
+        message: expect.stringContaining('curve applies only to algorithm "ec"'),
+      });
+      expect(certManager.generateCsr).not.toHaveBeenCalled();
+    });
+
+    it("generateCsr accepts the satisfied rsa/bits pairing", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      const result = await client.generateCsr("web", {
+        subject: "web.example.com",
+        algorithm: "rsa",
+        bits: 4096,
+      });
+
+      expect(result.handle).toBe("secret://web");
+      expect(certManager.generateCsr).toHaveBeenCalledWith(
+        "web",
+        expect.objectContaining({ algorithm: "rsa", modulusLength: 4096 }),
+      );
+    });
+
+    it("generateCsr defaults the algorithm to ec (REST-route parity)", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      await client.generateCsr("web", { subject: "web.example.com" });
+
+      expect(certManager.generateCsr).toHaveBeenCalledWith(
+        "web",
+        expect.objectContaining({ algorithm: "ec" }),
+      );
+    });
+
+    it("renewCertificate resolves the handle and forwards the http port", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      const status = await client.renewCertificate("secret://web", { httpPort: 8080 });
+
+      expect(status.renewal_status).toBe("ok");
+      expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://web");
+      expect(certManager.renewCertificate).toHaveBeenCalledWith("uuid-1", { httpPort: 8080 });
+    });
+
+    it("getCertificateStatus resolves the handle and passes no caller", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      const status = await client.getCertificateStatus("secret://web");
+
+      expect(status.subject).toBe("CN=web.example.com");
+      expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://web");
+      expect(engine.getCertificateStatus).toHaveBeenCalledWith("uuid-1");
+    });
   });
 
   describe("error propagation", () => {

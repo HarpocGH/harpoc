@@ -7,6 +7,7 @@ import type { ScopeGuard } from "../guards/scope-guard.js";
 
 const PERMISSION: Permission = "list";
 const EXPIRING_SOON_DAYS = 7;
+const OAUTH_WINDOW_MS = 60 * 60 * 1000;
 
 export function registerCheckHealth(
   server: McpServer,
@@ -39,6 +40,19 @@ export function registerCheckHealth(
         }
       }
 
+      const oauthNeeding = scopeGuard.filterByScope(
+        engine.getExpiringOAuthTokenStatuses(OAUTH_WINDOW_MS, scopeGuard.caller),
+      );
+      const certsNearing = scopeGuard.filterByScope(
+        engine.getExpiringCertificateStatuses(scopeGuard.caller),
+      );
+      const oauthRefreshNeeded = args.handle
+        ? oauthNeeding.filter((i) => i.handle === args.handle)
+        : oauthNeeding;
+      const certificatesNearingRenewal = args.handle
+        ? certsNearing.filter((i) => i.handle === args.handle)
+        : certsNearing;
+
       return {
         content: [
           {
@@ -49,6 +63,8 @@ export function registerCheckHealth(
                 total_secrets: filtered.length,
                 by_status: byStatus,
                 expiring_soon: expiringSoon,
+                oauth_refresh_needed: oauthRefreshNeeded,
+                certificates_nearing_renewal: certificatesNearingRenewal,
               },
               null,
               2,

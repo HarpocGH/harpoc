@@ -1,14 +1,20 @@
 import type {
   AccessPolicy,
   AccessPolicyInput,
+  CertificateImportRequestInput,
+  CertificateStatus,
   ConnectionConfig,
   CreateSecretRequest,
   CreateSecretResponse,
+  GenerateCsrRequest,
   HealthResponse,
   InjectionPolicy,
   InjectionPolicyInput,
   McpServerConfig,
+  OAuthFlowResult,
+  OAuthTokenStatus,
   SetInjectionPolicyOptions,
+  StartOAuthFlowInput,
   UseSecretAction,
   UseSecretResponse,
 } from "@harpoc/shared";
@@ -26,6 +32,21 @@ export type CreateSecretInput = Omit<CreateSecretRequest, "value"> & {
 export type GrantPolicyInput = AccessPolicyInput;
 
 export type { HealthResponse };
+
+/**
+ * Declared here rather than imported from `@harpoc/cert-manager`: that package
+ * is an optional peer (D4), and `client.ts` must stay loadable — and its
+ * declarations emittable — without it installed.
+ */
+export interface CertificateRef {
+  handle: string;
+  secretId: string;
+}
+
+export interface GeneratedCsrRef {
+  handle: string;
+  csrPem: string;
+}
 
 export interface VaultClient {
   listSecrets(project?: string): Promise<SecretInfo[]>;
@@ -51,4 +72,14 @@ export interface VaultClient {
   listPolicies(handle: string): Promise<AccessPolicy[]>;
   queryAudit(options?: AuditQueryOptions): Promise<DecryptedAuditEvent[]>;
   getHealth(): Promise<HealthResponse>;
+  startOAuthFlow(input: StartOAuthFlowInput): Promise<OAuthFlowResult>;
+  getOAuthStatus(handle: string): Promise<OAuthTokenStatus>;
+  refreshOAuthToken(handle: string): Promise<number | null>;
+  importCertificate(
+    name: string,
+    input: Omit<CertificateImportRequestInput, "name">,
+  ): Promise<CertificateRef>;
+  generateCsr(name: string, input: Omit<GenerateCsrRequest, "name">): Promise<GeneratedCsrRef>;
+  renewCertificate(handle: string, options?: { httpPort?: number }): Promise<CertificateStatus>;
+  getCertificateStatus(handle: string): Promise<CertificateStatus>;
 }

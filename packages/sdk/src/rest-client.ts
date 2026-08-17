@@ -1,17 +1,30 @@
 import type {
   AccessPolicy,
+  CertificateImportRequestInput,
+  CertificateStatus,
   ConnectionConfig,
   CreateSecretResponse,
+  GenerateCsrRequest,
   InjectionPolicy,
   InjectionPolicyInput,
   McpServerConfig,
+  OAuthFlowResult,
+  OAuthTokenStatus,
   SetInjectionPolicyOptions,
+  StartOAuthFlowInput,
   UseSecretAction,
   UseSecretResponse,
 } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditQueryOptions, DecryptedAuditEvent, SecretInfo } from "@harpoc/core";
-import type { CreateSecretInput, GrantPolicyInput, HealthResponse, VaultClient } from "./client.js";
+import type {
+  CertificateRef,
+  CreateSecretInput,
+  GeneratedCsrRef,
+  GrantPolicyInput,
+  HealthResponse,
+  VaultClient,
+} from "./client.js";
 
 export interface RestClientOptions {
   baseUrl: string;
@@ -185,6 +198,69 @@ export class RestClient implements VaultClient {
 
   async getHealth(): Promise<HealthResponse> {
     return this.request<HealthResponse>("GET", "/api/v1/health");
+  }
+
+  async startOAuthFlow(input: StartOAuthFlowInput): Promise<OAuthFlowResult> {
+    return this.request<OAuthFlowResult>("POST", "/api/v1/oauth/authorize", input);
+  }
+
+  async getOAuthStatus(handle: string): Promise<OAuthTokenStatus> {
+    return this.request<OAuthTokenStatus>(
+      "GET",
+      `/api/v1/oauth/${this.encodeHandle(handle)}/status`,
+    );
+  }
+
+  async refreshOAuthToken(handle: string): Promise<number | null> {
+    const result = await this.request<{ refreshed: boolean; expires_at: number | null }>(
+      "POST",
+      `/api/v1/oauth/${this.encodeHandle(handle)}/refresh`,
+    );
+    return result.expires_at;
+  }
+
+  async importCertificate(
+    name: string,
+    input: Omit<CertificateImportRequestInput, "name">,
+  ): Promise<CertificateRef> {
+    const result = await this.request<{ handle: string; secret_id: string }>(
+      "POST",
+      "/api/v1/certificates/import",
+      { name, ...input },
+    );
+    return { handle: result.handle, secretId: result.secret_id };
+  }
+
+  async generateCsr(
+    name: string,
+    input: Omit<GenerateCsrRequest, "name">,
+  ): Promise<GeneratedCsrRef> {
+    const result = await this.request<{ handle: string; csr_pem: string }>(
+      "POST",
+      "/api/v1/certificates/csr",
+      { name, ...input },
+    );
+    return { handle: result.handle, csrPem: result.csr_pem };
+  }
+
+  async renewCertificate(
+    handle: string,
+    options?: { httpPort?: number },
+  ): Promise<CertificateStatus> {
+    // The route parses a body unconditionally, so one is always sent — an
+    // omitted port is simply absent from it (the ACME default applies).
+    return this.request<CertificateStatus>(
+      "POST",
+      `/api/v1/certificates/${this.encodeHandle(handle)}/renew`,
+      { http_port: options?.httpPort },
+    );
+  }
+
+  async getCertificateStatus(handle: string): Promise<CertificateStatus> {
+    return this.request<CertificateStatus>(
+      "GET",
+      `/api/v1/certificates/${this.encodeHandle(handle)}/status`,
+    );
   }
 
   private encodeHandle(handle: string): string {

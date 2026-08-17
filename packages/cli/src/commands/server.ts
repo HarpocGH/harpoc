@@ -32,6 +32,15 @@ export function registerServerCommand(program: Command): void {
       "Explicitly run the stdio MCP server without a launch token — all tools and resources are unrestricted (local full-access mode)",
     )
     .option("--oauth-refresh", "Refresh expiring OAuth tokens in the background (60s interval)")
+    .option(
+      "--cert-renew",
+      "Renew expiring auto-renew certificates in the background (hourly check)",
+    )
+    .option(
+      "--cert-renew-port <port>",
+      "HTTP port for the http-01 challenge responder during renewal",
+      "80",
+    )
     .action(
       async (
         opts: {
@@ -44,20 +53,28 @@ export function registerServerCommand(program: Command): void {
           token?: string;
           allowTokenless?: boolean;
           oauthRefresh?: boolean;
+          certRenew?: boolean;
+          certRenewPort: string;
         },
         cmd: Command,
       ) => {
         let engine: Awaited<ReturnType<typeof loadUnlockedEngine>> | undefined;
         try {
-          if (!opts.mcp && !opts.mcpHttp && !opts.rest && !opts.oauthRefresh) {
+          if (!opts.mcp && !opts.mcpHttp && !opts.rest && !opts.oauthRefresh && !opts.certRenew) {
             console.error(
-              "Error: At least one of --mcp, --mcp-http, --rest or --oauth-refresh is required.",
+              "Error: At least one of --mcp, --mcp-http, --rest, --oauth-refresh or --cert-renew is required.",
             );
+            process.exit(1);
+          }
+
+          if (cmd.getOptionValueSource("certRenewPort") === "cli" && !opts.certRenew) {
+            console.error("Error: --cert-renew-port requires --cert-renew.");
             process.exit(1);
           }
 
           const port = parsePort(opts.port, "port");
           const mcpHttpPort = parsePort(opts.mcpHttpPort, "MCP HTTP port");
+          const certRenewPort = parsePort(opts.certRenewPort, "cert renewal port");
 
           if (opts.token && !opts.mcp) {
             console.error(
@@ -94,6 +111,7 @@ export function registerServerCommand(program: Command): void {
           let mcpHttpServer: { close(): Promise<void> } | undefined;
           let restServer: { close(): void } | undefined;
           let refreshScheduler: { stop(): Promise<void> } | undefined;
+          let renewalScheduler: { stop(): Promise<void> } | undefined;
           let shuttingDown = false;
 
           const shutdown = async (): Promise<void> => {
@@ -103,6 +121,9 @@ export function registerServerCommand(program: Command): void {
             // rotated refresh_token arriving on a closed database is lost
             // permanently (the provider already invalidated the old one).
             if (refreshScheduler) await refreshScheduler.stop();
+            // Same reasoning for certificate renewal: an order abandoned
+            // between issuance and storage is lost for good.
+            if (renewalScheduler) await renewalScheduler.stop();
             if (mcpServer) await mcpServer.close();
             if (mcpHttpServer) await mcpHttpServer.close();
             if (restServer) restServer.close();
@@ -166,6 +187,31 @@ export function registerServerCommand(program: Command): void {
             scheduler.start();
             refreshScheduler = scheduler;
             console.error("[harpoc] OAuth token refresh scheduler running (60s interval)");
+          }
+
+          if (opts.certRenew) {
+            const { CertManager, RenewalScheduler } = await import("@harpoc/cert-manager");
+            const certManager = new CertManager(engine);
+            const scheduler = new RenewalScheduler(
+              engine,
+              {
+                renewCertificate: (secretId) =>
+                  certManager.renewCertificate(secretId, { httpPort: certRenewPort }),
+              },
+              {
+                onRenewError: (secretId, err) => {
+                  if (shuttingDown) return;
+                  console.error(
+                    `Warning: certificate renewal failed (${secretId}): ${err instanceof Error ? err.message : String(err)}`,
+                  );
+                },
+              },
+            );
+            scheduler.start();
+            renewalScheduler = scheduler;
+            console.error(
+              "[harpoc] certificate renewal scheduler running (hourly check, auto-renew certificates only)",
+            );
           }
         } catch (err: unknown) {
           await engine?.destroy();

@@ -366,6 +366,222 @@ describe("RestClient", () => {
     });
   });
 
+  describe("oauth", () => {
+    it("startOAuthFlow posts the input verbatim to /api/v1/oauth/authorize", async () => {
+      mockFetchResponse(
+        {
+          handle: "secret://gh",
+          status: "authorized",
+          message: "Client credentials flow completed for github",
+        },
+        201,
+      );
+
+      const input = {
+        name: "gh",
+        provider: "github" as const,
+        grant_type: "client_credentials" as const,
+        client_id: "cid",
+        client_secret: "csec",
+        token_endpoint_auth_method: "client_secret_basic" as const,
+        scopes: ["repo"],
+        project: "proj",
+      };
+      const result = await client.startOAuthFlow(input);
+
+      expect(result).toEqual({
+        handle: "secret://gh",
+        status: "authorized",
+        message: "Client credentials flow completed for github",
+      });
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/oauth/authorize`);
+      expect(call[1].method).toBe("POST");
+      expect(JSON.parse(call[1].body as string)).toEqual(input);
+    });
+
+    it("startOAuthFlow returns the device-code fields the route sends", async () => {
+      mockFetchResponse(
+        {
+          handle: "secret://gh",
+          status: "pending_authorization",
+          auth_url: "https://github.com/login/device",
+          user_code: "ABCD-1234",
+          message: "Please visit https://github.com/login/device and enter code: ABCD-1234",
+        },
+        201,
+      );
+
+      const result = await client.startOAuthFlow({
+        name: "gh",
+        provider: "github",
+        grant_type: "device_code",
+        client_id: "cid",
+      });
+
+      expect(result.status).toBe("pending_authorization");
+      expect(result.user_code).toBe("ABCD-1234");
+      expect(result.auth_url).toBe("https://github.com/login/device");
+    });
+
+    it("getOAuthStatus sends GET /api/v1/oauth/:handle/status", async () => {
+      const status = {
+        secret_id: "uuid-1",
+        provider: "github",
+        grant_type: "authorization_code",
+        access_token_expires_at: 4000,
+        has_refresh_token: true,
+        last_refreshed_at: 3000,
+        refresh_status: "ok",
+        token_endpoint_auth_method: "client_secret_post",
+      };
+      mockFetchResponse(status);
+
+      const result = await client.getOAuthStatus("secret://gh");
+
+      expect(result).toEqual(status);
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/oauth/gh/status`);
+      expect(call[1].method).toBe("GET");
+    });
+
+    it("refreshOAuthToken posts to the refresh route and returns expires_at", async () => {
+      mockFetchResponse({ refreshed: true, expires_at: 1234 });
+
+      const result = await client.refreshOAuthToken("secret://proj/gh");
+
+      expect(result).toBe(1234);
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/oauth/proj%2Fgh/refresh`);
+      expect(call[1].method).toBe("POST");
+    });
+
+    it("refreshOAuthToken returns null when the route reports no expiry", async () => {
+      mockFetchResponse({ refreshed: true, expires_at: null });
+      expect(await client.refreshOAuthToken("secret://gh")).toBeNull();
+    });
+  });
+
+  describe("certificates", () => {
+    it("importCertificate posts { name, ...input } and maps secret_id to secretId", async () => {
+      mockFetchResponse({ handle: "secret://web", secret_id: "uuid-1" }, 201);
+
+      const result = await client.importCertificate("web", {
+        private_key_pem: "-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----",
+        certificate_pem: "-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----",
+        chain_pem: "-----BEGIN CERTIFICATE-----\ni\n-----END CERTIFICATE-----",
+        project: "proj",
+        auto_renew: true,
+        renew_before_days: 14,
+      });
+
+      expect(result).toEqual({ handle: "secret://web", secretId: "uuid-1" });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/certificates/import`);
+      expect(call[1].method).toBe("POST");
+      expect(JSON.parse(call[1].body as string)).toEqual({
+        name: "web",
+        private_key_pem: "-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----",
+        certificate_pem: "-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----",
+        chain_pem: "-----BEGIN CERTIFICATE-----\ni\n-----END CERTIFICATE-----",
+        project: "proj",
+        auto_renew: true,
+        renew_before_days: 14,
+      });
+    });
+
+    // auto_renew / renew_before_days carry schema defaults, so the caller may
+    // omit them — and the client must not invent values the route would then
+    // treat as a deliberate choice.
+    it("importCertificate omits the defaulted fields the caller left out", async () => {
+      mockFetchResponse({ handle: "secret://web", secret_id: "uuid-1" }, 201);
+
+      await client.importCertificate("web", {
+        private_key_pem: "-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----",
+        certificate_pem: "-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----",
+      });
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(call[1].body as string) as Record<string, unknown>;
+      expect(Object.keys(body).sort()).toEqual(["certificate_pem", "name", "private_key_pem"]);
+      expect("auto_renew" in body).toBe(false);
+      expect("renew_before_days" in body).toBe(false);
+    });
+
+    it("generateCsr posts { name, ...input } and maps csr_pem to csrPem", async () => {
+      mockFetchResponse(
+        { handle: "secret://web", csr_pem: "-----BEGIN CERTIFICATE REQUEST-----\nr\n" },
+        201,
+      );
+
+      const result = await client.generateCsr("web", {
+        subject: "web.example.com",
+        sans: ["www.example.com"],
+        algorithm: "rsa",
+        bits: 4096,
+        project: "proj",
+      });
+
+      expect(result).toEqual({
+        handle: "secret://web",
+        csrPem: "-----BEGIN CERTIFICATE REQUEST-----\nr\n",
+      });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/certificates/csr`);
+      expect(JSON.parse(call[1].body as string)).toEqual({
+        name: "web",
+        subject: "web.example.com",
+        sans: ["www.example.com"],
+        algorithm: "rsa",
+        bits: 4096,
+        project: "proj",
+      });
+    });
+
+    it("renewCertificate posts http_port to the renew route", async () => {
+      const status = {
+        secret_id: "uuid-1",
+        subject: "CN=web.example.com",
+        issuer: "CN=Test CA",
+        not_before: 1000,
+        not_after: 2000,
+        auto_renew: true,
+        renewal_status: "ok",
+      };
+      mockFetchResponse(status);
+
+      const result = await client.renewCertificate("secret://web", { httpPort: 8080 });
+
+      expect(result).toEqual(status);
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/certificates/web/renew`);
+      expect(call[1].method).toBe("POST");
+      expect(JSON.parse(call[1].body as string)).toEqual({ http_port: 8080 });
+    });
+
+    // The route reads its body with c.req.json(), so a body must always be
+    // sent — the port is simply absent from it.
+    it("renewCertificate still sends a JSON body when no options are given", async () => {
+      mockFetchResponse({ renewal_status: "ok" });
+      await client.renewCertificate("secret://web");
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(JSON.parse(call[1].body as string)).toEqual({});
+    });
+
+    it("getCertificateStatus sends GET /api/v1/certificates/:handle/status", async () => {
+      mockFetchResponse({ secret_id: "uuid-1", renewal_status: "expiring_soon" });
+
+      const result = await client.getCertificateStatus("secret://web");
+
+      expect(result.renewal_status).toBe("expiring_soon");
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/certificates/web/status`);
+      expect(call[1].method).toBe("GET");
+    });
+  });
+
   describe("error handling", () => {
     it("maps error responses to VaultError with correct code", async () => {
       fetchSpy.mockResolvedValueOnce({

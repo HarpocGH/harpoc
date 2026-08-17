@@ -47,6 +47,8 @@ function createMockEngine() {
     useSecret: vi.fn().mockResolvedValue({ type: "http", status: 200 }),
     resolveSecretId: vi.fn().mockResolvedValue("uuid-1"),
     queryAudit: vi.fn().mockReturnValue([]),
+    getOAuthTokenStatus: vi.fn().mockReturnValue({ secret_id: "uuid-1" }),
+    getCertificateStatus: vi.fn().mockReturnValue({ secret_id: "uuid-1" }),
   };
 }
 
@@ -129,6 +131,32 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
     expect(overflow.status).toBe(429);
     // Well below the global allowance: this is the per-secret bucket talking.
     expect(RATE_LIMIT_PER_SECRET + 1).toBeLessThan(RATE_LIMIT_GLOBAL);
+  });
+
+  /**
+   * T10 (REST half): the route's own `limiter.checkSecret(...)` call runs
+   * regardless of whether `createRateLimitMiddleware` is registered for the
+   * prefix — it would still 429 a lone handle hammered past
+   * `RATE_LIMIT_PER_SECRET` even with the `app.use(...)` registration
+   * deleted, so a per-secret hammer proves nothing about that registration.
+   * What the registration alone controls is the *global* bucket: draining it
+   * through an unrelated route only 429s these two routes next if they still
+   * run through `createRateLimitMiddleware`. Guard-flip-verified: deleting
+   * the `/api/v1/certificates/*` registration in app.ts turns this red
+   * (200, not 429) and was restored after confirming that.
+   */
+  it("draining the global bucket 429s the OAuth and certificates status routes", async () => {
+    const instance = app();
+
+    expect(await hammer(instance, "/api/v1/secrets", RATE_LIMIT_GLOBAL)).toBe(200);
+
+    const oauthOverflow = await instance.request("/api/v1/oauth/k/status", { headers: AUTH });
+    expect(oauthOverflow.status).toBe(429);
+
+    const certOverflow = await instance.request("/api/v1/certificates/k/status", {
+      headers: AUTH,
+    });
+    expect(certOverflow.status).toBe(429);
   });
 
   it("use carries its own, higher tier", async () => {

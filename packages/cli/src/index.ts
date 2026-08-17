@@ -27,6 +27,7 @@ import { registerPolicyListCommand } from "./commands/policy/list.js";
 import { registerOAuthConnectCommand } from "./commands/oauth/connect.js";
 import { registerOAuthStatusCommand } from "./commands/oauth/status.js";
 import { registerOAuthRefreshCommand } from "./commands/oauth/refresh.js";
+import { registerOAuthProvidersCommand } from "./commands/oauth/providers.js";
 import { registerCertImportCommand } from "./commands/cert/import.js";
 import { registerCertStatusCommand } from "./commands/cert/status.js";
 import { registerCertCsrCommand } from "./commands/cert/csr.js";
@@ -77,6 +78,7 @@ const oauth = program.command("oauth").description("Connect and manage OAuth pro
 registerOAuthConnectCommand(oauth);
 registerOAuthStatusCommand(oauth);
 registerOAuthRefreshCommand(oauth);
+registerOAuthProvidersCommand(oauth);
 
 // cert subcommands
 const cert = program.command("cert").description("Manage certificate secrets");

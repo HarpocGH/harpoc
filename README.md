@@ -197,6 +197,8 @@ npx harpoc oauth connect m2m-token --provider custom --client-id <CLIENT_ID> \
   --token-endpoint https://auth.example.com/token --client-credentials
 ```
 
+`npx harpoc oauth providers` lists the built-in presets with the endpoints and default scopes they supply (`--json` for exact output) — static data, so it needs neither an unlocked vault nor a token.
+
 The client secret is never passed via argv: set `HARPOC_OAUTH_CLIENT_SECRET` or enter it at the hidden prompt (leave empty for a public client). The token-endpoint auth method chosen at connect time (`--auth-method client_secret_basic` sends credentials in the `Authorization` header, never the request body) is stored with the secret and honored by every later refresh. Inspect and maintain tokens with `harpoc oauth status <handle>` and `harpoc oauth refresh <handle>`, or refresh them continuously in a long-lived server:
 
 ```bash
@@ -222,7 +224,16 @@ npx harpoc cert renew secret://web-cert
 npx harpoc cert status secret://web-cert
 ```
 
-Private keys are stored under the vault's own encryption and never travel via argv — `cert import --key` reads the PEM from a file, and a passphrase-protected key prompts once for the passphrase and is decrypted in memory at import (the same path as `secret set --from-file`). Each certificate gets its own ACME account, stored encrypted alongside it; `--dns` selects dns-01 instead of the http-01 responder and prints the TXT record for you to place manually. `--auto-renew` records the intent but does not renew on its own — no renewal daemon ships yet, so run `harpoc cert renew <handle>` (from cron, a timer, or by hand) until one does.
+Private keys are stored under the vault's own encryption and never travel via argv — `cert import --key` reads the PEM from a file, and a passphrase-protected key prompts once for the passphrase and is decrypted in memory at import (the same path as `secret set --from-file`). Each certificate gets its own ACME account, stored encrypted alongside it; `--dns` selects dns-01 instead of the http-01 responder and prints the TXT record for you to place manually.
+
+Renew continuously in a long-lived process — alongside any server, or standalone as a renewal daemon:
+
+```bash
+npx harpoc server start --rest --cert-renew   # or --cert-renew alone as a renewal daemon
+npx harpoc server start --cert-renew --cert-renew-port 8080
+```
+
+The scheduler checks hourly (the first tick one interval after start) and renews **only** certificates created with `--auto-renew`, and only once they are inside their `--renew-before-days` window (default 30). `--cert-renew-port` (default 80, requires `--cert-renew`) is the port the http-01 responder binds for the duration of a renewal. A failed renewal is audited as a failed `cert.renew`, warned on stderr, and quarantined with exponential backoff; an in-flight renewal is drained on shutdown before the vault seals. Without the daemon, `harpoc cert renew <handle>` (from cron, a timer, or by hand) remains the only thing that renews.
 
 ## Development
 

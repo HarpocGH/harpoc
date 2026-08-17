@@ -1,5 +1,7 @@
 import { serve } from "@hono/node-server";
 import type { VaultEngine } from "@harpoc/core";
+import type { CertManager } from "@harpoc/cert-manager";
+import type { OAuthManager } from "@harpoc/oauth-proxy";
 import { VaultState } from "@harpoc/shared";
 import { createApp } from "./app.js";
 
@@ -8,6 +10,9 @@ export interface ServerOptions {
   port?: number;
   /** Bind address. Loopback by default (thesis §4.1); override for shared/team deployments. */
   hostname?: string;
+  /** Optional managers; `createApp` constructs REST-appropriate defaults otherwise. */
+  oauthManager?: OAuthManager;
+  certManager?: CertManager;
 }
 
 export function startServer(options: ServerOptions): ReturnType<typeof serve> {
@@ -23,7 +28,7 @@ export function startServer(options: ServerOptions): ReturnType<typeof serve> {
     );
   }
 
-  const app = createApp(engine);
+  const app = createApp(engine, options);
 
   const server = serve({ fetch: app.fetch, port, hostname });
   console.log(`[harpoc] REST API listening on ${hostname}:${port}`);

@@ -10,6 +10,10 @@ const {
   mockRestServer,
   mockScheduler,
   schedulerCtorCalls,
+  mockCertManager,
+  certManagerCtorCalls,
+  mockRenewalScheduler,
+  renewalSchedulerCtorCalls,
 } = vi.hoisted(() => ({
   mockEngine: {
     destroy: vi.fn().mockResolvedValue(undefined),
@@ -32,6 +36,19 @@ const {
     stop: vi.fn(),
   },
   schedulerCtorCalls: [] as { engine: unknown; options: Record<string, unknown> }[],
+  mockCertManager: {
+    renewCertificate: vi.fn().mockResolvedValue(undefined),
+  },
+  certManagerCtorCalls: [] as { engine: unknown }[],
+  mockRenewalScheduler: {
+    start: vi.fn(),
+    stop: vi.fn(),
+  },
+  renewalSchedulerCtorCalls: [] as {
+    engine: unknown;
+    renewer: unknown;
+    options: Record<string, unknown>;
+  }[],
 }));
 
 // ── Module mocks ───────────────────────────────────────────────────
@@ -59,6 +76,23 @@ vi.mock("@harpoc/oauth-proxy", () => ({
     schedulerCtorCalls.push({ engine, options: options as Record<string, unknown> });
     return mockScheduler;
   }),
+}));
+
+vi.mock("@harpoc/cert-manager", () => ({
+  CertManager: vi.fn().mockImplementation((engine: unknown) => {
+    certManagerCtorCalls.push({ engine });
+    return mockCertManager;
+  }),
+  RenewalScheduler: vi
+    .fn()
+    .mockImplementation((engine: unknown, renewer: unknown, options: unknown) => {
+      renewalSchedulerCtorCalls.push({
+        engine,
+        renewer,
+        options: options as Record<string, unknown>,
+      });
+      return mockRenewalScheduler;
+    }),
 }));
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -91,6 +125,8 @@ describe("server start", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     schedulerCtorCalls.length = 0;
+    certManagerCtorCalls.length = 0;
+    renewalSchedulerCtorCalls.length = 0;
     priorSigintListeners = process.listeners("SIGINT");
     priorSigtermListeners = process.listeners("SIGTERM");
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
@@ -118,7 +154,7 @@ describe("server start", () => {
     await expect(run([])).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(errorSpy).toHaveBeenCalledWith(
-      "Error: At least one of --mcp, --mcp-http, --rest or --oauth-refresh is required.",
+      "Error: At least one of --mcp, --mcp-http, --rest, --oauth-refresh or --cert-renew is required.",
     );
   });
 
@@ -510,6 +546,154 @@ describe("server start", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     // The store must stay open while a rotated token may still arrive —
     // pre-fix, shutdown fired stop() without awaiting the drain.
+    expect(mockEngine.destroy).not.toHaveBeenCalled();
+
+    releaseDrain();
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+
+    onSpy.mockRestore();
+  });
+
+  // ── Certificate renewal scheduler ───────────────────────────────
+
+  it("--cert-renew alone is a valid start mode and starts the scheduler", async () => {
+    const { CertManager, RenewalScheduler } = await import("@harpoc/cert-manager");
+
+    await run(["--cert-renew"]);
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(CertManager).toHaveBeenCalledTimes(1);
+    expect(certManagerCtorCalls[0]?.engine).toBe(mockEngine);
+    expect(RenewalScheduler).toHaveBeenCalledTimes(1);
+    expect(renewalSchedulerCtorCalls[0]?.engine).toBe(mockEngine);
+    expect(mockRenewalScheduler.start).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("certificate renewal scheduler running"),
+    );
+  });
+
+  it("threads the default httpPort 80 into renewCertificate", async () => {
+    await run(["--cert-renew"]);
+
+    const renewer = renewalSchedulerCtorCalls[0]?.renewer as {
+      renewCertificate: (secretId: string) => Promise<unknown>;
+    };
+    await renewer.renewCertificate("sid-1");
+
+    expect(mockCertManager.renewCertificate).toHaveBeenCalledWith("sid-1", { httpPort: 80 });
+  });
+
+  it("--cert-renew-port 8080 threads httpPort 8080 into renewCertificate", async () => {
+    await run(["--cert-renew", "--cert-renew-port", "8080"]);
+
+    const renewer = renewalSchedulerCtorCalls[0]?.renewer as {
+      renewCertificate: (secretId: string) => Promise<unknown>;
+    };
+    await renewer.renewCertificate("sid-1");
+
+    expect(mockCertManager.renewCertificate).toHaveBeenCalledWith("sid-1", { httpPort: 8080 });
+  });
+
+  it("exits with error when --cert-renew-port is given without --cert-renew", async () => {
+    await expect(run(["--rest", "--cert-renew-port", "8080"])).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--cert-renew-port requires --cert-renew"),
+    );
+  });
+
+  it("exits with error for an invalid --cert-renew-port before loading the vault", async () => {
+    const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+    await expect(run(["--cert-renew", "--cert-renew-port", "abc"])).rejects.toThrow("process.exit");
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid"));
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+  });
+
+  it("--rest alone does not construct a renewal scheduler (negative control)", async () => {
+    const { RenewalScheduler } = await import("@harpoc/cert-manager");
+
+    await run(["--rest"]);
+
+    expect(RenewalScheduler).not.toHaveBeenCalled();
+    expect(mockRenewalScheduler.start).not.toHaveBeenCalled();
+  });
+
+  it("onRenewError prints a Warning: line to stderr", async () => {
+    await run(["--cert-renew"]);
+
+    const options = renewalSchedulerCtorCalls[0]?.options as {
+      onRenewError: (secretId: string, err: unknown) => void;
+    };
+    options.onRenewError("secret-1", new Error("CA unreachable"));
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Warning: certificate renewal failed (secret-1): CA unreachable",
+    );
+  });
+
+  it("onRenewError is suppressed once shutdown began", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    exitSpy.mockImplementation(() => undefined as never);
+
+    await run(["--cert-renew"]);
+    const options = renewalSchedulerCtorCalls[0]?.options as {
+      onRenewError: (secretId: string, err: unknown) => void;
+    };
+
+    const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
+    (sigintCall?.[1] as () => void)();
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+
+    errorSpy.mockClear();
+    options.onRenewError("secret-1", new Error("vault locked"));
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Warning:"));
+
+    onSpy.mockRestore();
+  });
+
+  it("SIGINT shutdown stops the renewal scheduler before destroying the engine", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    exitSpy.mockImplementation(() => undefined as never);
+
+    await run(["--cert-renew"]);
+
+    const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
+    expect(sigintCall).toBeDefined();
+    (sigintCall?.[1] as () => void)();
+
+    await vi.waitFor(() => {
+      expect(exitSpy).toHaveBeenCalledWith(0);
+    });
+    expect(mockRenewalScheduler.stop).toHaveBeenCalledTimes(1);
+    const stopOrder = mockRenewalScheduler.stop.mock.invocationCallOrder[0] as number;
+    const destroyOrder = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+    expect(stopOrder).toBeLessThan(destroyOrder);
+
+    onSpy.mockRestore();
+  });
+
+  it("shutdown awaits the renewal scheduler drain before destroying the engine", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    exitSpy.mockImplementation(() => undefined as never);
+    let releaseDrain: () => void = () => {};
+    mockRenewalScheduler.stop.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        releaseDrain = resolve;
+      }),
+    );
+
+    await run(["--cert-renew"]);
+    const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
+    (sigintCall?.[1] as () => void)();
+
+    await vi.waitFor(() => expect(mockRenewalScheduler.stop).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // An order abandoned between issuance and storage is lost for good —
+    // the store must stay open while a renewal may still be settling.
     expect(mockEngine.destroy).not.toHaveBeenCalled();
 
     releaseDrain();

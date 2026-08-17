@@ -46,11 +46,39 @@ describe("sdk", () => {
     });
   });
 
+  /**
+   * D4: the OAuth and certificate peers follow @harpoc/core — optional peers,
+   * loaded by `import()` only when an OAuth/cert method is actually called, so
+   * a REST-mode (or plain secrets) embedding resolves neither. Their specifiers
+   * *do* appear as strings in dist (that is what a dynamic import compiles to),
+   * so only the resolve-hook tripwire below can pin this — deliberately no
+   * string-absence assertion for these two.
+   */
+  describe("the OAuth and certificate peers stay lazy", () => {
+    const pkgJson = JSON.parse(readFileSync(resolve(pkgRoot, "package.json"), "utf-8")) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+      peerDependencies?: Record<string, string>;
+      peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+    };
+
+    for (const peer of ["@harpoc/oauth-proxy", "@harpoc/cert-manager"]) {
+      it(`declares ${peer} as an optional peer, never a runtime dependency`, () => {
+        expect(pkgJson.dependencies?.[peer]).toBeUndefined();
+        expect(pkgJson.peerDependencies?.[peer]).toBeDefined();
+        expect(pkgJson.peerDependenciesMeta?.[peer]?.optional).toBe(true);
+        expect(pkgJson.devDependencies?.[peer]).toBe("workspace:*");
+      });
+    }
+  });
+
   describeRuntimeDependencyConfinement({
     entryUrl: pathToFileURL(resolve(distDir, "index.js")).href,
     cwd: pkgRoot,
     forbidden: [
       "@harpoc/core",
+      "@harpoc/oauth-proxy",
+      "@harpoc/cert-manager",
       "@modelcontextprotocol",
       "argon2",
       "better-sqlite3",

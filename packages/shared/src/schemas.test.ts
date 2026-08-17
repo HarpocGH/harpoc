@@ -9,6 +9,7 @@ import {
   createSecretInputSchema,
   databaseActionSchema,
   followRedirectsSchema,
+  generateCsrRequestSchema,
   handleSchema,
   healthResponseSchema,
   httpActionSchema,
@@ -25,6 +26,7 @@ import {
   permissionSchema,
   principalTypeSchema,
   processActionSchema,
+  renewCertificateRequestSchema,
   responseModeSchema,
   secretStatusSchema,
   secretTypeSchema,
@@ -1322,10 +1324,20 @@ describe("certificateImportSchema", () => {
   const validPem = "-----BEGIN PRIVATE KEY-----\nMIIEvQ...\n-----END PRIVATE KEY-----";
   const validCertPem = "-----BEGIN CERTIFICATE-----\nMIIEvQ...\n-----END CERTIFICATE-----";
 
-  it("accepts valid minimal input", () => {
+  it("rejects a missing certificate_pem", () => {
+    expect(() =>
+      certificateImportSchema.parse({
+        name: "my-cert",
+        private_key_pem: validPem,
+      }),
+    ).toThrow();
+  });
+
+  it("accepts valid minimal input with certificate_pem", () => {
     const result = certificateImportSchema.parse({
       name: "my-cert",
       private_key_pem: validPem,
+      certificate_pem: validCertPem,
     });
     expect(result.name).toBe("my-cert");
     expect(result.auto_renew).toBe(false);
@@ -1352,6 +1364,7 @@ describe("certificateImportSchema", () => {
       certificateImportSchema.parse({
         name: "my-cert",
         private_key_pem: "not-a-pem-value",
+        certificate_pem: validCertPem,
       }),
     ).toThrow();
   });
@@ -1361,6 +1374,7 @@ describe("certificateImportSchema", () => {
       certificateImportSchema.parse({
         name: "my-cert",
         private_key_pem: "",
+        certificate_pem: validCertPem,
       }),
     ).toThrow();
   });
@@ -1370,6 +1384,7 @@ describe("certificateImportSchema", () => {
       certificateImportSchema.parse({
         name: "has space",
         private_key_pem: validPem,
+        certificate_pem: validCertPem,
       }),
     ).toThrow();
   });
@@ -1379,6 +1394,7 @@ describe("certificateImportSchema", () => {
       certificateImportSchema.parse({
         name: "my-cert",
         private_key_pem: validPem,
+        certificate_pem: validCertPem,
         renew_before_days: 366,
       }),
     ).toThrow();
@@ -1389,6 +1405,7 @@ describe("certificateImportSchema", () => {
       certificateImportSchema.parse({
         name: "my-cert",
         private_key_pem: validPem,
+        certificate_pem: validCertPem,
         renew_before_days: 0,
       }),
     ).toThrow();
@@ -1398,6 +1415,7 @@ describe("certificateImportSchema", () => {
     const result = certificateImportSchema.parse({
       name: "my-cert",
       private_key_pem: validPem,
+      certificate_pem: validCertPem,
       renew_before_days: 1,
     });
     expect(result.renew_before_days).toBe(1);
@@ -1407,6 +1425,7 @@ describe("certificateImportSchema", () => {
     const result = certificateImportSchema.parse({
       name: "my-cert",
       private_key_pem: validPem,
+      certificate_pem: validCertPem,
       renew_before_days: 365,
     });
     expect(result.renew_before_days).toBe(365);
@@ -1420,6 +1439,52 @@ describe("certificateImportSchema", () => {
         certificate_pem: "not-pem",
       }),
     ).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// generateCsrRequestSchema / renewCertificateRequestSchema
+// ---------------------------------------------------------------------------
+
+describe("generateCsrRequestSchema", () => {
+  it("accepts a minimal EC request (default algorithm)", () => {
+    const r = generateCsrRequestSchema.safeParse({ name: "web-cert", subject: "example.com" });
+    expect(r.success).toBe(true);
+  });
+  it("accepts bits with algorithm rsa", () => {
+    expect(
+      generateCsrRequestSchema.safeParse({
+        name: "web-cert",
+        subject: "example.com",
+        algorithm: "rsa",
+        bits: 4096,
+      }).success,
+    ).toBe(true);
+  });
+  it("refuses bits without algorithm rsa (the CLI's pairing rule)", () => {
+    expect(
+      generateCsrRequestSchema.safeParse({ name: "web-cert", subject: "example.com", bits: 2048 })
+        .success,
+    ).toBe(false);
+  });
+  it("refuses curve with algorithm rsa", () => {
+    expect(
+      generateCsrRequestSchema.safeParse({
+        name: "web-cert",
+        subject: "example.com",
+        algorithm: "rsa",
+        curve: "P-256",
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("renewCertificateRequestSchema", () => {
+  it("accepts an empty body and a valid port; refuses port 0 and 65536", () => {
+    expect(renewCertificateRequestSchema.safeParse({}).success).toBe(true);
+    expect(renewCertificateRequestSchema.safeParse({ http_port: 8080 }).success).toBe(true);
+    expect(renewCertificateRequestSchema.safeParse({ http_port: 0 }).success).toBe(false);
+    expect(renewCertificateRequestSchema.safeParse({ http_port: 65536 }).success).toBe(false);
   });
 });
 

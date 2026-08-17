@@ -1,3 +1,5 @@
+import { isEncryptedPrivateKeyPem } from "@harpoc/shared";
+
 /**
  * Armor/header detection shared by the import-time classifier
  * (key-import.ts) and the use-time loader guard (key-loader.ts) — a single
@@ -11,9 +13,14 @@ export const LEGACY_KEY_ARMOR = /-----BEGIN (?:RSA|EC|DSA) PRIVATE KEY-----/;
 export const ANY_KEY_ARMOR = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
 export const LEGACY_ENCRYPTED_HEADER = /Proc-Type:\s*4\s*,\s*ENCRYPTED/i;
 
-/** True when the PEM text carries an encrypted PKCS#8 armor or a legacy encryption header. */
+/**
+ * True when the PEM text carries an encrypted PKCS#8 armor or a legacy
+ * encryption header. Delegates to `@harpoc/shared`'s `isEncryptedPrivateKeyPem`,
+ * which is the single source of truth for this predicate (Phase 10, D5) —
+ * kept as a re-export here so core call sites are untouched.
+ */
 export function hasEncryptedPemMarker(pem: string): boolean {
-  return pem.includes(PKCS8_ENCRYPTED_ARMOR) || LEGACY_ENCRYPTED_HEADER.test(pem);
+  return isEncryptedPrivateKeyPem(pem);
 }
 
 const PEM_BLOCK_LABELS = /-----BEGIN ([A-Z0-9 ]+?)-----/g;

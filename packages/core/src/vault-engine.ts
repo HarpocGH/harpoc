@@ -7,6 +7,8 @@ import type {
   CertificateStatus,
   ConnectionConfig,
   CreateSecretResponse,
+  ExpiringCertificateInfo,
+  ExpiringOAuthTokenInfo,
   HttpResult,
   ImportCertificateOptions,
   InjectionPolicy,
@@ -129,6 +131,39 @@ interface UnlockedState {
   databaseInjector: DatabaseInjector;
   sshInjector: SshInjector;
   gitInjector: GitInjector;
+}
+
+const DAY_MS = 86_400_000;
+
+/**
+ * The renewal scheduler's wide net (renewal-scheduler.ts): one leap year, so no
+ * row can carry a `renew_before_days` wide enough to fall outside the query it
+ * is then filtered against.
+ */
+const EXPIRING_CERT_QUERY_DAYS = 366;
+
+/**
+ * The refresh state of an OAuth row, derived from the stored expiry alone.
+ * Shared by the per-secret status accessor and the expiring-token projection:
+ * two derivations would eventually disagree about what `expiring_soon` means.
+ */
+function computeOAuthRefreshStatus(row: OAuthTokenRow): OAuthTokenStatus["refresh_status"] {
+  const hasAccessToken = row.access_token_encrypted !== null;
+  const hasRefreshToken = row.refresh_token_encrypted !== null;
+  const expiresAt = row.access_token_expires_at;
+
+  if (!hasRefreshToken) return "no_refresh_token";
+  if (!hasAccessToken || (expiresAt !== null && expiresAt <= Date.now())) return "expired";
+  if (expiresAt !== null && expiresAt <= Date.now() + 5 * 60 * 1000) return "expiring_soon";
+  return "ok";
+}
+
+/** The certificate counterpart of {@link computeOAuthRefreshStatus}. */
+function computeCertificateRenewalStatus(row: CertificateRow): CertificateStatus["renewal_status"] {
+  if (!row.certificate_pem || row.not_after === null) return "no_certificate";
+  if (row.not_after <= Date.now()) return "expired";
+  if (row.not_after <= Date.now() + row.renew_before_days * DAY_MS) return "expiring_soon";
+  return "ok";
 }
 
 /**
@@ -1329,14 +1364,55 @@ export class VaultEngine {
    * and the same secretId proceeds — so re-running `oauth connect` after a
    * cancelled/failed flow works. ACTIVE or non-OAuth collisions stay
    * DUPLICATE_SECRET.
+   *
+   * `caller` is attribution only, exactly as on `createSecret`: `create` is not
+   * grantable per secret (W2), so token scope governs it — but without the
+   * caller a token-bearing connect wrote NULL-principal rows, which is the
+   * documented marker for the *trusted local path* (L3), so a REST/MCP/CLI-token
+   * connect was indistinguishable from a local one in the trail (V2 attribution
+   * parity). `oauth.authorize` is this operation's own row and carries the
+   * attribution on both the fresh-create and the resume path; refusals are
+   * audited as a failed `oauth.authorize`, like `refreshOAuthToken` audits its
+   * own.
    */
   async createOAuthSecret(
     name: string,
     providerConfig: OAuthProviderConfig,
     project?: string,
+    caller?: CallerContext,
   ): Promise<{ handle: string; secretId: string }> {
     const s = this.assertUnlocked();
+    let secretId: string | undefined;
+    try {
+      return await this.doCreateOAuthSecret(
+        s,
+        name,
+        providerConfig,
+        (id) => (secretId = id),
+        project,
+        caller,
+      );
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.OAUTH_AUTHORIZE,
+        err,
+        { name, provider: providerConfig.provider, grant_type: providerConfig.grant_type },
+        secretId,
+        caller,
+      );
+      throw err;
+    }
+  }
 
+  private async doCreateOAuthSecret(
+    s: UnlockedState,
+    name: string,
+    providerConfig: OAuthProviderConfig,
+    onResolved: (secretId: string) => void,
+    project?: string,
+    caller?: CallerContext,
+  ): Promise<{ handle: string; secretId: string }> {
     let handle: string;
     let resumed = false;
     try {
@@ -1365,6 +1441,7 @@ export class VaultEngine {
     }
 
     const secret = await s.secretManager.resolveHandle(handle);
+    onResolved(secret.id);
 
     // Encrypt client_id with KEK
     const clientIdBytes = new Uint8Array(Buffer.from(providerConfig.client_id, "utf8"));
@@ -1411,11 +1488,14 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.OAUTH_AUTHORIZE,
         secretId: secret.id,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
         detail: {
           handle,
           provider: providerConfig.provider,
           grant_type: providerConfig.grant_type,
           ...(resumed ? { resumed: true } : {}),
+          ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
       });
@@ -1707,29 +1787,14 @@ export class VaultEngine {
 
     const secret = s.store.getSecret(secretId);
 
-    const hasAccessToken = oauthRow.access_token_encrypted !== null;
-    const hasRefreshToken = oauthRow.refresh_token_encrypted !== null;
-    const expiresAt = oauthRow.access_token_expires_at;
-
-    let refreshStatus: OAuthTokenStatus["refresh_status"];
-    if (!hasRefreshToken) {
-      refreshStatus = "no_refresh_token";
-    } else if (!hasAccessToken || (expiresAt !== null && expiresAt <= Date.now())) {
-      refreshStatus = "expired";
-    } else if (expiresAt !== null && expiresAt <= Date.now() + 5 * 60 * 1000) {
-      refreshStatus = "expiring_soon";
-    } else {
-      refreshStatus = "ok";
-    }
-
     return {
       secret_id: secretId,
       provider: oauthRow.provider as OAuthProviderPreset,
-      has_access_token: hasAccessToken,
-      access_token_expires_at: expiresAt,
-      has_refresh_token: hasRefreshToken,
+      has_access_token: oauthRow.access_token_encrypted !== null,
+      access_token_expires_at: oauthRow.access_token_expires_at,
+      has_refresh_token: oauthRow.refresh_token_encrypted !== null,
       last_refreshed_at: secret?.updated_at ?? null,
-      refresh_status: refreshStatus,
+      refresh_status: computeOAuthRefreshStatus(oauthRow),
       token_endpoint_auth_method:
         oauthRow.token_endpoint_auth_method === "client_secret_basic" ||
         oauthRow.token_endpoint_auth_method === "client_secret_post"
@@ -1851,6 +1916,40 @@ export class VaultEngine {
   getExpiringOAuthTokens(withinMs: number): OAuthTokenRow[] {
     const s = this.assertUnlocked();
     return s.store.getExpiringOAuthTokens(withinMs);
+  }
+
+  /**
+   * Metadata-only projection of the expiring OAuth rows (D5): the row shape
+   * carries the encrypted client/token columns, so no interface outside core
+   * may see it — health surfaces get handle/name/project plus the derived
+   * refresh state and nothing else.
+   *
+   * Policy-filtered like `listSecrets` (W2) and silent for the same reason: a
+   * gated secret must not be recoverable from an expiry census, and enumeration
+   * writes no audit row. An absent caller is the trusted local path.
+   */
+  getExpiringOAuthTokenStatuses(
+    withinMs: number,
+    caller?: CallerContext,
+  ): ExpiringOAuthTokenInfo[] {
+    const s = this.assertUnlocked();
+    const infoById = this.secretInfoById(s, caller);
+
+    const out: ExpiringOAuthTokenInfo[] = [];
+    for (const row of s.store.getExpiringOAuthTokens(withinMs)) {
+      const info = infoById.get(row.secret_id);
+      if (!info) continue;
+      out.push({
+        handle: info.handle,
+        name: info.name,
+        project: info.project,
+        provider: row.provider as OAuthProviderPreset,
+        access_token_expires_at: row.access_token_expires_at,
+        has_refresh_token: row.refresh_token_encrypted !== null,
+        refresh_status: computeOAuthRefreshStatus(row),
+      });
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------------------
@@ -2156,17 +2255,6 @@ export class VaultEngine {
     const row = s.store.getCertificate(secretId);
     if (!row) throw VaultError.certNotConfigured();
 
-    let renewalStatus: CertificateStatus["renewal_status"];
-    if (!row.certificate_pem || row.not_after === null) {
-      renewalStatus = "no_certificate";
-    } else if (row.not_after <= Date.now()) {
-      renewalStatus = "expired";
-    } else if (row.not_after <= Date.now() + row.renew_before_days * 24 * 60 * 60 * 1000) {
-      renewalStatus = "expiring_soon";
-    } else {
-      renewalStatus = "ok";
-    }
-
     return {
       secret_id: secretId,
       subject: row.subject,
@@ -2174,7 +2262,7 @@ export class VaultEngine {
       not_before: row.not_before,
       not_after: row.not_after,
       auto_renew: row.auto_renew,
-      renewal_status: renewalStatus,
+      renewal_status: computeCertificateRenewalStatus(row),
     };
   }
 
@@ -2254,6 +2342,40 @@ export class VaultEngine {
   getExpiringCertificates(withinDays: number): CertificateRow[] {
     const s = this.assertUnlocked();
     return s.store.getExpiringCertificates(withinDays);
+  }
+
+  /**
+   * Metadata-only projection of the certificates inside their renewal window
+   * (D5) — the certificate counterpart of `getExpiringOAuthTokenStatuses`, and
+   * policy-filtered the same silent way.
+   *
+   * There is no window argument: the query casts the scheduler's wide net and
+   * each row is then judged against its own `renew_before_days`, so a census
+   * cannot report a certificate as expiring under a window its owner never set.
+   */
+  getExpiringCertificateStatuses(caller?: CallerContext): ExpiringCertificateInfo[] {
+    const s = this.assertUnlocked();
+    const infoById = this.secretInfoById(s, caller);
+    const now = Date.now();
+
+    const out: ExpiringCertificateInfo[] = [];
+    for (const row of s.store.getExpiringCertificates(EXPIRING_CERT_QUERY_DAYS)) {
+      if (row.not_after === null) continue;
+      if (row.not_after > now + row.renew_before_days * DAY_MS) continue;
+      const info = infoById.get(row.secret_id);
+      if (!info) continue;
+      out.push({
+        handle: info.handle,
+        name: info.name,
+        project: info.project,
+        subject: row.subject,
+        not_after: row.not_after,
+        auto_renew: row.auto_renew,
+        renew_before_days: row.renew_before_days,
+        renewal_status: computeCertificateRenewalStatus(row),
+      });
+    }
+    return out;
   }
 
   /**
@@ -2779,6 +2901,33 @@ export class VaultEngine {
       success: false,
       sessionId: this.sessionId ?? undefined,
     });
+  }
+
+  /**
+   * Every secret the caller may enumerate, keyed by internal id — the join
+   * table the row-shaped expiry accessors project through. Same filter as
+   * `listSecrets` (W2): `list`/`admin` over the caller's principal set, silent,
+   * and an absent caller (trusted local path) sees everything.
+   *
+   * Certificate and OAuth rows are keyed by secret id and carry no handle or
+   * name, so the metadata has to come from here; a missing entry means the
+   * caller may not enumerate that secret and the row is dropped.
+   */
+  private secretInfoById(s: UnlockedState, caller?: CallerContext): Map<string, SecretInfo> {
+    const entries = s.secretManager.listSecretsWithIds(undefined);
+    const permitted = caller
+      ? s.policyEngine.filterPermitted(
+          entries.map((entry) => entry.id),
+          this.callerPrincipals(caller),
+          "list",
+        )
+      : null;
+
+    const map = new Map<string, SecretInfo>();
+    for (const entry of entries) {
+      if (!permitted || permitted.has(entry.id)) map.set(entry.id, entry.info);
+    }
+    return map;
   }
 
   /**

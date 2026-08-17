@@ -121,7 +121,7 @@ describe("startMcpHttpServer", () => {
     expect(endpoint).toBe("/mcp");
   });
 
-  it("completes an initialize handshake and lists all 7 tools", async () => {
+  it("completes an initialize handshake and lists all 9 tools", async () => {
     const engine = mockEngine();
     const { port } = await start(engine);
 
@@ -134,8 +134,10 @@ describe("startMcpHttpServer", () => {
       "create_secret",
       "get_secret_info",
       "list_secrets",
+      "renew_certificate",
       "revoke_secret",
       "rotate_secret",
+      "start_oauth_flow",
       "use_secret",
     ]);
     expect(engine.verifyToken).toHaveBeenCalledWith(TOKEN);
@@ -347,7 +349,7 @@ describe("startMcpHttpServer", () => {
     expect(engine.listSecrets).not.toHaveBeenCalled();
 
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(9);
   });
 
   it("rejects unknown paths with 404", async () => {
@@ -402,8 +404,8 @@ describe("startMcpHttpServer", () => {
     clients.push(a.client, b.client);
 
     const [toolsA, toolsB] = await Promise.all([a.client.listTools(), b.client.listTools()]);
-    expect(toolsA.tools).toHaveLength(7);
-    expect(toolsB.tools).toHaveLength(7);
+    expect(toolsA.tools).toHaveLength(9);
+    expect(toolsB.tools).toHaveLength(9);
     expect(a.transport.sessionId).not.toBe(b.transport.sessionId);
   });
 

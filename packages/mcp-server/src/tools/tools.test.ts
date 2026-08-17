@@ -69,6 +69,8 @@ function mockEngine(): VaultEngine {
     resolveSecretId: vi.fn().mockResolvedValue("uuid-123"),
     getState: vi.fn().mockReturnValue("unlocked"),
     queryAudit: vi.fn().mockReturnValue([]),
+    getExpiringOAuthTokenStatuses: vi.fn().mockReturnValue([]),
+    getExpiringCertificateStatuses: vi.fn().mockReturnValue([]),
   } as unknown as VaultEngine;
 }
 
@@ -549,6 +551,140 @@ describe("MCP Tools", () => {
       const data = JSON.parse(getToolText(result));
       expect(data.total_secrets).toBe(1);
       expect(getToolText(result)).not.toContain("my-key");
+    });
+
+    function oauthItem(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
+      return {
+        handle: "secret://gh-token",
+        name: "gh-token",
+        project: null,
+        provider: "github",
+        access_token_expires_at: 1_000,
+        has_refresh_token: true,
+        refresh_status: "ok",
+        ...overrides,
+      };
+    }
+
+    function certItem(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
+      return {
+        handle: "secret://my-cert",
+        name: "my-cert",
+        project: null,
+        subject: "CN=example.com",
+        not_after: 2_000,
+        auto_renew: true,
+        renew_before_days: 30,
+        renewal_status: "expiring_soon",
+        ...overrides,
+      };
+    }
+
+    it("includes oauth_refresh_needed and certificates_nearing_renewal with the exact D5 key sets", async () => {
+      (engine.getExpiringOAuthTokenStatuses as ReturnType<typeof vi.fn>).mockReturnValue([
+        oauthItem(),
+      ]);
+      (engine.getExpiringCertificateStatuses as ReturnType<typeof vi.fn>).mockReturnValue([
+        certItem(),
+      ]);
+
+      const result = await callTool(server, "check_secret_health", {});
+      const data = JSON.parse(getToolText(result));
+
+      expect(data.oauth_refresh_needed).toHaveLength(1);
+      expect(Object.keys(data.oauth_refresh_needed[0]).sort()).toEqual([
+        "access_token_expires_at",
+        "handle",
+        "has_refresh_token",
+        "name",
+        "project",
+        "provider",
+        "refresh_status",
+      ]);
+      expect(data.certificates_nearing_renewal).toHaveLength(1);
+      expect(Object.keys(data.certificates_nearing_renewal[0]).sort()).toEqual([
+        "auto_renew",
+        "handle",
+        "name",
+        "not_after",
+        "project",
+        "renew_before_days",
+        "renewal_status",
+        "subject",
+      ]);
+    });
+
+    it("passes the scope guard's caller and a one-hour window to the engine projections", async () => {
+      const token = {
+        sub: "test",
+        vault_id: "v",
+        scope: ["list"] as const,
+        iat: 0,
+        exp: 9999999999,
+        jti: "j",
+      };
+      const guard = new ScopeGuard(token);
+      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      registerCheckHealth(srv, engine, guard, rateLimiter);
+
+      await callTool(srv, "check_secret_health", {});
+
+      expect(engine.getExpiringOAuthTokenStatuses).toHaveBeenCalledWith(
+        60 * 60 * 1000,
+        guard.caller,
+      );
+      expect(engine.getExpiringCertificateStatuses).toHaveBeenCalledWith(guard.caller);
+      expect(guard.caller).not.toBeUndefined();
+    });
+
+    it("a project-scoped token filters out-of-project oauth/cert items", async () => {
+      (engine.getExpiringOAuthTokenStatuses as ReturnType<typeof vi.fn>).mockReturnValue([
+        oauthItem({ handle: "secret://prod/gh-token", name: "gh-token", project: "prod" }),
+        oauthItem({ handle: "secret://dev/gh-token", name: "gh-token", project: "dev" }),
+      ]);
+      (engine.getExpiringCertificateStatuses as ReturnType<typeof vi.fn>).mockReturnValue([
+        certItem({ handle: "secret://prod/my-cert", name: "my-cert", project: "prod" }),
+        certItem({ handle: "secret://dev/my-cert", name: "my-cert", project: "dev" }),
+      ]);
+      const token = {
+        sub: "test",
+        vault_id: "v",
+        scope: ["list"] as const,
+        project: "prod",
+        iat: 0,
+        exp: 9999999999,
+        jti: "j",
+      };
+      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
+
+      const result = await callTool(srv, "check_secret_health", {});
+      const data = JSON.parse(getToolText(result));
+
+      expect(data.oauth_refresh_needed).toHaveLength(1);
+      expect(data.oauth_refresh_needed[0].handle).toBe("secret://prod/gh-token");
+      expect(data.certificates_nearing_renewal).toHaveLength(1);
+      expect(data.certificates_nearing_renewal[0].handle).toBe("secret://prod/my-cert");
+      expect(getToolText(result)).not.toContain("dev/");
+    });
+
+    it("args.handle narrows both oauth_refresh_needed and certificates_nearing_renewal", async () => {
+      (engine.getExpiringOAuthTokenStatuses as ReturnType<typeof vi.fn>).mockReturnValue([
+        oauthItem({ handle: "secret://a", name: "a" }),
+        oauthItem({ handle: "secret://b", name: "b" }),
+      ]);
+      (engine.getExpiringCertificateStatuses as ReturnType<typeof vi.fn>).mockReturnValue([
+        certItem({ handle: "secret://a", name: "a" }),
+        certItem({ handle: "secret://b", name: "b" }),
+      ]);
+
+      const result = await callTool(server, "check_secret_health", { handle: "secret://a" });
+      const data = JSON.parse(getToolText(result));
+
+      expect(data.oauth_refresh_needed).toHaveLength(1);
+      expect(data.oauth_refresh_needed[0].handle).toBe("secret://a");
+      expect(data.certificates_nearing_renewal).toHaveLength(1);
+      expect(data.certificates_nearing_renewal[0].handle).toBe("secret://a");
     });
   });
 

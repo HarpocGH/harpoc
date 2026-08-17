@@ -6,7 +6,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, PrincipalType } from "@harpoc/shared";
-import type { OAuthProviderConfig, Permission } from "@harpoc/shared";
+import type { CallerContext, OAuthProviderConfig, Permission } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
@@ -200,6 +200,94 @@ describe("createOAuthSecret", () => {
     await expect(
       engine.createOAuthSecret("api-col", defaultProviderConfig()),
     ).rejects.toMatchObject({ code: ErrorCode.DUPLICATE_SECRET });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createOAuthSecret — caller attribution (V2 parity)
+// ---------------------------------------------------------------------------
+
+describe("createOAuthSecret — caller attribution", () => {
+  const caller: CallerContext = {
+    principal_type: PrincipalType.AGENT,
+    principal_id: "tok-sub",
+    interface: "rest",
+  };
+
+  beforeEach(async () => {
+    await engine.initVault("password");
+  });
+
+  it("stamps the principal and interface on the oauth.authorize row", async () => {
+    await engine.createOAuthSecret("attributed", defaultProviderConfig(), undefined, caller);
+
+    const events = engine.queryAudit({ eventType: AuditEventType.OAUTH_AUTHORIZE });
+    expect(events).toHaveLength(1);
+    expect(events[0]?.success).toBe(true);
+    expect(events[0]?.principal_type).toBe(PrincipalType.AGENT);
+    expect(events[0]?.principal_id).toBe("tok-sub");
+    expect(events[0]?.detail).toMatchObject({ interface: "rest" });
+  });
+
+  it("attribution alone does not gate the create (create is not grantable per secret, W2)", async () => {
+    const { handle, secretId } = await engine.createOAuthSecret(
+      "ungated",
+      defaultProviderConfig(),
+      undefined,
+      caller,
+    );
+
+    expect(handle).toBe("secret://ungated");
+    expect(engine.getOAuthTokenStatus(secretId).provider).toBe("github");
+  });
+
+  it("the resume path returns the same handle and attributes the resumed row", async () => {
+    const first = await engine.createOAuthSecret("resume-attributed", defaultProviderConfig());
+    const second = await engine.createOAuthSecret(
+      "resume-attributed",
+      defaultProviderConfig(),
+      undefined,
+      caller,
+    );
+
+    expect(second.handle).toBe(first.handle);
+    expect(second.secretId).toBe(first.secretId);
+
+    // queryAudit returns newest-first: [0] is the attributed resume, [1] the
+    // callerless original, whose NULL principal marks the trusted local path.
+    const events = engine.queryAudit({ eventType: AuditEventType.OAUTH_AUTHORIZE });
+    expect(events).toHaveLength(2);
+    expect(events[0]?.principal_id).toBe("tok-sub");
+    expect(events[0]?.detail).toMatchObject({ resumed: true, interface: "rest" });
+    expect(events[1]?.principal_id).toBeNull();
+  });
+
+  it("audits the refusal under the caller when the name collides with an ACTIVE secret", async () => {
+    const { secretId } = await engine.createOAuthSecret("denied-col", defaultProviderConfig());
+    await engine.completeOAuthFlow(secretId, "access-tok");
+
+    await expect(
+      engine.createOAuthSecret("denied-col", defaultProviderConfig(), undefined, caller),
+    ).rejects.toMatchObject({ code: ErrorCode.DUPLICATE_SECRET });
+
+    const denials = engine
+      .queryAudit({ eventType: AuditEventType.OAUTH_AUTHORIZE })
+      .filter((e) => !e.success);
+    expect(denials).toHaveLength(1);
+    expect(denials[0]?.principal_id).toBe("tok-sub");
+    expect(denials[0]?.detail).toMatchObject({
+      error: ErrorCode.DUPLICATE_SECRET,
+      interface: "rest",
+    });
+  });
+
+  it("a callerless create still writes a NULL-principal row (trusted local path)", async () => {
+    await engine.createOAuthSecret("local-path", defaultProviderConfig());
+
+    const events = engine.queryAudit({ eventType: AuditEventType.OAUTH_AUTHORIZE });
+    expect(events[0]?.principal_id).toBeNull();
+    expect(events[0]?.principal_type).toBeNull();
+    expect(events[0]?.detail?.interface).toBeUndefined();
   });
 });
 

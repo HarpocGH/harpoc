@@ -20,6 +20,8 @@
     "@harpoc/mcp-server": "workspace:*",
     "@harpoc/rest-api": "workspace:*",
     "@harpoc/sdk": "workspace:*",
+    "@harpoc/oauth-proxy": "workspace:*",
+    "@harpoc/cert-manager": "workspace:*",
     "@hono/node-server": "^1.14.0",
     "@modelcontextprotocol/sdk": "^1.27.1"
   },

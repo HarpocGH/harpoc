@@ -71,6 +71,10 @@ export function registerCreateSecret(
         }
         if (value) {
           try {
+            // Deliberately caller-less: setSecretValue enforces `rotate` for a
+            // token-derived caller, which a `create`-scoped token does not
+            // hold. This value-set is part of the creation the caller was
+            // already checked for, not a rotation.
             await engine.setSecretValue(result.handle, value);
           } finally {
             value.fill(0);

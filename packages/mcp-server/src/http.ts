@@ -5,11 +5,12 @@ import type { AddressInfo } from "node:net";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { CertManager } from "@harpoc/cert-manager";
 import type { VaultEngine } from "@harpoc/core";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { InjectionGuard } from "./guards/injection-guard.js";
 import { RateLimiter } from "./guards/rate-limiter.js";
-import { createMcpServer } from "./server.js";
+import { createDefaultOAuthManager, createMcpServer } from "./server.js";
 
 export const DEFAULT_MCP_HTTP_PORT = 3001;
 const DEFAULT_HOST = "127.0.0.1";
@@ -87,6 +88,8 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
   const sessions = new Map<string, McpHttpSession>();
   const rateLimiter = new RateLimiter();
   const injectionGuard = new InjectionGuard();
+  const oauthManager = createDefaultOAuthManager(engine);
+  const certManager = new CertManager(engine);
 
   const maxSessions = options.sessionLimits?.max ?? MAX_SESSIONS;
   const idleTtlMs = options.sessionLimits?.idleTtlMs ?? SESSION_IDLE_TTL_MS;
@@ -226,6 +229,8 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
         launchToken: token,
         rateLimiter,
         injectionGuard,
+        oauthManager,
+        certManager,
         accessInterface: "mcp-http",
       });
     } catch (err) {

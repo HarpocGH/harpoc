@@ -65,6 +65,8 @@ function mockEngine(): VaultEngine {
     ),
     getSecretInfo: vi.fn().mockResolvedValue(VISIBLE),
     getState: vi.fn().mockReturnValue("unlocked"),
+    getExpiringOAuthTokenStatuses: vi.fn().mockReturnValue([]),
+    getExpiringCertificateStatuses: vi.fn().mockReturnValue([]),
   } as unknown as VaultEngine;
 }
 

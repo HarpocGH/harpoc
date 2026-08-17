@@ -32,6 +32,34 @@ export async function callTool(
   );
 }
 
+export interface ToolDescriptor {
+  name: string;
+  description?: string;
+  inputSchema: { properties?: Record<string, unknown> };
+}
+
+/**
+ * List the registered tools via the same low-level hack. The advertised
+ * inputSchema is the agent-facing contract — what a model may be asked for —
+ * so a pin on its property names is a pin on that contract.
+ */
+export async function listTools(server: McpServer): Promise<ToolDescriptor[]> {
+  const lowLevel = (server as unknown as { server: { _requestHandlers: Map<string, unknown> } })
+    .server;
+  const handler = lowLevel._requestHandlers.get("tools/list") as (
+    req: { method: string; params: Record<string, never> },
+    extra: unknown,
+  ) => Promise<{ tools: ToolDescriptor[] }>;
+
+  if (!handler) throw new Error("No tools/list handler registered");
+
+  const result = await handler(
+    { method: "tools/list", params: {} },
+    { signal: new AbortController().signal, sessionId: "integration-test" },
+  );
+  return result.tools;
+}
+
 /**
  * Read an MCP resource via the low-level _requestHandlers hack.
  */
