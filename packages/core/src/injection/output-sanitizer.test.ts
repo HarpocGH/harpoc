@@ -204,6 +204,36 @@ describe("redactSecretEncodings — JSON escaping conventions (review 2026-08-14
   });
 });
 
+describe("redactSecretEncodings — backslash-probe wiring pins (review 2026-08-14, Task 2 deferred minor)", () => {
+  // Both backslash short-circuits skip escape-aware work when the probed
+  // string contains none. The probe must read the TEXT: a real credential
+  // almost never contains a backslash, so probing the SECRET instead would
+  // skip these passes for virtually every credential — silently disabling
+  // escape-tolerant redaction wholesale. The convention cases above catch
+  // that mutation only incidentally; these two exist to catch it by name.
+
+  it("the flat pass probes the text: an escaped occurrence of a backslash-free secret is redacted", () => {
+    const secret = "wiring-pin-token";
+    expect(secret).not.toContain("\\");
+    // Deliberately NOT a JSON document: on a parseable body the structural
+    // descent would decode the escape via JSON.parse and rescue a mis-wired
+    // flat pass, so only a non-JSON fixture makes this pin discriminate.
+    const body = "token=wiring-pin-tok\\u0065n";
+    expect(body).not.toContain(secret);
+    expect(redactSecretEncodings(body, secret)).toBe("token=[REDACTED]");
+  });
+
+  it("the descent gate probes the text: a nested occurrence of a backslash-free secret is redacted", () => {
+    const secret = 'wiring"pin-2';
+    expect(secret).not.toContain("\\");
+    // Two escape layers deep: the flat tolerant pass decodes only one, so the
+    // structural descent is the only path to this occurrence — a gate probing
+    // the (backslash-free) secret would never open it.
+    const body = JSON.stringify({ data: JSON.stringify({ echo: secret }) });
+    expect(redactSecretEncodings(body, secret)).not.toContain("pin-2");
+  });
+});
+
 describe("mapStringLeaves — JSON descent budget", () => {
   // An EXACT-match mapper, not a substring one. A substring mapper would rewrite
   // the word wherever it appears, including inside the serialized document at

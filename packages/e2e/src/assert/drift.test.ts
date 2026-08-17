@@ -65,6 +65,19 @@ describe("product/harness drift (decision D2)", () => {
     expect(escapeNonAscii("emoji-\u{1F600}-tail", false)).toContain("\\ud83d\\ude00");
   });
 
+  it("no convention degenerates to the identity over the corpus", () => {
+    // If an encoder silently became the identity, its bodies would carry the
+    // credential literally — vault and harness would both go green through the
+    // LITERAL path, and the two tests below would keep passing while no longer
+    // exercising that escaping direction at all (review 2026-08-14, Task 5
+    // deferred minor: previously verified by hand for v8 and php_ensure_ascii,
+    // pinned by nothing).
+    const degenerate = CONVENTIONS.filter(([, encode]) =>
+      SECRETS.every((s) => encode(s) === s),
+    ).map(([name]) => name);
+    expect(degenerate).toEqual([]);
+  });
+
   it("detects every form the vault redacts", () => {
     const blindSpots: string[] = [];
     for (const secret of SECRETS) {
