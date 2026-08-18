@@ -9,6 +9,7 @@ import type { CallerContext, CertificateStatus } from "@harpoc/shared";
 import { CertManager } from "./cert-manager.js";
 import type { CertificateEngine } from "./cert-manager.js";
 import { generateCertKeyPair } from "./key-pair.js";
+import type { KeyPairOptions } from "./key-pair.js";
 import { RenewalScheduler } from "./renewal-scheduler.js";
 
 interface ScriptedChallenge {
@@ -252,6 +253,15 @@ function storedAccount(engine: EngineMock): { privateKeyPem: string; accountUrl:
   const call = engine.storeAcmeAccount.mock.calls[0];
   if (call === undefined) throw new Error("storeAcmeAccount was not called");
   return JSON.parse(call[1]) as { privateKeyPem: string; accountUrl: string };
+}
+
+/**
+ * The generateCertKeyPair arguments in call order. `issueWithAcme` generates
+ * the certificate key first and the ACME account key second, so index 0 is the
+ * key the operator's flags govern and index 1 the one they must never reach.
+ */
+function keyPairCalls(): KeyPairOptions[] {
+  return vi.mocked(generateCertKeyPair).mock.calls.map((call) => call[0]);
 }
 
 function importOptions(engine: EngineMock): ImportOptions {
@@ -551,6 +561,38 @@ describe("CertManager", () => {
 
       expect(vi.mocked(generateCertKeyPair)).toHaveBeenCalledWith({ algorithm: "ec" });
       expect(storedAccount(engine).privateKeyPem).toContain("-----BEGIN PRIVATE KEY-----");
+    });
+
+    it("threads modulusLength through to the certificate key pair", async () => {
+      await manager.issueWithAcme("web", {
+        ...issueOptions,
+        algorithm: "rsa",
+        modulusLength: 4096,
+      });
+
+      const [certificateKey, accountKey] = keyPairCalls();
+      expect(certificateKey).toEqual({ algorithm: "rsa", modulusLength: 4096 });
+      // The account key is the manager's own material, not the subscriber's:
+      // an operator's key-strength request must not follow it (P-256 stays).
+      expect(accountKey).toEqual({ algorithm: "ec" });
+    });
+
+    it("threads namedCurve through to the certificate key pair", async () => {
+      await manager.issueWithAcme("web", {
+        ...issueOptions,
+        algorithm: "ec",
+        namedCurve: "P-384",
+      });
+
+      const [certificateKey, accountKey] = keyPairCalls();
+      expect(certificateKey).toEqual({ algorithm: "ec", namedCurve: "P-384" });
+      expect(accountKey).toEqual({ algorithm: "ec" });
+    });
+
+    it("defaults the certificate key to RSA with no size or curve override", async () => {
+      await manager.issueWithAcme("web", issueOptions);
+
+      expect(keyPairCalls()[0]).toEqual({ algorithm: "rsa" });
     });
 
     it("registers the account exactly once", async () => {

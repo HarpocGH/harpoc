@@ -4,7 +4,7 @@
  */
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -73,6 +73,17 @@ export function describeWorkspaceDeps(pkgRoot: string, deps: string[]): void {
         expect(dependencies[dep]).toBe("workspace:*");
       });
     }
+
+    it("pins the complete workspace dependency inventory", () => {
+      const pkg = JSON.parse(readFileSync(join(pkgRoot, "package.json"), "utf8")) as {
+        dependencies?: Record<string, string>;
+      };
+      const actual = Object.entries(pkg.dependencies ?? {})
+        .filter(([, version]) => version === "workspace:*")
+        .map(([name]) => name)
+        .sort();
+      expect(actual).toEqual([...deps].sort());
+    });
   });
 }
 

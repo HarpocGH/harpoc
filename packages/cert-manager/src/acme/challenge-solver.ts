@@ -25,10 +25,14 @@ export class Http01Solver {
     });
     this.server = server;
     return new Promise<number>((resolve, reject) => {
-      const onStartError = (cause: unknown): void => {
+      /* The cause is deliberately discarded, not logged: its text distinguishes
+       * EADDRINUSE from EACCES and names the bind interface, which turns every
+       * caller surface into a port-occupancy oracle. Only the caller-supplied
+       * port — already known to the caller — appears. */
+      const onStartError = (): void => {
         this.server = null;
         reject(
-          VaultError.certAcmeFailed(`http-01 challenge server failed to start: ${String(cause)}`),
+          VaultError.certAcmeFailed(`http-01 challenge server failed to start on port ${port}`),
         );
       };
       server.once("error", onStartError);

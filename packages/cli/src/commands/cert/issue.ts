@@ -5,6 +5,12 @@ import { handleError, printJson, printRecord, formatTimestamp } from "../../util
 import { parseIntOption } from "../../utils/options.js";
 import { promptHidden } from "../../utils/prompt.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import {
+  assertAlgorithmPairing,
+  parseAlgorithm,
+  parseBits,
+  parseCurve,
+} from "./key-algorithm-options.js";
 
 const MIN_RENEW_BEFORE_DAYS = 1;
 const MAX_RENEW_BEFORE_DAYS = 365;
@@ -17,6 +23,9 @@ interface CertIssueOptions {
   staging?: boolean;
   httpPort?: string;
   dns?: boolean;
+  algorithm: string;
+  bits?: string;
+  curve?: string;
   autoRenew?: boolean;
   renewBeforeDays: string;
   project?: string;
@@ -57,6 +66,12 @@ export function registerCertIssueCommand(cert: Command): void {
     .option("--staging", "Use the Let's Encrypt staging directory")
     .option("--http-port <port>", "Port for the http-01 challenge responder (default: 80)")
     .option("--dns", "Solve dns-01 interactively instead of http-01")
+    // Defaults to rsa, not to csr's ec: `cert issue` generated RSA-2048 before
+    // the flags existed, and an operator who never types --algorithm must keep
+    // getting exactly the key they got yesterday.
+    .option("--algorithm <rsa|ec>", "Certificate key algorithm", "rsa")
+    .option("--bits <2048|4096>", "RSA key size (only with --algorithm rsa)")
+    .option("--curve <P-256|P-384>", "EC named curve (only with --algorithm ec)")
     .option(
       "--auto-renew",
       "Auto ACME renewal (takes effect once the renewal daemon lands; until then use cert renew)",
@@ -97,6 +112,10 @@ export function registerCertIssueCommand(cert: Command): void {
           MIN_RENEW_BEFORE_DAYS,
           MAX_RENEW_BEFORE_DAYS,
         );
+        const algorithm = parseAlgorithm(options.algorithm);
+        const modulusLength = parseBits(options.bits);
+        const namedCurve = parseCurve(options.curve);
+        assertAlgorithmPairing(algorithm, modulusLength, namedCurve);
 
         const engine = await loadUnlockedEngine(vaultDir);
         try {
@@ -117,6 +136,9 @@ export function registerCertIssueCommand(cert: Command): void {
             staging: options.staging ?? false,
             httpPort,
             dns01: options.dns === true ? publishDnsRecord : undefined,
+            algorithm,
+            modulusLength,
+            namedCurve,
             project: options.project,
             autoRenew: options.autoRenew ?? false,
             renewBeforeDays,

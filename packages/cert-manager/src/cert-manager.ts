@@ -91,6 +91,10 @@ export interface IssueOptions {
   autoRenew?: boolean;
   renewBeforeDays?: number;
   algorithm?: "rsa" | "ec";
+  /** RSA modulus length for the certificate key; only meaningful with algorithm "rsa". Default 2048. */
+  modulusLength?: 2048 | 4096;
+  /** EC named curve for the certificate key; only meaningful with algorithm "ec". Default "P-256". */
+  namedCurve?: "P-256" | "P-384";
   caller?: CallerContext;
 }
 
@@ -201,8 +205,14 @@ export class CertManager {
     }
     assertHttpPort(options.httpPort);
 
-    const { privateKeyPem } = generateCertKeyPair({ algorithm: options.algorithm ?? "rsa" });
+    const { privateKeyPem } = generateCertKeyPair({
+      algorithm: options.algorithm ?? "rsa",
+      modulusLength: options.modulusLength,
+      namedCurve: options.namedCurve,
+    });
     const csr = buildCsr({ privateKeyPem, commonName, sans: options.domains });
+    // The account key is the manager's own protocol material and stays a fresh
+    // P-256 key regardless of what the subscriber certificate was asked for.
     const accountKeyPem = generateCertKeyPair({ algorithm: "ec" }).privateKeyPem;
 
     const client = new AcmeClient({

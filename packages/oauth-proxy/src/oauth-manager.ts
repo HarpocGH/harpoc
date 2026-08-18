@@ -1,6 +1,6 @@
 import type { VaultEngine } from "@harpoc/core";
 import type { CallerContext, OAuthFlowResult, OAuthProviderConfig } from "@harpoc/shared";
-import { VaultError } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 import { AuthorizationCodeFlow } from "./flows/authorization-code.js";
 import { ClientCredentialsFlow } from "./flows/client-credentials.js";
 import { DeviceCodeFlow } from "./flows/device-code.js";
@@ -19,6 +19,26 @@ export interface OAuthManagerOptions {
    * the package stays console-free; the host decides how to report.
    */
   onBackgroundFlowError?: (secretId: string, err: unknown) => void;
+  /**
+   * Ceiling on concurrently pending authorization-code flows, each of which
+   * holds a loopback callback listener until the redirect arrives or the
+   * callback times out. Default {@link DEFAULT_MAX_PENDING_AUTHORIZATIONS}.
+   * Device-code flows hold no socket and are not counted.
+   */
+  maxPendingAuthorizations?: number;
+}
+
+/** Default ceiling on socket-holding authorization-code flows (D3). */
+export const DEFAULT_MAX_PENDING_AUTHORIZATIONS = 32;
+
+/**
+ * A registered background flow. `holdsSocket` marks the authorization-code
+ * flows — the ones that pin a loopback listener and a timeout timer for the
+ * whole callback window, and therefore the ones the cap counts.
+ */
+interface PendingFlow {
+  controller: AbortController;
+  holdsSocket: boolean;
 }
 
 /**
@@ -97,7 +117,8 @@ export class OAuthManager {
   private callbackPort: number;
   private callbackTimeoutMs: number;
   private onBackgroundFlowError?: (secretId: string, err: unknown) => void;
-  private readonly pendingFlows = new Map<string, AbortController>();
+  private maxPendingAuthorizations: number;
+  private readonly pendingFlows = new Map<string, PendingFlow>();
 
   constructor(engine: VaultEngine, options?: OAuthManagerOptions) {
     this.engine = engine;
@@ -105,21 +126,37 @@ export class OAuthManager {
     this.callbackPort = options?.callbackPort ?? 19876;
     this.callbackTimeoutMs = options?.callbackTimeoutMs ?? 5 * 60 * 1000;
     this.onBackgroundFlowError = options?.onBackgroundFlowError;
+    // A non-finite cap would make every `count >= max` comparison false, i.e.
+    // silently disable the control — the one fail-open direction here.
+    const requestedMax = options?.maxPendingAuthorizations;
+    this.maxPendingAuthorizations =
+      requestedMax !== undefined && Number.isFinite(requestedMax)
+        ? requestedMax
+        : DEFAULT_MAX_PENDING_AUTHORIZATIONS;
   }
 
   /** Abort one pending background device-code poll. */
   cancelFlow(secretId: string): boolean {
-    const controller = this.pendingFlows.get(secretId);
-    if (!controller) return false;
-    controller.abort();
+    const flow = this.pendingFlows.get(secretId);
+    if (!flow) return false;
+    flow.controller.abort();
     return true;
   }
 
   /** Abort every pending background device-code poll (owner dispose path). */
   cancelPendingFlows(): void {
-    for (const controller of this.pendingFlows.values()) {
-      controller.abort();
+    for (const flow of this.pendingFlows.values()) {
+      flow.controller.abort();
     }
+  }
+
+  /** Pending flows currently pinning a loopback callback listener. */
+  private countSocketFlows(): number {
+    let count = 0;
+    for (const flow of this.pendingFlows.values()) {
+      if (flow.holdsSocket) count++;
+    }
+    return count;
   }
 
   /**
@@ -149,6 +186,20 @@ export class OAuthManager {
       project,
       caller,
     );
+
+    // Cap the concurrently pinned loopback listeners (D3). Checked here — the
+    // secretId is known, so a supersede (same secret, its predecessor already
+    // holding a socket that this start replaces) is exempt — and before the
+    // CallbackServer exists, so a refusal binds no socket and arms no timer.
+    // The PENDING secret row above stays and is resumable: that row is what
+    // `create` scope already buys.
+    const predecessor = this.pendingFlows.get(secretId);
+    if (
+      predecessor?.holdsSocket !== true &&
+      this.countSocketFlows() >= this.maxPendingAuthorizations
+    ) {
+      throw new VaultError(ErrorCode.RATE_LIMIT_EXCEEDED, "Too many pending authorization flows");
+    }
 
     const callbackServer = new CallbackServer(this.callbackPort);
     const flow = new AuthorizationCodeFlow();
@@ -244,7 +295,7 @@ export class OAuthManager {
     codeVerifier: string,
     secretId: string,
   ): Promise<void> {
-    const controller = this.registerPendingFlow(secretId);
+    const controller = this.registerPendingFlow(secretId, true);
 
     const completion = (async () => {
       try {
@@ -288,16 +339,16 @@ export class OAuthManager {
    * would otherwise leave the first flow live but uncancellable — still able to
    * exchange a redirect and drive the secret ACTIVE behind the caller's back.
    */
-  private registerPendingFlow(secretId: string): AbortController {
-    this.pendingFlows.get(secretId)?.abort();
+  private registerPendingFlow(secretId: string, holdsSocket: boolean): AbortController {
+    this.pendingFlows.get(secretId)?.controller.abort();
     const controller = new AbortController();
-    this.pendingFlows.set(secretId, controller);
+    this.pendingFlows.set(secretId, { controller, holdsSocket });
     return controller;
   }
 
   /** Drop a settled flow's entry — never a successor's (same-secretId restart). */
   private unregisterPendingFlow(secretId: string, controller: AbortController): void {
-    if (this.pendingFlows.get(secretId) === controller) {
+    if (this.pendingFlows.get(secretId)?.controller === controller) {
       this.pendingFlows.delete(secretId);
     }
   }
@@ -391,7 +442,9 @@ export class OAuthManager {
     expiresIn: number,
     secretId: string,
   ): Promise<void> {
-    const controller = this.registerPendingFlow(secretId);
+    // A device-code poll holds no listener: registered for cancellation, but
+    // outside the authorization cap.
+    const controller = this.registerPendingFlow(secretId, false);
     const completion = flow
       .pollForToken(deviceCode, interval, config, expiresIn, controller.signal)
       .then(async (tokens) => {

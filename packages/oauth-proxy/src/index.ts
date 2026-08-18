@@ -28,7 +28,11 @@ export { TokenRefreshScheduler } from "./token-refresh.js";
 export type { TokenRefreshSchedulerOptions } from "./token-refresh.js";
 
 // OAuth manager
-export { OAuthManager, defaultOpenBrowser } from "./oauth-manager.js";
+export {
+  OAuthManager,
+  defaultOpenBrowser,
+  DEFAULT_MAX_PENDING_AUTHORIZATIONS,
+} from "./oauth-manager.js";
 export type {
   OAuthManagerOptions,
   DeviceCodeFlowResult,

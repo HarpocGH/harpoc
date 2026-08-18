@@ -282,6 +282,23 @@ describe("POST /api/v1/oauth/authorize — validation and scope", () => {
     expect(oauthManager.startClientCredentials).not.toHaveBeenCalled();
   });
 
+  // The manager caps concurrently pending authorization-code flows (D3): each
+  // holds a loopback listener for the whole callback window, so an unbounded
+  // `create`-scoped caller could pin sockets at will. The refusal is a plain
+  // VaultError travelling the existing error handler — no route branch.
+  it("surfaces the pending-flow cap refusal as 429 RATE_LIMIT_EXCEEDED", async () => {
+    oauthManager.startAuthorizationCodeDeferred.mockRejectedValueOnce(
+      new VaultError(ErrorCode.RATE_LIMIT_EXCEEDED, "Too many pending authorization flows"),
+    );
+
+    const res = await authorize(AUTH_CODE_BODY);
+
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe(ErrorCode.RATE_LIMIT_EXCEEDED);
+    expect(body.message).toContain("Too many pending authorization flows");
+  });
+
   it("maps an OAuth flow failure to its VaultError status", async () => {
     oauthManager.startClientCredentials.mockRejectedValueOnce(
       VaultError.oauthFlowFailed("token endpoint returned 400"),

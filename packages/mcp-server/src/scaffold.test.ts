@@ -12,6 +12,16 @@ const distDir = resolve(pkgRoot, "dist");
 
 describe("mcp-server", () => {
   describeBuildOutput(distDir, { shebang: true });
-  describeCrossPackageImports(["@harpoc/shared", "@harpoc/core"]);
-  describeWorkspaceDeps(pkgRoot, ["@harpoc/shared", "@harpoc/core"]);
+  describeCrossPackageImports([
+    "@harpoc/shared",
+    "@harpoc/core",
+    "@harpoc/oauth-proxy",
+    "@harpoc/cert-manager",
+  ]);
+  describeWorkspaceDeps(pkgRoot, [
+    "@harpoc/shared",
+    "@harpoc/core",
+    "@harpoc/oauth-proxy",
+    "@harpoc/cert-manager",
+  ]);
 });

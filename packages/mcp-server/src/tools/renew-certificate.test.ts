@@ -127,28 +127,30 @@ describe("renew_certificate", () => {
     expect(certManager.renewCertificate).not.toHaveBeenCalled();
   });
 
-  it("resolves the handle and calls certManager.renewCertificate with the resolved secretId, http_port, and the scope guard's caller", async () => {
+  it("resolves the handle and calls certManager.renewCertificate with the resolved secretId and the scope guard's caller", async () => {
     const { server, engine, certManager } = harness();
 
-    await callTool(server, "renew_certificate", {
-      handle: "secret://prod/my-cert",
-      http_port: 8080,
-    });
+    await callTool(server, "renew_certificate", { handle: "secret://prod/my-cert" });
 
     expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://prod/my-cert");
     expect(certManager.renewCertificate).toHaveBeenCalledWith("uuid-123", {
-      httpPort: 8080,
       caller: EXPECTED_CALLER,
     });
   });
 
-  it("omits http_port when not supplied", async () => {
+  // D1: the bind port is no longer an MCP-side choice, so a smuggled one is
+  // dropped the way any undeclared argument is — the renewal still runs, on the
+  // http-01 default port, and the manager is never told which port to try.
+  it("drops a smuggled http_port rather than refusing it, and never forwards it to the manager", async () => {
     const { server, certManager } = harness();
 
-    await callTool(server, "renew_certificate", { handle: "secret://my-cert" });
+    const result = await callTool(server, "renew_certificate", {
+      handle: "secret://my-cert",
+      http_port: 8080,
+    });
 
+    expect(result.isError ?? false).toBe(false);
     expect(certManager.renewCertificate).toHaveBeenCalledWith("uuid-123", {
-      httpPort: undefined,
       caller: EXPECTED_CALLER,
     });
   });
@@ -192,24 +194,6 @@ describe("renew_certificate", () => {
       "uuid-456",
       expect.objectContaining({}),
     );
-  });
-
-  it("rejects an out-of-range http_port before calling certManager.renewCertificate", async () => {
-    const { server, certManager } = harness();
-
-    const tooLow = await callTool(server, "renew_certificate", {
-      handle: "secret://my-cert",
-      http_port: 0,
-    });
-    expect(tooLow.isError).toBe(true);
-
-    const tooHigh = await callTool(server, "renew_certificate", {
-      handle: "secret://my-cert",
-      http_port: 70000,
-    });
-    expect(tooHigh.isError).toBe(true);
-
-    expect(certManager.renewCertificate).not.toHaveBeenCalled();
   });
 
   it("a certManager throw surfaces as an error result, not a crash", async () => {

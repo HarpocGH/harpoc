@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { VaultError, VaultState, VAULT_VERSION } from "@harpoc/shared";
+import { ErrorCode, VaultError, VaultState, VAULT_VERSION } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
-import { createApp } from "./app.js";
+import { OAuthManager, defaultOpenBrowser } from "@harpoc/oauth-proxy";
+import { createApp, createDefaultOAuthManager } from "./app.js";
 
 const MOCK_TOKEN: VaultApiToken = {
   sub: "test-agent",
@@ -63,6 +64,9 @@ function createMockEngine() {
     }),
     revokePolicy: vi.fn(),
     queryAudit: vi.fn().mockReturnValue([]),
+    // Only reached through the default OAuth manager: a real manager calls
+    // this first, before any network leg.
+    createOAuthSecret: vi.fn().mockRejectedValue(VaultError.invalidInput("stub engine")),
   };
 }
 
@@ -178,6 +182,30 @@ describe("createApp integration", () => {
     expect(res.status).toBe(200);
   });
 
+  it("serves the OAuth routes through a default manager when none is injected", async () => {
+    const engine = createMockEngine();
+    const app = createApp(engine as never);
+
+    const res = await app.request("/api/v1/oauth/authorize", {
+      method: "POST",
+      headers: { authorization: "Bearer valid", "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "gh-app",
+        provider: "github",
+        grant_type: "client_credentials",
+        client_id: "cid",
+        client_secret: "csecret",
+      }),
+    });
+
+    // The default manager's first engine call. An unset context var would throw
+    // a TypeError and answer 500 INTERNAL_ERROR instead of the stub's own code.
+    expect(engine.createOAuthSecret).toHaveBeenCalled();
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe(ErrorCode.INVALID_INPUT);
+  });
+
   it("VAULT_LOCKED errors return 503", async () => {
     const engine = createMockEngine();
     engine.verifyToken.mockImplementation(() => {
@@ -189,5 +217,40 @@ describe("createApp integration", () => {
       headers: { authorization: "Bearer valid" },
     });
     expect(res.status).toBe(503);
+  });
+});
+
+describe("createDefaultOAuthManager", () => {
+  it("builds the REST-shaped manager an owner can dispose", () => {
+    const engine = createMockEngine();
+    const manager = createDefaultOAuthManager(engine as never);
+
+    expect(manager).toBeInstanceOf(OAuthManager);
+    // The dispose seam the owner (CLI `server start --rest`) calls on shutdown.
+    expect(typeof manager.cancelPendingFlows).toBe("function");
+
+    const internals = manager as unknown as {
+      callbackPort: number;
+      openBrowser: (url: string) => Promise<void>;
+    };
+    // Concurrent and re-POSTed flows would EADDRINUSE-collide on a fixed port.
+    expect(internals.callbackPort).toBe(0);
+    // REST never runs the browser leg (D2): the client follows auth_url itself.
+    expect(internals.openBrowser).not.toBe(defaultOpenBrowser);
+  });
+
+  it("reports a background flow failure on stderr", () => {
+    const manager = createDefaultOAuthManager(createMockEngine() as never);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const internals = manager as unknown as {
+      onBackgroundFlowError: (secretId: string, err: unknown) => void;
+    };
+    internals.onBackgroundFlowError("secret-1", new Error("provider offline"));
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[harpoc] OAuth background flow failed (secret-1): provider offline",
+    );
+    errorSpy.mockRestore();
   });
 });

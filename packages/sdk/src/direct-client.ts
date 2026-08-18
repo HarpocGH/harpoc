@@ -26,6 +26,7 @@ import type {
   VaultClient,
 } from "./client.js";
 import {
+  ENCRYPTED_KEY_IMPORT_REFUSAL,
   ErrorCode,
   VAULT_VERSION,
   VaultError,
@@ -223,9 +224,7 @@ export class DirectClient implements VaultClient {
       throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
     }
     if (isEncryptedPrivateKeyPem(input.private_key_pem)) {
-      throw VaultError.schemaValidation(
-        "private_key_pem is passphrase-protected — decrypt it first or import via 'harpoc cert import', which prompts for the passphrase (D3)",
-      );
+      throw VaultError.schemaValidation(ENCRYPTED_KEY_IMPORT_REFUSAL);
     }
     const manager = await this.loadCertManager();
     const ref = await manager.importCertificate(name, {

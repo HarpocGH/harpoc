@@ -96,7 +96,7 @@ describe("Session Sharing", () => {
   it("Engine2 listSecrets sees secrets created by Engine1", () => {
     const secrets = engine2.listSecrets();
     expect(secrets).toHaveLength(1);
-    expect(secrets[0]!.handle).toBe(handle);
+    expect(secrets[0]?.handle).toBe(handle);
   });
 
   // ---- Test 3: Engine2 getSecretInfo works --------------------------------
@@ -110,9 +110,9 @@ describe("Session Sharing", () => {
   // ---- Test 4: MCP on Engine2 sees Engine1's secrets ----------------------
   it("MCP server on Engine2 sees Engine1's secrets", async () => {
     const result = await callTool(mcpServer, "list_secrets", {});
-    const secrets = JSON.parse(result.content[0]!.text) as Array<{ handle: string }>;
+    const secrets = JSON.parse(result.content[0]?.text ?? "") as Array<{ handle: string }>;
     expect(secrets).toHaveLength(1);
-    expect(secrets[0]!.handle).toBe(handle);
+    expect(secrets[0]?.handle).toBe(handle);
   });
 
   // ---- Test 5: REST on Engine2 serves Engine1's secrets -------------------
@@ -124,7 +124,7 @@ describe("Session Sharing", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { data: Array<{ handle: string }> };
     expect(body.data).toHaveLength(1);
-    expect(body.data[0]!.handle).toBe(handle);
+    expect(body.data[0]?.handle).toBe(handle);
   });
 
   // ---- Test 6: Engine2 can getSecretValue + useSecret ---------------------
@@ -138,8 +138,10 @@ describe("Session Sharing", () => {
       url: echoUrl,
       injection: { type: InjectionType.BEARER },
     });
+    expect(response.type).toBe("http");
+    if (response.type !== "http") throw new Error("expected http result");
     expect(response.status).toBe(200);
-    const body = JSON.parse(response.body!) as { headers: Record<string, string> };
+    const body = JSON.parse(response.body ?? "{}") as { headers: Record<string, string> };
     // Exact-match redaction in VaultEngine.useSecret() scrubs the secret value
     expect(body.headers.authorization).toBe("Bearer [REDACTED]");
   });

@@ -24,6 +24,29 @@ export interface CreateAppOptions {
   certManager?: CertManager;
 }
 
+/**
+ * The OAuth manager a REST host runs with. Exported so the process that owns
+ * the app — `harpoc server start --rest` — can construct it, hand it in, and
+ * cancel its pending background flows on shutdown: a manager built inside
+ * `createApp` has no dispose path, and its flows outlive the store they write
+ * to.
+ */
+export function createDefaultOAuthManager(engine: VaultEngine): OAuthManager {
+  return new OAuthManager(engine, {
+    // REST never runs the browser leg (D2): the client follows auth_url itself.
+    openBrowser: async () => {},
+    // A long-lived server runs concurrent flows for different secrets, and a
+    // re-POSTed resume flow starts a second callback server for the same
+    // secret — a fixed port would EADDRINUSE-collide. Port 0 = per-flow
+    // ephemeral, and the bound port is what the redirect URI carries.
+    callbackPort: 0,
+    onBackgroundFlowError: (secretId, err) =>
+      console.error(
+        `[harpoc] OAuth background flow failed (${secretId}): ${err instanceof Error ? err.message : String(err)}`,
+      ),
+  });
+}
+
 export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono<HarpocEnv> {
   const app = new Hono<HarpocEnv>();
 
@@ -33,21 +56,7 @@ export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono
   // Rate limiter (created early so it can be injected into context)
   const limiter = new RateLimiter();
 
-  const oauthManager =
-    options?.oauthManager ??
-    new OAuthManager(engine, {
-      // REST never runs the browser leg (D2): the client follows auth_url itself.
-      openBrowser: async () => {},
-      // A long-lived server runs concurrent flows for different secrets, and a
-      // re-POSTed resume flow starts a second callback server for the same
-      // secret — a fixed port would EADDRINUSE-collide. Port 0 = per-flow
-      // ephemeral, and the bound port is what the redirect URI carries.
-      callbackPort: 0,
-      onBackgroundFlowError: (secretId, err) =>
-        console.error(
-          `[harpoc] OAuth background flow failed (${secretId}): ${err instanceof Error ? err.message : String(err)}`,
-        ),
-    });
+  const oauthManager = options?.oauthManager ?? createDefaultOAuthManager(engine);
   const certManager = options?.certManager ?? new CertManager(engine);
 
   // Inject engine, limiter and the managers into context for all routes

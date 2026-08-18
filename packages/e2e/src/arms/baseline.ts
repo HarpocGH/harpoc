@@ -64,22 +64,37 @@ function awaitPort(child: ChildProcessWithoutNullStreams): Promise<number> {
   });
 }
 
+/** A running baseline fixture with a connected MCP client. */
+export interface BaselineServer {
+  client: Client;
+  child: ChildProcessWithoutNullStreams;
+  port: number;
+  /** Everything the child has written to stderr so far, read at call time. */
+  stderr(): string;
+  stop(): Promise<void>;
+}
+
 /**
- * The §2.3 baseline arm: a real MCP server holding the credential in its launch
- * environment, with no vault in the path (D2, D5).
+ * The §2.3 baseline fixture, running: a real MCP server holding the credential
+ * in its launch environment, with no vault in the path (D2, D5).
  *
  * Spawned rather than containerised because it is the analogue of the vault's
  * own MCP server, which the Harpoc arm runs in-process — a container would put
- * a network boundary on one side of the comparison and not the other.
+ * a network boundary on one side of the comparison and not the other. That also
+ * makes it fleet-free, which is what lets the behavioural pin on the fixture's
+ * own injection dispatch run on a host without Docker.
  */
-export async function startBaselineArm(credential: string, secretName?: string): Promise<Arm> {
+export async function startBaselineServer(opts: {
+  credential: string;
+  secretName?: string;
+}): Promise<BaselineServer> {
   const child = spawn(process.execPath, [SERVER], {
     env: {
       ...process.env,
       ...resolvedBinaries(),
       // The credential enters exactly as Listing 2.1 delivers it.
-      API_TOKEN: credential,
-      SECRET_NAME: secretName ?? "baseline-secret",
+      API_TOKEN: opts.credential,
+      SECRET_NAME: opts.secretName ?? "baseline-secret",
       PORT: "0",
     },
     shell: false,
@@ -99,6 +114,26 @@ export async function startBaselineArm(credential: string, secretName?: string):
   const client = new Client({ name: "harpoc-e2e-baseline-client", version: "1.0.0" });
   await client.connect(transport);
 
+  return {
+    client,
+    child,
+    port,
+    stderr: () => stderr,
+    async stop() {
+      await client.close();
+      child.kill();
+    },
+  };
+}
+
+/**
+ * The §2.3 baseline arm: the fixture above, wrapped in the `Arm` contract the
+ * paired scenarios drive.
+ */
+export async function startBaselineArm(credential: string, secretName?: string): Promise<Arm> {
+  const server = await startBaselineServer({ credential, secretName });
+  const client = server.client;
+
   const call = async (name: string, args: Record<string, unknown>): Promise<CallOutcome> => {
     try {
       const raw = (await client.callTool({ name, arguments: args })) as {
@@ -106,11 +141,12 @@ export async function startBaselineArm(credential: string, secretName?: string):
         content?: unknown;
       };
       const text = textOf(raw);
+      const stderr = server.stderr();
       if (raw.isError === true) return { ok: false, result: raw, text, errorText: text, stderr };
       return { ok: true, result: raw, text, stderr };
     } catch (err) {
       const text = err instanceof Error ? err.message : String(err);
-      return { ok: false, result: err, text, errorText: text, stderr };
+      return { ok: false, result: err, text, errorText: text, stderr: server.stderr() };
     }
   };
 
@@ -138,12 +174,11 @@ export async function startBaselineArm(credential: string, secretName?: string):
           resource,
         },
         text: parts.map((p) => p.text).join("\n"),
-        stderr,
+        stderr: server.stderr(),
       };
     },
-    async close() {
-      await client.close();
-      child.kill();
+    close() {
+      return server.stop();
     },
   };
 }

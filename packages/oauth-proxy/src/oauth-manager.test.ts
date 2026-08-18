@@ -4,10 +4,11 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { CallerContext, OAuthProviderConfig } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
-import { OAuthManager } from "./oauth-manager.js";
+import { CallbackServer } from "./callback-server.js";
+import { DEFAULT_MAX_PENDING_AUTHORIZATIONS, OAuthManager } from "./oauth-manager.js";
 import type { OAuthManagerOptions } from "./oauth-manager.js";
 
 // Mock argon2 for speed (same approach as core tests)
@@ -587,6 +588,166 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
 
     expect(errors).toHaveLength(0);
     expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pending-flow cap (D3): concurrent socket-holding authorization-code flows
+// ---------------------------------------------------------------------------
+
+/** Distinct secretId per name — the cap is about *concurrent* flows. */
+function makePerNameFakeEngine(): FakeEngine {
+  return {
+    createOAuthSecret: vi.fn(async (name: string) => ({
+      handle: `secret://${name}`,
+      secretId: `sid-${name}`,
+    })),
+    completeOAuthFlow: vi.fn(async () => undefined),
+  };
+}
+
+function pendingDeviceCodeHandler(): void {
+  deviceHandler = (_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        device_code: "dc-cap",
+        user_code: "USER-CAP",
+        verification_uri: "https://example.com/device",
+        // Long interval: the background poll sleeps for the whole test rather
+        // than hammering the token endpoint.
+        interval: 60,
+        expires_in: 600,
+      }),
+    );
+  };
+}
+
+describe("OAuthManager pending-flow cap (D3)", () => {
+  it("refuses an authorization-code start once the cap of socket-holding flows is reached", async () => {
+    const fake = makePerNameFakeEngine();
+    const manager = fakeEngineManager(fake, { callbackPort: 0, maxPendingAuthorizations: 2 });
+
+    const a = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+    const b = await manager.startAuthorizationCodeDeferred("b", makeAuthCodeConfig());
+
+    const refusal: unknown = await manager
+      .startAuthorizationCodeDeferred("c", makeAuthCodeConfig())
+      .catch((err: unknown) => err);
+
+    expect(refusal).toBeInstanceOf(VaultError);
+    const err = refusal as VaultError;
+    expect(err.code).toBe(ErrorCode.RATE_LIMIT_EXCEEDED);
+    expect(err.message).toContain("Too many pending authorization flows");
+    expect(err.statusCode).toBe(429);
+
+    manager.cancelPendingFlows();
+    await expect(a.completion).rejects.toBeDefined();
+    await expect(b.completion).rejects.toBeDefined();
+  });
+
+  it("floors a non-finite cap to the default rather than disabling it", async () => {
+    const fake = makePerNameFakeEngine();
+    const manager = fakeEngineManager(fake, {
+      callbackPort: 0,
+      maxPendingAuthorizations: Number.NaN,
+    });
+
+    // Every `count >= NaN` is false, so a NaN cap enforces nothing at all —
+    // the one fail-open direction on this control.
+    expect(
+      (manager as unknown as { maxPendingAuthorizations: number }).maxPendingAuthorizations,
+    ).toBe(DEFAULT_MAX_PENDING_AUTHORIZATIONS);
+
+    // The fallback is a live cap, not a refuse-everything one.
+    const a = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+    expect(a.handle).toBe("secret://a");
+
+    manager.cancelPendingFlows();
+    await expect(a.completion).rejects.toBeDefined();
+  });
+
+  it("a supersede for the same secret never trips the cap", async () => {
+    const fake = makePerNameFakeEngine();
+    const manager = fakeEngineManager(fake, { callbackPort: 0, maxPendingAuthorizations: 1 });
+
+    const first = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+    // Same name → same secretId → the predecessor's listener is replaced, not
+    // added to: one socket before, one socket after.
+    const second = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+    expect(second.secretId).toBe(first.secretId);
+
+    await expect(first.completion).rejects.toBeDefined();
+    expect(manager.cancelFlow(second.secretId)).toBe(true);
+    await expect(second.completion).rejects.toBeDefined();
+  });
+
+  it("a cancelled flow frees its slot", async () => {
+    const fake = makePerNameFakeEngine();
+    const manager = fakeEngineManager(fake, { callbackPort: 0, maxPendingAuthorizations: 1 });
+
+    const a = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+    expect(manager.cancelFlow(a.secretId)).toBe(true);
+    await expect(a.completion).rejects.toBeDefined();
+    await vi.waitFor(() => {
+      expect(manager.cancelFlow(a.secretId)).toBe(false);
+    });
+
+    const b = await manager.startAuthorizationCodeDeferred("b", makeAuthCodeConfig());
+    expect(b.handle).toBe("secret://b");
+
+    manager.cancelFlow(b.secretId);
+    await expect(b.completion).rejects.toBeDefined();
+  });
+
+  it("device-code flows neither trip the cap nor count toward it", async () => {
+    pendingDeviceCodeHandler();
+    const fake = makePerNameFakeEngine();
+    const manager = fakeEngineManager(fake, { callbackPort: 0, maxPendingAuthorizations: 1 });
+
+    // A device flow registers in the same map but holds no socket, so the one
+    // authorization-code slot is still free...
+    const device = await manager.startDeviceCode("d", makeDeviceCodeConfig());
+    expect(device.status).toBe("pending_authorization");
+
+    const a = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+    expect(a.handle).toBe("secret://a");
+
+    // ...and with that slot taken, a further device flow is still not refused.
+    const second = await manager.startDeviceCode("d2", makeDeviceCodeConfig());
+    expect(second.status).toBe("pending_authorization");
+
+    manager.cancelPendingFlows();
+    await expect(a.completion).rejects.toBeDefined();
+    await expect(device.completion).rejects.toBeDefined();
+    await expect(second.completion).rejects.toBeDefined();
+  });
+
+  it("a refused start binds no callback socket (the PENDING secret stays resumable)", async () => {
+    const fake = makePerNameFakeEngine();
+    const manager = fakeEngineManager(fake, { callbackPort: 0, maxPendingAuthorizations: 1 });
+    const startSpy = vi.spyOn(CallbackServer.prototype, "start");
+
+    try {
+      const a = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+      expect(startSpy).toHaveBeenCalledTimes(1);
+
+      await expect(
+        manager.startAuthorizationCodeDeferred("b", makeAuthCodeConfig()),
+      ).rejects.toBeDefined();
+
+      // Refusal lands before any CallbackServer is constructed or started: no
+      // second listener, no second timeout timer.
+      expect(startSpy).toHaveBeenCalledTimes(1);
+      // The vault row was created first, so the refused start leaves a
+      // resumable PENDING secret (D3 — that is what `create` scope buys).
+      expect(fake.createOAuthSecret).toHaveBeenCalledTimes(2);
+
+      manager.cancelFlow(a.secretId);
+      await expect(a.completion).rejects.toBeDefined();
+    } finally {
+      startSpy.mockRestore();
+    }
   });
 });
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isEncryptedPrivateKeyPem } from "./pem.js";
+import { ENCRYPTED_KEY_IMPORT_REFUSAL, isEncryptedPrivateKeyPem } from "./pem.js";
 
 describe("isEncryptedPrivateKeyPem", () => {
   it("detects a PKCS#8 encrypted private key", () => {
@@ -23,5 +23,12 @@ describe("isEncryptedPrivateKeyPem", () => {
   it("returns false for a certificate", () => {
     const pem = "-----BEGIN CERTIFICATE-----\nMIIE...\n-----END CERTIFICATE-----";
     expect(isEncryptedPrivateKeyPem(pem)).toBe(false);
+  });
+});
+
+describe("ENCRYPTED_KEY_IMPORT_REFUSAL", () => {
+  it("points the caller at the CLI import path", () => {
+    expect(ENCRYPTED_KEY_IMPORT_REFUSAL).toContain("passphrase-protected");
+    expect(ENCRYPTED_KEY_IMPORT_REFUSAL).toContain("harpoc cert import");
   });
 });

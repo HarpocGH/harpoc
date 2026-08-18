@@ -9,3 +9,10 @@ export function isEncryptedPrivateKeyPem(pem: string): boolean {
     /Proc-Type:\s*4\s*,\s*ENCRYPTED/i.test(pem)
   );
 }
+
+/**
+ * Refusal text for passphrase-protected private keys on the REST/SDK import
+ * paths (D3, Phase 10). One constant so the surfaces cannot drift apart.
+ */
+export const ENCRYPTED_KEY_IMPORT_REFUSAL =
+  "private_key_pem is passphrase-protected — decrypt it first or import via 'harpoc cert import', which prompts for the passphrase (D3)";

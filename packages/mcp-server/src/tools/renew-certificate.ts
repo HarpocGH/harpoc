@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { CertManager } from "@harpoc/cert-manager";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
-import { parseHandle, renewCertificateRequestSchema } from "@harpoc/shared";
+import { parseHandle } from "@harpoc/shared";
 import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
 
@@ -18,13 +18,9 @@ export function registerRenewCertificate(
 ): void {
   server.tool(
     "renew_certificate",
-    "Renew a certificate secret via ACME (http-01 only). Returns certificate metadata; never key material.",
+    "Renew a certificate secret via ACME (http-01 on the default port 80). Returns certificate metadata; never key material. The challenge responder's port is not selectable here — use `harpoc cert renew --http-port` or POST /api/v1/certificates/:handle/renew.",
     {
       handle: z.string().describe("Secret handle (secret://[project/]name)"),
-      // The shared field schema, so the advertised bounds are the enforced ones.
-      http_port: renewCertificateRequestSchema.shape.http_port.describe(
-        "Port for the http-01 challenge responder (default 80)",
-      ),
     },
     async (args) => {
       const parsed = parseHandle(args.handle);
@@ -32,7 +28,6 @@ export function registerRenewCertificate(
       const secretId = await engine.resolveSecretId(args.handle);
       rateLimiter.checkLimit(secretId);
       const status = await certManager.renewCertificate(secretId, {
-        httpPort: args.http_port,
         caller: scopeGuard.caller,
       });
       return { content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }] };

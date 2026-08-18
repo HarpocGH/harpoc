@@ -219,12 +219,15 @@ npx harpoc cert csr web-cert --subject www.example.com --sans www.example.com,ex
 # Issue via ACME (Let's Encrypt); --staging targets the staging directory
 npx harpoc cert issue web-cert --domains www.example.com,example.com --email ops@example.com --staging
 
+# ...or issue an EC key instead of the RSA-2048 default
+npx harpoc cert issue web-cert --domains www.example.com --email ops@example.com --algorithm ec --curve P-384
+
 # Renew an ACME-issued certificate, and inspect health
 npx harpoc cert renew secret://web-cert
 npx harpoc cert status secret://web-cert
 ```
 
-Private keys are stored under the vault's own encryption and never travel via argv — `cert import --key` reads the PEM from a file, and a passphrase-protected key prompts once for the passphrase and is decrypted in memory at import (the same path as `secret set --from-file`). Each certificate gets its own ACME account, stored encrypted alongside it; `--dns` selects dns-01 instead of the http-01 responder and prints the TXT record for you to place manually.
+Private keys are stored under the vault's own encryption and never travel via argv — `cert import --key` reads the PEM from a file, and a passphrase-protected key prompts once for the passphrase and is decrypted in memory at import (the same path as `secret set --from-file`). Each certificate gets its own ACME account, stored encrypted alongside it; `--dns` selects dns-01 instead of the http-01 responder and prints the TXT record for you to place manually. Both `cert csr` and `cert issue` take `--algorithm rsa|ec` with `--bits 2048|4096` or `--curve P-256|P-384`; only their defaults differ — `csr` generates EC P-256, `issue` RSA-2048 — and a flag that does not pair with the chosen algorithm is refused rather than silently ignored.
 
 Renew continuously in a long-lived process — alongside any server, or standalone as a renewal daemon:
 

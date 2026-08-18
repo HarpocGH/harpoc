@@ -26,6 +26,8 @@
     "@modelcontextprotocol/sdk": "^1.27.1"
   },
   "scripts": {
-    "test": "vitest run"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src/"
   }
 }

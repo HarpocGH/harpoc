@@ -4,7 +4,11 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { providerConfigFromFlowInput } from "@harpoc/oauth-proxy";
 import { DirectClient, RestClient } from "@harpoc/sdk";
-import { ErrorCode, startOAuthFlowInputSchema } from "@harpoc/shared";
+import {
+  ErrorCode,
+  renewCertificateRequestSchema,
+  startOAuthFlowInputSchema,
+} from "@harpoc/shared";
 import type { ExpiringCertificateInfo, ExpiringOAuthTokenInfo } from "@harpoc/shared";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
@@ -13,6 +17,7 @@ import type { TestServer } from "./helpers/rest-helpers.js";
 import { callTool, listTools } from "./helpers/mcp-helpers.js";
 import { startMockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import type { MockOAuthProvider } from "./helpers/mock-oauth-provider.js";
+import { KEY_PEM, CERT_PEM, EXPIRED_KEY_PEM, EXPIRED_CERT_PEM } from "./helpers/cert-fixtures.js";
 
 /**
  * Security posture of the OAuth and certificate surfaces (Phase 10): the two
@@ -20,8 +25,9 @@ import type { MockOAuthProvider } from "./helpers/mock-oauth-provider.js";
  * client secret, a refresh token, a certificate's private key. The pins here
  * are about what leaves the vault rather than what it stores:
  *
- * 1. the MCP tool contract offers no place to put a client secret, and a
- *    smuggled one is dropped rather than exchanged;
+ * 1. the MCP tool contract offers no place to put a client secret — nor an
+ *    http-01 bind port (D1) — and a smuggled one of either is dropped rather
+ *    than acted on;
  * 2. every REST body, MCP tool result and caught error message produced by a
  *    real client-credentials flow and a real certificate import is swept for
  *    the material in play — with the mock provider's own traffic and the
@@ -106,127 +112,6 @@ const CERT_PROJECTION_KEYS = [
 ];
 
 /**
- * The long-lived fixture pair of `cert-lifecycle.test.ts` (self-signed
- * `CN=fixture.example.com`, valid until 2036): the certificate whose import
- * runs through the leak sweep.
- */
-const KEY_PEM = `-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC0gezLrQJ9Tppg
-7x7dTCyjhtgbPjQmrtuPVe4tG59xBD77ufh3aiNLkQbF3MIdoqsdC2MVx5NVsA5n
-EBFjZtz8tWc/eo8Cpq1fahfw0gLE9ZBjgCIh0rH+911uktuBN+wxGfNgSC7mYo8l
-xnmPmyBhSgvrtLmgKsW6fVQRigyKJjOhey2qmSs8Sbezwk4n44jUuhY/n7XtYJ7B
-CXRyM/3A2TzZR1L75mOfQTJmZmb7LANZJmCm10DxF20FYFv72uyuitRYH4xhRjg7
-Nvb0yJkybBpe73ZE/jTimC45J1TOCSTvsy4hE0AmwdwIls9PhJ/yMo+ccXTVydyC
-KT9NUx5bAgMBAAECggEACOYq5XO3HrRkWgkP7XsW7Ez2lIlBivKt8mgbIPAusSSz
-cjed7001RkF1IwYaL9nYM8te7DD1q5DNdPlO0ia9GFxdJb0GFexfuceCPKYt6sXs
-g2tKw34etmI9ofjth3ZZV6Ze4E1Oup77TbJ2RcUxGHrNEabMTAAv1VzeayryKVFZ
-oOw6ABQe4nanryuNGdkqHl1YGMt59Y+NsrJulIbveOVQoWQa5f06o7faEl3sG4ZA
-67H4FsEPFIVTOSc3SfTp0i6X7Au+XBpStjUo5xzfqIWzpfSzOPeCWn8XnQH5nSdE
-kb1Uq5UkiF+QNpErlst4uhFxo+uYvCKbwNAFZLc1UQKBgQDbfiL1tI2eesBkyTmI
-ukapsXBiVknzm/ldxP+/OqusBvEN7v7msUTmUQpKTiZaiQ+aTTfvzgPiQvhyhBe6
-mxD8nyVrEoLe2/dQRSnbQEy6YpZiHIGtBoNa8pZ7dzSSWqnNx7ZUtfOdkdChZdOy
-8Uv6slaTlWAlzt8dNd0iuLjXmQKBgQDSh9KjiNptutaQVcvcDpeQ0HQOObXjMk24
-cnrouKP4rqw96dQWPNWTGT+PQgGTbCPSquFicteAyI1y5oIJ84LiRCHRVSsGv6X/
-SutYsUDH9ieh8Wz6ymz1069yQSYh1hr8HhdwXPSulZGMjUKBE0M4qIMHkRJdtM4S
-7yNKZc7OEwKBgQCyal3Qi+tyHyW0xzzVP1WhKnLH/IwwUWDqL/ATaYWSWDIpuVPK
-Ad6XuNg8fjn+7dqY+pu1eij+CqIZs/X14YZ1Uof/+RQYQ4VM4mubpTC5cNn89l8S
-XnD3xKk9wzAgp0HP278CLMTSGG0WRMdIdYvlRIHLhWiaUwZZoCcYyj62QQKBgApV
-knhmklpKjpe9LmmZ6cS5Bslf+dayNHB2ZiQgVCQz5s6PONLyn4U9+wm8Mrma2FNS
-AghEHOH8dj0KpZ15b5ZNw98zsA3/wFU8xzquUMDAC4f+gtv4rcqPXpBcNFP63446
-p+njFjuvqdpdYMNXP7h7RRtM+rrQ0kDJrlDLmJAzAoGAHaiD4Wr3bkcWunzUWQ6a
-PtNFckGmS2KxmzNabWdjIkfndQRUurDwsDVLmJfi/nCzpFCzT2YbYQimqHwU4Vi3
-xd6mjDA02tITq223GyL+nTEZoY8aiVfo/fkYhDv6+ACHwwjtbKgdnLXRlNnNZKAh
-eeVINiZeV4eX+yn98HQGP38=
------END PRIVATE KEY-----
-`;
-
-const CERT_PEM = `-----BEGIN CERTIFICATE-----
-MIIDUDCCAjigAwIBAgIUV4LlHuGDii2+dH7JUYi6MAqPSvgwDQYJKoZIhvcNAQEL
-BQAwHjEcMBoGA1UEAwwTZml4dHVyZS5leGFtcGxlLmNvbTAeFw0yNjA4MTYxOTQ2
-MjRaFw0zNjA4MTMxOTQ2MjRaMB4xHDAaBgNVBAMME2ZpeHR1cmUuZXhhbXBsZS5j
-b20wggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC0gezLrQJ9Tppg7x7d
-TCyjhtgbPjQmrtuPVe4tG59xBD77ufh3aiNLkQbF3MIdoqsdC2MVx5NVsA5nEBFj
-Ztz8tWc/eo8Cpq1fahfw0gLE9ZBjgCIh0rH+911uktuBN+wxGfNgSC7mYo8lxnmP
-myBhSgvrtLmgKsW6fVQRigyKJjOhey2qmSs8Sbezwk4n44jUuhY/n7XtYJ7BCXRy
-M/3A2TzZR1L75mOfQTJmZmb7LANZJmCm10DxF20FYFv72uyuitRYH4xhRjg7Nvb0
-yJkybBpe73ZE/jTimC45J1TOCSTvsy4hE0AmwdwIls9PhJ/yMo+ccXTVydyCKT9N
-Ux5bAgMBAAGjgYUwgYIwHQYDVR0OBBYEFLzqGRo+NHjo59C9fi/QWF5JBcusMB8G
-A1UdIwQYMBaAFLzqGRo+NHjo59C9fi/QWF5JBcusMA8GA1UdEwEB/wQFMAMBAf8w
-LwYDVR0RBCgwJoITZml4dHVyZS5leGFtcGxlLmNvbYIPYWx0LmV4YW1wbGUuY29t
-MA0GCSqGSIb3DQEBCwUAA4IBAQBMX8DB2mNfsQvvuL7YgqZ/LSP9vXedijvkNI5Q
-zaOPExE3q+vxAXXm13InuqKwijDJW0rWpjPwUDqoIMrxd+r75bHPbQt3HlCo4Nnk
-BGR9+PrLLOF4rtWIWOUj4m0Akn5+cFvWsBWJj018snzPryEo6FF6Gu1FxdRPiZn3
-QlC2dTgJE0w9UYnMRl7mclPamK95ktSUTRvgoEYafs2Xja9jJnY5FlJRGg/A0IT4
-yFGMH4Mm0eFV0mtt2DfgUgUDVPMC2lEvo2rQkCMHsLMc5X0jZveizbrOjTUHxMea
-t5QDMGv1OV8EZUsEB/jTK6gk4as0QYjt7tQjkl9XPhWPmfyS
------END CERTIFICATE-----
-`;
-
-/**
- * The checked-in expired pair of `packages/core/src/__fixtures__/certs`
- * (`expired-key.pem` + `expired-cert.pem`, self-signed
- * `CN=expired.example.com`, 2019→2020), copied the way `cert-lifecycle.test.ts`
- * copies the long-lived pair.
- *
- * The D5 certificate projection only reports rows inside their own renewal
- * window, and the store casts a 366-day net before that filter — so the
- * long-lived fixture above (a decade out) can never land in it, whatever
- * `renew_before_days` says. This pair covers the already-expired state without
- * any surgery (it is inside every window by construction); `setNotAfter` below
- * covers the live-window state.
- */
-const EXPIRED_KEY_PEM = `-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCncuF9fihg3tIL
-Gp+cPv2hdPNPJzxRrenY3E3dSt1f4kjXCM3YbbimzOxmj4Md+tacD6UUXmAlxNPY
-5ZOiInWmT2YnegOBc5tj3i7xaEMkaB3F5v83L23kSK4B/ZsNFRaf+0iQ4Ki1l3MX
-62e/NvqwYRMt0Ldp4bHvJYGvYo1OwsmdB7HwzKSJfcBy2WOdckf1c+PWgn5r9qLV
-phxT8Bi8L8YnteZ0LSF7vjJMLIABGlJj3dD9kqyzLidXOmK0896lJaqua2nIvR6r
-qrvMURDJgJOoyzhXDa7iJMia0AK+//UXg8HLugWxRUZaPxLL77TRMqkxtXS2jlQq
-FCiDb08BAgMBAAECggEAPd9dIpmzIdgzlJbJ01oTLc2g+eZti2DPv6nnu5UmJ3/d
-mldOeGJSkI+36k2tDS7ajd/aB6S3sj0AamyqGIbTIhjEjmGvWe31xPkcL2dvJ8yw
-86dfNmz4Fhok8edbm4HnUkXvkljw/ehwRq5dL3KJPxMfmxY8L4uNy+f3+25W+Hq4
-MlneVe0oh96KWWZ6veICZdISDvSOumDn2poQRYsmylD6ACmzABgf3ziSsrliiWah
-O45kFEbL6rHkZiGVoKBcA8pTcqpPMq/d2y5I/j98tizD3svZAKV0j2RzHHR0Pb1n
-NSprYlHq2dO8e+p7rR4V9v2a+h1e7+rkDfcZ33kgYQKBgQDP38FAyuxwwN+fueLm
-lUA6VhwaiwpJfw4YNH0mz8r4rG1WOiE9gwkNPkR+k58l8tMxT+nhzLuBPhTioznW
-adktjUD8D0dvZDU/XtdNqLTdYuy5GMdt8J12jJvmCyNciOkGaaMiC5Q9mluGiWrr
-iTw/udrF0LoEXTKV8VNBABuBhwKBgQDONzTX/WnRSdqSz56S+YOpk0lTY+zw2ybu
-pC8v4Anuh25++EhB/6eBLRBOB8DM9b1VUghnl+dSLPtW4sq4aqvEwTludpHRUoba
-Bj+5G1EnaoluBM/djO9ckHiJPlIQqhrwgzxhCFDxfYOam48lksWxQL71/NhUjbBx
-QIA1VaBtNwKBgBqSFkiq54gOD0eCYi9pGnmaciMubJUyaWHMq8afPumEWMFx0rfj
-HPAVannncqtOG5KtDU8wdTMy9UZ26LiwdPMuoATYCyCA5ZGBFPI3Q08dCvcp5Kv3
-2pjBplfESrPUSDzqmdCLPFqXdWWAASu0MgBPSFiKsoxGQWYLH8IqOlnXAoGBALqP
-8Yvy5PgGY+tsUF9Rw474BF+gSK2C508BVPtwKiwVdJ8ESoMDIuzX8ydVFlWXgQoe
-pCHsqMeMkHsDxTlgsDPaR/Yq6TNCAWRgQOhb0WjilqDlU5Vxut+4iIRJ0H7pFmQ/
-prF2j5xa3GRUlgX9KkN5ewobDTA528Yp/5PA+tmzAoGAU7W7va3fW+Q+K1JYd2F3
-Df+sbLS3LwCCjgx0hFhMhXdrDVDnkvHHoFgG+mFAZB4KGk9MwTYIqtSaToFCh9Ne
-vaNgkVOyLd2RI2FTj4+TfRS5GRECMrKWdkX3rTtFFm/HIR3w+TlUIuLcLIWowScV
-wl3JpL4UGRgNblqw6848pVA=
------END PRIVATE KEY-----
-`;
-
-const EXPIRED_CERT_PEM = `-----BEGIN CERTIFICATE-----
-MIIDHTCCAgWgAwIBAgIUAYEWwUUmB0G9Bi/YGeGAsMwFATEwDQYJKoZIhvcNAQEL
-BQAwHjEcMBoGA1UEAwwTZXhwaXJlZC5leGFtcGxlLmNvbTAeFw0xOTAxMDEwMDAw
-MDBaFw0yMDAxMDEwMDAwMDBaMB4xHDAaBgNVBAMME2V4cGlyZWQuZXhhbXBsZS5j
-b20wggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCncuF9fihg3tILGp+c
-Pv2hdPNPJzxRrenY3E3dSt1f4kjXCM3YbbimzOxmj4Md+tacD6UUXmAlxNPY5ZOi
-InWmT2YnegOBc5tj3i7xaEMkaB3F5v83L23kSK4B/ZsNFRaf+0iQ4Ki1l3MX62e/
-NvqwYRMt0Ldp4bHvJYGvYo1OwsmdB7HwzKSJfcBy2WOdckf1c+PWgn5r9qLVphxT
-8Bi8L8YnteZ0LSF7vjJMLIABGlJj3dD9kqyzLidXOmK0896lJaqua2nIvR6rqrvM
-URDJgJOoyzhXDa7iJMia0AK+//UXg8HLugWxRUZaPxLL77TRMqkxtXS2jlQqFCiD
-b08BAgMBAAGjUzBRMB0GA1UdDgQWBBTrHS7bT7EqVCdy+D24Tu2avuA6wzAfBgNV
-HSMEGDAWgBTrHS7bT7EqVCdy+D24Tu2avuA6wzAPBgNVHRMBAf8EBTADAQH/MA0G
-CSqGSIb3DQEBCwUAA4IBAQASpjRZgjaRYBCacGq38kxppu1zWLseKx2qJ0Ct+tKk
-4Pnm1sYGhfWyLv/ETDBCfL8EIfRo5JDYoe0aAAEZHGuteWtIa89QXWCGFArsDGgU
-qJQtZwVoO6xJiRUdGVP4ttTR5/FD9Q2JcEaRZuehmzpssIDIpR7kXizqWRQCfeys
-j2ahWUY7pIga9YQ9xNzGZbx59juoDXWBNNFoDBkmkFESUt15zQ1zWGzXXiyCWsjh
-KEhBRKR3UNLC2j/zg7DCAzOpHgAjADjeXbQSiXFEFO0TtusAvSxSjFkIqb4/wDxM
-MIqzPddWqeYNhE33+87iPm85UwD0zFDAJs11aQT0K0mF
------END CERTIFICATE-----
-`;
-
-/**
  * The narrowest renewal window that still reaches the fixture's validity end —
  * derived, not assumed, so a regenerated fixture keeps the row in window.
  */
@@ -235,6 +120,14 @@ function windowDaysCovering(certPem: string): number {
   return Math.min(365, Math.max(1, Math.ceil((validToMs - Date.now()) / DAY_MS) + 1));
 }
 
+/**
+ * `EXPIRED_CERT_PEM`, not the long-lived `CERT_PEM` above, drives this: the D5
+ * certificate projection only reports rows inside their own renewal window,
+ * and the store casts a 366-day net before that filter — so a decade-out
+ * fixture can never land in it, whatever `renew_before_days` says. The
+ * already-expired pair sits inside every window by construction, covering
+ * that state without `setNotAfter`-style surgery.
+ */
 const EXPIRING_WINDOW_DAYS = windowDaysCovering(EXPIRED_CERT_PEM);
 
 interface Needle {
@@ -403,6 +296,20 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
     // The asymmetry is deliberate, so it is pinned rather than left to the
     // reader: REST is the trusted admin path and does take a client secret.
     expect(Object.keys(startOAuthFlowInputSchema.shape)).toContain("client_secret");
+  });
+
+  it("1b. no MCP tool picks a listening port — renew_certificate advertises a handle and nothing else", async () => {
+    const tools = await listTools(mcp);
+    const renew = tools.find((t) => t.name === "renew_certificate");
+
+    expect(renew).toBeDefined();
+    expect(Object.keys(renew?.inputSchema.properties ?? {})).toEqual(["handle"]);
+
+    // Same shape of asymmetry as the client secret above: the trusted admin
+    // paths (CLI `--http-port`, REST renew body) still choose the http-01
+    // responder's port, so the field lives on in the shared request schema —
+    // what an agent may ask for is what shrank.
+    expect(Object.keys(renewCertificateRequestSchema.shape)).toContain("http_port");
   });
 
   it("2. the OAuth and certificate flows run over REST, MCP and both SDK clients", async () => {

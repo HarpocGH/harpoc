@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Server } from "node:http";
+import { createServer } from "node:net";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import { Http01Solver, dns01TxtValue } from "./challenge-solver.js";
@@ -103,6 +105,25 @@ describe("Http01Solver", () => {
     await solver.start(TOKEN, KEY_AUTHORIZATION, 0);
     await solver.stop();
     await expect(solver.stop()).resolves.toBeUndefined();
+  });
+
+  it("bind failure names the port but never the cause", async () => {
+    const blocker = createServer();
+    await new Promise<void>((resolve) => {
+      blocker.listen(0, "0.0.0.0", () => resolve());
+    });
+    const port = (blocker.address() as AddressInfo).port;
+    solver = new Http01Solver();
+    try {
+      await expect(solver.start(TOKEN, KEY_AUTHORIZATION, port)).rejects.toMatchObject({
+        code: ErrorCode.CERT_ACME_FAILED,
+        message: `ACME operation failed: http-01 challenge server failed to start on port ${port}`,
+      });
+    } finally {
+      await new Promise<void>((resolve) => {
+        blocker.close(() => resolve());
+      });
+    }
   });
 
   it("removes the start-time error listener once listening, so a later server error cannot corrupt stop() or leak the socket", async () => {

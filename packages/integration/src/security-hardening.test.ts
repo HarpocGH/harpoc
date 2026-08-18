@@ -27,6 +27,14 @@ const REPO_ROOT = join(__dirname, "..", "..", "..");
 
 const PASSWORD = "security-hardening-pw";
 
+/** Structural view of the store's raw SQLite handle — only what this file calls. */
+interface RawStatement {
+  all(...args: unknown[]): unknown[];
+}
+interface RawDb {
+  prepare(sql: string): RawStatement;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Memory Wiping
 // ---------------------------------------------------------------------------
@@ -88,6 +96,8 @@ describe("Memory Wiping", () => {
       url: echoUrl,
       injection: { type: InjectionType.BEARER },
     });
+    expect(response.type).toBe("http");
+    if (response.type !== "http") throw new Error("expected http result");
     expect(response.status).toBe(200);
 
     await new Promise<void>((resolve, reject) => {
@@ -140,17 +150,15 @@ describe("Memory Wiping", () => {
 // ---------------------------------------------------------------------------
 describe("Error Message Sanitization", () => {
   let vault: TestVault;
-  let handle: string;
 
   beforeAll(async () => {
     vault = createTestVault();
     await vault.engine.initVault(PASSWORD);
-    const result = await vault.engine.createSecret({
+    await vault.engine.createSecret({
       name: "sanitization-test",
       type: SecretType.API_KEY,
       value: new Uint8Array(Buffer.from("sk-super-secret-12345")),
     });
-    handle = result.handle;
   });
 
   afterAll(async () => {
@@ -370,15 +378,17 @@ describe("IV Uniqueness", () => {
 
     // Get original IV from DB
     const store = new SqliteStore(vault.dbPath);
-    const beforeSecrets = store.listSecrets();
-    const originalIv = Buffer.from(beforeSecrets[0]!.ct_iv).toString("hex");
+    const beforeRow = store.listSecrets()[0];
+    if (!beforeRow) throw new Error("expected a stored secret row");
+    const originalIv = Buffer.from(beforeRow.ct_iv).toString("hex");
 
     await vault.engine.rotateSecret(result.handle, new Uint8Array(Buffer.from("new-value")));
 
     // Get new IV from DB (re-open to see updated data)
     const store2 = new SqliteStore(vault.dbPath);
-    const afterSecrets = store2.listSecrets();
-    const newIv = Buffer.from(afterSecrets[0]!.ct_iv).toString("hex");
+    const afterRow = store2.listSecrets()[0];
+    if (!afterRow) throw new Error("expected a stored secret row");
+    const newIv = Buffer.from(afterRow.ct_iv).toString("hex");
 
     expect(newIv).not.toBe(originalIv);
 
@@ -434,8 +444,8 @@ describe("Timing Attack Protection", () => {
     const token = vault.engine.createToken("test-agent", ["admin"]);
     const parts = token.split(".");
     // Flip one bit in the signature
-    const sigBytes = Buffer.from(parts[2]!, "base64url");
-    sigBytes[0] = sigBytes[0]! ^ 0x01;
+    const sigBytes = Buffer.from(parts[2] as string, "base64url");
+    sigBytes[0] = (sigBytes[0] as number) ^ 0x01;
     const tamperedToken = `${parts[0]}.${parts[1]}.${sigBytes.toString("base64url")}`;
 
     expect(() => vault.engine.verifyToken(tamperedToken)).toThrow();
@@ -475,11 +485,7 @@ describe("Timing Attack Protection", () => {
 
     // Deterministic replacement for the old flaky `< 1000 ms` assertion:
     // ask SQLite how it would execute the name_hmac lookup.
-    const db = (
-      vault.engine as unknown as {
-        store: { db: import("better-sqlite3").Database };
-      }
-    ).store.db;
+    const db = (vault.engine as unknown as { store: { db: RawDb } }).store.db;
     const plan = db
       .prepare("EXPLAIN QUERY PLAN SELECT id FROM secrets WHERE name_hmac = ?")
       .all("probe") as { detail: string }[];
@@ -551,7 +557,7 @@ describe("Lockout Progression", () => {
         const err = e as VaultError;
         expect(err.code).toBe(ErrorCode.LOCKOUT_ACTIVE);
         expect(err.details?.retry_after_ms).toBeDefined();
-        expect(Number(err.details?.retry_after_ms)).toBeLessThanOrEqual(LOCKOUT_DURATIONS_MS[0]!);
+        expect(Number(err.details?.retry_after_ms)).toBeLessThanOrEqual(LOCKOUT_DURATIONS_MS[0]);
       } finally {
         await engine.destroy();
       }
@@ -667,7 +673,7 @@ describe("Lockout Progression", () => {
       }
 
       // Fast-forward past 30s lockout
-      await vi.advanceTimersByTimeAsync(LOCKOUT_DURATIONS_MS[0]! + 1000);
+      await vi.advanceTimersByTimeAsync(LOCKOUT_DURATIONS_MS[0] + 1000);
 
       // 5 more failures (total 10) → 5 min lockout
       for (let i = 0; i < LOCKOUT_MAX_ATTEMPTS; i++) {
@@ -688,13 +694,13 @@ describe("Lockout Progression", () => {
       } catch (e) {
         const err = e as VaultError;
         expect(err.code).toBe(ErrorCode.LOCKOUT_ACTIVE);
-        expect(Number(err.details?.retry_after_ms)).toBeLessThanOrEqual(LOCKOUT_DURATIONS_MS[1]!);
+        expect(Number(err.details?.retry_after_ms)).toBeLessThanOrEqual(LOCKOUT_DURATIONS_MS[1]);
       } finally {
         await engine1.destroy();
       }
 
       // Fast-forward past 5 min lockout
-      await vi.advanceTimersByTimeAsync(LOCKOUT_DURATIONS_MS[1]! + 1000);
+      await vi.advanceTimersByTimeAsync(LOCKOUT_DURATIONS_MS[1] + 1000);
 
       // 5 more failures (total 15) → 30 min lockout
       for (let i = 0; i < LOCKOUT_MAX_ATTEMPTS; i++) {
@@ -714,7 +720,7 @@ describe("Lockout Progression", () => {
       } catch (e) {
         const err = e as VaultError;
         expect(err.code).toBe(ErrorCode.LOCKOUT_ACTIVE);
-        expect(Number(err.details?.retry_after_ms)).toBeLessThanOrEqual(LOCKOUT_DURATIONS_MS[2]!);
+        expect(Number(err.details?.retry_after_ms)).toBeLessThanOrEqual(LOCKOUT_DURATIONS_MS[2]);
       } finally {
         await engine2.destroy();
       }
@@ -760,7 +766,7 @@ describe("No-Logging Static Audit", () => {
       const content = readFileSync(filePath, "utf8");
       const lines = content.split("\n");
       for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]!;
+        const line = lines[i] as string;
         if (consolePattern.test(line)) {
           expect.fail(`Found console call in ${filePath}:${i + 1}: ${line.trim()}`);
         }
@@ -778,7 +784,7 @@ describe("No-Logging Static Audit", () => {
       const content = readFileSync(filePath, "utf8");
       const lines = content.split("\n");
       for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]!;
+        const line = lines[i] as string;
         if (consolePattern.test(line)) {
           expect.fail(`Found console call in ${filePath}:${i + 1}: ${line.trim()}`);
         }
@@ -822,7 +828,7 @@ describe("No-Logging Static Audit", () => {
       const content = readFileSync(filePath, "utf8");
       const lines = content.split("\n");
       for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]!;
+        const line = lines[i] as string;
         if (consolePattern.test(line) && sensitivePattern.test(line)) {
           expect.fail(
             `Console call references sensitive term in ${filePath}:${i + 1}: ${line.trim()}`,
@@ -923,6 +929,8 @@ describe("SSRF E2E via useSecret", () => {
       url: echoUrl,
       injection: { type: InjectionType.BEARER },
     });
+    expect(response.type).toBe("http");
+    if (response.type !== "http") throw new Error("expected http result");
     expect(response.status).toBe(200);
   });
 

@@ -8,6 +8,7 @@ const {
   mockMcpHttpServer,
   mockTransport,
   mockRestServer,
+  mockRestOAuthManager,
   mockScheduler,
   schedulerCtorCalls,
   mockCertManager,
@@ -30,6 +31,9 @@ const {
   mockTransport: {},
   mockRestServer: {
     close: vi.fn(),
+  },
+  mockRestOAuthManager: {
+    cancelPendingFlows: vi.fn(),
   },
   mockScheduler: {
     start: vi.fn(),
@@ -69,6 +73,7 @@ vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
 
 vi.mock("@harpoc/rest-api", () => ({
   startServer: vi.fn().mockReturnValue(mockRestServer),
+  createDefaultOAuthManager: vi.fn().mockReturnValue(mockRestOAuthManager),
 }));
 
 vi.mock("@harpoc/oauth-proxy", () => ({
@@ -388,6 +393,7 @@ describe("server start", () => {
       engine: mockEngine,
       port: 3000,
       hostname: "127.0.0.1",
+      oauthManager: mockRestOAuthManager,
     });
   });
 
@@ -400,6 +406,7 @@ describe("server start", () => {
       engine: mockEngine,
       port: 8080,
       hostname: "127.0.0.1",
+      oauthManager: mockRestOAuthManager,
     });
   });
 
@@ -412,7 +419,65 @@ describe("server start", () => {
       engine: mockEngine,
       port: 3000,
       hostname: "0.0.0.0",
+      oauthManager: mockRestOAuthManager,
     });
+  });
+
+  it("constructs the REST OAuth manager through the rest-api factory", async () => {
+    const { createDefaultOAuthManager } = await import("@harpoc/rest-api");
+
+    await run(["--rest"]);
+
+    // The owner of the app's background flows must be the CLI, not createApp:
+    // an internally-constructed manager has no dispose path on shutdown (D4).
+    expect(createDefaultOAuthManager).toHaveBeenCalledTimes(1);
+    expect(createDefaultOAuthManager).toHaveBeenCalledWith(mockEngine);
+  });
+
+  it("does not construct a REST OAuth manager without --rest (negative control)", async () => {
+    const { createDefaultOAuthManager } = await import("@harpoc/rest-api");
+
+    await run(["--mcp-http"]);
+
+    expect(createDefaultOAuthManager).not.toHaveBeenCalled();
+  });
+
+  it("SIGINT shutdown cancels pending OAuth flows before destroying the engine", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    exitSpy.mockImplementation(() => undefined as never);
+
+    await run(["--rest"]);
+
+    const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
+    expect(sigintCall).toBeDefined();
+    (sigintCall?.[1] as () => void)();
+
+    await vi.waitFor(() => {
+      expect(exitSpy).toHaveBeenCalledWith(0);
+    });
+    // A pending authorization-code flow pins a loopback listener and a 5-minute
+    // timer, and completes against the store — abort it before the store closes.
+    expect(mockRestOAuthManager.cancelPendingFlows).toHaveBeenCalledTimes(1);
+    const cancelOrder = mockRestOAuthManager.cancelPendingFlows.mock
+      .invocationCallOrder[0] as number;
+    const destroyOrder = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+    expect(cancelOrder).toBeLessThan(destroyOrder);
+
+    onSpy.mockRestore();
+  });
+
+  it("shutdown without --rest cancels nothing (negative control)", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    exitSpy.mockImplementation(() => undefined as never);
+
+    await run(["--mcp"]);
+    const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
+    (sigintCall?.[1] as () => void)();
+
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    expect(mockRestOAuthManager.cancelPendingFlows).not.toHaveBeenCalled();
+
+    onSpy.mockRestore();
   });
 
   // ── Dual mode ───────────────────────────────────────────────────

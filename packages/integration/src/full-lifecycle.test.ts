@@ -83,18 +83,23 @@ describe("Full Lifecycle", () => {
   // ---- Test 2: MCP list_secrets -------------------------------------------
   it("MCP list_secrets returns the secret without value", async () => {
     const result = await callTool(mcpServer, "list_secrets", {});
-    const secrets = JSON.parse(result.content[0]!.text) as Array<{ handle: string; name: string }>;
+    const secrets = JSON.parse(result.content[0]?.text ?? "") as Array<{
+      handle: string;
+      name: string;
+    }>;
     expect(secrets).toHaveLength(1);
-    expect(secrets[0]!.handle).toBe(handle);
-    expect(secrets[0]!.name).toBe(SECRET_NAME);
+    const listed = secrets[0];
+    if (!listed) throw new Error("expected a listed secret");
+    expect(listed.handle).toBe(handle);
+    expect(listed.name).toBe(SECRET_NAME);
     // Ensure no value field
-    expect(Object.keys(secrets[0]!)).not.toContain("value");
+    expect(Object.keys(listed)).not.toContain("value");
   });
 
   // ---- Test 3: MCP get_secret_info ----------------------------------------
   it("MCP get_secret_info returns correct metadata", async () => {
     const result = await callTool(mcpServer, "get_secret_info", { handle });
-    const info = JSON.parse(result.content[0]!.text) as Record<string, unknown>;
+    const info = JSON.parse(result.content[0]?.text ?? "") as Record<string, unknown>;
     expect(info.name).toBe(SECRET_NAME);
     expect(info.type).toBe(SecretType.API_KEY);
     expect(info.status).toBe("active");
@@ -113,7 +118,7 @@ describe("Full Lifecycle", () => {
       },
     });
     expect(result.isError).toBeFalsy();
-    const response = JSON.parse(result.content[0]!.text) as { status: number; body: string };
+    const response = JSON.parse(result.content[0]?.text ?? "") as { status: number; body: string };
     expect(response.status).toBe(200);
 
     // The echo server returned the Authorization header in the body.
@@ -130,7 +135,7 @@ describe("Full Lifecycle", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { data: Array<{ handle: string }> };
     expect(body.data).toHaveLength(1);
-    expect(body.data[0]!.handle).toBe(handle);
+    expect(body.data[0]?.handle).toBe(handle);
   });
 
   // ---- Test 6: REST GET /api/v1/secrets/:handle ---------------------------
@@ -183,7 +188,7 @@ describe("Full Lifecycle", () => {
   // ---- Test 11: MCP get_secret_info after rotation -------------------------
   it("MCP get_secret_info shows version=2 after rotation", async () => {
     const result = await callTool(mcpServer, "get_secret_info", { handle });
-    const info = JSON.parse(result.content[0]!.text) as { version: number };
+    const info = JSON.parse(result.content[0]?.text ?? "") as { version: number };
     expect(info.version).toBe(2);
   });
 

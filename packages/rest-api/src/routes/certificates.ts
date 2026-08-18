@@ -6,6 +6,7 @@ import {
   generateCsrRequestSchema,
   renewCertificateRequestSchema,
   isEncryptedPrivateKeyPem,
+  ENCRYPTED_KEY_IMPORT_REFUSAL,
 } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
@@ -23,9 +24,7 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
     }
     checkTokenScope(token, "create", parsed.data.project, parsed.data.name);
     if (isEncryptedPrivateKeyPem(parsed.data.private_key_pem)) {
-      throw VaultError.schemaValidation(
-        "private_key_pem is passphrase-protected — decrypt it first or import via 'harpoc cert import', which prompts for the passphrase (D3)",
-      );
+      throw VaultError.schemaValidation(ENCRYPTED_KEY_IMPORT_REFUSAL);
     }
     const ref = await c.get("certManager").importCertificate(parsed.data.name, {
       privateKeyPem: parsed.data.private_key_pem,

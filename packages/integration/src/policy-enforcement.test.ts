@@ -88,8 +88,10 @@ describe("per-secret access policy enforcement end-to-end", () => {
     return client;
   }
 
-  function textOf(result: { content?: unknown }): string {
-    const content = result.content as { type: string; text?: string }[] | undefined;
+  function textOf(result: unknown): string {
+    const content = (result as { content?: unknown }).content as
+      | { type: string; text?: string }[]
+      | undefined;
     return (content ?? []).map((c) => c.text ?? "").join("\n");
   }
 

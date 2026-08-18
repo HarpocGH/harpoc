@@ -11,6 +11,7 @@ import type { TestVault } from "./helpers/engine-factory.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
 import { callTool } from "./helpers/mcp-helpers.js";
+import { KEY_PEM, CERT_PEM } from "./helpers/cert-fixtures.js";
 
 /**
  * Certificate lifecycle across the wired surfaces (Phase 10): REST import →
@@ -32,66 +33,6 @@ const CSR_NAME = "csr-pending";
 const CSR_SUBJECT = "csr.example.com";
 const ENCRYPTED_REST_NAME = "enc-rest";
 const ENCRYPTED_DIRECT_NAME = "enc-direct";
-
-/**
- * The fixture pair of `packages/cli/src/commands/cert`'s tests, copied from the
- * files those read as `KEY_PEM`/`CERT_PEM`
- * (`packages/cli/src/__fixtures__/certs/rsa-key.pem` + `rsa-cert.pem`, read in
- * `import-status.test.ts:47-48`). Self-signed `CN=fixture.example.com`, valid
- * until 2036-08-13 — long-lived on purpose, so nothing here can drift into a
- * nearing-renewal assertion (core owns those).
- */
-const KEY_PEM = `-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC0gezLrQJ9Tppg
-7x7dTCyjhtgbPjQmrtuPVe4tG59xBD77ufh3aiNLkQbF3MIdoqsdC2MVx5NVsA5n
-EBFjZtz8tWc/eo8Cpq1fahfw0gLE9ZBjgCIh0rH+911uktuBN+wxGfNgSC7mYo8l
-xnmPmyBhSgvrtLmgKsW6fVQRigyKJjOhey2qmSs8Sbezwk4n44jUuhY/n7XtYJ7B
-CXRyM/3A2TzZR1L75mOfQTJmZmb7LANZJmCm10DxF20FYFv72uyuitRYH4xhRjg7
-Nvb0yJkybBpe73ZE/jTimC45J1TOCSTvsy4hE0AmwdwIls9PhJ/yMo+ccXTVydyC
-KT9NUx5bAgMBAAECggEACOYq5XO3HrRkWgkP7XsW7Ez2lIlBivKt8mgbIPAusSSz
-cjed7001RkF1IwYaL9nYM8te7DD1q5DNdPlO0ia9GFxdJb0GFexfuceCPKYt6sXs
-g2tKw34etmI9ofjth3ZZV6Ze4E1Oup77TbJ2RcUxGHrNEabMTAAv1VzeayryKVFZ
-oOw6ABQe4nanryuNGdkqHl1YGMt59Y+NsrJulIbveOVQoWQa5f06o7faEl3sG4ZA
-67H4FsEPFIVTOSc3SfTp0i6X7Au+XBpStjUo5xzfqIWzpfSzOPeCWn8XnQH5nSdE
-kb1Uq5UkiF+QNpErlst4uhFxo+uYvCKbwNAFZLc1UQKBgQDbfiL1tI2eesBkyTmI
-ukapsXBiVknzm/ldxP+/OqusBvEN7v7msUTmUQpKTiZaiQ+aTTfvzgPiQvhyhBe6
-mxD8nyVrEoLe2/dQRSnbQEy6YpZiHIGtBoNa8pZ7dzSSWqnNx7ZUtfOdkdChZdOy
-8Uv6slaTlWAlzt8dNd0iuLjXmQKBgQDSh9KjiNptutaQVcvcDpeQ0HQOObXjMk24
-cnrouKP4rqw96dQWPNWTGT+PQgGTbCPSquFicteAyI1y5oIJ84LiRCHRVSsGv6X/
-SutYsUDH9ieh8Wz6ymz1069yQSYh1hr8HhdwXPSulZGMjUKBE0M4qIMHkRJdtM4S
-7yNKZc7OEwKBgQCyal3Qi+tyHyW0xzzVP1WhKnLH/IwwUWDqL/ATaYWSWDIpuVPK
-Ad6XuNg8fjn+7dqY+pu1eij+CqIZs/X14YZ1Uof/+RQYQ4VM4mubpTC5cNn89l8S
-XnD3xKk9wzAgp0HP278CLMTSGG0WRMdIdYvlRIHLhWiaUwZZoCcYyj62QQKBgApV
-knhmklpKjpe9LmmZ6cS5Bslf+dayNHB2ZiQgVCQz5s6PONLyn4U9+wm8Mrma2FNS
-AghEHOH8dj0KpZ15b5ZNw98zsA3/wFU8xzquUMDAC4f+gtv4rcqPXpBcNFP63446
-p+njFjuvqdpdYMNXP7h7RRtM+rrQ0kDJrlDLmJAzAoGAHaiD4Wr3bkcWunzUWQ6a
-PtNFckGmS2KxmzNabWdjIkfndQRUurDwsDVLmJfi/nCzpFCzT2YbYQimqHwU4Vi3
-xd6mjDA02tITq223GyL+nTEZoY8aiVfo/fkYhDv6+ACHwwjtbKgdnLXRlNnNZKAh
-eeVINiZeV4eX+yn98HQGP38=
------END PRIVATE KEY-----
-`;
-
-const CERT_PEM = `-----BEGIN CERTIFICATE-----
-MIIDUDCCAjigAwIBAgIUV4LlHuGDii2+dH7JUYi6MAqPSvgwDQYJKoZIhvcNAQEL
-BQAwHjEcMBoGA1UEAwwTZml4dHVyZS5leGFtcGxlLmNvbTAeFw0yNjA4MTYxOTQ2
-MjRaFw0zNjA4MTMxOTQ2MjRaMB4xHDAaBgNVBAMME2ZpeHR1cmUuZXhhbXBsZS5j
-b20wggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC0gezLrQJ9Tppg7x7d
-TCyjhtgbPjQmrtuPVe4tG59xBD77ufh3aiNLkQbF3MIdoqsdC2MVx5NVsA5nEBFj
-Ztz8tWc/eo8Cpq1fahfw0gLE9ZBjgCIh0rH+911uktuBN+wxGfNgSC7mYo8lxnmP
-myBhSgvrtLmgKsW6fVQRigyKJjOhey2qmSs8Sbezwk4n44jUuhY/n7XtYJ7BCXRy
-M/3A2TzZR1L75mOfQTJmZmb7LANZJmCm10DxF20FYFv72uyuitRYH4xhRjg7Nvb0
-yJkybBpe73ZE/jTimC45J1TOCSTvsy4hE0AmwdwIls9PhJ/yMo+ccXTVydyCKT9N
-Ux5bAgMBAAGjgYUwgYIwHQYDVR0OBBYEFLzqGRo+NHjo59C9fi/QWF5JBcusMB8G
-A1UdIwQYMBaAFLzqGRo+NHjo59C9fi/QWF5JBcusMA8GA1UdEwEB/wQFMAMBAf8w
-LwYDVR0RBCgwJoITZml4dHVyZS5leGFtcGxlLmNvbYIPYWx0LmV4YW1wbGUuY29t
-MA0GCSqGSIb3DQEBCwUAA4IBAQBMX8DB2mNfsQvvuL7YgqZ/LSP9vXedijvkNI5Q
-zaOPExE3q+vxAXXm13InuqKwijDJW0rWpjPwUDqoIMrxd+r75bHPbQt3HlCo4Nnk
-BGR9+PrLLOF4rtWIWOUj4m0Akn5+cFvWsBWJj018snzPryEo6FF6Gu1FxdRPiZn3
-QlC2dTgJE0w9UYnMRl7mclPamK95ktSUTRvgoEYafs2Xja9jJnY5FlJRGg/A0IT4
-yFGMH4Mm0eFV0mtt2DfgUgUDVPMC2lEvo2rQkCMHsLMc5X0jZveizbrOjTUHxMea
-t5QDMGv1OV8EZUsEB/jTK6gk4as0QYjt7tQjkl9XPhWPmfyS
------END CERTIFICATE-----
-`;
 
 const FIXTURE_SUBJECT = "CN=fixture.example.com";
 const FIXTURE_NOT_AFTER = new Date("2036-08-13T19:46:24Z").getTime();

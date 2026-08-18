@@ -3,15 +3,12 @@ import { CertManager } from "@harpoc/cert-manager";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
-
-const ALGORITHMS = ["rsa", "ec"] as const;
-type Algorithm = (typeof ALGORITHMS)[number];
-
-const RSA_KEY_SIZES = [2048, 4096] as const;
-type RsaKeySize = (typeof RSA_KEY_SIZES)[number];
-
-const EC_CURVES = ["P-256", "P-384"] as const;
-type EcCurve = (typeof EC_CURVES)[number];
+import {
+  assertAlgorithmPairing,
+  parseAlgorithm,
+  parseBits,
+  parseCurve,
+} from "./key-algorithm-options.js";
 
 interface CertCsrOptions {
   subject: string;
@@ -22,47 +19,6 @@ interface CertCsrOptions {
   project?: string;
   json?: boolean;
   token?: string;
-}
-
-function isAlgorithm(value: string): value is Algorithm {
-  return (ALGORITHMS as readonly string[]).includes(value);
-}
-
-function isRsaKeySize(value: number): value is RsaKeySize {
-  return (RSA_KEY_SIZES as readonly number[]).includes(value);
-}
-
-function isEcCurve(value: string): value is EcCurve {
-  return (EC_CURVES as readonly string[]).includes(value);
-}
-
-/**
- * Every option below is range-checked before the vault opens (the `secret
- * set` F4 lesson, also applied to `cert import`'s --renew-before-days): an
- * operator typo must not spend a key-pair generation or reach the engine.
- */
-function parseAlgorithm(value: string): Algorithm {
-  if (!isAlgorithm(value)) {
-    throw new Error(`Invalid algorithm "${value}". Must be one of: ${ALGORITHMS.join(", ")}.`);
-  }
-  return value;
-}
-
-function parseBits(value: string | undefined): RsaKeySize | undefined {
-  if (value === undefined) return undefined;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || !isRsaKeySize(parsed)) {
-    throw new Error(`Invalid bits "${value}". Must be one of: ${RSA_KEY_SIZES.join(", ")}.`);
-  }
-  return parsed;
-}
-
-function parseCurve(value: string | undefined): EcCurve | undefined {
-  if (value === undefined) return undefined;
-  if (!isEcCurve(value)) {
-    throw new Error(`Invalid curve "${value}". Must be one of: ${EC_CURVES.join(", ")}.`);
-  }
-  return value;
 }
 
 function parseSans(value: string | undefined): string[] | undefined {
@@ -85,20 +41,13 @@ export function registerCertCsrCommand(cert: Command): void {
     .action(async (name: string, options: CertCsrOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        // Parsed before the vault opens (the `secret set` F4 lesson): an
+        // operator typo must not spend a key-pair generation or reach the
+        // engine.
         const algorithm = parseAlgorithm(options.algorithm);
         const modulusLength = parseBits(options.bits);
         const namedCurve = parseCurve(options.curve);
-        // A mismatched flag is refused rather than silently dropped: an
-        // operator's explicit strength request (--bits/--curve) must not be
-        // ignored just because it doesn't pair with the resolved algorithm —
-        // including the ec default, so a bare `--bits 4096` doesn't quietly
-        // produce a P-256 key.
-        if (algorithm === "ec" && modulusLength !== undefined) {
-          throw new Error("--bits only applies with --algorithm rsa.");
-        }
-        if (algorithm === "rsa" && namedCurve !== undefined) {
-          throw new Error("--curve only applies with --algorithm ec.");
-        }
+        assertAlgorithmPairing(algorithm, modulusLength, namedCurve);
         const sans = parseSans(options.sans);
 
         const engine = await loadUnlockedEngine(vaultDir);

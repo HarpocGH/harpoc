@@ -110,6 +110,7 @@ export function registerServerCommand(program: Command): void {
           let mcpServer: { close(): Promise<void> } | undefined;
           let mcpHttpServer: { close(): Promise<void> } | undefined;
           let restServer: { close(): void } | undefined;
+          let restOAuthManager: { cancelPendingFlows(): void } | undefined;
           let refreshScheduler: { stop(): Promise<void> } | undefined;
           let renewalScheduler: { stop(): Promise<void> } | undefined;
           let shuttingDown = false;
@@ -127,6 +128,12 @@ export function registerServerCommand(program: Command): void {
             if (mcpServer) await mcpServer.close();
             if (mcpHttpServer) await mcpHttpServer.close();
             if (restServer) restServer.close();
+            // Abort the REST app's pending background OAuth flows before the
+            // store closes: each authorization-code flow pins a loopback
+            // listener and a 5-minute timer, and its completion writes to the
+            // vault. Cancellation is a synchronous abort fan-out — nothing to
+            // drain, unlike the schedulers above.
+            restOAuthManager?.cancelPendingFlows();
             await engine?.destroy();
             process.exit(0);
           };
@@ -169,8 +176,12 @@ export function registerServerCommand(program: Command): void {
           }
 
           if (opts.rest) {
-            const { startServer } = await import("@harpoc/rest-api");
-            restServer = startServer({ engine, port, hostname: opts.host });
+            const { startServer, createDefaultOAuthManager } = await import("@harpoc/rest-api");
+            // Constructed here, not inside createApp: the shutdown path needs a
+            // handle on the manager to cancel its pending flows (D4).
+            const oauthManager = createDefaultOAuthManager(engine);
+            restOAuthManager = oauthManager;
+            restServer = startServer({ engine, port, hostname: opts.host, oauthManager });
           }
 
           if (opts.oauthRefresh) {
