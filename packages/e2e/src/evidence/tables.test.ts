@@ -462,7 +462,7 @@ describe("renderMatrixTable", () => {
     expect(tex).toContain("Transport coverage");
     expect(tex).toContain("demo-mcp-stdio-downstream & mcp & cli & SUCCEEDED");
     // Still 6 x 4: the extra cell did not become a matrix claim.
-    expect(tex.match(/SUCCEEDED/g)?.length).toBe(25);
+    expect(tex.match(/SUCCEEDED/g)).toHaveLength(25);
   });
 });
 
@@ -486,14 +486,14 @@ describe("interface-less demonstration records (review 2026-08-14, F3)", () => {
 
   it("routes a record with no interface to unclassified, not matrix", () => {
     const { matrix, unclassified } = classify([{ ...base }]);
-    expect(matrix.length).toBe(0);
-    expect(unclassified.length).toBe(1);
+    expect(matrix).toHaveLength(0);
+    expect(unclassified).toHaveLength(1);
   });
 
   it("keeps a record WITH an interface in the matrix (negative control)", () => {
     const { matrix, unclassified } = classify([{ ...base, interface: "rest" }]);
-    expect(matrix.length).toBe(1);
-    expect(unclassified.length).toBe(0);
+    expect(matrix).toHaveLength(1);
+    expect(unclassified).toHaveLength(0);
   });
 
   it("refuses to render, naming the interface as the reason", () => {
@@ -629,5 +629,18 @@ describe("duplicate and multi-commit record sets (review 2026-08-14, F6)", () =>
     expect(unclassified).toContain(records[0]);
     expect(unclassified).toHaveLength(1);
     expect(matrix).toHaveLength(0);
+  });
+
+  // The harpoc-only case the two pins above cannot reach: with no baseline for
+  // the row there is no row-map entry, so the pairing loop skipped both records
+  // and the displaced one was counted in `other` as an ordinary single-arm
+  // exclusion — the same silent drop the 2026-08-14 review closed for paired
+  // rows, still open for unpaired ones.
+  it("classify() routes a shadowed harpoc-only record to unclassified, not other", () => {
+    const records = [rec(), rec({ observed: "BYPASSED" })];
+    const { unclassified, other } = classify(records);
+    expect(unclassified).toEqual([records[0]]);
+    expect(other).toEqual([records[1]]);
+    expect(checkGates(records, []).some((p) => p.includes("fits no table"))).toBe(true);
   });
 });

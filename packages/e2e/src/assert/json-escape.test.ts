@@ -36,4 +36,24 @@ describe("findEscapeTolerant", () => {
   it("finds nothing for an empty needle", () => {
     expect(findEscapeTolerant("abc", "")).toEqual([]);
   });
+
+  // One case per remaining SIMPLE entry. `\/` and `\uXXXX` are covered above;
+  // without these, deleting a row from the table reds nothing.
+  it.each([
+    ['\\"', '"'],
+    ["\\\\", "\\"],
+    ["\\b", "\b"],
+    ["\\f", "\f"],
+    ["\\n", "\n"],
+    ["\\r", "\r"],
+    ["\\t", "\t"],
+  ])("finds the %s escape and reports it escaped", (escapedForm, ch) => {
+    const [hit] = findEscapeTolerant(`"a${escapedForm}b"`, `a${ch}b`);
+    expect(hit?.escaped).toBe(true);
+  });
+
+  it("treats an invalid escape's backslash as a literal character (fallback)", () => {
+    const [hit] = findEscapeTolerant('"a\\qb"', "a\\qb");
+    expect(hit).toMatchObject({ escaped: false });
+  });
 });

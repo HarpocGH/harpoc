@@ -10,7 +10,7 @@ import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
-import { callTool } from "./helpers/mcp-helpers.js";
+import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 import { startMockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import type { MockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 
@@ -111,10 +111,16 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
       client_id: CC_CLIENT_ID,
       client_secret: CC_CLIENT_SECRET,
     });
+    ccSecretId = await vault.engine.resolveSecretId(`secret://${CC_NAME}`);
+
+    // Positive control for the access-token needle: the vault really holds
+    // at-cc-1, read back over the trusted local path. Without it the opacity
+    // assertion below would pass just as well against a provider that never
+    // honoured `setNextTokens` and handed out its default token instead.
+    expect(await vault.engine.getOAuthAccessToken(ccSecretId)).toBe(CC_ACCESS_TOKEN);
+
     expect(raw).not.toContain(CC_CLIENT_SECRET);
     expect(raw).not.toContain(CC_ACCESS_TOKEN);
-
-    ccSecretId = await vault.engine.resolveSecretId(`secret://${CC_NAME}`);
   });
 
   it("2. REST status reports the stored access token without a refresh token", async () => {
@@ -306,7 +312,7 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
     });
 
     expect(result.isError ?? false).toBe(false);
-    const payload = JSON.parse(result.content[0]?.text ?? "") as {
+    const payload = parseToolResult(result, "start_oauth_flow") as {
       handle: string;
       status: string;
       message: string;

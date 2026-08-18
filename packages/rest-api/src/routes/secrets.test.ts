@@ -205,6 +205,18 @@ describe("secret routes", () => {
       });
       expect(res.status).toBe(403);
     });
+
+    it("a bodyless POST is a descriptive 400, not a generic 500", async () => {
+      const res = await app.request("/api/v1/secrets", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; message: string };
+      expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+      expect(body.message).toBe("Request body must be valid JSON");
+      expect(engine.createSecret).not.toHaveBeenCalled();
+    });
   });
 
   describe("GET /api/v1/secrets/:handle", () => {

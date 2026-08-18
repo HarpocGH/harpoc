@@ -70,13 +70,20 @@ function post(path: string, body: unknown): Promise<Response> {
   });
 }
 
-async function getStatus(name: string): Promise<{ raw: string; status: CertificateStatus }> {
+/**
+ * Every status read sweeps the whole serialized response, not just the fields
+ * its caller goes on to assert: the secret this status describes holds a
+ * private key, and neither it nor the certificate may ride along on the status
+ * projection.
+ */
+async function getStatus(name: string): Promise<CertificateStatus> {
   const res = await fetch(`${rest.baseUrl}/api/v1/certificates/${name}/status`, {
     headers: authHeaders(),
   });
   expect(res.status).toBe(200);
   const raw = await res.text();
-  return { raw, status: (JSON.parse(raw) as { data: CertificateStatus }).data };
+  expect(raw).not.toContain(PEM_ARMOR);
+  return (JSON.parse(raw) as { data: CertificateStatus }).data;
 }
 
 beforeAll(async () => {
@@ -107,7 +114,7 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
     expect(created.data.handle).toBe(`secret://${IMPORTED_NAME}`);
     expect(created.data.secret_id).toBe(await vault.engine.resolveSecretId(created.data.handle));
 
-    const { raw, status } = await getStatus(IMPORTED_NAME);
+    const status = await getStatus(IMPORTED_NAME);
     importedStatus = status;
     expect(status.secret_id).toBe(created.data.secret_id);
     expect(status.subject).toBe(FIXTURE_SUBJECT);
@@ -116,11 +123,6 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
     expect(status.not_before).toBeLessThan(status.not_after as number);
     expect(status.auto_renew).toBe(false);
     expect(status.renewal_status).toBe("ok");
-
-    // The whole serialized response, not just the fields above: the secret this
-    // status describes holds a private key, and neither it nor the certificate
-    // may ride along on the status projection.
-    expect(raw).not.toContain(PEM_ARMOR);
 
     const info = await vault.engine.getSecretInfo(created.data.handle);
     expect(info.type).toBe(SecretType.CERTIFICATE);
@@ -146,6 +148,9 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
 
     expect(res.status).toBe(201);
     const created = (await res.json()) as { data: { handle: string; csr_pem: string } };
+    // The response carries the handle and the request, and nothing else — the
+    // key the CSR was built from stays in the vault.
+    expect(Object.keys(created.data).sort()).toEqual(["csr_pem", "handle"]);
     expect(created.data.handle).toBe(`secret://${CSR_NAME}`);
     // The CSR is public material and is the one payload that legitimately
     // carries PEM armor — it exists to be handed to a CA.
@@ -155,13 +160,12 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
 
     // CSR-only: the subject comes from the request, and there is no validity
     // window until an issued certificate arrives.
-    const { raw, status } = await getStatus(CSR_NAME);
+    const status = await getStatus(CSR_NAME);
     expect(status.subject).toBe(`CN=${CSR_SUBJECT}`);
     expect(status.issuer).toBeNull();
     expect(status.not_before).toBeNull();
     expect(status.not_after).toBeNull();
     expect(status.renewal_status).toBe("no_certificate");
-    expect(raw).not.toContain(PEM_ARMOR);
 
     const info = await vault.engine.getSecretInfo(`secret://${CSR_NAME}`);
     expect(info.type).toBe(SecretType.CERTIFICATE);
@@ -198,7 +202,7 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
 
     // A refused renewal changes nothing about the certificate it was asked to
     // replace.
-    const { status } = await getStatus(IMPORTED_NAME);
+    const status = await getStatus(IMPORTED_NAME);
     expect(status).toEqual(importedStatus);
   });
 

@@ -1,6 +1,6 @@
-import { startOAuthFlowInputSchema } from "@harpoc/shared";
+import { VaultError, startOAuthFlowInputSchema } from "@harpoc/shared";
 import type { OAuthGrantType, OAuthProviderConfig } from "@harpoc/shared";
-import { providerConfigFromFlowInput } from "@harpoc/oauth-proxy";
+import { formatIssues, providerConfigFromFlowInput } from "@harpoc/oauth-proxy";
 
 export interface OAuthConnectFlags {
   provider?: string;
@@ -12,10 +12,6 @@ export interface OAuthConnectFlags {
   redirectUri?: string;
   authMethod?: string;
   project?: string;
-}
-
-function formatIssues(issues: { path: (string | number)[]; message: string }[]): string {
-  return issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
 }
 
 /**
@@ -30,10 +26,12 @@ export function buildOAuthProviderConfig(
   clientSecret: string | undefined,
 ): { config: OAuthProviderConfig; project?: string } {
   if (!flags.provider) {
-    throw new Error("--provider is required (github | google | microsoft | slack | custom).");
+    throw VaultError.invalidInput(
+      "--provider is required (github | google | microsoft | slack | custom).",
+    );
   }
   if (!flags.clientId) {
-    throw new Error("--client-id is required.");
+    throw VaultError.invalidInput("--client-id is required.");
   }
 
   const scopes = flags.scopes
@@ -55,7 +53,7 @@ export function buildOAuthProviderConfig(
     device_authorization_endpoint: flags.deviceEndpoint,
   });
   if (!parsedInput.success) {
-    throw new Error(formatIssues(parsedInput.error.issues));
+    throw VaultError.schemaValidation(formatIssues(parsedInput.error.issues));
   }
 
   return providerConfigFromFlowInput(parsedInput.data, { redirect_uri: flags.redirectUri });

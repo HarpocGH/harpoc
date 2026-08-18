@@ -90,9 +90,11 @@ function grant(
 }
 
 /**
- * The narrowest renewal window that still reaches the fixture's validity end.
- * The checked-in pair is expired, so this floors at one day; deriving it keeps
- * the test honest should the fixture ever be regenerated with a live window.
+ * A renewal window covering the fixture's remaining validity: whole days to its
+ * `validTo` plus a one-day margin, floored at 1 (the checked-in pair is already
+ * expired) and clamped at 365 — the engine's `renew_before_days` ceiling, which
+ * refuses anything wider. Derived rather than hardcoded so a regenerated
+ * fixture stays covered, up to that ceiling.
  */
 function windowDaysCovering(certPem: string): number {
   const validToMs = new Date(new X509Certificate(certPem).validTo).getTime();
@@ -104,11 +106,18 @@ function windowDaysCovering(certPem: string): number {
  * for a decade, so none of them lands strictly inside the scheduler's wide net
  * with its own renewal window still ahead. Moving `not_after` out-of-band is the
  * only way to exercise the per-row window filter.
+ *
+ * The row count is asserted: an UPDATE matching nothing is silent, and the
+ * caller would go on asserting about the fixture's own imported validity window
+ * while believing it had moved it.
  */
 function setNotAfter(secretId: string, notAfter: number): void {
   const db = new Database(dbPath);
   try {
-    db.prepare("UPDATE certificates SET not_after = ? WHERE secret_id = ?").run(notAfter, secretId);
+    const { changes }: { changes: number } = db
+      .prepare("UPDATE certificates SET not_after = ? WHERE secret_id = ?")
+      .run(notAfter, secretId);
+    expect(changes).toBe(1);
   } finally {
     db.close();
   }
@@ -413,6 +422,74 @@ describe("getExpiringCertificateStatuses", () => {
     expect(() => engine.getExpiringCertificateStatuses()).toThrow(
       expect.objectContaining({ code: ErrorCode.VAULT_LOCKED }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inclusive edges — pinned from both sides against a frozen clock
+// ---------------------------------------------------------------------------
+
+/**
+ * Every threshold on these paths is `<=`. Each case writes its fixture exactly
+ * on the edge and asserts the inclusive outcome, then moves it 1 ms past and
+ * asserts the opposite — a one-sided assertion holds just as well for a `<`.
+ *
+ * The clock is frozen before the fixture is written: with a real one the
+ * milliseconds between the write and the read shift the edge under the test.
+ */
+describe("inclusive window and status edges", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("includes an OAuth token expiring exactly at the caller's window edge", async () => {
+    const { secretId } = await engine.createOAuthSecret("edge", oauthConfig());
+
+    await engine.completeOAuthFlow(secretId, "at", "rt", Date.now() + HOUR_MS);
+    expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS)).toHaveLength(1);
+
+    await engine.completeOAuthFlow(secretId, "at", "rt", Date.now() + HOUR_MS + 1);
+    expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS)).toEqual([]);
+  });
+
+  it("reports expiring_soon exactly at the 5 min refresh buffer", async () => {
+    const { secretId } = await engine.createOAuthSecret("buffer", oauthConfig());
+
+    await engine.completeOAuthFlow(secretId, "at", "rt", Date.now() + 5 * MINUTE_MS);
+    expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS)[0]?.refresh_status).toBe("expiring_soon");
+
+    await engine.completeOAuthFlow(secretId, "at", "rt", Date.now() + 5 * MINUTE_MS + 1);
+    expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS)[0]?.refresh_status).toBe("ok");
+  });
+
+  it("includes a certificate landing exactly on its own renew_before_days edge", async () => {
+    const { secretId } = await engine.importCertificate("edge", fx("rsa-key.pem"), {
+      certificatePem: fx("rsa-cert.pem"),
+      renewBeforeDays: 30,
+    });
+
+    setNotAfter(secretId, Date.now() + 30 * DAY_MS);
+    expect(engine.getExpiringCertificateStatuses().map((i) => i.name)).toEqual(["edge"]);
+
+    setNotAfter(secretId, Date.now() + 30 * DAY_MS + 1);
+    expect(engine.getExpiringCertificateStatuses()).toEqual([]);
+  });
+
+  it("reports expired exactly at not_after", async () => {
+    const { secretId } = await engine.importCertificate("edge", fx("rsa-key.pem"), {
+      certificatePem: fx("rsa-cert.pem"),
+      renewBeforeDays: 30,
+    });
+
+    setNotAfter(secretId, Date.now());
+    expect(engine.getExpiringCertificateStatuses()[0]?.renewal_status).toBe("expired");
+
+    setNotAfter(secretId, Date.now() + 1);
+    expect(engine.getExpiringCertificateStatuses()[0]?.renewal_status).toBe("expiring_soon");
   });
 });
 

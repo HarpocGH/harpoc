@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { describeWorkspaceDeps } from "../../shared/src/scaffold-helpers.js";
 
 const PKG_ROOT = join(import.meta.dirname, "..");
 const DIST_ROOT = join(PKG_ROOT, "dist");
@@ -35,3 +36,5 @@ describe("package scaffold", () => {
     expect(existsSync(join(DIST_ROOT, "index.d.ts"))).toBe(true);
   });
 });
+
+describeWorkspaceDeps(PKG_ROOT, ["@harpoc/shared", "@harpoc/core"]);

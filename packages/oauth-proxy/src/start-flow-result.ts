@@ -47,11 +47,16 @@ export async function startOAuthFlowResult(
     };
   }
 
-  const start = await manager.startAuthorizationCodeDeferred(input.name, config, project, caller);
-  return {
-    handle: start.handle,
-    status: "pending_authorization",
-    auth_url: start.authUrl,
-    message: PENDING_AUTHORIZATION_MESSAGE,
-  };
+  if (input.grant_type === OAuthGrantType.AUTHORIZATION_CODE) {
+    const start = await manager.startAuthorizationCodeDeferred(input.name, config, project, caller);
+    return {
+      handle: start.handle,
+      status: "pending_authorization",
+      auth_url: start.authUrl,
+      message: PENDING_AUTHORIZATION_MESSAGE,
+    };
+  }
+
+  const unhandled: never = input.grant_type;
+  throw new Error(`Unhandled grant_type: ${String(unhandled)}`);
 }

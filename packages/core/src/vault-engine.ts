@@ -547,6 +547,14 @@ export class VaultEngine {
     // The resolved id, reported by the manager's read hook: without it the
     // success rows left `audit_log.secret_id` NULL, so `audit --secret <id>`
     // omitted exactly the successful reads of that secret (L4).
+    //
+    // On the catch arm it is still undefined in every reachable case — the
+    // manager's getSecretInfo throws only out of handle resolution, which runs
+    // before the hook fires (a throw after it would mean the name decrypt
+    // failed, i.e. a corrupted vault). It is passed anyway so this arm stays
+    // identical in shape to getSecretValue's, where the id genuinely is set by
+    // the time the throw happens: the cert-value refusal and the usability check
+    // both sit after the hook there (secret-manager.ts:303-328).
     let secretId: string | undefined;
     let info: SecretInfo;
     try {
@@ -1942,10 +1950,15 @@ export class VaultEngine {
     caller?: CallerContext,
   ): ExpiringOAuthTokenInfo[] {
     const s = this.assertUnlocked();
-    const infoById = this.secretInfoById(s, caller);
+    // The metadata join is built only once a row needs it: `secretInfoById`
+    // KEK-decrypts every secret name in the vault, and a health census with
+    // nothing expiring is the common case.
+    const rows = s.store.getExpiringOAuthTokens(withinMs);
+    if (rows.length === 0) return [];
 
+    const infoById = this.secretInfoById(s, caller);
     const out: ExpiringOAuthTokenInfo[] = [];
-    for (const row of s.store.getExpiringOAuthTokens(withinMs)) {
+    for (const row of rows) {
       const info = infoById.get(row.secret_id);
       if (!info) continue;
       out.push({
@@ -2375,13 +2388,22 @@ export class VaultEngine {
    */
   getExpiringCertificateStatuses(caller?: CallerContext): ExpiringCertificateInfo[] {
     const s = this.assertUnlocked();
-    const infoById = this.secretInfoById(s, caller);
     const now = Date.now();
+    // Per-row window first: it needs no metadata, and building the join costs a
+    // KEK decrypt of every secret name in the vault (see
+    // `getExpiringOAuthTokenStatuses`). The wide net routinely returns rows that
+    // this filter then drops, so the zero-survivor case is not just the empty
+    // vault.
+    const rows = s.store
+      .getExpiringCertificates(EXPIRING_CERT_QUERY_DAYS)
+      .filter(
+        (row) => row.not_after !== null && row.not_after <= now + row.renew_before_days * DAY_MS,
+      );
+    if (rows.length === 0) return [];
 
+    const infoById = this.secretInfoById(s, caller);
     const out: ExpiringCertificateInfo[] = [];
-    for (const row of s.store.getExpiringCertificates(EXPIRING_CERT_QUERY_DAYS)) {
-      if (row.not_after === null) continue;
-      if (row.not_after > now + row.renew_before_days * DAY_MS) continue;
+    for (const row of rows) {
       const info = infoById.get(row.secret_id);
       if (!info) continue;
       out.push({

@@ -10,6 +10,7 @@ import {
 } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
+import { readJsonBody } from "../utils/read-json-body.js";
 
 export function createCertificateRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
@@ -17,7 +18,7 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
   router.post("/import", async (c) => {
     const token = c.get("token");
     checkTokenScope(token, "create");
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await readJsonBody(c);
     const parsed = certificateImportSchema.safeParse(body);
     if (!parsed.success) {
       throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
@@ -41,7 +42,7 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
   router.post("/csr", async (c) => {
     const token = c.get("token");
     checkTokenScope(token, "create");
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await readJsonBody(c);
     const parsed = generateCsrRequestSchema.safeParse(body);
     if (!parsed.success) {
       throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
@@ -63,7 +64,7 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
     const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
     checkTokenScope(token, "rotate", project, name);
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await readJsonBody(c);
     const parsed = renewCertificateRequestSchema.safeParse(body);
     if (!parsed.success) {
       throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));

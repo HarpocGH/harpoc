@@ -17,35 +17,49 @@ export interface TokenExchangeResult {
   expires_in?: number;
 }
 
+/**
+ * The one authorization-URL construction — startFlow and the manager's deferred
+ * rebuild (which must wait for the actually-bound callback port) share it so the
+ * parameter sets cannot drift.
+ */
+export function buildAuthorizationUrl(
+  config: OAuthProviderConfig,
+  redirectUri: string,
+  state: string,
+  codeChallenge: string,
+): string {
+  if (!config.auth_endpoint) {
+    throw VaultError.oauthFlowFailed("auth_endpoint is required for authorization_code flow");
+  }
+
+  const url = new URL(config.auth_endpoint);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", config.client_id);
+  url.searchParams.set("redirect_uri", redirectUri);
+  url.searchParams.set("state", state);
+  url.searchParams.set("code_challenge", codeChallenge);
+  url.searchParams.set("code_challenge_method", "S256");
+
+  if (config.scopes && config.scopes.length > 0) {
+    const separator = getScopesSeparator(config.provider);
+    url.searchParams.set("scope", config.scopes.join(separator));
+  }
+
+  return url.toString();
+}
+
 export class AuthorizationCodeFlow {
   /**
    * Build the authorization URL with PKCE and state parameters.
    * Returns the URL to open in a browser, plus the state and verifier to keep in memory.
    */
   startFlow(config: OAuthProviderConfig, redirectUri: string): AuthCodeFlowStartResult {
-    if (!config.auth_endpoint) {
-      throw VaultError.oauthFlowFailed("auth_endpoint is required for authorization_code flow");
-    }
-
     const state = randomBytes(32).toString("hex");
     const codeVerifier = generateCodeVerifier();
     const codeChallenge = generateCodeChallenge(codeVerifier);
 
-    const url = new URL(config.auth_endpoint);
-    url.searchParams.set("response_type", "code");
-    url.searchParams.set("client_id", config.client_id);
-    url.searchParams.set("redirect_uri", redirectUri);
-    url.searchParams.set("state", state);
-    url.searchParams.set("code_challenge", codeChallenge);
-    url.searchParams.set("code_challenge_method", "S256");
-
-    if (config.scopes && config.scopes.length > 0) {
-      const separator = getScopesSeparator(config.provider);
-      url.searchParams.set("scope", config.scopes.join(separator));
-    }
-
     return {
-      auth_url: url.toString(),
+      auth_url: buildAuthorizationUrl(config, redirectUri, state, codeChallenge),
       state,
       code_verifier: codeVerifier,
     };

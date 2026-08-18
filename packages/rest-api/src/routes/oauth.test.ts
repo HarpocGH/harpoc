@@ -254,6 +254,22 @@ describe("POST /api/v1/oauth/authorize — validation and scope", () => {
     expect(oauthManager.startClientCredentials).not.toHaveBeenCalled();
   });
 
+  // `authorize()` always stringifies, so the bodyless request is built by hand.
+  it("a bodyless POST is a descriptive 400, not a generic 500", async () => {
+    const res = await app.request("/api/v1/oauth/authorize", {
+      method: "POST",
+      headers: JSON_HEADERS,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+    expect(body.message).toBe("Request body must be valid JSON");
+    // No body named a grant type, so no dispatch arm may have run.
+    expect(oauthManager.startClientCredentials).not.toHaveBeenCalled();
+    expect(oauthManager.startDeviceCode).not.toHaveBeenCalled();
+    expect(oauthManager.startAuthorizationCodeDeferred).not.toHaveBeenCalled();
+  });
+
   it("rejects an unknown provider", async () => {
     const res = await authorize({ ...CLIENT_CREDENTIALS_BODY, provider: "notaprovider" });
     expect(res.status).toBe(400);

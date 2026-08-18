@@ -62,7 +62,7 @@ function unmediatedHttp(action) {
   // fixture reading `name` would put the credential in a different position
   // from the arm it is compared against (review 2026-08-14, F2).
   const injection = action.injection;
-  if (injection === undefined) {
+  if (injection == null) {
     throw new Error("baseline: action carries no injection config");
   }
   const mode = injection.type;
@@ -465,8 +465,8 @@ const httpServer = createServer((req, res) => {
       // A client that disconnects before close resolves would otherwise turn a
       // rejection into an unhandled one — fatal on this long-lived container
       // (review 2026-08-14, F5).
-      void transport.close().catch(() => undefined);
-      void server.close().catch(() => undefined);
+      void transport.close().catch((err) => console.error("[fixture] close failed:", err));
+      void server.close().catch((err) => console.error("[fixture] close failed:", err));
     });
 
     try {

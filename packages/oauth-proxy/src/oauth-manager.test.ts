@@ -526,6 +526,41 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
     });
   });
 
+  it("cancelPendingFlows cancels an authorization-code flow like cancelFlow does", async () => {
+    const fake = makeFakeEngine();
+    const errors: unknown[] = [];
+    const manager = fakeEngineManager(fake, {
+      callbackPort: 0,
+      onBackgroundFlowError: (_secretId, err) => {
+        errors.push(err);
+      },
+    });
+
+    const start = await manager.startAuthorizationCodeDeferred("gh", makeAuthCodeConfig());
+    const redirectUri = new URL(new URL(start.authUrl).searchParams.get("redirect_uri") as string);
+
+    manager.cancelPendingFlows();
+    await expect(start.completion).rejects.toBeDefined();
+    expect(errors).toHaveLength(0);
+    expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
+
+    // The abort stopped the callback server: nothing answers on the port
+    // (a still-live server would answer the non-callback path with 404).
+    await vi.waitFor(async () => {
+      await expect(
+        fetch(`http://127.0.0.1:${redirectUri.port}/not-the-callback`),
+      ).rejects.toThrow();
+    });
+
+    // Deregistered, so a second sweep has nothing left to abort.
+    await vi.waitFor(() => {
+      expect(manager.cancelFlow(start.secretId)).toBe(false);
+    });
+    manager.cancelPendingFlows();
+    expect(manager.cancelFlow(start.secretId)).toBe(false);
+    expect(errors).toHaveLength(0);
+  });
+
   it("an unfetched callback times out: completion rejects and onBackgroundFlowError fires", async () => {
     const fake = makeFakeEngine();
     const errors: { secretId: string; err: unknown }[] = [];
@@ -547,6 +582,35 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
     });
     expect(errors[0]?.secretId).toBe("sid-1");
     expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
+  });
+
+  it("a throwing onBackgroundFlowError does not become an unhandled rejection", async () => {
+    const fake = makeFakeEngine();
+    const unhandled = vi.fn();
+    process.once("unhandledRejection", unhandled);
+    try {
+      const manager = fakeEngineManager(fake, {
+        callbackPort: 0,
+        callbackTimeoutMs: 100,
+        onBackgroundFlowError: () => {
+          throw new Error("embedder bug");
+        },
+      });
+
+      const start = await manager.startAuthorizationCodeDeferred("gh", makeAuthCodeConfig());
+      await expect(start.completion).rejects.toMatchObject({
+        code: ErrorCode.OAUTH_CALLBACK_TIMEOUT,
+      });
+
+      await vi.waitFor(() => {
+        expect(manager.cancelFlow(start.secretId)).toBe(false);
+      });
+      // Node emits unhandledRejection a turn after the microtask queue drains.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
   });
 
   it("a restart for the same secret supersedes the first flow and keeps the second cancellable", async () => {

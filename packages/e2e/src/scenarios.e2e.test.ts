@@ -9,7 +9,7 @@ import { recordArm } from "./harness/evidence.js";
 import { startBaselineArm } from "./arms/baseline.js";
 import { startHarpocArm } from "./arms/harpoc.js";
 import type { Arm } from "./arms/arm.js";
-import { SCENARIO_ARMS, armsOf } from "./scenarios/index.js";
+import { SCENARIO_ARMS, armSetupKey, armsOf } from "./scenarios/index.js";
 import type { ScenarioSetup } from "./scenarios/scenario.js";
 import { BASELINE_COUNTERPART_ARMS } from "./scenarios/targeted.js";
 
@@ -74,13 +74,6 @@ describe("attack scenarios — baseline versus Harpoc", () => {
   const setups = new Map<string, ScenarioSetup>();
   const emitted: EvidenceRecord[] = [];
 
-  // Includes context, matching tables.mjs's rowKeyOf. Without it two arms
-  // sharing scenario+variant across contexts collide, `setups.set` silently
-  // overwrites, and the earlier arm runs against the wrong secret and policy
-  // (review 2026-08-14, F12).
-  const keyOf = (s: { scenario: string; context: string; variant?: string }): string =>
-    `${s.scenario}|${s.context}|${s.variant ?? ""}`;
-
   beforeAll(async () => {
     for (const service of new Set(SCENARIO_ARMS.flatMap((a) => a.services ?? []))) {
       assertFleetUp(service);
@@ -88,7 +81,7 @@ describe("attack scenarios — baseline versus Harpoc", () => {
 
     vault = await createHarnessVault(PASSWORD);
     for (const arm of SCENARIO_ARMS) {
-      setups.set(keyOf(arm), await arm.setup(vault));
+      setups.set(armSetupKey(arm), await arm.setup(vault));
     }
 
     harpoc = await startHarpocArm(vault, "scenario-principal", [
@@ -112,7 +105,7 @@ describe("attack scenarios — baseline versus Harpoc", () => {
     describe(label, () => {
       for (const armName of armsOf(scenarioArm)) {
         it(`${armName}: matches its pre-registered outcome`, async () => {
-          const setup = setups.get(keyOf(scenarioArm));
+          const setup = setups.get(armSetupKey(scenarioArm));
           if (setup === undefined) throw new Error(`no setup for ${label}`);
 
           // The baseline server holds ONE credential in its launch environment

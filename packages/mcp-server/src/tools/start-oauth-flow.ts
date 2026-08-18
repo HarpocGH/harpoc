@@ -96,9 +96,12 @@ export function registerStartOauthFlow(
         });
       }
       let clientSecret: string;
+      // Buffer.from(Uint8Array) copies — the copy holds the credential too.
+      const decodeCopy = Buffer.from(secretBytes);
       try {
-        clientSecret = Buffer.from(secretBytes).toString("utf8");
+        clientSecret = decodeCopy.toString("utf8");
       } finally {
+        decodeCopy.fill(0);
         secretBytes.fill(0);
       }
       // Shared arm (oauth-proxy): projects handle/status/message only.

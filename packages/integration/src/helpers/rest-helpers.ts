@@ -26,6 +26,11 @@ export function startTestServer(engine: VaultEngine, options?: CreateAppOptions)
     baseUrl,
     close: () =>
       new Promise<void>((resolve, reject) => {
+        // A test's fetch keeps its connection alive, so `close` alone would
+        // wait out the keep-alive timeout before its callback fires. `serve`
+        // is typed as an HTTP/1 or HTTP/2 server and only the former has the
+        // method; without a `createServer` option it is always the former.
+        if ("closeAllConnections" in server) server.closeAllConnections();
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };

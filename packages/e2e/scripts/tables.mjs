@@ -127,10 +127,19 @@ export function classify(records) {
   // demonstration, not half of a comparison. A SECOND Harpoc record for a row
   // is a duplicate, tracked in `shadowed` the same way the baseline loop above
   // does.
+  const harpocOnly = new Map();
   for (const r of records) {
     if (r.arm === "baseline") continue;
     const entry = byRow.get(rowKeyOf(r));
-    if (entry === undefined) continue;
+    if (entry === undefined) {
+      // No baseline for this row: a single-arm demonstration. A SECOND such
+      // record is still a shadowing duplicate — tracked here, since it never
+      // reaches the row map the loop below dedups through.
+      const prev = harpocOnly.get(rowKeyOf(r));
+      if (prev !== undefined) shadowed.add(prev);
+      harpocOnly.set(rowKeyOf(r), r);
+      continue;
+    }
     if (entry.harpoc !== undefined) shadowed.add(entry.harpoc);
     entry.harpoc = r;
   }

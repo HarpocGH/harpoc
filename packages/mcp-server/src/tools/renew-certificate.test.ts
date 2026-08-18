@@ -96,6 +96,17 @@ function requestHandler<T>(server: McpServer, method: string): (req: unknown, ex
 
 const EXTRA = { signal: new AbortController().signal, sessionId: "test" };
 
+interface ToolDescriptor {
+  name: string;
+  inputSchema: { properties?: Record<string, unknown> };
+}
+
+async function listTools(server: McpServer): Promise<ToolDescriptor[]> {
+  const handler = requestHandler<Promise<{ tools: ToolDescriptor[] }>>(server, "tools/list");
+  const result = await handler({ method: "tools/list", params: {} }, EXTRA);
+  return result.tools;
+}
+
 interface ToolResult {
   content: Array<{ type: string; text: string }>;
   isError?: boolean;
@@ -115,6 +126,13 @@ function toolData(result: ToolResult): Record<string, unknown> {
 }
 
 describe("renew_certificate", () => {
+  it("advertises exactly one input property: handle (D1 — no http_port)", async () => {
+    const { server } = harness();
+    const tool = (await listTools(server)).find((t) => t.name === "renew_certificate");
+    expect(tool).toBeDefined();
+    expect(Object.keys((tool as ToolDescriptor).inputSchema.properties ?? {})).toEqual(["handle"]);
+  });
+
   it("denies a token without the rotate scope", async () => {
     const { server, certManager } = harness({ scope: ["use", "read"] });
 

@@ -167,6 +167,54 @@ describe("L4 — lifecycle success rows are addressable by secret_id", () => {
       .find((r) => !r.success);
     expect(row?.secret_id).toBeNull();
   });
+
+  // The three denial arms that pass no resolved id at all: nothing resolved, so
+  // NULL is the honest column value — and a later refactor that reaches for a
+  // "nearby" id instead would mis-attribute a row about a secret that was never
+  // found.
+
+  it("a failed revoke of an unresolvable handle audits with secret_id null", async () => {
+    await expect(engine.revokeSecret("secret://ghost")).rejects.toMatchObject({
+      code: ErrorCode.SECRET_NOT_FOUND,
+    });
+
+    const row = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_REVOKE })
+      .find((r) => !r.success);
+    expect(row).toBeDefined();
+    expect(row?.secret_id).toBeNull();
+  });
+
+  it("a failed useSecret handle resolution audits with secret_id null", async () => {
+    await expect(
+      engine.useSecret("secret://ghost", {
+        type: "http",
+        method: "GET",
+        url: "https://example.invalid/",
+        injection: { type: "bearer" },
+      }),
+    ).rejects.toMatchObject({ code: ErrorCode.SECRET_NOT_FOUND });
+
+    const row = engine.queryAudit({ eventType: AuditEventType.SECRET_USE }).find((r) => !r.success);
+    expect(row).toBeDefined();
+    expect(row?.secret_id).toBeNull();
+  });
+
+  it("a caller-present unresolvable handle audits the policy denial with secret_id null", async () => {
+    // With a caller the refusal happens one layer earlier, in
+    // enforceCallerPolicy's own resolution attempt — a different auditDenied
+    // call site from the negative control above.
+    await expect(engine.getSecretInfo("secret://ghost", agent("mallory"))).rejects.toMatchObject({
+      code: ErrorCode.SECRET_NOT_FOUND,
+    });
+
+    const row = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_READ })
+      .find((r) => !r.success);
+    expect(row).toBeDefined();
+    expect(row?.principal_id).toBe("mallory");
+    expect(row?.secret_id).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

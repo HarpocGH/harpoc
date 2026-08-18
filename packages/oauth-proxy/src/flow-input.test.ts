@@ -43,6 +43,18 @@ describe("providerConfigFromFlowInput", () => {
     expect(config.scopes).toEqual(["repo", "user:email"]);
   });
 
+  it("passes client_secret through untouched", () => {
+    const { config } = providerConfigFromFlowInput(baseInput({ client_secret: "s3cret" }));
+    expect(config.client_secret).toBe("s3cret");
+  });
+
+  it("passes token_endpoint_auth_method through untouched", () => {
+    const { config } = providerConfigFromFlowInput(
+      baseInput({ token_endpoint_auth_method: "client_secret_basic" }),
+    );
+    expect(config.token_endpoint_auth_method).toBe("client_secret_basic");
+  });
+
   it("lets explicit endpoints win over the preset", () => {
     const { config } = providerConfigFromFlowInput(
       baseInput({

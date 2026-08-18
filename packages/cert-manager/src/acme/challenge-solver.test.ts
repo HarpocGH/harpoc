@@ -115,9 +115,13 @@ describe("Http01Solver", () => {
     const port = (blocker.address() as AddressInfo).port;
     solver = new Http01Solver();
     try {
+      // details: undefined pins the whole object, not just code/message — the
+      // errno and interface are deliberately discarded (D6, 2026-08-18 tranche);
+      // this key catches a future change that starts attaching a details cause.
       await expect(solver.start(TOKEN, KEY_AUTHORIZATION, port)).rejects.toMatchObject({
         code: ErrorCode.CERT_ACME_FAILED,
         message: `ACME operation failed: http-01 challenge server failed to start on port ${port}`,
+        details: undefined,
       });
     } finally {
       await new Promise<void>((resolve) => {

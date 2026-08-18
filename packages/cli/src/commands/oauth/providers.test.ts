@@ -41,6 +41,14 @@ describe("oauth providers", () => {
     expect(output).toContain("https://github.com/login/oauth/authorize");
   });
 
+  it("human output closes with the custom-provider reminder", async () => {
+    await run(["providers"]);
+
+    const lastLogged = String(logSpy.mock.calls.at(-1)?.[0]);
+    expect(lastLogged).toContain('Provider "custom" is also accepted');
+    expect(lastLogged).toContain("--auth-endpoint");
+  });
+
   it("--json prints { providers: [...] } with the full field set for all four presets", async () => {
     await run(["providers", "--json"]);
 

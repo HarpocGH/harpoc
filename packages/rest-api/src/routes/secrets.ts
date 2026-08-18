@@ -13,6 +13,7 @@ import {
 import { InjectionGuard, sanitizeUseSecretResult } from "@harpoc/core";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
+import { readJsonBody } from "../utils/read-json-body.js";
 
 export function createSecretRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
@@ -52,7 +53,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     checkTokenScope(token, "create");
 
     const engine = c.get("engine");
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await readJsonBody(c);
 
     const parsed = createSecretInputSchema.safeParse(body);
     if (!parsed.success) {
@@ -134,7 +135,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     checkTokenScope(token, "rotate", project, name);
 
     const engine = c.get("engine");
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await readJsonBody(c);
 
     // Validated, not merely truthy: Buffer.from(x, "base64") drops invalid
     // characters silently, so a malformed value rotated the credential to
@@ -160,7 +161,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     checkTokenScope(token, "use", project, name);
 
     const engine = c.get("engine");
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await readJsonBody(c);
 
     const parsed = useSecretActionSchema.safeParse(body.action);
     if (!parsed.success) {
@@ -197,7 +198,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     checkTokenScope(token, "rotate", project, name);
 
     const engine = c.get("engine");
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await readJsonBody(c);
     const parsed = setInjectionPolicyRequestSchema.safeParse(body);
     if (!parsed.success) {
       throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
@@ -233,7 +234,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     checkTokenScope(token, "rotate", project, name);
 
     const engine = c.get("engine");
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await readJsonBody(c);
     const parsed = mcpServerConfigSchema.safeParse(body);
     if (!parsed.success) {
       throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
@@ -275,7 +276,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     checkTokenScope(token, "rotate", project, name);
 
     const engine = c.get("engine");
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await readJsonBody(c);
     const parsed = connectionConfigSchema.safeParse(body);
     if (!parsed.success) {
       throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));

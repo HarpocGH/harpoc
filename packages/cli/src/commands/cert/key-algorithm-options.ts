@@ -28,9 +28,10 @@ function isEcCurve(value: string): value is EcCurve {
 }
 
 /**
- * Every option below is range-checked before the vault opens (the `secret
- * set` F4 lesson, also applied to `cert import`'s --renew-before-days): an
- * operator typo must not spend a key-pair generation or reach the engine.
+ * Range-checked at parse time; the callers run these before the vault opens
+ * (the `secret set` F4 lesson, also applied to `cert import`'s
+ * --renew-before-days) so an operator typo spends no key-pair generation and
+ * never reaches the engine.
  */
 export function parseAlgorithm(value: string): KeyAlgorithm {
   if (!isAlgorithm(value)) {
@@ -57,7 +58,7 @@ export function parseCurve(value: string | undefined): EcCurve | undefined {
 }
 
 /**
- * A mismatched flag is refused rather than silently dropped: an operator's
+ * Callers refuse a mismatched flag rather than silently drop it: an operator's
  * explicit strength request (--bits/--curve) must not be ignored just because
  * it doesn't pair with the resolved algorithm — including a defaulted one, so
  * neither a bare `--bits 4096` on csr quietly produces a P-256 key nor a bare

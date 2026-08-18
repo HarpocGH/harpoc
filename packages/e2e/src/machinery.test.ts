@@ -5,7 +5,7 @@ import { createHarnessVault, storeSecret, EVIDENCE_FILE } from "./harness/vault.
 import type { HarnessVault } from "./harness/vault.js";
 import { recordArm } from "./harness/evidence.js";
 import { resolvePrintenv } from "./harness/fixtures.js";
-import { SCENARIO_ARMS } from "./scenarios/index.js";
+import { SCENARIO_ARMS, armSetupKey } from "./scenarios/index.js";
 
 const PASSWORD = "e2e-machinery-pw";
 const SECRET = 'sk-machinery/ab+cd 123"x';
@@ -96,7 +96,7 @@ describe("harness machinery, proven against the process context", () => {
 describe("scenario runner setup key", () => {
   it("the runner's setup key includes context, matching the canonical row key (F12)", () => {
     // A collision would make one arm run against another's secret and policy.
-    const keys = SCENARIO_ARMS.map((a) => `${a.scenario}|${a.context}|${a.variant ?? ""}`);
+    const keys = SCENARIO_ARMS.map((a) => armSetupKey(a));
     expect(new Set(keys).size).toBe(SCENARIO_ARMS.length);
   });
 });

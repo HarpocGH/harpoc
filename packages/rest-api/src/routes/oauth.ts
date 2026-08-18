@@ -3,6 +3,7 @@ import { VaultError, callerFromToken, startOAuthFlowInputSchema } from "@harpoc/
 import { startOAuthFlowResult } from "@harpoc/oauth-proxy";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
+import { readJsonBody } from "../utils/read-json-body.js";
 
 export function createOAuthRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
@@ -10,7 +11,7 @@ export function createOAuthRoutes(): Hono<HarpocEnv> {
   router.post("/authorize", async (c) => {
     const token = c.get("token");
     checkTokenScope(token, "create");
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await readJsonBody(c);
     const parsed = startOAuthFlowInputSchema.safeParse(body);
     if (!parsed.success) {
       throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));

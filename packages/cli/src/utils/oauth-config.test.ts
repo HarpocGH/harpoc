@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import { ErrorCode, OAuthGrantType, VaultError } from "@harpoc/shared";
 import { buildOAuthProviderConfig } from "./oauth-config.js";
 
+function captureError(fn: () => unknown): unknown {
+  try {
+    fn();
+  } catch (err) {
+    return err;
+  }
+  throw new Error("expected buildOAuthProviderConfig to throw");
+}
+
 describe("buildOAuthProviderConfig", () => {
   it("merges github preset token and auth endpoints", () => {
     const { config } = buildOAuthProviderConfig(
@@ -159,7 +168,7 @@ describe("buildOAuthProviderConfig", () => {
     ).toThrow(/provider/);
   });
 
-  it("requires --provider and --client-id", () => {
+  it("requires --provider and --client-id, refusing both as INVALID_INPUT VaultErrors", () => {
     expect(() =>
       buildOAuthProviderConfig("x", OAuthGrantType.AUTHORIZATION_CODE, {}, undefined),
     ).toThrow(/--provider is required/);
@@ -171,6 +180,36 @@ describe("buildOAuthProviderConfig", () => {
         undefined,
       ),
     ).toThrow(/--client-id is required/);
+
+    const missingProvider = captureError(() =>
+      buildOAuthProviderConfig("x", OAuthGrantType.AUTHORIZATION_CODE, {}, undefined),
+    );
+    expect(missingProvider).toBeInstanceOf(VaultError);
+    expect((missingProvider as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
+
+    const missingClientId = captureError(() =>
+      buildOAuthProviderConfig(
+        "x",
+        OAuthGrantType.AUTHORIZATION_CODE,
+        { provider: "github" },
+        undefined,
+      ),
+    );
+    expect(missingClientId).toBeInstanceOf(VaultError);
+    expect((missingClientId as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
+  });
+
+  it("throws the input-schema refusal as a SCHEMA_VALIDATION_ERROR VaultError", () => {
+    const caught = captureError(() =>
+      buildOAuthProviderConfig(
+        "has space",
+        OAuthGrantType.AUTHORIZATION_CODE,
+        { provider: "github", clientId: "client-1" },
+        undefined,
+      ),
+    );
+    expect(caught).toBeInstanceOf(VaultError);
+    expect((caught as VaultError).code).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
   });
 
   it("passes project through and includes the client secret in the config", () => {

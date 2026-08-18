@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SecretInfo } from "@harpoc/core";
 import type { VaultEngine } from "@harpoc/core";
+import type { ExpiringCertificateInfo, ExpiringOAuthTokenInfo } from "@harpoc/shared";
 import { InjectionGuard } from "../guards/injection-guard.js";
 import { RateLimiter } from "../guards/rate-limiter.js";
 import { ScopeGuard } from "../guards/scope-guard.js";
@@ -553,7 +554,7 @@ describe("MCP Tools", () => {
       expect(getToolText(result)).not.toContain("my-key");
     });
 
-    function oauthItem(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
+    function oauthItem(overrides: Partial<ExpiringOAuthTokenInfo> = {}): ExpiringOAuthTokenInfo {
       return {
         handle: "secret://gh-token",
         name: "gh-token",
@@ -566,7 +567,7 @@ describe("MCP Tools", () => {
       };
     }
 
-    function certItem(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
+    function certItem(overrides: Partial<ExpiringCertificateInfo> = {}): ExpiringCertificateInfo {
       return {
         handle: "secret://my-cert",
         name: "my-cert",
@@ -666,6 +667,68 @@ describe("MCP Tools", () => {
       expect(data.certificates_nearing_renewal).toHaveLength(1);
       expect(data.certificates_nearing_renewal[0].handle).toBe("secret://prod/my-cert");
       expect(getToolText(result)).not.toContain("dev/");
+    });
+
+    it("a name-pattern-scoped token filters non-matching oauth/cert items", async () => {
+      (engine.getExpiringOAuthTokenStatuses as ReturnType<typeof vi.fn>).mockReturnValue([
+        oauthItem({ handle: "secret://db-prod", name: "db-prod" }),
+        oauthItem({ handle: "secret://api-key", name: "api-key" }),
+      ]);
+      (engine.getExpiringCertificateStatuses as ReturnType<typeof vi.fn>).mockReturnValue([
+        certItem({ handle: "secret://db-prod", name: "db-prod" }),
+        certItem({ handle: "secret://api-key", name: "api-key" }),
+      ]);
+      const token = {
+        sub: "test",
+        vault_id: "v",
+        scope: ["list"] as const,
+        secrets: ["db-*"],
+        iat: 0,
+        exp: 9999999999,
+        jti: "j",
+      };
+      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
+
+      const result = await callTool(srv, "check_secret_health", {});
+      const data = JSON.parse(getToolText(result));
+
+      expect(data.oauth_refresh_needed).toHaveLength(1);
+      expect(data.oauth_refresh_needed[0].handle).toBe("secret://db-prod");
+      expect(data.certificates_nearing_renewal).toHaveLength(1);
+      expect(data.certificates_nearing_renewal[0].handle).toBe("secret://db-prod");
+      expect(getToolText(result)).not.toContain("api-key");
+    });
+
+    it("a project-scoped token drops project-less oauth/cert items", async () => {
+      (engine.getExpiringOAuthTokenStatuses as ReturnType<typeof vi.fn>).mockReturnValue([
+        oauthItem({ handle: "secret://prod/gh-token", name: "gh-token", project: "prod" }),
+        oauthItem({ handle: "secret://global-token", name: "global-token", project: null }),
+      ]);
+      (engine.getExpiringCertificateStatuses as ReturnType<typeof vi.fn>).mockReturnValue([
+        certItem({ handle: "secret://prod/my-cert", name: "my-cert", project: "prod" }),
+        certItem({ handle: "secret://global-cert", name: "global-cert", project: null }),
+      ]);
+      const token = {
+        sub: "test",
+        vault_id: "v",
+        scope: ["list"] as const,
+        project: "prod",
+        iat: 0,
+        exp: 9999999999,
+        jti: "j",
+      };
+      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
+
+      const result = await callTool(srv, "check_secret_health", {});
+      const data = JSON.parse(getToolText(result));
+
+      expect(data.oauth_refresh_needed).toHaveLength(1);
+      expect(data.oauth_refresh_needed[0].handle).toBe("secret://prod/gh-token");
+      expect(data.certificates_nearing_renewal).toHaveLength(1);
+      expect(data.certificates_nearing_renewal[0].handle).toBe("secret://prod/my-cert");
+      expect(getToolText(result)).not.toContain("global-");
     });
 
     it("args.handle narrows both oauth_refresh_needed and certificates_nearing_renewal", async () => {

@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ENCRYPTED_KEY_IMPORT_REFUSAL, ErrorCode, VaultError } from "@harpoc/shared";
 import type { CertificateStatus, VaultApiToken } from "@harpoc/shared";
 import { authMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
@@ -159,7 +159,7 @@ describe("POST /api/v1/certificates/import", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string; message: string };
     expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
-    expect(body.message).toContain("harpoc cert import");
+    expect(body.message).toBe(ENCRYPTED_KEY_IMPORT_REFUSAL);
     expect(certManager.importCertificate).not.toHaveBeenCalled();
   });
 
@@ -188,9 +188,12 @@ describe("POST /api/v1/certificates/import", () => {
   });
 });
 
+// The wire `subject` is the bare common name: the manager prefixes `CN=`
+// itself when it stores the CSR's subject, so a `CN=`-carrying request models
+// a certificate that would be stored as `CN=CN=example.com`.
 const CSR_BODY = {
   name: "my-csr",
-  subject: "CN=example.com",
+  subject: "example.com",
 };
 
 describe("POST /api/v1/certificates/csr", () => {
@@ -204,7 +207,7 @@ describe("POST /api/v1/certificates/csr", () => {
   it("maps subject/bits/curve onto commonName/modulusLength/namedCurve", async () => {
     await post("/api/v1/certificates/csr", {
       name: "my-csr",
-      subject: "CN=example.com",
+      subject: "example.com",
       sans: ["www.example.com"],
       algorithm: "rsa",
       bits: 4096,
@@ -212,7 +215,7 @@ describe("POST /api/v1/certificates/csr", () => {
     });
 
     expect(certManager.generateCsr).toHaveBeenCalledWith("my-csr", {
-      commonName: "CN=example.com",
+      commonName: "example.com",
       sans: ["www.example.com"],
       algorithm: "rsa",
       modulusLength: 4096,
@@ -225,7 +228,7 @@ describe("POST /api/v1/certificates/csr", () => {
   it("maps a curve for the ec algorithm", async () => {
     await post("/api/v1/certificates/csr", {
       name: "my-csr",
-      subject: "CN=example.com",
+      subject: "example.com",
       algorithm: "ec",
       curve: "P-384",
     });
@@ -239,7 +242,7 @@ describe("POST /api/v1/certificates/csr", () => {
   it("defaults algorithm to ec when omitted, so an explicit curve is not silently dropped", async () => {
     await post("/api/v1/certificates/csr", {
       name: "my-csr",
-      subject: "CN=example.com",
+      subject: "example.com",
       curve: "P-384",
     });
 
@@ -252,7 +255,7 @@ describe("POST /api/v1/certificates/csr", () => {
   it("rejects bits paired without algorithm rsa (manager untouched)", async () => {
     const res = await post("/api/v1/certificates/csr", {
       name: "my-csr",
-      subject: "CN=example.com",
+      subject: "example.com",
       bits: 2048,
     });
     expect(res.status).toBe(400);
@@ -299,6 +302,19 @@ describe("POST /api/v1/certificates/:handle/renew", () => {
     engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: ["read", "create"] });
     const res = await post("/api/v1/certificates/my-cert/renew", {});
     expect(res.status).toBe(403);
+    expect(certManager.renewCertificate).not.toHaveBeenCalled();
+  });
+
+  // `post()` always stringifies, so the bodyless request is built by hand.
+  it("a bodyless POST is a descriptive 400, not a generic 500", async () => {
+    const res = await app.request("/api/v1/certificates/my-cert/renew", {
+      method: "POST",
+      headers: JSON_HEADERS,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+    expect(body.message).toBe("Request body must be valid JSON");
     expect(certManager.renewCertificate).not.toHaveBeenCalled();
   });
 });

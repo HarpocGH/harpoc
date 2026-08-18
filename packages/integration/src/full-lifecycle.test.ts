@@ -10,7 +10,7 @@ import { AuditEventType, SecretType, VaultState } from "@harpoc/shared";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
-import { callTool } from "./helpers/mcp-helpers.js";
+import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
 
@@ -83,7 +83,7 @@ describe("Full Lifecycle", () => {
   // ---- Test 2: MCP list_secrets -------------------------------------------
   it("MCP list_secrets returns the secret without value", async () => {
     const result = await callTool(mcpServer, "list_secrets", {});
-    const secrets = JSON.parse(result.content[0]?.text ?? "") as Array<{
+    const secrets = parseToolResult(result, "list_secrets") as Array<{
       handle: string;
       name: string;
     }>;
@@ -99,7 +99,7 @@ describe("Full Lifecycle", () => {
   // ---- Test 3: MCP get_secret_info ----------------------------------------
   it("MCP get_secret_info returns correct metadata", async () => {
     const result = await callTool(mcpServer, "get_secret_info", { handle });
-    const info = JSON.parse(result.content[0]?.text ?? "") as Record<string, unknown>;
+    const info = parseToolResult(result, "get_secret_info") as Record<string, unknown>;
     expect(info.name).toBe(SECRET_NAME);
     expect(info.type).toBe(SecretType.API_KEY);
     expect(info.status).toBe("active");
@@ -118,7 +118,7 @@ describe("Full Lifecycle", () => {
       },
     });
     expect(result.isError).toBeFalsy();
-    const response = JSON.parse(result.content[0]?.text ?? "") as { status: number; body: string };
+    const response = parseToolResult(result, "use_secret") as { status: number; body: string };
     expect(response.status).toBe(200);
 
     // The echo server returned the Authorization header in the body.
@@ -188,7 +188,7 @@ describe("Full Lifecycle", () => {
   // ---- Test 11: MCP get_secret_info after rotation -------------------------
   it("MCP get_secret_info shows version=2 after rotation", async () => {
     const result = await callTool(mcpServer, "get_secret_info", { handle });
-    const info = JSON.parse(result.content[0]?.text ?? "") as { version: number };
+    const info = parseToolResult(result, "get_secret_info (after rotation)") as { version: number };
     expect(info.version).toBe(2);
   });
 

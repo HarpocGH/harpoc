@@ -5,6 +5,7 @@ import { startBaselineServer } from "../arms/baseline.js";
 import type { BaselineServer } from "../arms/baseline.js";
 import { sinkSawCredential } from "./attacker.js";
 import type { SinkRequest } from "./attacker.js";
+import { textOf } from "./surfaces/mcp-http.js";
 
 /**
  * The behavioural counterpart to `fixtures.test.ts`'s source-text pin (F2).
@@ -24,6 +25,7 @@ import type { SinkRequest } from "./attacker.js";
  * on a Windows development host between fleet runs.
  */
 const CREDENTIAL = "baseline-behavior-credential-4b7e";
+/** Accepted by the fixture's schema, never read by it (mirrors the real tool's call shape). */
 const HANDLE = "secret://baseline-behavior";
 
 /**
@@ -101,16 +103,21 @@ describe("baseline-mcp injects the credential where the action names (F2, behavi
   }, 60_000);
 
   afterAll(async () => {
-    // The child first: it holds the keep-alive sockets that would otherwise
-    // keep `sink.close()` pending until undici's idle timeout.
-    await baseline?.stop();
-    await new Promise<void>((resolve, reject) => {
-      sink.close((err) => {
-        if (err) reject(err);
-        else resolve();
+    try {
+      // The child first: it holds the keep-alive sockets that would otherwise
+      // keep `sink.close()` pending until undici's idle timeout.
+      await baseline?.stop();
+    } finally {
+      // Unconditional: a failed child stop must not leave the sink listening,
+      // which would hold the vitest worker open past the run.
+      await new Promise<void>((resolve, reject) => {
+        sink.close((err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+        sink.closeAllConnections();
       });
-      sink.closeAllConnections();
-    });
+    }
   });
 
   it("puts the credential in the named header and nowhere else", async () => {
@@ -139,6 +146,12 @@ describe("baseline-mcp injects the credential where the action names (F2, behavi
     expect(record.headers["x-renamed"]).toBe(CREDENTIAL);
     expect(record.headers["x-api-key"]).toBeUndefined();
     expect(record.authorization).toBeNull();
+    // "Nowhere else" belongs on the rename case too: a fixture that renamed the
+    // header AND left a copy on another channel would still pass the three
+    // assertions above.
+    expect(record.query).toEqual({});
+    expect(record.path).not.toContain(CREDENTIAL);
+    expect(record.body).toBe("");
     expect(sinkSawCredential(CREDENTIAL, [record])).toBe(true);
   });
 
@@ -149,5 +162,36 @@ describe("baseline-mcp injects the credential where the action names (F2, behavi
     expect(Object.values(record.headers)).not.toContain(CREDENTIAL);
     expect(record.authorization).toBeNull();
     expect(sinkSawCredential(CREDENTIAL, [record])).toBe(true);
+  });
+
+  it("moves the credential when the action renames the query parameter", async () => {
+    // The query twin of the header rename control, for the same reason: only a
+    // fixture reading the caller-supplied `query_param` can move it.
+    const record = await invokeBaseline({ type: "query", query_param: "renamed_key" });
+
+    expect(record.query["renamed_key"]).toBe(CREDENTIAL);
+    expect(record.query["api_key"]).toBeUndefined();
+    expect(Object.values(record.headers)).not.toContain(CREDENTIAL);
+    expect(record.authorization).toBeNull();
+    expect(sinkSawCredential(CREDENTIAL, [record])).toBe(true);
+  });
+
+  it("names a null injection config instead of dereferencing it", async () => {
+    // JSON carries `null` where the fixture's guard only tested `undefined`, so
+    // this arrived as a raw TypeError — an error text about the fixture's own
+    // code rather than about the action it was handed.
+    records.length = 0;
+    const raw = (await baseline.client.callTool({
+      name: "use_secret",
+      arguments: {
+        handle: HANDLE,
+        action: { type: "http", url: sinkUrl, method: "POST", injection: null },
+      },
+    })) as { isError?: boolean; content?: unknown };
+
+    expect(raw.isError).toBe(true);
+    expect(textOf(raw)).toContain("carries no injection config");
+    expect(textOf(raw)).not.toContain("Cannot read properties of null");
+    expect(records).toHaveLength(0);
   });
 });

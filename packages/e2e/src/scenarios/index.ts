@@ -29,5 +29,11 @@ export const SCENARIO_ARMS: ScenarioArm[] = [
   ...BASELINE_COUNTERPART_ARMS,
 ];
 
+/** The canonical per-arm setup key — includes context (review 2026-08-14,
+ *  F12): two arms sharing scenario+variant across contexts must not collide. */
+export function armSetupKey(s: { scenario: string; context: string; variant?: string }): string {
+  return `${s.scenario}|${s.context}|${s.variant ?? ""}`;
+}
+
 export { Outcome, armsOf } from "./scenario.js";
 export type { ScenarioArm, ScenarioSetup, OutcomeValue } from "./scenario.js";

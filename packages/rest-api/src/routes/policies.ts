@@ -3,6 +3,7 @@ import type { PrincipalType, Permission } from "@harpoc/shared";
 import { VaultError, ErrorCode, accessPolicyInputSchema, callerFromToken } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
+import { readJsonBody } from "../utils/read-json-body.js";
 
 export function createPolicyRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
@@ -31,7 +32,7 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
     const handle = buildHandle(c.req.param("handle"));
     const secretId = await engine.resolveSecretId(handle);
 
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await readJsonBody(c);
     const parsed = accessPolicyInputSchema.safeParse(body);
     if (!parsed.success) {
       throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));

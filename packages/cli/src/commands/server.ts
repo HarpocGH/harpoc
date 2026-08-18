@@ -221,7 +221,7 @@ export function registerServerCommand(program: Command): void {
             scheduler.start();
             renewalScheduler = scheduler;
             console.error(
-              "[harpoc] certificate renewal scheduler running (hourly check, auto-renew certificates only)",
+              "[harpoc] certificate renewal scheduler running (checks hourly, first check in ~1 h; auto-renew certificates only)",
             );
           }
         } catch (err: unknown) {

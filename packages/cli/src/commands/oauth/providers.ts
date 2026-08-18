@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { PROVIDER_PRESETS } from "@harpoc/oauth-proxy";
-import { printJson } from "../../utils/output.js";
+import { printJson, printRecord } from "../../utils/output.js";
 
 export function registerOAuthProvidersCommand(parent: Command): void {
   parent
@@ -23,11 +23,12 @@ export function registerOAuthProvidersCommand(parent: Command): void {
       }
       for (const p of providers) {
         console.log(p.provider);
-        console.log(`  auth:   ${p.auth_endpoint}`);
-        console.log(`  token:  ${p.token_endpoint}`);
-        if (p.device_authorization_endpoint)
-          console.log(`  device: ${p.device_authorization_endpoint}`);
-        if (p.default_scopes.length > 0) console.log(`  scopes: ${p.default_scopes.join(", ")}`);
+        printRecord({
+          auth: p.auth_endpoint,
+          token: p.token_endpoint,
+          device: p.device_authorization_endpoint,
+          scopes: p.default_scopes.length > 0 ? p.default_scopes.join(", ") : undefined,
+        });
       }
       console.log(
         '\nProvider "custom" is also accepted — supply endpoints via --auth-endpoint / --token-endpoint / --device-endpoint.',

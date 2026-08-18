@@ -2,6 +2,8 @@
  * Passphrase-protected private-key PEM detection: PKCS#8 "ENCRYPTED PRIVATE KEY"
  * and legacy PEM "Proc-Type: 4,ENCRYPTED". OpenSSH-format encryption is not
  * header-detectable here and is refused downstream by the key parser (D3).
+ * This file also carries the shared import-refusal text
+ * (`ENCRYPTED_KEY_IMPORT_REFUSAL`), so the REST and SDK surfaces cannot drift apart.
  */
 export function isEncryptedPrivateKeyPem(pem: string): boolean {
   return (

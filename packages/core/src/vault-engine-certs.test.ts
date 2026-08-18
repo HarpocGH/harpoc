@@ -147,11 +147,19 @@ function transplantAcmeBlob(fromSecretId: string, toSecretId: string): void {
   }
 }
 
-/** Shrink a stored certificate's expiry out-of-band (idiom: vault-engine-expiring-status.test.ts). */
+/**
+ * Shrink a stored certificate's expiry out-of-band (idiom:
+ * vault-engine-expiring-status.test.ts). The row count is asserted: an UPDATE
+ * matching nothing is silent, and the caller would go on asserting about the
+ * fixture's own imported validity window while believing it had moved it.
+ */
 function setNotAfter(secretId: string, notAfter: number): void {
   const db = new Database(dbPath);
   try {
-    db.prepare("UPDATE certificates SET not_after = ? WHERE secret_id = ?").run(notAfter, secretId);
+    const { changes }: { changes: number } = db
+      .prepare("UPDATE certificates SET not_after = ? WHERE secret_id = ?")
+      .run(notAfter, secretId);
+    expect(changes).toBe(1);
   } finally {
     db.close();
   }

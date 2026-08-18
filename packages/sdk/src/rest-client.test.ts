@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
+import type { OAuthTokenStatus } from "@harpoc/shared";
 import { RestClient } from "./rest-client.js";
 
 const BASE_URL = "http://localhost:3000";
@@ -426,10 +427,10 @@ describe("RestClient", () => {
     });
 
     it("getOAuthStatus sends GET /api/v1/oauth/:handle/status", async () => {
-      const status = {
+      const status: OAuthTokenStatus = {
         secret_id: "uuid-1",
         provider: "github",
-        grant_type: "authorization_code",
+        has_access_token: true,
         access_token_expires_at: 4000,
         has_refresh_token: true,
         last_refreshed_at: 3000,

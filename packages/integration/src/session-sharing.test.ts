@@ -23,7 +23,7 @@ import { InjectionType, PrincipalType, SecretType, VaultState } from "@harpoc/sh
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
-import { callTool } from "./helpers/mcp-helpers.js";
+import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 import { assertTierAvailable } from "./helpers/platform-tiers.js";
 
 const PASSWORD = "session-sharing-pw";
@@ -110,7 +110,7 @@ describe("Session Sharing", () => {
   // ---- Test 4: MCP on Engine2 sees Engine1's secrets ----------------------
   it("MCP server on Engine2 sees Engine1's secrets", async () => {
     const result = await callTool(mcpServer, "list_secrets", {});
-    const secrets = JSON.parse(result.content[0]?.text ?? "") as Array<{ handle: string }>;
+    const secrets = parseToolResult(result, "list_secrets on engine2") as Array<{ handle: string }>;
     expect(secrets).toHaveLength(1);
     expect(secrets[0]?.handle).toBe(handle);
   });

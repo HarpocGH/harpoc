@@ -1,8 +1,21 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-interface ToolResult {
+export interface ToolResult {
   content: Array<{ type: string; text: string }>;
   isError?: boolean;
+}
+
+/**
+ * `JSON.parse` of an empty tool result dies as a bare "Unexpected end of JSON
+ * input" naming neither the tool nor the error flag that explains it — so the
+ * emptiness is asserted first and the caller named.
+ */
+export function parseToolResult(result: ToolResult, context: string): unknown {
+  const text = result.content[0]?.text;
+  if (!text) {
+    throw new Error(`empty tool result in ${context} (isError=${String(result.isError ?? false)})`);
+  }
+  return JSON.parse(text);
 }
 
 /**

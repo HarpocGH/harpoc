@@ -1,13 +1,13 @@
 import type { VaultEngine } from "@harpoc/core";
 import type { CallerContext, OAuthFlowResult, OAuthProviderConfig } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
-import { AuthorizationCodeFlow } from "./flows/authorization-code.js";
+import { AuthorizationCodeFlow, buildAuthorizationUrl } from "./flows/authorization-code.js";
 import { ClientCredentialsFlow } from "./flows/client-credentials.js";
 import { DeviceCodeFlow } from "./flows/device-code.js";
 import { CallbackServer } from "./callback-server.js";
 import type { CallbackResult } from "./callback-server.js";
 import { generateCodeChallenge } from "./pkce.js";
-import { getScopesSeparator, resolveProvider } from "./providers.js";
+import { resolveProvider } from "./providers.js";
 
 export interface OAuthManagerOptions {
   openBrowser?: (url: string) => Promise<void>;
@@ -216,7 +216,12 @@ export class OAuthManager {
       // Final redirect URI carries the actually bound port (callbackPort 0)
       const redirectUri =
         resolved.redirect_uri ?? `http://localhost:${callbackServer.listenPort}/oauth/callback`;
-      const authUrl = this.buildAuthorizationUrl(resolved, redirectUri, state, code_verifier);
+      const authUrl = buildAuthorizationUrl(
+        resolved,
+        redirectUri,
+        state,
+        generateCodeChallenge(code_verifier),
+      );
 
       const completion = this.completeAuthorizationCodeInBackground(
         flow,
@@ -264,29 +269,6 @@ export class OAuthManager {
     };
   }
 
-  /** Auth URL over the SAME state and PKCE verifier the callback server expects. */
-  private buildAuthorizationUrl(
-    resolved: OAuthProviderConfig,
-    redirectUri: string,
-    state: string,
-    codeVerifier: string,
-  ): string {
-    const authUrl = new URL(resolved.auth_endpoint as string);
-    authUrl.searchParams.set("response_type", "code");
-    authUrl.searchParams.set("client_id", resolved.client_id);
-    authUrl.searchParams.set("redirect_uri", redirectUri);
-    authUrl.searchParams.set("state", state);
-    authUrl.searchParams.set("code_challenge", generateCodeChallenge(codeVerifier));
-    authUrl.searchParams.set("code_challenge_method", "S256");
-    if (resolved.scopes && resolved.scopes.length > 0) {
-      authUrl.searchParams.set(
-        "scope",
-        resolved.scopes.join(getScopesSeparator(resolved.provider)),
-      );
-    }
-    return authUrl.toString();
-  }
-
   private completeAuthorizationCodeInBackground(
     flow: AuthorizationCodeFlow,
     callbackServer: CallbackServer,
@@ -323,7 +305,12 @@ export class OAuthManager {
         // timeout, token exchange failure, completeOAuthFlow on a sealed
         // engine) is surfaced — the secret stays PENDING either way.
         if (!controller.signal.aborted) {
-          this.onBackgroundFlowError?.(secretId, err);
+          try {
+            this.onBackgroundFlowError?.(secretId, err);
+          } catch {
+            // An embedder callback that throws must not poison the derived
+            // chain — the chain exists precisely to keep rejections observed.
+          }
         }
       })
       .finally(() => {
@@ -465,7 +452,12 @@ export class OAuthManager {
         // timeout, completeOAuthFlow on a sealed engine) is surfaced — the
         // secret stays PENDING either way.
         if (!controller.signal.aborted) {
-          this.onBackgroundFlowError?.(secretId, err);
+          try {
+            this.onBackgroundFlowError?.(secretId, err);
+          } catch {
+            // An embedder callback that throws must not poison the derived
+            // chain — the chain exists precisely to keep rejections observed.
+          }
         }
       })
       .finally(() => {

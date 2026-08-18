@@ -26,8 +26,11 @@ import { KEY_PEM, CERT_PEM, EXPIRED_KEY_PEM, EXPIRED_CERT_PEM } from "./helpers/
  * are about what leaves the vault rather than what it stores:
  *
  * 1. the MCP tool contract offers no place to put a client secret — nor an
- *    http-01 bind port (D1) — and a smuggled one of either is dropped rather
- *    than acted on;
+ *    http-01 bind port (D1) — and a smuggled client secret is dropped rather
+ *    than exchanged. The port half is pinned here as the advertised key set
+ *    only; that a smuggled `http_port` is dropped rather than bound is
+ *    mcp-server's own `renew-certificate.test.ts`, which can observe the
+ *    renewal call's arguments;
  * 2. every REST body, MCP tool result and caught error message produced by a
  *    real client-credentials flow and a real certificate import is swept for
  *    the material in play — with the mock provider's own traffic and the
@@ -112,8 +115,11 @@ const CERT_PROJECTION_KEYS = [
 ];
 
 /**
- * The narrowest renewal window that still reaches the fixture's validity end —
- * derived, not assumed, so a regenerated fixture keeps the row in window.
+ * A renewal window covering the fixture's remaining validity: whole days to its
+ * `validTo` plus a one-day margin, floored at 1 (the fixture pair is already
+ * expired) and clamped at 365 — the engine's `renew_before_days` ceiling, which
+ * refuses anything wider. Derived rather than hardcoded so a regenerated
+ * fixture stays covered, up to that ceiling.
  */
 function windowDaysCovering(certPem: string): number {
   const validToMs = new Date(new X509Certificate(certPem).validTo).getTime();
@@ -125,8 +131,9 @@ function windowDaysCovering(certPem: string): number {
  * certificate projection only reports rows inside their own renewal window,
  * and the store casts a 366-day net before that filter — so a decade-out
  * fixture can never land in it, whatever `renew_before_days` says. The
- * already-expired pair sits inside every window by construction, covering
- * that state without `setNotAfter`-style surgery.
+ * already-expired pair sits inside every window by construction, so it covers
+ * that state without the `setNotAfter` surgery the live-window row further
+ * down this file does need.
  */
 const EXPIRING_WINDOW_DAYS = windowDaysCovering(EXPIRED_CERT_PEM);
 
@@ -148,6 +155,16 @@ function keyNeedles(label: string, pem: string): Needle[] {
     { label: `${label} (first base64 line)`, value: lines[0] as string },
     { label: `${label} (unwrapped base64 body)`, value: lines.join("") },
   ];
+}
+
+/**
+ * Line breaks are not part of a needle's identity: an armored key reaches a raw
+ * response body wrapped at real newlines and a stringified one wrapped at `\n`
+ * escapes, while the unwrapped-body needle carries neither. Stripping both from
+ * both sides is what lets that needle fire at all.
+ */
+function canon(text: string): string {
+  return text.replaceAll("\\n", "").replaceAll("\n", "");
 }
 
 const NEEDLES: Needle[] = [
@@ -191,7 +208,7 @@ function record(surface: string, text: string): void {
 }
 
 interface SqliteHandle {
-  prepare(sql: string): { run(...params: unknown[]): unknown };
+  prepare(sql: string): { run(...params: unknown[]): { changes: number } };
 }
 
 /**
@@ -201,10 +218,17 @@ interface SqliteHandle {
  * window. The engine's own connection is borrowed the way
  * `security-hardening.test.ts` borrows it — no second handle on the file, and
  * `better-sqlite3` stays out of this package's dependencies.
+ *
+ * The row count is asserted: an `UPDATE` matching nothing is silent, and a
+ * renamed column or a moved secret id would leave the projection tests below
+ * asserting against an untouched fixture.
  */
 function setNotAfter(secretId: string, notAfter: number): void {
   const db = (vault.engine as unknown as { store: { db: SqliteHandle } }).store.db;
-  db.prepare("UPDATE certificates SET not_after = ? WHERE secret_id = ?").run(notAfter, secretId);
+  const { changes } = db
+    .prepare("UPDATE certificates SET not_after = ? WHERE secret_id = ?")
+    .run(notAfter, secretId);
+  expect(changes, "setNotAfter matched no certificate row").toBe(1);
 }
 
 function authHeaders(): Record<string, string> {
@@ -354,6 +378,12 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
       AC_REFRESH_TOKEN,
       Date.now() + 30 * 60 * 1000,
     );
+
+    // Positive control for the seeded-access-token needle, taken here because
+    // the refresh below overwrites it: the value the sweep looks for is the
+    // value the vault held.
+    expect(await vault.engine.getOAuthAccessToken(seeded.secretId)).toBe(AC_ACCESS_TOKEN);
+
     mock.setNextTokens({
       access_token: ROTATED_ACCESS_TOKEN,
       refresh_token: ROTATED_REFRESH_TOKEN,
@@ -365,6 +395,19 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
       { method: "POST", headers: authHeaders() },
     );
     expect(refreshed.status).toBe(200);
+
+    // A second refresh, so the *rotated* refresh token also goes outbound: the
+    // provider only ever saw the seeded one, which would leave the rotated
+    // needle unproven. The mock still answers with the same rotated pair, so
+    // the stored state — and every assertion below that reads it — is
+    // unchanged; what this adds is one more provider request and one more
+    // response body for the sweep.
+    const refreshedAgain = await restCall(
+      "rest POST /oauth/:handle/refresh (rotated refresh token outbound)",
+      `/api/v1/oauth/${AC_NAME}/refresh`,
+      { method: "POST", headers: authHeaders() },
+    );
+    expect(refreshedAgain.status).toBe(200);
 
     const imported = await postJson(
       "rest POST /certificates/import",
@@ -502,6 +545,7 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
       "rest POST /certificates/import (in renewal window)",
       "rest POST /certificates/import (refused, malformed certificate_pem)",
       "rest POST /oauth/:handle/refresh",
+      "rest POST /oauth/:handle/refresh (rotated refresh token outbound)",
       "rest POST /oauth/authorize (client_credentials)",
       "sdk DirectClient.renewCertificate (refused)",
       "sdk RestClient.renewCertificate (refused)",
@@ -527,21 +571,35 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
     }
 
     // Positive controls: the credentials really are in play under exactly these
-    // bytes. The provider received the client secret and the refresh token, and
-    // the vault holds the private key — the needles match there, so a clean
-    // sweep below is the vault withholding them, not a matcher that never fires.
+    // bytes. The provider received both client secrets and both refresh tokens
+    // — the rotated one only because test 2 spends it on a second refresh — so
+    // a clean sweep below is the vault withholding them, not a matcher that
+    // never fires.
     const providerTraffic = JSON.stringify(mock.requests);
     expect(providerTraffic).toContain(CC_CLIENT_SECRET);
     expect(providerTraffic).toContain(AC_CLIENT_SECRET);
     expect(providerTraffic).toContain(AC_REFRESH_TOKEN);
+    expect(providerTraffic).toContain(ROTATED_REFRESH_TOKEN);
+
+    // The access tokens travel the other way — they arrive in the provider's
+    // responses — so the vault's own read is their control. The seeded one is
+    // controlled in test 2, at the only moment it is the stored value; the
+    // refresh replaced it with the rotated one read back here.
+    const ccSecretId = await vault.engine.resolveSecretId(`secret://${CC_NAME}`);
+    expect(await vault.engine.getOAuthAccessToken(ccSecretId)).toBe(CC_ACCESS_TOKEN);
+    const acSecretId = await vault.engine.resolveSecretId(`secret://${AC_NAME}`);
+    expect(await vault.engine.getOAuthAccessToken(acSecretId)).toBe(ROTATED_ACCESS_TOKEN);
+
     const storedKey = await vault.engine.getCertificatePrivateKey(importedSecretId);
     for (const needle of keyNeedles("control", KEY_PEM)) {
-      expect(storedKey.replaceAll("\n", "")).toContain(needle.value.replaceAll("\n", ""));
+      expect(canon(storedKey)).toContain(canon(needle.value));
     }
     expect(storedKey).toContain(PEM_ARMOR);
 
     const leaks = observed.flatMap(({ surface, text }) =>
-      NEEDLES.filter((n) => text.includes(n.value)).map((n) => `${surface} carries ${n.label}`),
+      NEEDLES.filter((n) => canon(text).includes(canon(n.value))).map(
+        (n) => `${surface} carries ${n.label}`,
+      ),
     );
     expect(leaks).toEqual([]);
   });

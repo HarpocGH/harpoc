@@ -620,6 +620,30 @@ describe("server start", () => {
     onSpy.mockRestore();
   });
 
+  it("combined --oauth-refresh --rest: refresh drain precedes restServer.close", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    exitSpy.mockImplementation(() => undefined as never);
+
+    await run(["--oauth-refresh", "--rest"]);
+
+    const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
+    expect(sigintCall).toBeDefined();
+    (sigintCall?.[1] as () => void)();
+
+    await vi.waitFor(() => {
+      expect(exitSpy).toHaveBeenCalledWith(0);
+    });
+    expect(mockScheduler.stop).toHaveBeenCalledTimes(1);
+    expect(mockRestServer.close).toHaveBeenCalledTimes(1);
+    // Tripwire on the drain's direction of travel: the stop < destroy pins
+    // above stay green while the drain slides down the teardown sequence.
+    const stopOrder = mockScheduler.stop.mock.invocationCallOrder[0] as number;
+    const closeOrder = mockRestServer.close.mock.invocationCallOrder[0] as number;
+    expect(stopOrder).toBeLessThan(closeOrder);
+
+    onSpy.mockRestore();
+  });
+
   // ── Certificate renewal scheduler ───────────────────────────────
 
   it("--cert-renew alone is a valid start mode and starts the scheduler", async () => {
@@ -636,6 +660,9 @@ describe("server start", () => {
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("certificate renewal scheduler running"),
     );
+    // The first check fires one interval after start, not at start — the
+    // startup line has to say so, or an operator reads silence as failure.
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("first check in ~1 h"));
   });
 
   it("threads the default httpPort 80 into renewCertificate", async () => {
@@ -674,7 +701,9 @@ describe("server start", () => {
     await expect(run(["--cert-renew", "--cert-renew-port", "abc"])).rejects.toThrow("process.exit");
 
     expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid"));
+    expect(errorSpy).toHaveBeenCalledWith(
+      'Error: Invalid cert renewal port "abc". Must be 1-65535.',
+    );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
@@ -764,6 +793,30 @@ describe("server start", () => {
     releaseDrain();
     await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+
+    onSpy.mockRestore();
+  });
+
+  it("combined --cert-renew --rest: renewal drain precedes restServer.close", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    exitSpy.mockImplementation(() => undefined as never);
+
+    await run(["--cert-renew", "--rest"]);
+
+    const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
+    expect(sigintCall).toBeDefined();
+    (sigintCall?.[1] as () => void)();
+
+    await vi.waitFor(() => {
+      expect(exitSpy).toHaveBeenCalledWith(0);
+    });
+    expect(mockRenewalScheduler.stop).toHaveBeenCalledTimes(1);
+    expect(mockRestServer.close).toHaveBeenCalledTimes(1);
+    // Same tripwire as the refresh twin: pins the direction the drain may
+    // move in the shutdown sequence, which stop < destroy alone cannot see.
+    const stopOrder = mockRenewalScheduler.stop.mock.invocationCallOrder[0] as number;
+    const closeOrder = mockRestServer.close.mock.invocationCallOrder[0] as number;
+    expect(stopOrder).toBeLessThan(closeOrder);
 
     onSpy.mockRestore();
   });

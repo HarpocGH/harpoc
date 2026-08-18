@@ -47,9 +47,10 @@ function awaitPort(child: ChildProcessWithoutNullStreams): Promise<number> {
       fn();
     };
     const timer = setTimeout(() => {
-      settle(() =>
-        reject(new Error(`baseline-mcp did not announce a port within ${STARTUP_TIMEOUT_MS} ms`)),
-      );
+      settle(() => {
+        child.kill(); // the spawn already succeeded; without this the fixture outlives the reject
+        reject(new Error(`baseline-mcp did not announce a port within ${STARTUP_TIMEOUT_MS} ms`));
+      });
     }, STARTUP_TIMEOUT_MS);
 
     child.stdout.on("data", (chunk: Buffer) => {

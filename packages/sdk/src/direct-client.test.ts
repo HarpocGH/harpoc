@@ -1,5 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
-import { ErrorCode, VAULT_VERSION, VaultError, VaultState } from "@harpoc/shared";
+import {
+  ENCRYPTED_KEY_IMPORT_REFUSAL,
+  ErrorCode,
+  VAULT_VERSION,
+  VaultError,
+  VaultState,
+} from "@harpoc/shared";
+import type { OAuthTokenStatus } from "@harpoc/shared";
 import { DirectClient } from "./direct-client.js";
 
 function createMockEngine() {
@@ -69,14 +76,15 @@ function createMockEngine() {
     getOAuthTokenStatus: vi.fn().mockReturnValue({
       secret_id: "uuid-1",
       provider: "github",
-      grant_type: "authorization_code",
+      has_access_token: true,
       access_token_expires_at: 4000,
       has_refresh_token: true,
       last_refreshed_at: 3000,
       refresh_status: "ok",
       token_endpoint_auth_method: "client_secret_post",
-    }),
+    } satisfies OAuthTokenStatus),
     refreshOAuthToken: vi.fn().mockResolvedValue(9999),
+    importCertificate: vi.fn().mockResolvedValue({ handle: "secret://web", secretId: "uuid-web" }),
     getCertificateStatus: vi.fn().mockReturnValue({
       secret_id: "uuid-1",
       subject: "CN=web.example.com",
@@ -555,6 +563,17 @@ describe("DirectClient", () => {
       expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://gh");
       expect(engine.refreshOAuthToken).toHaveBeenCalledWith("uuid-1");
     });
+
+    // RestClient pins the same null arm (a provider that issues no expiry);
+    // without this the direct mode could coerce it to a number and the two
+    // client modes would disagree on what "no expiry" looks like.
+    it("refreshOAuthToken returns null when the engine reports no expiry", async () => {
+      const engine = createMockEngine();
+      engine.refreshOAuthToken.mockResolvedValueOnce(null);
+      const client = new DirectClient(engine as never);
+
+      expect(await client.refreshOAuthToken("secret://gh")).toBeNull();
+    });
   });
 
   describe("close()", () => {
@@ -674,7 +693,7 @@ describe("DirectClient", () => {
         }),
       ).rejects.toMatchObject({
         code: ErrorCode.SCHEMA_VALIDATION_ERROR,
-        message: expect.stringContaining("passphrase-protected"),
+        message: ENCRYPTED_KEY_IMPORT_REFUSAL,
       });
       expect(certManager.importCertificate).not.toHaveBeenCalled();
     });
@@ -815,6 +834,60 @@ describe("DirectClient", () => {
       expect(status.subject).toBe("CN=web.example.com");
       expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://web");
       expect(engine.getCertificateStatus).toHaveBeenCalledWith("uuid-1");
+    });
+  });
+
+  /**
+   * D4 says the OAuth and certificate peers are loaded by `import()` only when
+   * one of their methods is actually called, and that each client builds its
+   * manager once. Every other test here injects a fake, so the real dynamic
+   * import ran only on the OAuth side (the background-failure test above) and
+   * neither side pinned the cache — a lost `if (!this.xInstance)` would have
+   * rebuilt a manager per call, silently.
+   */
+  describe("lazy optional peers (no injected manager)", () => {
+    it("lazily builds the real CertManager when none is injected", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      const ref = await client.importCertificate("web", {
+        private_key_pem: PLAIN_KEY_PEM,
+        certificate_pem: LEAF_PEM,
+      });
+
+      expect(ref).toEqual({ handle: "secret://web", secretId: "uuid-web" });
+      // The real manager's own mapping: a bundle split into leaf + chain, then
+      // the engine's positional signature. A fake could not produce this.
+      expect(engine.importCertificate).toHaveBeenCalledWith(
+        "web",
+        PLAIN_KEY_PEM,
+        {
+          certificatePem: LEAF_PEM,
+          chainPem: undefined,
+          autoRenew: undefined,
+          renewBeforeDays: undefined,
+        },
+        undefined,
+        undefined,
+      );
+    });
+
+    it("caches the lazily built managers (one instance per client)", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+      // The cache is the property under test, so reference equality through the
+      // private loaders is the honest pin — no public method exposes it.
+      const load = client as never as {
+        loadOAuthManager(): Promise<unknown>;
+        loadCertManager(): Promise<unknown>;
+      };
+
+      try {
+        expect(await load.loadOAuthManager()).toBe(await load.loadOAuthManager());
+        expect(await load.loadCertManager()).toBe(await load.loadCertManager());
+      } finally {
+        client.close();
+      }
     });
   });
 
