@@ -12,6 +12,7 @@ import { createPolicyRoutes } from "./routes/policies.js";
 import { createAuditRoutes } from "./routes/audit.js";
 import { createOAuthRoutes } from "./routes/oauth.js";
 import { createCertificateRoutes } from "./routes/certificates.js";
+import { createUiRoutes } from "./routes/ui.js";
 import type { HarpocEnv } from "./types.js";
 
 export interface CreateAppOptions {
@@ -22,6 +23,12 @@ export interface CreateAppOptions {
    */
   oauthManager?: OAuthManager;
   certManager?: CertManager;
+  /**
+   * Absolute path to the built Web UI. When set, served at /ui as
+   * unauthenticated static assets (they hold no secrets); every data request
+   * still crosses the authed /api/v1 surface.
+   */
+  uiDir?: string;
 }
 
 /**
@@ -79,20 +86,20 @@ export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono
 
   // Rate limiter for all non-health API routes
   app.use("/api/v1/secrets/*", createRateLimitMiddleware(limiter));
-  app.use("/api/v1/audit", createRateLimitMiddleware(limiter));
+  app.use("/api/v1/audit/*", createRateLimitMiddleware(limiter));
   app.use("/api/v1/health/expiring", createRateLimitMiddleware(limiter));
   app.use("/api/v1/oauth/*", createRateLimitMiddleware(limiter));
   app.use("/api/v1/certificates/*", createRateLimitMiddleware(limiter));
 
   // Audit logging (runs after handler via await next())
   app.use("/api/v1/secrets/*", auditMiddleware);
-  app.use("/api/v1/audit", auditMiddleware);
+  app.use("/api/v1/audit/*", auditMiddleware);
   app.use("/api/v1/oauth/*", auditMiddleware);
   app.use("/api/v1/certificates/*", auditMiddleware);
 
   // Auth middleware for protected routes
   app.use("/api/v1/secrets/*", authMiddleware);
-  app.use("/api/v1/audit", authMiddleware);
+  app.use("/api/v1/audit/*", authMiddleware);
   app.use("/api/v1/health/expiring", authMiddleware);
   app.use("/api/v1/oauth/*", authMiddleware);
   app.use("/api/v1/certificates/*", authMiddleware);
@@ -104,6 +111,10 @@ export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono
   app.route("/api/v1/health/expiring", createExpiringSecretsRoute());
   app.route("/api/v1/oauth", createOAuthRoutes());
   app.route("/api/v1/certificates", createCertificateRoutes());
+
+  if (options?.uiDir !== undefined) {
+    app.route("/ui", createUiRoutes(options.uiDir));
+  }
 
   return app;
 }

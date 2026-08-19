@@ -3,6 +3,7 @@ import { AuditEventType } from "@harpoc/shared";
 import { generateRandomBytes } from "../crypto/random.js";
 import { SqliteStore } from "../storage/sqlite-store.js";
 import { AuditLogger } from "./audit-logger.js";
+import { AuditQuery } from "./audit-query.js";
 
 let store: SqliteStore;
 let auditKey: Uint8Array;
@@ -86,5 +87,35 @@ describe("AuditLogger", () => {
 
     const events = store.queryAuditLog();
     expect(events[0]?.success).toBe(true);
+  });
+});
+
+describe("success filter", () => {
+  beforeEach(() => {
+    logger.log({ eventType: AuditEventType.SECRET_READ, success: true });
+    logger.log({ eventType: AuditEventType.ACCESS_DENIED, success: false });
+  });
+
+  it("queryAuditLog({ success: false }) returns only failures", () => {
+    const failures = store.queryAuditLog({ success: false });
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.event_type).toBe("access.denied");
+  });
+
+  it("queryAuditLog({ success: true }) excludes failures", () => {
+    const ok = store.queryAuditLog({ success: true });
+    expect(ok).toHaveLength(1);
+    expect(ok[0]?.event_type).toBe("secret.read");
+  });
+
+  it("absent success returns all rows", () => {
+    expect(store.queryAuditLog()).toHaveLength(2);
+  });
+
+  it("AuditQuery.query passes success through", () => {
+    const q = new AuditQuery(store, auditKey);
+    const events = q.query({ success: false });
+    expect(events).toHaveLength(1);
+    expect(events[0]?.success).toBe(false);
   });
 });

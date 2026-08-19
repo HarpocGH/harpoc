@@ -27,5 +27,6 @@ describe("cli", () => {
     "@harpoc/mcp-server",
     "@harpoc/oauth-proxy",
     "@harpoc/rest-api",
+    "@harpoc/web-ui",
   ]);
 });

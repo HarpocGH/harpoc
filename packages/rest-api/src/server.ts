@@ -13,6 +13,8 @@ export interface ServerOptions {
   /** Optional managers; `createApp` constructs REST-appropriate defaults otherwise. */
   oauthManager?: OAuthManager;
   certManager?: CertManager;
+  /** Absolute path to the built Web UI; served at /ui when set. */
+  uiDir?: string;
 }
 
 export function startServer(options: ServerOptions): ReturnType<typeof serve> {

@@ -1,0 +1,38 @@
+{
+  "name": "@harpoc/web-ui",
+  "version": "1.0.0",
+  "description": "Web UI for Harpoc — dashboard, secret management, audit viewer (Preact SPA)",
+  "license": "BUSL-1.1",
+  "author": "Stefan Gönitzer",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HarpocGH/harpoc.git",
+    "directory": "packages/web-ui"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@harpoc/shared": "workspace:*",
+    "@fontsource/ibm-plex-mono": "^5.2.5",
+    "preact": "^10.26.9"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.1",
+    "@testing-library/preact": "^3.2.4",
+    "@types/node": "^22.15.0",
+    "jsdom": "^26.1.0",
+    "vite": "^7.0.0"
+  },
+  "scripts": {
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src/"
+  }
+}

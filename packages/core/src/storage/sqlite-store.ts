@@ -45,6 +45,7 @@ export interface AuditFilter {
   since?: number;
   until?: number;
   limit?: number;
+  success?: boolean;
 }
 
 /** Raw audit row plus its chain link, for tamper-evidence verification. */
@@ -627,6 +628,10 @@ export class SqliteStore {
     if (filter?.until) {
       sql += " AND timestamp <= ?";
       params.push(filter.until);
+    }
+    if (filter?.success !== undefined) {
+      sql += " AND success = ?";
+      params.push(filter.success ? 1 : 0);
     }
 
     sql += " ORDER BY timestamp DESC";

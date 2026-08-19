@@ -55,6 +55,7 @@ export interface AuditQueryOptions {
   since?: number;
   until?: number;
   limit?: number;
+  success?: boolean;
 }
 
 /**
@@ -73,6 +74,7 @@ export class AuditQuery {
       since: options?.since,
       until: options?.until,
       limit: options?.limit,
+      success: options?.success,
     };
 
     const events = this.store.queryAuditLog(filter);

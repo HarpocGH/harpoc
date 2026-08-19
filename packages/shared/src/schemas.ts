@@ -524,6 +524,7 @@ export const auditQuerySchema = z.object({
   event_type: auditEventTypeSchema.optional(),
   since: z.number().int().nonnegative().optional(),
   until: z.number().int().nonnegative().optional(),
+  success: z.boolean().optional(),
   limit: z.number().int().positive().max(1000).optional(),
 });
 

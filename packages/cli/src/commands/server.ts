@@ -1,4 +1,7 @@
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import type { Command } from "commander";
+import { MAX_TOKEN_TTL_MS, Permission } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError } from "../utils/output.js";
 
@@ -9,6 +12,11 @@ function parsePort(value: string, label: string): number {
     process.exit(1);
   }
   return port;
+}
+
+function resolveUiDistDir(): string {
+  const require = createRequire(import.meta.url);
+  return join(dirname(require.resolve("@harpoc/web-ui/package.json")), "dist");
 }
 
 export function registerServerCommand(program: Command): void {
@@ -23,6 +31,7 @@ export function registerServerCommand(program: Command): void {
     .option("--rest", "Start REST API server")
     .option("--port <port>", "REST API port", "3000")
     .option("--host <address>", "REST API bind address (loopback by default)", "127.0.0.1")
+    .option("--ui", "Serve the Web UI at /ui (requires --rest); prints a one-time admin launch URL")
     .option(
       "--token <jwt>",
       "Launch token for MCP scope enforcement (stdio only); prefer the HARPOC_TOKEN environment variable — command-line arguments are visible to other local processes",
@@ -50,6 +59,7 @@ export function registerServerCommand(program: Command): void {
           rest?: boolean;
           port: string;
           host: string;
+          ui?: boolean;
           token?: string;
           allowTokenless?: boolean;
           oauthRefresh?: boolean;
@@ -60,6 +70,11 @@ export function registerServerCommand(program: Command): void {
       ) => {
         let engine: Awaited<ReturnType<typeof loadUnlockedEngine>> | undefined;
         try {
+          if (opts.ui && !opts.rest) {
+            console.error("Error: --ui requires --rest.");
+            process.exit(1);
+          }
+
           if (!opts.mcp && !opts.mcpHttp && !opts.rest && !opts.oauthRefresh && !opts.certRenew) {
             console.error(
               "Error: At least one of --mcp, --mcp-http, --rest, --oauth-refresh or --cert-renew is required.",
@@ -181,7 +196,26 @@ export function registerServerCommand(program: Command): void {
             // handle on the manager to cancel its pending flows (D4).
             const oauthManager = createDefaultOAuthManager(engine);
             restOAuthManager = oauthManager;
-            restServer = startServer({ engine, port, hostname: opts.host, oauthManager });
+            const uiDir = opts.ui ? resolveUiDistDir() : undefined;
+            restServer = startServer({ engine, port, hostname: opts.host, oauthManager, uiDir });
+            if (opts.ui) {
+              // Fragment, not query: the token must never appear in a request
+              // line a server or proxy could log.
+              const launchToken = engine.createToken(
+                "web-ui",
+                [Permission.ADMIN],
+                MAX_TOKEN_TTL_MS,
+                {
+                  principalType: "user",
+                },
+              );
+              console.error(
+                `[harpoc] Web UI: http://${opts.host}:${String(port)}/ui#token=${launchToken}`,
+              );
+              console.error(
+                "[harpoc] The link grants admin access until the token expires (24 h cap). Do not share it.",
+              );
+            }
           }
 
           if (opts.oauthRefresh) {

@@ -953,6 +953,15 @@ describe("auditQuerySchema", () => {
   it("rejects non-UUID secret_id", () => {
     expect(() => auditQuerySchema.parse({ secret_id: "not-uuid" })).toThrow();
   });
+
+  it("accepts success: true and success: false", () => {
+    expect(auditQuerySchema.parse({ success: true }).success).toBe(true);
+    expect(auditQuerySchema.parse({ success: false }).success).toBe(false);
+  });
+
+  it("rejects non-boolean success", () => {
+    expect(() => auditQuerySchema.parse({ success: "false" })).toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------------

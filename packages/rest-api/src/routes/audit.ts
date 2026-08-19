@@ -18,6 +18,7 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
     const since = c.req.query("since");
     const until = c.req.query("until");
     const limit = c.req.query("limit");
+    const success = c.req.query("success");
 
     const raw = {
       secret_id: secretId ?? undefined,
@@ -25,6 +26,14 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
       since: since ? parseInt(since, 10) : undefined,
       until: until ? parseInt(until, 10) : undefined,
       limit: limit ? parseInt(limit, 10) : undefined,
+      success:
+        success === undefined
+          ? undefined
+          : success === "true"
+            ? true
+            : success === "false"
+              ? false
+              : success,
     };
 
     const parsed = auditQuerySchema.safeParse(raw);
@@ -42,11 +51,31 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
         since: parsed.data.since,
         until: parsed.data.until,
         limit: parsed.data.limit,
+        success: parsed.data.success,
       },
       auditScopeFromToken(token),
     );
 
     return c.json({ data: events });
+  });
+
+  router.post("/verify", (c) => {
+    const token = c.get("token");
+    checkTokenScope(token, "admin");
+
+    const engine = c.get("engine");
+    const report = engine.verifyAuditChain();
+    // The tail is anchor material with a CLI-only export path (`harpoc audit
+    // anchor`) — an anchor stored via the browser would live on the same disk
+    // it guards.
+    return c.json({
+      data: {
+        valid: report.valid,
+        checked: report.checked,
+        legacy: report.legacy,
+        first_broken_id: report.firstBrokenId,
+      },
+    });
   });
 
   return router;

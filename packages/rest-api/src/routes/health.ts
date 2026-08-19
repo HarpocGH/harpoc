@@ -6,11 +6,16 @@ import {
   VaultError,
   VaultState,
 } from "@harpoc/shared";
-import type { HealthResponse } from "@harpoc/shared";
+import type {
+  ExpiringCertificateInfo,
+  ExpiringOAuthTokenInfo,
+  HealthResponse,
+} from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope } from "../middleware/scope.js";
 
 const MAX_EXPIRING_WINDOW_DAYS = 365;
+const OAUTH_WINDOW_MS = 60 * 60 * 1000; // mirrors mcp-server check-health
 
 export function createHealthRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
@@ -48,7 +53,8 @@ export function createExpiringSecretsRoute(): Hono<HarpocEnv> {
     }
     const threshold = Date.now() + days * 24 * 60 * 60 * 1000;
 
-    let secrets = engine.listSecrets(token.project, callerFromToken(token, "rest"));
+    const caller = callerFromToken(token, "rest");
+    let secrets = engine.listSecrets(token.project, caller);
     if (token.secrets?.length) {
       secrets = secrets.filter((s) => matchesSecretNameScope(s.name, token.secrets));
     }
@@ -56,7 +62,24 @@ export function createExpiringSecretsRoute(): Hono<HarpocEnv> {
       (s) => s.expiresAt !== null && s.expiresAt <= threshold && s.status === "active",
     );
 
-    return c.json({ data: expiring });
+    // Same name/project scoping the secrets list gets (W2 posture): the
+    // aggregates are computed over the caller-addressable set only.
+    const scoped = <T extends { name: string; project: string | null }>(items: T[]): T[] =>
+      items.filter(
+        (i) =>
+          (token.project === undefined || i.project === token.project) &&
+          (!token.secrets?.length || matchesSecretNameScope(i.name, token.secrets)),
+      );
+
+    return c.json({
+      data: expiring,
+      oauth_refresh_needed: scoped<ExpiringOAuthTokenInfo>(
+        engine.getExpiringOAuthTokenStatuses(OAUTH_WINDOW_MS, caller),
+      ),
+      certificates_nearing_renewal: scoped<ExpiringCertificateInfo>(
+        engine.getExpiringCertificateStatuses(caller),
+      ),
+    });
   });
 
   return router;

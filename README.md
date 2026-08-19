@@ -17,7 +17,8 @@ The MCP specification has no built-in credential management. In practice, 79% of
 - **Database, Git & SSH injection** — in-vault PostgreSQL/MySQL connections (TLS by default), Git over HTTPS or SSH, and SSH sessions via an in-process ephemeral key agent — the private key never touches disk
 - **Audit trail** — every vault operation logged, detail fields encrypted at rest, rows HMAC-chained (`harpoc audit verify`); `harpoc audit anchor` exports the chain tail for off-host storage so tail truncation and rollback are detectable (`verify --anchor`). Token-authenticated accesses — every `use_secret` invocation included — are attributed to the requesting principal and access interface (REST / MCP stdio / MCP HTTP); trusted-local (CLI/SDK) rows stay principal-less by design
 - **Access control** — per-secret policies and scoped tokens with wildcard secret-name patterns
-- **Multiple interfaces** — MCP server, REST API, TypeScript SDK, CLI
+- **Web UI** — a browser dashboard, secret manager, and audit viewer served by the REST API at `/ui` (`server start --rest --ui`); secret values are write-only in the browser — the UI can create and rotate them but never fetches or displays one
+- **Multiple interfaces** — MCP server, REST API, TypeScript SDK, CLI, Web UI
 
 ## Architecture
 
@@ -52,6 +53,7 @@ Storage     SQLite (WAL mode, encrypted payloads)
 | `@harpoc/sdk`          | TypeScript client (REST + in-process modes)                                                                                                                                           | Complete |
 | `@harpoc/oauth-proxy`  | OAuth 2.1 proxy — PKCE, provider presets, callback server, token refresh scheduler (CLI: `harpoc oauth connect/status/refresh`, `server start --oauth-refresh`)                       | Complete |
 | `@harpoc/cert-manager` | Certificate lifecycle — PKCS#10 CSR builder + RFC 8555 ACME client (`node:crypto` only), http-01/dns-01 solvers, renewal scheduler (CLI: `harpoc cert import/csr/issue/renew/status`) | Complete |
+| `@harpoc/web-ui`       | Web UI — Preact + Vite SPA (dashboard, secret management, audit viewer) served by the REST API at `/ui` (CLI: `harpoc server start --rest --ui`)                                      | Complete |
 | `@harpoc/integration`  | Cross-package integration tests                                                                                                                                                       | Complete |
 
 ## Quick Start
@@ -237,6 +239,18 @@ npx harpoc server start --cert-renew --cert-renew-port 8080
 ```
 
 The scheduler checks hourly (the first tick one interval after start) and renews **only** certificates created with `--auto-renew`, and only once they are inside their `--renew-before-days` window (default 30). `--cert-renew-port` (default 80, requires `--cert-renew`) is the port the http-01 responder binds for the duration of a renewal. A failed renewal is audited as a failed `cert.renew`, warned on stderr, and quarantined with exponential backoff; an in-flight renewal is drained on shutdown before the vault seals. Without the daemon, `harpoc cert renew <handle>` (from cron, a timer, or by hand) remains the only thing that renews.
+
+## Web UI
+
+Serve the browser dashboard from the REST API:
+
+```bash
+npx harpoc server start --rest --ui
+```
+
+The server prints a one-time launch link to stderr — `http://127.0.0.1:3000/ui#token=…` — carrying an admin-scoped token in the URL **fragment** (it never appears in a request line or a server log). The SPA keeps the token in `sessionStorage` for the life of the tab and sends it as a Bearer header on every API call; a paste-token sign-in screen is the fallback for a fresh tab or an expired token (24 h cap), and a sealed vault takes the UI over with re-unlock instructions.
+
+Three pages: a **dashboard** (attention queue — secret counts, expiring secrets, OAuth tokens needing refresh, certificates nearing renewal, recent audit failures), **secrets** (metadata, injection-policy editing with the interpreter acknowledgement gate, create/rotate/delete — values are write-only: the UI never fetches or displays one, and its API client has no method that could), and **audit** (filterable feed plus a chain-verify button backed by `POST /api/v1/audit/verify`). Static assets are served unauthenticated at `/ui` under a strict same-origin CSP; all data crosses the authenticated `/api/v1` surface. OAuth and certificate lifecycles remain CLI affordances — the UI shows their status and points at `harpoc oauth` / `harpoc cert`.
 
 ## Development
 

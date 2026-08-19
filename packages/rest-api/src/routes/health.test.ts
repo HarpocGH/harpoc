@@ -43,6 +43,8 @@ function createTestApp(
         rotatedAt: null,
       })),
     ),
+    getExpiringOAuthTokenStatuses: vi.fn().mockReturnValue([]),
+    getExpiringCertificateStatuses: vi.fn().mockReturnValue([]),
   };
 
   const app = new Hono<HarpocEnv>();
@@ -191,6 +193,115 @@ describe("health routes", () => {
       project: "proj-a",
       interface: "rest",
     });
+  });
+
+  it("GET /api/v1/health/expiring carries the OAuth/cert aggregate keys", async () => {
+    const { app, engine } = createTestApp(VaultState.UNLOCKED, []);
+
+    const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body.data)).toBe(true);
+    expect(body.oauth_refresh_needed).toEqual([]);
+    expect(body.certificates_nearing_renewal).toEqual([]);
+    expect(engine.getExpiringOAuthTokenStatuses).toHaveBeenCalledWith(
+      60 * 60 * 1000,
+      expect.anything(),
+    );
+    expect(engine.getExpiringCertificateStatuses).toHaveBeenCalledWith(expect.anything());
+  });
+
+  it("GET /api/v1/health/expiring scopes oauth_refresh_needed to the token's project/name pattern", async () => {
+    const { app, engine } = createTestApp(VaultState.UNLOCKED, [], {
+      ...MOCK_TOKEN,
+      scope: ["list"],
+      project: "proj-a",
+      secrets: ["db-*"],
+    });
+
+    engine.getExpiringOAuthTokenStatuses.mockReturnValue([
+      {
+        handle: "secret://db-prod",
+        name: "db-prod",
+        project: "proj-a",
+        provider: "github",
+        access_token_expires_at: Date.now(),
+        has_refresh_token: true,
+        refresh_status: "expiring_soon",
+      },
+      {
+        handle: "secret://db-other-project",
+        name: "db-other-project",
+        project: "proj-b",
+        provider: "github",
+        access_token_expires_at: Date.now(),
+        has_refresh_token: true,
+        refresh_status: "expiring_soon",
+      },
+      {
+        handle: "secret://api-key",
+        name: "api-key",
+        project: "proj-a",
+        provider: "github",
+        access_token_expires_at: Date.now(),
+        has_refresh_token: true,
+        refresh_status: "expiring_soon",
+      },
+    ]);
+
+    const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.oauth_refresh_needed).toHaveLength(1);
+    expect(body.oauth_refresh_needed[0].name).toBe("db-prod");
+  });
+
+  it("GET /api/v1/health/expiring scopes certificates_nearing_renewal to the token's project/name pattern", async () => {
+    const { app, engine } = createTestApp(VaultState.UNLOCKED, [], {
+      ...MOCK_TOKEN,
+      scope: ["list"],
+      project: "proj-a",
+      secrets: ["db-*"],
+    });
+
+    engine.getExpiringCertificateStatuses.mockReturnValue([
+      {
+        handle: "secret://db-prod",
+        name: "db-prod",
+        project: "proj-a",
+        subject: "CN=db-prod",
+        not_after: Date.now(),
+        auto_renew: true,
+        renew_before_days: 30,
+        renewal_status: "expiring_soon",
+      },
+      {
+        handle: "secret://db-other-project",
+        name: "db-other-project",
+        project: "proj-b",
+        subject: "CN=db-other-project",
+        not_after: Date.now(),
+        auto_renew: true,
+        renew_before_days: 30,
+        renewal_status: "expiring_soon",
+      },
+      {
+        handle: "secret://api-key",
+        name: "api-key",
+        project: "proj-a",
+        subject: "CN=api-key",
+        not_after: Date.now(),
+        auto_renew: true,
+        renew_before_days: 30,
+        renewal_status: "expiring_soon",
+      },
+    ]);
+
+    const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.certificates_nearing_renewal).toHaveLength(1);
+    expect(body.certificates_nearing_renewal[0].name).toBe("db-prod");
   });
 
   it("GET /api/v1/health/expiring rejects out-of-range and malformed days", async () => {

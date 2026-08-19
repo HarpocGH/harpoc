@@ -37,6 +37,13 @@ function createMockEngine(token: VaultApiToken = ADMIN_TOKEN) {
         success: true,
       },
     ]),
+    verifyAuditChain: vi.fn().mockReturnValue({
+      valid: true,
+      checked: 12,
+      legacy: 2,
+      firstBrokenId: null,
+      tail: { lastId: 14, timestamp: 999, rowHmac: new Uint8Array([1]) },
+    }),
   };
 }
 
@@ -51,7 +58,7 @@ beforeEach(() => {
     c.set("engine", engine as never);
     await next();
   });
-  app.use("/api/v1/audit", authMiddleware);
+  app.use("/api/v1/audit/*", authMiddleware);
   app.route("/api/v1/audit", createAuditRoutes());
 });
 
@@ -153,5 +160,59 @@ describe("audit routes", () => {
     });
 
     expect(engine.queryAudit).toHaveBeenCalledWith(expect.anything(), { project: "finance" });
+  });
+
+  it("passes success=false to engine.queryAudit", async () => {
+    await app.request("/api/v1/audit?success=false", { headers: AUTH });
+    expect(engine.queryAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ success: false }),
+      undefined,
+    );
+  });
+
+  it("passes success=true to engine.queryAudit", async () => {
+    await app.request("/api/v1/audit?success=true", { headers: AUTH });
+    expect(engine.queryAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ success: true }),
+      undefined,
+    );
+  });
+
+  it("rejects a non-boolean success value", async () => {
+    const res = await app.request("/api/v1/audit?success=maybe", { headers: AUTH });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("SCHEMA_VALIDATION_ERROR");
+  });
+});
+
+describe("POST /api/v1/audit/verify", () => {
+  it("returns the verification report in snake_case without the tail", async () => {
+    const res = await app.request("/api/v1/audit/verify", { method: "POST", headers: AUTH });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.data).toEqual({ valid: true, checked: 12, legacy: 2, first_broken_id: null });
+    expect(body.data.tail).toBeUndefined();
+  });
+
+  it("requires admin scope", async () => {
+    engine = createMockEngine(NON_ADMIN_TOKEN);
+    // rebuild app exactly as beforeEach does, with the non-admin engine
+    app = new Hono<HarpocEnv>();
+    app.onError(errorHandler);
+    app.use("*", async (c, next) => {
+      c.set("engine", engine as never);
+      await next();
+    });
+    app.use("/api/v1/audit/*", authMiddleware);
+    app.route("/api/v1/audit", createAuditRoutes());
+
+    const res = await app.request("/api/v1/audit/verify", { method: "POST", headers: AUTH });
+    expect(res.status).toBe(403);
+  });
+
+  it("requires auth", async () => {
+    const res = await app.request("/api/v1/audit/verify", { method: "POST" });
+    expect(res.status).toBe(401);
   });
 });

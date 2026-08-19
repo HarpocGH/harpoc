@@ -18,6 +18,7 @@ const {
 } = vi.hoisted(() => ({
   mockEngine: {
     destroy: vi.fn().mockResolvedValue(undefined),
+    createToken: vi.fn().mockReturnValue("mock-launch-jwt"),
   },
   mockMcpServer: {
     connect: vi.fn().mockResolvedValue(undefined),
@@ -478,6 +479,37 @@ describe("server start", () => {
     expect(mockRestOAuthManager.cancelPendingFlows).not.toHaveBeenCalled();
 
     onSpy.mockRestore();
+  });
+
+  // ── Web UI ──────────────────────────────────────────────────────
+
+  it("--ui requires --rest", async () => {
+    await expect(run(["--ui"])).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith("Error: --ui requires --rest.");
+  });
+
+  it("--rest --ui passes uiDir to startServer, mints the launch token, prints the URL", async () => {
+    await run(["--rest", "--ui"]);
+    const { startServer } = await import("@harpoc/rest-api");
+    const call = (startServer as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+      uiDir?: string;
+    };
+    expect(call.uiDir).toMatch(/web-ui[\\/]dist$/);
+    expect(mockEngine.createToken).toHaveBeenCalledWith("web-ui", ["admin"], 24 * 60 * 60 * 1000, {
+      principalType: "user",
+    });
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("/ui#token=mock-launch-jwt"));
+  });
+
+  it("--rest without --ui passes no uiDir and mints no token", async () => {
+    await run(["--rest"]);
+    const { startServer } = await import("@harpoc/rest-api");
+    const call = (startServer as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+      uiDir?: string;
+    };
+    expect(call.uiDir).toBeUndefined();
+    expect(mockEngine.createToken).not.toHaveBeenCalled();
   });
 
   // ── Dual mode ───────────────────────────────────────────────────
