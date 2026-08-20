@@ -674,6 +674,86 @@ describe("useSecret (imap) — an OAuth-type secret is refused (no XOAUTH2 accou
   });
 });
 
+describe("useSecret (imap) — OAuth arm (XOAUTH2 via the action's account field)", () => {
+  let oauthHandle: string;
+
+  beforeEach(async () => {
+    await engine.initVault("password");
+    const { handle, secretId } = await engine.createOAuthSecret("mailbox", {
+      provider: "google",
+      grant_type: "client_credentials",
+      token_endpoint: "https://oauth.example.com/token",
+      client_id: "cid",
+    });
+    oauthHandle = handle;
+    await engine.completeOAuthFlow(secretId, "ya29.imap-access-token");
+  });
+
+  it("resolves the access token and passes { accessToken, username } to the injector", async () => {
+    const calls = installSeams(engine, {});
+
+    const res = await engine.useSecret(oauthHandle, {
+      ...IMAP_ACTION,
+      account: "agent@example.com",
+    });
+
+    expect(calls.imap).toHaveLength(1);
+    expect(calls.imap[0]?.oauth).toEqual({
+      accessToken: "ya29.imap-access-token",
+      username: "agent@example.com",
+    });
+    expect(res).toEqual({ type: "imap", operation: "search", uids: [7] });
+  });
+
+  it("still refuses without the account field, naming it in the message", async () => {
+    const calls = installSeams(engine, {});
+
+    const err = (await engine
+      .useSecret(oauthHandle, IMAP_ACTION)
+      .catch((e: unknown) => e)) as VaultError;
+
+    expect(calls.imap).toHaveLength(0);
+    expect(err.code).toBe(ErrorCode.INVALID_INPUT);
+    expect(err.message).toContain("'account'");
+  });
+});
+
+describe("useSecret (imap) — the account field is refused for the username:password arm", () => {
+  beforeEach(async () => {
+    await initWithSecret("inbox", "ops@example.com:mailpass");
+  });
+
+  it("refuses before the injector is reached", async () => {
+    const calls = installSeams(engine, {});
+
+    const err = (await engine
+      .useSecret("secret://inbox", { ...IMAP_ACTION, account: "agent@example.com" })
+      .catch((e: unknown) => e)) as VaultError;
+
+    expect(calls.imap).toHaveLength(0);
+    expect(err.code).toBe(ErrorCode.INVALID_INPUT);
+    expect(err.message).toContain("'account'");
+  });
+
+  it("audits the refusal as a failed secret.use row naming the attempted identity", async () => {
+    installSeams(engine, {});
+
+    await engine
+      .useSecret("secret://inbox", { ...IMAP_ACTION, account: "agent@example.com" })
+      .catch(() => undefined);
+
+    expect(useRows(false)[0]?.detail).toEqual({
+      context: "imap",
+      host: "imap.example.com",
+      mailbox: "INBOX",
+      operation: "search",
+      uid_count: 0,
+      auth_account: "agent@example.com",
+      error: ErrorCode.INVALID_INPUT,
+    });
+  });
+});
+
 describe("useSecret (imap) — both refusals run before the credential is produced", () => {
   it("the OAuth×imap refusal happens before any token fetch or refresh", async () => {
     // A stub that would succeed: if the refusal is late, the refresh runs to

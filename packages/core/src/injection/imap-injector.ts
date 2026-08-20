@@ -49,6 +49,8 @@ export interface ImapAuditDetails {
   mailbox: string;
   operation: string;
   uid_count: number;
+  /** XOAUTH2 identity from the action's `account` — present on the OAuth arm only. */
+  auth_account?: string;
 }
 
 /** Result of a full run: the wire result plus the audit projection the engine writes. */
@@ -116,6 +118,7 @@ export function buildImapAuditDetails(
     mailbox: action.mailbox,
     operation: action.operation.kind,
     uid_count: resultUidCount(result),
+    ...(action.account !== undefined ? { auth_account: action.account } : {}),
   };
 }
 

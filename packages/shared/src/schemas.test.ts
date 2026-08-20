@@ -1821,6 +1821,31 @@ describe("v1.3 action schemas", () => {
       }),
     ).toThrow();
   });
+  it("imap: optional account (the XOAUTH2 identity) must be an email address", () => {
+    expect(
+      imapActionSchema.parse({
+        type: "imap",
+        host: "mail.example.com",
+        operation: { kind: "search", unseen: true },
+        account: "agent@example.com",
+      }).account,
+    ).toBe("agent@example.com");
+    expect(
+      imapActionSchema.parse({
+        type: "imap",
+        host: "mail.example.com",
+        operation: { kind: "search", unseen: true },
+      }),
+    ).not.toHaveProperty("account");
+    expect(() =>
+      imapActionSchema.parse({
+        type: "imap",
+        host: "mail.example.com",
+        operation: { kind: "search", unseen: true },
+        account: "not-an-email",
+      }),
+    ).toThrow();
+  });
   it("websocket: wss ok, ws non-loopback refused, ws loopback ok, collect bounds", () => {
     expect(() =>
       websocketActionSchema.parse({

@@ -282,6 +282,22 @@ describe("ImapInjector — audit details shape", () => {
     });
   });
 
+  it("buildImapAuditDetails carries auth_account when the action names an XOAUTH2 identity", () => {
+    const action = baseAction({
+      host: "imap.example.com",
+      mailbox: "Work",
+      account: "agent@example.com",
+      operation: { kind: "search" },
+    });
+    expect(buildImapAuditDetails(action, { uids: [1] })).toEqual({
+      host: "imap.example.com",
+      mailbox: "Work",
+      operation: "search",
+      uid_count: 1,
+      auth_account: "agent@example.com",
+    });
+  });
+
   it("run() returns audit details reflecting the operation kind and mailbox", async () => {
     const client = makeFakeClient({ searchUids: () => Promise.resolve([7, 8, 9]) });
     const { fn } = connectReturning(client);

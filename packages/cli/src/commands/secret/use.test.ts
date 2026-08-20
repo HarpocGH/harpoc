@@ -597,6 +597,27 @@ describe("secret use — buildAction covers the five v1.3 contexts", () => {
     });
   });
 
+  it("imap: --account maps the XOAUTH2 identity into the action", async () => {
+    await run([
+      "secret://k",
+      "--action",
+      "imap",
+      "--host",
+      "imap.example.com",
+      "--account",
+      "agent@example.com",
+      "--operation",
+      "search",
+      "--search-unseen",
+    ]);
+    expect(actionOf()).toMatchObject({
+      type: "imap",
+      host: "imap.example.com",
+      account: "agent@example.com",
+      operation: { kind: "search", unseen: true },
+    });
+  });
+
   it("imap: a store operation with no --uid (min 1) is refused by the schema", async () => {
     await expect(
       run([

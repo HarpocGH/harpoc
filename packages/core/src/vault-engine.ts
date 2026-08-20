@@ -96,6 +96,7 @@ import {
 } from "./injection/docker/docker-injector.js";
 import { GitInjector } from "./injection/git-injector.js";
 import { HttpInjector } from "./injection/http-injector.js";
+import type { ImapOAuth } from "./injection/imap-injector.js";
 import { buildImapAuditDetails, ImapInjector } from "./injection/imap-injector.js";
 import { McpInjector } from "./injection/mcp-injector.js";
 import { McpConnectionRegistry } from "./injection/mcp-registry.js";
@@ -1113,18 +1114,18 @@ export class VaultEngine {
             ...buildImapAuditDetails(action, { affected: 0 }),
           };
 
+          const imapSecretValue = Buffer.from(value).toString("utf8");
+          const imapOAuth: ImapOAuth | undefined =
+            secret.type === SecretType.OAUTH_TOKEN
+              ? // `assertImapUsageAllowed` guarantees `account` is present on
+                // this arm; XOAUTH2 authenticates that mailbox, mirroring how
+                // the SMTP arm reads the identity off the envelope sender.
+                { accessToken: imapSecretValue, username: action.account as string }
+              : undefined;
+
           let execution;
           try {
-            execution = await s.imapInjector.run(
-              action,
-              Buffer.from(value).toString("utf8"),
-              policy,
-              mail,
-              // The OAuth arm is refused by `assertImapUsageAllowed` before
-              // the value block, so this leg is always the
-              // `username:password` arm.
-              undefined,
-            );
+            execution = await s.imapInjector.run(action, imapSecretValue, policy, mail, imapOAuth);
           } catch (err) {
             const mapped = toVaultError(err);
             this.auditUse(
@@ -1303,8 +1304,12 @@ export class VaultEngine {
    *
    * - Ruling 3: the IMAP client is implicit-TLS-only (design §4.2), so a mail
    *   `tls: false` opt-out cannot be honored on this leg.
-   * - Ruling 4: XOAUTH2 needs the mailbox account name, which no `imap` action
-   *   field carries and the OAuth row does not store.
+   * - Ruling 4 (narrowed 2026-08-20): XOAUTH2 needs the mailbox account name,
+   *   which the OAuth row does not store — the imap action's `account` field
+   *   carries it now, so only an OAuth secret *without* that field refuses.
+   *   The mirror image refuses too: `account` on a username:password secret
+   *   would be silently dead (that arm's username lives in the value), and
+   *   dead config is refused, not dropped (the tls:false precedent above).
    *
    * Both are architectural — no credential can satisfy either — so, like
    * `assertDockerIsolationAllowed`, they belong before the value block rather
@@ -1358,16 +1363,29 @@ export class VaultEngine {
       throw err;
     }
 
-    // Ruling 4: the SMTP context reads the account name off the envelope
-    // sender; no `imap` action field carries one and the OAuth row stores no
-    // account identity, so the access token has no user to bind to. Refused
-    // rather than falling through to the password arm, which would put the
-    // access token on the wire as an IMAP password.
-    if (secret.type === SecretType.OAUTH_TOKEN) {
+    // Ruling 4 (narrowed): the SMTP context reads the account name off the
+    // envelope sender; the imap action's `account` field is its counterpart.
+    // Without it the access token has no user to bind to — refused rather
+    // than falling through to the password arm, which would put the access
+    // token on the wire as an IMAP password.
+    if (secret.type === SecretType.OAUTH_TOKEN && action.account === undefined) {
       const err = VaultError.invalidInput(
-        "an OAuth-type secret cannot authenticate an imap action: XOAUTH2 needs the " +
-          "mailbox account name and no imap action field carries one. Use a secret whose " +
-          "value is 'username:password' for the IMAP leg.",
+        "an OAuth-type secret cannot authenticate an imap action without the mailbox " +
+          "account name: XOAUTH2 binds the access token to an account. Set the imap " +
+          "action's 'account' field to the mailbox address.",
+      );
+      this.auditUse(s, secret.id, { ...failedDetail, error: err.code }, false, attribution);
+      throw err;
+    }
+
+    // The mirror image: on the username:password arm the wire username comes
+    // from the secret value, so a supplied `account` would be silently dead —
+    // refused, not dropped.
+    if (secret.type !== SecretType.OAUTH_TOKEN && action.account !== undefined) {
+      const err = VaultError.invalidInput(
+        "the imap action's 'account' field names the XOAUTH2 identity and is only " +
+          "meaningful for an OAuth-type secret: the username:password arm reads its " +
+          "username from the secret value. Remove the field or use an OAuth-type secret.",
       );
       this.auditUse(s, secret.id, { ...failedDetail, error: err.code }, false, attribution);
       throw err;

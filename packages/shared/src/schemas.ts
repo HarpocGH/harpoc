@@ -610,6 +610,11 @@ export const imapActionSchema = z.object({
   host: hostPattern,
   port: z.number().int().positive().max(65_535).optional().default(DEFAULT_IMAP_PORT),
   mailbox: imapMailboxSchema.optional().default("INBOX"),
+  // XOAUTH2 identity: the mailbox account the access token is bound to.
+  // Required by the engine for an OAuth-type secret (SMTP reads the same
+  // identity off `from`; IMAP has no envelope, so it is its own field) and
+  // refused for the username:password arm, whose username lives in the value.
+  account: emailAddressSchema.optional(),
   operation: imapOperationSchema,
   timeout_ms: z.number().int().positive().max(300_000).optional(),
 });

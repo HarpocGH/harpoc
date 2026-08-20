@@ -74,6 +74,7 @@ interface UseOptions {
   security?: string;
   // IMAP action (also shares --host/--port/--operation above)
   mailbox?: string;
+  account?: string;
   uid?: string[];
   parts?: string;
   searchUnseen?: boolean;
@@ -161,6 +162,10 @@ export function registerSecretUseCommand(secret: Command): void {
     .option("--security <mode>", "Transport security: tls | starttls (smtp action)")
     // IMAP action
     .option("--mailbox <name>", "Mailbox to select (imap action, default INBOX)")
+    .option(
+      "--account <addr>",
+      "Mailbox account name for XOAUTH2 (imap action with an OAuth secret)",
+    )
     .option("--uid <n>", "Message UID (repeatable, imap action)", collect, [])
     .option("--parts <mode>", "Fetch parts: envelope | headers | text | full (imap fetch)")
     .option("--search-unseen", "Search: only unseen messages (imap search)")
@@ -401,6 +406,7 @@ export function buildAction(
       host: options.host,
       port: parseNumericOption(options.port, "--port"),
       mailbox: options.mailbox,
+      account: options.account,
       operation: buildImapOperation(options),
       timeout_ms,
     };

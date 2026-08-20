@@ -420,7 +420,7 @@ describe("MCP Tools", () => {
       it("advertises the imap arm's exact key set", async () => {
         const arm = armFor(await actionArms(), "imap");
         expect(Object.keys(arm.properties ?? {}).sort()).toEqual(
-          ["type", "host", "port", "mailbox", "operation", "timeout_ms"].sort(),
+          ["type", "host", "port", "mailbox", "account", "operation", "timeout_ms"].sort(),
         );
       });
 
