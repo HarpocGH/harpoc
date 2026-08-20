@@ -1,3 +1,6 @@
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { ErrorCode, VaultError } from "@harpoc/shared";
@@ -473,6 +476,375 @@ describe("secret use — buildAction covers all six contexts", () => {
   });
 });
 
+// v1.3: the five Extended Injection Contexts (smtp, imap, websocket, sftp,
+// docker_registry) buildAction gained, plus --action-file. Mirrors the
+// six-context describe block above: one happy case (flags in → exact
+// action object out) and one schema refusal per context.
+describe("secret use — buildAction covers the five v1.3 contexts", () => {
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.HARPOC_TOKEN;
+    mockEngine.useSecret.mockResolvedValue({ type: "http", status: 200 });
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  async function run(args: string[]): Promise<void> {
+    const program = new Command();
+    program.option("--vault-dir <path>", "Path to vault directory");
+    const secret = program.command("secret");
+    registerSecretUseCommand(secret);
+    program.exitOverride();
+    program.configureOutput({ writeErr: () => {} });
+    await program.parseAsync(["node", "harpoc", "secret", "use", ...args]);
+  }
+
+  function actionOf(): Record<string, unknown> {
+    const call = mockEngine.useSecret.mock.calls[0] as unknown[] | undefined;
+    if (!call) throw new Error("useSecret was never called");
+    return call[1] as Record<string, unknown>;
+  }
+
+  it("smtp: host, from, repeated to, subject, text and security", async () => {
+    await run([
+      "secret://k",
+      "--action",
+      "smtp",
+      "--host",
+      "smtp.example.com",
+      "--from",
+      "alerts@example.com",
+      "--to",
+      "a@example.com",
+      "--to",
+      "b@example.com",
+      "--subject",
+      "Report",
+      "--text",
+      "body text",
+      "--security",
+      "starttls",
+    ]);
+    expect(actionOf()).toMatchObject({
+      type: "smtp",
+      host: "smtp.example.com",
+      from: "alerts@example.com",
+      to: ["a@example.com", "b@example.com"],
+      subject: "Report",
+      text: "body text",
+      security: "starttls",
+    });
+  });
+
+  it("smtp: a missing --to (min 1 recipient) is refused by the schema", async () => {
+    await expect(
+      run([
+        "secret://k",
+        "--action",
+        "smtp",
+        "--host",
+        "smtp.example.com",
+        "--from",
+        "alerts@example.com",
+        "--subject",
+        "Report",
+        "--text",
+        "body text",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+    // The refusal must come from the schema (recipient count), not from
+    // --action itself being unrecognized — pins the real failure reason.
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("--action must be one of"));
+  });
+
+  it("imap: host, mailbox, and a fetch operation with repeated uids and parts", async () => {
+    await run([
+      "secret://k",
+      "--action",
+      "imap",
+      "--host",
+      "imap.example.com",
+      "--mailbox",
+      "Archive",
+      "--operation",
+      "fetch",
+      "--uid",
+      "1",
+      "--uid",
+      "2",
+      "--parts",
+      "headers",
+    ]);
+    expect(actionOf()).toMatchObject({
+      type: "imap",
+      host: "imap.example.com",
+      mailbox: "Archive",
+      operation: { kind: "fetch", uids: [1, 2], parts: "headers" },
+    });
+  });
+
+  it("imap: a store operation with no --uid (min 1) is refused by the schema", async () => {
+    await expect(
+      run([
+        "secret://k",
+        "--action",
+        "imap",
+        "--host",
+        "imap.example.com",
+        "--operation",
+        "store",
+        "--add-flag",
+        "\\Seen",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("--action must be one of"));
+  });
+
+  it("websocket: url, injection, message, collect window and subprotocols", async () => {
+    await run([
+      "secret://k",
+      "--action",
+      "websocket",
+      "--url",
+      "wss://ws.example.com/socket",
+      "--injection",
+      "header",
+      "--header-name",
+      "X-Api-Key",
+      "--message",
+      "hello",
+      "--collect-max",
+      "3",
+      "--collect-window",
+      "1000",
+      "--subprotocol",
+      "chat",
+    ]);
+    expect(actionOf()).toMatchObject({
+      type: "websocket",
+      url: "wss://ws.example.com/socket",
+      injection: { type: "header", header_name: "X-Api-Key" },
+      message: "hello",
+      collect: { max_messages: 3, window_ms: 1000 },
+      subprotocols: ["chat"],
+    });
+  });
+
+  it("websocket: a plain ws:// URL to a non-loopback host is refused by the schema", async () => {
+    await expect(
+      run(["secret://k", "--action", "websocket", "--url", "ws://ws.example.com/socket"]),
+    ).rejects.toThrow("process.exit");
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("--action must be one of"));
+  });
+
+  it("sftp: host, user, operation, remote and local paths", async () => {
+    await run([
+      "secret://k",
+      "--action",
+      "sftp",
+      "--host",
+      "sftp.example.com",
+      "--user",
+      "deploy",
+      "--operation",
+      "upload",
+      "--remote",
+      "/var/data/file.txt",
+      "--local",
+      "/tmp/file.txt",
+    ]);
+    expect(actionOf()).toMatchObject({
+      type: "sftp",
+      host: "sftp.example.com",
+      user: "deploy",
+      operation: "upload",
+      remote_path: "/var/data/file.txt",
+      local_path: "/tmp/file.txt",
+    });
+  });
+
+  it("sftp: --local paired with a list operation is refused by the schema", async () => {
+    await expect(
+      run([
+        "secret://k",
+        "--action",
+        "sftp",
+        "--host",
+        "sftp.example.com",
+        "--user",
+        "deploy",
+        "--operation",
+        "list",
+        "--remote",
+        "/var/data",
+        "--local",
+        "/tmp/x",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("--action must be one of"));
+  });
+
+  it("docker_registry: operation and image", async () => {
+    await run([
+      "secret://k",
+      "--action",
+      "docker_registry",
+      "--operation",
+      "pull",
+      "--image",
+      "registry.example.com/team/app:latest",
+    ]);
+    expect(actionOf()).toMatchObject({
+      type: "docker_registry",
+      operation: "pull",
+      image: "registry.example.com/team/app:latest",
+    });
+  });
+
+  it("docker_registry: an invalid image reference is refused by the schema", async () => {
+    await expect(
+      run([
+        "secret://k",
+        "--action",
+        "docker_registry",
+        "--operation",
+        "pull",
+        "--image",
+        "not a valid ref",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("--action must be one of"));
+  });
+});
+
+describe("secret use — --action-file", () => {
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let tempDir: string;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.HARPOC_TOKEN;
+    mockEngine.useSecret.mockResolvedValue({ type: "imap", operation: "expunge", affected: 0 });
+    tempDir = join(
+      tmpdir(),
+      `harpoc-use-action-file-${String(Date.now())}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(tempDir, { recursive: true });
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  async function run(args: string[]): Promise<void> {
+    const program = new Command();
+    program.option("--vault-dir <path>", "Path to vault directory");
+    const secret = program.command("secret");
+    registerSecretUseCommand(secret);
+    program.exitOverride();
+    program.configureOutput({ writeErr: () => {} });
+    await program.parseAsync(["node", "harpoc", "secret", "use", ...args]);
+  }
+
+  function actionOf(): Record<string, unknown> {
+    const call = mockEngine.useSecret.mock.calls[0] as unknown[] | undefined;
+    if (!call) throw new Error("useSecret was never called");
+    return call[1] as Record<string, unknown>;
+  }
+
+  it("round-trips a complete action document through the same schema buildAction feeds", async () => {
+    const filePath = join(tempDir, "action.json");
+    const action = {
+      type: "imap",
+      host: "imap.example.com",
+      port: 993,
+      mailbox: "INBOX",
+      operation: { kind: "expunge" },
+    };
+    writeFileSync(filePath, JSON.stringify(action));
+    await run(["secret://k", "--action-file", filePath]);
+    expect(actionOf()).toEqual(action);
+  });
+
+  it("conflicts with an action-shaping flag, naming both in an INVALID_INPUT refusal", async () => {
+    const filePath = join(tempDir, "action.json");
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        type: "imap",
+        host: "imap.example.com",
+        mailbox: "INBOX",
+        operation: { kind: "expunge" },
+      }),
+    );
+    await expect(
+      run(["secret://k", "--action-file", filePath, "--url", "https://api.example.com"]),
+    ).rejects.toThrow("process.exit");
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("INVALID_INPUT"));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--action-file"));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--url"));
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+  });
+
+  it("a nonexistent --action-file path is refused as INVALID_INPUT, not a crash", async () => {
+    await expect(
+      run(["secret://k", "--action-file", join(tempDir, "missing.json")]),
+    ).rejects.toThrow("process.exit");
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("INVALID_INPUT"));
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+  });
+
+  it("malformed JSON in --action-file is refused as INVALID_INPUT", async () => {
+    const filePath = join(tempDir, "bad.json");
+    writeFileSync(filePath, "{not json");
+    await expect(run(["secret://k", "--action-file", filePath])).rejects.toThrow("process.exit");
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("INVALID_INPUT"));
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+  });
+
+  it("--action-file alone (no other flags) is not a false-positive conflict", async () => {
+    const filePath = join(tempDir, "action.json");
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        type: "docker_registry",
+        operation: "pull",
+        image: "registry.example.com/team/app:latest",
+      }),
+    );
+    await run(["secret://k", "--action-file", filePath]);
+    expect(mockEngine.useSecret).toHaveBeenCalled();
+  });
+});
+
 describe("secret use — --action is a closed set", () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
   let errorSpy: ReturnType<typeof vi.spyOn>;
@@ -663,6 +1035,13 @@ describe("summarizeResult renders every context", () => {
     expect(summarizeResult({ type: "ssh", exit_code: 255, stdout: "", stderr: "" })).toMatchObject({
       type: "ssh",
       exit_code: 255,
+    });
+  });
+
+  it("sftp surfaces the exit code", () => {
+    expect(summarizeResult({ type: "sftp", exit_code: 1, stdout: "", stderr: "" })).toMatchObject({
+      type: "sftp",
+      exit_code: 1,
     });
   });
 });

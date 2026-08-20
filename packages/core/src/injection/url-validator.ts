@@ -91,20 +91,43 @@ export interface ValidatedUrl {
 }
 
 /**
+ * The secure/insecure scheme pair `validateUrl` enforces — `insecure` is
+ * permitted only for loopback targets, `secure` is permitted anywhere.
+ * Defaults to HTTP(S); the WebSocket injector reuses the same SSRF/DNS-rebinding
+ * logic below with {@link WS_SCHEMES} instead of duplicating it.
+ */
+export interface UrlSchemePolicy {
+  secure: string;
+  insecure: string;
+}
+
+const HTTP_SCHEMES: UrlSchemePolicy = { secure: "https:", insecure: "http:" };
+
+/** Mirrors the loopback-only `ws:` / anywhere `wss:` policy the shared
+ * `websocketActionSchema` already enforces (schemas.ts `websocketUrlSchema`). */
+export const WS_SCHEMES: UrlSchemePolicy = { secure: "wss:", insecure: "ws:" };
+
+/**
  * Validate a URL for use in secret injection.
  *
  * Rules:
  * - Must be a valid URL
- * - Must use HTTPS (exception: HTTP for loopback)
+ * - Must use the secure scheme (exception: the insecure scheme for loopback)
  * - Must not target private/internal IP ranges (SSRF prevention)
  * - DNS resolution is checked to prevent DNS rebinding attacks
+ *
+ * `schemes` defaults to HTTP(S); pass {@link WS_SCHEMES} to validate a
+ * `ws:`/`wss:` target with the exact same SSRF/DNS-rebinding checks.
  *
  * Returns the validated URL and every resolved IP address (if DNS was performed;
  * all addresses are re-checked against the SSRF policy). Callers must pin the
  * connection to the resolved addresses, closing the TOCTOU window DNS rebinding
  * would otherwise open between validation and connect.
  */
-export async function validateUrl(urlStr: string): Promise<ValidatedUrl> {
+export async function validateUrl(
+  urlStr: string,
+  schemes: UrlSchemePolicy = HTTP_SCHEMES,
+): Promise<ValidatedUrl> {
   let url: URL;
   try {
     url = new URL(urlStr);
@@ -115,17 +138,17 @@ export async function validateUrl(urlStr: string): Promise<ValidatedUrl> {
   const hostname = url.hostname;
 
   // Scheme check
-  if (url.protocol === "http:") {
+  if (url.protocol === schemes.insecure) {
     if (!isLoopback(hostname)) {
       throw new VaultError(
         ErrorCode.URL_HTTPS_REQUIRED,
-        "HTTP is only allowed for loopback addresses (localhost, 127.0.0.1, ::1)",
+        `${schemes.insecure} is only allowed for loopback addresses (localhost, 127.0.0.1, ::1)`,
       );
     }
-  } else if (url.protocol !== "https:") {
+  } else if (url.protocol !== schemes.secure) {
     throw new VaultError(
       ErrorCode.URL_HTTPS_REQUIRED,
-      `Only HTTPS URLs are allowed, got ${url.protocol}`,
+      `Only ${schemes.secure} URLs are allowed, got ${url.protocol}`,
     );
   }
 

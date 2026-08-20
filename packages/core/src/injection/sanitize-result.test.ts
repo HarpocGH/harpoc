@@ -111,6 +111,22 @@ describe("sanitizeUseSecretResult", () => {
       expect(result.stderr).toContain("[REDACTED]");
     });
 
+    it("sftp: stdout, stderr and error", () => {
+      const result: UseSecretResponse = {
+        type: "sftp",
+        stdout: `transferred ${BEARERISH}`,
+        stderr: `warning about ${BEARERISH}`,
+        exit_code: 0,
+        error: `sftp error ${BEARERISH}`,
+      };
+      sanitizeUseSecretResult(result, guard);
+
+      expect(result.stdout).not.toContain(BEARERISH);
+      expect(result.stderr).not.toContain(BEARERISH);
+      expect(result.error).not.toContain(BEARERISH);
+      expect(result.stdout).toContain("[REDACTED]");
+    });
+
     it("process: stdout, stderr and error", () => {
       const result: UseSecretResponse = {
         type: "process",
@@ -139,6 +155,31 @@ describe("sanitizeUseSecretResult", () => {
       expect(result.body).not.toContain(BEARERISH);
       expect(result.headers?.["x-echo"]).not.toContain(BEARERISH);
       expect(result.error).not.toContain(BEARERISH);
+    });
+
+    it("imap: fetched message content, at any depth", () => {
+      const result: UseSecretResponse = {
+        type: "imap",
+        operation: "fetch",
+        messages: [
+          { uid: 1, flags: [], envelope: { subject: `re: ${BEARERISH}` }, text: BEARERISH },
+        ],
+      };
+      sanitizeUseSecretResult(result, guard);
+
+      expect(JSON.stringify(result.messages)).not.toContain(BEARERISH);
+    });
+
+    it("websocket: every collected frame", () => {
+      const result: UseSecretResponse = {
+        type: "websocket",
+        messages: ["hello", `echo ${BEARERISH}`],
+        close_code: 1000,
+      };
+      sanitizeUseSecretResult(result, guard);
+
+      expect(result.messages[1]).not.toContain(BEARERISH);
+      expect(result.messages[0]).toBe("hello");
     });
 
     it("control: text carrying no credential pattern is left byte-identical", () => {

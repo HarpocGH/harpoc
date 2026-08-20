@@ -1,7 +1,19 @@
 import { z } from "zod";
 
-import { MAX_NAME_LENGTH, MAX_PROCESS_ARGS } from "./constants.js";
+import {
+  DEFAULT_IMAP_PORT,
+  DEFAULT_WS_COLLECT_WINDOW_MS,
+  MAX_DOCKER_TIMEOUT_MS,
+  MAX_IMAP_FETCH_UIDS,
+  MAX_NAME_LENGTH,
+  MAX_PROCESS_ARGS,
+  MAX_SMTP_ATTACHMENTS,
+  MAX_SMTP_RECIPIENTS,
+  MAX_WS_COLLECT_MESSAGES,
+  MAX_WS_COLLECT_WINDOW_MS,
+} from "./constants.js";
 import { isValidHandle } from "./handle.js";
+import { isValidRecipientPattern } from "./recipient-pattern.js";
 import {
   ActionType,
   AuditEventType,
@@ -74,6 +86,16 @@ export const vaultStateSchema = z.enum(vaultStateValues);
 // ---------------------------------------------------------------------------
 
 export const handleSchema = z.string().refine(isValidHandle, { message: "Invalid secret handle" });
+
+/**
+ * SMTP recipient allowlist pattern (thesis-aligned v1.3 §5.2): an exact
+ * address or a `*@domain` wildcard. See `recipient-pattern.ts` for match
+ * semantics.
+ */
+export const recipientPatternSchema = z
+  .string()
+  .max(320)
+  .refine(isValidRecipientPattern, { message: "Invalid recipient pattern" });
 
 // ---------------------------------------------------------------------------
 // Injection config schema
@@ -258,13 +280,26 @@ const hostPattern = z
     { message: "Port must be between 1 and 65535" },
   );
 
+const SQL_DATABASE_ENGINES: readonly DatabaseEngine[] = [
+  DatabaseEngine.POSTGRESQL,
+  DatabaseEngine.MYSQL,
+];
+
 /**
- * Database action — request-mediated injection. The vault assembles the
+ * Database action shape — request-mediated injection. The vault assembles the
  * connection string in-process (the credential is the secret, `user:password`),
- * connects with TLS by default, executes the query and returns the result set.
- * `host` may embed a port (`host:port`); an explicit `port` overrides it.
+ * connects with TLS by default, executes the query/command and returns the
+ * result set. `host` may embed a port (`host:port`); an explicit `port`
+ * overrides it.
+ *
+ * Bare (no cross-field refinement) so it can sit as a `z.discriminatedUnion`
+ * member in `useSecretActionSchema` — a `superRefine`-wrapped `ZodEffects`
+ * has no `.shape` and `discriminatedUnion` throws at construction time. The
+ * engine/query/command cross-field matrix lives in `refineDatabaseAction`
+ * below, applied both to the standalone export (`databaseActionSchema`) and,
+ * via the same function reference, to the outer union's `superRefine`.
  */
-export const databaseActionSchema = z.object({
+const bareDatabaseActionSchema = z.object({
   type: z.literal(ActionType.DATABASE),
   engine: databaseEngineSchema,
   host: hostPattern,
@@ -274,10 +309,82 @@ export const databaseActionSchema = z.object({
     .min(1)
     .max(255)
     .regex(/^[a-zA-Z0-9_.$-]+$/, "Invalid database name"),
-  query: z.string().min(1).max(1_000_000),
+  query: z.string().min(1).max(1_000_000).optional(),
   params: z.array(z.unknown()).max(1_000).optional(),
+  command: z
+    .union([z.array(z.string().max(65_536)).min(1).max(1_000), z.record(z.unknown())])
+    .optional(),
   timeout_ms: z.number().int().positive().max(300_000).optional(),
 });
+
+type BareDatabaseAction = z.infer<typeof bareDatabaseActionSchema>;
+
+/**
+ * `engine` selects one of two disjoint dispatch shapes (schema-level, like
+ * the cert `--bits`/`--curve` pairing rule): `postgresql`/`mysql` require
+ * `query` (+ optional `params`) and refuse `command`; `redis` requires
+ * `command` as a string array (the command name plus its arguments — never
+ * inline protocol text) and refuses `query`/`params`; `mongodb` requires
+ * `command` as a document (runCommand-style) and refuses `query`/`params`.
+ * `query` is schema-optional so the object shape stays a single type across
+ * all four engines, but every existing `{engine: "postgresql"|"mysql",
+ * query, params}` caller remains valid — the refinement requires exactly
+ * what was always required for those two engines.
+ */
+function refineDatabaseAction(data: BareDatabaseAction, ctx: z.RefinementCtx): void {
+  if (SQL_DATABASE_ENGINES.includes(data.engine)) {
+    if (!data.query) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "query is required for this engine",
+        path: ["query"],
+      });
+    }
+    if (data.command !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "command is not allowed for this engine",
+        path: ["command"],
+      });
+    }
+    return;
+  }
+
+  if (data.engine === DatabaseEngine.REDIS) {
+    if (!Array.isArray(data.command)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "command must be a string array for redis",
+        path: ["command"],
+      });
+    }
+  } else if (data.engine === DatabaseEngine.MONGODB) {
+    if (data.command === undefined || Array.isArray(data.command)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "command must be a document for mongodb",
+        path: ["command"],
+      });
+    }
+  }
+
+  if (data.query !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "query is not allowed for this engine",
+      path: ["query"],
+    });
+  }
+  if (data.params !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "params is not allowed for this engine",
+      path: ["params"],
+    });
+  }
+}
+
+export const databaseActionSchema = bareDatabaseActionSchema.superRefine(refineDatabaseAction);
 
 export type DatabaseAction = z.infer<typeof databaseActionSchema>;
 
@@ -297,6 +404,20 @@ export const gitActionSchema = z.object({
 
 export type GitAction = z.infer<typeof gitActionSchema>;
 
+/** Host charset shared by the SSH and SFTP process-mediated contexts. */
+const sshHostSchema = z
+  .string()
+  .min(1)
+  .max(255)
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, "Invalid host format");
+
+/** User charset shared by the SSH and SFTP process-mediated contexts. */
+const sshUserSchema = z
+  .string()
+  .min(1)
+  .max(255)
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, "Invalid user format");
+
 /**
  * SSH action — process-mediated injection. The vault spawns `ssh` with the
  * private key served through an ephemeral ssh-agent (signatures only, key never
@@ -304,31 +425,374 @@ export type GitAction = z.infer<typeof gitActionSchema>;
  */
 export const sshActionSchema = z.object({
   type: z.literal(ActionType.SSH),
-  host: z
-    .string()
-    .min(1)
-    .max(255)
-    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, "Invalid host format"),
-  user: z
-    .string()
-    .min(1)
-    .max(255)
-    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, "Invalid user format"),
+  host: sshHostSchema,
+  user: sshUserSchema,
   command: z.string().min(1).max(65_536),
   timeout_ms: z.number().int().positive().max(300_000).optional(),
 });
 
 export type SshAction = z.infer<typeof sshActionSchema>;
 
-/** Discriminated union over the execution context. */
-export const useSecretActionSchema = z.discriminatedUnion("type", [
-  httpActionSchema,
-  processActionSchema,
-  mcpActionSchema,
-  databaseActionSchema,
-  gitActionSchema,
-  sshActionSchema,
+// ---------------------------------------------------------------------------
+// v1.3 extended-context action schemas (thesis-aligned; design-v1.3-contexts §4)
+// ---------------------------------------------------------------------------
+
+const emailAddressSchema = z.string().email().max(320);
+
+const SMTP_ENVELOPE_HEADER_NAMES = new Set([
+  "from",
+  "to",
+  "cc",
+  "bcc",
+  "subject",
+  "content-type",
+  "mime-version",
+  "date",
+  "message-id",
 ]);
+
+/**
+ * Caller-supplied SMTP headers: deny-listed against the envelope and
+ * structural headers the vault assembles itself, so the audited envelope
+ * (from/to/subject) and the wire headers can never diverge. Matched
+ * case-insensitively — header names are case-insensitive per RFC 5322.
+ */
+const smtpHeadersSchema = z
+  .record(z.string().min(1).max(256), z.string().max(8192))
+  .refine(
+    (headers) =>
+      Object.keys(headers).every((k) => !SMTP_ENVELOPE_HEADER_NAMES.has(k.toLowerCase())),
+    { message: "Header shadows an envelope or structural field" },
+  );
+
+/**
+ * True if `value` contains any C0 control character (including CR/LF/NUL) —
+ * a path-traversal / batch-injection defense at the schema boundary. Written
+ * as a char-code scan rather than a `[\x00-\x1f]` regex class, which ESLint's
+ * `no-control-regex` flags.
+ */
+function hasControlCharacters(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    if (value.charCodeAt(i) <= 0x1f) return true;
+  }
+  return false;
+}
+
+/** Absolute path (POSIX or Windows drive-letter), no control characters or newlines. */
+const attachmentPathSchema = z
+  .string()
+  .min(1)
+  .max(4096)
+  .refine((p) => !hasControlCharacters(p), {
+    message: "Path must not contain control characters",
+  })
+  .refine((p) => /^(\/|[a-zA-Z]:[\\/])/.test(p), {
+    message: "Attachment path must be absolute",
+  });
+
+/** One SMTP attachment: an absolute file path plus optional wire metadata. */
+export const smtpAttachmentSchema = z.object({
+  path: attachmentPathSchema,
+  filename: z.string().min(1).max(255).optional(),
+  content_type: z.string().min(1).max(255).optional(),
+});
+
+/**
+ * SMTP action shape — request-mediated injection. The vault dials the mail
+ * server, authenticates (secret value `username:password`; an OAuth-type
+ * handle switches to XOAUTH2) and assembles + sends the message; the client
+ * never authors MIME. `port` defaults per `security` (465 for `tls`, 587 for
+ * `starttls`) at the connection layer, not in this schema. Attachment byte
+ * caps (`MAX_ATTACHMENT_BYTES`/`MAX_ATTACHMENT_TOTAL_BYTES`) are enforced in
+ * core — the schema cannot see file sizes before reading them.
+ *
+ * Bare (no cross-field refinement) for the same `discriminatedUnion`-member
+ * reason `bareDatabaseActionSchema` documents above; the at-least-one-of
+ * text/html and total-recipient-count rules live in `refineSmtpAction`.
+ */
+const bareSmtpActionSchema = z.object({
+  type: z.literal(ActionType.SMTP),
+  host: hostPattern,
+  port: z.number().int().positive().max(65_535).optional(),
+  security: z.enum(["tls", "starttls"]).optional().default("tls"),
+  from: emailAddressSchema,
+  to: z.array(emailAddressSchema).min(1).max(MAX_SMTP_RECIPIENTS),
+  cc: z.array(emailAddressSchema).max(MAX_SMTP_RECIPIENTS).optional(),
+  bcc: z.array(emailAddressSchema).max(MAX_SMTP_RECIPIENTS).optional(),
+  subject: z.string().min(1).max(998),
+  text: z.string().optional(),
+  html: z.string().optional(),
+  headers: smtpHeadersSchema.optional(),
+  attachments: z.array(smtpAttachmentSchema).max(MAX_SMTP_ATTACHMENTS).optional(),
+  timeout_ms: z.number().int().positive().max(300_000).optional(),
+});
+
+type BareSmtpAction = z.infer<typeof bareSmtpActionSchema>;
+
+/** At least one of `text`/`html` is required; `to`+`cc`+`bcc` together stay within the recipient cap. */
+function refineSmtpAction(data: BareSmtpAction, ctx: z.RefinementCtx): void {
+  if (!data.text && !data.html) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "at least one of text or html is required",
+      path: ["text"],
+    });
+  }
+  const recipientCount = data.to.length + (data.cc?.length ?? 0) + (data.bcc?.length ?? 0);
+  if (recipientCount > MAX_SMTP_RECIPIENTS) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `At most ${MAX_SMTP_RECIPIENTS} recipients (to + cc + bcc) are allowed`,
+      path: ["to"],
+    });
+  }
+}
+
+export const smtpActionSchema = bareSmtpActionSchema.superRefine(refineSmtpAction);
+
+export type SmtpAction = z.infer<typeof smtpActionSchema>;
+
+/** Closed IMAP flag vocabulary — matches the client-authored subset only. */
+export const imapFlagSchema = z.enum(["\\Seen", "\\Flagged", "\\Answered", "\\Deleted"]);
+
+const imapUidsSchema = z.array(z.number().int().positive()).min(1).max(MAX_IMAP_FETCH_UIDS);
+
+const imapMailboxSchema = z.string().min(1).max(255);
+
+/**
+ * Inner IMAP operation union — the client authors structured criteria only;
+ * a raw IMAP query string is never accepted (command/args-are-data
+ * convention, mirrors the process/git/ssh contexts).
+ */
+const imapOperationSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("search"),
+    unseen: z.boolean().optional(),
+    since: z.string().date().optional(),
+    from: z.string().min(1).max(320).optional(),
+    subject: z.string().min(1).max(998).optional(),
+    text: z.string().min(1).max(1024).optional(),
+  }),
+  z.object({
+    kind: z.literal("fetch"),
+    uids: imapUidsSchema,
+    parts: z.enum(["envelope", "headers", "text", "full"]),
+  }),
+  z.object({
+    kind: z.literal("store"),
+    uids: imapUidsSchema,
+    add_flags: z.array(imapFlagSchema).optional(),
+    remove_flags: z.array(imapFlagSchema).optional(),
+  }),
+  z.object({
+    kind: z.literal("move"),
+    uids: imapUidsSchema,
+    target_mailbox: imapMailboxSchema,
+  }),
+  z.object({
+    kind: z.literal("copy"),
+    uids: imapUidsSchema,
+    target_mailbox: imapMailboxSchema,
+  }),
+  z.object({
+    kind: z.literal("expunge"),
+  }),
+]);
+
+/**
+ * IMAP action — request-mediated injection, implicit TLS only. Same
+ * auth ladder as SMTP (PLAIN/LOGIN; XOAUTH2 for OAuth-type handles).
+ * `imap_read_only` (policy field) refuses the mutating operation kinds
+ * before this schema is even consulted by the injector.
+ */
+export const imapActionSchema = z.object({
+  type: z.literal(ActionType.IMAP),
+  host: hostPattern,
+  port: z.number().int().positive().max(65_535).optional().default(DEFAULT_IMAP_PORT),
+  mailbox: imapMailboxSchema.optional().default("INBOX"),
+  operation: imapOperationSchema,
+  timeout_ms: z.number().int().positive().max(300_000).optional(),
+});
+
+export type ImapAction = z.infer<typeof imapActionSchema>;
+
+const websocketCollectSchema = z.object({
+  max_messages: z.number().int().positive().max(MAX_WS_COLLECT_MESSAGES).optional().default(1),
+  window_ms: z
+    .number()
+    .int()
+    .positive()
+    .max(MAX_WS_COLLECT_WINDOW_MS)
+    .optional()
+    .default(DEFAULT_WS_COLLECT_WINDOW_MS),
+});
+
+/** Mirrors the loopback set the OAuth endpoint schema and core's `validateUrl` use. */
+const WS_LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * WebSocket URL: `wss://` anywhere, or `ws://` for loopback only — mirrors
+ * core's `validateUrl` SSRF policy (same shape as `oauthEndpointUrlSchema`).
+ */
+const websocketUrlSchema = z
+  .string()
+  .url()
+  .refine((value) => {
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      return false;
+    }
+    return (
+      url.protocol === "wss:" || (url.protocol === "ws:" && WS_LOOPBACK_HOSTS.has(url.hostname))
+    );
+  }, "WebSocket URL must use wss: (plain ws: is allowed for loopback only)");
+
+/**
+ * WebSocket action — request-mediated injection. The credential is applied
+ * at the upgrade handshake via the same `injectionConfigSchema` HTTP reuses
+ * (bearer/header/query/basic_auth). `message` absent = connect-and-listen
+ * only; `collect` bounds how many frames are gathered before the vault
+ * closes the connection and returns them.
+ */
+export const websocketActionSchema = z.object({
+  type: z.literal(ActionType.WEBSOCKET),
+  url: websocketUrlSchema,
+  injection: injectionConfigSchema,
+  message: z.string().max(1_048_576).optional(),
+  subprotocols: z.array(z.string().min(1).max(255)).max(16).optional(),
+  collect: websocketCollectSchema.optional(),
+  response_mode: responseModeSchema.optional(),
+  timeout_ms: z.number().int().positive().max(300_000).optional(),
+});
+
+export type WebsocketAction = z.infer<typeof websocketActionSchema>;
+
+/** Remote/local path: control characters and newlines refused at the boundary. */
+const sftpPathSchema = z
+  .string()
+  .min(1)
+  .max(4096)
+  .refine((p) => !hasControlCharacters(p), {
+    message: "Path must not contain control characters",
+  });
+
+/**
+ * SFTP action shape — process-mediated injection over the same ephemeral
+ * ssh-agent as the SSH context (`sshHostSchema`/`sshUserSchema`, declared
+ * above with `sshActionSchema`). Bare (no cross-field refinement) for the
+ * same `discriminatedUnion`-member reason `bareDatabaseActionSchema`
+ * documents above; the `local_path` requirement lives in `refineSftpAction`.
+ */
+const bareSftpActionSchema = z.object({
+  type: z.literal(ActionType.SFTP),
+  host: sshHostSchema,
+  user: sshUserSchema,
+  operation: z.enum(["upload", "download", "list"]),
+  remote_path: sftpPathSchema,
+  local_path: sftpPathSchema.optional(),
+  timeout_ms: z.number().int().positive().max(300_000).optional(),
+});
+
+type BareSftpAction = z.infer<typeof bareSftpActionSchema>;
+
+/**
+ * `local_path` is required for `upload`/`download` (the vault-local file
+ * side of the transfer) and refused for `list` (nothing local to name).
+ */
+function refineSftpAction(data: BareSftpAction, ctx: z.RefinementCtx): void {
+  if ((data.operation === "upload" || data.operation === "download") && !data.local_path) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "local_path is required for upload/download",
+      path: ["local_path"],
+    });
+  }
+  if (data.operation === "list" && data.local_path !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "local_path is not allowed for list",
+      path: ["local_path"],
+    });
+  }
+}
+
+export const sftpActionSchema = bareSftpActionSchema.superRefine(refineSftpAction);
+
+export type SftpAction = z.infer<typeof sftpActionSchema>;
+
+/**
+ * Docker image reference: `[registry-host[:port]/]repo[:tag][@digest]`. The
+ * registry component (when present) is the allowlist subject.
+ */
+const DOCKER_IMAGE_REGEX =
+  /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::\d{1,5})?\/)?[a-zA-Z0-9._-]+(?:\/[a-zA-Z0-9._-]+)*(?::[a-zA-Z0-9._-]+)?(?:@sha256:[a-f0-9]{64})?$/;
+
+const dockerImageSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .regex(DOCKER_IMAGE_REGEX, "Invalid image reference");
+
+/**
+ * Docker registry action — process-mediated injection: the vault spawns the
+ * `docker` CLI. `timeout_ms`'s cap is raised for this context only (image
+ * transfers routinely exceed the 5-minute norm). `network_isolation`/
+ * `fs_isolation` on the secret refuse this context outright (before any
+ * spawn) — the daemon, not the spawned CLI, performs the actual registry
+ * I/O, so wrapping the CLI would isolate the messenger, not the actor.
+ */
+export const dockerRegistryActionSchema = z.object({
+  type: z.literal(ActionType.DOCKER_REGISTRY),
+  operation: z.enum(["pull", "push"]),
+  image: dockerImageSchema,
+  timeout_ms: z.number().int().positive().max(MAX_DOCKER_TIMEOUT_MS).optional().default(300_000),
+});
+
+export type DockerRegistryAction = z.infer<typeof dockerRegistryActionSchema>;
+
+/**
+ * Discriminated union over the execution context. Members are the BARE
+ * `z.object(...)` schemas (`discriminatedUnion` requires `.shape` on every
+ * member — a `superRefine`-wrapped `ZodEffects` member throws at
+ * schema-construction time); the three members with a cross-field rule
+ * (database/smtp/sftp) get it applied here, in one outer `.superRefine`
+ * dispatching by `type`, calling the exact same refine function their
+ * standalone exports use — defined once, enforced both ways.
+ *
+ * `discriminatedUnion` (not a plain `z.union`) matters beyond dispatch speed:
+ * it keeps field-level errors (a missing/invalid required field on any
+ * variant) at the top level of `error.issues`. REST
+ * (`routes/secrets.ts`) and CLI (`commands/secret/use.ts`) both read
+ * `error.issues` directly, never `error.unionErrors` — under a plain
+ * `z.union` those field errors get buried per-branch and both surfaces fall
+ * back to a bare "Invalid input" instead of naming the field.
+ */
+export const useSecretActionSchema = z
+  .discriminatedUnion("type", [
+    httpActionSchema,
+    processActionSchema,
+    mcpActionSchema,
+    bareDatabaseActionSchema,
+    gitActionSchema,
+    sshActionSchema,
+    bareSmtpActionSchema,
+    imapActionSchema,
+    websocketActionSchema,
+    bareSftpActionSchema,
+    dockerRegistryActionSchema,
+  ])
+  .superRefine((data, ctx) => {
+    switch (data.type) {
+      case "smtp":
+        return refineSmtpAction(data, ctx);
+      case "database":
+        return refineDatabaseAction(data, ctx);
+      case "sftp":
+        return refineSftpAction(data, ctx);
+    }
+  });
 
 /** Discriminated union of context-specific use_secret action specifications. */
 export type UseSecretAction = z.infer<typeof useSecretActionSchema>;
@@ -365,6 +829,8 @@ export const injectionPolicyInputSchema = z.object({
     .default([]),
   network_isolation: z.boolean().optional().default(false),
   fs_isolation: z.boolean().optional().default(false),
+  smtp_recipient_allowlist: z.array(recipientPatternSchema).max(100).optional().default([]),
+  imap_read_only: z.boolean().optional().default(false),
 });
 
 /**
@@ -382,9 +848,17 @@ export const injectionPolicyInputSchema = z.object({
  * cannot deliver it refuse the use. `fs_isolation` (default `false`) demands
  * write-deny filesystem isolation for every process-mediated child: Linux via
  * setpriv with Landlock support, macOS via sandbox-exec, Windows refused
- * fail-closed (unsupported by design); writes to `/dev/null` are exempt. The
- * schema's output type: all defaults applied, every field present — the
- * shape the vault loads and returns.
+ * fail-closed (unsupported by design); writes to `/dev/null` are exempt.
+ * `smtp_recipient_allowlist` (v1.3, default `[]`) bounds SMTP recipients
+ * (exact addresses or `*@domain` patterns, design §5.2): absent, any
+ * recipient is allowed for a body-only send; configured, every recipient
+ * (to/cc/bcc) must match, and an attachment-bearing send additionally
+ * refuses outright unless the list is configured — that coupling rule is
+ * enforced by the SMTP injector, not this schema. `imap_read_only` (v1.3,
+ * default `false`) is a tighten-only knob (same shape as `response_mode`):
+ * set, it refuses the mutating IMAP operation kinds (`store`/`move`/`copy`/
+ * `expunge`) before any socket opens. The schema's output type: all defaults
+ * applied, every field present — the shape the vault loads and returns.
  */
 export type InjectionPolicy = z.output<typeof injectionPolicyInputSchema>;
 
@@ -428,22 +902,41 @@ export const sshConnectionConfigSchema = z.object({
 export type SshConnectionConfig = z.infer<typeof sshConnectionConfigSchema>;
 
 /**
+ * Mail (SMTP/IMAP) endpoint-authentication config — the database group's TLS
+ * policy in the mail contexts' idiom (design §5.5), shaped 1:1 onto core's
+ * `MailTlsConfig`. `tls` absent means TLS against the default system CAs;
+ * `{ ca }` pins a private CA bundle; `false` is the audited plaintext opt-out
+ * — honored by **SMTP only** (`tls_opt_out: true` lands in the `secret.use`
+ * row). IMAP is implicit-TLS-only (design §4.2), so an `imap` action on a
+ * secret carrying `tls: false` refuses at use time rather than silently
+ * ignoring an opt-out the admin believes is in force.
+ */
+export const mailConnectionConfigSchema = z.object({
+  tls: z
+    .union([z.literal(false), z.object({ ca: z.string().min(1).max(65_536).optional() })])
+    .optional(),
+});
+
+export type MailConnectionConfig = z.infer<typeof mailConnectionConfigSchema>;
+
+/**
  * Per-secret endpoint-authentication pins (KEK-encrypted at rest), the §4.7
  * "authenticated target connections" counterpart to the target allowlist. Set
  * only via the trusted admin path (CLI/REST) — never via an MCP tool. `ssh` is
- * shared by the SSH and Git-over-SSH contexts. At least one of `database` /
- * `ssh` must be present.
+ * shared by the SSH and Git-over-SSH contexts, `mail` by the SMTP and IMAP
+ * contexts (v1.3). At least one of `database` / `ssh` / `mail` must be present.
  */
 export const connectionConfigSchema = z
   .object({
     database: databaseConnectionConfigSchema.optional(),
     ssh: sshConnectionConfigSchema.optional(),
+    mail: mailConnectionConfigSchema.optional(),
   })
   .superRefine((data, ctx) => {
-    if (!data.database && !data.ssh) {
+    if (!data.database && !data.ssh && !data.mail) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "connection config must set at least one of database or ssh",
+        message: "connection config must set at least one of database, ssh or mail",
         path: [],
       });
     }

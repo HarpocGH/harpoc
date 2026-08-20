@@ -890,5 +890,101 @@
     "surface": "mcp-http",
     "arm": "baseline",
     "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "context-opacity",
+    "context": "smtp",
+    "variant": "smtp",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "context-opacity",
+    "context": "smtp",
+    "variant": "smtp",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "OPAQUE"
+  },
+  {
+    "scenario": "context-opacity",
+    "context": "imap",
+    "variant": "imap",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "context-opacity",
+    "context": "imap",
+    "variant": "imap",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "OPAQUE"
+  },
+  {
+    "scenario": "context-opacity",
+    "context": "database",
+    "variant": "redis",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "context-opacity",
+    "context": "database",
+    "variant": "redis",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "OPAQUE"
+  },
+  {
+    "scenario": "context-opacity",
+    "context": "database",
+    "variant": "mongodb",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "context-opacity",
+    "context": "database",
+    "variant": "mongodb",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "OPAQUE"
+  },
+  {
+    "scenario": "context-opacity",
+    "context": "sftp",
+    "variant": "sftp",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "context-opacity",
+    "context": "sftp",
+    "variant": "sftp",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "OPAQUE"
+  },
+  {
+    "scenario": "context-opacity",
+    "context": "docker_registry",
+    "variant": "docker-registry",
+    "surface": "mcp-http",
+    "arm": "baseline",
+    "expected": "LEAKED"
+  },
+  {
+    "scenario": "context-opacity",
+    "context": "docker_registry",
+    "variant": "docker-registry",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "OPAQUE"
   }
 ]

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
-import { isLoopback, isPrivateIp, validateHostPort, validateUrl } from "./url-validator.js";
+import {
+  WS_SCHEMES,
+  isLoopback,
+  isPrivateIp,
+  validateHostPort,
+  validateUrl,
+} from "./url-validator.js";
 
 describe("isPrivateIp", () => {
   it.each([
@@ -371,5 +377,44 @@ describe("validateHostPort", () => {
     await expect(validateHostPort("fc00::1", 5432)).rejects.toMatchObject({
       code: ErrorCode.SSRF_BLOCKED,
     });
+  });
+});
+
+describe("validateUrl with a custom scheme policy (WS_SCHEMES)", () => {
+  // Literal IPs throughout — DNS is never touched for these (thesis-aligned
+  // convention: url-validator tests avoid real lookups).
+
+  it("accepts wss: for a public literal IP", async () => {
+    const result = await validateUrl("wss://8.8.8.8/v1/test", WS_SCHEMES);
+    expect(result.url.protocol).toBe("wss:");
+    expect(result.resolvedAddresses).toBeUndefined();
+  });
+
+  it("accepts ws: for loopback", async () => {
+    const result = await validateUrl("ws://127.0.0.1:3000/api", WS_SCHEMES);
+    expect(result.url.protocol).toBe("ws:");
+  });
+
+  it("rejects ws: for a non-loopback target", async () => {
+    await expect(validateUrl("ws://8.8.8.8/api", WS_SCHEMES)).rejects.toMatchObject({
+      code: ErrorCode.URL_HTTPS_REQUIRED,
+    });
+  });
+
+  it("rejects an http: URL under the ws scheme policy", async () => {
+    await expect(validateUrl("http://127.0.0.1:3000/api", WS_SCHEMES)).rejects.toMatchObject({
+      code: ErrorCode.URL_HTTPS_REQUIRED,
+    });
+  });
+
+  it("blocks SSRF for a private literal IP under wss:", async () => {
+    await expect(validateUrl("wss://10.0.0.1/api", WS_SCHEMES)).rejects.toMatchObject({
+      code: ErrorCode.SSRF_BLOCKED,
+    });
+  });
+
+  it("defaults to the HTTP(S) scheme policy when none is passed", async () => {
+    const result = await validateUrl("https://8.8.8.8/v1/test");
+    expect(result.url.protocol).toBe("https:");
   });
 });

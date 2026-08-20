@@ -151,6 +151,74 @@ export const MCP_POISONED = {
   benignMarker: "mcp-poisoned-benign-marker",
 } as const;
 
+/**
+ * Mail backend for the v1.3 SMTP and IMAP contexts — one container serving
+ * SMTPS and IMAPS over a fixture-CA certificate (SAN-covered `localhost`, the
+ * same certificate the echo-https service presents, so no new PKI leaf is
+ * generated). `credential` is `username:password`, distinct from the database
+ * and git passwords so a mail-path leak cannot be masked by a coincidental
+ * match. SMTP dials `smtpPort` with implicit TLS; IMAP dials `imapPort`
+ * (implicit-TLS-only, design §4.2).
+ */
+export const MAIL = {
+  host: "localhost",
+  ip: "127.0.0.1",
+  smtpPort: 55465,
+  imapPort: 55993,
+  user: "harpoc-mail",
+  password: "mail-e2e-pw",
+  credential: "harpoc-mail:mail-e2e-pw",
+} as const;
+
+/**
+ * Redis backend for the database context's `redis` engine (v1.3). Plaintext on
+ * loopback (`tls_mode: "disable"`, the audited database opt-out — a fixture-CA
+ * TLS leaf buys nothing on a loopback container, and the opacity claim is
+ * orthogonal to transport). `--requirepass` is set to the password half so the
+ * credential is genuinely exercised at AUTH.
+ */
+export const REDIS = {
+  host: "127.0.0.1",
+  ip: "127.0.0.1",
+  port: 55379,
+  user: "default",
+  password: "redis-e2e-pw",
+  credential: "default:redis-e2e-pw",
+  database: "0",
+} as const;
+
+/**
+ * MongoDB backend for the database context's `mongodb` engine (v1.3). Plaintext
+ * on loopback with root credentials, same reasoning as REDIS. `database` is the
+ * authSource the URI carries.
+ */
+export const MONGO = {
+  host: "127.0.0.1",
+  ip: "127.0.0.1",
+  port: 55017,
+  user: "harpoc-mongo",
+  password: "mongo-e2e-pw",
+  credential: "harpoc-mongo:mongo-e2e-pw",
+  database: "admin",
+} as const;
+
+/**
+ * A `registry:2` for the docker-registry context (v1.3). Basic-auth over
+ * loopback HTTP; `credential` is `username:password` and matches the registry's
+ * baked htpasswd. The vault spawns `docker` and injects the credential through
+ * the vault-authored credential helper (never argv), so a clean process result
+ * proves the credential did not ride the output.
+ */
+export const DOCKER_REGISTRY = {
+  host: "127.0.0.1",
+  ip: "127.0.0.1",
+  port: 55000,
+  user: "harpoc-docker",
+  password: "docker-e2e-pw",
+  credential: "harpoc-docker:docker-e2e-pw",
+  image: "hello-world:latest",
+} as const;
+
 export type FleetService =
   | "postgres-tls"
   | "postgres-plain"
@@ -161,7 +229,11 @@ export type FleetService =
   | "echo-https"
   | "mcp-downstream"
   | "mcp-poisoned"
-  | "attacker";
+  | "attacker"
+  | "mail"
+  | "redis"
+  | "mongo"
+  | "registry";
 
 const COMPOSE_DIR = fileURLToPath(new URL("../..", import.meta.url));
 

@@ -395,6 +395,43 @@ describe("secret routes", () => {
       expect(body.data.type).toBe("process");
       expect(body.data.exit_code).toBe(0);
     });
+
+    // v1.3: the action union widened to 11 types purely through the shared
+    // schema (useSecretActionSchema) — no REST-side copy of the union exists
+    // to update. A websocket action (unknown to REST before this tranche)
+    // must parse, reach the engine verbatim and round-trip its typed result
+    // without any route change; that is the pin.
+    it("executes a websocket action and returns the collected messages (v1.3 context widening)", async () => {
+      engine.useSecret.mockResolvedValueOnce({
+        type: "websocket",
+        messages: ["hello from server"],
+        close_code: 1000,
+      });
+      const res = await app.request("/api/v1/secrets/test-key/use", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          action: {
+            type: "websocket",
+            url: "wss://echo.example.com/socket",
+            injection: { type: "bearer" },
+            message: "ping",
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data.type).toBe("websocket");
+      expect(body.data.messages).toEqual(["hello from server"]);
+      expect(body.data.close_code).toBe(1000);
+
+      const call = engine.useSecret.mock.calls[0] as unknown[];
+      expect(call[0]).toBe("secret://test-key");
+      const action = call[1] as { type: string; url: string; message?: string };
+      expect(action.type).toBe("websocket");
+      expect(action.url).toBe("wss://echo.example.com/socket");
+      expect(action.message).toBe("ping");
+    });
   });
 
   describe("POST /api/v1/secrets/:handle/use validation", () => {
@@ -722,6 +759,72 @@ describe("secret routes", () => {
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.error).toBe(ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED);
+    });
+
+    // v1.3: smtp_recipient_allowlist / imap_read_only — same replace-semantics
+    // precedent as network_isolation/fs_isolation above (set → stored; a
+    // second PUT omitting the field → reset to its default, not left as-is).
+    it("PUT forwards smtp_recipient_allowlist to the engine", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          command_allowlist: ["gh"],
+          smtp_recipient_allowlist: ["ops@example.com", "*@example.com"],
+        }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+      expect((call[1] as { smtp_recipient_allowlist: string[] }).smtp_recipient_allowlist).toEqual([
+        "ops@example.com",
+        "*@example.com",
+      ]);
+    });
+
+    it("PUT omitting smtp_recipient_allowlist resets it to [] (whole-policy replace)", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ url_allowlist: ["https://api.github.com/*"] }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+      expect((call[1] as { smtp_recipient_allowlist: string[] }).smtp_recipient_allowlist).toEqual(
+        [],
+      );
+    });
+
+    it("PUT forwards imap_read_only: true to the engine", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ command_allowlist: ["gh"], imap_read_only: true }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+      expect((call[1] as { imap_read_only: boolean }).imap_read_only).toBe(true);
+    });
+
+    it("PUT omitting imap_read_only resets it to false (whole-policy replace)", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ url_allowlist: ["https://api.github.com/*"] }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+      expect((call[1] as { imap_read_only: boolean }).imap_read_only).toBe(false);
+    });
+
+    it("PUT rejects a malformed recipient pattern with SCHEMA_VALIDATION_ERROR", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ smtp_recipient_allowlist: ["not-a-valid-pattern"] }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
     });
   });
 

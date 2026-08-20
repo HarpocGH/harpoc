@@ -7,6 +7,7 @@ import type {
   CertificateStatus,
   ConnectionConfig,
   CreateSecretResponse,
+  DockerResult,
   ExpiringCertificateInfo,
   ExpiringOAuthTokenInfo,
   HttpResult,
@@ -20,6 +21,8 @@ import type {
   Secret,
   SessionFile,
   SetInjectionPolicyOptions,
+  SftpResult,
+  SmtpAction,
   TokenPrincipalType,
   UseSecretAction,
   UseSecretResponse,
@@ -67,7 +70,12 @@ import {
 } from "@harpoc/shared";
 import { PolicyEngine } from "./access/policy-engine.js";
 import type { GrantPolicyInput, PolicyPrincipal } from "./access/policy-engine.js";
-import { attributionFromCaller, callerInterfaceDetail } from "./audit/attribution.js";
+import type { AuditAttribution } from "./audit/attribution.js";
+import {
+  attributionFromCaller,
+  callerInterfaceDetail,
+  withAttribution,
+} from "./audit/attribution.js";
 import { AuditLogger } from "./audit/audit-logger.js";
 import { AuditQuery } from "./audit/audit-query.js";
 import type {
@@ -82,15 +90,24 @@ import { assertNever } from "./assert-never.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
 import { matchesUrlAllowlist } from "./injection/allowlist.js";
 import { DatabaseInjector } from "./injection/database-injector.js";
+import {
+  buildDockerAuditDetails,
+  executeDockerRegistryAction,
+} from "./injection/docker/docker-injector.js";
 import { GitInjector } from "./injection/git-injector.js";
 import { HttpInjector } from "./injection/http-injector.js";
+import { buildImapAuditDetails, ImapInjector } from "./injection/imap-injector.js";
 import { McpInjector } from "./injection/mcp-injector.js";
 import { McpConnectionRegistry } from "./injection/mcp-registry.js";
 import { redactSecretEncodings } from "./injection/output-sanitizer.js";
 import { ProcessInjector } from "./injection/process-injector.js";
 import { isResponseModeAllowed } from "./injection/response-mode.js";
+import { buildSftpAuditDetails, executeSftpAction } from "./injection/sftp-injector.js";
+import type { SmtpOAuth, SmtpResolvedAttachment } from "./injection/smtp-injector.js";
+import { buildSmtpAuditDetails, SmtpInjector } from "./injection/smtp-injector.js";
 import { SshInjector } from "./injection/ssh-injector.js";
 import { validateUrl } from "./injection/url-validator.js";
+import { buildWsAuditDetails, executeWebsocketAction } from "./injection/websocket-injector.js";
 import type { SecretInfo } from "./secrets/secret-manager.js";
 import { SecretManager } from "./secrets/secret-manager.js";
 import { SessionManager } from "./session/session-manager.js";
@@ -114,6 +131,20 @@ export interface AuditChainVerificationReport extends AuditChainVerification {
   tail: AuditChainAnchor | null;
 }
 
+/**
+ * The v1.3 mail/WebSocket dispatch seams. Unlike the older injectors these
+ * write no audit row of their own — they hand the engine a metadata-only
+ * projection and the engine writes the `secret.use` row — so the engine holds
+ * them behind the narrowest structural type that its dispatch needs. The real
+ * injectors satisfy them as-is, and an engine test can substitute a plain
+ * object (the `ImapClientLike` pattern the IMAP injector uses for its client).
+ */
+export type SmtpRunner = Pick<SmtpInjector, "run">;
+export type ImapRunner = Pick<ImapInjector, "run">;
+export type WebsocketExecutor = typeof executeWebsocketAction;
+export type SftpExecutor = typeof executeSftpAction;
+export type DockerExecutor = typeof executeDockerRegistryAction;
+
 interface UnlockedState {
   store: SqliteStore;
   kek: Uint8Array;
@@ -131,6 +162,11 @@ interface UnlockedState {
   databaseInjector: DatabaseInjector;
   sshInjector: SshInjector;
   gitInjector: GitInjector;
+  smtpInjector: SmtpRunner;
+  imapInjector: ImapRunner;
+  websocketExecutor: WebsocketExecutor;
+  sftpExecutor: SftpExecutor;
+  dockerExecutor: DockerExecutor;
 }
 
 const DAY_MS = 86_400_000;
@@ -167,6 +203,45 @@ function computeOAuthRefreshStatus(row: OAuthTokenRow): OAuthTokenStatus["refres
   return "ok";
 }
 
+/**
+ * The attachments an SMTP action asked for, with unknown sizes. A failed
+ * `secret.use` row is built from these: the injector returns its resolved
+ * (read) attachment list on success only, and a refusal may have happened
+ * before the first `stat`. Naming the attempted paths keeps the
+ * exfiltration-relevant fact — which local files the caller tried to send — in
+ * the trail; `attachment_total_bytes` stays 0 because nothing was read.
+ */
+function attemptedAttachments(action: SmtpAction): SmtpResolvedAttachment[] {
+  return (action.attachments ?? []).map((spec) => ({ path: spec.path, bytes: 0 }));
+}
+
+/**
+ * Every throw out of the SMTP injector is already a redacted `VaultError`
+ * except a raw `node:fs` error from the attachment `stat`/`readFile` pair,
+ * whose message carries the filesystem path. Remapped path-free here so no raw
+ * error message reaches an interface boundary (design §7.1 reuses
+ * `FILE_IO_ERROR` for an unreadable attachment).
+ */
+function mapSmtpThrow(err: unknown): VaultError {
+  if (err instanceof VaultError) return err;
+  return new VaultError(ErrorCode.FILE_IO_ERROR, "an attachment could not be read");
+}
+
+/**
+ * Coerce any throw out of a v1.3 injector into a redacted `VaultError` so the
+ * dispatch arm can audit-then-throw unconditionally. Every injector provably
+ * throws only `VaultError`, so the fallback is the honest "shouldn't happen"
+ * path: a non-`VaultError` becomes a generic, value-free `INTERNAL_ERROR` — the
+ * failed `secret.use` row is still written (audit-every-denial made structural,
+ * not reachability-dependent) and no raw error message crosses an interface
+ * boundary. Kept distinct from {@link mapSmtpThrow}, whose `FILE_IO_ERROR`
+ * mapping is specific to the SMTP attachment `stat`/`readFile` pair.
+ */
+function toVaultError(err: unknown): VaultError {
+  if (err instanceof VaultError) return err;
+  return VaultError.internalError("the injection context failed unexpectedly");
+}
+
 /** The certificate counterpart of {@link computeOAuthRefreshStatus}. */
 function computeCertificateRenewalStatus(row: CertificateRow): CertificateStatus["renewal_status"] {
   if (!row.certificate_pem || row.not_after === null) return "no_certificate";
@@ -198,6 +273,11 @@ export class VaultEngine {
   private databaseInjector: DatabaseInjector | null = null;
   private sshInjector: SshInjector | null = null;
   private gitInjector: GitInjector | null = null;
+  private smtpInjector: SmtpRunner | null = null;
+  private imapInjector: ImapRunner | null = null;
+  private websocketExecutor: WebsocketExecutor = executeWebsocketAction;
+  private sftpExecutor: SftpExecutor = executeSftpAction;
+  private dockerExecutor: DockerExecutor = executeDockerRegistryAction;
   private sessionManager: SessionManager;
   private sessionMonitorInterval: ReturnType<typeof setInterval> | null = null;
   private lastSessionSlideAt = 0;
@@ -783,6 +863,16 @@ export class VaultEngine {
 
     const policy = this.loadInjectionPolicy(s, secret.id);
 
+    // Docker × isolation (design §5.4) — fail closed BEFORE the dispatch arm,
+    // before any spawn, and before the credential is even decrypted. The
+    // spawned `docker` CLI is a thin client: the daemon the vault never
+    // spawned performs the registry egress and writes the layers, and its Unix
+    // socket survives `unshare -rn`, so wrapping the CLI would isolate the
+    // messenger, not the actor. Documenting-and-allowing would make the audit
+    // row assert an isolation that was never enforced. Same fail-closed answer
+    // the MCP stdio arm gives, and network keeps precedence over fs there too.
+    this.assertDockerIsolationAllowed(s, action, policy, secret.id, caller);
+
     let value: Uint8Array;
     try {
       if (secret.type === SecretType.OAUTH_TOKEN) {
@@ -949,12 +1039,303 @@ export class VaultEngine {
           );
         }
 
+        case "smtp": {
+          const mail = this.loadConnectionConfig(s, secret.id)?.mail;
+          // `tls: false` is the audited plaintext opt-out on this leg — the
+          // one mail case the vault honors, mirroring the database
+          // `tls_mode: "disable"` opt-out (which is audited on the config-set
+          // row; the use row records it per invocation as well).
+          const tlsOptOut = mail?.tls === false;
+          const secretValue = Buffer.from(value).toString("utf8");
+          const oauth: SmtpOAuth | undefined =
+            secret.type === SecretType.OAUTH_TOKEN
+              ? // XOAUTH2 authenticates the envelope sender's mailbox; the
+                // OAuth row stores no account identity of its own.
+                { accessToken: secretValue, username: action.from }
+              : undefined;
+
+          let execution;
+          try {
+            execution = await s.smtpInjector.run(action, secretValue, policy, mail, oauth);
+          } catch (err) {
+            const mapped = mapSmtpThrow(err);
+            this.auditUse(
+              s,
+              secret.id,
+              {
+                context: "smtp",
+                ...buildSmtpAuditDetails(action, attemptedAttachments(action)),
+                ...(tlsOptOut ? { tls_opt_out: true } : {}),
+                error: mapped.code,
+              },
+              false,
+              attribution,
+            );
+            throw mapped;
+          }
+
+          this.auditUse(
+            s,
+            secret.id,
+            {
+              context: "smtp",
+              ...execution.auditDetails,
+              ...(tlsOptOut ? { tls_opt_out: true } : {}),
+            },
+            true,
+            attribution,
+          );
+          return {
+            type: "smtp",
+            accepted: execution.result.accepted,
+            message_id: execution.result.message_id,
+          };
+        }
+
+        case "imap": {
+          const mail = this.loadConnectionConfig(s, secret.id)?.mail;
+
+          // A failed row's details describe the attempt with the
+          // result-derived counter at zero: `uid_count` is "what was touched"
+          // (Task 8's decided semantic), and a refusal touched nothing.
+          const failedDetail = {
+            context: "imap",
+            ...buildImapAuditDetails(action, { affected: 0 }),
+          };
+
+          // Ruling 3: the IMAP client is implicit-TLS-only (design §4.2), so a
+          // mail TLS opt-out cannot be honored on this leg. Refused before any
+          // socket rather than silently ignored — a silent no-op would leave
+          // the admin believing an opt-out is live, with no trail.
+          if (mail?.tls === false) {
+            const err = VaultError.invalidInput(
+              "IMAP is implicit-TLS-only: the mail connection config's TLS opt-out (tls: false) " +
+                "cannot be honored for imap actions. Remove the mail TLS opt-out from this " +
+                "secret's connection config, or split the plaintext SMTP leg and the IMAP leg " +
+                "onto two secrets.",
+            );
+            this.auditUse(s, secret.id, { ...failedDetail, error: err.code }, false, attribution);
+            throw err;
+          }
+
+          // XOAUTH2 needs the mailbox account name. The SMTP context reads it
+          // off the envelope sender; no `imap` action field carries one and the
+          // OAuth row stores no account identity, so the access token has no
+          // user to bind to. Refused rather than falling through to the
+          // password arm, which would put the access token on the wire as an
+          // IMAP password.
+          if (secret.type === SecretType.OAUTH_TOKEN) {
+            const err = VaultError.invalidInput(
+              "an OAuth-type secret cannot authenticate an imap action: XOAUTH2 needs the " +
+                "mailbox account name and no imap action field carries one. Use a secret whose " +
+                "value is 'username:password' for the IMAP leg.",
+            );
+            this.auditUse(s, secret.id, { ...failedDetail, error: err.code }, false, attribution);
+            throw err;
+          }
+
+          let execution;
+          try {
+            execution = await s.imapInjector.run(
+              action,
+              Buffer.from(value).toString("utf8"),
+              policy,
+              mail,
+              // The OAuth arm is refused above, so this leg is always the
+              // `username:password` arm.
+              undefined,
+            );
+          } catch (err) {
+            const mapped = toVaultError(err);
+            this.auditUse(
+              s,
+              secret.id,
+              { ...failedDetail, error: mapped.code },
+              false,
+              attribution,
+            );
+            throw mapped;
+          }
+
+          this.auditUse(
+            s,
+            secret.id,
+            { context: "imap", ...execution.auditDetails },
+            true,
+            attribution,
+          );
+          return { type: "imap", operation: action.operation.kind, ...execution.result };
+        }
+
+        case "websocket": {
+          // A failed row keeps `sent` as the attempt (a message was supplied)
+          // and the result-derived `received` at zero — the same
+          // attempt-plus-zero-counter shape the smtp/imap failures use.
+          const failedDetail = {
+            context: "websocket",
+            ...buildWsAuditDetails(action, { messages: [], close_code: null }),
+          };
+
+          let result;
+          try {
+            result = await s.websocketExecutor(action, value, policy);
+          } catch (err) {
+            const mapped = toVaultError(err);
+            this.auditUse(
+              s,
+              secret.id,
+              { ...failedDetail, error: mapped.code },
+              false,
+              attribution,
+            );
+            throw mapped;
+          }
+
+          this.auditUse(
+            s,
+            secret.id,
+            { context: "websocket", ...buildWsAuditDetails(action, result) },
+            true,
+            attribution,
+          );
+          return { type: "websocket", messages: result.messages, close_code: result.close_code };
+        }
+
+        case "sftp": {
+          const config = this.loadConnectionConfig(s, secret.id);
+          // Every SftpAuditDetails field is request-derived (design §7.2:
+          // host, operation, remote/local paths — no result-derived counter to
+          // zero on a denial), so the same projection covers the attempt and
+          // the outcome (Task 12's rule, applied where nothing needs zeroing).
+          const auditDetail = { context: "sftp", ...buildSftpAuditDetails(action) };
+
+          let result: SftpResult;
+          try {
+            result = await s.sftpExecutor(action, value, policy, config);
+          } catch (err) {
+            const mapped = toVaultError(err);
+            this.auditUse(s, secret.id, { ...auditDetail, error: mapped.code }, false, attribution);
+            throw mapped;
+          }
+
+          // A process-shaped result can carry a graceful, non-throwing
+          // failure (e.g. PROCESS_TIMEOUT) in `error` — mirrors the ssh arm's
+          // own `error === undefined` success test.
+          this.auditUse(
+            s,
+            secret.id,
+            result.error ? { ...auditDetail, error: result.error } : auditDetail,
+            result.error === undefined,
+            attribution,
+          );
+          return result;
+        }
+
+        case "docker_registry": {
+          // Reached only after `assertDockerIsolationAllowed` above cleared the
+          // action — a docker × isolation secret is refused before this arm.
+          // Every DockerAuditDetails field is request-derived (the registry is
+          // parsed from the image, plus image + operation — no result-derived
+          // counter to zero on a denial), so the same projection covers the
+          // attempt and the outcome, exactly like the sftp arm.
+          const auditDetail = { context: "docker_registry", ...buildDockerAuditDetails(action) };
+
+          let result: DockerResult;
+          try {
+            result = await s.dockerExecutor(action, value, policy);
+          } catch (err) {
+            const mapped = toVaultError(err);
+            this.auditUse(s, secret.id, { ...auditDetail, error: mapped.code }, false, attribution);
+            throw mapped;
+          }
+
+          // A process-shaped result can carry a graceful, non-throwing failure
+          // (a PROCESS_TIMEOUT) in `error`; a non-zero docker exit throws
+          // DOCKER_OPERATION_FAILED and is handled on the catch arm above.
+          this.auditUse(
+            s,
+            secret.id,
+            result.error ? { ...auditDetail, error: result.error } : auditDetail,
+            result.error === undefined,
+            attribution,
+          );
+          return result;
+        }
+
         default:
           return assertNever(action, "action type");
       }
     } finally {
       wipeBuffer(value);
     }
+  }
+
+  /**
+   * Refuse a `docker_registry` action on a secret demanding process isolation
+   * (design §5.4). Engine-level and pre-dispatch: unlike the platform-capability
+   * refusals, this one is architectural — the Docker daemon, not the spawned
+   * CLI, performs the registry egress and writes the layers, and the daemon
+   * socket survives `unshare -rn`. Fail closed, audited like every denial.
+   * Network takes precedence when both flags are set, matching the MCP arm.
+   */
+  private assertDockerIsolationAllowed(
+    s: UnlockedState,
+    action: UseSecretAction,
+    policy: InjectionPolicy,
+    secretId: string,
+    caller?: CallerContext,
+  ): void {
+    if (action.type !== "docker_registry") return;
+    const wantsNetwork = policy.network_isolation === true;
+    if (!wantsNetwork && policy.fs_isolation !== true) return;
+
+    const err = wantsNetwork
+      ? VaultError.networkIsolationUnavailable(
+          "network isolation cannot be enforced across the Docker daemon boundary — the daemon, " +
+            "not the spawned CLI, performs registry egress; remove the requirement via: " +
+            "secret allow <handle> --no-network-isolation",
+        )
+      : VaultError.fsIsolationUnavailable(
+          "filesystem isolation cannot be enforced across the Docker daemon boundary — the " +
+            "daemon, not the spawned CLI, writes the image layers; remove the requirement via: " +
+            "secret allow <handle> --no-fs-isolation",
+        );
+
+    this.auditDenied(
+      s,
+      AuditEventType.SECRET_USE,
+      err,
+      {
+        context: "docker_registry",
+        image: action.image,
+        operation: action.operation,
+        ...(wantsNetwork ? { network_isolation: true } : { fs_isolation: true }),
+      },
+      secretId,
+      caller,
+    );
+    throw err;
+  }
+
+  /**
+   * Write the `secret.use` row for a context whose injector returns a
+   * metadata-only projection instead of logging its own row (the v1.3
+   * mail/WebSocket contexts, design §7.2). Same envelope the injector-written
+   * rows use, so attribution and the encrypted detail stay identical.
+   */
+  private auditUse(
+    s: UnlockedState,
+    secretId: string,
+    detail: Record<string, unknown>,
+    success: boolean,
+    attribution: AuditAttribution | undefined,
+  ): void {
+    s.auditLogger.log(
+      withAttribution(
+        { eventType: AuditEventType.SECRET_USE, secretId, detail, success },
+        attribution,
+      ),
+    );
   }
 
   /** Scrub the secret value and its common encodings from an HTTP result (I2a). */
@@ -989,6 +1370,8 @@ export class VaultEngine {
         response_header_allowlist: [],
         network_isolation: false,
         fs_isolation: false,
+        smtp_recipient_allowlist: [],
+        imap_read_only: false,
       };
     }
     const bytes = decrypt(
@@ -1008,6 +1391,8 @@ export class VaultEngine {
       response_header_allowlist: parsed.response_header_allowlist ?? [],
       network_isolation: parsed.network_isolation ?? false,
       fs_isolation: parsed.fs_isolation ?? false,
+      smtp_recipient_allowlist: parsed.smtp_recipient_allowlist ?? [],
+      imap_read_only: parsed.imap_read_only ?? false,
     };
   }
 
@@ -1068,6 +1453,8 @@ export class VaultEngine {
       response_header_allowlist: policy.response_header_allowlist ?? [],
       network_isolation: policy.network_isolation ?? false,
       fs_isolation: policy.fs_isolation ?? false,
+      smtp_recipient_allowlist: policy.smtp_recipient_allowlist ?? [],
+      imap_read_only: policy.imap_read_only ?? false,
     });
     const enc = encrypt(
       s.kek,
@@ -1102,6 +1489,8 @@ export class VaultEngine {
           response_header_count: policy.response_header_allowlist?.length ?? 0,
           network_isolation: policy.network_isolation ?? false,
           fs_isolation: policy.fs_isolation ?? false,
+          recipient_count: policy.smtp_recipient_allowlist?.length ?? 0,
+          imap_read_only: policy.imap_read_only ?? false,
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
@@ -1321,7 +1710,17 @@ export class VaultEngine {
           policy: "connection",
           has_database: config.database !== undefined,
           has_ssh: config.ssh !== undefined,
+          has_mail: config.mail !== undefined,
           database_tls: config.database?.tls_mode,
+          // The mail group carries the TLS decision as a value, not a mode —
+          // projected onto the database group's require/disable vocabulary so
+          // one audit reader covers both TLS opt-outs.
+          mail_tls:
+            config.mail === undefined
+              ? undefined
+              : config.mail.tls === false
+                ? "disable"
+                : "require",
           known_hosts_count: config.ssh?.known_hosts.length ?? 0,
           ...callerInterfaceDetail(caller),
         },
@@ -3096,6 +3495,11 @@ export class VaultEngine {
       databaseInjector: this.databaseInjector as DatabaseInjector,
       sshInjector: this.sshInjector as SshInjector,
       gitInjector: this.gitInjector as GitInjector,
+      smtpInjector: this.smtpInjector as SmtpRunner,
+      imapInjector: this.imapInjector as ImapRunner,
+      websocketExecutor: this.websocketExecutor,
+      sftpExecutor: this.sftpExecutor,
+      dockerExecutor: this.dockerExecutor,
     };
   }
 
@@ -3131,6 +3535,10 @@ export class VaultEngine {
     this.databaseInjector = new DatabaseInjector(this.auditLogger);
     this.sshInjector = new SshInjector(this.auditLogger);
     this.gitInjector = new GitInjector(this.auditLogger);
+    // The v1.3 mail injectors take no AuditLogger: they return a metadata-only
+    // projection and the engine writes the `secret.use` row (design §7.2).
+    this.smtpInjector = new SmtpInjector();
+    this.imapInjector = new ImapInjector();
   }
 
   private wipeKeys(): void {

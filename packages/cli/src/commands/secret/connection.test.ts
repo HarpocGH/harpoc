@@ -12,6 +12,13 @@ const CA_PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
 const STORED: ConnectionConfig = {
   database: { tls_mode: "require", ca_pem: CA_PEM, servername: "db.internal" },
   ssh: { known_hosts: ["host1 ssh-ed25519 AAAA1", "host2 ssh-ed25519 AAAA2"] },
+  mail: { tls: { ca: CA_PEM } },
+};
+
+/** The other mail-group value: the audited plaintext opt-out (v1.3, SMTP leg). */
+const STORED_MAIL_OPT_OUT: ConnectionConfig = {
+  database: { tls_mode: "require" },
+  mail: { tls: false },
 };
 
 let tempDir: string;
@@ -52,6 +59,26 @@ describe("mergeConnectionConfig", () => {
     expect(mergeConnectionConfig(STORED, {})).toEqual(STORED);
   });
 
+  // The mail group now has its own flags (--mail-no-tls/--mail-ca, below),
+  // but an unrelated group's flags must still carry it through untouched —
+  // the same "a downgrade of an endpoint-auth pin must be explicit" rule the
+  // database CA pin gets above.
+  it("keeps the stored mail CA pin when only --db-tls is set", () => {
+    const merged = mergeConnectionConfig(STORED, { dbTls: "disable" });
+    expect(merged.mail).toEqual({ tls: { ca: CA_PEM } });
+  });
+
+  it("keeps the stored mail TLS opt-out when only --db-tls is set", () => {
+    const merged = mergeConnectionConfig(STORED_MAIL_OPT_OUT, { dbTls: "disable" });
+    expect(merged.mail).toEqual({ tls: false });
+    expect(merged.database?.tls_mode).toBe("disable");
+  });
+
+  it("keeps the stored mail group when only --known-host is set", () => {
+    const merged = mergeConnectionConfig(STORED, { knownHost: ["host3 ssh-rsa AAAA3"] });
+    expect(merged.mail).toEqual({ tls: { ca: CA_PEM } });
+  });
+
   it("--clear starts from an empty config instead of the stored one", () => {
     const merged = mergeConnectionConfig(STORED, { clear: true, dbTls: "require" });
     expect(merged.database).toEqual({
@@ -60,6 +87,13 @@ describe("mergeConnectionConfig", () => {
       servername: undefined,
     });
     expect(merged.ssh).toBeUndefined();
+    // --clear is the explicit downgrade: the mail group goes with everything else.
+    expect(merged.mail).toBeUndefined();
+  });
+
+  it("--clear drops a stored mail TLS opt-out too", () => {
+    const merged = mergeConnectionConfig(STORED_MAIL_OPT_OUT, { clear: true, dbTls: "require" });
+    expect(merged.mail).toBeUndefined();
   });
 
   it("builds from flags alone when no config is stored", () => {
@@ -87,6 +121,51 @@ describe("mergeConnectionConfig", () => {
     writeFileSync(khPath, "# comment\nhost1 ssh-ed25519 AAAA1\n\nhost2 ssh-rsa AAAA2\n");
     const merged = mergeConnectionConfig(null, { knownHostsFile: khPath });
     expect(merged.ssh?.known_hosts).toEqual(["host1 ssh-ed25519 AAAA1", "host2 ssh-rsa AAAA2"]);
+  });
+});
+
+describe("mergeConnectionConfig — mail TLS group (v1.3)", () => {
+  it("--mail-no-tls sets the plaintext opt-out, replacing a stored CA pin", () => {
+    const merged = mergeConnectionConfig(STORED, { mailNoTls: true });
+    expect(merged.mail).toEqual({ tls: false });
+    // Other groups are untouched.
+    expect(merged.database).toEqual(STORED.database);
+    expect(merged.ssh).toEqual(STORED.ssh);
+  });
+
+  it("--mail-ca pins a new CA and clears a stored plaintext opt-out", () => {
+    const caPath = join(tempDir, "mail-ca.pem");
+    writeFileSync(caPath, CA_PEM);
+    const merged = mergeConnectionConfig(STORED_MAIL_OPT_OUT, { mailCa: caPath });
+    expect(merged.mail).toEqual({ tls: { ca: CA_PEM } });
+  });
+
+  it("builds a plaintext mail opt-out from --mail-no-tls alone when nothing is stored", () => {
+    const merged = mergeConnectionConfig(null, { mailNoTls: true });
+    expect(merged.mail).toEqual({ tls: false });
+  });
+
+  it("builds a pinned-CA mail group from --mail-ca alone when nothing is stored", () => {
+    const caPath = join(tempDir, "mail-ca2.pem");
+    writeFileSync(caPath, CA_PEM);
+    const merged = mergeConnectionConfig(null, { mailCa: caPath });
+    expect(merged.mail).toEqual({ tls: { ca: CA_PEM } });
+  });
+
+  it("refuses --mail-no-tls combined with --mail-ca in the same invocation", () => {
+    expect(() =>
+      mergeConnectionConfig(STORED, {
+        mailNoTls: true,
+        mailCa: join(tempDir, "unread.pem"),
+      }),
+    ).toThrow("--mail-no-tls and --mail-ca cannot be combined");
+  });
+
+  it("--clear combined with --mail-no-tls drops every other stored group", () => {
+    const merged = mergeConnectionConfig(STORED, { clear: true, mailNoTls: true });
+    expect(merged.mail).toEqual({ tls: false });
+    expect(merged.ssh).toBeUndefined();
+    expect(merged.database).toBeUndefined();
   });
 });
 

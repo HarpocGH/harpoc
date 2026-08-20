@@ -28,6 +28,8 @@ const current: InjectionPolicy = {
   response_header_allowlist: ["Content-Type"],
   network_isolation: true,
   fs_isolation: true,
+  smtp_recipient_allowlist: [],
+  imap_read_only: false,
 };
 
 describe("mergePolicy", () => {
@@ -107,6 +109,8 @@ describe("mergePolicy", () => {
       response_header_allowlist: [],
       network_isolation: false,
       fs_isolation: false,
+      smtp_recipient_allowlist: [],
+      imap_read_only: false,
     });
   });
 
@@ -115,6 +119,61 @@ describe("mergePolicy", () => {
     expect(merged.response_mode).toBe("filtered");
     expect(merged.url_allowlist).toEqual([]);
     expect(merged.response_header_allowlist).toEqual([]);
+  });
+
+  it("keeps a stored smtp_recipient_allowlist when --recipient is absent", () => {
+    const merged = mergePolicy(
+      { ...current, smtp_recipient_allowlist: ["a@b.c"] },
+      { command: ["git"] },
+    );
+    expect(merged.smtp_recipient_allowlist).toEqual(["a@b.c"]);
+  });
+
+  it("--recipient adds to the stored allowlist instead of replacing it", () => {
+    const merged = mergePolicy(
+      { ...current, smtp_recipient_allowlist: ["a@b.c"] },
+      { recipient: ["*@d.e"] },
+    );
+    expect(merged.smtp_recipient_allowlist).toEqual(["a@b.c", "*@d.e"]);
+  });
+
+  it("--recipient dedupes a pattern already present in the stored allowlist", () => {
+    const merged = mergePolicy(
+      { ...current, smtp_recipient_allowlist: ["a@b.c"] },
+      { recipient: ["a@b.c"] },
+    );
+    expect(merged.smtp_recipient_allowlist).toEqual(["a@b.c"]);
+  });
+
+  it("--clear empties the recipient allowlist before a new --recipient is added", () => {
+    const merged = mergePolicy(
+      { ...current, smtp_recipient_allowlist: ["a@b.c"] },
+      { clear: true, recipient: ["*@d.e"] },
+    );
+    expect(merged.smtp_recipient_allowlist).toEqual(["*@d.e"]);
+  });
+
+  it("keeps a stored imap_read_only when both flags are absent", () => {
+    const merged = mergePolicy({ ...current, imap_read_only: true }, { command: ["git"] });
+    expect(merged.imap_read_only).toBe(true);
+  });
+
+  it("sets and clears imap_read_only via the tri-state option", () => {
+    const off = mergePolicy({ ...current, imap_read_only: true }, { imapReadOnly: false });
+    expect(off.imap_read_only).toBe(false);
+
+    const on = mergePolicy({ ...current, imap_read_only: false }, { imapReadOnly: true });
+    expect(on.imap_read_only).toBe(true);
+  });
+
+  it("the recipient allowlist and imap_read_only move independently of the other groups", () => {
+    const merged = mergePolicy(
+      { ...current, smtp_recipient_allowlist: ["a@b.c"], imap_read_only: false },
+      { recipient: ["*@d.e"], imapReadOnly: true },
+    );
+    expect(merged.smtp_recipient_allowlist).toEqual(["a@b.c", "*@d.e"]);
+    expect(merged.imap_read_only).toBe(true);
+    expect(merged.command_allowlist).toEqual(["gh"]);
   });
 });
 
@@ -320,6 +379,144 @@ describe("secret allow command — filesystem isolation flags", () => {
     expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
       "secret://k",
       expect.objectContaining({ fs_isolation: false }),
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+  });
+});
+
+describe("secret allow command — recipient allowlist flag (v1.3)", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.HARPOC_TOKEN;
+    mockEngine.getInjectionPolicy.mockResolvedValue({
+      url_allowlist: [],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: false,
+      smtp_recipient_allowlist: ["a@b.c"],
+      imap_read_only: false,
+    });
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+    else process.env.HARPOC_TOKEN = savedEnvToken;
+  });
+
+  async function run(args: string[]): Promise<void> {
+    const program = new Command();
+    program.option("--vault-dir <path>", "Path to vault directory");
+    const secret = program.command("secret");
+    registerSecretAllowCommand(secret);
+    program.exitOverride();
+    program.configureOutput({ writeErr: () => {} });
+    await program.parseAsync(["node", "harpoc", "secret", "allow", ...args]);
+  }
+
+  it("--recipient is a set (not a show) and merges additively with the stored list", async () => {
+    await run(["secret://k", "--recipient", "*@d.e"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ smtp_recipient_allowlist: ["a@b.c", "*@d.e"] }),
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+  });
+
+  it("--clear followed by --recipient starts from an empty allowlist", async () => {
+    await run(["secret://k", "--clear", "--recipient", "*@d.e"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ smtp_recipient_allowlist: ["*@d.e"] }),
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+  });
+});
+
+describe("secret allow command — imap read-only flag (v1.3)", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.HARPOC_TOKEN;
+    mockEngine.getInjectionPolicy.mockResolvedValue({
+      url_allowlist: [],
+      command_allowlist: ["gh"],
+      env_allowlist: [],
+      host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: false,
+      smtp_recipient_allowlist: [],
+      imap_read_only: true,
+    });
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+    else process.env.HARPOC_TOKEN = savedEnvToken;
+  });
+
+  async function run(args: string[]): Promise<void> {
+    const program = new Command();
+    program.option("--vault-dir <path>", "Path to vault directory");
+    const secret = program.command("secret");
+    registerSecretAllowCommand(secret);
+    program.exitOverride();
+    program.configureOutput({ writeErr: () => {} });
+    await program.parseAsync(["node", "harpoc", "secret", "allow", ...args]);
+  }
+
+  it("--imap-read-only alone is a set (not a show) and lands as true", async () => {
+    mockEngine.getInjectionPolicy.mockResolvedValue({
+      url_allowlist: [],
+      command_allowlist: ["gh"],
+      env_allowlist: [],
+      host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: false,
+      smtp_recipient_allowlist: [],
+      imap_read_only: false,
+    });
+    await run(["secret://k", "--imap-read-only"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ imap_read_only: true }),
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+  });
+
+  it("--no-imap-read-only clears the stored requirement", async () => {
+    await run(["secret://k", "--no-imap-read-only"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ imap_read_only: false }),
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+  });
+
+  it("keeps the stored true when neither spelling is passed (commander tri-state pin)", async () => {
+    await run(["secret://k", "--url", "https://api.example.com/*"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ imap_read_only: true }),
       { acknowledge_interpreters: false },
       undefined,
     );

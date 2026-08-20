@@ -107,6 +107,17 @@ describe("HTTP status mapping", () => {
     [ErrorCode.CERT_CSR_FAILED, 500],
     [ErrorCode.CERT_NOT_CONFIGURED, 400],
     [ErrorCode.CERT_VALUE_UNSUPPORTED, 400],
+    // Email / WebSocket / SFTP / Docker contexts (v1.3)
+    [ErrorCode.RECIPIENT_NOT_ALLOWED, 403],
+    [ErrorCode.ATTACHMENT_POLICY_REQUIRED, 403],
+    [ErrorCode.ATTACHMENT_REJECTED, 400],
+    [ErrorCode.IMAP_MUTATION_NOT_ALLOWED, 403],
+    [ErrorCode.SMTP_STARTTLS_UNAVAILABLE, 502],
+    [ErrorCode.SMTP_DELIVERY_FAILED, 502],
+    [ErrorCode.IMAP_OPERATION_FAILED, 502],
+    [ErrorCode.WEBSOCKET_CONNECT_FAILED, 502],
+    [ErrorCode.SFTP_OPERATION_FAILED, 502],
+    [ErrorCode.DOCKER_OPERATION_FAILED, 502],
     // System
     [ErrorCode.INTERNAL_ERROR, 500],
     [ErrorCode.DATABASE_ERROR, 500],
@@ -121,7 +132,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(91);
+    expect(members).toHaveLength(101);
   });
 });
 
@@ -610,5 +621,95 @@ describe("factory methods", () => {
     expect(err.statusCode).toBe(400);
     expect(err.message).toContain("ssh-keygen -p -f <keyfile> -m PKCS8");
     expect(err.message).toContain("decrypts at import");
+  });
+
+  it("recipientNotAllowed() names the recipient", () => {
+    const err = VaultError.recipientNotAllowed("someone@example.com");
+    expect(err.code).toBe(ErrorCode.RECIPIENT_NOT_ALLOWED);
+    expect(err.statusCode).toBe(403);
+    expect(err.message).toContain("someone@example.com");
+  });
+
+  it("attachmentPolicyRequired() names the admin fix", () => {
+    const err = VaultError.attachmentPolicyRequired();
+    expect(err.code).toBe(ErrorCode.ATTACHMENT_POLICY_REQUIRED);
+    expect(err.statusCode).toBe(403);
+    expect(err.message).toContain("secret allow <handle> --recipient");
+  });
+
+  it("attachmentRejected() names the reason", () => {
+    const err = VaultError.attachmentRejected("extension .exe is not permitted");
+    expect(err.code).toBe(ErrorCode.ATTACHMENT_REJECTED);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toContain("extension .exe is not permitted");
+  });
+
+  it("imapMutationNotAllowed() points at the read-only policy", () => {
+    const err = VaultError.imapMutationNotAllowed("delete");
+    expect(err.code).toBe(ErrorCode.IMAP_MUTATION_NOT_ALLOWED);
+    expect(err.statusCode).toBe(403);
+    expect(err.message).toContain("delete");
+    expect(err.message).toMatch(/read-only/i);
+  });
+
+  it("smtpStarttlsUnavailable() names the host", () => {
+    const err = VaultError.smtpStarttlsUnavailable("smtp.example.com");
+    expect(err.code).toBe(ErrorCode.SMTP_STARTTLS_UNAVAILABLE);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toContain("smtp.example.com");
+  });
+
+  it("smtpDeliveryFailed() names the origin", () => {
+    const err = VaultError.smtpDeliveryFailed("smtp.example.com:587");
+    expect(err.code).toBe(ErrorCode.SMTP_DELIVERY_FAILED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toContain("smtp.example.com:587");
+  });
+
+  it("imapOperationFailed() names the origin and operation", () => {
+    const err = VaultError.imapOperationFailed("imap.example.com:993", "fetch");
+    expect(err.code).toBe(ErrorCode.IMAP_OPERATION_FAILED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toContain("imap.example.com:993");
+    expect(err.message).toContain("fetch");
+  });
+
+  it("websocketConnectFailed() names the origin", () => {
+    const err = VaultError.websocketConnectFailed("wss://example.com/socket");
+    expect(err.code).toBe(ErrorCode.WEBSOCKET_CONNECT_FAILED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toContain("wss://example.com/socket");
+  });
+
+  it("sftpOperationFailed() names the exit code", () => {
+    const err = VaultError.sftpOperationFailed(2);
+    expect(err.code).toBe(ErrorCode.SFTP_OPERATION_FAILED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toContain("2");
+  });
+
+  it("dockerOperationFailed() names the exit code", () => {
+    const err = VaultError.dockerOperationFailed(125);
+    expect(err.code).toBe(ErrorCode.DOCKER_OPERATION_FAILED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toContain("125");
+  });
+
+  it("v1.3 context factory messages never contain the word 'password' (credential-leak tripwire)", () => {
+    const messages = [
+      VaultError.recipientNotAllowed("someone@example.com").message,
+      VaultError.attachmentPolicyRequired().message,
+      VaultError.attachmentRejected("extension .exe is not permitted").message,
+      VaultError.imapMutationNotAllowed("delete").message,
+      VaultError.smtpStarttlsUnavailable("smtp.example.com").message,
+      VaultError.smtpDeliveryFailed("smtp.example.com:587").message,
+      VaultError.imapOperationFailed("imap.example.com:993", "fetch").message,
+      VaultError.websocketConnectFailed("wss://example.com/socket").message,
+      VaultError.sftpOperationFailed(2).message,
+      VaultError.dockerOperationFailed(125).message,
+    ];
+    for (const message of messages) {
+      expect(message.toLowerCase()).not.toContain("password");
+    }
   });
 });

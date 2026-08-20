@@ -754,6 +754,8 @@ describe("injection policy", () => {
       response_header_allowlist: [],
       network_isolation: false,
       fs_isolation: false,
+      smtp_recipient_allowlist: [],
+      imap_read_only: false,
     });
   });
 
@@ -809,6 +811,33 @@ describe("injection policy", () => {
     // network_isolation.
     await engine.setInjectionPolicy("secret://pol", { url_allowlist: [] });
     expect((await engine.getInjectionPolicy("secret://pol")).fs_isolation).toBe(false);
+  });
+
+  it("round-trips the v1.3 mail policy fields and defaults them when omitted", async () => {
+    await engine.setInjectionPolicy("secret://pol", {
+      smtp_recipient_allowlist: ["ops@example.com", "*@example.org"],
+      imap_read_only: true,
+    });
+    const p = await engine.getInjectionPolicy("secret://pol");
+    expect(p.smtp_recipient_allowlist).toEqual(["ops@example.com", "*@example.org"]);
+    expect(p.imap_read_only).toBe(true);
+
+    // Re-set without them: the write-side defaults are `[]`/false, following
+    // the network_isolation precedent (replace, never merge).
+    await engine.setInjectionPolicy("secret://pol", { url_allowlist: [] });
+    const cleared = await engine.getInjectionPolicy("secret://pol");
+    expect(cleared.smtp_recipient_allowlist).toEqual([]);
+    expect(cleared.imap_read_only).toBe(false);
+  });
+
+  it("audits the v1.3 policy fields in the POLICY_GRANT detail", async () => {
+    await engine.setInjectionPolicy("secret://pol", {
+      smtp_recipient_allowlist: ["ops@example.com"],
+      imap_read_only: true,
+    });
+    const grant = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0];
+    expect(grant?.detail?.recipient_count).toBe(1);
+    expect(grant?.detail?.imap_read_only).toBe(true);
   });
 
   it("decrypts a pre-feature policy blob (no fs_isolation key) as false", async () => {
@@ -1817,6 +1846,29 @@ describe("connection config", () => {
 
   it("returns false when deleting a nonexistent config", async () => {
     expect(await engine.deleteConnectionConfig("secret://conn")).toBe(false);
+  });
+
+  it("round-trips the v1.3 mail group (CA pin and plaintext opt-out)", async () => {
+    await engine.setConnectionConfig("secret://conn", { mail: { tls: { ca: "-----CA-----" } } });
+    expect((await engine.getConnectionConfig("secret://conn"))?.mail).toEqual({
+      tls: { ca: "-----CA-----" },
+    });
+
+    await engine.setConnectionConfig("secret://conn", { mail: { tls: false } });
+    expect((await engine.getConnectionConfig("secret://conn"))?.mail).toEqual({ tls: false });
+  });
+
+  it("audits the mail group's TLS decision in the database group's vocabulary", async () => {
+    await engine.setConnectionConfig("secret://conn", { mail: { tls: false } });
+    await engine.setConnectionConfig("secret://conn", { mail: {} });
+
+    const grants = engine
+      .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
+      .filter((e) => e.detail?.policy === "connection");
+    // queryAudit is newest-first.
+    expect(grants[0]?.detail?.has_mail).toBe(true);
+    expect(grants[0]?.detail?.mail_tls).toBe("require");
+    expect(grants[1]?.detail?.mail_tls).toBe("disable");
   });
 });
 

@@ -49,6 +49,7 @@ const PHASE4_SCENARIOS: string[] = [
   "response-channel-echo",
   "tool-poisoning",
   "log-to-leak",
+  "context-opacity",
 ];
 
 /**

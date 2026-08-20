@@ -75,6 +75,31 @@ export function resolveGit(): string {
 }
 
 /**
+ * The absolute `sftp` path to pin in a secret's command_allowlist for the SFTP
+ * context (v1.3). Resolved with the injector's OWN resolver against the same
+ * PATH (F-6), and via `preferNativeSsh` on Windows so the native Win32-OpenSSH
+ * `sftp.exe` (the only one that can read the named-pipe agent) wins over any
+ * MSYS/Git-bundled copy — the same reasoning `resolveSsh` documents.
+ */
+export function resolveSftp(): string {
+  preferNativeSsh();
+  const p = resolveExecutable("sftp", controlledPathDirs());
+  if (!p) throw new Error("no sftp binary found on PATH — install OpenSSH");
+  return p;
+}
+
+/**
+ * The absolute `docker` path to pin in a secret's command_allowlist for the
+ * docker-registry context (v1.3). Same resolver as ssh/git so the allowlist
+ * entry and the injector's resolution land on one real file.
+ */
+export function resolveDocker(): string {
+  const p = resolveExecutable("docker", controlledPathDirs());
+  if (!p) throw new Error("no docker binary found on PATH — install Docker");
+  return p;
+}
+
+/**
  * The compiled entry points the out-of-process surfaces spawn. Both are build
  * artifacts, so a missing one is a setup error with an actionable recovery, not
  * a skip: a silently skipped surface would drop a third of the demonstration

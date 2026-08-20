@@ -9,14 +9,18 @@ export interface TempSshFile {
 }
 
 /**
- * Write pinned host keys to a 0600 known_hosts file in a 0700 temp directory.
- * Host keys are public, so disk is acceptable (unlike the private key, which the
- * ephemeral agent keeps in memory). Shared by the SSH and Git-over-SSH contexts.
+ * Write `content` to a 0600 file named `name` inside a fresh 0700 temp
+ * directory prefixed `prefix`, returning the file path and a best-effort
+ * disposer that removes the whole directory. This is the one place the
+ * mkdtempSync → writeFileSync(mode 0600) → rmSync(recursive, force)
+ * shape is defined — shared by every SSH-family per-invocation temp file:
+ * the pinned known_hosts, the ephemeral agent's public identity, and (core's
+ * sftp-injector) the vault-authored batch file.
  */
-export function writeKnownHosts(knownHosts: string[]): TempSshFile {
-  const dir = mkdtempSync(join(tmpdir(), "harpoc-ssh-"));
-  const file = join(dir, "known_hosts");
-  writeFileSync(file, knownHosts.join("\n") + "\n", { mode: 0o600 });
+export function writeTempSshFile(prefix: string, name: string, content: string): TempSshFile {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const file = join(dir, name);
+  writeFileSync(file, content, { mode: 0o600 });
   return {
     file,
     dispose: () => {
@@ -30,6 +34,15 @@ export function writeKnownHosts(knownHosts: string[]): TempSshFile {
 }
 
 /**
+ * Write pinned host keys to a 0600 known_hosts file in a 0700 temp directory.
+ * Host keys are public, so disk is acceptable (unlike the private key, which the
+ * ephemeral agent keeps in memory). Shared by the SSH and Git-over-SSH contexts.
+ */
+export function writeKnownHosts(knownHosts: string[]): TempSshFile {
+  return writeTempSshFile("harpoc-ssh-", "known_hosts", knownHosts.join("\n") + "\n");
+}
+
+/**
  * Write the ephemeral identity's public line to a 0600 file in a 0700 temp
  * directory, for use as ssh's IdentityFile. Only the public half touches disk
  * (harmless, like the pinned host keys); the private key stays confined to the
@@ -39,19 +52,7 @@ export function writeKnownHosts(knownHosts: string[]): TempSshFile {
  * (or worse, proceeds with the host user's ambient default keys).
  */
 export function writeIdentityFile(publicKeyLine: string): TempSshFile {
-  const dir = mkdtempSync(join(tmpdir(), "harpoc-ssh-id-"));
-  const file = join(dir, "identity.pub");
-  writeFileSync(file, publicKeyLine + "\n", { mode: 0o600 });
-  return {
-    file,
-    dispose: () => {
-      try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch {
-        /* best effort */
-      }
-    },
-  };
+  return writeTempSshFile("harpoc-ssh-id-", "identity.pub", publicKeyLine + "\n");
 }
 
 /**

@@ -8,6 +8,7 @@ export * from "./dedicated-contexts.js";
 export * from "./interpreters.js";
 export * from "./name-pattern.js";
 export * from "./pem.js";
+export * from "./recipient-pattern.js";
 export * from "./schemas.js";
 export * from "./token-endpoint-auth.js";
 export * from "./version.js";

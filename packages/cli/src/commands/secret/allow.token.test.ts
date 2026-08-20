@@ -114,4 +114,17 @@ describe("secret allow — token path", () => {
       undefined,
     );
   });
+
+  // v1.3: --recipient / --imap-read-only ride the existing rotate scope —
+  // no new token-parity entry (token-parity.test.ts is unchanged by this task).
+  it("--imap-read-only rides the existing rotate scope", async () => {
+    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    await run(["secret://k", "--imap-read-only", "--token", "jwt-value"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ imap_read_only: true }),
+      { acknowledge_interpreters: false },
+      expect.objectContaining({ principal_id: "agent-1", interface: "cli" }),
+    );
+  });
 });

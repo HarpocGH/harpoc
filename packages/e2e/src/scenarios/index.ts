@@ -6,6 +6,7 @@ import { OUTPUT_CHANNEL_ARMS } from "./output-channel.js";
 import { RESPONSE_CHANNEL_ARMS } from "./response-channel.js";
 import { TOOL_POISONING_ARMS } from "./tool-poisoning.js";
 import { LOG_TO_LEAK_ARMS } from "./log-to-leak.js";
+import { CONTEXT_OPACITY_ARMS } from "./context-opacity.js";
 import { TARGETED_ARMS, BASELINE_COUNTERPART_ARMS } from "./targeted.js";
 
 /**
@@ -25,6 +26,7 @@ export const SCENARIO_ARMS: ScenarioArm[] = [
   ...RESPONSE_CHANNEL_ARMS,
   ...TOOL_POISONING_ARMS,
   ...LOG_TO_LEAK_ARMS,
+  ...CONTEXT_OPACITY_ARMS,
   ...TARGETED_ARMS,
   ...BASELINE_COUNTERPART_ARMS,
 ];

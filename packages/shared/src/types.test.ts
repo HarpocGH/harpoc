@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ActionType,
   AuditEventType,
+  DatabaseEngine,
   FollowRedirects,
   InjectionType,
   OAuthGrantType,
@@ -53,8 +54,12 @@ describe("enum member counts", () => {
     expect(Object.values(ResponseMode)).toHaveLength(3);
   });
 
-  it("ActionType has 6 members", () => {
-    expect(Object.values(ActionType)).toHaveLength(6);
+  it("ActionType has 11 members", () => {
+    expect(Object.values(ActionType)).toHaveLength(11);
+  });
+
+  it("DatabaseEngine has 4 members", () => {
+    expect(Object.values(DatabaseEngine)).toHaveLength(4);
   });
 
   it("VaultState has 2 members", () => {
@@ -69,10 +74,10 @@ describe("enum member counts", () => {
     expect(Object.values(OAuthProviderPreset)).toHaveLength(5);
   });
 
-  it("ErrorCode has 91 members", () => {
+  it("ErrorCode has 101 members", () => {
     // Filter out reverse mappings (numeric keys) from TypeScript enum
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(91);
+    expect(members).toHaveLength(101);
   });
 });
 
@@ -134,8 +139,28 @@ describe("ActionType values", () => {
   it.each([
     ["HTTP", "http"],
     ["PROCESS", "process"],
+    ["MCP", "mcp"],
+    ["DATABASE", "database"],
+    ["GIT", "git"],
+    ["SSH", "ssh"],
+    ["SMTP", "smtp"],
+    ["IMAP", "imap"],
+    ["WEBSOCKET", "websocket"],
+    ["SFTP", "sftp"],
+    ["DOCKER_REGISTRY", "docker_registry"],
   ] as const)("%s is '%s'", (key, value) => {
     expect(ActionType[key]).toBe(value);
+  });
+});
+
+describe("DatabaseEngine values", () => {
+  it.each([
+    ["POSTGRESQL", "postgresql"],
+    ["MYSQL", "mysql"],
+    ["REDIS", "redis"],
+    ["MONGODB", "mongodb"],
+  ] as const)("%s is '%s'", (key, value) => {
+    expect(DatabaseEngine[key]).toBe(value);
   });
 });
 

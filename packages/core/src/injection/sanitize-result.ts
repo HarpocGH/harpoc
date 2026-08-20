@@ -44,10 +44,29 @@ export function sanitizeUseSecretResult(result: UseSecretResponse, guard: Inject
       return;
     }
     case "git":
-    case "ssh": {
+    case "ssh":
+    case "sftp":
+    case "docker_registry": {
       result.stdout = guard.sanitize(result.stdout);
       result.stderr = guard.sanitize(result.stderr);
       if (result.error) result.error = guard.sanitize(result.error);
+      return;
+    }
+    case "smtp": {
+      // Nothing endpoint-authored comes back: `accepted` is a count and
+      // `message_id` is the vault's own generated Message-ID.
+      return;
+    }
+    case "imap": {
+      // Fetched messages are mail-server content — the mail-context analog of
+      // a database row.
+      if (result.messages) {
+        result.messages = mapStringLeaves(result.messages, (s) => guard.sanitize(s)) as unknown[];
+      }
+      return;
+    }
+    case "websocket": {
+      result.messages = result.messages.map((message) => guard.sanitize(message));
       return;
     }
 

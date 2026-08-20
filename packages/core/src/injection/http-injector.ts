@@ -68,6 +68,55 @@ export function createPinnedLookup(pins: ReadonlyMap<string, readonly string[]>)
   };
 }
 
+/**
+ * Applies an `injectionConfigSchema` credential to a request: `bearer`/
+ * `basic_auth` set the `Authorization` header, `header` sets a named header,
+ * `query` sets a URL search param (mutating `url` in place — `URL` objects are
+ * mutable, and every caller already holds its own copy). Shared verbatim
+ * between the HTTP and WebSocket injectors (the latter applies it at the
+ * upgrade handshake) so the bearer/header/query/basic_auth placement logic has
+ * exactly one implementation.
+ */
+export function applyInjectionConfig(
+  url: URL,
+  headers: Record<string, string>,
+  injection: InjectionConfig,
+  secretValue: Uint8Array,
+): { url: string; headers: Record<string, string> } {
+  const outHeaders = { ...headers };
+  const valueStr = Buffer.from(secretValue).toString("utf8");
+
+  switch (injection.type) {
+    case "bearer":
+      outHeaders["Authorization"] = `Bearer ${valueStr}`;
+      break;
+    case "basic_auth":
+      // RFC 7617: value is expected to be "user:password", base64-encoded as-is
+      outHeaders["Authorization"] = `Basic ${Buffer.from(valueStr).toString("base64")}`;
+      break;
+    case "header":
+      if (!injection.header_name) {
+        throw new VaultError(
+          ErrorCode.INVALID_INJECTION_CONFIG,
+          "header_name required for header injection",
+        );
+      }
+      outHeaders[injection.header_name] = valueStr;
+      break;
+    case "query":
+      if (!injection.query_param) {
+        throw new VaultError(
+          ErrorCode.INVALID_INJECTION_CONFIG,
+          "query_param required for query injection",
+        );
+      }
+      url.searchParams.set(injection.query_param, valueStr);
+      break;
+  }
+
+  return { url: url.toString(), headers: outHeaders };
+}
+
 export interface HttpInjectorRequest {
   method: HttpMethod;
   url: string;
@@ -105,40 +154,14 @@ export class HttpInjector {
       const validated = await validateUrl(request.url);
       const url = validated.url;
 
-      // Build headers
-      const headers: Record<string, string> = { ...request.headers };
-      const valueStr = Buffer.from(secretValue).toString("utf8");
-
-      // Inject credential
-      let finalUrl = url.toString();
-      switch (injection.type) {
-        case "bearer":
-          headers["Authorization"] = `Bearer ${valueStr}`;
-          break;
-        case "basic_auth":
-          // RFC 7617: value is expected to be "user:password", base64-encoded as-is
-          headers["Authorization"] = `Basic ${Buffer.from(valueStr).toString("base64")}`;
-          break;
-        case "header":
-          if (!injection.header_name) {
-            throw new VaultError(
-              ErrorCode.INVALID_INJECTION_CONFIG,
-              "header_name required for header injection",
-            );
-          }
-          headers[injection.header_name] = valueStr;
-          break;
-        case "query":
-          if (!injection.query_param) {
-            throw new VaultError(
-              ErrorCode.INVALID_INJECTION_CONFIG,
-              "query_param required for query injection",
-            );
-          }
-          url.searchParams.set(injection.query_param, valueStr);
-          finalUrl = url.toString();
-          break;
-      }
+      // Build headers + inject credential (bearer/header/query/basic_auth),
+      // shared verbatim with the WebSocket injector.
+      const { url: finalUrl, headers } = applyInjectionConfig(
+        url,
+        { ...request.headers },
+        injection,
+        secretValue,
+      );
 
       // DNS-rebinding TOCTOU protection: every request connects through a
       // dispatcher whose connection-time lookup serves only the addresses the

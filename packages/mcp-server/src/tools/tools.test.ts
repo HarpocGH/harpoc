@@ -79,6 +79,27 @@ function getToolText(result: { content: Array<{ type: string; text: string }> })
   return (result.content[0] as { text: string }).text;
 }
 
+interface McpToolDescriptor {
+  name: string;
+  inputSchema: { properties?: Record<string, unknown> };
+}
+
+/** Advertised `tools/list` output — used by the v1.3 schema-widening pins below. */
+async function listTools(server: McpServer): Promise<McpToolDescriptor[]> {
+  const lowLevelServer = (
+    server as unknown as { server: { _requestHandlers: Map<string, unknown> } }
+  ).server;
+  const handler = lowLevelServer._requestHandlers.get("tools/list") as (
+    req: unknown,
+    extra: unknown,
+  ) => Promise<{ tools: McpToolDescriptor[] }>;
+  const result = await handler(
+    { method: "tools/list", params: {} },
+    { signal: new AbortController().signal, sessionId: "test" },
+  );
+  return result.tools;
+}
+
 async function callTool(
   server: McpServer,
   name: string,
@@ -339,6 +360,136 @@ describe("MCP Tools", () => {
       expect(data.content[0].text).not.toContain("eyJhbG");
       expect(data.structured_content.note).toContain("[REDACTED]");
       expect(data.structured_content.note).not.toContain("eyJhbG");
+    });
+
+    // v1.3: `action: useSecretActionSchema.describe(...)` IS the shared
+    // schema (design §7.3) — nothing here hand-copies the action union, so
+    // MCP's advertised tools/list schema must widen automatically the moment
+    // the shared schema gains an arm. These pins read the actual advertised
+    // JSON schema (via tools/list), not the Zod source, so a regression to a
+    // hand-maintained MCP-side copy would fail them.
+    describe("advertised action schema (v1.3 context widening pin)", () => {
+      interface AnyOfArm {
+        properties?: Record<string, { const?: string }>;
+      }
+
+      async function actionArms(): Promise<AnyOfArm[]> {
+        const tools = await listTools(server);
+        const tool = tools.find((t) => t.name === "use_secret");
+        expect(tool).toBeDefined();
+        const actionSchema = (tool as McpToolDescriptor).inputSchema.properties?.action as
+          | { anyOf?: AnyOfArm[] }
+          | undefined;
+        expect(actionSchema?.anyOf).toBeDefined();
+        return actionSchema?.anyOf ?? [];
+      }
+
+      function armFor(arms: AnyOfArm[], type: string): AnyOfArm {
+        const arm = arms.find((a) => a.properties?.type?.const === type);
+        expect(arm).toBeDefined();
+        return arm as AnyOfArm;
+      }
+
+      it("advertises 11 action arms — the shared 11-type union crossed the MCP boundary unmodified", async () => {
+        const arms = await actionArms();
+        expect(arms).toHaveLength(11);
+      });
+
+      it("advertises the smtp arm's exact key set", async () => {
+        const arm = armFor(await actionArms(), "smtp");
+        expect(Object.keys(arm.properties ?? {}).sort()).toEqual(
+          [
+            "type",
+            "host",
+            "port",
+            "security",
+            "from",
+            "to",
+            "cc",
+            "bcc",
+            "subject",
+            "text",
+            "html",
+            "headers",
+            "attachments",
+            "timeout_ms",
+          ].sort(),
+        );
+      });
+
+      it("advertises the imap arm's exact key set", async () => {
+        const arm = armFor(await actionArms(), "imap");
+        expect(Object.keys(arm.properties ?? {}).sort()).toEqual(
+          ["type", "host", "port", "mailbox", "operation", "timeout_ms"].sort(),
+        );
+      });
+
+      it("advertises the websocket arm's exact key set", async () => {
+        const arm = armFor(await actionArms(), "websocket");
+        expect(Object.keys(arm.properties ?? {}).sort()).toEqual(
+          [
+            "type",
+            "url",
+            "injection",
+            "message",
+            "subprotocols",
+            "collect",
+            "response_mode",
+            "timeout_ms",
+          ].sort(),
+        );
+      });
+
+      it("advertises the sftp arm's exact key set", async () => {
+        const arm = armFor(await actionArms(), "sftp");
+        expect(Object.keys(arm.properties ?? {}).sort()).toEqual(
+          ["type", "host", "user", "operation", "remote_path", "local_path", "timeout_ms"].sort(),
+        );
+      });
+
+      it("advertises the docker_registry arm's exact key set", async () => {
+        const arm = armFor(await actionArms(), "docker_registry");
+        expect(Object.keys(arm.properties ?? {}).sort()).toEqual(
+          ["type", "operation", "image", "timeout_ms"].sort(),
+        );
+      });
+    });
+
+    it("rejects a malformed smtp action at the schema boundary (-32602)", async () => {
+      const result = await callTool(server, "use_secret", {
+        handle: "secret://my-key",
+        action: {
+          type: "smtp",
+          host: "smtp.example.com",
+          from: "not-an-email",
+          to: ["ops@example.com"],
+          subject: "hi",
+          text: "hi",
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(getToolText(result)).toContain("-32602");
+      expect(engine.useSecret).not.toHaveBeenCalled();
+    });
+
+    it("sanitizes credential patterns in a websocket result (new-context guard pin)", async () => {
+      (engine.useSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
+        type: "websocket",
+        messages: ["Bearer eyJhbGciOiJIUzI1NiJ9.test.signature leaked!"],
+        close_code: 1000,
+      });
+
+      const result = await callTool(server, "use_secret", {
+        handle: "secret://my-key",
+        action: {
+          type: "websocket",
+          url: "wss://echo.example.com/socket",
+          injection: { type: "bearer" },
+        },
+      });
+      const data = JSON.parse(getToolText(result));
+      expect(data.messages[0]).toContain("[REDACTED]");
+      expect(data.messages[0]).not.toContain("eyJhbG");
     });
   });
 

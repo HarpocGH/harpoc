@@ -207,3 +207,18 @@ export function AAD_CONNECTION_CONFIG(secretId: string): string {
 // -- Name constraints --------------------------------------------------------
 
 export const MAX_NAME_LENGTH = 255;
+
+// -- SMTP / IMAP / WebSocket / Docker registry / use_secret defaults (v1.3) --
+
+export const MAX_SMTP_RECIPIENTS = 100;
+export const MAX_SMTP_ATTACHMENTS = 16;
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MiB per file
+export const MAX_ATTACHMENT_TOTAL_BYTES = 25 * 1024 * 1024; // 25 MiB per message
+export const MAX_WS_COLLECT_MESSAGES = 100;
+export const MAX_WS_COLLECT_WINDOW_MS = 300_000; // 5 minutes
+export const DEFAULT_WS_COLLECT_WINDOW_MS = 30_000; // 30 seconds
+export const MAX_DOCKER_TIMEOUT_MS = 1_800_000; // 30 minutes
+export const DEFAULT_SMTP_TLS_PORT = 465;
+export const DEFAULT_SMTP_STARTTLS_PORT = 587;
+export const DEFAULT_IMAP_PORT = 993;
+export const MAX_IMAP_FETCH_UIDS = 100;

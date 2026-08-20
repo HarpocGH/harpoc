@@ -157,7 +157,80 @@ function splitCredential() {
     : { user: CREDENTIAL.slice(0, colon), password: CREDENTIAL.slice(colon + 1) };
 }
 
+// The v1.3 extended contexts (SMTP, IMAP, the Redis/Mongo database engines,
+// SFTP, docker-registry). The status quo returns the credential to the agent
+// that owns it — the same exposure list_secrets/get_secret_info embody — which
+// is the positive control the §6.2 result-opacity arms pair against. These
+// naive handlers surface the credential rather than completing every protocol
+// exchange: the LEAK those arms measure is the credential reaching the caller
+// through the result, and a server holding it in its launch environment
+// surfaces it whether or not the wire op runs. The Harpoc arm, by contrast,
+// runs the real operation against the fleet and returns a result the vault
+// authored, which is where the opacity claim is actually tested.
+function unmediatedSmtp(action) {
+  return {
+    type: "smtp",
+    server: `${String(action.host)}:${String(action.port ?? 465)}`,
+    authenticated_as: CREDENTIAL,
+    accepted: Array.isArray(action.to) ? action.to.length : 0,
+    message_id: `<baseline-${String(Date.now())}@harpoc-e2e>`,
+  };
+}
+
+function unmediatedImap(action) {
+  return {
+    type: "imap",
+    server: `${String(action.host)}:${String(action.port ?? 993)}`,
+    mailbox: String(action.mailbox ?? "INBOX"),
+    operation: String(action.operation?.kind ?? ""),
+    authenticated_as: CREDENTIAL,
+    uids: [],
+  };
+}
+
+function unmediatedRedis(action) {
+  return {
+    type: "database",
+    engine: "redis",
+    authenticated_as: CREDENTIAL,
+    result: Array.isArray(action.command) ? action.command.slice(1).join(" ") : null,
+  };
+}
+
+function unmediatedMongo() {
+  return { type: "database", engine: "mongodb", authenticated_as: CREDENTIAL, result: { ok: 1 } };
+}
+
+function unmediatedSftp(action) {
+  // The private key echoed back the way a naive integration surfaces its
+  // connection profile — the vault serves it from the in-process agent and it
+  // never rides the result.
+  return {
+    type: "sftp",
+    host: String(action.host),
+    operation: String(action.operation),
+    identity: CREDENTIAL,
+    exit_code: 0,
+    stdout: "",
+    stderr: "",
+  };
+}
+
+function unmediatedDocker(action) {
+  return {
+    type: "docker_registry",
+    operation: String(action.operation),
+    image: String(action.image),
+    authenticated_as: CREDENTIAL,
+    exit_code: 0,
+    stdout: "",
+    stderr: "",
+  };
+}
+
 async function unmediatedDatabase(action) {
+  if (action.engine === "redis") return unmediatedRedis(action);
+  if (action.engine === "mongodb") return unmediatedMongo(action);
   const { default: pg } = await import("pg");
   const { user, password } = splitCredential();
   const { host, port } = splitHostPort(action.host, action.port, 5432);
@@ -372,6 +445,10 @@ async function dispatch(action) {
   if (action?.type === "git") return unmediatedGit(action);
   if (action?.type === "ssh") return unmediatedSsh(action);
   if (action?.type === "mcp") return unmediatedMcp(action);
+  if (action?.type === "smtp") return unmediatedSmtp(action);
+  if (action?.type === "imap") return unmediatedImap(action);
+  if (action?.type === "sftp") return unmediatedSftp(action);
+  if (action?.type === "docker_registry") return unmediatedDocker(action);
   // Fail loudly. A silent no-op here would record as "the baseline did not
   // leak", which is exactly the false negative that makes a paired row vacuous.
   throw new Error(`baseline-mcp: unimplemented action type "${String(action?.type)}"`);

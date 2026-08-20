@@ -8,12 +8,14 @@ import {
   certificateImportSchema,
   createSecretInputSchema,
   databaseActionSchema,
+  dockerRegistryActionSchema,
   followRedirectsSchema,
   generateCsrRequestSchema,
   handleSchema,
   healthResponseSchema,
   httpActionSchema,
   httpMethodSchema,
+  imapActionSchema,
   injectionConfigSchema,
   injectionPolicyInputSchema,
   injectionTypeSchema,
@@ -32,11 +34,14 @@ import {
   secretTypeSchema,
   sessionFileSchema,
   setInjectionPolicyRequestSchema,
+  sftpActionSchema,
+  smtpActionSchema,
   sshActionSchema,
   startOAuthFlowInputSchema,
   useSecretActionSchema,
   useSecretRequestSchema,
   vaultStateSchema,
+  websocketActionSchema,
 } from "./schemas.js";
 
 // ---------------------------------------------------------------------------
@@ -576,6 +581,26 @@ describe("useSecretActionSchema", () => {
   it("rejects a missing discriminant", () => {
     expect(() => useSecretActionSchema.parse({ command: "gh", env_var: "GH_TOKEN" })).toThrow();
   });
+
+  it("surfaces a field-level error at the top level of error.issues, not buried in unionErrors", () => {
+    // REST (routes/secrets.ts) and CLI (commands/secret/use.ts) both read
+    // error.issues directly, never error.unionErrors — a plain z.union
+    // buries per-branch field errors there, degrading every field-level
+    // refusal (missing/invalid required field) on every action type to a
+    // bare "Invalid input". discriminatedUnion keeps them at the top level.
+    const result = useSecretActionSchema.safeParse({
+      type: "http",
+      method: "GET",
+      injection: { type: "bearer" },
+      // url omitted
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.length).toBeGreaterThan(0);
+      const urlIssue = result.error.issues.find((issue) => issue.path.includes("url"));
+      expect(urlIssue).toBeDefined();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -634,6 +659,8 @@ describe("injectionPolicyInputSchema", () => {
       response_header_allowlist: [],
       network_isolation: false,
       fs_isolation: false,
+      smtp_recipient_allowlist: [],
+      imap_read_only: false,
     });
   });
 
@@ -1703,5 +1730,215 @@ describe("auditChainAnchorSchema", () => {
 
   it("rejects an empty vault_id", () => {
     expect(() => auditChainAnchorSchema.parse({ ...validAnchor, vault_id: "" })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.3 extended-context action schemas
+// ---------------------------------------------------------------------------
+
+describe("v1.3 action schemas", () => {
+  it("accepts a minimal smtp action and applies defaults", () => {
+    const a = smtpActionSchema.parse({
+      type: "smtp",
+      host: "smtp.example.com",
+      from: "bot@example.com",
+      to: ["ops@example.com"],
+      subject: "hi",
+      text: "body",
+    });
+    expect(a.security).toBe("tls");
+  });
+  it("refuses an smtp action with neither text nor html", () => {
+    expect(() =>
+      smtpActionSchema.parse({
+        type: "smtp",
+        host: "h",
+        from: "a@b.c",
+        to: ["d@e.f"],
+        subject: "s",
+      }),
+    ).toThrow();
+  });
+  it("refuses envelope-shadowing extra headers", () => {
+    for (const k of [
+      "From",
+      "to",
+      "Subject",
+      "content-type",
+      "MIME-Version",
+      "Date",
+      "Message-ID",
+      "Cc",
+      "bcc",
+    ]) {
+      expect(() =>
+        smtpActionSchema.parse({
+          type: "smtp",
+          host: "h",
+          from: "a@b.c",
+          to: ["d@e.f"],
+          subject: "s",
+          text: "x",
+          headers: { [k]: "v" },
+        }),
+      ).toThrow();
+    }
+  });
+  it("refuses relative and control-char attachment paths", () => {
+    const base = { type: "smtp", host: "h", from: "a@b.c", to: ["d@e.f"], subject: "s", text: "x" };
+    expect(() =>
+      smtpActionSchema.parse({ ...base, attachments: [{ path: "rel/file.txt" }] }),
+    ).toThrow();
+    expect(() =>
+      smtpActionSchema.parse({ ...base, attachments: [{ path: "C:/x\n.txt" }] }),
+    ).toThrow();
+  });
+  it("imap: structured search only, closed flag enum, uid caps", () => {
+    expect(
+      imapActionSchema.parse({
+        type: "imap",
+        host: "mail.example.com",
+        operation: { kind: "search", unseen: true, since: "2026-08-01" },
+      }).mailbox,
+    ).toBe("INBOX");
+    expect(() =>
+      imapActionSchema.parse({
+        type: "imap",
+        host: "h",
+        operation: { kind: "store", uids: [1], add_flags: ["\\Recent"] },
+      }),
+    ).toThrow(); // not in the closed enum
+    expect(() =>
+      imapActionSchema.parse({
+        type: "imap",
+        host: "h",
+        operation: {
+          kind: "fetch",
+          uids: Array.from({ length: 101 }, (_, i) => i + 1),
+          parts: "headers",
+        },
+      }),
+    ).toThrow();
+  });
+  it("websocket: wss ok, ws non-loopback refused, ws loopback ok, collect bounds", () => {
+    expect(() =>
+      websocketActionSchema.parse({
+        type: "websocket",
+        url: "ws://example.com/x",
+        injection: { type: "bearer" },
+      }),
+    ).toThrow();
+    websocketActionSchema.parse({
+      type: "websocket",
+      url: "ws://127.0.0.1:9/x",
+      injection: { type: "bearer" },
+    });
+    expect(() =>
+      websocketActionSchema.parse({
+        type: "websocket",
+        url: "wss://a.b/x",
+        injection: { type: "bearer" },
+        collect: { max_messages: 101 },
+      }),
+    ).toThrow();
+  });
+  it("sftp: local_path required for upload/download, refused for list; control chars refused", () => {
+    expect(() =>
+      sftpActionSchema.parse({
+        type: "sftp",
+        host: "h",
+        user: "u",
+        operation: "upload",
+        remote_path: "/r",
+      }),
+    ).toThrow();
+    expect(() =>
+      sftpActionSchema.parse({
+        type: "sftp",
+        host: "h",
+        user: "u",
+        operation: "list",
+        remote_path: "/r",
+        local_path: "/l",
+      }),
+    ).toThrow();
+    expect(() =>
+      sftpActionSchema.parse({
+        type: "sftp",
+        host: "h",
+        user: "u",
+        operation: "list",
+        remote_path: "/r\nrm x",
+      }),
+    ).toThrow();
+  });
+  it("docker_registry: image reference validated, timeout cap 30 min", () => {
+    dockerRegistryActionSchema.parse({
+      type: "docker_registry",
+      operation: "pull",
+      image: "registry.example.com:5000/team/app:1.2",
+    });
+    expect(() =>
+      dockerRegistryActionSchema.parse({
+        type: "docker_registry",
+        operation: "pull",
+        image: "reg/app:1.2",
+        timeout_ms: 1_800_001,
+      }),
+    ).toThrow();
+  });
+  it("database per-engine refinement matrix", () => {
+    const sql = {
+      type: "database",
+      engine: "postgresql",
+      host: "db",
+      database: "d",
+      query: "select 1",
+    };
+    databaseActionSchema.parse(sql);
+    expect(() => databaseActionSchema.parse({ ...sql, command: ["PING"] })).toThrow();
+    databaseActionSchema.parse({
+      type: "database",
+      engine: "redis",
+      host: "r",
+      database: "0",
+      command: ["GET", "k"],
+    });
+    expect(() =>
+      databaseActionSchema.parse({
+        type: "database",
+        engine: "redis",
+        host: "r",
+        database: "0",
+        query: "GET k",
+      }),
+    ).toThrow();
+    databaseActionSchema.parse({
+      type: "database",
+      engine: "mongodb",
+      host: "m",
+      database: "app",
+      command: { find: "users", limit: 1 },
+    });
+    expect(() =>
+      databaseActionSchema.parse({
+        type: "database",
+        engine: "mongodb",
+        host: "m",
+        database: "app",
+        command: { find: "users" },
+        params: [1],
+      }),
+    ).toThrow();
+  });
+  it("policy input gains recipient allowlist + imap_read_only with replace defaults", () => {
+    const p = injectionPolicyInputSchema.parse({});
+    expect(p.smtp_recipient_allowlist).toEqual([]);
+    expect(p.imap_read_only).toBe(false);
+    expect(() => injectionPolicyInputSchema.parse({ smtp_recipient_allowlist: ["*@*"] })).toThrow(); // wildcard domain refused
+    injectionPolicyInputSchema.parse({
+      smtp_recipient_allowlist: ["ops@example.com", "*@example.com"],
+    });
   });
 });

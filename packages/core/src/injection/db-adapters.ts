@@ -3,6 +3,8 @@ import type { Socket } from "node:net";
 import { checkServerIdentity } from "node:tls";
 import type { PeerCertificate } from "node:tls";
 import type { DatabaseEngine } from "@harpoc/shared";
+import { MongoAdapter } from "./mongo-adapter.js";
+import { RedisAdapter } from "./redis-adapter.js";
 
 /**
  * Engine-agnostic database access seam. Each adapter assembles the connection
@@ -50,13 +52,24 @@ export interface DbEngineAdapter {
 }
 
 /**
+ * Seam for command-style engines (redis, mongodb — v1.3) that have no
+ * SQL-shaped `query`/`params`/result-set model: a single generic command in,
+ * a single normalized result out. `command` is `unknown` here (the caller
+ * validates its shape per engine via `databaseActionSchema`'s per-engine
+ * refinement) so this interface stays engine-agnostic.
+ */
+export interface DbCommandAdapter {
+  execute(opts: DbConnectOptions, command: unknown): Promise<DbQueryResult>;
+}
+
+/**
  * TLS server-identity check bound to the LOGICAL host, whatever address the
  * socket ended up dialing. Node derives the name to verify as
  * `servername || options.host || socket._host || "localhost"`, and neither
  * driver supplies a servername for an IP-literal target (SNI forbids it), so
  * without this the check runs against the wrong name.
  */
-function identityCheckerFor(host: string) {
+export function identityCheckerFor(host: string) {
   return (_derivedHost: string, cert: PeerCertificate): Error | undefined =>
     checkServerIdentity(host, cert);
 }
@@ -171,15 +184,38 @@ class MysqlAdapter implements DbEngineAdapter {
   }
 }
 
-/** Default engine adapters. Callers may substitute a mock adapter in tests. */
-export function defaultDbAdapters(): Record<DatabaseEngine, DbEngineAdapter> {
+/** Default engine adapters (SQL engines: postgresql, mysql). Callers may substitute a mock adapter in tests. */
+export function defaultDbAdapters(): Partial<Record<DatabaseEngine, DbEngineAdapter>> {
   return {
     postgresql: new PostgresAdapter(),
     mysql: new MysqlAdapter(),
   };
 }
 
+/**
+ * Default command adapters (command-style engines: redis, mongodb). The
+ * `Record<string, DbCommandAdapter>` return type (rather than
+ * `Partial<Record<DatabaseEngine, ...>>`) leaves this seam open without a
+ * signature change. Both drivers are lazy-imported inside their adapter's
+ * `execute` — instantiating the adapter here does not load either.
+ */
+export function defaultDbCommandAdapters(): Record<string, DbCommandAdapter> {
+  return {
+    redis: new RedisAdapter(),
+    mongodb: new MongoAdapter(),
+  };
+}
+
 /** Default TCP port for an engine when the action omits one. */
 export function defaultDbPort(engine: DatabaseEngine): number {
-  return engine === "mysql" ? 3306 : 5432;
+  switch (engine) {
+    case "mysql":
+      return 3306;
+    case "redis":
+      return 6379;
+    case "mongodb":
+      return 27017;
+    default:
+      return 5432;
+  }
 }

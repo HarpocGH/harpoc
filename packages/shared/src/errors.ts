@@ -109,6 +109,18 @@ export enum ErrorCode {
   CERT_NOT_CONFIGURED = "CERT_NOT_CONFIGURED",
   CERT_VALUE_UNSUPPORTED = "CERT_VALUE_UNSUPPORTED",
 
+  // Email / WebSocket / SFTP / Docker contexts (v1.3)
+  RECIPIENT_NOT_ALLOWED = "RECIPIENT_NOT_ALLOWED",
+  ATTACHMENT_POLICY_REQUIRED = "ATTACHMENT_POLICY_REQUIRED",
+  ATTACHMENT_REJECTED = "ATTACHMENT_REJECTED",
+  IMAP_MUTATION_NOT_ALLOWED = "IMAP_MUTATION_NOT_ALLOWED",
+  SMTP_STARTTLS_UNAVAILABLE = "SMTP_STARTTLS_UNAVAILABLE",
+  SMTP_DELIVERY_FAILED = "SMTP_DELIVERY_FAILED",
+  IMAP_OPERATION_FAILED = "IMAP_OPERATION_FAILED",
+  WEBSOCKET_CONNECT_FAILED = "WEBSOCKET_CONNECT_FAILED",
+  SFTP_OPERATION_FAILED = "SFTP_OPERATION_FAILED",
+  DOCKER_OPERATION_FAILED = "DOCKER_OPERATION_FAILED",
+
   // Rate limiting
   RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED",
 
@@ -227,6 +239,18 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.CERT_CSR_FAILED]: 500,
   [ErrorCode.CERT_NOT_CONFIGURED]: 400,
   [ErrorCode.CERT_VALUE_UNSUPPORTED]: 400,
+
+  // Email / WebSocket / SFTP / Docker contexts (v1.3)
+  [ErrorCode.RECIPIENT_NOT_ALLOWED]: 403,
+  [ErrorCode.ATTACHMENT_POLICY_REQUIRED]: 403,
+  [ErrorCode.ATTACHMENT_REJECTED]: 400,
+  [ErrorCode.IMAP_MUTATION_NOT_ALLOWED]: 403,
+  [ErrorCode.SMTP_STARTTLS_UNAVAILABLE]: 502,
+  [ErrorCode.SMTP_DELIVERY_FAILED]: 502,
+  [ErrorCode.IMAP_OPERATION_FAILED]: 502,
+  [ErrorCode.WEBSOCKET_CONNECT_FAILED]: 502,
+  [ErrorCode.SFTP_OPERATION_FAILED]: 502,
+  [ErrorCode.DOCKER_OPERATION_FAILED]: 502,
 
   // Rate limiting
   [ErrorCode.RATE_LIMIT_EXCEEDED]: 429,
@@ -663,6 +687,71 @@ export class VaultError extends Error {
         "certificate bundle). Decrypt-at-import would silently drop everything but the key — " +
         "import the key alone, or use --no-decrypt to store the bundle verbatim (the key then " +
         "stays encrypted and is unusable for SSH until re-imported on its own)",
+    );
+  }
+
+  static recipientNotAllowed(recipient: string): VaultError {
+    return new VaultError(
+      ErrorCode.RECIPIENT_NOT_ALLOWED,
+      `Recipient not in secret allowlist: ${recipient}`,
+    );
+  }
+
+  static attachmentPolicyRequired(): VaultError {
+    return new VaultError(
+      ErrorCode.ATTACHMENT_POLICY_REQUIRED,
+      "Attachments require an explicit recipient allowlist before they can be sent: " +
+        "configure one via secret allow <handle> --recipient",
+    );
+  }
+
+  static attachmentRejected(reason: string): VaultError {
+    return new VaultError(ErrorCode.ATTACHMENT_REJECTED, `Attachment rejected: ${reason}`);
+  }
+
+  static imapMutationNotAllowed(operation: string): VaultError {
+    return new VaultError(
+      ErrorCode.IMAP_MUTATION_NOT_ALLOWED,
+      `IMAP mutation '${operation}' is not allowed: this secret's IMAP policy is read-only`,
+    );
+  }
+
+  static smtpStarttlsUnavailable(host: string): VaultError {
+    return new VaultError(
+      ErrorCode.SMTP_STARTTLS_UNAVAILABLE,
+      `SMTP STARTTLS is required but not available on ${host}`,
+    );
+  }
+
+  static smtpDeliveryFailed(origin: string): VaultError {
+    return new VaultError(ErrorCode.SMTP_DELIVERY_FAILED, `SMTP delivery failed: ${origin}`);
+  }
+
+  static imapOperationFailed(origin: string, operation: string): VaultError {
+    return new VaultError(
+      ErrorCode.IMAP_OPERATION_FAILED,
+      `IMAP operation '${operation}' failed: ${origin}`,
+    );
+  }
+
+  static websocketConnectFailed(origin: string): VaultError {
+    return new VaultError(
+      ErrorCode.WEBSOCKET_CONNECT_FAILED,
+      `WebSocket connection failed: ${origin}`,
+    );
+  }
+
+  static sftpOperationFailed(exitCode: number): VaultError {
+    return new VaultError(
+      ErrorCode.SFTP_OPERATION_FAILED,
+      `SFTP operation failed (exit code ${exitCode})`,
+    );
+  }
+
+  static dockerOperationFailed(exitCode: number): VaultError {
+    return new VaultError(
+      ErrorCode.DOCKER_OPERATION_FAILED,
+      `Docker operation failed (exit code ${exitCode})`,
     );
   }
 }

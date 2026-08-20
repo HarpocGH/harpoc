@@ -5,6 +5,7 @@ import type {
   InjectionPolicy,
 } from "@harpoc/shared";
 import {
+  DatabaseEngine,
   DEFAULT_DB_TIMEOUT_MS,
   MAX_DB_RESULT_BYTES,
   MAX_DB_ROWS,
@@ -14,8 +15,13 @@ import type { AuditAttribution } from "../audit/attribution.js";
 import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { matchesHostPortAllowlist } from "./allowlist.js";
-import type { DbEngineAdapter, DbTlsOptions } from "./db-adapters.js";
-import { defaultDbAdapters, defaultDbPort } from "./db-adapters.js";
+import type {
+  DbCommandAdapter,
+  DbEngineAdapter,
+  DbQueryResult,
+  DbTlsOptions,
+} from "./db-adapters.js";
+import { defaultDbAdapters, defaultDbCommandAdapters, defaultDbPort } from "./db-adapters.js";
 import { mapStringLeaves, redactSecretEncodings } from "./output-sanitizer.js";
 import { validateHostPort } from "./url-validator.js";
 
@@ -35,12 +41,15 @@ import { validateHostPort } from "./url-validator.js";
  */
 export class DatabaseInjector {
   private readonly adapters: Record<string, DbEngineAdapter>;
+  private readonly commandAdapters: Record<string, DbCommandAdapter>;
 
   constructor(
     private readonly auditLogger: AuditLogger | null,
     adapters?: Record<string, DbEngineAdapter>,
+    commandAdapters?: Record<string, DbCommandAdapter>,
   ) {
     this.adapters = adapters ?? defaultDbAdapters();
+    this.commandAdapters = commandAdapters ?? defaultDbCommandAdapters();
   }
 
   async executeWithSecret(
@@ -51,8 +60,10 @@ export class DatabaseInjector {
     secretId?: string,
     attribution?: AuditAttribution,
   ): Promise<DatabaseResult> {
-    const adapter = this.adapters[action.engine];
-    if (!adapter) {
+    const isCommandEngine = COMMAND_ENGINES.includes(action.engine);
+    const adapter = isCommandEngine ? undefined : this.adapters[action.engine];
+    const commandAdapter = isCommandEngine ? this.commandAdapters[action.engine] : undefined;
+    if (!adapter && !commandAdapter) {
       this.audit(action, secretId, { error: "UNSUPPORTED_DB_ENGINE" }, false, attribution);
       throw VaultError.unsupportedDbEngine(action.engine);
     }
@@ -95,18 +106,47 @@ export class DatabaseInjector {
       return user.length >= 3 ? redactSecretEncodings(redacted, user) : redacted;
     };
 
+    const connectOpts = {
+      host,
+      port,
+      address: pinnedAddress,
+      user,
+      password,
+      database: action.database,
+      tls,
+      timeoutMs,
+    };
+
+    if (commandAdapter) {
+      // Command-style engines (redis, mongodb) have no separate connect/query
+      // split — `execute` owns its own connection lifecycle end to end — so a
+      // failure anywhere inside it (connect or command) surfaces as one
+      // DB_QUERY_FAILED, the same code an equivalent SQL query error maps to.
+      try {
+        const res = await commandAdapter.execute(connectOpts, action.command);
+        const { result, truncated } = this.toDatabaseResult(res, redactCredential);
+        this.audit(
+          action,
+          secretId,
+          { host, port, row_count: result.row_count, truncated },
+          true,
+          attribution,
+        );
+        return result;
+      } catch (err) {
+        const detail = redactCredential(errMessage(err));
+        this.audit(action, secretId, { host, port, error: "DB_QUERY_FAILED" }, false, attribution);
+        throw VaultError.dbQueryFailed(detail);
+      }
+    }
+
+    // adapter is guaranteed defined here: the unsupported-engine guard above
+    // requires at least one of adapter/commandAdapter, and isCommandEngine
+    // false means commandAdapter is undefined.
+    const sqlAdapter = adapter as DbEngineAdapter;
     let connection;
     try {
-      connection = await adapter.connect({
-        host,
-        port,
-        address: pinnedAddress,
-        user,
-        password,
-        database: action.database,
-        tls,
-        timeoutMs,
-      });
+      connection = await sqlAdapter.connect(connectOpts);
     } catch (err) {
       const detail = redactCredential(errMessage(err));
       this.audit(
@@ -120,23 +160,17 @@ export class DatabaseInjector {
     }
 
     try {
-      const res = await connection.query(action.query, action.params);
-      const { rows, truncated } = capRows(res.rows);
+      // The schema's superRefine guarantees `query` for every SQL engine.
+      const query = action.query as string;
+      const res = await connection.query(query, action.params);
       // Column names and the command tag are endpoint-authored too: an alias
       // (`SELECT 1 AS "<credential>"`) put the value in a position no redactor
       // saw, while the same string in a row value was redacted (L1).
-      const result: DatabaseResult = {
-        type: "database",
-        row_count: res.rowCount ?? rows.length,
-        rows: mapStringLeaves(rows, redactCredential) as unknown[],
-        fields: res.fields.map((f) => ({ name: redactCredential(f.name) })),
-        command: res.command === undefined ? undefined : redactCredential(res.command),
-        truncated: truncated ? true : undefined,
-      };
+      const { result, truncated } = this.toDatabaseResult(res, redactCredential);
       this.audit(
         action,
         secretId,
-        { host, port, row_count: result.row_count, truncated: truncated ? true : false },
+        { host, port, row_count: result.row_count, truncated },
         true,
         attribution,
       );
@@ -152,6 +186,23 @@ export class DatabaseInjector {
         // best-effort close
       }
     }
+  }
+
+  /** Cap + redact a driver result into the wire `DatabaseResult` shape shared by both dispatch paths. */
+  private toDatabaseResult(
+    res: DbQueryResult,
+    redactCredential: (s: string) => string,
+  ): { result: DatabaseResult; truncated: boolean } {
+    const { rows, truncated } = capRows(res.rows);
+    const result: DatabaseResult = {
+      type: "database",
+      row_count: res.rowCount ?? rows.length,
+      rows: mapStringLeaves(rows, redactCredential) as unknown[],
+      fields: res.fields.map((f) => ({ name: redactCredential(f.name) })),
+      command: res.command === undefined ? undefined : redactCredential(res.command),
+      truncated: truncated ? true : undefined,
+    };
+    return { result, truncated };
   }
 
   private audit(
@@ -179,6 +230,9 @@ export class DatabaseInjector {
     );
   }
 }
+
+/** Command-style engines dispatch through `DbCommandAdapter.execute` instead of `DbEngineAdapter.connect(...).query(...)`. */
+const COMMAND_ENGINES: readonly string[] = [DatabaseEngine.REDIS, DatabaseEngine.MONGODB];
 
 /** Split `host` (which may embed `:port`) and an optional explicit port. */
 function parseHostPort(

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import type { Command } from "commander";
-import type { ConnectionConfig } from "@harpoc/shared";
-import { connectionConfigSchema } from "@harpoc/shared";
+import type { ConnectionConfig, MailConnectionConfig } from "@harpoc/shared";
+import { connectionConfigSchema, VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
@@ -17,6 +17,10 @@ export interface ConnectionOptions {
   dbServername?: string;
   knownHost?: string[];
   knownHostsFile?: string;
+  /** Mail TLS opt-out (audited, SMTP-only leg — IMAP refuses tls:false at use-time). */
+  mailNoTls?: boolean;
+  /** Path to a CA certificate PEM to pin the mail TLS connection to. */
+  mailCa?: string;
   clear?: boolean;
   show?: boolean;
   delete?: boolean;
@@ -40,6 +44,14 @@ export function registerSecretConnectionCommand(secret: Command): void {
       [],
     )
     .option("--known-hosts-file <path>", "Path to a known_hosts file to pin (SSH)")
+    .option(
+      "--mail-no-tls",
+      "Opt out of TLS for mail (SMTP/IMAP); honored for SMTP only — an imap action refuses this fail-closed",
+    )
+    .option(
+      "--mail-ca <path>",
+      "Path to a CA certificate PEM (mail TLS); also clears --mail-no-tls",
+    )
     .option("--clear", "Reset the whole config to empty before applying the other flags")
     .option("--show", "Show the current config instead of setting it")
     .option("--delete", "Remove the config")
@@ -69,6 +81,8 @@ export function registerSecretConnectionCommand(secret: Command): void {
             options.dbServername !== undefined ||
             (options.knownHost?.length ?? 0) > 0 ||
             options.knownHostsFile !== undefined ||
+            options.mailNoTls === true ||
+            options.mailCa !== undefined ||
             options.clear === true;
           if (options.show || !hasInput) {
             const resolved = resolveTokenCallerForHandle(engine, "read", handle, tokenValue);
@@ -141,5 +155,40 @@ export function mergeConnectionConfig(
     config.ssh = base.ssh;
   }
 
+  const mail = mergeMailConfig(base?.mail, options);
+  if (mail) {
+    config.mail = mail;
+  }
+
   return config;
+}
+
+/**
+ * Mirrors the database group's per-field merge for the single `tls` field
+ * mail carries: `--mail-no-tls` (opt out) and `--mail-ca` (pin a CA, and —
+ * since it means "use TLS" — clears a stored opt-out) are mutually
+ * exclusive on one invocation, refused rather than silently picking one, the
+ * same "a config the vault cannot honor refuses" convention `cert issue`'s
+ * `--dns`+`--http-port` refusal follows. Neither flag present carries the
+ * stored `tls` value through untouched, including a stored opt-out.
+ */
+function mergeMailConfig(
+  base: MailConnectionConfig | undefined,
+  options: ConnectionOptions,
+): MailConnectionConfig | undefined {
+  const noTlsGiven = options.mailNoTls === true;
+  const caGiven = options.mailCa !== undefined;
+  if (noTlsGiven && caGiven) {
+    throw VaultError.invalidInput("--mail-no-tls and --mail-ca cannot be combined");
+  }
+  if (!noTlsGiven && !caGiven) {
+    return base;
+  }
+
+  if (noTlsGiven) {
+    return { tls: false };
+  }
+
+  const ca = options.mailCa ? readFileSync(options.mailCa, "utf8") : undefined;
+  return { tls: ca !== undefined ? { ca } : {} };
 }

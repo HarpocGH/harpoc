@@ -21,6 +21,10 @@ export interface AllowOptions {
   networkIsolation?: boolean;
   /** Tri-state: true (--fs-isolation), false (--no-fs-isolation), undefined (keep stored). */
   fsIsolation?: boolean;
+  /** Additive: provided patterns are added to the stored allowlist, not replaced. */
+  recipient?: string[];
+  /** Tri-state: true (--imap-read-only), false (--no-imap-read-only), undefined (keep stored). */
+  imapReadOnly?: boolean;
   acknowledgeInterpreter?: boolean;
   clear?: boolean;
   show?: boolean;
@@ -37,6 +41,8 @@ const EMPTY_POLICY: InjectionPolicy = {
   response_header_allowlist: [],
   network_isolation: false,
   fs_isolation: false,
+  smtp_recipient_allowlist: [],
+  imap_read_only: false,
 };
 
 /**
@@ -45,6 +51,12 @@ const EMPTY_POLICY: InjectionPolicy = {
  * a `status_only` response mode back to `filtered`, or drop a stored
  * `network_isolation` or `fs_isolation` requirement. `--clear` starts from an
  * empty default policy instead of the stored one.
+ *
+ * `--recipient` is deliberately additive (unlike every other allowlist flag
+ * here, which replaces wholesale): recipients are typically granted one at a
+ * time, so a `--recipient` update merges with the stored list rather than
+ * requiring the caller to restate every existing entry. `--clear` still
+ * empties the list first, same as the other groups.
  */
 export function mergePolicy(current: InjectionPolicy, options: AllowOptions): InjectionPolicy {
   const base = options.clear ? EMPTY_POLICY : current;
@@ -59,6 +71,10 @@ export function mergePolicy(current: InjectionPolicy, options: AllowOptions): In
       : base.response_header_allowlist,
     network_isolation: options.networkIsolation ?? base.network_isolation,
     fs_isolation: options.fsIsolation ?? base.fs_isolation,
+    smtp_recipient_allowlist: options.recipient?.length
+      ? Array.from(new Set([...base.smtp_recipient_allowlist, ...options.recipient]))
+      : base.smtp_recipient_allowlist,
+    imap_read_only: options.imapReadOnly ?? base.imap_read_only,
   };
 }
 
@@ -108,6 +124,17 @@ export function registerSecretAllowCommand(secret: Command): void {
     )
     .option("--no-fs-isolation", "Remove a stored filesystem-isolation requirement")
     .option(
+      "--recipient <pattern>",
+      "Allowlisted SMTP recipient pattern to add (repeatable, additive — merges with the stored list)",
+      collect,
+      [],
+    )
+    .option(
+      "--imap-read-only",
+      "Refuse mutating IMAP operations (store/move/copy/expunge) for this secret",
+    )
+    .option("--no-imap-read-only", "Remove a stored IMAP read-only requirement")
+    .option(
       "--acknowledge-interpreter",
       "Explicitly acknowledge allowlisting a known interpreter (sh, bash, python, node, ...) — collapses the capability ladder for this secret; refused and audited otherwise",
     )
@@ -129,6 +156,8 @@ export function registerSecretAllowCommand(secret: Command): void {
             (options.responseMode !== undefined ? 1 : 0) +
             (options.networkIsolation !== undefined ? 1 : 0) +
             (options.fsIsolation !== undefined ? 1 : 0) +
+            (options.recipient?.length ?? 0) +
+            (options.imapReadOnly !== undefined ? 1 : 0) +
             (options.clear ? 1 : 0);
 
           const tokenValue = options.token ?? process.env.HARPOC_TOKEN;

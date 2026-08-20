@@ -122,6 +122,11 @@ export const ActionType = {
   DATABASE: "database",
   GIT: "git",
   SSH: "ssh",
+  SMTP: "smtp",
+  IMAP: "imap",
+  WEBSOCKET: "websocket",
+  SFTP: "sftp",
+  DOCKER_REGISTRY: "docker_registry",
 } as const;
 export type ActionType = (typeof ActionType)[keyof typeof ActionType];
 
@@ -132,10 +137,17 @@ export const McpTransport = {
 } as const;
 export type McpTransport = (typeof McpTransport)[keyof typeof McpTransport];
 
-/** SQL engine of a database action. The `engine` field keeps the taxonomy open. */
+/**
+ * Backing store engine of a database action. The `engine` field keeps the
+ * taxonomy open. `redis` and `mongodb` (v1.3) route through `command`
+ * instead of `query`/`params` — see `databaseActionSchema`'s per-engine
+ * refinement.
+ */
 export const DatabaseEngine = {
   POSTGRESQL: "postgresql",
   MYSQL: "mysql",
+  REDIS: "redis",
+  MONGODB: "mongodb",
 } as const;
 export type DatabaseEngine = (typeof DatabaseEngine)[keyof typeof DatabaseEngine];
 
@@ -353,6 +365,74 @@ export interface SshResult {
   error?: string;
 }
 
+/**
+ * Result of an SFTP use_secret invocation (design §4.7): process-shaped, like
+ * `SshResult` — the sftp client's own exit status plus captured, sanitized
+ * output. There is no per-path echo: the transferred file's content never
+ * rides the result.
+ */
+export interface SftpResult {
+  type: typeof ActionType.SFTP;
+  exit_code: number | null;
+  stdout: string;
+  stderr: string;
+  timed_out?: boolean;
+  truncated?: boolean;
+  signal?: string;
+  error?: string;
+}
+
+/**
+ * Result of an SMTP use_secret invocation (design §4.7): the number of
+ * recipients the server accepted plus the vault-generated Message-ID. The
+ * message itself never comes back — the vault authored it.
+ */
+export interface SmtpResult {
+  type: typeof ActionType.SMTP;
+  accepted: number;
+  message_id?: string;
+}
+
+/**
+ * Result of an IMAP use_secret invocation (design §4.7) — operation-shaped:
+ * `search` fills `uids`, `fetch` fills `messages` (uid/flags plus the parts
+ * requested; endpoint-authored, so typed like `DatabaseResult.rows`), and the
+ * mutating kinds fill `affected`.
+ */
+export interface ImapResult {
+  type: typeof ActionType.IMAP;
+  operation: string;
+  uids?: number[];
+  messages?: unknown[];
+  affected?: number;
+}
+
+/** Result of a WebSocket use_secret invocation: the collected frames (shaped by
+ * `response_mode`) and the code the connection closed with. */
+export interface WebsocketResult {
+  type: typeof ActionType.WEBSOCKET;
+  messages: string[];
+  close_code: number | null;
+}
+
+/**
+ * Result of a Docker registry use_secret invocation (design §5.4):
+ * process-shaped, like `GitResult` — the spawned `docker` CLI's own exit status
+ * plus captured, sanitized output. The credential never rides the result; it
+ * reached docker only through the vault-authored credential helper.
+ */
+export interface DockerResult {
+  type: typeof ActionType.DOCKER_REGISTRY;
+  operation: "pull" | "push";
+  exit_code: number | null;
+  stdout: string;
+  stderr: string;
+  timed_out?: boolean;
+  truncated?: boolean;
+  signal?: string;
+  error?: string;
+}
+
 /** Response from use_secret — discriminated by execution mechanism. */
 export type UseSecretResponse =
   | HttpResult
@@ -360,7 +440,12 @@ export type UseSecretResponse =
   | McpResult
   | DatabaseResult
   | GitResult
-  | SshResult;
+  | SshResult
+  | SmtpResult
+  | ImapResult
+  | WebsocketResult
+  | SftpResult
+  | DockerResult;
 
 /**
  * Options for the trusted-admin injection-policy set path.
