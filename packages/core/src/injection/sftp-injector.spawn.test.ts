@@ -356,6 +356,23 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     ).rejects.toMatchObject({ code: ErrorCode.SFTP_OPERATION_FAILED });
   });
 
+  it("maps a plain exit 255 (connect/auth failure) to SSH_CONNECT_FAILED", async () => {
+    spawnMock.mockResolvedValue({
+      ...OK_RESULT,
+      exit_code: 255,
+      stderr: "ssh: connect to host 127.0.0.2 port 22: Connection refused",
+    });
+
+    await expect(
+      executeSftpAction(
+        LIST_ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        allowedPolicy(),
+        SFTP_CONFIG,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.SSH_CONNECT_FAILED });
+  });
+
   it("maps host-key verification failure text to SSH_HOST_KEY_MISMATCH", async () => {
     spawnMock.mockResolvedValue({
       ...OK_RESULT,

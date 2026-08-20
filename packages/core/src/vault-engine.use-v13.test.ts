@@ -13,12 +13,12 @@ import type {
   SmtpAction,
   UseSecretAction,
   WebsocketAction,
+  WebsocketResult,
 } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
 import type { ImapExecution, ImapOAuth } from "./injection/imap-injector.js";
 import type { MailTlsConfig, SmtpExecution, SmtpOAuth } from "./injection/smtp-injector.js";
-import type { WsResult } from "./injection/websocket-injector.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();
@@ -104,7 +104,7 @@ interface Seams {
 
 type SmtpOutcome = SmtpExecution | (() => never);
 type ImapOutcome = ImapExecution | (() => never);
-type WsOutcome = WsResult | (() => never);
+type WsOutcome = WebsocketResult | (() => never);
 type SftpOutcome = SftpResult | (() => never);
 type DockerOutcome = DockerResult | (() => never);
 
@@ -113,10 +113,15 @@ function resolveOutcome<T>(outcome: T | (() => never)): T {
   return outcome;
 }
 
+/** The one engine internal the hoist pins directly: the value-decrypt call. */
+interface EngineInternals {
+  secretManager: { getSecretValue: (handle: string) => Promise<Uint8Array> };
+}
+
 interface EngineSeams {
   smtpInjector: { run: (...args: unknown[]) => Promise<SmtpExecution> };
   imapInjector: { run: (...args: unknown[]) => Promise<ImapExecution> };
-  websocketExecutor: (...args: unknown[]) => Promise<WsResult>;
+  websocketExecutor: (...args: unknown[]) => Promise<WebsocketResult>;
   sftpExecutor: (...args: unknown[]) => Promise<SftpResult>;
   dockerExecutor: (...args: unknown[]) => Promise<DockerResult>;
 }
@@ -146,7 +151,7 @@ function installSeams(
       });
       return resolveOutcome(
         outcomes.smtp ?? {
-          result: { accepted: 1, message_id: "<vault@harpoc>" },
+          result: { type: "smtp", accepted: 1, message_id: "<vault@harpoc>" },
           auditDetails: {
             host: "smtp.example.com",
             from: "ops@example.com",
@@ -170,7 +175,7 @@ function installSeams(
       });
       return resolveOutcome(
         outcomes.imap ?? {
-          result: { uids: [7] },
+          result: { type: "imap", operation: "search", uids: [7] },
           auditDetails: {
             host: "imap.example.com",
             mailbox: "INBOX",
@@ -188,7 +193,9 @@ function installSeams(
       secretValue: Buffer.from(args[1] as Uint8Array).toString("utf8"),
       policy: args[2] as InjectionPolicy,
     });
-    return resolveOutcome(outcomes.websocket ?? { messages: ["pong"], close_code: 1000 });
+    return resolveOutcome(
+      outcomes.websocket ?? { type: "websocket", messages: ["pong"], close_code: 1000 },
+    );
   };
 
   seams.sftpExecutor = async (...args: unknown[]) => {
@@ -293,7 +300,7 @@ describe("useSecret (smtp) — engine dispatch", () => {
   it("writes a successful secret.use row carrying the spec §7.2 smtp details", async () => {
     installSeams(engine, {
       smtp: {
-        result: { accepted: 2, message_id: "<id@harpoc>" },
+        result: { type: "smtp", accepted: 2, message_id: "<id@harpoc>" },
         auditDetails: {
           host: "smtp.example.com",
           from: "ops@example.com",
@@ -426,7 +433,7 @@ describe("useSecret (imap) — engine dispatch", () => {
   it("dispatches to the IMAP injector and returns the operation-shaped envelope", async () => {
     const calls = installSeams(engine, {
       imap: {
-        result: { uids: [3, 9] },
+        result: { type: "imap", operation: "search", uids: [3, 9] },
         auditDetails: {
           host: "imap.example.com",
           mailbox: "INBOX",
@@ -445,7 +452,11 @@ describe("useSecret (imap) — engine dispatch", () => {
   it("returns fetched messages under the imap envelope", async () => {
     installSeams(engine, {
       imap: {
-        result: { messages: [{ uid: 4, flags: ["\\Seen"], text: "hello" }] },
+        result: {
+          type: "imap",
+          operation: "fetch",
+          messages: [{ uid: 4, flags: ["\\Seen"], text: "hello" }],
+        },
         auditDetails: {
           host: "imap.example.com",
           mailbox: "INBOX",
@@ -470,7 +481,7 @@ describe("useSecret (imap) — engine dispatch", () => {
   it("returns the affected count for a mutation", async () => {
     installSeams(engine, {
       imap: {
-        result: { affected: 3 },
+        result: { type: "imap", operation: "store", affected: 3 },
         auditDetails: {
           host: "imap.example.com",
           mailbox: "INBOX",
@@ -491,7 +502,7 @@ describe("useSecret (imap) — engine dispatch", () => {
   it("writes a successful secret.use row carrying the spec §7.2 imap details", async () => {
     installSeams(engine, {
       imap: {
-        result: { uids: [3, 9] },
+        result: { type: "imap", operation: "search", uids: [3, 9] },
         auditDetails: {
           host: "imap.example.com",
           mailbox: "Archive",
@@ -663,6 +674,77 @@ describe("useSecret (imap) — an OAuth-type secret is refused (no XOAUTH2 accou
   });
 });
 
+describe("useSecret (imap) — both refusals run before the credential is produced", () => {
+  it("the OAuth×imap refusal happens before any token fetch or refresh", async () => {
+    // A stub that would succeed: if the refusal is late, the refresh runs to
+    // completion — POST, persisted rotation and the `oauth.refresh` row.
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            access_token: "ya29.rotated-access-token",
+            refresh_token: "rt-rotated",
+            expires_in: 3600,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      await engine.initVault("password");
+      const { handle, secretId } = await engine.createOAuthSecret("mailbox", {
+        provider: "google",
+        grant_type: "client_credentials",
+        // Loopback: the SSRF pre-flight skips DNS for it, so a refresh that is
+        // allowed to start really does reach the stubbed fetch.
+        token_endpoint: "http://127.0.0.1:1/token",
+        client_id: "cid",
+      });
+      // Arm the auto-refresh: an access token expiring inside the 60 s window
+      // with a refresh_token beside it is exactly the shape
+      // `getOAuthAccessToken` POSTs to the token endpoint for.
+      await engine.completeOAuthFlow(
+        secretId,
+        "ya29.imap-access-token",
+        "rt-1",
+        Date.now() + 30_000,
+      );
+      const calls = installSeams(engine, {});
+
+      await expect(engine.useSecret(handle, IMAP_ACTION)).rejects.toMatchObject({
+        code: ErrorCode.INVALID_INPUT,
+      });
+
+      expect(calls.imap).toHaveLength(0);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(engine.queryAudit({ eventType: AuditEventType.OAUTH_REFRESH })).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("the tls:false×imap refusal happens before the value decrypt", async () => {
+    await initWithSecret("inbox", "ops@example.com:mailpass");
+    await engine.setConnectionConfig("secret://inbox", { mail: { tls: false } });
+    const calls = installSeams(engine, {});
+    const getSecretValue = vi.spyOn(
+      (engine as unknown as EngineInternals).secretManager,
+      "getSecretValue",
+    );
+
+    try {
+      await expect(engine.useSecret("secret://inbox", IMAP_ACTION)).rejects.toMatchObject({
+        code: ErrorCode.INVALID_INPUT,
+      });
+
+      expect(calls.imap).toHaveLength(0);
+      expect(getSecretValue).not.toHaveBeenCalled();
+    } finally {
+      getSecretValue.mockRestore();
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // WebSocket
 // ---------------------------------------------------------------------------
@@ -674,7 +756,7 @@ describe("useSecret (websocket) — engine dispatch", () => {
 
   it("dispatches to the WebSocket injector and returns the websocket envelope", async () => {
     const calls = installSeams(engine, {
-      websocket: { messages: ["a", "b"], close_code: 1000 },
+      websocket: { type: "websocket", messages: ["a", "b"], close_code: 1000 },
     });
 
     const res = await engine.useSecret("secret://ws", WS_ACTION);
@@ -685,7 +767,9 @@ describe("useSecret (websocket) — engine dispatch", () => {
   });
 
   it("writes a successful secret.use row carrying the spec §7.2 websocket details", async () => {
-    installSeams(engine, { websocket: { messages: ["a", "b"], close_code: 1000 } });
+    installSeams(engine, {
+      websocket: { type: "websocket", messages: ["a", "b"], close_code: 1000 },
+    });
 
     await engine.useSecret("secret://ws", WS_ACTION);
 

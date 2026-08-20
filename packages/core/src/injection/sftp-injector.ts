@@ -131,16 +131,24 @@ function buildBatchCommand(action: SftpAction): string {
 
 /** Maps a settled spawn result to the process-shaped `SftpResult`, or throws
  * for the outcomes the vault treats as a hard failure rather than a return
- * value: a pinned host-key mismatch, a connect failure, or (unlike a remote
- * shell command's arbitrary exit status) any non-zero exit from the sftp
- * client itself — sftp's batch mode aborts and reports failure on the first
- * failed scripted command, so a non-zero exit is always the vault's own
- * signal that the operation did not complete. */
+ * value: a pinned host-key mismatch, a connect failure (including OpenSSH's
+ * generic exit 255 for connection/auth/protocol failure), or (unlike a
+ * remote shell command's arbitrary exit status) any other non-zero exit from
+ * the sftp client itself — sftp's batch mode aborts and reports failure on
+ * the first failed scripted command, so a non-zero exit is always the
+ * vault's own signal that the operation did not complete. */
 function toSftpResult(r: SpawnCapturedResult, host: string): SftpResult {
   if (isHostKeyFailure(r.stderr)) {
     throw VaultError.sshHostKeyMismatch(host);
   }
   if (r.spawn_failed) {
+    throw VaultError.sshConnectFailed(host);
+  }
+  // OpenSSH clients exit 255 on connection/auth/protocol failure (a failed
+  // batch command exits 1) — classify it as the connect failure it is. The
+  // host-key check above must keep winning: a pinned-key mismatch also
+  // exits 255.
+  if (r.exit_code === 255) {
     throw VaultError.sshConnectFailed(host);
   }
   if (r.timed_out) {

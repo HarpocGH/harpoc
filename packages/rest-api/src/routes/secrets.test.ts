@@ -191,7 +191,7 @@ describe("secret routes", () => {
         body: JSON.stringify({ name: "new-key", type: "api_key", value }),
       });
 
-      const call = engine.createSecret.mock.calls[0] as Array<{ value?: Uint8Array }>;
+      const call = engine.createSecret.mock.calls[0] as [{ value?: Uint8Array }];
       expect(call[0].value).toBeInstanceOf(Uint8Array);
       expect(Buffer.from(call[0].value as Uint8Array).toString()).toBe("my-secret-value");
     });
@@ -216,6 +216,18 @@ describe("secret routes", () => {
       expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
       expect(body.message).toBe("Request body must be valid JSON");
       expect(engine.createSecret).not.toHaveBeenCalled();
+    });
+
+    it("a non-object JSON body is a descriptive 400", async () => {
+      const res = await app.request("/api/v1/secrets", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify([1, 2]),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; message: string };
+      expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+      expect(body.message).toBe("Request body must be valid JSON");
     });
   });
 
@@ -431,6 +443,18 @@ describe("secret routes", () => {
       expect(action.type).toBe("websocket");
       expect(action.url).toBe("wss://echo.example.com/socket");
       expect(action.message).toBe("ping");
+    });
+
+    it("a JSON null body is a descriptive 400, not a generic 500", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/use", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: "null",
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; message: string };
+      expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+      expect(body.message).toBe("Request body must be valid JSON");
     });
   });
 
@@ -991,7 +1015,7 @@ describe("secret routes", () => {
       title: string;
       missing: string;
       engineFn: keyof ReturnType<typeof createMockEngine>;
-      request: () => Promise<Response>;
+      request: () => Response | Promise<Response>;
     }[] = [
       {
         title: "GET /:handle requires read",
@@ -1116,7 +1140,7 @@ describe("secret routes", () => {
     const patternCases: {
       title: string;
       engineFn: keyof ReturnType<typeof createMockEngine>;
-      request: () => Promise<Response>;
+      request: () => Response | Promise<Response>;
     }[] = [
       {
         title: "GET /:handle/value",
@@ -1266,7 +1290,7 @@ describe("engine-level policy enforcement wiring (thesis §4.6)", () => {
   const configCallerCases: {
     title: string;
     engineFn: keyof typeof engine;
-    request: () => Promise<Response>;
+    request: () => Response | Promise<Response>;
     args: unknown[];
   }[] = [
     {

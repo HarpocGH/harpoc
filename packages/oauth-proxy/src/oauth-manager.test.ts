@@ -510,7 +510,10 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
     const redirectUri = new URL(new URL(start.authUrl).searchParams.get("redirect_uri") as string);
 
     expect(manager.cancelFlow(start.secretId)).toBe(true);
-    await expect(start.completion).rejects.toBeDefined();
+    await expect(start.completion).rejects.toMatchObject({
+      code: ErrorCode.OAUTH_FLOW_FAILED,
+      message: "OAuth flow failed: Authorization flow aborted",
+    });
     expect(errors).toHaveLength(0);
     expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
 
@@ -540,7 +543,10 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
     const redirectUri = new URL(new URL(start.authUrl).searchParams.get("redirect_uri") as string);
 
     manager.cancelPendingFlows();
-    await expect(start.completion).rejects.toBeDefined();
+    await expect(start.completion).rejects.toMatchObject({
+      code: ErrorCode.OAUTH_FLOW_FAILED,
+      message: "OAuth flow failed: Authorization flow aborted",
+    });
     expect(errors).toHaveLength(0);
     expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
 
@@ -587,12 +593,14 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
   it("a throwing onBackgroundFlowError does not become an unhandled rejection", async () => {
     const fake = makeFakeEngine();
     const unhandled = vi.fn();
+    let onBackgroundFlowErrorCalls = 0;
     process.once("unhandledRejection", unhandled);
     try {
       const manager = fakeEngineManager(fake, {
         callbackPort: 0,
         callbackTimeoutMs: 100,
         onBackgroundFlowError: () => {
+          onBackgroundFlowErrorCalls++;
           throw new Error("embedder bug");
         },
       });
@@ -607,6 +615,7 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
       });
       // Node emits unhandledRejection a turn after the microtask queue drains.
       await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(onBackgroundFlowErrorCalls).toBe(1);
       expect(unhandled).not.toHaveBeenCalled();
     } finally {
       process.off("unhandledRejection", unhandled);

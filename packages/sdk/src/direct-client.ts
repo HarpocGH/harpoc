@@ -64,6 +64,8 @@ export interface DirectClientOptions {
 export class DirectClient implements VaultClient {
   private oauthManagerInstance?: OAuthManagerT;
   private certManagerInstance?: CertManagerT;
+  private oauthManagerLoad?: Promise<OAuthManagerT>;
+  private certManagerLoad?: Promise<CertManagerT>;
   private readonly onBackgroundFlowError?: (secretId: string, err: unknown) => void;
 
   constructor(
@@ -276,32 +278,60 @@ export class DirectClient implements VaultClient {
     return this.engine.getCertificateStatus(secretId);
   }
 
+  /**
+   * Memoizes the in-flight load, not just its result: two un-awaited first
+   * calls both pass an `if (!instance)` check before either constructs, so the
+   * plain-field form built two managers and left `close()` cancelling only the
+   * last one written — the other's callback listener pinned the event loop for
+   * the whole callback timeout. A rejected load clears the memo (identity-
+   * guarded) so a missing optional peer stays retryable.
+   */
   private async loadOAuthManager(): Promise<OAuthManagerT> {
-    if (!this.oauthManagerInstance) {
-      const { OAuthManager } = await import("@harpoc/oauth-proxy");
-      this.oauthManagerInstance = new OAuthManager(this.engine, {
-        // The SDK never runs the browser leg: the embedder follows auth_url.
-        openBrowser: async () => {},
-        // Ephemeral per flow, so concurrent or resumed flows cannot
-        // EADDRINUSE-collide; the bound port is what the redirect URI carries.
-        callbackPort: 0,
-        onBackgroundFlowError:
-          this.onBackgroundFlowError ??
-          ((secretId, err): void => {
-            process.stderr.write(
-              `[harpoc] OAuth background flow failed (${secretId}): ${err instanceof Error ? err.message : String(err)}\n`,
-            );
-          }),
-      });
+    if (this.oauthManagerInstance) return this.oauthManagerInstance;
+    const attempt = (this.oauthManagerLoad ??= this.buildOAuthManager());
+    try {
+      return await attempt;
+    } catch (err) {
+      if (this.oauthManagerLoad === attempt) this.oauthManagerLoad = undefined;
+      throw err;
     }
-    return this.oauthManagerInstance;
+  }
+
+  private async buildOAuthManager(): Promise<OAuthManagerT> {
+    const { OAuthManager } = await import("@harpoc/oauth-proxy");
+    const manager = new OAuthManager(this.engine, {
+      // The SDK never runs the browser leg: the embedder follows auth_url.
+      openBrowser: async () => {},
+      // Ephemeral per flow, so concurrent or resumed flows cannot
+      // EADDRINUSE-collide; the bound port is what the redirect URI carries.
+      callbackPort: 0,
+      onBackgroundFlowError:
+        this.onBackgroundFlowError ??
+        ((secretId, err): void => {
+          process.stderr.write(
+            `[harpoc] OAuth background flow failed (${secretId}): ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }),
+    });
+    this.oauthManagerInstance = manager;
+    return manager;
   }
 
   private async loadCertManager(): Promise<CertManagerT> {
-    if (!this.certManagerInstance) {
-      const { CertManager } = await import("@harpoc/cert-manager");
-      this.certManagerInstance = new CertManager(this.engine);
+    if (this.certManagerInstance) return this.certManagerInstance;
+    const attempt = (this.certManagerLoad ??= this.buildCertManager());
+    try {
+      return await attempt;
+    } catch (err) {
+      if (this.certManagerLoad === attempt) this.certManagerLoad = undefined;
+      throw err;
     }
-    return this.certManagerInstance;
+  }
+
+  private async buildCertManager(): Promise<CertManagerT> {
+    const { CertManager } = await import("@harpoc/cert-manager");
+    const manager = new CertManager(this.engine);
+    this.certManagerInstance = manager;
+    return manager;
   }
 }

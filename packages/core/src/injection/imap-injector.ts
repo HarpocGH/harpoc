@@ -1,5 +1,5 @@
-import type { ImapAction, InjectionPolicy } from "@harpoc/shared";
-import { DEFAULT_HTTP_TIMEOUT_MS, DEFAULT_IMAP_PORT, VaultError } from "@harpoc/shared";
+import type { ImapAction, ImapResult, InjectionPolicy } from "@harpoc/shared";
+import { ActionType, DEFAULT_HTTP_TIMEOUT_MS, DEFAULT_IMAP_PORT, VaultError } from "@harpoc/shared";
 import { matchesHostPortAllowlist } from "./allowlist.js";
 import type {
   ImapAuth,
@@ -31,8 +31,13 @@ export interface ImapOAuth {
   username: string;
 }
 
-/** The wire result of an IMAP operation, shaped per operation kind (spec §4.7). */
-export type ImapResult = { uids: number[] } | { messages: ImapMessage[] } | { affected: number };
+/**
+ * The operation-shaped half of an {@link ImapResult}: `search` fills `uids`,
+ * `fetch` fills `messages`, the mutating kinds fill `affected` — exactly one
+ * per operation. The injector wraps it with the `type`/`operation`
+ * discriminants to form the wire result.
+ */
+type ImapOperationFields = Omit<ImapResult, "type" | "operation">;
 
 /**
  * Metadata-only audit projection of an IMAP operation. Names the origin, the
@@ -89,17 +94,23 @@ const MUTATION_KINDS = new Set<ImapAction["operation"]["kind"]>([
 
 /** The number of UIDs/messages a result actually touched — used for both the
  * audit projection and (indirectly) test assertions on operation shape. */
-function resultUidCount(result: ImapResult): number {
-  if ("uids" in result) return result.uids.length;
-  if ("messages" in result) return result.messages.length;
-  return result.affected;
+function resultUidCount(result: ImapOperationFields): number {
+  if (result.uids !== undefined) return result.uids.length;
+  if (result.messages !== undefined) return result.messages.length;
+  return result.affected ?? 0;
 }
 
 /**
  * Builds the metadata-only audit projection for an IMAP operation. Pure — the
  * engine (Task 12) or the injector itself calls it once the result is known.
+ * Takes only the operation-shaped half, so the engine's zeroed refusal
+ * projections (`{ affected: 0 }`) need no discriminants to describe an attempt
+ * that produced no result at all.
  */
-export function buildImapAuditDetails(action: ImapAction, result: ImapResult): ImapAuditDetails {
+export function buildImapAuditDetails(
+  action: ImapAction,
+  result: ImapOperationFields,
+): ImapAuditDetails {
   return {
     host: action.host,
     mailbox: action.mailbox,
@@ -206,12 +217,13 @@ export class ImapInjector {
       await client.select(action.mailbox, readOnly);
 
       // 7. Dispatch the single operation (sequential — one command in flight
-      //    per connection).
-      const result = await this.runOperation(client, action.operation, material);
+      //    per connection), then wrap its operation-shaped fields in the wire
+      //    discriminants.
+      const fields = await this.runOperation(client, action.operation, material);
 
       return {
-        result,
-        auditDetails: buildImapAuditDetails(action, result),
+        result: { type: ActionType.IMAP, operation: kind, ...fields },
+        auditDetails: buildImapAuditDetails(action, fields),
       };
     } finally {
       try {
@@ -226,7 +238,7 @@ export class ImapInjector {
     client: ImapClientLike,
     operation: ImapAction["operation"],
     material: string[],
-  ): Promise<ImapResult> {
+  ): Promise<ImapOperationFields> {
     switch (operation.kind) {
       case "search": {
         const criteria: ImapSearchCriteria = {

@@ -1,7 +1,8 @@
 import { readFile as nodeReadFile, stat as nodeStat } from "node:fs/promises";
 import { basename } from "node:path";
-import type { InjectionPolicy, SmtpAction } from "@harpoc/shared";
+import type { InjectionPolicy, SmtpAction, SmtpResult } from "@harpoc/shared";
 import {
+  ActionType,
   DEFAULT_HTTP_TIMEOUT_MS,
   DEFAULT_SMTP_STARTTLS_PORT,
   DEFAULT_SMTP_TLS_PORT,
@@ -34,12 +35,6 @@ export interface MailTlsConfig {
 export interface SmtpOAuth {
   accessToken: string;
   username: string;
-}
-
-/** The wire result of an SMTP send. */
-export interface SmtpResult {
-  accepted: number;
-  message_id: string;
 }
 
 /**
@@ -261,7 +256,7 @@ export class SmtpInjector {
     });
 
     return {
-      result: { accepted, message_id: assembled.messageId },
+      result: { type: ActionType.SMTP, accepted, message_id: assembled.messageId },
       auditDetails: buildSmtpAuditDetails(action, resolved),
     };
   }

@@ -889,6 +889,66 @@ describe("DirectClient", () => {
         client.close();
       }
     });
+
+    // RED before the promise memoization: each un-awaited first call passed the
+    // `if (!instance)` check, so two managers were built and the field kept the
+    // second — close() then cancelled a manager the first caller never had.
+    it("two concurrent first calls share one manager, and close() cancels that one", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+      const load = client as never as {
+        loadOAuthManager(): Promise<{ cancelPendingFlows: () => void }>;
+      };
+
+      try {
+        const [first, second] = await Promise.all([
+          load.loadOAuthManager(),
+          load.loadOAuthManager(),
+        ]);
+        expect(first).toBe(second);
+
+        const cancelled: unknown[] = [];
+        const original = first.cancelPendingFlows.bind(first);
+        first.cancelPendingFlows = (): void => {
+          cancelled.push(first);
+          original();
+        };
+
+        client.close();
+        expect(cancelled).toEqual([first]);
+      } finally {
+        client.close();
+      }
+    });
+
+    it("two concurrent first calls share one CertManager", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+      const load = client as never as { loadCertManager(): Promise<unknown> };
+
+      const [first, second] = await Promise.all([load.loadCertManager(), load.loadCertManager()]);
+      expect(first).toBe(second);
+    });
+
+    it("a failed load does not stick — the next call retries", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+      const build = vi
+        .spyOn(
+          client as never as { buildOAuthManager: () => Promise<unknown> },
+          "buildOAuthManager",
+        )
+        .mockRejectedValueOnce(new Error("optional peer not installed"));
+      const load = client as never as { loadOAuthManager(): Promise<unknown> };
+
+      await expect(load.loadOAuthManager()).rejects.toThrow("optional peer not installed");
+      build.mockRestore();
+      try {
+        await expect(load.loadOAuthManager()).resolves.toBeDefined();
+      } finally {
+        client.close();
+      }
+    });
   });
 
   describe("error propagation", () => {

@@ -873,6 +873,17 @@ export class VaultEngine {
     // the MCP stdio arm gives, and network keeps precedence over fs there too.
     this.assertDockerIsolationAllowed(s, action, policy, secret.id, caller);
 
+    // IMAP × (mail TLS opt-out | OAuth secret) — the same pre-dispatch,
+    // pre-credential placement, for the same reason: both are architectural
+    // refusals that no credential can satisfy, so producing the credential
+    // first is pure exposure. An OAuth-typed secret would otherwise run a live
+    // token refresh (a refresh_token POST plus a persisted rotation) for a use
+    // that is refused a few lines later, and a `tls: false` secret would be
+    // decrypted for it. The loaded connection config is handed back so the
+    // imap arm reads it once; every other action type returns without touching
+    // the config store.
+    const imapConnection = this.assertImapUsageAllowed(s, action, secret, attribution);
+
     let value: Uint8Array;
     try {
       if (secret.type === SecretType.OAUTH_TOKEN) {
@@ -1085,15 +1096,14 @@ export class VaultEngine {
             true,
             attribution,
           );
-          return {
-            type: "smtp",
-            accepted: execution.result.accepted,
-            message_id: execution.result.message_id,
-          };
+          return execution.result;
         }
 
         case "imap": {
-          const mail = this.loadConnectionConfig(s, secret.id)?.mail;
+          // Loaded once by `assertImapUsageAllowed` above, which needed it for
+          // the TLS refusal — re-reading it here would decrypt the same row a
+          // second time.
+          const mail = imapConnection?.mail;
 
           // A failed row's details describe the attempt with the
           // result-derived counter at zero: `uid_count` is "what was touched"
@@ -1103,37 +1113,6 @@ export class VaultEngine {
             ...buildImapAuditDetails(action, { affected: 0 }),
           };
 
-          // Ruling 3: the IMAP client is implicit-TLS-only (design §4.2), so a
-          // mail TLS opt-out cannot be honored on this leg. Refused before any
-          // socket rather than silently ignored — a silent no-op would leave
-          // the admin believing an opt-out is live, with no trail.
-          if (mail?.tls === false) {
-            const err = VaultError.invalidInput(
-              "IMAP is implicit-TLS-only: the mail connection config's TLS opt-out (tls: false) " +
-                "cannot be honored for imap actions. Remove the mail TLS opt-out from this " +
-                "secret's connection config, or split the plaintext SMTP leg and the IMAP leg " +
-                "onto two secrets.",
-            );
-            this.auditUse(s, secret.id, { ...failedDetail, error: err.code }, false, attribution);
-            throw err;
-          }
-
-          // XOAUTH2 needs the mailbox account name. The SMTP context reads it
-          // off the envelope sender; no `imap` action field carries one and the
-          // OAuth row stores no account identity, so the access token has no
-          // user to bind to. Refused rather than falling through to the
-          // password arm, which would put the access token on the wire as an
-          // IMAP password.
-          if (secret.type === SecretType.OAUTH_TOKEN) {
-            const err = VaultError.invalidInput(
-              "an OAuth-type secret cannot authenticate an imap action: XOAUTH2 needs the " +
-                "mailbox account name and no imap action field carries one. Use a secret whose " +
-                "value is 'username:password' for the IMAP leg.",
-            );
-            this.auditUse(s, secret.id, { ...failedDetail, error: err.code }, false, attribution);
-            throw err;
-          }
-
           let execution;
           try {
             execution = await s.imapInjector.run(
@@ -1141,7 +1120,8 @@ export class VaultEngine {
               Buffer.from(value).toString("utf8"),
               policy,
               mail,
-              // The OAuth arm is refused above, so this leg is always the
+              // The OAuth arm is refused by `assertImapUsageAllowed` before
+              // the value block, so this leg is always the
               // `username:password` arm.
               undefined,
             );
@@ -1164,7 +1144,7 @@ export class VaultEngine {
             true,
             attribution,
           );
-          return { type: "imap", operation: action.operation.kind, ...execution.result };
+          return execution.result;
         }
 
         case "websocket": {
@@ -1198,7 +1178,7 @@ export class VaultEngine {
             true,
             attribution,
           );
-          return { type: "websocket", messages: result.messages, close_code: result.close_code };
+          return result;
         }
 
         case "sftp": {
@@ -1315,6 +1295,85 @@ export class VaultEngine {
       caller,
     );
     throw err;
+  }
+
+  /**
+   * Refuse an `imap` action the vault can never serve, and hand the imap arm
+   * the connection config it loaded on the way. Two refusals, in this order:
+   *
+   * - Ruling 3: the IMAP client is implicit-TLS-only (design §4.2), so a mail
+   *   `tls: false` opt-out cannot be honored on this leg.
+   * - Ruling 4: XOAUTH2 needs the mailbox account name, which no `imap` action
+   *   field carries and the OAuth row does not store.
+   *
+   * Both are architectural — no credential can satisfy either — so, like
+   * `assertDockerIsolationAllowed`, they belong before the value block rather
+   * than inside the dispatch arm. That placement is the point: producing the
+   * credential first would run a live token refresh (a refresh_token POST plus
+   * a persisted rotation and its `oauth.refresh` row) for the OAuth case, and
+   * decrypt the value for the TLS case, both for a use that is then refused.
+   *
+   * Deliberate consequence, shared with the docker guard: a secret that is
+   * expired but not yet lazily transitioned now refuses INVALID_INPUT here
+   * instead of reaching `assertUsable`'s expiry transition and the
+   * `mcpRegistry.terminate` backstop. The refusal is architectural and
+   * status-independent — an expired secret was never going to be usable on
+   * this leg either — and the next non-imap use still transitions it.
+   *
+   * Unlike the docker guard this audits through `auditUse`, not `auditDenied`:
+   * the failed-row shape (`context: "imap"` plus the zeroed
+   * `buildImapAuditDetails` projection) is the mail contexts' own, and moving
+   * the refusal must not change what an operator reads off the trail.
+   */
+  private assertImapUsageAllowed(
+    s: UnlockedState,
+    action: UseSecretAction,
+    secret: Secret,
+    attribution: AuditAttribution | undefined,
+  ): ConnectionConfig | undefined {
+    if (action.type !== "imap") return undefined;
+
+    const connection = this.loadConnectionConfig(s, secret.id);
+    const mail = connection?.mail;
+
+    // A failed row's details describe the attempt with the result-derived
+    // counter at zero: `uid_count` is "what was touched" (Task 8's decided
+    // semantic), and a refusal touched nothing.
+    const failedDetail = {
+      context: "imap",
+      ...buildImapAuditDetails(action, { affected: 0 }),
+    };
+
+    // Ruling 3: refused before any socket rather than silently ignored — a
+    // silent no-op would leave the admin believing an opt-out is live, with no
+    // trail.
+    if (mail?.tls === false) {
+      const err = VaultError.invalidInput(
+        "IMAP is implicit-TLS-only: the mail connection config's TLS opt-out (tls: false) " +
+          "cannot be honored for imap actions. Remove the mail TLS opt-out from this " +
+          "secret's connection config, or split the plaintext SMTP leg and the IMAP leg " +
+          "onto two secrets.",
+      );
+      this.auditUse(s, secret.id, { ...failedDetail, error: err.code }, false, attribution);
+      throw err;
+    }
+
+    // Ruling 4: the SMTP context reads the account name off the envelope
+    // sender; no `imap` action field carries one and the OAuth row stores no
+    // account identity, so the access token has no user to bind to. Refused
+    // rather than falling through to the password arm, which would put the
+    // access token on the wire as an IMAP password.
+    if (secret.type === SecretType.OAUTH_TOKEN) {
+      const err = VaultError.invalidInput(
+        "an OAuth-type secret cannot authenticate an imap action: XOAUTH2 needs the " +
+          "mailbox account name and no imap action field carries one. Use a secret whose " +
+          "value is 'username:password' for the IMAP leg.",
+      );
+      this.auditUse(s, secret.id, { ...failedDetail, error: err.code }, false, attribution);
+      throw err;
+    }
+
+    return connection;
   }
 
   /**

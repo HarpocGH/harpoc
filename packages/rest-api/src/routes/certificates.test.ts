@@ -109,7 +109,7 @@ beforeEach(() => {
 const AUTH = { authorization: "Bearer valid-jwt" };
 const JSON_HEADERS = { ...AUTH, "content-type": "application/json" };
 
-function post(path: string, body: unknown): Promise<Response> {
+function post(path: string, body: unknown): Response | Promise<Response> {
   return app.request(path, {
     method: "POST",
     headers: JSON_HEADERS,

@@ -227,7 +227,8 @@ describe("MCP Resources", () => {
         secret_count: number;
       }>;
       expect(data).toHaveLength(1);
-      expect(data[0].project).toBe("prod");
+      expect(data[0]).toBeDefined();
+      expect(data[0]?.project).toBe("prod");
     });
 
     // L10: the audit resource enforced the permission dimension alone, so a

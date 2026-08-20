@@ -1,5 +1,11 @@
-import type { InjectionPolicy, ResponseMode, WebsocketAction } from "@harpoc/shared";
+import type {
+  InjectionPolicy,
+  ResponseMode,
+  WebsocketAction,
+  WebsocketResult,
+} from "@harpoc/shared";
 import {
+  ActionType,
   DEFAULT_HTTP_TIMEOUT_MS,
   DEFAULT_WS_COLLECT_WINDOW_MS,
   ResponseMode as ResponseModeValue,
@@ -12,12 +18,10 @@ import { redactErrorMessage, redactSecretEncodings } from "./output-sanitizer.js
 import { isResponseModeAllowed } from "./response-mode.js";
 import { WS_SCHEMES, validateUrl } from "./url-validator.js";
 
-/** The wire result of a WebSocket exchange: the frames collected (shaped by
- * `response_mode`) and the close code the connection actually closed with. */
-export interface WsResult {
-  messages: string[];
-  close_code: number | null;
-}
+/** The frame-shaped half of a {@link WebsocketResult}: the frames collected
+ * (shaped by `response_mode`) and the close code the connection actually
+ * closed with, without the wire discriminant. */
+type WebsocketFrames = Omit<WebsocketResult, "type">;
 
 /** Metadata-only audit projection of a WebSocket exchange — never a frame's
  * content or the credential. `sent` is 1 when `action.message` was sent, 0
@@ -34,7 +38,10 @@ export interface WsAuditDetails {
  * Builds the metadata-only audit projection for a WebSocket exchange. Pure —
  * the engine (Task 12) calls it once the result is known.
  */
-export function buildWsAuditDetails(action: WebsocketAction, result: WsResult): WsAuditDetails {
+export function buildWsAuditDetails(
+  action: WebsocketAction,
+  result: WebsocketFrames,
+): WsAuditDetails {
   return {
     url: action.url,
     sent: action.message !== undefined ? 1 : 0,
@@ -184,7 +191,7 @@ async function dialAndCollect(
   action: WebsocketAction,
   responseMode: ResponseMode,
   valueStr: string,
-): Promise<WsResult> {
+): Promise<WebsocketResult> {
   const ws = new WebSocket(finalUrl, {
     dispatcher,
     headers,
@@ -228,7 +235,11 @@ async function dialAndCollect(
     // handshake must not hang the exchange forever (see waitWithTimeout).
     await waitWithTimeout(closedPromise, timeoutMs);
 
-    return { messages: shapeMessages(rawMessages, responseMode, valueStr), close_code: closeCode };
+    return {
+      type: ActionType.WEBSOCKET,
+      messages: shapeMessages(rawMessages, responseMode, valueStr),
+      close_code: closeCode,
+    };
   } finally {
     if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
       ws.close();
@@ -261,7 +272,7 @@ export async function executeWebsocketAction(
   action: WebsocketAction,
   secretValue: Uint8Array,
   policy: InjectionPolicy,
-): Promise<WsResult> {
+): Promise<WebsocketResult> {
   const responseMode = resolveResponseMode(action, policy);
   const valueStr = Buffer.from(secretValue).toString("utf8");
 

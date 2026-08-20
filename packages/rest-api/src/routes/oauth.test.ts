@@ -105,7 +105,7 @@ beforeEach(() => {
 const AUTH = { authorization: "Bearer valid-jwt" };
 const JSON_HEADERS = { ...AUTH, "content-type": "application/json" };
 
-function authorize(body: unknown): Promise<Response> {
+function authorize(body: unknown): Response | Promise<Response> {
   return app.request("/api/v1/oauth/authorize", {
     method: "POST",
     headers: JSON_HEADERS,

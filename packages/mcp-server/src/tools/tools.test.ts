@@ -668,7 +668,7 @@ describe("MCP Tools", () => {
       const token = {
         sub: "test",
         vault_id: "v",
-        scope: ["list"] as const,
+        scope: ["list"] as "list"[],
         secrets: ["db-*"],
         iat: 0,
         exp: 9999999999,
@@ -690,7 +690,7 @@ describe("MCP Tools", () => {
       const token = {
         sub: "test",
         vault_id: "v",
-        scope: ["list"] as const,
+        scope: ["list"] as "list"[],
         project: "prod",
         iat: 0,
         exp: 9999999999,
@@ -770,7 +770,7 @@ describe("MCP Tools", () => {
       const token = {
         sub: "test",
         vault_id: "v",
-        scope: ["list"] as const,
+        scope: ["list"] as "list"[],
         iat: 0,
         exp: 9999999999,
         jti: "j",
@@ -801,7 +801,7 @@ describe("MCP Tools", () => {
       const token = {
         sub: "test",
         vault_id: "v",
-        scope: ["list"] as const,
+        scope: ["list"] as "list"[],
         project: "prod",
         iat: 0,
         exp: 9999999999,
@@ -832,7 +832,7 @@ describe("MCP Tools", () => {
       const token = {
         sub: "test",
         vault_id: "v",
-        scope: ["list"] as const,
+        scope: ["list"] as "list"[],
         secrets: ["db-*"],
         iat: 0,
         exp: 9999999999,
@@ -863,7 +863,7 @@ describe("MCP Tools", () => {
       const token = {
         sub: "test",
         vault_id: "v",
-        scope: ["list"] as const,
+        scope: ["list"] as "list"[],
         project: "prod",
         iat: 0,
         exp: 9999999999,
@@ -907,7 +907,7 @@ describe("MCP Tools", () => {
       const token = {
         sub: "test",
         vault_id: "v",
-        scope: ["list"] as const,
+        scope: ["list"] as "list"[],
         iat: 0,
         exp: 9999999999,
         jti: "j",
@@ -925,7 +925,7 @@ describe("MCP Tools", () => {
       const token = {
         sub: "test",
         vault_id: "v",
-        scope: ["create"] as const,
+        scope: ["create"] as "create"[],
         secrets: ["api-*"],
         iat: 0,
         exp: 9999999999,
@@ -956,7 +956,7 @@ describe("MCP Tools", () => {
       const token = {
         sub: "test",
         vault_id: "v",
-        scope: ["create"] as const,
+        scope: ["create"] as "create"[],
         project: "prod",
         iat: 0,
         exp: 9999999999,

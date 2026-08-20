@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ImapAction, InjectionPolicy, InjectionPolicyInput } from "@harpoc/shared";
+import type { ImapAction, ImapResult, InjectionPolicy, InjectionPolicyInput } from "@harpoc/shared";
 import { ActionType, ErrorCode, VaultError, injectionPolicyInputSchema } from "@harpoc/shared";
 import type { ImapConnectOptions, ImapMessage } from "./mail/imap-client.js";
 import type { ImapClientLike, ImapInjectorDeps, ImapOAuth } from "./imap-injector.js";
@@ -114,7 +114,7 @@ describe("ImapInjector — imap_read_only mutation gate (fires before any socket
       undefined,
       undefined,
     );
-    expect(result).toEqual({ affected: 0 });
+    expect(result).toEqual({ type: "imap", operation: "expunge", affected: 0 });
   });
 });
 
@@ -374,7 +374,7 @@ describe("ImapInjector — operation dispatch shapes", () => {
       undefined,
       undefined,
     );
-    expect(result).toEqual({ uids: [4, 5] });
+    expect(result).toEqual({ type: "imap", operation: "search", uids: [4, 5] });
   });
 
   it("fetch returns { messages }", async () => {
@@ -389,7 +389,7 @@ describe("ImapInjector — operation dispatch shapes", () => {
       undefined,
       undefined,
     );
-    expect(result).toEqual({ messages });
+    expect(result).toEqual({ type: "imap", operation: "fetch", messages });
   });
 
   it("store/move/copy/expunge return { affected }", async () => {
@@ -404,7 +404,7 @@ describe("ImapInjector — operation dispatch shapes", () => {
       undefined,
       undefined,
     );
-    expect(store.result).toEqual({ affected: 2 });
+    expect(store.result).toEqual({ type: "imap", operation: "store", affected: 2 });
 
     const move = await injector.run(
       baseAction({ operation: { kind: "move", uids: [1], target_mailbox: "Archive" } }),
@@ -413,7 +413,7 @@ describe("ImapInjector — operation dispatch shapes", () => {
       undefined,
       undefined,
     );
-    expect(move.result).toEqual({ affected: 1 });
+    expect(move.result).toEqual({ type: "imap", operation: "move", affected: 1 });
 
     const copy = await injector.run(
       baseAction({ operation: { kind: "copy", uids: [1, 2, 3], target_mailbox: "Archive" } }),
@@ -422,7 +422,7 @@ describe("ImapInjector — operation dispatch shapes", () => {
       undefined,
       undefined,
     );
-    expect(copy.result).toEqual({ affected: 3 });
+    expect(copy.result).toEqual({ type: "imap", operation: "copy", affected: 3 });
 
     const expunge = await injector.run(
       baseAction({ operation: { kind: "expunge" } }),
@@ -431,7 +431,7 @@ describe("ImapInjector — operation dispatch shapes", () => {
       undefined,
       undefined,
     );
-    expect(expunge.result).toEqual({ affected: 0 });
+    expect(expunge.result).toEqual({ type: "imap", operation: "expunge", affected: 0 });
   });
 });
 
@@ -482,7 +482,11 @@ describe("executeImapAction (free function, default deps)", () => {
     ).rejects.toMatchObject({ code: ErrorCode.IMAP_MUTATION_NOT_ALLOWED });
   });
 
-  it("is typed to return an ImapResult", () => {
+  it("pins the shared ImapResult wire shape (compile-time)", () => {
+    // Compile-time pin against the shared import: the injector's exported
+    // result type is shared's, never a local shadow.
+    const result = { type: "imap", operation: "search", uids: [1, 2] } satisfies ImapResult;
+    expect(result.operation).toBe("search");
     expect(typeof executeImapAction).toBe("function");
   });
 });

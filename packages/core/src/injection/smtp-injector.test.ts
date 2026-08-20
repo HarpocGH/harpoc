@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { InjectionPolicy, InjectionPolicyInput, SmtpAction } from "@harpoc/shared";
+import type { InjectionPolicy, InjectionPolicyInput, SmtpAction, SmtpResult } from "@harpoc/shared";
 import {
   ActionType,
   ErrorCode,
@@ -451,9 +451,13 @@ describe("executeSmtpAction (free function, default deps)", () => {
     ).rejects.toMatchObject({ code: ErrorCode.ATTACHMENT_POLICY_REQUIRED });
   });
 
-  it("is typed to return an SmtpResult", () => {
+  it("pins the shared SmtpResult wire shape (compile-time)", () => {
     const oauth: SmtpOAuth | undefined = undefined;
     expect(oauth).toBeUndefined();
+    // Compile-time pin against the shared import: the injector's exported
+    // result type is shared's, never a local shadow.
+    const result = { type: "smtp", accepted: 1, message_id: "x" } satisfies SmtpResult;
+    expect(result.accepted).toBe(1);
     expect(typeof executeSmtpAction).toBe("function");
   });
 });
