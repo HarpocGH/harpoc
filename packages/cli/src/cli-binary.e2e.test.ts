@@ -61,6 +61,19 @@ function runCli(args: string[], options?: { stdin?: string }): Promise<CliResult
   });
 }
 
+async function registerAgents(...names: string[]): Promise<void> {
+  for (const name of names) {
+    const result = await runCli(["agent", "register", name]);
+    // Idempotent: a re-run against a surviving vault directory finds the agent
+    // already registered, which is not a failure of the smoke.
+    if (result.code !== 0 && !result.stderr.includes("AGENT_EXISTS")) {
+      throw new Error(
+        `harpoc agent register ${name} failed (exit ${String(result.code)}): ${result.stderr}`,
+      );
+    }
+  }
+}
+
 beforeAll(async () => {
   expect(existsSync(CLI_PATH)).toBe(true);
 
@@ -85,6 +98,10 @@ beforeAll(async () => {
   if (init.code !== 0) {
     throw new Error(`harpoc init failed (exit ${String(init.code)}): ${init.stderr}`);
   }
+
+  // The v1.4 registration gate refuses an unregistered agent-typed subject, and
+  // `auth token` defaults to the agent-typed subject "cli-user".
+  await registerAgents("cli-user", "demo-agent");
 }, 60_000);
 
 afterAll(() => {

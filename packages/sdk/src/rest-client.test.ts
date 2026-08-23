@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
-import type { OAuthTokenStatus } from "@harpoc/shared";
+import type { OAuthTokenStatus, SetAgentPermissionsInput } from "@harpoc/shared";
 import { RestClient } from "./rest-client.js";
 
 const BASE_URL = "http://localhost:3000";
@@ -354,6 +354,190 @@ describe("RestClient", () => {
 
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];
       expect(call[0]).toBe(`${BASE_URL}/api/v1/audit`);
+    });
+
+    it("forwards success, principalType and principalId", async () => {
+      mockFetchResponse([]);
+      await client.queryAudit({ success: false, principalType: "agent", principalId: "x" });
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(
+        `${BASE_URL}/api/v1/audit?success=false&principal_type=agent&principal_id=x`,
+      );
+    });
+
+    it("sends no principal_id param for an empty-string principalId (server rejects empty)", async () => {
+      mockFetchResponse([]);
+      await client.queryAudit({ principalId: "" });
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/audit`);
+    });
+  });
+
+  describe("agent governance", () => {
+    it("registerAgent sends POST /api/v1/agents", async () => {
+      mockFetchResponse({ id: "agent-1", name: "deploy-bot" }, 201);
+      const input = { name: "deploy-bot", description: "d" };
+      await client.registerAgent(input);
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/agents`);
+      expect(call[1].method).toBe("POST");
+      expect(JSON.parse(call[1].body as string)).toEqual(input);
+    });
+
+    it("listAgents sends GET /api/v1/agents without params when status omitted", async () => {
+      mockFetchResponse([]);
+      await client.listAgents();
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/agents`);
+      expect(call[1].method).toBe("GET");
+    });
+
+    it("listAgents sends GET /api/v1/agents?status=", async () => {
+      mockFetchResponse([]);
+      await client.listAgents("all");
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/agents?status=all`);
+    });
+
+    it("getAgent sends GET /api/v1/agents/:name", async () => {
+      mockFetchResponse({ id: "agent-1", name: "deploy-bot" });
+      await client.getAgent("deploy-bot");
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/agents/deploy-bot`);
+      expect(call[1].method).toBe("GET");
+    });
+
+    it("getAgent encodeURIComponent's the name", async () => {
+      mockFetchResponse({ id: "agent-1", name: "a b" });
+      await client.getAgent("a b");
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/agents/${encodeURIComponent("a b")}`);
+    });
+
+    it("updateAgent sends PUT /api/v1/agents/:name with the body", async () => {
+      mockFetchResponse({ id: "agent-1", name: "deploy-bot", description: "updated" });
+      const input = { description: "updated" };
+      await client.updateAgent("deploy-bot", input);
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/agents/deploy-bot`);
+      expect(call[1].method).toBe("PUT");
+      expect(JSON.parse(call[1].body as string)).toEqual(input);
+    });
+
+    it("deactivateAgent sends a bodyless POST", async () => {
+      mockFetchResponse({ revoked_tokens: 2 });
+      const result = await client.deactivateAgent("deploy-bot");
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/agents/deploy-bot/deactivate`);
+      expect(call[1].method).toBe("POST");
+      expect(call[1].body).toBeUndefined();
+      expect(result).toEqual({ revoked_tokens: 2 });
+    });
+
+    it("activateAgent sends a bodyless POST", async () => {
+      mockFetchResponse({ id: "agent-1", name: "deploy-bot" });
+      await client.activateAgent("deploy-bot");
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/agents/deploy-bot/activate`);
+      expect(call[1].method).toBe("POST");
+      expect(call[1].body).toBeUndefined();
+    });
+
+    it("deleteAgent sends DELETE /api/v1/agents/:name", async () => {
+      mockFetchResponse({ revoked_tokens: 1, removed_grants: 3 });
+      const result = await client.deleteAgent("deploy-bot");
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/agents/deploy-bot`);
+      expect(call[1].method).toBe("DELETE");
+      expect(result).toEqual({ revoked_tokens: 1, removed_grants: 3 });
+    });
+
+    it("listAgentPolicies sends GET /api/v1/agents/:name/policies", async () => {
+      mockFetchResponse([]);
+      await client.listAgentPolicies("deploy-bot");
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/agents/deploy-bot/policies`);
+      expect(call[1].method).toBe("GET");
+    });
+
+    it("setAgentPermissions sends PUT to the encoded handle path with the body", async () => {
+      mockFetchResponse({ policy: null, gated_before: false, gated_after: false });
+      const input: SetAgentPermissionsInput = { permissions: ["read"] };
+      await client.setAgentPermissions("deploy-bot", "secret://proj/key", input);
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(
+        `${BASE_URL}/api/v1/agents/deploy-bot/secrets/${encodeURIComponent("proj/key")}/permissions`,
+      );
+      expect(call[1].method).toBe("PUT");
+      expect(JSON.parse(call[1].body as string)).toEqual(input);
+    });
+
+    it("setAgentPermissions strips the secret:// prefix via encodeHandle", async () => {
+      mockFetchResponse({ policy: null, gated_before: false, gated_after: false });
+      await client.setAgentPermissions("deploy-bot", "secret://key", { permissions: [] });
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/agents/deploy-bot/secrets/key/permissions`);
+    });
+  });
+
+  describe("issued tokens", () => {
+    it("listTokens sends GET /api/v1/tokens without params when omitted", async () => {
+      mockFetchResponse([]);
+      await client.listTokens();
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/tokens`);
+      expect(call[1].method).toBe("GET");
+    });
+
+    it("listTokens encodes the agent and status query params", async () => {
+      mockFetchResponse([]);
+      await client.listTokens({ agent: "a b", status: "all" });
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const url = new URL(call[0]);
+      expect(url.pathname).toBe("/api/v1/tokens");
+      expect(url.searchParams.get("agent")).toBe("a b");
+      expect(url.searchParams.get("status")).toBe("all");
+    });
+
+    it("sends no agent param for an empty-string agent (server rejects empty)", async () => {
+      mockFetchResponse([]);
+      await client.listTokens({ agent: "", status: "all" });
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/tokens?status=all`);
+    });
+
+    it("revokeToken sends DELETE /api/v1/tokens/:jti", async () => {
+      mockFetchResponse({ revoked: true });
+      await client.revokeToken("jti-1");
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/tokens/jti-1`);
+      expect(call[1].method).toBe("DELETE");
+    });
+
+    it("revokeToken encodeURIComponent's the jti", async () => {
+      mockFetchResponse({ revoked: true });
+      await client.revokeToken("a/b");
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/tokens/${encodeURIComponent("a/b")}`);
     });
   });
 

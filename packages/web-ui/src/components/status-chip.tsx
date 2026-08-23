@@ -5,6 +5,7 @@ const TONE: Record<string, string> = {
   expiring: "warn",
   expired: "bad",
   revoked: "bad",
+  inactive: "bad",
   failed: "bad",
 };
 

@@ -49,6 +49,9 @@ function createMockEngine() {
     queryAudit: vi.fn().mockReturnValue([]),
     getOAuthTokenStatus: vi.fn().mockReturnValue({ secret_id: "uuid-1" }),
     getCertificateStatus: vi.fn().mockReturnValue({ secret_id: "uuid-1" }),
+    listAgents: vi.fn().mockReturnValue([]),
+    getAgent: vi.fn().mockReturnValue({ id: "agent-1", name: "x", status: "active" }),
+    listIssuedTokens: vi.fn().mockReturnValue([]),
   };
 }
 
@@ -143,9 +146,11 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
    * through an unrelated route only 429s these two routes next if they still
    * run through `createRateLimitMiddleware`. Guard-flip-verified: deleting
    * the `/api/v1/certificates/*` registration in app.ts turns this red
-   * (200, not 429) and was restored after confirming that.
+   * (200, not 429) and was restored after confirming that; the v1.4
+   * `/api/v1/agents/*` and `/api/v1/tokens/*` registrations were verified the
+   * same way.
    */
-  it("draining the global bucket 429s the OAuth and certificates status routes", async () => {
+  it("draining the global bucket 429s the OAuth, certificates, agents and tokens routes", async () => {
     const instance = app();
 
     expect(await hammer(instance, "/api/v1/secrets", RATE_LIMIT_GLOBAL)).toBe(200);
@@ -157,6 +162,12 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
       headers: AUTH,
     });
     expect(certOverflow.status).toBe(429);
+
+    const agentsOverflow = await instance.request("/api/v1/agents", { headers: AUTH });
+    expect(agentsOverflow.status).toBe(429);
+
+    const tokensOverflow = await instance.request("/api/v1/tokens", { headers: AUTH });
+    expect(tokensOverflow.status).toBe(429);
   });
 
   it("use carries its own, higher tier", async () => {
@@ -206,6 +217,9 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
   it.each([
     ["/api/v1/secrets", "collection"],
     ["/api/v1/secrets/k", "item"],
+    ["/api/v1/agents", "agent collection"],
+    ["/api/v1/agents/x", "agent item"],
+    ["/api/v1/tokens", "token collection"],
   ])("each middleware runs once per request on the %s route (%s)", async (path) => {
     const engine = createMockEngine();
     const instance = createApp(engine as never);

@@ -2,6 +2,9 @@ const LINKS = [
   ["/", "Dashboard"],
   ["/secrets", "Secrets"],
   ["/audit", "Audit"],
+  ["/agents", "Agents"],
+  ["/permissions", "Permissions"],
+  ["/tokens", "Tokens"],
 ] as const;
 
 export function Nav({ route }: { route: string }) {

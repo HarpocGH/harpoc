@@ -7,7 +7,7 @@ import { DirectClient } from "@harpoc/sdk";
 import { SESSION_CLEANUP_INTERVAL_MS, VaultState } from "@harpoc/shared";
 import type { SessionFile } from "@harpoc/shared";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool } from "./helpers/mcp-helpers.js";
 
@@ -26,6 +26,7 @@ describe("Session Expiry", () => {
   beforeAll(async () => {
     vault = createTestVault();
     await vault.engine.initVault(PASSWORD);
+    registerAgents(vault.engine, "test-agent");
     await vault.engine.destroy();
   });
 

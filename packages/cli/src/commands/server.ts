@@ -207,6 +207,7 @@ export function registerServerCommand(program: Command): void {
                 MAX_TOKEN_TTL_MS,
                 {
                   principalType: "user",
+                  label: "web-ui launch",
                 },
               );
               console.error(

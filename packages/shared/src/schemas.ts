@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 import {
+  AGENT_DESCRIPTION_MAX_LENGTH,
+  AGENT_OWNER_MAX_LENGTH,
   DEFAULT_IMAP_PORT,
   DEFAULT_WS_COLLECT_WINDOW_MS,
   MAX_DOCKER_TIMEOUT_MS,
@@ -128,6 +130,9 @@ const namePattern = z
   .string()
   .regex(/^[a-zA-Z0-9_-]+$/, "Invalid name format")
   .max(MAX_NAME_LENGTH);
+
+/** Agent name: same charset/length as other resource names (`namePattern`). */
+export const agentNameSchema = namePattern;
 
 export const createSecretInputSchema = z.object({
   name: namePattern,
@@ -1017,6 +1022,53 @@ export const accessPolicyInputSchema = z.object({
 /** Access-policy grant request body (principal + permissions). */
 export type AccessPolicyInput = z.infer<typeof accessPolicyInputSchema>;
 
+// ---------------------------------------------------------------------------
+// Agent governance schemas (v1.4)
+// ---------------------------------------------------------------------------
+
+export const agentStatusFilterSchema = z.enum(["active", "inactive", "all"]);
+
+export const issuedTokenStatusFilterSchema = z.enum(["active", "expired", "revoked", "all"]);
+
+/** Register-agent request body. */
+export const registerAgentInputSchema = z.object({
+  name: agentNameSchema,
+  description: z.string().max(AGENT_DESCRIPTION_MAX_LENGTH).optional(),
+  owner: z.string().max(AGENT_OWNER_MAX_LENGTH).optional(),
+});
+
+/** Update-agent request body: description/owner only — renaming an agent is not supported. */
+export const updateAgentInputSchema = z.object({
+  description: z.string().max(AGENT_DESCRIPTION_MAX_LENGTH).optional(),
+  owner: z.string().max(AGENT_OWNER_MAX_LENGTH).optional(),
+});
+
+/**
+ * Set-agent-permissions request body: an empty `permissions` array is valid
+ * (it clears the grant — the presence gate: a matrix cell with no permissions
+ * writes nothing); `create` is never grantable per secret and is refused at
+ * the engine, not here.
+ */
+export const setAgentPermissionsInputSchema = z.object({
+  permissions: z.array(permissionSchema),
+  expires_at: z.number().int().positive().optional(),
+});
+
+export const listAgentsQuerySchema = z.object({
+  status: agentStatusFilterSchema.optional(),
+});
+
+export const listTokensQuerySchema = z.object({
+  status: issuedTokenStatusFilterSchema.optional(),
+  agent: agentNameSchema.optional(),
+});
+
+export type RegisterAgentInput = z.infer<typeof registerAgentInputSchema>;
+export type UpdateAgentInput = z.infer<typeof updateAgentInputSchema>;
+export type SetAgentPermissionsInput = z.infer<typeof setAgentPermissionsInputSchema>;
+export type AgentStatusFilter = z.infer<typeof agentStatusFilterSchema>;
+export type IssuedTokenStatusFilter = z.infer<typeof issuedTokenStatusFilterSchema>;
+
 export const auditQuerySchema = z.object({
   secret_id: z.string().uuid().optional(),
   event_type: auditEventTypeSchema.optional(),
@@ -1024,6 +1076,10 @@ export const auditQuerySchema = z.object({
   until: z.number().int().nonnegative().optional(),
   success: z.boolean().optional(),
   limit: z.number().int().positive().max(1000).optional(),
+  /** Filter by the audited principal's type (v1.4 agent-governance audit filters). */
+  principal_type: principalTypeSchema.optional(),
+  /** Filter by the audited principal's id; paired with `principal_type`. */
+  principal_id: z.string().min(1).optional(),
 });
 
 export const healthResponseSchema = z.object({

@@ -5,7 +5,7 @@ import { createApp } from "@harpoc/rest-api";
 import { startMcpHttpServer } from "@harpoc/mcp-server";
 import type { McpHttpServer } from "@harpoc/mcp-server";
 import { AuditEventType, SecretType } from "@harpoc/shared";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 
 const PASSWORD = "audit-attribution-pw";
@@ -36,6 +36,7 @@ describe("credential-access audit attribution end-to-end", () => {
   beforeAll(async () => {
     vault = createTestVault();
     await vault.engine.initVault(PASSWORD);
+    registerAgents(vault.engine, "rest-agent");
     await vault.engine.createSecret({
       name: "attr-key",
       type: SecretType.API_KEY,

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuditEventType, ErrorCode, PrincipalType } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, PrincipalType, VaultError } from "@harpoc/shared";
 import type { CallerContext, OAuthProviderConfig, Permission } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
 
@@ -33,6 +33,20 @@ let tokenEndpointHandler: (req: IncomingMessage, res: ServerResponse) => void;
 // Target HTTP server for useSecret
 let targetServer: Server;
 let targetServerUrl: string;
+
+/**
+ * Register the agent identities this suite mints tokens or grants for — the
+ * v1.4 registration gate refuses an unregistered agent-typed principal.
+ */
+function registerAgents(...names: string[]): void {
+  for (const name of names) {
+    try {
+      engine.registerAgent({ name });
+    } catch (err) {
+      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
+    }
+  }
+}
 
 function defaultProviderConfig(overrides?: Partial<OAuthProviderConfig>): OAuthProviderConfig {
   return {
@@ -920,6 +934,7 @@ describe("OAuth entry points — caller policy enforcement (token-cli-parity)", 
     secretId = result.secretId;
     await engine.completeOAuthFlow(secretId, "old-access", "old-refresh", Date.now() - 1000);
     // Presence-gates the secret: any caller now needs a matching grant.
+    registerAgents("deploy-bot", "auditor");
     engine.grantPolicy(
       {
         secretId,

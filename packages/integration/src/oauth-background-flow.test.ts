@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { OAuthManager } from "@harpoc/oauth-proxy";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
@@ -87,6 +87,7 @@ beforeAll(async () => {
 
   vault = createTestVault();
   await vault.engine.initVault(PASSWORD);
+  registerAgents(vault.engine, PRINCIPAL);
 
   backgroundErrors = [];
   manager = new OAuthManager(vault.engine, {

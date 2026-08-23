@@ -121,6 +121,11 @@ export enum ErrorCode {
   SFTP_OPERATION_FAILED = "SFTP_OPERATION_FAILED",
   DOCKER_OPERATION_FAILED = "DOCKER_OPERATION_FAILED",
 
+  // Agent governance (v1.4)
+  AGENT_NOT_FOUND = "AGENT_NOT_FOUND",
+  AGENT_INACTIVE = "AGENT_INACTIVE",
+  AGENT_EXISTS = "AGENT_EXISTS",
+
   // Rate limiting
   RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED",
 
@@ -251,6 +256,11 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.WEBSOCKET_CONNECT_FAILED]: 502,
   [ErrorCode.SFTP_OPERATION_FAILED]: 502,
   [ErrorCode.DOCKER_OPERATION_FAILED]: 502,
+
+  // Agent governance (v1.4)
+  [ErrorCode.AGENT_NOT_FOUND]: 404,
+  [ErrorCode.AGENT_INACTIVE]: 403,
+  [ErrorCode.AGENT_EXISTS]: 409,
 
   // Rate limiting
   [ErrorCode.RATE_LIMIT_EXCEEDED]: 429,
@@ -753,5 +763,23 @@ export class VaultError extends Error {
       ErrorCode.DOCKER_OPERATION_FAILED,
       `Docker operation failed (exit code ${exitCode})`,
     );
+  }
+
+  static agentNotFound(name: string): VaultError {
+    return new VaultError(
+      ErrorCode.AGENT_NOT_FOUND,
+      `Agent not registered: "${name}". Register it with: harpoc agent register ${name}`,
+    );
+  }
+
+  static agentInactive(name: string): VaultError {
+    return new VaultError(
+      ErrorCode.AGENT_INACTIVE,
+      `Agent "${name}" is deactivated. Reactivate it with: harpoc agent activate ${name}`,
+    );
+  }
+
+  static agentExists(name: string): VaultError {
+    return new VaultError(ErrorCode.AGENT_EXISTS, `Agent already registered: "${name}"`);
   }
 }

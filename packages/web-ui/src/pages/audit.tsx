@@ -1,12 +1,34 @@
-import type { AuditEventType } from "@harpoc/shared";
+import type { AuditEventType, PrincipalType } from "@harpoc/shared";
 import { useState } from "preact/hooks";
 import type { ApiClient, AuditVerifyReport } from "../api/client";
 import { useAsync } from "../hooks";
+
+const PRINCIPAL_TYPES: PrincipalType[] = ["agent", "tool", "project", "user"];
+
+/**
+ * The `?principal_type=&principal_id=` prefilter the agent-detail page's "open
+ * in Audit" link carries. `URLSearchParams` already decodes, so the value is
+ * taken as it comes — decoding a second time would corrupt a principal id
+ * carrying a percent sign. The type is checked against the union rather than
+ * passed through: unlike the free-text event-type input, the control is a
+ * closed vocabulary, and seeding a `<select>` with a value none of its options
+ * carry desynchronises what is displayed from what is queried.
+ */
+function hashQuery(): URLSearchParams {
+  const hash = window.location.hash;
+  const query = hash.indexOf("?");
+  return new URLSearchParams(query === -1 ? "" : hash.slice(query + 1));
+}
 
 export function AuditPage({ api }: { api: ApiClient }) {
   const [eventType, setEventType] = useState("");
   const [successFilter, setSuccessFilter] = useState<"all" | "ok" | "failed">("all");
   const [limit, setLimit] = useState(100);
+  const [principalType, setPrincipalType] = useState<PrincipalType | "">(() => {
+    const value = hashQuery().get("principal_type");
+    return PRINCIPAL_TYPES.find((t) => t === value) ?? "";
+  });
+  const [principalId, setPrincipalId] = useState(() => hashQuery().get("principal_id") ?? "");
   const [report, setReport] = useState<AuditVerifyReport | null>(null);
   const [verifyError, setVerifyError] = useState<string | null>(null);
 
@@ -18,9 +40,11 @@ export function AuditPage({ api }: { api: ApiClient }) {
         // validation against the known-type union.
         event_type: eventType === "" ? undefined : (eventType as AuditEventType),
         success: successFilter === "all" ? undefined : successFilter === "ok",
+        principal_type: principalType === "" ? undefined : principalType,
+        principal_id: principalId === "" ? undefined : principalId,
         limit,
       }),
-    [eventType, successFilter, limit],
+    [eventType, successFilter, principalType, principalId, limit],
   );
 
   return (
@@ -43,6 +67,26 @@ export function AuditPage({ api }: { api: ApiClient }) {
           <option value="ok">ok</option>
           <option value="failed">failed</option>
         </select>
+        <label for="principal-type">Principal type</label>
+        <select
+          id="principal-type"
+          value={principalType}
+          onChange={(e) => setPrincipalType(e.currentTarget.value as PrincipalType | "")}
+        >
+          <option value="">all</option>
+          {PRINCIPAL_TYPES.map((value) => (
+            <option key={value} value={value}>
+              {value}
+            </option>
+          ))}
+        </select>
+        <label for="principal-id">Principal id</label>
+        <input
+          id="principal-id"
+          autocomplete="off"
+          value={principalId}
+          onInput={(e) => setPrincipalId(e.currentTarget.value)}
+        />
         <label for="limit">Limit</label>
         <input
           id="limit"

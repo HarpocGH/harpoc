@@ -208,6 +208,12 @@ export function AAD_CONNECTION_CONFIG(secretId: string): string {
 
 export const MAX_NAME_LENGTH = 255;
 
+// -- Agent governance (v1.4) --------------------------------------------------
+
+export const AGENT_DESCRIPTION_MAX_LENGTH = 1024;
+export const AGENT_OWNER_MAX_LENGTH = 255;
+export const TOKEN_LABEL_MAX_LENGTH = 255;
+
 // -- SMTP / IMAP / WebSocket / Docker registry / use_secret defaults (v1.3) --
 
 export const MAX_SMTP_RECIPIENTS = 100;

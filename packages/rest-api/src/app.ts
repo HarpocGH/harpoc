@@ -12,6 +12,8 @@ import { createPolicyRoutes } from "./routes/policies.js";
 import { createAuditRoutes } from "./routes/audit.js";
 import { createOAuthRoutes } from "./routes/oauth.js";
 import { createCertificateRoutes } from "./routes/certificates.js";
+import { createAgentRoutes } from "./routes/agents.js";
+import { createTokenRoutes } from "./routes/tokens.js";
 import { createUiRoutes } from "./routes/ui.js";
 import type { HarpocEnv } from "./types.js";
 
@@ -90,12 +92,16 @@ export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono
   app.use("/api/v1/health/expiring", createRateLimitMiddleware(limiter));
   app.use("/api/v1/oauth/*", createRateLimitMiddleware(limiter));
   app.use("/api/v1/certificates/*", createRateLimitMiddleware(limiter));
+  app.use("/api/v1/agents/*", createRateLimitMiddleware(limiter));
+  app.use("/api/v1/tokens/*", createRateLimitMiddleware(limiter));
 
   // Audit logging (runs after handler via await next())
   app.use("/api/v1/secrets/*", auditMiddleware);
   app.use("/api/v1/audit/*", auditMiddleware);
   app.use("/api/v1/oauth/*", auditMiddleware);
   app.use("/api/v1/certificates/*", auditMiddleware);
+  app.use("/api/v1/agents/*", auditMiddleware);
+  app.use("/api/v1/tokens/*", auditMiddleware);
 
   // Auth middleware for protected routes
   app.use("/api/v1/secrets/*", authMiddleware);
@@ -103,6 +109,8 @@ export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono
   app.use("/api/v1/health/expiring", authMiddleware);
   app.use("/api/v1/oauth/*", authMiddleware);
   app.use("/api/v1/certificates/*", authMiddleware);
+  app.use("/api/v1/agents/*", authMiddleware);
+  app.use("/api/v1/tokens/*", authMiddleware);
 
   // Routes
   app.route("/api/v1/secrets", createSecretRoutes());
@@ -111,6 +119,8 @@ export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono
   app.route("/api/v1/health/expiring", createExpiringSecretsRoute());
   app.route("/api/v1/oauth", createOAuthRoutes());
   app.route("/api/v1/certificates", createCertificateRoutes());
+  app.route("/api/v1/agents", createAgentRoutes());
+  app.route("/api/v1/tokens", createTokenRoutes());
 
   if (options?.uiDir !== undefined) {
     app.route("/ui", createUiRoutes(options.uiDir));

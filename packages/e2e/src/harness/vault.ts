@@ -2,7 +2,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { VaultEngine } from "@harpoc/core";
-import { VAULT_DB_NAME, SESSION_FILE_NAME, SecretType } from "@harpoc/shared";
+import {
+  ErrorCode,
+  VAULT_DB_NAME,
+  SESSION_FILE_NAME,
+  SecretType,
+  VaultError,
+} from "@harpoc/shared";
 
 export { EVIDENCE_FILE, PREREGISTRATION_FILE } from "../evidence/paths.js";
 
@@ -28,6 +34,19 @@ export async function createHarnessVault(password: string): Promise<HarnessVault
       rmSync(tmpDir, { recursive: true, force: true });
     },
   };
+}
+
+/**
+ * Register the principal a surface is about to mint a token for — the v1.4
+ * registration gate refuses an unregistered agent-typed subject. Idempotent, so
+ * several surfaces may share one principal name.
+ */
+export function ensureAgent(vault: HarnessVault, name: string): void {
+  try {
+    vault.engine.registerAgent({ name });
+  } catch (err) {
+    if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
+  }
 }
 
 /** Store a credential and return its opaque handle. */

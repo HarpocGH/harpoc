@@ -1,5 +1,8 @@
 import type {
   AccessPolicy,
+  Agent,
+  AgentPolicy,
+  AgentStatusFilter,
   AuditEventType,
   CertificateStatus,
   CreateSecretRequest,
@@ -9,9 +12,15 @@ import type {
   HealthResponse,
   InjectionPolicy,
   InjectionPolicyInput,
+  IssuedToken,
+  IssuedTokenStatusFilter,
   OAuthTokenStatus,
   PrincipalType,
+  RegisterAgentInput,
   SecretType,
+  SetAgentPermissionsInput,
+  SetAgentPermissionsResult,
+  UpdateAgentInput,
 } from "@harpoc/shared";
 
 /** REST error envelope is flat: { error: <code>, message } (error-handler.ts). */
@@ -84,6 +93,20 @@ export interface AuditQueryFilters {
   until?: number;
   limit?: number;
   success?: boolean;
+  principal_type?: PrincipalType;
+  principal_id?: string;
+}
+
+/** `GET /tokens` filters — the issued-token registry's two query params. */
+export interface TokenQueryFilters {
+  status?: IssuedTokenStatusFilter;
+  agent?: string;
+}
+
+/** `DELETE /agents/:name`: what the cascade removed. */
+export interface DeleteAgentResult {
+  revoked_tokens: number;
+  removed_grants: number;
 }
 
 /** PUT injection-policy body: the policy plus the per-operation interpreter waiver. */
@@ -107,6 +130,22 @@ export interface ApiClient {
   getCertificateStatus(handle: string): Promise<CertificateStatus>;
   queryAudit(filters: AuditQueryFilters): Promise<AuditEventWire[]>;
   verifyAuditChain(): Promise<AuditVerifyReport>;
+  listAgents(status?: AgentStatusFilter): Promise<Agent[]>;
+  getAgent(name: string): Promise<Agent>;
+  registerAgent(input: RegisterAgentInput): Promise<Agent>;
+  /** PUT is replace semantics: an omitted field is cleared, not kept. */
+  updateAgent(name: string, input: UpdateAgentInput): Promise<Agent>;
+  deactivateAgent(name: string): Promise<{ revoked_tokens: number }>;
+  activateAgent(name: string): Promise<Agent>;
+  deleteAgent(name: string): Promise<DeleteAgentResult>;
+  listAgentPolicies(name: string): Promise<AgentPolicy[]>;
+  setAgentPermissions(
+    name: string,
+    handle: string,
+    input: SetAgentPermissionsInput,
+  ): Promise<SetAgentPermissionsResult>;
+  listTokens(filters?: TokenQueryFilters): Promise<IssuedToken[]>;
+  revokeToken(jti: string): Promise<void>;
 }
 
 /**
@@ -123,6 +162,22 @@ export const secretPath = (handle: string): string =>
  * secret (`myproj%2Ftest-key`).
  */
 const handlePath = (handle: string): string => encodeURIComponent(secretPath(handle));
+
+/**
+ * Query string from a filter object. An undefined value is an absent filter —
+ * and so is an empty string: `principal_id=` is a 400 (the schema's minimum
+ * length), and empty is exactly what a cleared input or a missing query param
+ * reads as at every call site.
+ */
+function queryString(filters: Record<string, unknown>): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value === undefined || value === "") continue;
+    params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return qs === "" ? "" : `?${qs}`;
+}
 
 /**
  * Session signals. `GET /health` is mounted ahead of `authMiddleware` on the
@@ -169,6 +224,10 @@ export function createApiClient(
         body: body === undefined ? undefined : JSON.stringify(body),
       })
     ).data;
+  const put = async <T>(path: string, body: unknown): Promise<T> =>
+    (await call<T>(path, { method: "PUT", body: JSON.stringify(body) })).data;
+  const del = async <T>(path: string): Promise<T> =>
+    (await call<T>(path, { method: "DELETE" })).data;
 
   return {
     health: () => get<HealthResponse>("/api/v1/health"),
@@ -213,14 +272,34 @@ export function createApiClient(
     getOAuthStatus: (handle) => get<OAuthTokenStatus>(`/api/v1/oauth/${handlePath(handle)}/status`),
     getCertificateStatus: (handle) =>
       get<CertificateStatus>(`/api/v1/certificates/${handlePath(handle)}/status`),
-    queryAudit: (filters) => {
-      const params = new URLSearchParams();
-      for (const [key, value] of Object.entries(filters)) {
-        if (value !== undefined) params.set(key, String(value));
-      }
-      const qs = params.toString();
-      return get<AuditEventWire[]>(`/api/v1/audit${qs === "" ? "" : `?${qs}`}`);
-    },
+    // Spread, not passed straight through: an interface carries no implicit
+    // index signature, so the anonymous copy is what `queryString` can read.
+    queryAudit: (filters) => get<AuditEventWire[]>(`/api/v1/audit${queryString({ ...filters })}`),
     verifyAuditChain: () => post<AuditVerifyReport>("/api/v1/audit/verify"),
+
+    listAgents: (status) => get<Agent[]>(`/api/v1/agents${queryString({ status })}`),
+    getAgent: (name) => get<Agent>(`/api/v1/agents/${encodeURIComponent(name)}`),
+    registerAgent: (input) => post<Agent>("/api/v1/agents", input),
+    updateAgent: (name, input) => put<Agent>(`/api/v1/agents/${encodeURIComponent(name)}`, input),
+    deactivateAgent: (name) =>
+      post<{ revoked_tokens: number }>(`/api/v1/agents/${encodeURIComponent(name)}/deactivate`),
+    activateAgent: (name) => post<Agent>(`/api/v1/agents/${encodeURIComponent(name)}/activate`),
+    deleteAgent: (name) => del<DeleteAgentResult>(`/api/v1/agents/${encodeURIComponent(name)}`),
+    listAgentPolicies: (name) =>
+      get<AgentPolicy[]>(`/api/v1/agents/${encodeURIComponent(name)}/policies`),
+    setAgentPermissions: (name, handle, input) =>
+      put<SetAgentPermissionsResult>(
+        `/api/v1/agents/${encodeURIComponent(name)}/secrets/${handlePath(handle)}/permissions`,
+        input,
+      ),
+    // Built field by field rather than from the caller's object, so the query
+    // string does not depend on the order the filters were written in.
+    listTokens: (filters) =>
+      get<IssuedToken[]>(
+        `/api/v1/tokens${queryString({ status: filters?.status, agent: filters?.agent })}`,
+      ),
+    revokeToken: async (jti) => {
+      await call<unknown>(`/api/v1/tokens/${encodeURIComponent(jti)}`, { method: "DELETE" });
+    },
   };
 }

@@ -34,8 +34,8 @@ describe("enum member counts", () => {
     expect(Object.values(Permission)).toHaveLength(7);
   });
 
-  it("AuditEventType has 30 members", () => {
-    expect(Object.values(AuditEventType)).toHaveLength(30);
+  it("AuditEventType has 35 members", () => {
+    expect(Object.values(AuditEventType)).toHaveLength(35);
   });
 
   it("PrincipalType has 4 members", () => {
@@ -74,10 +74,10 @@ describe("enum member counts", () => {
     expect(Object.values(OAuthProviderPreset)).toHaveLength(5);
   });
 
-  it("ErrorCode has 101 members", () => {
+  it("ErrorCode has 104 members", () => {
     // Filter out reverse mappings (numeric keys) from TypeScript enum
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(101);
+    expect(members).toHaveLength(104);
   });
 });
 
@@ -183,5 +183,15 @@ describe("OAuthProviderPreset values", () => {
     ["CUSTOM", "custom"],
   ] as const)("%s is '%s'", (key, value) => {
     expect(OAuthProviderPreset[key]).toBe(value);
+  });
+});
+
+describe("AuditEventType agent governance values (v1.4)", () => {
+  it("AuditEventType carries the five agent events", () => {
+    expect(AuditEventType.AGENT_REGISTER).toBe("agent.register");
+    expect(AuditEventType.AGENT_UPDATE).toBe("agent.update");
+    expect(AuditEventType.AGENT_ACTIVATE).toBe("agent.activate");
+    expect(AuditEventType.AGENT_DEACTIVATE).toBe("agent.deactivate");
+    expect(AuditEventType.AGENT_DELETE).toBe("agent.delete");
   });
 });

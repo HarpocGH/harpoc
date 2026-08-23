@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { AuditEventType } from "@harpoc/shared";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 
 const PASSWORD = "integration-password";
@@ -13,6 +13,7 @@ let restoreStderr: (() => void) | null = null;
 beforeEach(async () => {
   vault = createTestVault();
   await vault.engine.initVault(PASSWORD);
+  registerAgents(vault.engine, "agent-1");
 
   // The tokenless branch writes its warning to the real stderr; capture it so
   // the suite output stays readable and the ordering stays assertable.

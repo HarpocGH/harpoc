@@ -21,7 +21,7 @@ import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { InjectionType, PrincipalType, SecretType, VaultState } from "@harpoc/shared";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 import { assertTierAvailable } from "./helpers/platform-tiers.js";
@@ -55,6 +55,7 @@ describe("Session Sharing", () => {
     // Engine1 inits vault and creates a secret
     vault1 = createTestVault();
     await vault1.engine.initVault(PASSWORD);
+    registerAgents(vault1.engine, "test-agent", "mcp-agent");
 
     const result = await vault1.engine.createSecret({
       name: SECRET_NAME,

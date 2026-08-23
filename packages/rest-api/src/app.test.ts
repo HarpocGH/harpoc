@@ -64,6 +64,8 @@ function createMockEngine() {
     }),
     revokePolicy: vi.fn(),
     queryAudit: vi.fn().mockReturnValue([]),
+    listAgents: vi.fn().mockReturnValue([]),
+    listIssuedTokens: vi.fn().mockReturnValue([]),
     // Only reached through the default OAuth manager: a real manager calls
     // this first, before any network leg.
     createOAuthSecret: vi.fn().mockRejectedValue(VaultError.invalidInput("stub engine")),
@@ -89,6 +91,22 @@ describe("createApp integration", () => {
     const res = await app.request("/api/v1/secrets");
     expect(res.status).toBe(401);
   });
+
+  // The governance prefixes are their own `app.use(...)` registrations: without
+  // them the mounted routes answer unauthenticated, since the routers read
+  // `c.get("token")` rather than verifying one themselves.
+  it.each(["/api/v1/agents", "/api/v1/tokens"])(
+    "the %s mount is behind the auth middleware",
+    async (path) => {
+      const engine = createMockEngine();
+      const app = createApp(engine as never);
+
+      expect((await app.request(path)).status).toBe(401);
+      expect(
+        (await app.request(path, { headers: { authorization: "Bearer valid-jwt" } })).status,
+      ).toBe(200);
+    },
+  );
 
   it("protected routes work with valid auth", async () => {
     const engine = createMockEngine();

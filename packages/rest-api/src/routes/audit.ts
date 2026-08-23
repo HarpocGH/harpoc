@@ -19,6 +19,8 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
     const until = c.req.query("until");
     const limit = c.req.query("limit");
     const success = c.req.query("success");
+    const principalType = c.req.query("principal_type");
+    const principalId = c.req.query("principal_id");
 
     const raw = {
       secret_id: secretId ?? undefined,
@@ -34,6 +36,8 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
             : success === "false"
               ? false
               : success,
+      principal_type: principalType ?? undefined,
+      principal_id: principalId ?? undefined,
     };
 
     const parsed = auditQuerySchema.safeParse(raw);
@@ -52,6 +56,8 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
         until: parsed.data.until,
         limit: parsed.data.limit,
         success: parsed.data.success,
+        principalType: parsed.data.principal_type,
+        principalId: parsed.data.principal_id,
       },
       auditScopeFromToken(token),
     );

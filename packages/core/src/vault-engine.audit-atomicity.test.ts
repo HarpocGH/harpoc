@@ -4,7 +4,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuditEventType, ErrorCode, SecretStatus } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, SecretStatus, VaultError } from "@harpoc/shared";
 import type { OAuthProviderConfig } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
@@ -92,7 +92,22 @@ beforeEach(async () => {
     sessionPath: join(tempDir, "session.json"),
   });
   await engine.initVault("password");
+  registerAgents("agent-1", "user-1");
 });
+
+/**
+ * Register the agent identities this suite mints tokens or grants for — the
+ * v1.4 registration gate refuses an unregistered agent-typed principal.
+ */
+function registerAgents(...names: string[]): void {
+  for (const name of names) {
+    try {
+      engine.registerAgent({ name });
+    } catch (err) {
+      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
+    }
+  }
+}
 
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -377,6 +392,19 @@ describe("fail-closed audit: policy and config writes", () => {
 });
 
 describe("fail-closed audit: tokens, OAuth flow, password change", () => {
+  it("createToken rolls back the issued-token row when the audit write fails", () => {
+    failNextAuditInsert();
+
+    expect(() => engine.createToken("user-1", ["read"])).toThrow("audit unavailable");
+
+    expect(engine.listIssuedTokens({ status: "all" })).toHaveLength(0);
+    expect(auditCount(AuditEventType.TOKEN_CREATE)).toBe(0);
+
+    engine.createToken("user-1", ["read"]);
+    expect(engine.listIssuedTokens()).toHaveLength(1);
+    expect(auditCount(AuditEventType.TOKEN_CREATE)).toBe(1);
+  });
+
   it("revokeToken rolls back the revocation when the audit write fails", async () => {
     const token = engine.createToken("user-1", ["read"]);
     const jti = engine.verifyToken(token).jti;

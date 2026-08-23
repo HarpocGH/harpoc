@@ -94,6 +94,51 @@ describe("AuditQuery", () => {
     expect(events[0]?.secret_id).toBe("s1");
   });
 
+  it("filters by principal type and id", () => {
+    logger.log({
+      eventType: AuditEventType.SECRET_READ,
+      principalType: "agent",
+      principalId: "alpha",
+    });
+    logger.log({
+      eventType: AuditEventType.SECRET_READ,
+      principalType: "agent",
+      principalId: "beta",
+    });
+    logger.log({
+      eventType: AuditEventType.SECRET_READ,
+      principalType: "user",
+      principalId: "alpha",
+    });
+    logger.log({ eventType: AuditEventType.SECRET_READ });
+
+    expect(query.query({ principalType: "agent", principalId: "alpha" })).toHaveLength(1);
+    expect(query.query({ principalType: "agent" })).toHaveLength(2);
+    expect(query.query({ principalId: "alpha" })).toHaveLength(2);
+    expect(query.query({ principalType: "agent", principalId: "ghost" })).toHaveLength(0);
+  });
+
+  it("combines the principal filter with the event type", () => {
+    logger.log({
+      eventType: AuditEventType.SECRET_READ,
+      principalType: "agent",
+      principalId: "alpha",
+    });
+    logger.log({
+      eventType: AuditEventType.POLICY_GRANT,
+      principalType: "agent",
+      principalId: "alpha",
+    });
+
+    const events = query.query({
+      principalType: "agent",
+      principalId: "alpha",
+      eventType: AuditEventType.POLICY_GRANT,
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]?.event_type).toBe("policy.grant");
+  });
+
   it("returns empty array when no events match filters", () => {
     logger.log({ eventType: AuditEventType.SECRET_READ, secretId: "s1" });
 

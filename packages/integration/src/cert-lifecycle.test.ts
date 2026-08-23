@@ -6,7 +6,7 @@ import { createMcpServer } from "@harpoc/mcp-server";
 import { DirectClient, RestClient } from "@harpoc/sdk";
 import { ErrorCode, SecretStatus, SecretType } from "@harpoc/shared";
 import type { CertificateStatus } from "@harpoc/shared";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
@@ -89,6 +89,7 @@ async function getStatus(name: string): Promise<CertificateStatus> {
 beforeAll(async () => {
   vault = createTestVault();
   await vault.engine.initVault(PASSWORD);
+  registerAgents(vault.engine, PRINCIPAL);
   rest = startTestServer(vault.engine);
   token = vault.engine.createToken(PRINCIPAL, ["create", "read", "rotate"]);
 });

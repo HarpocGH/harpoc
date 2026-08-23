@@ -5,6 +5,7 @@ import { RestClient } from "@harpoc/sdk";
 import { VaultError } from "@harpoc/shared";
 import type { Permission, UseSecretAction } from "@harpoc/shared";
 import type { HarnessVault } from "../vault.js";
+import { ensureAgent } from "../vault.js";
 import type { CallOutcome, Surface } from "./surface.js";
 
 export interface SdkSurface extends Surface {
@@ -29,6 +30,7 @@ export async function startSdkSurface(
   principal: string,
   scopes: Permission[],
 ): Promise<SdkSurface> {
+  ensureAgent(vault, principal);
   const app = createApp(vault.engine);
   // Asynchronous bind — see the note in the rest driver.
   const { server, port } = await new Promise<{ server: ReturnType<typeof serve>; port: number }>(

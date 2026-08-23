@@ -73,6 +73,78 @@ function createMockEngine() {
     revokePolicy: vi.fn(),
     listPolicies: vi.fn().mockReturnValue([]),
     queryAudit: vi.fn().mockReturnValue([]),
+    registerAgent: vi.fn().mockReturnValue({
+      id: "agent-1",
+      name: "deploy-bot",
+      description: null,
+      owner: null,
+      status: "active",
+      created_at: 1000,
+      updated_at: 1000,
+      deactivated_at: null,
+      last_active_at: null,
+      active_tokens: 0,
+      grants: 0,
+    }),
+    listAgents: vi.fn().mockReturnValue([]),
+    getAgent: vi.fn().mockReturnValue({
+      id: "agent-1",
+      name: "deploy-bot",
+      description: null,
+      owner: null,
+      status: "active",
+      created_at: 1000,
+      updated_at: 1000,
+      deactivated_at: null,
+      last_active_at: null,
+      active_tokens: 0,
+      grants: 0,
+    }),
+    updateAgent: vi.fn().mockReturnValue({
+      id: "agent-1",
+      name: "deploy-bot",
+      description: "updated",
+      owner: null,
+      status: "active",
+      created_at: 1000,
+      updated_at: 2000,
+      deactivated_at: null,
+      last_active_at: null,
+      active_tokens: 0,
+      grants: 0,
+    }),
+    deactivateAgent: vi.fn().mockReturnValue({ revoked_tokens: 2 }),
+    activateAgent: vi.fn().mockReturnValue({
+      id: "agent-1",
+      name: "deploy-bot",
+      description: null,
+      owner: null,
+      status: "active",
+      created_at: 1000,
+      updated_at: 3000,
+      deactivated_at: null,
+      last_active_at: null,
+      active_tokens: 0,
+      grants: 0,
+    }),
+    deleteAgent: vi.fn().mockReturnValue({ revoked_tokens: 1, removed_grants: 3 }),
+    listAgentPolicies: vi.fn().mockReturnValue([]),
+    setAgentPermissions: vi.fn().mockReturnValue({
+      policy: {
+        id: "p1",
+        secret_id: "uuid-1",
+        principal_type: "agent",
+        principal_id: "deploy-bot",
+        permissions: ["read"],
+        created_at: Date.now(),
+        expires_at: null,
+        created_by: "sdk-direct",
+      },
+      gated_before: false,
+      gated_after: true,
+    }),
+    listIssuedTokens: vi.fn().mockReturnValue([]),
+    revokeToken: vi.fn(),
     getOAuthTokenStatus: vi.fn().mockReturnValue({
       secret_id: "uuid-1",
       provider: "github",
@@ -401,6 +473,196 @@ describe("DirectClient", () => {
 
     await client.queryAudit({ limit: 10 });
     expect(engine.queryAudit).toHaveBeenCalledWith({ limit: 10 });
+  });
+
+  describe("agent governance", () => {
+    it("registerAgent delegates to engine with no caller (trusted local path)", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      const input = { name: "deploy-bot", description: "d", owner: "o" };
+      const agent = await client.registerAgent(input);
+
+      expect(agent.name).toBe("deploy-bot");
+      expect(engine.registerAgent).toHaveBeenCalledWith(input);
+    });
+
+    it("listAgents delegates to engine with the default status", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      await client.listAgents();
+      expect(engine.listAgents).toHaveBeenCalledWith(undefined);
+    });
+
+    it("listAgents forwards an explicit status", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      await client.listAgents("all");
+      expect(engine.listAgents).toHaveBeenCalledWith("all");
+    });
+
+    it("getAgent delegates to engine", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      const agent = await client.getAgent("deploy-bot");
+      expect(agent.name).toBe("deploy-bot");
+      expect(engine.getAgent).toHaveBeenCalledWith("deploy-bot");
+    });
+
+    it("updateAgent delegates to engine", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      const input = { description: "updated" };
+      const agent = await client.updateAgent("deploy-bot", input);
+      expect(agent.description).toBe("updated");
+      expect(engine.updateAgent).toHaveBeenCalledWith("deploy-bot", input);
+    });
+
+    it("deactivateAgent delegates to engine", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      const result = await client.deactivateAgent("deploy-bot");
+      expect(result).toEqual({ revoked_tokens: 2 });
+      expect(engine.deactivateAgent).toHaveBeenCalledWith("deploy-bot");
+    });
+
+    it("activateAgent delegates to engine", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      const agent = await client.activateAgent("deploy-bot");
+      expect(agent.name).toBe("deploy-bot");
+      expect(engine.activateAgent).toHaveBeenCalledWith("deploy-bot");
+    });
+
+    it("deleteAgent delegates to engine", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      const result = await client.deleteAgent("deploy-bot");
+      expect(result).toEqual({ revoked_tokens: 1, removed_grants: 3 });
+      expect(engine.deleteAgent).toHaveBeenCalledWith("deploy-bot");
+    });
+
+    it("listAgentPolicies delegates to engine", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      await client.listAgentPolicies("deploy-bot");
+      expect(engine.listAgentPolicies).toHaveBeenCalledWith("deploy-bot");
+    });
+
+    it("setAgentPermissions resolves the handle and delegates with sdk-direct as createdBy", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      const result = await client.setAgentPermissions("deploy-bot", "secret://key", {
+        permissions: ["read"],
+      });
+
+      expect(result.gated_after).toBe(true);
+      expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://key");
+      expect(engine.setAgentPermissions).toHaveBeenCalledWith(
+        "deploy-bot",
+        "uuid-1",
+        ["read"],
+        undefined,
+        "sdk-direct",
+      );
+    });
+
+    it("setAgentPermissions forwards an explicit expiry", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      await client.setAgentPermissions("deploy-bot", "secret://key", {
+        permissions: ["read", "rotate"],
+        expires_at: 5000,
+      });
+
+      expect(engine.setAgentPermissions).toHaveBeenCalledWith(
+        "deploy-bot",
+        "uuid-1",
+        ["read", "rotate"],
+        5000,
+        "sdk-direct",
+      );
+    });
+
+    it("passes no caller on any governance operation (trusted local path)", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      await client.registerAgent({ name: "deploy-bot" });
+      await client.listAgents();
+      await client.getAgent("deploy-bot");
+      await client.updateAgent("deploy-bot", {});
+      await client.deactivateAgent("deploy-bot");
+      await client.activateAgent("deploy-bot");
+      await client.deleteAgent("deploy-bot");
+      await client.listAgentPolicies("deploy-bot");
+      await client.setAgentPermissions("deploy-bot", "secret://key", { permissions: [] });
+      await client.listTokens();
+      await client.revokeToken("jti-1");
+
+      for (const fn of [
+        engine.registerAgent,
+        engine.listAgents,
+        engine.getAgent,
+        engine.updateAgent,
+        engine.deactivateAgent,
+        engine.activateAgent,
+        engine.deleteAgent,
+        engine.listAgentPolicies,
+        engine.listIssuedTokens,
+        engine.revokeToken,
+      ]) {
+        const call = fn.mock.calls[0] as unknown[];
+        expect(call[call.length - 1]).not.toEqual(
+          expect.objectContaining({ principal_type: expect.anything() }),
+        );
+      }
+      // setAgentPermissions passes createdBy "sdk-direct" as its fifth
+      // argument and no sixth (caller) argument at all.
+      const setCall = engine.setAgentPermissions.mock.calls[0] as unknown[];
+      expect(setCall).toHaveLength(5);
+    });
+  });
+
+  describe("issued tokens", () => {
+    it("listTokens delegates to engine with no options", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      await client.listTokens();
+      expect(engine.listIssuedTokens).toHaveBeenCalledWith({ agent: undefined, status: undefined });
+    });
+
+    it("listTokens forwards agent and status filters", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      await client.listTokens({ agent: "deploy-bot", status: "active" });
+      expect(engine.listIssuedTokens).toHaveBeenCalledWith({
+        agent: "deploy-bot",
+        status: "active",
+      });
+    });
+
+    it("revokeToken delegates to engine with one argument", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      await client.revokeToken("jti-1");
+      expect(engine.revokeToken).toHaveBeenCalledWith("jti-1");
+      const call = engine.revokeToken.mock.calls[0] as unknown[];
+      expect(call).toHaveLength(1);
+    });
   });
 
   it("getHealth returns state and version", async () => {

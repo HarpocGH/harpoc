@@ -181,10 +181,10 @@ describe("migration 011 upgrade (v10 → v11)", () => {
     store.close();
   });
 
-  it("creates a fresh DB at v11 with the column present", () => {
+  it("creates a fresh DB at the current schema version with the column present", () => {
     const dbPath = join(tempDir, "fresh.vault.db");
     const store = new SqliteStore(dbPath);
-    expect(store.getMeta("schema_version")).toBe("11");
+    expect(store.getMeta("schema_version")).toBe("12");
 
     const columns = store.db.prepare("PRAGMA table_info(oauth_tokens)").all() as { name: string }[];
     expect(columns.map((c) => c.name)).toContain("token_endpoint_auth_method");

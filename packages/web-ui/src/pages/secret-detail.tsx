@@ -38,6 +38,10 @@ export function SecretDetailPage({ api, handle }: { api: ApiClient; handle: stri
   if (secret.error) return <p class="error-text">{secret.error.message}</p>;
   if (!secret.data) return <p class="empty">Loading…</p>;
 
+  // The same link the agent-detail page emits: one route segment, the scheme
+  // stripped and the project separator percent-encoded.
+  const matrixLink = `#/permissions?secret=${encodeURIComponent(secretPath(secret.data.handle))}`;
+
   return (
     <>
       <h1>
@@ -63,7 +67,7 @@ export function SecretDetailPage({ api, handle }: { api: ApiClient; handle: stri
       {grants.data && grants.data.length === 0 && (
         <p class="empty">
           No per-secret grants — token scope alone governs access. Grant with{" "}
-          <code>harpoc policy grant</code>. Editing arrives with agent governance (v1.4).
+          <code>harpoc policy grant</code> or in the <a href={matrixLink}>permission matrix</a>.
         </p>
       )}
       {grants.data && grants.data.length > 0 && (
@@ -72,6 +76,9 @@ export function SecretDetailPage({ api, handle }: { api: ApiClient; handle: stri
             {grants.data.map((g) => (
               <tr key={g.id}>
                 <td>{JSON.stringify(g)}</td>
+                <td>
+                  <a href={matrixLink}>open in matrix</a>
+                </td>
               </tr>
             ))}
           </tbody>

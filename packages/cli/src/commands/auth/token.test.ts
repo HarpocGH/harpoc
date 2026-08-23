@@ -73,3 +73,65 @@ describe("auth token --principal-type", () => {
     expect(output).toContain("Valid: agent, tool, user");
   });
 });
+
+describe("auth token --label", () => {
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  const stdout = (): string => logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  it("passes the label through to createToken", async () => {
+    await run(["--agent", "bot-1", "--label", "ci"]);
+    expect(mockEngine.createToken).toHaveBeenCalledWith(
+      "bot-1",
+      expect.any(Array),
+      expect.any(Number),
+      expect.objectContaining({ label: "ci" }),
+    );
+  });
+
+  it("passes no label when the flag is absent", async () => {
+    await run(["--agent", "bot-1"]);
+    expect(mockEngine.createToken).toHaveBeenCalledWith(
+      "bot-1",
+      expect.any(Array),
+      expect.any(Number),
+      expect.objectContaining({ label: undefined }),
+    );
+  });
+
+  it("prints the label in the human output", async () => {
+    await run(["--agent", "bot-1", "--label", "ci"]);
+    const out = stdout();
+    expect(out).toContain("Label");
+    expect(out).toContain("ci");
+  });
+
+  it("prints the label under --json", async () => {
+    await run(["--agent", "bot-1", "--label", "ci", "--json"]);
+    const payload = JSON.parse(stdout()) as { label: string | null };
+    expect(payload.label).toBe("ci");
+  });
+
+  it("prints a null label under --json when the flag is absent", async () => {
+    await run(["--agent", "bot-1", "--json"]);
+    const payload = JSON.parse(stdout()) as { label: string | null };
+    expect(payload.label).toBeNull();
+  });
+});

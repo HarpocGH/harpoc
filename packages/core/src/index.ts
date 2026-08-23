@@ -36,6 +36,9 @@ export type {
   InjectionPolicyRow,
   McpServerRow,
   ConnectionConfigRow,
+  AgentRow,
+  IssuedTokenRow,
+  IssuedTokenFilter,
 } from "./storage/sqlite-store.js";
 
 // Session
@@ -81,8 +84,9 @@ export type {
 } from "./audit/audit-query.js";
 
 // Access
+export { AgentRegistry } from "./access/agent-registry.js";
 export { PolicyEngine } from "./access/policy-engine.js";
-export type { GrantPolicyInput } from "./access/policy-engine.js";
+export type { GrantPolicyInput, PolicyPrincipal } from "./access/policy-engine.js";
 
 // Secrets
 export { SecretManager } from "./secrets/secret-manager.js";

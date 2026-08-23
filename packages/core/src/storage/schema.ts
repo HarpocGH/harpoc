@@ -98,6 +98,60 @@ export const CREATE_REVOKED_TOKENS_INDEXES = `
 CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires_at ON revoked_tokens (expires_at);
 `;
 
+/**
+ * The agent registry (migration 012). Plaintext columns like access_policies
+ * and revoked_tokens: rows are looked up by name and filtered by status, never
+ * read whole by secret id. `name` is the `principal_id` every agent-typed
+ * policy and token carries, and is immutable once registered. All timestamps
+ * are milliseconds.
+ */
+export const CREATE_AGENTS = `
+CREATE TABLE IF NOT EXISTS agents (
+  id             TEXT PRIMARY KEY,
+  name           TEXT NOT NULL UNIQUE,
+  description    TEXT,
+  owner          TEXT,
+  status         TEXT NOT NULL CHECK (status IN ('active', 'inactive')),
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL,
+  deactivated_at INTEGER
+) STRICT;
+`;
+
+/**
+ * Claims metadata of issued tokens (migration 012) — never the JWT itself.
+ * `scope` and `secrets` hold JSON arrays; a NULL `secrets` means unrestricted.
+ * All timestamps are milliseconds, `expires_at` included: revoked_tokens keeps
+ * that column in seconds, and this table deliberately does not inherit the
+ * quirk. `revoked_at` is a history mirror written beside the revoked_tokens
+ * insert — revoked_tokens stays the sole revocation truth verifyToken reads.
+ */
+export const CREATE_ISSUED_TOKENS = `
+CREATE TABLE IF NOT EXISTS issued_tokens (
+  jti            TEXT PRIMARY KEY,
+  subject        TEXT NOT NULL,
+  principal_type TEXT NOT NULL CHECK (principal_type IN ('agent', 'tool', 'user')),
+  agent_id       TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  scope          TEXT NOT NULL,
+  project        TEXT,
+  secrets        TEXT,
+  label          TEXT,
+  issued_at      INTEGER NOT NULL,
+  expires_at     INTEGER NOT NULL,
+  revoked_at     INTEGER
+) STRICT;
+`;
+
+export const CREATE_ISSUED_TOKENS_INDEXES = `
+CREATE INDEX IF NOT EXISTS idx_issued_tokens_agent ON issued_tokens (agent_id);
+CREATE INDEX IF NOT EXISTS idx_issued_tokens_expires ON issued_tokens (expires_at);
+`;
+
+/** Principal-scoped audit lookups — last-active and the attribution filter (migration 012). */
+export const CREATE_AUDIT_PRINCIPAL_INDEX = `
+CREATE INDEX IF NOT EXISTS idx_audit_principal ON audit_log (principal_type, principal_id, timestamp);
+`;
+
 export const ALTER_SECRETS_ADD_NAME_HMAC = `
 ALTER TABLE secrets ADD COLUMN name_hmac TEXT;
 `;

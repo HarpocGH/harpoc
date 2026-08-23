@@ -80,6 +80,20 @@ beforeEach(() => {
   engine = new VaultEngine({ dbPath, sessionPath });
 });
 
+/**
+ * Register the agent identities this suite mints tokens or grants for — the
+ * v1.4 registration gate refuses an unregistered agent-typed principal.
+ */
+function registerAgents(...names: string[]): void {
+  for (const name of names) {
+    try {
+      engine.registerAgent({ name });
+    } catch (err) {
+      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
+    }
+  }
+}
+
 afterEach(async () => {
   await engine.destroy();
   try {
@@ -1995,6 +2009,7 @@ describe("useSecret (MCP proxy)", () => {
 describe("policies", () => {
   beforeEach(async () => {
     await engine.initVault("password");
+    registerAgents("agent-1");
     await engine.createSecret({
       name: "policy-test",
       type: "api_key",
@@ -2042,6 +2057,7 @@ describe("policies", () => {
 describe("JWT tokens", () => {
   beforeEach(async () => {
     await engine.initVault("password");
+    registerAgents("user-1");
   });
 
   it("creates and verifies a token", () => {
@@ -2225,6 +2241,7 @@ describe("JWT tokens", () => {
 describe("JWT edge cases", () => {
   beforeEach(async () => {
     await engine.initVault("password");
+    registerAgents("user-1");
   });
 
   it("rejects token with tampered signature", () => {
@@ -2920,6 +2937,7 @@ describe("lockout mechanism", () => {
 describe("audit trail completeness", () => {
   beforeEach(async () => {
     await engine.initVault("password");
+    registerAgents("agent-1");
   });
 
   it("logs secret rotation", async () => {

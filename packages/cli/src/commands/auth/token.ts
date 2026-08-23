@@ -24,6 +24,7 @@ export function registerAuthTokenCommand(auth: Command): void {
       "--secrets <patterns>",
       "Comma-separated secret names or patterns with * wildcards (e.g. db-*) the token can access",
     )
+    .option("--label <text>", "Label for the issued token (shown in token listings)")
     .option("--json", "Output as JSON")
     .action(
       async (
@@ -34,6 +35,7 @@ export function registerAuthTokenCommand(auth: Command): void {
           principalType?: string;
           project?: string;
           secrets?: string;
+          label?: string;
           json?: boolean;
         },
         cmd: Command,
@@ -86,6 +88,7 @@ export function registerAuthTokenCommand(auth: Command): void {
               project,
               secrets,
               principalType,
+              label: options.label,
             });
 
             if (options.json) {
@@ -97,6 +100,7 @@ export function registerAuthTokenCommand(auth: Command): void {
                 ttl_minutes: parseInt(options.ttl ?? "60", 10),
                 project: options.project ?? null,
                 secrets: options.secrets ? options.secrets.split(",").map((s) => s.trim()) : null,
+                label: options.label ?? null,
               });
             } else {
               printRecord({
@@ -107,6 +111,7 @@ export function registerAuthTokenCommand(auth: Command): void {
                 TTL: `${options.ttl ?? "60"} minutes`,
                 Project: options.project ?? "-",
                 Secrets: options.secrets ?? "-",
+                Label: options.label ?? "-",
               });
             }
           } finally {

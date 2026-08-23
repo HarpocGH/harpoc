@@ -184,6 +184,40 @@ describe("audit routes", () => {
     const body = await res.json();
     expect(body.error).toBe("SCHEMA_VALIDATION_ERROR");
   });
+
+  it("forwards the principal filter to engine.queryAudit", async () => {
+    await app.request("/api/v1/audit?principal_type=agent&principal_id=deploy-bot", {
+      headers: AUTH,
+    });
+    expect(engine.queryAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ principalType: "agent", principalId: "deploy-bot" }),
+      undefined,
+    );
+  });
+
+  it("forwards principal_id alone", async () => {
+    await app.request("/api/v1/audit?principal_id=deploy-bot", { headers: AUTH });
+    expect(engine.queryAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ principalType: undefined, principalId: "deploy-bot" }),
+      undefined,
+    );
+  });
+
+  it("rejects an unknown principal_type", async () => {
+    const res = await app.request("/api/v1/audit?principal_type=robot", { headers: AUTH });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("SCHEMA_VALIDATION_ERROR");
+    expect(engine.queryAudit).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty principal_id", async () => {
+    const res = await app.request("/api/v1/audit?principal_id=", { headers: AUTH });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("SCHEMA_VALIDATION_ERROR");
+    expect(engine.queryAudit).not.toHaveBeenCalled();
+  });
 });
 
 describe("POST /api/v1/audit/verify", () => {

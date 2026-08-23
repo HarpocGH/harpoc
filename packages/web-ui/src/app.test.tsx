@@ -38,6 +38,31 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     verifyAuditChain: vi
       .fn()
       .mockResolvedValue({ valid: true, checked: 0, legacy: 0, first_broken_id: null }),
+    listAgents: vi.fn().mockResolvedValue([]),
+    getAgent: vi.fn().mockResolvedValue({
+      id: "id-1",
+      name: "ci-bot",
+      description: null,
+      owner: null,
+      status: "active",
+      created_at: 0,
+      updated_at: 0,
+      deactivated_at: null,
+      last_active_at: null,
+      active_tokens: 0,
+      grants: 0,
+    }),
+    registerAgent: vi.fn().mockResolvedValue({}),
+    updateAgent: vi.fn().mockResolvedValue({}),
+    deactivateAgent: vi.fn().mockResolvedValue({ revoked_tokens: 0 }),
+    activateAgent: vi.fn().mockResolvedValue({}),
+    deleteAgent: vi.fn().mockResolvedValue({ revoked_tokens: 0, removed_grants: 0 }),
+    listAgentPolicies: vi.fn().mockResolvedValue([]),
+    setAgentPermissions: vi
+      .fn()
+      .mockResolvedValue({ policy: null, gated_before: false, gated_after: false }),
+    listTokens: vi.fn().mockResolvedValue([]),
+    revokeToken: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as ApiClient;
 }
@@ -349,5 +374,57 @@ describe("App session signals", () => {
     render(<App api={fakeApi()} />);
     await waitFor(() => expect(screen.getByText("UNLOCKED")).toBeTruthy());
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("App shell v1.4 routes", () => {
+  it("routes #/agents to the agents page", async () => {
+    setToken("t");
+    window.location.hash = "#/agents";
+    render(<App api={fakeApi()} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Agents" })).toBeTruthy());
+  });
+
+  it("routes an agent detail hash and decodes the name", async () => {
+    setToken("t");
+    window.location.hash = "#/agents/ci-bot";
+    const api = fakeApi();
+    render(<App api={api} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: /ci-bot/ })).toBeTruthy());
+    expect(api.getAgent).toHaveBeenCalledWith("ci-bot");
+    expect(screen.queryByRole("heading", { name: "Agents" })).toBeNull();
+  });
+
+  it("routes #/permissions to the matrix, the ?secret= preselect included", async () => {
+    setToken("t");
+    window.location.hash = "#/permissions?secret=myproj%2Ftest-key";
+    render(<App api={fakeApi()} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Permissions" })).toBeTruthy());
+  });
+
+  it("matches a route on its path, not on the query the page reads", async () => {
+    // `currentRoute()` carries the whole hash, query included — the prefiltered
+    // links the agent detail emits are exactly that shape, and a route matched
+    // on the raw hash would render nothing for them.
+    setToken("t");
+    window.location.hash = "#/audit?principal_type=agent&principal_id=ci-bot";
+    render(<App api={fakeApi()} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Audit" })).toBeTruthy());
+  });
+
+  it("routes #/tokens to the issued-token registry", async () => {
+    setToken("t");
+    window.location.hash = "#/tokens";
+    const api = fakeApi();
+    render(<App api={api} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Tokens" })).toBeTruthy());
+    expect(api.listTokens).toHaveBeenCalled();
+  });
+
+  it("carries the governance links in the nav rail", () => {
+    setToken("t");
+    render(<App api={fakeApi()} />);
+    const labels = [...document.querySelectorAll("nav.rail a")].map((a) => a.textContent);
+    expect(labels).toEqual(["Dashboard", "Secrets", "Audit", "Agents", "Permissions", "Tokens"]);
   });
 });

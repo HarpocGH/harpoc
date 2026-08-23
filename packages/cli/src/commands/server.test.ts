@@ -498,6 +498,7 @@ describe("server start", () => {
     expect(call.uiDir).toMatch(/web-ui[\\/]dist$/);
     expect(mockEngine.createToken).toHaveBeenCalledWith("web-ui", ["admin"], 24 * 60 * 60 * 1000, {
       principalType: "user",
+      label: "web-ui launch",
     });
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("/ui#token=mock-launch-jwt"));
   });

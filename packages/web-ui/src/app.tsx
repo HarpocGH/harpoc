@@ -5,10 +5,14 @@ import { clearToken, getToken } from "./auth/token-store";
 import { Nav } from "./components/nav";
 import { SealBar } from "./components/seal-bar";
 import { useAsync } from "./hooks";
+import { AgentDetailPage } from "./pages/agent-detail";
+import { AgentsPage } from "./pages/agents";
 import { AuditPage } from "./pages/audit";
 import { DashboardPage } from "./pages/dashboard";
+import { PermissionsPage } from "./pages/permissions";
 import { SecretDetailPage } from "./pages/secret-detail";
 import { SecretsPage } from "./pages/secrets";
+import { TokensPage } from "./pages/tokens";
 import { useHashRoute } from "./router";
 import { Sealed } from "./screens/sealed";
 import { Unauthorized } from "./screens/unauthorized";
@@ -55,21 +59,34 @@ export function App({ api }: { api?: ApiClient }) {
     );
   }
 
-  const detailMatch = /^\/secrets\/(?<handle>.+)$/.exec(route);
+  // `currentRoute()` hands over the whole hash, `?query` included — the
+  // prefiltered links the governance pages emit are exactly that shape. Routes
+  // are therefore matched on the path alone, and a page that wants the query
+  // reads it off `window.location.hash` itself.
+  const path = route.split("?")[0] ?? route;
+  const detailMatch = /^\/secrets\/(?<handle>.+)$/.exec(path);
   const detailHandle = detailMatch?.groups?.["handle"];
+  const agentMatch = /^\/agents\/(?<name>[^/]+)$/.exec(path);
+  const agentName = agentMatch?.groups?.["name"];
 
   return (
     <>
       <SealBar state={state} />
       <div class="layout">
-        <Nav route={route} />
+        <Nav route={path} />
         <main class="content">
-          {route === "/" && <DashboardPage api={client} />}
-          {route === "/secrets" && <SecretsPage api={client} />}
+          {path === "/" && <DashboardPage api={client} />}
+          {path === "/secrets" && <SecretsPage api={client} />}
           {detailHandle !== undefined && (
             <SecretDetailPage api={client} handle={decodeURIComponent(detailHandle)} />
           )}
-          {route === "/audit" && <AuditPage api={client} />}
+          {path === "/audit" && <AuditPage api={client} />}
+          {path === "/agents" && <AgentsPage api={client} />}
+          {path === "/permissions" && <PermissionsPage api={client} />}
+          {path === "/tokens" && <TokensPage api={client} />}
+          {agentName !== undefined && (
+            <AgentDetailPage api={client} name={decodeURIComponent(agentName)} />
+          )}
         </main>
       </div>
     </>

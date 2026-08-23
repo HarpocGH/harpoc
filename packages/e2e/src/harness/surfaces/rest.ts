@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import { createApp } from "@harpoc/rest-api";
 import type { Permission } from "@harpoc/shared";
 import type { HarnessVault } from "../vault.js";
+import { ensureAgent } from "../vault.js";
 import type { CallOutcome, Surface } from "./surface.js";
 
 export interface RestSurface extends Surface {
@@ -25,6 +26,7 @@ export async function startRestSurface(
   principal: string,
   scopes: Permission[],
 ): Promise<RestSurface> {
+  ensureAgent(vault, principal);
   const app = createApp(vault.engine);
   // The bind is asynchronous: `serve()` returns before the socket is listening,
   // so the port has to come from the ready callback, not from a same-tick

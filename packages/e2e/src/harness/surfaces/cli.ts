@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { Permission } from "@harpoc/shared";
 import type { HarnessVault } from "../vault.js";
+import { ensureAgent } from "../vault.js";
 import { resolveCliEntry } from "../fixtures.js";
 import type { CallOutcome, Surface } from "./surface.js";
 
@@ -109,6 +110,7 @@ export async function startCliSurface(
   principal: string,
   scopes: Permission[],
 ): Promise<CliSurface> {
+  ensureAgent(vault, principal);
   const entry = resolveCliEntry();
   const token = vault.engine.createToken(principal, scopes);
 

@@ -47,6 +47,20 @@ beforeEach(async () => {
   await engine.initVault("password");
 });
 
+/**
+ * Register the agent identities this suite mints tokens or grants for — the
+ * v1.4 registration gate refuses an unregistered agent-typed principal.
+ */
+function registerAgents(...names: string[]): void {
+  for (const name of names) {
+    try {
+      engine.registerAgent({ name });
+    } catch (err) {
+      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
+    }
+  }
+}
+
 afterEach(async () => {
   await engine.destroy();
   try {
@@ -78,6 +92,7 @@ function grant(
   permissions: Permission[],
   expiresAt?: number,
 ): void {
+  if (principalType === "agent") registerAgents(principalId);
   engine.grantPolicy({ secretId, principalType, principalId, permissions, expiresAt }, "admin");
 }
 
@@ -215,6 +230,7 @@ describe("policy administration (D3: grant/revoke require admin)", () => {
   it("the first grant is ungated, later ones require an admin grant", async () => {
     const id = await makeSecret("bootstrap");
     const bob = agent("bob");
+    registerAgents("alice", "bob");
 
     // No rows yet ⇒ presence gate off.
     expect(() =>

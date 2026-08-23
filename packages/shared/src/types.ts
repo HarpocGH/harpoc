@@ -65,6 +65,16 @@ export const AuditEventType = {
    * unrestricted server started.
    */
   SERVER_START: "server.start",
+  /** A new agent was registered in the agent registry (v1.4). */
+  AGENT_REGISTER: "agent.register",
+  /** An agent's description or owner was updated (v1.4). */
+  AGENT_UPDATE: "agent.update",
+  /** A deactivated agent was reactivated (v1.4). */
+  AGENT_ACTIVATE: "agent.activate",
+  /** An agent was deactivated (v1.4). */
+  AGENT_DEACTIVATE: "agent.deactivate",
+  /** An agent was deleted from the registry (v1.4). */
+  AGENT_DELETE: "agent.delete",
 } as const;
 export type AuditEventType = (typeof AuditEventType)[keyof typeof AuditEventType];
 
@@ -188,6 +198,25 @@ export const OAuthProviderPreset = {
 export type OAuthProviderPreset = (typeof OAuthProviderPreset)[keyof typeof OAuthProviderPreset];
 
 // ---------------------------------------------------------------------------
+// Agent governance enums (v1.4)
+// ---------------------------------------------------------------------------
+
+/** Lifecycle status of a registered agent (agent registry, v1.4). */
+export const AgentStatus = {
+  ACTIVE: "active",
+  INACTIVE: "inactive",
+} as const;
+export type AgentStatus = (typeof AgentStatus)[keyof typeof AgentStatus];
+
+/** Lifecycle status of an issued token, as reported by the issued-token registry (v1.4). */
+export const IssuedTokenStatus = {
+  ACTIVE: "active",
+  EXPIRED: "expired",
+  REVOKED: "revoked",
+} as const;
+export type IssuedTokenStatus = (typeof IssuedTokenStatus)[keyof typeof IssuedTokenStatus];
+
+// ---------------------------------------------------------------------------
 // Domain interfaces (v1.0 scope)
 // ---------------------------------------------------------------------------
 
@@ -228,6 +257,64 @@ export interface AccessPolicy {
   created_at: number;
   expires_at: number | null;
   created_by: string;
+}
+
+/** A registered agent — maps to the `agents` SQLite table (v1.4 agent registry). */
+export interface Agent {
+  id: string;
+  name: string;
+  description: string | null;
+  owner: string | null;
+  status: AgentStatus;
+  created_at: number;
+  updated_at: number;
+  deactivated_at: number | null;
+  last_active_at: number | null;
+  active_tokens: number;
+  grants: number;
+}
+
+/**
+ * Metadata-only record of an issued token — maps to the `issued_tokens`
+ * SQLite table (v1.4 issued-token registry). The JWT itself is never stored.
+ */
+export interface IssuedToken {
+  jti: string;
+  subject: string;
+  principal_type: TokenPrincipalType;
+  agent: string | null;
+  scope: Permission[];
+  project: string | null;
+  secrets: string[] | null;
+  label: string | null;
+  issued_at: number;
+  expires_at: number;
+  revoked_at: number | null;
+  status: IssuedTokenStatus;
+}
+
+/**
+ * An agent's effective per-secret permission grant, projected from
+ * `access_policies` (v1.4 permission matrix).
+ */
+export interface AgentPolicy {
+  policy_id: string;
+  secret_id: string;
+  handle: string;
+  permissions: Permission[];
+  expires_at: number | null;
+  created_at: number;
+}
+
+/**
+ * Result of setting an agent's permissions on a secret: the resulting policy
+ * (null when the set permissions were empty — the presence gate) plus the
+ * secret's gated-before/after state.
+ */
+export interface SetAgentPermissionsResult {
+  policy: AccessPolicy | null;
+  gated_before: boolean;
+  gated_after: boolean;
 }
 
 /** Audit log entry — maps to the `audit_log` SQLite table. */

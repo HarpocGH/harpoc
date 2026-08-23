@@ -1,6 +1,9 @@
 import type { VaultEngine } from "@harpoc/core";
 import type {
   AccessPolicy,
+  Agent,
+  AgentPolicy,
+  AgentStatusFilter,
   CertificateImportRequestInput,
   CertificateStatus,
   ConnectionConfig,
@@ -8,11 +11,16 @@ import type {
   GenerateCsrRequest,
   InjectionPolicy,
   InjectionPolicyInput,
+  IssuedToken,
   McpServerConfig,
   OAuthFlowResult,
   OAuthTokenStatus,
+  RegisterAgentInput,
+  SetAgentPermissionsInput,
+  SetAgentPermissionsResult,
   SetInjectionPolicyOptions,
   StartOAuthFlowInput,
+  UpdateAgentInput,
   UseSecretAction,
   UseSecretResponse,
 } from "@harpoc/shared";
@@ -23,6 +31,7 @@ import type {
   GeneratedCsrRef,
   GrantPolicyInput,
   HealthResponse,
+  ListTokensOptions,
   VaultClient,
 } from "./client.js";
 import {
@@ -186,6 +195,61 @@ export class DirectClient implements VaultClient {
 
   async queryAudit(options?: AuditQueryOptions): Promise<DecryptedAuditEvent[]> {
     return this.engine.queryAudit(options);
+  }
+
+  async registerAgent(input: RegisterAgentInput): Promise<Agent> {
+    return this.engine.registerAgent(input);
+  }
+
+  async listAgents(status?: AgentStatusFilter): Promise<Agent[]> {
+    return this.engine.listAgents(status);
+  }
+
+  async getAgent(name: string): Promise<Agent> {
+    return this.engine.getAgent(name);
+  }
+
+  async updateAgent(name: string, input: UpdateAgentInput): Promise<Agent> {
+    return this.engine.updateAgent(name, input);
+  }
+
+  async deactivateAgent(name: string): Promise<{ revoked_tokens: number }> {
+    return this.engine.deactivateAgent(name);
+  }
+
+  async activateAgent(name: string): Promise<Agent> {
+    return this.engine.activateAgent(name);
+  }
+
+  async deleteAgent(name: string): Promise<{ revoked_tokens: number; removed_grants: number }> {
+    return this.engine.deleteAgent(name);
+  }
+
+  async listAgentPolicies(name: string): Promise<AgentPolicy[]> {
+    return this.engine.listAgentPolicies(name);
+  }
+
+  async setAgentPermissions(
+    name: string,
+    handle: string,
+    input: SetAgentPermissionsInput,
+  ): Promise<SetAgentPermissionsResult> {
+    const secretId = await this.engine.resolveSecretId(handle);
+    return this.engine.setAgentPermissions(
+      name,
+      secretId,
+      input.permissions,
+      input.expires_at,
+      "sdk-direct",
+    );
+  }
+
+  async listTokens(options?: ListTokensOptions): Promise<IssuedToken[]> {
+    return this.engine.listIssuedTokens({ agent: options?.agent, status: options?.status });
+  }
+
+  async revokeToken(jti: string): Promise<void> {
+    this.engine.revokeToken(jti);
   }
 
   async getHealth(): Promise<HealthResponse> {

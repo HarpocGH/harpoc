@@ -123,6 +123,31 @@ tr[data-clickable="true"]:hover {
   cursor: pointer;
 }
 
+.matrix {
+  overflow-x: auto;
+}
+.matrix th[scope="row"] {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.matrix td[data-clickable="true"]:hover {
+  background: var(--panel);
+  cursor: pointer;
+}
+.matrix td[data-readonly="true"] {
+  opacity: 0.55;
+}
+.muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+.perm-grid label {
+  display: inline-block;
+  margin-right: 1.25rem;
+}
+
 .chip {
   display: inline-block;
   padding: 0 0.5rem;
@@ -144,6 +169,14 @@ tr[data-clickable="true"]:hover {
 .chip[data-tone="bad"] {
   color: var(--wax);
   border-color: var(--wax);
+}
+
+.countdown {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.countdown[data-tone="warn"] {
+  color: var(--amber);
 }
 
 button,

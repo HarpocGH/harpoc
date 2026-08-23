@@ -1,6 +1,8 @@
 import { createHmac, createPrivateKey, timingSafeEqual, X509Certificate } from "node:crypto";
 import type {
   AccessPolicy,
+  Agent,
+  AgentPolicy,
   AuditChainAnchor,
   AuditVisibilityScope,
   CallerContext,
@@ -14,16 +16,21 @@ import type {
   ImportCertificateOptions,
   InjectionPolicy,
   InjectionPolicyInput,
+  IssuedToken,
+  IssuedTokenStatusFilter,
   McpServerConfig,
   OAuthProviderConfig,
   OAuthTokenStatus,
   Permission,
+  RegisterAgentInput,
   Secret,
   SessionFile,
+  SetAgentPermissionsResult,
   SetInjectionPolicyOptions,
   SftpResult,
   SmtpAction,
   TokenPrincipalType,
+  UpdateAgentInput,
   UseSecretAction,
   UseSecretResponse,
   VaultApiToken,
@@ -44,6 +51,7 @@ import {
   AAD_SESSION_JWT,
   AAD_SESSION_KEK,
   AES_KEY_LENGTH,
+  AgentStatus,
   AuditEventType,
   DEFAULT_SESSION_TTL_MS,
   ErrorCode,
@@ -51,6 +59,7 @@ import {
   formatHandle,
   isValidSecretNamePattern,
   isVaultVersionSupported,
+  IssuedTokenStatus,
   LOCKOUT_DURATIONS_MS,
   LOCKOUT_MAX_ATTEMPTS,
   matchesSecretNameScope,
@@ -64,10 +73,12 @@ import {
   SESSION_CLEANUP_INTERVAL_MS,
   TokenPrincipalType as TokenPrincipalTypeValues,
   SESSION_SLIDE_INTERVAL_MS,
+  TOKEN_LABEL_MAX_LENGTH,
   VaultError,
   VaultState,
   VAULT_VERSION,
 } from "@harpoc/shared";
+import { AgentRegistry } from "./access/agent-registry.js";
 import { PolicyEngine } from "./access/policy-engine.js";
 import type { GrantPolicyInput, PolicyPrincipal } from "./access/policy-engine.js";
 import type { AuditAttribution } from "./audit/attribution.js";
@@ -154,6 +165,7 @@ interface UnlockedState {
   vaultId: string;
   secretManager: SecretManager;
   policyEngine: PolicyEngine;
+  agentRegistry: AgentRegistry;
   auditLogger: AuditLogger;
   auditQuery: AuditQuery;
   httpInjector: HttpInjector;
@@ -187,6 +199,13 @@ const MAX_RENEW_BEFORE_DAYS = 365;
  * filtered against.
  */
 const EXPIRING_CERT_QUERY_DAYS = 366;
+
+/**
+ * The `create` refusal shared by `grantPolicy` and `setAgentPermissions`: both
+ * write the same policy row, so the two paths must refuse it with one message.
+ */
+const CREATE_NOT_GRANTABLE_MESSAGE =
+  "'create' cannot be granted per secret: a policy attaches to an existing secret. Use token scope (harpoc auth token --permissions create) instead";
 
 /**
  * The refresh state of an OAuth row, derived from the stored expiry alone.
@@ -265,6 +284,7 @@ export class VaultEngine {
 
   private secretManager: SecretManager | null = null;
   private policyEngine: PolicyEngine | null = null;
+  private agentRegistry: AgentRegistry | null = null;
   private auditLogger: AuditLogger | null = null;
   private auditQuery: AuditQuery | null = null;
   private httpInjector: HttpInjector | null = null;
@@ -2974,6 +2994,211 @@ export class VaultEngine {
   }
 
   // ---------------------------------------------------------------------------
+  // Agents
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Register an agent — the named identity a token may later be issued to
+   * (design §5.1). Governance operations have no per-secret referent, so the
+   * `admin` check lives at the interface (REST route / CLI token path) and the
+   * `caller` here is audit attribution only (§5.6): NULL principal columns mark
+   * the trusted local path.
+   */
+  registerAgent(input: RegisterAgentInput, caller?: CallerContext): Agent {
+    const s = this.assertUnlocked();
+    return s.store.transaction(() => {
+      const row = s.agentRegistry.register(input);
+
+      s.auditLogger.log({
+        eventType: AuditEventType.AGENT_REGISTER,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
+        detail: {
+          name: row.name,
+          ...(row.owner !== null ? { owner: row.owner } : {}),
+          ...callerInterfaceDetail(caller),
+        },
+        sessionId: this.sessionId ?? undefined,
+      });
+
+      return s.agentRegistry.toAgent(row);
+    });
+  }
+
+  /** Governance read: unaudited on success (design §5.6); the caller is signature parity only. */
+  getAgent(name: string, caller?: CallerContext): Agent {
+    const s = this.assertUnlocked();
+    void caller;
+    return s.agentRegistry.toAgent(s.agentRegistry.getByName(name));
+  }
+
+  /** Governance read: unaudited on success (design §5.6); the caller is signature parity only. */
+  listAgents(status: AgentStatus | "all" = AgentStatus.ACTIVE, caller?: CallerContext): Agent[] {
+    const s = this.assertUnlocked();
+    void caller;
+    const now = Date.now();
+    return s.agentRegistry.list(status).map((row) => s.agentRegistry.toAgent(row, now));
+  }
+
+  /**
+   * Replace an agent's two metadata fields — an omitted field is cleared. The
+   * audited `fields` are the ones the request carried; their complement is what
+   * the replace cleared.
+   */
+  updateAgent(name: string, input: UpdateAgentInput, caller?: CallerContext): Agent {
+    const s = this.assertUnlocked();
+    const fields = (["description", "owner"] as const).filter(
+      (field) => input[field] !== undefined,
+    );
+
+    return s.store.transaction(() => {
+      const row = s.agentRegistry.updateMetadata(name, input);
+
+      s.auditLogger.log({
+        eventType: AuditEventType.AGENT_UPDATE,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
+        detail: { name: row.name, fields, ...callerInterfaceDetail(caller) },
+        sessionId: this.sessionId ?? undefined,
+      });
+
+      return s.agentRegistry.toAgent(row);
+    });
+  }
+
+  /** Reactivate a deactivated agent. Status only: tokens revoked on the way out stay revoked. */
+  activateAgent(name: string, caller?: CallerContext): Agent {
+    const s = this.assertUnlocked();
+    return s.store.transaction(() => {
+      const row = s.agentRegistry.setStatus(name, AgentStatus.ACTIVE);
+
+      s.auditLogger.log({
+        eventType: AuditEventType.AGENT_ACTIVATE,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
+        detail: { name: row.name, ...callerInterfaceDetail(caller) },
+        sessionId: this.sessionId ?? undefined,
+      });
+
+      return s.agentRegistry.toAgent(row);
+    });
+  }
+
+  /**
+   * Deactivate an agent and revoke every token it still holds, in one
+   * transaction: a deactivation that left live tokens behind would be
+   * governance theatre. Grants are kept — reactivation restores the agent's
+   * standing, and the tokens are the part that cannot be un-issued.
+   * Idempotent on an already-inactive agent: 0 tokens, still audited, and the
+   * status write is skipped so a repeat call cannot re-stamp `deactivated_at`.
+   */
+  deactivateAgent(name: string, caller?: CallerContext): { revoked_tokens: number } {
+    const s = this.assertUnlocked();
+    return s.store.transaction(() => {
+      const existing = s.agentRegistry.getByName(name);
+      const row =
+        existing.status === AgentStatus.INACTIVE
+          ? existing
+          : s.agentRegistry.setStatus(name, AgentStatus.INACTIVE);
+      const revokedTokens = this.revokeLiveTokensForAgent(s, row.id, "agent_deactivated", caller);
+
+      s.auditLogger.log({
+        eventType: AuditEventType.AGENT_DEACTIVATE,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
+        detail: { name: row.name, revoked_tokens: revokedTokens, ...callerInterfaceDetail(caller) },
+        sessionId: this.sessionId ?? undefined,
+      });
+
+      return { revoked_tokens: revokedTokens };
+    });
+  }
+
+  /**
+   * Delete an agent: revoke its live tokens, remove every grant it holds and
+   * drop the registry row — one transaction, so a partial deletion cannot
+   * leave a nameless identity holding permissions. The issued-token rows
+   * survive with a NULL `agent_id` (FK ON DELETE SET NULL): the token history
+   * is the audit trail's to keep, not the agent's.
+   */
+  deleteAgent(
+    name: string,
+    caller?: CallerContext,
+  ): { revoked_tokens: number; removed_grants: number } {
+    const s = this.assertUnlocked();
+    return s.store.transaction(() => {
+      const row = s.agentRegistry.getByName(name);
+      const revokedTokens = this.revokeLiveTokensForAgent(s, row.id, "agent_deleted", caller);
+
+      const removed = s.store.deletePoliciesForPrincipal("agent", row.name);
+      for (const policy of removed) {
+        s.auditLogger.log({
+          eventType: AuditEventType.POLICY_REVOKE,
+          secretId: policy.secret_id,
+          principalType: caller?.principal_type,
+          principalId: caller?.principal_id,
+          detail: {
+            policy_id: policy.id,
+            reason: "agent_deleted",
+            ...callerInterfaceDetail(caller),
+          },
+          sessionId: this.sessionId ?? undefined,
+        });
+      }
+
+      s.agentRegistry.delete(row.name);
+
+      s.auditLogger.log({
+        eventType: AuditEventType.AGENT_DELETE,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
+        detail: {
+          name: row.name,
+          revoked_tokens: revokedTokens,
+          removed_grants: removed.length,
+          ...callerInterfaceDetail(caller),
+        },
+        sessionId: this.sessionId ?? undefined,
+      });
+
+      return { revoked_tokens: revokedTokens, removed_grants: removed.length };
+    });
+  }
+
+  /**
+   * Revoke every live token of one agent, mirroring the revocation onto its
+   * issued-token row. Run inside the agent-lifecycle transactions, so the
+   * revocations commit with the status change that caused them. `revoked_tokens`
+   * stays the revocation truth `verifyToken` consults — the floor is
+   * `revokeToken`'s, so the entry always outlives any token it names.
+   */
+  private revokeLiveTokensForAgent(
+    s: UnlockedState,
+    agentId: string,
+    reason: "agent_deactivated" | "agent_deleted",
+    caller?: CallerContext,
+  ): number {
+    const now = Date.now();
+    const floor = Math.floor(now / 1000) + Math.floor(MAX_TOKEN_TTL_MS / 1000);
+    const jtis = s.store.listLiveTokenJtisForAgent(agentId, now);
+
+    for (const jti of jtis) {
+      s.store.insertRevokedToken(jti, floor);
+      s.store.markIssuedTokenRevoked(jti, now);
+
+      s.auditLogger.log({
+        eventType: AuditEventType.TOKEN_REVOKE,
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
+        detail: { jti, reason, ...callerInterfaceDetail(caller) },
+        sessionId: this.sessionId ?? undefined,
+      });
+    }
+
+    return jtis.length;
+  }
+
+  // ---------------------------------------------------------------------------
   // Policies
   // ---------------------------------------------------------------------------
 
@@ -2988,6 +3213,10 @@ export class VaultEngine {
    * `create` is refused: a policy row is keyed by an existing secret, so the
    * permission to *add* secrets has no per-secret referent and is enforced
    * where it is decidable — the token's own scope at the interface layer.
+   *
+   * An `agent` principal must be registered and active (v1.4 §5.2): the
+   * registry is the identity authority, so a grant cannot name an identity the
+   * vault does not know. `tool`, `user` and `project` principals are unaffected.
    */
   grantPolicy(
     input: Omit<GrantPolicyInput, "createdBy">,
@@ -2995,11 +3224,10 @@ export class VaultEngine {
     caller?: CallerContext,
   ): AccessPolicy {
     if (input.permissions.includes("create" as Permission)) {
-      throw VaultError.invalidInput(
-        "'create' cannot be granted per secret: a policy attaches to an existing secret. Use token scope (harpoc auth token --permissions create) instead",
-      );
+      throw VaultError.invalidInput(CREATE_NOT_GRANTABLE_MESSAGE);
     }
     const s = this.assertUnlocked();
+    if (input.principalType === "agent") s.agentRegistry.assertActive(input.principalId);
     this.checkResolvedCallerPolicy(
       s,
       input.secretId,
@@ -3071,6 +3299,126 @@ export class VaultEngine {
       });
     }
     return s.policyEngine.listPolicies(secretId);
+  }
+
+  /**
+   * Write one cell of the permission matrix — replace semantics for the
+   * (agent, secret) pair (design §5.3). The existing grant/revoke pair is two
+   * calls against a schema that permits duplicate rows, so a matrix edit built
+   * from them can leave a cell holding two grants or none; this removes every
+   * row the agent holds on the secret and writes at most one back, in a single
+   * transaction with its audit rows.
+   *
+   * Empty `permissions` clears the cell, and when it held the secret's last
+   * row the presence gate flips off with it. `gated_before`/`gated_after` are
+   * both read inside the transaction, so the caller is told what the engine
+   * did rather than left to predict it. `create` is refused exactly as in
+   * {@link grantPolicy} — same reason, same message — and the per-secret
+   * `admin` check runs for a token-derived caller before anything is written.
+   */
+  setAgentPermissions(
+    agentName: string,
+    secretId: string,
+    permissions: Permission[],
+    expiresAt: number | undefined,
+    createdBy: string,
+    caller?: CallerContext,
+  ): SetAgentPermissionsResult {
+    if (permissions.includes("create" as Permission)) {
+      throw VaultError.invalidInput(CREATE_NOT_GRANTABLE_MESSAGE);
+    }
+    const s = this.assertUnlocked();
+    s.agentRegistry.assertActive(agentName);
+    this.checkResolvedCallerPolicy(s, secretId, caller, "admin", AuditEventType.POLICY_GRANT, {
+      policy: "access",
+      principal: `agent:${agentName}`,
+      via: "matrix",
+    });
+
+    return s.store.transaction(() => {
+      const gatedBefore = s.policyEngine.hasActivePolicies(secretId);
+
+      const removed = s.store.deletePoliciesForPrincipalOnSecret(secretId, "agent", agentName);
+      for (const row of removed) {
+        s.auditLogger.log({
+          eventType: AuditEventType.POLICY_REVOKE,
+          secretId,
+          principalType: caller?.principal_type,
+          principalId: caller?.principal_id,
+          detail: { policy_id: row.id, replaced: true, ...callerInterfaceDetail(caller) },
+          sessionId: this.sessionId ?? undefined,
+        });
+      }
+
+      let policy: AccessPolicy | null = null;
+      if (permissions.length > 0) {
+        policy = s.policyEngine.grantPolicy({
+          secretId,
+          principalType: "agent",
+          principalId: agentName,
+          permissions,
+          expiresAt,
+          createdBy,
+        });
+
+        s.auditLogger.log({
+          eventType: AuditEventType.POLICY_GRANT,
+          secretId,
+          principalType: caller?.principal_type,
+          principalId: caller?.principal_id,
+          detail: {
+            policy_id: policy.id,
+            principal: `agent:${agentName}`,
+            ...callerInterfaceDetail(caller),
+          },
+          sessionId: this.sessionId ?? undefined,
+        });
+      }
+
+      return {
+        policy,
+        gated_before: gatedBefore,
+        gated_after: s.policyEngine.hasActivePolicies(secretId),
+      };
+    });
+  }
+
+  /**
+   * The agent's row of the matrix: its non-expired grants with the secret
+   * handle resolved. Governance read — unaudited on success (design §5.6) and
+   * the caller is attribution parity only. Registration is checked with
+   * `getByName`, not `assertActive`: deactivation keeps an agent's grants (see
+   * {@link deactivateAgent}), so hiding them would misreport what a
+   * reactivation would restore. A grant whose secret no longer resolves is
+   * skipped rather than reported handle-less.
+   */
+  listAgentPolicies(agentName: string, caller?: CallerContext): AgentPolicy[] {
+    const s = this.assertUnlocked();
+    void caller;
+    const name = s.agentRegistry.getByName(agentName).name;
+    const now = Date.now();
+
+    const handles = new Map(
+      s.secretManager.listSecretsWithIds().map((entry) => [entry.id, entry.info.handle]),
+    );
+
+    const listed: AgentPolicy[] = [];
+    for (const policy of s.store.listPoliciesByPrincipal("agent", name)) {
+      if (policy.expires_at !== null && policy.expires_at <= now) continue;
+      const handle = handles.get(policy.secret_id);
+      if (handle === undefined) continue;
+
+      listed.push({
+        policy_id: policy.id,
+        secret_id: policy.secret_id,
+        handle,
+        permissions: policy.permissions,
+        expires_at: policy.expires_at,
+        created_at: policy.created_at,
+      });
+    }
+
+    return listed;
   }
 
   // ---------------------------------------------------------------------------
@@ -3192,12 +3540,23 @@ export class VaultEngine {
    * per-secret policy matching (thesis §4.6): agent, tool or user — absent =
    * agent. `project` is not issuable; project principals derive from the
    * token's project claim.
+   *
+   * An agent-typed subject must be a registered, active agent (v1.4 §5.2) —
+   * the registration gate is what makes the registry authoritative rather than
+   * advisory. The claims metadata of every issued token is recorded in
+   * `issued_tokens` in the same transaction as its `token.create` row; the JWT
+   * itself is never stored.
    */
   createToken(
     subject: string,
     scope: Permission[],
     ttlMs: number = 3600_000,
-    options?: { project?: string; secrets?: string[]; principalType?: TokenPrincipalType },
+    options?: {
+      project?: string;
+      secrets?: string[];
+      principalType?: TokenPrincipalType;
+      label?: string;
+    },
   ): string {
     const s = this.assertUnlocked();
 
@@ -3220,6 +3579,13 @@ export class VaultEngine {
       );
     }
 
+    if (options?.label !== undefined && options.label.length > TOKEN_LABEL_MAX_LENGTH) {
+      throw VaultError.invalidInput(`Token label exceeds ${TOKEN_LABEL_MAX_LENGTH} characters`);
+    }
+
+    const effectiveType = options?.principalType ?? "agent";
+    const agent = effectiveType === "agent" ? s.agentRegistry.assertActive(subject) : undefined;
+
     const effectiveTtl = Math.min(Math.max(ttlMs, 0), MAX_TOKEN_TTL_MS);
     const now = Math.floor(Date.now() / 1000);
     const payload: VaultApiToken = {
@@ -3237,16 +3603,37 @@ export class VaultEngine {
 
     const token = this.signJwt(payload);
 
-    s.auditLogger.log({
-      eventType: AuditEventType.TOKEN_CREATE,
-      detail: {
-        subject,
+    s.store.transaction(() => {
+      s.store.insertIssuedToken({
         jti: payload.jti,
+        subject,
+        principal_type: effectiveType,
+        agent_id: agent ? agent.id : null,
         scope,
-        project: options?.project,
-        principal_type: options?.principalType ?? "agent",
-      },
-      sessionId: this.sessionId ?? undefined,
+        // The registry row mirrors the claims the JWT actually carries: an
+        // empty narrowing sets no claim, and a stored `[]` would read as
+        // "restricted to nothing" for a token that is in fact unrestricted.
+        project: options?.project || null,
+        secrets: options?.secrets?.length ? options.secrets : null,
+        label: options?.label ?? null,
+        issued_at: Date.now(),
+        // The JWT exp is in seconds; the registry column is milliseconds.
+        expires_at: payload.exp * 1000,
+        revoked_at: null,
+      });
+
+      s.auditLogger.log({
+        eventType: AuditEventType.TOKEN_CREATE,
+        detail: {
+          subject,
+          jti: payload.jti,
+          scope,
+          project: options?.project,
+          principal_type: effectiveType,
+          ...(options?.label !== undefined ? { label: options.label } : {}),
+        },
+        sessionId: this.sessionId ?? undefined,
+      });
     });
 
     return token;
@@ -3295,8 +3682,13 @@ export class VaultEngine {
 
   /**
    * Revoke a JWT token by JTI.
+   *
+   * `caller` is attribution only (v1.4 R6): a token-derived revocation — REST
+   * `DELETE /tokens/:jti`, and the Web UI through it — names its principal on
+   * the `token.revoke` row. The trusted local paths (`harpoc auth revoke`, the
+   * in-process SDK) pass none and keep the NULL principal columns.
    */
-  revokeToken(jti: string, expiresAt?: number): void {
+  revokeToken(jti: string, expiresAt?: number, caller?: CallerContext): void {
     const s = this.assertUnlocked();
     // Floor: MAX_TOKEN_TTL_MS from now ensures the revocation entry always
     // outlives any token (since createToken caps TTL at MAX_TOKEN_TTL_MS).
@@ -3308,13 +3700,62 @@ export class VaultEngine {
     const effectiveExpiresAt = Math.max(expiresAt ?? 0, floor);
     s.store.transaction(() => {
       s.store.insertRevokedToken(jti, effectiveExpiresAt);
+      // History mirror; revoked_tokens stays the revocation truth verifyToken
+      // consults. A jti with no registry row (minted before v1.4) is a no-op.
+      s.store.markIssuedTokenRevoked(jti, Date.now());
 
       s.auditLogger.log({
         eventType: AuditEventType.TOKEN_REVOKE,
-        detail: { jti },
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
+        detail: { jti, ...callerInterfaceDetail(caller) },
         sessionId: this.sessionId ?? undefined,
       });
     });
+  }
+
+  /**
+   * List the claims metadata of issued tokens (v1.4 issued-token registry) —
+   * never a JWT. Status is derived, not stored: a revocation stamp wins over
+   * an elapsed expiry, so a token revoked before it lapsed reads `revoked`.
+   *
+   * Governance read: unaudited on success (design §5.6); the caller is
+   * attribution parity only.
+   */
+  listIssuedTokens(
+    filter?: { agent?: string; status?: IssuedTokenStatusFilter },
+    caller?: CallerContext,
+  ): IssuedToken[] {
+    const s = this.assertUnlocked();
+    void caller;
+
+    const agentId =
+      filter?.agent !== undefined ? s.agentRegistry.getByName(filter.agent).id : undefined;
+    const status = filter?.status ?? IssuedTokenStatus.ACTIVE;
+    const now = Date.now();
+
+    return s.store
+      .listIssuedTokens(agentId !== undefined ? { agentId } : undefined)
+      .map((row) => ({
+        jti: row.jti,
+        subject: row.subject,
+        principal_type: row.principal_type,
+        agent: row.agent_name,
+        scope: row.scope,
+        project: row.project,
+        secrets: row.secrets,
+        label: row.label,
+        issued_at: row.issued_at,
+        expires_at: row.expires_at,
+        revoked_at: row.revoked_at,
+        status:
+          row.revoked_at !== null
+            ? IssuedTokenStatus.REVOKED
+            : row.expires_at <= now
+              ? IssuedTokenStatus.EXPIRED
+              : IssuedTokenStatus.ACTIVE,
+      }))
+      .filter((token) => status === "all" || token.status === status);
   }
 
   // ---------------------------------------------------------------------------
@@ -3563,6 +4004,7 @@ export class VaultEngine {
       vaultId: this.vaultId as string,
       secretManager: this.secretManager as SecretManager,
       policyEngine: this.policyEngine as PolicyEngine,
+      agentRegistry: this.agentRegistry as AgentRegistry,
       auditLogger: this.auditLogger as AuditLogger,
       auditQuery: this.auditQuery as AuditQuery,
       httpInjector: this.httpInjector as HttpInjector,
@@ -3603,6 +4045,7 @@ export class VaultEngine {
       });
     });
     this.policyEngine = new PolicyEngine(store);
+    this.agentRegistry = new AgentRegistry(store);
     this.auditLogger = new AuditLogger(store, auditKey);
     this.auditQuery = new AuditQuery(store, auditKey);
     this.httpInjector = new HttpInjector(this.auditLogger);
@@ -3639,6 +4082,7 @@ export class VaultEngine {
 
     this.secretManager = null;
     this.policyEngine = null;
+    this.agentRegistry = null;
     this.auditLogger = null;
     this.auditQuery = null;
     this.httpInjector = null;

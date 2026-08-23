@@ -1,6 +1,9 @@
 import type {
   AccessPolicy,
   AccessPolicyInput,
+  Agent,
+  AgentPolicy,
+  AgentStatusFilter,
   CertificateImportRequestInput,
   CertificateStatus,
   ConnectionConfig,
@@ -10,11 +13,17 @@ import type {
   HealthResponse,
   InjectionPolicy,
   InjectionPolicyInput,
+  IssuedToken,
+  IssuedTokenStatusFilter,
   McpServerConfig,
   OAuthFlowResult,
   OAuthTokenStatus,
+  RegisterAgentInput,
+  SetAgentPermissionsInput,
+  SetAgentPermissionsResult,
   SetInjectionPolicyOptions,
   StartOAuthFlowInput,
+  UpdateAgentInput,
   UseSecretAction,
   UseSecretResponse,
 } from "@harpoc/shared";
@@ -32,6 +41,19 @@ export type CreateSecretInput = Omit<CreateSecretRequest, "value"> & {
 export type GrantPolicyInput = AccessPolicyInput;
 
 export type { HealthResponse };
+
+/** Wire shapes for the v1.4 agent governance inputs — re-exported for callers. */
+export type {
+  RegisterAgentInput,
+  UpdateAgentInput,
+  SetAgentPermissionsInput,
+} from "@harpoc/shared";
+
+/** Filters for {@link VaultClient.listTokens} (the issued-token registry, v1.4). */
+export interface ListTokensOptions {
+  agent?: string;
+  status?: IssuedTokenStatusFilter;
+}
 
 /**
  * Declared here rather than imported from `@harpoc/cert-manager`: that package
@@ -71,6 +93,21 @@ export interface VaultClient {
   revokePolicy(handle: string, policyId: string): Promise<void>;
   listPolicies(handle: string): Promise<AccessPolicy[]>;
   queryAudit(options?: AuditQueryOptions): Promise<DecryptedAuditEvent[]>;
+  registerAgent(input: RegisterAgentInput): Promise<Agent>;
+  listAgents(status?: AgentStatusFilter): Promise<Agent[]>;
+  getAgent(name: string): Promise<Agent>;
+  updateAgent(name: string, input: UpdateAgentInput): Promise<Agent>;
+  deactivateAgent(name: string): Promise<{ revoked_tokens: number }>;
+  activateAgent(name: string): Promise<Agent>;
+  deleteAgent(name: string): Promise<{ revoked_tokens: number; removed_grants: number }>;
+  listAgentPolicies(name: string): Promise<AgentPolicy[]>;
+  setAgentPermissions(
+    name: string,
+    handle: string,
+    input: SetAgentPermissionsInput,
+  ): Promise<SetAgentPermissionsResult>;
+  listTokens(options?: ListTokensOptions): Promise<IssuedToken[]>;
+  revokeToken(jti: string): Promise<void>;
   getHealth(): Promise<HealthResponse>;
   startOAuthFlow(input: StartOAuthFlowInput): Promise<OAuthFlowResult>;
   getOAuthStatus(handle: string): Promise<OAuthTokenStatus>;

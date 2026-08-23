@@ -36,6 +36,15 @@ const { mockEngine, mockManager, mockCertManager, mockResolveSecretValue, mockPr
         getOAuthTokenStatus: vi.fn(),
         refreshOAuthToken: vi.fn(),
         getCertificateStatus: vi.fn(),
+        registerAgent: vi.fn(),
+        getAgent: vi.fn(),
+        listAgents: vi.fn(),
+        updateAgent: vi.fn(),
+        deactivateAgent: vi.fn(),
+        activateAgent: vi.fn(),
+        deleteAgent: vi.fn(),
+        setAgentPermissions: vi.fn(),
+        listIssuedTokens: vi.fn(),
         verifyToken: vi.fn(),
         destroy: vi.fn().mockResolvedValue(undefined),
       },
@@ -87,6 +96,15 @@ import { registerCertStatusCommand } from "./cert/status.js";
 import { registerCertCsrCommand } from "./cert/csr.js";
 import { registerCertIssueCommand } from "./cert/issue.js";
 import { registerCertRenewCommand } from "./cert/renew.js";
+import { registerAgentRegisterCommand } from "./agent/register.js";
+import { registerAgentListCommand } from "./agent/list.js";
+import { registerAgentShowCommand } from "./agent/show.js";
+import { registerAgentUpdateCommand } from "./agent/update.js";
+import { registerAgentDeactivateCommand } from "./agent/deactivate.js";
+import { registerAgentActivateCommand } from "./agent/activate.js";
+import { registerAgentDeleteCommand } from "./agent/delete.js";
+import { registerAgentPermissionsCommand } from "./agent/permissions.js";
+import { registerAuthListCommand } from "./auth/list.js";
 
 const FIXTURES = new URL("../__fixtures__/certs/", import.meta.url);
 const KEY_PATH = fileURLToPath(new URL("rsa-key.pem", FIXTURES));
@@ -125,6 +143,20 @@ const CERT_STATUS: CertificateStatus = {
   not_after: 2_102_000_000_000,
   auto_renew: false,
   renewal_status: "ok",
+};
+
+const AGENT = {
+  id: "agent-1",
+  name: "bot",
+  description: null,
+  owner: null,
+  status: "active",
+  created_at: 0,
+  updated_at: 0,
+  deactivated_at: null,
+  last_active_at: null,
+  active_tokens: 0,
+  grants: 0,
 };
 
 const POLICY = {
@@ -168,6 +200,24 @@ function buildProgram(): Command {
   registerCertCsrCommand(cert);
   registerCertIssueCommand(cert);
   registerCertRenewCommand(cert);
+
+  const agent = program.command("agent");
+  registerAgentRegisterCommand(agent);
+  registerAgentListCommand(agent);
+  registerAgentShowCommand(agent);
+  registerAgentUpdateCommand(agent);
+  registerAgentDeactivateCommand(agent);
+  registerAgentActivateCommand(agent);
+  registerAgentDeleteCommand(agent);
+  registerAgentPermissionsCommand(agent);
+
+  // Only `auth list` from the auth group (R4): `auth token` declares no
+  // --token flag at all, so the pin below never sees it; `auth revoke` does
+  // declare one, but it is the JWT whose expiry the command extracts — not a
+  // scoped caller — so it stays out of the map, and registering it here would
+  // red the exhaustiveness pin.
+  const auth = program.command("auth");
+  registerAuthListCommand(auth);
 
   return program;
 }
@@ -314,6 +364,31 @@ const ROWS: Row[] = [
     permission: "create",
     call: "issueWithAcme",
   },
+  // Agent governance (v1.4): no per-secret referent, so `admin` at the
+  // interface is the whole gate — the same permission the REST routes check.
+  // The matrix cell names a secret on top of that, and its row is the `admin`
+  // one for the same reason `policy grant`'s is.
+  { argv: ["agent", "register", "bot"], permission: "admin", call: "registerAgent" },
+  { argv: ["agent", "list"], permission: "admin", call: "listAgents" },
+  { argv: ["agent", "show", "bot"], permission: "admin", call: "getAgent" },
+  {
+    argv: ["agent", "update", "bot", "--owner", "ops"],
+    permission: "admin",
+    call: "updateAgent",
+  },
+  { argv: ["agent", "deactivate", "bot"], permission: "admin", call: "deactivateAgent" },
+  { argv: ["agent", "activate", "bot"], permission: "admin", call: "activateAgent" },
+  {
+    argv: ["agent", "delete", "bot", "--confirm"],
+    permission: "admin",
+    call: "deleteAgent",
+  },
+  {
+    argv: ["agent", "permissions", "bot", "secret://k", "--permissions", "use"],
+    permission: "admin",
+    call: "setAgentPermissions",
+  },
+  { argv: ["auth", "list"], permission: "admin", call: "listIssuedTokens" },
 ];
 
 describe("token permission map (Task 9 pin)", () => {
@@ -383,6 +458,19 @@ describe("token permission map (Task 9 pin)", () => {
     });
     mockEngine.refreshOAuthToken.mockResolvedValue(2_000_000_000_000);
     mockEngine.getCertificateStatus.mockReturnValue(CERT_STATUS);
+    mockEngine.registerAgent.mockReturnValue(AGENT);
+    mockEngine.getAgent.mockReturnValue(AGENT);
+    mockEngine.listAgents.mockReturnValue([AGENT]);
+    mockEngine.updateAgent.mockReturnValue(AGENT);
+    mockEngine.deactivateAgent.mockReturnValue({ revoked_tokens: 0 });
+    mockEngine.activateAgent.mockReturnValue(AGENT);
+    mockEngine.deleteAgent.mockReturnValue({ revoked_tokens: 0, removed_grants: 0 });
+    mockEngine.setAgentPermissions.mockReturnValue({
+      policy: POLICY,
+      gated_before: true,
+      gated_after: true,
+    });
+    mockEngine.listIssuedTokens.mockReturnValue([]);
     mockEngine.verifyToken.mockReturnValue(token());
 
     mockManager.importCertificate.mockResolvedValue({ handle: "secret://k", secretId: "sid-1" });

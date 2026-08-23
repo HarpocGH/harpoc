@@ -1,0 +1,16 @@
+import {
+  CREATE_AGENTS,
+  CREATE_AUDIT_PRINCIPAL_INDEX,
+  CREATE_ISSUED_TOKENS,
+  CREATE_ISSUED_TOKENS_INDEXES,
+} from "../schema.js";
+
+export const migration012 = {
+  version: 12,
+  up: [
+    CREATE_AGENTS,
+    CREATE_ISSUED_TOKENS,
+    CREATE_ISSUED_TOKENS_INDEXES,
+    CREATE_AUDIT_PRINCIPAL_INDEX,
+  ].join("\n"),
+};

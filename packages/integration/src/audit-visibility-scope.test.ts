@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createApp } from "@harpoc/rest-api";
 import { SecretType } from "@harpoc/shared";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 
 const PASSWORD = "audit-visibility-pw";
@@ -29,6 +29,14 @@ describe("audit visibility scope end-to-end (L10)", () => {
   beforeAll(async () => {
     vault = createTestVault();
     await vault.engine.initVault(PASSWORD);
+    registerAgents(
+      vault.engine,
+      "full-admin",
+      "pattern-admin",
+      "pattern-admin-2",
+      "pattern-admin-3",
+      "project-admin",
+    );
 
     for (const [name, project] of [
       ["db-prod", undefined],

@@ -6,7 +6,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { providerConfigFromFlowInput } from "@harpoc/oauth-proxy";
 import { AuditEventType, ErrorCode } from "@harpoc/shared";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
@@ -68,6 +68,7 @@ beforeAll(async () => {
 
   vault = createTestVault();
   await vault.engine.initVault(PASSWORD);
+  registerAgents(vault.engine, PRINCIPAL);
   rest = startTestServer(vault.engine);
   token = vault.engine.createToken(PRINCIPAL, ["create", "read", "rotate", "use"]);
 });

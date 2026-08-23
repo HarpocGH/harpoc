@@ -43,6 +43,10 @@ function api(over: Partial<ApiClient> = {}): ApiClient {
   } as ApiClient;
 }
 
+const matrixLink = (): string | undefined =>
+  document.querySelector<HTMLAnchorElement>('a[href^="#/permissions"]')?.getAttribute("href") ??
+  undefined;
+
 describe("SecretDetailPage", () => {
   it("renders metadata and injection policy", async () => {
     render(<SecretDetailPage api={api()} handle="k1" />);
@@ -109,6 +113,38 @@ describe("SecretDetailPage", () => {
     render(<SecretDetailPage api={api()} handle="k1" />);
     await waitFor(() => expect(screen.getByText(/No per-secret grants/)).toBeTruthy());
     expect(screen.getByText(/harpoc policy grant/)).toBeTruthy();
+  });
+
+  it("offers the matrix as the other way to grant, prefiltered to this secret", async () => {
+    render(
+      <SecretDetailPage
+        api={api({
+          getSecret: vi
+            .fn()
+            .mockResolvedValue(secret({ handle: "secret://myproj/test-key", name: "test-key" })),
+        })}
+        handle="myproj/test-key"
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/No per-secret grants/)).toBeTruthy());
+    expect(matrixLink()).toBe("#/permissions?secret=myproj%2Ftest-key");
+  });
+
+  it("no longer defers editing to a future version", async () => {
+    render(<SecretDetailPage api={api()} handle="k1" />);
+    await waitFor(() => expect(screen.getByText(/No per-secret grants/)).toBeTruthy());
+    expect(document.body.textContent).not.toContain("v1.4");
+  });
+
+  it("links each listed grant to the matrix", async () => {
+    render(
+      <SecretDetailPage
+        api={api({ getAccessPolicies: vi.fn().mockResolvedValue([grant()]) })}
+        handle="k1"
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/agent-7/)).toBeTruthy());
+    expect(matrixLink()).toBe("#/permissions?secret=k1");
   });
 
   it("lists per-secret grants when the secret has them", async () => {

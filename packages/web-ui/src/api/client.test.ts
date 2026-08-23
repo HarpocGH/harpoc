@@ -283,3 +283,156 @@ describe("api client session signals", () => {
     await expect(api.listSecrets()).rejects.toBeInstanceOf(ApiError);
   });
 });
+
+// The v1.4 agent-governance surface. Every assertion here is about the wire:
+// the path a method addresses, the verb it uses and the body it sends — the
+// three things a page cannot check for itself.
+describe("api client agent governance", () => {
+  it("listAgents omits the status filter when absent and sends it when given", async () => {
+    const fetchFn = stubFetch(200, { data: [] });
+    const api = createApiClient(() => "t", fetchFn);
+    await api.listAgents();
+    await api.listAgents("all");
+    expect(callOf(fetchFn, 0).url).toBe("/api/v1/agents");
+    expect(callOf(fetchFn, 1).url).toBe("/api/v1/agents?status=all");
+  });
+
+  it("getAgent reads the agent route with an encoded name segment", async () => {
+    const fetchFn = stubFetch(200, { data: { name: "ci-bot" } });
+    const api = createApiClient(() => "t", fetchFn);
+    await api.getAgent("ci-bot");
+    expect(callOf(fetchFn).url).toBe("/api/v1/agents/ci-bot");
+  });
+
+  it("keeps a hostile name inside its own path segment", async () => {
+    // A valid agent name is [a-zA-Z0-9_-]+, so encoding never alters one. The
+    // encode is the guard against everything else reaching the router as path
+    // structure rather than as a name.
+    const fetchFn = stubFetch(200, { data: {} });
+    const api = createApiClient(() => "t", fetchFn);
+    await api.getAgent("../secrets");
+    expect(callOf(fetchFn).url).toBe("/api/v1/agents/..%2Fsecrets");
+  });
+
+  it("registerAgent POSTs the input body", async () => {
+    const fetchFn = stubFetch(201, { data: { name: "ci-bot" } });
+    const api = createApiClient(() => "t", fetchFn);
+    const created = await api.registerAgent({ name: "ci-bot", owner: "platform" });
+    const { url, init } = callOf(fetchFn);
+    expect(url).toBe("/api/v1/agents");
+    expect(init.method).toBe("POST");
+    expect(headersOf(init)["Content-Type"]).toBe("application/json");
+    expect(JSON.parse(init.body as string)).toEqual({ name: "ci-bot", owner: "platform" });
+    expect(created.name).toBe("ci-bot");
+  });
+
+  it("updateAgent PUTs the input body and returns the updated agent", async () => {
+    const fetchFn = stubFetch(200, { data: { name: "ci-bot", owner: "sre" } });
+    const api = createApiClient(() => "t", fetchFn);
+    const updated = await api.updateAgent("ci-bot", { description: "d", owner: "sre" });
+    const { url, init } = callOf(fetchFn);
+    expect(url).toBe("/api/v1/agents/ci-bot");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string)).toEqual({ description: "d", owner: "sre" });
+    expect(updated.owner).toBe("sre");
+  });
+
+  it("deactivateAgent POSTs bodyless and returns the revoked count", async () => {
+    const fetchFn = stubFetch(200, { data: { revoked_tokens: 3 } });
+    const api = createApiClient(() => "t", fetchFn);
+    const result = await api.deactivateAgent("ci-bot");
+    const { url, init } = callOf(fetchFn);
+    expect(url).toBe("/api/v1/agents/ci-bot/deactivate");
+    expect(init.method).toBe("POST");
+    // The route reads no body; sending one would only invite a framing error.
+    expect(init.body).toBeUndefined();
+    expect(result.revoked_tokens).toBe(3);
+  });
+
+  it("activateAgent POSTs bodyless and returns the agent", async () => {
+    const fetchFn = stubFetch(200, { data: { name: "ci-bot", status: "active" } });
+    const api = createApiClient(() => "t", fetchFn);
+    const agent = await api.activateAgent("ci-bot");
+    const { url, init } = callOf(fetchFn);
+    expect(url).toBe("/api/v1/agents/ci-bot/activate");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBeUndefined();
+    expect(agent.status).toBe("active");
+  });
+
+  it("deleteAgent DELETEs and returns both cascade counts", async () => {
+    const fetchFn = stubFetch(200, { data: { revoked_tokens: 2, removed_grants: 5 } });
+    const api = createApiClient(() => "t", fetchFn);
+    const result = await api.deleteAgent("ci-bot");
+    const { url, init } = callOf(fetchFn);
+    expect(url).toBe("/api/v1/agents/ci-bot");
+    expect(init.method).toBe("DELETE");
+    expect(result).toEqual({ revoked_tokens: 2, removed_grants: 5 });
+  });
+
+  it("listAgentPolicies reads the agent's grants", async () => {
+    const fetchFn = stubFetch(200, { data: [] });
+    const api = createApiClient(() => "t", fetchFn);
+    await api.listAgentPolicies("ci-bot");
+    expect(callOf(fetchFn).url).toBe("/api/v1/agents/ci-bot/policies");
+  });
+
+  it("setAgentPermissions PUTs the matrix cell, handle-encoded like every other secret path", async () => {
+    const fetchFn = stubFetch(200, {
+      data: { policy: null, gated_before: false, gated_after: false },
+    });
+    const api = createApiClient(() => "t", fetchFn);
+    const result = await api.setAgentPermissions("ci-bot", "secret://myproj/test-key", {
+      permissions: ["read", "use"],
+      expires_at: 1234,
+    });
+    const { url, init } = callOf(fetchFn);
+    expect(url).toBe("/api/v1/agents/ci-bot/secrets/myproj%2Ftest-key/permissions");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string)).toEqual({
+      permissions: ["read", "use"],
+      expires_at: 1234,
+    });
+    expect(result.gated_after).toBe(false);
+  });
+
+  it("listTokens builds the status and agent filters", async () => {
+    const fetchFn = stubFetch(200, { data: [] });
+    const api = createApiClient(() => "t", fetchFn);
+    await api.listTokens();
+    await api.listTokens({ agent: "ci-bot" });
+    await api.listTokens({ status: "revoked", agent: "ci-bot" });
+    expect([0, 1, 2].map((i) => callOf(fetchFn, i).url)).toEqual([
+      "/api/v1/tokens",
+      "/api/v1/tokens?agent=ci-bot",
+      "/api/v1/tokens?status=revoked&agent=ci-bot",
+    ]);
+  });
+
+  it("revokeToken DELETEs the jti route with an encoded segment", async () => {
+    const fetchFn = stubFetch(200, { data: { revoked: true } });
+    const api = createApiClient(() => "t", fetchFn);
+    await api.revokeToken("a/b+c");
+    const { url, init } = callOf(fetchFn);
+    expect(url).toBe("/api/v1/tokens/a%2Fb%2Bc");
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("passes the principal filters to the audit route", async () => {
+    const fetchFn = stubFetch(200, { data: [] });
+    const api = createApiClient(() => "t", fetchFn);
+    await api.queryAudit({ principal_type: "agent", principal_id: "ci-bot", limit: 50 });
+    expect(callOf(fetchFn).url).toBe(
+      "/api/v1/audit?principal_type=agent&principal_id=ci-bot&limit=50",
+    );
+  });
+
+  it("drops an empty-string filter rather than sending a value the API refuses", async () => {
+    // `principal_id=` is a 400 (min-length 1), and an empty string is what a
+    // cleared input or an absent query param reads as at every call site.
+    const fetchFn = stubFetch(200, { data: [] });
+    const api = createApiClient(() => "t", fetchFn);
+    await api.queryAudit({ principal_type: "agent", principal_id: "", limit: 50 });
+    expect(callOf(fetchFn).url).toBe("/api/v1/audit?principal_type=agent&limit=50");
+  });
+});

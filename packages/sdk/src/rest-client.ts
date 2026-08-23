@@ -1,5 +1,8 @@
 import type {
   AccessPolicy,
+  Agent,
+  AgentPolicy,
+  AgentStatusFilter,
   CertificateImportRequestInput,
   CertificateStatus,
   ConnectionConfig,
@@ -7,11 +10,16 @@ import type {
   GenerateCsrRequest,
   InjectionPolicy,
   InjectionPolicyInput,
+  IssuedToken,
   McpServerConfig,
   OAuthFlowResult,
   OAuthTokenStatus,
+  RegisterAgentInput,
+  SetAgentPermissionsInput,
+  SetAgentPermissionsResult,
   SetInjectionPolicyOptions,
   StartOAuthFlowInput,
+  UpdateAgentInput,
   UseSecretAction,
   UseSecretResponse,
 } from "@harpoc/shared";
@@ -23,6 +31,7 @@ import type {
   GeneratedCsrRef,
   GrantPolicyInput,
   HealthResponse,
+  ListTokensOptions,
   VaultClient,
 } from "./client.js";
 
@@ -191,9 +200,79 @@ export class RestClient implements VaultClient {
     if (options?.since !== undefined) params.set("since", String(options.since));
     if (options?.until !== undefined) params.set("until", String(options.until));
     if (options?.limit !== undefined) params.set("limit", String(options.limit));
+    if (options?.success !== undefined) params.set("success", String(options.success));
+    if (options?.principalType) params.set("principal_type", options.principalType);
+    if (options?.principalId) params.set("principal_id", options.principalId);
 
     const qs = params.toString();
     return this.request<DecryptedAuditEvent[]>("GET", `/api/v1/audit${qs ? `?${qs}` : ""}`);
+  }
+
+  async registerAgent(input: RegisterAgentInput): Promise<Agent> {
+    return this.request<Agent>("POST", "/api/v1/agents", input);
+  }
+
+  async listAgents(status?: AgentStatusFilter): Promise<Agent[]> {
+    const params = status ? `?status=${encodeURIComponent(status)}` : "";
+    return this.request<Agent[]>("GET", `/api/v1/agents${params}`);
+  }
+
+  async getAgent(name: string): Promise<Agent> {
+    return this.request<Agent>("GET", `/api/v1/agents/${encodeURIComponent(name)}`);
+  }
+
+  async updateAgent(name: string, input: UpdateAgentInput): Promise<Agent> {
+    return this.request<Agent>("PUT", `/api/v1/agents/${encodeURIComponent(name)}`, input);
+  }
+
+  async deactivateAgent(name: string): Promise<{ revoked_tokens: number }> {
+    return this.request<{ revoked_tokens: number }>(
+      "POST",
+      `/api/v1/agents/${encodeURIComponent(name)}/deactivate`,
+    );
+  }
+
+  async activateAgent(name: string): Promise<Agent> {
+    return this.request<Agent>("POST", `/api/v1/agents/${encodeURIComponent(name)}/activate`);
+  }
+
+  async deleteAgent(name: string): Promise<{ revoked_tokens: number; removed_grants: number }> {
+    return this.request<{ revoked_tokens: number; removed_grants: number }>(
+      "DELETE",
+      `/api/v1/agents/${encodeURIComponent(name)}`,
+    );
+  }
+
+  async listAgentPolicies(name: string): Promise<AgentPolicy[]> {
+    return this.request<AgentPolicy[]>(
+      "GET",
+      `/api/v1/agents/${encodeURIComponent(name)}/policies`,
+    );
+  }
+
+  async setAgentPermissions(
+    name: string,
+    handle: string,
+    input: SetAgentPermissionsInput,
+  ): Promise<SetAgentPermissionsResult> {
+    return this.request<SetAgentPermissionsResult>(
+      "PUT",
+      `/api/v1/agents/${encodeURIComponent(name)}/secrets/${this.encodeHandle(handle)}/permissions`,
+      input,
+    );
+  }
+
+  async listTokens(options?: ListTokensOptions): Promise<IssuedToken[]> {
+    const params = new URLSearchParams();
+    if (options?.status !== undefined) params.set("status", options.status);
+    if (options?.agent) params.set("agent", options.agent);
+
+    const qs = params.toString();
+    return this.request<IssuedToken[]>("GET", `/api/v1/tokens${qs ? `?${qs}` : ""}`);
+  }
+
+  async revokeToken(jti: string): Promise<void> {
+    await this.request<{ revoked: boolean }>("DELETE", `/api/v1/tokens/${encodeURIComponent(jti)}`);
   }
 
   async getHealth(): Promise<HealthResponse> {

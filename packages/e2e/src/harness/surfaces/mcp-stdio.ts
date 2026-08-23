@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { Permission } from "@harpoc/shared";
 import type { HarnessVault } from "../vault.js";
+import { ensureAgent } from "../vault.js";
 import { resolveMcpServerEntry } from "../fixtures.js";
 import { textOf } from "./mcp-http.js";
 import type { CallOutcome, Surface } from "./surface.js";
@@ -38,6 +39,7 @@ export async function startMcpStdioSurface(
   principal: string,
   scopes: Permission[],
 ): Promise<McpStdioSurface> {
+  ensureAgent(vault, principal);
   const token = vault.engine.createToken(principal, scopes);
   const entry = resolveMcpServerEntry();
 

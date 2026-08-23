@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuditEventType, ErrorCode, PrincipalType, SecretType } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, PrincipalType, SecretType, VaultError } from "@harpoc/shared";
 import type { Permission } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
@@ -68,6 +68,20 @@ let tempDir: string;
 let dbPath: string;
 let sessionPath: string;
 let engine: VaultEngine;
+
+/**
+ * Register the agent identities this suite mints tokens or grants for — the
+ * v1.4 registration gate refuses an unregistered agent-typed principal.
+ */
+function registerAgents(...names: string[]): void {
+  for (const name of names) {
+    try {
+      engine.registerAgent({ name });
+    } catch (err) {
+      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
+    }
+  }
+}
 
 /**
  * Some row-level assertions read the committed row straight from SQLite — for
@@ -1365,6 +1379,7 @@ describe("updateCertificate", () => {
 
   it("refuses an ungranted caller before the private key is read", async () => {
     const secretId = await pending("gated-renewal");
+    registerAgents("renewer");
     engine.grantPolicy(
       {
         secretId,
@@ -1396,6 +1411,7 @@ describe("updateCertificate", () => {
 
   it("lets a rotate-granted caller complete the renewal and attributes the row", async () => {
     const secretId = await pending("granted-renewal");
+    registerAgents("renewer");
     engine.grantPolicy(
       {
         secretId,
@@ -1451,6 +1467,7 @@ describe("certificate accessors — caller policy enforcement", () => {
       certificatePem: fx("rsa-cert.pem"),
     }));
     // Presence-gates the secret: any caller now needs a matching grant.
+    registerAgents("reader");
     engine.grantPolicy(
       {
         secretId,

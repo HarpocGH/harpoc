@@ -34,6 +34,20 @@ beforeEach(async () => {
   engine = new VaultEngine({ dbPath, sessionPath });
 });
 
+/**
+ * Register the agent identities this suite mints tokens or grants for — the
+ * v1.4 registration gate refuses an unregistered agent-typed principal.
+ */
+function registerAgents(...names: string[]): void {
+  for (const name of names) {
+    try {
+      engine.registerAgent({ name });
+    } catch (err) {
+      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
+    }
+  }
+}
+
 afterEach(async () => {
   await engine.destroy();
   try {
@@ -331,6 +345,7 @@ describe("audit command flow", () => {
 describe("auth token command flow", () => {
   beforeEach(async () => {
     await engine.initVault(TEST_PASSWORD);
+    registerAgents("test-agent", "my-bot", "revoke-test");
   });
 
   it("creates a scoped JWT token", () => {
@@ -370,6 +385,7 @@ describe("auth token command flow", () => {
 describe("policy command flow", () => {
   beforeEach(async () => {
     await engine.initVault(TEST_PASSWORD);
+    registerAgents("claude-agent");
   });
 
   it("grants, lists, and revokes a policy", async () => {

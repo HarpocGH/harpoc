@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuditEventType } from "@harpoc/shared";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 
 const PASSWORD = "integration-password";
@@ -10,6 +10,7 @@ let vault: TestVault;
 beforeEach(async () => {
   vault = createTestVault();
   await vault.engine.initVault(PASSWORD);
+  registerAgents(vault.engine, "agent-1");
 });
 
 afterEach(async () => {

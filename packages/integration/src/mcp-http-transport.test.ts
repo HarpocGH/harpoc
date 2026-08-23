@@ -6,7 +6,7 @@ import { VaultEngine } from "@harpoc/core";
 import { startMcpHttpServer } from "@harpoc/mcp-server";
 import type { McpHttpServer } from "@harpoc/mcp-server";
 import { SecretType } from "@harpoc/shared";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 
 const PASSWORD = "mcp-http-transport-pw";
@@ -27,6 +27,7 @@ describe("MCP Streamable HTTP transport (real engine, real tokens)", () => {
     vault = createTestVault();
     engine = vault.engine;
     await engine.initVault(PASSWORD);
+    registerAgents(engine, "it-admin", "it-owner", "it-revoked", "it-scoped", "it-thief");
     await engine.createSecret({
       name: "db-prod",
       type: SecretType.API_KEY,

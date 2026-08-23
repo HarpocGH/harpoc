@@ -8,7 +8,7 @@ import { createApp } from "@harpoc/rest-api";
 import { DirectClient, RestClient } from "@harpoc/sdk";
 import { AuditEventType, SecretType, VaultState } from "@harpoc/shared";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
@@ -48,6 +48,7 @@ describe("Full Lifecycle", () => {
     // 2. Create VaultEngine, init vault, create secret
     vault = createTestVault();
     await vault.engine.initVault(PASSWORD);
+    registerAgents(vault.engine, "test-agent");
 
     const result = await vault.engine.createSecret({
       name: SECRET_NAME,

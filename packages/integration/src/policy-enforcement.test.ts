@@ -5,7 +5,7 @@ import { createApp } from "@harpoc/rest-api";
 import { startMcpHttpServer } from "@harpoc/mcp-server";
 import type { McpHttpServer } from "@harpoc/mcp-server";
 import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 
 const PASSWORD = "policy-enforcement-pw";
@@ -27,6 +27,15 @@ describe("per-secret access policy enforcement end-to-end", () => {
   beforeAll(async () => {
     vault = createTestVault();
     await vault.engine.initVault(PASSWORD);
+    registerAgents(
+      vault.engine,
+      "allowed-agent",
+      "cfg-admin",
+      "charlie",
+      "other-agent",
+      "someone-else",
+      "w2-lister",
+    );
     await vault.engine.createSecret({
       name: "db-prod",
       type: SecretType.API_KEY,

@@ -114,8 +114,8 @@ describe("schema creation", () => {
     expect(row?.name).toBe("connection_configs");
   });
 
-  it("sets schema_version to 11", () => {
-    expect(store.getMeta("schema_version")).toBe("11");
+  it("sets schema_version to 12", () => {
+    expect(store.getMeta("schema_version")).toBe("12");
   });
 
   it("creates the live-name unique index", () => {

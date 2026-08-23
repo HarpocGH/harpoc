@@ -4,6 +4,7 @@ import { startMcpHttpServer } from "@harpoc/mcp-server";
 import type { McpHttpServer } from "@harpoc/mcp-server";
 import type { Permission } from "@harpoc/shared";
 import type { HarnessVault } from "../vault.js";
+import { ensureAgent } from "../vault.js";
 import type { CallOutcome, Surface } from "./surface.js";
 
 export type { CallOutcome } from "./surface.js";
@@ -39,6 +40,7 @@ export async function startMcpHttpSurface(
   principal: string,
   scopes: Permission[],
 ): Promise<McpHttpSurface> {
+  ensureAgent(vault, principal);
   const server: McpHttpServer = await startMcpHttpServer({ engine: vault.engine, port: 0 });
   const token = vault.engine.createToken(principal, scopes);
 

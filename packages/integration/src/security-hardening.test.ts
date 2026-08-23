@@ -16,7 +16,7 @@ import {
   LOCKOUT_MAX_ATTEMPTS,
   LOCKOUT_DURATIONS_MS,
 } from "@harpoc/shared";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { randomBytes } from "node:crypto";
 
@@ -410,6 +410,7 @@ describe("Timing Attack Protection", () => {
     // detail distinguishing how close the guess was.
     const vault = createTestVault();
     await vault.engine.initVault(PASSWORD);
+    registerAgents(vault.engine, "test-agent");
 
     const token = vault.engine.createToken("test-agent", ["admin"]);
     const parts = token.split(".");
@@ -440,6 +441,7 @@ describe("Timing Attack Protection", () => {
   it("JWT with single-bit signature flip is rejected", async () => {
     const vault = createTestVault();
     await vault.engine.initVault(PASSWORD);
+    registerAgents(vault.engine, "test-agent");
 
     const token = vault.engine.createToken("test-agent", ["admin"]);
     const parts = token.split(".");
@@ -457,6 +459,7 @@ describe("Timing Attack Protection", () => {
   it("JWT with entirely different signature is rejected", async () => {
     const vault = createTestVault();
     await vault.engine.initVault(PASSWORD);
+    registerAgents(vault.engine, "test-agent");
 
     const token = vault.engine.createToken("test-agent", ["admin"]);
     const parts = token.split(".");

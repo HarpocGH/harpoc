@@ -20,10 +20,19 @@ import { registerSecretMcpServerCommand } from "./commands/secret/mcp-server.js"
 import { registerSecretConnectionCommand } from "./commands/secret/connection.js";
 import { registerAuditCommand } from "./commands/audit.js";
 import { registerAuthTokenCommand } from "./commands/auth/token.js";
+import { registerAuthListCommand } from "./commands/auth/list.js";
 import { registerAuthRevokeCommand } from "./commands/auth/revoke.js";
 import { registerPolicyGrantCommand } from "./commands/policy/grant.js";
 import { registerPolicyRevokeCommand } from "./commands/policy/revoke.js";
 import { registerPolicyListCommand } from "./commands/policy/list.js";
+import { registerAgentRegisterCommand } from "./commands/agent/register.js";
+import { registerAgentListCommand } from "./commands/agent/list.js";
+import { registerAgentShowCommand } from "./commands/agent/show.js";
+import { registerAgentUpdateCommand } from "./commands/agent/update.js";
+import { registerAgentDeactivateCommand } from "./commands/agent/deactivate.js";
+import { registerAgentActivateCommand } from "./commands/agent/activate.js";
+import { registerAgentDeleteCommand } from "./commands/agent/delete.js";
+import { registerAgentPermissionsCommand } from "./commands/agent/permissions.js";
 import { registerOAuthConnectCommand } from "./commands/oauth/connect.js";
 import { registerOAuthStatusCommand } from "./commands/oauth/status.js";
 import { registerOAuthRefreshCommand } from "./commands/oauth/refresh.js";
@@ -65,6 +74,7 @@ registerSecretConnectionCommand(secret);
 // auth subcommands
 const auth = program.command("auth").description("Manage API tokens");
 registerAuthTokenCommand(auth);
+registerAuthListCommand(auth);
 registerAuthRevokeCommand(auth);
 
 // policy subcommands
@@ -72,6 +82,17 @@ const policy = program.command("policy").description("Manage access policies");
 registerPolicyGrantCommand(policy);
 registerPolicyRevokeCommand(policy);
 registerPolicyListCommand(policy);
+
+// agent subcommands
+const agent = program.command("agent").description("Manage registered agents");
+registerAgentRegisterCommand(agent);
+registerAgentListCommand(agent);
+registerAgentShowCommand(agent);
+registerAgentUpdateCommand(agent);
+registerAgentDeactivateCommand(agent);
+registerAgentActivateCommand(agent);
+registerAgentDeleteCommand(agent);
+registerAgentPermissionsCommand(agent);
 
 // oauth subcommands
 const oauth = program.command("oauth").description("Connect and manage OAuth provider secrets");

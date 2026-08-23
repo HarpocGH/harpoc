@@ -2,14 +2,18 @@ import { chmodSync, existsSync } from "node:fs";
 import Database from "better-sqlite3";
 import type {
   AccessPolicy,
+  AgentStatus,
   AuditEvent,
   AuditEventType,
+  Permission,
   PrincipalType,
   Secret,
   SecretStatus,
   SecretType,
+  TokenPrincipalType,
 } from "@harpoc/shared";
 import { SQLITE_PRAGMAS, VaultError } from "@harpoc/shared";
+import { generateUUIDv7 } from "../crypto/random.js";
 import { migration001 } from "./migrations/001-initial.js";
 import { migration002 } from "./migrations/002-revoked-tokens.js";
 import { migration003 } from "./migrations/003-name-hmac.js";
@@ -21,6 +25,10 @@ import { migration008 } from "./migrations/008-connection-configs.js";
 import { migration009 } from "./migrations/009-name-hmac-unique.js";
 import { migration010 } from "./migrations/010-audit-row-hmac.js";
 import { migration011 } from "./migrations/011-oauth-auth-method.js";
+import { migration012 } from "./migrations/012-agent-governance.js";
+
+/** Description stamped on agents the 012 backfill registers from existing grants. */
+const AGENT_BACKFILL_DESCRIPTION = "auto-registered from existing grants (migration 012)";
 
 /** True for a better-sqlite3 UNIQUE/PRIMARY-KEY constraint violation. */
 export function isUniqueConstraintError(err: unknown): boolean {
@@ -46,6 +54,8 @@ export interface AuditFilter {
   until?: number;
   limit?: number;
   success?: boolean;
+  principalType?: PrincipalType;
+  principalId?: string;
 }
 
 /** Raw audit row plus its chain link, for tamper-evidence verification. */
@@ -151,6 +161,49 @@ export interface ConnectionConfigRow {
   config_tag: Uint8Array;
   created_at: number;
   updated_at: number;
+}
+
+/**
+ * A registered agent as stored (v1.4 agent registry). Plaintext columns; the
+ * derived fields of the shared `Agent` wire type (last_active_at, active_tokens,
+ * grants) are computed by the engine from the counting queries below.
+ * Timestamps are milliseconds.
+ */
+export interface AgentRow {
+  id: string;
+  name: string;
+  description: string | null;
+  owner: string | null;
+  status: AgentStatus;
+  created_at: number;
+  updated_at: number;
+  deactivated_at: number | null;
+}
+
+/**
+ * Claims metadata of an issued token as stored (v1.4 issued-token registry) —
+ * never the JWT. `scope`/`secrets` are JSON-encoded on the way in; a null
+ * `secrets` means unrestricted. Every timestamp is in **milliseconds**,
+ * `expires_at` included — unlike revoked_tokens.expires_at, which is seconds.
+ * `revoked_at` is a history mirror; revoked_tokens remains the revocation truth.
+ */
+export interface IssuedTokenRow {
+  jti: string;
+  subject: string;
+  principal_type: TokenPrincipalType;
+  agent_id: string | null;
+  scope: Permission[];
+  project: string | null;
+  secrets: string[] | null;
+  label: string | null;
+  issued_at: number;
+  expires_at: number;
+  revoked_at: number | null;
+}
+
+/** Filters for listing issued tokens. */
+export interface IssuedTokenFilter {
+  agentId?: string;
 }
 
 export class SqliteStore {
@@ -270,6 +323,48 @@ export class SqliteStore {
         this.db.exec(migration011.up);
         this.setMeta("schema_version", "11");
       })();
+    }
+    if (currentVersion < 12) {
+      this.db.transaction(() => {
+        this.db.exec(migration012.up);
+        // The v1.4 gates require every agent principal to be registered, so
+        // agents that already hold grants are registered by the upgrade
+        // itself — in this transaction, or an interrupted upgrade would leave
+        // the tables without their principals.
+        this.backfillAgentsFromPolicies();
+        this.setMeta("schema_version", "12");
+      })();
+    }
+  }
+
+  /**
+   * Register an agent row for every distinct agent principal that already holds
+   * an access policy. Names are taken exactly as stored — legacy names predate
+   * the registry's name rule and are not rewritten.
+   */
+  private backfillAgentsFromPolicies(): void {
+    const principals = this.db
+      .prepare("SELECT DISTINCT principal_id FROM access_policies WHERE principal_type = 'agent'")
+      .all() as { principal_id: string }[];
+    if (principals.length === 0) return;
+
+    const now = Date.now();
+    const insert = this.db.prepare(
+      `INSERT OR IGNORE INTO agents (
+        id, name, description, owner, status, created_at, updated_at, deactivated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const { principal_id } of principals) {
+      insert.run(
+        generateUUIDv7(),
+        principal_id,
+        AGENT_BACKFILL_DESCRIPTION,
+        null,
+        "active",
+        now,
+        now,
+        null,
+      );
     }
   }
 
@@ -526,6 +621,54 @@ export class SqliteStore {
     return result.changes > 0;
   }
 
+  /** Remove every policy of one principal, returning the rows that were removed. */
+  deletePoliciesForPrincipal(principalType: PrincipalType, principalId: string): AccessPolicy[] {
+    const removed = this.listPoliciesByPrincipal(principalType, principalId);
+    if (removed.length === 0) return [];
+    this.db
+      .prepare("DELETE FROM access_policies WHERE principal_type = ? AND principal_id = ?")
+      .run(principalType, principalId);
+    return removed;
+  }
+
+  /** Remove one principal's policies on a single secret, returning the removed rows. */
+  deletePoliciesForPrincipalOnSecret(
+    secretId: string,
+    principalType: PrincipalType,
+    principalId: string,
+  ): AccessPolicy[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM access_policies
+         WHERE secret_id = ? AND principal_type = ? AND principal_id = ?
+         ORDER BY created_at DESC`,
+      )
+      .all(secretId, principalType, principalId) as Record<string, unknown>[];
+    if (rows.length === 0) return [];
+    this.db
+      .prepare(
+        "DELETE FROM access_policies WHERE secret_id = ? AND principal_type = ? AND principal_id = ?",
+      )
+      .run(secretId, principalType, principalId);
+    return rows.map((row) => this.rowToPolicy(row));
+  }
+
+  /** Count a principal's policies that have not expired at `now` (ms). */
+  countActivePoliciesForPrincipal(
+    principalType: PrincipalType,
+    principalId: string,
+    now: number,
+  ): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM access_policies
+         WHERE principal_type = ? AND principal_id = ?
+           AND (expires_at IS NULL OR expires_at > ?)`,
+      )
+      .get(principalType, principalId, now) as { c: number };
+    return row.c;
+  }
+
   // ---------------------------------------------------------------------------
   // audit_log
   // ---------------------------------------------------------------------------
@@ -621,6 +764,14 @@ export class SqliteStore {
       sql += " AND event_type = ?";
       params.push(filter.eventType);
     }
+    if (filter?.principalType) {
+      sql += " AND principal_type = ?";
+      params.push(filter.principalType);
+    }
+    if (filter?.principalId) {
+      sql += " AND principal_id = ?";
+      params.push(filter.principalId);
+    }
     if (filter?.since) {
       sql += " AND timestamp >= ?";
       params.push(filter.since);
@@ -669,6 +820,171 @@ export class SqliteStore {
       .prepare("DELETE FROM revoked_tokens WHERE expires_at < ?")
       .run(Math.floor(Date.now() / 1000));
     return result.changes;
+  }
+
+  // ---------------------------------------------------------------------------
+  // agents
+  // ---------------------------------------------------------------------------
+
+  /** Insert an agent; a duplicate name surfaces as a UNIQUE constraint error. */
+  insertAgent(row: AgentRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO agents (
+          id, name, description, owner, status, created_at, updated_at, deactivated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.id,
+        row.name,
+        row.description,
+        row.owner,
+        row.status,
+        row.created_at,
+        row.updated_at,
+        row.deactivated_at,
+      );
+  }
+
+  getAgentByName(name: string): AgentRow | undefined {
+    const row = this.db.prepare("SELECT * FROM agents WHERE name = ?").get(name) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? this.rowToAgent(row) : undefined;
+  }
+
+  getAgentById(id: string): AgentRow | undefined {
+    const row = this.db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? this.rowToAgent(row) : undefined;
+  }
+
+  listAgents(status: AgentStatus | "all"): AgentRow[] {
+    const rows =
+      status === "all"
+        ? (this.db.prepare("SELECT * FROM agents ORDER BY name ASC").all() as Record<
+            string,
+            unknown
+          >[])
+        : (this.db
+            .prepare("SELECT * FROM agents WHERE status = ? ORDER BY name ASC")
+            .all(status) as Record<string, unknown>[]);
+    return rows.map((row) => this.rowToAgent(row));
+  }
+
+  /** Replace the two metadata fields; name and status are untouched here. */
+  updateAgentMetadata(
+    id: string,
+    description: string | null,
+    owner: string | null,
+    updatedAt: number,
+  ): void {
+    this.db
+      .prepare("UPDATE agents SET description = ?, owner = ?, updated_at = ? WHERE id = ?")
+      .run(description, owner, updatedAt, id);
+  }
+
+  /** Set status; deactivated_at records the moment of deactivation and clears on reactivation. */
+  setAgentStatus(id: string, status: AgentStatus, at: number): void {
+    this.db
+      .prepare("UPDATE agents SET status = ?, updated_at = ?, deactivated_at = ? WHERE id = ?")
+      .run(status, at, status === "inactive" ? at : null, id);
+  }
+
+  deleteAgent(id: string): boolean {
+    const result = this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+    return result.changes > 0;
+  }
+
+  /** Most recent audit timestamp attributed to this agent, or null if it has none. */
+  agentLastActiveAt(name: string): number | null {
+    const row = this.db
+      .prepare(
+        "SELECT MAX(timestamp) AS last_active FROM audit_log WHERE principal_type = 'agent' AND principal_id = ?",
+      )
+      .get(name) as { last_active: number | null };
+    return row.last_active ?? null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // issued_tokens
+  // ---------------------------------------------------------------------------
+
+  insertIssuedToken(row: IssuedTokenRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO issued_tokens (
+          jti, subject, principal_type, agent_id, scope, project, secrets, label,
+          issued_at, expires_at, revoked_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.jti,
+        row.subject,
+        row.principal_type,
+        row.agent_id,
+        JSON.stringify(row.scope),
+        row.project,
+        row.secrets === null ? null : JSON.stringify(row.secrets),
+        row.label,
+        row.issued_at,
+        row.expires_at,
+        row.revoked_at,
+      );
+  }
+
+  /** Stamp the revocation mirror once — a later revocation never rewrites the first. */
+  markIssuedTokenRevoked(jti: string, revokedAt: number): void {
+    this.db
+      .prepare("UPDATE issued_tokens SET revoked_at = ? WHERE jti = ? AND revoked_at IS NULL")
+      .run(revokedAt, jti);
+  }
+
+  /** Newest first; agent_name is null for tool/user tokens and for deleted agents. */
+  listIssuedTokens(
+    filter?: IssuedTokenFilter,
+  ): Array<IssuedTokenRow & { agent_name: string | null }> {
+    let sql = `SELECT t.*, a.name AS agent_name
+       FROM issued_tokens t
+       LEFT JOIN agents a ON a.id = t.agent_id
+       WHERE 1=1`;
+    const params: unknown[] = [];
+
+    if (filter?.agentId) {
+      sql += " AND t.agent_id = ?";
+      params.push(filter.agentId);
+    }
+
+    sql += " ORDER BY t.issued_at DESC";
+
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
+    return rows.map((row) => ({
+      ...this.rowToIssuedToken(row),
+      agent_name: (row.agent_name as string) ?? null,
+    }));
+  }
+
+  /** jtis of this agent's tokens that are neither expired at `now` (ms) nor revoked. */
+  listLiveTokenJtisForAgent(agentId: string, now: number): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT jti FROM issued_tokens
+         WHERE agent_id = ? AND expires_at > ? AND revoked_at IS NULL
+         ORDER BY issued_at DESC`,
+      )
+      .all(agentId, now) as { jti: string }[];
+    return rows.map((row) => row.jti);
+  }
+
+  countActiveTokensForAgent(agentId: string, now: number): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM issued_tokens
+         WHERE agent_id = ? AND expires_at > ? AND revoked_at IS NULL`,
+      )
+      .get(agentId, now) as { c: number };
+    return row.c;
   }
 
   // ---------------------------------------------------------------------------
@@ -1149,6 +1465,35 @@ export class SqliteStore {
       created_at: row.created_at as number,
       expires_at: (row.expires_at as number) ?? null,
       created_by: row.created_by as string,
+    };
+  }
+
+  private rowToAgent(row: Record<string, unknown>): AgentRow {
+    return {
+      id: row.id as string,
+      name: row.name as string,
+      description: (row.description as string) ?? null,
+      owner: (row.owner as string) ?? null,
+      status: row.status as AgentStatus,
+      created_at: row.created_at as number,
+      updated_at: row.updated_at as number,
+      deactivated_at: (row.deactivated_at as number) ?? null,
+    };
+  }
+
+  private rowToIssuedToken(row: Record<string, unknown>): IssuedTokenRow {
+    return {
+      jti: row.jti as string,
+      subject: row.subject as string,
+      principal_type: row.principal_type as TokenPrincipalType,
+      agent_id: (row.agent_id as string) ?? null,
+      scope: JSON.parse(row.scope as string) as Permission[],
+      project: (row.project as string) ?? null,
+      secrets: row.secrets == null ? null : (JSON.parse(row.secrets as string) as string[]),
+      label: (row.label as string) ?? null,
+      issued_at: row.issued_at as number,
+      expires_at: row.expires_at as number,
+      revoked_at: (row.revoked_at as number) ?? null,
     };
   }
 

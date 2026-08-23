@@ -1,4 +1,4 @@
-import type { AuditEvent, AuditEventType } from "@harpoc/shared";
+import type { AuditEvent, AuditEventType, PrincipalType } from "@harpoc/shared";
 import { AAD_AUDIT_DETAIL_V2 } from "@harpoc/shared";
 import { decrypt } from "../crypto/aes-gcm.js";
 import type { AuditFilter, SqliteStore } from "../storage/sqlite-store.js";
@@ -56,6 +56,8 @@ export interface AuditQueryOptions {
   until?: number;
   limit?: number;
   success?: boolean;
+  principalType?: PrincipalType;
+  principalId?: string;
 }
 
 /**
@@ -75,6 +77,8 @@ export class AuditQuery {
       until: options?.until,
       limit: options?.limit,
       success: options?.success,
+      principalType: options?.principalType,
+      principalId: options?.principalId,
     };
 
     const events = this.store.queryAuditLog(filter);

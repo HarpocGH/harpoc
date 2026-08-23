@@ -118,6 +118,10 @@ describe("HTTP status mapping", () => {
     [ErrorCode.WEBSOCKET_CONNECT_FAILED, 502],
     [ErrorCode.SFTP_OPERATION_FAILED, 502],
     [ErrorCode.DOCKER_OPERATION_FAILED, 502],
+    // Agent governance (v1.4)
+    [ErrorCode.AGENT_NOT_FOUND, 404],
+    [ErrorCode.AGENT_INACTIVE, 403],
+    [ErrorCode.AGENT_EXISTS, 409],
     // System
     [ErrorCode.INTERNAL_ERROR, 500],
     [ErrorCode.DATABASE_ERROR, 500],
@@ -132,7 +136,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(101);
+    expect(members).toHaveLength(104);
   });
 });
 
@@ -693,6 +697,29 @@ describe("factory methods", () => {
     expect(err.code).toBe(ErrorCode.DOCKER_OPERATION_FAILED);
     expect(err.statusCode).toBe(502);
     expect(err.message).toContain("125");
+  });
+
+  it("agentNotFound() names the agent and the register fix", () => {
+    const err = VaultError.agentNotFound("claude-code");
+    expect(err.code).toBe(ErrorCode.AGENT_NOT_FOUND);
+    expect(err.statusCode).toBe(404);
+    expect(err.message).toContain('"claude-code"');
+    expect(err.message).toContain("harpoc agent register claude-code");
+  });
+
+  it("agentInactive() names the agent and the activate fix", () => {
+    const err = VaultError.agentInactive("claude-code");
+    expect(err.code).toBe(ErrorCode.AGENT_INACTIVE);
+    expect(err.statusCode).toBe(403);
+    expect(err.message).toContain('"claude-code"');
+    expect(err.message).toContain("harpoc agent activate claude-code");
+  });
+
+  it("agentExists() names the agent", () => {
+    const err = VaultError.agentExists("claude-code");
+    expect(err.code).toBe(ErrorCode.AGENT_EXISTS);
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toBe('Agent already registered: "claude-code"');
   });
 
   it("v1.3 context factory messages never contain the word 'password' (credential-leak tripwire)", () => {

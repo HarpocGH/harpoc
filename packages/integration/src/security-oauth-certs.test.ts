@@ -10,7 +10,7 @@ import {
   startOAuthFlowInputSchema,
 } from "@harpoc/shared";
 import type { ExpiringCertificateInfo, ExpiringOAuthTokenInfo } from "@harpoc/shared";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
@@ -292,6 +292,7 @@ beforeAll(async () => {
   mock = await startMockOAuthProvider();
   vault = createTestVault();
   await vault.engine.initVault(PASSWORD);
+  registerAgents(vault.engine, PRINCIPAL);
   rest = startTestServer(vault.engine);
   mcp = createMcpServer({ engine: vault.engine, allowTokenless: true });
   token = vault.engine.createToken(PRINCIPAL, ["create", "read", "rotate", "list"]);

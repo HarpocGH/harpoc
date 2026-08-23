@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createApp } from "@harpoc/rest-api";
 import { SecretType } from "@harpoc/shared";
-import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
+import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 
 const PASSWORD = "rest-scope-denial-pw";
@@ -23,6 +23,7 @@ describe("REST scope enforcement end-to-end", () => {
   beforeAll(async () => {
     vault = createTestVault();
     await vault.engine.initVault(PASSWORD);
+    registerAgents(vault.engine, "expired-agent", "pattern-agent", "revoked-agent", "scoped-agent");
     await vault.engine.createSecret({
       name: "db-prod",
       type: SecretType.API_KEY,

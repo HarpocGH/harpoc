@@ -11,6 +11,7 @@ describe("StatusChip", () => {
     ["pending", "warn"],
     ["expired", "bad"],
     ["revoked", "bad"],
+    ["inactive", "bad"],
     ["failed", "bad"],
   ])("tones %s as %s", (status, tone) => {
     render(<StatusChip status={status} />);

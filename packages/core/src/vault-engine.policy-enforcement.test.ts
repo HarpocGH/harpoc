@@ -33,6 +33,20 @@ beforeEach(async () => {
   await engine.initVault("password");
 });
 
+/**
+ * Register the agent identities this suite mints tokens or grants for — the
+ * v1.4 registration gate refuses an unregistered agent-typed principal.
+ */
+function registerAgents(...names: string[]): void {
+  for (const name of names) {
+    try {
+      engine.registerAgent({ name });
+    } catch (err) {
+      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
+    }
+  }
+}
+
 afterEach(async () => {
   await engine.destroy();
   try {
@@ -64,6 +78,7 @@ function grant(
   permissions: Permission[],
   expiresAt?: number,
 ): void {
+  if (principalType === "agent") registerAgents(principalId);
   engine.grantPolicy(
     { secretId, principalType, principalId, permissions, expiresAt },
     "test-admin",
@@ -305,6 +320,7 @@ describe("createToken principal_type claim", () => {
   });
 
   it("legacy shape: no option → no claim in the payload, audited as agent", async () => {
+    registerAgents("legacy");
     const token = engine.createToken("legacy", ["use"], 60_000);
     const payload = engine.verifyToken(token);
     expect("principal_type" in payload).toBe(false);
