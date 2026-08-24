@@ -1,4 +1,11 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -50,7 +57,11 @@ let savedPath: string | undefined;
 beforeEach(() => {
   vi.mocked(spawnCaptured).mockReset();
   vi.mocked(spawnCaptured).mockResolvedValue(OK_RESULT);
-  binDir = mkdtempSync(join(tmpdir(), "harpoc-docker-bin-"));
+  // realpathSync, the allowlist.test.ts precedent: the resolver spawns the
+  // resolved symlink-followed path by design, and on macOS tmpdir() sits
+  // behind the /tmp -> /private/tmp symlink — an un-resolved expectation
+  // fails there and nowhere else.
+  binDir = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-docker-bin-")));
   const name = process.platform === "win32" ? "docker.exe" : "docker";
   dockerPath = join(binDir, name);
   writeFileSync(dockerPath, "", { mode: 0o755 });

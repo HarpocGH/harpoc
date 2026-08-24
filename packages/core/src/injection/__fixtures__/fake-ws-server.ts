@@ -210,7 +210,12 @@ export async function startFakeWsServer(script: FakeWsScript): Promise<FakeWsSer
   return {
     port,
     requests: () => requests,
-    clientFrames: () => clientFrames,
+    // Data frames only (text/binary/continuation): whether the client's
+    // close frame has been decoded by the time a test samples this is a
+    // scheduling race the injector does not synchronize — macOS runners lost
+    // it routinely. Control frames are connection machinery, never a message
+    // the injector authored from action input.
+    clientFrames: () => clientFrames.filter((f) => f.opcode <= 0x2),
     close: () =>
       new Promise<void>((resolve) => {
         // A `neverAckClose` script deliberately leaves a connection open
