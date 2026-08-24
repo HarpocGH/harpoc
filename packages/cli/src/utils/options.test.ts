@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { parseIntOption } from "./options.js";
 
 describe("parseIntOption", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -53,4 +53,12 @@ describe("parseIntOption", () => {
     expect(() => parseIntOption("-1", "callback port", 0, 65535)).toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
+
+  it.each(["0x10", "1e2", " 5 ", "5.0", "+5", ""])(
+    "refuses the non-decimal form %j",
+    (value: string) => {
+      expect(() => parseIntOption(value, "callback port", 0, 65535)).toThrow("process.exit");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    },
+  );
 });

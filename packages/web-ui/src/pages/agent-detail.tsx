@@ -108,10 +108,11 @@ export function AgentDetailPage({ api, name }: { api: ApiClient; name: string })
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const run = (action: () => Promise<string | null>): void => {
-    setBusy(true);
+  const run = (action: () => Promise<string | null>, confirmMessage?: string): void => {
     setActionError(null);
     setNotice(null);
+    if (confirmMessage !== undefined && !window.confirm(confirmMessage)) return;
+    setBusy(true);
     action().then(
       (message) => {
         setNotice(message);
@@ -142,15 +143,14 @@ export function AgentDetailPage({ api, name }: { api: ApiClient; name: string })
   const onDelete = (): void => {
     const loaded = agent.data;
     if (loaded === null) return;
-    const confirmed = window.confirm(
+    run(
+      async () => {
+        await api.deleteAgent(name);
+        navigate("/agents");
+        return null;
+      },
       `Delete agent "${loaded.name}"? This revokes its ${String(loaded.active_tokens)} active token(s) and removes its ${String(loaded.grants)} grant(s). There is no undo.`,
     );
-    if (!confirmed) return;
-    run(async () => {
-      await api.deleteAgent(name);
-      navigate("/agents");
-      return null;
-    });
   };
 
   if (agent.error) return <p class="error-text">{agent.error.message}</p>;

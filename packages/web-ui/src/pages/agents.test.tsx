@@ -31,7 +31,7 @@ const api = (over: Partial<ApiClient> = {}): ApiClient =>
     ...over,
   }) as ApiClient;
 
-function submitRegisterForm(container: HTMLElement): void {
+function submitRegisterForm(container: Element): void {
   const form = container.querySelector("form");
   if (form === null) throw new Error("register form missing");
   fireEvent.submit(form);

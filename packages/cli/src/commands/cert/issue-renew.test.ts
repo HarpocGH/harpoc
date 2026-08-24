@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { VaultError } from "@harpoc/shared";
 import type { CertificateStatus, VaultApiToken } from "@harpoc/shared";
 import type { IssueOptions, RenewOptions } from "@harpoc/cert-manager";
@@ -63,7 +63,7 @@ function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
   };
 }
 
-let exitSpy: ReturnType<typeof vi.spyOn>;
+let exitSpy: MockInstance;
 let errorSpy: ReturnType<typeof vi.spyOn>;
 let logSpy: ReturnType<typeof vi.spyOn>;
 const savedEnvToken = process.env.HARPOC_TOKEN;

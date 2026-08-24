@@ -22,14 +22,21 @@ export function setTheme(pref: ThemePreference): void {
     if (pref === null) sessionStorage.removeItem(KEY);
     else sessionStorage.setItem(KEY, pref);
   } catch {
-    // Storage refusals (private mode) leave the choice session-local in memory.
+    // Storage refusals (private mode) keep the choice for this page load only:
+    // cycling reads the applied attribute, not storage, so the toggle keeps
+    // working; the preference is not remembered across reloads.
   }
   applyTheme(pref);
 }
 
+function appliedTheme(): ThemePreference {
+  const value = document.documentElement.getAttribute("data-theme");
+  return value === "light" || value === "dark" ? value : null;
+}
+
 export function cycleTheme(): ThemePreference {
   const order: ThemePreference[] = [null, "light", "dark"];
-  const next = order[(order.indexOf(storedTheme()) + 1) % order.length] ?? null;
+  const next = order[(order.indexOf(appliedTheme()) + 1) % order.length] ?? null;
   setTheme(next);
   return next;
 }

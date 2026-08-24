@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { VaultEngine } from "@harpoc/core";
 import { SESSION_FILE_NAME, VAULT_DB_NAME } from "@harpoc/shared";
-import { freePort, runCli, startCliServer } from "./helpers/spawn-cli.js";
+import { runCli, startCliServerOnFreePort } from "./helpers/spawn-cli.js";
 
 const PASSWORD = "launch-flow-pw-1";
 const LAUNCH_LINE = /\[harpoc\] Web UI: (http:\/\/[^#\s?]+)#token=(\S+)/;
@@ -40,10 +40,10 @@ describe("web-ui launch flow (spawned CLI)", () => {
   });
 
   it("serves the UI and a working fragment launch token", async () => {
-    const port = await freePort();
-    const server = startCliServer(["server", "start", "--rest", "--ui", "--port", String(port)], {
-      vaultDir,
-    });
+    const { server, port } = await startCliServerOnFreePort(
+      (p) => ["server", "start", "--rest", "--ui", "--port", String(p)],
+      { vaultDir },
+    );
     try {
       const [, base, token] = await server.waitForStderr(LAUNCH_LINE);
       expect(base).toBe(`http://127.0.0.1:${String(port)}/ui`);
@@ -93,9 +93,8 @@ describe("web-ui launch flow (spawned CLI)", () => {
   }, 120_000);
 
   it("--ui-token-ttl shortens the launch token to the minute", async () => {
-    const port = await freePort();
-    const server = startCliServer(
-      ["server", "start", "--rest", "--ui", "--port", String(port), "--ui-token-ttl", "5"],
+    const { server } = await startCliServerOnFreePort(
+      (p) => ["server", "start", "--rest", "--ui", "--port", String(p), "--ui-token-ttl", "5"],
       { vaultDir },
     );
     try {

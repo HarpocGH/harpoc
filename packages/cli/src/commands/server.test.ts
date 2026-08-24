@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 
 // ── Hoisted mocks (available inside vi.mock factories) ─────────────
 
@@ -123,7 +123,7 @@ async function run(args: string[]): Promise<void> {
 // ── Tests ──────────────────────────────────────────────────────────
 
 describe("server start", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let priorSigintListeners: NodeJS.SignalsListener[];
   let priorSigtermListeners: NodeJS.SignalsListener[];
@@ -500,7 +500,9 @@ describe("server start", () => {
       principalType: "user",
       label: "web-ui launch",
     });
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("/ui#token=mock-launch-jwt"));
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[harpoc] Web UI: http://127.0.0.1:3000/ui#token=mock-launch-jwt",
+    );
   });
 
   it("--rest without --ui passes no uiDir and mints no token", async () => {
@@ -542,12 +544,60 @@ describe("server start", () => {
     });
   });
 
-  it("without the flag the launch token keeps the 24 h default", async () => {
-    await run(["--rest", "--ui"]);
-    expect(mockEngine.createToken).toHaveBeenCalledWith("web-ui", ["admin"], 24 * 60 * 60 * 1000, {
+  it.each(["0x10", "1e2", " 5 ", "5.0"])(
+    "--ui-token-ttl refuses the non-decimal form %j",
+    async (value: string) => {
+      await expect(run(["--rest", "--ui", "--ui-token-ttl", value])).rejects.toThrow(
+        "process.exit",
+      );
+      expect(errorSpy).toHaveBeenCalledWith(
+        "Error: --ui-token-ttl must be a whole number of minutes (>= 1).",
+      );
+      expect(mockEngine.createToken).not.toHaveBeenCalled();
+    },
+  );
+
+  it("--port refuses a hex form", async () => {
+    await expect(run(["--rest", "--port", "0x1f90"])).rejects.toThrow("process.exit");
+    expect(errorSpy).toHaveBeenCalledWith('Error: Invalid port "0x1f90". Must be 1-65535.');
+  });
+
+  it("--ui-token-ttl 1440 is accepted — the boundary equals the 24 h cap", async () => {
+    await run(["--rest", "--ui", "--ui-token-ttl", "1440"]);
+    expect(mockEngine.createToken).toHaveBeenCalledWith("web-ui", ["admin"], 1440 * 60_000, {
       principalType: "user",
       label: "web-ui launch",
     });
+  });
+
+  it("--ui-token-ttl 1 is accepted at the low boundary", async () => {
+    await run(["--rest", "--ui", "--ui-token-ttl", "1"]);
+    expect(mockEngine.createToken).toHaveBeenCalledWith("web-ui", ["admin"], 60_000, {
+      principalType: "user",
+      label: "web-ui launch",
+    });
+  });
+
+  it("--ui-token-ttl 0 is refused", async () => {
+    await expect(run(["--rest", "--ui", "--ui-token-ttl", "0"])).rejects.toThrow("process.exit");
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Error: --ui-token-ttl must be a whole number of minutes (>= 1).",
+    );
+    expect(mockEngine.createToken).not.toHaveBeenCalled();
+  });
+
+  it("the launch warning names the 24 h cap when the flag is absent", async () => {
+    await run(["--rest", "--ui"]);
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[harpoc] The link grants admin access until the token expires (24 h cap). Do not share it.",
+    );
+  });
+
+  it("the launch warning names the actual validity under --ui-token-ttl", async () => {
+    await run(["--rest", "--ui", "--ui-token-ttl", "30"]);
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[harpoc] The link grants admin access until the token expires (30 min). Do not share it.",
+    );
   });
 
   // ── Dual mode ───────────────────────────────────────────────────

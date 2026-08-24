@@ -35,7 +35,10 @@ function runCli(args: string[], options?: { stdin?: string }): Promise<CliResult
     // the spawned child (it would be verified against a foreign JWT and
     // refused). Tests that need an ambient token (D8) set it explicitly on
     // their own separate spawn call, not through this helper.
-    const childEnv = { ...process.env, HARPOC_OAUTH_CLIENT_SECRET: CLIENT_SECRET };
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      HARPOC_OAUTH_CLIENT_SECRET: CLIENT_SECRET,
+    };
     delete childEnv.HARPOC_TOKEN;
     const child = spawn(process.execPath, [CLI_PATH, "--vault-dir", vaultDir, ...args], {
       env: childEnv,

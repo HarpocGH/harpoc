@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -33,7 +33,7 @@ async function run(args: string[]): Promise<void> {
 }
 
 describe("policy grant --principal-type validation", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
   const savedEnvToken = process.env.HARPOC_TOKEN;

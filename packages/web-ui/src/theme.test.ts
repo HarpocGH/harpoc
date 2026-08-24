@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyTheme, cycleTheme, setTheme, storedTheme } from "./theme";
 
 afterEach(() => {
   sessionStorage.clear();
   document.documentElement.removeAttribute("data-theme");
+  vi.restoreAllMocks();
 });
 
 describe("theme", () => {
@@ -37,6 +38,16 @@ describe("theme", () => {
 
   it("applyTheme alone never writes storage", () => {
     applyTheme("dark");
+    expect(sessionStorage.getItem("harpoc.theme")).toBeNull();
+  });
+
+  it("keeps cycling when sessionStorage refuses the write", () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("refused");
+    });
+    expect(cycleTheme()).toBe("light");
+    expect(cycleTheme()).toBe("dark");
+    expect(cycleTheme()).toBeNull();
     expect(sessionStorage.getItem("harpoc.theme")).toBeNull();
   });
 });

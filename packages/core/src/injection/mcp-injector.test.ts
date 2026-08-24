@@ -83,6 +83,8 @@ const POLICY: InjectionPolicy = {
   response_header_allowlist: [],
   network_isolation: false,
   fs_isolation: false,
+  smtp_recipient_allowlist: [],
+  imap_read_only: false,
 };
 
 function mcpAction(tool: string, overrides: Partial<McpAction> = {}): McpAction {

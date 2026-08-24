@@ -153,7 +153,8 @@ describe("AuditQuery", () => {
     });
 
     const events = query.query();
-    const event = events[0] as Record<string, unknown>;
+    const event = events[0];
+    if (event === undefined) throw new Error("expected an audit event");
     expect(event).not.toHaveProperty("detail_encrypted");
     expect(event).not.toHaveProperty("detail_iv");
     expect(event).not.toHaveProperty("detail_tag");

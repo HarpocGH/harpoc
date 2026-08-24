@@ -82,13 +82,14 @@ async function makeSecret(name: string): Promise<string> {
 }
 
 function expectCode(fn: () => unknown, code: ErrorCode): void {
+  let thrown: unknown;
   try {
     fn();
-    expect.fail(`expected ${code}`);
   } catch (err) {
-    expect(err).toBeInstanceOf(VaultError);
-    expect((err as VaultError).code).toBe(code);
+    thrown = err;
   }
+  expect(thrown, `expected ${code}`).toBeInstanceOf(VaultError);
+  expect((thrown as VaultError).code).toBe(code);
 }
 
 beforeEach(async () => {
@@ -178,13 +179,15 @@ describe("getAgent / listAgents", () => {
   });
 
   it("refuses an unknown agent with AGENT_NOT_FOUND naming the register command", () => {
+    let thrown: unknown;
     try {
       engine.getAgent("missing");
-      expect.fail("expected AGENT_NOT_FOUND");
     } catch (err) {
-      expect((err as VaultError).code).toBe(ErrorCode.AGENT_NOT_FOUND);
-      expect((err as VaultError).message).toContain("harpoc agent register");
+      thrown = err;
     }
+    expect(thrown, "expected AGENT_NOT_FOUND").toBeInstanceOf(VaultError);
+    expect((thrown as VaultError).code).toBe(ErrorCode.AGENT_NOT_FOUND);
+    expect((thrown as VaultError).message).toContain("harpoc agent register");
   });
 
   it("lists active agents by default and inactive ones only under an explicit filter", () => {
@@ -498,13 +501,15 @@ describe("sealed vault", () => {
 
 describe("createToken registration gate", () => {
   it("refuses an unregistered agent-typed subject and writes nothing", () => {
+    let thrown: unknown;
     try {
       engine.createToken("ghost", ["use"]);
-      expect.fail("expected AGENT_NOT_FOUND");
     } catch (err) {
-      expect((err as VaultError).code).toBe(ErrorCode.AGENT_NOT_FOUND);
-      expect((err as VaultError).message).toContain("harpoc agent register ghost");
+      thrown = err;
     }
+    expect(thrown, "expected AGENT_NOT_FOUND").toBeInstanceOf(VaultError);
+    expect((thrown as VaultError).code).toBe(ErrorCode.AGENT_NOT_FOUND);
+    expect((thrown as VaultError).message).toContain("harpoc agent register ghost");
 
     expect(rows(AuditEventType.TOKEN_CREATE)).toHaveLength(0);
     expect(liveStore().listIssuedTokens()).toHaveLength(0);

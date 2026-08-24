@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 
 // ── Hoisted mocks (available inside vi.mock factories) ─────────────
 
@@ -71,7 +71,7 @@ const AUTH_RESULT = {
 // ── Tests ──────────────────────────────────────────────────────────
 
 describe("oauth connect", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
   const savedEnv = process.env.HARPOC_OAUTH_CLIENT_SECRET;

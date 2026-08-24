@@ -40,6 +40,9 @@ const EMPTY_POLICY: InjectionPolicy = {
   response_mode: "filtered",
   response_header_allowlist: [],
   network_isolation: false,
+  fs_isolation: false,
+  smtp_recipient_allowlist: [],
+  imap_read_only: false,
 };
 
 function captureLogger(): { log: ReturnType<typeof vi.fn>; logger: AuditLogger } {
@@ -119,7 +122,12 @@ describe("SshInjector attribution", () => {
   it("stamps the host-allowlist denial row", async () => {
     const { log, logger } = captureLogger();
     const injector = new SshInjector(logger);
-    const action: SshAction = { type: "ssh", host: "host.example.com", user: "deploy" };
+    const action: SshAction = {
+      type: "ssh",
+      host: "host.example.com",
+      user: "deploy",
+      command: "true",
+    };
     await expect(
       injector.executeWithSecret(action, SECRET, EMPTY_POLICY, undefined, "secret-1", ATTRIBUTION),
     ).rejects.toMatchObject({ code: ErrorCode.HOST_NOT_ALLOWED });
@@ -150,7 +158,7 @@ describe("GitInjector attribution", () => {
 describe("DatabaseInjector attribution", () => {
   const action: DatabaseAction = {
     type: "database",
-    engine: "postgres",
+    engine: "postgresql",
     host: "8.8.8.8",
     database: "app",
     query: "SELECT 1",
@@ -164,7 +172,7 @@ describe("DatabaseInjector attribution", () => {
         end: async () => undefined,
       }),
     };
-    const injector = new DatabaseInjector(logger, { postgres: adapter });
+    const injector = new DatabaseInjector(logger, { postgresql: adapter });
     await injector.executeWithSecret(
       action,
       new Uint8Array(Buffer.from("dbuser:dbpassword", "utf8")),

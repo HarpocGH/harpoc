@@ -144,13 +144,6 @@ function toSftpResult(r: SpawnCapturedResult, host: string): SftpResult {
   if (r.spawn_failed) {
     throw VaultError.sshConnectFailed(host);
   }
-  // OpenSSH clients exit 255 on connection/auth/protocol failure (a failed
-  // batch command exits 1) — classify it as the connect failure it is. The
-  // host-key check above must keep winning: a pinned-key mismatch also
-  // exits 255.
-  if (r.exit_code === 255) {
-    throw VaultError.sshConnectFailed(host);
-  }
   if (r.timed_out) {
     return {
       type: "sftp",
@@ -162,6 +155,14 @@ function toSftpResult(r: SpawnCapturedResult, host: string): SftpResult {
       signal: r.signal ?? undefined,
       error: ErrorCode.PROCESS_TIMEOUT,
     };
+  }
+  // OpenSSH clients exit 255 on connection/auth/protocol failure (a failed
+  // batch command exits 1) — classify it as the connect failure it is. The
+  // host-key check above must keep winning (a pinned-key mismatch also exits
+  // 255), and a timeout is the vault's own kill, never a peer connect
+  // failure — the same order the ssh injector classifies in.
+  if (r.exit_code === 255) {
+    throw VaultError.sshConnectFailed(host);
   }
   if (r.exit_code !== 0) {
     throw VaultError.sftpOperationFailed(r.exit_code ?? -1);

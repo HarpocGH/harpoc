@@ -223,16 +223,19 @@ describe("api client", () => {
     expect(url).toBe("/api/v1/oauth/gh-app/refresh");
     expect(init.method).toBe("POST");
     expect(init.body).toBeUndefined();
+    expect(headersOf(init)["Content-Type"]).toBeUndefined();
   });
 
   it("renewCertificate POSTs an empty JSON object (http-01 default port)", async () => {
     const fetchFn = stubFetch(200, { data: { subject: "CN=x" } });
     const api = createApiClient(() => "jwt-1", fetchFn);
-    await api.renewCertificate("secret://web-cert");
+    const status = await api.renewCertificate("secret://web-cert");
     const { url, init } = callOf(fetchFn);
     expect(url).toBe("/api/v1/certificates/web-cert/renew");
     expect(init.method).toBe("POST");
     expect(init.body).toBe("{}");
+    expect(headersOf(init)["Content-Type"]).toBe("application/json");
+    expect(status).toEqual({ subject: "CN=x" });
   });
 
   it("exposes no value-fetch method", () => {

@@ -72,23 +72,30 @@ describe("spawnCaptured lifecycle (M4)", () => {
     expect(elapsed).toBeLessThan(4_000);
   }, 25_000);
 
-  // Discriminating on POSIX, where a same-group grandchild plainly outlives a
-  // kill aimed at the child alone; on Windows the grandchild is torn down with
-  // its parent regardless (probed on this host), so there the case asserts the
-  // property without being able to fail for the old behaviour.
+  // Discriminating on both platforms only if the grandchild already exists when
+  // the timeout fires: `killTree` on win32 is one `taskkill /T` whose descendant
+  // snapshot is taken once, so a grandchild created after that snapshot escapes
+  // it (observed under the parallel root gate with a 300 ms timeout, where node
+  // start-up outran the kill). Hence the wide timeout below — that
+  // spawn-during-kill window is a product-side follow-up, not what this case
+  // pins.
   it("the timeout kills the whole process tree, not just the direct child", async () => {
     const marker = join(dir, "grandchild-marker.txt");
     const result = await spawnCaptured(
       process.execPath,
-      ["-e", grandchildScript({ holdMs: 2_500, markerPath: marker, parentWaits: true })],
-      { env: {}, timeoutMs: 300 },
+      ["-e", grandchildScript({ holdMs: 6_000, markerPath: marker, parentWaits: true })],
+      { env: {}, timeoutMs: 2_000 },
     );
 
     expect(result.timed_out).toBe(true);
 
     // Well past the grandchild's own deadline: if it had survived the kill it
-    // would have written the marker with the credential still in its env.
-    await sleep(4_000);
+    // would have written the marker with the credential still in its env. Its
+    // 6 s timer starts at its own boot, which cannot be later than the kill at
+    // t+2 s plus a node start-up, so the marker would land by t+9 s at the
+    // latest; this wait puts the assertion at t+10 s even when the kill settles
+    // instantly.
+    await sleep(8_000);
     expect(existsSync(marker)).toBe(false);
   }, 25_000);
 

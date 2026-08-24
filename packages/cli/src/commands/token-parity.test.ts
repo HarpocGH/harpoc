@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { Command } from "commander";
 import type { CertificateStatus, Permission, VaultApiToken } from "@harpoc/shared";
 
@@ -392,10 +392,10 @@ const ROWS: Row[] = [
 ];
 
 describe("token permission map (Task 9 pin)", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
-  let stdoutWriteSpy: ReturnType<typeof vi.spyOn>;
+  let stdoutWriteSpy: MockInstance;
   const savedEnvToken = process.env.HARPOC_TOKEN;
 
   beforeEach(() => {

@@ -51,13 +51,14 @@ async function makeSecret(name: string, project?: string): Promise<string> {
 }
 
 function expectCode(fn: () => unknown, code: ErrorCode): void {
+  let thrown: unknown;
   try {
     fn();
-    expect.fail(`expected ${code}`);
   } catch (err) {
-    expect(err).toBeInstanceOf(VaultError);
-    expect((err as VaultError).code).toBe(code);
+    thrown = err;
   }
+  expect(thrown, `expected ${code}`).toBeInstanceOf(VaultError);
+  expect((thrown as VaultError).code).toBe(code);
 }
 
 beforeEach(async () => {
@@ -206,27 +207,28 @@ describe("setAgentPermissions", () => {
     const secretId = await makeSecret("db-password");
     engine.registerAgent({ name: "alpha" });
 
-    let matrixMessage = "";
+    let matrixThrown: unknown;
     try {
       engine.setAgentPermissions("alpha", secretId, ["create"], undefined, "test-admin");
-      expect.fail("expected INVALID_INPUT");
     } catch (err) {
-      expect((err as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
-      matrixMessage = (err as VaultError).message;
+      matrixThrown = err;
     }
+    expect(matrixThrown, "expected INVALID_INPUT").toBeInstanceOf(VaultError);
+    expect((matrixThrown as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
 
-    let grantMessage = "";
+    let grantThrown: unknown;
     try {
       engine.grantPolicy(
         { secretId, principalType: "agent", principalId: "alpha", permissions: ["create"] },
         "test-admin",
       );
-      expect.fail("expected INVALID_INPUT");
     } catch (err) {
-      grantMessage = (err as VaultError).message;
+      grantThrown = err;
     }
+    expect(grantThrown, "expected INVALID_INPUT").toBeInstanceOf(VaultError);
+    expect((grantThrown as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
 
-    expect(matrixMessage).toBe(grantMessage);
+    expect((matrixThrown as VaultError).message).toBe((grantThrown as VaultError).message);
     expect(engine.listPolicies(secretId)).toHaveLength(0);
     expect(rows(AuditEventType.POLICY_GRANT)).toHaveLength(0);
   });

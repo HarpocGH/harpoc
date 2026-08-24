@@ -274,6 +274,10 @@ button:disabled {
 button:disabled:hover {
   background: none;
 }
+.rail .theme-toggle:hover {
+  background: var(--panel);
+  color: var(--ink);
+}
 :focus-visible {
   outline: 2px solid var(--brass);
   outline-offset: 1px;
@@ -323,5 +327,10 @@ button:disabled:hover {
     flex-direction: row;
     border-right: none;
     border-bottom: 1px solid var(--hairline);
+  }
+  .rail .theme-toggle {
+    margin-top: 0;
+    margin-inline-start: auto;
+    align-self: center;
   }
 }

@@ -44,7 +44,6 @@ const MCP_CONFIG: McpServerConfig = {
   server_name: "docs",
   transport: "http",
   url: "https://mcp.example.com/mcp",
-  auth: { type: "bearer" },
 };
 
 beforeEach(async () => {

@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { VaultError } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
 
@@ -73,7 +73,7 @@ function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
 }
 
 let tempDir: string;
-let exitSpy: ReturnType<typeof vi.spyOn>;
+let exitSpy: MockInstance;
 let errorSpy: ReturnType<typeof vi.spyOn>;
 let logSpy: ReturnType<typeof vi.spyOn>;
 const savedEnvToken = process.env.HARPOC_TOKEN;

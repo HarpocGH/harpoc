@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -30,7 +30,7 @@ async function run(args: string[]): Promise<void> {
 }
 
 describe("audit --since validation", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
   const savedEnvToken = process.env.HARPOC_TOKEN;
@@ -78,7 +78,7 @@ describe("audit --since validation", () => {
 });
 
 describe("audit table Principal column (by whom, thesis §4.3.4)", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
   const savedEnvToken = process.env.HARPOC_TOKEN;
@@ -149,7 +149,7 @@ const validAnchor = {
 
 describe("audit anchor / verify --anchor", () => {
   let tempDir: string;
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
   const savedEnvToken = process.env.HARPOC_TOKEN;

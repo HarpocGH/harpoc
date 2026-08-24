@@ -42,6 +42,8 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     response_header_allowlist: [],
     network_isolation: false,
     fs_isolation: false,
+    smtp_recipient_allowlist: [],
+    imap_read_only: false,
     ...overrides,
   };
 }
@@ -371,6 +373,40 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
         SFTP_CONFIG,
       ),
     ).rejects.toMatchObject({ code: ErrorCode.SSH_CONNECT_FAILED });
+  });
+
+  it("returns PROCESS_TIMEOUT for a timed-out sftp run", async () => {
+    spawnMock.mockResolvedValue({
+      ...OK_RESULT,
+      exit_code: null,
+      timed_out: true,
+      signal: "SIGKILL",
+    });
+
+    const result = await executeSftpAction(
+      LIST_ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      allowedPolicy(),
+      SFTP_CONFIG,
+    );
+
+    expect(result.timed_out).toBe(true);
+    expect(result.error).toBe(ErrorCode.PROCESS_TIMEOUT);
+  });
+
+  it("prefers PROCESS_TIMEOUT over the 255 connect classification (ssh-injector ordering)", async () => {
+    // Seam-impossible input (a timed-out child reports exit_code null) — pins
+    // the classification order only, mirroring ssh-injector's.
+    spawnMock.mockResolvedValue({ ...OK_RESULT, exit_code: 255, timed_out: true });
+
+    await expect(
+      executeSftpAction(
+        LIST_ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        allowedPolicy(),
+        SFTP_CONFIG,
+      ),
+    ).resolves.toMatchObject({ error: ErrorCode.PROCESS_TIMEOUT });
   });
 
   it("maps host-key verification failure text to SSH_HOST_KEY_MISMATCH", async () => {

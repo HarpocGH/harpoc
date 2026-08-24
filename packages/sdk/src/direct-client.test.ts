@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   ENCRYPTED_KEY_IMPORT_REFUSAL,
   ErrorCode,
@@ -8,6 +8,10 @@ import {
 } from "@harpoc/shared";
 import type { OAuthTokenStatus } from "@harpoc/shared";
 import { DirectClient } from "./direct-client.js";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function createMockEngine() {
   return {
@@ -892,6 +896,59 @@ describe("DirectClient", () => {
         client.close();
       }
     });
+
+    // RED before startOAuthFlow's post-import re-check: on a warm client the
+    // manager load resolves without ever yielding to a close(), so only the
+    // peer import's await was left to see it — and an auth-code start binds a
+    // callback socket on a client the embedder has already shut down.
+    it("startOAuthFlow racing close() on a warm client starts no flow", async () => {
+      const engine = createMockEngine();
+      const oauthManager = createFakeOAuthManager();
+      const client = new DirectClient(engine as never, { oauthManager: oauthManager as never });
+
+      const pending = client.startOAuthFlow({
+        name: "gh",
+        provider: "github",
+        grant_type: "authorization_code",
+        client_id: "cid",
+      });
+      pending.catch(() => {});
+      client.close();
+
+      await expect(pending).rejects.toMatchObject({ code: ErrorCode.INVALID_INPUT });
+      expect(oauthManager.startAuthorizationCodeDeferred).not.toHaveBeenCalled();
+      expect(oauthManager.startDeviceCode).not.toHaveBeenCalled();
+      expect(oauthManager.startClientCredentials).not.toHaveBeenCalled();
+    });
+
+    // RED with the closed check below the injected-instance return: the rule
+    // covers a manager handed in through DirectClientOptions exactly as it
+    // covers one the client built for itself.
+    it("refuses an injected OAuth manager after close()", async () => {
+      const engine = createMockEngine();
+      const oauthManager = createFakeOAuthManager();
+      const client = new DirectClient(engine as never, { oauthManager: oauthManager as never });
+      const internals = client as never as { loadOAuthManager(): Promise<unknown> };
+
+      client.close();
+
+      await expect(internals.loadOAuthManager()).rejects.toMatchObject({
+        code: ErrorCode.INVALID_INPUT,
+      });
+    });
+
+    it("refuses an injected CertManager after close()", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+      const internals = client as never as { loadCertManager(): Promise<unknown> };
+
+      client.close();
+
+      await expect(internals.loadCertManager()).rejects.toMatchObject({
+        code: ErrorCode.INVALID_INPUT,
+      });
+    });
   });
 
   describe("certificates (injected manager)", () => {
@@ -1112,26 +1169,30 @@ describe("DirectClient", () => {
       const engine = createMockEngine();
       const client = new DirectClient(engine as never);
 
-      const ref = await client.importCertificate("web", {
-        private_key_pem: PLAIN_KEY_PEM,
-        certificate_pem: LEAF_PEM,
-      });
+      try {
+        const ref = await client.importCertificate("web", {
+          private_key_pem: PLAIN_KEY_PEM,
+          certificate_pem: LEAF_PEM,
+        });
 
-      expect(ref).toEqual({ handle: "secret://web", secretId: "uuid-web" });
-      // The real manager's own mapping: a bundle split into leaf + chain, then
-      // the engine's positional signature. A fake could not produce this.
-      expect(engine.importCertificate).toHaveBeenCalledWith(
-        "web",
-        PLAIN_KEY_PEM,
-        {
-          certificatePem: LEAF_PEM,
-          chainPem: undefined,
-          autoRenew: undefined,
-          renewBeforeDays: undefined,
-        },
-        undefined,
-        undefined,
-      );
+        expect(ref).toEqual({ handle: "secret://web", secretId: "uuid-web" });
+        // The real manager's own mapping: a bundle split into leaf + chain, then
+        // the engine's positional signature. A fake could not produce this.
+        expect(engine.importCertificate).toHaveBeenCalledWith(
+          "web",
+          PLAIN_KEY_PEM,
+          {
+            certificatePem: LEAF_PEM,
+            chainPem: undefined,
+            autoRenew: undefined,
+            renewBeforeDays: undefined,
+          },
+          undefined,
+          undefined,
+        );
+      } finally {
+        client.close();
+      }
     });
 
     it("caches the lazily built managers (one instance per client)", async () => {
@@ -1155,7 +1216,7 @@ describe("DirectClient", () => {
     // RED before the promise memoization: each un-awaited first call passed the
     // `if (!instance)` check, so two managers were built and the field kept the
     // second — close() then cancelled a manager the first caller never had.
-    it("two concurrent first calls share one manager, and close() cancels that one", async () => {
+    it("two concurrent first calls share one manager", async () => {
       const engine = createMockEngine();
       const client = new DirectClient(engine as never);
       const load = client as never as {
@@ -1168,16 +1229,38 @@ describe("DirectClient", () => {
           load.loadOAuthManager(),
         ]);
         expect(first).toBe(second);
-
-        const cancelled: unknown[] = [];
-        const original = first.cancelPendingFlows.bind(first);
-        first.cancelPendingFlows = (): void => {
-          cancelled.push(first);
-          original();
-        };
-
+      } finally {
         client.close();
-        expect(cancelled).toEqual([first]);
+      }
+    });
+
+    // RED before the promise memoization independently of the identity check:
+    // the second manager is reachable by nobody, so close() leaves it uncancelled.
+    it("close() cancels every OAuth manager the client built", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+      const internals = client as never as {
+        buildOAuthManager(): Promise<{ cancelPendingFlows: () => void }>;
+        loadOAuthManager(): Promise<{ cancelPendingFlows: () => void }>;
+      };
+      const built: Array<{ cancelPendingFlows: () => void }> = [];
+      const original = internals.buildOAuthManager;
+      vi.spyOn(internals, "buildOAuthManager").mockImplementation(async () => {
+        const manager = await original.call(client);
+        vi.spyOn(manager, "cancelPendingFlows");
+        built.push(manager);
+        return manager;
+      });
+
+      try {
+        const [a, b] = await Promise.all([
+          internals.loadOAuthManager(),
+          internals.loadOAuthManager(),
+        ]);
+        client.close();
+        expect(built).toHaveLength(1);
+        for (const manager of built) expect(manager.cancelPendingFlows).toHaveBeenCalledTimes(1);
+        expect(a).toBe(b);
       } finally {
         client.close();
       }
@@ -1188,8 +1271,12 @@ describe("DirectClient", () => {
       const client = new DirectClient(engine as never);
       const load = client as never as { loadCertManager(): Promise<unknown> };
 
-      const [first, second] = await Promise.all([load.loadCertManager(), load.loadCertManager()]);
-      expect(first).toBe(second);
+      try {
+        const [first, second] = await Promise.all([load.loadCertManager(), load.loadCertManager()]);
+        expect(first).toBe(second);
+      } finally {
+        client.close();
+      }
     });
 
     it("a failed load does not stick — the next call retries", async () => {
@@ -1203,10 +1290,199 @@ describe("DirectClient", () => {
         .mockRejectedValueOnce(new Error("optional peer not installed"));
       const load = client as never as { loadOAuthManager(): Promise<unknown> };
 
-      await expect(load.loadOAuthManager()).rejects.toThrow("optional peer not installed");
-      build.mockRestore();
+      try {
+        await expect(load.loadOAuthManager()).rejects.toThrow("optional peer not installed");
+      } finally {
+        build.mockRestore();
+      }
       try {
         await expect(load.loadOAuthManager()).resolves.toBeDefined();
+      } finally {
+        client.close();
+      }
+    });
+
+    // RED today: close() reads only oauthManagerInstance, which the build sets on
+    // resolve — a close() during the load cancels nothing, and the flow started
+    // afterwards pins the event loop for the whole callback timeout.
+    it("close() during an in-flight peer load leaves no uncancelled manager", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+      const internals = client as never as {
+        buildOAuthManager(): Promise<unknown>;
+        loadOAuthManager(): Promise<unknown>;
+      };
+      const manager = { cancelPendingFlows: vi.fn() };
+      let release: (m: unknown) => void = () => {};
+      vi.spyOn(internals, "buildOAuthManager").mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            release = resolve as (m: unknown) => void;
+          }),
+      );
+
+      const pending = internals.loadOAuthManager();
+      pending.catch(() => {});
+      client.close();
+      release(manager);
+
+      await expect(pending).rejects.toMatchObject({ code: ErrorCode.INVALID_INPUT });
+      expect(manager.cancelPendingFlows).toHaveBeenCalledTimes(1);
+    });
+
+    it("a load started after close() refuses before building", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+      const internals = client as never as {
+        buildOAuthManager(): Promise<unknown>;
+        loadOAuthManager(): Promise<unknown>;
+      };
+      const build = vi.spyOn(internals, "buildOAuthManager");
+      client.close();
+
+      await expect(internals.loadOAuthManager()).rejects.toMatchObject({
+        code: ErrorCode.INVALID_INPUT,
+      });
+      expect(build).not.toHaveBeenCalled();
+    });
+
+    // RED without loadCertManager's post-await check: the build resolves after
+    // close() and hands the caller a manager on a client the embedder has
+    // already shut down. No cancel to assert — CertManager holds no socket.
+    it("close() during an in-flight CertManager load refuses the resolved manager", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+      const internals = client as never as {
+        buildCertManager(): Promise<unknown>;
+        loadCertManager(): Promise<unknown>;
+      };
+      const manager = {};
+      let release: (m: unknown) => void = () => {};
+      vi.spyOn(internals, "buildCertManager").mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            release = resolve as (m: unknown) => void;
+          }),
+      );
+
+      const pending = internals.loadCertManager();
+      pending.catch(() => {});
+      client.close();
+      release(manager);
+
+      await expect(pending).rejects.toMatchObject({ code: ErrorCode.INVALID_INPUT });
+    });
+
+    it("a CertManager load started after close() refuses before building", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+      const internals = client as never as {
+        buildCertManager(): Promise<unknown>;
+        loadCertManager(): Promise<unknown>;
+      };
+      const build = vi.spyOn(internals, "buildCertManager");
+      client.close();
+
+      await expect(internals.loadCertManager()).rejects.toMatchObject({
+        code: ErrorCode.INVALID_INPUT,
+      });
+      expect(build).not.toHaveBeenCalled();
+    });
+
+    // RED without the `=== attempt` identity guard: the stale catch clears the
+    // NEWER attempt, and the next caller builds a third manager close() never
+    // reaches.
+    it("a stale rejection does not clear a newer in-flight load", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+      const internals = client as never as {
+        buildOAuthManager(): Promise<unknown>;
+        loadOAuthManager(): Promise<unknown>;
+        oauthManagerLoad?: Promise<unknown>;
+      };
+      const secondManager = { cancelPendingFlows: vi.fn() };
+      let release: (m: unknown) => void = () => {};
+      const build = vi
+        .spyOn(internals, "buildOAuthManager")
+        .mockRejectedValueOnce(new Error("optional peer not installed"))
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              release = resolve as (m: unknown) => void;
+            }),
+        );
+
+      try {
+        const first = internals.loadOAuthManager();
+        first.catch(() => {});
+        const attempt = internals.oauthManagerLoad as Promise<unknown>;
+
+        let newer: Promise<unknown> | undefined;
+        attempt.catch(() => {
+          newer = internals.loadOAuthManager();
+          newer.catch(() => {});
+        });
+
+        const second = internals.loadOAuthManager();
+        second.catch(() => {});
+
+        await expect(first).rejects.toThrow("optional peer not installed");
+        await expect(second).rejects.toThrow("optional peer not installed");
+
+        const third = internals.loadOAuthManager();
+        release(secondManager);
+
+        expect(await third).toBe(secondManager);
+        expect(await (newer as Promise<unknown>)).toBe(secondManager);
+        expect(build).toHaveBeenCalledTimes(2);
+      } finally {
+        client.close();
+      }
+    });
+
+    it("a stale CertManager rejection does not clear a newer in-flight load", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+      const internals = client as never as {
+        buildCertManager(): Promise<unknown>;
+        loadCertManager(): Promise<unknown>;
+        certManagerLoad?: Promise<unknown>;
+      };
+      const secondManager = {};
+      let release: (m: unknown) => void = () => {};
+      const build = vi
+        .spyOn(internals, "buildCertManager")
+        .mockRejectedValueOnce(new Error("optional peer not installed"))
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              release = resolve as (m: unknown) => void;
+            }),
+        );
+
+      try {
+        const first = internals.loadCertManager();
+        first.catch(() => {});
+        const attempt = internals.certManagerLoad as Promise<unknown>;
+
+        let newer: Promise<unknown> | undefined;
+        attempt.catch(() => {
+          newer = internals.loadCertManager();
+          newer.catch(() => {});
+        });
+
+        const second = internals.loadCertManager();
+        second.catch(() => {});
+
+        await expect(first).rejects.toThrow("optional peer not installed");
+        await expect(second).rejects.toThrow("optional peer not installed");
+
+        const third = internals.loadCertManager();
+        release(secondManager);
+
+        expect(await third).toBe(secondManager);
+        expect(await (newer as Promise<unknown>)).toBe(secondManager);
+        expect(build).toHaveBeenCalledTimes(2);
       } finally {
         client.close();
       }

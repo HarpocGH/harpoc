@@ -40,10 +40,11 @@ export function SecretDetailPage({ api, handle }: { api: ApiClient; handle: stri
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const run = (action: () => Promise<string | null>): void => {
-    setBusy(true);
+  const run = (action: () => Promise<string | null>, confirmMessage?: string): void => {
     setActionError(null);
     setNotice(null);
+    if (confirmMessage !== undefined && !window.confirm(confirmMessage)) return;
+    setBusy(true);
     action().then(
       (message) => {
         setNotice(message);
@@ -68,19 +69,14 @@ export function SecretDetailPage({ api, handle }: { api: ApiClient; handle: stri
         : `Token refreshed — expires ${new Date(result.expires_at).toISOString()}`;
     });
 
-  const onRenewCert = (): void => {
-    // A renewal is a live ACME order against the CA, not a local write: the
-    // confirm is what keeps a stray click off a rate-limited endpoint.
-    const confirmed = window.confirm(
-      "Renew this certificate now? This performs a live ACME order against the stored account (CA rate limits apply).",
-    );
-    if (!confirmed) return;
+  // A renewal is a live ACME order against the CA, not a local write: the
+  // confirm is what keeps a stray click off a rate-limited endpoint.
+  const onRenewCert = (): void =>
     run(async () => {
       await api.renewCertificate(handle);
       cert.reload();
       return "Certificate renewed.";
-    });
-  };
+    }, "Renew this certificate now? This performs a live ACME order against the stored account (CA rate limits apply).");
 
   if (secret.error) return <p class="error-text">{secret.error.message}</p>;
   if (!secret.data) return <p class="empty">Loading…</p>;
@@ -141,7 +137,7 @@ export function SecretDetailPage({ api, handle }: { api: ApiClient; handle: stri
               without keeping the field types checked. */}
           <MetaTable entries={{ ...oauth.data }} />
           <p>
-            <button onClick={onRefreshOAuth} disabled={busy}>
+            <button type="button" onClick={onRefreshOAuth} disabled={busy}>
               Refresh token
             </button>
           </p>
@@ -155,7 +151,7 @@ export function SecretDetailPage({ api, handle }: { api: ApiClient; handle: stri
           <h2>Certificate status</h2>
           <MetaTable entries={{ ...cert.data }} />
           <p>
-            <button onClick={onRenewCert} disabled={busy}>
+            <button type="button" onClick={onRenewCert} disabled={busy}>
               Renew certificate
             </button>
           </p>

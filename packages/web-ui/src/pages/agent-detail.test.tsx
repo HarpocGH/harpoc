@@ -258,4 +258,45 @@ describe("AgentDetailPage", () => {
     expect(screen.getByText(/No tokens/)).toBeTruthy();
     expect(screen.getByText(/No recent activity/)).toBeTruthy();
   });
+
+  it("re-enables Deactivate after a refusal", async () => {
+    render(
+      <AgentDetailPage
+        api={api({ deactivateAgent: vi.fn().mockRejectedValue(new Error("ACCESS_DENIED")) })}
+        name="ci-bot"
+      />,
+    );
+    const button = (await screen.findByRole("button", {
+      name: "Deactivate",
+    })) as HTMLButtonElement;
+    fireEvent.click(button);
+    await screen.findByText("ACCESS_DENIED");
+    expect(button.disabled).toBe(false);
+  });
+
+  it("disables Deactivate while the call is in flight", async () => {
+    render(
+      <AgentDetailPage
+        api={api({ deactivateAgent: vi.fn().mockReturnValue(new Promise(() => undefined)) })}
+        name="ci-bot"
+      />,
+    );
+    const button = (await screen.findByRole("button", {
+      name: "Deactivate",
+    })) as HTMLButtonElement;
+    fireEvent.click(button);
+    await waitFor(() => expect(button.disabled).toBe(true));
+  });
+
+  it("clears the previous notice when the delete confirmation is declined", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const deleteAgent = vi.fn().mockResolvedValue({ revoked_tokens: 3, removed_grants: 4 });
+    render(<AgentDetailPage api={api({ deleteAgent })} name="ci-bot" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Deactivate" }));
+    await screen.findByText(/3 token/);
+    fireEvent.click(screen.getByRole("button", { name: "Delete agent" }));
+    await waitFor(() => expect(screen.queryByText(/3 token/)).toBeNull());
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(deleteAgent).not.toHaveBeenCalled();
+  });
 });

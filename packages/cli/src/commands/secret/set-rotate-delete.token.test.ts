@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { Command } from "commander";
 import type { VaultApiToken } from "@harpoc/shared";
 
@@ -38,7 +38,7 @@ function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
 }
 
 describe("secret set/rotate/delete — token path", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
   const savedEnvToken = process.env.HARPOC_TOKEN;

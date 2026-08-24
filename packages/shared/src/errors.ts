@@ -126,6 +126,9 @@ export enum ErrorCode {
   AGENT_INACTIVE = "AGENT_INACTIVE",
   AGENT_EXISTS = "AGENT_EXISTS",
 
+  // Optional dependencies
+  MISSING_DEPENDENCY = "MISSING_DEPENDENCY",
+
   // Rate limiting
   RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED",
 
@@ -261,6 +264,9 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.AGENT_NOT_FOUND]: 404,
   [ErrorCode.AGENT_INACTIVE]: 403,
   [ErrorCode.AGENT_EXISTS]: 409,
+
+  // Optional dependencies
+  [ErrorCode.MISSING_DEPENDENCY]: 501,
 
   // Rate limiting
   [ErrorCode.RATE_LIMIT_EXCEEDED]: 429,
@@ -781,5 +787,12 @@ export class VaultError extends Error {
 
   static agentExists(name: string): VaultError {
     return new VaultError(ErrorCode.AGENT_EXISTS, `Agent already registered: "${name}"`);
+  }
+
+  static missingDependency(specifier: string): VaultError {
+    return new VaultError(
+      ErrorCode.MISSING_DEPENDENCY,
+      `Optional dependency "${specifier}" is not installed. Install it to use this feature.`,
+    );
   }
 }

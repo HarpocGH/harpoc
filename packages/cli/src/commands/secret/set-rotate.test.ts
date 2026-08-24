@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { Command } from "commander";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 
@@ -27,7 +27,7 @@ import { registerSecretRotateCommand } from "./rotate.js";
 const loadEngineMock = vi.mocked(loadUnlockedEngine);
 
 let errorSpy: ReturnType<typeof vi.spyOn>;
-let exitSpy: ReturnType<typeof vi.spyOn>;
+let exitSpy: MockInstance;
 const savedEnvToken = process.env.HARPOC_TOKEN;
 
 beforeEach(() => {

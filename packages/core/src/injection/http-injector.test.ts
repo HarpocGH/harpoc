@@ -8,6 +8,15 @@ let server: Server;
 let baseUrl: string;
 const requestPaths: string[] = [];
 
+async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
+  const err = await promise.then(
+    () => undefined,
+    (e: unknown) => e as Error,
+  );
+  if (err === undefined) throw new Error("expected the call to reject");
+  return err;
+}
+
 beforeAll(async () => {
   server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", `http://localhost`);
@@ -270,34 +279,34 @@ describe("HttpInjector", () => {
       const CREDENTIAL = "sk-live-h2-9f3a2b7c1d4e5f60";
 
       it("bearer: SSRF-refused hop reflecting the token", async () => {
-        const err = await injector
-          .executeWithSecret(
+        const err = await rejectionOf(
+          injector.executeWithSecret(
             { method: "GET", url: `${baseUrl}/redirect-echo-credential` },
             new Uint8Array(Buffer.from(CREDENTIAL)),
             { type: "bearer" },
             "any",
-          )
-          .catch((e: unknown) => e as Error);
+          ),
+        );
         expect(err).toMatchObject({ code: ErrorCode.REDIRECT_POLICY_VIOLATION });
         expect(err.message).not.toContain(CREDENTIAL);
         expect(err.message).not.toContain(encodeURIComponent(CREDENTIAL));
       });
 
       it("header injection: SSRF-refused hop reflecting the header value", async () => {
-        const err = await injector
-          .executeWithSecret(
+        const err = await rejectionOf(
+          injector.executeWithSecret(
             { method: "GET", url: `${baseUrl}/redirect-echo-credential` },
             new Uint8Array(Buffer.from(CREDENTIAL)),
             { type: "header", header_name: "X-Api-Key" },
             "any",
-          )
-          .catch((e: unknown) => e as Error);
+          ),
+        );
         expect(err.message).not.toContain(CREDENTIAL);
       });
 
       it("allowlist-refused hop reflecting the token", async () => {
-        const err = await injector
-          .executeWithSecret(
+        const err = await rejectionOf(
+          injector.executeWithSecret(
             {
               method: "GET",
               url: `${baseUrl}/redirect-echo-credential-allowlist`,
@@ -306,15 +315,15 @@ describe("HttpInjector", () => {
             new Uint8Array(Buffer.from(CREDENTIAL)),
             { type: "bearer" },
             "any",
-          )
-          .catch((e: unknown) => e as Error);
+          ),
+        );
         expect(err).toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
         expect(err.message).not.toContain(CREDENTIAL);
       });
 
       it("status_only does not help — the leak was on the throw path", async () => {
-        const err = await injector
-          .executeWithSecret(
+        const err = await rejectionOf(
+          injector.executeWithSecret(
             {
               method: "GET",
               url: `${baseUrl}/redirect-echo-credential`,
@@ -323,8 +332,8 @@ describe("HttpInjector", () => {
             new Uint8Array(Buffer.from(CREDENTIAL)),
             { type: "bearer" },
             "any",
-          )
-          .catch((e: unknown) => e as Error);
+          ),
+        );
         expect(err.message).not.toContain(CREDENTIAL);
       });
 
@@ -332,14 +341,14 @@ describe("HttpInjector", () => {
       // redaction backstop: with the whole URL interpolated the path survives
       // even though the credential inside it would be redacted.
       it("reports the origin without the endpoint-authored path", async () => {
-        const err = await injector
-          .executeWithSecret(
+        const err = await rejectionOf(
+          injector.executeWithSecret(
             { method: "GET", url: `${baseUrl}/redirect-echo-credential` },
             new Uint8Array(Buffer.from(CREDENTIAL)),
             { type: "bearer" },
             "any",
-          )
-          .catch((e: unknown) => e as Error);
+          ),
+        );
         expect(err.message).not.toContain("/leak/");
       });
 
@@ -347,26 +356,26 @@ describe("HttpInjector", () => {
       // credential reflected into the hostname is part of the origin itself.
       it("redacts a credential reflected into the refused hop's hostname", async () => {
         const lower = CREDENTIAL.toLowerCase();
-        const err = await injector
-          .executeWithSecret(
+        const err = await rejectionOf(
+          injector.executeWithSecret(
             { method: "GET", url: `${baseUrl}/redirect-echo-credential-host` },
             new Uint8Array(Buffer.from(lower)),
             { type: "bearer" },
             "any",
-          )
-          .catch((e: unknown) => e as Error);
+          ),
+        );
         expect(err.message).not.toContain(lower);
       });
 
       it("still names the refused origin, so the refusal stays diagnosable", async () => {
-        const err = await injector
-          .executeWithSecret(
+        const err = await rejectionOf(
+          injector.executeWithSecret(
             { method: "GET", url: `${baseUrl}/redirect-private` },
             new Uint8Array(Buffer.from(CREDENTIAL)),
             { type: "bearer" },
             "any",
-          )
-          .catch((e: unknown) => e as Error);
+          ),
+        );
         expect(err.message).toContain("https://10.0.0.1");
       });
     });

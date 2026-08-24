@@ -2,7 +2,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { Command } from "commander";
 import { SecretStatus, SecretType } from "@harpoc/shared";
 import type { CertificateStatus } from "@harpoc/shared";
@@ -22,7 +22,7 @@ const CERT_PATH = join(FIXTURES, "rsa-cert.pem");
 const TEST_PASSWORD = "test-password-123";
 
 let vaultDir: string;
-let exitSpy: ReturnType<typeof vi.spyOn>;
+let exitSpy: MockInstance;
 let errorSpy: ReturnType<typeof vi.spyOn>;
 let logSpy: ReturnType<typeof vi.spyOn>;
 const savedEnvToken = process.env.HARPOC_TOKEN;

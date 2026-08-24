@@ -63,7 +63,9 @@ describe("spawnCaptured — network isolation seam", () => {
     });
     expect(isolationMock).toHaveBeenCalledWith("/audited/original-command", ["original-arg"]);
     // The actual spawn used the wrapper's command/args, not the originals.
-    const [spawnedCommand, spawnedArgs] = spawnMock.mock.calls.at(-1) as [string, string[]];
+    const spawnCall = spawnMock.mock.calls.at(-1);
+    if (spawnCall === undefined) throw new Error("expected a spawn call");
+    const [spawnedCommand, spawnedArgs] = spawnCall;
     expect(spawnedCommand).toBe(NODE);
     expect(spawnedArgs).toEqual(["-e", "process.exit(0)"]);
     expect(r.exit_code).toBe(0);
@@ -122,7 +124,9 @@ describe("spawnCaptured — filesystem isolation seam", () => {
       fs: true,
     });
     // The actual spawn used the wrapper's command/args, not the originals.
-    const [spawnedCommand, spawnedArgs] = spawnMock.mock.calls.at(-1) as [string, string[]];
+    const spawnCall = spawnMock.mock.calls.at(-1);
+    if (spawnCall === undefined) throw new Error("expected a spawn call");
+    const [spawnedCommand, spawnedArgs] = spawnCall;
     expect(spawnedCommand).toBe(NODE);
     expect(spawnedArgs).toEqual(["-e", "process.exit(0)"]);
     expect(r.exit_code).toBe(0);

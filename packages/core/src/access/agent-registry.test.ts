@@ -96,13 +96,14 @@ function makeAuditEvent(overrides: Partial<Omit<AuditEvent, "id">> = {}): Omit<A
 }
 
 function expectCode(fn: () => unknown, code: ErrorCode): void {
+  let thrown: unknown;
   try {
     fn();
-    expect.fail(`expected ${code}`);
   } catch (err) {
-    expect(err).toBeInstanceOf(VaultError);
-    expect((err as VaultError).code).toBe(code);
+    thrown = err;
   }
+  expect(thrown, `expected ${code}`).toBeInstanceOf(VaultError);
+  expect((thrown as VaultError).code).toBe(code);
 }
 
 beforeEach(() => {
@@ -165,12 +166,15 @@ describe("register", () => {
   });
 
   it("names the offending field in the refusal message", () => {
+    let thrown: unknown;
     try {
       registry.register({ name: "bad name" });
-      expect.fail("expected INVALID_INPUT");
     } catch (err) {
-      expect((err as VaultError).message).toContain("name");
+      thrown = err;
     }
+    expect(thrown, "expected INVALID_INPUT").toBeInstanceOf(VaultError);
+    expect((thrown as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
+    expect((thrown as VaultError).message).toContain("name");
   });
 
   it("maps a duplicate name to AGENT_EXISTS, whatever the existing status", () => {

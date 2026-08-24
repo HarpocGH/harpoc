@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import type { ImapAction, ImapResult, InjectionPolicy, InjectionPolicyInput } from "@harpoc/shared";
 import { ActionType, ErrorCode, VaultError, injectionPolicyInputSchema } from "@harpoc/shared";
 import type { ImapConnectOptions, ImapMessage } from "./mail/imap-client.js";
-import type { ImapClientLike, ImapInjectorDeps, ImapOAuth } from "./imap-injector.js";
+import type {
+  ImapClientLike,
+  ImapInjectorDeps,
+  ImapOAuth,
+  ImapOperationFields,
+} from "./imap-injector.js";
 import { ImapInjector, buildImapAuditDetails, executeImapAction } from "./imap-injector.js";
 
 const SECRET = "imapuser:imappass";
@@ -504,5 +509,17 @@ describe("executeImapAction (free function, default deps)", () => {
     const result = { type: "imap", operation: "search", uids: [1, 2] } satisfies ImapResult;
     expect(result.operation).toBe("search");
     expect(typeof executeImapAction).toBe("function");
+  });
+
+  it("rejects a two-field operation result (compile-time)", () => {
+    // Compile-time pin: exactly one operation field per result.
+    // @ts-expect-error uids and affected cannot coexist
+    const bad: ImapOperationFields = { uids: [1], affected: 1 };
+    expect(bad).toBeDefined();
+  });
+
+  it("reports uid_count 0 for a zero-affected mutating result", () => {
+    const action = baseAction({ operation: { kind: "expunge" } });
+    expect(buildImapAuditDetails(action, { affected: 0 })).toMatchObject({ uid_count: 0 });
   });
 });

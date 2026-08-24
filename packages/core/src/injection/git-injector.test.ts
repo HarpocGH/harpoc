@@ -18,6 +18,9 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     response_mode: "filtered",
     response_header_allowlist: [],
     network_isolation: false,
+    fs_isolation: false,
+    smtp_recipient_allowlist: [],
+    imap_read_only: false,
     ...overrides,
   };
 }
@@ -162,7 +165,11 @@ describe("GitInjector enforcement (no git binary required)", () => {
     ])("rejects the dangerous-prefix working_directory %s", async (working_directory) => {
       const err = await injector
         .executeWithSecret(gitAction({ working_directory }), SECRET, policy(), undefined)
-        .catch((e: unknown) => e as Error);
+        .then(
+          () => undefined,
+          (e: unknown) => e as Error,
+        );
+      if (err === undefined) throw new Error("expected the call to reject");
 
       expect(err).toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
       expect(err.message).toContain("must not start with '-'");

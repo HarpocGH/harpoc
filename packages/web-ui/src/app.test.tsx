@@ -112,6 +112,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  document.documentElement.removeAttribute("data-theme");
 });
 
 describe("App shell", () => {
@@ -426,5 +427,20 @@ describe("App shell v1.4 routes", () => {
     render(<App api={fakeApi()} />);
     const labels = [...document.querySelectorAll("nav.rail a")].map((a) => a.textContent);
     expect(labels).toEqual(["Dashboard", "Secrets", "Audit", "Agents", "Permissions", "Tokens"]);
+  });
+
+  it("cycles the theme from the nav toggle", () => {
+    setToken("t");
+    render(<App api={fakeApi()} />);
+    const toggle = screen.getByRole("button", { name: /theme:/ });
+    expect(toggle.textContent).toBe("theme: system");
+    fireEvent.click(toggle);
+    expect(toggle.textContent).toBe("theme: light");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    fireEvent.click(toggle);
+    expect(toggle.textContent).toBe("theme: dark");
+    fireEvent.click(toggle);
+    expect(toggle.textContent).toBe("theme: system");
+    expect(document.documentElement.hasAttribute("data-theme")).toBe(false);
   });
 });

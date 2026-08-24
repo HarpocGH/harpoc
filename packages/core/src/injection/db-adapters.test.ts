@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbConnectOptions } from "./db-adapters.js";
+import type { DbConnectOptions, DbEngineAdapter } from "./db-adapters.js";
 import { defaultDbAdapters } from "./db-adapters.js";
 
 // Driver mocks capture the connection config the adapters assemble; no real
@@ -70,14 +70,16 @@ beforeEach(() => {
 
 describe("PostgresAdapter connection config", () => {
   it("dials the pinned address and verifies TLS against the logical hostname", async () => {
-    await defaultDbAdapters().postgresql.connect(opts());
+    const adapter = defaultDbAdapters().postgresql as DbEngineAdapter;
+    await adapter.connect(opts());
     const cfg = pgClientConfigs[0] as PgConfig;
     expect(cfg.host).toBe("203.0.113.7");
     expect(cfg.ssl).toMatchObject({ rejectUnauthorized: true, servername: "db.example.com" });
   });
 
   it("sets no servername when the target was not pinned (literal IP)", async () => {
-    await defaultDbAdapters().postgresql.connect(opts({ host: "8.8.8.8", address: "8.8.8.8" }));
+    const adapter = defaultDbAdapters().postgresql as DbEngineAdapter;
+    await adapter.connect(opts({ host: "8.8.8.8", address: "8.8.8.8" }));
     const cfg = pgClientConfigs[0] as PgConfig;
     expect(cfg.host).toBe("8.8.8.8");
     expect(cfg.ssl).not.toBe(false);
@@ -85,7 +87,8 @@ describe("PostgresAdapter connection config", () => {
   });
 
   it("still dials the pinned address with TLS disabled", async () => {
-    await defaultDbAdapters().postgresql.connect(opts({ tls: false }));
+    const adapter = defaultDbAdapters().postgresql as DbEngineAdapter;
+    await adapter.connect(opts({ tls: false }));
     const cfg = pgClientConfigs[0] as PgConfig;
     expect(cfg.host).toBe("203.0.113.7");
     expect(cfg.ssl).toBe(false);
@@ -94,7 +97,8 @@ describe("PostgresAdapter connection config", () => {
 
 describe("MysqlAdapter connection config", () => {
   it("keeps the logical hostname for TLS and dials the pin via the stream factory", async () => {
-    await defaultDbAdapters().mysql.connect(opts({ port: 3306 }));
+    const adapter = defaultDbAdapters().mysql as DbEngineAdapter;
+    await adapter.connect(opts({ port: 3306 }));
     const cfg = mysqlConfigs[0] as MysqlConfig;
     expect(cfg.host).toBe("db.example.com");
     expect(cfg.ssl).toMatchObject({ rejectUnauthorized: true, verifyIdentity: true });
@@ -111,9 +115,8 @@ describe("MysqlAdapter connection config", () => {
   // at all. Identity verification is unconditional now, and the socket carries
   // the logical host so Node checks against the actual target.
   it("verifies the certificate identity for a literal-IP target too", async () => {
-    await defaultDbAdapters().mysql.connect(
-      opts({ host: "8.8.8.8", address: "8.8.8.8", port: 3306 }),
-    );
+    const adapter = defaultDbAdapters().mysql as DbEngineAdapter;
+    await adapter.connect(opts({ host: "8.8.8.8", address: "8.8.8.8", port: 3306 }));
     const cfg = mysqlConfigs[0] as MysqlConfig;
     expect(cfg.host).toBe("8.8.8.8");
     expect(cfg.ssl).toMatchObject({ rejectUnauthorized: true, verifyIdentity: true });
@@ -124,7 +127,8 @@ describe("MysqlAdapter connection config", () => {
   });
 
   it("still dials the pinned address with TLS disabled", async () => {
-    await defaultDbAdapters().mysql.connect(opts({ port: 3306, tls: false }));
+    const adapter = defaultDbAdapters().mysql as DbEngineAdapter;
+    await adapter.connect(opts({ port: 3306, tls: false }));
     const cfg = mysqlConfigs[0] as MysqlConfig;
     expect(cfg.ssl).toBeUndefined();
     expect(typeof cfg.stream).toBe("function");

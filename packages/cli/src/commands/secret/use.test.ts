@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { Command } from "commander";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
@@ -36,7 +36,7 @@ function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
 }
 
 describe("secret use — token-scoped path (D1)", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
   const savedEnvToken = process.env.HARPOC_TOKEN;
@@ -158,7 +158,7 @@ describe("secret use — token-scoped path (D1)", () => {
 });
 
 describe("secret use — token denials refuse before the injection runs", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
 
@@ -257,7 +257,7 @@ describe("secret use — token denials refuse before the injection runs", () => 
 // mapped every one of the six contexts untested, and the only invocation of
 // `secret use` anywhere in the repo was a platform-gated negative control.
 describe("secret use — buildAction covers all six contexts", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
 
@@ -481,7 +481,7 @@ describe("secret use — buildAction covers all six contexts", () => {
 // six-context describe block above: one happy case (flags in → exact
 // action object out) and one schema refusal per context.
 describe("secret use — buildAction covers the five v1.3 contexts", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
 
@@ -757,7 +757,7 @@ describe("secret use — buildAction covers the five v1.3 contexts", () => {
 });
 
 describe("secret use — --action-file", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
   let tempDir: string;
@@ -867,7 +867,7 @@ describe("secret use — --action-file", () => {
 });
 
 describe("secret use — --action is a closed set", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
 
@@ -922,7 +922,7 @@ describe("secret use — --action is a closed set", () => {
 });
 
 describe("secret use — output shape and boundary sanitization", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
 

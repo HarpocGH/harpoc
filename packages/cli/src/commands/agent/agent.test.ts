@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 import type { Agent, SetAgentPermissionsResult } from "@harpoc/shared";
 
 const { mockEngine, mockPromptConfirm } = vi.hoisted(() => ({
@@ -91,7 +91,7 @@ async function run(args: string[]): Promise<void> {
 }
 
 describe("harpoc agent group", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
   const savedEnvToken = process.env.HARPOC_TOKEN;

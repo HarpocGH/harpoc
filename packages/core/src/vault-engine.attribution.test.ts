@@ -2,7 +2,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CallerContext } from "@harpoc/shared";
+import type { CallerContext, UseSecretAction } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
 
@@ -72,12 +72,12 @@ async function makeProcessSecret(name: string): Promise<void> {
   );
 }
 
-const PROCESS_ACTION = {
+const PROCESS_ACTION: UseSecretAction = {
   type: "process",
   command: NODE,
   args: ["-e", "process.exit(0)"],
   env_var: "SECRET",
-} as const;
+};
 
 describe("use_secret success-row attribution (V2 end-to-end)", () => {
   it("a caller-attributed use stamps principal, session and interface on the injector-written success row", async () => {

@@ -267,6 +267,21 @@ describe("TokensPage", () => {
     await waitFor(() => expect(screen.getByText("ACCESS_DENIED")).toBeTruthy());
   });
 
+  // RED while the clear sits below the confirm: a declined revoke returns
+  // early and leaves the previous failure on screen, reading as if this
+  // attempt had failed too.
+  it("clears the previous error when a revoke confirmation is declined", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const revokeToken = vi.fn().mockRejectedValue(new Error("ACCESS_DENIED"));
+    render(<TokensPage api={api({ revokeToken })} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+    await screen.findByText("ACCESS_DENIED");
+    confirmSpy.mockReturnValue(false);
+    fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
+    await waitFor(() => expect(screen.queryByText("ACCESS_DENIED")).toBeNull());
+    expect(revokeToken).toHaveBeenCalledTimes(1);
+  });
+
   it("points at the CLI when nothing matches the filter", async () => {
     render(<TokensPage api={api({ listTokens: vi.fn().mockResolvedValue([]) })} />);
     await waitFor(() => expect(screen.getByText(/No tokens/)).toBeTruthy());

@@ -237,7 +237,9 @@ async function initWithSecret(name: string, value: string): Promise<void> {
   });
 }
 
-function useRows(success?: boolean): { detail?: Record<string, unknown>; success: boolean }[] {
+function useRows(
+  success?: boolean,
+): { detail: Record<string, unknown> | null; success: boolean }[] {
   return engine
     .queryAudit({ eventType: AuditEventType.SECRET_USE })
     .filter((row) => success === undefined || row.success === success)

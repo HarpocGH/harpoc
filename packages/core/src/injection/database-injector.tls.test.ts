@@ -63,6 +63,9 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     response_mode: "filtered",
     response_header_allowlist: [],
     network_isolation: false,
+    fs_isolation: false,
+    smtp_recipient_allowlist: [],
+    imap_read_only: false,
     ...overrides,
   };
 }
@@ -174,6 +177,7 @@ describe("database TLS server-identity binding (M3)", () => {
       action({ engine: "mysql", host: "8.8.8.8" }),
       SECRET,
       policy(),
+      undefined,
     );
 
     const cfg = mysqlConfigs[0] as TlsConfig;
@@ -185,6 +189,7 @@ describe("database TLS server-identity binding (M3)", () => {
       action({ engine: "mysql", host: `127.0.0.1:${echoPort}` }),
       SECRET,
       policy(),
+      undefined,
     );
 
     const cfg = mysqlConfigs[0] as TlsConfig;
@@ -203,7 +208,7 @@ describe("database TLS server-identity binding (M3)", () => {
   });
 
   it("pg: the identity check is bound to the logical host, not Node's default", async () => {
-    await injector.executeWithSecret(action({ host: "8.8.8.8" }), SECRET, policy());
+    await injector.executeWithSecret(action({ host: "8.8.8.8" }), SECRET, policy(), undefined);
 
     const cfg = pgClientConfigs[0] as TlsConfig;
     const ssl = cfg.ssl as {

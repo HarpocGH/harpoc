@@ -82,6 +82,7 @@ describe("sanitizeUseSecretResult", () => {
     it("git: stdout, stderr and error", () => {
       const result: UseSecretResponse = {
         type: "git",
+        operation: "clone",
         stdout: `remote: ${BEARERISH}`,
         stderr: `fatal: could not read ${BEARERISH}`,
         exit_code: 1,

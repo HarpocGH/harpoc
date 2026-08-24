@@ -1,5 +1,5 @@
 import { createPrivateKey } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { VaultError } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
 
@@ -32,10 +32,10 @@ function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
   };
 }
 
-let exitSpy: ReturnType<typeof vi.spyOn>;
+let exitSpy: MockInstance;
 let errorSpy: ReturnType<typeof vi.spyOn>;
 let logSpy: ReturnType<typeof vi.spyOn>;
-let stdoutSpy: ReturnType<typeof vi.spyOn>;
+let stdoutSpy: MockInstance;
 const savedEnvToken = process.env.HARPOC_TOKEN;
 
 async function run(args: string[]): Promise<void> {

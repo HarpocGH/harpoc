@@ -3,7 +3,17 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockInstance,
+} from "vitest";
 import { AuditEventType } from "@harpoc/shared";
 import { Command } from "commander";
 import { createEngine, loadUnlockedEngine } from "../../utils/vault-loader.js";
@@ -83,7 +93,7 @@ async function run(args: string[]): Promise<void> {
 }
 
 describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provider)", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
   const savedEnv = process.env.HARPOC_OAUTH_CLIENT_SECRET;

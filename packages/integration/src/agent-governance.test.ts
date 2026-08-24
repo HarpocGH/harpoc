@@ -526,6 +526,8 @@ describe("agent governance end to end", () => {
     });
 
     it("leaves an agent-typed admin token refused and blind — gating is unchanged", async () => {
+      const before = vault.engine.listAgentPolicies("r7-cell");
+
       const refused = await setCell("r7-cell", ["read"], agentAdminToken);
       expect(refused.status).toBe(403);
       const failure = await bodyOf<ErrorBody>(refused);
@@ -537,10 +539,10 @@ describe("agent governance end to end", () => {
 
       expect(await listedNames(agentAdminToken)).not.toContain(handle);
 
-      // The refusal wrote nothing: the user-admin cell above still stands.
-      const policies = vault.engine.listAgentPolicies("r7-cell");
-      expect(policies).toHaveLength(1);
-      expect([...(policies[0]?.permissions ?? [])].sort()).toEqual(["read", "use"]);
+      // The refusal wrote nothing — compared against this test's own snapshot, so
+      // it does not depend on which cell an earlier test left behind.
+      expect(vault.engine.listAgentPolicies("r7-cell")).toEqual(before);
+      expect(before).toHaveLength(1);
     });
   });
 });

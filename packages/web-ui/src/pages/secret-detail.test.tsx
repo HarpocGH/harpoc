@@ -280,4 +280,65 @@ describe("SecretDetailPage", () => {
     expect(screen.queryByRole("button", { name: /refresh token/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /renew certificate/i })).toBeNull();
   });
+
+  it("re-enables the refresh button after a refusal", async () => {
+    const stub = api({
+      getSecret: vi.fn().mockResolvedValue(secret({ type: "oauth_token" })),
+      refreshOAuth: vi.fn().mockRejectedValue(new Error("No refresh token stored")),
+    });
+    render(<SecretDetailPage api={stub} handle="secret://k1" />);
+    const button = (await screen.findByRole("button", {
+      name: /refresh token/i,
+    })) as HTMLButtonElement;
+    fireEvent.click(button);
+    await screen.findByText(/no refresh token stored/i);
+    expect(button.disabled).toBe(false);
+  });
+
+  it("disables the refresh button while the call is in flight", async () => {
+    const stub = api({
+      getSecret: vi.fn().mockResolvedValue(secret({ type: "oauth_token" })),
+      refreshOAuth: vi.fn().mockReturnValue(new Promise(() => undefined)),
+    });
+    render(<SecretDetailPage api={stub} handle="secret://k1" />);
+    const button = (await screen.findByRole("button", {
+      name: /refresh token/i,
+    })) as HTMLButtonElement;
+    fireEvent.click(button);
+    await waitFor(() => expect(button.disabled).toBe(true));
+  });
+
+  it("clears the previous notice when a renew confirmation is declined", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const stub = api({ getSecret: vi.fn().mockResolvedValue(secret({ type: "certificate" })) });
+    render(<SecretDetailPage api={stub} handle="secret://k1" />);
+    const button = await screen.findByRole("button", { name: /renew certificate/i });
+    fireEvent.click(button);
+    await screen.findByText(/certificate renewed/i);
+    confirmSpy.mockReturnValue(false);
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.queryByText(/certificate renewed/i)).toBeNull());
+  });
+
+  it("clears the previous error when a renew confirmation is declined", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const stub = api({
+      getSecret: vi.fn().mockResolvedValue(secret({ type: "certificate" })),
+      renewCertificate: vi.fn().mockRejectedValue(new Error("Access denied")),
+    });
+    render(<SecretDetailPage api={stub} handle="secret://k1" />);
+    const button = await screen.findByRole("button", { name: /renew certificate/i });
+    fireEvent.click(button);
+    await screen.findByText(/access denied/i);
+    confirmSpy.mockReturnValue(false);
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.queryByText(/access denied/i)).toBeNull());
+  });
+
+  it("the lifecycle buttons are type=button", async () => {
+    const stub = api({ getSecret: vi.fn().mockResolvedValue(secret({ type: "certificate" })) });
+    render(<SecretDetailPage api={stub} handle="secret://k1" />);
+    const button = await screen.findByRole("button", { name: /renew certificate/i });
+    expect(button.getAttribute("type")).toBe("button");
+  });
 });

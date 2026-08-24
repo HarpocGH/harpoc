@@ -123,21 +123,20 @@ describe("R7 admin-user exemption", () => {
     expect(flip.gated_after).toBe(true);
   });
 
-  it("agent+admin and tool+admin callers stay gated (ACCESS_DENIED)", () => {
+  it.each([
+    ["agent", "gov-admin"],
+    ["tool", "ops-tool"],
+  ] as const)("a %s+admin caller stays gated (ACCESS_DENIED)", (kind, principal) => {
     engine.registerAgent({ name: "gov-admin" });
-
-    for (const caller of [
-      callerFor("gov-admin", ["admin"], "agent"),
-      callerFor("ops-tool", ["admin"], "tool"),
-    ]) {
-      try {
-        engine.setAgentPermissions("cell-agent", secretId, ["read", "use"], undefined, "x", caller);
-        expect.fail(`expected ACCESS_DENIED for ${caller.principal_type}`);
-      } catch (err) {
-        expect(err).toBeInstanceOf(VaultError);
-        expect((err as VaultError).code).toBe(ErrorCode.ACCESS_DENIED);
-      }
+    const caller = callerFor(principal, ["admin"], kind);
+    let thrown: unknown;
+    try {
+      engine.setAgentPermissions("cell-agent", secretId, ["read", "use"], undefined, "x", caller);
+    } catch (err) {
+      thrown = err;
     }
+    expect(thrown, `expected ACCESS_DENIED for ${kind}`).toBeInstanceOf(VaultError);
+    expect((thrown as VaultError).code).toBe(ErrorCode.ACCESS_DENIED);
   });
 
   it("a user caller without admin scope stays gated", async () => {

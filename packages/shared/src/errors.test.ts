@@ -29,114 +29,155 @@ describe("VaultError", () => {
   });
 });
 
+const STATUS_CASES = [
+  // Vault state
+  [ErrorCode.VAULT_LOCKED, 423],
+  [ErrorCode.VAULT_NOT_FOUND, 404],
+  [ErrorCode.VAULT_ALREADY_EXISTS, 409],
+  [ErrorCode.VAULT_CORRUPTED, 500],
+  // Auth
+  [ErrorCode.INVALID_PASSWORD, 401],
+  [ErrorCode.INVALID_TOKEN, 401],
+  [ErrorCode.TOKEN_EXPIRED, 401],
+  [ErrorCode.TOKEN_REVOKED, 401],
+  [ErrorCode.TOKEN_REQUIRED, 401],
+  [ErrorCode.ACCESS_DENIED, 403],
+  [ErrorCode.LOCKOUT_ACTIVE, 429],
+  // Secrets
+  [ErrorCode.SECRET_NOT_FOUND, 404],
+  [ErrorCode.AMBIGUOUS_HANDLE, 409],
+  [ErrorCode.DUPLICATE_SECRET, 409],
+  [ErrorCode.SECRET_EXPIRED, 410],
+  [ErrorCode.SECRET_REVOKED, 410],
+  [ErrorCode.INVALID_SECRET_TYPE, 400],
+  [ErrorCode.SECRET_VALUE_REQUIRED, 400],
+  // HTTP injection
+  [ErrorCode.URL_INVALID, 400],
+  [ErrorCode.URL_HTTPS_REQUIRED, 400],
+  [ErrorCode.SSRF_BLOCKED, 403],
+  [ErrorCode.TLS_ERROR, 502],
+  [ErrorCode.DNS_RESOLUTION_FAILED, 502],
+  [ErrorCode.CONNECTION_REFUSED, 502],
+  [ErrorCode.TIMEOUT, 504],
+  [ErrorCode.REDIRECT_POLICY_VIOLATION, 502],
+  [ErrorCode.INVALID_INJECTION_CONFIG, 400],
+  [ErrorCode.URL_NOT_ALLOWED, 403],
+  [ErrorCode.RESPONSE_MODE_NOT_ALLOWED, 403],
+  // Process execution
+  [ErrorCode.COMMAND_NOT_ALLOWED, 403],
+  [ErrorCode.PROCESS_SPAWN_FAILED, 500],
+  [ErrorCode.PROCESS_TIMEOUT, 504],
+  [ErrorCode.PROCESS_OUTPUT_LIMIT, 413],
+  [ErrorCode.INVALID_PROCESS_CONFIG, 400],
+  [ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED, 400],
+  [ErrorCode.NETWORK_ISOLATION_UNAVAILABLE, 501],
+  [ErrorCode.FS_ISOLATION_UNAVAILABLE, 501],
+  // MCP proxy
+  [ErrorCode.MCP_SERVER_NOT_CONFIGURED, 400],
+  [ErrorCode.MCP_SERVER_MISMATCH, 400],
+  [ErrorCode.MCP_CONNECT_FAILED, 502],
+  [ErrorCode.MCP_SERVER_CRASHED, 502],
+  [ErrorCode.MCP_PROTOCOL_ERROR, 502],
+  [ErrorCode.MCP_TIMEOUT, 504],
+  // Database / Git / SSH contexts
+  [ErrorCode.HOST_NOT_ALLOWED, 403],
+  [ErrorCode.DB_CONNECTION_FAILED, 502],
+  [ErrorCode.DB_QUERY_FAILED, 400],
+  [ErrorCode.DB_TLS_REQUIRED, 400],
+  [ErrorCode.UNSUPPORTED_DB_ENGINE, 400],
+  [ErrorCode.INVALID_DATABASE_CONFIG, 400],
+  [ErrorCode.SSH_CONNECT_FAILED, 502],
+  [ErrorCode.SSH_HOST_KEY_MISMATCH, 502],
+  [ErrorCode.SSH_AGENT_FAILED, 500],
+  [ErrorCode.SSH_NOT_CONFIGURED, 400],
+  [ErrorCode.INVALID_SSH_CONFIG, 400],
+  [ErrorCode.GIT_OPERATION_FAILED, 502],
+  [ErrorCode.GIT_UNSUPPORTED_TRANSPORT, 400],
+  [ErrorCode.INVALID_GIT_CONFIG, 400],
+  [ErrorCode.KEY_PASSPHRASE_INVALID, 400],
+  [ErrorCode.ENCRYPTED_KEY_UNSUPPORTED, 400],
+  [ErrorCode.KEY_BUNDLE_UNSUPPORTED, 400],
+  [ErrorCode.DEDICATED_CONTEXT_REQUIRED, 403],
+  // Validation
+  [ErrorCode.WEAK_PASSWORD, 400],
+  [ErrorCode.INVALID_INPUT, 400],
+  [ErrorCode.INVALID_HANDLE, 400],
+  [ErrorCode.INVALID_PROJECT_NAME, 400],
+  [ErrorCode.INVALID_SECRET_NAME, 400],
+  [ErrorCode.SCHEMA_VALIDATION_ERROR, 400],
+  // Policy
+  [ErrorCode.POLICY_NOT_FOUND, 404],
+  [ErrorCode.POLICY_CONFLICT, 409],
+  [ErrorCode.PRINCIPAL_NOT_FOUND, 404],
+  // OAuth
+  [ErrorCode.OAUTH_FLOW_FAILED, 502],
+  [ErrorCode.OAUTH_CALLBACK_TIMEOUT, 504],
+  [ErrorCode.OAUTH_INVALID_STATE, 400],
+  [ErrorCode.OAUTH_TOKEN_EXCHANGE_FAILED, 502],
+  [ErrorCode.OAUTH_REFRESH_FAILED, 502],
+  [ErrorCode.OAUTH_PROVIDER_NOT_FOUND, 404],
+  [ErrorCode.OAUTH_NOT_CONFIGURED, 400],
+  // Certificates
+  [ErrorCode.CERT_INVALID, 400],
+  [ErrorCode.CERT_EXPIRED, 410],
+  [ErrorCode.CERT_PRIVATE_KEY_MISMATCH, 400],
+  [ErrorCode.CERT_ACME_FAILED, 502],
+  [ErrorCode.CERT_CSR_FAILED, 500],
+  [ErrorCode.CERT_NOT_CONFIGURED, 400],
+  [ErrorCode.CERT_VALUE_UNSUPPORTED, 400],
+  // Email / WebSocket / SFTP / Docker contexts (v1.3)
+  [ErrorCode.RECIPIENT_NOT_ALLOWED, 403],
+  [ErrorCode.ATTACHMENT_POLICY_REQUIRED, 403],
+  [ErrorCode.ATTACHMENT_REJECTED, 400],
+  [ErrorCode.IMAP_MUTATION_NOT_ALLOWED, 403],
+  [ErrorCode.SMTP_STARTTLS_UNAVAILABLE, 502],
+  [ErrorCode.SMTP_DELIVERY_FAILED, 502],
+  [ErrorCode.IMAP_OPERATION_FAILED, 502],
+  [ErrorCode.WEBSOCKET_CONNECT_FAILED, 502],
+  [ErrorCode.SFTP_OPERATION_FAILED, 502],
+  [ErrorCode.DOCKER_OPERATION_FAILED, 502],
+  // Agent governance (v1.4)
+  [ErrorCode.AGENT_NOT_FOUND, 404],
+  [ErrorCode.AGENT_INACTIVE, 403],
+  [ErrorCode.AGENT_EXISTS, 409],
+  // Optional dependencies
+  [ErrorCode.MISSING_DEPENDENCY, 501],
+  // Rate limiting
+  [ErrorCode.RATE_LIMIT_EXCEEDED, 429],
+  // System
+  [ErrorCode.INTERNAL_ERROR, 500],
+  [ErrorCode.DATABASE_ERROR, 500],
+  [ErrorCode.ENCRYPTION_ERROR, 500],
+  [ErrorCode.KEY_DERIVATION_ERROR, 500],
+  [ErrorCode.FILE_IO_ERROR, 500],
+  [ErrorCode.SESSION_FILE_ERROR, 500],
+] as const;
+
 describe("HTTP status mapping", () => {
-  it.each([
-    // Vault state
-    [ErrorCode.VAULT_LOCKED, 423],
-    [ErrorCode.VAULT_NOT_FOUND, 404],
-    [ErrorCode.VAULT_ALREADY_EXISTS, 409],
-    [ErrorCode.VAULT_CORRUPTED, 500],
-    // Auth
-    [ErrorCode.INVALID_PASSWORD, 401],
-    [ErrorCode.INVALID_TOKEN, 401],
-    [ErrorCode.TOKEN_EXPIRED, 401],
-    [ErrorCode.TOKEN_REVOKED, 401],
-    [ErrorCode.TOKEN_REQUIRED, 401],
-    [ErrorCode.ACCESS_DENIED, 403],
-    [ErrorCode.LOCKOUT_ACTIVE, 429],
-    // Secrets
-    [ErrorCode.SECRET_NOT_FOUND, 404],
-    [ErrorCode.AMBIGUOUS_HANDLE, 409],
-    [ErrorCode.DUPLICATE_SECRET, 409],
-    [ErrorCode.SECRET_EXPIRED, 410],
-    [ErrorCode.SECRET_REVOKED, 410],
-    [ErrorCode.INVALID_SECRET_TYPE, 400],
-    [ErrorCode.SECRET_VALUE_REQUIRED, 400],
-    // HTTP injection
-    [ErrorCode.URL_INVALID, 400],
-    [ErrorCode.URL_HTTPS_REQUIRED, 400],
-    [ErrorCode.SSRF_BLOCKED, 403],
-    [ErrorCode.TLS_ERROR, 502],
-    [ErrorCode.DNS_RESOLUTION_FAILED, 502],
-    [ErrorCode.CONNECTION_REFUSED, 502],
-    [ErrorCode.TIMEOUT, 504],
-    [ErrorCode.REDIRECT_POLICY_VIOLATION, 502],
-    [ErrorCode.INVALID_INJECTION_CONFIG, 400],
-    [ErrorCode.URL_NOT_ALLOWED, 403],
-    [ErrorCode.RESPONSE_MODE_NOT_ALLOWED, 403],
-    // Process execution
-    [ErrorCode.COMMAND_NOT_ALLOWED, 403],
-    [ErrorCode.PROCESS_SPAWN_FAILED, 500],
-    [ErrorCode.PROCESS_TIMEOUT, 504],
-    [ErrorCode.PROCESS_OUTPUT_LIMIT, 413],
-    [ErrorCode.INVALID_PROCESS_CONFIG, 400],
-    [ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED, 400],
-    [ErrorCode.NETWORK_ISOLATION_UNAVAILABLE, 501],
-    [ErrorCode.FS_ISOLATION_UNAVAILABLE, 501],
-    // MCP proxy
-    [ErrorCode.MCP_SERVER_NOT_CONFIGURED, 400],
-    [ErrorCode.MCP_SERVER_MISMATCH, 400],
-    [ErrorCode.MCP_CONNECT_FAILED, 502],
-    [ErrorCode.MCP_SERVER_CRASHED, 502],
-    [ErrorCode.MCP_PROTOCOL_ERROR, 502],
-    [ErrorCode.MCP_TIMEOUT, 504],
-    // Validation
-    [ErrorCode.WEAK_PASSWORD, 400],
-    [ErrorCode.INVALID_INPUT, 400],
-    [ErrorCode.INVALID_HANDLE, 400],
-    [ErrorCode.INVALID_PROJECT_NAME, 400],
-    [ErrorCode.INVALID_SECRET_NAME, 400],
-    [ErrorCode.SCHEMA_VALIDATION_ERROR, 400],
-    // Policy
-    [ErrorCode.POLICY_NOT_FOUND, 404],
-    [ErrorCode.POLICY_CONFLICT, 409],
-    [ErrorCode.PRINCIPAL_NOT_FOUND, 404],
-    // OAuth
-    [ErrorCode.OAUTH_FLOW_FAILED, 502],
-    [ErrorCode.OAUTH_CALLBACK_TIMEOUT, 504],
-    [ErrorCode.OAUTH_INVALID_STATE, 400],
-    [ErrorCode.OAUTH_TOKEN_EXCHANGE_FAILED, 502],
-    [ErrorCode.OAUTH_REFRESH_FAILED, 502],
-    [ErrorCode.OAUTH_PROVIDER_NOT_FOUND, 404],
-    [ErrorCode.OAUTH_NOT_CONFIGURED, 400],
-    // Certificates
-    [ErrorCode.CERT_INVALID, 400],
-    [ErrorCode.CERT_EXPIRED, 410],
-    [ErrorCode.CERT_PRIVATE_KEY_MISMATCH, 400],
-    [ErrorCode.CERT_ACME_FAILED, 502],
-    [ErrorCode.CERT_CSR_FAILED, 500],
-    [ErrorCode.CERT_NOT_CONFIGURED, 400],
-    [ErrorCode.CERT_VALUE_UNSUPPORTED, 400],
-    // Email / WebSocket / SFTP / Docker contexts (v1.3)
-    [ErrorCode.RECIPIENT_NOT_ALLOWED, 403],
-    [ErrorCode.ATTACHMENT_POLICY_REQUIRED, 403],
-    [ErrorCode.ATTACHMENT_REJECTED, 400],
-    [ErrorCode.IMAP_MUTATION_NOT_ALLOWED, 403],
-    [ErrorCode.SMTP_STARTTLS_UNAVAILABLE, 502],
-    [ErrorCode.SMTP_DELIVERY_FAILED, 502],
-    [ErrorCode.IMAP_OPERATION_FAILED, 502],
-    [ErrorCode.WEBSOCKET_CONNECT_FAILED, 502],
-    [ErrorCode.SFTP_OPERATION_FAILED, 502],
-    [ErrorCode.DOCKER_OPERATION_FAILED, 502],
-    // Agent governance (v1.4)
-    [ErrorCode.AGENT_NOT_FOUND, 404],
-    [ErrorCode.AGENT_INACTIVE, 403],
-    [ErrorCode.AGENT_EXISTS, 409],
-    // System
-    [ErrorCode.INTERNAL_ERROR, 500],
-    [ErrorCode.DATABASE_ERROR, 500],
-    [ErrorCode.ENCRYPTION_ERROR, 500],
-    [ErrorCode.KEY_DERIVATION_ERROR, 500],
-    [ErrorCode.FILE_IO_ERROR, 500],
-    [ErrorCode.SESSION_FILE_ERROR, 500],
-  ] as const)("%s → %d", (code, expected) => {
+  it.each(STATUS_CASES)("%s → %d", (code, expected) => {
     const err = new VaultError(code, "test");
     expect(err.statusCode).toBe(expected);
   });
 
+  it("the status table covers every ErrorCode member", () => {
+    const tabled = new Set<string>(STATUS_CASES.map(([code]) => code));
+    const missing = Object.values(ErrorCode).filter((code) => !tabled.has(code));
+    expect(missing).toEqual([]);
+  });
+
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(104);
+    expect(members).toHaveLength(105);
+  });
+
+  it("STATUS_MAP has a row for every ErrorCode member", () => {
+    for (const code of Object.values(ErrorCode)) {
+      expect(new VaultError(code, "x").statusCode, code).toBeTypeOf("number");
+    }
+  });
+
+  it("maps MISSING_DEPENDENCY to 501", () => {
+    expect(new VaultError(ErrorCode.MISSING_DEPENDENCY, "x").statusCode).toBe(501);
   });
 });
 
@@ -720,6 +761,15 @@ describe("factory methods", () => {
     expect(err.code).toBe(ErrorCode.AGENT_EXISTS);
     expect(err.statusCode).toBe(409);
     expect(err.message).toBe('Agent already registered: "claude-code"');
+  });
+
+  it("missingDependency() names the specifier and the remedy", () => {
+    const err = VaultError.missingDependency("@harpoc/oauth-proxy");
+    expect(err.code).toBe(ErrorCode.MISSING_DEPENDENCY);
+    expect(err.statusCode).toBe(501);
+    expect(err.message).toBe(
+      'Optional dependency "@harpoc/oauth-proxy" is not installed. Install it to use this feature.',
+    );
   });
 
   it("v1.3 context factory messages never contain the word 'password' (credential-leak tripwire)", () => {

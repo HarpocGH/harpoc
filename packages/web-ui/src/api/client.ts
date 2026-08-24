@@ -86,12 +86,6 @@ export interface AuditVerifyReport {
   first_broken_id: number | null;
 }
 
-/** `POST /oauth/:handle/refresh`: `engine.refreshOAuthToken`'s wire projection. */
-export interface OAuthRefreshResult {
-  refreshed: boolean;
-  expires_at: number | null;
-}
-
 export interface AuditQueryFilters {
   secret_id?: string;
   event_type?: AuditEventType;
@@ -107,6 +101,12 @@ export interface AuditQueryFilters {
 export interface TokenQueryFilters {
   status?: IssuedTokenStatusFilter;
   agent?: string;
+}
+
+/** `POST /oauth/:handle/refresh`: `engine.refreshOAuthToken`'s wire projection. */
+export interface OAuthRefreshResult {
+  refreshed: boolean;
+  expires_at: number | null;
 }
 
 /** `DELETE /agents/:name`: what the cascade removed. */

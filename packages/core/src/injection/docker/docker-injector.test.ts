@@ -34,6 +34,8 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     response_header_allowlist: [],
     network_isolation: false,
     fs_isolation: false,
+    smtp_recipient_allowlist: [],
+    imap_read_only: false,
     ...overrides,
   };
 }

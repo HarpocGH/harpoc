@@ -43,6 +43,7 @@ import {
   generateCsrRequestSchema,
   isEncryptedPrivateKeyPem,
 } from "@harpoc/shared";
+import { importPeer } from "./import-peer.js";
 
 /**
  * The optional OAuth/certificate peers (D4) reach this file as types only —
@@ -75,6 +76,7 @@ export class DirectClient implements VaultClient {
   private certManagerInstance?: CertManagerT;
   private oauthManagerLoad?: Promise<OAuthManagerT>;
   private certManagerLoad?: Promise<CertManagerT>;
+  private closed = false;
   private readonly onBackgroundFlowError?: (secretId: string, err: unknown) => void;
 
   constructor(
@@ -91,9 +93,12 @@ export class DirectClient implements VaultClient {
    * device-code polls): the callback server otherwise pins the event loop
    * for the callback timeout, and an orphaned poll would complete against
    * an engine the embedder has already destroyed. Idempotent; a client that
-   * never touched OAuth has nothing to cancel.
+   * never touched OAuth has nothing to cancel. After it returns, the lazy
+   * OAuth and certificate methods refuse with `INVALID_INPUT` — a load still
+   * in flight would otherwise hand back a manager this call could not reach.
    */
   close(): void {
+    this.closed = true;
     this.oauthManagerInstance?.cancelPendingFlows();
   }
 
@@ -260,10 +265,19 @@ export class DirectClient implements VaultClient {
   }
 
   async startOAuthFlow(input: StartOAuthFlowInput): Promise<OAuthFlowResult> {
+    // Manager first: a closed client must refuse before paying the peer import.
+    const manager = await this.loadOAuthManager();
     // The grant dispatch and its wire-safe projections (never secretId, never
     // a completion promise — D2) live in oauth-proxy, shared with REST.
-    const { startOAuthFlowResult } = await import("@harpoc/oauth-proxy");
-    const manager = await this.loadOAuthManager();
+    const { startOAuthFlowResult } = await importPeer(
+      "@harpoc/oauth-proxy",
+      () => import("@harpoc/oauth-proxy"),
+    );
+    // Re-checked after the import: on a warm client the load above resolves
+    // without ever yielding to a close(), so this await is the only place a
+    // close() landing mid-call becomes visible — and starting an auth-code
+    // flow here would bind a callback socket on a shut-down client.
+    if (this.closed) throw VaultError.invalidInput("DirectClient is closed");
     return startOAuthFlowResult(manager, input);
   }
 
@@ -351,18 +365,28 @@ export class DirectClient implements VaultClient {
    * guarded) so a missing optional peer stays retryable.
    */
   private async loadOAuthManager(): Promise<OAuthManagerT> {
+    if (this.closed) throw VaultError.invalidInput("DirectClient is closed");
     if (this.oauthManagerInstance) return this.oauthManagerInstance;
     const attempt = (this.oauthManagerLoad ??= this.buildOAuthManager());
+    let manager: OAuthManagerT;
     try {
-      return await attempt;
+      manager = await attempt;
     } catch (err) {
       if (this.oauthManagerLoad === attempt) this.oauthManagerLoad = undefined;
       throw err;
     }
+    if (this.closed) {
+      manager.cancelPendingFlows();
+      throw VaultError.invalidInput("DirectClient is closed");
+    }
+    return manager;
   }
 
   private async buildOAuthManager(): Promise<OAuthManagerT> {
-    const { OAuthManager } = await import("@harpoc/oauth-proxy");
+    const { OAuthManager } = await importPeer(
+      "@harpoc/oauth-proxy",
+      () => import("@harpoc/oauth-proxy"),
+    );
     const manager = new OAuthManager(this.engine, {
       // The SDK never runs the browser leg: the embedder follows auth_url.
       openBrowser: async () => {},
@@ -381,19 +405,32 @@ export class DirectClient implements VaultClient {
     return manager;
   }
 
+  /**
+   * Same in-flight memoization + identity-guarded clear as
+   * {@link DirectClient.loadOAuthManager} — see its docblock for the race this
+   * closes. CertManager holds no socket, so a duplicate here would cost a
+   * wasted build rather than a pinned event loop.
+   */
   private async loadCertManager(): Promise<CertManagerT> {
+    if (this.closed) throw VaultError.invalidInput("DirectClient is closed");
     if (this.certManagerInstance) return this.certManagerInstance;
     const attempt = (this.certManagerLoad ??= this.buildCertManager());
+    let manager: CertManagerT;
     try {
-      return await attempt;
+      manager = await attempt;
     } catch (err) {
       if (this.certManagerLoad === attempt) this.certManagerLoad = undefined;
       throw err;
     }
+    if (this.closed) throw VaultError.invalidInput("DirectClient is closed");
+    return manager;
   }
 
   private async buildCertManager(): Promise<CertManagerT> {
-    const { CertManager } = await import("@harpoc/cert-manager");
+    const { CertManager } = await importPeer(
+      "@harpoc/cert-manager",
+      () => import("@harpoc/cert-manager"),
+    );
     const manager = new CertManager(this.engine);
     this.certManagerInstance = manager;
     return manager;

@@ -48,6 +48,7 @@ export function TokensPage({ api }: { api: ApiClient }) {
   );
 
   const onRevoke = (row: IssuedToken): void => {
+    setError(null);
     // The session's own bearer is decoded here, not fetched: the page already
     // holds it, and revoking it logs this tab out on the next call.
     const held = getToken();
@@ -59,7 +60,6 @@ export function TokensPage({ api }: { api: ApiClient }) {
     );
     if (!confirmed) return;
     setBusy(true);
-    setError(null);
     api.revokeToken(row.jti).then(
       () => {
         setBusy(false);

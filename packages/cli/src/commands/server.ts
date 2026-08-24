@@ -4,10 +4,11 @@ import type { Command } from "commander";
 import { MAX_TOKEN_TTL_MS, Permission } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError } from "../utils/output.js";
+import { isDecimalInteger } from "../utils/options.js";
 
 function parsePort(value: string, label: string): number {
   const port = Number(value);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  if (!isDecimalInteger(value) || port < 1 || port > 65535) {
     console.error(`Error: Invalid ${label} "${value}". Must be 1-65535.`);
     process.exit(1);
   }
@@ -87,7 +88,7 @@ export function registerServerCommand(program: Command): void {
           let uiTokenTtlMs: number | undefined;
           if (opts.uiTokenTtl !== undefined) {
             const minutes = Number(opts.uiTokenTtl);
-            if (!Number.isInteger(minutes) || minutes < 1) {
+            if (!isDecimalInteger(opts.uiTokenTtl) || minutes < 1) {
               console.error("Error: --ui-token-ttl must be a whole number of minutes (>= 1).");
               process.exit(1);
             }

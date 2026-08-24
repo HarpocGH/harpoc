@@ -34,10 +34,14 @@ export interface ImapOAuth {
 /**
  * The operation-shaped half of an {@link ImapResult}: `search` fills `uids`,
  * `fetch` fills `messages`, the mutating kinds fill `affected` — exactly one
- * per operation. The injector wraps it with the `type`/`operation`
- * discriminants to form the wire result.
+ * per operation, which the `?: never` exclusions make a compile-time
+ * invariant rather than a convention. The injector wraps it with the
+ * `type`/`operation` discriminants to form the wire result.
  */
-type ImapOperationFields = Omit<ImapResult, "type" | "operation">;
+export type ImapOperationFields =
+  | { uids: number[]; messages?: never; affected?: never }
+  | { messages: ImapMessage[]; uids?: never; affected?: never }
+  | { affected: number; uids?: never; messages?: never };
 
 /**
  * Metadata-only audit projection of an IMAP operation. Names the origin, the
@@ -94,12 +98,12 @@ const MUTATION_KINDS = new Set<ImapAction["operation"]["kind"]>([
   "expunge",
 ]);
 
-/** The number of UIDs/messages a result actually touched — used for both the
- * audit projection and (indirectly) test assertions on operation shape. */
+/** The number of UIDs/messages a result actually touched — the sole source of
+ * `ImapAuditDetails.uid_count`. */
 function resultUidCount(result: ImapOperationFields): number {
   if (result.uids !== undefined) return result.uids.length;
   if (result.messages !== undefined) return result.messages.length;
-  return result.affected ?? 0;
+  return result.affected;
 }
 
 /**
