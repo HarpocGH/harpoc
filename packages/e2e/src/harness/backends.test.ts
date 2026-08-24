@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { connect as netConnect } from "node:net";
+import { readFileSync } from "node:fs";
 import {
   PG,
   MYSQL,
@@ -9,6 +10,7 @@ import {
   ECHO_HTTPS,
   MCP_DOWNSTREAM,
   ATTACKER,
+  DOCKER_REGISTRY,
   assertFleetUp,
   parseComposeRows,
 } from "./backends.js";
@@ -136,5 +138,23 @@ describe("backend fleet", () => {
     expect(ATTACKER.recordedUrl).toContain(String(ATTACKER.port));
     assertFleetUp("attacker");
     expect(await canOpenTcp(ATTACKER.ip, ATTACKER.port)).toBe(true);
+  });
+});
+
+describe("seed-registry script", () => {
+  // scripts/seed-registry.mjs is dist-free provisioning and cannot import this
+  // module, so its copies of the DOCKER_REGISTRY constants would drift in
+  // silence — a renamed image or a rotated fixture password would leave the
+  // seeded reference and the arm's pull pointing at different things. Pin the
+  // script's literals to the single source of truth here.
+  it("carries the DOCKER_REGISTRY constants verbatim", () => {
+    const script = readFileSync(
+      new URL("../../scripts/seed-registry.mjs", import.meta.url),
+      "utf8",
+    );
+    expect(script).toContain(`"${DOCKER_REGISTRY.host}:${String(DOCKER_REGISTRY.port)}"`);
+    expect(script).toContain(`"${DOCKER_REGISTRY.user}"`);
+    expect(script).toContain(`"${DOCKER_REGISTRY.password}"`);
+    expect(script).toContain(`"${DOCKER_REGISTRY.image}"`);
   });
 });

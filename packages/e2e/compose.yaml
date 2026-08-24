@@ -291,18 +291,18 @@ services:
 
   # ---------------------------------------------------------------------------
   # v1.3 extended-context backends (SMTP/IMAP mail, Redis, MongoDB, docker
-  # registry). Added for the context-opacity scenarios; the full fleet run
-  # exercising them stays owed at the next Linux session (D8) — Windows verifies
-  # scenario collection only.
+  # registry). Added for the context-opacity scenarios; first exercised by a
+  # full fleet run on 2026-08-24 (win32, all six paired arms matched their
+  # pre-registration).
   # ---------------------------------------------------------------------------
 
   # SMTP + IMAP mail server for the smtp and imap contexts. A single Node
   # fixture serving SMTPS (465) and IMAPS (993) over the SAN-covered localhost
   # leaf the echo-https service already presents, so no new PKI leaf is
   # generated — trust rides the fixture CA via NODE_EXTRA_CA_CERTS, exactly like
-  # the http and database TLS paths. Provisional: the protocol subset is
-  # tailored to the vault's in-house SMTP/IMAP clients (design §4.2) and is
-  # validated at the owed Linux fleet run.
+  # the http and database TLS paths. The protocol subset is tailored to the
+  # vault's in-house SMTP/IMAP clients (design §4.2); validated live by the
+  # 2026-08-24 full fleet run (smtp/imap opacity arms green).
   mail:
     build:
       context: ./fixtures/mail
@@ -355,20 +355,27 @@ services:
       timeout: 5s
       retries: 45
 
-  # A registry:2 for the docker-registry context. The vault spawns `docker` and
-  # injects the credential through its credential helper; the result opacity is
-  # what the arm certifies. OWED at the Linux fleet run: seeding `hello-world`
-  # into this registry for a clean pull, and — per the Task 14 rider — enabling
-  # htpasswd auth so the credential helper is genuinely consulted (and
-  # confirming `docker-credential-harpoc` resolves by name from the prepended
-  # PATH). The opacity measurement holds regardless, but a successful pull needs
-  # the seed.
+  # A registry:2 for the docker-registry context, with htpasswd auth baked into
+  # the image (fixtures/registry — the Task 14 rider): the vault spawns `docker`
+  # and injects the credential through its credential helper, and with
+  # anonymous access answering 401 a successful pull proves the helper was
+  # genuinely consulted. The registry starts empty, so fleet:up seeds
+  # `hello-world:latest` through scripts/seed-registry.mjs once the fleet is
+  # healthy — the opacity arm's pull needs an image to succeed. The healthcheck
+  # carries the credentials because /v2/ now answers 401 without them, which
+  # busybox wget treats as a failure.
   registry:
-    image: registry:2
+    build:
+      context: ./fixtures/registry
+    image: harpoc-e2e-registry
     ports:
       - "127.0.0.1:55000:5000"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:5000/v2/ || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://harpoc-docker:docker-e2e-pw@127.0.0.1:5000/v2/ || exit 1",
+        ]
       interval: 2s
       timeout: 5s
       retries: 45
