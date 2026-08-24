@@ -1,3 +1,6 @@
+import { useState } from "preact/hooks";
+import { cycleTheme, storedTheme } from "../theme";
+
 const LINKS = [
   ["/", "Dashboard"],
   ["/secrets", "Secrets"],
@@ -8,6 +11,7 @@ const LINKS = [
 ] as const;
 
 export function Nav({ route }: { route: string }) {
+  const [theme, setThemeState] = useState(storedTheme());
   return (
     <nav class="rail">
       {LINKS.map(([target, label]) => (
@@ -19,6 +23,9 @@ export function Nav({ route }: { route: string }) {
           {label}
         </a>
       ))}
+      <button class="theme-toggle" type="button" onClick={() => setThemeState(cycleTheme())}>
+        theme: {theme ?? "system"}
+      </button>
     </nav>
   );
 }

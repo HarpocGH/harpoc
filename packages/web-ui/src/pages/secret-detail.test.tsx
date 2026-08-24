@@ -1,10 +1,13 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/preact";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AccessPolicy } from "@harpoc/shared";
 import type { ApiClient, SecretInfo } from "../api/client";
 import { SecretDetailPage } from "./secret-detail";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 const secret = (over: Partial<SecretInfo> = {}): SecretInfo => ({
   handle: "secret://k1",
@@ -39,6 +42,8 @@ function api(over: Partial<ApiClient> = {}): ApiClient {
     getAccessPolicies: vi.fn().mockResolvedValue([]),
     getOAuthStatus: vi.fn().mockResolvedValue({ provider: "github" }),
     getCertificateStatus: vi.fn().mockResolvedValue({ issuer: "LE" }),
+    refreshOAuth: vi.fn().mockResolvedValue({ refreshed: true, expires_at: null }),
+    renewCertificate: vi.fn().mockResolvedValue({ issuer: "LE" }),
     ...over,
   } as ApiClient;
 }
@@ -181,5 +186,98 @@ describe("SecretDetailPage", () => {
     const { container } = render(<SecretDetailPage api={api()} handle="k1" />);
     await waitFor(() => expect(screen.getByText("k1")).toBeTruthy());
     expect(container.querySelector("section#actions")).toBeTruthy();
+  });
+
+  it("refreshes the OAuth token from the panel and reloads the status", async () => {
+    const stub = api({
+      getSecret: vi.fn().mockResolvedValue(secret({ type: "oauth_token" })),
+      refreshOAuth: vi.fn().mockResolvedValue({ refreshed: true, expires_at: 1_700_000_000_000 }),
+    });
+    render(<SecretDetailPage api={stub} handle="secret://k1" />);
+    const button = await screen.findByRole("button", { name: /refresh token/i });
+    fireEvent.click(button);
+    await waitFor(() => expect(stub.refreshOAuth).toHaveBeenCalledWith("secret://k1"));
+    await screen.findByText(/token refreshed/i);
+    // Initial load plus the reload the successful refresh triggers: the panel
+    // must show the new expiry, not the one the refresh just replaced.
+    await waitFor(() => expect(stub.getOAuthStatus).toHaveBeenCalledTimes(2));
+  });
+
+  it("names the new expiry in the refresh notice", async () => {
+    const stub = api({
+      getSecret: vi.fn().mockResolvedValue(secret({ type: "oauth_token" })),
+      refreshOAuth: vi.fn().mockResolvedValue({ refreshed: true, expires_at: 1_700_000_000_000 }),
+    });
+    render(<SecretDetailPage api={stub} handle="secret://k1" />);
+    fireEvent.click(await screen.findByRole("button", { name: /refresh token/i }));
+    await screen.findByText(new RegExp(new Date(1_700_000_000_000).toISOString()));
+  });
+
+  it("surfaces a refusal from the refresh route inline", async () => {
+    const stub = api({
+      getSecret: vi.fn().mockResolvedValue(secret({ type: "oauth_token" })),
+      refreshOAuth: vi.fn().mockRejectedValue(new Error("No refresh token stored")),
+    });
+    render(<SecretDetailPage api={stub} handle="secret://k1" />);
+    fireEvent.click(await screen.findByRole("button", { name: /refresh token/i }));
+    await screen.findByText(/no refresh token stored/i);
+    expect(stub.getOAuthStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("narrows the OAuth hint to re-authorization now that refresh has a button", async () => {
+    const stub = api({ getSecret: vi.fn().mockResolvedValue(secret({ type: "oauth_token" })) });
+    render(<SecretDetailPage api={stub} handle="secret://k1" />);
+    await screen.findByText(/harpoc oauth connect/);
+    expect(screen.queryByText(/harpoc oauth connect \/ refresh/)).toBeNull();
+  });
+
+  it("renew asks for confirmation and does nothing when declined", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const stub = api({
+      getSecret: vi.fn().mockResolvedValue(secret({ type: "certificate" })),
+      renewCertificate: vi.fn(),
+    });
+    render(<SecretDetailPage api={stub} handle="secret://k1" />);
+    fireEvent.click(await screen.findByRole("button", { name: /renew certificate/i }));
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(stub.renewCertificate).not.toHaveBeenCalled();
+  });
+
+  it("renew (confirmed) calls the route and reloads the certificate status", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const stub = api({
+      getSecret: vi.fn().mockResolvedValue(secret({ type: "certificate" })),
+      renewCertificate: vi.fn().mockResolvedValue({ issuer: "LE" }),
+    });
+    render(<SecretDetailPage api={stub} handle="secret://k1" />);
+    fireEvent.click(await screen.findByRole("button", { name: /renew certificate/i }));
+    await waitFor(() => expect(stub.renewCertificate).toHaveBeenCalledWith("secret://k1"));
+    await screen.findByText(/certificate renewed/i);
+    await waitFor(() => expect(stub.getCertificateStatus).toHaveBeenCalledTimes(2));
+  });
+
+  it("renew (confirmed) surfaces an ACCESS_DENIED failure inline", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const stub = api({
+      getSecret: vi.fn().mockResolvedValue(secret({ type: "certificate" })),
+      renewCertificate: vi.fn().mockRejectedValue(new Error("Access denied")),
+    });
+    render(<SecretDetailPage api={stub} handle="secret://k1" />);
+    fireEvent.click(await screen.findByRole("button", { name: /renew certificate/i }));
+    await screen.findByText(/access denied/i);
+    expect(stub.getCertificateStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the --http-port pointer on the certificate panel", async () => {
+    const stub = api({ getSecret: vi.fn().mockResolvedValue(secret({ type: "certificate" })) });
+    render(<SecretDetailPage api={stub} handle="secret://k1" />);
+    await screen.findByText(/harpoc cert renew --http-port/);
+  });
+
+  it("offers neither lifecycle button on a plain api_key secret", async () => {
+    render(<SecretDetailPage api={api()} handle="k1" />);
+    await waitFor(() => expect(screen.getByText("k1")).toBeTruthy());
+    expect(screen.queryByRole("button", { name: /refresh token/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /renew certificate/i })).toBeNull();
   });
 });

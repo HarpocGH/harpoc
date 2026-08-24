@@ -21,7 +21,8 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "dependencies": {
     "@harpoc/shared": "workspace:*",

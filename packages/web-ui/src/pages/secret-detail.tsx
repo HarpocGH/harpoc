@@ -1,3 +1,4 @@
+import { useState } from "preact/hooks";
 import type { ApiClient } from "../api/client";
 import { secretPath } from "../api/client";
 import { MetaTable } from "../components/meta-table";
@@ -34,6 +35,52 @@ export function SecretDetailPage({ api, handle }: { api: ApiClient; handle: stri
     () => (type === "certificate" ? api.getCertificateStatus(handle) : Promise.resolve(null)),
     [handle, type],
   );
+
+  const [actionError, setActionError] = useState<Error | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const run = (action: () => Promise<string | null>): void => {
+    setBusy(true);
+    setActionError(null);
+    setNotice(null);
+    action().then(
+      (message) => {
+        setNotice(message);
+        setBusy(false);
+      },
+      (err: unknown) => {
+        setActionError(err instanceof Error ? err : new Error(String(err)));
+        setBusy(false);
+      },
+    );
+  };
+
+  // Both lifecycle actions are metadata-only round trips: the route answers a
+  // status projection, never a token or a key, and the reload re-reads the same
+  // status panel the button sits under.
+  const onRefreshOAuth = (): void =>
+    run(async () => {
+      const result = await api.refreshOAuth(handle);
+      oauth.reload();
+      return result.expires_at === null
+        ? "Token refreshed."
+        : `Token refreshed — expires ${new Date(result.expires_at).toISOString()}`;
+    });
+
+  const onRenewCert = (): void => {
+    // A renewal is a live ACME order against the CA, not a local write: the
+    // confirm is what keeps a stray click off a rate-limited endpoint.
+    const confirmed = window.confirm(
+      "Renew this certificate now? This performs a live ACME order against the stored account (CA rate limits apply).",
+    );
+    if (!confirmed) return;
+    run(async () => {
+      await api.renewCertificate(handle);
+      cert.reload();
+      return "Certificate renewed.";
+    });
+  };
 
   if (secret.error) return <p class="error-text">{secret.error.message}</p>;
   if (!secret.data) return <p class="empty">Loading…</p>;
@@ -93,8 +140,13 @@ export function SecretDetailPage({ api, handle }: { api: ApiClient; handle: stri
               MetaTable's Record. A cast would silence the same mismatch
               without keeping the field types checked. */}
           <MetaTable entries={{ ...oauth.data }} />
+          <p>
+            <button onClick={onRefreshOAuth} disabled={busy}>
+              Refresh token
+            </button>
+          </p>
           <p class="empty">
-            Manage the OAuth lifecycle with <code>harpoc oauth connect / refresh</code>.
+            Re-authorize with <code>harpoc oauth connect</code>.
           </p>
         </>
       )}
@@ -102,11 +154,20 @@ export function SecretDetailPage({ api, handle }: { api: ApiClient; handle: stri
         <>
           <h2>Certificate status</h2>
           <MetaTable entries={{ ...cert.data }} />
+          <p>
+            <button onClick={onRenewCert} disabled={busy}>
+              Renew certificate
+            </button>
+          </p>
           <p class="empty">
-            Manage the certificate lifecycle with <code>harpoc cert renew / status</code>.
+            Renews on http-01 port 80 — non-default ports via{" "}
+            <code>harpoc cert renew --http-port</code>.
           </p>
         </>
       )}
+
+      {notice !== null && <p class="empty">{notice}</p>}
+      {actionError !== null && <p class="error-text">{actionError.message}</p>}
 
       <section id="actions">
         <RotateForm api={api} handle={handle} onDone={secret.reload} />

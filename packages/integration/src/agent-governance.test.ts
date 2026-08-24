@@ -464,4 +464,83 @@ describe("agent governance end to end", () => {
       expect(vault.engine.listAgentPolicies("onlooker")).toHaveLength(0);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // (6) R7: an admin-scoped user token is exempt from the per-secret gate
+  // -------------------------------------------------------------------------
+  describe("an admin-scoped user token is exempt from the per-secret gate", () => {
+    const handle = "r7-gated";
+    let userAdminToken: string;
+    let agentAdminToken: string;
+
+    const setCell = async (
+      agent: string,
+      permissions: string[],
+      token: string,
+    ): Promise<Response> =>
+      api(`/agents/${agent}/secrets/${handle}/permissions`, {
+        method: "PUT",
+        headers: jsonHeaders(token),
+        body: JSON.stringify({ permissions }),
+      });
+
+    const listedNames = async (token: string): Promise<string[]> => {
+      const res = await api("/secrets", { headers: authHeaders(token) });
+      expect(res.status).toBe(200);
+      return (await bodyOf<DataBody<{ name: string }[]>>(res)).data.map((secret) => secret.name);
+    };
+
+    beforeAll(async () => {
+      const secretId = await createSecret(handle);
+      registerAgents(vault.engine, "r7-cell", "r7-admin");
+      // Trusted local path (no caller): the secret is gated before any token
+      // touches it, so what the assertions below observe is the exemption and
+      // not a first-cell-on-an-ungated-secret pass.
+      const gated = vault.engine.setAgentPermissions(
+        "r7-cell",
+        secretId,
+        ["read"],
+        undefined,
+        "integration-test",
+      );
+      expect(gated.gated_after).toBe(true);
+
+      userAdminToken = vault.engine.createToken("web-ui", ["admin"], 60_000, {
+        principalType: "user",
+      });
+      agentAdminToken = vault.engine.createToken("r7-admin", ["admin"]);
+    });
+
+    it("writes a matrix cell on the gated secret it holds no grant on (was 403)", async () => {
+      const res = await setCell("r7-cell", ["read", "use"], userAdminToken);
+      expect(res.status).toBe(200);
+      const flip = (await bodyOf<DataBody<MatrixResult>>(res)).data;
+      expect(flip.gated_before).toBe(true);
+      expect(flip.gated_after).toBe(true);
+      expect(flip.policy?.principal_id).toBe("r7-cell");
+      expect([...(flip.policy?.permissions ?? [])].sort()).toEqual(["read", "use"]);
+    });
+
+    it("still enumerates the gated secret (the W2 half of the same exemption)", async () => {
+      expect(await listedNames(userAdminToken)).toContain(handle);
+    });
+
+    it("leaves an agent-typed admin token refused and blind — gating is unchanged", async () => {
+      const refused = await setCell("r7-cell", ["read"], agentAdminToken);
+      expect(refused.status).toBe(403);
+      const failure = await bodyOf<ErrorBody>(refused);
+      expect(failure.error).toBe(ErrorCode.ACCESS_DENIED);
+      // The engine's per-secret check, not the interface's token-scope one.
+      expect(failure.message).toBe(
+        "Access denied: Principal lacks 'admin' permission on this secret",
+      );
+
+      expect(await listedNames(agentAdminToken)).not.toContain(handle);
+
+      // The refusal wrote nothing: the user-admin cell above still stands.
+      const policies = vault.engine.listAgentPolicies("r7-cell");
+      expect(policies).toHaveLength(1);
+      expect([...(policies[0]?.permissions ?? [])].sort()).toEqual(["read", "use"]);
+    });
+  });
 });

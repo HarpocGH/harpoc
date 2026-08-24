@@ -43,6 +43,9 @@ const ADMIN_CALLER = {
   principal_type: "agent",
   principal_id: "admin-agent",
   interface: "rest",
+  // R7 (v1.4.1): callerFromToken marks every admin-scoped token. The mark
+  // exempts user-type callers only — this agent-type caller stays gated.
+  admin_scope: true,
 };
 
 function createMockEngine(token: VaultApiToken = ADMIN_TOKEN) {

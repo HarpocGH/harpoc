@@ -42,9 +42,9 @@ function preselectedSecret(route: string): string | null {
 /**
  * The command that lifts a refusal on a policy-gated secret. Once the secret
  * holds its first agent row, a token caller needs a grant of its own on it —
- * this session's launch token included — and only the trusted local CLI path
- * can write that first one. The principal is read off the session's own bearer;
- * an absent `principal_type` claim is the CLI's default, `agent`.
+ * an agent- or tool-type admin token included — and only the trusted local CLI
+ * path can write that first one. The principal is read off the session's own
+ * bearer; an absent `principal_type` claim is the CLI's default, `agent`.
  */
 function grantCommand(handle: string): string {
   const held = getToken();

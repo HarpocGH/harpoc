@@ -25,6 +25,9 @@
     "@hono/node-server": "^1.14.0",
     "@modelcontextprotocol/sdk": "^1.27.1"
   },
+  "devDependencies": {
+    "@harpoc/cli": "workspace:*"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

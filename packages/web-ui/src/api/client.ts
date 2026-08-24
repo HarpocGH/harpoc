@@ -86,6 +86,12 @@ export interface AuditVerifyReport {
   first_broken_id: number | null;
 }
 
+/** `POST /oauth/:handle/refresh`: `engine.refreshOAuthToken`'s wire projection. */
+export interface OAuthRefreshResult {
+  refreshed: boolean;
+  expires_at: number | null;
+}
+
 export interface AuditQueryFilters {
   secret_id?: string;
   event_type?: AuditEventType;
@@ -127,7 +133,9 @@ export interface ApiClient {
   putInjectionPolicy(handle: string, policy: SetInjectionPolicyRequest): Promise<void>;
   getAccessPolicies(handle: string): Promise<AccessPolicy[]>;
   getOAuthStatus(handle: string): Promise<OAuthTokenStatus>;
+  refreshOAuth(handle: string): Promise<OAuthRefreshResult>;
   getCertificateStatus(handle: string): Promise<CertificateStatus>;
+  renewCertificate(handle: string): Promise<CertificateStatus>;
   queryAudit(filters: AuditQueryFilters): Promise<AuditEventWire[]>;
   verifyAuditChain(): Promise<AuditVerifyReport>;
   listAgents(status?: AgentStatusFilter): Promise<Agent[]>;
@@ -270,8 +278,12 @@ export function createApiClient(
     getAccessPolicies: (handle) =>
       get<AccessPolicy[]>(`/api/v1/secrets/${handlePath(handle)}/policies`),
     getOAuthStatus: (handle) => get<OAuthTokenStatus>(`/api/v1/oauth/${handlePath(handle)}/status`),
+    refreshOAuth: (handle) =>
+      post<OAuthRefreshResult>(`/api/v1/oauth/${handlePath(handle)}/refresh`),
     getCertificateStatus: (handle) =>
       get<CertificateStatus>(`/api/v1/certificates/${handlePath(handle)}/status`),
+    renewCertificate: (handle) =>
+      post<CertificateStatus>(`/api/v1/certificates/${handlePath(handle)}/renew`, {}),
     // Spread, not passed straight through: an interface carries no implicit
     // index signature, so the anonymous copy is what `queryString` can read.
     queryAudit: (filters) => get<AuditEventWire[]>(`/api/v1/audit${queryString({ ...filters })}`),

@@ -13,6 +13,36 @@
   --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
+/* Light "vault paper & brass": the system default (media query) and the
+   explicit override are deliberately identical — bare `:root` above already IS
+   the dark palette, so no `[data-theme="dark"]` block is needed. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: #f2efe8;
+    --panel: #faf8f2;
+    --hairline: #d9d2c3;
+    --ink: #262c33;
+    --muted: #5c6874;
+    --brass: #8a6420;
+    --patina: #1e6f4f;
+    --amber: #856800;
+    --wax: #a03a32;
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f2efe8;
+  --panel: #faf8f2;
+  --hairline: #d9d2c3;
+  --ink: #262c33;
+  --muted: #5c6874;
+  --brass: #8a6420;
+  --patina: #1e6f4f;
+  --amber: #856800;
+  --wax: #a03a32;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -80,6 +110,16 @@ nav.rail a {
 nav.rail a[data-active="true"] {
   color: var(--ink);
   border-left: 2px solid var(--brass);
+}
+.rail .theme-toggle {
+  margin-top: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--hairline);
+  padding: 0.25rem 0.5rem;
+  cursor: pointer;
 }
 main.content {
   flex: 1;

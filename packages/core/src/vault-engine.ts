@@ -57,6 +57,7 @@ import {
   ErrorCode,
   findKnownInterpreters,
   formatHandle,
+  isAdminUserCaller,
   isValidSecretNamePattern,
   isVaultVersionSupported,
   IssuedTokenStatus,
@@ -717,11 +718,14 @@ export class VaultEngine {
    * policy rows is omitted unless a grant matches, so a read-gated secret's
    * metadata row cannot be recovered from the listing. Filtering is silent —
    * enumeration writes no audit row, here as before. An absent caller is the
-   * trusted local path (CLI, in-process SDK) and sees everything.
+   * trusted local path (CLI, in-process SDK) and sees everything; so does an
+   * admin-scoped user-type token since R7 (v1.4.1), the one caller class the
+   * per-secret gate exempts — a gated secret must not vanish from the
+   * operator's own listing while they may still address it.
    */
   listSecrets(project?: string, caller?: CallerContext): SecretInfo[] {
     const s = this.assertUnlocked();
-    if (!caller) return s.secretManager.listSecrets(project);
+    if (!caller || isAdminUserCaller(caller)) return s.secretManager.listSecrets(project);
 
     const entries = s.secretManager.listSecretsWithIds(project);
     const permitted = s.policyEngine.filterPermitted(
@@ -3866,7 +3870,8 @@ export class VaultEngine {
    * Every secret the caller may enumerate, keyed by internal id — the join
    * table the row-shaped expiry accessors project through. Same filter as
    * `listSecrets` (W2): `list`/`admin` over the caller's principal set, silent,
-   * and an absent caller (trusted local path) sees everything.
+   * and an absent caller (trusted local path) — or an admin-scoped user-type
+   * token, exempt since R7 (v1.4.1) — sees everything.
    *
    * Certificate and OAuth rows are keyed by secret id and carry no handle or
    * name, so the metadata has to come from here; a missing entry means the
@@ -3874,13 +3879,14 @@ export class VaultEngine {
    */
   private secretInfoById(s: UnlockedState, caller?: CallerContext): Map<string, SecretInfo> {
     const entries = s.secretManager.listSecretsWithIds(undefined);
-    const permitted = caller
-      ? s.policyEngine.filterPermitted(
-          entries.map((entry) => entry.id),
-          this.callerPrincipals(caller),
-          "list",
-        )
-      : null;
+    const permitted =
+      caller && !isAdminUserCaller(caller)
+        ? s.policyEngine.filterPermitted(
+            entries.map((entry) => entry.id),
+            this.callerPrincipals(caller),
+            "list",
+          )
+        : null;
 
     const map = new Map<string, SecretInfo>();
     for (const entry of entries) {
@@ -3916,6 +3922,9 @@ export class VaultEngine {
    * the token is project-scoped; `admin` implies every permission). A secret
    * without policy rows stays governed by token scope alone. An absent
    * caller is the trusted local path (thesis §4.7) and is never checked.
+   * R7 (v1.4.1) adds one further exempt class: an admin-scoped user-type
+   * token, the operator's own proxy, passes without a per-secret grant —
+   * agent- and tool-type callers stay gated whatever their token scope.
    * Denials are audited under the operation's event type with the requesting
    * principal before anything is decrypted, injected or mutated.
    */
@@ -3928,6 +3937,9 @@ export class VaultEngine {
     detail: Record<string, unknown>,
   ): void {
     if (!caller) return;
+    // R7 (v1.4.1): an admin-scoped user-type token is the operator's proxy —
+    // exempt from per-secret rows, still bound by 3-dim token scope upstream.
+    if (isAdminUserCaller(caller)) return;
     if (!s.policyEngine.hasActivePolicies(secretId)) return;
 
     const granted = this.callerPrincipals(caller).some((principal) =>

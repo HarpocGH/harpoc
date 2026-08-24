@@ -33,6 +33,10 @@ export function registerServerCommand(program: Command): void {
     .option("--host <address>", "REST API bind address (loopback by default)", "127.0.0.1")
     .option("--ui", "Serve the Web UI at /ui (requires --rest); prints a one-time admin launch URL")
     .option(
+      "--ui-token-ttl <minutes>",
+      "Web UI launch-token validity in minutes (requires --ui; 1-1440, default 24 h)",
+    )
+    .option(
       "--token <jwt>",
       "Launch token for MCP scope enforcement (stdio only); prefer the HARPOC_TOKEN environment variable — command-line arguments are visible to other local processes",
     )
@@ -60,6 +64,7 @@ export function registerServerCommand(program: Command): void {
           port: string;
           host: string;
           ui?: boolean;
+          uiTokenTtl?: string;
           token?: string;
           allowTokenless?: boolean;
           oauthRefresh?: boolean;
@@ -73,6 +78,24 @@ export function registerServerCommand(program: Command): void {
           if (opts.ui && !opts.rest) {
             console.error("Error: --ui requires --rest.");
             process.exit(1);
+          }
+
+          if (cmd.getOptionValueSource("uiTokenTtl") === "cli" && !opts.ui) {
+            console.error("Error: --ui-token-ttl requires --ui.");
+            process.exit(1);
+          }
+          let uiTokenTtlMs: number | undefined;
+          if (opts.uiTokenTtl !== undefined) {
+            const minutes = Number(opts.uiTokenTtl);
+            if (!Number.isInteger(minutes) || minutes < 1) {
+              console.error("Error: --ui-token-ttl must be a whole number of minutes (>= 1).");
+              process.exit(1);
+            }
+            if (minutes * 60_000 > MAX_TOKEN_TTL_MS) {
+              console.error("Error: --ui-token-ttl exceeds the 24 h token cap (1440).");
+              process.exit(1);
+            }
+            uiTokenTtlMs = minutes * 60_000;
           }
 
           if (!opts.mcp && !opts.mcpHttp && !opts.rest && !opts.oauthRefresh && !opts.certRenew) {
@@ -204,7 +227,7 @@ export function registerServerCommand(program: Command): void {
               const launchToken = engine.createToken(
                 "web-ui",
                 [Permission.ADMIN],
-                MAX_TOKEN_TTL_MS,
+                uiTokenTtlMs ?? MAX_TOKEN_TTL_MS,
                 {
                   principalType: "user",
                   label: "web-ui launch",
@@ -213,8 +236,10 @@ export function registerServerCommand(program: Command): void {
               console.error(
                 `[harpoc] Web UI: http://${opts.host}:${String(port)}/ui#token=${launchToken}`,
               );
+              const validity =
+                uiTokenTtlMs === undefined ? "24 h cap" : `${String(uiTokenTtlMs / 60_000)} min`;
               console.error(
-                "[harpoc] The link grants admin access until the token expires (24 h cap). Do not share it.",
+                `[harpoc] The link grants admin access until the token expires (${validity}). Do not share it.`,
               );
             }
           }

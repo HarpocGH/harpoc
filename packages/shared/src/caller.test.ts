@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { callerFromToken, checkTokenScope } from "./caller.js";
+import { callerFromToken, checkTokenScope, isAdminUserCaller } from "./caller.js";
 import { ErrorCode } from "./errors.js";
 import type { VaultApiToken } from "./types.js";
 import { TokenPrincipalType } from "./types.js";
@@ -120,5 +120,40 @@ describe("checkTokenScope", () => {
 
   it("permission-only calls skip the project and name dimensions", () => {
     expect(() => checkTokenScope(baseToken({ project: "api" }), "use")).not.toThrow();
+  });
+});
+
+describe("admin_scope (R7)", () => {
+  it("callerFromToken sets admin_scope when the scope claim includes admin", () => {
+    const caller = callerFromToken(baseToken({ scope: ["admin"], principal_type: "user" }));
+    expect(caller.admin_scope).toBe(true);
+  });
+
+  it("callerFromToken omits admin_scope for a non-admin scope", () => {
+    const caller = callerFromToken(
+      baseToken({ scope: ["read", "rotate"], principal_type: "user" }),
+    );
+    expect("admin_scope" in caller).toBe(false);
+  });
+
+  it("isAdminUserCaller: true only for user-type callers carrying the flag", () => {
+    expect(
+      isAdminUserCaller(callerFromToken(baseToken({ scope: ["admin"], principal_type: "user" }))),
+    ).toBe(true);
+    // absent type = agent
+    expect(isAdminUserCaller(callerFromToken(baseToken({ scope: ["admin"] })))).toBe(false);
+    expect(
+      isAdminUserCaller(callerFromToken(baseToken({ scope: ["admin"], principal_type: "agent" }))),
+    ).toBe(false);
+    expect(
+      isAdminUserCaller(callerFromToken(baseToken({ scope: ["admin"], principal_type: "tool" }))),
+    ).toBe(false);
+    expect(
+      isAdminUserCaller(callerFromToken(baseToken({ scope: ["read"], principal_type: "user" }))),
+    ).toBe(false);
+  });
+
+  it("isAdminUserCaller ignores a hand-built caller without the flag", () => {
+    expect(isAdminUserCaller({ principal_type: "user", principal_id: "x" })).toBe(false);
   });
 });

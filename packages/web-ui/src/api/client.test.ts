@@ -212,6 +212,29 @@ describe("api client", () => {
     ]);
   });
 
+  it("refreshOAuth POSTs the refresh route with no body", async () => {
+    const fetchFn = stubFetch(200, {
+      data: { refreshed: true, expires_at: 123 },
+    });
+    const api = createApiClient(() => "jwt-1", fetchFn);
+    const result = await api.refreshOAuth("secret://gh-app");
+    expect(result).toEqual({ refreshed: true, expires_at: 123 });
+    const { url, init } = callOf(fetchFn);
+    expect(url).toBe("/api/v1/oauth/gh-app/refresh");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBeUndefined();
+  });
+
+  it("renewCertificate POSTs an empty JSON object (http-01 default port)", async () => {
+    const fetchFn = stubFetch(200, { data: { subject: "CN=x" } });
+    const api = createApiClient(() => "jwt-1", fetchFn);
+    await api.renewCertificate("secret://web-cert");
+    const { url, init } = callOf(fetchFn);
+    expect(url).toBe("/api/v1/certificates/web-cert/renew");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe("{}");
+  });
+
   it("exposes no value-fetch method", () => {
     const api = createApiClient(() => "t", stubFetch(200, { data: {} }));
     expect(Object.keys(api).some((k) => k.toLowerCase().includes("value"))).toBe(false);

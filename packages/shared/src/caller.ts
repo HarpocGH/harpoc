@@ -29,7 +29,19 @@ export function callerFromToken(token: VaultApiToken, iface?: AccessInterface): 
   if (iface) {
     caller.interface = iface;
   }
+  if (token.scope.includes("admin")) {
+    caller.admin_scope = true;
+  }
   return caller;
+}
+
+/**
+ * R7 (v1.4.1): the one caller class exempt from per-secret access policies —
+ * a user-type principal whose token carried admin scope. The flag exists only
+ * on callerFromToken-built contexts, so hand-built callers are never exempt.
+ */
+export function isAdminUserCaller(caller: CallerContext): boolean {
+  return caller.principal_type === TokenPrincipalType.USER && caller.admin_scope === true;
 }
 
 /**

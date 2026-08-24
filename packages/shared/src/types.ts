@@ -371,6 +371,12 @@ export interface CallerContext {
   project?: string;
   /** Interface the request arrived through; audit attribution only. */
   interface?: AccessInterface;
+  /**
+   * Set only by callerFromToken when the token's scope claim includes
+   * `admin`. R7 (v1.4.1): a user-type caller carrying it bypasses the
+   * per-secret presence gate and the W2 enumeration filter.
+   */
+  admin_scope?: true;
 }
 
 /**

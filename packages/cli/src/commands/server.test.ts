@@ -513,6 +513,43 @@ describe("server start", () => {
     expect(mockEngine.createToken).not.toHaveBeenCalled();
   });
 
+  it("--ui-token-ttl requires --ui", async () => {
+    await expect(run(["--rest", "--ui-token-ttl", "10"])).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith("Error: --ui-token-ttl requires --ui.");
+  });
+
+  it("--ui-token-ttl refuses a non-integer value", async () => {
+    await expect(run(["--rest", "--ui", "--ui-token-ttl", "ten"])).rejects.toThrow("process.exit");
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Error: --ui-token-ttl must be a whole number of minutes (>= 1).",
+    );
+  });
+
+  it("--ui-token-ttl refuses a value over the 24 h cap — never clamps", async () => {
+    await expect(run(["--rest", "--ui", "--ui-token-ttl", "1441"])).rejects.toThrow("process.exit");
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Error: --ui-token-ttl exceeds the 24 h token cap (1440).",
+    );
+    expect(mockEngine.createToken).not.toHaveBeenCalled();
+  });
+
+  it("--ui-token-ttl mints the launch token with the shortened TTL", async () => {
+    await run(["--rest", "--ui", "--ui-token-ttl", "30"]);
+    expect(mockEngine.createToken).toHaveBeenCalledWith("web-ui", ["admin"], 30 * 60 * 1000, {
+      principalType: "user",
+      label: "web-ui launch",
+    });
+  });
+
+  it("without the flag the launch token keeps the 24 h default", async () => {
+    await run(["--rest", "--ui"]);
+    expect(mockEngine.createToken).toHaveBeenCalledWith("web-ui", ["admin"], 24 * 60 * 60 * 1000, {
+      principalType: "user",
+      label: "web-ui launch",
+    });
+  });
+
   // ── Dual mode ───────────────────────────────────────────────────
 
   it("starts both MCP and REST with --mcp --rest", async () => {
