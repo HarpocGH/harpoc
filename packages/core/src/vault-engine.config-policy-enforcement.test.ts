@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext, McpServerConfig, Permission, PrincipalType } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
+import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 /**
  * W1: secret-scoped *configuration* under the per-secret policy layer.
@@ -96,13 +97,10 @@ function grant(
 }
 
 async function expectDenied(promise: Promise<unknown> | (() => unknown)): Promise<void> {
-  try {
-    await (typeof promise === "function" ? promise() : promise);
-    expect.fail("expected ACCESS_DENIED");
-  } catch (e) {
-    expect(e).toBeInstanceOf(VaultError);
-    expect((e as VaultError).code).toBe(ErrorCode.ACCESS_DENIED);
-  }
+  await expectVaultError(
+    () => (typeof promise === "function" ? promise() : promise),
+    ErrorCode.ACCESS_DENIED,
+  );
 }
 
 /** Every config read + mutation, driven with one caller. */

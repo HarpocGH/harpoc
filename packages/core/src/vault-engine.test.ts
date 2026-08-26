@@ -14,6 +14,7 @@ import type { McpConnectionEntry, McpConnectionRegistry } from "./injection/mcp-
 import { SqliteStore } from "./storage/sqlite-store.js";
 import { DpapiSessionKeyProtector } from "./session/session-key-protector.js";
 import type { SessionKeyProtector } from "./session/session-key-protector.js";
+import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();
@@ -113,10 +114,7 @@ describe("vault version guard", () => {
   const expectUnlockCorrupted = async (): Promise<void> => {
     const engine2 = new VaultEngine({ dbPath, sessionPath });
     try {
-      await engine2.unlock("password");
-      expect.fail("unlock should have refused the vault version");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.VAULT_CORRUPTED);
+      await expectVaultError(() => engine2.unlock("password"), ErrorCode.VAULT_CORRUPTED);
     } finally {
       await engine2.destroy();
     }
@@ -386,12 +384,7 @@ describe("lifecycle", () => {
   });
 
   it("rejects weak password on initVault", async () => {
-    try {
-      await engine.initVault("short");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.WEAK_PASSWORD);
-    }
+    await expectVaultError(() => engine.initVault("short"), ErrorCode.WEAK_PASSWORD);
   });
 
   it("refuses to re-init an existing vault and preserves its secrets", async () => {
@@ -404,12 +397,7 @@ describe("lifecycle", () => {
     await engine.lock();
 
     const engine2 = new VaultEngine({ dbPath, sessionPath });
-    try {
-      await engine2.initVault("newpass1");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.VAULT_ALREADY_EXISTS);
-    }
+    await expectVaultError(() => engine2.initVault("newpass1"), ErrorCode.VAULT_ALREADY_EXISTS);
     expect(engine2.getState()).toBe(VaultState.SEALED);
 
     await engine2.unlock("original1");
@@ -511,30 +499,21 @@ describe("error propagation through VaultEngine", () => {
   });
 
   it("getSecretInfo throws SECRET_NOT_FOUND for non-existent handle", async () => {
-    try {
-      await engine.getSecretInfo("secret://nonexistent");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SECRET_NOT_FOUND);
-    }
+    await expectVaultError(
+      () => engine.getSecretInfo("secret://nonexistent"),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
   });
 
   it("getSecretValue throws SECRET_NOT_FOUND for non-existent handle", async () => {
-    try {
-      await engine.getSecretValue("secret://nonexistent");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SECRET_NOT_FOUND);
-    }
+    await expectVaultError(
+      () => engine.getSecretValue("secret://nonexistent"),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
   });
 
   it("getSecretInfo throws INVALID_HANDLE for malformed handle", async () => {
-    try {
-      await engine.getSecretInfo("not-a-handle");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_HANDLE);
-    }
+    await expectVaultError(() => engine.getSecretInfo("not-a-handle"), ErrorCode.INVALID_HANDLE);
   });
 
   it("getSecretValue throws SECRET_REVOKED for revoked secret", async () => {
@@ -545,23 +524,16 @@ describe("error propagation through VaultEngine", () => {
     });
     await engine.revokeSecret("secret://rev");
 
-    try {
-      await engine.getSecretValue("secret://rev");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SECRET_REVOKED);
-    }
+    await expectVaultError(() => engine.getSecretValue("secret://rev"), ErrorCode.SECRET_REVOKED);
   });
 
   it("getSecretValue throws SECRET_VALUE_REQUIRED for pending secret", async () => {
     await engine.createSecret({ name: "pend", type: "api_key" });
 
-    try {
-      await engine.getSecretValue("secret://pend");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SECRET_VALUE_REQUIRED);
-    }
+    await expectVaultError(
+      () => engine.getSecretValue("secret://pend"),
+      ErrorCode.SECRET_VALUE_REQUIRED,
+    );
   });
 
   it("createSecret throws DUPLICATE_SECRET for duplicate name", async () => {
@@ -571,16 +543,15 @@ describe("error propagation through VaultEngine", () => {
       value: new Uint8Array(Buffer.from("v")),
     });
 
-    try {
-      await engine.createSecret({
-        name: "dup",
-        type: "api_key",
-        value: new Uint8Array(Buffer.from("v2")),
-      });
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.DUPLICATE_SECRET);
-    }
+    await expectVaultError(
+      () =>
+        engine.createSecret({
+          name: "dup",
+          type: "api_key",
+          value: new Uint8Array(Buffer.from("v2")),
+        }),
+      ErrorCode.DUPLICATE_SECRET,
+    );
   });
 
   it("rotateSecret throws SECRET_REVOKED for revoked secret", async () => {
@@ -591,26 +562,23 @@ describe("error propagation through VaultEngine", () => {
     });
     await engine.revokeSecret("secret://rot-rev");
 
-    try {
-      await engine.rotateSecret("secret://rot-rev", new Uint8Array(Buffer.from("new")));
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SECRET_REVOKED);
-    }
+    await expectVaultError(
+      () => engine.rotateSecret("secret://rot-rev", new Uint8Array(Buffer.from("new"))),
+      ErrorCode.SECRET_REVOKED,
+    );
   });
 
   it("useSecret throws SECRET_NOT_FOUND for non-existent handle", async () => {
-    try {
-      await engine.useSecret("secret://nonexistent", {
-        type: "http",
-        method: "GET",
-        url: `${baseUrl}/test`,
-        injection: { type: "bearer" },
-      });
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SECRET_NOT_FOUND);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://nonexistent", {
+          type: "http",
+          method: "GET",
+          url: `${baseUrl}/test`,
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
   });
 
   it("useSecret throws SECRET_REVOKED for revoked secret", async () => {
@@ -621,17 +589,16 @@ describe("error propagation through VaultEngine", () => {
     });
     await engine.revokeSecret("secret://use-rev");
 
-    try {
-      await engine.useSecret("secret://use-rev", {
-        type: "http",
-        method: "GET",
-        url: `${baseUrl}/test`,
-        injection: { type: "bearer" },
-      });
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SECRET_REVOKED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://use-rev", {
+          type: "http",
+          method: "GET",
+          url: `${baseUrl}/test`,
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.SECRET_REVOKED,
+    );
   });
 
   it("useSecret throws URL_INVALID for invalid URL", async () => {
@@ -641,17 +608,16 @@ describe("error propagation through VaultEngine", () => {
       value: new Uint8Array(Buffer.from("v")),
     });
 
-    try {
-      await engine.useSecret("secret://url-test", {
-        type: "http",
-        method: "GET",
-        url: "not-a-url",
-        injection: { type: "bearer" },
-      });
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.URL_INVALID);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://url-test", {
+          type: "http",
+          method: "GET",
+          url: "not-a-url",
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.URL_INVALID,
+    );
   });
 
   it("useSecret throws SSRF_BLOCKED for private IP", async () => {
@@ -661,17 +627,16 @@ describe("error propagation through VaultEngine", () => {
       value: new Uint8Array(Buffer.from("v")),
     });
 
-    try {
-      await engine.useSecret("secret://ssrf-test", {
-        type: "http",
-        method: "GET",
-        url: "https://10.0.0.1/api",
-        injection: { type: "bearer" },
-      });
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://ssrf-test", {
+          type: "http",
+          method: "GET",
+          url: "https://10.0.0.1/api",
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.SSRF_BLOCKED,
+    );
   });
 });
 
@@ -1041,17 +1006,15 @@ describe("audit-chain anchor (tail truncation)", () => {
     expect(newAnchorResult.anchor?.status).toBe("row_missing");
   });
 
-  it("rejects an anchor taken from a different vault before touching any rows", () => {
+  it("rejects an anchor taken from a different vault before touching any rows", async () => {
     const anchor = engine.getAuditChainTail();
     expect(anchor).not.toBeNull();
     const foreign = { ...(anchor as NonNullable<typeof anchor>), vault_id: "someone-elses-vault" };
-    try {
-      engine.verifyAuditChain({ anchor: foreign });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
-      expect((e as VaultError).message).toContain("different vault");
-    }
+    const err = await expectVaultError(
+      () => engine.verifyAuditChain({ anchor: foreign }),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toContain("different vault");
   });
 });
 
@@ -1066,16 +1029,15 @@ describe("interpreter acknowledgement (thesis §4.5.3)", () => {
   });
 
   it("refuses to add a known interpreter without acknowledgement and audits the refusal", async () => {
-    try {
-      await engine.setInjectionPolicy("secret://interp", {
-        url_allowlist: [],
-        command_allowlist: ["python"],
-        env_allowlist: [],
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED);
-    }
+    await expectVaultError(
+      () =>
+        engine.setInjectionPolicy("secret://interp", {
+          url_allowlist: [],
+          command_allowlist: ["python"],
+          env_allowlist: [],
+        }),
+      ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED,
+    );
     // The policy is unchanged and no grant was recorded
     const p = await engine.getInjectionPolicy("secret://interp");
     expect(p.command_allowlist).toEqual([]);
@@ -1112,16 +1074,15 @@ describe("interpreter acknowledgement (thesis §4.5.3)", () => {
       "C:\\Program Files\\nodejs\\node.exe",
       "bash",
     ]) {
-      try {
-        await engine.setInjectionPolicy("secret://interp", {
-          url_allowlist: [],
-          command_allowlist: [entry],
-          env_allowlist: [],
-        });
-        expect.fail("should throw");
-      } catch (e) {
-        expect((e as VaultError).code).toBe(ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED);
-      }
+      await expectVaultError(
+        () =>
+          engine.setInjectionPolicy("secret://interp", {
+            url_allowlist: [],
+            command_allowlist: [entry],
+            env_allowlist: [],
+          }),
+        ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED,
+      );
     }
   });
 
@@ -1155,16 +1116,15 @@ describe("interpreter acknowledgement (thesis §4.5.3)", () => {
       { url_allowlist: [], command_allowlist: ["python"], env_allowlist: [] },
       { acknowledge_interpreters: true },
     );
-    try {
-      await engine.setInjectionPolicy("secret://interp", {
-        url_allowlist: [],
-        command_allowlist: ["python", "bash"],
-        env_allowlist: [],
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED);
-    }
+    await expectVaultError(
+      () =>
+        engine.setInjectionPolicy("secret://interp", {
+          url_allowlist: [],
+          command_allowlist: ["python", "bash"],
+          env_allowlist: [],
+        }),
+      ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED,
+    );
     const refused = engine.queryAudit({
       eventType: AuditEventType.POLICY_INTERPRETER_REFUSED,
     });
@@ -1229,17 +1189,16 @@ describe("URL allowlist enforcement (HTTP)", () => {
       command_allowlist: [],
       env_allowlist: [],
     });
-    try {
-      await engine.useSecret("secret://url-al", {
-        type: "http",
-        method: "GET",
-        url: `${baseUrl}/blocked`,
-        injection: { type: "bearer" },
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.URL_NOT_ALLOWED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://url-al", {
+          type: "http",
+          method: "GET",
+          url: `${baseUrl}/blocked`,
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.URL_NOT_ALLOWED,
+    );
   });
 
   it("audits a blocked URL with success=false", async () => {
@@ -1270,18 +1229,17 @@ describe("URL allowlist enforcement (HTTP)", () => {
       env_allowlist: [],
     });
     const before = requestCount;
-    try {
-      await engine.useSecret("secret://url-al", {
-        type: "http",
-        method: "GET",
-        url: `${baseUrl}/redirect-hop`,
-        injection: { type: "bearer" },
-        follow_redirects: "any",
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.URL_NOT_ALLOWED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://url-al", {
+          type: "http",
+          method: "GET",
+          url: `${baseUrl}/redirect-hop`,
+          injection: { type: "bearer" },
+          follow_redirects: "any",
+        }),
+      ErrorCode.URL_NOT_ALLOWED,
+    );
     // The credential-bearing request never followed the redirect: only the
     // 302 itself was fetched, /target was not.
     expect(requestCount - before).toBe(1);
@@ -1299,15 +1257,14 @@ describe("use_secret action dispatch", () => {
       type: "api_key",
       value: new Uint8Array(Buffer.from("v")),
     });
-    try {
-      await engine.useSecret("secret://dispatch", { type: "ftp" } as unknown as Parameters<
-        VaultEngine["useSecret"]
-      >[1]);
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
-      expect((e as VaultError).message).toContain("Unsupported action type: ftp");
-    }
+    const err = await expectVaultError(
+      () =>
+        engine.useSecret("secret://dispatch", { type: "ftp" } as unknown as Parameters<
+          VaultEngine["useSecret"]
+        >[1]),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toContain("Unsupported action type: ftp");
   });
 });
 
@@ -1410,18 +1367,17 @@ describe("response mode enforcement (HTTP)", () => {
   it("rejects a loosening override without executing the request", async () => {
     await engine.setInjectionPolicy("secret://rm", { response_mode: "status_only" });
     const before = requestCount;
-    try {
-      await engine.useSecret("secret://rm", {
-        type: "http",
-        method: "GET",
-        url: `${baseUrl}/x`,
-        injection: { type: "bearer" },
-        response_mode: "full",
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.RESPONSE_MODE_NOT_ALLOWED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://rm", {
+          type: "http",
+          method: "GET",
+          url: `${baseUrl}/x`,
+          injection: { type: "bearer" },
+          response_mode: "full",
+        }),
+      ErrorCode.RESPONSE_MODE_NOT_ALLOWED,
+    );
     expect(requestCount).toBe(before);
     const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
     const denied = events.find((e) => e.detail?.error === "RESPONSE_MODE_NOT_ALLOWED");
@@ -1431,18 +1387,17 @@ describe("response mode enforcement (HTTP)", () => {
   });
 
   it("rejects requesting full against the default filtered floor", async () => {
-    try {
-      await engine.useSecret("secret://rm", {
-        type: "http",
-        method: "GET",
-        url: `${baseUrl}/x`,
-        injection: { type: "bearer" },
-        response_mode: "full",
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.RESPONSE_MODE_NOT_ALLOWED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://rm", {
+          type: "http",
+          method: "GET",
+          url: `${baseUrl}/x`,
+          injection: { type: "bearer" },
+          response_mode: "full",
+        }),
+      ErrorCode.RESPONSE_MODE_NOT_ALLOWED,
+    );
   });
 
   it("full policy returns the raw echo unredacted", async () => {
@@ -1477,18 +1432,17 @@ describe("response mode enforcement (HTTP)", () => {
       url_allowlist: [`${baseUrl}/allowed/*`],
       response_mode: "status_only",
     });
-    try {
-      await engine.useSecret("secret://rm", {
-        type: "http",
-        method: "GET",
-        url: `${baseUrl}/blocked`,
-        injection: { type: "bearer" },
-        response_mode: "full",
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.URL_NOT_ALLOWED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://rm", {
+          type: "http",
+          method: "GET",
+          url: `${baseUrl}/blocked`,
+          injection: { type: "bearer" },
+          response_mode: "full",
+        }),
+      ErrorCode.URL_NOT_ALLOWED,
+    );
   });
 });
 
@@ -1537,17 +1491,16 @@ describe("useSecret (process injection)", () => {
   });
 
   it("denies a process command by default when no allowlist is set", async () => {
-    try {
-      await engine.useSecret("secret://proc", {
-        type: "process",
-        command: process.execPath,
-        args: ["-e", `process.stdout.write("x")`],
-        env_var: "TOKEN",
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://proc", {
+          type: "process",
+          command: process.execPath,
+          args: ["-e", `process.stdout.write("x")`],
+          env_var: "TOKEN",
+        }),
+      ErrorCode.COMMAND_NOT_ALLOWED,
+    );
   });
 
   it("refuses fail-closed when policy demands isolation the platform cannot deliver", async () => {
@@ -1616,18 +1569,17 @@ describe("useSecret (database) — engine dispatch", () => {
       env_allowlist: [],
       host_allowlist: ["db.internal:5432"],
     });
-    try {
-      await engine.useSecret("secret://db", {
-        type: "database",
-        engine: "postgresql",
-        host: "8.8.8.8",
-        database: "app",
-        query: "SELECT 1",
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.HOST_NOT_ALLOWED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://db", {
+          type: "database",
+          engine: "postgresql",
+          host: "8.8.8.8",
+          database: "app",
+          query: "SELECT 1",
+        }),
+      ErrorCode.HOST_NOT_ALLOWED,
+    );
     const denied = engine
       .queryAudit({ eventType: AuditEventType.SECRET_USE })
       .find((e) => e.detail?.error === "HOST_NOT_ALLOWED");
@@ -1636,18 +1588,17 @@ describe("useSecret (database) — engine dispatch", () => {
   });
 
   it("blocks SSRF to a private database host", async () => {
-    try {
-      await engine.useSecret("secret://db", {
-        type: "database",
-        engine: "postgresql",
-        host: "10.0.0.5",
-        database: "app",
-        query: "SELECT 1",
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://db", {
+          type: "database",
+          engine: "postgresql",
+          host: "10.0.0.5",
+          database: "app",
+          query: "SELECT 1",
+        }),
+      ErrorCode.SSRF_BLOCKED,
+    );
   });
 });
 
@@ -1664,17 +1615,16 @@ describe("useSecret (ssh) — engine dispatch", () => {
   });
 
   it("denies by default when the host allowlist is empty", async () => {
-    try {
-      await engine.useSecret("secret://sshkey", {
-        type: "ssh",
-        host: "deploy.example.com",
-        user: "deploy",
-        command: "whoami",
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.HOST_NOT_ALLOWED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://sshkey", {
+          type: "ssh",
+          host: "deploy.example.com",
+          user: "deploy",
+          command: "whoami",
+        }),
+      ErrorCode.HOST_NOT_ALLOWED,
+    );
   });
 
   it("requires pinned host keys once the host is allowlisted", async () => {
@@ -1684,17 +1634,16 @@ describe("useSecret (ssh) — engine dispatch", () => {
       env_allowlist: [],
       host_allowlist: ["deploy.example.com"],
     });
-    try {
-      await engine.useSecret("secret://sshkey", {
-        type: "ssh",
-        host: "deploy.example.com",
-        user: "deploy",
-        command: "whoami",
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SSH_NOT_CONFIGURED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://sshkey", {
+          type: "ssh",
+          host: "deploy.example.com",
+          user: "deploy",
+          command: "whoami",
+        }),
+      ErrorCode.SSH_NOT_CONFIGURED,
+    );
   });
 });
 
@@ -1709,29 +1658,27 @@ describe("useSecret (git) — engine dispatch", () => {
   });
 
   it("rejects a forbidden transport before touching the command", async () => {
-    try {
-      await engine.useSecret("secret://gh", {
-        type: "git",
-        operation: "clone",
-        repository: "ext::sh -c whoami",
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.GIT_UNSUPPORTED_TRANSPORT);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://gh", {
+          type: "git",
+          operation: "clone",
+          repository: "ext::sh -c whoami",
+        }),
+      ErrorCode.GIT_UNSUPPORTED_TRANSPORT,
+    );
   });
 
   it("denies git by default when no command allowlist is set", async () => {
-    try {
-      await engine.useSecret("secret://gh", {
-        type: "git",
-        operation: "clone",
-        repository: "https://github.com/user/repo.git",
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://gh", {
+          type: "git",
+          operation: "clone",
+          repository: "https://github.com/user/repo.git",
+        }),
+      ErrorCode.COMMAND_NOT_ALLOWED,
+    );
   });
 });
 
@@ -1897,16 +1844,15 @@ describe("useSecret (MCP proxy)", () => {
   });
 
   it("rejects an mcp action when no server config is set", async () => {
-    try {
-      await engine.useSecret("secret://mcpuse", {
-        type: "mcp",
-        server: "github-mcp",
-        tool: "echo",
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.MCP_SERVER_NOT_CONFIGURED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://mcpuse", {
+          type: "mcp",
+          server: "github-mcp",
+          tool: "echo",
+        }),
+      ErrorCode.MCP_SERVER_NOT_CONFIGURED,
+    );
   });
 
   it("forwards a tool call to a spawned stdio server with the credential injected", async () => {
@@ -1943,16 +1889,15 @@ describe("useSecret (MCP proxy)", () => {
       args: ["-e", MCP_TEST_SERVER],
       env_var: "DOWNSTREAM_TOKEN",
     });
-    try {
-      await engine.useSecret("secret://mcpuse", {
-        type: "mcp",
-        server: "test-mcp",
-        tool: "leak",
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://mcpuse", {
+          type: "mcp",
+          server: "test-mcp",
+          tool: "leak",
+        }),
+      ErrorCode.COMMAND_NOT_ALLOWED,
+    );
   });
 
   it("audits mcp.spawn on first use and secret.use with context=mcp", async () => {
@@ -2076,14 +2021,12 @@ describe("JWT tokens", () => {
     expect(decoded.secrets).toEqual(["db-*", "api-key"]);
   });
 
-  it("rejects an invalid secret-name pattern at creation", () => {
+  it("rejects an invalid secret-name pattern at creation", async () => {
     for (const pattern of ["db/*", "db prod", "", "[a]"]) {
-      try {
-        engine.createToken("user-1", ["use"], 60_000, { secrets: [pattern] });
-        expect.fail("should throw");
-      } catch (e) {
-        expect((e as VaultError).code).toBe(ErrorCode.INVALID_SECRET_NAME);
-      }
+      await expectVaultError(
+        () => engine.createToken("user-1", ["use"], 60_000, { secrets: [pattern] }),
+        ErrorCode.INVALID_SECRET_NAME,
+      );
     }
   });
 
@@ -2127,25 +2070,15 @@ describe("JWT tokens", () => {
     });
     await engine2.initVault("password");
 
-    try {
-      engine2.verifyToken(token);
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_TOKEN);
-    }
+    await expectVaultError(() => engine2.verifyToken(token), ErrorCode.INVALID_TOKEN);
     await engine2.destroy();
   });
 
-  it("rejects expired token", () => {
+  it("rejects expired token", async () => {
     // Create token with 0 TTL (immediately expired)
     const token = engine.createToken("user-1", ["read"], 0);
 
-    try {
-      engine.verifyToken(token);
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.TOKEN_EXPIRED);
-    }
+    await expectVaultError(() => engine.verifyToken(token), ErrorCode.TOKEN_EXPIRED);
   });
 
   it("caps token TTL at MAX_TOKEN_TTL_MS", () => {
@@ -2244,7 +2177,7 @@ describe("JWT edge cases", () => {
     registerAgents("user-1");
   });
 
-  it("rejects token with tampered signature", () => {
+  it("rejects token with tampered signature", async () => {
     const token = engine.createToken("user-1", ["read"]);
     const parts = token.split(".");
     // Flip the FIRST signature character — all six of its bits are
@@ -2254,54 +2187,29 @@ describe("JWT edge cases", () => {
     const sig = parts[2] as string;
     const tampered = `${parts[0]}.${parts[1]}.${sig.startsWith("A") ? "B" : "A"}${sig.slice(1)}`;
 
-    try {
-      engine.verifyToken(tampered);
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_TOKEN);
-    }
+    await expectVaultError(() => engine.verifyToken(tampered), ErrorCode.INVALID_TOKEN);
   });
 
-  it("rejects token with tampered payload", () => {
+  it("rejects token with tampered payload", async () => {
     const token = engine.createToken("user-1", ["read"]);
     const parts = token.split(".");
     // Replace payload with a different one
     const fakePayload = Buffer.from(JSON.stringify({ sub: "hacker" })).toString("base64url");
     const tampered = `${parts[0]}.${fakePayload}.${parts[2]}`;
 
-    try {
-      engine.verifyToken(tampered);
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_TOKEN);
-    }
+    await expectVaultError(() => engine.verifyToken(tampered), ErrorCode.INVALID_TOKEN);
   });
 
-  it("rejects 2-part token", () => {
-    try {
-      engine.verifyToken("header.body");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_TOKEN);
-    }
+  it("rejects 2-part token", async () => {
+    await expectVaultError(() => engine.verifyToken("header.body"), ErrorCode.INVALID_TOKEN);
   });
 
-  it("rejects 4-part token", () => {
-    try {
-      engine.verifyToken("a.b.c.d");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_TOKEN);
-    }
+  it("rejects 4-part token", async () => {
+    await expectVaultError(() => engine.verifyToken("a.b.c.d"), ErrorCode.INVALID_TOKEN);
   });
 
-  it("rejects empty-segment token", () => {
-    try {
-      engine.verifyToken("..");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_TOKEN);
-    }
+  it("rejects empty-segment token", async () => {
+    await expectVaultError(() => engine.verifyToken(".."), ErrorCode.INVALID_TOKEN);
   });
 });
 
@@ -2654,11 +2562,7 @@ describe("key hierarchy instantiation (thesis §5.3.2)", () => {
 
     const engine2 = new VaultEngine({ dbPath, sessionPath });
     try {
-      await engine2.unlock("password");
-      expect.fail("should throw VAULT_CORRUPTED");
-    } catch (e) {
-      expect(e).toBeInstanceOf(VaultError);
-      expect((e as VaultError).code).toBe(ErrorCode.VAULT_CORRUPTED);
+      await expectVaultError(() => engine2.unlock("password"), ErrorCode.VAULT_CORRUPTED);
     } finally {
       await engine2.destroy();
     }
@@ -2679,28 +2583,22 @@ describe("destroy() correctness", () => {
     await engine.initVault("password");
     await engine.destroy();
 
-    try {
-      engine.listSecrets();
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.VAULT_LOCKED);
-    }
+    await expectVaultError(() => engine.listSecrets(), ErrorCode.VAULT_LOCKED);
   });
 
   it("rejects createSecret after destroy", async () => {
     await engine.initVault("password");
     await engine.destroy();
 
-    try {
-      await engine.createSecret({
-        name: "fail",
-        type: "api_key",
-        value: new Uint8Array(Buffer.from("v")),
-      });
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.VAULT_LOCKED);
-    }
+    await expectVaultError(
+      () =>
+        engine.createSecret({
+          name: "fail",
+          type: "api_key",
+          value: new Uint8Array(Buffer.from("v")),
+        }),
+      ErrorCode.VAULT_LOCKED,
+    );
   });
 });
 
@@ -2728,12 +2626,10 @@ describe("password change", () => {
   it("rejects change with wrong old password as INVALID_PASSWORD", async () => {
     await engine.initVault("correct-pass");
 
-    try {
-      await engine.changePassword("wrong-pass", "new-pass1");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_PASSWORD);
-    }
+    await expectVaultError(
+      () => engine.changePassword("wrong-pass", "new-pass1"),
+      ErrorCode.INVALID_PASSWORD,
+    );
   });
 
   it("wrong-old-password changePassword feeds the shared lockout counter", async () => {
@@ -2820,24 +2716,17 @@ describe("password change", () => {
     await engine.lock();
 
     const engine2 = new VaultEngine({ dbPath, sessionPath });
-    try {
-      await engine2.unlock("old-pass1");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_PASSWORD);
-    }
+    await expectVaultError(() => engine2.unlock("old-pass1"), ErrorCode.INVALID_PASSWORD);
     await engine2.destroy();
   });
 
   it("rejects weak new password on changePassword", async () => {
     await engine.initVault("password");
 
-    try {
-      await engine.changePassword("password", "short");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.WEAK_PASSWORD);
-    }
+    await expectVaultError(
+      () => engine.changePassword("password", "short"),
+      ErrorCode.WEAK_PASSWORD,
+    );
   });
 });
 
@@ -2858,12 +2747,7 @@ describe("lockout mechanism", () => {
 
     // 6th attempt should hit lockout
     const eng = new VaultEngine({ dbPath, sessionPath });
-    try {
-      await eng.unlock("wrong123");
-      expect.fail("Should throw lockout");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.LOCKOUT_ACTIVE);
-    }
+    await expectVaultError(() => eng.unlock("wrong123"), ErrorCode.LOCKOUT_ACTIVE);
     await eng.destroy();
   });
 
@@ -2883,12 +2767,7 @@ describe("lockout mechanism", () => {
 
     // Correct password during lockout should also fail
     const eng = new VaultEngine({ dbPath, sessionPath });
-    try {
-      await eng.unlock("correct1");
-      expect.fail("Should throw lockout");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.LOCKOUT_ACTIVE);
-    }
+    await expectVaultError(() => eng.unlock("correct1"), ErrorCode.LOCKOUT_ACTIVE);
     await eng.destroy();
   });
 

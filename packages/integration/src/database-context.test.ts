@@ -72,12 +72,14 @@ describe("Database context (request-mediated, §4.5.5)", () => {
   });
 
   it("I1: the credential never appears in a rejection", async () => {
+    let thrown: unknown;
     try {
       await client.useSecret(handle, dbAction("attacker.example.com:5432"));
-      expect.fail("should throw");
-    } catch (e) {
-      expect(JSON.stringify(e)).not.toContain("sk-db-secret");
+    } catch (err) {
+      thrown = err;
     }
+    expect(thrown).toBeDefined();
+    expect(JSON.stringify(thrown)).not.toContain("sk-db-secret");
   });
 
   it("records the denied use in the audit trail with context=database", async () => {

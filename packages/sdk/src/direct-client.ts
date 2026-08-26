@@ -307,6 +307,9 @@ export class DirectClient implements VaultClient {
       throw VaultError.schemaValidation(ENCRYPTED_KEY_IMPORT_REFUSAL);
     }
     const manager = await this.loadCertManager();
+    // Mirrors startOAuthFlow: the loader's checks precede its return, so a
+    // close() landing after them is visible only here.
+    if (this.closed) throw VaultError.invalidInput("DirectClient is closed");
     const ref = await manager.importCertificate(name, {
       privateKeyPem: input.private_key_pem,
       certificatePem: input.certificate_pem,
@@ -331,6 +334,7 @@ export class DirectClient implements VaultClient {
       throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
     }
     const manager = await this.loadCertManager();
+    if (this.closed) throw VaultError.invalidInput("DirectClient is closed");
     const csr = await manager.generateCsr(parsed.data.name, {
       commonName: parsed.data.subject,
       sans: parsed.data.sans,
@@ -348,6 +352,7 @@ export class DirectClient implements VaultClient {
   ): Promise<CertificateStatus> {
     const secretId = await this.engine.resolveSecretId(handle);
     const manager = await this.loadCertManager();
+    if (this.closed) throw VaultError.invalidInput("DirectClient is closed");
     return manager.renewCertificate(secretId, { httpPort: options?.httpPort });
   }
 

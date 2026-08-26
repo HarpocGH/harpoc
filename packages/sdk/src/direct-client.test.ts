@@ -901,6 +901,9 @@ describe("DirectClient", () => {
     // manager load resolves without ever yielding to a close(), so only the
     // peer import's await was left to see it — and an auth-code start binds a
     // callback socket on a client the embedder has already shut down.
+    // The pin relies on close() landing in the peer import's await — the one
+    // yield a warm client has — and would pass vacuously if that await moved
+    // above the loader; there is no ordering-free way to observe the window.
     it("startOAuthFlow racing close() on a warm client starts no flow", async () => {
       const engine = createMockEngine();
       const oauthManager = createFakeOAuthManager();
@@ -1387,6 +1390,75 @@ describe("DirectClient", () => {
         code: ErrorCode.INVALID_INPUT,
       });
       expect(build).not.toHaveBeenCalled();
+    });
+
+    // RED without the post-load re-check: the loader's own checks run before it
+    // hands the manager back, so a close() landing after them — modelled here by
+    // closing from inside the loader — must be seen by the method itself.
+    describe("the three cert-manager calls re-check closed after the load", () => {
+      it.each([
+        [
+          "importCertificate",
+          (c: DirectClient) =>
+            c.importCertificate("web", {
+              private_key_pem: PLAIN_KEY_PEM,
+              certificate_pem: LEAF_PEM,
+            }),
+        ],
+        ["generateCsr", (c: DirectClient) => c.generateCsr("web", { subject: "web.example.com" })],
+        ["renewCertificate", (c: DirectClient) => c.renewCertificate("secret://web")],
+      ] as const)("%s refuses when the client closed during the load", async (name, call) => {
+        const engine = createMockEngine();
+        const client = new DirectClient(engine as never);
+        const manager = createFakeCertManager();
+        const internals = client as never as {
+          loadCertManager(): Promise<unknown>;
+        };
+        vi.spyOn(internals, "loadCertManager").mockImplementation(async () => {
+          client.close();
+          return manager;
+        });
+
+        await expect(call(client)).rejects.toMatchObject({
+          code: ErrorCode.INVALID_INPUT,
+          message: "DirectClient is closed",
+        });
+        expect(manager[name]).not.toHaveBeenCalled();
+      });
+    });
+
+    // Mock-free twin of the OAuth warm-client pin: an injected manager makes
+    // the loader resolve without yielding, so a close() landing right after
+    // the call is seen only by the method's own re-check (RED for import and
+    // csr without it). renewCertificate awaits resolveSecretId first, so the
+    // loader's own check refuses it there and this row pins the refusal only.
+    describe("the three cert-manager calls racing close() on a warm client", () => {
+      it.each([
+        [
+          "importCertificate",
+          (c: DirectClient) =>
+            c.importCertificate("web", {
+              private_key_pem: PLAIN_KEY_PEM,
+              certificate_pem: LEAF_PEM,
+            }),
+        ],
+        ["generateCsr", (c: DirectClient) => c.generateCsr("web", { subject: "web.example.com" })],
+        ["renewCertificate", (c: DirectClient) => c.renewCertificate("secret://web")],
+      ] as const)("%s starts nothing on the injected manager", async (name, call) => {
+        const engine = createMockEngine();
+        const certManager = createFakeCertManager();
+        const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+        const pending = call(client);
+        pending.catch(() => {});
+        client.close();
+
+        await expect(pending).rejects.toMatchObject({
+          code: ErrorCode.INVALID_INPUT,
+          message: "DirectClient is closed",
+        });
+        expect(certManager[name]).not.toHaveBeenCalled();
+      });
     });
 
     // RED without the `=== attempt` identity guard: the stale catch clears the

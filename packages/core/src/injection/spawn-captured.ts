@@ -3,6 +3,7 @@ import type { ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { MAX_PROCESS_OUTPUT_BYTES } from "@harpoc/shared";
 import { CappedOutput } from "./capped-output.js";
+import { sweepDescendants } from "./descendant-sweep.js";
 import type { FsIsolationMechanism } from "./fs-isolation.js";
 import { requireIsolation } from "./isolation.js";
 import type { NetworkIsolationMechanism } from "./network-isolation.js";
@@ -56,17 +57,27 @@ export interface SpawnCapturedOptions {
  */
 const STREAM_FLUSH_GRACE_MS = 1_000;
 
-/** Backstop after a timeout kill: settle even if neither exit nor close lands. */
+/**
+ * Backstop after a timeout kill has been delivered: settle even if neither
+ * exit nor close lands. Armed once `killTree` resolves, not at dispatch — a
+ * backstop that raced the kill itself settled the spawn before the child's
+ * exit under load, and with it skipped the descendant sweep.
+ */
 const KILL_SETTLE_MS = 2_000;
+
+/** Bound on waiting for the win32 taskkill helper to close before the backstop is armed. */
+const KILL_HELPER_TIMEOUT_MS = 10_000;
 
 /**
  * Terminate the child AND anything it spawned. Killing only the direct child
  * leaves a grandchild holding the inherited stdio — and, since the child is a
  * process-group leader (POSIX `detached`), the group signal is what reaches
  * the whole tree. On Windows the same job is done by the OS-shipped `taskkill
- * /T`, pinned to System32 and given nothing but a numeric pid.
+ * /T`, pinned to System32 and given nothing but a numeric pid. Resolves once
+ * the kill has been delivered: on Windows when the taskkill helper closes
+ * (bounded by KILL_HELPER_TIMEOUT_MS), immediately on every other path.
  */
-function killTree(child: ChildProcess): void {
+function killTree(child: ChildProcess): Promise<void> {
   const pid = child.pid;
   const killDirect = (): void => {
     try {
@@ -77,27 +88,45 @@ function killTree(child: ChildProcess): void {
   };
   if (pid === undefined) {
     killDirect();
-    return;
+    return Promise.resolve();
   }
   if (process.platform === "win32") {
-    try {
-      const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
-      const killer = spawn(taskkill, ["/pid", String(pid), "/T", "/F"], {
-        shell: false,
-        windowsHide: true,
-        stdio: "ignore",
+    return new Promise<void>((resolve) => {
+      let killer: ChildProcess;
+      try {
+        const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+        killer = spawn(taskkill, ["/pid", String(pid), "/T", "/F"], {
+          shell: false,
+          windowsHide: true,
+          stdio: "ignore",
+        });
+      } catch {
+        killDirect();
+        resolve();
+        return;
+      }
+      let done = false;
+      const delivered = (): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(bound);
+        resolve();
+      };
+      const bound = setTimeout(delivered, KILL_HELPER_TIMEOUT_MS);
+      if (bound.unref) bound.unref();
+      killer.on("error", () => {
+        killDirect();
+        delivered();
       });
-      killer.on("error", killDirect);
-    } catch {
-      killDirect();
-    }
-    return;
+      killer.on("close", delivered);
+    });
   }
   try {
     process.kill(-pid, "SIGKILL");
   } catch {
     killDirect();
   }
+  return Promise.resolve();
 }
 
 /**
@@ -110,7 +139,8 @@ function killTree(child: ChildProcess): void {
  * process group, settlement is driven by the child's own `'exit'` with a
  * bounded flush grace (not by `'close'`, which a surviving grandchild holding
  * the inherited stdio can withhold forever), and a post-kill backstop settles
- * even if the kill itself does not take. A pending promise here would strand
+ * even if the kill itself does not take — within KILL_HELPER_TIMEOUT_MS +
+ * KILL_SETTLE_MS of the timeout. A pending promise here would strand
  * the caller's `finally` — the plaintext wipe, the ephemeral ssh-agent socket
  * and the identity/known-hosts temp files all hang off it.
  *
@@ -152,6 +182,7 @@ export async function spawnCaptured(
 
   return new Promise<SpawnCapturedResult>((resolvePromise) => {
     let child: ReturnType<typeof spawn>;
+    const spawnedAtMs = Date.now();
     try {
       child = spawn(command, args, {
         shell: false,
@@ -182,6 +213,7 @@ export async function spawnCaptured(
     let settled = false;
     let flushTimer: NodeJS.Timeout | undefined;
     let backstopTimer: NodeJS.Timeout | undefined;
+    let sweep: Promise<unknown> | undefined;
 
     const settle = (result: SpawnCapturedResult): void => {
       if (settled) return;
@@ -193,30 +225,37 @@ export async function spawnCaptured(
     };
 
     const finish = (code: number | null, signal: string | null, spawnFailed: boolean): void => {
-      settle({
-        // A timed-out child was killed by the vault, so it reports as killed on
-        // every platform: Windows has no signals and surfaces the taskkill as
-        // an ordinary non-zero exit, which would otherwise read as the payload
-        // having chosen that status.
-        exit_code: timedOut ? null : code,
-        stdout: redactAll(stdout.toString()),
-        stderr: redactAll(stderr.toString()),
-        timed_out: timedOut,
-        truncated: stdout.truncated || stderr.truncated,
-        signal: timedOut ? (signal ?? "SIGKILL") : signal,
-        spawn_failed: spawnFailed,
-        isolation_mechanism: isolationMechanism,
-        fs_isolation_mechanism: fsIsolationMechanism,
-      });
+      const emit = (): void =>
+        settle({
+          // A timed-out child was killed by the vault, so it reports as killed on
+          // every platform: Windows has no signals and surfaces the taskkill as
+          // an ordinary non-zero exit, which would otherwise read as the payload
+          // having chosen that status.
+          exit_code: timedOut ? null : code,
+          stdout: redactAll(stdout.toString()),
+          stderr: redactAll(stderr.toString()),
+          timed_out: timedOut,
+          truncated: stdout.truncated || stderr.truncated,
+          signal: timedOut ? (signal ?? "SIGKILL") : signal,
+          spawn_failed: spawnFailed,
+          isolation_mechanism: isolationMechanism,
+          fs_isolation_mechanism: fsIsolationMechanism,
+        });
+      if (sweep) void sweep.then(emit, emit);
+      else emit();
     };
 
     const timer = setTimeout(() => {
       timedOut = true;
-      killTree(child);
       // A kill that does not take (an unkillable state, a failed taskkill)
-      // must not strand the caller: settle with what was captured.
-      backstopTimer = setTimeout(() => finish(null, "SIGKILL", false), KILL_SETTLE_MS);
-      if (backstopTimer.unref) backstopTimer.unref();
+      // must not strand the caller: settle with what was captured — but only
+      // once the kill has been delivered, so a slow taskkill cannot settle the
+      // spawn ahead of the exit that starts the descendant sweep.
+      void killTree(child).then(() => {
+        if (settled) return;
+        backstopTimer = setTimeout(() => finish(null, "SIGKILL", false), KILL_SETTLE_MS);
+        if (backstopTimer.unref) backstopTimer.unref();
+      });
     }, opts.timeoutMs);
     if (timer.unref) timer.unref();
 
@@ -232,7 +271,17 @@ export async function spawnCaptured(
     // bounded flush window instead. On the normal path 'close' follows within
     // microseconds and settles immediately with the complete output.
     child.on("exit", (code, signal) => {
-      if (settled || flushTimer) return;
+      if (settled) return;
+      // win32 only, after a timeout kill: taskkill /T's descendant snapshot is
+      // taken once, so a grandchild created inside that gap outlives the tree
+      // kill with the credential in its inherited env. The sweep is bounded and
+      // every settlement path waits for it (see finish).
+      if (timedOut && process.platform === "win32" && child.pid !== undefined && !sweep) {
+        sweep = sweepDescendants(child.pid, { spawnedAtMs, exitedAtMs: Date.now() }).catch(
+          () => undefined,
+        );
+      }
+      if (flushTimer) return;
       flushTimer = setTimeout(() => finish(code, signal ?? null, false), STREAM_FLUSH_GRACE_MS);
       if (flushTimer.unref) flushTimer.unref();
     });

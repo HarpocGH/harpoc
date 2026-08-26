@@ -266,12 +266,14 @@ describe("executeWebsocketAction — non-101 / connection failure", () => {
       injection: { type: "query", query_param: "token" },
     });
 
+    let thrown: unknown;
     try {
       await executeWebsocketAction(action, secretBytes(), basePolicy());
-      expect.fail("should have thrown");
     } catch (err) {
-      expect((err as VaultError).message).not.toContain(SECRET);
+      thrown = err;
     }
+    expect(thrown).toBeInstanceOf(VaultError);
+    expect((thrown as VaultError).message).not.toContain(SECRET);
   });
 });
 

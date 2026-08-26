@@ -335,10 +335,13 @@ describe("SecretDetailPage", () => {
     await waitFor(() => expect(screen.queryByText(/access denied/i)).toBeNull());
   });
 
-  it("the lifecycle buttons are type=button", async () => {
-    const stub = api({ getSecret: vi.fn().mockResolvedValue(secret({ type: "certificate" })) });
+  it.each([
+    ["certificate", /renew certificate/i],
+    ["oauth_token", /refresh token/i],
+  ] as const)("the %s lifecycle button is type=button", async (type, name) => {
+    const stub = api({ getSecret: vi.fn().mockResolvedValue(secret({ type })) });
     render(<SecretDetailPage api={stub} handle="secret://k1" />);
-    const button = await screen.findByRole("button", { name: /renew certificate/i });
+    const button = await screen.findByRole("button", { name });
     expect(button.getAttribute("type")).toBe("button");
   });
 });

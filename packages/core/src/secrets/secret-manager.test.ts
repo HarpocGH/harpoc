@@ -3,6 +3,7 @@ import { ErrorCode, VaultError } from "@harpoc/shared";
 import { createVaultKeys } from "../crypto/key-hierarchy.js";
 import { SqliteStore } from "../storage/sqlite-store.js";
 import { SecretManager } from "./secret-manager.js";
+import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 let store: SqliteStore;
 let manager: SecretManager;
@@ -93,16 +94,15 @@ describe("createSecret", () => {
 
   it("rejects an invalid name before inserting any row", async () => {
     for (const name of ["bad.name", "has space", "a".repeat(256)]) {
-      try {
-        await manager.createSecret({
-          name,
-          type: "api_key",
-          value: new Uint8Array(Buffer.from("v")),
-        });
-        expect.fail("Should throw");
-      } catch (e) {
-        expect((e as VaultError).code).toBe(ErrorCode.INVALID_SECRET_NAME);
-      }
+      await expectVaultError(
+        () =>
+          manager.createSecret({
+            name,
+            type: "api_key",
+            value: new Uint8Array(Buffer.from("v")),
+          }),
+        ErrorCode.INVALID_SECRET_NAME,
+      );
     }
 
     // No phantom row: listing still works and shows nothing
@@ -110,17 +110,16 @@ describe("createSecret", () => {
   });
 
   it("rejects an invalid project before inserting any row", async () => {
-    try {
-      await manager.createSecret({
-        name: "good-name",
-        type: "api_key",
-        project: "bad/project",
-        value: new Uint8Array(Buffer.from("v")),
-      });
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_PROJECT_NAME);
-    }
+    await expectVaultError(
+      () =>
+        manager.createSecret({
+          name: "good-name",
+          type: "api_key",
+          project: "bad/project",
+          value: new Uint8Array(Buffer.from("v")),
+        }),
+      ErrorCode.INVALID_PROJECT_NAME,
+    );
 
     expect(manager.listSecrets()).toEqual([]);
 
@@ -317,12 +316,10 @@ describe("revokeSecret", () => {
     });
     await manager.revokeSecret("secret://already");
 
-    try {
-      await manager.revokeSecret("secret://already");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SECRET_REVOKED);
-    }
+    await expectVaultError(
+      () => manager.revokeSecret("secret://already"),
+      ErrorCode.SECRET_REVOKED,
+    );
   });
 });
 
@@ -351,21 +348,14 @@ describe("resolveHandle", () => {
   });
 
   it("throws SECRET_NOT_FOUND for nonexistent handle", async () => {
-    try {
-      await manager.resolveHandle("secret://nonexistent");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SECRET_NOT_FOUND);
-    }
+    await expectVaultError(
+      () => manager.resolveHandle("secret://nonexistent"),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
   });
 
   it("throws INVALID_HANDLE for malformed handle", async () => {
-    try {
-      await manager.resolveHandle("not-a-handle");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_HANDLE);
-    }
+    await expectVaultError(() => manager.resolveHandle("not-a-handle"), ErrorCode.INVALID_HANDLE);
   });
 
   it("resolves active secret when revoked secret has same name", async () => {
@@ -544,12 +534,10 @@ describe("rotateSecret on non-active secrets", () => {
   it("throws for pending secret", async () => {
     await manager.createSecret({ name: "pend-rot", type: "api_key" });
 
-    try {
-      await manager.rotateSecret("secret://pend-rot", new Uint8Array(Buffer.from("val")));
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SECRET_VALUE_REQUIRED);
-    }
+    await expectVaultError(
+      () => manager.rotateSecret("secret://pend-rot", new Uint8Array(Buffer.from("val"))),
+      ErrorCode.SECRET_VALUE_REQUIRED,
+    );
   });
 });
 

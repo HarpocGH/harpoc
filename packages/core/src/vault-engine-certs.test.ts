@@ -10,6 +10,7 @@ import { AuditEventType, ErrorCode, PrincipalType, SecretType, VaultError } from
 import type { Permission } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
+import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();
@@ -609,17 +610,16 @@ describe("certificate secrets are refused on the generic value paths", () => {
 
   it("refuses useSecret with an http action before any request is made", async () => {
     const before = requestCount;
-    try {
-      await engine.useSecret("secret://tls-cert", {
-        type: "http",
-        method: "GET",
-        url: `${targetUrl}/x`,
-        injection: { type: "bearer" },
-      });
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as { code: string }).code).toBe(ErrorCode.CERT_VALUE_UNSUPPORTED);
-    }
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://tls-cert", {
+          type: "http",
+          method: "GET",
+          url: `${targetUrl}/x`,
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.CERT_VALUE_UNSUPPORTED,
+    );
     expect(requestCount).toBe(before);
 
     const denied = engine
@@ -1479,18 +1479,16 @@ describe("certificate accessors — caller policy enforcement", () => {
     );
   });
 
-  it("getCertificateStatus refuses an ungranted caller and allows a read-granted one", () => {
-    let thrown: unknown;
-    try {
-      engine.getCertificateStatus(secretId, {
-        principal_type: PrincipalType.AGENT,
-        principal_id: "other-agent",
-        interface: "cli",
-      });
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown).toMatchObject({ code: ErrorCode.ACCESS_DENIED });
+  it("getCertificateStatus refuses an ungranted caller and allows a read-granted one", async () => {
+    await expectVaultError(
+      () =>
+        engine.getCertificateStatus(secretId, {
+          principal_type: PrincipalType.AGENT,
+          principal_id: "other-agent",
+          interface: "cli",
+        }),
+      ErrorCode.ACCESS_DENIED,
+    );
 
     const denials = engine
       .queryAudit({ eventType: AuditEventType.SECRET_READ })

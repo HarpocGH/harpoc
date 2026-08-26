@@ -18,6 +18,7 @@ import {
 } from "@harpoc/shared";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 import { randomBytes } from "node:crypto";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -167,14 +168,11 @@ describe("Error Message Sanitization", () => {
   });
 
   it("SECRET_NOT_FOUND contains handle, not secret value", async () => {
-    try {
-      await vault.engine.getSecretInfo("secret://nonexistent");
-      expect.fail("Should throw");
-    } catch (e) {
-      const err = e as VaultError;
-      expect(err.code).toBe(ErrorCode.SECRET_NOT_FOUND);
-      expect(err.message).not.toContain("sk-super-secret");
-    }
+    const err = await expectVaultError(
+      () => vault.engine.getSecretInfo("secret://nonexistent"),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
+    expect(err.message).not.toContain("sk-super-secret");
   });
 
   it("SECRET_REVOKED contains handle, not value", async () => {
@@ -185,15 +183,12 @@ describe("Error Message Sanitization", () => {
     });
     await vault.engine.revokeSecret(revokeResult.handle);
 
-    try {
-      // rotateSecret calls assertUsable which throws SECRET_REVOKED
-      await vault.engine.rotateSecret(revokeResult.handle, new Uint8Array(Buffer.from("new")));
-      expect.fail("Should throw");
-    } catch (e) {
-      const err = e as VaultError;
-      expect(err.code).toBe(ErrorCode.SECRET_REVOKED);
-      expect(err.message).not.toContain("sk-revoke-value");
-    }
+    // rotateSecret calls assertUsable which throws SECRET_REVOKED
+    const err = await expectVaultError(
+      () => vault.engine.rotateSecret(revokeResult.handle, new Uint8Array(Buffer.from("new"))),
+      ErrorCode.SECRET_REVOKED,
+    );
+    expect(err.message).not.toContain("sk-revoke-value");
   });
 
   it("SECRET_EXPIRED contains handle, not value", async () => {
@@ -204,25 +199,21 @@ describe("Error Message Sanitization", () => {
       expiresAt: Date.now() - 1000, // already expired
     });
 
-    try {
-      // rotateSecret calls assertUsable which throws SECRET_EXPIRED
-      await vault.engine.rotateSecret(expireResult.handle, new Uint8Array(Buffer.from("new")));
-      expect.fail("Should throw");
-    } catch (e) {
-      const err = e as VaultError;
-      expect(err.code).toBe(ErrorCode.SECRET_EXPIRED);
-      expect(err.message).not.toContain("sk-expire-value");
-    }
+    // rotateSecret calls assertUsable which throws SECRET_EXPIRED
+    const err = await expectVaultError(
+      () => vault.engine.rotateSecret(expireResult.handle, new Uint8Array(Buffer.from("new"))),
+      ErrorCode.SECRET_EXPIRED,
+    );
+    expect(err.message).not.toContain("sk-expire-value");
   });
 
   it("INVALID_PASSWORD is generic, no key material", async () => {
     const engine2 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
     try {
-      await engine2.unlock("wrong-password-here");
-      expect.fail("Should throw");
-    } catch (e) {
-      const err = e as VaultError;
-      expect(err.code).toBe(ErrorCode.INVALID_PASSWORD);
+      const err = await expectVaultError(
+        () => engine2.unlock("wrong-password-here"),
+        ErrorCode.INVALID_PASSWORD,
+      );
       expect(err.message).toBe("Invalid password");
       expect(err.message).not.toContain("wrong-password");
     } finally {
@@ -231,18 +222,16 @@ describe("Error Message Sanitization", () => {
   });
 
   it("DUPLICATE_SECRET contains name, not value", async () => {
-    try {
-      await vault.engine.createSecret({
-        name: "sanitization-test", // already exists
-        type: SecretType.API_KEY,
-        value: new Uint8Array(Buffer.from("another-value")),
-      });
-      expect.fail("Should throw");
-    } catch (e) {
-      const err = e as VaultError;
-      expect(err.code).toBe(ErrorCode.DUPLICATE_SECRET);
-      expect(err.message).not.toContain("another-value");
-    }
+    const err = await expectVaultError(
+      () =>
+        vault.engine.createSecret({
+          name: "sanitization-test", // already exists
+          type: SecretType.API_KEY,
+          value: new Uint8Array(Buffer.from("another-value")),
+        }),
+      ErrorCode.DUPLICATE_SECRET,
+    );
+    expect(err.message).not.toContain("another-value");
   });
 
   it("all VaultError factory methods produce messages free of binary/base64 patterns", () => {
@@ -554,11 +543,7 @@ describe("Lockout Progression", () => {
 
       const engine = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
       try {
-        await engine.unlock(PASSWORD);
-        expect.fail("Should throw LOCKOUT_ACTIVE");
-      } catch (e) {
-        const err = e as VaultError;
-        expect(err.code).toBe(ErrorCode.LOCKOUT_ACTIVE);
+        const err = await expectVaultError(() => engine.unlock(PASSWORD), ErrorCode.LOCKOUT_ACTIVE);
         expect(err.details?.retry_after_ms).toBeDefined();
         expect(Number(err.details?.retry_after_ms)).toBeLessThanOrEqual(LOCKOUT_DURATIONS_MS[0]);
       } finally {
@@ -586,10 +571,7 @@ describe("Lockout Progression", () => {
       // New engine on same DB — lockout should persist
       const engine = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
       try {
-        await engine.unlock(PASSWORD);
-        expect.fail("Should throw LOCKOUT_ACTIVE");
-      } catch (e) {
-        expect((e as VaultError).code).toBe(ErrorCode.LOCKOUT_ACTIVE);
+        await expectVaultError(() => engine.unlock(PASSWORD), ErrorCode.LOCKOUT_ACTIVE);
       } finally {
         await engine.destroy();
       }
@@ -649,10 +631,7 @@ describe("Lockout Progression", () => {
       // Even correct password returns LOCKOUT_ACTIVE (not INVALID_PASSWORD)
       const engine = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
       try {
-        await engine.unlock(PASSWORD);
-        expect.fail("Should throw");
-      } catch (e) {
-        expect((e as VaultError).code).toBe(ErrorCode.LOCKOUT_ACTIVE);
+        await expectVaultError(() => engine.unlock(PASSWORD), ErrorCode.LOCKOUT_ACTIVE);
       } finally {
         await engine.destroy();
       }
@@ -692,11 +671,10 @@ describe("Lockout Progression", () => {
       // Check lockout at 5 min tier
       const engine1 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
       try {
-        await engine1.unlock(PASSWORD);
-        expect.fail("Should be locked out");
-      } catch (e) {
-        const err = e as VaultError;
-        expect(err.code).toBe(ErrorCode.LOCKOUT_ACTIVE);
+        const err = await expectVaultError(
+          () => engine1.unlock(PASSWORD),
+          ErrorCode.LOCKOUT_ACTIVE,
+        );
         expect(Number(err.details?.retry_after_ms)).toBeLessThanOrEqual(LOCKOUT_DURATIONS_MS[1]);
       } finally {
         await engine1.destroy();
@@ -718,11 +696,10 @@ describe("Lockout Progression", () => {
 
       const engine2 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
       try {
-        await engine2.unlock(PASSWORD);
-        expect.fail("Should be locked out");
-      } catch (e) {
-        const err = e as VaultError;
-        expect(err.code).toBe(ErrorCode.LOCKOUT_ACTIVE);
+        const err = await expectVaultError(
+          () => engine2.unlock(PASSWORD),
+          ErrorCode.LOCKOUT_ACTIVE,
+        );
         expect(Number(err.details?.retry_after_ms)).toBeLessThanOrEqual(LOCKOUT_DURATIONS_MS[2]);
       } finally {
         await engine2.destroy();
@@ -884,45 +861,42 @@ describe("SSRF E2E via useSecret", () => {
   });
 
   it("useSecret to https://10.0.0.1/api → SSRF_BLOCKED", async () => {
-    try {
-      await vault.engine.useSecret(handle, {
-        type: "http",
-        method: "GET",
-        url: "https://10.0.0.1/api",
-        injection: { type: InjectionType.BEARER },
-      });
-      expect.fail("Should throw SSRF_BLOCKED");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
-    }
+    await expectVaultError(
+      () =>
+        vault.engine.useSecret(handle, {
+          type: "http",
+          method: "GET",
+          url: "https://10.0.0.1/api",
+          injection: { type: InjectionType.BEARER },
+        }),
+      ErrorCode.SSRF_BLOCKED,
+    );
   });
 
   it("useSecret to https://192.168.1.1/api → SSRF_BLOCKED", async () => {
-    try {
-      await vault.engine.useSecret(handle, {
-        type: "http",
-        method: "GET",
-        url: "https://192.168.1.1/api",
-        injection: { type: InjectionType.BEARER },
-      });
-      expect.fail("Should throw SSRF_BLOCKED");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
-    }
+    await expectVaultError(
+      () =>
+        vault.engine.useSecret(handle, {
+          type: "http",
+          method: "GET",
+          url: "https://192.168.1.1/api",
+          injection: { type: InjectionType.BEARER },
+        }),
+      ErrorCode.SSRF_BLOCKED,
+    );
   });
 
   it("useSecret to https://[fc00::1]/api → SSRF_BLOCKED", async () => {
-    try {
-      await vault.engine.useSecret(handle, {
-        type: "http",
-        method: "GET",
-        url: "https://[fc00::1]/api",
-        injection: { type: InjectionType.BEARER },
-      });
-      expect.fail("Should throw SSRF_BLOCKED");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
-    }
+    await expectVaultError(
+      () =>
+        vault.engine.useSecret(handle, {
+          type: "http",
+          method: "GET",
+          url: "https://[fc00::1]/api",
+          injection: { type: InjectionType.BEARER },
+        }),
+      ErrorCode.SSRF_BLOCKED,
+    );
   });
 
   it("useSecret to loopback echo server succeeds", async () => {

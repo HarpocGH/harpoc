@@ -8,11 +8,11 @@ import {
   MAX_NAME_LENGTH,
   SecretStatus,
   SecretType,
-  VaultError,
 } from "@harpoc/shared";
 import type { IssuedTokenRow } from "../storage/sqlite-store.js";
 import { SqliteStore } from "../storage/sqlite-store.js";
 import { AgentRegistry } from "./agent-registry.js";
+import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 let store: SqliteStore;
 let registry: AgentRegistry;
@@ -95,17 +95,6 @@ function makeAuditEvent(overrides: Partial<Omit<AuditEvent, "id">> = {}): Omit<A
   };
 }
 
-function expectCode(fn: () => unknown, code: ErrorCode): void {
-  let thrown: unknown;
-  try {
-    fn();
-  } catch (err) {
-    thrown = err;
-  }
-  expect(thrown, `expected ${code}`).toBeInstanceOf(VaultError);
-  expect((thrown as VaultError).code).toBe(code);
-}
-
 beforeEach(() => {
   store = new SqliteStore(":memory:");
   registry = new AgentRegistry(store);
@@ -140,17 +129,17 @@ describe("register", () => {
     expect(row.owner).toBeNull();
   });
 
-  it("refuses a name violating the shared name rule", () => {
-    expectCode(() => registry.register({ name: "bad name" }), ErrorCode.INVALID_INPUT);
-    expectCode(() => registry.register({ name: "" }), ErrorCode.INVALID_INPUT);
-    expectCode(
+  it("refuses a name violating the shared name rule", async () => {
+    await expectVaultError(() => registry.register({ name: "bad name" }), ErrorCode.INVALID_INPUT);
+    await expectVaultError(() => registry.register({ name: "" }), ErrorCode.INVALID_INPUT);
+    await expectVaultError(
       () => registry.register({ name: "a".repeat(MAX_NAME_LENGTH + 1) }),
       ErrorCode.INVALID_INPUT,
     );
   });
 
-  it("refuses an over-long description or owner (the whole input is schema-validated)", () => {
-    expectCode(
+  it("refuses an over-long description or owner (the whole input is schema-validated)", async () => {
+    await expectVaultError(
       () =>
         registry.register({
           name: "alpha",
@@ -158,39 +147,35 @@ describe("register", () => {
         }),
       ErrorCode.INVALID_INPUT,
     );
-    expectCode(
+    await expectVaultError(
       () => registry.register({ name: "alpha", owner: "o".repeat(AGENT_OWNER_MAX_LENGTH + 1) }),
       ErrorCode.INVALID_INPUT,
     );
     expect(store.listAgents("all")).toHaveLength(0);
   });
 
-  it("names the offending field in the refusal message", () => {
-    let thrown: unknown;
-    try {
-      registry.register({ name: "bad name" });
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown, "expected INVALID_INPUT").toBeInstanceOf(VaultError);
-    expect((thrown as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
-    expect((thrown as VaultError).message).toContain("name");
+  it("names the offending field in the refusal message", async () => {
+    const err = await expectVaultError(
+      () => registry.register({ name: "bad name" }),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toContain("name");
   });
 
-  it("maps a duplicate name to AGENT_EXISTS, whatever the existing status", () => {
+  it("maps a duplicate name to AGENT_EXISTS, whatever the existing status", async () => {
     registry.register({ name: "alpha" }, NOW);
-    expectCode(() => registry.register({ name: "alpha" }), ErrorCode.AGENT_EXISTS);
+    await expectVaultError(() => registry.register({ name: "alpha" }), ErrorCode.AGENT_EXISTS);
 
     registry.setStatus("alpha", "inactive", NOW);
-    expectCode(() => registry.register({ name: "alpha" }), ErrorCode.AGENT_EXISTS);
+    await expectVaultError(() => registry.register({ name: "alpha" }), ErrorCode.AGENT_EXISTS);
   });
 });
 
 describe("lookup", () => {
-  it("getByName returns the row and throws AGENT_NOT_FOUND for an unknown name", () => {
+  it("getByName returns the row and throws AGENT_NOT_FOUND for an unknown name", async () => {
     const row = registry.register({ name: "alpha" }, NOW);
     expect(registry.getByName("alpha")).toEqual(row);
-    expectCode(() => registry.getByName("missing"), ErrorCode.AGENT_NOT_FOUND);
+    await expectVaultError(() => registry.getByName("missing"), ErrorCode.AGENT_NOT_FOUND);
   });
 
   it("findByName returns undefined instead of throwing", () => {
@@ -216,14 +201,14 @@ describe("assertActive", () => {
     expect(registry.assertActive("alpha")).toEqual(row);
   });
 
-  it("throws AGENT_NOT_FOUND for an unregistered name", () => {
-    expectCode(() => registry.assertActive("missing"), ErrorCode.AGENT_NOT_FOUND);
+  it("throws AGENT_NOT_FOUND for an unregistered name", async () => {
+    await expectVaultError(() => registry.assertActive("missing"), ErrorCode.AGENT_NOT_FOUND);
   });
 
-  it("throws AGENT_INACTIVE for a deactivated agent", () => {
+  it("throws AGENT_INACTIVE for a deactivated agent", async () => {
     registry.register({ name: "alpha" }, NOW);
     registry.setStatus("alpha", "inactive", NOW);
-    expectCode(() => registry.assertActive("alpha"), ErrorCode.AGENT_INACTIVE);
+    await expectVaultError(() => registry.assertActive("alpha"), ErrorCode.AGENT_INACTIVE);
   });
 });
 
@@ -254,14 +239,17 @@ describe("updateMetadata", () => {
     expect(updated.status).toBe("inactive");
   });
 
-  it("validates the input and refuses an unknown agent", () => {
+  it("validates the input and refuses an unknown agent", async () => {
     registry.register({ name: "alpha" }, NOW);
-    expectCode(
+    await expectVaultError(
       () =>
         registry.updateMetadata("alpha", { owner: "o".repeat(AGENT_OWNER_MAX_LENGTH + 1) }, NOW),
       ErrorCode.INVALID_INPUT,
     );
-    expectCode(() => registry.updateMetadata("missing", {}, NOW), ErrorCode.AGENT_NOT_FOUND);
+    await expectVaultError(
+      () => registry.updateMetadata("missing", {}, NOW),
+      ErrorCode.AGENT_NOT_FOUND,
+    );
   });
 });
 
@@ -281,8 +269,11 @@ describe("setStatus", () => {
     expect(store.getAgentByName("alpha")).toEqual(on);
   });
 
-  it("throws AGENT_NOT_FOUND for an unknown agent", () => {
-    expectCode(() => registry.setStatus("missing", "inactive", NOW), ErrorCode.AGENT_NOT_FOUND);
+  it("throws AGENT_NOT_FOUND for an unknown agent", async () => {
+    await expectVaultError(
+      () => registry.setStatus("missing", "inactive", NOW),
+      ErrorCode.AGENT_NOT_FOUND,
+    );
   });
 });
 
@@ -293,8 +284,8 @@ describe("delete", () => {
     expect(store.getAgentByName("alpha")).toBeUndefined();
   });
 
-  it("throws AGENT_NOT_FOUND for an unknown agent", () => {
-    expectCode(() => registry.delete("missing"), ErrorCode.AGENT_NOT_FOUND);
+  it("throws AGENT_NOT_FOUND for an unknown agent", async () => {
+    await expectVaultError(() => registry.delete("missing"), ErrorCode.AGENT_NOT_FOUND);
   });
 });
 

@@ -13,6 +13,7 @@ import {
 } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
 import type { SecretInfo, DecryptedAuditEvent } from "@harpoc/core";
+import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 import { resolveSecretId } from "../utils/vault-loader.js";
 
 /**
@@ -84,12 +85,7 @@ describe("unlock/lock command flow", () => {
     await engine.lock();
 
     const engine2 = new VaultEngine({ dbPath, sessionPath });
-    try {
-      await engine2.unlock("wrong-password");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_PASSWORD);
-    }
+    await expectVaultError(() => engine2.unlock("wrong-password"), ErrorCode.INVALID_PASSWORD);
     await engine2.destroy();
   });
 
@@ -108,12 +104,7 @@ describe("unlock/lock command flow", () => {
     }
 
     const eng = new VaultEngine({ dbPath, sessionPath });
-    try {
-      await eng.unlock("wrong-pass");
-      expect.fail("Should throw lockout");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.LOCKOUT_ACTIVE);
-    }
+    await expectVaultError(() => eng.unlock("wrong-pass"), ErrorCode.LOCKOUT_ACTIVE);
     await eng.destroy();
   });
 });
@@ -221,16 +212,15 @@ describe("secret set/get/list command flow", () => {
       value: new TextEncoder().encode("first"),
     });
 
-    try {
-      await engine.createSecret({
-        name: "dup-test",
-        type: SecretType.API_KEY,
-        value: new TextEncoder().encode("second"),
-      });
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.DUPLICATE_SECRET);
-    }
+    await expectVaultError(
+      () =>
+        engine.createSecret({
+          name: "dup-test",
+          type: SecretType.API_KEY,
+          value: new TextEncoder().encode("second"),
+        }),
+      ErrorCode.DUPLICATE_SECRET,
+    );
   });
 });
 
@@ -367,18 +357,13 @@ describe("auth token command flow", () => {
     expect(payload.sub).toBe("my-bot");
   });
 
-  it("revokes a token", () => {
+  it("revokes a token", async () => {
     const token = engine.createToken("revoke-test", [Permission.USE]);
     const payload = engine.verifyToken(token);
 
     engine.revokeToken(payload.jti);
 
-    try {
-      engine.verifyToken(token);
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.TOKEN_REVOKED);
-    }
+    await expectVaultError(() => engine.verifyToken(token), ErrorCode.TOKEN_REVOKED);
   });
 });
 

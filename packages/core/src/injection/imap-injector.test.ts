@@ -303,6 +303,11 @@ describe("ImapInjector — audit details shape", () => {
     });
   });
 
+  it("reports uid_count 0 for a zero-affected mutating result", () => {
+    const action = baseAction({ operation: { kind: "expunge" } });
+    expect(buildImapAuditDetails(action, { affected: 0 })).toMatchObject({ uid_count: 0 });
+  });
+
   it("run() returns audit details reflecting the operation kind and mailbox", async () => {
     const client = makeFakeClient({ searchUids: () => Promise.resolve([7, 8, 9]) });
     const { fn } = connectReturning(client);
@@ -490,6 +495,26 @@ describe("ImapInjector — logout", () => {
   });
 });
 
+describe("ImapResult / ImapOperationFields (compile-time pins)", () => {
+  it("pins the shared ImapResult wire shape (compile-time)", () => {
+    // Compile-time pin against the shared import: the injector's exported
+    // result type is shared's, never a local shadow.
+    const result = {
+      type: "imap",
+      operation: "search",
+      uids: [1, 2],
+    } satisfies ImapResult;
+    expect(result.operation).toBe("search");
+  });
+
+  it("rejects a two-field operation result (compile-time)", () => {
+    // Compile-time pin: exactly one operation field per result.
+    // @ts-expect-error uids and affected cannot coexist
+    const bad: ImapOperationFields = { uids: [1], affected: 1 };
+    expect(bad).toBeDefined();
+  });
+});
+
 describe("executeImapAction (free function, default deps)", () => {
   it("enforces the read-only gate without reaching the network", async () => {
     await expect(
@@ -501,25 +526,5 @@ describe("executeImapAction (free function, default deps)", () => {
         undefined,
       ),
     ).rejects.toMatchObject({ code: ErrorCode.IMAP_MUTATION_NOT_ALLOWED });
-  });
-
-  it("pins the shared ImapResult wire shape (compile-time)", () => {
-    // Compile-time pin against the shared import: the injector's exported
-    // result type is shared's, never a local shadow.
-    const result = { type: "imap", operation: "search", uids: [1, 2] } satisfies ImapResult;
-    expect(result.operation).toBe("search");
-    expect(typeof executeImapAction).toBe("function");
-  });
-
-  it("rejects a two-field operation result (compile-time)", () => {
-    // Compile-time pin: exactly one operation field per result.
-    // @ts-expect-error uids and affected cannot coexist
-    const bad: ImapOperationFields = { uids: [1], affected: 1 };
-    expect(bad).toBeDefined();
-  });
-
-  it("reports uid_count 0 for a zero-affected mutating result", () => {
-    const action = baseAction({ operation: { kind: "expunge" } });
-    expect(buildImapAuditDetails(action, { affected: 0 })).toMatchObject({ uid_count: 0 });
   });
 });

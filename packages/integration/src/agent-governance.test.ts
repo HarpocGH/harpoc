@@ -286,6 +286,7 @@ describe("agent governance end to end", () => {
       expect(flip.gated_before).toBe(false);
       expect(flip.gated_after).toBe(true);
       expect(flip.policy?.principal_id).toBe("other");
+      expect([...(flip.policy?.permissions ?? [])].sort()).toEqual(["read"]);
 
       const denied = await readValue();
       expect(denied.status).toBe(403);
@@ -329,6 +330,7 @@ describe("agent governance end to end", () => {
       const flip = (await bodyOf<DataBody<MatrixResult>>(res)).data;
       expect(flip.gated_before).toBe(true);
       expect(flip.gated_after).toBe(true);
+      expect([...(flip.policy?.permissions ?? [])].sort()).toEqual(["read"]);
 
       expect((await readValue()).status).toBe(200);
     });

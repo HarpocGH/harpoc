@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, PrincipalType, VaultError } from "@harpoc/shared";
 import type { CallerContext, OAuthProviderConfig, Permission } from "@harpoc/shared";
+import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 import { VaultEngine } from "./vault-engine.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
@@ -994,18 +995,16 @@ describe("OAuth entry points — caller policy enforcement (token-cli-parity)", 
     await expect(engine.refreshOAuthToken(secretId)).resolves.toBeGreaterThan(Date.now());
   });
 
-  it("getOAuthTokenStatus refuses an ungranted caller and allows a read-granted one", () => {
-    let thrown: unknown;
-    try {
-      engine.getOAuthTokenStatus(secretId, {
-        principal_type: PrincipalType.AGENT,
-        principal_id: "other-agent",
-        interface: "cli",
-      });
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown).toMatchObject({ code: ErrorCode.ACCESS_DENIED });
+  it("getOAuthTokenStatus refuses an ungranted caller and allows a read-granted one", async () => {
+    await expectVaultError(
+      () =>
+        engine.getOAuthTokenStatus(secretId, {
+          principal_type: PrincipalType.AGENT,
+          principal_id: "other-agent",
+          interface: "cli",
+        }),
+      ErrorCode.ACCESS_DENIED,
+    );
 
     const status = engine.getOAuthTokenStatus(secretId, {
       principal_type: PrincipalType.AGENT,

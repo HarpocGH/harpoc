@@ -6,6 +6,7 @@ import { vi } from "vitest";
 import type { CallerContext, Permission, PrincipalType } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
+import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();
@@ -86,13 +87,7 @@ function grant(
 }
 
 async function expectDenied(promise: Promise<unknown>): Promise<void> {
-  try {
-    await promise;
-    expect.fail("expected ACCESS_DENIED");
-  } catch (e) {
-    expect(e).toBeInstanceOf(VaultError);
-    expect((e as VaultError).code).toBe(ErrorCode.ACCESS_DENIED);
-  }
+  await expectVaultError(() => promise, ErrorCode.ACCESS_DENIED);
 }
 
 /** A use action that, once past the policy gate, fails deterministically at the
@@ -105,12 +100,10 @@ const PROCESS_ACTION = {
 } as const;
 
 async function expectGateOpenOnUse(handle: string, caller?: CallerContext): Promise<void> {
-  try {
-    await engine.useSecret(handle, PROCESS_ACTION, caller);
-    expect.fail("expected COMMAND_NOT_ALLOWED past the gate");
-  } catch (e) {
-    expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
-  }
+  await expectVaultError(
+    () => engine.useSecret(handle, PROCESS_ACTION, caller),
+    ErrorCode.COMMAND_NOT_ALLOWED,
+  );
 }
 
 describe("presence gate", () => {

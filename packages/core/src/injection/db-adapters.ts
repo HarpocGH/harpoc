@@ -62,6 +62,11 @@ export interface DbCommandAdapter {
   execute(opts: DbConnectOptions, command: unknown): Promise<DbQueryResult>;
 }
 
+/** Engines dispatched through `DbEngineAdapter.connect(...).query(...)`. */
+export type DbSqlEngine = typeof DatabaseEngine.POSTGRESQL | typeof DatabaseEngine.MYSQL;
+/** Engines dispatched through `DbCommandAdapter.execute` (v1.3). */
+export type DbCommandEngine = typeof DatabaseEngine.REDIS | typeof DatabaseEngine.MONGODB;
+
 /**
  * TLS server-identity check bound to the LOGICAL host, whatever address the
  * socket ended up dialing. Node derives the name to verify as
@@ -185,7 +190,7 @@ class MysqlAdapter implements DbEngineAdapter {
 }
 
 /** Default engine adapters (SQL engines: postgresql, mysql). Callers may substitute a mock adapter in tests. */
-export function defaultDbAdapters(): Partial<Record<DatabaseEngine, DbEngineAdapter>> {
+export function defaultDbAdapters(): Partial<Record<DbSqlEngine, DbEngineAdapter>> {
   return {
     postgresql: new PostgresAdapter(),
     mysql: new MysqlAdapter(),
@@ -193,13 +198,11 @@ export function defaultDbAdapters(): Partial<Record<DatabaseEngine, DbEngineAdap
 }
 
 /**
- * Default command adapters (command-style engines: redis, mongodb). The
- * `Record<string, DbCommandAdapter>` return type (rather than
- * `Partial<Record<DatabaseEngine, ...>>`) leaves this seam open without a
- * signature change. Both drivers are lazy-imported inside their adapter's
- * `execute` — instantiating the adapter here does not load either.
+ * Default command adapters (command-style engines: redis, mongodb). Both
+ * drivers are lazy-imported inside their adapter's `execute` — instantiating
+ * the adapter here does not load either.
  */
-export function defaultDbCommandAdapters(): Record<string, DbCommandAdapter> {
+export function defaultDbCommandAdapters(): Partial<Record<DbCommandEngine, DbCommandAdapter>> {
   return {
     redis: new RedisAdapter(),
     mongodb: new MongoAdapter(),

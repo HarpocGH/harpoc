@@ -1,8 +1,9 @@
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import type { UseSecretResponse } from "@harpoc/shared";
 import { describe, expect, it } from "vitest";
 import { InjectionGuard } from "./injection-guard.js";
 import { sanitizeUseSecretResult } from "./sanitize-result.js";
+import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 describe("sanitizeUseSecretResult", () => {
   const guard = new InjectionGuard();
@@ -196,14 +197,12 @@ describe("sanitizeUseSecretResult", () => {
     });
   });
 
-  it("rejects an unknown result type instead of passing it through unsanitized", () => {
+  it("rejects an unknown result type instead of passing it through unsanitized", async () => {
     const bogus = { type: "ftp", payload: "x" } as unknown as UseSecretResponse;
-    try {
-      sanitizeUseSecretResult(bogus, guard);
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
-      expect((e as VaultError).message).toContain("Unsupported result type: ftp");
-    }
+    const err = await expectVaultError(
+      () => sanitizeUseSecretResult(bogus, guard),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toContain("Unsupported result type: ftp");
   });
 });

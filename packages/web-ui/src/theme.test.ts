@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { applyTheme, cycleTheme, setTheme, storedTheme } from "./theme";
+import { appliedTheme, applyTheme, cycleTheme, setTheme, storedTheme } from "./theme";
 
 afterEach(() => {
   sessionStorage.clear();
@@ -28,6 +28,12 @@ describe("theme", () => {
   it("ignores a garbage stored value", () => {
     sessionStorage.setItem("harpoc.theme", "mauve");
     expect(storedTheme()).toBeNull();
+  });
+
+  it("appliedTheme ignores a garbage attribute and cycling starts from system", () => {
+    document.documentElement.setAttribute("data-theme", "blue");
+    expect(appliedTheme()).toBeNull();
+    expect(cycleTheme()).toBe("light");
   });
 
   it("cycles system → light → dark → system", () => {

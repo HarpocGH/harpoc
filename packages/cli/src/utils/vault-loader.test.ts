@@ -2,8 +2,9 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ErrorCode, VAULT_DB_NAME, VAULT_DIR_NAME, VaultError } from "@harpoc/shared";
+import { ErrorCode, VAULT_DB_NAME, VAULT_DIR_NAME } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
+import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 import {
   createEngine,
   loadUnlockedEngine,
@@ -69,12 +70,7 @@ describe("loadUnlockedEngine", () => {
     await setupEngine.lock();
     await setupEngine.destroy();
 
-    try {
-      await loadUnlockedEngine(tempDir);
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.VAULT_LOCKED);
-    }
+    await expectVaultError(() => loadUnlockedEngine(tempDir), ErrorCode.VAULT_LOCKED);
   });
 });
 

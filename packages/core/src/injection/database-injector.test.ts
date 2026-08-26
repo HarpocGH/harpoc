@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, DatabaseAction, InjectionPolicy } from "@harpoc/shared";
-import { ErrorCode, MAX_DB_RESULT_BYTES, VaultError } from "@harpoc/shared";
+import { ErrorCode, MAX_DB_RESULT_BYTES } from "@harpoc/shared";
 import { DatabaseInjector } from "./database-injector.js";
 import type {
   DbCommandAdapter,
@@ -9,6 +9,7 @@ import type {
   DbEngineAdapter,
   DbQueryResult,
 } from "./db-adapters.js";
+import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 // Lazy-driver pin (mirrors the pg mock in database-injector.tls.test.ts):
 // running a non-redis action through the REAL default adapters must never
@@ -266,6 +267,29 @@ describe("DatabaseInjector", () => {
     ).rejects.toMatchObject({ code: ErrorCode.UNSUPPORTED_DB_ENGINE });
   });
 
+  it("refuses an unknown SQL engine key in the adapter registry (compile-time)", () => {
+    const mock = new MockAdapter({ rows: [] });
+    // Compile-time pin: the registry is keyed by DbSqlEngine, so the
+    // `"postgres"` fixture that once passed for months is a type error now.
+    // @ts-expect-error "postgres" is not a DbSqlEngine
+    const inj = new DatabaseInjector(null, { postgres: mock });
+    expect(inj).toBeInstanceOf(DatabaseInjector);
+  });
+
+  it("refuses a command engine key in the SQL adapter registry (compile-time)", () => {
+    const mock = new MockAdapter({ rows: [] });
+    // @ts-expect-error redis is a command engine, not a SQL engine
+    const inj = new DatabaseInjector(null, { redis: mock });
+    expect(inj).toBeInstanceOf(DatabaseInjector);
+  });
+
+  it("refuses a SQL engine key in the command-adapter registry (compile-time)", () => {
+    const cmd = new MockCommandAdapter();
+    // @ts-expect-error postgresql is a SQL engine, not a command engine
+    const inj = new DatabaseInjector(null, {}, { postgresql: cmd });
+    expect(inj).toBeInstanceOf(DatabaseInjector);
+  });
+
   it("redacts the credential from the result rows", async () => {
     const mock = new MockAdapter({ rows: [{ note: "value is s3cr3t here" }] });
     const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
@@ -310,14 +334,11 @@ describe("DatabaseInjector", () => {
 
   it("redacts the credential from a query error and maps to DB_QUERY_FAILED", async () => {
     const mock = new MockAdapter({ queryError: new Error("auth failed for admin:s3cr3t") });
-    try {
-      await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
-      expect.fail("should throw");
-    } catch (e) {
-      const err = e as VaultError;
-      expect(err.code).toBe(ErrorCode.DB_QUERY_FAILED);
-      expect(err.message).not.toContain("s3cr3t");
-    }
+    const err = await expectVaultError(
+      () => injector(mock).executeWithSecret(action(), SECRET, policy(), undefined),
+      ErrorCode.DB_QUERY_FAILED,
+    );
+    expect(err.message).not.toContain("s3cr3t");
   });
 
   it("maps a connection failure to DB_CONNECTION_FAILED", async () => {
@@ -336,28 +357,22 @@ describe("DatabaseInjector", () => {
 
   it("redacts the username half from a query error", async () => {
     const mock = new MockAdapter({ queryError: new Error("permission denied for role admin") });
-    try {
-      await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
-      expect.fail("should throw");
-    } catch (e) {
-      const err = e as VaultError;
-      expect(err.code).toBe(ErrorCode.DB_QUERY_FAILED);
-      expect(err.message).not.toContain("admin");
-    }
+    const err = await expectVaultError(
+      () => injector(mock).executeWithSecret(action(), SECRET, policy(), undefined),
+      ErrorCode.DB_QUERY_FAILED,
+    );
+    expect(err.message).not.toContain("admin");
   });
 
   it("redacts the username half from a connection error", async () => {
     const mock = new MockAdapter({
       connectError: new Error('password authentication failed for user "admin"'),
     });
-    try {
-      await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
-      expect.fail("should throw");
-    } catch (e) {
-      const err = e as VaultError;
-      expect(err.code).toBe(ErrorCode.DB_CONNECTION_FAILED);
-      expect(err.message).not.toContain("admin");
-    }
+    const err = await expectVaultError(
+      () => injector(mock).executeWithSecret(action(), SECRET, policy(), undefined),
+      ErrorCode.DB_CONNECTION_FAILED,
+    );
+    expect(err.message).not.toContain("admin");
   });
 
   it("leaves a 1-2 char username unredacted (would shred unrelated output)", async () => {
@@ -541,14 +556,11 @@ describe("DatabaseInjector redis dispatch", () => {
 
   it("redacts the credential from a redis command error and maps to DB_QUERY_FAILED", async () => {
     const cmd = new MockCommandAdapter({ error: new Error("WRONGPASS s3cr3t") });
-    try {
-      await injectorWithRedis(cmd).executeWithSecret(redisAction(), SECRET, policy(), undefined);
-      expect.fail("should throw");
-    } catch (e) {
-      const err = e as VaultError;
-      expect(err.code).toBe(ErrorCode.DB_QUERY_FAILED);
-      expect(err.message).not.toContain("s3cr3t");
-    }
+    const err = await expectVaultError(
+      () => injectorWithRedis(cmd).executeWithSecret(redisAction(), SECRET, policy(), undefined),
+      ErrorCode.DB_QUERY_FAILED,
+    );
+    expect(err.message).not.toContain("s3cr3t");
   });
 
   it("rejects an engine with no command adapter configured on this injector instance", async () => {

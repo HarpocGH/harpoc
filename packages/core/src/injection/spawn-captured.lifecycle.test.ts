@@ -77,8 +77,9 @@ describe("spawnCaptured lifecycle (M4)", () => {
   // snapshot is taken once, so a grandchild created after that snapshot escapes
   // it (observed under the parallel root gate with a 300 ms timeout, where node
   // start-up outran the kill). Hence the wide timeout below — that
-  // spawn-during-kill window is a product-side follow-up, not what this case
-  // pins.
+  // spawn-during-kill window is the descendant sweep's to close (pinned in
+  // descendant-sweep.test.ts and spawn-captured.sweep.test.ts), not what this
+  // case pins.
   it("the timeout kills the whole process tree, not just the direct child", async () => {
     const marker = join(dir, "grandchild-marker.txt");
     const result = await spawnCaptured(
@@ -90,12 +91,11 @@ describe("spawnCaptured lifecycle (M4)", () => {
     expect(result.timed_out).toBe(true);
 
     // Well past the grandchild's own deadline: if it had survived the kill it
-    // would have written the marker with the credential still in its env. Its
-    // 6 s timer starts at its own boot, which cannot be later than the kill at
-    // t+2 s plus a node start-up, so the marker would land by t+9 s at the
-    // latest; this wait puts the assertion at t+10 s even when the kill settles
-    // instantly.
-    await sleep(8_000);
+    // would have written the marker with the credential still in its env. The
+    // kill fires at t+2 s; the grandchild's 6 s timer starts at its own boot,
+    // allowed the same 2 s the child had, so the marker would land by t+10 s
+    // at the latest; this wait puts the assertion at t+11 s.
+    await sleep(9_000);
     expect(existsSync(marker)).toBe(false);
   }, 25_000);
 

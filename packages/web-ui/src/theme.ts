@@ -29,7 +29,7 @@ export function setTheme(pref: ThemePreference): void {
   applyTheme(pref);
 }
 
-function appliedTheme(): ThemePreference {
+export function appliedTheme(): ThemePreference {
   const value = document.documentElement.getAttribute("data-theme");
   return value === "light" || value === "dark" ? value : null;
 }

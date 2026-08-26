@@ -90,15 +90,17 @@ describeGit("Git context (both mechanisms, §4.5.6)", () => {
   });
 
   it("I1: the token never appears in a rejection", async () => {
+    let thrown: unknown;
     try {
       await client.useSecret(handle, {
         type: "git",
         operation: "clone",
         repository: "https://8.8.8.8/attacker/repo.git",
       });
-      expect.fail("should throw");
-    } catch (e) {
-      expect(JSON.stringify(e)).not.toContain("ghp_git-secret");
+    } catch (err) {
+      thrown = err;
     }
+    expect(thrown).toBeDefined();
+    expect(JSON.stringify(thrown)).not.toContain("ghp_git-secret");
   });
 });

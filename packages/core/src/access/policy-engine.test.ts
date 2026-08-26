@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Secret } from "@harpoc/shared";
-import { ErrorCode, SecretStatus, SecretType, VaultError } from "@harpoc/shared";
+import { ErrorCode, SecretStatus, SecretType } from "@harpoc/shared";
 import { SqliteStore } from "../storage/sqlite-store.js";
 import { PolicyEngine } from "./policy-engine.js";
+import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 let store: SqliteStore;
 let engine: PolicyEngine;
@@ -96,14 +97,8 @@ describe("revokePolicy", () => {
     expect(policies.length).toBe(0);
   });
 
-  it("throws POLICY_NOT_FOUND for missing policy", () => {
-    try {
-      engine.revokePolicy("nonexistent");
-      expect.fail("Should have thrown");
-    } catch (e) {
-      expect(e).toBeInstanceOf(VaultError);
-      expect((e as VaultError).code).toBe(ErrorCode.POLICY_NOT_FOUND);
-    }
+  it("throws POLICY_NOT_FOUND for missing policy", async () => {
+    await expectVaultError(() => engine.revokePolicy("nonexistent"), ErrorCode.POLICY_NOT_FOUND);
   });
 });
 

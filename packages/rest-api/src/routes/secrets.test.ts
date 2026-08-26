@@ -8,6 +8,16 @@ import { RateLimiter } from "../middleware/rate-limit.js";
 import { createSecretRoutes } from "./secrets.js";
 import type { HarpocEnv } from "../types.js";
 
+// The readJsonBody non-object clause: every JSON scalar and the array are
+// refused before any route reads a field (D2, 2026-08-20).
+const NON_OBJECT_BODIES = [
+  ["a string", '"hi"'],
+  ["a number", "42"],
+  ["a boolean", "true"],
+  ["null", "null"],
+  ["an array", "[1,2]"],
+] as const;
+
 const MOCK_TOKEN: VaultApiToken = {
   sub: "test-agent",
   vault_id: "vault-1",
@@ -555,13 +565,7 @@ describe("secret routes", () => {
       expect(body.data.structured_content.note).toContain("[REDACTED]");
     });
 
-    it.each([
-      ["a string", '"hi"'],
-      ["a number", "42"],
-      ["a boolean", "true"],
-      ["null", "null"],
-      ["an array", "[1,2]"],
-    ])(
+    it.each(NON_OBJECT_BODIES)(
       "refuses %s body with the framing message and never reaches the engine",
       async (_kind, raw) => {
         const res = await app.request("/api/v1/secrets/test-key/use", {
@@ -988,13 +992,7 @@ describe("secret routes", () => {
       expect(res.status).toBe(201);
     });
 
-    it.each([
-      ["a string", '"hi"'],
-      ["a number", "42"],
-      ["a boolean", "true"],
-      ["null", "null"],
-      ["an array", "[1,2]"],
-    ])(
+    it.each(NON_OBJECT_BODIES)(
       "refuses %s body with the framing message and never reaches the engine",
       async (_kind, raw) => {
         const res = await app.request("/api/v1/secrets", {

@@ -5,6 +5,7 @@ export * from "./constants.js";
 export * from "./handle.js";
 export * from "./binary-name.js";
 export * from "./dedicated-contexts.js";
+export * from "./decimal-integer.js";
 export * from "./interpreters.js";
 export * from "./name-pattern.js";
 export * from "./pem.js";

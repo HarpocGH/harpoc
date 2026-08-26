@@ -443,4 +443,15 @@ describe("App shell v1.4 routes", () => {
     expect(toggle.textContent).toBe("theme: system");
     expect(document.documentElement.hasAttribute("data-theme")).toBe(false);
   });
+
+  // RED while Nav seeds its label from storedTheme(): under a storage that
+  // refuses writes the attribute is the only truth, and a remount used to
+  // relabel "system" while the page stayed dark.
+  it("a remounted nav labels the applied theme, not the stored one", () => {
+    sessionStorage.clear();
+    setToken("t");
+    document.documentElement.setAttribute("data-theme", "dark");
+    render(<App api={fakeApi()} />);
+    expect(screen.getByRole("button", { name: /theme:/i }).textContent).toBe("theme: dark");
+  });
 });

@@ -17,8 +17,10 @@ import type { AuditLogger } from "../audit/audit-logger.js";
 import { matchesHostPortAllowlist } from "./allowlist.js";
 import type {
   DbCommandAdapter,
+  DbCommandEngine,
   DbEngineAdapter,
   DbQueryResult,
+  DbSqlEngine,
   DbTlsOptions,
 } from "./db-adapters.js";
 import { defaultDbAdapters, defaultDbCommandAdapters, defaultDbPort } from "./db-adapters.js";
@@ -40,13 +42,13 @@ import { validateHostPort } from "./url-validator.js";
  *  - Result + error sanitization: the credential and its encodings are redacted.
  */
 export class DatabaseInjector {
-  private readonly adapters: Record<string, DbEngineAdapter>;
-  private readonly commandAdapters: Record<string, DbCommandAdapter>;
+  private readonly adapters: Partial<Record<DbSqlEngine, DbEngineAdapter>>;
+  private readonly commandAdapters: Partial<Record<DbCommandEngine, DbCommandAdapter>>;
 
   constructor(
     private readonly auditLogger: AuditLogger | null,
-    adapters?: Record<string, DbEngineAdapter>,
-    commandAdapters?: Record<string, DbCommandAdapter>,
+    adapters?: Partial<Record<DbSqlEngine, DbEngineAdapter>>,
+    commandAdapters?: Partial<Record<DbCommandEngine, DbCommandAdapter>>,
   ) {
     this.adapters = adapters ?? defaultDbAdapters();
     this.commandAdapters = commandAdapters ?? defaultDbCommandAdapters();
@@ -60,9 +62,10 @@ export class DatabaseInjector {
     secretId?: string,
     attribution?: AuditAttribution,
   ): Promise<DatabaseResult> {
-    const isCommandEngine = COMMAND_ENGINES.includes(action.engine);
-    const adapter = isCommandEngine ? undefined : this.adapters[action.engine];
-    const commandAdapter = isCommandEngine ? this.commandAdapters[action.engine] : undefined;
+    const adapter = isCommandEngine(action.engine) ? undefined : this.adapters[action.engine];
+    const commandAdapter = isCommandEngine(action.engine)
+      ? this.commandAdapters[action.engine]
+      : undefined;
     if (!adapter && !commandAdapter) {
       this.audit(action, secretId, { error: "UNSUPPORTED_DB_ENGINE" }, false, attribution);
       throw VaultError.unsupportedDbEngine(action.engine);
@@ -232,7 +235,11 @@ export class DatabaseInjector {
 }
 
 /** Command-style engines dispatch through `DbCommandAdapter.execute` instead of `DbEngineAdapter.connect(...).query(...)`. */
-const COMMAND_ENGINES: readonly string[] = [DatabaseEngine.REDIS, DatabaseEngine.MONGODB];
+const COMMAND_ENGINES: readonly DatabaseEngine[] = [DatabaseEngine.REDIS, DatabaseEngine.MONGODB];
+
+function isCommandEngine(engine: DatabaseEngine): engine is DbCommandEngine {
+  return COMMAND_ENGINES.includes(engine);
+}
 
 /** Split `host` (which may embed `:port`) and an optional explicit port. */
 function parseHostPort(

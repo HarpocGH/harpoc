@@ -8,7 +8,8 @@ import type {
   Permission,
   TokenPrincipalType,
 } from "@harpoc/shared";
-import { callerFromToken, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
+import { callerFromToken, ErrorCode, SecretType } from "@harpoc/shared";
+import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 import { VaultEngine } from "./vault-engine.js";
 
 /**
@@ -126,17 +127,14 @@ describe("R7 admin-user exemption", () => {
   it.each([
     ["agent", "gov-admin"],
     ["tool", "ops-tool"],
-  ] as const)("a %s+admin caller stays gated (ACCESS_DENIED)", (kind, principal) => {
-    engine.registerAgent({ name: "gov-admin" });
+  ] as const)("%s-type admin caller stays gated (ACCESS_DENIED)", async (kind, principal) => {
+    if (kind === "agent") engine.registerAgent({ name: principal });
     const caller = callerFor(principal, ["admin"], kind);
-    let thrown: unknown;
-    try {
-      engine.setAgentPermissions("cell-agent", secretId, ["read", "use"], undefined, "x", caller);
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown, `expected ACCESS_DENIED for ${kind}`).toBeInstanceOf(VaultError);
-    expect((thrown as VaultError).code).toBe(ErrorCode.ACCESS_DENIED);
+    await expectVaultError(
+      () =>
+        engine.setAgentPermissions("cell-agent", secretId, ["read", "use"], undefined, "x", caller),
+      ErrorCode.ACCESS_DENIED,
+    );
   });
 
   it("a user caller without admin scope stays gated", async () => {

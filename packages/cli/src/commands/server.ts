@@ -1,10 +1,9 @@
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { Command } from "commander";
-import { MAX_TOKEN_TTL_MS, Permission } from "@harpoc/shared";
+import { MAX_TOKEN_TTL_MS, Permission, isDecimalInteger } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError } from "../utils/output.js";
-import { isDecimalInteger } from "../utils/options.js";
 
 function parsePort(value: string, label: string): number {
   const port = Number(value);

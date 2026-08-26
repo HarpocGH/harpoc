@@ -6,6 +6,7 @@ import { vi } from "vitest";
 import type { CallerContext, Permission, PrincipalType } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
+import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 /**
  * W2 — `list` as live policy vocabulary: enumeration is filtered by the
@@ -295,20 +296,19 @@ describe("grantPolicy refuses `create`", () => {
       ),
     ).toThrow(VaultError);
 
-    try {
-      engine.grantPolicy(
-        {
-          secretId: id,
-          principalType: "agent",
-          principalId: "alice",
-          permissions: ["read", "create"],
-        },
-        "test-admin",
-      );
-      expect.fail("expected INVALID_INPUT");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
-    }
+    await expectVaultError(
+      () =>
+        engine.grantPolicy(
+          {
+            secretId: id,
+            principalType: "agent",
+            principalId: "alice",
+            permissions: ["read", "create"],
+          },
+          "test-admin",
+        ),
+      ErrorCode.INVALID_INPUT,
+    );
 
     // Nothing written: the secret stays ungated.
     expect(engine.listPolicies(id)).toHaveLength(0);

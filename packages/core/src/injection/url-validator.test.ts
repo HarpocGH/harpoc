@@ -7,6 +7,7 @@ import {
   validateHostPort,
   validateUrl,
 } from "./url-validator.js";
+import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 describe("isPrivateIp", () => {
   it.each([
@@ -179,57 +180,33 @@ describe("validateUrl", () => {
   });
 
   it("rejects HTTP for non-loopback", async () => {
-    try {
-      await validateUrl("http://api.example.com/test");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.URL_HTTPS_REQUIRED);
-    }
+    await expectVaultError(
+      () => validateUrl("http://api.example.com/test"),
+      ErrorCode.URL_HTTPS_REQUIRED,
+    );
   });
 
   it("rejects non-HTTP(S) schemes", async () => {
-    try {
-      await validateUrl("ftp://example.com/file");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.URL_HTTPS_REQUIRED);
-    }
+    await expectVaultError(
+      () => validateUrl("ftp://example.com/file"),
+      ErrorCode.URL_HTTPS_REQUIRED,
+    );
   });
 
   it("rejects invalid URLs", async () => {
-    try {
-      await validateUrl("not-a-url");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.URL_INVALID);
-    }
+    await expectVaultError(() => validateUrl("not-a-url"), ErrorCode.URL_INVALID);
   });
 
   it("blocks SSRF for private IPs", async () => {
-    try {
-      await validateUrl("https://10.0.0.1/api");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
-    }
+    await expectVaultError(() => validateUrl("https://10.0.0.1/api"), ErrorCode.SSRF_BLOCKED);
   });
 
   it("blocks SSRF for 192.168.x.x", async () => {
-    try {
-      await validateUrl("https://192.168.1.1/api");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
-    }
+    await expectVaultError(() => validateUrl("https://192.168.1.1/api"), ErrorCode.SSRF_BLOCKED);
   });
 
   it("blocks SSRF for 172.16-31.x.x", async () => {
-    try {
-      await validateUrl("https://172.16.0.1/api");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
-    }
+    await expectVaultError(() => validateUrl("https://172.16.0.1/api"), ErrorCode.SSRF_BLOCKED);
   });
 
   it("allows loopback despite being 'private'", async () => {
@@ -238,21 +215,14 @@ describe("validateUrl", () => {
   });
 
   it("blocks SSRF for IPv4-mapped IPv6 private addresses", async () => {
-    try {
-      await validateUrl("https://[::ffff:192.168.1.1]/api");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
-    }
+    await expectVaultError(
+      () => validateUrl("https://[::ffff:192.168.1.1]/api"),
+      ErrorCode.SSRF_BLOCKED,
+    );
   });
 
   it("blocks SSRF for 0.0.0.0", async () => {
-    try {
-      await validateUrl("https://0.0.0.0/api");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
-    }
+    await expectVaultError(() => validateUrl("https://0.0.0.0/api"), ErrorCode.SSRF_BLOCKED);
   });
 
   it("returns resolvedAddresses for IP-based URLs as undefined", async () => {
@@ -268,47 +238,49 @@ describe("validateUrl", () => {
   // --- Edge case tests ---
 
   it("rejects empty string", async () => {
-    try {
-      await validateUrl("");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.URL_INVALID);
-    }
+    await expectVaultError(() => validateUrl(""), ErrorCode.URL_INVALID);
   });
 
   it("rejects URL with no host (https:///path)", async () => {
+    // URL constructor may parse this or throw — either SSRF_BLOCKED or URL_INVALID is acceptable
+    let thrown: unknown;
     try {
       await validateUrl("https:///path");
-      expect.fail("Should throw");
     } catch (e) {
-      // URL constructor may parse this or throw — either SSRF_BLOCKED or URL_INVALID is acceptable
-      const err = e as VaultError;
-      expect([
-        ErrorCode.URL_INVALID,
-        ErrorCode.SSRF_BLOCKED,
-        ErrorCode.DNS_RESOLUTION_FAILED,
-      ]).toContain(err.code);
+      thrown = e;
     }
+    expect(thrown).toBeInstanceOf(VaultError);
+    expect([
+      ErrorCode.URL_INVALID,
+      ErrorCode.SSRF_BLOCKED,
+      ErrorCode.DNS_RESOLUTION_FAILED,
+    ]).toContain((thrown as VaultError).code);
   });
 
   it("rejects javascript: scheme", async () => {
+    let thrown: unknown;
     try {
       await validateUrl("javascript:alert(1)");
-      expect.fail("Should throw");
     } catch (e) {
-      const err = e as VaultError;
-      expect([ErrorCode.URL_INVALID, ErrorCode.URL_HTTPS_REQUIRED]).toContain(err.code);
+      thrown = e;
     }
+    expect(thrown).toBeInstanceOf(VaultError);
+    expect([ErrorCode.URL_INVALID, ErrorCode.URL_HTTPS_REQUIRED]).toContain(
+      (thrown as VaultError).code,
+    );
   });
 
   it("rejects data: scheme", async () => {
+    let thrown: unknown;
     try {
       await validateUrl("data:text/html,<h1>test</h1>");
-      expect.fail("Should throw");
     } catch (e) {
-      const err = e as VaultError;
-      expect([ErrorCode.URL_INVALID, ErrorCode.URL_HTTPS_REQUIRED]).toContain(err.code);
+      thrown = e;
     }
+    expect(thrown).toBeInstanceOf(VaultError);
+    expect([ErrorCode.URL_INVALID, ErrorCode.URL_HTTPS_REQUIRED]).toContain(
+      (thrown as VaultError).code,
+    );
   });
 
   it("accepts HTTPS URL with explicit non-default port", async () => {
@@ -324,30 +296,18 @@ describe("validateUrl", () => {
   });
 
   it("blocks IPv6 ULA in URL https://[fc00::1]/api", async () => {
-    try {
-      await validateUrl("https://[fc00::1]/api");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
-    }
+    await expectVaultError(() => validateUrl("https://[fc00::1]/api"), ErrorCode.SSRF_BLOCKED);
   });
 
   it("blocks IPv6 link-local in URL https://[fe80::1]/api", async () => {
-    try {
-      await validateUrl("https://[fe80::1]/api");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
-    }
+    await expectVaultError(() => validateUrl("https://[fe80::1]/api"), ErrorCode.SSRF_BLOCKED);
   });
 
   it("blocks IPv4-mapped IPv6 in URL https://[::ffff:10.0.0.1]/api", async () => {
-    try {
-      await validateUrl("https://[::ffff:10.0.0.1]/api");
-      expect.fail("Should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SSRF_BLOCKED);
-    }
+    await expectVaultError(
+      () => validateUrl("https://[::ffff:10.0.0.1]/api"),
+      ErrorCode.SSRF_BLOCKED,
+    );
   });
 });
 

@@ -100,11 +100,13 @@ describe("SSH context (process-mediated, §4.5.7)", () => {
   });
 
   it("I1: the private key never appears in a rejection", async () => {
+    let thrown: unknown;
     try {
       await client.useSecret(handle, sshAction("deploy.example.com"));
-      expect.fail("should throw");
-    } catch (e) {
-      expect(JSON.stringify(e)).not.toContain("PRIVATE KEY");
+    } catch (err) {
+      thrown = err;
     }
+    expect(thrown).toBeDefined();
+    expect(JSON.stringify(thrown)).not.toContain("PRIVATE KEY");
   });
 });

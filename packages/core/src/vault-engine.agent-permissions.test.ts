@@ -7,6 +7,7 @@ import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/share
 import type { DecryptedAuditEvent } from "./audit/audit-query.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
 import { VaultEngine } from "./vault-engine.js";
+import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();
@@ -48,17 +49,6 @@ async function makeSecret(name: string, project?: string): Promise<string> {
     value: new Uint8Array(Buffer.from("v", "utf8")),
   });
   return engine.resolveSecretId(`secret://${project ? `${project}/` : ""}${name}`);
-}
-
-function expectCode(fn: () => unknown, code: ErrorCode): void {
-  let thrown: unknown;
-  try {
-    fn();
-  } catch (err) {
-    thrown = err;
-  }
-  expect(thrown, `expected ${code}`).toBeInstanceOf(VaultError);
-  expect((thrown as VaultError).code).toBe(code);
 }
 
 beforeEach(async () => {
@@ -236,7 +226,7 @@ describe("setAgentPermissions", () => {
   it("refuses create before the registration gate", async () => {
     const secretId = await makeSecret("db-password");
 
-    expectCode(
+    await expectVaultError(
       () => engine.setAgentPermissions("ghost", secretId, ["create"], undefined, "test-admin"),
       ErrorCode.INVALID_INPUT,
     );
@@ -245,7 +235,7 @@ describe("setAgentPermissions", () => {
   it("refuses an unregistered agent", async () => {
     const secretId = await makeSecret("db-password");
 
-    expectCode(
+    await expectVaultError(
       () => engine.setAgentPermissions("ghost", secretId, ["read"], undefined, "test-admin"),
       ErrorCode.AGENT_NOT_FOUND,
     );
@@ -257,7 +247,7 @@ describe("setAgentPermissions", () => {
     engine.registerAgent({ name: "alpha" });
     engine.deactivateAgent("alpha");
 
-    expectCode(
+    await expectVaultError(
       () => engine.setAgentPermissions("alpha", secretId, ["read"], undefined, "test-admin"),
       ErrorCode.AGENT_INACTIVE,
     );
@@ -273,7 +263,7 @@ describe("setAgentPermissions", () => {
       "test-admin",
     );
 
-    expectCode(
+    await expectVaultError(
       () =>
         engine.setAgentPermissions(
           "alpha",
@@ -369,7 +359,7 @@ describe("setAgentPermissions", () => {
     engine.registerAgent({ name: "alpha" });
     await engine.lock();
 
-    expectCode(
+    await expectVaultError(
       () => engine.setAgentPermissions("alpha", secretId, ["read"], undefined, "test-admin"),
       ErrorCode.VAULT_LOCKED,
     );
@@ -432,8 +422,8 @@ describe("listAgentPolicies", () => {
     expect(engine.listAgentPolicies("alpha")).toHaveLength(1);
   });
 
-  it("refuses an unknown agent", () => {
-    expectCode(() => engine.listAgentPolicies("ghost"), ErrorCode.AGENT_NOT_FOUND);
+  it("refuses an unknown agent", async () => {
+    await expectVaultError(() => engine.listAgentPolicies("ghost"), ErrorCode.AGENT_NOT_FOUND);
   });
 
   it("skips a row whose secret no longer exists", async () => {
@@ -460,7 +450,7 @@ describe("listAgentPolicies", () => {
     engine.registerAgent({ name: "alpha" });
     await engine.lock();
 
-    expectCode(() => engine.listAgentPolicies("alpha"), ErrorCode.VAULT_LOCKED);
+    await expectVaultError(() => engine.listAgentPolicies("alpha"), ErrorCode.VAULT_LOCKED);
   });
 });
 

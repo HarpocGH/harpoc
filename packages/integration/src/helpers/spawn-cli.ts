@@ -59,7 +59,7 @@ export function startCliServer(args: string[], opts: { vaultDir: string }): CliS
   child.on("error", (err: Error) => {
     spawnError = err;
   });
-  child.once("exit", () => {
+  child.once("close", () => {
     exited = true;
   });
   child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
@@ -108,7 +108,8 @@ export function startCliServer(args: string[], opts: { vaultDir: string }): CliS
           resolve();
           return;
         }
-        if (spawnError) {
+        // No pid: the spawn itself failed and there is no process to wait for.
+        if (child.pid === undefined) {
           child.kill();
           resolve();
           return;
@@ -173,11 +174,11 @@ export async function startCliServerOnFreePort(
       return { server, port };
     } catch (err) {
       // Read before stop(): stop() kills the child, so only a child that had
-      // already died on its own is the bind collision worth retrying.
-      const died = server.exited();
+      // already died on its own — and died on the bind — is worth retrying.
+      const collided = server.exited() && /EADDRINUSE/.test(server.stderrSoFar());
       last = err instanceof Error ? err.message : String(err);
       await server.stop();
-      if (!died) throw err;
+      if (!collided) throw err;
     }
   }
   throw new Error(`server failed to bind after ${String(attempts)} attempts: ${last}`);

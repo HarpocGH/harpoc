@@ -8,6 +8,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { VaultEngine } from "@harpoc/core";
 import { VAULT_DB_NAME, VAULT_DIR_NAME, SESSION_FILE_NAME } from "@harpoc/shared";
 import { DEFAULT_MCP_HTTP_PORT, startMcpHttpServer } from "./http.js";
+import { parseHttpPortOption } from "./cli-options.js";
 import { createMcpServer } from "./server.js";
 
 export { createMcpServer } from "./server.js";
@@ -59,11 +60,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const port = values.port !== undefined ? Number(values.port) : DEFAULT_MCP_HTTP_PORT;
-  if (values.http && (!Number.isInteger(port) || port < 1 || port > 65535)) {
-    process.stderr.write(`Error: Invalid port "${String(values.port)}". Must be 1-65535.\n`);
+  const parsedPort = parseHttpPortOption(values.port as string | undefined);
+  if (values.http && !parsedPort.ok) {
+    process.stderr.write(parsedPort.message);
     process.exit(1);
   }
+  const port = parsedPort.ok ? parsedPort.port : DEFAULT_MCP_HTTP_PORT;
 
   const vaultDir = resolveVaultDir(values["vault-dir"] as string | undefined);
   const dbPath = join(vaultDir, VAULT_DB_NAME);

@@ -463,14 +463,15 @@ describe("L5/L10 sanity", () => {
     store.setMeta("vault_version", "99.0.0");
     store.close();
     const reloaded = new VaultEngine({ dbPath, sessionPath });
+    let thrown: unknown;
     try {
       await reloaded.loadSession();
-      expect.fail("should throw");
     } catch (err) {
-      expect(err).toBeInstanceOf(VaultError);
+      thrown = err;
     } finally {
       await reloaded.destroy();
     }
+    expect(thrown).toBeInstanceOf(VaultError);
     engine = new VaultEngine({ dbPath, sessionPath });
   });
 });

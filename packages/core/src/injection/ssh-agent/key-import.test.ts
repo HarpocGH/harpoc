@@ -12,6 +12,7 @@ import { ErrorCode, VaultError } from "@harpoc/shared";
 import { describe, expect, it } from "vitest";
 import { analyzeKeyMaterial, decryptKeyForImport } from "./key-import.js";
 import { loadPrivateKey } from "./key-loader.js";
+import { expectVaultError } from "../../test-helpers/expect-vault-error.js";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "..", "__fixtures__", "ssh");
 const readFixture = (name: string): string => readFileSync(join(FIXTURES, name), "utf8");
@@ -195,17 +196,14 @@ describe("decryptKeyForImport — roundtrip", () => {
 });
 
 describe("decryptKeyForImport — rejection", () => {
-  it("throws KEY_PASSPHRASE_INVALID on a wrong passphrase, leaking nothing", () => {
+  it("throws KEY_PASSPHRASE_INVALID on a wrong passphrase, leaking nothing", async () => {
     const { privateKey } = encryptedPkcs8("ed25519");
-    try {
-      decryptKeyForImport(privateKey, "wrong-passphrase");
-      expect.fail("should throw");
-    } catch (err) {
-      expect(err).toBeInstanceOf(VaultError);
-      expect((err as VaultError).code).toBe(ErrorCode.KEY_PASSPHRASE_INVALID);
-      expect((err as Error).message).not.toContain("wrong-passphrase");
-      expect((err as Error).message).not.toContain("BEGIN");
-    }
+    const err = await expectVaultError(
+      () => decryptKeyForImport(privateKey, "wrong-passphrase"),
+      ErrorCode.KEY_PASSPHRASE_INVALID,
+    );
+    expect(err.message).not.toContain("wrong-passphrase");
+    expect(err.message).not.toContain("BEGIN");
   });
 
   it("throws KEY_PASSPHRASE_INVALID on material that is not a decryptable key", () => {

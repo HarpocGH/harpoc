@@ -7,7 +7,7 @@ afterEach(() => {
 });
 
 describe("main boot", () => {
-  it("applies the stored theme before the first render", async () => {
+  it("stamps data-theme from sessionStorage during module boot", async () => {
     document.body.innerHTML = '<div id="root"></div>';
     sessionStorage.setItem("harpoc.theme", "dark");
     vi.resetModules();

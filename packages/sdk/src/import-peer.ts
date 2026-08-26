@@ -1,5 +1,3 @@
-import { VaultError } from "@harpoc/shared";
-
 /**
  * Loader for the optional OAuth/certificate peers (D4). A missing peer reaches
  * an embedder as Node's raw `ERR_MODULE_NOT_FOUND` otherwise — an untyped
@@ -9,6 +7,8 @@ import { VaultError } from "@harpoc/shared";
  * a test can stand in for this module and see which specifier each lazy call
  * site asks for. Not re-exported from `index.ts` — package-internal.
  */
+
+import { VaultError } from "@harpoc/shared";
 
 /**
  * The message clause is load-bearing: an installed peer whose own dependency is

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { VaultApiToken } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
+import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 import {
   refuseEmptyToken,
   resolveTokenCaller,
@@ -62,15 +63,17 @@ describe("resolveTokenCaller", () => {
     ).toThrow("Token lacks permission: read");
   });
 
-  it("enforces the project dimension", () => {
+  it("enforces the project dimension", async () => {
     const engine = engineWith(payload({ scope: ["read"], project: "api" }));
-    let thrown: unknown;
-    try {
-      resolveTokenCaller(engine, { permission: "read", project: "other", name: "k" }, "jwt-value");
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown).toMatchObject({ code: ErrorCode.ACCESS_DENIED });
+    await expectVaultError(
+      () =>
+        resolveTokenCaller(
+          engine,
+          { permission: "read", project: "other", name: "k" },
+          "jwt-value",
+        ),
+      ErrorCode.ACCESS_DENIED,
+    );
   });
 
   it("enforces the secret-name-pattern dimension", () => {

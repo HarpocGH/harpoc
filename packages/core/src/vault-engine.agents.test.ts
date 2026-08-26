@@ -3,16 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext } from "@harpoc/shared";
-import {
-  AuditEventType,
-  ErrorCode,
-  SecretType,
-  TOKEN_LABEL_MAX_LENGTH,
-  VaultError,
-} from "@harpoc/shared";
+import { AuditEventType, ErrorCode, SecretType, TOKEN_LABEL_MAX_LENGTH } from "@harpoc/shared";
 import type { DecryptedAuditEvent } from "./audit/audit-query.js";
 import type { IssuedTokenRow, SqliteStore } from "./storage/sqlite-store.js";
 import { VaultEngine } from "./vault-engine.js";
+import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();
@@ -81,17 +76,6 @@ async function makeSecret(name: string): Promise<string> {
   return engine.resolveSecretId(`secret://${name}`);
 }
 
-function expectCode(fn: () => unknown, code: ErrorCode): void {
-  let thrown: unknown;
-  try {
-    fn();
-  } catch (err) {
-    thrown = err;
-  }
-  expect(thrown, `expected ${code}`).toBeInstanceOf(VaultError);
-  expect((thrown as VaultError).code).toBe(code);
-}
-
 beforeEach(async () => {
   tempDir = join(tmpdir(), `harpoc-agov-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
@@ -133,14 +117,17 @@ describe("registerAgent", () => {
     expect(registered[0]?.success).toBe(true);
   });
 
-  it("refuses a duplicate registration with AGENT_EXISTS", () => {
+  it("refuses a duplicate registration with AGENT_EXISTS", async () => {
     engine.registerAgent({ name: "alpha" });
-    expectCode(() => engine.registerAgent({ name: "alpha" }), ErrorCode.AGENT_EXISTS);
+    await expectVaultError(() => engine.registerAgent({ name: "alpha" }), ErrorCode.AGENT_EXISTS);
     expect(rows(AuditEventType.AGENT_REGISTER)).toHaveLength(1);
   });
 
-  it("refuses an invalid name before writing anything", () => {
-    expectCode(() => engine.registerAgent({ name: "bad name" }), ErrorCode.INVALID_INPUT);
+  it("refuses an invalid name before writing anything", async () => {
+    await expectVaultError(
+      () => engine.registerAgent({ name: "bad name" }),
+      ErrorCode.INVALID_INPUT,
+    );
     expect(engine.listAgents("all")).toHaveLength(0);
     expect(rows(AuditEventType.AGENT_REGISTER)).toHaveLength(0);
   });
@@ -178,16 +165,9 @@ describe("getAgent / listAgents", () => {
     expect(engine.queryAudit()).toHaveLength(before);
   });
 
-  it("refuses an unknown agent with AGENT_NOT_FOUND naming the register command", () => {
-    let thrown: unknown;
-    try {
-      engine.getAgent("missing");
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown, "expected AGENT_NOT_FOUND").toBeInstanceOf(VaultError);
-    expect((thrown as VaultError).code).toBe(ErrorCode.AGENT_NOT_FOUND);
-    expect((thrown as VaultError).message).toContain("harpoc agent register");
+  it("refuses an unknown agent with AGENT_NOT_FOUND naming the register command", async () => {
+    const err = await expectVaultError(() => engine.getAgent("missing"), ErrorCode.AGENT_NOT_FOUND);
+    expect(err.message).toContain("harpoc agent register");
   });
 
   it("lists active agents by default and inactive ones only under an explicit filter", () => {
@@ -235,8 +215,8 @@ describe("updateAgent", () => {
     });
   });
 
-  it("refuses an unknown agent", () => {
-    expectCode(() => engine.updateAgent("missing", {}), ErrorCode.AGENT_NOT_FOUND);
+  it("refuses an unknown agent", async () => {
+    await expectVaultError(() => engine.updateAgent("missing", {}), ErrorCode.AGENT_NOT_FOUND);
   });
 
   it("rolls the update back when the audit write fails", () => {
@@ -329,8 +309,8 @@ describe("deactivateAgent", () => {
     expect(second?.updated_at).toBe(first?.updated_at);
   });
 
-  it("refuses an unknown agent", () => {
-    expectCode(() => engine.deactivateAgent("missing"), ErrorCode.AGENT_NOT_FOUND);
+  it("refuses an unknown agent", async () => {
+    await expectVaultError(() => engine.deactivateAgent("missing"), ErrorCode.AGENT_NOT_FOUND);
   });
 
   it("leaves the agent active and the tokens live when the audit write fails", () => {
@@ -380,8 +360,8 @@ describe("activateAgent", () => {
     expect(activations[0]?.detail).toMatchObject({ name: "alpha" });
   });
 
-  it("refuses an unknown agent", () => {
-    expectCode(() => engine.activateAgent("missing"), ErrorCode.AGENT_NOT_FOUND);
+  it("refuses an unknown agent", async () => {
+    await expectVaultError(() => engine.activateAgent("missing"), ErrorCode.AGENT_NOT_FOUND);
   });
 
   it("rolls the status write back when the audit write fails", () => {
@@ -408,7 +388,7 @@ describe("deleteAgent", () => {
 
     expect(engine.isTokenRevoked("jti-1")).toBe(true);
     expect(engine.listPolicies(secretId)).toHaveLength(0);
-    expectCode(() => engine.getAgent("alpha"), ErrorCode.AGENT_NOT_FOUND);
+    await expectVaultError(() => engine.getAgent("alpha"), ErrorCode.AGENT_NOT_FOUND);
 
     const revocations = rows(AuditEventType.POLICY_REVOKE);
     expect(revocations).toHaveLength(1);
@@ -462,8 +442,8 @@ describe("deleteAgent", () => {
     expect(engine.listPolicies(secretId)).toHaveLength(2);
   });
 
-  it("refuses an unknown agent", () => {
-    expectCode(() => engine.deleteAgent("missing"), ErrorCode.AGENT_NOT_FOUND);
+  it("refuses an unknown agent", async () => {
+    await expectVaultError(() => engine.deleteAgent("missing"), ErrorCode.AGENT_NOT_FOUND);
   });
 
   it("rolls the whole cascade back when the audit write fails", async () => {
@@ -489,37 +469,33 @@ describe("sealed vault", () => {
     engine.registerAgent({ name: "alpha" });
     await engine.lock();
 
-    expectCode(() => engine.registerAgent({ name: "beta" }), ErrorCode.VAULT_LOCKED);
-    expectCode(() => engine.getAgent("alpha"), ErrorCode.VAULT_LOCKED);
-    expectCode(() => engine.listAgents(), ErrorCode.VAULT_LOCKED);
-    expectCode(() => engine.updateAgent("alpha", {}), ErrorCode.VAULT_LOCKED);
-    expectCode(() => engine.activateAgent("alpha"), ErrorCode.VAULT_LOCKED);
-    expectCode(() => engine.deactivateAgent("alpha"), ErrorCode.VAULT_LOCKED);
-    expectCode(() => engine.deleteAgent("alpha"), ErrorCode.VAULT_LOCKED);
+    await expectVaultError(() => engine.registerAgent({ name: "beta" }), ErrorCode.VAULT_LOCKED);
+    await expectVaultError(() => engine.getAgent("alpha"), ErrorCode.VAULT_LOCKED);
+    await expectVaultError(() => engine.listAgents(), ErrorCode.VAULT_LOCKED);
+    await expectVaultError(() => engine.updateAgent("alpha", {}), ErrorCode.VAULT_LOCKED);
+    await expectVaultError(() => engine.activateAgent("alpha"), ErrorCode.VAULT_LOCKED);
+    await expectVaultError(() => engine.deactivateAgent("alpha"), ErrorCode.VAULT_LOCKED);
+    await expectVaultError(() => engine.deleteAgent("alpha"), ErrorCode.VAULT_LOCKED);
   });
 });
 
 describe("createToken registration gate", () => {
-  it("refuses an unregistered agent-typed subject and writes nothing", () => {
-    let thrown: unknown;
-    try {
-      engine.createToken("ghost", ["use"]);
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown, "expected AGENT_NOT_FOUND").toBeInstanceOf(VaultError);
-    expect((thrown as VaultError).code).toBe(ErrorCode.AGENT_NOT_FOUND);
-    expect((thrown as VaultError).message).toContain("harpoc agent register ghost");
+  it("refuses an unregistered agent-typed subject and writes nothing", async () => {
+    const err = await expectVaultError(
+      () => engine.createToken("ghost", ["use"]),
+      ErrorCode.AGENT_NOT_FOUND,
+    );
+    expect(err.message).toContain("harpoc agent register ghost");
 
     expect(rows(AuditEventType.TOKEN_CREATE)).toHaveLength(0);
     expect(liveStore().listIssuedTokens()).toHaveLength(0);
   });
 
-  it("refuses a deactivated agent with AGENT_INACTIVE", () => {
+  it("refuses a deactivated agent with AGENT_INACTIVE", async () => {
     engine.registerAgent({ name: "ghost" });
     engine.deactivateAgent("ghost");
 
-    expectCode(() => engine.createToken("ghost", ["use"]), ErrorCode.AGENT_INACTIVE);
+    await expectVaultError(() => engine.createToken("ghost", ["use"]), ErrorCode.AGENT_INACTIVE);
     expect(liveStore().listIssuedTokens()).toHaveLength(0);
   });
 
@@ -567,10 +543,10 @@ describe("createToken registration gate", () => {
     expect(rows(AuditEventType.TOKEN_CREATE)[0]?.detail).not.toHaveProperty("label");
   });
 
-  it("refuses a label over the maximum length before writing anything", () => {
+  it("refuses a label over the maximum length before writing anything", async () => {
     engine.registerAgent({ name: "ghost" });
 
-    expectCode(
+    await expectVaultError(
       () => engine.createToken("ghost", ["use"], 60_000, { label: "x".repeat(256) }),
       ErrorCode.INVALID_INPUT,
     );
@@ -622,7 +598,7 @@ describe("grantPolicy registration gate", () => {
   it("refuses an unregistered agent principal before writing a policy row", async () => {
     const secretId = await makeSecret("db-password");
 
-    expectCode(
+    await expectVaultError(
       () =>
         engine.grantPolicy(
           { secretId, principalType: "agent", principalId: "ghost2", permissions: ["read"] },
@@ -639,7 +615,7 @@ describe("grantPolicy registration gate", () => {
     engine.registerAgent({ name: "ghost2" });
     engine.deactivateAgent("ghost2");
 
-    expectCode(
+    await expectVaultError(
       () =>
         engine.grantPolicy(
           { secretId, principalType: "agent", principalId: "ghost2", permissions: ["read"] },
@@ -652,7 +628,7 @@ describe("grantPolicy registration gate", () => {
   it("refuses a create grant before reaching the registration gate", async () => {
     const secretId = await makeSecret("db-password");
 
-    expectCode(
+    await expectVaultError(
       () =>
         engine.grantPolicy(
           { secretId, principalType: "agent", principalId: "ghost2", permissions: ["create"] },
@@ -727,8 +703,11 @@ describe("listIssuedTokens", () => {
     expect(listed[0]?.subject).toBe("ghost");
   });
 
-  it("refuses an unknown agent filter", () => {
-    expectCode(() => engine.listIssuedTokens({ agent: "missing" }), ErrorCode.AGENT_NOT_FOUND);
+  it("refuses an unknown agent filter", async () => {
+    await expectVaultError(
+      () => engine.listIssuedTokens({ agent: "missing" }),
+      ErrorCode.AGENT_NOT_FOUND,
+    );
   });
 
   it("orders newest first and writes no audit row", () => {
@@ -765,7 +744,7 @@ describe("listIssuedTokens", () => {
 
   it("refuses on a sealed vault", async () => {
     await engine.lock();
-    expectCode(() => engine.listIssuedTokens(), ErrorCode.VAULT_LOCKED);
+    await expectVaultError(() => engine.listIssuedTokens(), ErrorCode.VAULT_LOCKED);
   });
 });
 

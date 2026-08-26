@@ -2,7 +2,7 @@ import { basename, dirname, join } from "node:path";
 import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import {
   controlledPathDirs,
   matchesHostAllowlist,
@@ -11,6 +11,7 @@ import {
   resolveAndMatchCommand,
   resolveExecutable,
 } from "./allowlist.js";
+import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 // ---------------------------------------------------------------------------
 // Host / host:port allowlist
@@ -163,31 +164,25 @@ describe("resolveAndMatchCommand", () => {
     expect(resolveAndMatchCommand(NODE_BASE, [process.execPath], [NODE_DIR])).toBe(NODE);
   });
 
-  it("denies by default when the allowlist is empty", () => {
-    try {
-      resolveAndMatchCommand(process.execPath, [], []);
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
-    }
+  it("denies by default when the allowlist is empty", async () => {
+    await expectVaultError(
+      () => resolveAndMatchCommand(process.execPath, [], []),
+      ErrorCode.COMMAND_NOT_ALLOWED,
+    );
   });
 
-  it("denies a command not in the allowlist", () => {
-    try {
-      resolveAndMatchCommand(process.execPath, ["some-other-binary"], controlledPathDirs());
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
-    }
+  it("denies a command not in the allowlist", async () => {
+    await expectVaultError(
+      () => resolveAndMatchCommand(process.execPath, ["some-other-binary"], controlledPathDirs()),
+      ErrorCode.COMMAND_NOT_ALLOWED,
+    );
   });
 
-  it("denies an unresolvable command", () => {
-    try {
-      resolveAndMatchCommand("definitely-not-real-xyz", ["definitely-not-real-xyz"], []);
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
-    }
+  it("denies an unresolvable command", async () => {
+    await expectVaultError(
+      () => resolveAndMatchCommand("definitely-not-real-xyz", ["definitely-not-real-xyz"], []),
+      ErrorCode.COMMAND_NOT_ALLOWED,
+    );
   });
 });
 
@@ -234,24 +229,21 @@ describeWindows("Windows batch file exclusion", () => {
     expect(resolveExecutable(join(dir, "UPPER.CMD"), [])).toBeNull();
   });
 
-  it("denies a batch file at the command-allowlist choke point even when allowlisted", () => {
+  it("denies a batch file at the command-allowlist choke point even when allowlisted", async () => {
     const cmd = join(dir, "tool.cmd");
-    try {
-      resolveAndMatchCommand(cmd, [cmd], []);
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
-    }
+    await expectVaultError(
+      () => resolveAndMatchCommand(cmd, [cmd], []),
+      ErrorCode.COMMAND_NOT_ALLOWED,
+    );
   });
 
-  it("rejects a symlink whose resolved target is a batch file", (ctx) => {
+  it("rejects a symlink whose resolved target is a batch file", async (ctx) => {
     if (!symlinkToBatch) return ctx.skip();
-    expect(resolveExecutable(symlinkToBatch, [])).toBeNull();
-    try {
-      resolveAndMatchCommand(symlinkToBatch, [symlinkToBatch], []);
-      expect.fail("should throw");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
-    }
+    const link = symlinkToBatch;
+    expect(resolveExecutable(link, [])).toBeNull();
+    await expectVaultError(
+      () => resolveAndMatchCommand(link, [link], []),
+      ErrorCode.COMMAND_NOT_ALLOWED,
+    );
   });
 });

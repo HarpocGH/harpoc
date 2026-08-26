@@ -1,5 +1,5 @@
 import { useState } from "preact/hooks";
-import { cycleTheme, storedTheme } from "../theme";
+import { appliedTheme, cycleTheme } from "../theme";
 
 const LINKS = [
   ["/", "Dashboard"],
@@ -11,7 +11,7 @@ const LINKS = [
 ] as const;
 
 export function Nav({ route }: { route: string }) {
-  const [theme, setThemeState] = useState(storedTheme());
+  const [theme, setThemeState] = useState(appliedTheme());
   return (
     <nav class="rail">
       {LINKS.map(([target, label]) => (
