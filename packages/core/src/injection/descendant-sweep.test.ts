@@ -132,12 +132,13 @@ describe("sweepDescendants", () => {
   // inside the bound, the second outlives it — the result must say so.
   it("reports the kills that landed before the bound expired", async () => {
     let calls = 0;
+    let pending: NodeJS.Timeout | undefined;
     const killPid = vi.fn(
       () =>
         new Promise<void>((resolve) => {
           calls += 1;
           if (calls === 1) resolve();
-          else setTimeout(resolve, 300);
+          else pending = setTimeout(resolve, 300);
         }),
     );
     const d = deps(
@@ -147,11 +148,15 @@ describe("sweepDescendants", () => {
       ],
       { killPid },
     );
-    await expect(sweepDescendants(7, WINDOW, d, 100)).resolves.toEqual({
-      killed: 1,
-      failed: true,
-    });
-    expect(killPid).toHaveBeenCalledTimes(2);
+    try {
+      await expect(sweepDescendants(7, WINDOW, d, 100)).resolves.toEqual({
+        killed: 1,
+        failed: true,
+      });
+      expect(killPid).toHaveBeenCalledTimes(2);
+    } finally {
+      clearTimeout(pending);
+    }
   });
 
   it.each([0, -1, 1.5, Number.NaN])(
@@ -169,6 +174,20 @@ describe("sweepDescendants", () => {
 
 const exitOf = (child: ChildProcess): Promise<void> =>
   new Promise((resolve) => child.once("exit", () => resolve()));
+
+const POLL_INTERVAL_MS = 250;
+const POLL_DEADLINE_MS = 10_000;
+
+/** Polls until the listing is empty or the deadline passes; resolves the last listing either way. */
+async function untilEmpty(list: () => Promise<DescendantProcess[]>): Promise<DescendantProcess[]> {
+  const deadline = Date.now() + POLL_DEADLINE_MS;
+  let last = await list();
+  while (last.length > 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    last = await list();
+  }
+  return last;
+}
 
 describe.runIf(process.platform === "win32")("win32SweepDeps — live helpers", () => {
   it("killPid tolerates a process that is already gone (taskkill exit 128)", async () => {
@@ -239,7 +258,10 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
     );
 
     expect(result.killed).toBeGreaterThanOrEqual(1);
-    await new Promise((r) => setTimeout(r, 1_000));
-    await expect(live.listDescendants(pid)).resolves.toEqual([]);
-  }, 30_000);
+    // taskkill reports success once the kill is delivered, not once the
+    // process is gone: under load the listing can still see the grandchild
+    // for a moment, so wait for it to disappear rather than for a fixed
+    // settle. The last listing is what fails, so a survivor stays visible.
+    await expect(untilEmpty(() => live.listDescendants(pid))).resolves.toEqual([]);
+  }, 45_000);
 });

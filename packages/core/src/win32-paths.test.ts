@@ -22,6 +22,11 @@ describe("system32Path", () => {
     );
   });
 
+  it("names System32 itself with no segments", () => {
+    process.env["SystemRoot"] = "D:\\Win";
+    expect(system32Path()).toMatch(/^D:\\Win[\\/]System32$/);
+  });
+
   it("falls back to C:\\Windows when SystemRoot is unset", () => {
     delete process.env["SystemRoot"];
     expect(system32Path("icacls.exe")).toMatch(/^C:\\Windows[\\/]System32[\\/]icacls\.exe$/);

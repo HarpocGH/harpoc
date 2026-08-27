@@ -70,19 +70,15 @@ export class DatabaseInjector {
     secretId: string | undefined,
     attribution: AuditAttribution | undefined,
   ): ResolvedAdapter {
-    let resolved: ResolvedAdapter | undefined;
     if (isCommandEngine(action.engine)) {
       const adapter = this.commandAdapters[action.engine];
-      if (adapter) resolved = { kind: "command", adapter };
+      if (adapter) return { kind: "command", adapter };
     } else {
       const adapter = this.adapters[action.engine];
-      if (adapter) resolved = { kind: "sql", adapter };
+      if (adapter) return { kind: "sql", adapter };
     }
-    if (!resolved) {
-      this.audit(action, secretId, { error: "UNSUPPORTED_DB_ENGINE" }, false, attribution);
-      throw VaultError.unsupportedDbEngine(action.engine);
-    }
-    return resolved;
+    this.audit(action, secretId, { error: "UNSUPPORTED_DB_ENGINE" }, false, attribution);
+    throw VaultError.unsupportedDbEngine(action.engine);
   }
 
   async executeWithSecret(

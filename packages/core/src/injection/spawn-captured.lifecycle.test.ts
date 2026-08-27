@@ -97,7 +97,8 @@ describe("spawnCaptured lifecycle (M4)", () => {
     // at the latest. On win32 the spawn itself settles only after the taskkill
     // wait and the descendant sweep — up to 27 s past the timeout, the bound
     // spawnCaptured documents — so this 9 s wait starts after that, and the
-    // budget below covers 2 + 27 + 9 with a margin for a cold PowerShell host.
+    // budget below covers 2 + 27 + 9 plus scheduler margin (27 s already is the
+    // cold-host worst case).
     await sleep(9_000);
     expect(existsSync(marker)).toBe(false);
   }, 40_000);

@@ -28,7 +28,7 @@ export interface DescendantProcess {
 }
 
 /** The child's lifetime: a survivor was created after the spawn and before the exit. */
-export interface DescendantSweepWindow {
+export interface DescendantLifetime {
   spawnedAtMs: number;
   exitedAtMs: number;
 }
@@ -56,7 +56,7 @@ const HELPER_TIMEOUT_MS = 10_000;
 
 export async function sweepDescendants(
   pid: number,
-  lifetime: DescendantSweepWindow,
+  lifetime: DescendantLifetime,
   deps: DescendantSweepDeps = win32SweepDeps(),
   timeoutMs: number = DESCENDANT_SWEEP_TIMEOUT_MS,
 ): Promise<DescendantSweepResult> {
@@ -78,7 +78,7 @@ export async function sweepDescendants(
     try {
       survivors = await deps.listDescendants(pid);
     } catch {
-      return { killed: 0, failed: true };
+      return { killed, failed: true };
     }
     let failed = false;
     for (const proc of survivors) {
