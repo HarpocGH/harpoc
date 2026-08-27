@@ -128,6 +128,32 @@ describe("sweepDescendants", () => {
     expect(killPid).toHaveBeenCalledTimes(1);
   });
 
+  // RED while expiry resolves a hard-coded { killed: 0 }: the first kill lands
+  // inside the bound, the second outlives it — the result must say so.
+  it("reports the kills that landed before the bound expired", async () => {
+    let calls = 0;
+    const killPid = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          calls += 1;
+          if (calls === 1) resolve();
+          else setTimeout(resolve, 300);
+        }),
+    );
+    const d = deps(
+      [
+        { pid: 11, createdAtMs: EXITED_AT - 10 },
+        { pid: 12, createdAtMs: EXITED_AT - 10 },
+      ],
+      { killPid },
+    );
+    await expect(sweepDescendants(7, WINDOW, d, 100)).resolves.toEqual({
+      killed: 1,
+      failed: true,
+    });
+    expect(killPid).toHaveBeenCalledTimes(2);
+  });
+
   it.each([0, -1, 1.5, Number.NaN])(
     "refuses a non-positive-integer pid %p without listing",
     async (pid) => {

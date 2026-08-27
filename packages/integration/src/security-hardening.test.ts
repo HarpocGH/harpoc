@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
 import { describe, it, expect, beforeAll, afterAll, vi, beforeEach, afterEach } from "vitest";
 import { VaultEngine, wipeBuffer, encrypt, SqliteStore } from "@harpoc/core";
 import {
@@ -19,7 +20,6 @@ import {
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { expectVaultError } from "./test-helpers/expect-vault-error.js";
-import { randomBytes } from "node:crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = join(__filename, "..");
@@ -510,9 +510,7 @@ describe("Lockout Progression", () => {
     for (let i = 0; i < 4; i++) {
       const engine = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
       try {
-        await engine.unlock("wrong-pw-attempt");
-      } catch (e) {
-        expect((e as VaultError).code).toBe(ErrorCode.INVALID_PASSWORD);
+        await expectVaultError(() => engine.unlock("wrong-pw-attempt"), ErrorCode.INVALID_PASSWORD);
       } finally {
         await engine.destroy();
       }

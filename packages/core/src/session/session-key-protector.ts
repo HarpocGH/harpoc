@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
 import type { SessionKeyProtectionScheme } from "@harpoc/shared";
 import { VaultError } from "@harpoc/shared";
 import { wipeBuffer } from "../crypto/random.js";
+import { system32Path } from "../win32-paths.js";
 import { runKeystoreHelper } from "./keystore-helper.js";
 import { KeychainWrappingKeyStore } from "./keychain-store.js";
 import {
@@ -74,8 +74,7 @@ function dpapiScript(method: "Protect" | "Unprotect"): string {
 }
 
 function defaultPowershellPath(): string {
-  const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
-  return join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  return system32Path("WindowsPowerShell", "v1.0", "powershell.exe");
 }
 
 const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;

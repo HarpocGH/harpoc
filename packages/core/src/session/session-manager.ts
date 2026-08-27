@@ -20,6 +20,7 @@ import {
   sessionFileSchema,
 } from "@harpoc/shared";
 import { wipeBuffer } from "../crypto/random.js";
+import { system32Path } from "../win32-paths.js";
 import { createSessionKeyProtector } from "./session-key-protector.js";
 import type { SessionKeyProtector } from "./session-key-protector.js";
 
@@ -344,7 +345,7 @@ export class SessionManager {
    * the shell's removal, so the account name comes from the process itself.
    */
   private restrictWindowsAcl(): void {
-    const icacls = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "icacls.exe");
+    const icacls = system32Path("icacls.exe");
     try {
       const account = userInfo().username;
       if (!account) throw new Error("could not determine the current account name");

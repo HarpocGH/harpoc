@@ -63,7 +63,7 @@ describe("startCliServerOnFreePort", () => {
       expect(started.port).not.toBe(taken);
       const res = await fetch(`http://127.0.0.1:${String(started.port)}/api/v1/health`);
       await res.text();
-      expect(res.ok).toBe(true);
+      expect(res.status).toBe(200);
     } finally {
       if (started) await started.server.stop();
       await new Promise<void>((resolve) => blocker.close(() => resolve()));

@@ -29,9 +29,11 @@ describe("parseHttpPortOption", () => {
 
   // Source-text tripwire: main() is not exported and no test spawns the binary,
   // so this is what keeps index.ts on the strict parser.
-  it("index.ts routes --port through parseHttpPortOption and never Number()s it", () => {
+  it("index.ts routes --port through parseHttpPortOption and never coerces it", () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     expect(source).toContain("parseHttpPortOption(");
-    expect(source).not.toContain("Number(values.port)");
+    // Rename-proof: index.ts has no numeric coercion at all — every numeric
+    // flag routes through shared's isDecimalInteger via parseHttpPortOption.
+    expect(source).not.toMatch(/\b(Number|parseInt|parseFloat)\(/);
   });
 });

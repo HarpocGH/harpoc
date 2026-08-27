@@ -4,13 +4,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ErrorCode, VAULT_DB_NAME, VAULT_DIR_NAME } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
-import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 import {
   createEngine,
   loadUnlockedEngine,
   resolveSecretId,
   resolveVaultDir,
 } from "./vault-loader.js";
+import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 let tempDir: string;
 

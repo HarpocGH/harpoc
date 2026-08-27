@@ -27,6 +27,11 @@ import { defaultDbAdapters, defaultDbCommandAdapters, defaultDbPort } from "./db
 import { mapStringLeaves, redactSecretEncodings } from "./output-sanitizer.js";
 import { validateHostPort } from "./url-validator.js";
 
+/** The adapter an action dispatches through, tagged so each arm narrows without a cast. */
+type ResolvedAdapter =
+  | { kind: "command"; adapter: DbCommandAdapter }
+  | { kind: "sql"; adapter: DbEngineAdapter };
+
 /**
  * Executes a SQL query with an injected credential (request-mediated injection,
  * thesis §4.5.5). The vault assembles the connection in-process — the credential
@@ -54,6 +59,32 @@ export class DatabaseInjector {
     this.commandAdapters = commandAdapters ?? defaultDbCommandAdapters();
   }
 
+  /**
+   * Resolves the action's adapter ahead of every pre-connect step, so an
+   * unsupported engine is refused — and its audit row written — before the
+   * host is parsed, allowlisted or resolved: the refusal row carries no
+   * `host`/`port` and is always the first row the action writes.
+   */
+  private resolveAdapter(
+    action: DatabaseAction,
+    secretId: string | undefined,
+    attribution: AuditAttribution | undefined,
+  ): ResolvedAdapter {
+    let resolved: ResolvedAdapter | undefined;
+    if (isCommandEngine(action.engine)) {
+      const adapter = this.commandAdapters[action.engine];
+      if (adapter) resolved = { kind: "command", adapter };
+    } else {
+      const adapter = this.adapters[action.engine];
+      if (adapter) resolved = { kind: "sql", adapter };
+    }
+    if (!resolved) {
+      this.audit(action, secretId, { error: "UNSUPPORTED_DB_ENGINE" }, false, attribution);
+      throw VaultError.unsupportedDbEngine(action.engine);
+    }
+    return resolved;
+  }
+
   async executeWithSecret(
     action: DatabaseAction,
     secretValue: Uint8Array,
@@ -62,14 +93,7 @@ export class DatabaseInjector {
     secretId?: string,
     attribution?: AuditAttribution,
   ): Promise<DatabaseResult> {
-    const adapter = isCommandEngine(action.engine) ? undefined : this.adapters[action.engine];
-    const commandAdapter = isCommandEngine(action.engine)
-      ? this.commandAdapters[action.engine]
-      : undefined;
-    if (!adapter && !commandAdapter) {
-      this.audit(action, secretId, { error: "UNSUPPORTED_DB_ENGINE" }, false, attribution);
-      throw VaultError.unsupportedDbEngine(action.engine);
-    }
+    const resolved = this.resolveAdapter(action, secretId, attribution);
 
     const { host, port } = parseHostPort(action.host, action.port, defaultDbPort(action.engine));
 
@@ -120,13 +144,13 @@ export class DatabaseInjector {
       timeoutMs,
     };
 
-    if (commandAdapter) {
+    if (resolved.kind === "command") {
       // Command-style engines (redis, mongodb) have no separate connect/query
       // split — `execute` owns its own connection lifecycle end to end — so a
       // failure anywhere inside it (connect or command) surfaces as one
       // DB_QUERY_FAILED, the same code an equivalent SQL query error maps to.
       try {
-        const res = await commandAdapter.execute(connectOpts, action.command);
+        const res = await resolved.adapter.execute(connectOpts, action.command);
         const { result, truncated } = this.toDatabaseResult(res, redactCredential);
         this.audit(
           action,
@@ -143,10 +167,8 @@ export class DatabaseInjector {
       }
     }
 
-    // adapter is guaranteed defined here: the unsupported-engine guard above
-    // requires at least one of adapter/commandAdapter, and isCommandEngine
-    // false means commandAdapter is undefined.
-    const sqlAdapter = adapter as DbEngineAdapter;
+    // Narrowed by the command arm above, which returns or throws on every path.
+    const sqlAdapter = resolved.adapter;
     let connection;
     try {
       connection = await sqlAdapter.connect(connectOpts);

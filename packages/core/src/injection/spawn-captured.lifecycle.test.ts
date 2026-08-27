@@ -94,10 +94,13 @@ describe("spawnCaptured lifecycle (M4)", () => {
     // would have written the marker with the credential still in its env. The
     // kill fires at t+2 s; the grandchild's 6 s timer starts at its own boot,
     // allowed the same 2 s the child had, so the marker would land by t+10 s
-    // at the latest; this wait puts the assertion at t+11 s.
+    // at the latest. On win32 the spawn itself settles only after the taskkill
+    // wait and the descendant sweep — up to 27 s past the timeout, the bound
+    // spawnCaptured documents — so this 9 s wait starts after that, and the
+    // budget below covers 2 + 27 + 9 with a margin for a cold PowerShell host.
     await sleep(9_000);
     expect(existsSync(marker)).toBe(false);
-  }, 25_000);
+  }, 40_000);
 
   it("control: an ordinary command still returns its full output and exit code", async () => {
     const result = await spawnCaptured(

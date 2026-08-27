@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext } from "@harpoc/shared";
-import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
 import type { DecryptedAuditEvent } from "./audit/audit-query.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
 import { VaultEngine } from "./vault-engine.js";
@@ -197,28 +197,25 @@ describe("setAgentPermissions", () => {
     const secretId = await makeSecret("db-password");
     engine.registerAgent({ name: "alpha" });
 
-    let matrixThrown: unknown;
-    try {
-      engine.setAgentPermissions("alpha", secretId, ["create"], undefined, "test-admin");
-    } catch (err) {
-      matrixThrown = err;
-    }
-    expect(matrixThrown, "expected INVALID_INPUT").toBeInstanceOf(VaultError);
-    expect((matrixThrown as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
+    const matrixThrown = await expectVaultError(
+      () => engine.setAgentPermissions("alpha", secretId, ["create"], undefined, "test-admin"),
+      ErrorCode.INVALID_INPUT,
+    );
+    const grantThrown = await expectVaultError(
+      () =>
+        engine.grantPolicy(
+          {
+            secretId,
+            principalType: "agent",
+            principalId: "alpha",
+            permissions: ["create"],
+          },
+          "test-admin",
+        ),
+      ErrorCode.INVALID_INPUT,
+    );
 
-    let grantThrown: unknown;
-    try {
-      engine.grantPolicy(
-        { secretId, principalType: "agent", principalId: "alpha", permissions: ["create"] },
-        "test-admin",
-      );
-    } catch (err) {
-      grantThrown = err;
-    }
-    expect(grantThrown, "expected INVALID_INPUT").toBeInstanceOf(VaultError);
-    expect((grantThrown as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
-
-    expect((matrixThrown as VaultError).message).toBe((grantThrown as VaultError).message);
+    expect(matrixThrown.message).toBe(grantThrown.message);
     expect(engine.listPolicies(secretId)).toHaveLength(0);
     expect(rows(AuditEventType.POLICY_GRANT)).toHaveLength(0);
   });

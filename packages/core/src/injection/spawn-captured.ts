@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { join } from "node:path";
 import { MAX_PROCESS_OUTPUT_BYTES } from "@harpoc/shared";
+import { system32Path } from "../win32-paths.js";
 import { CappedOutput } from "./capped-output.js";
 import { sweepDescendants } from "./descendant-sweep.js";
 import type { FsIsolationMechanism } from "./fs-isolation.js";
@@ -94,7 +94,7 @@ function killTree(child: ChildProcess): Promise<void> {
     return new Promise<void>((resolve) => {
       let killer: ChildProcess;
       try {
-        const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+        const taskkill = system32Path("taskkill.exe");
         killer = spawn(taskkill, ["/pid", String(pid), "/T", "/F"], {
           shell: false,
           windowsHide: true,
@@ -139,10 +139,16 @@ function killTree(child: ChildProcess): Promise<void> {
  * process group, settlement is driven by the child's own `'exit'` with a
  * bounded flush grace (not by `'close'`, which a surviving grandchild holding
  * the inherited stdio can withhold forever), and a post-kill backstop settles
- * even if the kill itself does not take — within KILL_HELPER_TIMEOUT_MS +
- * KILL_SETTLE_MS of the timeout. A pending promise here would strand
- * the caller's `finally` — the plaintext wipe, the ephemeral ssh-agent socket
- * and the identity/known-hosts temp files all hang off it.
+ * even if the kill itself does not take. On win32 — where the kill is a
+ * taskkill helper and a timed-out exit starts the descendant sweep — a spawn
+ * whose exit never lands settles within KILL_HELPER_TIMEOUT_MS +
+ * KILL_SETTLE_MS (12 s) of the timeout, and one whose exit does land settles
+ * within DESCENDANT_SWEEP_TIMEOUT_MS (15 s) of that exit; since the exit
+ * itself lands inside the first bound, the collapsed worst case is
+ * timeout + 27 s. POSIX has no helper and no sweep: timeout + KILL_SETTLE_MS.
+ * A pending promise here would strand the caller's `finally` — the plaintext
+ * wipe, the ephemeral ssh-agent socket and the identity/known-hosts temp
+ * files all hang off it.
  *
  * Isolation — network, filesystem or both — is applied here, at the single
  * spawn seam, after the caller's allowlist resolution, so no process-mediated

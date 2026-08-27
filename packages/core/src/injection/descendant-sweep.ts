@@ -20,7 +20,7 @@
  * sweep existed (fail-open).
  */
 import { spawn } from "node:child_process";
-import { join } from "node:path";
+import { system32Path } from "../win32-paths.js";
 
 export interface DescendantProcess {
   pid: number;
@@ -56,18 +56,19 @@ const HELPER_TIMEOUT_MS = 10_000;
 
 export async function sweepDescendants(
   pid: number,
-  window: DescendantSweepWindow,
+  lifetime: DescendantSweepWindow,
   deps: DescendantSweepDeps = win32SweepDeps(),
   timeoutMs: number = DESCENDANT_SWEEP_TIMEOUT_MS,
 ): Promise<DescendantSweepResult> {
   if (!Number.isInteger(pid) || pid <= 0) return { killed: 0, failed: true };
 
   let expired = false;
+  let killed = 0;
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<DescendantSweepResult>((resolve) => {
     timer = setTimeout(() => {
       expired = true;
-      resolve({ killed: 0, failed: true });
+      resolve({ killed, failed: true });
     }, timeoutMs);
     if (timer.unref) timer.unref();
   });
@@ -79,11 +80,12 @@ export async function sweepDescendants(
     } catch {
       return { killed: 0, failed: true };
     }
-    let killed = 0;
     let failed = false;
     for (const proc of survivors) {
       if (expired) break;
-      if (proc.createdAtMs < window.spawnedAtMs || proc.createdAtMs > window.exitedAtMs) continue;
+      if (proc.createdAtMs < lifetime.spawnedAtMs || proc.createdAtMs > lifetime.exitedAtMs) {
+        continue;
+      }
       try {
         await deps.killPid(proc.pid);
         killed += 1;
@@ -99,10 +101,6 @@ export async function sweepDescendants(
   } finally {
     if (timer) clearTimeout(timer);
   }
-}
-
-function systemRoot(): string {
-  return process.env["SystemRoot"] ?? "C:\\Windows";
 }
 
 /** One line per descendant: `<pid> <unix-ms>`. The pid is a validated integer, never operator text. */
@@ -140,6 +138,7 @@ function runHelper(executable: string, args: string[]): Promise<HelperOutcome> {
       child.kill();
       finish(new Error("descendant sweep helper timed out"), null);
     }, HELPER_TIMEOUT_MS);
+    if (timer.unref) timer.unref();
     child.stdout?.on("data", (chunk: Buffer) => {
       bytes += chunk.length;
       if (bytes <= MAX_LISTING_BYTES) chunks.push(chunk);
@@ -153,8 +152,8 @@ function runHelper(executable: string, args: string[]): Promise<HelperOutcome> {
 const TASKKILL_NOT_FOUND = 128;
 
 export function win32SweepDeps(): DescendantSweepDeps {
-  const powershell = join(systemRoot(), "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-  const taskkill = join(systemRoot(), "System32", "taskkill.exe");
+  const powershell = system32Path("WindowsPowerShell", "v1.0", "powershell.exe");
+  const taskkill = system32Path("taskkill.exe");
   return {
     async listDescendants(pid) {
       const { code, stdout } = await runHelper(powershell, [

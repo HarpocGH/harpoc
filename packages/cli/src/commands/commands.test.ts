@@ -13,8 +13,8 @@ import {
 } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
 import type { SecretInfo, DecryptedAuditEvent } from "@harpoc/core";
-import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 import { resolveSecretId } from "../utils/vault-loader.js";
+import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 /**
  * These tests exercise VaultEngine directly — the same operations the CLI commands perform.

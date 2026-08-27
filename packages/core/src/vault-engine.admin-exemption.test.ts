@@ -9,8 +9,8 @@ import type {
   TokenPrincipalType,
 } from "@harpoc/shared";
 import { callerFromToken, ErrorCode, SecretType } from "@harpoc/shared";
-import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 import { VaultEngine } from "./vault-engine.js";
+import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 /**
  * R7 (v1.4.1): an admin-scoped user-type token is the operator's own proxy, so

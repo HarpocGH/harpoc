@@ -338,7 +338,7 @@ describe("SecretDetailPage", () => {
   it.each([
     ["certificate", /renew certificate/i],
     ["oauth_token", /refresh token/i],
-  ] as const)("the %s lifecycle button is type=button", async (type, name) => {
+  ] as const)("the lifecycle button on a %s secret is type=button", async (type, name) => {
     const stub = api({ getSecret: vi.fn().mockResolvedValue(secret({ type })) });
     render(<SecretDetailPage api={stub} handle="secret://k1" />);
     const button = await screen.findByRole("button", { name });

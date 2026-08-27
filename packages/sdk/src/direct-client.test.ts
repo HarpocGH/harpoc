@@ -897,13 +897,15 @@ describe("DirectClient", () => {
       }
     });
 
-    // RED before startOAuthFlow's post-import re-check: on a warm client the
-    // manager load resolves without ever yielding to a close(), so only the
-    // peer import's await was left to see it — and an auth-code start binds a
-    // callback socket on a client the embedder has already shut down.
-    // The pin relies on close() landing in the peer import's await — the one
-    // yield a warm client has — and would pass vacuously if that await moved
-    // above the loader; there is no ordering-free way to observe the window.
+    // RED before startOAuthFlow's post-import re-check. With the manager
+    // injected, the loader resolves on a warm client without ever yielding to
+    // a close(): the close() below lands in the loader's own await, after the
+    // loader's check has already passed, so only the re-check after the peer
+    // import can see it — and without that re-check an auth-code start binds a
+    // callback socket on a client the embedder has already shut down. The pin
+    // depends on that order: with the import above the loader, the loader's
+    // check would refuse instead and the row would pass vacuously; there is no
+    // ordering-free way to observe the window.
     it("startOAuthFlow racing close() on a warm client starts no flow", async () => {
       const engine = createMockEngine();
       const oauthManager = createFakeOAuthManager();

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, DatabaseAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode, MAX_DB_RESULT_BYTES } from "@harpoc/shared";
+import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
 import { DatabaseInjector } from "./database-injector.js";
 import type {
   DbCommandAdapter,
@@ -265,6 +266,47 @@ describe("DatabaseInjector", () => {
     await expect(
       inj.executeWithSecret(action({ engine: "mysql" }), SECRET, policy(), undefined),
     ).rejects.toMatchObject({ code: ErrorCode.UNSUPPORTED_DB_ENGINE });
+  });
+
+  // The adapter is resolved ahead of every pre-connect step: a target that
+  // would fail all three of them (an out-of-range embedded port that
+  // `parseHostPort` would refuse, a host:port `parseHostPort` would produce
+  // that the allowlist wouldn't match, and a private address the SSRF floor
+  // would block) still refuses as UNSUPPORTED_DB_ENGINE, with exactly one
+  // audit row whose detail names no host or port — so a reorder past any one
+  // of the three steps would change the error code or the row.
+  it("refuses an unsupported engine before parsing, allowlisting or resolving the host", async () => {
+    const log = vi.fn();
+    const inj = new DatabaseInjector({ log } as unknown as AuditLogger, {
+      postgresql: new MockAdapter(),
+    });
+    await expectVaultError(
+      () =>
+        inj.executeWithSecret(
+          action({ engine: "mysql", host: "10.0.0.1:0" }),
+          SECRET,
+          policy({ host_allowlist: ["db.example.com:5432"] }),
+          undefined,
+          "secret-1",
+        ),
+      ErrorCode.UNSUPPORTED_DB_ENGINE,
+    );
+    expect(log).toHaveBeenCalledTimes(1);
+    const row = log.mock.calls[0]?.[0] as AuditLogOptions;
+    expect(row.success).toBe(false);
+    expect(row.secretId).toBe("secret-1");
+    expect(Object.keys(row.detail ?? {}).sort()).toEqual([
+      "context",
+      "database",
+      "engine",
+      "error",
+    ]);
+    expect(row.detail).toMatchObject({
+      context: "database",
+      engine: "mysql",
+      database: "app",
+      error: "UNSUPPORTED_DB_ENGINE",
+    });
   });
 
   it("refuses an unknown SQL engine key in the adapter registry (compile-time)", () => {
