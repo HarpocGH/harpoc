@@ -71,4 +71,28 @@ describe("descendant sweep bounds (ruled 2026-08-29)", () => {
   it("bounds the whole sweep at 30 s", () => {
     expect(DESCENDANT_SWEEP_TIMEOUT_MS).toBe(30_000);
   });
+
+  // The live orphan test proves the sweep's logic against a real process
+  // tree, not the CI runner's WMI latency: it builds its deps with a wider
+  // helper bound. Product callers pass nothing and keep the 20 s default.
+  it("lets a caller widen the helper bound without touching the default", async () => {
+    let settled: "pending" | "rejected" | "resolved" = "pending";
+    const listing = win32SweepDeps({ helperTimeoutMs: 60_000 })
+      .listDescendants(1)
+      .then(
+        () => {
+          settled = "resolved";
+        },
+        () => {
+          settled = "rejected";
+        },
+      );
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(settled).toBe("pending");
+
+    await vi.advanceTimersByTimeAsync(1);
+    await listing;
+    expect(settled).toBe("rejected");
+  });
 });

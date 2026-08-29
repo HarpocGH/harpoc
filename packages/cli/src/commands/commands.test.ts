@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AuditEventType,
   ErrorCode,
@@ -15,6 +15,21 @@ import { VaultEngine } from "@harpoc/core";
 import type { SecretInfo, DecryptedAuditEvent } from "@harpoc/core";
 import { resolveSecretId } from "../utils/vault-loader.js";
 import { expectVaultError } from "../test-helpers/expect-vault-error.js";
+
+// Mock argon2 for speed (the connect.e2e / core / oauth-proxy stand-in): nothing
+// here depends on the KDF's cost, and the real RFC 9106 profile made the
+// lockout test six 2 GiB derivations — 31–42 s on a loaded windows-latest
+// runner against the 30 s ceiling (18b58b9). core keeps the real-Argon2id suites.
+vi.mock("argon2", () => ({
+  hash: async (password: Buffer | string, opts: { salt: Buffer | Uint8Array }) => {
+    const { createHash } = await import("node:crypto");
+    const salt = opts.salt instanceof Uint8Array ? Buffer.from(opts.salt) : opts.salt;
+    return createHash("sha256")
+      .update(typeof password === "string" ? password : Buffer.from(password))
+      .update(salt)
+      .digest();
+  },
+}));
 
 /**
  * These tests exercise VaultEngine directly — the same operations the CLI commands perform.

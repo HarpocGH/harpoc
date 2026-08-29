@@ -127,7 +127,10 @@ describe("spawnCaptured lifecycle (M4)", () => {
     expect(result.timed_out).toBe(true);
     expect(result.stdout).toContain("before");
     expect(result.spawn_failed).toBe(false);
-  }, 15_000);
+    // Times a child out, so on win32 its settlement waits for the descendant
+    // sweep — up to the same timeout + 42 s bound as the tree-kill test above
+    // (a 15 s budget lost to the 20 s helper bound on windows-latest, 18b58b9).
+  }, 60_000);
 
   it("control: a failed spawn still settles as spawn_failed", async () => {
     const result = await spawnCaptured(join(dir, "does-not-exist"), [], {

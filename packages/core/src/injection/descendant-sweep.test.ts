@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { sweepDescendants, win32SweepDeps } from "./descendant-sweep.js";
 import type { DescendantProcess, DescendantSweepDeps } from "./descendant-sweep.js";
 
@@ -213,16 +213,49 @@ describe.runIf(process.platform === "win32")("win32SweepDeps — live helpers", 
   }, 30_000);
 });
 
+// The live test proves the sweep's logic against a real process tree; it does
+// not certify the CI runner's WMI latency. windows-latest under the full gate
+// has answered `Get-CimInstance Win32_Process` in > 10 s on every run since
+// a7ec9fc and in > 20 s on 18b58b9's windows-22 leg (an idle host: ~250 ms;
+// the same leg's DPAPI round-trips — a fresh powershell.exe each — 0.3–0.7 s,
+// so the cost is the CIM/WMI listing, not PowerShell start-up). The product
+// keeps its 20 s / 30 s bounds and fails open past them by design; here the
+// helpers get 60 s and the sweep 90 s, so a slow provider stretches the test
+// instead of failing it, and the one-time cold cost is paid by a warm-up
+// whose duration — with the warm listing's — is printed for the CI log.
+const LIVE_HELPER_TIMEOUT_MS = 60_000;
+const LIVE_SWEEP_TIMEOUT_MS = 90_000;
+// Outlasts the pre-listing and the sweep's own listing at their 60 s bounds.
+const LIVE_LISTING_LIFETIME_MS = 150_000;
+
 describe.runIf(process.platform === "win32")("sweepDescendants — live win32 orphan", () => {
+  const live = win32SweepDeps({ helperTimeoutMs: LIVE_HELPER_TIMEOUT_MS });
+
+  beforeAll(
+    async () => {
+      const timings: string[] = [];
+      for (const label of ["cold", "warm"]) {
+        const started = Date.now();
+        let outcome = "ok";
+        try {
+          await live.listDescendants(process.pid);
+        } catch (err) {
+          outcome = err instanceof Error ? err.message : String(err);
+        }
+        timings.push(`${label}=${String(Date.now() - started)}ms (${outcome})`);
+      }
+      console.error(`[descendant-sweep live] WMI listing warm-up: ${timings.join(", ")}`);
+    },
+    LIVE_HELPER_TIMEOUT_MS * 2 + 5_000,
+  );
+
   // Survival is pinned by a second listing, not by a marker file: a cold
-  // PowerShell host plus taskkill can take seconds under load, and a marker
+  // WMI provider plus taskkill can take seconds under load, and a marker
   // written on the grandchild's own clock would race that. The grandchild's
-  // 60 s lifetime only keeps it findable long enough — past the pre-listing
-  // and the sweep's own listing at their 20 s helper bounds (windows-latest
-  // spent > 10 s on the first PowerShell host on every run since a7ec9fc) —
-  // and self-terminates it if the sweep never reaches it.
+  // lifetime only keeps it findable past the pre-listing and the sweep's own
+  // listing, and self-terminates it if the sweep never reaches it.
   it("kills a grandchild orphaned by a plain (non-tree) kill of its parent", async () => {
-    const grandchild = "setTimeout(() => {}, 60000)";
+    const grandchild = `setTimeout(() => {}, ${String(LIVE_LISTING_LIFETIME_MS)})`;
     // `detached` keeps the grandchild out of the parent's libuv job object,
     // which would otherwise kill it with the parent — the survivor the sweep
     // targets is one no job ever claimed.
@@ -249,7 +282,6 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
     await exited;
     const exitedAt = Date.now();
 
-    const live = win32SweepDeps();
     const before = await live.listDescendants(pid);
     expect(before.length).toBeGreaterThanOrEqual(1);
 
@@ -257,6 +289,7 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
       pid,
       { spawnedAtMs: spawnedAt, exitedAtMs: exitedAt },
       live,
+      LIVE_SWEEP_TIMEOUT_MS,
     );
 
     expect(result.killed).toBeGreaterThanOrEqual(1);
@@ -265,5 +298,6 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
     // for a moment, so wait for it to disappear rather than for a fixed
     // settle. The last listing is what fails, so a survivor stays visible.
     await expect(untilEmpty(() => live.listDescendants(pid))).resolves.toEqual([]);
-  }, 75_000);
+    // Budget: pre-listing (≤ 60 s) + sweep (≤ 90 s) + poll (10 s) + spawn.
+  }, 180_000);
 });

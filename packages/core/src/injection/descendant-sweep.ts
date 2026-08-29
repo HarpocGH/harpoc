@@ -124,7 +124,11 @@ interface HelperOutcome {
 }
 
 /** Rejects only when the helper could not be run to completion (spawn error, timeout); the exit code is the caller's to judge. */
-function runHelper(executable: string, args: string[]): Promise<HelperOutcome> {
+function runHelper(
+  executable: string,
+  args: string[],
+  timeoutMs: number = HELPER_TIMEOUT_MS,
+): Promise<HelperOutcome> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
       shell: false,
@@ -144,7 +148,7 @@ function runHelper(executable: string, args: string[]): Promise<HelperOutcome> {
     const timer = setTimeout(() => {
       child.kill();
       finish(new Error("descendant sweep helper timed out"), null);
-    }, HELPER_TIMEOUT_MS);
+    }, timeoutMs);
     if (timer.unref) timer.unref();
     child.stdout?.on("data", (chunk: Buffer) => {
       bytes += chunk.length;
@@ -158,17 +162,27 @@ function runHelper(executable: string, args: string[]): Promise<HelperOutcome> {
 /** taskkill exits 128 for a process that is already gone — the sweep's goal, not a failure. */
 const TASKKILL_NOT_FOUND = 128;
 
-export function win32SweepDeps(): DescendantSweepDeps {
+export interface Win32SweepDepsOptions {
+  /**
+   * Per-helper bound; defaults to `HELPER_TIMEOUT_MS`. Product callers pass
+   * nothing — the option exists so the live test can prove the sweep against a
+   * real process tree on a host whose WMI answers slower than the product is
+   * willing to wait (windows-latest under the full gate: > 20 s, vs ~250 ms idle).
+   */
+  helperTimeoutMs?: number;
+}
+
+export function win32SweepDeps(options: Win32SweepDepsOptions = {}): DescendantSweepDeps {
   const powershell = system32Path("WindowsPowerShell", "v1.0", "powershell.exe");
   const taskkill = system32Path("taskkill.exe");
+  const helperTimeoutMs = options.helperTimeoutMs ?? HELPER_TIMEOUT_MS;
   return {
     async listDescendants(pid) {
-      const { code, stdout } = await runHelper(powershell, [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        listingScript(pid),
-      ]);
+      const { code, stdout } = await runHelper(
+        powershell,
+        ["-NoProfile", "-NonInteractive", "-Command", listingScript(pid)],
+        helperTimeoutMs,
+      );
       if (code !== 0) throw new Error(`descendant sweep listing exited ${String(code)}`);
       const found: DescendantProcess[] = [];
       for (const line of stdout.split(/\r?\n/)) {
@@ -178,7 +192,11 @@ export function win32SweepDeps(): DescendantSweepDeps {
       return found;
     },
     async killPid(pid) {
-      const { code } = await runHelper(taskkill, ["/pid", String(pid), "/T", "/F"]);
+      const { code } = await runHelper(
+        taskkill,
+        ["/pid", String(pid), "/T", "/F"],
+        helperTimeoutMs,
+      );
       if (code !== 0 && code !== TASKKILL_NOT_FOUND) {
         throw new Error(`descendant sweep kill exited ${String(code)}`);
       }
