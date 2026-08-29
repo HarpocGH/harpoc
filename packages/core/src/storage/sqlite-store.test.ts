@@ -12,13 +12,15 @@ import type {
   OAuthTokenRow,
 } from "./sqlite-store.js";
 import { SqliteStore } from "./sqlite-store.js";
+import { LATEST_SCHEMA_VERSION } from "./schema.js";
 
 let store: SqliteStore;
 
 function makeSecret(overrides: Partial<Secret> = {}): Secret {
   const now = Date.now();
+  const id = `secret-${Math.random().toString(36).slice(2)}`;
   return {
-    id: `secret-${Math.random().toString(36).slice(2)}`,
+    id,
     name_encrypted: new Uint8Array([1, 2, 3]),
     name_iv: new Uint8Array(12),
     name_tag: new Uint8Array(16),
@@ -40,7 +42,7 @@ function makeSecret(overrides: Partial<Secret> = {}): Secret {
     version: 1,
     status: SecretStatus.ACTIVE,
     sync_version: 0,
-    name_hmac: null,
+    name_hmac: `hmac-${id}`,
     ...overrides,
   };
 }
@@ -116,7 +118,7 @@ describe("schema creation", () => {
   });
 
   it("sets schema_version to 12", () => {
-    expect(store.getMeta("schema_version")).toBe("12");
+    expect(store.getMeta("schema_version")).toBe(String(LATEST_SCHEMA_VERSION));
   });
 
   it("creates the live-name unique index", () => {
@@ -482,6 +484,53 @@ describe("audit_log", () => {
     }
 
     expect(store.queryAuditLog({ limit: 3 }).length).toBe(3);
+  });
+
+  it("applies visibleSecretIds before the limit", () => {
+    const row = (timestamp: number, secretId: string | null) => ({
+      timestamp,
+      event_type: AuditEventType.SECRET_READ,
+      secret_id: secretId,
+      principal_type: null,
+      principal_id: null,
+      detail_encrypted: null,
+      detail_iv: null,
+      detail_tag: null,
+      ip_address: null,
+      session_id: null,
+      success: true,
+    });
+    store.insertAuditEvent(row(1000, "id-a"));
+    store.insertAuditEvent(row(2000, "id-b"));
+
+    // Without the filter the newest row (B) wins the single slot; with it, the
+    // limit is spent on a row the caller may actually see.
+    expect(store.queryAuditLog({ limit: 1 })[0]?.secret_id).toBe("id-b");
+    const scoped = store.queryAuditLog({ visibleSecretIds: ["id-a"], limit: 1 });
+    expect(scoped).toHaveLength(1);
+    expect(scoped[0]?.secret_id).toBe("id-a");
+  });
+
+  it("an empty visibleSecretIds list leaves only the secret-less rows", () => {
+    const row = (secretId: string | null) => ({
+      timestamp: Date.now(),
+      event_type: AuditEventType.SECRET_READ,
+      secret_id: secretId,
+      principal_type: null,
+      principal_id: null,
+      detail_encrypted: null,
+      detail_iv: null,
+      detail_tag: null,
+      ip_address: null,
+      session_id: null,
+      success: true,
+    });
+    store.insertAuditEvent(row("id-a"));
+    store.insertAuditEvent(row(null));
+
+    const scoped = store.queryAuditLog({ visibleSecretIds: [] });
+    expect(scoped).toHaveLength(1);
+    expect(scoped[0]?.secret_id).toBeNull();
   });
 
   it("stores encrypted detail blobs", () => {
@@ -1316,10 +1365,11 @@ describe("concurrent file-based WAL access", () => {
   });
 });
 
-// L11: the database was created with no explicit mode, so on POSIX its
-// permissions were umask-dependent — typically world-readable — while the
-// session file beside it is deliberately 0600. Contents are KEK-encrypted, so
-// this is hardening consistency, not a confidentiality fix.
+// L11: the database file is created 0600 before SQLite opens it (D55), so on
+// POSIX its permissions no longer depend on the umask — matching the session
+// file beside it. A pre-existing file is chmod-repaired best-effort. Contents
+// are KEK-encrypted, so this is hardening consistency, not a confidentiality
+// fix.
 describe("database file permissions (L11)", () => {
   let dir: string;
   let store: SqliteStore;
@@ -1346,8 +1396,9 @@ describe("database file permissions (L11)", () => {
     expect(statSync(dbPath).mode & 0o777).toBe(0o600);
     for (const sidecar of [`${dbPath}-wal`, `${dbPath}-shm`]) {
       if (existsSync(sidecar)) {
-        // The sidecars are created by SQLite after the constructor ran, so they
-        // follow the umask; the finding is about the database file itself.
+        // SQLite's unix VFS copies the main file's mode onto -wal/-shm, so the
+        // pre-created 0600 carries over; the finding is about the database
+        // file itself, which the assertion above pins.
         expect(statSync(sidecar).isFile()).toBe(true);
       }
     }

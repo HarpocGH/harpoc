@@ -12,14 +12,18 @@ function baseToken(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
     iat: 0,
     exp: 2_000_000_000,
     jti: "jti-1",
+    principal_type: "agent",
     ...overrides,
   };
 }
 
 describe("callerFromToken", () => {
-  it("defaults an absent principal_type claim to agent (legacy tokens)", () => {
-    const caller = callerFromToken(baseToken());
-    expect(caller).toEqual({ principal_type: "agent", principal_id: "alice" });
+  it("carries the token's principal_type claim through verbatim", () => {
+    expect(callerFromToken(baseToken())).toEqual({
+      principal_type: "agent",
+      principal_id: "alice",
+    });
+    expect(callerFromToken(baseToken({ principal_type: "user" })).principal_type).toBe("user");
   });
 
   it("carries each issuable principal type through", () => {
@@ -140,8 +144,6 @@ describe("admin_scope (R7)", () => {
     expect(
       isAdminUserCaller(callerFromToken(baseToken({ scope: ["admin"], principal_type: "user" }))),
     ).toBe(true);
-    // absent type = agent
-    expect(isAdminUserCaller(callerFromToken(baseToken({ scope: ["admin"] })))).toBe(false);
     expect(
       isAdminUserCaller(callerFromToken(baseToken({ scope: ["admin"], principal_type: "agent" }))),
     ).toBe(false);

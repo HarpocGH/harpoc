@@ -76,8 +76,8 @@ function failNextAuditInsert(): void {
   });
 }
 
-function auditCount(eventType: AuditEventType): number {
-  return engine.queryAudit({ eventType }).length;
+function auditCount(eventType: AuditEventType, success?: boolean): number {
+  return engine.queryAudit({ eventType, success }).length;
 }
 
 function rawStatus(secretId: string): string | undefined {
@@ -145,11 +145,12 @@ describe("fail-closed audit: secret CRUD", () => {
     ).rejects.toThrow("audit unavailable");
 
     expect((await engine.getSecretInfo("secret://pending-key")).status).toBe(SecretStatus.PENDING);
-    expect(auditCount(AuditEventType.SECRET_CREATE)).toBe(1); // the create only
+    // Successful rows only: the rolled-back attempt writes its own denial row (E75f).
+    expect(auditCount(AuditEventType.SECRET_CREATE, true)).toBe(1); // the create only
 
     await engine.setSecretValue("secret://pending-key", new Uint8Array(Buffer.from("v1")));
     expect((await engine.getSecretInfo("secret://pending-key")).status).toBe(SecretStatus.ACTIVE);
-    expect(auditCount(AuditEventType.SECRET_CREATE)).toBe(2);
+    expect(auditCount(AuditEventType.SECRET_CREATE, true)).toBe(2);
   });
 
   it("rotateSecret rolls back value and version when the audit write fails", async () => {
@@ -168,11 +169,13 @@ describe("fail-closed audit: secret CRUD", () => {
     expect(Buffer.from(await engine.getSecretValue("secret://rotate-key")).toString()).toBe(
       "old-value",
     );
-    expect(auditCount(AuditEventType.SECRET_ROTATE)).toBe(0);
+    // Successful rows only: the rolled-back attempt writes its own denial row (E75f).
+    expect(auditCount(AuditEventType.SECRET_ROTATE, true)).toBe(0);
+    expect(auditCount(AuditEventType.SECRET_ROTATE, false)).toBe(1);
 
     await engine.rotateSecret("secret://rotate-key", new Uint8Array(Buffer.from("new-value")));
     expect((await engine.getSecretInfo("secret://rotate-key")).version).toBe(2);
-    expect(auditCount(AuditEventType.SECRET_ROTATE)).toBe(1);
+    expect(auditCount(AuditEventType.SECRET_ROTATE, true)).toBe(1);
   });
 
   it("revokeSecret rolls back the status change when the audit write fails", async () => {
@@ -186,10 +189,11 @@ describe("fail-closed audit: secret CRUD", () => {
     await expect(engine.revokeSecret("secret://revoke-key")).rejects.toThrow("audit unavailable");
 
     expect((await engine.getSecretInfo("secret://revoke-key")).status).toBe(SecretStatus.ACTIVE);
-    expect(auditCount(AuditEventType.SECRET_REVOKE)).toBe(0);
+    // Successful rows only: the rolled-back attempt writes its own denial row (E75f).
+    expect(auditCount(AuditEventType.SECRET_REVOKE, true)).toBe(0);
 
     await engine.revokeSecret("secret://revoke-key");
-    expect(auditCount(AuditEventType.SECRET_REVOKE)).toBe(1);
+    expect(auditCount(AuditEventType.SECRET_REVOKE, true)).toBe(1);
   });
 });
 
@@ -420,24 +424,73 @@ describe("fail-closed audit: tokens, OAuth flow, password change", () => {
     expect(auditCount(AuditEventType.TOKEN_REVOKE)).toBe(1);
   });
 
-  it("createOAuthSecret rolls back the OAuth row when the audit write fails, and resume recovers", async () => {
-    failNextAuditInsert();
+  it("createOAuthSecret rolls the base row back with the OAuth row and the audit row (N10)", async () => {
+    vi.spyOn(liveStore(), "insertOAuthToken").mockImplementationOnce(() => {
+      throw new Error("oauth row unavailable");
+    });
 
     await expect(engine.createOAuthSecret("oauth-atomic", providerConfig())).rejects.toThrow(
+      "oauth row unavailable",
+    );
+
+    // Base row, OAuth row and the success audit row roll back together — the
+    // D4 window is closed. What survives is the denial row the outer catch
+    // writes after the rollback (E75f): a raw failure reads INTERNAL_ERROR.
+    expect(auditCount(AuditEventType.OAUTH_AUTHORIZE, true)).toBe(0);
+    const denied = engine.queryAudit({ eventType: AuditEventType.OAUTH_AUTHORIZE });
+    expect(denied).toHaveLength(1);
+    expect(denied[0]?.success).toBe(false);
+    expect(denied[0]?.detail?.error).toBe(ErrorCode.INTERNAL_ERROR);
+    await expect(engine.resolveSecretId("secret://oauth-atomic")).rejects.toMatchObject({
+      code: ErrorCode.SECRET_NOT_FOUND,
+    });
+
+    // A retry is a fresh create, not a resume.
+    const second = await engine.createOAuthSecret("oauth-atomic", providerConfig());
+    expect(liveStore().getOAuthToken(second.secretId)).toBeDefined();
+    const [row] = engine.queryAudit({ eventType: AuditEventType.OAUTH_AUTHORIZE, success: true });
+    expect(row?.detail?.resumed).toBeUndefined();
+  });
+
+  it("a failed re-insert on the resume path keeps the previous OAuth row", async () => {
+    const first = await engine.createOAuthSecret("oauth-resume", providerConfig());
+    vi.spyOn(liveStore(), "insertOAuthToken").mockImplementationOnce(() => {
+      throw new Error("oauth row unavailable");
+    });
+
+    await expect(engine.createOAuthSecret("oauth-resume", providerConfig())).rejects.toThrow(
+      "oauth row unavailable",
+    );
+
+    // The delete + re-insert + audit row roll back together, so the
+    // previous provider row and the original create's audit row both stand.
+    expect(liveStore().getOAuthToken(first.secretId)).toBeDefined();
+    expect(auditCount(AuditEventType.OAUTH_AUTHORIZE, true)).toBe(1);
+
+    // The resumed secret outlives the rollback, so its denial row names it.
+    const denied = engine.queryAudit({ eventType: AuditEventType.OAUTH_AUTHORIZE, success: false });
+    expect(denied).toHaveLength(1);
+    expect(denied[0]?.secret_id).toBe(first.secretId);
+  });
+
+  it("createOAuthSecret rolls the base row back when the audit write fails", async () => {
+    failNextAuditInsert();
+
+    await expect(engine.createOAuthSecret("oauth-audit", providerConfig())).rejects.toThrow(
       "audit unavailable",
     );
 
-    // The D4 window made real: the base secret row committed (PENDING), the
-    // OAuth row + audit rolled back together — a visibly incomplete operation.
-    expect(auditCount(AuditEventType.OAUTH_AUTHORIZE)).toBe(0);
-    const secretId = await engine.resolveSecretId("secret://oauth-atomic");
-    expect(liveStore().getOAuthToken(secretId)).toBeUndefined();
+    // Same rollback shape as the OAuth-row failure: nothing durable survives.
+    // Successful rows only: the rolled-back attempt writes its own denial row (E75f).
+    expect(auditCount(AuditEventType.OAUTH_AUTHORIZE, true)).toBe(0);
+    await expect(engine.resolveSecretId("secret://oauth-audit")).rejects.toMatchObject({
+      code: ErrorCode.SECRET_NOT_FOUND,
+    });
 
-    // Re-running connect resumes the PENDING secret.
-    const second = await engine.createOAuthSecret("oauth-atomic", providerConfig());
-    expect(second.secretId).toBe(secretId);
-    expect(liveStore().getOAuthToken(secretId)).toBeDefined();
-    expect(auditCount(AuditEventType.OAUTH_AUTHORIZE)).toBe(1);
+    // Re-running connect creates the secret from scratch.
+    const second = await engine.createOAuthSecret("oauth-audit", providerConfig());
+    expect(liveStore().getOAuthToken(second.secretId)).toBeDefined();
+    expect(auditCount(AuditEventType.OAUTH_AUTHORIZE, true)).toBe(1);
   });
 
   it("completeOAuthFlow rolls back tokens and ACTIVE transition when the audit write fails", async () => {
@@ -472,14 +525,15 @@ describe("fail-closed audit: tokens, OAuth flow, password change", () => {
     expect(Buffer.from(after?.access_token_encrypted ?? new Uint8Array())).toEqual(
       Buffer.from(before?.access_token_encrypted ?? new Uint8Array()),
     );
-    expect(auditCount(AuditEventType.OAUTH_REFRESH)).toBe(0);
+    // Successful rows only: the rolled-back attempt writes its own denial row (E75f).
+    expect(auditCount(AuditEventType.OAUTH_REFRESH, true)).toBe(0);
 
     await engine.refreshOAuthToken(secretId);
     const rotated = liveStore().getOAuthToken(secretId);
     expect(Buffer.from(rotated?.access_token_encrypted ?? new Uint8Array())).not.toEqual(
       Buffer.from(before?.access_token_encrypted ?? new Uint8Array()),
     );
-    expect(auditCount(AuditEventType.OAUTH_REFRESH)).toBe(1);
+    expect(auditCount(AuditEventType.OAUTH_REFRESH, true)).toBe(1);
   });
 
   it("changePassword rolls back all key metas when the audit write fails (torn-KEK pin)", async () => {

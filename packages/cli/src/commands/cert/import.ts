@@ -16,7 +16,6 @@ interface CertImportOptions {
   cert: string;
   chain?: string;
   project?: string;
-  autoRenew?: boolean;
   renewBeforeDays: string;
   json?: boolean;
   token?: string;
@@ -61,10 +60,6 @@ export function registerCertImportCommand(cert: Command): void {
     .requiredOption("--cert <path>", "Certificate PEM file (may contain the chain)")
     .option("--chain <path>", "Separate chain PEM file")
     .option("--project <project>", "Project scope")
-    .option(
-      "--auto-renew",
-      "Auto ACME renewal (takes effect once the renewal daemon lands; until then use cert renew)",
-    )
     .option("--renew-before-days <n>", "Renewal window in days", "30")
     .option("--json", "Output as JSON")
     .option("--token <jwt>", TOKEN_OPTION_DESCRIPTION)
@@ -119,7 +114,6 @@ export function registerCertImportCommand(cert: Command): void {
               certificatePem,
               chainPem,
               project: options.project,
-              autoRenew: options.autoRenew ?? false,
               renewBeforeDays,
               caller: resolved?.caller,
             });

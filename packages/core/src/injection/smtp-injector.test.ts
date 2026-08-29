@@ -381,6 +381,33 @@ describe("SmtpInjector — error redaction and translation", () => {
     expect((caught as VaultError).message).not.toContain("s3cr3tpass");
   });
 
+  it("redacts a username at the shared floor (MIN_REDACTABLE_FRAGMENT)", async () => {
+    const injector = new SmtpInjector({
+      sendSmtp: () =>
+        Promise.reject(new VaultError(ErrorCode.SMTP_DELIVERY_FAILED, "relay rejected user abc")),
+    });
+
+    const err = (await injector
+      .run(baseAction(), "abc:s3cr3tpass", basePolicy({}), undefined, undefined)
+      .catch((e: unknown) => e)) as VaultError;
+
+    expect(err.message).not.toContain("abc");
+    expect(err.message).toContain("[REDACTED]");
+  });
+
+  it("leaves a 1-2 char username unredacted (would shred unrelated output)", async () => {
+    const injector = new SmtpInjector({
+      sendSmtp: () =>
+        Promise.reject(new VaultError(ErrorCode.SMTP_DELIVERY_FAILED, "relay rejected user ab")),
+    });
+
+    const err = (await injector
+      .run(baseAction(), "ab:s3cr3tpass", basePolicy({}), undefined, undefined)
+      .catch((e: unknown) => e)) as VaultError;
+
+    expect(err.message).toBe("relay rejected user ab");
+  });
+
   it("translates a reserved-header plain Error from assembleMessage into a VaultError", async () => {
     const { fn } = makeFakeSend();
     const injector = new SmtpInjector({ sendSmtp: fn });

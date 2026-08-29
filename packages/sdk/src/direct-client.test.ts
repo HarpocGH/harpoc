@@ -982,10 +982,7 @@ describe("DirectClient", () => {
       });
     });
 
-    // The defaulted fields are the schema's / engine's to fill (both say
-    // false / 30), so an omitting caller must reach the manager with them
-    // undefined rather than with values the SDK invented.
-    it("importCertificate leaves the omitted defaults undefined for the engine to fill", async () => {
+    it("importCertificate hands the engine the parsed defaults (false / 30)", async () => {
       const engine = createMockEngine();
       const certManager = createFakeCertManager();
       const client = new DirectClient(engine as never, { certManager: certManager as never });
@@ -1000,8 +997,8 @@ describe("DirectClient", () => {
         certificatePem: LEAF_PEM,
         chainPem: undefined,
         project: undefined,
-        autoRenew: undefined,
-        renewBeforeDays: undefined,
+        autoRenew: false,
+        renewBeforeDays: 30,
       });
     });
 
@@ -1016,7 +1013,7 @@ describe("DirectClient", () => {
           certificate_pem: LEAF_PEM,
         }),
       ).rejects.toMatchObject({
-        code: ErrorCode.SCHEMA_VALIDATION_ERROR,
+        code: ErrorCode.ENCRYPTED_KEY_UNSUPPORTED,
         message: ENCRYPTED_KEY_IMPORT_REFUSAL,
       });
       expect(certManager.importCertificate).not.toHaveBeenCalled();
@@ -1189,8 +1186,8 @@ describe("DirectClient", () => {
           {
             certificatePem: LEAF_PEM,
             chainPem: undefined,
-            autoRenew: undefined,
-            renewBeforeDays: undefined,
+            autoRenew: false,
+            renewBeforeDays: 30,
           },
           undefined,
           undefined,

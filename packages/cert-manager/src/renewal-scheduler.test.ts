@@ -27,7 +27,10 @@ function row(secretId: string, overrides: Partial<Omit<StubRow, "secret_id">> = 
 }
 
 function engineWith(rows: StubRow[]) {
-  return { getExpiringCertificates: vi.fn().mockReturnValue(rows) };
+  return {
+    getExpiringCertificates: vi.fn().mockReturnValue(rows),
+    auditCertRenewFailure: vi.fn(),
+  };
 }
 
 function failingRenewer(message = "acme unreachable") {
@@ -358,6 +361,42 @@ describe("RenewalScheduler onRenewError", () => {
     await drive(scheduler.tick());
 
     expect(onRenewError).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes a failed cert.renew row through the engine once retries are exhausted, before onRenewError", async () => {
+    const engine = engineWith([row("broken")]);
+    const renewError = new Error("challenge never validated");
+    const order: string[] = [];
+    engine.auditCertRenewFailure.mockImplementation(() => {
+      order.push("audit");
+    });
+
+    scheduler = new RenewalScheduler(
+      engine as never,
+      { renewCertificate: vi.fn().mockRejectedValue(renewError) },
+      {
+        onRenewError: () => {
+          order.push("report");
+        },
+      },
+    );
+    await drive(scheduler.tick());
+
+    expect(engine.auditCertRenewFailure).toHaveBeenCalledWith("broken", renewError);
+    expect(order).toEqual(["audit", "report"]);
+  });
+
+  it("a throwing audit write (sealed engine) does not halt the loop", async () => {
+    const engine = engineWith([row("a"), row("b")]);
+    engine.auditCertRenewFailure.mockImplementation(() => {
+      throw new Error("vault is locked");
+    });
+    const renewer = failingRenewer();
+
+    scheduler = new RenewalScheduler(engine as never, renewer);
+    await drive(scheduler.tick());
+
+    expect(renewer.renewCertificate).toHaveBeenCalledTimes(6);
   });
 
   it("renewNow rethrows to the caller without invoking onRenewError", async () => {

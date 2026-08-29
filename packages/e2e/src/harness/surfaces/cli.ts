@@ -80,6 +80,7 @@ export function actionToFlags(action: unknown): string[] {
     }
     case "ssh": {
       push("--host", a["host"]);
+      push("--port", a["port"]);
       push("--user", a["user"]);
       push("--command", a["command"]);
       break;

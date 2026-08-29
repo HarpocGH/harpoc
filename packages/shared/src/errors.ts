@@ -676,14 +676,15 @@ export class VaultError extends Error {
     );
   }
 
-  static encryptedKeyUnsupported(): VaultError {
+  static encryptedKeyUnsupported(message?: string): VaultError {
     return new VaultError(
       ErrorCode.ENCRYPTED_KEY_UNSUPPORTED,
-      "Encrypted OpenSSH-format keys are not supported (bcrypt-pbkdf is outside node:crypto). " +
-        "RSA/ECDSA: convert in place with `ssh-keygen -p -f <keyfile> -m PKCS8` (the passphrase " +
-        "is kept), then re-import — the vault decrypts at import. Ed25519: ssh-keygen cannot " +
-        "write PKCS#8 — strip the passphrase with `ssh-keygen -p -f <keyfile> -N ''` and " +
-        "re-import (the vault stores the key under its own encryption either way)",
+      message ??
+        "Encrypted OpenSSH-format keys are not supported (bcrypt-pbkdf is outside node:crypto). " +
+          "RSA/ECDSA: convert in place with `ssh-keygen -p -f <keyfile> -m PKCS8` (the passphrase " +
+          "is kept), then re-import — the vault decrypts at import. Ed25519: ssh-keygen cannot " +
+          "write PKCS#8 — strip the passphrase with `ssh-keygen -p -f <keyfile> -N ''` and " +
+          "re-import (the vault stores the key under its own encryption either way)",
     );
   }
 

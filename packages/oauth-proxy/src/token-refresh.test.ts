@@ -252,6 +252,41 @@ describe("TokenRefreshScheduler stop() drain (review fix F2)", () => {
     expect(scheduler.isRunning).toBe(false);
   });
 
+  it("the default drain outlives a single 30 s refresh attempt (a response at t+31 s is persisted)", async () => {
+    vi.useFakeTimers();
+    try {
+      let persisted = false;
+      const engine = {
+        getExpiringOAuthTokens: vi.fn().mockReturnValue([{ secret_id: "s1" }]),
+        refreshOAuthToken: vi.fn().mockImplementation(
+          () =>
+            new Promise<number>((resolve) => {
+              setTimeout(() => {
+                persisted = true;
+                resolve(Date.now() + 3600_000);
+              }, 31_000);
+            }),
+        ),
+      };
+      scheduler = new TokenRefreshScheduler(engine as never, { checkIntervalMs: 10 });
+      scheduler.start();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(engine.refreshOAuthToken).toHaveBeenCalledTimes(1);
+
+      let stopResolved = false;
+      const stopping = scheduler.stop().then(() => {
+        stopResolved = true;
+      });
+      await vi.advanceTimersByTimeAsync(30_500);
+      expect(stopResolved).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await stopping;
+      expect(persisted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("stop() with no tick in flight resolves immediately", async () => {
     const engine = {
       getExpiringOAuthTokens: vi.fn().mockReturnValue([]),

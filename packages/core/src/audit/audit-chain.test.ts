@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AAD_AUDIT_DETAIL, AuditEventType } from "@harpoc/shared";
+import { AuditEventType } from "@harpoc/shared";
 import { encrypt } from "../crypto/aes-gcm.js";
 import { generateRandomBytes } from "../crypto/random.js";
 import { SqliteStore } from "../storage/sqlite-store.js";
@@ -53,10 +53,10 @@ describe("row-bound audit detail AAD (v2)", () => {
     expect(events[0]?.detail_unreadable).toBe(false);
   });
 
-  it("marks a legacy (constant-AAD) row unreadable without breaking the listing", () => {
-    // Simulate a pre-fix row written with the old constant AAD and no chain.
-    const plaintext = new Uint8Array(Buffer.from(JSON.stringify({ legacy: true }), "utf8"));
-    const enc = encrypt(auditKey, plaintext, AAD_AUDIT_DETAIL);
+  it("marks a tampered or mis-bound detail blob unreadable without breaking the listing", () => {
+    // A blob encrypted under an AAD that is not the row's v2 AAD — a moved or tampered row.
+    const plaintext = new Uint8Array(Buffer.from(JSON.stringify({ misbound: true }), "utf8"));
+    const enc = encrypt(auditKey, plaintext, "harpoc:audit-detail:mis-bound");
     store.db
       .prepare(
         `INSERT INTO audit_log (timestamp, event_type, secret_id, principal_type, principal_id,
@@ -75,9 +75,9 @@ describe("row-bound audit detail AAD (v2)", () => {
 
     const events = query.query();
     expect(events).toHaveLength(2);
-    const legacy = events.find((e) => e.detail_unreadable);
+    const misbound = events.find((e) => e.detail_unreadable);
     const fresh = events.find((e) => !e.detail_unreadable);
-    expect(legacy?.detail).toBeNull();
+    expect(misbound?.detail).toBeNull();
     expect(fresh?.detail).toEqual({ ok: 1 });
   });
 });

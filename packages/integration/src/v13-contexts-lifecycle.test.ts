@@ -280,6 +280,7 @@ describe("v1.3 contexts — lifecycle through the real engine", () => {
       context: "sftp",
       host: "deploy.example.com",
       operation: "upload",
+      port: null,
       remote_path: "/srv/report.pdf",
       local_path: "/tmp/report.pdf",
       error: ErrorCode.HOST_NOT_ALLOWED,

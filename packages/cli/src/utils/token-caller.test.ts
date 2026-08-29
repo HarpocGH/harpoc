@@ -16,6 +16,7 @@ function payload(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
     iat: 0,
     exp: 2_000_000_000,
     jti: "jti-1",
+    principal_type: "agent",
     ...overrides,
   };
 }

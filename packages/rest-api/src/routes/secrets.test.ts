@@ -25,6 +25,7 @@ const MOCK_TOKEN: VaultApiToken = {
   iat: Math.floor(Date.now() / 1000),
   exp: Math.floor(Date.now() / 1000) + 3600,
   jti: "jti-1",
+  principal_type: "agent",
 };
 
 function createMockEngine() {
@@ -86,7 +87,6 @@ function createMockEngine() {
     setConnectionConfig: vi.fn().mockResolvedValue(undefined),
     getConnectionConfig: vi.fn().mockResolvedValue(undefined),
     deleteConnectionConfig: vi.fn().mockResolvedValue(true),
-    resolveSecretId: vi.fn().mockResolvedValue("secret-uuid-1"),
   };
 }
 

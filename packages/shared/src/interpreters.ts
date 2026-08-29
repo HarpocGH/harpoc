@@ -15,10 +15,13 @@
  * `python`). The list is curated, not exhaustive: it names binaries whose
  * ordinary invocation accepts an inline program (the `-c`/`-e` class), spawns
  * an interactive shell, fetches and executes arbitrary packages (the `npx`
- * class) or execs its argument (`env`). A renamed or symlinked interpreter
- * evades basename matching by construction — the gate targets deliberate
- * policy decisions by a trusted administrator, not adversarial evasion, which
- * for on-disk binaries is L4/L5 territory.
+ * class) or execs its argument (`env`). Basename matching alone is evaded by
+ * a rename, but not by a symlink: the policy-write gate resolves each newly
+ * added entry on the vault's controlled PATH and matches the target too (a
+ * symlink to `sh` is `sh`), the same parity the use-time gate has, so the
+ * residual is only what the resolver cannot resolve. The gate targets
+ * deliberate policy decisions by a trusted administrator, not adversarial
+ * evasion, which for on-disk binaries is L4/L5 territory.
  */
 
 import { normalizeBinaryBasename } from "./binary-name.js";

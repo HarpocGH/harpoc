@@ -338,7 +338,7 @@ rl.on("line", (line) => {
     expectAttributed(rows(log)[0] as AuditLogOptions);
   });
 
-  it("attributes mcp.spawn and the secret.use success; crash and terminate rows stay unattributed (D5)", async () => {
+  it("attributes mcp.spawn and the secret.use success; the crash row and a vault-initiated terminate stay unattributed", async () => {
     const { log, logger } = captureLogger();
     registry = new McpConnectionRegistry(logger);
     const injector = new McpInjector(logger, registry);
@@ -374,7 +374,8 @@ rl.on("line", (line) => {
     expect(crash).toBeDefined();
     expectUnattributed(crash as AuditLogOptions);
 
-    // Vault-initiated terminate: unattributed too (D5).
+    // Vault-initiated (closeAll) terminate: unattributed; a caller-driven
+    // terminate is attributed (E75c).
     await injector.executeWithSecret(
       mcpAction("echo"),
       SECRET,

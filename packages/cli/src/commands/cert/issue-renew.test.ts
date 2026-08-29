@@ -59,6 +59,7 @@ function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
     iat: 0,
     exp: 2_000_000_000,
     jti: "jti-1",
+    principal_type: "agent",
     ...overrides,
   };
 }
@@ -153,9 +154,8 @@ describe("cert issue", () => {
     expect(opts.httpPort).toBeUndefined();
     expect(opts.dns01).toBeUndefined();
     expect(opts.project).toBeUndefined();
-    // RSA-2048 stays the default (D2): adding the flags must not silently
-    // change the key every existing `cert issue` invocation produces.
-    expect(opts.algorithm).toBe("rsa");
+    // EC P-256 is the default on both commands (D8).
+    expect(opts.algorithm).toBe("ec");
     expect(opts.modulusLength).toBeUndefined();
     expect(opts.namedCurve).toBeUndefined();
   });
@@ -195,7 +195,7 @@ describe("cert issue", () => {
     expect(opts.modulusLength).toBeUndefined();
   });
 
-  it("--bits forwards the modulus length under the rsa default", async () => {
+  it("--bits forwards the modulus length with --algorithm rsa", async () => {
     await run([
       "issue",
       "web",
@@ -203,6 +203,8 @@ describe("cert issue", () => {
       "example.com",
       "--email",
       "ops@example.com",
+      "--algorithm",
+      "rsa",
       "--bits",
       "4096",
     ]);
@@ -213,9 +215,7 @@ describe("cert issue", () => {
     expect(opts.namedCurve).toBeUndefined();
   });
 
-  // The pairing rule is the mirror image of csr's: issue defaults to rsa, so a
-  // bare --bits is valid here and a bare --curve is what refuses.
-  it("--algorithm ec paired with --bits is refused before the vault opens", async () => {
+  it("--bits under the default (ec) algorithm is refused rather than silently dropped", async () => {
     await expect(
       run([
         "issue",
@@ -224,13 +224,10 @@ describe("cert issue", () => {
         "example.com",
         "--email",
         "ops@example.com",
-        "--algorithm",
-        "ec",
         "--bits",
-        "2048",
+        "4096",
       ]),
     ).rejects.toThrow("process.exit");
-
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("--bits only applies with --algorithm rsa."),
     );
@@ -238,25 +235,21 @@ describe("cert issue", () => {
     expect(mockIssueWithAcme).not.toHaveBeenCalled();
   });
 
-  it("--curve under the default (rsa) algorithm is refused rather than silently dropped", async () => {
-    await expect(
-      run([
-        "issue",
-        "web",
-        "--domains",
-        "example.com",
-        "--email",
-        "ops@example.com",
-        "--curve",
-        "P-384",
-      ]),
-    ).rejects.toThrow("process.exit");
-
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("--curve only applies with --algorithm ec."),
-    );
-    expect(loadUnlockedEngine).not.toHaveBeenCalled();
-    expect(mockIssueWithAcme).not.toHaveBeenCalled();
+  it("--curve under the default (ec) algorithm is accepted", async () => {
+    await run([
+      "issue",
+      "web",
+      "--domains",
+      "example.com",
+      "--email",
+      "ops@example.com",
+      "--curve",
+      "P-384",
+    ]);
+    const opts = issueOptions();
+    expect(opts.algorithm).toBe("ec");
+    expect(opts.namedCurve).toBe("P-384");
+    expect(opts.modulusLength).toBeUndefined();
   });
 
   it("an invalid --algorithm is refused before the vault opens", async () => {

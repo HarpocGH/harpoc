@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import type { Server } from "node:http";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -152,6 +152,15 @@ describe("vault version guard", () => {
     await engine2.unlock("password");
     expect(engine2.getState()).toBe(VaultState.UNLOCKED);
     await engine2.destroy();
+  });
+
+  it("refuses to unlock a vault whose vault_version row is missing (N2)", async () => {
+    await engine.initVault("password");
+    await engine.lock();
+    const db = new Database(dbPath);
+    db.prepare("DELETE FROM vault_meta WHERE key = 'vault_version'").run();
+    db.close();
+    await expectUnlockCorrupted();
   });
 });
 
@@ -871,10 +880,29 @@ describe("injection policy", () => {
     await engine.setInjectionPolicy("secret://pol", { fs_isolation: true });
 
     expect(terminate).toHaveBeenCalledTimes(1);
-    expect(terminate).toHaveBeenCalledWith(secretId, "fs_isolation_enabled");
+    expect(terminate).toHaveBeenCalledWith(secretId, "fs_isolation_enabled", {
+      session_id: expect.any(String),
+    });
     const terminates = engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
     expect(terminates).toHaveLength(1);
     expect(terminates[0]?.detail?.reason).toBe("fs_isolation_enabled");
+  });
+
+  it("attributes the terminate row to the caller that flipped the policy", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    await seedLiveStdioEntry(secretId);
+    registerAgents("policy-admin");
+
+    await engine.setInjectionPolicy("secret://pol", { fs_isolation: true }, undefined, {
+      principal_type: "agent",
+      principal_id: "policy-admin",
+      interface: "cli",
+    });
+
+    const [row] = engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
+    expect(row?.principal_type).toBe("agent");
+    expect(row?.principal_id).toBe("policy-admin");
+    expect(row?.detail).toMatchObject({ reason: "fs_isolation_enabled", interface: "cli" });
   });
 
   it("terminates once with the network reason when both isolation flags are enabled", async () => {
@@ -888,7 +916,9 @@ describe("injection policy", () => {
     });
 
     expect(terminate).toHaveBeenCalledTimes(1);
-    expect(terminate).toHaveBeenCalledWith(secretId, "network_isolation_enabled");
+    expect(terminate).toHaveBeenCalledWith(secretId, "network_isolation_enabled", {
+      session_id: expect.any(String),
+    });
     const terminates = engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
     expect(terminates).toHaveLength(1);
     expect(terminates[0]?.detail?.reason).toBe("network_isolation_enabled");
@@ -1132,7 +1162,41 @@ describe("interpreter acknowledgement (thesis §4.5.3)", () => {
     expect(refused[0]?.detail?.interpreters).toEqual(["bash"]);
   });
 
+  it("gates a symlink whose resolved target is a known interpreter (E71 — resolved-path parity with the use-time gate)", async (ctx) => {
+    const target =
+      process.platform === "win32"
+        ? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe")
+        : "/bin/sh";
+    const link = join(tempDir, process.platform === "win32" ? "runner.exe" : "runner");
+    try {
+      symlinkSync(target, link, "file");
+    } catch {
+      // Symlink creation needs privileges this host may not grant (the
+      // allowlist.test.ts precedent) — skipped, never silently passed.
+      return ctx.skip();
+    }
+
+    await expectVaultError(
+      () => engine.setInjectionPolicy("secret://interp", { command_allowlist: [link] }),
+      ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED,
+    );
+    const refused = engine.queryAudit({ eventType: AuditEventType.POLICY_INTERPRETER_REFUSED });
+    expect(refused).toHaveLength(1);
+    expect(refused[0]?.detail?.interpreters).toEqual([link]);
+
+    await engine.setInjectionPolicy(
+      "secret://interp",
+      { command_allowlist: [link] },
+      { acknowledge_interpreters: true },
+    );
+    expect((await engine.getInjectionPolicy("secret://interp")).command_allowlist).toEqual([link]);
+    expect(
+      engine.queryAudit({ eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED }),
+    ).toHaveLength(1);
+  });
+
   it("never gates non-interpreter commands", async () => {
+    // Chosen to resolve to nothing or to a non-interpreter on every CI image.
     await engine.setInjectionPolicy("secret://interp", {
       url_allowlist: [],
       command_allowlist: ["gh", "/usr/bin/git"],
@@ -2011,6 +2075,31 @@ describe("JWT tokens", () => {
 
     expect(decoded.sub).toBe("user-1");
     expect(decoded.scope).toEqual(["read", "use"]);
+  });
+
+  it("always mints the principal_type claim, defaulting to agent", () => {
+    const token = engine.createToken("user-1", ["read"]);
+    expect(engine.verifyToken(token).principal_type).toBe("agent");
+  });
+
+  it("refuses a signed payload without a principal_type claim (N13 claim-shape check)", async () => {
+    const internals = engine as unknown as {
+      signJwt(payload: Record<string, unknown>): string;
+      vaultId: string;
+    };
+    const now = Math.floor(Date.now() / 1000);
+    const base = {
+      sub: "user-1",
+      vault_id: internals.vaultId,
+      scope: ["read"],
+      iat: now,
+      exp: now + 60,
+    };
+    const claimless = internals.signJwt({ ...base, jti: "jti-claimless" });
+    await expectVaultError(() => engine.verifyToken(claimless), ErrorCode.INVALID_TOKEN);
+
+    const bogus = internals.signJwt({ ...base, jti: "jti-bogus", principal_type: "root" });
+    await expectVaultError(() => engine.verifyToken(bogus), ErrorCode.INVALID_TOKEN);
   });
 
   it("carries secret-name patterns in the secrets claim (thesis §4.7)", () => {

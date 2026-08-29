@@ -15,7 +15,7 @@ export interface DecryptedAuditEvent extends Omit<
   "detail_encrypted" | "detail_iv" | "detail_tag"
 > {
   detail: Record<string, unknown> | null;
-  /** True when a stored detail blob could not be decrypted (legacy pre-v2 AAD, or tampered). */
+  /** True when a stored detail blob could not be decrypted (tampered, or mis-bound to another row). */
   detail_unreadable?: boolean;
 }
 
@@ -58,6 +58,8 @@ export interface AuditQueryOptions {
   success?: boolean;
   principalType?: PrincipalType;
   principalId?: string;
+  /** Secret ids a scoped caller may see (L10) — applied inside the query, ahead of `limit`. */
+  visibleSecretIds?: string[];
 }
 
 /**
@@ -79,6 +81,7 @@ export class AuditQuery {
       success: options?.success,
       principalType: options?.principalType,
       principalId: options?.principalId,
+      visibleSecretIds: options?.visibleSecretIds,
     };
 
     const events = this.store.queryAuditLog(filter);
@@ -187,8 +190,8 @@ export class AuditQuery {
         );
         detail = JSON.parse(Buffer.from(plaintext).toString("utf8")) as Record<string, unknown>;
       } catch {
-        // No legacy fallback: a pre-v2 (constant-AAD) or tampered blob is
-        // unreadable. Degrade per row — never throw — so one bad row cannot
+        // No fallback: a blob that fails the row-bound AAD is tampered or
+        // mis-bound. Degrade per row — never throw — so one bad row cannot
         // break the whole listing; the plaintext columns stay intact.
         detail = null;
         detailUnreadable = true;

@@ -25,6 +25,7 @@ function mockEngine(overrides: Record<string, unknown> = {}): VaultEngine {
       iat: Math.floor(Date.now() / 1000),
       exp: Math.floor(Date.now() / 1000) + 3600,
       jti: "jti-1",
+      principal_type: "agent",
     }),
     ...overrides,
   } as unknown as VaultEngine;
@@ -89,13 +90,20 @@ describe("createMcpServer", () => {
     expect(engine.auditServerStart).not.toHaveBeenCalled();
   });
 
-  it("writes no server.start row when the token gate refuses", () => {
+  it("writes a failed server.start row when the token gate refuses", () => {
     const engine = mockEngine();
     expect(() => createMcpServer({ engine })).toThrow(
       expect.objectContaining({ code: ErrorCode.TOKEN_REQUIRED }),
     );
 
-    expect(engine.auditServerStart).not.toHaveBeenCalled();
+    expect(engine.auditServerStart).toHaveBeenCalledTimes(1);
+    expect(engine.auditServerStart).toHaveBeenCalledWith({
+      transport: "stdio",
+      tokenless: false,
+      ttyPrompt: false,
+      success: false,
+      error: ErrorCode.TOKEN_REQUIRED,
+    });
   });
 
   it("fails closed when the waiver cannot be recorded — no warning, no server (D4)", () => {
@@ -201,6 +209,7 @@ describe("createMcpServer", () => {
           iat: Math.floor(Date.now() / 1000),
           exp: Math.floor(Date.now() / 1000) + 3600,
           jti: "jti-1",
+          principal_type: "agent",
         }),
       });
 
@@ -234,6 +243,7 @@ describe("createMcpServer", () => {
           iat: Math.floor(Date.now() / 1000),
           exp: Math.floor(Date.now() / 1000) + 3600,
           jti: "jti-1",
+          principal_type: "agent",
         }),
       });
 

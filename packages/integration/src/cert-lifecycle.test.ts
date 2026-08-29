@@ -216,7 +216,7 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
 
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string; message: string };
-    expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+    expect(body.error).toBe(ErrorCode.ENCRYPTED_KEY_UNSUPPORTED);
     expect(body.message).toContain("harpoc cert import");
     await expect(vault.engine.resolveSecretId(`secret://${ENCRYPTED_REST_NAME}`)).rejects.toThrow();
 
@@ -232,7 +232,7 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
         private_key_pem: encryptedEcPrivateKeyPem(),
         certificate_pem: CERT_PEM,
       }),
-    ).rejects.toMatchObject({ code: ErrorCode.SCHEMA_VALIDATION_ERROR });
+    ).rejects.toMatchObject({ code: ErrorCode.ENCRYPTED_KEY_UNSUPPORTED });
 
     expect(importSpy).not.toHaveBeenCalled();
     await expect(

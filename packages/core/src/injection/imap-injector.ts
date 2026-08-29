@@ -1,5 +1,11 @@
 import type { ImapAction, ImapResult, InjectionPolicy } from "@harpoc/shared";
-import { ActionType, DEFAULT_HTTP_TIMEOUT_MS, DEFAULT_IMAP_PORT, VaultError } from "@harpoc/shared";
+import {
+  ActionType,
+  DEFAULT_HTTP_TIMEOUT_MS,
+  DEFAULT_IMAP_PORT,
+  MIN_REDACTABLE_FRAGMENT,
+  VaultError,
+} from "@harpoc/shared";
 import { matchesHostPortAllowlist } from "./allowlist.js";
 import type {
   ImapAuth,
@@ -350,8 +356,8 @@ function imapTls(connection: ImapTlsConfig | undefined): { ca?: string } | undef
 /**
  * The sensitive strings to strip from any thrown error message or fetched
  * message content. XOAUTH2 → the access token; password arm → the password,
- * plus the username when it is long enough that redacting it will not shred
- * unrelated text (parity with the database/SMTP injectors' 3-char floor).
+ * plus the username when it reaches the shared floor (MIN_REDACTABLE_FRAGMENT),
+ * below which redacting it would shred unrelated text.
  */
 function redactionMaterial(secretValue: string, oauth: ImapOAuth | undefined): string[] {
   if (oauth) return [oauth.accessToken];
@@ -359,7 +365,7 @@ function redactionMaterial(secretValue: string, oauth: ImapOAuth | undefined): s
   if (i < 0) return [secretValue];
   const password = secretValue.slice(i + 1);
   const user = secretValue.slice(0, i);
-  return user.length >= 3 ? [password, user] : [password];
+  return user.length >= MIN_REDACTABLE_FRAGMENT ? [password, user] : [password];
 }
 
 /** Strip every credential fragment from a thrown error, in turn. */

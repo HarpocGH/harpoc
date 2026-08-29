@@ -14,6 +14,7 @@ const ADMIN_TOKEN: VaultApiToken = {
   iat: Math.floor(Date.now() / 1000),
   exp: Math.floor(Date.now() / 1000) + 3600,
   jti: "jti-admin",
+  principal_type: "agent",
 };
 
 const READ_TOKEN: VaultApiToken = {
@@ -23,6 +24,7 @@ const READ_TOKEN: VaultApiToken = {
   iat: Math.floor(Date.now() / 1000),
   exp: Math.floor(Date.now() / 1000) + 3600,
   jti: "jti-read",
+  principal_type: "agent",
 };
 
 const MOCK_POLICY: AccessPolicy = {
@@ -136,6 +138,22 @@ describe("policy routes", () => {
         body: JSON.stringify({ principal_type: "agent" }),
       });
       expect(res.status).toBe(400);
+    });
+
+    it("refuses an agent principal_id that is not a valid agent name (C34)", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/policies", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          principal_type: "agent",
+          principal_id: "a b",
+          permissions: ["read"],
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe("SCHEMA_VALIDATION_ERROR");
+      expect(engine.grantPolicy).not.toHaveBeenCalled();
     });
   });
 

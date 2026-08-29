@@ -29,17 +29,12 @@ export const AES_KEY_LENGTH = 32; // 256 bits
 export const AES_IV_LENGTH = 12; // 96 bits
 export const AES_TAG_LENGTH = 16; // 128 bits
 
-// -- HKDF info strings -------------------------------------------------------
-
-export const HKDF_INFO_SYNC = "sync-key-v1";
-
 // -- AAD (Additional Authenticated Data) strings -----------------------------
 
 export const AAD_VAULT_KEK = "vault-kek";
 export const AAD_SESSION_KEK = "session-kek";
 export const AAD_SESSION_JWT = "session-jwt";
 export const AAD_SESSION_AUDIT = "session-audit";
-export const AAD_AUDIT_DETAIL = "audit-detail";
 
 /**
  * Row-bound AAD for audit detail (v2): binds the ciphertext to the row's
@@ -228,3 +223,11 @@ export const DEFAULT_SMTP_TLS_PORT = 465;
 export const DEFAULT_SMTP_STARTTLS_PORT = 587;
 export const DEFAULT_IMAP_PORT = 993;
 export const MAX_IMAP_FETCH_UIDS = 100;
+
+// -- Output sanitization ------------------------------------------------------
+
+/**
+ * Shortest credential fragment (a username half) worth redacting — shorter ones
+ * would shred unrelated output. One floor for every injector.
+ */
+export const MIN_REDACTABLE_FRAGMENT = 3;

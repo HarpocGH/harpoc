@@ -55,8 +55,6 @@ export interface SecretInfo {
 }
 
 export class SecretManager {
-  private backfillDone = false;
-
   constructor(
     private readonly store: SqliteStore,
     private readonly kek: Uint8Array,
@@ -67,29 +65,6 @@ export class SecretManager {
      */
     private readonly onLazyExpire: (secretId: string, handle: string) => void = (): void => {},
   ) {}
-
-  /**
-   * One-time migration: backfill name_hmac for secrets that don't have one.
-   * Called lazily on first resolve/create to avoid blocking constructor.
-   */
-  private async ensureNameHmacBackfill(): Promise<void> {
-    if (this.backfillDone) return;
-    this.backfillDone = true;
-
-    const secrets = this.store.listSecrets();
-    for (const secret of secrets) {
-      if (secret.name_hmac) continue;
-      const name = decryptName(
-        this.kek,
-        secret.name_encrypted,
-        secret.name_iv,
-        secret.name_tag,
-        secret.id,
-      );
-      const hmac = await computeNameHmac(this.kek, name, secret.project);
-      this.store.updateSecretNameHmac(secret.id, hmac);
-    }
-  }
 
   /**
    * Create a new secret. If no value is provided, status is PENDING.
@@ -109,8 +84,6 @@ export class SecretManager {
     // Validates name and project before any row is written — a post-insert
     // failure would leave an unaddressable row that breaks every listSecrets.
     const handle = formatHandle(name, project);
-
-    await this.ensureNameHmacBackfill();
 
     const id = generateUUIDv7();
     const now = Date.now();
@@ -464,8 +437,6 @@ export class SecretManager {
   // ---------------------------------------------------------------------------
 
   private async resolveHandleToSecret(handle: string): Promise<Secret> {
-    await this.ensureNameHmacBackfill();
-
     const parsed: ParsedHandle = parseHandle(handle);
     const nameHmac = await computeNameHmac(this.kek, parsed.name, parsed.project ?? null);
     const matches = this.store.getSecretsByNameHmac(nameHmac);

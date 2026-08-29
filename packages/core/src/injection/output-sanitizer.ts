@@ -295,8 +295,8 @@ export function redactSecretEncodings(text: string, secret: string): string {
 }
 
 /**
- * Redact the credential from a thrown error's message, preserving its type,
- * code and details.
+ * Redact the credential from a thrown error's message and details, preserving
+ * its type and code.
  *
  * A thrown error is a model-visible channel that no result-shaped redaction
  * layer touches: the MCP SDK turns a thrown handler error into the tool result
@@ -304,10 +304,21 @@ export function redactSecretEncodings(text: string, secret: string): string {
  * message can carry attacker-authored text — a redirect target the receiving
  * endpoint chose, a driver message quoting the connection string — so the value
  * is stripped on the way out regardless of which code wrote the message (H2).
+ *
+ * `details` travels the same channels as the message (the REST error body
+ * serializes it, the MCP tool result quotes it), so its string leaves and keys
+ * are walked too. An error carrying the credential in neither is returned
+ * unchanged, identity included.
  */
 export function redactErrorMessage(err: unknown, secret: string): unknown {
   if (!(err instanceof VaultError)) return err;
-  const redacted = redactSecretEncodings(err.message, secret);
-  if (redacted === err.message) return err;
-  return new VaultError(err.code, redacted, err.details);
+  const message = redactSecretEncodings(err.message, secret);
+  const walked =
+    err.details === undefined
+      ? undefined
+      : mapStringLeavesTracked(err.details, (s) => redactSecretEncodings(s, secret), 0);
+  if (message === err.message && walked?.changed !== true) return err;
+  const details =
+    walked?.changed === true ? (walked.value as Record<string, unknown>) : err.details;
+  return new VaultError(err.code, message, details);
 }

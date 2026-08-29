@@ -27,8 +27,9 @@ describe("parseHttpPortOption", () => {
     },
   );
 
-  // Source-text tripwire: main() is not exported and no test spawns the binary,
-  // so this is what keeps index.ts on the strict parser.
+  // Source-text tripwire: main() is not exported, and the integration test
+  // `mcp-port-refusal.test.ts` spawns the built binary; this tripwire keeps
+  // `index.ts` on the helper even when that dist is stale.
   it("index.ts routes --port through parseHttpPortOption and never coerces it", () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     expect(source).toContain("parseHttpPortOption(");

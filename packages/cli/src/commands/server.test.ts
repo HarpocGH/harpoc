@@ -229,6 +229,22 @@ describe("server start", () => {
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("must differ"));
   });
 
+  it("exits with error when the REST port and the cert-renewal port collide", async () => {
+    await expect(
+      run(["--rest", "--port", "3000", "--cert-renew", "--cert-renew-port", "3000"]),
+    ).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--cert-renew-port must differ"));
+  });
+
+  it("exits with error when the MCP HTTP port and the cert-renewal port collide", async () => {
+    await expect(
+      run(["--mcp-http", "--mcp-http-port", "3001", "--cert-renew", "--cert-renew-port", "3001"]),
+    ).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--cert-renew-port must differ"));
+  });
+
   // ── MCP mode ────────────────────────────────────────────────────
 
   it("starts MCP server with --mcp", async () => {

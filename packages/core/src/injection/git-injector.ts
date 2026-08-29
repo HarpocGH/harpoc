@@ -2,7 +2,12 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ConnectionConfig, GitAction, GitResult, InjectionPolicy } from "@harpoc/shared";
-import { DEFAULT_GIT_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
+import {
+  DEFAULT_GIT_TIMEOUT_MS,
+  ErrorCode,
+  MIN_REDACTABLE_FRAGMENT,
+  VaultError,
+} from "@harpoc/shared";
 import type { AuditAttribution } from "../audit/attribution.js";
 import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
@@ -177,9 +182,9 @@ export class GitInjector {
       env.HARPOC_GIT_PASSWORD = password;
       // Binds the credential to the validated host (see ASKPASS_HELPER_SRC).
       env.HARPOC_GIT_HOST = new URL(action.repository).hostname.toLowerCase();
-      // The username is credential material too; a 1–2 char username would
-      // shred unrelated output, so such fragments stay unredacted.
-      const redact = user.length >= 3 ? [password, user] : [password];
+      // The username is credential material too, down to the shared floor
+      // (MIN_REDACTABLE_FRAGMENT); shorter fragments stay unredacted.
+      const redact = user.length >= MIN_REDACTABLE_FRAGMENT ? [password, user] : [password];
       const networkIsolation = policy.network_isolation === true;
       const fsIsolation = policy.fs_isolation === true;
       let r: import("./spawn-captured.js").SpawnCapturedResult;

@@ -219,6 +219,30 @@ describe("executeDockerRegistryAction result mapping", () => {
 
     expect(err.message).not.toContain("s3cr3t-registry-pass-value");
   });
+
+  it("redacts a username at the shared floor (MIN_REDACTABLE_FRAGMENT)", async () => {
+    await executeDockerRegistryAction(
+      PULL_ACTION,
+      new Uint8Array(Buffer.from("abc:s3cr3t-registry-pass-value")),
+      allowed(),
+    );
+
+    const opts = vi.mocked(spawnCaptured).mock.calls[0]?.[2];
+    expect(opts?.redact).toContain("s3cr3t-registry-pass-value");
+    expect(opts?.redact).toContain("abc");
+  });
+
+  it("leaves a 1-2 char username out of the redaction set (would shred output)", async () => {
+    await executeDockerRegistryAction(
+      PULL_ACTION,
+      new Uint8Array(Buffer.from("ab:s3cr3t-registry-pass-value")),
+      allowed(),
+    );
+
+    const opts = vi.mocked(spawnCaptured).mock.calls[0]?.[2];
+    expect(opts?.redact).toContain("s3cr3t-registry-pass-value");
+    expect(opts?.redact).not.toContain("ab");
+  });
 });
 
 describe("parseImageReference", () => {

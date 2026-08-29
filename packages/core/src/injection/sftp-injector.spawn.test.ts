@@ -139,6 +139,25 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     expect(opts.redact).toContain(keyPem);
   });
 
+  it("passes a non-22 port as -P ahead of the batch-mode flags", async () => {
+    await executeSftpAction(
+      { ...LIST_ACTION, port: 2222 },
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      allowedPolicy(),
+      SFTP_CONFIG,
+    );
+    const [, args] = spawnMock.mock.calls[0] as [string, string[], { env: Record<string, string> }];
+    const tail = args.slice(-6);
+    expect(tail).toEqual([
+      "-P",
+      "2222",
+      "-oBatchMode=yes",
+      "-b",
+      expect.stringMatching(/harpoc-sftp-batch-[^\\/]+[\\/]batch$/),
+      "deploy@deploy.example.com",
+    ]);
+  });
+
   it("removes the batch file after a successful invocation", async () => {
     let batchPath = "";
     spawnMock.mockImplementation((_cmd, args) => {

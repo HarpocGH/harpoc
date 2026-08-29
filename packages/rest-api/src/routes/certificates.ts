@@ -25,7 +25,7 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
     }
     checkTokenScope(token, "create", parsed.data.project, parsed.data.name);
     if (isEncryptedPrivateKeyPem(parsed.data.private_key_pem)) {
-      throw VaultError.schemaValidation(ENCRYPTED_KEY_IMPORT_REFUSAL);
+      throw VaultError.encryptedKeyUnsupported(ENCRYPTED_KEY_IMPORT_REFUSAL);
     }
     const ref = await c.get("certManager").importCertificate(parsed.data.name, {
       privateKeyPem: parsed.data.private_key_pem,

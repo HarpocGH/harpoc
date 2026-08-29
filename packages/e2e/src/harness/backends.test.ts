@@ -5,6 +5,7 @@ import {
   PG,
   MYSQL,
   SSHD_PINNED,
+  SSHD_PINNED_ALT_PORT,
   SSHD_ROGUE,
   GIT_HTTP,
   ECHO_HTTPS,
@@ -81,13 +82,16 @@ describe("backend fleet", () => {
   });
 
   it("addresses the two sshd servers at distinct loopback aliases on port 22", () => {
-    // The ssh context cannot speak any port but 22 (F-1), so the pinned and
-    // rogue servers must live at different addresses, not different ports.
+    // An ssh host forbids ":", so the pinned and rogue servers must live at
+    // different addresses rather than different ports on one address.
     expect(SSHD_PINNED.host).toBe("127.0.0.2");
     expect(SSHD_ROGUE.host).toBe("127.0.0.3");
     expect(SSHD_PINNED.port).toBe(22);
     expect(SSHD_ROGUE.port).toBe(22);
     expect(SSHD_PINNED.host).not.toBe(SSHD_ROGUE.host);
+    // The pinned server's second publication, for the non-22 `port` arm (D59):
+    // 127.0.0.1 at a 55xxx port, out of the way of a developer's own sshd.
+    expect(SSHD_PINNED_ALT_PORT).toBe(55022);
   });
 
   it("keeps the git-http credential distinct from the database password", () => {

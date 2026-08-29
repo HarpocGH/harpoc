@@ -589,4 +589,14 @@ describe("name_hmac round-trip", () => {
     expect(secret.name_hmac).toBeTruthy();
     expect(typeof secret.name_hmac).toBe("string");
   });
+
+  it("refuses a row whose name_hmac is NULL as corrupted instead of backfilling it", async () => {
+    await manager.createSecret({
+      name: "nulled",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+    store.db.exec("UPDATE secrets SET name_hmac = NULL");
+    await expectVaultError(() => manager.listSecrets(), ErrorCode.VAULT_CORRUPTED);
+  });
 });

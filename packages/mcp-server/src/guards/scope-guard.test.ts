@@ -11,6 +11,7 @@ function makeToken(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 3600,
     jti: "jti-123",
+    principal_type: "agent",
     ...overrides,
   };
 }
@@ -200,7 +201,7 @@ describe("ScopeGuard", () => {
 });
 
 describe("caller (engine-level policy enforcement)", () => {
-  it("derives the caller from the token, defaulting principal_type to agent and interface to mcp (stdio)", () => {
+  it("derives the caller from the token, carrying principal_type through and defaulting the interface to mcp (stdio)", () => {
     const guard = new ScopeGuard(makeToken({ sub: "alice" }));
     expect(guard.caller).toEqual({
       principal_type: "agent",

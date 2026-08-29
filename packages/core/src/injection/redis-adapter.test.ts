@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ErrorCode } from "@harpoc/shared";
 import type { DbConnectOptions } from "./db-adapters.js";
 import { RedisAdapter } from "./redis-adapter.js";
 
@@ -178,10 +179,14 @@ describe("RedisAdapter connection config (SSRF pinning + TLS identity, spec §10
     expect(cfg.database).toBe(3);
   });
 
-  it("leaves the database index unset for a non-numeric value (defaults to DB 0)", async () => {
-    await new RedisAdapter().execute(opts({ database: "app" }), ["PING"]);
-    const cfg = createClientCalls[0] as RedisClientConfig;
-    expect(cfg.database).toBeUndefined();
+  it("refuses a non-integer database index before loading the driver (belt-and-braces under the schema)", async () => {
+    await expect(
+      new RedisAdapter().execute(opts({ database: "app" }), ["PING"]),
+    ).rejects.toMatchObject({ code: ErrorCode.INVALID_DATABASE_CONFIG });
+    await expect(
+      new RedisAdapter().execute(opts({ database: "-1" }), ["PING"]),
+    ).rejects.toMatchObject({ code: ErrorCode.INVALID_DATABASE_CONFIG });
+    expect(createClientCalls).toHaveLength(0);
   });
 });
 

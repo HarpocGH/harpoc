@@ -114,7 +114,7 @@ export class McpInjector {
       // credential with full egress — terminate it before refusing, so a
       // policy tightened from a separate process (unreachable registry)
       // takes effect on the next invocation attempt at the latest.
-      await this.registry.terminate(secretId, "network_isolation_enabled");
+      await this.registry.terminate(secretId, "network_isolation_enabled", attribution);
       const err = VaultError.networkIsolationUnavailable(
         "MCP stdio downstream servers cannot be network-isolated yet",
       );
@@ -134,7 +134,7 @@ export class McpInjector {
     // does not go through. Checked after the network branch, so a policy
     // demanding both keeps the network refusal's code and reason.
     if (policy.fs_isolation === true && config.transport === McpTransport.STDIO) {
-      await this.registry.terminate(secretId, "fs_isolation_enabled");
+      await this.registry.terminate(secretId, "fs_isolation_enabled", attribution);
       const err = VaultError.fsIsolationUnavailable(
         "MCP stdio downstream servers cannot be fs-isolated yet",
       );
@@ -184,9 +184,9 @@ export class McpInjector {
     const existing = this.registry.get(secretId);
     if (existing) {
       if (existing.credentialFingerprint !== credentialFingerprint) {
-        await this.registry.terminate(secretId, "credential_rotated");
+        await this.registry.terminate(secretId, "credential_rotated", attribution);
       } else if (existing.configFingerprint !== configFingerprint) {
-        await this.registry.terminate(secretId, "config_changed");
+        await this.registry.terminate(secretId, "config_changed", attribution);
       }
     }
 

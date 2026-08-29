@@ -1,0 +1,31 @@
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { describe, expect, it } from "vitest";
+
+const MCP_ENTRY = join(
+  dirname(createRequire(import.meta.url).resolve("@harpoc/mcp-server/package.json")),
+  "dist",
+  "index.js",
+);
+
+function runMcp(args: string[]): Promise<{ code: number | null; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [MCP_ENTRY, ...args], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stderr }));
+  });
+}
+
+describe("harpoc-mcp --http --port (spawned binary)", () => {
+  it("refuses a non-decimal port before touching any vault", async () => {
+    const result = await runMcp(["--http", "--port", "0x10"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('Invalid port "0x10". Must be 1-65535.');
+    expect(result.stderr).not.toContain("Vault is locked");
+  }, 30_000);
+});

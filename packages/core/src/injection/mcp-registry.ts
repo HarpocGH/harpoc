@@ -1,5 +1,7 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { AuditEventType, MCP_SHUTDOWN_TIMEOUT_MS, VaultError } from "@harpoc/shared";
+import type { AuditAttribution } from "../audit/attribution.js";
+import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { InjectionGuard } from "./injection-guard.js";
 import type { StdioChildTransport } from "./mcp-stdio-transport.js";
@@ -89,8 +91,13 @@ export class McpConnectionRegistry {
     }
   }
 
-  /** Deliberately terminate one connection (rotation, config change). */
-  async terminate(secretId: string, reason: string): Promise<void> {
+  /**
+   * Deliberately terminate one connection (rotation, config change). The
+   * optional attribution names the principal whose call drove the teardown —
+   * a vault-initiated terminate (session end, lazy expiry) passes none and
+   * keeps the NULL-principal shape.
+   */
+  async terminate(secretId: string, reason: string, attribution?: AuditAttribution): Promise<void> {
     const promise = this.connections.get(secretId);
     if (!promise) return;
     this.connections.delete(secretId);
@@ -101,7 +108,7 @@ export class McpConnectionRegistry {
     } catch {
       return;
     }
-    await this.terminateEntry(entry, reason);
+    await this.terminateEntry(entry, reason, attribution);
   }
 
   /** Graceful session-end teardown (lock/destroy): close all within a budget. */
@@ -202,7 +209,11 @@ export class McpConnectionRegistry {
     });
   }
 
-  private async terminateEntry(entry: McpConnectionEntry, reason: string): Promise<void> {
+  private async terminateEntry(
+    entry: McpConnectionEntry,
+    reason: string,
+    attribution?: AuditAttribution,
+  ): Promise<void> {
     if (entry.state === "closing") return;
     entry.state = "closing";
 
@@ -210,17 +221,22 @@ export class McpConnectionRegistry {
       this.live.delete(entry.secretId);
     }
 
-    this.auditLogger?.log({
-      eventType: AuditEventType.MCP_TERMINATE,
-      secretId: entry.secretId,
-      detail: {
-        server: entry.serverName,
-        transport: entry.transportKind,
-        reason,
-        uptime_ms: Date.now() - entry.spawnedAt,
-      },
-      success: true,
-    });
+    this.auditLogger?.log(
+      withAttribution(
+        {
+          eventType: AuditEventType.MCP_TERMINATE,
+          secretId: entry.secretId,
+          detail: {
+            server: entry.serverName,
+            transport: entry.transportKind,
+            reason,
+            uptime_ms: Date.now() - entry.spawnedAt,
+          },
+          success: true,
+        },
+        attribution,
+      ),
+    );
 
     try {
       await entry.client.close();

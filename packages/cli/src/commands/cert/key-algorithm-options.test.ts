@@ -4,7 +4,12 @@ import {
   parseBits,
   parseCurve,
   assertAlgorithmPairing,
+  DEFAULT_KEY_ALGORITHM,
 } from "./key-algorithm-options.js";
+
+it("DEFAULT_KEY_ALGORITHM is ec", () => {
+  expect(DEFAULT_KEY_ALGORITHM).toBe("ec");
+});
 
 describe("parseAlgorithm", () => {
   it("accepts rsa and ec", () => {

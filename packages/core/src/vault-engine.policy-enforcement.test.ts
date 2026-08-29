@@ -312,11 +312,11 @@ describe("createToken principal_type claim", () => {
     expect(rows.at(-1)?.detail?.principal_type).toBe("tool");
   });
 
-  it("legacy shape: no option → no claim in the payload, audited as agent", async () => {
+  it("no option → the claim is minted as agent, audited as agent", async () => {
     registerAgents("legacy");
     const token = engine.createToken("legacy", ["use"], 60_000);
     const payload = engine.verifyToken(token);
-    expect("principal_type" in payload).toBe(false);
+    expect(payload.principal_type).toBe("agent");
 
     const rows = engine.queryAudit({ eventType: AuditEventType.TOKEN_CREATE });
     expect(rows.at(-1)?.detail?.principal_type).toBe("agent");

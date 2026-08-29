@@ -232,7 +232,8 @@ function makeEngine() {
     getCertificateStatus: vi.fn<(secretId: string, caller?: CallerContext) => CertificateStatus>(
       () => STATUS,
     ),
-    storeAcmeAccount: vi.fn<(secretId: string, accountJson: string) => void>(),
+    storeAcmeAccount:
+      vi.fn<(secretId: string, accountJson: string, caller?: CallerContext) => void>(),
     getAcmeAccount: vi.fn<(secretId: string, caller?: CallerContext) => string | null>(() => null),
   };
 }
@@ -528,6 +529,12 @@ describe("CertManager", () => {
       expect(engine.getCertificateStatus).toHaveBeenCalledWith(SECRET_ID);
     });
 
+    it("attributes the stored ACME account to the issuing caller", async () => {
+      await manager.issueWithAcme("web", { ...issueOptions, algorithm: "ec", caller: CALLER });
+
+      expect(engine.storeAcmeAccount).toHaveBeenCalledWith(SECRET_ID, expect.any(String), CALLER);
+    });
+
     it("orders exactly the requested domains and finalizes with the generated CSR DER", async () => {
       await manager.issueWithAcme("web", {
         domains: ["fixture.example.com", "alt.example.com"],
@@ -550,7 +557,11 @@ describe("CertManager", () => {
       const account = storedAccount(engine);
       expect(account.accountUrl).toBe(ACCOUNT_URL);
       expect(account.privateKeyPem).toBe(issued().accountKeyPem);
-      expect(engine.storeAcmeAccount).toHaveBeenCalledWith(SECRET_ID, expect.any(String));
+      expect(engine.storeAcmeAccount).toHaveBeenCalledWith(
+        SECRET_ID,
+        expect.any(String),
+        undefined,
+      );
       const importOrder = engine.importCertificate.mock.invocationCallOrder[0] as number;
       const storeOrder = engine.storeAcmeAccount.mock.invocationCallOrder[0] as number;
       expect(storeOrder).toBeGreaterThan(importOrder);

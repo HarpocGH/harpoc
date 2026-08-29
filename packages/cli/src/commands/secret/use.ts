@@ -3,7 +3,7 @@ import type { Command } from "commander";
 import type { VaultEngine } from "@harpoc/core";
 import { InjectionGuard, sanitizeUseSecretResult } from "@harpoc/core";
 import type { CallerContext, UseSecretResponse } from "@harpoc/shared";
-import { useSecretActionSchema, VaultError } from "@harpoc/shared";
+import { isDecimalInteger, useSecretActionSchema, VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
@@ -138,7 +138,7 @@ export function registerSecretUseCommand(secret: Command): void {
     // Database action
     .option("--engine <engine>", "Database engine: postgresql | mysql (database action)")
     .option("--host <host>", "Host (database/ssh/smtp/imap/sftp action)")
-    .option("--port <port>", "Port (database/smtp/imap action)")
+    .option("--port <port>", "Port (database/ssh/sftp/smtp/imap action)")
     .option("--database <name>", "Database name (database action)")
     .option("--query <sql>", "SQL query (database action)")
     .option("--param <value>", "Query parameter (repeatable, database action)", collect, [])
@@ -259,11 +259,10 @@ export function parseActionType(action: string | undefined): ActionTypeName {
 
 function parseNumericOption(value: string | undefined, flag: string): number | undefined {
   if (value === undefined) return undefined;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed)) {
+  if (!isDecimalInteger(value)) {
     throw new Error(`${flag} must be an integer (got "${value}")`);
   }
-  return parsed;
+  return Number(value);
 }
 
 /**
@@ -373,6 +372,7 @@ export function buildAction(
     return {
       type: "ssh",
       host: options.host,
+      port: parseNumericOption(options.port, "--port"),
       user: options.user,
       command: options.command,
       timeout_ms,
@@ -435,6 +435,7 @@ export function buildAction(
     return {
       type: "sftp",
       host: options.host,
+      port: parseNumericOption(options.port, "--port"),
       user: options.user,
       operation: options.operation,
       remote_path: options.remote,

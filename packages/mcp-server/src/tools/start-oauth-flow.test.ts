@@ -49,6 +49,7 @@ function token(scope: string[]): Record<string, unknown> {
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 3600,
     jti: "jti-1",
+    principal_type: "agent",
   };
 }
 

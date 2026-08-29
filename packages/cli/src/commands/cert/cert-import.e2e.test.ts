@@ -68,7 +68,7 @@ afterEach(() => {
 
 describe("cert import / cert status — end to end", () => {
   it("creates an ACTIVE certificate secret and renders its status", async () => {
-    await run(["import", "web", "--key", KEY_PATH, "--cert", CERT_PATH, "--auto-renew"]);
+    await run(["import", "web", "--key", KEY_PATH, "--cert", CERT_PATH]);
     expect(exitSpy).not.toHaveBeenCalled();
 
     const verify = await loadUnlockedEngine(vaultDir);
@@ -88,7 +88,7 @@ describe("cert import / cert status — end to end", () => {
     const status = JSON.parse(logSpy.mock.calls[0]?.[0] as string) as CertificateStatus;
     expect(status.subject).toBe("CN=fixture.example.com");
     expect(status.issuer).toBe("CN=fixture.example.com");
-    expect(status.auto_renew).toBe(true);
+    expect(status.auto_renew).toBe(false);
     expect(status.renewal_status).toBe("ok");
     expect(status.not_after).toBe(new Date("2036-08-13T19:46:24Z").getTime());
   });

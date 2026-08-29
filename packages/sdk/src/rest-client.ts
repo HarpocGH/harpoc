@@ -119,6 +119,8 @@ export class RestClient implements VaultClient {
         response_header_allowlist: policy.response_header_allowlist,
         network_isolation: policy.network_isolation,
         fs_isolation: policy.fs_isolation,
+        smtp_recipient_allowlist: policy.smtp_recipient_allowlist,
+        imap_read_only: policy.imap_read_only,
         acknowledge_interpreters: options?.acknowledge_interpreters ?? false,
       },
     );

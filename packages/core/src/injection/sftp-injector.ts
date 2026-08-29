@@ -23,6 +23,7 @@ import type { TempSshFile } from "./ssh-common.js";
 export interface SftpAuditDetails {
   host: string;
   operation: string;
+  port: number | null;
   remote_path: string;
   local_path: string | null;
 }
@@ -33,6 +34,7 @@ export function buildSftpAuditDetails(action: SftpAction): SftpAuditDetails {
   return {
     host: action.host,
     operation: action.operation,
+    port: action.port ?? null,
     remote_path: action.remote_path,
     local_path: action.local_path ?? null,
   };
@@ -244,6 +246,7 @@ export async function executeSftpAction(
 
     const args = [
       ...sshHardeningArgs(kh.file, identity.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
+      ...(action.port !== undefined ? ["-P", String(action.port)] : []),
       "-oBatchMode=yes",
       "-b",
       batch.file,

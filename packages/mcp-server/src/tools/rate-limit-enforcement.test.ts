@@ -203,10 +203,10 @@ describe("every MCP tool consults the rate limiter (T8)", () => {
 
   /**
    * The per-secret tiers are separate buckets, and `use_secret` is the one
-   * keyed by the resolved secret id under its own (higher) limit — a tier the
+   * keyed by the requested handle under its own (higher) limit — a tier the
    * global-exhaustion case above cannot distinguish.
    */
-  it("use_secret is bounded by the use tier, keyed by secret id", async () => {
+  it("use_secret is bounded by the use tier, keyed by the requested handle", async () => {
     const server = new McpServer({ name: "t", version: "0.0.0" });
     const limiter = new RateLimiter(10_000, 10_000, 2);
     registerUseSecret(server, engine, scopeGuard, limiter, injectionGuard);

@@ -17,7 +17,7 @@ export interface ConnectionOptions {
   dbServername?: string;
   knownHost?: string[];
   knownHostsFile?: string;
-  /** Mail TLS opt-out (audited, SMTP-only leg — IMAP refuses tls:false at use-time). */
+  /** Mail TLS opt-out (audited); honored for the implicit-TLS SMTP leg only — imap and smtp starttls actions refuse it fail-closed. */
   mailNoTls?: boolean;
   /** Path to a CA certificate PEM to pin the mail TLS connection to. */
   mailCa?: string;
@@ -39,14 +39,14 @@ export function registerSecretConnectionCommand(secret: Command): void {
     .option("--db-servername <name>", "TLS servername override (database)")
     .option(
       "--known-host <line>",
-      "Pinned SSH known_hosts line (repeatable, replaces the stored list)",
+      "Pinned SSH known_hosts line (repeatable, replaces the stored list) — a non-22 port is pinned as `[host]:port`",
       collect,
       [],
     )
     .option("--known-hosts-file <path>", "Path to a known_hosts file to pin (SSH)")
     .option(
       "--mail-no-tls",
-      "Opt out of TLS for mail (SMTP/IMAP); honored for SMTP only — an imap action refuses this fail-closed",
+      "Opt out of TLS for mail (SMTP/IMAP); honored for the implicit-TLS SMTP leg only — imap and smtp starttls actions refuse this fail-closed",
     )
     .option(
       "--mail-ca <path>",

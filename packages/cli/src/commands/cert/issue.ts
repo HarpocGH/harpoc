@@ -10,6 +10,7 @@ import {
   parseAlgorithm,
   parseBits,
   parseCurve,
+  DEFAULT_KEY_ALGORITHM,
 } from "./key-algorithm-options.js";
 
 const MIN_RENEW_BEFORE_DAYS = 1;
@@ -66,15 +67,12 @@ export function registerCertIssueCommand(cert: Command): void {
     .option("--staging", "Use the Let's Encrypt staging directory")
     .option("--http-port <port>", "Port for the http-01 challenge responder (default: 80)")
     .option("--dns", "Solve dns-01 interactively instead of http-01")
-    // Defaults to rsa, not to csr's ec: `cert issue` generated RSA-2048 before
-    // the flags existed, and an operator who never types --algorithm must keep
-    // getting exactly the key they got yesterday.
-    .option("--algorithm <rsa|ec>", "Certificate key algorithm", "rsa")
+    .option("--algorithm <rsa|ec>", "Certificate key algorithm", DEFAULT_KEY_ALGORITHM)
     .option("--bits <2048|4096>", "RSA key size (only with --algorithm rsa)")
     .option("--curve <P-256|P-384>", "EC named curve (only with --algorithm ec)")
     .option(
       "--auto-renew",
-      "Auto ACME renewal (takes effect once the renewal daemon lands; until then use cert renew)",
+      "Renew automatically under `harpoc server start --cert-renew`, inside the renew-before window",
     )
     .option("--renew-before-days <n>", "Renewal window in days", "30")
     .option("--project <project>", "Project scope")

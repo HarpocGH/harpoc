@@ -256,6 +256,7 @@ export class CertManager {
     this.engine.storeAcmeAccount(
       secretId,
       JSON.stringify({ privateKeyPem: accountKeyPem, accountUrl }),
+      options.caller,
     );
 
     // The closing read stays caller-less deliberately: passing a caller to

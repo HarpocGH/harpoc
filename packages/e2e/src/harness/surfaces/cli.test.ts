@@ -157,6 +157,22 @@ describe("actionToFlags round-trips every context", () => {
     expect(useSecretActionSchema.safeParse(action).success).toBe(true);
   });
 
+  it("maps an ssh action's non-22 port onto --port", () => {
+    const action = {
+      type: "ssh",
+      host: "127.0.0.1",
+      port: 55022,
+      user: "harpoc",
+      command: "id -un",
+    };
+    const flags = actionToFlags(action);
+    expect(flags.slice(flags.indexOf("--port"), flags.indexOf("--port") + 2)).toEqual([
+      "--port",
+      "55022",
+    ]);
+    expect(useSecretActionSchema.safeParse(action).success).toBe(true);
+  });
+
   it("refuses an unknown action type instead of emitting a broken flag list", () => {
     expect(() => actionToFlags({ type: "telepathy" })).toThrow(/unsupported action type/i);
   });

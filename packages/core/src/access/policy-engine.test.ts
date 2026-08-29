@@ -33,7 +33,7 @@ function makeSecret(id: string): Secret {
     version: 1,
     status: SecretStatus.ACTIVE,
     sync_version: 0,
-    name_hmac: null,
+    name_hmac: `hmac-${id}`,
   };
 }
 

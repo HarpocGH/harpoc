@@ -142,6 +142,19 @@ export function registerServerCommand(program: Command): void {
             process.exit(1);
           }
 
+          if (opts.rest && opts.certRenew && port === certRenewPort) {
+            console.error(
+              `Error: --port and --cert-renew-port must differ (both are ${String(port)}).`,
+            );
+            process.exit(1);
+          }
+          if (opts.mcpHttp && opts.certRenew && mcpHttpPort === certRenewPort) {
+            console.error(
+              `Error: --mcp-http-port and --cert-renew-port must differ (both are ${String(mcpHttpPort)}).`,
+            );
+            process.exit(1);
+          }
+
           const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir as string | undefined);
           engine = await loadUnlockedEngine(vaultDir);
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createMcpServer } from "@harpoc/mcp-server";
-import { AuditEventType } from "@harpoc/shared";
+import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 
@@ -69,6 +69,21 @@ describe("tokenless MCP server start lands in the audit trail", () => {
     const report = vault.engine.verifyAuditChain({ anchor: anchor ?? undefined });
     expect(report.valid).toBe(true);
     expect(report.anchor?.status).toBe("ok");
+  });
+
+  it("records the token-gate refusal as a failed row carrying the code", () => {
+    expect(() => createMcpServer({ engine: vault.engine })).toThrow(
+      expect.objectContaining({ code: ErrorCode.TOKEN_REQUIRED }),
+    );
+
+    const rows = vault.engine.queryAudit({ eventType: AuditEventType.SERVER_START });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.success).toBe(false);
+    expect(rows[0]?.detail?.error).toBe(ErrorCode.TOKEN_REQUIRED);
+    expect(rows[0]?.detail?.tokenless).toBe(false);
+
+    const report = vault.engine.verifyAuditChain();
+    expect(report.valid).toBe(true);
   });
 
   it("a token-bearing start writes no row (D2)", () => {

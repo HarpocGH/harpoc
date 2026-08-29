@@ -31,6 +31,7 @@ function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
     iat: 0,
     exp: 2_000_000_000,
     jti: "jti-1",
+    principal_type: "agent",
     ...overrides,
   };
 }
@@ -447,6 +448,23 @@ describe("secret use — buildAction covers all six contexts", () => {
     });
   });
 
+  it("ssh: --port reaches the action", async () => {
+    await run([
+      "secret://k",
+      "--action",
+      "ssh",
+      "--host",
+      "10.0.0.5",
+      "--user",
+      "deploy",
+      "--command",
+      "id -un",
+      "--port",
+      "2222",
+    ]);
+    expect(actionOf()).toMatchObject({ type: "ssh", port: 2222 });
+  });
+
   it("--timeout-ms reaches every context that accepts it", async () => {
     const contexts: [string, string[]][] = [
       ["http", ["--url", "https://api.example.com/v1"]],
@@ -698,6 +716,47 @@ describe("secret use — buildAction covers the five v1.3 contexts", () => {
       remote_path: "/var/data/file.txt",
       local_path: "/tmp/file.txt",
     });
+  });
+
+  it("sftp: --port reaches the action", async () => {
+    await run([
+      "secret://k",
+      "--action",
+      "sftp",
+      "--host",
+      "sftp.example.com",
+      "--user",
+      "deploy",
+      "--operation",
+      "list",
+      "--remote",
+      "/var/data",
+      "--port",
+      "2222",
+    ]);
+    expect(actionOf()).toMatchObject({ type: "sftp", port: 2222 });
+  });
+
+  it("--port refuses a non-decimal integer literal", async () => {
+    await expect(
+      run([
+        "secret://k",
+        "--action",
+        "database",
+        "--engine",
+        "postgresql",
+        "--host",
+        "db.internal",
+        "--database",
+        "app",
+        "--query",
+        "SELECT 1",
+        "--port",
+        "0x10",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--port must be an integer"));
   });
 
   it("sftp: --local paired with a list operation is refused by the schema", async () => {

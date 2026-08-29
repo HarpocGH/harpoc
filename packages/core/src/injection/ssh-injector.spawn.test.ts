@@ -122,6 +122,53 @@ describeSsh("SshInjector spawn hardening (ssh resolvable)", () => {
     expect(opts.redact).toContain(keyPem);
   });
 
+  it("passes a non-22 port as -p ahead of -l, leaving the positional tail intact", async () => {
+    await injector.executeWithSecret(
+      { ...ACTION, port: 2222 },
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      policy({ host_allowlist: ["deploy.example.com"], command_allowlist: [SSH as string] }),
+      SSH_CONFIG,
+    );
+    const [, args] = spawnMock.mock.calls[0] as [string, string[], { env: Record<string, string> }];
+    expect(args.slice(-7)).toEqual([
+      "-p",
+      "2222",
+      "-l",
+      "deploy",
+      "--",
+      "deploy.example.com",
+      "whoami",
+    ]);
+  });
+
+  it("records the port in the secret.use detail when present", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    await audited.executeWithSecret(
+      { ...ACTION, port: 2222 },
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      policy({ host_allowlist: ["deploy.example.com"], command_allowlist: [SSH as string] }),
+      SSH_CONFIG,
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail).toMatchObject({ context: "ssh", host: "deploy.example.com", port: 2222 });
+  });
+
+  it("leaves the port out of the detail entirely when the action names none", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    await audited.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      policy({ host_allowlist: ["deploy.example.com"], command_allowlist: [SSH as string] }),
+      SSH_CONFIG,
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail).not.toHaveProperty("port");
+  });
+
   it("backs the agent identity with a vault-written .pub, removed after the invocation", async () => {
     let identityPath = "";
     let identityContentAtSpawn = "";

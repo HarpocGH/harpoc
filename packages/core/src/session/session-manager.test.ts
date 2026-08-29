@@ -30,6 +30,7 @@ function makeValidSession(overrides: Partial<SessionFile> = {}): SessionFile {
     created_at: now,
     expires_at: now + DEFAULT_SESSION_TTL_MS,
     max_expires_at: now + MAX_SESSION_TTL_MS,
+    key_protection: "none",
     session_key: b64,
     wrapped_kek: b64,
     wrapped_kek_iv: b64,
@@ -402,14 +403,15 @@ describe("session-key protection", () => {
     expect(await plain.readSession()).toBeNull();
   });
 
-  it("reads legacy files without key_protection as unwrapped", async () => {
+  it("refuses a file without key_protection (null → re-unlock), never unwrapping", async () => {
     const protector = new FakeKeystoreProtector();
-    const session = makeValidSession();
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { key_protection: _omitted, ...session } = makeValidSession();
     writeFileSync(sessionPath, JSON.stringify(session, null, 2), "utf8");
 
     const mgr = new SessionManager(sessionPath, { protector });
     const read = await mgr.readSession();
-    expect(read?.session_key).toBe(session.session_key);
+    expect(read).toBeNull();
     expect(protector.unprotectCalls).toBe(0);
   });
 

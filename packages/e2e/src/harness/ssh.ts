@@ -47,3 +47,16 @@ function pubKeyBody(name: string): string {
 export function knownHostPin(host: string, which: "pinned" | "rogue" = "pinned"): string {
   return `${host} ${pubKeyBody(`hostkey_${which}_ed25519`)}`;
 }
+
+/**
+ * The same pin for a server reached on a non-22 port: OpenSSH keys those
+ * entries by the bracketed `[host]:port` form, and the vault writes the
+ * operator's line verbatim — it never rewrites a pin to match an action.
+ */
+export function knownHostPinOnPort(
+  host: string,
+  port: number,
+  which: "pinned" | "rogue" = "pinned",
+): string {
+  return knownHostPin(`[${host}]:${port}`, which);
+}

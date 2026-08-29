@@ -55,12 +55,12 @@ import {
   AuditEventType,
   DEFAULT_SESSION_TTL_MS,
   ErrorCode,
-  findKnownInterpreters,
   formatHandle,
   isAdminUserCaller,
   isValidSecretNamePattern,
   isVaultVersionSupported,
   IssuedTokenStatus,
+  knownInterpreterName,
   LOCKOUT_DURATIONS_MS,
   LOCKOUT_MAX_ATTEMPTS,
   matchesSecretNameScope,
@@ -100,7 +100,11 @@ import type { WrappedKey } from "./crypto/key-hierarchy.js";
 import { changePassword, createVaultKeys, unlockVault } from "./crypto/key-hierarchy.js";
 import { assertNever } from "./assert-never.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
-import { matchesUrlAllowlist } from "./injection/allowlist.js";
+import {
+  controlledPathDirs,
+  matchesUrlAllowlist,
+  resolveExecutable,
+} from "./injection/allowlist.js";
 import { DatabaseInjector } from "./injection/database-injector.js";
 import {
   buildDockerAuditDetails,
@@ -112,7 +116,7 @@ import type { ImapOAuth } from "./injection/imap-injector.js";
 import { buildImapAuditDetails, ImapInjector } from "./injection/imap-injector.js";
 import { McpInjector } from "./injection/mcp-injector.js";
 import { McpConnectionRegistry } from "./injection/mcp-registry.js";
-import { redactSecretEncodings } from "./injection/output-sanitizer.js";
+import { redactErrorMessage, redactSecretEncodings } from "./injection/output-sanitizer.js";
 import { ProcessInjector } from "./injection/process-injector.js";
 import { isResponseModeAllowed } from "./injection/response-mode.js";
 import { buildSftpAuditDetails, executeSftpAction } from "./injection/sftp-injector.js";
@@ -403,10 +407,12 @@ export class VaultEngine {
     // compare orders "1.10.0" before "1.2.0" and defeats this guard. Fails
     // closed on malformed version strings.
     const vaultVersion = store.getMeta("vault_version");
-    if (vaultVersion && !isVaultVersionSupported(vaultVersion, VAULT_VERSION)) {
+    if (!vaultVersion || !isVaultVersionSupported(vaultVersion, VAULT_VERSION)) {
       if (isNewStore) store.close();
       throw VaultError.vaultCorrupted(
-        `Vault version ${vaultVersion} is newer than supported ${VAULT_VERSION}`,
+        vaultVersion
+          ? `Vault version ${vaultVersion} is newer than supported ${VAULT_VERSION}`
+          : "vault_version row is missing",
       );
     }
 
@@ -500,10 +506,12 @@ export class VaultEngine {
     // rather than reported as "no session": falling through would prompt for a
     // password and then raise this very error from `unlock`.
     const vaultVersion = store.getMeta("vault_version");
-    if (vaultVersion && !isVaultVersionSupported(vaultVersion, VAULT_VERSION)) {
+    if (!vaultVersion || !isVaultVersionSupported(vaultVersion, VAULT_VERSION)) {
       if (isNewStore) store.close();
       throw VaultError.vaultCorrupted(
-        `Vault version ${vaultVersion} is newer than supported ${VAULT_VERSION}`,
+        vaultVersion
+          ? `Vault version ${vaultVersion} is newer than supported ${VAULT_VERSION}`
+          : "vault_version row is missing",
       );
     }
 
@@ -829,7 +837,11 @@ export class VaultEngine {
     // out indefinitely (L2). Terminated after the revoke commits, so a failed
     // teardown cannot roll the revocation back.
     if (revokedId) {
-      await s.mcpRegistry.terminate(revokedId, "secret_revoked");
+      await s.mcpRegistry.terminate(
+        revokedId,
+        "secret_revoked",
+        attributionFromCaller(caller, this.sessionId),
+      );
     }
   }
 
@@ -898,6 +910,11 @@ export class VaultEngine {
     // the MCP stdio arm gives, and network keeps precedence over fs there too.
     this.assertDockerIsolationAllowed(s, action, policy, secret.id, caller);
 
+    // SMTP STARTTLS × the mail TLS opt-out — the same pre-dispatch,
+    // pre-credential placement: the opt-out cannot be honored on this leg, so
+    // producing the credential for it is pure exposure.
+    this.assertSmtpUsageAllowed(s, action, secret, attribution);
+
     // IMAP × (mail TLS opt-out | OAuth secret) — the same pre-dispatch,
     // pre-credential placement, for the same reason: both are architectural
     // refusals that no credential can satisfy, so producing the credential
@@ -930,7 +947,7 @@ export class VaultEngine {
       // lazy expiry detected in another process, cannot reach this process's
       // registry. The credential is no longer usable here, so any downstream
       // child still holding it is torn down before the refusal returns.
-      await s.mcpRegistry.terminate(secret.id, "secret_unusable");
+      await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
       throw err;
     }
 
@@ -1077,11 +1094,14 @@ export class VaultEngine {
 
         case "smtp": {
           const mail = this.loadConnectionConfig(s, secret.id)?.mail;
-          // `tls: false` is the audited plaintext opt-out on this leg — the
-          // one mail case the vault honors, mirroring the database
+          // `tls: false` is the audited plaintext opt-out on the implicit-TLS
+          // leg — the one mail case the vault honors, mirroring the database
           // `tls_mode: "disable"` opt-out (which is audited on the config-set
-          // row; the use row records it per invocation as well).
-          const tlsOptOut = mail?.tls === false;
+          // row; the use row records it per invocation as well). Stamped only
+          // when that leg was actually skipped: the STARTTLS leg cannot honor
+          // the opt-out, and `assertSmtpUsageAllowed` has already refused that
+          // combination above.
+          const tlsOptOut = action.security === "tls" && mail?.tls === false;
           const secretValue = Buffer.from(value).toString("utf8");
           const oauth: SmtpOAuth | undefined =
             secret.type === SecretType.OAUTH_TOKEN
@@ -1270,6 +1290,21 @@ export class VaultEngine {
         default:
           return assertNever(action, "action type");
       }
+    } catch (err) {
+      // The choke point (E69): every thrown error leaves this method as a
+      // VaultError with the credential stripped from message and details. The
+      // injector-authored arms audit the VaultErrors they throw; a raw throw
+      // provably had no row, so it gets the engine's (N16).
+      if (!(err instanceof VaultError)) {
+        this.auditUse(
+          s,
+          secret.id,
+          { handle, context: action.type, error: ErrorCode.INTERNAL_ERROR },
+          false,
+          attribution,
+        );
+      }
+      throw redactErrorMessage(toVaultError(err), Buffer.from(value).toString("utf8"));
     } finally {
       wipeBuffer(value);
     }
@@ -1318,6 +1353,57 @@ export class VaultEngine {
       },
       secretId,
       caller,
+    );
+    throw err;
+  }
+
+  /**
+   * Refuse an `smtp` action whose STARTTLS leg cannot honor the mail
+   * connection config's `tls: false` opt-out (N4). The opt-out is an
+   * implicit-TLS-mode instruction — the SMTP client ignores it for STARTTLS,
+   * which upgrades before authenticating regardless — so honoring it here was
+   * never possible; the arm below merely stamped `tls_opt_out: true` on a row
+   * whose leg had run encrypted, making the trail assert a plaintext send that
+   * never happened. Dead config is refused, not dropped (the imap `account`
+   * precedent), and like the docker and imap guards this runs before the
+   * dispatch arm, so no credential is produced for a use that is refused.
+   *
+   * Audited through `auditUse`, not `auditDenied`, for the imap guard's
+   * reason: the failed row keeps the smtp contexts' own shape, with
+   * `attachment_total_bytes` at zero because nothing was read. It carries no
+   * `tls_opt_out`: nothing was sent in the clear, so nothing may claim it was.
+   *
+   * Shares the imap guard's deliberate consequence: an expired-but-not-yet-
+   * transitioned secret refuses INVALID_INPUT here instead of reaching
+   * `assertUsable`'s expiry transition — the refusal is architectural and
+   * status-independent, and the next non-refused use still transitions it.
+   */
+  private assertSmtpUsageAllowed(
+    s: UnlockedState,
+    action: UseSecretAction,
+    secret: Secret,
+    attribution: AuditAttribution | undefined,
+  ): void {
+    if (action.type !== "smtp" || action.security !== "starttls") return;
+    const mail = this.loadConnectionConfig(s, secret.id)?.mail;
+    if (mail?.tls !== false) return;
+
+    const err = VaultError.invalidInput(
+      "SMTP STARTTLS cannot honor the mail connection config's TLS opt-out (tls: false): " +
+        "the STARTTLS leg upgrades before authenticating. Use security: tls to keep the " +
+        "opt-out meaningful on the implicit-TLS leg, or remove the mail TLS opt-out from " +
+        "this secret's connection config.",
+    );
+    this.auditUse(
+      s,
+      secret.id,
+      {
+        context: "smtp",
+        ...buildSmtpAuditDetails(action, attemptedAttachments(action)),
+        error: err.code,
+      },
+      false,
+      attribution,
     );
     throw err;
   }
@@ -1507,6 +1593,11 @@ export class VaultEngine {
    * `options.acknowledge_interpreters`; the refusal and any acknowledged
    * addition are both audited. Entries already on the stored allowlist are
    * not re-gated — re-asserting them is not an addition.
+   *
+   * An entry is gated on its own name and on the binary it resolves to on
+   * this host's controlled PATH (a symlink to `sh` is `sh`), which is the
+   * parity the use-time gate already has; a resolution failure is ignored —
+   * such an entry cannot spawn.
    */
   async setInjectionPolicy(
     handle: string,
@@ -1526,9 +1617,18 @@ export class VaultEngine {
     });
 
     const stored = new Set(this.loadInjectionPolicy(s, secret.id).command_allowlist);
-    const addedInterpreters = findKnownInterpreters(
-      (policy.command_allowlist ?? []).filter((entry) => !stored.has(entry)),
-    );
+    const pathDirs = controlledPathDirs();
+    const addedInterpreters = [
+      ...new Set(
+        (policy.command_allowlist ?? [])
+          .filter((entry) => !stored.has(entry))
+          .filter((entry) => {
+            if (knownInterpreterName(entry) !== null) return true;
+            const resolved = resolveExecutable(entry, pathDirs);
+            return resolved !== null && knownInterpreterName(resolved) !== null;
+          }),
+      ),
+    ];
     if (addedInterpreters.length > 0 && options?.acknowledge_interpreters !== true) {
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_INTERPRETER_REFUSED,
@@ -1624,6 +1724,7 @@ export class VaultEngine {
       await s.mcpRegistry.terminate(
         secret.id,
         policy.network_isolation === true ? "network_isolation_enabled" : "fs_isolation_enabled",
+        attributionFromCaller(caller, this.sessionId),
       );
     }
   }
@@ -1705,7 +1806,11 @@ export class VaultEngine {
       });
     });
 
-    await s.mcpRegistry.terminate(secret.id, "config_changed");
+    await s.mcpRegistry.terminate(
+      secret.id,
+      "config_changed",
+      attributionFromCaller(caller, this.sessionId),
+    );
   }
 
   /** Read a secret's downstream MCP server config (undefined when unset). */
@@ -1731,7 +1836,11 @@ export class VaultEngine {
       policy: "mcp_server",
       handle,
     });
-    await s.mcpRegistry.terminate(secret.id, "config_removed");
+    await s.mcpRegistry.terminate(
+      secret.id,
+      "config_removed",
+      attributionFromCaller(caller, this.sessionId),
+    );
     return s.store.transaction(() => {
       const deleted = s.store.deleteMcpServer(secret.id);
       if (deleted) {
@@ -1930,55 +2039,23 @@ export class VaultEngine {
     project?: string,
     caller?: CallerContext,
   ): Promise<{ handle: string; secretId: string }> {
-    let handle: string;
-    let resumed = false;
-    try {
-      const result = await s.secretManager.createSecret({
-        name,
-        type: SecretType.OAUTH_TOKEN,
-        project,
-      });
-      handle = result.handle;
-    } catch (createErr) {
-      if (!(createErr instanceof VaultError) || createErr.code !== ErrorCode.DUPLICATE_SECRET) {
-        throw createErr;
+    // Base row, OAuth row and the `oauth.authorize` row commit together (NM3,
+    // N10) — a crash cannot leave a PENDING secret without its provider row.
+    // Runs inside the caller's transaction: `createSecret`'s own on the fresh
+    // path, the replace transaction on the resume path.
+    const commitOAuthRow = (secretId: string, handle: string, resumed: boolean): void => {
+      const clientIdBytes = new Uint8Array(Buffer.from(providerConfig.client_id, "utf8"));
+      const clientIdEnc = encrypt(s.kek, clientIdBytes, AAD_OAUTH_CLIENT_ID(secretId));
+
+      let clientSecretEnc: { ciphertext: Uint8Array; iv: Uint8Array; tag: Uint8Array } | null =
+        null;
+      if (providerConfig.client_secret) {
+        const clientSecretBytes = new Uint8Array(Buffer.from(providerConfig.client_secret, "utf8"));
+        clientSecretEnc = encrypt(s.kek, clientSecretBytes, AAD_OAUTH_CLIENT_SECRET(secretId));
       }
-      handle = formatHandle(name, project);
-      let existing: Awaited<ReturnType<typeof s.secretManager.resolveHandle>>;
-      try {
-        existing = await s.secretManager.resolveHandle(handle);
-      } catch {
-        throw createErr;
-      }
-      if (existing.type !== SecretType.OAUTH_TOKEN || existing.status !== SecretStatus.PENDING) {
-        throw createErr;
-      }
-      s.store.deleteOAuthToken(existing.id);
-      resumed = true;
-    }
 
-    const secret = await s.secretManager.resolveHandle(handle);
-    onResolved(secret.id);
-
-    // Encrypt client_id with KEK
-    const clientIdBytes = new Uint8Array(Buffer.from(providerConfig.client_id, "utf8"));
-    const clientIdEnc = encrypt(s.kek, clientIdBytes, AAD_OAUTH_CLIENT_ID(secret.id));
-
-    // Encrypt client_secret with KEK (if provided)
-    let clientSecretEnc: { ciphertext: Uint8Array; iv: Uint8Array; tag: Uint8Array } | null = null;
-    if (providerConfig.client_secret) {
-      const clientSecretBytes = new Uint8Array(Buffer.from(providerConfig.client_secret, "utf8"));
-      clientSecretEnc = encrypt(s.kek, clientSecretBytes, AAD_OAUTH_CLIENT_SECRET(secret.id));
-    }
-
-    // OAuth row + audit in one transaction (NM3). The base secret row committed
-    // in the manager's own transaction above — a crash between the two leaves a
-    // visibly incomplete PENDING secret without an OAuth row, which re-running
-    // `oauth connect` resumes (fresh config, same secretId); not a completed-
-    // but-unaudited operation.
-    s.store.transaction(() => {
       s.store.insertOAuthToken({
-        secret_id: secret.id,
+        secret_id: secretId,
         provider: providerConfig.provider,
         grant_type: providerConfig.grant_type,
         token_endpoint: providerConfig.token_endpoint,
@@ -1999,12 +2076,13 @@ export class VaultEngine {
         access_token_expires_at: null,
         redirect_uri: providerConfig.redirect_uri ?? null,
         pkce_method: providerConfig.pkce_method ?? "S256",
-        token_endpoint_auth_method: providerConfig.token_endpoint_auth_method ?? null,
+        token_endpoint_auth_method:
+          providerConfig.token_endpoint_auth_method ?? "client_secret_post",
       });
 
       s.auditLogger.log({
         eventType: AuditEventType.OAUTH_AUTHORIZE,
-        secretId: secret.id,
+        secretId,
         principalType: caller?.principal_type,
         principalId: caller?.principal_id,
         detail: {
@@ -2016,9 +2094,43 @@ export class VaultEngine {
         },
         sessionId: this.sessionId ?? undefined,
       });
-    });
+    };
 
-    return { handle, secretId: secret.id };
+    let createdId = "";
+    try {
+      const result = await s.secretManager.createSecret(
+        { name, type: SecretType.OAUTH_TOKEN, project },
+        (response, id) => {
+          createdId = id;
+          commitOAuthRow(id, response.handle, false);
+        },
+      );
+      return { handle: result.handle, secretId: createdId };
+    } catch (createErr) {
+      if (!(createErr instanceof VaultError) || createErr.code !== ErrorCode.DUPLICATE_SECRET) {
+        throw createErr;
+      }
+      const handle = formatHandle(name, project);
+      let existing: Awaited<ReturnType<typeof s.secretManager.resolveHandle>>;
+      try {
+        existing = await s.secretManager.resolveHandle(handle);
+      } catch {
+        throw createErr;
+      }
+      if (existing.type !== SecretType.OAUTH_TOKEN || existing.status !== SecretStatus.PENDING) {
+        throw createErr;
+      }
+
+      // Only the resume path has a secret that outlives a rollback, so it is
+      // the only one that can attribute a denial row to a secret id.
+      const existingId = existing.id;
+      onResolved(existingId);
+      s.store.transaction(() => {
+        s.store.deleteOAuthToken(existingId);
+        commitOAuthRow(existingId, handle, true);
+      });
+      return { handle, secretId: existingId };
+    }
   }
 
   /**
@@ -2082,6 +2194,22 @@ export class VaultEngine {
         success: true,
       });
     });
+  }
+
+  /**
+   * The token-endpoint client authentication a stored OAuth row prescribes.
+   *
+   * NULL is the pre-011 legacy state — migration 011 deliberately leaves rows
+   * written before the column existed unset — and reads as client_secret_post,
+   * the pre-migration wire shape. Any other unknown value is corruption, not a
+   * degradation target: silently POSTing the client secret to a provider that
+   * expects something else is a credential disclosure, so it fails closed.
+   */
+  private storedAuthMethod(row: OAuthTokenRow): "client_secret_post" | "client_secret_basic" {
+    const method = row.token_endpoint_auth_method;
+    if (method === null || method === "client_secret_post") return "client_secret_post";
+    if (method === "client_secret_basic") return "client_secret_basic";
+    throw VaultError.vaultCorrupted(`unknown token_endpoint_auth_method "${method}"`);
   }
 
   /**
@@ -2191,13 +2319,9 @@ export class VaultEngine {
     await validateUrl(oauthRow.token_endpoint);
 
     // POST to token endpoint. Client authentication follows the stored
-    // token_endpoint_auth_method (migration 011); anything other than
-    // "client_secret_basic" — including NULL on legacy rows — degrades to
-    // client_secret_post, the pre-migration wire shape.
-    const authMethod =
-      oauthRow.token_endpoint_auth_method === "client_secret_basic"
-        ? ("client_secret_basic" as const)
-        : ("client_secret_post" as const);
+    // method; NULL is the pre-011 legacy state and reads as
+    // client_secret_post, any other unknown value is corruption (fail closed).
+    const authMethod = this.storedAuthMethod(oauthRow);
     const params = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
@@ -2313,10 +2437,7 @@ export class VaultEngine {
       last_refreshed_at: secret?.updated_at ?? null,
       refresh_status: computeOAuthRefreshStatus(oauthRow),
       token_endpoint_auth_method:
-        oauthRow.token_endpoint_auth_method === "client_secret_basic" ||
-        oauthRow.token_endpoint_auth_method === "client_secret_post"
-          ? oauthRow.token_endpoint_auth_method
-          : null,
+        oauthRow.token_endpoint_auth_method === null ? null : this.storedAuthMethod(oauthRow),
     };
   }
 
@@ -2327,46 +2448,38 @@ export class VaultEngine {
   async getOAuthAccessToken(secretId: string): Promise<string> {
     const s = this.assertUnlocked();
 
+    // No denial row here: the only caller is `useSecret`, whose own catch
+    // writes the attributed `secret.use` refusal — a second, unattributed
+    // `secret.read` row would double-count one refused use (E75h).
     const secret = s.store.getSecret(secretId);
-    try {
-      if (!secret) throw VaultError.secretNotFound();
-      if (secret.type !== SecretType.OAUTH_TOKEN) {
-        throw VaultError.oauthNotConfigured();
-      }
+    if (!secret) throw VaultError.secretNotFound();
+    if (secret.type !== SecretType.OAUTH_TOKEN) {
+      throw VaultError.oauthNotConfigured();
+    }
 
-      // Lazy expiry check — status write + audit row in one transaction (NM3)
-      if (
-        secret.status !== SecretStatus.EXPIRED &&
-        secret.expires_at !== null &&
-        secret.expires_at <= Date.now()
-      ) {
-        s.store.transaction(() => {
-          s.store.updateSecret(secretId, {
-            status: SecretStatus.EXPIRED,
-            updated_at: Date.now(),
-          });
-          s.auditLogger.log({
-            eventType: AuditEventType.SECRET_EXPIRE,
-            secretId,
-            sessionId: this.sessionId ?? undefined,
-          });
+    // Lazy expiry check — status write + audit row in one transaction (NM3)
+    if (
+      secret.status !== SecretStatus.EXPIRED &&
+      secret.expires_at !== null &&
+      secret.expires_at <= Date.now()
+    ) {
+      s.store.transaction(() => {
+        s.store.updateSecret(secretId, {
+          status: SecretStatus.EXPIRED,
+          updated_at: Date.now(),
         });
-        throw VaultError.secretExpired();
-      }
-      if (secret.status === SecretStatus.EXPIRED) throw VaultError.secretExpired();
-      if (secret.status === SecretStatus.REVOKED) throw VaultError.secretRevoked();
-      if (secret.status === SecretStatus.PENDING) {
-        throw VaultError.oauthNotConfigured("OAuth flow not completed");
-      }
-    } catch (err) {
-      this.auditDenied(
-        s,
-        AuditEventType.SECRET_READ,
-        err,
-        { action: "oauth_access_token" },
-        secretId,
-      );
-      throw err;
+        s.auditLogger.log({
+          eventType: AuditEventType.SECRET_EXPIRE,
+          secretId,
+          sessionId: this.sessionId ?? undefined,
+        });
+      });
+      throw VaultError.secretExpired();
+    }
+    if (secret.status === SecretStatus.EXPIRED) throw VaultError.secretExpired();
+    if (secret.status === SecretStatus.REVOKED) throw VaultError.secretRevoked();
+    if (secret.status === SecretStatus.PENDING) {
+      throw VaultError.oauthNotConfigured("OAuth flow not completed");
     }
 
     const oauthRow = s.store.getOAuthToken(secretId);
@@ -2549,6 +2662,12 @@ export class VaultEngine {
     ) {
       throw VaultError.invalidInput(
         `renewBeforeDays must be an integer between 1 and ${MAX_RENEW_BEFORE_DAYS}`,
+      );
+    }
+
+    if (o.autoRenew === true && o.acmeIssued !== true) {
+      throw VaultError.invalidInput(
+        "auto_renew requires an ACME-issued certificate (harpoc cert issue)",
       );
     }
 
@@ -2923,8 +3042,9 @@ export class VaultEngine {
   /**
    * Store the ACME account (its key pair and account URL, serialised by the
    * caller) KEK-encrypted under a per-secret AAD, so an account blob lifted
-   * onto another certificate's row fails to decrypt. Internal to the ACME
-   * flow: no caller parameter, no interface reaches it directly.
+   * onto another certificate's row fails to decrypt. Called only by the ACME
+   * issue flow, which threads its caller for attribution (no policy gate —
+   * `importCertificate` gated it).
    *
    * The write and its audit row commit together (NM3) — key material never
    * lands on a certificate row unaudited. `policy.grant` is the event every
@@ -2932,7 +3052,7 @@ export class VaultEngine {
    * MCP server, connection config); the detail names the config and nothing
    * else — the account blob and its key stay out of the trail.
    */
-  storeAcmeAccount(secretId: string, accountJson: string): void {
+  storeAcmeAccount(secretId: string, accountJson: string, caller?: CallerContext): void {
     const s = this.assertUnlocked();
     const row = s.store.getCertificate(secretId);
     if (!row) throw VaultError.certNotConfigured();
@@ -2952,7 +3072,9 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_GRANT,
         secretId,
-        detail: { config: "acme_account" },
+        principalType: caller?.principal_type,
+        principalId: caller?.principal_id,
+        detail: { config: "acme_account", ...callerInterfaceDetail(caller) },
         sessionId: this.sessionId ?? undefined,
         success: true,
       });
@@ -3437,34 +3559,34 @@ export class VaultEngine {
    * targeted oracle (L10). Rows without a `secret_id` (vault lifecycle, token
    * issuance, server start) carry no per-secret metadata and stay visible.
    *
-   * Filtering happens after the query's own `limit`, so a scoped token can see
-   * fewer rows than it asked for — the same property W2's list filter has. An
-   * absent scope is the unrestricted case: no filtering work is done at all.
+   * The visibility filter is applied inside the query, ahead of `limit`, so a
+   * scoped token gets up to `limit` rows it may see. An absent scope is the
+   * unrestricted case: no filtering work is done at all.
    */
   queryAudit(options?: AuditQueryOptions, scope?: AuditVisibilityScope): DecryptedAuditEvent[] {
     const s = this.assertUnlocked();
-    const events = s.auditQuery.query(options);
-    if (!scope || (scope.project === undefined && !scope.secrets?.length)) return events;
+    if (!scope || (scope.project === undefined && !scope.secrets?.length)) {
+      return s.auditQuery.query(options);
+    }
 
-    const visible = new Set(
-      s.secretManager
-        .listSecretsWithIds()
-        .filter(
-          (entry) =>
-            (scope.project === undefined || entry.info.project === scope.project) &&
-            matchesSecretNameScope(entry.info.name, scope.secrets),
-        )
-        .map((entry) => entry.id),
-    );
+    const visible = s.secretManager
+      .listSecretsWithIds()
+      .filter(
+        (entry) =>
+          (scope.project === undefined || entry.info.project === scope.project) &&
+          matchesSecretNameScope(entry.info.name, scope.secrets),
+      )
+      .map((entry) => entry.id);
 
-    return events.filter((event) => event.secret_id === null || visible.has(event.secret_id));
+    return s.auditQuery.query({ ...options, visibleSecretIds: visible });
   }
 
   /**
    * Record an unrestricted (tokenless) MCP server start — the `--allow-tokenless`
-   * waiver, in the tamper-evident trail (review finding W6). Only that waiver
-   * reaches this method: a token-bearing start writes no row, because every
-   * operation it serves is attributed to the requesting principal instead.
+   * waiver, in the tamper-evident trail (review finding W6). The waiver and the
+   * refusal reach this method (a failed `server.start` carries the refusal
+   * code): a token-bearing start writes no row, because every operation it
+   * serves is attributed to the requesting principal instead.
    *
    * Deliberately unattributed (NULL principal columns, `vault.unlock` shape):
    * the operator at the console is the trusted local path, not a requesting
@@ -3472,9 +3594,17 @@ export class VaultEngine {
    * needed — chain linearity is handled inside the logger.
    *
    * Fail-closed by omission: this method does not swallow write failures, so a
-   * caller that cannot record the waiver must not proceed to serve.
+   * caller that cannot record the waiver must not proceed to serve. On the
+   * refusal branch that means an audit-write failure replaces `TOKEN_REQUIRED`
+   * as the thrown error — both outcomes refuse the start (D5).
    */
-  auditServerStart(options: { transport: "stdio"; tokenless: boolean; ttyPrompt?: boolean }): void {
+  auditServerStart(options: {
+    transport: "stdio";
+    tokenless: boolean;
+    ttyPrompt?: boolean;
+    success?: false;
+    error?: ErrorCode;
+  }): void {
     const s = this.assertUnlocked();
     s.auditLogger.log({
       eventType: AuditEventType.SERVER_START,
@@ -3482,7 +3612,30 @@ export class VaultEngine {
         transport: options.transport,
         tokenless: options.tokenless,
         tty_prompt: options.ttyPrompt ?? false,
+        ...(options.error ? { error: options.error } : {}),
       },
+      success: options.success ?? true,
+      sessionId: this.sessionId ?? undefined,
+    });
+  }
+
+  /**
+   * Record a scheduled renewal that failed after its retries — the daemon's
+   * one path with no engine write of its own (N5). NULL principal: the
+   * scheduler is the trusted local path, like `auditServerStart`. Throws on
+   * a sealed engine; the scheduler swallows that (the audit write must not
+   * halt the loop).
+   */
+  auditCertRenewFailure(secretId: string, error: unknown): void {
+    const s = this.assertUnlocked();
+    s.auditLogger.log({
+      eventType: AuditEventType.CERT_RENEW,
+      secretId,
+      detail: {
+        action: "scheduled_renewal",
+        error: error instanceof VaultError ? error.code : ErrorCode.INTERNAL_ERROR,
+      },
+      success: false,
       sessionId: this.sessionId ?? undefined,
     });
   }
@@ -3541,9 +3694,9 @@ export class VaultEngine {
    * pattern grammar — name characters plus `*`, no other meta-characters.
    *
    * `options.principalType` sets the token's principal identity for
-   * per-secret policy matching (thesis §4.6): agent, tool or user — absent =
-   * agent. `project` is not issuable; project principals derive from the
-   * token's project claim.
+   * per-secret policy matching (thesis §4.6): agent, tool or user — the claim
+   * is always minted (default agent). `project` is not issuable; project
+   * principals derive from the token's project claim.
    *
    * An agent-typed subject must be a registered, active agent (v1.4 §5.2) —
    * the registration gate is what makes the registry authoritative rather than
@@ -3599,11 +3752,11 @@ export class VaultEngine {
       iat: now,
       exp: now + Math.floor(effectiveTtl / 1000),
       jti: generateUUIDv7(),
+      principal_type: effectiveType,
     };
 
     if (options?.project) payload.project = options.project;
     if (options?.secrets?.length) payload.secrets = options.secrets;
-    if (options?.principalType) payload.principal_type = options.principalType;
 
     const token = this.signJwt(payload);
 
@@ -3705,7 +3858,9 @@ export class VaultEngine {
     s.store.transaction(() => {
       s.store.insertRevokedToken(jti, effectiveExpiresAt);
       // History mirror; revoked_tokens stays the revocation truth verifyToken
-      // consults. A jti with no registry row (minted before v1.4) is a no-op.
+      // consults. A jti with no registry row is a no-op — every token
+      // verifyToken accepts carries the principal_type claim, so none
+      // predates the registry.
       s.store.markIssuedTokenRevoked(jti, Date.now());
 
       s.auditLogger.log({
@@ -3844,7 +3999,8 @@ export class VaultEngine {
    * Audit a denied operation (`success: false`, error code in detail) without
    * altering the thrown error. Denied access must be as visible in the trail
    * as granted access — a scoped token probing revoked/expired secrets is
-   * exactly what the audit trail exists to catch.
+   * exactly what the audit trail exists to catch. A non-VaultError is recorded
+   * as INTERNAL_ERROR — a raw failure is still a denial the trail must show.
    */
   private auditDenied(
     s: UnlockedState,
@@ -3854,13 +4010,13 @@ export class VaultEngine {
     secretId?: string,
     caller?: CallerContext,
   ): void {
-    if (!(err instanceof VaultError)) return;
+    const code = err instanceof VaultError ? err.code : ErrorCode.INTERNAL_ERROR;
     s.auditLogger.log({
       eventType,
       secretId,
       principalType: caller?.principal_type,
       principalId: caller?.principal_id,
-      detail: { ...detail, error: err.code, ...callerInterfaceDetail(caller) },
+      detail: { ...detail, error: code, ...callerInterfaceDetail(caller) },
       success: false,
       sessionId: this.sessionId ?? undefined,
     });
@@ -4313,11 +4469,20 @@ export class VaultEngine {
       throw new VaultError(ErrorCode.INVALID_TOKEN, "Invalid token signature");
     }
 
+    let payload: VaultApiToken;
     try {
-      return JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as VaultApiToken;
+      payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as VaultApiToken;
     } catch {
       throw new VaultError(ErrorCode.INVALID_TOKEN, "Invalid token payload");
     }
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      !(Object.values(TokenPrincipalTypeValues) as string[]).includes(payload.principal_type)
+    ) {
+      throw new VaultError(ErrorCode.INVALID_TOKEN, "Invalid token payload");
+    }
+    return payload;
   }
 
   // ---------------------------------------------------------------------------

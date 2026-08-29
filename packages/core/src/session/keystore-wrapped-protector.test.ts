@@ -195,6 +195,7 @@ describe("KeystoreWrappedSessionKeyProtector through SessionManager", () => {
       created_at: now,
       expires_at: now + DEFAULT_SESSION_TTL_MS,
       max_expires_at: now + MAX_SESSION_TTL_MS,
+      key_protection: "none",
       session_key: b64,
       wrapped_kek: b64,
       wrapped_kek_iv: b64,

@@ -9,6 +9,7 @@ import {
   DEFAULT_DB_TIMEOUT_MS,
   MAX_DB_RESULT_BYTES,
   MAX_DB_ROWS,
+  MIN_REDACTABLE_FRAGMENT,
   VaultError,
 } from "@harpoc/shared";
 import type { AuditAttribution } from "../audit/attribution.js";
@@ -118,15 +119,22 @@ export class DatabaseInjector {
     const dbConfig = config?.database;
     const tlsMode = dbConfig?.tls_mode ?? "require";
     const tls: DbTlsOptions = tlsMode === "disable" ? false : { ca: dbConfig?.ca_pem };
+    // The opt-out is stamped on every row written past this point: the config
+    // records the operator's choice, the use row records that the credential
+    // actually crossed a plaintext leg. The pre-connect refusals above are
+    // deliberately excluded — they resolve no connection config (D13).
+    const tlsOptOut = tlsMode === "disable" ? { tls_opt_out: true } : {};
 
     const { user, password } = parseUserPassword(secretValue);
     const timeoutMs = action.timeout_ms ?? DEFAULT_DB_TIMEOUT_MS;
 
-    // The username half of the credential is redacted alongside the password;
-    // a 1–2 char username would shred unrelated output, so it stays unredacted.
+    // The username half of the credential is redacted alongside the password,
+    // down to the shared floor (MIN_REDACTABLE_FRAGMENT).
     const redactCredential = (s: string): string => {
       const redacted = redactSecretEncodings(s, password);
-      return user.length >= 3 ? redactSecretEncodings(redacted, user) : redacted;
+      return user.length >= MIN_REDACTABLE_FRAGMENT
+        ? redactSecretEncodings(redacted, user)
+        : redacted;
     };
 
     const connectOpts = {
@@ -151,14 +159,20 @@ export class DatabaseInjector {
         this.audit(
           action,
           secretId,
-          { host, port, row_count: result.row_count, truncated },
+          { host, port, row_count: result.row_count, truncated, ...tlsOptOut },
           true,
           attribution,
         );
         return result;
       } catch (err) {
         const detail = redactCredential(errMessage(err));
-        this.audit(action, secretId, { host, port, error: "DB_QUERY_FAILED" }, false, attribution);
+        this.audit(
+          action,
+          secretId,
+          { host, port, error: "DB_QUERY_FAILED", ...tlsOptOut },
+          false,
+          attribution,
+        );
         throw VaultError.dbQueryFailed(detail);
       }
     }
@@ -173,7 +187,7 @@ export class DatabaseInjector {
       this.audit(
         action,
         secretId,
-        { host, port, error: "DB_CONNECTION_FAILED" },
+        { host, port, error: "DB_CONNECTION_FAILED", ...tlsOptOut },
         false,
         attribution,
       );
@@ -191,14 +205,20 @@ export class DatabaseInjector {
       this.audit(
         action,
         secretId,
-        { host, port, row_count: result.row_count, truncated },
+        { host, port, row_count: result.row_count, truncated, ...tlsOptOut },
         true,
         attribution,
       );
       return result;
     } catch (err) {
       const detail = redactCredential(errMessage(err));
-      this.audit(action, secretId, { host, port, error: "DB_QUERY_FAILED" }, false, attribution);
+      this.audit(
+        action,
+        secretId,
+        { host, port, error: "DB_QUERY_FAILED", ...tlsOptOut },
+        false,
+        attribution,
+      );
       throw VaultError.dbQueryFailed(detail);
     } finally {
       try {

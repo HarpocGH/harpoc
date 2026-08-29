@@ -121,7 +121,7 @@ export class SessionManager {
     }
     if (!stored) return null;
 
-    const scheme = stored.key_protection ?? "none";
+    const scheme = stored.key_protection;
     if (scheme === "none") {
       return stored;
     }
@@ -293,7 +293,10 @@ export class SessionManager {
 
       // Checked as close to the rename as possible: if the session file is
       // gone, do not recreate it. A microsecond check→rename window remains
-      // (no cross-platform conditional rename exists) — the monitor backstops.
+      // (no cross-platform conditional rename exists) — a cross-process
+      // `harpoc lock` landing in it is resurrected until the TTL ceiling (the
+      // monitor seals only on a *missing* file); to be closed by the session
+      // mutex ruling (R8).
       if (requireExisting && !existsSync(this.sessionPath)) {
         unlinkSync(tmpPath);
         return false;
@@ -396,6 +399,7 @@ export class SessionManager {
       created_at: now,
       expires_at: now + ttlMs,
       max_expires_at: now + MAX_SESSION_TTL_MS,
+      key_protection: "none",
       session_key: sessionKey,
       wrapped_kek: wrappedKek,
       wrapped_kek_iv: wrappedKekIv,

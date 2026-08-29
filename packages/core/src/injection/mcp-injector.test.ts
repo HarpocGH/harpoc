@@ -412,7 +412,7 @@ describe("McpInjector — filesystem isolation", () => {
       ),
     ).rejects.toMatchObject({ code: ErrorCode.FS_ISOLATION_UNAVAILABLE });
 
-    expect(terminateSpy).toHaveBeenCalledWith("secret-1", "fs_isolation_enabled");
+    expect(terminateSpy).toHaveBeenCalledWith("secret-1", "fs_isolation_enabled", undefined);
     expect(registry.get("secret-1")).toBeUndefined();
     expect(log).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -452,6 +452,6 @@ describe("McpInjector — filesystem isolation", () => {
       }),
     ).rejects.toMatchObject({ code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE });
     expect(terminateSpy).toHaveBeenCalledTimes(1);
-    expect(terminateSpy).toHaveBeenCalledWith("secret-1", "network_isolation_enabled");
+    expect(terminateSpy).toHaveBeenCalledWith("secret-1", "network_isolation_enabled", undefined);
   });
 });

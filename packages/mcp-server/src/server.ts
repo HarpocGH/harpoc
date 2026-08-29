@@ -3,7 +3,7 @@ import { CertManager } from "@harpoc/cert-manager";
 import type { VaultEngine } from "@harpoc/core";
 import { OAuthManager } from "@harpoc/oauth-proxy";
 import type { AccessInterface } from "@harpoc/shared";
-import { VaultError } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 import { InjectionGuard } from "./guards/injection-guard.js";
 import { RateLimiter } from "./guards/rate-limiter.js";
 import { ScopeGuard } from "./guards/scope-guard.js";
@@ -113,6 +113,15 @@ export function createMcpServer(options: CreateMcpServerOptions): McpServer {
     );
     scopeGuard = new ScopeGuard(null, accessInterface);
   } else {
+    // The refusal is as much a start decision as the waiver: without a row the
+    // trail shows nothing at all for a launch that was attempted and denied.
+    engine.auditServerStart({
+      transport: "stdio",
+      tokenless: false,
+      ttyPrompt: options.enableTtyPrompt ?? false,
+      success: false,
+      error: ErrorCode.TOKEN_REQUIRED,
+    });
     throw VaultError.tokenRequired();
   }
 

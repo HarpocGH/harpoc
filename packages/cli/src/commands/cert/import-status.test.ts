@@ -68,6 +68,7 @@ function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
     iat: 0,
     exp: 2_000_000_000,
     jti: "jti-1",
+    principal_type: "agent",
     ...overrides,
   };
 }
@@ -152,7 +153,7 @@ describe("cert import", () => {
       {
         certificatePem: expect.stringContaining("BEGIN CERTIFICATE") as string,
         chainPem: undefined,
-        autoRenew: false,
+        autoRenew: undefined,
         renewBeforeDays: 30,
       },
       undefined,
@@ -171,7 +172,7 @@ describe("cert import", () => {
     expect(printed).toEqual({ handle: "secret://web" });
   });
 
-  it("forwards --project, --auto-renew and --renew-before-days", async () => {
+  it("forwards --project and --renew-before-days", async () => {
     await run([
       "import",
       "web",
@@ -181,7 +182,6 @@ describe("cert import", () => {
       CERT_PATH,
       "--project",
       "team-a",
-      "--auto-renew",
       "--renew-before-days",
       "14",
     ]);
@@ -189,10 +189,18 @@ describe("cert import", () => {
     expect(mockEngine.importCertificate).toHaveBeenCalledWith(
       "web",
       KEY_PEM,
-      expect.objectContaining({ autoRenew: true, renewBeforeDays: 14 }),
+      expect.objectContaining({ renewBeforeDays: 14 }),
       "team-a",
       undefined,
     );
+  });
+
+  it("no longer accepts --auto-renew (auto_renew is ACME-only)", async () => {
+    await expect(
+      run(["import", "web", "--key", KEY_PATH, "--cert", CERT_PATH, "--auto-renew"]),
+    ).rejects.toThrow("unknown option '--auto-renew'");
+
+    expect(mockEngine.importCertificate).not.toHaveBeenCalled();
   });
 
   it("splits a bundled certificate file into leaf and chain", async () => {

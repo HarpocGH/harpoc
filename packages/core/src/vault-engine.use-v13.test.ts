@@ -19,6 +19,7 @@ import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
 import type { ImapExecution, ImapOAuth } from "./injection/imap-injector.js";
 import type { MailTlsConfig, SmtpExecution, SmtpOAuth } from "./injection/smtp-injector.js";
+import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();
@@ -124,19 +125,34 @@ interface EngineSeams {
   websocketExecutor: (...args: unknown[]) => Promise<WebsocketResult>;
   sftpExecutor: (...args: unknown[]) => Promise<SftpResult>;
   dockerExecutor: (...args: unknown[]) => Promise<DockerResult>;
+  processInjector: { executeWithSecret: (...args: unknown[]) => Promise<unknown> };
+  databaseInjector: { executeWithSecret: (...args: unknown[]) => Promise<unknown> };
+  sshInjector: { executeWithSecret: (...args: unknown[]) => Promise<unknown> };
+  gitInjector: { executeWithSecret: (...args: unknown[]) => Promise<unknown> };
 }
 
-/** Replace all five v1.3 seams with recording fakes; returns the call log. */
-function installSeams(
-  e: VaultEngine,
-  outcomes: {
-    smtp?: SmtpOutcome;
-    imap?: ImapOutcome;
-    websocket?: WsOutcome;
-    sftp?: SftpOutcome;
-    docker?: DockerOutcome;
-  },
-): Seams {
+/**
+ * Outcomes for the seams a test drives. The five v1.3 seams take a result or a
+ * throwing function; the four pre-v1.3 injector seams are installed only when
+ * a test supplies a throw for them, so every other test keeps the real ones.
+ */
+interface SeamOutcomes {
+  smtp?: SmtpOutcome;
+  imap?: ImapOutcome;
+  websocket?: WsOutcome;
+  sftp?: SftpOutcome;
+  docker?: DockerOutcome;
+  process?: () => never;
+  database?: () => never;
+  ssh?: () => never;
+  git?: () => never;
+}
+
+/**
+ * Replace all five v1.3 seams with recording fakes, plus any pre-v1.3 injector
+ * seam the test supplies a throw for; returns the call log.
+ */
+function installSeams(e: VaultEngine, outcomes: SeamOutcomes): Seams {
   const calls: Seams = { smtp: [], imap: [], websocket: [], sftp: [], docker: [] };
   const seams = e as unknown as EngineSeams;
 
@@ -224,6 +240,11 @@ function installSeams(
       },
     );
   };
+
+  if (outcomes.process) seams.processInjector = { executeWithSecret: outcomes.process };
+  if (outcomes.database) seams.databaseInjector = { executeWithSecret: outcomes.database };
+  if (outcomes.ssh) seams.sshInjector = { executeWithSecret: outcomes.ssh };
+  if (outcomes.git) seams.gitInjector = { executeWithSecret: outcomes.git };
 
   return calls;
 }
@@ -420,6 +441,60 @@ describe("useSecret (smtp) — OAuth arm", () => {
       accessToken: "ya29.smtp-access-token",
       username: "ops@example.com",
     });
+  });
+});
+
+describe("useSecret (smtp) — STARTTLS cannot honor the mail TLS opt-out (N4)", () => {
+  const STARTTLS_ACTION: SmtpAction = { ...SMTP_ACTION, security: "starttls" };
+
+  beforeEach(async () => {
+    await initWithSecret("mail", "ops@example.com:mailpass");
+    await engine.setConnectionConfig("secret://mail", { mail: { tls: false } });
+  });
+
+  it("refuses before the injector and before the value decrypt", async () => {
+    const calls = installSeams(engine, {});
+    const getSecretValue = vi.spyOn(
+      (engine as unknown as EngineInternals).secretManager,
+      "getSecretValue",
+    );
+
+    try {
+      await expectVaultError(
+        () => engine.useSecret("secret://mail", STARTTLS_ACTION),
+        ErrorCode.INVALID_INPUT,
+      );
+
+      expect(calls.smtp).toHaveLength(0);
+      expect(getSecretValue).not.toHaveBeenCalled();
+    } finally {
+      getSecretValue.mockRestore();
+    }
+  });
+
+  it("audits the refusal as a failed secret.use row WITHOUT tls_opt_out", async () => {
+    installSeams(engine, {});
+
+    await engine.useSecret("secret://mail", STARTTLS_ACTION).catch(() => undefined);
+
+    const [row] = useRows(false);
+    expect(row?.detail).toMatchObject({
+      context: "smtp",
+      host: "smtp.example.com",
+      error: ErrorCode.INVALID_INPUT,
+    });
+    expect(row?.detail).not.toHaveProperty("tls_opt_out");
+  });
+
+  it("names the conflict and both fixes in the message", async () => {
+    installSeams(engine, {});
+
+    const err = (await engine
+      .useSecret("secret://mail", STARTTLS_ACTION)
+      .catch((e: unknown) => e)) as VaultError;
+
+    expect(err.message).toContain("STARTTLS");
+    expect(err.message).toContain("security: tls");
   });
 });
 
@@ -943,6 +1018,7 @@ describe("useSecret (sftp) — engine dispatch", () => {
       context: "sftp",
       host: "deploy.example.com",
       operation: "upload",
+      port: null,
       remote_path: "/srv/report.pdf",
       local_path: "/tmp/report.pdf",
     });
@@ -965,6 +1041,7 @@ describe("useSecret (sftp) — engine dispatch", () => {
       context: "sftp",
       host: "deploy.example.com",
       operation: "list",
+      port: null,
       remote_path: "/srv/reports",
       local_path: null,
       error: ErrorCode.HOST_NOT_ALLOWED,
@@ -990,6 +1067,7 @@ describe("useSecret (sftp) — engine dispatch", () => {
       context: "sftp",
       host: "deploy.example.com",
       operation: "list",
+      port: null,
       remote_path: "/srv/reports",
       local_path: null,
       error: ErrorCode.PROCESS_TIMEOUT,
@@ -1014,6 +1092,7 @@ describe("useSecret (sftp) — engine dispatch", () => {
       context: "sftp",
       host: "deploy.example.com",
       operation: "list",
+      port: null,
       remote_path: "/srv/reports",
       local_path: null,
       error: ErrorCode.INTERNAL_ERROR,
@@ -1310,5 +1389,96 @@ describe("redis/mongodb route through the existing database arm", () => {
     const row = useRows(false)[0];
     expect(row?.detail?.context).toBe("database");
     expect(row?.detail?.engine).toBe("mongodb");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The thrown-error choke point (E69 + N16)
+// ---------------------------------------------------------------------------
+
+describe("useSecret — thrown-error choke point (E69 + N16)", () => {
+  const VALUE = "tok-4b1d-secret-value";
+
+  const throwCarryingValue = (): never => {
+    throw new VaultError(ErrorCode.GIT_OPERATION_FAILED, `fatal: ${VALUE}`, { where: VALUE });
+  };
+
+  // `failedRows` is the arm's own bookkeeping, not the choke point's: only the
+  // sftp arm audits inside the engine, so the four injector-audited arms leave
+  // no row once their injector is replaced by a throwing fake.
+  const cases: [string, UseSecretAction, SeamOutcomes, number][] = [
+    [
+      "process",
+      { type: "process", command: "x", env_var: "T" },
+      { process: throwCarryingValue },
+      0,
+    ],
+    [
+      "git",
+      { type: "git", operation: "clone", repository: "https://8.8.8.8/o/r.git" },
+      { git: throwCarryingValue },
+      0,
+    ],
+    [
+      "ssh",
+      { type: "ssh", host: "h.example", user: "u", command: "id" },
+      { ssh: throwCarryingValue },
+      0,
+    ],
+    [
+      "sftp",
+      { type: "sftp", host: "h.example", user: "u", operation: "list", remote_path: "/" },
+      { sftp: throwCarryingValue },
+      1,
+    ],
+    [
+      "database",
+      { type: "database", engine: "postgresql", host: "8.8.8.8", database: "d", query: "select 1" },
+      { database: throwCarryingValue },
+      0,
+    ],
+  ];
+
+  it.each(cases)(
+    "%s: a VaultError carrying the value is rethrown redacted, code preserved",
+    async (_kind, action, outcomes, failedRows) => {
+      await initWithSecret("k", VALUE);
+      installSeams(engine, outcomes);
+
+      const err = (await engine
+        .useSecret("secret://k", action)
+        .catch((e: unknown) => e)) as VaultError;
+
+      expect(err).toBeInstanceOf(VaultError);
+      expect(err.code).toBe(ErrorCode.GIT_OPERATION_FAILED);
+      expect(err.message).toContain("[REDACTED]");
+      expect(err.message).not.toContain(VALUE);
+      expect(JSON.stringify(err.details ?? {})).not.toContain(VALUE);
+      expect(useRows(false)).toHaveLength(failedRows);
+    },
+  );
+
+  it("a raw Error out of the git seam becomes a value-free INTERNAL_ERROR with one failed secret.use row", async () => {
+    await initWithSecret("k", VALUE);
+    installSeams(engine, {
+      git: () => {
+        throw new Error(`ENOENT ${VALUE}`);
+      },
+    });
+
+    const err = (await engine
+      .useSecret("secret://k", {
+        type: "git",
+        operation: "clone",
+        repository: "https://8.8.8.8/o/r.git",
+      })
+      .catch((e: unknown) => e)) as VaultError;
+
+    expect(err.code).toBe(ErrorCode.INTERNAL_ERROR);
+    expect(err.message).not.toContain(VALUE);
+
+    const failed = useRows(false);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.detail).toMatchObject({ context: "git", error: ErrorCode.INTERNAL_ERROR });
   });
 });

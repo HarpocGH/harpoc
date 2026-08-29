@@ -14,6 +14,7 @@ const ADMIN_TOKEN: VaultApiToken = {
   iat: Math.floor(Date.now() / 1000),
   exp: Math.floor(Date.now() / 1000) + 3600,
   jti: "jti-admin",
+  principal_type: "agent",
 };
 
 const READ_TOKEN: VaultApiToken = {

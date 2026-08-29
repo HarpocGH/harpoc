@@ -298,6 +298,34 @@ describe("importCertificate", () => {
     expect((storedCert(secretId) as StoredCertRow).renew_before_days).toBe(365);
   });
 
+  it("refuses auto_renew on a non-ACME import before any write (E86c)", async () => {
+    await expectVaultError(
+      () =>
+        engine.importCertificate("manual-auto", fx("rsa-key.pem"), {
+          certificatePem: fx("rsa-cert.pem"),
+          autoRenew: true,
+        }),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(engine.listSecrets().find((x) => x.name === "manual-auto")).toBeUndefined();
+    const denied = engine
+      .queryAudit({ eventType: AuditEventType.CERT_ISSUE })
+      .filter((e) => !e.success);
+    expect(denied[0]?.detail).toMatchObject({
+      name: "manual-auto",
+      error: ErrorCode.INVALID_INPUT,
+    });
+  });
+
+  it("stores auto_renew for an ACME-issued import", async () => {
+    const { secretId } = await engine.importCertificate("acme-auto", fx("rsa-key.pem"), {
+      certificatePem: fx("rsa-cert.pem"),
+      autoRenew: true,
+      acmeIssued: true,
+    });
+    expect((storedCert(secretId) as StoredCertRow).auto_renew).toBe(1);
+  });
+
   it("accepts an EC key/cert pair", async () => {
     const { secretId } = await engine.importCertificate("ec-cert", fx("ec-key.pem"), {
       certificatePem: fx("ec-cert.pem"),
@@ -424,6 +452,7 @@ describe("importCertificate", () => {
         certificatePem: fx("rsa-cert.pem"),
         chainPem: fx("ec-cert.pem"),
         autoRenew: true,
+        acmeIssued: true,
         renewBeforeDays: 14,
       },
       "webops",
@@ -761,6 +790,7 @@ describe("certificate accessors", () => {
     const { secretId: autoId } = await engine.importCertificate("auto-cert", fx("rsa-key.pem"), {
       certificatePem: fx("rsa-cert.pem"),
       autoRenew: true,
+      acmeIssued: true,
     });
     expect(engine.getCertificateStatus(autoId).auto_renew).toBe(true);
   });
@@ -901,6 +931,21 @@ describe("certificate accessors", () => {
     expect(rows[0]?.success).toBe(true);
     expect(rows[0]?.detail).toEqual({ config: "acme_account" });
     expect(JSON.stringify(rows[0]?.detail)).not.toContain("privateKeyPem");
+  });
+
+  it("storeAcmeAccount attributes its policy.grant row to the issuing caller", () => {
+    engine.storeAcmeAccount(secretId, "{}", {
+      principal_type: PrincipalType.AGENT,
+      principal_id: "issuer",
+      interface: "cli",
+    });
+
+    const [row] = engine
+      .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
+      .filter((e) => e.secret_id === secretId);
+    expect(row?.principal_type).toBe(PrincipalType.AGENT);
+    expect(row?.principal_id).toBe("issuer");
+    expect(row?.detail).toEqual({ config: "acme_account", interface: "cli" });
   });
 
   it("storeAcmeAccount audits every write, not only the first", () => {
@@ -1287,6 +1332,22 @@ describe("updateCertificate", () => {
     expect(renews[0]?.success).toBe(true);
     expect(renews[0]?.detail).toMatchObject({ subject: "CN=fixture.example.com" });
     expect(renews[0]?.detail?.not_after).toBeGreaterThan(Date.now());
+  });
+
+  it("auditCertRenewFailure writes one failed cert.renew row naming the code", async () => {
+    const secretId = await pending("renew-fail");
+
+    engine.auditCertRenewFailure(secretId, VaultError.certAcmeFailed("no ACME account"));
+    engine.auditCertRenewFailure(secretId, new Error("raw"));
+
+    const rows = engine.queryAudit({ secretId, eventType: AuditEventType.CERT_RENEW });
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.success === false)).toBe(true);
+    expect(rows.every((r) => r.detail?.action === "scheduled_renewal")).toBe(true);
+    expect(rows.map((r) => r.detail?.error).sort()).toEqual(
+      [ErrorCode.CERT_ACME_FAILED, ErrorCode.INTERNAL_ERROR].sort(),
+    );
+    expect(rows.every((r) => r.principal_id === null)).toBe(true);
   });
 
   it("logs cert.issue when the completion is not a renewal", async () => {

@@ -20,7 +20,7 @@ describe("decodeJwtClaims", () => {
     });
   });
 
-  it("omits an absent principal_type — the CLI default the caller applies", () => {
+  it("passes an absent principal_type through as undefined", () => {
     expect(decodeJwtClaims(jwt({ sub: "ci-bot" }))).toEqual({ sub: "ci-bot" });
   });
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { mapStringLeaves, redactSecretEncodings } from "./output-sanitizer.js";
+import { ErrorCode, VaultError } from "@harpoc/shared";
+import { mapStringLeaves, redactErrorMessage, redactSecretEncodings } from "./output-sanitizer.js";
 
 const SECRET = "sk-topsecretvalue-123456";
 
@@ -460,5 +461,39 @@ describe("redactSecretEncodings — nested JSON documents", () => {
     const body = JSON.stringify({ pad: padding, data: inner });
     // Over the guard: the flat passes still run, the descent does not.
     expect(redactSecretEncodings(body, secret)).toContain("en-big");
+  });
+});
+
+describe("redactErrorMessage", () => {
+  it("redacts the credential from the message and from details string leaves, keeping the code", () => {
+    const err = new VaultError(ErrorCode.GIT_OPERATION_FAILED, `fatal: ${SECRET}`, {
+      location: `/tmp/${SECRET}`,
+      exit_code: 128,
+    });
+
+    const out = redactErrorMessage(err, SECRET) as VaultError;
+
+    expect(out.code).toBe(ErrorCode.GIT_OPERATION_FAILED);
+    expect(out.message).not.toContain(SECRET);
+    expect(out.details?.location).not.toContain(SECRET);
+    expect(out.details?.exit_code).toBe(128);
+  });
+
+  it("redacts details even when the message is clean", () => {
+    const err = new VaultError(ErrorCode.GIT_OPERATION_FAILED, "x", { location: SECRET });
+
+    expect((redactErrorMessage(err, SECRET) as VaultError).details?.location).toBe("[REDACTED]");
+  });
+
+  it("returns the same error object when nothing carries the credential", () => {
+    const err = new VaultError(ErrorCode.GIT_OPERATION_FAILED, "clean", { location: "/tmp/repo" });
+
+    expect(redactErrorMessage(err, SECRET)).toBe(err);
+  });
+
+  it("returns a non-VaultError untouched", () => {
+    const plain = new Error(SECRET);
+
+    expect(redactErrorMessage(plain, SECRET)).toBe(plain);
   });
 });

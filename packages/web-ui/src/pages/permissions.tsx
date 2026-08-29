@@ -44,7 +44,9 @@ function preselectedSecret(route: string): string | null {
  * holds its first agent row, a token caller needs a grant of its own on it —
  * an agent- or tool-type admin token included — and only the trusted local CLI
  * path can write that first one. The principal is read off the session's own
- * bearer; an absent `principal_type` claim is the CLI's default, `agent`.
+ * bearer; every verified token carries the `principal_type` claim, so the
+ * `agent` fallback below covers only an un-decodable bearer, where web-ui's
+ * local decode yields no claims at all.
  */
 function grantCommand(handle: string): string {
   const held = getToken();

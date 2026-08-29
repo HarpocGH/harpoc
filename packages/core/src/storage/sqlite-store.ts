@@ -1,4 +1,4 @@
-import { chmodSync, existsSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, openSync } from "node:fs";
 import Database from "better-sqlite3";
 import type {
   AccessPolicy,
@@ -26,6 +26,7 @@ import { migration009 } from "./migrations/009-name-hmac-unique.js";
 import { migration010 } from "./migrations/010-audit-row-hmac.js";
 import { migration011 } from "./migrations/011-oauth-auth-method.js";
 import { migration012 } from "./migrations/012-agent-governance.js";
+import { LATEST_SCHEMA_VERSION } from "./schema.js";
 
 /** Description stamped on agents the 012 backfill registers from existing grants. */
 const AGENT_BACKFILL_DESCRIPTION = "auto-registered from existing grants (migration 012)";
@@ -56,7 +57,21 @@ export interface AuditFilter {
   success?: boolean;
   principalType?: PrincipalType;
   principalId?: string;
+  /**
+   * The secret ids a scoped caller may see (L10). Applied inside the query,
+   * ahead of `limit`, so a scoped read gets up to `limit` rows it may see
+   * instead of the visible remainder of the newest `limit` rows. Rows without
+   * a `secret_id` carry no per-secret metadata and stay visible.
+   */
+  visibleSecretIds?: string[];
 }
+
+/**
+ * SQLite's compiled-in host-parameter ceiling (SQLITE_MAX_VARIABLE_NUMBER) is
+ * 32766 in the versions better-sqlite3 ships; a visibility list longer than
+ * what fits alongside the other predicates is filtered in JS instead.
+ */
+const MAX_SQL_VARIABLES = 32_000;
 
 /** Raw audit row plus its chain link, for tamper-evidence verification. */
 export interface AuditChainRow {
@@ -227,6 +242,9 @@ export class SqliteStore {
 
   constructor(path: string) {
     try {
+      if (!path.startsWith(":") && !existsSync(path)) {
+        closeSync(openSync(path, "a", 0o600));
+      }
       this.db = new Database(path);
     } catch (err) {
       throw VaultError.databaseError(
@@ -332,7 +350,7 @@ export class SqliteStore {
         // itself — in this transaction, or an interrupted upgrade would leave
         // the tables without their principals.
         this.backfillAgentsFromPolicies();
-        this.setMeta("schema_version", "12");
+        this.setMeta("schema_version", String(LATEST_SCHEMA_VERSION));
       })();
     }
   }
@@ -388,19 +406,23 @@ export class SqliteStore {
   }
 
   private getMigrationVersion(): number {
-    try {
-      // Check if vault_meta table exists
-      const row = this.db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='vault_meta'")
-        .get() as { name: string } | undefined;
+    const row = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='vault_meta'")
+      .get() as { name: string } | undefined;
+    if (!row) return 0;
 
-      if (!row) return 0;
-
-      const version = this.getMeta("schema_version");
-      return version ? parseInt(version, 10) : 0;
-    } catch {
-      return 0;
+    const version = this.getMeta("schema_version");
+    if (version === undefined) return 0;
+    if (!/^\d+$/.test(version)) {
+      throw VaultError.vaultCorrupted(`Malformed schema_version "${version}"`);
     }
+    const parsed = Number(version);
+    if (parsed > LATEST_SCHEMA_VERSION) {
+      throw VaultError.vaultCorrupted(
+        `Vault schema ${parsed} is newer than supported ${LATEST_SCHEMA_VERSION}`,
+      );
+    }
+    return parsed;
   }
 
   // ---------------------------------------------------------------------------
@@ -550,10 +572,6 @@ export class SqliteStore {
       .prepare("SELECT * FROM secrets WHERE name_hmac = ? ORDER BY created_at DESC")
       .all(nameHmac) as Record<string, unknown>[];
     return rows.map((row) => this.rowToSecret(row));
-  }
-
-  updateSecretNameHmac(id: string, nameHmac: string): void {
-    this.db.prepare("UPDATE secrets SET name_hmac = ? WHERE id = ?").run(nameHmac, id);
   }
 
   deleteSecret(id: string): boolean {
@@ -785,15 +803,33 @@ export class SqliteStore {
       params.push(filter.success ? 1 : 0);
     }
 
+    const ids = filter?.visibleSecretIds;
+    const inlineVisibility = ids !== undefined && params.length + ids.length <= MAX_SQL_VARIABLES;
+    if (ids !== undefined && inlineVisibility) {
+      // An empty visibility list is a scope that matches no secret: only the
+      // secret-less rows remain (`IN ()` is not valid SQLite).
+      sql +=
+        ids.length === 0
+          ? " AND secret_id IS NULL"
+          : ` AND (secret_id IS NULL OR secret_id IN (${ids.map(() => "?").join(",")}))`;
+      params.push(...ids);
+    }
+
     sql += " ORDER BY timestamp DESC";
 
-    if (filter?.limit) {
+    if (filter?.limit && (ids === undefined || inlineVisibility)) {
       sql += " LIMIT ?";
       params.push(filter.limit);
     }
 
     const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
-    return rows.map((row) => this.rowToAuditEvent(row));
+    let events = rows.map((row) => this.rowToAuditEvent(row));
+    if (ids !== undefined && !inlineVisibility) {
+      const visible = new Set(ids);
+      events = events.filter((event) => event.secret_id === null || visible.has(event.secret_id));
+      if (filter?.limit) events = events.slice(0, filter.limit);
+    }
+    return events;
   }
 
   // ---------------------------------------------------------------------------
@@ -1426,6 +1462,10 @@ export class SqliteStore {
   // ---------------------------------------------------------------------------
 
   private rowToSecret(row: Record<string, unknown>): Secret {
+    const nameHmac = row.name_hmac;
+    if (typeof nameHmac !== "string") {
+      throw VaultError.vaultCorrupted(`secret ${String(row.id)} has no name_hmac`);
+    }
     return {
       id: row.id as string,
       name_encrypted: new Uint8Array(row.name_encrypted as Buffer),
@@ -1451,7 +1491,7 @@ export class SqliteStore {
       version: row.version as number,
       status: row.status as SecretStatus,
       sync_version: row.sync_version as number,
-      name_hmac: (row.name_hmac as string) ?? null,
+      name_hmac: nameHmac,
     };
   }
 
@@ -1622,9 +1662,9 @@ export class SqliteStore {
 /**
  * Restrict the vault database (and its WAL sidecars) to the owner on POSIX.
  *
- * The database was created with no explicit mode, so its permissions were
- * umask-dependent — typically world-readable — while the session file beside it
- * is deliberately 0600 (L11). Contents are KEK-encrypted, so this is hardening
+ * The database file is created `0o600` before SQLite opens it (SQLite's unix
+ * VFS copies the main file's mode onto `-wal`/`-shm`); the chmod below repairs
+ * an older file. Contents are KEK-encrypted, so this is hardening
  * consistency rather than a confidentiality fix: it keeps encrypted blobs,
  * timestamps and row counts off other local accounts. Best-effort by design —
  * a foreign-owned or read-only vault file must still open. No-op on Windows,

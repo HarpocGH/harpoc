@@ -35,7 +35,7 @@ export interface RenewalSchedulerOptions {
 }
 
 export class RenewalScheduler {
-  private engine: Pick<VaultEngine, "getExpiringCertificates">;
+  private engine: Pick<VaultEngine, "getExpiringCertificates" | "auditCertRenewFailure">;
   private renewer: CertificateRenewer;
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private checkIntervalMs: number;
@@ -51,7 +51,7 @@ export class RenewalScheduler {
   private readonly quarantine = new Map<string, QuarantineEntry>();
 
   constructor(
-    engine: Pick<VaultEngine, "getExpiringCertificates">,
+    engine: Pick<VaultEngine, "getExpiringCertificates" | "auditCertRenewFailure">,
     renewer: CertificateRenewer,
     options?: RenewalSchedulerOptions,
   ) {
@@ -150,6 +150,11 @@ export class RenewalScheduler {
       } catch (err) {
         // One unrenewable certificate must not halt the loop; the host is
         // notified, remaining certificates are still processed.
+        try {
+          this.engine.auditCertRenewFailure(cert.secret_id, err);
+        } catch {
+          // A sealed engine mid-shutdown cannot take the row; the loop goes on.
+        }
         this.onRenewError?.(cert.secret_id, err);
       }
     }

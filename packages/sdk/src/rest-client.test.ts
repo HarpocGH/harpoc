@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, injectionPolicyInputSchema } from "@harpoc/shared";
 import type { OAuthTokenStatus, SetAgentPermissionsInput } from "@harpoc/shared";
 import { RestClient } from "./rest-client.js";
 
@@ -239,6 +239,43 @@ describe("RestClient", () => {
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];
       const body = JSON.parse(call[1].body as string) as Record<string, unknown>;
       expect("fs_isolation" in body).toBe(false);
+    });
+
+    it("setInjectionPolicy forwards the v1.3 mail fields", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", {
+        url_allowlist: [],
+        command_allowlist: [],
+        env_allowlist: [],
+        smtp_recipient_allowlist: ["*@corp.example"],
+        imap_read_only: true,
+      });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(call[1].body as string);
+      expect(body.smtp_recipient_allowlist).toEqual(["*@corp.example"]);
+      expect(body.imap_read_only).toBe(true);
+    });
+
+    it("setInjectionPolicy serializes every injectionPolicyInputSchema key when supplied (drift pin)", async () => {
+      mockFetchResponse({ updated: true });
+      const full = {
+        url_allowlist: ["https://a.example/*"],
+        command_allowlist: ["gh"],
+        env_allowlist: ["CI"],
+        host_allowlist: ["db.example:5432"],
+        response_mode: "full" as const,
+        response_header_allowlist: ["x-request-id"],
+        network_isolation: true,
+        fs_isolation: true,
+        smtp_recipient_allowlist: ["*@corp.example"],
+        imap_read_only: true,
+      };
+      await client.setInjectionPolicy("secret://k", full);
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(call[1].body as string) as Record<string, unknown>;
+      for (const key of Object.keys(injectionPolicyInputSchema.shape)) {
+        expect(body, key).toHaveProperty(key);
+      }
     });
 
     it("setInjectionPolicy defaults acknowledge_interpreters to false in the body", async () => {

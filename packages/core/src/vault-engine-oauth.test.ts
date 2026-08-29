@@ -205,6 +205,30 @@ describe("createOAuthSecret", () => {
     ).rejects.toMatchObject({ code: ErrorCode.DUPLICATE_SECRET });
   });
 
+  it("audits a raw non-VaultError failure of createOAuthSecret as INTERNAL_ERROR", async () => {
+    const manager = (engine as unknown as { secretManager: { createSecret: unknown } })
+      .secretManager;
+    const spy = vi
+      .spyOn(manager as { createSecret(): Promise<unknown> }, "createSecret")
+      .mockRejectedValueOnce(new Error("disk on fire"));
+    try {
+      await expect(engine.createOAuthSecret("raw-fail", defaultProviderConfig())).rejects.toThrow(
+        "disk on fire",
+      );
+    } finally {
+      spy.mockRestore();
+    }
+
+    const denied = engine
+      .queryAudit({ eventType: AuditEventType.OAUTH_AUTHORIZE })
+      .filter((e) => !e.success);
+    expect(denied).toHaveLength(1);
+    expect(denied[0]?.detail).toMatchObject({
+      name: "raw-fail",
+      error: ErrorCode.INTERNAL_ERROR,
+    });
+  });
+
   it("a non-OAuth secret of the same name still collides (negative control)", async () => {
     await engine.createSecret({
       name: "api-col",
@@ -638,7 +662,7 @@ describe("refreshOAuthToken token-endpoint auth methods", () => {
     expect(decodeURIComponent(pair.slice(separator + 1))).toBe(clientSecret);
   });
 
-  it("no stored method refreshes with credentials in the body (legacy wire shape)", async () => {
+  it("a defaulted method refreshes with credentials in the body (client_secret_post)", async () => {
     const secretId = await createActiveOAuthSecret("legacy-refresh");
 
     await engine.refreshOAuthToken(secretId);
@@ -663,7 +687,7 @@ describe("refreshOAuthToken token-endpoint auth methods", () => {
     expect(request.body.get("client_secret")).toBe("my-client-secret");
   });
 
-  it("a NULL column and an unknown stored value both degrade to client_secret_post", async () => {
+  it("a NULL column degrades to client_secret_post — the pre-011 legacy state", async () => {
     const secretId = await createActiveOAuthSecret("degrade-refresh", {
       token_endpoint_auth_method: "client_secret_basic",
     });
@@ -675,21 +699,24 @@ describe("refreshOAuthToken token-endpoint auth methods", () => {
     db.close();
     await engine.refreshOAuthToken(secretId);
 
-    let request = captured[0] as CapturedTokenRequest;
+    const request = captured[0] as CapturedTokenRequest;
     expect(request.authorization).toBeUndefined();
     expect(request.body.get("client_id")).toBe("my-client-id");
+  });
 
-    const db2 = new Database(dbPath);
-    db2
-      .prepare("UPDATE oauth_tokens SET token_endpoint_auth_method = ? WHERE secret_id = ?")
-      .run("private_key_jwt", secretId);
-    db2.close();
-    await engine.refreshOAuthToken(secretId);
+  it("an unknown stored auth method refuses the refresh as VAULT_CORRUPTED instead of POSTing", async () => {
+    const secretId = await createActiveOAuthSecret("bad-method");
 
-    request = captured[1] as CapturedTokenRequest;
-    expect(request.authorization).toBeUndefined();
-    expect(request.body.get("client_id")).toBe("my-client-id");
-    expect(request.body.get("client_secret")).toBe("my-client-secret");
+    const db = new Database(dbPath);
+    db.prepare("UPDATE oauth_tokens SET token_endpoint_auth_method = ? WHERE secret_id = ?").run(
+      "private_key_jwt",
+      secretId,
+    );
+    db.close();
+
+    await expectVaultError(() => engine.refreshOAuthToken(secretId), ErrorCode.VAULT_CORRUPTED);
+    expect(captured).toHaveLength(0);
+    await expectVaultError(() => engine.getOAuthTokenStatus(secretId), ErrorCode.VAULT_CORRUPTED);
   });
 
   it("client_secret_basic without a stored secret falls back to client_id in the body", async () => {
@@ -706,7 +733,7 @@ describe("refreshOAuthToken token-endpoint auth methods", () => {
     expect(request.body.has("client_secret")).toBe(false);
   });
 
-  it("createOAuthSecret persists the method to the row, defaulting to NULL", async () => {
+  it("createOAuthSecret persists the method to the row, defaulting to client_secret_post", async () => {
     const { secretId: basicId } = await engine.createOAuthSecret(
       "persist-basic",
       defaultProviderConfig({ token_endpoint_auth_method: "client_secret_basic" }),
@@ -725,7 +752,9 @@ describe("refreshOAuthToken token-endpoint auth methods", () => {
     expect(rows.find((r) => r.secret_id === basicId)?.token_endpoint_auth_method).toBe(
       "client_secret_basic",
     );
-    expect(rows.find((r) => r.secret_id === defaultId)?.token_endpoint_auth_method).toBeNull();
+    expect(rows.find((r) => r.secret_id === defaultId)?.token_endpoint_auth_method).toBe(
+      "client_secret_post",
+    );
   });
 });
 
@@ -750,8 +779,10 @@ describe("getOAuthTokenStatus", () => {
     expect(status.refresh_status).toBe("expiring_soon");
   });
 
-  it("surfaces the configured token-endpoint auth method, null for legacy rows", async () => {
-    expect(engine.getOAuthTokenStatus(secretId).token_endpoint_auth_method).toBeNull();
+  it("surfaces the configured token-endpoint auth method, client_secret_post for a defaulted row", async () => {
+    expect(engine.getOAuthTokenStatus(secretId).token_endpoint_auth_method).toBe(
+      "client_secret_post",
+    );
 
     const basic = await engine.createOAuthSecret(
       "status-basic",
@@ -840,17 +871,6 @@ describe("getOAuthAccessToken", () => {
     });
   });
 
-  it("logs a denied access-token read with success=false", async () => {
-    await expect(engine.getOAuthAccessToken(secretId)).rejects.toThrow();
-
-    const denied = engine
-      .queryAudit({ eventType: AuditEventType.SECRET_READ })
-      .filter((e) => !e.success);
-    expect(denied).toHaveLength(1);
-    expect(denied[0]?.detail?.error).toBe(ErrorCode.OAUTH_NOT_CONFIGURED);
-    expect(denied[0]?.secret_id).toBe(secretId);
-  });
-
   it("throws for non-OAuth secrets", async () => {
     await engine.createSecret({
       name: "regular-key",
@@ -898,6 +918,23 @@ describe("useSecret with OAuth", () => {
     // Token is correctly redacted from response (server echoes Authorization header)
     const body = JSON.parse(response.body ?? "{}");
     expect(body.authorization).toBe("Bearer [REDACTED]");
+  });
+
+  it("a use on a PENDING OAuth secret writes exactly one failed row — the attributed secret.use", async () => {
+    await expect(
+      engine.useSecret("secret://use-test", {
+        type: "http",
+        method: "GET",
+        url: `${targetServerUrl}/api/data`,
+        injection: { type: "bearer" },
+      }),
+    ).rejects.toMatchObject({ code: ErrorCode.OAUTH_NOT_CONFIGURED });
+
+    const failed = engine.queryAudit({}).filter((e) => !e.success);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.event_type).toBe(AuditEventType.SECRET_USE);
+    expect(failed[0]?.secret_id).toBe(secretId);
+    expect(failed[0]?.detail).toMatchObject({ error: ErrorCode.OAUTH_NOT_CONFIGURED });
   });
 
   it("auto-refreshes expired OAuth token before HTTP injection", async () => {

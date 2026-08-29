@@ -274,8 +274,12 @@ export function PolicyEditor({
       host_allowlist: splitList(hosts),
       // Not edited here, and a PUT replaces the whole policy — resubmitting
       // them unchanged is the difference between "not edited" and "cleared".
+      // Covers env_allowlist, response_header_allowlist, smtp_recipient_allowlist
+      // and imap_read_only.
       env_allowlist: initial.env_allowlist ?? [],
       response_header_allowlist: initial.response_header_allowlist ?? [],
+      smtp_recipient_allowlist: initial.smtp_recipient_allowlist ?? [],
+      imap_read_only: initial.imap_read_only ?? false,
       response_mode: mode,
       network_isolation: networkIsolation,
       fs_isolation: fsIsolation,
@@ -297,7 +301,8 @@ export function PolicyEditor({
         Saving replaces the whole policy (REST PUT semantics) — omitted lists reset.
       </p>
       <p class="empty">
-        <code>env_allowlist</code> and <code>response_header_allowlist</code> are not editable here
+        <code>env_allowlist</code>, <code>response_header_allowlist</code>,{" "}
+        <code>smtp_recipient_allowlist</code> and <code>imap_read_only</code> are not editable here
         and are sent back unchanged.
       </p>
       <label for="policy-urls">URL allowlist (comma-separated)</label>

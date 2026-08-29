@@ -248,6 +248,47 @@ describe("ImapInjector — fetched content sanitization", () => {
     expect(JSON.stringify(out)).not.toContain("s3cr3tpass");
   });
 
+  it("redacts a username at the shared floor (MIN_REDACTABLE_FRAGMENT)", async () => {
+    const messages: ImapMessage[] = [
+      { uid: 1, flags: [], headers: "Subject: leak\r\n", text: "logged in as abc" },
+    ];
+    const client = makeFakeClient({ fetch: () => Promise.resolve(messages) });
+    const { fn } = connectReturning(client);
+    const injector = new ImapInjector({ connectImap: fn });
+
+    const { result } = await injector.run(
+      baseAction({ operation: { kind: "fetch", uids: [1], parts: "full" } }),
+      "abc:s3cr3tpass",
+      basePolicy({}),
+      undefined,
+      undefined,
+    );
+
+    const out = (result as { messages: ImapMessage[] }).messages;
+    expect(out[0]?.text).not.toContain("abc");
+    expect(out[0]?.text).toContain("[REDACTED]");
+  });
+
+  it("leaves a 1-2 char username unredacted (would shred unrelated output)", async () => {
+    const messages: ImapMessage[] = [
+      { uid: 1, flags: [], headers: "Subject: leak\r\n", text: "logged in as ab" },
+    ];
+    const client = makeFakeClient({ fetch: () => Promise.resolve(messages) });
+    const { fn } = connectReturning(client);
+    const injector = new ImapInjector({ connectImap: fn });
+
+    const { result } = await injector.run(
+      baseAction({ operation: { kind: "fetch", uids: [1], parts: "full" } }),
+      "ab:s3cr3tpass",
+      basePolicy({}),
+      undefined,
+      undefined,
+    );
+
+    const out = (result as { messages: ImapMessage[] }).messages;
+    expect(out[0]?.text).toBe("logged in as ab");
+  });
+
   it("does not touch message content when no credential is present", async () => {
     const messages: ImapMessage[] = [{ uid: 1, flags: ["\\Seen"], text: "hello world" }];
     const client = makeFakeClient({ fetch: () => Promise.resolve(messages) });

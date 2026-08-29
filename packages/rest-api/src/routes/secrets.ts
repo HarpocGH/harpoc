@@ -86,8 +86,9 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const secretId = await engine.resolveSecretId(handle);
-    c.get("limiter").checkSecret(secretId);
+    // Keyed on the handle, not a resolved id: resolving before the audited
+    // engine path let an unknown-handle probe leave no row (N3).
+    c.get("limiter").checkSecret(handle);
     const info = await engine.getSecretInfo(handle, callerFromToken(token, "rest"));
 
     return c.json({ data: info });
@@ -101,8 +102,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const secretId = await engine.resolveSecretId(handle);
-    c.get("limiter").checkSecret(secretId);
+    c.get("limiter").checkSecret(handle);
     const value = await engine.getSecretValue(handle, callerFromToken(token, "rest"));
 
     return c.json({ data: { value: Buffer.from(value).toString("base64") } });
@@ -121,8 +121,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const secretId = await engine.resolveSecretId(handle);
-    c.get("limiter").checkSecret(secretId);
+    c.get("limiter").checkSecret(handle);
     await engine.revokeSecret(handle, callerFromToken(token, "rest"));
 
     return c.json({ data: { revoked: true } });
@@ -146,8 +145,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     }
 
     const handle = buildHandle(c.req.param("handle"));
-    const secretId = await engine.resolveSecretId(handle);
-    c.get("limiter").checkSecret(secretId);
+    c.get("limiter").checkSecret(handle);
     const newValue = new Uint8Array(Buffer.from(parsedBody.data.value, "base64"));
     await engine.rotateSecret(handle, newValue, callerFromToken(token, "rest"));
 
@@ -169,8 +167,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     }
 
     const handle = buildHandle(c.req.param("handle"));
-    const secretId = await engine.resolveSecretId(handle);
-    c.get("limiter").checkSecret(secretId, true);
+    c.get("limiter").checkSecret(handle, true);
     const result = await engine.useSecret(handle, parsed.data, callerFromToken(token, "rest"));
 
     // Sanitize response to prevent credential leakage (parity across interfaces)

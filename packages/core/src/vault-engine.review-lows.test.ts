@@ -440,6 +440,21 @@ describe("L10 — audit visibility scope", () => {
     expect(visible.some((r) => r.event_type === AuditEventType.VAULT_UNLOCK)).toBe(true);
   });
 
+  it("applies the visibility filter before the limit (a scoped limit=2 still returns the older in-scope row)", async () => {
+    const dbId = await engine.resolveSecretId("secret://db-prod");
+    const apiId = await engine.resolveSecretId("secret://api-key");
+    await engine.getSecretInfo("secret://db-prod");
+    for (let i = 0; i < 3; i++) await engine.getSecretInfo("secret://api-key");
+
+    const visible = engine.queryAudit(
+      { eventType: AuditEventType.SECRET_READ, limit: 2 },
+      { secrets: ["db-*"] },
+    );
+
+    expect(visible.map((r) => r.secret_id)).toContain(dbId);
+    expect(visible.map((r) => r.secret_id)).not.toContain(apiId);
+  });
+
   it("control: an unscoped read (CLI / unrestricted admin token) sees everything", async () => {
     const apiId = await engine.resolveSecretId("secret://api-key");
     const all = engine.queryAudit();

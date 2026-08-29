@@ -320,7 +320,10 @@ describe("compiled binary smoke: stdio MCP token gate (V3)", () => {
       detail: { tokenless?: boolean; transport?: string } | null;
     }>;
     expect(rows.length).toBeGreaterThan(0);
-    const row = rows[0];
+    // The refusal case above shares this vault and now leaves its own failed
+    // server.start row (E75g), so pick the waiver row by its detail.
+    const row = rows.find((r) => r.detail?.tokenless === true);
+    expect(row).toBeDefined();
     expect(row?.event_type).toBe("server.start");
     expect(row?.success).toBe(true);
     expect(row?.detail?.tokenless).toBe(true);

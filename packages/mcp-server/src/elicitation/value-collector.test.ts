@@ -370,7 +370,11 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         message: string;
       };
       expect(payload.status).toBe("created");
-      expect(engine.setSecretValue).toHaveBeenCalledWith("secret://api-key", expect.anything());
+      expect(engine.setSecretValue).toHaveBeenCalledWith(
+        "secret://api-key",
+        expect.anything(),
+        undefined,
+      );
       expect(captured).toBe("browser-entered-value");
       expect(result.content[0]?.text).not.toContain("browser-entered-value");
     } finally {

@@ -17,6 +17,7 @@ const MOCK_TOKEN: VaultApiToken = {
   iat: Math.floor(Date.now() / 1000),
   exp: Math.floor(Date.now() / 1000) + 3600,
   jti: "jti-1",
+  principal_type: "agent",
 };
 
 const EXPECTED_CALLER = {
@@ -158,7 +159,7 @@ describe("POST /api/v1/certificates/import", () => {
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string; message: string };
-    expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+    expect(body.error).toBe(ErrorCode.ENCRYPTED_KEY_UNSUPPORTED);
     expect(body.message).toBe(ENCRYPTED_KEY_IMPORT_REFUSAL);
     expect(certManager.importCertificate).not.toHaveBeenCalled();
   });

@@ -1,5 +1,8 @@
 /** DDL constants for the v1.0 vault database schema. */
 
+/** Highest migration this binary knows; a vault stamped above it is refused. */
+export const LATEST_SCHEMA_VERSION = 12;
+
 export const CREATE_VAULT_META = `
 CREATE TABLE IF NOT EXISTS vault_meta (
   key   TEXT PRIMARY KEY,
@@ -163,9 +166,9 @@ CREATE INDEX IF NOT EXISTS idx_secrets_name_hmac ON secrets (name_hmac);
 /**
  * Enforce name uniqueness among live (non-revoked) secrets at the storage
  * layer, closing the create-time check-then-insert TOCTOU. Partial index:
- * revoked rows are excluded (recreating a revoked name stays legal) and NULL
- * name_hmac (pre-backfill legacy rows) are distinct in SQLite, so they never
- * collide.
+ * revoked rows are excluded (recreating a revoked name stays legal). The
+ * column is populated on every insert; the index stays partial only for the
+ * revoked-row exemption.
  */
 export const CREATE_NAME_HMAC_UNIQUE_INDEX = `
 CREATE UNIQUE INDEX IF NOT EXISTS idx_secrets_name_hmac_live

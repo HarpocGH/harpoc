@@ -417,6 +417,18 @@ describe("DatabaseInjector", () => {
     expect(err.message).not.toContain("admin");
   });
 
+  it("redacts a username at the shared floor (MIN_REDACTABLE_FRAGMENT)", async () => {
+    const mock = new MockAdapter({ rows: [{ note: "logged in as abc just now" }] });
+    const res = await injector(mock).executeWithSecret(
+      action(),
+      new Uint8Array(Buffer.from("abc:s3cr3t")),
+      policy(),
+      undefined,
+    );
+    expect(JSON.stringify(res.rows)).not.toContain("abc");
+    expect(JSON.stringify(res.rows)).toContain("[REDACTED]");
+  });
+
   it("leaves a 1-2 char username unredacted (would shred unrelated output)", async () => {
     const mock = new MockAdapter({ rows: [{ note: "a value about nothing" }] });
     const res = await injector(mock).executeWithSecret(
@@ -611,6 +623,120 @@ describe("DatabaseInjector redis dispatch", () => {
     await expect(
       inj.executeWithSecret(redisAction({ engine: "mongodb" }), SECRET, policy(), undefined),
     ).rejects.toMatchObject({ code: ErrorCode.UNSUPPORTED_DB_ENGINE });
+  });
+});
+
+// E81: the audited TLS opt-out is a per-use fact — the connection config
+// records the operator's choice, the use row records that the credential
+// actually crossed a plaintext leg (the SMTP arm's `tls_opt_out` convention).
+describe("DatabaseInjector tls_opt_out audit detail (E81)", () => {
+  function loggerSpy(): { log: ReturnType<typeof vi.fn>; logger: AuditLogger } {
+    const log = vi.fn();
+    return { log, logger: { log } as unknown as AuditLogger };
+  }
+
+  const DISABLED: ConnectionConfig = { database: { tls_mode: "disable" } };
+
+  function lastDetail(log: ReturnType<typeof vi.fn>): Record<string, unknown> {
+    const calls = log.mock.calls;
+    const row = calls[calls.length - 1]?.[0] as AuditLogOptions;
+    return (row.detail ?? {}) as Record<string, unknown>;
+  }
+
+  it("stamps tls_opt_out on the SQL success row", async () => {
+    const { log, logger } = loggerSpy();
+    const inj = new DatabaseInjector(logger, { postgresql: new MockAdapter({ rows: [] }) });
+
+    await inj.executeWithSecret(action(), SECRET, policy(), DISABLED, "secret-1");
+
+    expect(lastDetail(log).tls_opt_out).toBe(true);
+  });
+
+  it("stamps tls_opt_out on the SQL connection-failure row", async () => {
+    const { log, logger } = loggerSpy();
+    const inj = new DatabaseInjector(logger, {
+      postgresql: new MockAdapter({ connectError: new Error("refused") }),
+    });
+
+    await expectVaultError(
+      () => inj.executeWithSecret(action(), SECRET, policy(), DISABLED, "secret-1"),
+      ErrorCode.DB_CONNECTION_FAILED,
+    );
+
+    const detail = lastDetail(log);
+    expect(detail.error).toBe("DB_CONNECTION_FAILED");
+    expect(detail.tls_opt_out).toBe(true);
+  });
+
+  it("stamps tls_opt_out on the SQL query-failure row", async () => {
+    const { log, logger } = loggerSpy();
+    const inj = new DatabaseInjector(logger, {
+      postgresql: new MockAdapter({ queryError: new Error("boom") }),
+    });
+
+    await expectVaultError(
+      () => inj.executeWithSecret(action(), SECRET, policy(), DISABLED, "secret-1"),
+      ErrorCode.DB_QUERY_FAILED,
+    );
+
+    const detail = lastDetail(log);
+    expect(detail.error).toBe("DB_QUERY_FAILED");
+    expect(detail.tls_opt_out).toBe(true);
+  });
+
+  it("stamps tls_opt_out on the command-engine success and failure rows", async () => {
+    const { log: okLog, logger: okLogger } = loggerSpy();
+    const ok = new DatabaseInjector(okLogger, {}, { redis: new MockCommandAdapter() });
+    await ok.executeWithSecret(redisAction(), SECRET, policy(), DISABLED, "secret-1");
+    expect(lastDetail(okLog).tls_opt_out).toBe(true);
+
+    const { log: failLog, logger: failLogger } = loggerSpy();
+    const failing = new DatabaseInjector(
+      failLogger,
+      {},
+      { redis: new MockCommandAdapter({ error: new Error("nope") }) },
+    );
+    await expectVaultError(
+      () => failing.executeWithSecret(redisAction(), SECRET, policy(), DISABLED, "secret-1"),
+      ErrorCode.DB_QUERY_FAILED,
+    );
+    const detail = lastDetail(failLog);
+    expect(detail.error).toBe("DB_QUERY_FAILED");
+    expect(detail.tls_opt_out).toBe(true);
+  });
+
+  it("control: TLS in force leaves the key absent from the row", async () => {
+    const { log, logger } = loggerSpy();
+    const inj = new DatabaseInjector(logger, { postgresql: new MockAdapter({ rows: [] }) });
+
+    await inj.executeWithSecret(
+      action(),
+      SECRET,
+      policy(),
+      { database: { tls_mode: "require" } },
+      "secret-1",
+    );
+
+    expect(lastDetail(log)).not.toHaveProperty("tls_opt_out");
+  });
+
+  it("control: the pre-connect refusals carry no tls_opt_out (the mode is not known yet)", async () => {
+    const { log, logger } = loggerSpy();
+    const inj = new DatabaseInjector(logger, { postgresql: new MockAdapter({ rows: [] }) });
+
+    await expectVaultError(
+      () =>
+        inj.executeWithSecret(
+          action(),
+          SECRET,
+          policy({ host_allowlist: ["9.9.9.9"] }),
+          DISABLED,
+          "secret-1",
+        ),
+      ErrorCode.HOST_NOT_ALLOWED,
+    );
+
+    expect(lastDetail(log)).not.toHaveProperty("tls_opt_out");
   });
 });
 

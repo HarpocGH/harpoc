@@ -8,6 +8,7 @@ import {
   parseAlgorithm,
   parseBits,
   parseCurve,
+  DEFAULT_KEY_ALGORITHM,
 } from "./key-algorithm-options.js";
 
 interface CertCsrOptions {
@@ -32,7 +33,7 @@ export function registerCertCsrCommand(cert: Command): void {
     .description("Generate a private key and a PKCS#10 certificate signing request")
     .requiredOption("--subject <cn>", "Common name for the certificate (a bare CN, not a DN)")
     .option("--sans <list>", "Comma-separated subject alternative names (DNS names or IPs)")
-    .option("--algorithm <rsa|ec>", "Key algorithm", "ec")
+    .option("--algorithm <rsa|ec>", "Key algorithm", DEFAULT_KEY_ALGORITHM)
     .option("--bits <2048|4096>", "RSA key size (only with --algorithm rsa)")
     .option("--curve <P-256|P-384>", "EC named curve (only with --algorithm ec)")
     .option("--project <project>", "Project scope")

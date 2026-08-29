@@ -1,3 +1,4 @@
+import { isDecimalInteger, VaultError } from "@harpoc/shared";
 import type { DbCommandAdapter, DbConnectOptions, DbQueryResult } from "./db-adapters.js";
 import { identityCheckerFor } from "./db-adapters.js";
 
@@ -22,6 +23,10 @@ import { identityCheckerFor } from "./db-adapters.js";
  */
 export class RedisAdapter implements DbCommandAdapter {
   async execute(opts: DbConnectOptions, command: unknown): Promise<DbQueryResult> {
+    if (!isDecimalInteger(opts.database)) {
+      throw VaultError.invalidDatabaseConfig("redis database must be a non-negative integer index");
+    }
+
     const { createClient } = await import("redis");
 
     // SNI forbids an IP-literal servername; only send one when `opts.host`
@@ -63,17 +68,11 @@ export class RedisAdapter implements DbCommandAdapter {
     // "default" — this vault always stores redis credentials as
     // "default:<password>" for that case). node-redis accepts both forms
     // through `{ username, password }` and negotiates the right AUTH shape.
-    //
-    // `database` selects the Redis DB index (`SELECT`); it is optional at
-    // the wire level, so a non-numeric or negative `opts.database` (the
-    // field is otherwise a free-form SQL database name) is left unset and
-    // the connection defaults to DB 0 rather than failing the action.
-    const databaseIndex = Number(opts.database);
     const client = createClient({
       socket,
       username: opts.user,
       password: opts.password,
-      ...(Number.isInteger(databaseIndex) && databaseIndex >= 0 ? { database: databaseIndex } : {}),
+      database: Number(opts.database),
     });
 
     await client.connect();

@@ -244,7 +244,7 @@ export interface Secret {
   version: number;
   status: SecretStatus;
   sync_version: number;
-  name_hmac: string | null;
+  name_hmac: string;
 }
 
 /** Per-secret access control — maps to the `access_policies` SQLite table. */
@@ -344,8 +344,8 @@ export interface VaultApiToken {
   project?: string;
   /** Secret-name patterns (`*` wildcards, thesis §4.7); absent = unrestricted. */
   secrets?: string[];
-  /** Principal type for per-secret policy matching; absent = "agent". */
-  principal_type?: TokenPrincipalType;
+  /** Principal type for per-secret policy matching; always minted by createToken, refused when absent. */
+  principal_type: TokenPrincipalType;
 }
 
 /**
@@ -625,7 +625,10 @@ export interface ImportCertificateOptions {
   subject?: string;
   autoRenew?: boolean;
   renewBeforeDays?: number;
-  /** Provenance only: the insert always logs cert.issue, this flags its `acme` detail. */
+  /**
+   * ACME provenance: the insert always logs cert.issue, this flags its `acme`
+   * detail — and gates `autoRenew`, which no manual import may carry.
+   */
   acmeIssued?: boolean;
 }
 

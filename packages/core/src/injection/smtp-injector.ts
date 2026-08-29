@@ -9,6 +9,7 @@ import {
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_TOTAL_BYTES,
   MAX_SMTP_ATTACHMENTS,
+  MIN_REDACTABLE_FRAGMENT,
   VaultError,
   matchesRecipientPattern,
 } from "@harpoc/shared";
@@ -321,9 +322,9 @@ function buildAuth(secretValue: string, oauth: SmtpOAuth | undefined): SmtpAuth 
 
 /**
  * The sensitive strings to strip from any thrown error message. XOAUTH2 → the
- * access token; password arm → the password, plus the username when it is long
- * enough that redacting it will not shred unrelated text (parity with the
- * database injector's 3-char floor).
+ * access token; password arm → the password, plus the username when it reaches
+ * the shared floor (MIN_REDACTABLE_FRAGMENT), below which redacting it would
+ * shred unrelated text.
  */
 function redactionMaterial(secretValue: string, oauth: SmtpOAuth | undefined): string[] {
   if (oauth) return [oauth.accessToken];
@@ -331,7 +332,7 @@ function redactionMaterial(secretValue: string, oauth: SmtpOAuth | undefined): s
   if (i < 0) return [secretValue];
   const password = secretValue.slice(i + 1);
   const user = secretValue.slice(0, i);
-  return user.length >= 3 ? [password, user] : [password];
+  return user.length >= MIN_REDACTABLE_FRAGMENT ? [password, user] : [password];
 }
 
 /** Strip every credential fragment from a thrown error, in turn. */

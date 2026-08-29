@@ -70,7 +70,9 @@ export async function resolveSecretValue(options: ResolveSecretValueOptions): Pr
     return value;
   }
 
-  const kind = analyzeKeyMaterial(value.toString("utf8"));
+  const kind = value.includes("-----BEGIN")
+    ? analyzeKeyMaterial(value.toString("utf8"))
+    : "not-a-key";
   if (kind === "encrypted-openssh") {
     wipeBuffer(value);
     throw VaultError.encryptedKeyUnsupported();

@@ -330,6 +330,7 @@ describe("getExpiringCertificateStatuses", () => {
     await engine.importCertificate("expired-leaf", fx("expired-key.pem"), {
       certificatePem: fx("expired-cert.pem"),
       autoRenew: true,
+      acmeIssued: true,
       renewBeforeDays: 1,
     });
 

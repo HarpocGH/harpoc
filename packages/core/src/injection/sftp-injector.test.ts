@@ -120,6 +120,7 @@ describe("buildSftpAuditDetails", () => {
     ).toEqual({
       host: "deploy.example.com",
       operation: "upload",
+      port: null,
       remote_path: "/srv/report.pdf",
       local_path: "/tmp/report.pdf",
     });
@@ -129,8 +130,14 @@ describe("buildSftpAuditDetails", () => {
     expect(buildSftpAuditDetails(ACTION)).toEqual({
       host: "deploy.example.com",
       operation: "list",
+      port: null,
       remote_path: "/srv/reports",
       local_path: null,
     });
+  });
+
+  it("carries a non-22 port and reports null when the action names none", () => {
+    expect(buildSftpAuditDetails({ ...ACTION, port: 2222 }).port).toBe(2222);
+    expect(buildSftpAuditDetails(ACTION).port).toBeNull();
   });
 });

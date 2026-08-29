@@ -1,13 +1,13 @@
 /**
  * The `--algorithm` / `--bits` / `--curve` option triple, shared by `cert csr`
- * and `cert issue`. The two commands differ only in their default algorithm
- * (`csr` defaults to ec, `issue` to rsa — keeping its pre-flag behaviour), so
- * the parsers, the value tables and the pairing rule live here rather than
- * being written twice with room to drift apart.
+ * and `cert issue` — one default (`DEFAULT_KEY_ALGORITHM`, EC P-256), one
+ * value table, one pairing rule, so the two commands cannot drift.
  */
 
 const ALGORITHMS = ["rsa", "ec"] as const;
 export type KeyAlgorithm = (typeof ALGORITHMS)[number];
+
+export const DEFAULT_KEY_ALGORITHM: KeyAlgorithm = "ec";
 
 const RSA_KEY_SIZES = [2048, 4096] as const;
 export type RsaKeySize = (typeof RSA_KEY_SIZES)[number];
@@ -61,8 +61,8 @@ export function parseCurve(value: string | undefined): EcCurve | undefined {
  * Callers refuse a mismatched flag rather than silently drop it: an operator's
  * explicit strength request (--bits/--curve) must not be ignored just because
  * it doesn't pair with the resolved algorithm — including a defaulted one, so
- * neither a bare `--bits 4096` on csr quietly produces a P-256 key nor a bare
- * `--curve P-384` on issue quietly produces an RSA-2048 one.
+ * a bare `--bits` on either command is refused rather than quietly producing
+ * a P-256 key.
  */
 export function assertAlgorithmPairing(
   algorithm: KeyAlgorithm,

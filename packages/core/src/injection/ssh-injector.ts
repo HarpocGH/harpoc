@@ -88,6 +88,7 @@ export class SshInjector {
       identity = writeIdentityFile(agent.publicKeyOpenssh);
       const args = [
         ...sshHardeningArgs(kh.file, identity.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
+        ...(action.port !== undefined ? ["-p", String(action.port)] : []),
         "-l",
         action.user,
         "--",
@@ -189,7 +190,13 @@ export class SshInjector {
         {
           eventType: "secret.use",
           secretId,
-          detail: { context: "ssh", host: action.host, user: action.user, ...detail },
+          detail: {
+            context: "ssh",
+            host: action.host,
+            ...(action.port !== undefined ? { port: action.port } : {}),
+            user: action.user,
+            ...detail,
+          },
           success,
         },
         attribution,

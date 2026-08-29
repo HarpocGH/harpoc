@@ -914,6 +914,19 @@ describe("accessPolicyInputSchema", () => {
       }),
     ).toThrow();
   });
+
+  it("refuses an agent-type principal_id that is not a valid agent name (C34)", () => {
+    const base = { permissions: ["read"] as const, principal_type: "agent" as const };
+    expect(accessPolicyInputSchema.safeParse({ ...base, principal_id: "a b" }).success).toBe(false);
+    expect(accessPolicyInputSchema.safeParse({ ...base, principal_id: "svc-1" }).success).toBe(
+      true,
+    );
+    // tool/user principals stay free-string.
+    expect(
+      accessPolicyInputSchema.safeParse({ ...base, principal_type: "tool", principal_id: "a b" })
+        .success,
+    ).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1023,6 +1036,7 @@ describe("sessionFileSchema", () => {
     created_at: Date.now(),
     expires_at: Date.now() + 900_000,
     max_expires_at: Date.now() + 86_400_000,
+    key_protection: "none" as const,
     session_key: "c2Vzc2lvbi1rZXk=",
     wrapped_kek: "d3JhcHBlZC1rZWs=",
     wrapped_kek_iv: "aXY=",
@@ -1098,8 +1112,10 @@ describe("sessionFileSchema", () => {
     }
   });
 
-  it("treats key_protection as optional (legacy files)", () => {
-    expect(sessionFileSchema.parse(validSession).key_protection).toBeUndefined();
+  it("requires key_protection (a field-less file is refused, forcing a re-unlock)", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { key_protection: _omitted, ...withoutField } = validSession;
+    expect(sessionFileSchema.safeParse(withoutField).success).toBe(false);
   });
 
   it("rejects unknown key_protection values", () => {
@@ -1570,6 +1586,14 @@ describe("sshActionSchema argv hardening", () => {
   it.each(["-root", ".hidden"])("rejects user %s (leading dash/dot)", (user) => {
     expect(() => sshActionSchema.parse({ ...validSsh, user })).toThrow();
   });
+
+  it("accepts an optional port in range and refuses 0, 65536 and a string", () => {
+    expect(sshActionSchema.parse({ ...validSsh, port: 2222 }).port).toBe(2222);
+    expect(sshActionSchema.parse(validSsh).port).toBeUndefined();
+    for (const port of [0, 65_536, "22", 22.5]) {
+      expect(() => sshActionSchema.parse({ ...validSsh, port })).toThrow();
+    }
+  });
 });
 
 describe("databaseActionSchema host:port range", () => {
@@ -1918,6 +1942,20 @@ describe("v1.3 action schemas", () => {
       }),
     ).toThrow();
   });
+  it("sftp: accepts an optional port in range and refuses 0, 65536 and a string", () => {
+    const validSftp = {
+      type: "sftp" as const,
+      host: "sftp.example.com",
+      user: "deploy",
+      operation: "list" as const,
+      remote_path: "/srv/reports",
+    };
+    expect(sftpActionSchema.parse({ ...validSftp, port: 2222 }).port).toBe(2222);
+    expect(sftpActionSchema.parse(validSftp).port).toBeUndefined();
+    for (const port of [0, 65_536, "22", 22.5]) {
+      expect(() => sftpActionSchema.parse({ ...validSftp, port })).toThrow();
+    }
+  });
   it("docker_registry: image reference validated, timeout cap 30 min", () => {
     dockerRegistryActionSchema.parse({
       type: "docker_registry",
@@ -1976,6 +2014,33 @@ describe("v1.3 action schemas", () => {
         params: [1],
       }),
     ).toThrow();
+  });
+  it("redis requires a non-negative integer database index", () => {
+    for (const database of ["app", "-1"]) {
+      expect(() =>
+        databaseActionSchema.parse({
+          type: "database",
+          engine: "redis",
+          host: "r",
+          database,
+          command: ["PING"],
+        }),
+      ).toThrow("non-negative integer index");
+    }
+    databaseActionSchema.parse({
+      type: "database",
+      engine: "redis",
+      host: "r",
+      database: "12",
+      command: ["PING"],
+    });
+    databaseActionSchema.parse({
+      type: "database",
+      engine: "mongodb",
+      host: "m",
+      database: "admin",
+      command: { ping: 1 },
+    });
   });
   it("policy input gains recipient allowlist + imap_read_only with replace defaults", () => {
     const p = injectionPolicyInputSchema.parse({});

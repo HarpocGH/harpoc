@@ -65,6 +65,7 @@ function mockEngine(): VaultEngine {
       status: "pending",
       message: "Secret created without value",
     }),
+    setSecretValue: vi.fn().mockResolvedValue(undefined),
     rotateSecret: vi.fn().mockResolvedValue(undefined),
     revokeSecret: vi.fn().mockResolvedValue(undefined),
     resolveSecretId: vi.fn().mockResolvedValue("uuid-123"),
@@ -440,10 +441,26 @@ describe("MCP Tools", () => {
         );
       });
 
+      it("advertises the ssh arm's exact key set", async () => {
+        const arm = armFor(await actionArms(), "ssh");
+        expect(Object.keys(arm.properties ?? {}).sort()).toEqual(
+          ["type", "host", "user", "command", "port", "timeout_ms"].sort(),
+        );
+      });
+
       it("advertises the sftp arm's exact key set", async () => {
         const arm = armFor(await actionArms(), "sftp");
         expect(Object.keys(arm.properties ?? {}).sort()).toEqual(
-          ["type", "host", "user", "operation", "remote_path", "local_path", "timeout_ms"].sort(),
+          [
+            "type",
+            "host",
+            "user",
+            "port",
+            "operation",
+            "remote_path",
+            "local_path",
+            "timeout_ms",
+          ].sort(),
         );
       });
 
@@ -673,6 +690,7 @@ describe("MCP Tools", () => {
         iat: 0,
         exp: 9999999999,
         jti: "j",
+        principal_type: "agent" as const,
       };
       const srv = new McpServer({ name: "test", version: "0.0.0" });
       registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
@@ -695,6 +713,7 @@ describe("MCP Tools", () => {
         iat: 0,
         exp: 9999999999,
         jti: "j",
+        principal_type: "agent" as const,
       };
       const srv = new McpServer({ name: "test", version: "0.0.0" });
       registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
@@ -774,6 +793,7 @@ describe("MCP Tools", () => {
         iat: 0,
         exp: 9999999999,
         jti: "j",
+        principal_type: "agent" as const,
       };
       const guard = new ScopeGuard(token);
       const srv = new McpServer({ name: "test", version: "0.0.0" });
@@ -806,6 +826,7 @@ describe("MCP Tools", () => {
         iat: 0,
         exp: 9999999999,
         jti: "j",
+        principal_type: "agent" as const,
       };
       const srv = new McpServer({ name: "test", version: "0.0.0" });
       registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
@@ -837,6 +858,7 @@ describe("MCP Tools", () => {
         iat: 0,
         exp: 9999999999,
         jti: "j",
+        principal_type: "agent" as const,
       };
       const srv = new McpServer({ name: "test", version: "0.0.0" });
       registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
@@ -868,6 +890,7 @@ describe("MCP Tools", () => {
         iat: 0,
         exp: 9999999999,
         jti: "j",
+        principal_type: "agent" as const,
       };
       const srv = new McpServer({ name: "test", version: "0.0.0" });
       registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
@@ -911,6 +934,7 @@ describe("MCP Tools", () => {
         iat: 0,
         exp: 9999999999,
         jti: "j",
+        principal_type: "agent" as const,
       };
       const restrictedGuard = new ScopeGuard(token);
       const srv = new McpServer({ name: "test", version: "0.0.0" });
@@ -930,6 +954,7 @@ describe("MCP Tools", () => {
         iat: 0,
         exp: 9999999999,
         jti: "j",
+        principal_type: "agent" as const,
       };
       const srv = new McpServer({ name: "test", version: "0.0.0" });
       registerCreateSecret(srv, engine, new ScopeGuard(token), rateLimiter);
@@ -961,6 +986,7 @@ describe("MCP Tools", () => {
         iat: 0,
         exp: 9999999999,
         jti: "j",
+        principal_type: "agent" as const,
       };
       const srv = new McpServer({ name: "test", version: "0.0.0" });
       registerCreateSecret(srv, engine, new ScopeGuard(token), rateLimiter);
@@ -988,7 +1014,13 @@ describe("token-derived caller wiring (engine-level policy enforcement)", () => 
   const TOKEN = {
     sub: "agent-7",
     vault_id: "vault-1",
-    scope: ["use", "read", "rotate", "revoke"] as ("use" | "read" | "rotate" | "revoke")[],
+    scope: ["use", "read", "rotate", "revoke", "create"] as (
+      | "use"
+      | "read"
+      | "rotate"
+      | "revoke"
+      | "create"
+    )[],
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 3600,
     jti: "jti-caller",
@@ -1053,5 +1085,36 @@ describe("token-derived caller wiring (engine-level policy enforcement)", () => 
   it("revoke_secret passes the caller to the engine", async () => {
     await callTool(server, "revoke_secret", { handle: "secret://api/my-key" });
     expect(engine.revokeSecret).toHaveBeenCalledWith("secret://api/my-key", EXPECTED_CALLER);
+  });
+
+  it("create_secret passes the caller to the out-of-band value set", async () => {
+    // Drive the real URL-elicitation channel: declare the capability, then
+    // answer the elicitation by posting into the one-time form the tool opened.
+    const inner = (server as unknown as { server: Record<string, unknown> }).server;
+    inner.getClientCapabilities = (): unknown => ({ elicitation: { url: {} } });
+    inner.createElicitationCompletionNotifier = (): (() => Promise<void>) => () =>
+      Promise.resolve();
+    inner.elicitInput = async (params: { url: string }): Promise<{ action: string }> => {
+      await fetch(params.url, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "value=browser-entered",
+      });
+      return { action: "accept" };
+    };
+    (engine.createSecret as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      handle: "secret://api/api-new",
+      status: "pending",
+      message: "",
+    });
+    registerCreateSecret(server, engine, new ScopeGuard(TOKEN), new RateLimiter());
+
+    await callTool(server, "create_secret", { name: "api-new", type: "api_key", project: "api" });
+
+    expect(engine.setSecretValue).toHaveBeenCalledWith(
+      "secret://api/api-new",
+      expect.anything(),
+      EXPECTED_CALLER,
+    );
   });
 });

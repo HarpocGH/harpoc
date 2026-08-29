@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import type { DockerRegistryAction, DockerResult, InjectionPolicy } from "@harpoc/shared";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode, MIN_REDACTABLE_FRAGMENT, VaultError } from "@harpoc/shared";
 import { controlledPathDirs, matchesHostAllowlist, resolveAndMatchCommand } from "../allowlist.js";
 import { redactErrorMessage } from "../output-sanitizer.js";
 import { spawnCaptured } from "../spawn-captured.js";
@@ -301,9 +301,9 @@ async function runDocker(
     env.HARPOC_DOCKER_USER = user;
     env.HARPOC_DOCKER_SECRET = secret;
 
-    // The username is credential material too; a 1–2 char username would shred
-    // unrelated output, so such fragments stay unredacted (mirrors git).
-    const redact = user.length >= 3 ? [secret, user] : [secret];
+    // The username is credential material too, down to the shared floor
+    // (MIN_REDACTABLE_FRAGMENT); shorter fragments stay unredacted (mirrors git).
+    const redact = user.length >= MIN_REDACTABLE_FRAGMENT ? [secret, user] : [secret];
 
     const r = await spawnCaptured(dockerPath, [action.operation, action.image], {
       env,

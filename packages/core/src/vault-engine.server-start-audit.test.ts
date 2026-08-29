@@ -58,6 +58,30 @@ describe("auditServerStart (W6)", () => {
     expect(row?.detail?.tty_prompt).toBe(false);
   });
 
+  it("writes a success:false row with the refusal code", () => {
+    engine.auditServerStart({
+      transport: "stdio",
+      tokenless: false,
+      success: false,
+      error: ErrorCode.TOKEN_REQUIRED,
+    });
+
+    const rows = engine.queryAudit({ eventType: AuditEventType.SERVER_START });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.success).toBe(false);
+    expect(rows[0]?.detail?.error).toBe(ErrorCode.TOKEN_REQUIRED);
+    expect(rows[0]?.detail?.tokenless).toBe(false);
+    expect(rows[0]?.detail?.tty_prompt).toBe(false);
+  });
+
+  it("omits the error key from a successful waiver row", () => {
+    engine.auditServerStart({ transport: "stdio", tokenless: true });
+
+    const row = engine.queryAudit({ eventType: AuditEventType.SERVER_START })[0];
+    expect(row?.success).toBe(true);
+    expect(row?.detail && "error" in (row.detail as object)).toBe(false);
+  });
+
   it("keeps the row unattributed but session-stamped (D5 pin)", () => {
     engine.auditServerStart({ transport: "stdio", tokenless: true });
 

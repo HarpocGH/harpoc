@@ -4,6 +4,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MockInstance } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { CallerContext, OAuthProviderConfig } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
@@ -696,6 +697,31 @@ function pendingDeviceCodeHandler(): void {
   };
 }
 
+/**
+ * Hold every `CallbackServer.start` inside the bind: the spy waits for
+ * `releaseBind()` and then delegates to the real implementation, so a test can
+ * observe a flow that has been started but has not yet bound its port.
+ */
+function gateCallbackServerStart(): {
+  startSpy: MockInstance<CallbackServer["start"]>;
+  releaseBind: () => void;
+} {
+  let releaseBind: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    releaseBind = resolve;
+  });
+  const realStart = CallbackServer.prototype.start;
+  const startSpy = vi.spyOn(CallbackServer.prototype, "start").mockImplementation(async function (
+    this: CallbackServer,
+    state: string,
+    timeoutMs?: number,
+  ) {
+    await gate;
+    return realStart.call(this, state, timeoutMs);
+  });
+  return { startSpy, releaseBind };
+}
+
 describe("OAuthManager pending-flow cap (D3)", () => {
   it("refuses an authorization-code start once the cap of socket-holding flows is reached", async () => {
     const fake = makePerNameFakeEngine();
@@ -818,6 +844,144 @@ describe("OAuthManager pending-flow cap (D3)", () => {
 
       manager.cancelFlow(a.secretId);
       await expect(a.completion).rejects.toBeDefined();
+    } finally {
+      startSpy.mockRestore();
+    }
+  });
+
+  it("counts a flow from before its bind, so a simultaneous burst cannot overshoot the cap", async () => {
+    const fake = makePerNameFakeEngine();
+    const manager = fakeEngineManager(fake, { callbackPort: 0, maxPendingAuthorizations: 1 });
+    const { startSpy, releaseBind } = gateCallbackServerStart();
+
+    try {
+      const first = manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+      // Let the first start reach its (gated) bind before the second is attempted.
+      await vi.waitFor(() => expect(startSpy).toHaveBeenCalledTimes(1));
+
+      const second: unknown = await manager
+        .startAuthorizationCodeDeferred("b", makeAuthCodeConfig())
+        .catch((err: unknown) => err);
+      expect(second).toBeInstanceOf(VaultError);
+      expect((second as VaultError).code).toBe(ErrorCode.RATE_LIMIT_EXCEEDED);
+      expect(startSpy).toHaveBeenCalledTimes(1);
+
+      releaseBind();
+      const a = await first;
+      manager.cancelFlow(a.secretId);
+      await expect(a.completion).rejects.toBeDefined();
+    } finally {
+      startSpy.mockRestore();
+    }
+  });
+
+  it("a cancelFlow during the bind window takes effect (the reservation is the controller)", async () => {
+    const fake = makePerNameFakeEngine();
+    const manager = fakeEngineManager(fake, { callbackPort: 0 });
+    const { startSpy, releaseBind } = gateCallbackServerStart();
+
+    try {
+      const pending = manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+      await vi.waitFor(() => expect(startSpy).toHaveBeenCalledTimes(1));
+      expect(manager.cancelFlow("sid-a")).toBe(true);
+      releaseBind();
+      const a = await pending;
+      await expect(a.completion).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+    } finally {
+      startSpy.mockRestore();
+    }
+  });
+
+  it("a failed bind never resurrects a predecessor that settled inside the bind window", async () => {
+    const fake = makePerNameFakeEngine();
+    const manager = fakeEngineManager(fake, {
+      callbackPort: 0,
+      callbackTimeoutMs: 500,
+      maxPendingAuthorizations: 1,
+    });
+
+    const first = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+
+    let releaseBind: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseBind = resolve;
+    });
+    const startSpy = vi.spyOn(CallbackServer.prototype, "start").mockImplementation(async () => {
+      await gate;
+      throw new Error("EADDRINUSE");
+    });
+
+    try {
+      // Same name → same secretId, so the successor's reservation replaces the
+      // predecessor's entry: the predecessor's own callback timeout then
+      // settles it without removing anything (the unregister is identity-guarded).
+      const second = manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+      await vi.waitFor(() => expect(startSpy).toHaveBeenCalledTimes(1));
+      await expect(first.completion).rejects.toMatchObject({
+        code: ErrorCode.OAUTH_CALLBACK_TIMEOUT,
+      });
+
+      releaseBind();
+      await expect(second).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+
+      // The failed bind leaves nothing dead behind: no entry to cancel...
+      expect(manager.cancelFlow("sid-a")).toBe(false);
+    } finally {
+      startSpy.mockRestore();
+    }
+
+    // ...and the cap's single slot is free for the next flow.
+    const b = await manager.startAuthorizationCodeDeferred("b", makeAuthCodeConfig());
+    expect(b.handle).toBe("secret://b");
+    manager.cancelFlow(b.secretId);
+    await expect(b.completion).rejects.toBeDefined();
+  });
+
+  it("a failed bind after its own reservation was cancelled aborts the predecessor too", async () => {
+    const fake = makePerNameFakeEngine();
+    const manager = fakeEngineManager(fake, { callbackPort: 0 });
+
+    const first = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+
+    let releaseBind: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseBind = resolve;
+    });
+    const startSpy = vi.spyOn(CallbackServer.prototype, "start").mockImplementation(async () => {
+      await gate;
+      throw new Error("EADDRINUSE");
+    });
+
+    try {
+      // Same name → same secretId: the successor's reservation replaces the
+      // predecessor's entry, so the predecessor is no longer in the map.
+      const second = manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+      await vi.waitFor(() => expect(startSpy).toHaveBeenCalledTimes(1));
+
+      // The owner dispose path (DirectClient.close) lands inside the bind
+      // window and aborts the only entry there — the reservation.
+      manager.cancelPendingFlows();
+
+      releaseBind();
+      await expect(second).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+
+      // The cancellation must cover the predecessor the reservation displaced:
+      // restoring it would leave its callback server up past the dispose.
+      const settled: unknown = await Promise.race([
+        first.completion.then(
+          () => "resolved" as const,
+          (err: unknown) => err,
+        ),
+        new Promise<"pending">((resolve) => {
+          setTimeout(() => {
+            resolve("pending");
+          }, 500);
+        }),
+      ]);
+      expect(settled).not.toBe("pending");
+      expect(settled).toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+
+      expect(manager.cancelFlow("sid-a")).toBe(false);
     } finally {
       startSpy.mockRestore();
     }

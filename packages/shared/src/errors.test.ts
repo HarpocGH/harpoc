@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ErrorCode, VaultError } from "./errors.js";
+import { ENCRYPTED_KEY_IMPORT_REFUSAL } from "./pem.js";
 
 describe("VaultError", () => {
   it("is an instance of Error", () => {
@@ -666,6 +667,13 @@ describe("factory methods", () => {
     expect(err.statusCode).toBe(400);
     expect(err.message).toContain("ssh-keygen -p -f <keyfile> -m PKCS8");
     expect(err.message).toContain("decrypts at import");
+  });
+
+  it("encryptedKeyUnsupported(message) keeps the code and status with an overridden message", () => {
+    const err = VaultError.encryptedKeyUnsupported(ENCRYPTED_KEY_IMPORT_REFUSAL);
+    expect(err.code).toBe(ErrorCode.ENCRYPTED_KEY_UNSUPPORTED);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toBe(ENCRYPTED_KEY_IMPORT_REFUSAL);
   });
 
   it("recipientNotAllowed() names the recipient", () => {

@@ -5,7 +5,7 @@ const EXPIRING_WITHIN_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_RETRIES = 3;
 const DEFAULT_INITIAL_RETRY_DELAY_MS = 1_000;
 const MAX_QUARANTINE_MS = 60 * 60 * 1000; // 1 hour backoff cap
-const DEFAULT_STOP_DRAIN_TIMEOUT_MS = 10_000;
+const DEFAULT_STOP_DRAIN_TIMEOUT_MS = 35_000;
 
 interface QuarantineEntry {
   failures: number;
@@ -82,6 +82,12 @@ export class TokenRefreshScheduler {
    * cannot block shutdown; a response arriving after the bound is lost
    * (accepted residual — the caller chose to stop). Fire-and-forget callers
    * may ignore the returned promise.
+   *
+   * The default bound (35 s) outlives one refresh attempt — the token-endpoint
+   * POST is capped at 30 s in core — so any response the vault would persist is
+   * persisted; a tick that is mid-retry (three attempts with 1 s and 4 s
+   * backoffs, ≈ 95 s worst case) or mid-list can still be cut by the bound,
+   * which is the accepted residual.
    */
   async stop(drainTimeoutMs: number = DEFAULT_STOP_DRAIN_TIMEOUT_MS): Promise<void> {
     if (this.intervalId) {

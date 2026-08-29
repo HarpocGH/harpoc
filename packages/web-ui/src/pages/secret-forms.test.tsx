@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { injectionPolicyInputSchema } from "@harpoc/shared";
 import type { ApiClient } from "../api/client";
 import { ApiError } from "../api/client";
 import { CreateSecretForm, DeleteForm, PolicyEditor, RotateForm } from "./secret-forms";
@@ -409,6 +410,41 @@ describe("PolicyEditor", () => {
     const body = put.mock.calls[0]?.[1] as Record<string, unknown>;
     expect(body["env_allowlist"]).toEqual(["CI"]);
     expect(body["response_header_allowlist"]).toEqual(["x-request-id"]);
+  });
+
+  it("resubmits the mail policy fields it does not edit (a PUT replaces the whole policy)", async () => {
+    const put = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PolicyEditor
+        api={{ putInjectionPolicy: put } as unknown as ApiClient}
+        handle="k1"
+        initial={{ smtp_recipient_allowlist: ["*@corp.example"], imap_read_only: true }}
+        onDone={vi.fn()}
+      />,
+    );
+    fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    const body = put.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(body["smtp_recipient_allowlist"]).toEqual(["*@corp.example"]);
+    expect(body["imap_read_only"]).toBe(true);
+  });
+
+  it("sends every injectionPolicyInputSchema key on save (drift pin)", async () => {
+    const put = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PolicyEditor
+        api={{ putInjectionPolicy: put } as unknown as ApiClient}
+        handle="k1"
+        initial={{}}
+        onDone={vi.fn()}
+      />,
+    );
+    fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    const body = put.mock.calls[0]?.[1] as Record<string, unknown>;
+    for (const key of Object.keys(injectionPolicyInputSchema.shape)) {
+      expect(body, key).toHaveProperty(key);
+    }
   });
 
   it("says out loud that saving replaces the whole policy", () => {

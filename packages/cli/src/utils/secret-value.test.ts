@@ -4,12 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { ErrorCode, VaultError } from "@harpoc/shared";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { analyzeKeyMaterial } from "@harpoc/core";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_SECRET_FILE_BYTES,
   readSecretValueFromFile,
   resolveSecretValue,
 } from "./secret-value.js";
+
+vi.mock("@harpoc/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@harpoc/core")>();
+  return { ...actual, analyzeKeyMaterial: vi.fn(actual.analyzeKeyMaterial) };
+});
 
 const PASSPHRASE = "correct horse battery";
 
@@ -127,6 +133,26 @@ describe("resolveSecretValue — acquisition", () => {
     const path = writeTemp("plain.pem", privateKey);
     const value = await resolveSecretValue({ fromFile: path, input: endedInput(), output: sink() });
     expect(value.toString("utf8")).toBe(privateKey);
+  });
+
+  it("never stringifies a value that carries no PEM armor (no analyze call, no string copy)", async () => {
+    vi.mocked(analyzeKeyMaterial).mockClear();
+    const path = writeTemp("plain.txt", "sk-abc123-no-armor");
+    const value = await resolveSecretValue({ fromFile: path, input: endedInput(), output: sink() });
+    expect(value.toString("utf8")).toBe("sk-abc123-no-armor");
+    expect(analyzeKeyMaterial).not.toHaveBeenCalled();
+  });
+
+  it("still analyzes armored input (the encrypted-OpenSSH refusal is reached)", async () => {
+    vi.mocked(analyzeKeyMaterial).mockClear();
+    const path = writeTemp(
+      "armored.pem",
+      "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----",
+    );
+    await resolveSecretValue({ fromFile: path, input: endedInput(), output: sink() }).catch(
+      () => undefined,
+    );
+    expect(analyzeKeyMaterial).toHaveBeenCalledTimes(1);
   });
 });
 

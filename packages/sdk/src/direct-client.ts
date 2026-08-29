@@ -295,28 +295,26 @@ export class DirectClient implements VaultClient {
     name: string,
     input: Omit<CertificateImportRequestInput, "name">,
   ): Promise<CertificateRef> {
-    // Gate only — the parsed output is deliberately discarded so an omitted
-    // auto_renew / renew_before_days stays undefined for the engine to fill
-    // (the schema's defaults would pin them here). generateCsr uses its parsed
-    // data instead because the superRefine pairing rules feed the manager call.
+    // Parsed like REST (`certificates.ts:30-38`): the schema's defaults are
+    // the wire contract.
     const parsed = certificateImportSchema.safeParse({ name, ...input });
     if (!parsed.success) {
       throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
     }
     if (isEncryptedPrivateKeyPem(input.private_key_pem)) {
-      throw VaultError.schemaValidation(ENCRYPTED_KEY_IMPORT_REFUSAL);
+      throw VaultError.encryptedKeyUnsupported(ENCRYPTED_KEY_IMPORT_REFUSAL);
     }
     const manager = await this.loadCertManager();
     // Mirrors startOAuthFlow: the loader's checks precede its return, so a
     // close() landing after them is visible only here.
     if (this.closed) throw VaultError.invalidInput("DirectClient is closed");
     const ref = await manager.importCertificate(name, {
-      privateKeyPem: input.private_key_pem,
-      certificatePem: input.certificate_pem,
-      chainPem: input.chain_pem,
-      project: input.project,
-      autoRenew: input.auto_renew,
-      renewBeforeDays: input.renew_before_days,
+      privateKeyPem: parsed.data.private_key_pem,
+      certificatePem: parsed.data.certificate_pem,
+      chainPem: parsed.data.chain_pem,
+      project: parsed.data.project,
+      autoRenew: parsed.data.auto_renew,
+      renewBeforeDays: parsed.data.renew_before_days,
     });
     return { handle: ref.handle, secretId: ref.secretId };
   }

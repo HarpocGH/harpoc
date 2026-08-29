@@ -179,6 +179,7 @@ describe("MCP Resources", () => {
         iat: Math.floor(Date.now() / 1000),
         exp: Math.floor(Date.now() / 1000) + 3600,
         jti: "jti-scoped",
+        principal_type: "agent",
         ...overrides,
       };
     }

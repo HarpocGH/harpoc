@@ -23,15 +23,16 @@ export function registerUseSecret(
     {
       handle: z.string().describe("Secret handle (secret://name)"),
       action: useSecretActionSchema.describe(
-        "Action specification. HTTP: {type:'http', method, url, injection, headers?, body?, follow_redirects?, response_mode?}. Process: {type:'process', command, args?, env_var, working_directory?}. MCP: {type:'mcp', server, tool, arguments?}. Database: {type:'database', engine:'postgresql'|'mysql', host, database, query, params?} for SQL, or {type:'database', engine:'redis'|'mongodb', host, database, command} for the key-value/document engines (SQL takes query, redis takes a string-array command, mongodb takes a document command). Git: {type:'git', operation:'clone'|'pull'|'push', repository, args?, working_directory?}. SSH: {type:'ssh', host, user, command}. SMTP: {type:'smtp', host, from, to, subject, text?|html?, cc?, bcc?, headers?, attachments?, security?, port?}. IMAP: {type:'imap', host, mailbox?, operation:{kind:'search'|'fetch'|'store'|'move'|'copy'|'expunge', ...}, port?}. WebSocket: {type:'websocket', url, injection, message?, subprotocols?, collect?, response_mode?}. SFTP: {type:'sftp', host, user, operation:'upload'|'download'|'list', remote_path, local_path?}. Docker registry: {type:'docker_registry', operation:'pull'|'push', image}. HTTP response_mode ('full'|'filtered'|'status_only') may only equal or tighten the secret's policy mode; 'status_only' returns the status code without a body. Target allowlists, the response-mode policy, TLS/host-key pinning, recipient allowlists, read-only mode and downstream config are set out-of-band via the trusted admin path (CLI/REST), never here.",
+        "Action specification. HTTP: {type:'http', method, url, injection, headers?, body?, follow_redirects?, response_mode?}. Process: {type:'process', command, args?, env_var, working_directory?}. MCP: {type:'mcp', server, tool, arguments?}. Database: {type:'database', engine:'postgresql'|'mysql', host, database, query, params?} for SQL, or {type:'database', engine:'redis'|'mongodb', host, database, command} for the key-value/document engines (SQL takes query, redis takes a string-array command, mongodb takes a document command). Git: {type:'git', operation:'clone'|'pull'|'push', repository, args?, working_directory?}. SSH: {type:'ssh', host, user, command, port?}. SMTP: {type:'smtp', host, from, to, subject, text?|html?, cc?, bcc?, headers?, attachments?, security?, port?}. IMAP: {type:'imap', host, mailbox?, operation:{kind:'search'|'fetch'|'store'|'move'|'copy'|'expunge', ...}, port?}. WebSocket: {type:'websocket', url, injection, message?, subprotocols?, collect?, response_mode?}. SFTP: {type:'sftp', host, user, operation:'upload'|'download'|'list', remote_path, local_path?, port?}. Docker registry: {type:'docker_registry', operation:'pull'|'push', image}. HTTP response_mode ('full'|'filtered'|'status_only') may only equal or tighten the secret's policy mode; 'status_only' returns the status code without a body. Target allowlists, the response-mode policy, TLS/host-key pinning, recipient allowlists, read-only mode and downstream config are set out-of-band via the trusted admin path (CLI/REST), never here.",
       ),
     },
     async (args) => {
       const parsed = parseHandle(args.handle);
       scopeGuard.checkAccess(PERMISSION, parsed.project, parsed.name);
 
-      const secretId = await engine.resolveSecretId(args.handle);
-      rateLimiter.checkLimit(secretId, true);
+      // Keyed on the handle, not a resolved id: resolving before the audited
+      // engine path let an unknown-handle probe leave no row (N3).
+      rateLimiter.checkLimit(`use:${parsed.project ?? ""}/${parsed.name}`, true);
 
       const response = await engine.useSecret(args.handle, args.action, scopeGuard.caller);
 

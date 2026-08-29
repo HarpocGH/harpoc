@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  AAD_AUDIT_DETAIL,
   AAD_CERT_ACME_ACCOUNT,
   AAD_CERT_PRIVATE_KEY,
   AAD_DEK_WRAP,
@@ -25,7 +24,7 @@ import {
   DEFAULT_HTTP_TIMEOUT_MS,
   DEFAULT_SESSION_TTL_MS,
   MAX_NAME_LENGTH,
-  HKDF_INFO_SYNC,
+  MIN_REDACTABLE_FRAGMENT,
   LOCKOUT_DURATIONS_MS,
   LOCKOUT_MAX_ATTEMPTS,
   MAX_SESSION_TTL_MS,
@@ -132,10 +131,6 @@ describe("static AAD strings", () => {
 
   it("AAD_SESSION_JWT", () => {
     expect(AAD_SESSION_JWT).toBe("session-jwt");
-  });
-
-  it("AAD_AUDIT_DETAIL", () => {
-    expect(AAD_AUDIT_DETAIL).toBe("audit-detail");
   });
 });
 
@@ -306,16 +301,6 @@ describe("SQLite pragmas", () => {
 });
 
 // ---------------------------------------------------------------------------
-// HKDF info strings
-// ---------------------------------------------------------------------------
-
-describe("HKDF info strings", () => {
-  it("HKDF_INFO_SYNC", () => {
-    expect(HKDF_INFO_SYNC).toBe("sync-key-v1");
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Vault defaults
 // ---------------------------------------------------------------------------
 
@@ -334,5 +319,15 @@ describe("vault defaults", () => {
 
   it("MAX_NAME_LENGTH is 255", () => {
     expect(MAX_NAME_LENGTH).toBe(255);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Output sanitization
+// ---------------------------------------------------------------------------
+
+describe("output sanitization constants", () => {
+  it("MIN_REDACTABLE_FRAGMENT is 3", () => {
+    expect(MIN_REDACTABLE_FRAGMENT).toBe(3);
   });
 });

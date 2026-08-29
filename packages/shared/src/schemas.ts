@@ -14,6 +14,7 @@ import {
   MAX_WS_COLLECT_MESSAGES,
   MAX_WS_COLLECT_WINDOW_MS,
 } from "./constants.js";
+import { isDecimalInteger } from "./decimal-integer.js";
 import { isValidHandle } from "./handle.js";
 import { isValidRecipientPattern } from "./recipient-pattern.js";
 import {
@@ -329,8 +330,10 @@ type BareDatabaseAction = z.infer<typeof bareDatabaseActionSchema>;
  * the cert `--bits`/`--curve` pairing rule): `postgresql`/`mysql` require
  * `query` (+ optional `params`) and refuse `command`; `redis` requires
  * `command` as a string array (the command name plus its arguments — never
- * inline protocol text) and refuses `query`/`params`; `mongodb` requires
- * `command` as a document (runCommand-style) and refuses `query`/`params`.
+ * inline protocol text) plus a `database` that is a decimal integer index
+ * (redis `SELECT` takes a number, so a name could only ever be dropped), and
+ * refuses `query`/`params`; `mongodb` requires `command` as a document
+ * (runCommand-style) and refuses `query`/`params`.
  * `query` is schema-optional so the object shape stays a single type across
  * all four engines, but every existing `{engine: "postgresql"|"mysql",
  * query, params}` caller remains valid — the refinement requires exactly
@@ -361,6 +364,13 @@ function refineDatabaseAction(data: BareDatabaseAction, ctx: z.RefinementCtx): v
         code: z.ZodIssueCode.custom,
         message: "command must be a string array for redis",
         path: ["command"],
+      });
+    }
+    if (!isDecimalInteger(data.database)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "database must be a non-negative integer index for redis",
+        path: ["database"],
       });
     }
   } else if (data.engine === DatabaseEngine.MONGODB) {
@@ -427,11 +437,15 @@ const sshUserSchema = z
  * SSH action — process-mediated injection. The vault spawns `ssh` with the
  * private key served through an ephemeral ssh-agent (signatures only, key never
  * on disk) and strict host-key verification against the pinned known_hosts.
+ *
+ * A non-22 `port` is pinned by OpenSSH's own `[host]:port` known_hosts form —
+ * the operator stores that line; the vault never rewrites a pin.
  */
 export const sshActionSchema = z.object({
   type: z.literal(ActionType.SSH),
   host: sshHostSchema,
   user: sshUserSchema,
+  port: z.number().int().min(1).max(65_535).optional(),
   command: z.string().min(1).max(65_536),
   timeout_ms: z.number().int().positive().max(300_000).optional(),
 });
@@ -699,6 +713,7 @@ const bareSftpActionSchema = z.object({
   type: z.literal(ActionType.SFTP),
   host: sshHostSchema,
   user: sshUserSchema,
+  port: z.number().int().min(1).max(65_535).optional(),
   operation: z.enum(["upload", "download", "list"]),
   remote_path: sftpPathSchema,
   local_path: sftpPathSchema.optional(),
@@ -916,10 +931,11 @@ export type SshConnectionConfig = z.infer<typeof sshConnectionConfigSchema>;
  * policy in the mail contexts' idiom (design §5.5), shaped 1:1 onto core's
  * `MailTlsConfig`. `tls` absent means TLS against the default system CAs;
  * `{ ca }` pins a private CA bundle; `false` is the audited plaintext opt-out
- * — honored by **SMTP only** (`tls_opt_out: true` lands in the `secret.use`
- * row). IMAP is implicit-TLS-only (design §4.2), so an `imap` action on a
- * secret carrying `tls: false` refuses at use time rather than silently
- * ignoring an opt-out the admin believes is in force.
+ * — honored by the **implicit-TLS SMTP leg only** (`tls_opt_out: true` lands
+ * in the `secret.use` row). A `starttls` smtp action upgrades before
+ * authenticating and IMAP is implicit-TLS-only (design §4.2), so both refuse
+ * at use time on a secret carrying `tls: false` rather than silently ignoring
+ * an opt-out the admin believes is in force.
  */
 export const mailConnectionConfigSchema = z.object({
   tls: z
@@ -1012,12 +1028,22 @@ export const mcpServerConfigSchema = z
  */
 export type McpServerConfig = z.infer<typeof mcpServerConfigSchema>;
 
-export const accessPolicyInputSchema = z.object({
-  principal_type: principalTypeSchema,
-  principal_id: z.string().min(1),
-  permissions: z.array(permissionSchema).min(1),
-  expires_at: z.number().int().positive().optional(),
-});
+export const accessPolicyInputSchema = z
+  .object({
+    principal_type: principalTypeSchema,
+    principal_id: z.string().min(1),
+    permissions: z.array(permissionSchema).min(1),
+    expires_at: z.number().int().positive().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.principal_type === "agent" && !agentNameSchema.safeParse(data.principal_id).success) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "principal_id must be a valid agent name for an agent principal",
+        path: ["principal_id"],
+      });
+    }
+  });
 
 /** Access-policy grant request body (principal + permissions). */
 export type AccessPolicyInput = z.infer<typeof accessPolicyInputSchema>;
@@ -1114,8 +1140,8 @@ export const sessionFileSchema = z.object({
   created_at: z.number().int().positive(),
   expires_at: z.number().int().positive(),
   max_expires_at: z.number().int().positive(),
-  /** Scheme wrapping `session_key`; absent means "none" (files written before this field existed). */
-  key_protection: sessionKeyProtectionSchemeSchema.optional(),
+  /** Scheme wrapping `session_key`; required — every writer sets it. */
+  key_protection: sessionKeyProtectionSchemeSchema,
   session_key: base64Pattern,
   wrapped_kek: base64Pattern,
   wrapped_kek_iv: base64Pattern,

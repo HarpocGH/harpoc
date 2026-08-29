@@ -221,15 +221,15 @@ npx harpoc cert csr web-cert --subject www.example.com --sans www.example.com,ex
 # Issue via ACME (Let's Encrypt); --staging targets the staging directory
 npx harpoc cert issue web-cert --domains www.example.com,example.com --email ops@example.com --staging
 
-# ...or issue an EC key instead of the RSA-2048 default
-npx harpoc cert issue web-cert --domains www.example.com --email ops@example.com --algorithm ec --curve P-384
+# ...or issue an RSA key instead of the EC P-256 default (`--algorithm rsa`)
+npx harpoc cert issue web-cert --domains www.example.com --email ops@example.com --algorithm rsa --bits 4096
 
 # Renew an ACME-issued certificate, and inspect health
 npx harpoc cert renew secret://web-cert
 npx harpoc cert status secret://web-cert
 ```
 
-Private keys are stored under the vault's own encryption and never travel via argv — `cert import --key` reads the PEM from a file, and a passphrase-protected key prompts once for the passphrase and is decrypted in memory at import (the same path as `secret set --from-file`). Each certificate gets its own ACME account, stored encrypted alongside it; `--dns` selects dns-01 instead of the http-01 responder and prints the TXT record for you to place manually. Both `cert csr` and `cert issue` take `--algorithm rsa|ec` with `--bits 2048|4096` or `--curve P-256|P-384`; only their defaults differ — `csr` generates EC P-256, `issue` RSA-2048 — and a flag that does not pair with the chosen algorithm is refused rather than silently ignored.
+Private keys are stored under the vault's own encryption and never travel via argv — `cert import --key` reads the PEM from a file, and a passphrase-protected key prompts once for the passphrase and is decrypted in memory at import (the same path as `secret set --from-file`). Each certificate gets its own ACME account, stored encrypted alongside it; `--dns` selects dns-01 instead of the http-01 responder and prints the TXT record for you to place manually. Both `cert csr` and `cert issue` take `--algorithm rsa|ec` with `--bits 2048|4096` or `--curve P-256|P-384`; both generate EC P-256 by default, and a flag that does not pair with the chosen algorithm is refused rather than silently ignored.
 
 Renew continuously in a long-lived process — alongside any server, or standalone as a renewal daemon:
 
@@ -238,7 +238,7 @@ npx harpoc server start --rest --cert-renew   # or --cert-renew alone as a renew
 npx harpoc server start --cert-renew --cert-renew-port 8080
 ```
 
-The scheduler checks hourly (the first tick one interval after start) and renews **only** certificates created with `--auto-renew`, and only once they are inside their `--renew-before-days` window (default 30). `--cert-renew-port` (default 80, requires `--cert-renew`) is the port the http-01 responder binds for the duration of a renewal. A failed renewal is audited as a failed `cert.renew`, warned on stderr, and quarantined with exponential backoff; an in-flight renewal is drained on shutdown before the vault seals. Without the daemon, `harpoc cert renew <handle>` (from cron, a timer, or by hand) remains the only thing that renews.
+The scheduler checks hourly (the first tick one interval after start) and renews **only** certificates created with `--auto-renew`, and only once they are inside their `--renew-before-days` window (default 30). `--cert-renew-port` (default 80, requires `--cert-renew`) is the port the http-01 responder binds for the duration of a renewal. A failed renewal is audited as a failed `cert.renew`, warned on stderr, and quarantined with exponential backoff; an in-flight renewal is drained on shutdown before the vault seals. Without the daemon, `harpoc cert renew <handle>` (from cron, a timer, or by hand) remains the only thing that renews. A `--cert-renew-port` equal to `--port` or `--mcp-http-port` is refused at start.
 
 ## Web UI
 
