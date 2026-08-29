@@ -143,9 +143,9 @@ function killTree(child: ChildProcess): Promise<void> {
  * taskkill helper and a timed-out exit starts the descendant sweep — a spawn
  * whose exit never lands settles within KILL_HELPER_TIMEOUT_MS +
  * KILL_SETTLE_MS (12 s) of the timeout, and one whose exit does land settles
- * within DESCENDANT_SWEEP_TIMEOUT_MS (15 s) of that exit; since the exit
+ * within DESCENDANT_SWEEP_TIMEOUT_MS (30 s) of that exit; since the exit
  * itself lands inside the first bound, the collapsed worst case is
- * timeout + 27 s. POSIX has no helper and no sweep: timeout + KILL_SETTLE_MS.
+ * timeout + 42 s. POSIX has no helper and no sweep: timeout + KILL_SETTLE_MS.
  * A pending promise here would strand the caller's `finally` — the plaintext
  * wipe, the ephemeral ssh-agent socket and the identity/known-hosts temp
  * files all hang off it.

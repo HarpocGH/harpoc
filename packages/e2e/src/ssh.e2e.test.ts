@@ -53,6 +53,7 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
   let notAllowedHandle: string;
   let altPortHandle: string;
   let altPortBarePinHandle: string;
+  let altPortBareWrongPinHandle: string;
 
   beforeAll(async () => {
     assertFleetUp("sshd-pinned");
@@ -104,8 +105,8 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
     });
 
     // The same pinned server on 127.0.0.1:55022 (D59): the pin is stored in
-    // OpenSSH's bracketed `[host]:port` form, which is what the vault writes
-    // verbatim — it never rewrites a pin to match the action's port.
+    // OpenSSH's bracketed `[host]:port` form, which the vault writes verbatim
+    // — it never rewrites a pin to match the action's port.
     altPortHandle = await storeSecret(vault, "ssh-alt-port", sshKey);
     await vault.engine.setInjectionPolicy(altPortHandle, {
       url_allowlist: [],
@@ -117,8 +118,12 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
       ssh: { known_hosts: [knownHostPinOnPort("127.0.0.1", SSHD_PINNED_ALT_PORT, "pinned")] },
     });
 
-    // The negative twin: the correct key pinned under the BARE host, which
-    // OpenSSH does not consult for a non-22 port — verification must fail.
+    // The correct key pinned under the BARE host. OpenSSH looks `[host]:port`
+    // up first and, finding no such entry, falls back to the bare-host line
+    // when its key matches ("found matching key w/out port" — verified against
+    // OpenSSH 9.6 on Ubuntu 24.04 and Win32-OpenSSH 9.5, 2026-08-29), so this
+    // pin is ACCEPTED. The arm's original expectation (a refusal) was wrong
+    // and failed on its first Linux run.
     altPortBarePinHandle = await storeSecret(vault, "ssh-alt-port-bare-pin", sshKey);
     await vault.engine.setInjectionPolicy(altPortBarePinHandle, {
       url_allowlist: [],
@@ -128,6 +133,20 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
     });
     await vault.engine.setConnectionConfig(altPortBarePinHandle, {
       ssh: { known_hosts: [knownHostPin("127.0.0.1", "pinned")] },
+    });
+
+    // The negative twin: the fallback is key-gated. The bare host pinned with
+    // the ROGUE key vouches for nothing the pinned server presents, so the
+    // non-22 connection must be refused as an unknown host.
+    altPortBareWrongPinHandle = await storeSecret(vault, "ssh-alt-port-bare-wrong-pin", sshKey);
+    await vault.engine.setInjectionPolicy(altPortBareWrongPinHandle, {
+      url_allowlist: [],
+      command_allowlist: [sshBin],
+      env_allowlist: [],
+      host_allowlist: ["127.0.0.1"],
+    });
+    await vault.engine.setConnectionConfig(altPortBareWrongPinHandle, {
+      ssh: { known_hosts: [knownHostPin("127.0.0.1", "rogue")] },
     });
 
     surface = await startMcpHttpSurface(vault, "e2e-ssh-agent", [Permission.USE]);
@@ -200,7 +219,7 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
     assertOpaque(sshKey, { result: outcome.result, auditRows, parentEnv: process.env });
   });
 
-  it("refuses the non-22 server when only the bare-host pin is stored", async () => {
+  it("accepts the non-22 server through OpenSSH's port-less fallback when the bare-host pin holds its key", async () => {
     const outcome = await surface.callUseSecret(altPortBarePinHandle, {
       type: "ssh",
       host: "127.0.0.1",
@@ -209,7 +228,28 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
       command: "id -un",
     });
 
+    expect(outcome.ok).toBe(true);
+    const r = sshResult(outcome);
+    expect(r.exit_code, outcome.text).toBe(0);
+    expect(r.error).toBeUndefined();
+    expect(r.stdout ?? "").toContain(SSHD_PINNED.user);
+
+    const auditRows = vault.engine.queryAudit({ eventType: "secret.use" }) as unknown as AuditRow[];
+    assertOpaque(sshKey, { result: outcome.result, auditRows, parentEnv: process.env });
+  });
+
+  it("refuses the non-22 server when the bare-host pin holds a different key (the fallback is key-gated)", async () => {
+    const outcome = await surface.callUseSecret(altPortBareWrongPinHandle, {
+      type: "ssh",
+      host: "127.0.0.1",
+      port: SSHD_PINNED_ALT_PORT,
+      user: SSHD_PINNED.user,
+      command: "id -un",
+    });
+
     expect(outcome.ok).toBe(false);
+    // The refusal REASON is host-key verification: OpenSSH finds neither a
+    // `[127.0.0.1]:55022` entry nor a bare entry holding the presented key.
     expect(outcome.errorText ?? "").toContain("host key does not match the pinned key");
     expect(JSON.stringify(outcome.result ?? "")).not.toContain(SSHD_PINNED.user);
 

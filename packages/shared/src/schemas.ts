@@ -438,8 +438,11 @@ const sshUserSchema = z
  * private key served through an ephemeral ssh-agent (signatures only, key never
  * on disk) and strict host-key verification against the pinned known_hosts.
  *
- * A non-22 `port` is pinned by OpenSSH's own `[host]:port` known_hosts form —
- * the operator stores that line; the vault never rewrites a pin.
+ * A non-22 `port` is pinned by OpenSSH's own `[host]:port` known_hosts form,
+ * which OpenSSH looks up first; absent that entry it falls back to the
+ * bare-host line when its key matches ("found matching key w/out port"), so a
+ * bare pin binds a non-22 port too. The operator stores the line; the vault
+ * never rewrites a pin.
  */
 export const sshActionSchema = z.object({
   type: z.literal(ActionType.SSH),

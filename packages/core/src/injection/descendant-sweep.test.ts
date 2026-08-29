@@ -217,10 +217,12 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
   // Survival is pinned by a second listing, not by a marker file: a cold
   // PowerShell host plus taskkill can take seconds under load, and a marker
   // written on the grandchild's own clock would race that. The grandchild's
-  // 12 s lifetime only keeps it findable long enough and self-terminates it
-  // if the sweep never reaches it.
+  // 60 s lifetime only keeps it findable long enough — past the pre-listing
+  // and the sweep's own listing at their 20 s helper bounds (windows-latest
+  // spent > 10 s on the first PowerShell host on every run since a7ec9fc) —
+  // and self-terminates it if the sweep never reaches it.
   it("kills a grandchild orphaned by a plain (non-tree) kill of its parent", async () => {
-    const grandchild = "setTimeout(() => {}, 12000)";
+    const grandchild = "setTimeout(() => {}, 60000)";
     // `detached` keeps the grandchild out of the parent's libuv job object,
     // which would otherwise kill it with the parent — the survivor the sweep
     // targets is one no job ever claimed.
@@ -263,5 +265,5 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
     // for a moment, so wait for it to disappear rather than for a fixed
     // settle. The last listing is what fails, so a survivor stays visible.
     await expect(untilEmpty(() => live.listDescendants(pid))).resolves.toEqual([]);
-  }, 45_000);
+  }, 75_000);
 });

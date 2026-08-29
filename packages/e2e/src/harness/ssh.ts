@@ -49,9 +49,12 @@ export function knownHostPin(host: string, which: "pinned" | "rogue" = "pinned")
 }
 
 /**
- * The same pin for a server reached on a non-22 port: OpenSSH keys those
- * entries by the bracketed `[host]:port` form, and the vault writes the
- * operator's line verbatim — it never rewrites a pin to match an action.
+ * The same pin for a server reached on a non-22 port, in OpenSSH's bracketed
+ * `[host]:port` form. OpenSSH looks that form up first and, when no such entry
+ * exists, falls back to the bare-host line if its key matches ("found matching
+ * key w/out port"), so a bare pin also binds a non-22 port; the bracketed form
+ * is the one that outranks it. The vault writes the operator's line verbatim —
+ * it never rewrites a pin to match an action.
  */
 export function knownHostPinOnPort(
   host: string,

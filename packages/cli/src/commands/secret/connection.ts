@@ -39,7 +39,7 @@ export function registerSecretConnectionCommand(secret: Command): void {
     .option("--db-servername <name>", "TLS servername override (database)")
     .option(
       "--known-host <line>",
-      "Pinned SSH known_hosts line (repeatable, replaces the stored list) — a non-22 port is pinned as `[host]:port`",
+      "Pinned SSH known_hosts line (repeatable, replaces the stored list) — a non-22 port is pinned as `[host]:port`; a bare-host line holding the same key also matches (OpenSSH's port-less fallback)",
       collect,
       [],
     )

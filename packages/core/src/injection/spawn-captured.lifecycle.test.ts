@@ -95,13 +95,13 @@ describe("spawnCaptured lifecycle (M4)", () => {
     // kill fires at t+2 s; the grandchild's 6 s timer starts at its own boot,
     // allowed the same 2 s the child had, so the marker would land by t+10 s
     // at the latest. On win32 the spawn itself settles only after the taskkill
-    // wait and the descendant sweep — up to 27 s past the timeout, the bound
+    // wait and the descendant sweep — up to 42 s past the timeout, the bound
     // spawnCaptured documents — so this 9 s wait starts after that, and the
-    // budget below covers 2 + 27 + 9 plus scheduler margin (27 s already is the
+    // budget below covers 2 + 42 + 9 plus scheduler margin (42 s already is the
     // cold-host worst case).
     await sleep(9_000);
     expect(existsSync(marker)).toBe(false);
-  }, 40_000);
+  }, 60_000);
 
   it("control: an ordinary command still returns its full output and exit code", async () => {
     const result = await spawnCaptured(

@@ -46,13 +46,20 @@ export interface DescendantSweepResult {
 /**
  * Bound on the whole sweep — the keystore-helper precedent: process start-up
  * stretches about tenfold under the full parallel gate, and a bound the sweep
- * cannot meet is a sweep that never runs.
+ * cannot meet is a sweep that never runs. 1.5× the per-helper bound: one
+ * listing plus the kills, as before.
  */
-export const DESCENDANT_SWEEP_TIMEOUT_MS = 15_000;
+export const DESCENDANT_SWEEP_TIMEOUT_MS = 30_000;
 
 const MAX_LISTING_BYTES = 64 * 1024;
-/** Per helper (one PowerShell listing, one taskkill): a cold PowerShell host exceeds 4 s under load. */
-const HELPER_TIMEOUT_MS = 10_000;
+/**
+ * Per helper (one PowerShell listing, one taskkill). A cold PowerShell host
+ * exceeded 4 s under the local parallel gate (2026-08-26) and 10 s on every
+ * windows-latest CI run since (PowerShell 5.1 start-up plus the CIM listing on
+ * a two-core runner under the full gate; ~250 ms on an idle host) — a bound
+ * the helper cannot meet is a sweep that silently fails open (2026-08-29).
+ */
+const HELPER_TIMEOUT_MS = 20_000;
 
 export async function sweepDescendants(
   pid: number,
