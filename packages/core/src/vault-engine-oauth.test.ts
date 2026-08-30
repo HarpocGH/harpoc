@@ -7,7 +7,7 @@ import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, PrincipalType, VaultError } from "@harpoc/shared";
 import type { CallerContext, OAuthProviderConfig, Permission } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { dropOAuthAuthMethodConstraint, expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
@@ -687,27 +687,28 @@ describe("refreshOAuthToken token-endpoint auth methods", () => {
     expect(request.body.get("client_secret")).toBe("my-client-secret");
   });
 
-  it("a NULL column degrades to client_secret_post — the pre-011 legacy state", async () => {
+  it("a NULL column on a rebuilt table is corruption, not a degradation to client_secret_post", async () => {
     const secretId = await createActiveOAuthSecret("degrade-refresh", {
       token_endpoint_auth_method: "client_secret_basic",
     });
 
     const db = new Database(dbPath);
+    dropOAuthAuthMethodConstraint(db);
     db.prepare("UPDATE oauth_tokens SET token_endpoint_auth_method = NULL WHERE secret_id = ?").run(
       secretId,
     );
     db.close();
-    await engine.refreshOAuthToken(secretId);
 
-    const request = captured[0] as CapturedTokenRequest;
-    expect(request.authorization).toBeUndefined();
-    expect(request.body.get("client_id")).toBe("my-client-id");
+    await expectVaultError(() => engine.refreshOAuthToken(secretId), ErrorCode.VAULT_CORRUPTED);
+    expect(captured).toHaveLength(0);
+    await expectVaultError(() => engine.getOAuthTokenStatus(secretId), ErrorCode.VAULT_CORRUPTED);
   });
 
   it("an unknown stored auth method refuses the refresh as VAULT_CORRUPTED instead of POSTing", async () => {
     const secretId = await createActiveOAuthSecret("bad-method");
 
     const db = new Database(dbPath);
+    dropOAuthAuthMethodConstraint(db);
     db.prepare("UPDATE oauth_tokens SET token_endpoint_auth_method = ? WHERE secret_id = ?").run(
       "private_key_jwt",
       secretId,
@@ -717,6 +718,37 @@ describe("refreshOAuthToken token-endpoint auth methods", () => {
     await expectVaultError(() => engine.refreshOAuthToken(secretId), ErrorCode.VAULT_CORRUPTED);
     expect(captured).toHaveLength(0);
     await expectVaultError(() => engine.getOAuthTokenStatus(secretId), ErrorCode.VAULT_CORRUPTED);
+  });
+
+  it("the v1.5 table refuses a NULL and an unknown auth method outright (R2)", async () => {
+    const secretId = await createActiveOAuthSecret("checked-column");
+    const db = new Database(dbPath);
+    const codeOf = (sql: string, ...params: unknown[]): string | undefined => {
+      let caught: unknown;
+      try {
+        db.prepare(sql).run(...params);
+      } catch (err) {
+        caught = err;
+      }
+      return (caught as { code?: string } | undefined)?.code;
+    };
+    expect(
+      codeOf(
+        "UPDATE oauth_tokens SET token_endpoint_auth_method = NULL WHERE secret_id = ?",
+        secretId,
+      ),
+    ).toBe("SQLITE_CONSTRAINT_NOTNULL");
+    expect(
+      codeOf(
+        "UPDATE oauth_tokens SET token_endpoint_auth_method = ? WHERE secret_id = ?",
+        "private_key_jwt",
+        secretId,
+      ),
+    ).toBe("SQLITE_CONSTRAINT_CHECK");
+    db.close();
+    expect(engine.getOAuthTokenStatus(secretId).token_endpoint_auth_method).toBe(
+      "client_secret_post",
+    );
   });
 
   it("client_secret_basic without a stored secret falls back to client_id in the body", async () => {
@@ -746,7 +778,7 @@ describe("refreshOAuthToken token-endpoint auth methods", () => {
     const db = new Database(dbPath, { readonly: true });
     const rows = db
       .prepare("SELECT secret_id, token_endpoint_auth_method FROM oauth_tokens")
-      .all() as { secret_id: string; token_endpoint_auth_method: string | null }[];
+      .all() as { secret_id: string; token_endpoint_auth_method: string }[];
     db.close();
 
     expect(rows.find((r) => r.secret_id === basicId)?.token_endpoint_auth_method).toBe(

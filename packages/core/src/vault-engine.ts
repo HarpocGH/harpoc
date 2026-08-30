@@ -53,6 +53,8 @@ import {
   DEFAULT_SESSION_TTL_MS,
   ErrorCode,
   formatHandle,
+  injectionPolicyInputSchema,
+  injectionPolicySchema,
   isAdminUserCaller,
   isValidSecretNamePattern,
   isVaultVersionSupported,
@@ -63,6 +65,7 @@ import {
   matchesSecretNameScope,
   MAX_SESSION_TTL_MS,
   MAX_TOKEN_TTL_MS,
+  meetsVaultVersionFloor,
   MIN_PASSWORD_LENGTH,
   OAuthProviderPreset,
   PrincipalType,
@@ -75,6 +78,7 @@ import {
   VaultError,
   VaultState,
   VAULT_VERSION,
+  VAULT_VERSION_FLOOR,
 } from "@harpoc/shared";
 import { AgentRegistry } from "./access/agent-registry.js";
 import { PolicyEngine } from "./access/policy-engine.js";
@@ -390,6 +394,29 @@ export class VaultEngine {
   }
 
   /**
+   * The fail-closed version guard every entry path shares: a missing stamp,
+   * one newer than this binary supports, or one below the v1.5 floor (R2 —
+   * the 1.0–1.4 line cannot be upgraded) all refuse as VAULT_CORRUPTED.
+   * Numeric per-component compare: a lexicographic string compare orders
+   * "1.10.0" before "1.2.0" and defeats the guard.
+   */
+  private assertVaultVersionOpenable(store: SqliteStore, closeOnFailure: boolean): void {
+    const vaultVersion = store.getMeta("vault_version");
+    let message: string | null = null;
+    if (!vaultVersion) {
+      message = "vault_version row is missing";
+    } else if (!isVaultVersionSupported(vaultVersion, VAULT_VERSION)) {
+      message = `Vault version ${vaultVersion} is newer than supported ${VAULT_VERSION}`;
+    } else if (!meetsVaultVersionFloor(vaultVersion, VAULT_VERSION_FLOOR)) {
+      message = `Vault version ${vaultVersion} predates the supported minimum ${VAULT_VERSION_FLOOR} and cannot be upgraded — move or delete the vault directory and run harpoc init`;
+    }
+    if (message !== null) {
+      if (closeOnFailure) store.close();
+      throw VaultError.vaultCorrupted(message);
+    }
+  }
+
+  /**
    * Unlock an existing vault with a password.
    */
   async unlock(password: string): Promise<void> {
@@ -402,18 +429,7 @@ export class VaultEngine {
       throw VaultError.vaultNotFound();
     }
 
-    // Version check — numeric per-component compare; a lexicographic string
-    // compare orders "1.10.0" before "1.2.0" and defeats this guard. Fails
-    // closed on malformed version strings.
-    const vaultVersion = store.getMeta("vault_version");
-    if (!vaultVersion || !isVaultVersionSupported(vaultVersion, VAULT_VERSION)) {
-      if (isNewStore) store.close();
-      throw VaultError.vaultCorrupted(
-        vaultVersion
-          ? `Vault version ${vaultVersion} is newer than supported ${VAULT_VERSION}`
-          : "vault_version row is missing",
-      );
-    }
+    this.assertVaultVersionOpenable(store, isNewStore);
 
     try {
       // Lockout and meta reads live inside the try so any throw (lockout
@@ -504,15 +520,7 @@ export class VaultEngine {
     // let an older binary open and write a newer-format vault (L5). Thrown
     // rather than reported as "no session": falling through would prompt for a
     // password and then raise this very error from `unlock`.
-    const vaultVersion = store.getMeta("vault_version");
-    if (!vaultVersion || !isVaultVersionSupported(vaultVersion, VAULT_VERSION)) {
-      if (isNewStore) store.close();
-      throw VaultError.vaultCorrupted(
-        vaultVersion
-          ? `Vault version ${vaultVersion} is newer than supported ${VAULT_VERSION}`
-          : "vault_version row is missing",
-      );
-    }
+    this.assertVaultVersionOpenable(store, isNewStore);
 
     // Unwrap KEK and JWT key from session
     const sessionKeyBytes = new Uint8Array(Buffer.from(session.session_key, "base64"));
@@ -1036,7 +1044,7 @@ export class VaultEngine {
           // Tighten-only response-mode override (thesis §4.5.2): a loosening
           // override would reopen the echo channel — rejected before the
           // request executes.
-          const policyMode = policy.response_mode ?? "filtered";
+          const policyMode = policy.response_mode;
           if (action.response_mode && !isResponseModeAllowed(policyMode, action.response_mode)) {
             s.auditLogger.log({
               eventType: AuditEventType.SECRET_USE,
@@ -1066,7 +1074,7 @@ export class VaultEngine {
               body: action.body,
               timeoutMs: action.timeout_ms,
               responseMode,
-              responseHeaderAllowlist: policy.response_header_allowlist ?? [],
+              responseHeaderAllowlist: policy.response_header_allowlist,
               urlAllowlist: policy.url_allowlist,
             },
             value,
@@ -1572,7 +1580,9 @@ export class VaultEngine {
   /**
    * Load a secret's injection policy, decrypting the allowlists. Returns empty
    * allowlists when no policy is set (URL allowlisting is then not enforced;
-   * command allowlisting denies by default — see ProcessInjector).
+   * command allowlisting denies by default — see ProcessInjector). A stored
+   * blob is parsed strictly (R2/C43): the writer always emits all ten fields,
+   * so a miss or an extra key is corruption.
    */
   private loadInjectionPolicy(s: UnlockedState, secretId: string): InjectionPolicy {
     const row = s.store.getInjectionPolicy(secretId);
@@ -1597,19 +1607,20 @@ export class VaultEngine {
       row.policy_tag,
       AAD_INJECTION_POLICY(secretId),
     );
-    const parsed = JSON.parse(Buffer.from(bytes).toString("utf8")) as Partial<InjectionPolicy>;
-    return {
-      url_allowlist: parsed.url_allowlist ?? [],
-      command_allowlist: parsed.command_allowlist ?? [],
-      env_allowlist: parsed.env_allowlist ?? [],
-      host_allowlist: parsed.host_allowlist ?? [],
-      response_mode: parsed.response_mode ?? "filtered",
-      response_header_allowlist: parsed.response_header_allowlist ?? [],
-      network_isolation: parsed.network_isolation ?? false,
-      fs_isolation: parsed.fs_isolation ?? false,
-      smtp_recipient_allowlist: parsed.smtp_recipient_allowlist ?? [],
-      imap_read_only: parsed.imap_read_only ?? false,
-    };
+    let raw: unknown;
+    try {
+      raw = JSON.parse(Buffer.from(bytes).toString("utf8"));
+    } catch {
+      throw VaultError.vaultCorrupted(`injection policy for secret ${secretId} is not JSON`);
+    }
+    const parsed = injectionPolicySchema.safeParse(raw);
+    if (!parsed.success) {
+      const paths = parsed.error.issues.map((issue) => issue.path.join(".") || "<root>");
+      throw VaultError.vaultCorrupted(
+        `injection policy for secret ${secretId} is malformed (${paths.join(", ")})`,
+      );
+    }
+    return parsed.data;
   }
 
   /**
@@ -1634,6 +1645,14 @@ export class VaultEngine {
     options?: SetInjectionPolicyOptions,
     caller?: CallerContext,
   ): Promise<void> {
+    const validated = injectionPolicyInputSchema.safeParse(policy);
+    if (!validated.success) {
+      const issues = validated.error.issues.map(
+        (issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`,
+      );
+      throw VaultError.schemaValidation(`Invalid injection policy: ${issues.join("; ")}`);
+    }
+
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
     // Configuration of a gated secret is itself gated (W1): the allowlists
@@ -2228,17 +2247,14 @@ export class VaultEngine {
 
   /**
    * The token-endpoint client authentication a stored OAuth row prescribes.
-   *
-   * NULL is the pre-011 legacy state — migration 011 deliberately leaves rows
-   * written before the column existed unset — and reads as client_secret_post,
-   * the pre-migration wire shape. Any other unknown value is corruption, not a
-   * degradation target: silently POSTing the client secret to a provider that
-   * expects something else is a credential disclosure, so it fails closed.
+   * The column is checked at the table (R2), so anything but the two methods
+   * is corruption, not a degradation target: silently POSTing the client
+   * secret to a provider that expects something else is a credential
+   * disclosure, so it fails closed.
    */
   private storedAuthMethod(row: OAuthTokenRow): "client_secret_post" | "client_secret_basic" {
     const method = row.token_endpoint_auth_method;
-    if (method === null || method === "client_secret_post") return "client_secret_post";
-    if (method === "client_secret_basic") return "client_secret_basic";
+    if (method === "client_secret_post" || method === "client_secret_basic") return method;
     throw VaultError.vaultCorrupted(`unknown token_endpoint_auth_method "${method}"`);
   }
 
@@ -2348,9 +2364,7 @@ export class VaultEngine {
     // Validate token endpoint (SSRF protection)
     await validateUrl(oauthRow.token_endpoint);
 
-    // POST to token endpoint. Client authentication follows the stored
-    // method; NULL is the pre-011 legacy state and reads as
-    // client_secret_post, any other unknown value is corruption (fail closed).
+    // POST to token endpoint. Client authentication follows the stored method; an unknown value is corruption (fail closed).
     const authMethod = this.storedAuthMethod(oauthRow);
     const params = new URLSearchParams({
       grant_type: "refresh_token",
@@ -2466,8 +2480,7 @@ export class VaultEngine {
       has_refresh_token: oauthRow.refresh_token_encrypted !== null,
       last_refreshed_at: secret?.updated_at ?? null,
       refresh_status: computeOAuthRefreshStatus(oauthRow),
-      token_endpoint_auth_method:
-        oauthRow.token_endpoint_auth_method === null ? null : this.storedAuthMethod(oauthRow),
+      token_endpoint_auth_method: this.storedAuthMethod(oauthRow),
     };
   }
 
@@ -3309,7 +3322,7 @@ export class VaultEngine {
     caller?: CallerContext,
   ): number {
     const now = Date.now();
-    const floor = Math.floor(now / 1000) + Math.floor(MAX_TOKEN_TTL_MS / 1000);
+    const floor = now + MAX_TOKEN_TTL_MS;
     const jtis = s.store.listLiveTokenJtisForAgent(agentId, now);
 
     for (const jti of jtis) {
@@ -3845,6 +3858,9 @@ export class VaultEngine {
   /**
    * Revoke a JWT token by JTI.
    *
+   * `expiresAt` is milliseconds since the epoch (R2/C36 — the same unit as
+   * every other timestamp); a caller decoding a JWT `exp` multiplies by 1000.
+   *
    * `caller` is attribution only (v1.4 R6): a token-derived revocation — REST
    * `DELETE /tokens/:jti`, and the Web UI through it — names its principal on
    * the `token.revoke` row. The trusted local paths (`harpoc auth revoke`, the
@@ -3857,8 +3873,10 @@ export class VaultEngine {
     // Clamped, never merely defaulted — verifyToken prunes entries whose
     // expires_at has passed *before* consulting them, so a supplied expiry
     // that is too early (a caller decoding the wrong JWT) would silently
-    // un-revoke the token. A larger supplied expiry is still honored.
-    const floor = Math.floor(Date.now() / 1000) + Math.floor(MAX_TOKEN_TTL_MS / 1000);
+    // un-revoke the token. A larger supplied expiry is still honored — and a
+    // seconds-valued one is simply clamped up to the floor, so a caller that
+    // forgot the unit cannot shorten a revocation.
+    const floor = Date.now() + MAX_TOKEN_TTL_MS;
     const effectiveExpiresAt = Math.max(expiresAt ?? 0, floor);
     s.store.transaction(() => {
       s.store.insertRevokedToken(jti, effectiveExpiresAt);

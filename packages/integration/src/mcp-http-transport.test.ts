@@ -118,7 +118,7 @@ describe("MCP Streamable HTTP transport (real engine, real tokens)", () => {
       jti: string;
       exp: number;
     };
-    engine.revokeToken(payload.jti, payload.exp);
+    engine.revokeToken(payload.jti, payload.exp * 1000);
 
     await expect(client.callTool({ name: "list_secrets", arguments: {} })).rejects.toThrow();
   });

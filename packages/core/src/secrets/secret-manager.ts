@@ -149,7 +149,6 @@ export class SecretManager {
       rotated_at: null,
       version: 1,
       status,
-      sync_version: 0,
       name_hmac: nameHmac,
     };
 

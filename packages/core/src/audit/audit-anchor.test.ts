@@ -5,6 +5,7 @@ import { SqliteStore } from "../storage/sqlite-store.js";
 import { AuditLogger } from "./audit-logger.js";
 import { AuditQuery } from "./audit-query.js";
 import type { AuditChainAnchorInput, AuditChainTailLink } from "./audit-query.js";
+import { dropAuditRowHmacConstraint } from "@harpoc/test-utils";
 
 let store: SqliteStore;
 let auditKey: Uint8Array;
@@ -31,6 +32,7 @@ function logRows(count: number): number[] {
 }
 
 function insertLegacyRow(): number {
+  dropAuditRowHmacConstraint(store.db);
   const result = store.db
     .prepare(
       `INSERT INTO audit_log (timestamp, event_type, secret_id, principal_type, principal_id,

@@ -42,6 +42,7 @@ import {
   VAULT_DB_NAME,
   VAULT_DIR_NAME,
   VAULT_VERSION,
+  VAULT_VERSION_FLOOR,
 } from "./constants.js";
 
 // ---------------------------------------------------------------------------
@@ -310,8 +311,9 @@ describe("SQLite pragmas", () => {
 // ---------------------------------------------------------------------------
 
 describe("vault defaults", () => {
-  it("VAULT_VERSION is 1.0.0", () => {
-    expect(VAULT_VERSION).toBe("1.0.0");
+  it("VAULT_VERSION is 1.5.0 and the floor equals it (R2 fresh-init floor)", () => {
+    expect(VAULT_VERSION).toBe("1.5.0");
+    expect(VAULT_VERSION_FLOOR).toBe("1.5.0");
   });
 
   it("VAULT_AUDIT_ENABLED is true", () => {

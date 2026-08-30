@@ -5,6 +5,7 @@ import { generateRandomBytes } from "../crypto/random.js";
 import { SqliteStore } from "../storage/sqlite-store.js";
 import { AuditLogger } from "./audit-logger.js";
 import { AuditQuery } from "./audit-query.js";
+import { dropAuditRowHmacConstraint } from "@harpoc/test-utils";
 
 let store: SqliteStore;
 let auditKey: Uint8Array;
@@ -61,7 +62,7 @@ describe("row-bound audit detail AAD (v2)", () => {
       .prepare(
         `INSERT INTO audit_log (timestamp, event_type, secret_id, principal_type, principal_id,
            detail_encrypted, detail_iv, detail_tag, ip_address, session_id, success, row_hmac)
-         VALUES (?, ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, 1, NULL)`,
+         VALUES (?, ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, 1, ?)`,
       )
       .run(
         Date.now(),
@@ -69,6 +70,7 @@ describe("row-bound audit detail AAD (v2)", () => {
         Buffer.from(enc.ciphertext),
         Buffer.from(enc.iv),
         Buffer.from(enc.tag),
+        Buffer.from(generateRandomBytes(32)),
       );
     // A normal v2 row alongside it.
     logger.log({ eventType: AuditEventType.SECRET_USE, detail: { ok: 1 } });
@@ -121,6 +123,7 @@ describe("audit HMAC chain verification", () => {
   });
 
   it("a NULL link ahead of the first chained row is a break, not history", () => {
+    dropAuditRowHmacConstraint(store.db);
     const legacyId = Number(
       store.db
         .prepare(
@@ -160,8 +163,15 @@ describe("audit HMAC chain verification", () => {
  * hold no audit key) could null the column on any suffix and then insert,
  * delete and edit those rows with `harpoc audit verify` reporting OK.
  * Since Wave 2 (C30) a NULL link anywhere — prefix included — is a break.
+ * Since v1.5 (R2) the column is NOT NULL, so these cases first rebuild the
+ * table without the constraint — the attacker's own move — while the
+ * describe below pins that the shipped table refuses the write.
  */
 describe("audit chain: NULL links are not a free pass", () => {
+  beforeEach(() => {
+    dropAuditRowHmacConstraint(store.db);
+  });
+
   function nullLinks(fromId: number): void {
     store.db.prepare("UPDATE audit_log SET row_hmac = NULL WHERE id >= ?").run(fromId);
   }
@@ -229,5 +239,60 @@ describe("audit chain: NULL links are not a free pass", () => {
     logger.log({ eventType: AuditEventType.SECRET_READ, detail: { a: 1 } });
     logger.log({ eventType: AuditEventType.SECRET_USE, detail: { b: 2 } });
     expect(query.verifyChain().valid).toBe(true);
+  });
+});
+
+describe("audit chain: the v1.5 table refuses an erased link (R2)", () => {
+  function sqliteCode(run: () => void): string | undefined {
+    let caught: unknown;
+    try {
+      run();
+    } catch (err) {
+      caught = err;
+    }
+    return (caught as { code?: string } | undefined)?.code;
+  }
+
+  it("UPDATE … SET row_hmac = NULL fails on the constraint and the chain stays valid", () => {
+    const id = logger.log({ eventType: AuditEventType.SECRET_READ, detail: { a: 1 } });
+    expect(
+      sqliteCode(() =>
+        store.db.prepare("UPDATE audit_log SET row_hmac = NULL WHERE id = ?").run(id),
+      ),
+    ).toBe("SQLITE_CONSTRAINT_NOTNULL");
+    expect(query.verifyChain()).toEqual({ valid: true, checked: 1, firstBrokenId: null });
+  });
+
+  it("a link-less INSERT fails on the constraint", () => {
+    expect(
+      sqliteCode(() =>
+        store.db
+          .prepare(
+            `INSERT INTO audit_log (timestamp, event_type, secret_id, principal_type, principal_id,
+               detail_encrypted, detail_iv, detail_tag, ip_address, session_id, success, row_hmac)
+             VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, NULL)`,
+          )
+          .run(Date.now(), AuditEventType.VAULT_UNLOCK),
+      ),
+    ).toBe("SQLITE_CONSTRAINT_NOTNULL");
+  });
+
+  it("compile-time pin: the store requires a link", () => {
+    const eventRow = {
+      timestamp: Date.now(),
+      event_type: AuditEventType.VAULT_UNLOCK,
+      secret_id: null,
+      principal_type: null,
+      principal_id: null,
+      detail_encrypted: null,
+      detail_iv: null,
+      detail_tag: null,
+      ip_address: null,
+      session_id: null,
+      success: true,
+    };
+    // @ts-expect-error — a link-less insert no longer typechecks (R2)
+    const call = (): number => store.insertAuditEvent(eventRow);
+    expect(typeof call).toBe("function");
   });
 });

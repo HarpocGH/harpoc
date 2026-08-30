@@ -13,23 +13,8 @@ import type {
   TokenPrincipalType,
 } from "@harpoc/shared";
 import { SQLITE_PRAGMAS, VaultError } from "@harpoc/shared";
-import { generateUUIDv7 } from "../crypto/random.js";
-import { migration001 } from "./migrations/001-initial.js";
-import { migration002 } from "./migrations/002-revoked-tokens.js";
-import { migration003 } from "./migrations/003-name-hmac.js";
-import { migration004 } from "./migrations/004-oauth-tokens.js";
-import { migration005 } from "./migrations/005-certificates.js";
-import { migration006 } from "./migrations/006-injection-policies.js";
-import { migration007 } from "./migrations/007-mcp-servers.js";
-import { migration008 } from "./migrations/008-connection-configs.js";
-import { migration009 } from "./migrations/009-name-hmac-unique.js";
-import { migration010 } from "./migrations/010-audit-row-hmac.js";
-import { migration011 } from "./migrations/011-oauth-auth-method.js";
-import { migration012 } from "./migrations/012-agent-governance.js";
+import { baselineSchema } from "./migrations/baseline.js";
 import { LATEST_SCHEMA_VERSION } from "./schema.js";
-
-/** Description stamped on agents the 012 backfill registers from existing grants. */
-const AGENT_BACKFILL_DESCRIPTION = "auto-registered from existing grants (migration 012)";
 
 /** True for a better-sqlite3 UNIQUE/PRIMARY-KEY constraint violation. */
 export function isUniqueConstraintError(err: unknown): boolean {
@@ -113,7 +98,7 @@ export interface OAuthTokenRow {
   access_token_expires_at: number | null;
   redirect_uri: string | null;
   pkce_method: string;
-  token_endpoint_auth_method: string | null;
+  token_endpoint_auth_method: string;
 }
 
 /** Certificate record for DB storage (encrypted fields as Buffer/Uint8Array). */
@@ -198,8 +183,7 @@ export interface AgentRow {
 /**
  * Claims metadata of an issued token as stored (v1.4 issued-token registry) —
  * never the JWT. `scope`/`secrets` are JSON-encoded on the way in; a null
- * `secrets` means unrestricted. Every timestamp is in **milliseconds**,
- * `expires_at` included — unlike revoked_tokens.expires_at, which is seconds.
+ * `secrets` means unrestricted. Every timestamp is milliseconds.
  * `revoked_at` is a history mirror; revoked_tokens remains the revocation truth.
  */
 export interface IssuedTokenRow {
@@ -234,7 +218,6 @@ export class SqliteStore {
     "version",
     "status",
     "expires_at",
-    "sync_version",
     "name_hmac",
   ]);
 
@@ -257,8 +240,7 @@ export class SqliteStore {
     try {
       this.runMigrations();
     } catch (err) {
-      // A failed migration (e.g. the 009 duplicate-name abort) must not leak
-      // the open handle, which would lock the file on Windows.
+      // A refused open must not leak the handle, which would lock the file on Windows.
       this.db.close();
       throw err;
     }
@@ -270,137 +252,27 @@ export class SqliteStore {
     }
   }
 
+  /**
+   * Bring the store to LATEST_SCHEMA_VERSION. An empty store gets the v1.5
+   * baseline in one transaction; a store from the retired 1.0–1.4 migration
+   * ladder (schema 1–11) cannot be upgraded and is refused before any DDL.
+   * Migrations past the baseline chain below the baseline block as
+   * `if (currentVersion < N) { transaction { exec; setMeta } }` steps, one per
+   * version, exactly the shape the ladder had — a one-time reset, not a
+   * no-migrations policy.
+   */
   private runMigrations(): void {
     const currentVersion = this.getMigrationVersion();
-    if (currentVersion < 1) {
+    if (currentVersion === 0) {
       this.db.transaction(() => {
-        this.db.exec(migration001.up);
-        this.setMeta("schema_version", "1");
+        this.db.exec(baselineSchema.up);
+        this.setMeta("schema_version", String(baselineSchema.version));
       })();
+      return;
     }
-    if (currentVersion < 2) {
-      this.db.transaction(() => {
-        this.db.exec(migration002.up);
-        this.setMeta("schema_version", "2");
-      })();
-    }
-    if (currentVersion < 3) {
-      this.db.transaction(() => {
-        this.db.exec(migration003.up);
-        this.setMeta("schema_version", "3");
-      })();
-    }
-    if (currentVersion < 4) {
-      this.db.transaction(() => {
-        this.db.exec(migration004.up);
-        this.setMeta("schema_version", "4");
-      })();
-    }
-    if (currentVersion < 5) {
-      this.db.transaction(() => {
-        this.db.exec(migration005.up);
-        this.setMeta("schema_version", "5");
-      })();
-    }
-    if (currentVersion < 6) {
-      this.db.transaction(() => {
-        this.db.exec(migration006.up);
-        this.setMeta("schema_version", "6");
-      })();
-    }
-    if (currentVersion < 7) {
-      this.db.transaction(() => {
-        this.db.exec(migration007.up);
-        this.setMeta("schema_version", "7");
-      })();
-    }
-    if (currentVersion < 8) {
-      this.db.transaction(() => {
-        this.db.exec(migration008.up);
-        this.setMeta("schema_version", "8");
-      })();
-    }
-    if (currentVersion < 9) {
-      this.db.transaction(() => {
-        // The unique index cannot be built while live duplicates exist (a
-        // pre-fix TOCTOU-race artifact). Surface a clear, actionable error
-        // instead of a raw "UNIQUE constraint failed" from the index build.
-        this.assertNoLiveDuplicateNames();
-        this.db.exec(migration009.up);
-        this.setMeta("schema_version", "9");
-      })();
-    }
-    if (currentVersion < 10) {
-      this.db.transaction(() => {
-        this.db.exec(migration010.up);
-        this.setMeta("schema_version", "10");
-      })();
-    }
-    if (currentVersion < 11) {
-      this.db.transaction(() => {
-        this.db.exec(migration011.up);
-        this.setMeta("schema_version", "11");
-      })();
-    }
-    if (currentVersion < 12) {
-      this.db.transaction(() => {
-        this.db.exec(migration012.up);
-        // The v1.4 gates require every agent principal to be registered, so
-        // agents that already hold grants are registered by the upgrade
-        // itself — in this transaction, or an interrupted upgrade would leave
-        // the tables without their principals.
-        this.backfillAgentsFromPolicies();
-        this.setMeta("schema_version", String(LATEST_SCHEMA_VERSION));
-      })();
-    }
-  }
-
-  /**
-   * Register an agent row for every distinct agent principal that already holds
-   * an access policy. Names are taken exactly as stored — legacy names predate
-   * the registry's name rule and are not rewritten.
-   */
-  private backfillAgentsFromPolicies(): void {
-    const principals = this.db
-      .prepare("SELECT DISTINCT principal_id FROM access_policies WHERE principal_type = 'agent'")
-      .all() as { principal_id: string }[];
-    if (principals.length === 0) return;
-
-    const now = Date.now();
-    const insert = this.db.prepare(
-      `INSERT OR IGNORE INTO agents (
-        id, name, description, owner, status, created_at, updated_at, deactivated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
-    for (const { principal_id } of principals) {
-      insert.run(
-        generateUUIDv7(),
-        principal_id,
-        AGENT_BACKFILL_DESCRIPTION,
-        null,
-        "active",
-        now,
-        now,
-        null,
-      );
-    }
-  }
-
-  /** Reject an upgrade when two non-revoked secrets share a name_hmac. */
-  private assertNoLiveDuplicateNames(): void {
-    const duplicates = this.db
-      .prepare(
-        `SELECT COUNT(*) AS c FROM (
-           SELECT name_hmac FROM secrets
-           WHERE status != 'revoked' AND name_hmac IS NOT NULL
-           GROUP BY name_hmac HAVING COUNT(*) > 1
-         )`,
-      )
-      .get() as { c: number };
-    if (duplicates.c > 0) {
+    if (currentVersion < baselineSchema.version) {
       throw VaultError.vaultCorrupted(
-        `Cannot upgrade vault: ${duplicates.c} secret name(s) have multiple active entries. ` +
-          `Revoke the duplicate secret(s) and retry.`,
+        `Vault schema ${currentVersion} predates the v1.5 baseline (${baselineSchema.version}) and cannot be upgraded — move or delete the vault directory and run harpoc init`,
       );
     }
   }
@@ -412,7 +284,9 @@ export class SqliteStore {
     if (!row) return 0;
 
     const version = this.getMeta("schema_version");
-    if (version === undefined) return 0;
+    if (version === undefined) {
+      throw VaultError.vaultCorrupted("Missing schema_version");
+    }
     if (!/^\d+$/.test(version)) {
       throw VaultError.vaultCorrupted(`Malformed schema_version "${version}"`);
     }
@@ -454,14 +328,14 @@ export class SqliteStore {
             ciphertext, ct_iv, ct_tag,
             metadata_encrypted, metadata_iv, metadata_tag,
             created_at, updated_at, expires_at, rotated_at,
-            version, status, sync_version, name_hmac
+            version, status, name_hmac
           ) VALUES (
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?,
             ?, ?, ?,
             ?, ?, ?,
             ?, ?, ?, ?,
-            ?, ?, ?, ?
+            ?, ?, ?
           )`,
         )
         .run(
@@ -486,7 +360,6 @@ export class SqliteStore {
           secret.rotated_at,
           secret.version,
           secret.status,
-          secret.sync_version,
           secret.name_hmac,
         );
     } catch (err) {
@@ -545,7 +418,6 @@ export class SqliteStore {
         | "version"
         | "status"
         | "expires_at"
-        | "sync_version"
         | "name_hmac"
       >
     >,
@@ -691,7 +563,7 @@ export class SqliteStore {
   // audit_log
   // ---------------------------------------------------------------------------
 
-  insertAuditEvent(event: Omit<AuditEvent, "id">, rowHmac: Uint8Array | null = null): number {
+  insertAuditEvent(event: Omit<AuditEvent, "id">, rowHmac: Uint8Array): number {
     const result = this.db
       .prepare(
         `INSERT INTO audit_log (
@@ -713,7 +585,7 @@ export class SqliteStore {
         event.ip_address,
         event.session_id,
         event.success ? 1 : 0,
-        rowHmac ? Buffer.from(rowHmac) : null,
+        Buffer.from(rowHmac),
       );
     return Number(result.lastInsertRowid);
   }
@@ -849,7 +721,7 @@ export class SqliteStore {
   pruneExpiredTokens(): number {
     const result = this.db
       .prepare("DELETE FROM revoked_tokens WHERE expires_at < ?")
-      .run(Math.floor(Date.now() / 1000));
+      .run(Date.now());
     return result.changes;
   }
 
@@ -1223,9 +1095,6 @@ export class SqliteStore {
         | "csr_pem"
         | "auto_renew"
         | "renew_before_days"
-        | "acme_account_encrypted"
-        | "acme_account_iv"
-        | "acme_account_tag"
       >
     >,
   ): void {
@@ -1240,9 +1109,6 @@ export class SqliteStore {
       "csr_pem",
       "auto_renew",
       "renew_before_days",
-      "acme_account_encrypted",
-      "acme_account_iv",
-      "acme_account_tag",
     ]);
 
     const setClauses: string[] = [];
@@ -1253,9 +1119,7 @@ export class SqliteStore {
         throw VaultError.internalError(`Invalid column name for certificate update: ${key}`);
       }
       setClauses.push(`${key} = ?`);
-      if (value instanceof Uint8Array) {
-        params.push(Buffer.from(value));
-      } else if (key === "auto_renew") {
+      if (key === "auto_renew") {
         params.push(value ? 1 : 0);
       } else {
         params.push(value);
@@ -1485,7 +1349,6 @@ export class SqliteStore {
       rotated_at: (row.rotated_at as number) ?? null,
       version: row.version as number,
       status: row.status as SecretStatus,
-      sync_version: row.sync_version as number,
       name_hmac: nameHmac,
     };
   }
@@ -1552,6 +1415,12 @@ export class SqliteStore {
   }
 
   private rowToOAuthToken(row: Record<string, unknown>): OAuthTokenRow {
+    const authMethod = row.token_endpoint_auth_method;
+    if (typeof authMethod !== "string") {
+      throw VaultError.vaultCorrupted(
+        `oauth row ${String(row.secret_id)} has no token_endpoint_auth_method`,
+      );
+    }
     return {
       secret_id: row.secret_id as string,
       provider: row.provider as string,
@@ -1590,7 +1459,7 @@ export class SqliteStore {
       access_token_expires_at: (row.access_token_expires_at as number) ?? null,
       redirect_uri: (row.redirect_uri as string) ?? null,
       pkce_method: (row.pkce_method as string) ?? "S256",
-      token_endpoint_auth_method: (row.token_endpoint_auth_method as string) ?? null,
+      token_endpoint_auth_method: authMethod,
     };
   }
 

@@ -3,7 +3,8 @@ import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js
 import { handleError, printSuccess } from "../../utils/output.js";
 
 /**
- * Expiry of the supplied JWT — but only when it is the token being revoked.
+ * Expiry of the supplied JWT in milliseconds (the engine's unit since R2) —
+ * but only when it is the token being revoked.
  * `HARPOC_TOKEN` is ambient (it authenticates other commands too), so an
  * unrelated token's `exp` must never become the revocation entry's lifetime:
  * an earlier expiry would prune the entry while the revoked token still
@@ -20,7 +21,7 @@ function decodeTokenExp(token: string, jti: string): number | undefined {
       );
       return undefined;
     }
-    if (typeof payload.exp === "number") return payload.exp;
+    if (typeof payload.exp === "number") return payload.exp * 1000;
   } catch {
     // Ignore decode errors
   }

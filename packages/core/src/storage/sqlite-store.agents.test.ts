@@ -6,6 +6,7 @@ import { isUniqueConstraintError, SqliteStore } from "./sqlite-store.js";
 
 let store: SqliteStore;
 const NOW = 1_800_000_000_000;
+const LINK = new Uint8Array(32).fill(7);
 
 function makeSecret(id: string): Secret {
   return {
@@ -30,7 +31,6 @@ function makeSecret(id: string): Secret {
     rotated_at: null,
     version: 1,
     status: SecretStatus.ACTIVE,
-    sync_version: 0,
     name_hmac: `hmac-${id}`,
   };
 }
@@ -183,12 +183,13 @@ describe("agents", () => {
     store.insertAgent(makeAgent());
     expect(store.agentLastActiveAt("alpha")).toBeNull();
 
-    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW - 10_000 }));
-    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW - 500 }));
+    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW - 10_000 }), LINK);
+    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW - 500 }), LINK);
     store.insertAuditEvent(
       makeAuditEvent({ timestamp: NOW + 90_000, principal_type: "tool", principal_id: "alpha" }),
+      LINK,
     );
-    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW + 80_000, principal_id: "beta" }));
+    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW + 80_000, principal_id: "beta" }), LINK);
 
     expect(store.agentLastActiveAt("alpha")).toBe(NOW - 500);
     expect(store.agentLastActiveAt("beta")).toBe(NOW + 80_000);
@@ -319,11 +320,12 @@ describe("policy deletion by principal", () => {
 
 describe("queryAuditLog principal filter", () => {
   beforeEach(() => {
-    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW + 1 }));
-    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW + 2, success: false }));
-    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW + 3, principal_id: "beta" }));
+    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW + 1 }), LINK);
+    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW + 2, success: false }), LINK);
+    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW + 3, principal_id: "beta" }), LINK);
     store.insertAuditEvent(
       makeAuditEvent({ timestamp: NOW + 4, principal_type: "tool", principal_id: "alpha" }),
+      LINK,
     );
   });
 

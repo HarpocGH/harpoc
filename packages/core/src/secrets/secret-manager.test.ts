@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { dropSecretsNameHmacConstraint, expectVaultError } from "@harpoc/test-utils";
 import { createVaultKeys } from "../crypto/key-hierarchy.js";
 import { SqliteStore } from "../storage/sqlite-store.js";
 import { SecretManager } from "./secret-manager.js";
@@ -596,6 +596,7 @@ describe("name_hmac round-trip", () => {
       type: "api_key",
       value: new Uint8Array(Buffer.from("v")),
     });
+    dropSecretsNameHmacConstraint(store.db);
     store.db.exec("UPDATE secrets SET name_hmac = NULL");
     await expectVaultError(() => manager.listSecrets(), ErrorCode.VAULT_CORRUPTED);
   });

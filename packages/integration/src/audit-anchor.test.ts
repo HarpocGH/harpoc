@@ -6,6 +6,7 @@ import { SqliteStore } from "@harpoc/core";
 import type { AuditChainAnchor } from "@harpoc/shared";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { dropAuditRowHmacConstraint } from "@harpoc/test-utils";
 
 const PASSWORD = "integration-password";
 
@@ -44,6 +45,7 @@ function truncateTail(fromId: number): void {
 function nullLinks(fromId: number): void {
   const store = new SqliteStore(vault.dbPath);
   try {
+    dropAuditRowHmacConstraint(store.db);
     store.db.prepare("UPDATE audit_log SET row_hmac = NULL WHERE id >= ?").run(fromId);
   } finally {
     store.close();
@@ -101,6 +103,9 @@ describe("audit-chain anchor across the real database file", () => {
   // rows. Nulling row_hmac made rows read as pre-migration legacy, which
   // verification skipped — so the suffix could then be rewritten at will and
   // `harpoc audit verify` still exited 0. No anchor is needed to catch this.
+  // Since R2 the column is NOT NULL, so the attacker first rebuilds the table
+  // without it (nullLinks does), and the last test pins that the shipped table
+  // refuses the plain UPDATE.
   it("detects erased chain links without any anchor", async () => {
     await createSecrets(["alpha", "beta", "gamma"]);
     const anchor = vault.engine.getAuditChainTail() as AuditChainAnchor;
@@ -184,5 +189,20 @@ describe("audit-chain anchor across the real database file", () => {
     } finally {
       await destroyTestVault(foreignVault);
     }
+  });
+
+  it("the v1.5 table refuses an erased link outright (R2)", async () => {
+    await createSecrets(["alpha"]);
+    const store = new SqliteStore(vault.dbPath);
+    let caught: unknown;
+    try {
+      store.db.prepare("UPDATE audit_log SET row_hmac = NULL").run();
+    } catch (err) {
+      caught = err;
+    } finally {
+      store.close();
+    }
+    expect((caught as { code?: string } | undefined)?.code).toBe("SQLITE_CONSTRAINT_NOTNULL");
+    expect(vault.engine.verifyAuditChain().valid).toBe(true);
   });
 });

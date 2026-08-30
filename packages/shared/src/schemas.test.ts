@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { z } from "zod";
 
 import {
   accessPolicyInputSchema,
@@ -20,6 +21,7 @@ import {
   imapActionSchema,
   injectionConfigSchema,
   injectionPolicyInputSchema,
+  injectionPolicySchema,
   injectionTypeSchema,
   listAgentsQuerySchema,
   listTokensQuerySchema,
@@ -50,6 +52,7 @@ import {
   vaultStateSchema,
   websocketActionSchema,
 } from "./schemas.js";
+import type { InjectionPolicy } from "./schemas.js";
 
 // ---------------------------------------------------------------------------
 // Enum schemas
@@ -741,6 +744,64 @@ describe("injectionPolicyInputSchema", () => {
       injectionPolicyInputSchema.parse({ response_header_allowlist: ["x\r\ny"] }),
     ).toThrow();
     expect(() => injectionPolicyInputSchema.parse({ response_header_allowlist: [""] })).toThrow();
+  });
+});
+
+describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
+  const complete = {
+    url_allowlist: ["https://api.example.com/*"],
+    command_allowlist: ["/usr/bin/gh"],
+    env_allowlist: ["HOME"],
+    host_allowlist: ["db.example.com:5432"],
+    response_mode: "filtered",
+    response_header_allowlist: ["content-type"],
+    network_isolation: false,
+    fs_isolation: true,
+    smtp_recipient_allowlist: ["*@example.com"],
+    imap_read_only: false,
+  };
+
+  it("accepts a complete policy unchanged", () => {
+    expect(injectionPolicySchema.parse(complete)).toEqual(complete);
+  });
+
+  it("refuses a missing key, naming it", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { imap_read_only: _dropped, ...partial } = complete;
+    const result = injectionPolicySchema.safeParse(partial);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((i) => i.path.join("."))).toContain("imap_read_only");
+    }
+  });
+
+  it("refuses an unknown key (strict)", () => {
+    expect(injectionPolicySchema.safeParse({ ...complete, extra: 1 }).success).toBe(false);
+  });
+
+  it("applies no defaults — an empty object is ten misses", () => {
+    const result = injectionPolicySchema.safeParse({});
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.issues).toHaveLength(10);
+  });
+
+  it("shares the field validators with the input schema", () => {
+    expect(
+      injectionPolicySchema.safeParse({ ...complete, smtp_recipient_allowlist: ["*@*"] }).success,
+    ).toBe(false);
+    expect(injectionPolicySchema.safeParse({ ...complete, env_allowlist: ["1BAD"] }).success).toBe(
+      false,
+    );
+    expect(Object.keys(injectionPolicySchema.shape)).toEqual(
+      Object.keys(injectionPolicyInputSchema.shape),
+    );
+  });
+
+  it("compile-time pin: InjectionPolicy is the input schema's output shape", () => {
+    type Equal<A, B> =
+      (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+    const identical: Equal<InjectionPolicy, z.output<typeof injectionPolicyInputSchema>> = true;
+    expect(identical).toBe(true);
   });
 });
 

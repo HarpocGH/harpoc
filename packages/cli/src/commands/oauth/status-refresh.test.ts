@@ -95,23 +95,6 @@ describe("oauth status / oauth refresh", () => {
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("client_secret_basic"));
   });
 
-  it("status renders a legacy null auth method as client_secret_post", async () => {
-    mockEngine.getOAuthTokenStatus.mockReturnValue({
-      secret_id: "secret-id-1",
-      provider: "github",
-      has_access_token: true,
-      access_token_expires_at: 1_800_000_000_000,
-      has_refresh_token: true,
-      last_refreshed_at: null,
-      refresh_status: "ok",
-      token_endpoint_auth_method: null,
-    });
-
-    await run(["status", "secret://gh-token"]);
-
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("client_secret_post"));
-  });
-
   it("refresh calls engine.refreshOAuthToken and prints the new expiry", async () => {
     await run(["refresh", "secret://gh-token"]);
 

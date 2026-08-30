@@ -106,7 +106,14 @@ export const SQLITE_PRAGMAS = {
 
 // -- Vault defaults ----------------------------------------------------------
 
-export const VAULT_VERSION = "1.0.0";
+export const VAULT_VERSION = "1.5.0";
+/**
+ * The oldest `vault_version` this binary opens (R2, 2026-08-30): v1.5 runs on
+ * a single baseline schema and cannot upgrade a vault from the 1.0–1.4 line.
+ * Stays at 1.5.0 while VAULT_VERSION advances through 1.5.x — a one-time
+ * reset, not a stamp that must match.
+ */
+export const VAULT_VERSION_FLOOR = "1.5.0";
 export const VAULT_AUDIT_ENABLED = true;
 
 // -- HTTP / use_secret defaults ----------------------------------------------

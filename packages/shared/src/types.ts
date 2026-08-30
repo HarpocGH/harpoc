@@ -243,7 +243,6 @@ export interface Secret {
   rotated_at: number | null;
   version: number;
   status: SecretStatus;
-  sync_version: number;
   name_hmac: string;
 }
 
@@ -647,8 +646,8 @@ export interface OAuthTokenStatus {
   has_refresh_token: boolean;
   last_refreshed_at: number | null;
   refresh_status: "ok" | "expiring_soon" | "expired" | "no_refresh_token";
-  /** Client auth at the token endpoint; null = legacy row, refreshes as client_secret_post. */
-  token_endpoint_auth_method: "client_secret_post" | "client_secret_basic" | null;
+  /** Client auth at the token endpoint — a stored value on every row since the v1.5 baseline. */
+  token_endpoint_auth_method: "client_secret_post" | "client_secret_basic";
 }
 
 /** Status of a certificate (for health checks and UI). */

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { SqliteStore } from "./storage/sqlite-store.js";
 import { VaultEngine } from "./vault-engine.js";
 
@@ -366,6 +367,25 @@ describe("L5 — session load honours the vault version", () => {
     }
 
     // Re-created for the shared afterEach teardown.
+    engine = new VaultEngine({ dbPath, sessionPath });
+  });
+
+  it("refuses a vault stamped below the v1.5 floor on the session path too (R2)", async () => {
+    await engine.destroy();
+
+    const store = new SqliteStore(dbPath);
+    store.setMeta("vault_version", "1.0.0");
+    store.close();
+
+    const reloaded = new VaultEngine({ dbPath, sessionPath });
+    try {
+      const err = await expectVaultError(() => reloaded.loadSession(), ErrorCode.VAULT_CORRUPTED);
+      expect(err.message).toContain("predates the supported minimum");
+      expect(err.message).toContain("harpoc init");
+    } finally {
+      await reloaded.destroy();
+    }
+
     engine = new VaultEngine({ dbPath, sessionPath });
   });
 

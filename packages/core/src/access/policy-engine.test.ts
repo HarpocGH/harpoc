@@ -32,7 +32,6 @@ function makeSecret(id: string): Secret {
     rotated_at: null,
     version: 1,
     status: SecretStatus.ACTIVE,
-    sync_version: 0,
     name_hmac: `hmac-${id}`,
   };
 }

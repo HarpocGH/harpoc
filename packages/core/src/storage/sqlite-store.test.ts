@@ -15,6 +15,7 @@ import { SqliteStore } from "./sqlite-store.js";
 import { LATEST_SCHEMA_VERSION } from "./schema.js";
 
 let store: SqliteStore;
+const LINK = new Uint8Array(32).fill(7);
 
 function makeSecret(overrides: Partial<Secret> = {}): Secret {
   const now = Date.now();
@@ -41,7 +42,6 @@ function makeSecret(overrides: Partial<Secret> = {}): Secret {
     rotated_at: null,
     version: 1,
     status: SecretStatus.ACTIVE,
-    sync_version: 0,
     name_hmac: `hmac-${id}`,
     ...overrides,
   };
@@ -338,19 +338,22 @@ describe("access_policies CRUD", () => {
 
 describe("audit_log", () => {
   it("inserts and queries audit events", () => {
-    const eventId = store.insertAuditEvent({
-      timestamp: Date.now(),
-      event_type: AuditEventType.SECRET_CREATE,
-      secret_id: "s1",
-      principal_type: "user",
-      principal_id: "user-1",
-      detail_encrypted: null,
-      detail_iv: null,
-      detail_tag: null,
-      ip_address: null,
-      session_id: "sess-1",
-      success: true,
-    });
+    const eventId = store.insertAuditEvent(
+      {
+        timestamp: Date.now(),
+        event_type: AuditEventType.SECRET_CREATE,
+        secret_id: "s1",
+        principal_type: "user",
+        principal_id: "user-1",
+        detail_encrypted: null,
+        detail_iv: null,
+        detail_tag: null,
+        ip_address: null,
+        session_id: "sess-1",
+        success: true,
+      },
+      LINK,
+    );
 
     expect(eventId).toBeGreaterThan(0);
 
@@ -361,116 +364,47 @@ describe("audit_log", () => {
   });
 
   it("filters by secretId", () => {
-    store.insertAuditEvent({
-      timestamp: Date.now(),
-      event_type: AuditEventType.SECRET_READ,
-      secret_id: "s1",
-      principal_type: null,
-      principal_id: null,
-      detail_encrypted: null,
-      detail_iv: null,
-      detail_tag: null,
-      ip_address: null,
-      session_id: null,
-      success: true,
-    });
-    store.insertAuditEvent({
-      timestamp: Date.now(),
-      event_type: AuditEventType.SECRET_READ,
-      secret_id: "s2",
-      principal_type: null,
-      principal_id: null,
-      detail_encrypted: null,
-      detail_iv: null,
-      detail_tag: null,
-      ip_address: null,
-      session_id: null,
-      success: true,
-    });
+    store.insertAuditEvent(
+      {
+        timestamp: Date.now(),
+        event_type: AuditEventType.SECRET_READ,
+        secret_id: "s1",
+        principal_type: null,
+        principal_id: null,
+        detail_encrypted: null,
+        detail_iv: null,
+        detail_tag: null,
+        ip_address: null,
+        session_id: null,
+        success: true,
+      },
+      LINK,
+    );
+    store.insertAuditEvent(
+      {
+        timestamp: Date.now(),
+        event_type: AuditEventType.SECRET_READ,
+        secret_id: "s2",
+        principal_type: null,
+        principal_id: null,
+        detail_encrypted: null,
+        detail_iv: null,
+        detail_tag: null,
+        ip_address: null,
+        session_id: null,
+        success: true,
+      },
+      LINK,
+    );
 
     expect(store.queryAuditLog({ secretId: "s1" }).length).toBe(1);
   });
 
   it("filters by event type", () => {
-    store.insertAuditEvent({
-      timestamp: Date.now(),
-      event_type: AuditEventType.VAULT_UNLOCK,
-      secret_id: null,
-      principal_type: null,
-      principal_id: null,
-      detail_encrypted: null,
-      detail_iv: null,
-      detail_tag: null,
-      ip_address: null,
-      session_id: null,
-      success: true,
-    });
-    store.insertAuditEvent({
-      timestamp: Date.now(),
-      event_type: AuditEventType.SECRET_CREATE,
-      secret_id: null,
-      principal_type: null,
-      principal_id: null,
-      detail_encrypted: null,
-      detail_iv: null,
-      detail_tag: null,
-      ip_address: null,
-      session_id: null,
-      success: true,
-    });
-
-    expect(store.queryAuditLog({ eventType: AuditEventType.VAULT_UNLOCK }).length).toBe(1);
-  });
-
-  it("filters by time range", () => {
-    store.insertAuditEvent({
-      timestamp: 1000,
-      event_type: AuditEventType.SECRET_USE,
-      secret_id: null,
-      principal_type: null,
-      principal_id: null,
-      detail_encrypted: null,
-      detail_iv: null,
-      detail_tag: null,
-      ip_address: null,
-      session_id: null,
-      success: true,
-    });
-    store.insertAuditEvent({
-      timestamp: 2000,
-      event_type: AuditEventType.SECRET_USE,
-      secret_id: null,
-      principal_type: null,
-      principal_id: null,
-      detail_encrypted: null,
-      detail_iv: null,
-      detail_tag: null,
-      ip_address: null,
-      session_id: null,
-      success: true,
-    });
-    store.insertAuditEvent({
-      timestamp: 3000,
-      event_type: AuditEventType.SECRET_USE,
-      secret_id: null,
-      principal_type: null,
-      principal_id: null,
-      detail_encrypted: null,
-      detail_iv: null,
-      detail_tag: null,
-      ip_address: null,
-      session_id: null,
-      success: true,
-    });
-
-    expect(store.queryAuditLog({ since: 1500, until: 2500 }).length).toBe(1);
-  });
-
-  it("respects limit", () => {
-    for (let i = 0; i < 5; i++) {
-      store.insertAuditEvent({
-        timestamp: Date.now() + i,
-        event_type: AuditEventType.SECRET_READ,
+    store.insertAuditEvent(
+      {
+        timestamp: Date.now(),
+        event_type: AuditEventType.VAULT_UNLOCK,
         secret_id: null,
         principal_type: null,
         principal_id: null,
@@ -480,7 +414,100 @@ describe("audit_log", () => {
         ip_address: null,
         session_id: null,
         success: true,
-      });
+      },
+      LINK,
+    );
+    store.insertAuditEvent(
+      {
+        timestamp: Date.now(),
+        event_type: AuditEventType.SECRET_CREATE,
+        secret_id: null,
+        principal_type: null,
+        principal_id: null,
+        detail_encrypted: null,
+        detail_iv: null,
+        detail_tag: null,
+        ip_address: null,
+        session_id: null,
+        success: true,
+      },
+      LINK,
+    );
+
+    expect(store.queryAuditLog({ eventType: AuditEventType.VAULT_UNLOCK }).length).toBe(1);
+  });
+
+  it("filters by time range", () => {
+    store.insertAuditEvent(
+      {
+        timestamp: 1000,
+        event_type: AuditEventType.SECRET_USE,
+        secret_id: null,
+        principal_type: null,
+        principal_id: null,
+        detail_encrypted: null,
+        detail_iv: null,
+        detail_tag: null,
+        ip_address: null,
+        session_id: null,
+        success: true,
+      },
+      LINK,
+    );
+    store.insertAuditEvent(
+      {
+        timestamp: 2000,
+        event_type: AuditEventType.SECRET_USE,
+        secret_id: null,
+        principal_type: null,
+        principal_id: null,
+        detail_encrypted: null,
+        detail_iv: null,
+        detail_tag: null,
+        ip_address: null,
+        session_id: null,
+        success: true,
+      },
+      LINK,
+    );
+    store.insertAuditEvent(
+      {
+        timestamp: 3000,
+        event_type: AuditEventType.SECRET_USE,
+        secret_id: null,
+        principal_type: null,
+        principal_id: null,
+        detail_encrypted: null,
+        detail_iv: null,
+        detail_tag: null,
+        ip_address: null,
+        session_id: null,
+        success: true,
+      },
+      LINK,
+    );
+
+    expect(store.queryAuditLog({ since: 1500, until: 2500 }).length).toBe(1);
+  });
+
+  it("respects limit", () => {
+    for (let i = 0; i < 5; i++) {
+      store.insertAuditEvent(
+        {
+          timestamp: Date.now() + i,
+          event_type: AuditEventType.SECRET_READ,
+          secret_id: null,
+          principal_type: null,
+          principal_id: null,
+          detail_encrypted: null,
+          detail_iv: null,
+          detail_tag: null,
+          ip_address: null,
+          session_id: null,
+          success: true,
+        },
+        LINK,
+      );
     }
 
     expect(store.queryAuditLog({ limit: 3 }).length).toBe(3);
@@ -500,8 +527,8 @@ describe("audit_log", () => {
       session_id: null,
       success: true,
     });
-    store.insertAuditEvent(row(1000, "id-a"));
-    store.insertAuditEvent(row(2000, "id-b"));
+    store.insertAuditEvent(row(1000, "id-a"), LINK);
+    store.insertAuditEvent(row(2000, "id-b"), LINK);
 
     // Without the filter the newest row (B) wins the single slot; with it, the
     // limit is spent on a row the caller may actually see.
@@ -525,8 +552,8 @@ describe("audit_log", () => {
       session_id: null,
       success: true,
     });
-    store.insertAuditEvent(row("id-a"));
-    store.insertAuditEvent(row(null));
+    store.insertAuditEvent(row("id-a"), LINK);
+    store.insertAuditEvent(row(null), LINK);
 
     const scoped = store.queryAuditLog({ visibleSecretIds: [] });
     expect(scoped).toHaveLength(1);
@@ -538,19 +565,22 @@ describe("audit_log", () => {
     const iv = new Uint8Array(12).fill(1);
     const tag = new Uint8Array(16).fill(2);
 
-    store.insertAuditEvent({
-      timestamp: Date.now(),
-      event_type: AuditEventType.SECRET_USE,
-      secret_id: null,
-      principal_type: null,
-      principal_id: null,
-      detail_encrypted: detail,
-      detail_iv: iv,
-      detail_tag: tag,
-      ip_address: null,
-      session_id: null,
-      success: true,
-    });
+    store.insertAuditEvent(
+      {
+        timestamp: Date.now(),
+        event_type: AuditEventType.SECRET_USE,
+        secret_id: null,
+        principal_type: null,
+        principal_id: null,
+        detail_encrypted: detail,
+        detail_iv: iv,
+        detail_tag: tag,
+        ip_address: null,
+        session_id: null,
+        success: true,
+      },
+      LINK,
+    );
 
     const events = store.queryAuditLog();
     expect(events[0]?.detail_encrypted).toBeInstanceOf(Uint8Array);
@@ -558,51 +588,60 @@ describe("audit_log", () => {
   });
 
   it("stores success=false", () => {
-    store.insertAuditEvent({
-      timestamp: Date.now(),
-      event_type: AuditEventType.ACCESS_DENIED,
-      secret_id: null,
-      principal_type: null,
-      principal_id: null,
-      detail_encrypted: null,
-      detail_iv: null,
-      detail_tag: null,
-      ip_address: null,
-      session_id: null,
-      success: false,
-    });
+    store.insertAuditEvent(
+      {
+        timestamp: Date.now(),
+        event_type: AuditEventType.ACCESS_DENIED,
+        secret_id: null,
+        principal_type: null,
+        principal_id: null,
+        detail_encrypted: null,
+        detail_iv: null,
+        detail_tag: null,
+        ip_address: null,
+        session_id: null,
+        success: false,
+      },
+      LINK,
+    );
 
     const events = store.queryAuditLog();
     expect(events[0]?.success).toBe(false);
   });
 
   it("orders by timestamp DESC", () => {
-    store.insertAuditEvent({
-      timestamp: 1000,
-      event_type: AuditEventType.SECRET_READ,
-      secret_id: null,
-      principal_type: null,
-      principal_id: null,
-      detail_encrypted: null,
-      detail_iv: null,
-      detail_tag: null,
-      ip_address: null,
-      session_id: null,
-      success: true,
-    });
-    store.insertAuditEvent({
-      timestamp: 3000,
-      event_type: AuditEventType.SECRET_CREATE,
-      secret_id: null,
-      principal_type: null,
-      principal_id: null,
-      detail_encrypted: null,
-      detail_iv: null,
-      detail_tag: null,
-      ip_address: null,
-      session_id: null,
-      success: true,
-    });
+    store.insertAuditEvent(
+      {
+        timestamp: 1000,
+        event_type: AuditEventType.SECRET_READ,
+        secret_id: null,
+        principal_type: null,
+        principal_id: null,
+        detail_encrypted: null,
+        detail_iv: null,
+        detail_tag: null,
+        ip_address: null,
+        session_id: null,
+        success: true,
+      },
+      LINK,
+    );
+    store.insertAuditEvent(
+      {
+        timestamp: 3000,
+        event_type: AuditEventType.SECRET_CREATE,
+        secret_id: null,
+        principal_type: null,
+        principal_id: null,
+        detail_encrypted: null,
+        detail_iv: null,
+        detail_tag: null,
+        ip_address: null,
+        session_id: null,
+        success: true,
+      },
+      LINK,
+    );
 
     const events = store.queryAuditLog();
     expect(events[0]?.timestamp).toBe(3000);
@@ -633,21 +672,21 @@ describe("transaction", () => {
 
 describe("revoked_tokens", () => {
   it("inserts and queries a revoked token", () => {
-    store.insertRevokedToken("jti-abc", Math.floor(Date.now() / 1000) + 3600);
+    store.insertRevokedToken("jti-abc", Date.now() + 3_600_000);
     expect(store.isTokenRevoked("jti-abc")).toBe(true);
     expect(store.isTokenRevoked("jti-unknown")).toBe(false);
   });
 
   it("INSERT OR IGNORE on duplicate jti", () => {
-    const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+    const expiresAt = Date.now() + 3_600_000;
     store.insertRevokedToken("jti-dup", expiresAt);
     store.insertRevokedToken("jti-dup", expiresAt + 100); // should not throw
     expect(store.isTokenRevoked("jti-dup")).toBe(true);
   });
 
   it("prunes expired tokens", () => {
-    const past = Math.floor(Date.now() / 1000) - 100;
-    const future = Math.floor(Date.now() / 1000) + 3600;
+    const past = Date.now() - 100_000;
+    const future = Date.now() + 3_600_000;
     store.insertRevokedToken("jti-expired", past);
     store.insertRevokedToken("jti-active", future);
 
@@ -657,7 +696,7 @@ describe("revoked_tokens", () => {
     expect(store.isTokenRevoked("jti-active")).toBe(true);
   });
 
-  it("migration creates revoked_tokens table", () => {
+  it("the baseline creates the revoked_tokens table", () => {
     const row = store.db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='revoked_tokens'")
       .get() as { name: string } | undefined;
@@ -692,7 +731,7 @@ function makeOAuthToken(secretId: string, overrides: Partial<OAuthTokenRow> = {}
     access_token_expires_at: null,
     redirect_uri: null,
     pkce_method: "S256",
-    token_endpoint_auth_method: null,
+    token_endpoint_auth_method: "client_secret_post",
     ...overrides,
   };
 }
@@ -748,7 +787,7 @@ describe("oauth_tokens CRUD", () => {
     expect(store.getOAuthToken("nonexistent")).toBeUndefined();
   });
 
-  it("roundtrips token_endpoint_auth_method and defaults it to null", () => {
+  it("roundtrips token_endpoint_auth_method (never null on the v1.5 baseline)", () => {
     const basicSecret = makeSecret({ type: SecretType.OAUTH_TOKEN });
     store.insertSecret(basicSecret);
     store.insertOAuthToken(
@@ -758,10 +797,12 @@ describe("oauth_tokens CRUD", () => {
       "client_secret_basic",
     );
 
-    const legacySecret = makeSecret({ type: SecretType.OAUTH_TOKEN });
-    store.insertSecret(legacySecret);
-    store.insertOAuthToken(makeOAuthToken(legacySecret.id));
-    expect(store.getOAuthToken(legacySecret.id)?.token_endpoint_auth_method).toBeNull();
+    const postSecret = makeSecret({ type: SecretType.OAUTH_TOKEN });
+    store.insertSecret(postSecret);
+    store.insertOAuthToken(makeOAuthToken(postSecret.id));
+    expect(store.getOAuthToken(postSecret.id)?.token_endpoint_auth_method).toBe(
+      "client_secret_post",
+    );
   });
 
   it("stores and retrieves encrypted client_id blob", () => {

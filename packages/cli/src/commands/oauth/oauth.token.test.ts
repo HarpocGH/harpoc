@@ -11,7 +11,7 @@ const { mockEngine } = vi.hoisted(() => ({
       has_refresh_token: true,
       last_refreshed_at: null,
       refresh_status: "ok",
-      token_endpoint_auth_method: null,
+      token_endpoint_auth_method: "client_secret_post",
     }),
     refreshOAuthToken: vi.fn().mockResolvedValue(2_000_000_000_000),
     verifyToken: vi.fn(),
@@ -75,7 +75,7 @@ describe("oauth status / refresh — token path", () => {
       has_refresh_token: true,
       last_refreshed_at: null,
       refresh_status: "ok",
-      token_endpoint_auth_method: null,
+      token_endpoint_auth_method: "client_secret_post",
     });
     mockEngine.refreshOAuthToken.mockResolvedValue(2_000_000_000_000);
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {

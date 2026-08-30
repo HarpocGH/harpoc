@@ -5,7 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuditEventType, ErrorCode, VaultError, VaultState, VAULT_VERSION } from "@harpoc/shared";
+import {
+  AuditEventType,
+  ErrorCode,
+  VaultError,
+  VaultState,
+  VAULT_VERSION,
+  VAULT_VERSION_FLOOR,
+} from "@harpoc/shared";
 import { AAD_INJECTION_POLICY } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
@@ -143,10 +150,32 @@ describe("vault version guard", () => {
     await expectUnlockCorrupted();
   });
 
-  it("opens a vault stamped with an older version", async () => {
+  it.each(["0.9.0", "1.0.0", "1.4.1"])(
+    "refuses a vault stamped %s — below the v1.5 floor — naming harpoc init (R2)",
+    async (stamp) => {
+      await engine.initVault("password");
+      await engine.lock();
+      setVaultVersion(stamp);
+
+      const engine2 = new VaultEngine({ dbPath, sessionPath });
+      try {
+        const err = await expectVaultError(
+          () => engine2.unlock("password"),
+          ErrorCode.VAULT_CORRUPTED,
+        );
+        expect(err.message).toBe(
+          `Vault corrupted: Vault version ${stamp} predates the supported minimum ${VAULT_VERSION_FLOOR} and cannot be upgraded — move or delete the vault directory and run harpoc init`,
+        );
+      } finally {
+        await engine2.destroy();
+      }
+    },
+  );
+
+  it("opens a vault stamped at the floor by a later 1.5.x binary's ceiling (the floor is not equality)", async () => {
     await engine.initVault("password");
     await engine.lock();
-    setVaultVersion("0.9.0");
+    setVaultVersion(VAULT_VERSION_FLOOR);
 
     const engine2 = new VaultEngine({ dbPath, sessionPath });
     await engine2.unlock("password");
@@ -828,9 +857,7 @@ describe("injection policy", () => {
     expect(grant?.detail?.imap_read_only).toBe(true);
   });
 
-  it("decrypts a pre-feature policy blob (no fs_isolation key) as false", async () => {
-    // A blob written before the flag existed: the read path must default it,
-    // not surface `undefined` into the injectors' `=== true` checks.
+  it("refuses a stored policy blob missing a key as VAULT_CORRUPTED, naming the path (R2/C43)", async () => {
     const secretId = await engine.resolveSecretId("secret://pol");
     const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
     const legacy = JSON.stringify({
@@ -857,9 +884,75 @@ describe("injection policy", () => {
       updated_at: now,
     });
 
+    const err = await expectVaultError(
+      () => engine.getInjectionPolicy("secret://pol"),
+      ErrorCode.VAULT_CORRUPTED,
+    );
+    expect(err.message).toContain(`injection policy for secret ${secretId} is malformed`);
+    expect(err.message).toContain("fs_isolation");
+    expect(err.message).not.toContain("gh");
+  });
+
+  it("refuses a stored policy blob with an unknown key and one that is not JSON", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
+    const write = (plaintext: string): void => {
+      const enc = encrypt(
+        kek,
+        new Uint8Array(Buffer.from(plaintext, "utf8")),
+        AAD_INJECTION_POLICY(secretId),
+      );
+      const now = Date.now();
+      store.upsertInjectionPolicy({
+        secret_id: secretId,
+        policy_encrypted: enc.ciphertext,
+        policy_iv: enc.iv,
+        policy_tag: enc.tag,
+        created_at: now,
+        updated_at: now,
+      });
+    };
+
+    write(JSON.stringify({ ...(await engine.getInjectionPolicy("secret://pol")), extra: 1 }));
+    const unknownKey = await expectVaultError(
+      () => engine.getInjectionPolicy("secret://pol"),
+      ErrorCode.VAULT_CORRUPTED,
+    );
+    expect(unknownKey.message).toContain("<root>");
+    expect(unknownKey.message).not.toContain("extra");
+
+    write("not json");
+    const err = await expectVaultError(
+      () => engine.getInjectionPolicy("secret://pol"),
+      ErrorCode.VAULT_CORRUPTED,
+    );
+    expect(err.message).toContain("is not JSON");
+  });
+
+  it("refuses a policy whose values fail the shared validators before writing (the strict read must never see one)", async () => {
+    await engine.setInjectionPolicy("secret://pol", { command_allowlist: ["gh"] });
+
+    const err = await expectVaultError(
+      () => engine.setInjectionPolicy("secret://pol", { env_allowlist: ["1BAD"] }),
+      ErrorCode.SCHEMA_VALIDATION_ERROR,
+    );
+    expect(err.message).toContain("env_allowlist");
+    expect(err.message).not.toContain("1BAD");
+
     const p = await engine.getInjectionPolicy("secret://pol");
     expect(p.command_allowlist).toEqual(["gh"]);
-    expect(p.fs_isolation).toBe(false);
+    expect(p.env_allowlist).toEqual([]);
+  });
+
+  it("control: a complete stored policy round-trips unchanged", async () => {
+    await engine.setInjectionPolicy("secret://pol", {
+      command_allowlist: ["gh"],
+      fs_isolation: true,
+    });
+    const p = await engine.getInjectionPolicy("secret://pol");
+    expect(p.command_allowlist).toEqual(["gh"]);
+    expect(p.fs_isolation).toBe(true);
+    expect(p.imap_read_only).toBe(false);
   });
 
   it("audits fs_isolation in the POLICY_GRANT detail both ways", async () => {
@@ -2228,39 +2321,39 @@ describe("JWT tokens", () => {
     const token = engine.createToken("user-1", ["read"]);
     const decoded = engine.verifyToken(token);
 
-    engine.revokeToken(decoded.jti, decoded.exp);
+    engine.revokeToken(decoded.jti, decoded.exp * 1000);
     expect(() => engine.verifyToken(token)).toThrow("revoked");
   });
 
   // M1: verifyToken prunes revocation entries whose expires_at has passed
   // *before* consulting them, so an expiry earlier than the token's own
   // silently un-revoked it. The stored lifetime is clamped to the maximum
-  // token TTL, which no token can outlive.
+  // token TTL, which no token can outlive. Since R2 the column is milliseconds.
   it("clamps a past expiresAt so the revocation still holds", () => {
     const token = engine.createToken("user-1", ["read"]);
     const decoded = engine.verifyToken(token);
 
-    engine.revokeToken(decoded.jti, Math.floor(Date.now() / 1000) - 60);
+    engine.revokeToken(decoded.jti, Date.now() - 60_000);
 
     expect(() => engine.verifyToken(token)).toThrow("revoked");
   });
 
-  it("clamps an expiresAt that falls short of the token's own expiry", () => {
+  it("clamps an expiresAt that falls short of the token's own expiry (stored in ms)", () => {
     const token = engine.createToken("user-1", ["read"]);
     const decoded = engine.verifyToken(token);
 
-    engine.revokeToken(decoded.jti, decoded.exp - 3600);
+    engine.revokeToken(decoded.jti, decoded.exp * 1000 - 3_600_000);
 
     const db = new Database(dbPath, { readonly: true });
     const row = db
       .prepare("SELECT expires_at FROM revoked_tokens WHERE jti = ?")
       .get(decoded.jti) as { expires_at: number } | undefined;
     db.close();
-    expect(row?.expires_at).toBeGreaterThanOrEqual(decoded.exp);
+    expect(row?.expires_at).toBeGreaterThanOrEqual(decoded.exp * 1000);
   });
 
-  it("honors an expiresAt beyond the clamp floor", () => {
-    const farFuture = Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60;
+  it("honors an expiresAt beyond the clamp floor, in milliseconds", () => {
+    const farFuture = Date.now() + 365 * 24 * 60 * 60 * 1000;
     engine.revokeToken("manual-jti", farFuture);
 
     const db = new Database(dbPath, { readonly: true });
@@ -2269,6 +2362,21 @@ describe("JWT tokens", () => {
       .get("manual-jti") as { expires_at: number } | undefined;
     db.close();
     expect(row?.expires_at).toBe(farFuture);
+  });
+
+  it("a seconds-valued expiresAt (a caller still decoding JWT exp raw) is clamped up, never trusted", () => {
+    const token = engine.createToken("user-1", ["read"]);
+    const decoded = engine.verifyToken(token);
+
+    engine.revokeToken(decoded.jti, decoded.exp);
+
+    const db = new Database(dbPath, { readonly: true });
+    const row = db
+      .prepare("SELECT expires_at FROM revoked_tokens WHERE jti = ?")
+      .get(decoded.jti) as { expires_at: number } | undefined;
+    db.close();
+    expect(row?.expires_at).toBeGreaterThanOrEqual(Date.now() + 23 * 60 * 60 * 1000);
+    expect(() => engine.verifyToken(token)).toThrow("revoked");
   });
 });
 

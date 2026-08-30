@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isVaultVersionSupported } from "./version.js";
+import {
+  compareVaultVersions,
+  isVaultVersionSupported,
+  meetsVaultVersionFloor,
+} from "./version.js";
 
 describe("isVaultVersionSupported", () => {
   it("accepts an equal version", () => {
@@ -54,5 +58,34 @@ describe("isVaultVersionSupported", () => {
     expect(isVaultVersionSupported("1.9.0", "1.10.0")).toBe(true);
     expect(isVaultVersionSupported("1.11.0", "1.10.0")).toBe(false);
     expect(isVaultVersionSupported("10.0.0", "9.99.99")).toBe(false);
+  });
+});
+
+describe("compareVaultVersions", () => {
+  it("orders numerically per component", () => {
+    expect(compareVaultVersions("1.0.0", "1.5.0")).toBe(-1);
+    expect(compareVaultVersions("1.5.0", "1.5.0")).toBe(0);
+    expect(compareVaultVersions("1.10.0", "1.5.0")).toBe(1);
+    expect(compareVaultVersions("1.5", "1.5.0")).toBe(0);
+  });
+
+  it("returns null for a malformed side", () => {
+    expect(compareVaultVersions("banana", "1.5.0")).toBeNull();
+    expect(compareVaultVersions("1.5.0", "")).toBeNull();
+  });
+});
+
+describe("meetsVaultVersionFloor", () => {
+  it("accepts the floor itself and anything above it", () => {
+    expect(meetsVaultVersionFloor("1.5.0", "1.5.0")).toBe(true);
+    expect(meetsVaultVersionFloor("1.5.3", "1.5.0")).toBe(true);
+    expect(meetsVaultVersionFloor("2.0.0", "1.5.0")).toBe(true);
+  });
+
+  it("refuses anything below the floor and fails closed on garbage", () => {
+    expect(meetsVaultVersionFloor("1.0.0", "1.5.0")).toBe(false);
+    expect(meetsVaultVersionFloor("0.9.0", "1.5.0")).toBe(false);
+    expect(meetsVaultVersionFloor("banana", "1.5.0")).toBe(false);
+    expect(meetsVaultVersionFloor("1.5.0", "banana")).toBe(false);
   });
 });

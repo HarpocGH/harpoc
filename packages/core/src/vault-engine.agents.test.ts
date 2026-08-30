@@ -325,6 +325,21 @@ describe("deactivateAgent", () => {
     expect(liveStore().listIssuedTokens()[0]?.revoked_at).toBeNull();
   });
 
+  it("a deactivated agent's token is refused by verifyToken, whose prune runs first (R2: the denylist floor is in ms)", () => {
+    engine.registerAgent({ name: "alpha" });
+    const token = engine.createToken("alpha", ["read"]);
+
+    engine.deactivateAgent("alpha");
+
+    expect(() => engine.verifyToken(token)).toThrow("revoked");
+
+    const denylist = liveStore().db.prepare("SELECT expires_at FROM revoked_tokens").all() as {
+      expires_at: number;
+    }[];
+    expect(denylist).toHaveLength(1);
+    expect(denylist[0]?.expires_at).toBeGreaterThanOrEqual(Date.now() + 23 * 60 * 60 * 1000);
+  });
+
   it("attributes the cascade rows to the caller", () => {
     engine.registerAgent({ name: "alpha" });
     seedToken("alpha", "jti-1");

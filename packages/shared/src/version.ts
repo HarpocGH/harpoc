@@ -8,32 +8,46 @@
  */
 
 /**
- * Whether a vault stamped `stored` may be opened by an engine that supports
- * formats up to `supported`. Components are compared numerically, left to
- * right; missing components count as 0 ("1.2" is "1.2.0"). Fail-closed: a
- * malformed version on either side (empty, non-numeric component) is treated
- * as unsupported — a garbage version string means corruption, and refusing is
- * safer than guessing.
+ * Numeric comparison of two dotted decimal versions: -1 when `a` is older, 0
+ * when equal, 1 when newer. Components compare left to right; a missing
+ * component counts as 0 ("1.2" is "1.2.0"). A malformed side (empty,
+ * non-numeric component) yields null — callers fail closed on it.
  */
-export function isVaultVersionSupported(stored: string, supported: string): boolean {
-  const storedParts = parseVersion(stored);
-  const supportedParts = parseVersion(supported);
-  if (storedParts === null || supportedParts === null) {
-    return false;
+export function compareVaultVersions(a: string, b: string): -1 | 0 | 1 | null {
+  const aParts = parseVersion(a);
+  const bParts = parseVersion(b);
+  if (aParts === null || bParts === null) {
+    return null;
   }
 
-  const length = Math.max(storedParts.length, supportedParts.length);
+  const length = Math.max(aParts.length, bParts.length);
   for (let i = 0; i < length; i++) {
-    const storedPart = storedParts[i] ?? 0;
-    const supportedPart = supportedParts[i] ?? 0;
-    if (storedPart > supportedPart) {
-      return false;
-    }
-    if (storedPart < supportedPart) {
-      return true;
-    }
+    const aPart = aParts[i] ?? 0;
+    const bPart = bParts[i] ?? 0;
+    if (aPart > bPart) return 1;
+    if (aPart < bPart) return -1;
   }
-  return true;
+  return 0;
+}
+
+/**
+ * Whether a vault stamped `stored` may be opened by an engine that supports
+ * formats up to `supported`. Fail-closed: a malformed version on either side
+ * is treated as unsupported — a garbage version string means corruption, and
+ * refusing is safer than guessing.
+ */
+export function isVaultVersionSupported(stored: string, supported: string): boolean {
+  const order = compareVaultVersions(stored, supported);
+  return order !== null && order <= 0;
+}
+
+/**
+ * Whether a vault stamped `stored` is at or above `floor` — the oldest format
+ * this binary can open. Fail-closed on a malformed side like the ceiling check.
+ */
+export function meetsVaultVersionFloor(stored: string, floor: string): boolean {
+  const order = compareVaultVersions(stored, floor);
+  return order !== null && order >= 0;
 }
 
 function parseVersion(version: string): number[] | null {

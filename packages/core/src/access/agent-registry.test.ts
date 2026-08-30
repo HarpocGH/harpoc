@@ -18,6 +18,7 @@ let store: SqliteStore;
 let registry: AgentRegistry;
 
 const NOW = 1_800_000_000_000;
+const LINK = new Uint8Array(32).fill(7);
 
 function makeSecret(id: string): Secret {
   return {
@@ -42,7 +43,6 @@ function makeSecret(id: string): Secret {
     rotated_at: null,
     version: 1,
     status: SecretStatus.ACTIVE,
-    sync_version: 0,
     name_hmac: `hmac-${id}`,
   };
 }
@@ -305,9 +305,9 @@ describe("toAgent", () => {
     store.insertPolicy(makePolicy({ id: "p3", secret_id: "s2", expires_at: NOW - 1 }));
     store.insertPolicy(makePolicy({ id: "p4", secret_id: "s1", principal_id: "beta" }));
 
-    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW - 10_000 }));
-    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW - 500 }));
-    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW - 100, principal_id: "beta" }));
+    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW - 10_000 }), LINK);
+    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW - 500 }), LINK);
+    store.insertAuditEvent(makeAuditEvent({ timestamp: NOW - 100, principal_id: "beta" }), LINK);
 
     expect(registry.toAgent(row, NOW)).toEqual({
       ...row,

@@ -55,13 +55,13 @@ describe("auth revoke token sources", () => {
   it("extracts the expiry from HARPOC_TOKEN when --token is not given", async () => {
     process.env.HARPOC_TOKEN = jwtWithExp(12345);
     await run(["some-jti"]);
-    expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti", 12345);
+    expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti", 12_345_000);
   });
 
   it("an explicit --token wins over HARPOC_TOKEN", async () => {
     process.env.HARPOC_TOKEN = jwtWithExp(11111);
     await run(["some-jti", "--token", jwtWithExp(22222)]);
-    expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti", 22222);
+    expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti", 22_222_000);
   });
 
   it("revokes without an expiry when no token is available anywhere", async () => {

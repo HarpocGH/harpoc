@@ -833,31 +833,55 @@ export const useSecretRequestSchema = z.object({
 /** Request to use a secret via a context-specific action. */
 export type UseSecretRequest = z.infer<typeof useSecretRequestSchema>;
 
+const urlAllowlistSchema = z.array(z.string().min(1).max(2048)).max(100);
+const commandAllowlistSchema = z.array(z.string().min(1).max(4096)).max(100);
+const envAllowlistSchema = z
+  .array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Invalid environment variable name"))
+  .max(100);
+const hostAllowlistSchema = z.array(z.string().min(1).max(2048)).max(100);
+const responseHeaderAllowlistSchema = z
+  .array(
+    z
+      .string()
+      .min(1)
+      .max(256)
+      .regex(/^[a-zA-Z0-9\-_]+$/, "Invalid header name characters"),
+  )
+  .max(100);
+const smtpRecipientAllowlistSchema = z.array(recipientPatternSchema).max(100);
+
+/**
+ * Per-secret injection policy as stored and loaded: every field present, no
+ * defaults, no unknown keys. The vault always writes all ten fields, so a
+ * decrypted blob that fails this schema is corruption (R2/C43), not a policy
+ * from before a field existed — no such vault opens under v1.5.
+ */
+export const injectionPolicySchema = z
+  .object({
+    url_allowlist: urlAllowlistSchema,
+    command_allowlist: commandAllowlistSchema,
+    env_allowlist: envAllowlistSchema,
+    host_allowlist: hostAllowlistSchema,
+    response_mode: responseModeSchema,
+    response_header_allowlist: responseHeaderAllowlistSchema,
+    network_isolation: z.boolean(),
+    fs_isolation: z.boolean(),
+    smtp_recipient_allowlist: smtpRecipientAllowlistSchema,
+    imap_read_only: z.boolean(),
+  })
+  .strict();
+
 /** Per-secret injection policy input (URL + host + command + env allowlists + HTTP response mode). */
 export const injectionPolicyInputSchema = z.object({
-  url_allowlist: z.array(z.string().min(1).max(2048)).max(100).optional().default([]),
-  command_allowlist: z.array(z.string().min(1).max(4096)).max(100).optional().default([]),
-  env_allowlist: z
-    .array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Invalid environment variable name"))
-    .max(100)
-    .optional()
-    .default([]),
-  host_allowlist: z.array(z.string().min(1).max(2048)).max(100).optional().default([]),
+  url_allowlist: urlAllowlistSchema.optional().default([]),
+  command_allowlist: commandAllowlistSchema.optional().default([]),
+  env_allowlist: envAllowlistSchema.optional().default([]),
+  host_allowlist: hostAllowlistSchema.optional().default([]),
   response_mode: responseModeSchema.optional().default(ResponseMode.FILTERED),
-  response_header_allowlist: z
-    .array(
-      z
-        .string()
-        .min(1)
-        .max(256)
-        .regex(/^[a-zA-Z0-9\-_]+$/, "Invalid header name characters"),
-    )
-    .max(100)
-    .optional()
-    .default([]),
+  response_header_allowlist: responseHeaderAllowlistSchema.optional().default([]),
   network_isolation: z.boolean().optional().default(false),
   fs_isolation: z.boolean().optional().default(false),
-  smtp_recipient_allowlist: z.array(recipientPatternSchema).max(100).optional().default([]),
+  smtp_recipient_allowlist: smtpRecipientAllowlistSchema.optional().default([]),
   imap_read_only: z.boolean().optional().default(false),
 });
 
@@ -885,10 +909,11 @@ export const injectionPolicyInputSchema = z.object({
  * enforced by the SMTP injector, not this schema. `imap_read_only` (v1.3,
  * default `false`) is a tighten-only knob (same shape as `response_mode`):
  * set, it refuses the mutating IMAP operation kinds (`store`/`move`/`copy`/
- * `expunge`) before any socket opens. The schema's output type: all defaults
- * applied, every field present — the shape the vault loads and returns.
+ * `expunge`) before any socket opens. The shape the vault stores, loads and
+ * returns: every field present, no defaults — defaults apply at
+ * `InjectionPolicyInput` (the input schema), never on the stored blob.
  */
-export type InjectionPolicy = z.output<typeof injectionPolicyInputSchema>;
+export type InjectionPolicy = z.output<typeof injectionPolicySchema>;
 
 /**
  * The policy as callers may supply it: every field optional; the vault (or

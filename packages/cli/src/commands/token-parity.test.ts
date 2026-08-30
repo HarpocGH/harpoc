@@ -454,7 +454,7 @@ describe("token permission map (Task 9 pin)", () => {
       has_refresh_token: true,
       last_refreshed_at: null,
       refresh_status: "ok",
-      token_endpoint_auth_method: null,
+      token_endpoint_auth_method: "client_secret_post",
     });
     mockEngine.refreshOAuthToken.mockResolvedValue(2_000_000_000_000);
     mockEngine.getCertificateStatus.mockReturnValue(CERT_STATUS);
