@@ -21,7 +21,7 @@ import { buildCleanEnv } from "./clean-env.js";
 import { createPinnedLookup } from "./http-injector.js";
 import type { McpConnectionEntry, McpConnectionRegistry } from "./mcp-registry.js";
 import { StdioChildTransport } from "./mcp-stdio-transport.js";
-import { mapStringLeaves, redactSecretEncodings } from "./output-sanitizer.js";
+import { mapStringLeavesTracked, redactSecretEncodings } from "./output-sanitizer.js";
 import { validateUrl } from "./url-validator.js";
 
 /** Hard ceiling on a per-invocation timeout override (parity with http/process). */
@@ -236,12 +236,16 @@ export class McpInjector {
       throw vaultErr;
     }
 
-    const result = this.sanitizeResult(rawResult, valueStr);
+    const { result, sanitized } = this.sanitizeResult(rawResult, valueStr);
     this.audit(
       action,
       secretId,
       config,
-      { is_error: result.is_error ?? false, truncated: result.truncated ?? false },
+      {
+        is_error: result.is_error ?? false,
+        truncated: result.truncated ?? false,
+        ...(sanitized ? { sanitized: true } : {}),
+      },
       true,
       attribution,
     );
@@ -448,22 +452,26 @@ export class McpInjector {
   private sanitizeResult(
     raw: { content?: unknown; structuredContent?: unknown; isError?: unknown },
     valueStr: string,
-  ): McpResult {
+  ): { result: McpResult; sanitized: boolean } {
     const redact = (s: string): string => redactSecretEncodings(s, valueStr);
 
-    const content = mapStringLeaves(
+    const content = mapStringLeavesTracked(
       Array.isArray(raw.content) ? raw.content : [],
       redact,
-    ) as unknown[];
-    const structuredContent =
+      0,
+    );
+    const structured =
       raw.structuredContent !== undefined && raw.structuredContent !== null
-        ? (mapStringLeaves(raw.structuredContent, redact) as Record<string, unknown>)
+        ? mapStringLeavesTracked(raw.structuredContent, redact, 0)
         : undefined;
+    const sanitized = content.changed || structured?.changed === true;
 
     const result: McpResult = {
       type: "mcp",
-      content,
-      ...(structuredContent !== undefined ? { structured_content: structuredContent } : {}),
+      content: content.value as unknown[],
+      ...(structured !== undefined
+        ? { structured_content: structured.value as Record<string, unknown> }
+        : {}),
       ...(raw.isError === true ? { is_error: true } : {}),
     };
 
@@ -475,7 +483,7 @@ export class McpInjector {
       }
     }
 
-    return result;
+    return { result, sanitized };
   }
 
   private audit(

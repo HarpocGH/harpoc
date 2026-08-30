@@ -29,6 +29,7 @@ const OK_RESULT: SpawnCapturedResult = {
   truncated: false,
   signal: null,
   spawn_failed: false,
+  redacted: false,
 };
 
 const ACTION: ProcessAction = {
@@ -116,5 +117,41 @@ describe("ProcessInjector filesystem isolation (§4.5.3 layer 4)", () => {
     // No mechanism key when no wrapper ran.
     const row = log.mock.calls[0]?.[0] as { detail: Record<string, unknown> };
     expect("fs_isolation_mechanism" in row.detail).toBe(false);
+  });
+});
+
+describe("ProcessInjector output sanitization on the row (Wave 2, E70)", () => {
+  const spawnMock = vi.mocked(spawnCaptured);
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it("marks the audited result row sanitized when the spawn seam redacted output", async () => {
+    const log = vi.fn();
+    const audited = new ProcessInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({ ...OK_RESULT, redacted: true });
+    await audited.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(SECRET, "utf8")),
+      { command_allowlist: [NODE], env_allowlist: [] },
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail).toMatchObject({ context: "process", sanitized: true });
+  });
+
+  it("leaves sanitized out of the row entirely when nothing was redacted", async () => {
+    const log = vi.fn();
+    const audited = new ProcessInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue(OK_RESULT);
+    await audited.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(SECRET, "utf8")),
+      { command_allowlist: [NODE], env_allowlist: [] },
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect("sanitized" in row.detail).toBe(false);
   });
 });

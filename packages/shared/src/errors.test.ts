@@ -64,6 +64,7 @@ const STATUS_CASES = [
   [ErrorCode.INVALID_INJECTION_CONFIG, 400],
   [ErrorCode.URL_NOT_ALLOWED, 403],
   [ErrorCode.RESPONSE_MODE_NOT_ALLOWED, 403],
+  [ErrorCode.RESPONSE_TOO_LARGE, 502],
   // Process execution
   [ErrorCode.COMMAND_NOT_ALLOWED, 403],
   [ErrorCode.PROCESS_SPAWN_FAILED, 500],
@@ -168,7 +169,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(105);
+    expect(members).toHaveLength(106);
   });
 
   it("STATUS_MAP has a row for every ErrorCode member", () => {
@@ -179,6 +180,15 @@ describe("HTTP status mapping", () => {
 
   it("maps MISSING_DEPENDENCY to 501", () => {
     expect(new VaultError(ErrorCode.MISSING_DEPENDENCY, "x").statusCode).toBe(501);
+  });
+
+  it("maps RESPONSE_TOO_LARGE to 502 and names the origin only", () => {
+    const err = VaultError.responseTooLarge("https://api.example.com", 4_194_304);
+    expect(err.code).toBe(ErrorCode.RESPONSE_TOO_LARGE);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toBe(
+      "Response body from https://api.example.com exceeds the 4194304-byte limit",
+    );
   });
 });
 

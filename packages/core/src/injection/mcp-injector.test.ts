@@ -455,3 +455,43 @@ describe("McpInjector — filesystem isolation", () => {
     expect(terminateSpy).toHaveBeenCalledWith("secret-1", "network_isolation_enabled", undefined);
   });
 });
+
+// E70: the downstream echo is scrubbed out of the wire result, so the success
+// row is the only surface on which the scrub is observable.
+describe("McpInjector — sanitized rides the success row (E70)", () => {
+  function lastDetail(log: ReturnType<typeof vi.fn>): Record<string, unknown> {
+    const calls = log.mock.calls;
+    const row = calls[calls.length - 1]?.[0] as { detail?: Record<string, unknown> };
+    return row.detail ?? {};
+  }
+
+  it("stamps sanitized when the downstream echoed the credential", async () => {
+    const log = vi.fn();
+    const audited = new McpInjector({ log } as unknown as AuditLogger, registry);
+
+    await audited.executeWithSecret(
+      mcpAction("leak-env"),
+      new Uint8Array(Buffer.from(SECRET, "utf8")),
+      POLICY,
+      STDIO_CONFIG,
+      "secret-1",
+    );
+
+    expect(lastDetail(log)).toMatchObject({ sanitized: true });
+  });
+
+  it("leaves the key absent when the downstream echoed nothing", async () => {
+    const log = vi.fn();
+    const audited = new McpInjector({ log } as unknown as AuditLogger, registry);
+
+    await audited.executeWithSecret(
+      mcpAction("echo", { arguments: { visibility: "public" } }),
+      new Uint8Array(Buffer.from(SECRET, "utf8")),
+      POLICY,
+      STDIO_CONFIG,
+      "secret-1",
+    );
+
+    expect(lastDetail(log)).not.toHaveProperty("sanitized");
+  });
+});

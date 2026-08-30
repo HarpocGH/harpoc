@@ -438,7 +438,6 @@ describe("token permission map (Task 9 pin)", () => {
       valid: true,
       firstBrokenId: null,
       checked: 0,
-      legacy: 0,
       tail: null,
     });
     mockEngine.getAuditChainTail.mockReturnValue({

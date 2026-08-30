@@ -90,7 +90,6 @@ describe("audit HMAC chain verification", () => {
     const result = query.verifyChain();
     expect(result.valid).toBe(true);
     expect(result.checked).toBe(5);
-    expect(result.legacy).toBe(0);
     expect(result.firstBrokenId).toBeNull();
   });
 
@@ -121,22 +120,24 @@ describe("audit HMAC chain verification", () => {
     expect(result.firstBrokenId).toBe(ids[2]);
   });
 
-  it("counts legacy rows and still verifies chained rows after them", () => {
-    // One unchained legacy row, then chained rows.
-    store.db
-      .prepare(
-        `INSERT INTO audit_log (timestamp, event_type, secret_id, principal_type, principal_id,
-           detail_encrypted, detail_iv, detail_tag, ip_address, session_id, success, row_hmac)
-         VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, NULL)`,
-      )
-      .run(Date.now(), AuditEventType.VAULT_UNLOCK);
+  it("a NULL link ahead of the first chained row is a break, not history", () => {
+    const legacyId = Number(
+      store.db
+        .prepare(
+          `INSERT INTO audit_log (timestamp, event_type, secret_id, principal_type, principal_id,
+             detail_encrypted, detail_iv, detail_tag, ip_address, session_id, success, row_hmac)
+           VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, NULL)`,
+        )
+        .run(Date.now(), AuditEventType.VAULT_UNLOCK).lastInsertRowid,
+    );
     logger.log({ eventType: AuditEventType.SECRET_READ, detail: { a: 1 } });
     logger.log({ eventType: AuditEventType.SECRET_USE, detail: { b: 2 } });
 
     const result = query.verifyChain();
-    expect(result.valid).toBe(true);
-    expect(result.legacy).toBe(1);
+    expect(result.valid).toBe(false);
+    expect(result.firstBrokenId).toBe(legacyId);
     expect(result.checked).toBe(2);
+    expect("legacy" in result).toBe(false);
   });
 
   it("cross-instance writes stay linear and verify", () => {
@@ -150,24 +151,15 @@ describe("audit HMAC chain verification", () => {
     expect(result.valid).toBe(true);
     expect(result.checked).toBe(3);
   });
-
-  it("reports valid with zero checks when auditing is disabled (no key)", () => {
-    const keyless = new AuditLogger(store, null);
-    keyless.log({ eventType: AuditEventType.SECRET_READ });
-    const keylessQuery = new AuditQuery(store, null);
-    const result = keylessQuery.verifyChain();
-    expect(result.valid).toBe(true);
-    expect(result.checked).toBe(0);
-    expect(result.legacy).toBe(1);
-  });
 });
 
 /**
- * M2. `row_hmac IS NULL` marks a pre-migration-010 row, which verification
- * counts and skips. Nothing enforced that such rows may only be a PREFIX, so a
- * database-writing attacker (the exact adversary the chain exists for — they
+ * M2. `row_hmac IS NULL` marked a pre-migration-010 row, which verification
+ * counted and skipped. Nothing enforced that such rows may only be a PREFIX, so
+ * a database-writing attacker (the exact adversary the chain exists for — they
  * hold no audit key) could null the column on any suffix and then insert,
  * delete and edit those rows with `harpoc audit verify` reporting OK.
+ * Since Wave 2 (C30) a NULL link anywhere — prefix included — is a break.
  */
 describe("audit chain: NULL links are not a free pass", () => {
   function nullLinks(fromId: number): void {
@@ -224,33 +216,13 @@ describe("audit chain: NULL links are not a free pass", () => {
     const result = query.verifyChain();
     expect(result.valid).toBe(false);
     expect(result.checked).toBe(0);
-    expect(result.legacy).toBe(3);
     expect(result.firstBrokenId).toBe(ids[0]);
-  });
-
-  it("control: a genuine legacy PREFIX followed by chained rows stays valid", () => {
-    store.db
-      .prepare(
-        `INSERT INTO audit_log (timestamp, event_type, secret_id, principal_type, principal_id,
-           detail_encrypted, detail_iv, detail_tag, ip_address, session_id, success, row_hmac)
-         VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, NULL)`,
-      )
-      .run(Date.now(), AuditEventType.VAULT_UNLOCK);
-    logger.log({ eventType: AuditEventType.SECRET_READ, detail: { a: 1 } });
-    logger.log({ eventType: AuditEventType.SECRET_USE, detail: { b: 2 } });
-
-    const result = query.verifyChain();
-    expect(result.valid).toBe(true);
-    expect(result.legacy).toBe(1);
-    expect(result.checked).toBe(2);
-    expect(result.firstBrokenId).toBeNull();
   });
 
   it("control: an empty log and an untampered chain stay valid", () => {
     expect(query.verifyChain()).toEqual({
       valid: true,
       checked: 0,
-      legacy: 0,
       firstBrokenId: null,
     });
 

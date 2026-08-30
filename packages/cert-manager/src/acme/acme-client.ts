@@ -1,5 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { VaultError } from "@harpoc/shared";
+import { contentLengthExceeds, readBodyCapped, VaultError } from "@harpoc/shared";
 import { validateAcmeUrl } from "./directory.js";
 import { jwkThumbprint, publicJwk, signJws } from "./jws.js";
 
@@ -301,13 +301,20 @@ export class AcmeClient {
     }
     const nonce = response.headers.get("replay-nonce");
     if (nonce !== null && nonce !== "") this.nonces.push(nonce);
-    assertBodyWithinCap(response.headers, origin);
-    let body: string;
+    if (contentLengthExceeds(response.headers, MAX_RESPONSE_BYTES)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw VaultError.certAcmeFailed(`response body from ${origin} is too large`);
+    }
+    let read: Awaited<ReturnType<typeof readBodyCapped>>;
     try {
-      body = await response.text();
+      read = await readBodyCapped(response.body, MAX_RESPONSE_BYTES);
     } catch {
       throw VaultError.certAcmeFailed(`response body from ${origin} could not be read`);
     }
+    if (!read.ok) {
+      throw VaultError.certAcmeFailed(`response body from ${origin} is too large`);
+    }
+    const body = new TextDecoder().decode(read.bytes);
     return { status: response.status, headers: response.headers, body };
   }
 
@@ -343,15 +350,6 @@ function locationOf(response: AcmeResponse, what: string): string {
   }
   validateAcmeUrl(location);
   return location;
-}
-
-function assertBodyWithinCap(headers: Headers, origin: string): void {
-  const declared = headers.get("content-length");
-  if (declared === null) return;
-  const length = Number(declared);
-  if (Number.isFinite(length) && length > MAX_RESPONSE_BYTES) {
-    throw VaultError.certAcmeFailed(`response body from ${origin} is too large`);
-  }
 }
 
 function identifierDomain(body: Record<string, unknown>): string {

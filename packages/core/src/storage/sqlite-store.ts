@@ -718,27 +718,22 @@ export class SqliteStore {
     return Number(result.lastInsertRowid);
   }
 
-  /** The most recent row's chain link, or null if none / the last row is legacy. */
-  getLastAuditRowHmac(): Uint8Array | null {
-    const row = this.db.prepare("SELECT row_hmac FROM audit_log ORDER BY id DESC LIMIT 1").get() as
-      | { row_hmac: Buffer | null }
-      | undefined;
-    return row?.row_hmac ? new Uint8Array(row.row_hmac) : null;
-  }
-
   /**
-   * The newest chained audit row (the anchorable chain tail), skipping trailing
-   * legacy rows. Distinct from getLastAuditRowHmac, which intentionally looks
-   * only at the very last row (insert-time chain semantics).
+   * The most recent audit row's id, timestamp and link. Insert-time chaining
+   * reads the very last row whatever its link (a NULL tail chains the next
+   * row from genesis, and verification reports the erased link); the anchor
+   * export refuses a tail without one.
    */
-  getLastChainedAuditRow(): { id: number; timestamp: number; row_hmac: Uint8Array } | null {
+  getLastAuditRow(): { id: number; timestamp: number; row_hmac: Uint8Array | null } | null {
     const row = this.db
-      .prepare(
-        "SELECT id, timestamp, row_hmac FROM audit_log WHERE row_hmac IS NOT NULL ORDER BY id DESC LIMIT 1",
-      )
-      .get() as { id: number; timestamp: number; row_hmac: Buffer } | undefined;
+      .prepare("SELECT id, timestamp, row_hmac FROM audit_log ORDER BY id DESC LIMIT 1")
+      .get() as { id: number; timestamp: number; row_hmac: Buffer | null } | undefined;
     if (!row) return null;
-    return { id: row.id, timestamp: row.timestamp, row_hmac: new Uint8Array(row.row_hmac) };
+    return {
+      id: row.id,
+      timestamp: row.timestamp,
+      row_hmac: row.row_hmac ? new Uint8Array(row.row_hmac) : null,
+    };
   }
 
   /** All audit rows in insertion order, with the fields the chain HMAC covers. */

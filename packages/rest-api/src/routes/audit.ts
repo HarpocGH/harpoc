@@ -78,7 +78,6 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
       data: {
         valid: report.valid,
         checked: report.checked,
-        legacy: report.legacy,
         first_broken_id: report.firstBrokenId,
       },
     });

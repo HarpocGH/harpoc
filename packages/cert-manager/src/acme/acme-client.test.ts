@@ -806,6 +806,19 @@ describe("AcmeClient redirects and body size", () => {
     expect(message).toContain("https://acme.example.com");
   });
 
+  it("refuses a Content-Length-less body that streams past the 1 MiB cap", async () => {
+    const chunk = new Uint8Array(64 * 1024);
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(chunk);
+      },
+    });
+    const ca = caWith(nonce("n1"), new Response(body, { status: 200 }));
+    const message = await messageOf(() => registeredClient(ca).getAuthorization(AUTHZ_URL));
+    expect(message).toContain("too large");
+    expect(message).toContain("https://acme.example.com");
+  });
+
   it("accepts a response sitting exactly on the cap", async () => {
     const ca = caWith(
       nonce("n1"),

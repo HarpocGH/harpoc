@@ -630,6 +630,12 @@ export interface ImportCertificateOptions {
    * detail — and gates `autoRenew`, which no manual import may carry.
    */
   acmeIssued?: boolean;
+  /**
+   * The ACME account (`{ privateKeyPem, accountUrl }` as JSON) an issuance
+   * stores with its certificate inside the same transaction as the row — only
+   * legal with `acmeIssued: true`; a manual import never carries one (E86b).
+   */
+  acmeAccountJson?: string;
 }
 
 /** Status of an OAuth token (for health checks and UI). */

@@ -25,7 +25,7 @@ import type {
   DbTlsOptions,
 } from "./db-adapters.js";
 import { defaultDbAdapters, defaultDbCommandAdapters, defaultDbPort } from "./db-adapters.js";
-import { mapStringLeaves, redactSecretEncodings } from "./output-sanitizer.js";
+import { mapStringLeavesTracked, redactSecretEncodings } from "./output-sanitizer.js";
 import { validateHostPort } from "./url-validator.js";
 
 /** The adapter an action dispatches through, tagged so each arm narrows without a cast. */
@@ -155,11 +155,18 @@ export class DatabaseInjector {
       // DB_QUERY_FAILED, the same code an equivalent SQL query error maps to.
       try {
         const res = await resolved.adapter.execute(connectOpts, action.command);
-        const { result, truncated } = this.toDatabaseResult(res, redactCredential);
+        const { result, truncated, sanitized } = this.toDatabaseResult(res, redactCredential);
         this.audit(
           action,
           secretId,
-          { host, port, row_count: result.row_count, truncated, ...tlsOptOut },
+          {
+            host,
+            port,
+            row_count: result.row_count,
+            truncated,
+            ...tlsOptOut,
+            ...(sanitized ? { sanitized: true } : {}),
+          },
           true,
           attribution,
         );
@@ -201,11 +208,18 @@ export class DatabaseInjector {
       // Column names and the command tag are endpoint-authored too: an alias
       // (`SELECT 1 AS "<credential>"`) put the value in a position no redactor
       // saw, while the same string in a row value was redacted (L1).
-      const { result, truncated } = this.toDatabaseResult(res, redactCredential);
+      const { result, truncated, sanitized } = this.toDatabaseResult(res, redactCredential);
       this.audit(
         action,
         secretId,
-        { host, port, row_count: result.row_count, truncated, ...tlsOptOut },
+        {
+          host,
+          port,
+          row_count: result.row_count,
+          truncated,
+          ...tlsOptOut,
+          ...(sanitized ? { sanitized: true } : {}),
+        },
         true,
         attribution,
       );
@@ -229,21 +243,30 @@ export class DatabaseInjector {
     }
   }
 
-  /** Cap + redact a driver result into the wire `DatabaseResult` shape shared by both dispatch paths. */
+  /** Cap + redact a driver result into the wire `DatabaseResult` shape shared by
+   * both dispatch paths. `sanitized` reports whether the redaction changed
+   * anything anywhere in the projection — rows, column names or command tag. */
   private toDatabaseResult(
     res: DbQueryResult,
     redactCredential: (s: string) => string,
-  ): { result: DatabaseResult; truncated: boolean } {
+  ): { result: DatabaseResult; truncated: boolean; sanitized: boolean } {
     const { rows, truncated } = capRows(res.rows);
+    const walked = mapStringLeavesTracked(rows, redactCredential, 0);
+    const fields = res.fields.map((f) => ({ name: redactCredential(f.name) }));
+    const command = res.command === undefined ? undefined : redactCredential(res.command);
+    const sanitized =
+      walked.changed ||
+      fields.some((f, i) => f.name !== res.fields[i]?.name) ||
+      (command !== undefined && command !== res.command);
     const result: DatabaseResult = {
       type: "database",
       row_count: res.rowCount ?? rows.length,
-      rows: mapStringLeaves(rows, redactCredential) as unknown[],
-      fields: res.fields.map((f) => ({ name: redactCredential(f.name) })),
-      command: res.command === undefined ? undefined : redactCredential(res.command),
+      rows: walked.value as unknown[],
+      fields,
+      command,
       truncated: truncated ? true : undefined,
     };
-    return { result, truncated };
+    return { result, truncated, sanitized };
   }
 
   private audit(

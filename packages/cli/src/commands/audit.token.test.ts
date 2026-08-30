@@ -12,7 +12,7 @@ const { mockEngine } = vi.hoisted(() => ({
     }),
     verifyAuditChain: vi
       .fn()
-      .mockReturnValue({ valid: true, firstBrokenId: null, checked: 0, legacy: 0, tail: null }),
+      .mockReturnValue({ valid: true, firstBrokenId: null, checked: 0, tail: null }),
     verifyToken: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),
   },
@@ -68,7 +68,6 @@ describe("audit — token path", () => {
       valid: true,
       firstBrokenId: null,
       checked: 0,
-      legacy: 0,
       tail: null,
     });
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {

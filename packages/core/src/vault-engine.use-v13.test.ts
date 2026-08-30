@@ -17,8 +17,11 @@ import type {
 } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
+import type { DockerExecution } from "./injection/docker/docker-injector.js";
 import type { ImapExecution, ImapOAuth } from "./injection/imap-injector.js";
+import type { SftpExecution } from "./injection/sftp-injector.js";
 import type { MailTlsConfig, SmtpExecution, SmtpOAuth } from "./injection/smtp-injector.js";
+import type { WebsocketExecution } from "./injection/websocket-injector.js";
 import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
@@ -104,7 +107,9 @@ interface Seams {
 }
 
 type SmtpOutcome = SmtpExecution | (() => never);
-type ImapOutcome = ImapExecution | (() => never);
+// The wire-shaped half only: `sanitized` is supplied separately by
+// `SeamOutcomes.imapSanitized`, mirroring how sftp/docker carry the flag.
+type ImapOutcome = Omit<ImapExecution, "sanitized"> | (() => never);
 type WsOutcome = WebsocketResult | (() => never);
 type SftpOutcome = SftpResult | (() => never);
 type DockerOutcome = DockerResult | (() => never);
@@ -122,9 +127,9 @@ interface EngineInternals {
 interface EngineSeams {
   smtpInjector: { run: (...args: unknown[]) => Promise<SmtpExecution> };
   imapInjector: { run: (...args: unknown[]) => Promise<ImapExecution> };
-  websocketExecutor: (...args: unknown[]) => Promise<WebsocketResult>;
-  sftpExecutor: (...args: unknown[]) => Promise<SftpResult>;
-  dockerExecutor: (...args: unknown[]) => Promise<DockerResult>;
+  websocketExecutor: (...args: unknown[]) => Promise<WebsocketExecution>;
+  sftpExecutor: (...args: unknown[]) => Promise<SftpExecution>;
+  dockerExecutor: (...args: unknown[]) => Promise<DockerExecution>;
   processInjector: { executeWithSecret: (...args: unknown[]) => Promise<unknown> };
   databaseInjector: { executeWithSecret: (...args: unknown[]) => Promise<unknown> };
   sshInjector: { executeWithSecret: (...args: unknown[]) => Promise<unknown> };
@@ -139,9 +144,13 @@ interface EngineSeams {
 interface SeamOutcomes {
   smtp?: SmtpOutcome;
   imap?: ImapOutcome;
+  imapSanitized?: boolean;
   websocket?: WsOutcome;
+  wsSanitized?: boolean;
   sftp?: SftpOutcome;
+  sftpSanitized?: boolean;
   docker?: DockerOutcome;
+  dockerSanitized?: boolean;
   process?: () => never;
   database?: () => never;
   ssh?: () => never;
@@ -189,7 +198,7 @@ function installSeams(e: VaultEngine, outcomes: SeamOutcomes): Seams {
         connection: args[3] as MailTlsConfig | undefined,
         oauth: args[4] as ImapOAuth | undefined,
       });
-      return resolveOutcome(
+      const execution: Omit<ImapExecution, "sanitized"> = resolveOutcome(
         outcomes.imap ?? {
           result: { type: "imap", operation: "search", uids: [7] },
           auditDetails: {
@@ -200,6 +209,7 @@ function installSeams(e: VaultEngine, outcomes: SeamOutcomes): Seams {
           },
         },
       );
+      return { ...execution, sanitized: outcomes.imapSanitized ?? false };
     },
   };
 
@@ -209,9 +219,10 @@ function installSeams(e: VaultEngine, outcomes: SeamOutcomes): Seams {
       secretValue: Buffer.from(args[1] as Uint8Array).toString("utf8"),
       policy: args[2] as InjectionPolicy,
     });
-    return resolveOutcome(
+    const result: WebsocketResult = resolveOutcome(
       outcomes.websocket ?? { type: "websocket", messages: ["pong"], close_code: 1000 },
     );
+    return { result, sanitized: outcomes.wsSanitized ?? false };
   };
 
   seams.sftpExecutor = async (...args: unknown[]) => {
@@ -221,7 +232,10 @@ function installSeams(e: VaultEngine, outcomes: SeamOutcomes): Seams {
       policy: args[2] as InjectionPolicy,
       connection: args[3] as ConnectionConfig | undefined,
     });
-    return resolveOutcome(outcomes.sftp ?? { type: "sftp", exit_code: 0, stdout: "", stderr: "" });
+    const result: SftpResult = resolveOutcome(
+      outcomes.sftp ?? { type: "sftp", exit_code: 0, stdout: "", stderr: "" },
+    );
+    return { result, sanitized: outcomes.sftpSanitized ?? false };
   };
 
   seams.dockerExecutor = async (...args: unknown[]) => {
@@ -230,7 +244,7 @@ function installSeams(e: VaultEngine, outcomes: SeamOutcomes): Seams {
       secretValue: Buffer.from(args[1] as Uint8Array).toString("utf8"),
       policy: args[2] as InjectionPolicy,
     });
-    return resolveOutcome(
+    const result: DockerResult = resolveOutcome(
       outcomes.docker ?? {
         type: "docker_registry",
         operation: "pull",
@@ -239,6 +253,7 @@ function installSeams(e: VaultEngine, outcomes: SeamOutcomes): Seams {
         stderr: "",
       },
     );
+    return { result, sanitized: outcomes.dockerSanitized ?? false };
   };
 
   if (outcomes.process) seams.processInjector = { executeWithSecret: outcomes.process };
@@ -1480,5 +1495,159 @@ describe("useSecret — thrown-error choke point (E69 + N16)", () => {
     const failed = useRows(false);
     expect(failed).toHaveLength(1);
     expect(failed[0]?.detail).toMatchObject({ context: "git", error: ErrorCode.INTERNAL_ERROR });
+  });
+});
+
+describe("useSecret — status precedes the pre-decrypt guards (Wave 2, B21)", () => {
+  it("an expired-but-untransitioned secret × imap tls:false reports SECRET_EXPIRED and transitions", async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "inbox",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("ops@example.com:mailpass")),
+      expiresAt: Date.now() - 1_000,
+    });
+    await engine.setConnectionConfig("secret://inbox", { mail: { tls: false } });
+    const calls = installSeams(engine, {});
+
+    await expectVaultError(
+      () => engine.useSecret("secret://inbox", IMAP_ACTION),
+      ErrorCode.SECRET_EXPIRED,
+    );
+
+    expect(calls.imap).toHaveLength(0);
+    expect(engine.queryAudit({ eventType: AuditEventType.SECRET_EXPIRE })).toHaveLength(1);
+    expect(useRows(false)[0]?.detail).toMatchObject({
+      context: "imap",
+      error: ErrorCode.SECRET_EXPIRED,
+    });
+    expect((await engine.getSecretInfo("secret://inbox")).status).toBe("expired");
+  });
+
+  it("a PENDING OAuth secret × imap reports OAUTH_NOT_CONFIGURED, not INVALID_INPUT", async () => {
+    await engine.initVault("password");
+    const { handle } = await engine.createOAuthSecret("mailbox", {
+      provider: "google",
+      grant_type: "client_credentials",
+      token_endpoint: "https://oauth.example.com/token",
+      client_id: "cid",
+    });
+    const calls = installSeams(engine, {});
+
+    const err = await expectVaultError(
+      () => engine.useSecret(handle, IMAP_ACTION),
+      ErrorCode.OAUTH_NOT_CONFIGURED,
+    );
+
+    expect(err.message).toBe("OAuth not configured for secret: OAuth flow not completed");
+    expect(calls.imap).toHaveLength(0);
+  });
+
+  it("a revoked secret × smtp starttls with tls:false reports SECRET_REVOKED", async () => {
+    await initWithSecret("outbox", "ops@example.com:mailpass");
+    await engine.setConnectionConfig("secret://outbox", { mail: { tls: false } });
+    await engine.revokeSecret("secret://outbox");
+    const calls = installSeams(engine, {});
+
+    await expectVaultError(
+      () => engine.useSecret("secret://outbox", { ...SMTP_ACTION, security: "starttls" }),
+      ErrorCode.SECRET_REVOKED,
+    );
+    expect(calls.smtp).toHaveLength(0);
+  });
+
+  it("an expired secret × docker isolation reports SECRET_EXPIRED before the isolation refusal", async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "reg",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("robot:regpass")),
+      expiresAt: Date.now() - 1_000,
+    });
+    await engine.setInjectionPolicy("secret://reg", { network_isolation: true });
+
+    await expectVaultError(
+      () => engine.useSecret("secret://reg", DOCKER_ACTION),
+      ErrorCode.SECRET_EXPIRED,
+    );
+  });
+
+  it("control: an ACTIVE secret still refuses the architectural conflict with INVALID_INPUT", async () => {
+    await initWithSecret("inbox2", "ops@example.com:mailpass");
+    await engine.setConnectionConfig("secret://inbox2", { mail: { tls: false } });
+    installSeams(engine, {});
+
+    await expectVaultError(
+      () => engine.useSecret("secret://inbox2", IMAP_ACTION),
+      ErrorCode.INVALID_INPUT,
+    );
+  });
+});
+
+describe("useSecret — sanitized rides the success row (Wave 2, E70)", () => {
+  it("sftp: the row carries sanitized: true when the executor redacted", async () => {
+    await initWithSecret("deploy", "FAKE-PRIVATE-KEY-PEM");
+    installSeams(engine, {
+      sftp: { type: "sftp", exit_code: 0, stdout: "file1\n", stderr: "" },
+      sftpSanitized: true,
+    });
+    await engine.useSecret("secret://deploy", SFTP_ACTION);
+    expect(useRows(true)[0]?.detail).toMatchObject({ context: "sftp", sanitized: true });
+  });
+
+  it("imap: the row carries sanitized: true when the injector redacted", async () => {
+    await initWithSecret("inbox", "ops@example.com:mailpass");
+    installSeams(engine, { imapSanitized: true });
+    await engine.useSecret("secret://inbox", IMAP_ACTION);
+    expect(useRows(true)[0]?.detail).toMatchObject({ context: "imap", sanitized: true });
+  });
+
+  it("websocket: the row carries sanitized: true when the executor redacted", async () => {
+    await initWithSecret("stream", "ws-token-value");
+    installSeams(engine, { wsSanitized: true });
+    await engine.useSecret("secret://stream", WS_ACTION);
+    expect(useRows(true)[0]?.detail).toMatchObject({ context: "websocket", sanitized: true });
+  });
+
+  it("websocket: the key is absent when nothing was redacted", async () => {
+    await initWithSecret("stream", "ws-token-value");
+    installSeams(engine, {});
+    await engine.useSecret("secret://stream", WS_ACTION);
+    expect("sanitized" in (useRows(true)[0]?.detail ?? {})).toBe(false);
+  });
+
+  it("docker: the row carries sanitized: true when the executor redacted", async () => {
+    await initWithSecret("reg", "robot:regpass");
+    installSeams(engine, {
+      docker: {
+        type: "docker_registry",
+        operation: "pull",
+        exit_code: 0,
+        stdout: "Pulled",
+        stderr: "",
+      },
+      dockerSanitized: true,
+    });
+    await engine.useSecret("secret://reg", DOCKER_ACTION);
+    expect(useRows(true)[0]?.detail).toMatchObject({
+      context: "docker_registry",
+      sanitized: true,
+    });
+  });
+
+  it("docker: the key is absent when nothing was redacted", async () => {
+    await initWithSecret("reg", "robot:regpass");
+    installSeams(engine, {
+      docker: {
+        type: "docker_registry",
+        operation: "pull",
+        exit_code: 0,
+        stdout: "Pulled\n",
+        stderr: "",
+      },
+    });
+    await engine.useSecret("secret://reg", DOCKER_ACTION);
+    expect(useRows(true)).toHaveLength(1);
+    expect("sanitized" in (useRows(true)[0]?.detail ?? {})).toBe(false);
   });
 });

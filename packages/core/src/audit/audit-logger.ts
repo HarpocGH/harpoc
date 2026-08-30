@@ -21,7 +21,6 @@ export interface AuditLogOptions {
 
 /**
  * Writes encrypted audit log entries to the database.
- * If no audit key is provided, detail is stored as null (unencrypted logging disabled).
  *
  * Detail ciphertext is bound to the row via a row-specific AAD (v2), and each
  * row carries an HMAC chain link over its fields plus the previous link, so a
@@ -29,13 +28,13 @@ export interface AuditLogOptions {
  * between rows, tamper with the plaintext columns, or delete a row undetected.
  */
 export class AuditLogger {
-  private readonly chainKey: Uint8Array | null;
+  private readonly chainKey: Uint8Array;
 
   constructor(
     private readonly store: SqliteStore,
-    private readonly auditKey: Uint8Array | null,
+    private readonly auditKey: Uint8Array,
   ) {
-    this.chainKey = auditKey ? deriveAuditChainKey(auditKey) : null;
+    this.chainKey = deriveAuditChainKey(auditKey);
   }
 
   log(options: AuditLogOptions): number {
@@ -56,7 +55,7 @@ export class AuditLogger {
     let detailIv: Uint8Array | null = null;
     let detailTag: Uint8Array | null = null;
 
-    if (detail && this.auditKey) {
+    if (detail) {
       const plaintext = new Uint8Array(Buffer.from(JSON.stringify(detail), "utf8"));
       const encrypted = encrypt(
         this.auditKey,
@@ -82,16 +81,11 @@ export class AuditLogger {
       success,
     };
 
-    const chainKey = this.chainKey;
-    if (!chainKey) {
-      return this.store.insertAuditEvent(eventRow);
-    }
-
     // SELECT-last + compute + INSERT in one transaction so concurrent writers
     // serialize on SQLite's lock and the chain stays linear.
     return this.store.transaction(() => {
-      const prev = this.store.getLastAuditRowHmac() ?? AUDIT_CHAIN_GENESIS_BYTES;
-      const rowHmac = computeAuditRowHmac(chainKey, eventRow, prev);
+      const prev = this.store.getLastAuditRow()?.row_hmac ?? AUDIT_CHAIN_GENESIS_BYTES;
+      const rowHmac = computeAuditRowHmac(this.chainKey, eventRow, prev);
       return this.store.insertAuditEvent(eventRow, rowHmac);
     });
   }

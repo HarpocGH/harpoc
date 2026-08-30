@@ -9,10 +9,8 @@ import type {
   CertificateStatus,
   ConnectionConfig,
   CreateSecretResponse,
-  DockerResult,
   ExpiringCertificateInfo,
   ExpiringOAuthTokenInfo,
-  HttpResult,
   ImportCertificateOptions,
   InjectionPolicy,
   InjectionPolicyInput,
@@ -27,7 +25,6 @@ import type {
   SessionFile,
   SetAgentPermissionsResult,
   SetInjectionPolicyOptions,
-  SftpResult,
   SmtpAction,
   TokenPrincipalType,
   UpdateAgentInput,
@@ -106,6 +103,7 @@ import {
   resolveExecutable,
 } from "./injection/allowlist.js";
 import { DatabaseInjector } from "./injection/database-injector.js";
+import type { DockerExecution } from "./injection/docker/docker-injector.js";
 import {
   buildDockerAuditDetails,
   executeDockerRegistryAction,
@@ -116,9 +114,10 @@ import type { ImapOAuth } from "./injection/imap-injector.js";
 import { buildImapAuditDetails, ImapInjector } from "./injection/imap-injector.js";
 import { McpInjector } from "./injection/mcp-injector.js";
 import { McpConnectionRegistry } from "./injection/mcp-registry.js";
-import { redactErrorMessage, redactSecretEncodings } from "./injection/output-sanitizer.js";
+import { redactErrorMessage } from "./injection/output-sanitizer.js";
 import { ProcessInjector } from "./injection/process-injector.js";
 import { isResponseModeAllowed } from "./injection/response-mode.js";
+import type { SftpExecution } from "./injection/sftp-injector.js";
 import { buildSftpAuditDetails, executeSftpAction } from "./injection/sftp-injector.js";
 import type { SmtpOAuth, SmtpResolvedAttachment } from "./injection/smtp-injector.js";
 import { buildSmtpAuditDetails, SmtpInjector } from "./injection/smtp-injector.js";
@@ -900,6 +899,39 @@ export class VaultEngine {
 
     const policy = this.loadInjectionPolicy(s, secret.id);
 
+    // Status before the architectural guards below (B21): an expired, revoked
+    // or pending secret reports its own status — and the lazy EXPIRED
+    // transition runs — instead of the INVALID_INPUT a guard would raise
+    // first. Same failure semantics as the value block: the denial row, then
+    // the registry backstop. The vault-managed-certificate refusal keeps its
+    // place ahead of the status ladder — as it has on both value paths — because
+    // the renewal census keys on the persisted status, so letting the lazy
+    // transition run here would drop the expired certificate out of the very
+    // set `server start --cert-renew` retries.
+    try {
+      if (secret.type === SecretType.CERTIFICATE && s.store.getCertificate(secret.id)) {
+        throw VaultError.certValueUnsupported(handle);
+      }
+
+      s.secretManager.assertUsable(secret, handle, {
+        pending:
+          secret.type === SecretType.OAUTH_TOKEN
+            ? () => VaultError.oauthNotConfigured("OAuth flow not completed")
+            : undefined,
+      });
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.SECRET_USE,
+        err,
+        { handle, context: action.type },
+        secret.id,
+        caller,
+      );
+      await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
+      throw err;
+    }
+
     // Docker × isolation (design §5.4) — fail closed BEFORE the dispatch arm,
     // before any spawn, and before the credential is even decrypted. The
     // spawned `docker` CLI is a thin client: the daemon the vault never
@@ -1044,15 +1076,6 @@ export class VaultEngine {
             attribution,
           );
 
-          // Value + encodings redaction (I2a) — skipped only under the
-          // policy-gated `full` opt-out.
-          if (responseMode !== "full") {
-            const valueStr = Buffer.from(value).toString("utf8");
-            if (valueStr.length > 0) {
-              this.redactHttpResult(response, valueStr);
-            }
-          }
-
           return response;
         }
 
@@ -1185,7 +1208,11 @@ export class VaultEngine {
           this.auditUse(
             s,
             secret.id,
-            { context: "imap", ...execution.auditDetails },
+            {
+              context: "imap",
+              ...execution.auditDetails,
+              ...(execution.sanitized ? { sanitized: true } : {}),
+            },
             true,
             attribution,
           );
@@ -1201,9 +1228,9 @@ export class VaultEngine {
             ...buildWsAuditDetails(action, { messages: [], close_code: null }),
           };
 
-          let result;
+          let execution;
           try {
-            result = await s.websocketExecutor(action, value, policy);
+            execution = await s.websocketExecutor(action, value, policy);
           } catch (err) {
             const mapped = toVaultError(err);
             this.auditUse(
@@ -1216,10 +1243,15 @@ export class VaultEngine {
             throw mapped;
           }
 
+          const result = execution.result;
           this.auditUse(
             s,
             secret.id,
-            { context: "websocket", ...buildWsAuditDetails(action, result) },
+            {
+              context: "websocket",
+              ...buildWsAuditDetails(action, result),
+              ...(execution.sanitized ? { sanitized: true } : {}),
+            },
             true,
             attribution,
           );
@@ -1228,20 +1260,28 @@ export class VaultEngine {
 
         case "sftp": {
           const config = this.loadConnectionConfig(s, secret.id);
-          // Every SftpAuditDetails field is request-derived (design §7.2:
-          // host, operation, remote/local paths — no result-derived counter to
-          // zero on a denial), so the same projection covers the attempt and
-          // the outcome (Task 12's rule, applied where nothing needs zeroing).
+          // Every SftpAuditDetails field the builder writes is request-derived
+          // (design §7.2: host, operation, remote/local paths — no result-derived
+          // counter to zero on a denial), so the same projection covers the
+          // attempt and the outcome (Task 12's rule, applied where nothing needs
+          // zeroing). `sanitized` is the one result-derived key, folded in below
+          // onto whichever row the spawn produced — a success, or a graceful
+          // non-throwing failure such as PROCESS_TIMEOUT; a refusal row (the
+          // catch arm, which never reached a spawn) is never flagged.
           const auditDetail = { context: "sftp", ...buildSftpAuditDetails(action) };
 
-          let result: SftpResult;
+          let execution: SftpExecution;
           try {
-            result = await s.sftpExecutor(action, value, policy, config);
+            execution = await s.sftpExecutor(action, value, policy, config);
           } catch (err) {
             const mapped = toVaultError(err);
             this.auditUse(s, secret.id, { ...auditDetail, error: mapped.code }, false, attribution);
             throw mapped;
           }
+          const result = execution.result;
+          const spawnedDetail = execution.sanitized
+            ? { ...auditDetail, sanitized: true }
+            : auditDetail;
 
           // A process-shaped result can carry a graceful, non-throwing
           // failure (e.g. PROCESS_TIMEOUT) in `error` — mirrors the ssh arm's
@@ -1249,7 +1289,7 @@ export class VaultEngine {
           this.auditUse(
             s,
             secret.id,
-            result.error ? { ...auditDetail, error: result.error } : auditDetail,
+            result.error ? { ...spawnedDetail, error: result.error } : spawnedDetail,
             result.error === undefined,
             attribution,
           );
@@ -1259,20 +1299,28 @@ export class VaultEngine {
         case "docker_registry": {
           // Reached only after `assertDockerIsolationAllowed` above cleared the
           // action — a docker × isolation secret is refused before this arm.
-          // Every DockerAuditDetails field is request-derived (the registry is
-          // parsed from the image, plus image + operation — no result-derived
-          // counter to zero on a denial), so the same projection covers the
-          // attempt and the outcome, exactly like the sftp arm.
+          // Every DockerAuditDetails field the builder writes is request-derived
+          // (the registry is parsed from the image, plus image + operation — no
+          // result-derived counter to zero on a denial), so the same projection
+          // covers the attempt and the outcome, exactly like the sftp arm.
+          // `sanitized` is the one result-derived key, folded in below onto
+          // whichever row the spawn produced — a success, or a graceful
+          // non-throwing failure such as PROCESS_TIMEOUT; a refusal row (the
+          // catch arm, which never reached a spawn) is never flagged.
           const auditDetail = { context: "docker_registry", ...buildDockerAuditDetails(action) };
 
-          let result: DockerResult;
+          let execution: DockerExecution;
           try {
-            result = await s.dockerExecutor(action, value, policy);
+            execution = await s.dockerExecutor(action, value, policy);
           } catch (err) {
             const mapped = toVaultError(err);
             this.auditUse(s, secret.id, { ...auditDetail, error: mapped.code }, false, attribution);
             throw mapped;
           }
+          const result = execution.result;
+          const spawnedDetail = execution.sanitized
+            ? { ...auditDetail, sanitized: true }
+            : auditDetail;
 
           // A process-shaped result can carry a graceful, non-throwing failure
           // (a PROCESS_TIMEOUT) in `error`; a non-zero docker exit throws
@@ -1280,7 +1328,7 @@ export class VaultEngine {
           this.auditUse(
             s,
             secret.id,
-            result.error ? { ...auditDetail, error: result.error } : auditDetail,
+            result.error ? { ...spawnedDetail, error: result.error } : spawnedDetail,
             result.error === undefined,
             attribution,
           );
@@ -1373,10 +1421,9 @@ export class VaultEngine {
    * `attachment_total_bytes` at zero because nothing was read. It carries no
    * `tls_opt_out`: nothing was sent in the clear, so nothing may claim it was.
    *
-   * Shares the imap guard's deliberate consequence: an expired-but-not-yet-
-   * transitioned secret refuses INVALID_INPUT here instead of reaching
-   * `assertUsable`'s expiry transition — the refusal is architectural and
-   * status-independent, and the next non-refused use still transitions it.
+   * Runs after `useSecret`'s status check (B21), so an expired, revoked or
+   * pending secret has already reported its own status by the time this
+   * architectural refusal is reached.
    */
   private assertSmtpUsageAllowed(
     s: UnlockedState,
@@ -1428,12 +1475,9 @@ export class VaultEngine {
    * a persisted rotation and its `oauth.refresh` row) for the OAuth case, and
    * decrypt the value for the TLS case, both for a use that is then refused.
    *
-   * Deliberate consequence, shared with the docker guard: a secret that is
-   * expired but not yet lazily transitioned now refuses INVALID_INPUT here
-   * instead of reaching `assertUsable`'s expiry transition and the
-   * `mcpRegistry.terminate` backstop. The refusal is architectural and
-   * status-independent — an expired secret was never going to be usable on
-   * this leg either — and the next non-imap use still transitions it.
+   * Runs after `useSecret`'s status check (B21), so an expired, revoked or
+   * pending secret has already reported its own status by the time this
+   * architectural refusal is reached.
    *
    * Unlike the docker guard this audits through `auditUse`, not `auditDenied`:
    * the failed-row shape (`context: "imap"` plus the zeroed
@@ -1523,21 +1567,6 @@ export class VaultEngine {
         attribution,
       ),
     );
-  }
-
-  /** Scrub the secret value and its common encodings from an HTTP result (I2a). */
-  private redactHttpResult(response: HttpResult, valueStr: string): void {
-    if (response.body) {
-      response.body = redactSecretEncodings(response.body, valueStr);
-    }
-    if (response.error) {
-      response.error = redactSecretEncodings(response.error, valueStr);
-    }
-    if (response.headers) {
-      for (const [key, val] of Object.entries(response.headers)) {
-        response.headers[key] = redactSecretEncodings(val, valueStr);
-      }
-    }
   }
 
   /**
@@ -1921,6 +1950,7 @@ export class VaultEngine {
           has_database: config.database !== undefined,
           has_ssh: config.ssh !== undefined,
           has_mail: config.mail !== undefined,
+          has_git: config.git !== undefined,
           database_tls: config.database?.tls_mode,
           // The mail group carries the TLS decision as a value, not a mode —
           // projected onto the database group's require/disable vocabulary so
@@ -2671,6 +2701,10 @@ export class VaultEngine {
       );
     }
 
+    if (o.acmeAccountJson !== undefined && o.acmeIssued !== true) {
+      throw VaultError.invalidInput("acmeAccountJson requires acmeIssued (an ACME issuance)");
+    }
+
     let keyObj: ReturnType<typeof createPrivateKey>;
     try {
       keyObj = createPrivateKey(privateKeyPem);
@@ -2736,12 +2770,23 @@ export class VaultEngine {
       AAD_CERT_PRIVATE_KEY(secret.id),
     );
 
+    const accountEnc =
+      o.acmeAccountJson === undefined
+        ? null
+        : encrypt(
+            s.kek,
+            new Uint8Array(Buffer.from(o.acmeAccountJson, "utf8")),
+            AAD_CERT_ACME_ACCOUNT(secret.id),
+          );
+
     // Certificate row, the ACTIVE transition and the cert.issue audit row
     // commit together (NM3) — the row is unconditional, `acme` only records
     // which path produced it. The base secret row committed in the manager's
     // own transaction above — a crash between the two leaves a visibly
     // incomplete PENDING secret with no certificate row, not a completed-but-
-    // unaudited import.
+    // unaudited import. The ACME account, when the issuance carries one, is
+    // encrypted and inserted in this same transaction (E86b) — a certificate
+    // can no longer commit without the account that renews it.
     s.store.transaction(() => {
       s.store.insertCertificate({
         secret_id: secret.id,
@@ -2758,9 +2803,9 @@ export class VaultEngine {
         csr_pem: o.csrPem ?? null,
         auto_renew: o.autoRenew ?? false,
         renew_before_days: o.renewBeforeDays ?? 30,
-        acme_account_encrypted: null,
-        acme_account_iv: null,
-        acme_account_tag: null,
+        acme_account_encrypted: accountEnc?.ciphertext ?? null,
+        acme_account_iv: accountEnc?.iv ?? null,
+        acme_account_tag: accountEnc?.tag ?? null,
       });
       if (o.certificatePem) {
         s.store.updateSecret(secret.id, { status: SecretStatus.ACTIVE, updated_at: Date.now() });
@@ -2776,6 +2821,7 @@ export class VaultEngine {
           subject,
           not_after: notAfter,
           acme: o.acmeIssued === true,
+          acme_account: accountEnc !== null,
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
@@ -3037,48 +3083,6 @@ export class VaultEngine {
       });
     }
     return out;
-  }
-
-  /**
-   * Store the ACME account (its key pair and account URL, serialised by the
-   * caller) KEK-encrypted under a per-secret AAD, so an account blob lifted
-   * onto another certificate's row fails to decrypt. Called only by the ACME
-   * issue flow, which threads its caller for attribution (no policy gate —
-   * `importCertificate` gated it).
-   *
-   * The write and its audit row commit together (NM3) — key material never
-   * lands on a certificate row unaudited. `policy.grant` is the event every
-   * other secret-scoped configuration write already uses (injection policy,
-   * MCP server, connection config); the detail names the config and nothing
-   * else — the account blob and its key stay out of the trail.
-   */
-  storeAcmeAccount(secretId: string, accountJson: string, caller?: CallerContext): void {
-    const s = this.assertUnlocked();
-    const row = s.store.getCertificate(secretId);
-    if (!row) throw VaultError.certNotConfigured();
-
-    const enc = encrypt(
-      s.kek,
-      new Uint8Array(Buffer.from(accountJson, "utf8")),
-      AAD_CERT_ACME_ACCOUNT(secretId),
-    );
-    s.store.transaction(() => {
-      s.store.updateCertificate(secretId, {
-        acme_account_encrypted: enc.ciphertext,
-        acme_account_iv: enc.iv,
-        acme_account_tag: enc.tag,
-      });
-      s.store.updateSecret(secretId, { updated_at: Date.now() });
-      s.auditLogger.log({
-        eventType: AuditEventType.POLICY_GRANT,
-        secretId,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
-        detail: { config: "acme_account", ...callerInterfaceDetail(caller) },
-        sessionId: this.sessionId ?? undefined,
-        success: true,
-      });
-    });
   }
 
   /**
@@ -3641,10 +3645,11 @@ export class VaultEngine {
   }
 
   /**
-   * The current audit-chain tail as an exportable anchor, or null when no
-   * chained rows exist yet. The anchor contains nothing sensitive — its value
-   * against tail truncation and rollback comes entirely from the operator
-   * storing it OFF-HOST (the vault cannot supply that trust domain itself).
+   * The current audit-chain tail as an exportable anchor, or null when the log
+   * is empty or its newest row carries no link. The anchor contains nothing
+   * sensitive — its value against tail truncation and rollback comes entirely
+   * from the operator storing it OFF-HOST (the vault cannot supply that trust
+   * domain itself).
    */
   getAuditChainTail(): AuditChainAnchor | null {
     const s = this.assertUnlocked();

@@ -82,7 +82,6 @@ export interface ExpiringReport {
 export interface AuditVerifyReport {
   valid: boolean;
   checked: number;
-  legacy: number;
   first_broken_id: number | null;
 }
 

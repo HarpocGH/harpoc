@@ -21,6 +21,8 @@ export interface ConnectionOptions {
   mailNoTls?: boolean;
   /** Path to a CA certificate PEM to pin the mail TLS connection to. */
   mailCa?: string;
+  /** Path to a CA certificate PEM to pin for the Git-HTTPS transport. */
+  gitCa?: string;
   clear?: boolean;
   show?: boolean;
   delete?: boolean;
@@ -32,7 +34,7 @@ export function registerSecretConnectionCommand(secret: Command): void {
   secret
     .command("connection <handle>")
     .description(
-      "Configure a secret's endpoint-authentication pins — database TLS policy and SSH host keys (trusted admin path); omitted flags keep their stored values",
+      "Configure a secret's endpoint-authentication pins — database TLS policy, SSH host keys, mail TLS and the Git-HTTPS CA (trusted admin path); omitted flags keep their stored values",
     )
     .option("--db-tls <mode>", "Database TLS mode: require | disable")
     .option("--db-ca-file <path>", "Path to a CA certificate PEM (database TLS)")
@@ -52,6 +54,7 @@ export function registerSecretConnectionCommand(secret: Command): void {
       "--mail-ca <path>",
       "Path to a CA certificate PEM (mail TLS); also clears --mail-no-tls",
     )
+    .option("--git-ca <path>", "Path to a CA certificate PEM to pin for the Git-HTTPS transport")
     .option("--clear", "Reset the whole config to empty before applying the other flags")
     .option("--show", "Show the current config instead of setting it")
     .option("--delete", "Remove the config")
@@ -83,6 +86,7 @@ export function registerSecretConnectionCommand(secret: Command): void {
             options.knownHostsFile !== undefined ||
             options.mailNoTls === true ||
             options.mailCa !== undefined ||
+            options.gitCa !== undefined ||
             options.clear === true;
           if (options.show || !hasInput) {
             const resolved = resolveTokenCallerForHandle(engine, "read", handle, tokenValue);
@@ -121,6 +125,8 @@ export function registerSecretConnectionCommand(secret: Command): void {
  * `known_hosts`; a downgrade of an endpoint-auth pin must be explicit.
  * Provided `--known-host`/`--known-hosts-file` flags replace the stored SSH
  * list. `--clear` starts from an empty config instead of the stored one.
+ * `--git-ca` pins a CA for the Git-HTTPS transport; omitted, a stored `git`
+ * group rides through.
  */
 export function mergeConnectionConfig(
   current: ConnectionConfig | null | undefined,
@@ -158,6 +164,11 @@ export function mergeConnectionConfig(
   const mail = mergeMailConfig(base?.mail, options);
   if (mail) {
     config.mail = mail;
+  }
+
+  const gitCaPem = options.gitCa ? readFileSync(options.gitCa, "utf8") : base?.git?.ca_pem;
+  if (gitCaPem !== undefined) {
+    config.git = { ca_pem: gitCaPem };
   }
 
   return config;

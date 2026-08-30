@@ -15,7 +15,11 @@ import type {
   ImapSearchCriteria,
 } from "./mail/imap-client.js";
 import { ImapClient } from "./mail/imap-client.js";
-import { mapStringLeaves, redactErrorMessage, redactSecretEncodings } from "./output-sanitizer.js";
+import {
+  mapStringLeavesTracked,
+  redactErrorMessage,
+  redactSecretEncodings,
+} from "./output-sanitizer.js";
 import type { MailTlsConfig } from "./smtp-injector.js";
 import { validateHostPort } from "./url-validator.js";
 
@@ -61,12 +65,20 @@ export interface ImapAuditDetails {
   uid_count: number;
   /** XOAUTH2 identity from the action's `account` — present on the OAuth arm only. */
   auth_account?: string;
+  /** Present only when the credential redaction changed the fetched content (E70). */
+  sanitized?: true;
 }
 
-/** Result of a full run: the wire result plus the audit projection the engine writes. */
+/**
+ * Result of a full run: the wire result, the audit projection the engine
+ * writes, and whether the credential redaction changed any fetched content.
+ * `sanitized` rides the engine's success audit row only — {@link ImapResult}
+ * stays byte-identical.
+ */
 export interface ImapExecution {
   result: ImapResult;
   auditDetails: ImapAuditDetails;
+  sanitized: boolean;
 }
 
 /**
@@ -232,11 +244,12 @@ export class ImapInjector {
       // 7. Dispatch the single operation (sequential — one command in flight
       //    per connection), then wrap its operation-shaped fields in the wire
       //    discriminants.
-      const fields = await this.runOperation(client, action.operation, material);
+      const { fields, sanitized } = await this.runOperation(client, action.operation, material);
 
       return {
         result: { type: ActionType.IMAP, operation: kind, ...fields },
         auditDetails: buildImapAuditDetails(action, fields),
+        sanitized,
       };
     } finally {
       try {
@@ -251,7 +264,7 @@ export class ImapInjector {
     client: ImapClientLike,
     operation: ImapAction["operation"],
     material: string[],
-  ): Promise<ImapOperationFields> {
+  ): Promise<{ fields: ImapOperationFields; sanitized: boolean }> {
     switch (operation.kind) {
       case "search": {
         const criteria: ImapSearchCriteria = {
@@ -262,11 +275,12 @@ export class ImapInjector {
           text: operation.text,
         };
         const uids = await client.searchUids(criteria);
-        return { uids };
+        return { fields: { uids }, sanitized: false };
       }
       case "fetch": {
         const messages = await client.fetch(operation.uids, operation.parts);
-        return { messages: redactMessages(messages, material) };
+        const redacted = redactMessages(messages, material);
+        return { fields: { messages: redacted.messages }, sanitized: redacted.sanitized };
       }
       case "store": {
         const affected = await client.store(
@@ -274,19 +288,19 @@ export class ImapInjector {
           operation.add_flags ?? [],
           operation.remove_flags ?? [],
         );
-        return { affected };
+        return { fields: { affected }, sanitized: false };
       }
       case "move": {
         const affected = await client.move(operation.uids, operation.target_mailbox);
-        return { affected };
+        return { fields: { affected }, sanitized: false };
       }
       case "copy": {
         const affected = await client.copy(operation.uids, operation.target_mailbox);
-        return { affected };
+        return { fields: { affected }, sanitized: false };
       }
       case "expunge": {
         const affected = await client.expunge();
-        return { affected };
+        return { fields: { affected }, sanitized: false };
       }
       default: {
         const exhaustive: never = operation;
@@ -383,11 +397,15 @@ function redactThrown(err: unknown, material: string[]): unknown {
  * of a database row or an HTTP response body carrying it back — is redacted
  * the same way those channels are.
  */
-function redactMessages(messages: ImapMessage[], material: string[]): ImapMessage[] {
+function redactMessages(
+  messages: ImapMessage[],
+  material: string[],
+): { messages: ImapMessage[]; sanitized: boolean } {
   const redactOne = (s: string): string =>
     material.reduce(
       (acc, secret) => (secret.length > 0 ? redactSecretEncodings(acc, secret) : acc),
       s,
     );
-  return mapStringLeaves(messages, redactOne) as ImapMessage[];
+  const walked = mapStringLeavesTracked(messages, redactOne, 0);
+  return { messages: walked.value as ImapMessage[], sanitized: walked.changed };
 }

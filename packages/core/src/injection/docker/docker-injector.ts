@@ -66,14 +66,30 @@ process.stdout.write(out + "\\n");
 
 /**
  * Metadata-only audit projection of a docker-registry operation (spec §7.2) —
- * never a credential. Every field is request-derived (the registry is parsed
- * from the image reference), so the same projection covers both a successful
- * use and a denial, exactly like the SFTP context.
+ * never a credential. Every field the builder writes is request-derived (the
+ * registry is parsed from the image reference), so the same projection covers
+ * both a successful use and a denial, exactly like the SFTP context. The
+ * optional `sanitized` is the one result-derived key: the engine folds it onto
+ * whichever row the spawn produced — a success, or a graceful non-throwing
+ * failure such as PROCESS_TIMEOUT — never onto a refusal row, which never
+ * reached a spawn.
  */
 export interface DockerAuditDetails {
   registry: string;
   image: string;
   operation: string;
+  /** Present only when the credential redaction changed the captured output (E70). */
+  sanitized?: true;
+}
+
+/**
+ * The docker executor's return to the engine: the wire result plus whether the
+ * spawn seam's redaction changed the captured output. `sanitized` rides the
+ * engine's post-spawn audit row only — {@link DockerResult} stays byte-identical.
+ */
+export interface DockerExecution {
+  result: DockerResult;
+  sanitized: boolean;
 }
 
 /** Builds the metadata-only audit projection for a docker action. Pure — the
@@ -245,7 +261,7 @@ export async function executeDockerRegistryAction(
   action: DockerRegistryAction,
   secretValue: Uint8Array,
   policy: InjectionPolicy,
-): Promise<DockerResult> {
+): Promise<DockerExecution> {
   const { user, secret } = parseDockerCredential(secretValue);
   try {
     return await runDocker(action, policy, user, secret);
@@ -261,7 +277,7 @@ async function runDocker(
   policy: InjectionPolicy,
   user: string,
   secret: string,
-): Promise<DockerResult> {
+): Promise<DockerExecution> {
   // Defense in depth beside the schema's alphanumeric-anchored image regex: the
   // image reaches argv, so a leading dash must never parse as a docker flag.
   if (action.image.startsWith("-")) {
@@ -310,7 +326,7 @@ async function runDocker(
       timeoutMs: action.timeout_ms,
       redact,
     });
-    return toDockerResult(action, r);
+    return { result: toDockerResult(action, r), sanitized: r.redacted };
   } finally {
     config.dispose();
     helper?.dispose();

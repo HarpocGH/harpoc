@@ -47,7 +47,7 @@ describe("audit log inside an outer transaction (savepoint nesting)", () => {
 
   it("rolls back both when the outer transaction throws after the log", () => {
     logger.log({ eventType: AuditEventType.VAULT_UNLOCK });
-    const tailBefore = store.getLastAuditRowHmac();
+    const tailBefore = store.getLastAuditRow()?.row_hmac ?? null;
 
     expect(() =>
       store.transaction(() => {
@@ -65,7 +65,7 @@ describe("audit log inside an outer transaction (savepoint nesting)", () => {
     const result = query.verifyChain();
     expect(result.valid).toBe(true);
     expect(result.checked).toBe(2);
-    expect(store.getLastAuditRowHmac()).not.toEqual(tailBefore);
+    expect(store.getLastAuditRow()?.row_hmac ?? null).not.toEqual(tailBefore);
   });
 
   it("keeps the chain linear across two logs in one transaction", () => {

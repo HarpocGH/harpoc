@@ -112,6 +112,7 @@ export const VAULT_AUDIT_ENABLED = true;
 // -- HTTP / use_secret defaults ----------------------------------------------
 
 export const DEFAULT_HTTP_TIMEOUT_MS = 30_000; // 30 seconds
+export const MAX_HTTP_RESPONSE_BYTES = 4_194_304; // 4 MiB — equals core's MAX_STRUCTURAL_CHARS, so a capped body never skips the structural redaction pass
 
 // -- Process execution / use_secret defaults ---------------------------------
 

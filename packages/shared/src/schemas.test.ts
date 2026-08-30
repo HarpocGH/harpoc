@@ -7,6 +7,7 @@ import {
   auditEventTypeSchema,
   auditQuerySchema,
   certificateImportSchema,
+  connectionConfigSchema,
   createSecretInputSchema,
   databaseActionSchema,
   dockerRegistryActionSchema,
@@ -2163,5 +2164,39 @@ describe("listTokensQuerySchema", () => {
     const result = listTokensQuerySchema.parse({ status: "active", agent: "claude-code" });
     expect(result.status).toBe("active");
     expect(result.agent).toBe("claude-code");
+  });
+});
+
+describe("connectionConfigSchema", () => {
+  const CA = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+
+  it("accepts a git group carrying a CA PEM", () => {
+    const parsed = connectionConfigSchema.safeParse({ git: { ca_pem: CA } });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.git).toEqual({ ca_pem: CA });
+  });
+
+  it("refuses a git group without ca_pem", () => {
+    expect(connectionConfigSchema.safeParse({ git: {} }).success).toBe(false);
+  });
+
+  it("refuses an empty config, naming all four groups", () => {
+    const parsed = connectionConfigSchema.safeParse({});
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues[0]?.message).toBe(
+        "connection config must set at least one of database, ssh, mail or git",
+      );
+    }
+  });
+
+  it("still accepts each existing group alone", () => {
+    expect(connectionConfigSchema.safeParse({ database: { tls_mode: "require" } }).success).toBe(
+      true,
+    );
+    expect(
+      connectionConfigSchema.safeParse({ ssh: { known_hosts: ["h ssh-ed25519 AAAA"] } }).success,
+    ).toBe(true);
+    expect(connectionConfigSchema.safeParse({ mail: { tls: false } }).success).toBe(true);
   });
 });

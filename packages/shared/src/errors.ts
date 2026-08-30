@@ -40,6 +40,7 @@ export enum ErrorCode {
   INVALID_INJECTION_CONFIG = "INVALID_INJECTION_CONFIG",
   URL_NOT_ALLOWED = "URL_NOT_ALLOWED",
   RESPONSE_MODE_NOT_ALLOWED = "RESPONSE_MODE_NOT_ALLOWED",
+  RESPONSE_TOO_LARGE = "RESPONSE_TOO_LARGE",
 
   // Process execution
   COMMAND_NOT_ALLOWED = "COMMAND_NOT_ALLOWED",
@@ -179,6 +180,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.INVALID_INJECTION_CONFIG]: 400,
   [ErrorCode.URL_NOT_ALLOWED]: 403,
   [ErrorCode.RESPONSE_MODE_NOT_ALLOWED]: 403,
+  [ErrorCode.RESPONSE_TOO_LARGE]: 502,
 
   // Process execution
   [ErrorCode.COMMAND_NOT_ALLOWED]: 403,
@@ -794,6 +796,13 @@ export class VaultError extends Error {
     return new VaultError(
       ErrorCode.MISSING_DEPENDENCY,
       `Optional dependency "${specifier}" is not installed. Install it to use this feature.`,
+    );
+  }
+
+  static responseTooLarge(origin: string, maxBytes: number): VaultError {
+    return new VaultError(
+      ErrorCode.RESPONSE_TOO_LARGE,
+      `Response body from ${origin} exceeds the ${maxBytes}-byte limit`,
     );
   }
 }

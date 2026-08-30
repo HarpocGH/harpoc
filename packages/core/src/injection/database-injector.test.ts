@@ -813,3 +813,67 @@ describe("DatabaseInjector lazy driver loading (redis, mongodb)", () => {
     expect(mongoClientCalls).toHaveLength(0);
   });
 });
+
+// E70: the redaction the injector already performed is invisible in the wire
+// result (that is the point), so the success row is the only place a reader can
+// learn that something was scrubbed out of it.
+describe("DatabaseInjector sanitized audit detail (E70)", () => {
+  function loggerSpy(): { log: ReturnType<typeof vi.fn>; logger: AuditLogger } {
+    const log = vi.fn();
+    return { log, logger: { log } as unknown as AuditLogger };
+  }
+
+  function lastDetail(log: ReturnType<typeof vi.fn>): Record<string, unknown> {
+    const calls = log.mock.calls;
+    const row = calls[calls.length - 1]?.[0] as AuditLogOptions;
+    return (row.detail ?? {}) as Record<string, unknown>;
+  }
+
+  it("stamps sanitized on the success row when a row value carried the credential", async () => {
+    const { log, logger } = loggerSpy();
+    const inj = new DatabaseInjector(logger, {
+      postgresql: new MockAdapter({ rows: [{ note: "value is s3cr3t here" }] }),
+    });
+
+    const res = await inj.executeWithSecret(action(), SECRET, policy(), undefined, "secret-1");
+
+    expect(JSON.stringify(res.rows)).toContain("[REDACTED]");
+    expect(lastDetail(log)).toMatchObject({ sanitized: true });
+  });
+
+  it("leaves the key absent when nothing was redacted", async () => {
+    const { log, logger } = loggerSpy();
+    const inj = new DatabaseInjector(logger, {
+      postgresql: new MockAdapter({
+        rows: [{ note: "nothing to see" }],
+        fields: [{ name: "note" }],
+      }),
+    });
+
+    await inj.executeWithSecret(action(), SECRET, policy(), undefined, "secret-1");
+
+    expect(lastDetail(log)).not.toHaveProperty("sanitized");
+  });
+
+  it("stamps sanitized on the command-engine success row too", async () => {
+    const { log, logger } = loggerSpy();
+    const inj = new DatabaseInjector(
+      logger,
+      {},
+      {
+        redis: new MockCommandAdapter({
+          result: {
+            rows: ["s3cr3t"],
+            fields: [{ name: "reply" }],
+            rowCount: 1,
+            command: undefined,
+          },
+        }),
+      },
+    );
+
+    await inj.executeWithSecret(redisAction(), SECRET, policy(), undefined, "secret-1");
+
+    expect(lastDetail(log)).toMatchObject({ sanitized: true });
+  });
+});

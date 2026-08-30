@@ -2,6 +2,7 @@ export * from "./types.js";
 export * from "./caller.js";
 export * from "./errors.js";
 export * from "./constants.js";
+export * from "./http-body.js";
 export * from "./handle.js";
 export * from "./binary-name.js";
 export * from "./dedicated-contexts.js";

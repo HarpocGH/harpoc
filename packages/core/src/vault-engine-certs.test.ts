@@ -126,6 +126,23 @@ function storedSecretUpdatedAt(secretId: string): number {
 }
 
 /**
+ * The persisted status column, not `getSecretInfo`'s effective status: the
+ * renewal census reads the row, so only the row answers whether a lazy EXPIRED
+ * transition ran.
+ */
+function storedSecretStatus(secretId: string): string {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const row = db.prepare("SELECT status FROM secrets WHERE id = ?").get(secretId) as {
+      status: string;
+    };
+    return row.status;
+  } finally {
+    db.close();
+  }
+}
+
+/**
  * Fault injection for the NM3 atomicity claims: let the first `passes` audit
  * inserts through, then break the next one. `passes` skips the rows a method
  * legitimately writes before the transaction under test (updateCertificate
@@ -668,6 +685,58 @@ describe("certificate secrets are refused on the generic value paths", () => {
     ).rejects.toMatchObject({ code: ErrorCode.CERT_VALUE_UNSUPPORTED });
   });
 
+  it("refuses an expired vault-managed certificate without transitioning it", async () => {
+    const { secretId } = await engine.importCertificate("exp-managed", fx("expired-key.pem"), {
+      certificatePem: fx("expired-cert.pem"),
+    });
+    const before = requestCount;
+
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://exp-managed", {
+          type: "http",
+          method: "GET",
+          url: `${targetUrl}/x`,
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.CERT_VALUE_UNSUPPORTED,
+    );
+
+    expect(requestCount).toBe(before);
+    // The renewal census reads `secrets.status`, so a transition here would
+    // drop the certificate that most needs renewing.
+    expect(storedSecretStatus(secretId)).toBe("active");
+    expect(engine.getExpiringCertificates(30).some((r) => r.secret_id === secretId)).toBe(true);
+
+    const uses = engine.queryAudit({ secretId, eventType: AuditEventType.SECRET_USE });
+    expect(uses).toHaveLength(1);
+    expect(uses[0]?.success).toBe(false);
+    expect(uses[0]?.detail).toMatchObject({ error: "CERT_VALUE_UNSUPPORTED" });
+    expect(engine.queryAudit({ secretId, eventType: AuditEventType.SECRET_EXPIRE })).toHaveLength(
+      0,
+    );
+  });
+
+  it("refuses a CSR-pending certificate secret with the certificate code", async () => {
+    const { secretId } = await engine.importCertificate("csr-pending-use", fx("rsa-key.pem"), {
+      csrPem: "-----BEGIN CERTIFICATE REQUEST-----\nMIIB\n-----END CERTIFICATE REQUEST-----\n",
+      subject: "CN=csr-pending.example.com",
+    });
+
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://csr-pending-use", {
+          type: "http",
+          method: "GET",
+          url: `${targetUrl}/x`,
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.CERT_VALUE_UNSUPPORTED,
+    );
+
+    expect(storedSecretStatus(secretId)).toBe("pending");
+  });
+
   it("refuses the direct value accessor", async () => {
     await expect(engine.getSecretValue("secret://tls-cert")).rejects.toMatchObject({
       code: ErrorCode.CERT_VALUE_UNSUPPORTED,
@@ -894,88 +963,122 @@ describe("certificate accessors", () => {
     await expect(engine.getCertificatePrivateKey(plainId)).rejects.toMatchObject({
       code: ErrorCode.CERT_NOT_CONFIGURED,
     });
-    expect(() => engine.storeAcmeAccount(plainId, "{}")).toThrow(notConfigured);
     expect(() => engine.getAcmeAccount(plainId)).toThrow(notConfigured);
   });
 
-  it("ACME account roundtrips through KEK encryption and is stored encrypted", () => {
-    expect(engine.getAcmeAccount(secretId)).toBeNull();
+  it("an import carrying acmeAccountJson stores the account in the cert.issue transaction", async () => {
+    const { secretId: acmeId } = await engine.importCertificate("acme-web", fx("ec-key.pem"), {
+      certificatePem: fx("ec-cert.pem"),
+      acmeIssued: true,
+      acmeAccountJson: JSON.stringify({ privateKeyPem: "k", accountUrl: "u" }),
+    });
 
-    engine.storeAcmeAccount(secretId, JSON.stringify({ privateKeyPem: "k", accountUrl: "u" }));
-    expect(JSON.parse(engine.getAcmeAccount(secretId) as string)).toEqual({
+    const row = storedCert(acmeId) as StoredCertRow;
+    expect(row.acme_account_encrypted).not.toBeNull();
+    expect((row.acme_account_encrypted as Buffer).toString("utf8")).not.toContain("accountUrl");
+    expect(JSON.parse(engine.getAcmeAccount(acmeId) as string)).toEqual({
       privateKeyPem: "k",
       accountUrl: "u",
     });
 
-    const row = storedCert(secretId) as StoredCertRow;
+    const issue = engine
+      .queryAudit({ eventType: AuditEventType.CERT_ISSUE })
+      .filter((e) => e.secret_id === acmeId);
+    expect(issue).toHaveLength(1);
+    expect(issue[0]?.detail).toMatchObject({ acme: true, acme_account: true });
+    expect(
+      engine
+        .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
+        .filter((e) => e.secret_id === acmeId),
+    ).toHaveLength(0);
+  });
+
+  it("rolls the ACME account back with the certificate when the cert.issue write fails", async () => {
+    // Pass 1 = the secret.create row the manager's own transaction writes, so
+    // the break lands on the cert.issue row of the certificate transaction.
+    failAuditInsertAfter(1);
+
+    await expect(
+      engine.importCertificate("acme-rb", fx("ec-key.pem"), {
+        certificatePem: fx("ec-cert.pem"),
+        acmeIssued: true,
+        acmeAccountJson: JSON.stringify({ privateKeyPem: "k", accountUrl: "u" }),
+      }),
+    ).rejects.toThrow("audit unavailable");
+
+    vi.restoreAllMocks();
+    // The secret row committed in the manager's own transaction, so it survives
+    // as PENDING; only the certificate transaction rolls back, which takes the
+    // ACME account with it.
+    const rolledBackId = await engine.resolveSecretId("secret://acme-rb");
+    expect(storedCert(rolledBackId)).toBeUndefined();
+    expect(() => engine.getAcmeAccount(rolledBackId)).toThrow(
+      expect.objectContaining({ code: ErrorCode.CERT_NOT_CONFIGURED }),
+    );
+  });
+
+  it("a manual import records acme_account: false and stores no account", async () => {
+    const { secretId: plainCertId } = await engine.importCertificate(
+      "manual-web",
+      fx("ec-key.pem"),
+      {
+        certificatePem: fx("ec-cert.pem"),
+      },
+    );
+    const issue = engine
+      .queryAudit({ eventType: AuditEventType.CERT_ISSUE })
+      .filter((e) => e.secret_id === plainCertId);
+    expect(issue[0]?.detail).toMatchObject({ acme: false, acme_account: false });
+    expect(engine.getAcmeAccount(plainCertId)).toBeNull();
+  });
+
+  it("acmeAccountJson without acmeIssued is refused before any write", async () => {
+    await expectVaultError(
+      () =>
+        engine.importCertificate("bad-acme", fx("ec-key.pem"), {
+          certificatePem: fx("ec-cert.pem"),
+          acmeAccountJson: "{}",
+        }),
+      ErrorCode.INVALID_INPUT,
+    );
+    await expect(engine.resolveSecretId("secret://bad-acme")).rejects.toMatchObject({
+      code: ErrorCode.SECRET_NOT_FOUND,
+    });
+  });
+
+  it("ACME account roundtrips through KEK encryption and is stored encrypted", async () => {
+    expect(engine.getAcmeAccount(secretId)).toBeNull();
+
+    const { secretId: acmeId } = await engine.importCertificate(
+      "roundtrip-acme",
+      fx("ec-key.pem"),
+      {
+        certificatePem: fx("ec-cert.pem"),
+        acmeIssued: true,
+        acmeAccountJson: JSON.stringify({ privateKeyPem: "k", accountUrl: "u" }),
+      },
+    );
+    expect(JSON.parse(engine.getAcmeAccount(acmeId) as string)).toEqual({
+      privateKeyPem: "k",
+      accountUrl: "u",
+    });
+
+    const row = storedCert(acmeId) as StoredCertRow;
     expect(row.acme_account_encrypted).not.toBeNull();
     expect((row.acme_account_encrypted as Buffer).toString("utf8")).not.toContain("accountUrl");
   });
 
-  it("storeAcmeAccount overwrites a previously stored account", () => {
-    engine.storeAcmeAccount(secretId, "first-account");
-    engine.storeAcmeAccount(secretId, "second-account");
-    expect(engine.getAcmeAccount(secretId)).toBe("second-account");
-  });
-
-  it("storeAcmeAccount writes one policy.grant row and bumps the secret's updated_at", () => {
-    backdateSecret(secretId);
-    engine.storeAcmeAccount(secretId, JSON.stringify({ privateKeyPem: "k", accountUrl: "u" }));
-
-    expect(storedSecretUpdatedAt(secretId)).toBeGreaterThan(0);
-
-    const rows = engine
-      .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
-      .filter((e) => e.secret_id === secretId);
-    expect(rows.length).toBe(1);
-    expect(rows[0]?.success).toBe(true);
-    expect(rows[0]?.detail).toEqual({ config: "acme_account" });
-    expect(JSON.stringify(rows[0]?.detail)).not.toContain("privateKeyPem");
-  });
-
-  it("storeAcmeAccount attributes its policy.grant row to the issuing caller", () => {
-    engine.storeAcmeAccount(secretId, "{}", {
-      principal_type: PrincipalType.AGENT,
-      principal_id: "issuer",
-      interface: "cli",
+  it("getAcmeAccount writes one secret.read row for a stored account", async () => {
+    const { secretId: acmeId } = await engine.importCertificate("read-row-acme", fx("ec-key.pem"), {
+      certificatePem: fx("ec-cert.pem"),
+      acmeIssued: true,
+      acmeAccountJson: JSON.stringify({ privateKeyPem: "k", accountUrl: "u" }),
     });
-
-    const [row] = engine
-      .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
-      .filter((e) => e.secret_id === secretId);
-    expect(row?.principal_type).toBe(PrincipalType.AGENT);
-    expect(row?.principal_id).toBe("issuer");
-    expect(row?.detail).toEqual({ config: "acme_account", interface: "cli" });
-  });
-
-  it("storeAcmeAccount audits every write, not only the first", () => {
-    engine.storeAcmeAccount(secretId, "first-account");
-    engine.storeAcmeAccount(secretId, "second-account");
-    const rows = engine
-      .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
-      .filter((e) => e.secret_id === secretId);
-    expect(rows.length).toBe(2);
-  });
-
-  it("storeAcmeAccount rolls the account write back when the audit write fails", () => {
-    failAuditInsertAfter(0);
-
-    expect(() => engine.storeAcmeAccount(secretId, "unaudited-account")).toThrow(
-      "audit unavailable",
-    );
-
-    vi.restoreAllMocks();
-    expect(storedCert(secretId)?.acme_account_encrypted).toBeNull();
-    expect(engine.getAcmeAccount(secretId)).toBeNull();
-  });
-
-  it("getAcmeAccount writes one secret.read row for a stored account", () => {
-    engine.storeAcmeAccount(secretId, JSON.stringify({ privateKeyPem: "k", accountUrl: "u" }));
-    expect(engine.getAcmeAccount(secretId)).toContain("accountUrl");
+    expect(engine.getAcmeAccount(acmeId)).toContain("accountUrl");
 
     const reads = engine
       .queryAudit({ eventType: AuditEventType.SECRET_READ })
-      .filter((e) => e.secret_id === secretId);
+      .filter((e) => e.secret_id === acmeId);
     expect(reads.length).toBe(1);
     expect(reads[0]?.success).toBe(true);
     expect(reads[0]?.detail).toMatchObject({ config: "acme_account" });
@@ -988,11 +1091,15 @@ describe("certificate accessors", () => {
   });
 
   it("an ACME account blob is bound to its own secret by AAD", async () => {
-    engine.storeAcmeAccount(secretId, JSON.stringify({ accountUrl: "u" }));
+    const { secretId: acmeId } = await engine.importCertificate("aad-acme", fx("ec-key.pem"), {
+      certificatePem: fx("ec-cert.pem"),
+      acmeIssued: true,
+      acmeAccountJson: JSON.stringify({ accountUrl: "u" }),
+    });
     const { secretId: otherId } = await engine.importCertificate("other-acme", fx("ec-key.pem"), {
       certificatePem: fx("ec-cert.pem"),
     });
-    transplantAcmeBlob(secretId, otherId);
+    transplantAcmeBlob(acmeId, otherId);
     expect(() => engine.getAcmeAccount(otherId)).toThrow(
       expect.objectContaining({ code: ErrorCode.ENCRYPTION_ERROR }),
     );
@@ -1032,7 +1139,6 @@ describe("certificate accessors", () => {
       code: ErrorCode.VAULT_LOCKED,
     });
     expect(() => engine.getExpiringCertificates(30)).toThrow(locked);
-    expect(() => engine.storeAcmeAccount(secretId, "{}")).toThrow(locked);
     expect(() => engine.getAcmeAccount(secretId)).toThrow(locked);
   });
 });
@@ -1540,6 +1646,24 @@ describe("certificate accessors — caller policy enforcement", () => {
     );
   });
 
+  const gatedAcmeCert = async (name: string, accountJson: string): Promise<string> => {
+    const { secretId: id } = await engine.importCertificate(name, fx("ec-key.pem"), {
+      certificatePem: fx("ec-cert.pem"),
+      acmeIssued: true,
+      acmeAccountJson: accountJson,
+    });
+    engine.grantPolicy(
+      {
+        secretId: id,
+        principalType: PrincipalType.AGENT,
+        principalId: "reader",
+        permissions: ["read"] as Permission[],
+      },
+      "test-setup",
+    );
+    return id;
+  };
+
   it("getCertificateStatus refuses an ungranted caller and allows a read-granted one", async () => {
     await expectVaultError(
       () =>
@@ -1603,11 +1727,11 @@ describe("certificate accessors — caller policy enforcement", () => {
     });
   });
 
-  it("getAcmeAccount refuses an ungranted caller before decrypting", () => {
-    engine.storeAcmeAccount(secretId, JSON.stringify({ privateKeyPem: "k" }));
+  it("getAcmeAccount refuses an ungranted caller before decrypting", async () => {
+    const acmeId = await gatedAcmeCert("pol-acme-denied", JSON.stringify({ privateKeyPem: "k" }));
 
     expect(() =>
-      engine.getAcmeAccount(secretId, {
+      engine.getAcmeAccount(acmeId, {
         principal_type: PrincipalType.AGENT,
         principal_id: "other-agent",
         interface: "cli",
@@ -1622,11 +1746,11 @@ describe("certificate accessors — caller policy enforcement", () => {
     expect(JSON.stringify(denials[0]?.detail)).not.toContain("privateKeyPem");
   });
 
-  it("getAcmeAccount attributes the granted read to its caller", () => {
-    engine.storeAcmeAccount(secretId, "account-blob");
+  it("getAcmeAccount attributes the granted read to its caller", async () => {
+    const acmeId = await gatedAcmeCert("pol-acme-granted", "account-blob");
 
     expect(
-      engine.getAcmeAccount(secretId, {
+      engine.getAcmeAccount(acmeId, {
         principal_type: PrincipalType.AGENT,
         principal_id: "reader",
         interface: "cli",

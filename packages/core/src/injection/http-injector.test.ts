@@ -1,12 +1,26 @@
 import { createServer } from "node:http";
 import type { Server } from "node:http";
-import { ErrorCode } from "@harpoc/shared";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { ErrorCode, MAX_HTTP_RESPONSE_BYTES } from "@harpoc/shared";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { AuditLogger } from "../audit/audit-logger.js";
 import { HttpInjector } from "./http-injector.js";
 
 let server: Server;
 let baseUrl: string;
 const requestPaths: string[] = [];
+const rows: unknown[] = [];
+const logger = {
+  log: (o: unknown) => {
+    rows.push(o);
+    return 1;
+  },
+} as unknown as AuditLogger;
+
+// The recording logger is module-scoped, so every case that reads `rows.at(-1)`
+// starts from an empty log — no row may be load-bearing across cases.
+beforeEach(() => {
+  rows.length = 0;
+});
 
 async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
   const err = await promise.then(
@@ -148,6 +162,35 @@ beforeAll(async () => {
       return;
     }
 
+    if (url.pathname === "/big") {
+      const bytes = parseInt(url.searchParams.get("bytes") ?? "0", 10);
+      // `declared=<n>` announces an arbitrary body size, independent of how
+      // many bytes are actually sent — which is what isolates the
+      // Content-Length pre-check from the streamed guard.
+      const contentLength = url.searchParams.get("declared") ?? undefined;
+      const chunk = Buffer.alloc(64 * 1024, 0x61);
+      res.writeHead(
+        200,
+        contentLength !== undefined
+          ? { "Content-Type": "text/plain", "Content-Length": contentLength }
+          : { "Content-Type": "text/plain" },
+      );
+      let sent = 0;
+      const pump = (): void => {
+        while (sent < bytes) {
+          const n = Math.min(chunk.length, bytes - sent);
+          sent += n;
+          if (!res.write(chunk.subarray(0, n))) {
+            res.once("drain", pump);
+            return;
+          }
+        }
+        res.end();
+      };
+      pump();
+      return;
+    }
+
     res.writeHead(404);
     res.end("Not Found");
   });
@@ -166,10 +209,13 @@ afterAll(() => {
 describe("HttpInjector", () => {
   const injector = new HttpInjector(null);
 
+  // The placement pins below read the credential back off the wire, so each
+  // asks for `full` — the injector redacts its own result under every other
+  // mode (E70), which would leave nothing for a placement to match.
   describe("bearer injection", () => {
     it("injects Bearer token in Authorization header", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/echo` },
+        { method: "GET", url: `${baseUrl}/echo`, responseMode: "full" },
         new Uint8Array(Buffer.from("my-token")),
         { type: "bearer" },
       );
@@ -183,7 +229,7 @@ describe("HttpInjector", () => {
   describe("header injection", () => {
     it("injects value in custom header", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/echo` },
+        { method: "GET", url: `${baseUrl}/echo`, responseMode: "full" },
         new Uint8Array(Buffer.from("key-123")),
         { type: "header", header_name: "X-Api-Key" },
       );
@@ -197,7 +243,7 @@ describe("HttpInjector", () => {
   describe("query injection", () => {
     it("injects value as query parameter", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/echo` },
+        { method: "GET", url: `${baseUrl}/echo`, responseMode: "full" },
         new Uint8Array(Buffer.from("query-val")),
         { type: "query", query_param: "api_key" },
       );
@@ -211,7 +257,7 @@ describe("HttpInjector", () => {
   describe("basic_auth injection", () => {
     it("injects Basic auth header", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/echo` },
+        { method: "GET", url: `${baseUrl}/echo`, responseMode: "full" },
         new Uint8Array(Buffer.from("user:pass")),
         { type: "basic_auth" },
       );
@@ -415,6 +461,7 @@ describe("HttpInjector", () => {
           method: "GET",
           url: `${baseUrl}/redirect`,
           urlAllowlist: [`${baseUrl}/*`, `http://localhost:${port()}/*`],
+          responseMode: "full",
         },
         new Uint8Array(Buffer.from("token")),
         { type: "bearer" },
@@ -457,7 +504,10 @@ describe("HttpInjector", () => {
    * T1: the strip itself was pinned only by the `redirect_warning` string, so
    * deleting all three statements while keeping the assignment left the suite
    * green while the wire delivered the credential to the cross-origin hop.
-   * These assertions read what the second server actually received.
+   * These assertions read what the second server actually received, so every
+   * request here asks for `full`: under any other mode the injector redacts
+   * its own result (E70) and a delivered credential would read back as
+   * `[REDACTED]` rather than as itself.
    */
   describe("cross-origin redirects strip the injected credential (same-origin mode)", () => {
     const CREDENTIAL = "sk-live-t1-4c8e1a90fb27d635";
@@ -466,7 +516,7 @@ describe("HttpInjector", () => {
 
     it("the Authorization header does not reach the cross-origin hop", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect` },
+        { method: "GET", url: `${baseUrl}/redirect`, responseMode: "full" },
         new Uint8Array(Buffer.from(CREDENTIAL)),
         { type: "bearer" },
         "same-origin",
@@ -480,7 +530,7 @@ describe("HttpInjector", () => {
 
     it("the injected custom header does not reach the cross-origin hop", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect` },
+        { method: "GET", url: `${baseUrl}/redirect`, responseMode: "full" },
         new Uint8Array(Buffer.from(CREDENTIAL)),
         { type: "header", header_name: "X-Api-Key" },
         "same-origin",
@@ -495,7 +545,7 @@ describe("HttpInjector", () => {
     // value, so a redaction-shaped defence would not catch it — only the strip.
     it("basic_auth credentials do not reach the cross-origin hop", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect` },
+        { method: "GET", url: `${baseUrl}/redirect`, responseMode: "full" },
         new Uint8Array(Buffer.from(`user:${CREDENTIAL}`)),
         { type: "basic_auth" },
         "same-origin",
@@ -507,7 +557,7 @@ describe("HttpInjector", () => {
 
     it("the injected query parameter does not survive the cross-origin hop", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect-keep-query` },
+        { method: "GET", url: `${baseUrl}/redirect-keep-query`, responseMode: "full" },
         new Uint8Array(Buffer.from(CREDENTIAL)),
         { type: "query", query_param: "api_key" },
         "same-origin",
@@ -523,7 +573,7 @@ describe("HttpInjector", () => {
     // that deliberately carries the credential across origins.
     it("control: a same-origin hop still receives the credential", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect-same` },
+        { method: "GET", url: `${baseUrl}/redirect-same`, responseMode: "full" },
         new Uint8Array(Buffer.from(CREDENTIAL)),
         { type: "bearer" },
         "same-origin",
@@ -535,7 +585,7 @@ describe("HttpInjector", () => {
 
     it("control: `any` carries the credential across origins by design", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect` },
+        { method: "GET", url: `${baseUrl}/redirect`, responseMode: "full" },
         new Uint8Array(Buffer.from(CREDENTIAL)),
         { type: "bearer" },
         "any",
@@ -694,6 +744,7 @@ describe("HttpInjector", () => {
           url: `${baseUrl}/echo`,
           body: JSON.stringify({ key: "value" }),
           headers: { "Content-Type": "application/json" },
+          responseMode: "full",
         },
         new Uint8Array(Buffer.from("post-token")),
         { type: "bearer" },
@@ -712,6 +763,7 @@ describe("HttpInjector", () => {
           method: "PUT",
           url: `${baseUrl}/echo`,
           body: "put-body-data",
+          responseMode: "full",
         },
         new Uint8Array(Buffer.from("put-key")),
         { type: "header", header_name: "X-Api-Key" },
@@ -730,6 +782,7 @@ describe("HttpInjector", () => {
           method: "POST",
           url: `${baseUrl}/echo`,
           body: "query-body",
+          responseMode: "full",
         },
         new Uint8Array(Buffer.from("query-val")),
         { type: "query", query_param: "api_key" },
@@ -748,6 +801,7 @@ describe("HttpInjector", () => {
           method: "PATCH",
           url: `${baseUrl}/echo`,
           body: "patch-data",
+          responseMode: "full",
         },
         new Uint8Array(Buffer.from("user:pass")),
         { type: "basic_auth" },
@@ -849,6 +903,109 @@ describe("HttpInjector", () => {
         "/chain/1",
         "/chain-end",
       ]);
+    });
+  });
+
+  describe("response byte cap (E80)", () => {
+    it("refuses a streamed body one byte past the cap, audits it, and returns no body", async () => {
+      const capped = new HttpInjector(logger);
+      const err = await rejectionOf(
+        capped.executeWithSecret(
+          { method: "GET", url: `${baseUrl}/big?bytes=${MAX_HTTP_RESPONSE_BYTES + 1}` },
+          new Uint8Array(Buffer.from("cap-tok")),
+          { type: "bearer" },
+          "any",
+          "secret-1",
+        ),
+      );
+      expect((err as { code?: string }).code).toBe(ErrorCode.RESPONSE_TOO_LARGE);
+      expect(err.message).not.toContain("/big");
+      const last = rows.at(-1) as { detail: { error?: string }; success?: boolean };
+      expect(last.success).toBe(false);
+      expect(last.detail.error).toBe(ErrorCode.RESPONSE_TOO_LARGE);
+    });
+
+    // The body is 100 bytes — well inside the cap — so only the declared
+    // Content-Length can refuse it: the case reds the moment the pre-check goes.
+    it("refuses a declared Content-Length past the cap without reading the body", async () => {
+      const err = await rejectionOf(
+        injector.executeWithSecret(
+          {
+            method: "GET",
+            url: `${baseUrl}/big?bytes=100&declared=${MAX_HTTP_RESPONSE_BYTES + 1}`,
+          },
+          new Uint8Array(Buffer.from("cap-tok")),
+          { type: "bearer" },
+        ),
+      );
+      expect((err as { code?: string }).code).toBe(ErrorCode.RESPONSE_TOO_LARGE);
+    });
+
+    it("returns a body sitting exactly on the cap", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/big?bytes=${MAX_HTTP_RESPONSE_BYTES}` },
+        new Uint8Array(Buffer.from("cap-tok")),
+        { type: "bearer" },
+      );
+      expect(response.body?.length).toBe(MAX_HTTP_RESPONSE_BYTES);
+    });
+
+    it("status_only never reads the body, whatever its size", async () => {
+      const response = await injector.executeWithSecret(
+        {
+          method: "GET",
+          url: `${baseUrl}/big?bytes=${MAX_HTTP_RESPONSE_BYTES * 2}`,
+          responseMode: "status_only",
+        },
+        new Uint8Array(Buffer.from("cap-tok")),
+        { type: "bearer" },
+      );
+      expect(response.status).toBe(200);
+      expect(response.body).toBeUndefined();
+    });
+  });
+
+  describe("redaction is the injector's and leaves a trace (E70)", () => {
+    it("filtered mode redacts an echoed credential and marks the row sanitized", async () => {
+      const recorded = new HttpInjector(logger);
+      const response = await recorded.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/echo` },
+        new Uint8Array(Buffer.from("echo-me-token-value")),
+        { type: "bearer" },
+        "any",
+        "secret-1",
+      );
+      expect(response.body).not.toContain("echo-me-token-value");
+      expect(response.body).toContain("[REDACTED]");
+      const last = rows.at(-1) as { detail: Record<string, unknown> };
+      expect(last.detail).toMatchObject({ context: "http", status: 200, sanitized: true });
+    });
+
+    it("a clean response carries no sanitized key", async () => {
+      const recorded = new HttpInjector(logger);
+      await recorded.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/status?code=200` },
+        new Uint8Array(Buffer.from("echo-me-token-value")),
+        { type: "bearer" },
+        "any",
+        "secret-1",
+      );
+      const last = rows.at(-1) as { detail: Record<string, unknown> };
+      expect("sanitized" in last.detail).toBe(false);
+    });
+
+    it("full mode neither redacts nor marks", async () => {
+      const recorded = new HttpInjector(logger);
+      const response = await recorded.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/echo`, responseMode: "full" },
+        new Uint8Array(Buffer.from("echo-me-token-value")),
+        { type: "bearer" },
+        "any",
+        "secret-1",
+      );
+      expect(response.body).toContain("echo-me-token-value");
+      const last = rows.at(-1) as { detail: Record<string, unknown> };
+      expect("sanitized" in last.detail).toBe(false);
     });
   });
 });

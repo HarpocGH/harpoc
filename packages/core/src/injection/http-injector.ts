@@ -8,14 +8,21 @@ import type {
   InjectionConfig,
   ResponseMode,
 } from "@harpoc/shared";
-import { DEFAULT_HTTP_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
+import {
+  DEFAULT_HTTP_TIMEOUT_MS,
+  ErrorCode,
+  MAX_HTTP_RESPONSE_BYTES,
+  VaultError,
+  contentLengthExceeds,
+  readBodyCapped,
+} from "@harpoc/shared";
 import { Agent, fetch as undiciFetch } from "undici";
 import type { Response as UndiciResponse } from "undici";
 import type { AuditAttribution } from "../audit/attribution.js";
 import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { matchesUrlAllowlist } from "./allowlist.js";
-import { redactErrorMessage } from "./output-sanitizer.js";
+import { redactErrorMessage, redactSecretEncodings } from "./output-sanitizer.js";
 import { validateUrl } from "./url-validator.js";
 
 type PinnedLookup = (
@@ -134,6 +141,29 @@ export interface HttpInjectorRequest {
   urlAllowlist?: string[];
 }
 
+/** Scrub the secret value and its encodings from an HTTP result (I2a); true when anything changed. */
+function redactHttpResult(result: HttpResult, valueStr: string): boolean {
+  let changed = false;
+  if (result.body) {
+    const out = redactSecretEncodings(result.body, valueStr);
+    changed = changed || out !== result.body;
+    result.body = out;
+  }
+  if (result.error) {
+    const out = redactSecretEncodings(result.error, valueStr);
+    changed = changed || out !== result.error;
+    result.error = out;
+  }
+  if (result.headers) {
+    for (const [key, val] of Object.entries(result.headers)) {
+      const out = redactSecretEncodings(val, valueStr);
+      changed = changed || out !== val;
+      result.headers[key] = out;
+    }
+  }
+  return changed;
+}
+
 /**
  * Executes HTTP requests with injected credentials.
  * The secret value is injected at the execution layer and never returned to the LLM.
@@ -196,6 +226,15 @@ export class HttpInjector {
         await dispatcher.close();
       }
 
+      // Value + encodings redaction (I2a) — the injector's own, so the flag
+      // lands on the row it writes (E70); skipped only under the policy-gated
+      // `full` opt-out.
+      let sanitized = false;
+      if ((request.responseMode ?? "filtered") !== "full") {
+        const valueStr = Buffer.from(secretValue).toString("utf8");
+        if (valueStr.length > 0) sanitized = redactHttpResult(response, valueStr);
+      }
+
       this.auditLogger?.log(
         withAttribution(
           {
@@ -208,6 +247,7 @@ export class HttpInjector {
               status: response.status,
               injection_type: injection.type,
               response_mode: request.responseMode ?? "filtered",
+              ...(sanitized ? { sanitized: true } : {}),
             },
           },
           attribution,
@@ -315,7 +355,12 @@ export class HttpInjector {
 
         // Not a redirect — return response
         if (response.status < 300 || response.status >= 400) {
-          const result = await this.buildResponse(response, responseMode, responseHeaderAllowlist);
+          const result = await this.buildResponse(
+            response,
+            currentUrl,
+            responseMode,
+            responseHeaderAllowlist,
+          );
           if (redirectWarning) result.redirect_warning = redirectWarning;
           return result;
         }
@@ -323,7 +368,7 @@ export class HttpInjector {
         const location = response.headers.get("location");
 
         if (followRedirects === "none" || !location) {
-          return this.buildResponse(response, responseMode, responseHeaderAllowlist);
+          return this.buildResponse(response, currentUrl, responseMode, responseHeaderAllowlist);
         }
 
         // This hop's body is never read — release the connection before following.
@@ -399,6 +444,7 @@ export class HttpInjector {
 
   private async buildResponse(
     response: UndiciResponse,
+    currentUrl: string,
     responseMode: ResponseMode,
     responseHeaderAllowlist: string[],
   ): Promise<HttpResult> {
@@ -427,10 +473,26 @@ export class HttpInjector {
       responseHeaders[key] = value;
     });
 
+    // Bounded read (E80): past `MAX_HTTP_RESPONSE_BYTES` the body is refused,
+    // never truncated — a cut mid-string can split an echoed credential past
+    // the redactor. The thrown VaultError lands in `executeWithSecret`'s own
+    // catch, which writes the failed row.
+    const origin = new URL(currentUrl).origin;
+    if (contentLengthExceeds(response.headers, MAX_HTTP_RESPONSE_BYTES)) {
+      await response.body?.cancel().catch(() => {});
+      throw VaultError.responseTooLarge(origin, MAX_HTTP_RESPONSE_BYTES);
+    }
+
     let body: string | undefined;
     try {
-      body = await response.text();
-    } catch {
+      const read = await readBodyCapped(
+        response.body as ReadableStream<Uint8Array> | null,
+        MAX_HTTP_RESPONSE_BYTES,
+      );
+      if (!read.ok) throw VaultError.responseTooLarge(origin, MAX_HTTP_RESPONSE_BYTES);
+      body = new TextDecoder().decode(read.bytes);
+    } catch (err) {
+      if (err instanceof VaultError) throw err;
       body = undefined;
     }
 

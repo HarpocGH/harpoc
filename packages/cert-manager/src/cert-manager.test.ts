@@ -198,6 +198,7 @@ interface ImportOptions {
   autoRenew?: boolean;
   renewBeforeDays?: number;
   acmeIssued?: boolean;
+  acmeAccountJson?: string;
 }
 
 interface CertificateMaterial {
@@ -232,8 +233,6 @@ function makeEngine() {
     getCertificateStatus: vi.fn<(secretId: string, caller?: CallerContext) => CertificateStatus>(
       () => STATUS,
     ),
-    storeAcmeAccount:
-      vi.fn<(secretId: string, accountJson: string, caller?: CallerContext) => void>(),
     getAcmeAccount: vi.fn<(secretId: string, caller?: CallerContext) => string | null>(() => null),
   };
 }
@@ -251,9 +250,9 @@ function issued(): AcmeStub {
 }
 
 function storedAccount(engine: EngineMock): { privateKeyPem: string; accountUrl: string } {
-  const call = engine.storeAcmeAccount.mock.calls[0];
-  if (call === undefined) throw new Error("storeAcmeAccount was not called");
-  return JSON.parse(call[1]) as { privateKeyPem: string; accountUrl: string };
+  const opts = engine.importCertificate.mock.calls[0]?.[2];
+  if (opts?.acmeAccountJson === undefined) throw new Error("the import carried no ACME account");
+  return JSON.parse(opts.acmeAccountJson) as { privateKeyPem: string; accountUrl: string };
 }
 
 /**
@@ -532,7 +531,8 @@ describe("CertManager", () => {
     it("attributes the stored ACME account to the issuing caller", async () => {
       await manager.issueWithAcme("web", { ...issueOptions, algorithm: "ec", caller: CALLER });
 
-      expect(engine.storeAcmeAccount).toHaveBeenCalledWith(SECRET_ID, expect.any(String), CALLER);
+      expect(engine.importCertificate.mock.calls[0]?.[4]).toEqual(CALLER);
+      expect(storedAccount(engine).accountUrl).toBe(ACCOUNT_URL);
     });
 
     it("orders exactly the requested domains and finalizes with the generated CSR DER", async () => {
@@ -551,20 +551,14 @@ describe("CertManager", () => {
       expect(client.finalize).toHaveBeenCalledWith(FINALIZE_URL, expected);
     });
 
-    it("stores the ACME account key and URL only after the certificate landed", async () => {
+    it("stores the ACME account key and URL inside the certificate import", async () => {
       await manager.issueWithAcme("web", { ...issueOptions, algorithm: "ec" });
 
       const account = storedAccount(engine);
       expect(account.accountUrl).toBe(ACCOUNT_URL);
       expect(account.privateKeyPem).toBe(issued().accountKeyPem);
-      expect(engine.storeAcmeAccount).toHaveBeenCalledWith(
-        SECRET_ID,
-        expect.any(String),
-        undefined,
-      );
-      const importOrder = engine.importCertificate.mock.invocationCallOrder[0] as number;
-      const storeOrder = engine.storeAcmeAccount.mock.invocationCallOrder[0] as number;
-      expect(storeOrder).toBeGreaterThan(importOrder);
+      expect(importOptions(engine).acmeIssued).toBe(true);
+      expect(engine.importCertificate).toHaveBeenCalledTimes(1);
     });
 
     it("uses a freshly generated EC account key", async () => {
@@ -662,7 +656,6 @@ describe("CertManager", () => {
       expect(scenario.solverStarts).toHaveLength(1);
       expect(scenario.solverStops).toBe(1);
       expect(engine.importCertificate).not.toHaveBeenCalled();
-      expect(engine.storeAcmeAccount).not.toHaveBeenCalled();
     });
 
     it("solves every authorization of a multi-domain order", async () => {
@@ -878,7 +871,7 @@ describe("CertManager", () => {
       expect(client.ensureAccount).not.toHaveBeenCalled();
       expect(client.accountUrl).toBe(ACCOUNT_URL);
       expect(client.accountKeyPem).toContain("-----BEGIN PRIVATE KEY-----");
-      expect(engine.storeAcmeAccount).not.toHaveBeenCalled();
+      expect(engine.importCertificate).not.toHaveBeenCalled();
     });
 
     it("orders the stored certificate's SANs and finalizes with the stored CSR DER", async () => {

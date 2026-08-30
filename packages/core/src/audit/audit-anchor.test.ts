@@ -61,16 +61,15 @@ describe("chainTail", () => {
     expect(query.chainTail()).toBeNull();
   });
 
-  it("returns null when only legacy rows exist", () => {
+  it("returns null when the only row carries no link", () => {
     insertLegacyRow();
     expect(query.chainTail()).toBeNull();
   });
 
-  it("skips trailing legacy rows back to the newest chained row", () => {
-    const ids = logRows(2);
+  it("returns null when the last row carries no link — nothing is anchorable", () => {
+    logRows(2);
     insertLegacyRow();
-    const tail = query.chainTail();
-    expect(tail?.lastId).toBe(ids[1]);
+    expect(query.chainTail()).toBeNull();
   });
 });
 
@@ -151,8 +150,6 @@ describe("anchored chain verification (tail truncation)", () => {
   });
 
   it("treats a legacy row at the anchored id as a mismatch", () => {
-    // Legacy row FIRST so the chain itself stays valid (a legacy link after a
-    // chained one is tampering, M2) — this pins the anchor status alone.
     const legacyId = insertLegacyRow();
     logRows(2);
     const anchor: AuditChainAnchorInput = {
@@ -162,6 +159,7 @@ describe("anchored chain verification (tail truncation)", () => {
     const result = query.verifyChain(anchor);
     expect(result.valid).toBe(false);
     expect(result.anchor).toEqual({ lastId: legacyId, status: "hmac_mismatch" });
+    expect(result.firstBrokenId).toBe(legacyId);
   });
 
   it("fails on an anchor whose id never existed", () => {
@@ -175,7 +173,7 @@ describe("anchored chain verification (tail truncation)", () => {
   it("leaves the anchor-less result shape unchanged", () => {
     logRows(2);
     const result = query.verifyChain();
-    expect(result).toEqual({ valid: true, checked: 2, legacy: 0, firstBrokenId: null });
+    expect(result).toEqual({ valid: true, checked: 2, firstBrokenId: null });
     expect("anchor" in result).toBe(false);
   });
 });

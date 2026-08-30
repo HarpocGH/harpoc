@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -56,6 +56,7 @@ const OK_RESULT: SpawnCapturedResult = {
   truncated: false,
   signal: null,
   spawn_failed: false,
+  redacted: false,
 };
 
 function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
@@ -223,6 +224,7 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
   const spawnMock = vi.mocked(spawnCaptured);
 
   const REPO = "https://8.8.8.8/org/repo.git";
+  const CA_PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
 
   function httpsPolicy(): InjectionPolicy {
     return policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] });
@@ -251,6 +253,125 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
     expect(args.slice(0, 2)).toEqual(["-c", "http.followRedirects=false"]);
     // The forced config must precede the subcommand or git ignores it.
     expect(args.indexOf("clone")).toBeGreaterThan(args.indexOf("http.followRedirects=false"));
+  });
+
+  it("pins a stored git CA through vault-authored config, on a 0600 file that is removed after the call", async () => {
+    let caPathSeen: string | undefined;
+    let caContent: string | undefined;
+    let caMode: number | undefined;
+    spawnMock.mockImplementationOnce(async (_cmd: string, args: string[]) => {
+      const at = args.indexOf("-c", 2);
+      caPathSeen = args[at + 1]?.replace(/^http\.sslCAInfo=/, "");
+      if (caPathSeen) {
+        caContent = readFileSync(caPathSeen, "utf8");
+        caMode = statSync(caPathSeen).mode & 0o777;
+      }
+      return OK_RESULT;
+    });
+
+    await injector.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      { git: { ca_pem: CA_PEM } },
+    );
+
+    const [, args] = spawnMock.mock.calls[0] as SpawnCall;
+    expect(args.slice(0, 6)).toEqual([
+      "-c",
+      "http.followRedirects=false",
+      "-c",
+      `http.sslCAInfo=${caPathSeen}`,
+      "-c",
+      "http.schannelUseSSLCAInfo=true",
+    ]);
+    expect(args.indexOf("clone")).toBe(6);
+    expect(caContent).toBe(CA_PEM);
+    if (process.platform !== "win32") expect(caMode).toBe(0o600);
+    expect(existsSync(caPathSeen as string)).toBe(false);
+  });
+
+  it("adds no CA config when the connection config has no git group", async () => {
+    await injector.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      { database: { tls_mode: "require" } },
+    );
+    const [, args] = spawnMock.mock.calls[0] as SpawnCall;
+    expect(args.join(" ")).not.toContain("sslCAInfo");
+    expect(args.indexOf("clone")).toBe(2);
+  });
+
+  it("marks the audited result row ca_pinned when a stored CA is pinned", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    await audited.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      { git: { ca_pem: CA_PEM } },
+      "secret-1",
+    );
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        detail: expect.objectContaining({ transport: "https", ca_pinned: true }),
+      }),
+    );
+  });
+
+  it("marks the audited spawn-refusal row ca_pinned too", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockRejectedValue(VaultError.networkIsolationUnavailable("mocked"));
+    await expect(
+      audited.executeWithSecret(
+        { type: "git", operation: "clone", repository: REPO },
+        new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+        httpsPolicy(),
+        { git: { ca_pem: CA_PEM } },
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        detail: expect.objectContaining({
+          error: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+          ca_pinned: true,
+        }),
+      }),
+    );
+  });
+
+  it("marks the audited result row sanitized when the spawn seam redacted output", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({ ...OK_RESULT, redacted: true });
+    await audited.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      undefined,
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail).toMatchObject({ transport: "https", sanitized: true });
+  });
+
+  it("leaves sanitized out of the row entirely when nothing was redacted", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    await audited.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      undefined,
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect("sanitized" in row.detail).toBe(false);
   });
 
   it("binds the credential to the validated host", async () => {

@@ -103,7 +103,7 @@ describe("executeWebsocketAction — bounded collect", () => {
       collect: { max_messages: 2, window_ms: 5_000 },
     });
 
-    const result = await executeWebsocketAction(action, secretBytes(), basePolicy());
+    const { result } = await executeWebsocketAction(action, secretBytes(), basePolicy());
 
     expect(result.messages).toEqual(["m1", "m2"]);
   });
@@ -116,7 +116,7 @@ describe("executeWebsocketAction — bounded collect", () => {
     });
 
     const start2 = Date.now();
-    const result = await executeWebsocketAction(action, secretBytes(), basePolicy());
+    const { result } = await executeWebsocketAction(action, secretBytes(), basePolicy());
     const elapsed = Date.now() - start2;
 
     expect(result.messages).toEqual(["only"]);
@@ -127,7 +127,7 @@ describe("executeWebsocketAction — bounded collect", () => {
     const fake = await start({ messages: ["first", "second"] });
     const action = baseAction({ url: `ws://127.0.0.1:${fake.port}/` });
 
-    const result = await executeWebsocketAction(action, secretBytes(), basePolicy());
+    const { result } = await executeWebsocketAction(action, secretBytes(), basePolicy());
 
     expect(result.messages).toEqual(["first"]);
   });
@@ -148,7 +148,7 @@ describe("executeWebsocketAction — bounded close wait", () => {
     });
 
     const started = Date.now();
-    const result = await executeWebsocketAction(action, secretBytes(), basePolicy());
+    const { result } = await executeWebsocketAction(action, secretBytes(), basePolicy());
     const elapsed = Date.now() - started;
 
     // No server Close frame was ever received, so undici's `close` event
@@ -166,10 +166,37 @@ describe("executeWebsocketAction — response_mode shaping", () => {
     const fake = await start({ messages: [`echo: ${SECRET}`] });
     const action = baseAction({ url: `ws://127.0.0.1:${fake.port}/` });
 
-    const result = await executeWebsocketAction(action, secretBytes(), basePolicy());
+    const { result } = await executeWebsocketAction(action, secretBytes(), basePolicy());
 
     expect(result.messages[0]).not.toContain(SECRET);
     expect(result.messages[0]).toContain("[REDACTED]");
+  });
+
+  // E70: the redaction is invisible in the wire result, so the execution
+  // reports it and the engine stamps its success row from that.
+  it("reports sanitized when a frame carried the credential", async () => {
+    const fake = await start({ messages: [`echo: ${SECRET}`] });
+    const action = baseAction({ url: `ws://127.0.0.1:${fake.port}/` });
+
+    const execution = await executeWebsocketAction(action, secretBytes(), basePolicy());
+
+    expect(execution.sanitized).toBe(true);
+  });
+
+  it("reports sanitized false under full, which redacts nothing", async () => {
+    const fake = await start({ messages: [`echo: ${SECRET}`] });
+    const action = baseAction({
+      url: `ws://127.0.0.1:${fake.port}/`,
+      response_mode: "full",
+    });
+
+    const execution = await executeWebsocketAction(
+      action,
+      secretBytes(),
+      basePolicy({ response_mode: "full" }),
+    );
+
+    expect(execution.sanitized).toBe(false);
   });
 
   it("returns frames verbatim under full", async () => {
@@ -179,7 +206,7 @@ describe("executeWebsocketAction — response_mode shaping", () => {
       response_mode: "full",
     });
 
-    const result = await executeWebsocketAction(
+    const { result } = await executeWebsocketAction(
       action,
       secretBytes(),
       basePolicy({ response_mode: "full" }),
@@ -195,7 +222,7 @@ describe("executeWebsocketAction — response_mode shaping", () => {
       response_mode: "status_only",
     });
 
-    const result = await executeWebsocketAction(action, secretBytes(), basePolicy());
+    const { result } = await executeWebsocketAction(action, secretBytes(), basePolicy());
 
     expect(result.messages).toEqual([]);
     expect(result.close_code).not.toBeNull();
@@ -225,7 +252,7 @@ describe("executeWebsocketAction — response_mode shaping", () => {
 
     await expect(
       executeWebsocketAction(action, secretBytes(), basePolicy({ response_mode: "filtered" })),
-    ).resolves.toMatchObject({ messages: [] });
+    ).resolves.toMatchObject({ result: { messages: [] } });
   });
 });
 

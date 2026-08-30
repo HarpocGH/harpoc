@@ -206,20 +206,20 @@ describe("audit anchor / verify --anchor", () => {
     mockEngine.getAuditChainTail.mockReturnValue(null);
     await expect(run(["anchor"])).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(stderrText()).toContain("No chained audit rows to anchor yet");
+    expect(stderrText()).toContain("No anchorable audit chain tail");
   });
 
   it("verify always prints the current tail link, without and with --json", async () => {
     mockEngine.verifyAuditChain.mockReturnValue({
       valid: true,
       checked: 3,
-      legacy: 0,
       firstBrokenId: null,
       tail: validAnchor,
     });
     await run(["verify"]);
     expect(stdoutText()).toContain(`Tail link: row ${validAnchor.last_id}`);
     expect(stdoutText()).toContain(validAnchor.row_hmac);
+    expect(stdoutText()).toContain("Audit chain OK — 3 row(s) verified.");
 
     logSpy.mockClear();
     await run(["verify", "--json"]);
@@ -231,7 +231,6 @@ describe("audit anchor / verify --anchor", () => {
     mockEngine.verifyAuditChain.mockReturnValue({
       valid: true,
       checked: 3,
-      legacy: 0,
       firstBrokenId: null,
       tail: validAnchor,
       anchor: { lastId: validAnchor.last_id, status: "ok" },
@@ -248,7 +247,6 @@ describe("audit anchor / verify --anchor", () => {
     mockEngine.verifyAuditChain.mockReturnValue({
       valid: false,
       checked: 2,
-      legacy: 0,
       firstBrokenId: null,
       tail: { ...validAnchor, last_id: 40 },
       anchor: { lastId: validAnchor.last_id, status: "row_missing" },

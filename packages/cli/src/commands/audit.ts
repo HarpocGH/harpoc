@@ -143,7 +143,9 @@ export function registerAuditCommand(program: Command): void {
 
           const anchor = engine.getAuditChainTail();
           if (!anchor) {
-            throw new Error("No chained audit rows to anchor yet.");
+            throw new Error(
+              "No anchorable audit chain tail — the log is empty or its last row carries no link (run harpoc audit verify).",
+            );
           }
           const payload = JSON.stringify(anchor, null, 2);
           if (options.out) {
@@ -191,13 +193,10 @@ export function registerAuditCommand(program: Command): void {
             console.log(tailLine(result.tail));
             // Chain and anchor are independent signals — report both, always.
             if (result.firstBrokenId === null) {
-              console.log(
-                `Audit chain OK — ${result.checked} row(s) verified, ${result.legacy} legacy row(s) skipped.`,
-              );
+              console.log(`Audit chain OK — ${result.checked} row(s) verified.`);
             } else {
               console.error(
-                `Audit chain BROKEN at row ${result.firstBrokenId} — ` +
-                  `${result.checked} verified, ${result.legacy} legacy.`,
+                `Audit chain BROKEN at row ${result.firstBrokenId} — ${result.checked} verified.`,
               );
             }
             if (result.anchor) {

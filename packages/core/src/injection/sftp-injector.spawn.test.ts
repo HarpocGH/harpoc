@@ -21,6 +21,7 @@ const OK_RESULT: SpawnCapturedResult = {
   truncated: false,
   signal: null,
   spawn_failed: false,
+  redacted: false,
 };
 
 function makeKeyPem(): string {
@@ -103,7 +104,8 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
       SFTP_CONFIG,
     );
 
-    expect(result.exit_code).toBe(0);
+    expect(result.result.exit_code).toBe(0);
+    expect(result.sanitized).toBe(false);
     expect(spawnMock).toHaveBeenCalledOnce();
     const [command, args, opts] = spawnMock.mock.calls[0] as [
       string,
@@ -364,6 +366,21 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     });
   });
 
+  it("reports sanitized when the spawn seam's redaction changed the captured output", async () => {
+    spawnMock.mockResolvedValue({ ...OK_RESULT, redacted: true });
+
+    const result = await executeSftpAction(
+      LIST_ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      allowedPolicy(),
+      SFTP_CONFIG,
+    );
+
+    expect(result.sanitized).toBe(true);
+    // The flag rides the execution envelope only — the wire result is untouched.
+    expect(result.result).not.toHaveProperty("sanitized");
+  });
+
   it("maps a non-zero exit to SFTP_OPERATION_FAILED", async () => {
     spawnMock.mockResolvedValue({ ...OK_RESULT, exit_code: 1, stderr: "No such file" });
 
@@ -409,8 +426,8 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
       SFTP_CONFIG,
     );
 
-    expect(result.timed_out).toBe(true);
-    expect(result.error).toBe(ErrorCode.PROCESS_TIMEOUT);
+    expect(result.result.timed_out).toBe(true);
+    expect(result.result.error).toBe(ErrorCode.PROCESS_TIMEOUT);
   });
 
   it("prefers PROCESS_TIMEOUT over the 255 connect classification (ssh-injector ordering)", async () => {
@@ -425,7 +442,7 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
         allowedPolicy(),
         SFTP_CONFIG,
       ),
-    ).resolves.toMatchObject({ error: ErrorCode.PROCESS_TIMEOUT });
+    ).resolves.toMatchObject({ result: { error: ErrorCode.PROCESS_TIMEOUT } });
   });
 
   it("maps host-key verification failure text to SSH_HOST_KEY_MISMATCH", async () => {

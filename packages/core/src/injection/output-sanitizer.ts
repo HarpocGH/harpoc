@@ -40,7 +40,7 @@ function setOwnProperty(target: Record<string, unknown>, key: string, value: unk
  * Redaction can collapse two distinct keys onto one name, so a collision keeps
  * the later entry under a suffixed key rather than silently dropping it.
  */
-function mapStringLeavesTracked(
+export function mapStringLeavesTracked(
   value: unknown,
   fn: (s: string) => string,
   budget: number,

@@ -41,7 +41,6 @@ export type CertificateEngine = Pick<
   | "updateCertificate"
   | "getCertificatePem"
   | "getCertificateStatus"
-  | "storeAcmeAccount"
   | "getAcmeAccount"
 >;
 
@@ -182,16 +181,16 @@ export class CertManager {
 
   /**
    * Issue a certificate over ACME. The key pair and its CSR never leave this
-   * process before the vault holds them, and the ACME account is stored only
-   * once the issued certificate landed — an account written for a certificate
-   * that was never stored would be renewable material for nothing.
+   * process before the vault holds them.
    *
    * A rate-limited or unavailable CA surfaces as a terminal CERT_ACME_FAILED:
    * backoff belongs to the RenewalScheduler, not to a single issuance.
    *
-   * Partial-failure recovery: the certificate import commits before
-   * storeAcmeAccount runs, so a failure writing the account leaves the cert
-   * secret stored without an ACME account — delete the secret and reissue.
+   * The ACME account travels inside the certificate import and commits in the
+   * same transaction as the certificate row (E86b): a crash, or a session TTL
+   * expiring during a long order, leaves either a complete ACME-issued
+   * certificate or nothing — never a certificate the renewal daemon can no
+   * longer re-order.
    */
   async issueWithAcme(name: string, options: IssueOptions): Promise<IssuedCertificate> {
     const [commonName] = options.domains;
@@ -249,13 +248,9 @@ export class CertManager {
         autoRenew: options.autoRenew,
         renewBeforeDays: options.renewBeforeDays,
         acmeIssued: true,
+        acmeAccountJson: JSON.stringify({ privateKeyPem: accountKeyPem, accountUrl }),
       },
       options.project,
-      options.caller,
-    );
-    this.engine.storeAcmeAccount(
-      secretId,
-      JSON.stringify({ privateKeyPem: accountKeyPem, accountUrl }),
       options.caller,
     );
 

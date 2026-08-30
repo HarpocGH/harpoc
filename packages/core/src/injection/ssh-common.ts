@@ -15,7 +15,8 @@ export interface TempSshFile {
  * mkdtempSync → writeFileSync(mode 0600) → rmSync(recursive, force)
  * shape is defined — shared by every SSH-family per-invocation temp file:
  * the pinned known_hosts, the ephemeral agent's public identity, and (core's
- * sftp-injector) the vault-authored batch file.
+ * sftp-injector) the vault-authored batch file — and, since Wave 2, the git
+ * injector's HTTPS CA pin (D64), the one consumer outside the SSH family.
  */
 export function writeTempSshFile(prefix: string, name: string, content: string): TempSshFile {
   const dir = mkdtempSync(join(tmpdir(), prefix));

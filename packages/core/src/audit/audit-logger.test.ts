@@ -42,17 +42,6 @@ describe("AuditLogger", () => {
     expect(events[0]?.detail_tag).not.toBeNull();
   });
 
-  it("stores null detail when auditKey is null", () => {
-    const loggerNoKey = new AuditLogger(store, null);
-    loggerNoKey.log({
-      eventType: AuditEventType.SECRET_READ,
-      detail: { handle: "secret://test" },
-    });
-
-    const events = store.queryAuditLog();
-    expect(events[0]?.detail_encrypted).toBeNull();
-  });
-
   it("stores null detail when no detail provided", () => {
     logger.log({ eventType: AuditEventType.VAULT_UNLOCK });
 

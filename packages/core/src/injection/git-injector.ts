@@ -26,7 +26,9 @@ import {
   sshHardeningArgs,
   writeIdentityFile,
   writeKnownHosts,
+  writeTempSshFile,
 } from "./ssh-common.js";
+import type { TempSshFile } from "./ssh-common.js";
 import { validateUrl } from "./url-validator.js";
 
 /** git args that turn data into an instruction vehicle (config/hook/transport execution).
@@ -93,7 +95,10 @@ process.stdout.write(out + "\\n");
  * Config the vault forces on every HTTPS invocation. `http.followRedirects=false`
  * keeps git on the validated host: git's default (`initial`) follows a 3xx on the
  * initial request, moving the base URL — and with it the credential prompt — to a
- * host the vault never resolved, validated or allowlisted.
+ * host the vault never resolved, validated or allowlisted. A stored `git.ca_pem`
+ * (D64) adds `http.sslCAInfo=<0600 temp file>` and
+ * `http.schannelUseSSLCAInfo=true` — vault-authored, since `-c` is denied to
+ * callers and both curl backends honor the pair.
  */
 const HTTPS_FORCED_CONFIG = ["-c", "http.followRedirects=false"];
 
@@ -143,7 +148,7 @@ export class GitInjector {
     }
 
     return transport === "https"
-      ? this.runHttps(action, gitPath, secretValue, policy, secretId, attribution)
+      ? this.runHttps(action, gitPath, secretValue, policy, config, secretId, attribution)
       : this.runSsh(action, gitPath, secretValue, policy, config, secretId, attribution);
   }
 
@@ -152,6 +157,7 @@ export class GitInjector {
     gitPath: string,
     secretValue: Uint8Array,
     policy: InjectionPolicy,
+    config: ConnectionConfig | undefined,
     secretId: string | undefined,
     attribution: AuditAttribution | undefined,
   ): Promise<GitResult> {
@@ -170,11 +176,20 @@ export class GitInjector {
 
     const { user, password } = parseGitCredential(secretValue);
     const built = buildGitArgs(action);
-    const args = [...HTTPS_FORCED_CONFIG, ...built.args];
     const cwd = built.cwd;
     const timeoutMs = action.timeout_ms ?? DEFAULT_GIT_TIMEOUT_MS;
     const askpass = writeAskpass();
+    let ca: TempSshFile | null = null;
     try {
+      ca =
+        config?.git === undefined
+          ? null
+          : writeTempSshFile("harpoc-git-ca-", "ca.pem", config.git.ca_pem);
+      const args = [
+        ...HTTPS_FORCED_CONFIG,
+        ...(ca ? ["-c", `http.sslCAInfo=${ca.file}`, "-c", "http.schannelUseSSLCAInfo=true"] : []),
+        ...built.args,
+      ];
       const env = baseGitEnv(policy.env_allowlist);
       env.GIT_ASKPASS = askpass.launcher;
       env.GIT_TERMINAL_PROMPT = "0";
@@ -207,6 +222,7 @@ export class GitInjector {
               error: err.code,
               network_isolation: networkIsolation,
               fs_isolation: fsIsolation,
+              ...(ca ? { ca_pinned: true } : {}),
             },
             false,
             attribution,
@@ -225,6 +241,8 @@ export class GitInjector {
           ...(r.isolation_mechanism ? { isolation_mechanism: r.isolation_mechanism } : {}),
           fs_isolation: fsIsolation,
           ...(r.fs_isolation_mechanism ? { fs_isolation_mechanism: r.fs_isolation_mechanism } : {}),
+          ...(ca ? { ca_pinned: true } : {}),
+          ...(r.redacted ? { sanitized: true } : {}),
         },
         result.error === undefined,
         attribution,
@@ -232,6 +250,7 @@ export class GitInjector {
       return result;
     } finally {
       askpass.dispose();
+      ca?.dispose();
     }
   }
 
@@ -279,7 +298,7 @@ export class GitInjector {
       throw err;
     }
 
-    let identity: import("./ssh-common.js").TempSshFile | null = null;
+    let identity: TempSshFile | null = null;
     try {
       identity = writeIdentityFile(agent.publicKeyOpenssh);
       const env = buildSshEnv(agent.authSock, policy.env_allowlist);
@@ -351,6 +370,7 @@ export class GitInjector {
           ...(r.isolation_mechanism ? { isolation_mechanism: r.isolation_mechanism } : {}),
           fs_isolation: fsIsolation,
           ...(r.fs_isolation_mechanism ? { fs_isolation_mechanism: r.fs_isolation_mechanism } : {}),
+          ...(r.redacted ? { sanitized: true } : {}),
         },
         result.error === undefined,
         attribution,

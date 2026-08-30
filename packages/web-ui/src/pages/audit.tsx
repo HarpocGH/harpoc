@@ -109,7 +109,7 @@ export function AuditPage({ api }: { api: ApiClient }) {
         </button>
         {report !== null && report.valid && (
           <p class="mono" style="color: var(--patina)">
-            chain intact — {report.checked} rows checked, {report.legacy} legacy rows skipped
+            chain intact — {report.checked} rows checked
           </p>
         )}
         {report !== null && !report.valid && (

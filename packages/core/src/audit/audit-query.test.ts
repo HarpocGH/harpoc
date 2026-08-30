@@ -36,17 +36,6 @@ describe("AuditQuery", () => {
     });
   });
 
-  it("returns null detail when auditKey is null", () => {
-    logger.log({
-      eventType: AuditEventType.SECRET_USE,
-      detail: { test: true },
-    });
-
-    const queryNoKey = new AuditQuery(store, null);
-    const events = queryNoKey.query();
-    expect(events[0]?.detail).toBeNull();
-  });
-
   it("returns null detail when no detail was stored", () => {
     logger.log({ eventType: AuditEventType.VAULT_UNLOCK });
 

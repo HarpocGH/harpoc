@@ -32,6 +32,19 @@ export interface WsAuditDetails {
   url: string;
   sent: number;
   received: number;
+  /** Present only when the credential redaction changed a returned frame (E70). */
+  sanitized?: true;
+}
+
+/**
+ * The websocket executor's return to the engine: the wire result plus whether
+ * the frame shaping's redaction changed anything. `sanitized` rides the
+ * engine's success audit row only — {@link WebsocketResult} stays
+ * byte-identical.
+ */
+export interface WebsocketExecution {
+  result: WebsocketResult;
+  sanitized: boolean;
 }
 
 /**
@@ -177,11 +190,16 @@ function waitWithTimeout(promise: Promise<void>, timeoutMs: number): Promise<voi
  * injector's body redaction), `full` returns them verbatim, `status_only`
  * returns none — the echo channel is absent, not filtered, matching the HTTP
  * injector's "body never read" contract (I2a). */
-function shapeMessages(raw: string[], mode: ResponseMode, valueStr: string): string[] {
-  if (mode === ResponseModeValue.STATUS_ONLY) return [];
-  if (mode === ResponseModeValue.FULL) return raw;
-  if (valueStr.length === 0) return raw;
-  return raw.map((message) => redactSecretEncodings(message, valueStr));
+function shapeMessages(
+  raw: string[],
+  mode: ResponseMode,
+  valueStr: string,
+): { messages: string[]; sanitized: boolean } {
+  if (mode === ResponseModeValue.STATUS_ONLY) return { messages: [], sanitized: false };
+  if (mode === ResponseModeValue.FULL) return { messages: raw, sanitized: false };
+  if (valueStr.length === 0) return { messages: raw, sanitized: false };
+  const messages = raw.map((message) => redactSecretEncodings(message, valueStr));
+  return { messages, sanitized: messages.some((m, i) => m !== raw[i]) };
 }
 
 async function dialAndCollect(
@@ -191,7 +209,7 @@ async function dialAndCollect(
   action: WebsocketAction,
   responseMode: ResponseMode,
   valueStr: string,
-): Promise<WebsocketResult> {
+): Promise<WebsocketExecution> {
   const ws = new WebSocket(finalUrl, {
     dispatcher,
     headers,
@@ -235,10 +253,14 @@ async function dialAndCollect(
     // handshake must not hang the exchange forever (see waitWithTimeout).
     await waitWithTimeout(closedPromise, timeoutMs);
 
+    const shaped = shapeMessages(rawMessages, responseMode, valueStr);
     return {
-      type: ActionType.WEBSOCKET,
-      messages: shapeMessages(rawMessages, responseMode, valueStr),
-      close_code: closeCode,
+      result: {
+        type: ActionType.WEBSOCKET,
+        messages: shaped.messages,
+        close_code: closeCode,
+      },
+      sanitized: shaped.sanitized,
     };
   } finally {
     if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
@@ -272,7 +294,7 @@ export async function executeWebsocketAction(
   action: WebsocketAction,
   secretValue: Uint8Array,
   policy: InjectionPolicy,
-): Promise<WebsocketResult> {
+): Promise<WebsocketExecution> {
   const responseMode = resolveResponseMode(action, policy);
   const valueStr = Buffer.from(secretValue).toString("utf8");
 

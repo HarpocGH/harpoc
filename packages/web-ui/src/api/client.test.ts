@@ -71,11 +71,12 @@ describe("api client", () => {
 
   it("verifyAuditChain POSTs to /api/v1/audit/verify", async () => {
     const fetchFn = stubFetch(200, {
-      data: { valid: true, checked: 1, legacy: 0, first_broken_id: null },
+      data: { valid: true, checked: 1, first_broken_id: null },
     });
     const api = createApiClient(() => "t", fetchFn);
     const report = await api.verifyAuditChain();
     expect(report.valid).toBe(true);
+    expect("legacy" in report).toBe(false);
     expect(callOf(fetchFn).url).toBe("/api/v1/audit/verify");
     expect(callOf(fetchFn).init.method).toBe("POST");
     // The verify route reads no body; sending one would only invite a framing error.

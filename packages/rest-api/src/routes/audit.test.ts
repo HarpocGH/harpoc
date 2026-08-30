@@ -41,7 +41,6 @@ function createMockEngine(token: VaultApiToken = ADMIN_TOKEN) {
     verifyAuditChain: vi.fn().mockReturnValue({
       valid: true,
       checked: 12,
-      legacy: 2,
       firstBrokenId: null,
       tail: { lastId: 14, timestamp: 999, rowHmac: new Uint8Array([1]) },
     }),
@@ -226,7 +225,7 @@ describe("POST /api/v1/audit/verify", () => {
     const res = await app.request("/api/v1/audit/verify", { method: "POST", headers: AUTH });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.data).toEqual({ valid: true, checked: 12, legacy: 2, first_broken_id: null });
+    expect(body.data).toEqual({ valid: true, checked: 12, first_broken_id: null });
     expect(body.data.tail).toBeUndefined();
   });
 

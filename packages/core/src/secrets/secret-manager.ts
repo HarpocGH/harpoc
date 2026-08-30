@@ -488,10 +488,16 @@ export class SecretManager {
     }
   }
 
-  private assertUsable(secret: Secret, handle: string): void {
-    // Lazy expiry: if expires_at is set and past, transition to EXPIRED. The
-    // status write and the engine's audit row (via onLazyExpire) commit in one
-    // transaction; the expiry then persists even though the access is denied.
+  /**
+   * Status ladder shared by the value paths and, since Wave 2 (B21), by
+   * `useSecret`'s pre-decrypt guards: the lazy EXPIRED transition (status write
+   * + the engine's `secret.expire` row via `onLazyExpire`, one transaction),
+   * then EXPIRED / REVOKED / PENDING — the PENDING error is the caller's when
+   * it has a better one (an OAuth secret's `OAUTH_NOT_CONFIGURED`).
+   *
+   * @internal Engine seam, not part of the `@harpoc/core` public API.
+   */
+  assertUsable(secret: Secret, handle: string, opts?: { pending?: () => VaultError }): void {
     if (
       secret.status !== SecretStatus.EXPIRED &&
       secret.expires_at !== null &&
@@ -514,7 +520,10 @@ export class SecretManager {
       throw VaultError.secretRevoked(handle);
     }
     if (secret.status === SecretStatus.PENDING) {
-      throw new VaultError(ErrorCode.SECRET_VALUE_REQUIRED, `Secret ${handle} has no value set`);
+      throw (
+        opts?.pending?.() ??
+        new VaultError(ErrorCode.SECRET_VALUE_REQUIRED, `Secret ${handle} has no value set`)
+      );
     }
   }
 }

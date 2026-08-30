@@ -22,6 +22,7 @@ const OK_RESULT: SpawnCapturedResult = {
   truncated: false,
   signal: null,
   spawn_failed: false,
+  redacted: false,
 };
 
 function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
@@ -151,7 +152,7 @@ describe("executeDockerRegistryAction result mapping", () => {
 
     const result = await executeDockerRegistryAction(PULL_ACTION, SECRET, allowed());
 
-    expect(result).toEqual({
+    expect(result.result).toEqual({
       type: "docker_registry",
       operation: "pull",
       exit_code: 0,
@@ -162,6 +163,17 @@ describe("executeDockerRegistryAction result mapping", () => {
       signal: undefined,
       error: undefined,
     });
+    expect(result.sanitized).toBe(false);
+  });
+
+  it("reports sanitized when the spawn seam's redaction changed the captured output", async () => {
+    vi.mocked(spawnCaptured).mockResolvedValue({ ...OK_RESULT, redacted: true });
+
+    const result = await executeDockerRegistryAction(PULL_ACTION, SECRET, allowed());
+
+    expect(result.sanitized).toBe(true);
+    // The flag rides the execution envelope only — the wire result is untouched.
+    expect(result.result).not.toHaveProperty("sanitized");
   });
 
   it("maps a non-zero docker exit to DOCKER_OPERATION_FAILED", async () => {
@@ -198,7 +210,7 @@ describe("executeDockerRegistryAction result mapping", () => {
 
     const result = await executeDockerRegistryAction(PULL_ACTION, SECRET, allowed());
 
-    expect(result).toMatchObject({
+    expect(result.result).toMatchObject({
       type: "docker_registry",
       operation: "pull",
       timed_out: true,

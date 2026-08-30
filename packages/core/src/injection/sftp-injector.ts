@@ -16,9 +16,13 @@ import type { TempSshFile } from "./ssh-common.js";
 
 /**
  * Metadata-only audit projection of an SFTP operation (design §7.2) — never a
- * credential or file content. Every field is request-derived (available before
- * the operation runs), so the same projection covers both a successful use
- * and a denial: `buildSftpAuditDetails` needs only the action, not a result.
+ * credential or file content. Every field the builder writes is request-derived
+ * (available before the operation runs), so the same projection covers both a
+ * successful use and a denial: `buildSftpAuditDetails` needs only the action,
+ * not a result. The optional `sanitized` is the one result-derived key: the
+ * engine folds it onto whichever row the spawn produced — a success, or a
+ * graceful non-throwing failure such as PROCESS_TIMEOUT — never onto a
+ * refusal row, which never reached a spawn.
  */
 export interface SftpAuditDetails {
   host: string;
@@ -26,6 +30,18 @@ export interface SftpAuditDetails {
   port: number | null;
   remote_path: string;
   local_path: string | null;
+  /** Present only when the credential redaction changed the captured output (E70). */
+  sanitized?: true;
+}
+
+/**
+ * The sftp executor's return to the engine: the wire result plus whether the
+ * spawn seam's redaction changed the captured output. `sanitized` rides the
+ * engine's post-spawn audit row only — {@link SftpResult} stays byte-identical.
+ */
+export interface SftpExecution {
+  result: SftpResult;
+  sanitized: boolean;
 }
 
 /** Builds the metadata-only audit projection for an SFTP action. Pure — the
@@ -196,7 +212,7 @@ export async function executeSftpAction(
   secretValue: Uint8Array,
   policy: InjectionPolicy,
   config: ConnectionConfig | undefined,
-): Promise<SftpResult> {
+): Promise<SftpExecution> {
   // Defense in depth beside the schema's first-character anchor (mirrors the
   // SSH context): host and user reach argv, so a leading dash must never
   // parse as an option.
@@ -264,7 +280,7 @@ export async function executeSftpAction(
       fsIsolation,
     });
 
-    return toSftpResult(r, action.host);
+    return { result: toSftpResult(r, action.host), sanitized: r.redacted };
   } finally {
     agent.dispose();
     kh.dispose();

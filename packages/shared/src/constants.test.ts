@@ -23,6 +23,7 @@ import {
   CONFIG_FILE_NAME,
   DEFAULT_HTTP_TIMEOUT_MS,
   DEFAULT_SESSION_TTL_MS,
+  MAX_HTTP_RESPONSE_BYTES,
   MAX_NAME_LENGTH,
   MIN_REDACTABLE_FRAGMENT,
   LOCKOUT_DURATIONS_MS,
@@ -215,6 +216,10 @@ describe("session timing constants", () => {
 
   it("MAX_SESSION_TTL_MS is 24 hours", () => {
     expect(MAX_SESSION_TTL_MS).toBe(24 * 60 * 60 * 1_000);
+  });
+
+  it("MAX_HTTP_RESPONSE_BYTES is 4 MiB", () => {
+    expect(MAX_HTTP_RESPONSE_BYTES).toBe(4 * 1024 * 1024);
   });
 
   it("SESSION_SLIDE_INTERVAL_MS is 30 seconds", () => {

@@ -949,23 +949,37 @@ export const mailConnectionConfigSchema = z.object({
 export type MailConnectionConfig = z.infer<typeof mailConnectionConfigSchema>;
 
 /**
+ * Git-HTTPS endpoint-authentication config: a private CA the vault pins for
+ * the HTTPS transport through vault-authored `-c http.sslCAInfo` (both curl
+ * backends — `http.schannelUseSSLCAInfo` covers Windows). Git-over-SSH uses
+ * the `ssh` group's host keys instead.
+ */
+export const gitConnectionConfigSchema = z.object({
+  ca_pem: z.string().min(1).max(65_536),
+});
+
+export type GitConnectionConfig = z.infer<typeof gitConnectionConfigSchema>;
+
+/**
  * Per-secret endpoint-authentication pins (KEK-encrypted at rest), the §4.7
  * "authenticated target connections" counterpart to the target allowlist. Set
  * only via the trusted admin path (CLI/REST) — never via an MCP tool. `ssh` is
  * shared by the SSH and Git-over-SSH contexts, `mail` by the SMTP and IMAP
- * contexts (v1.3). At least one of `database` / `ssh` / `mail` must be present.
+ * contexts (v1.3). At least one of `database` / `ssh` / `mail` / `git` must be
+ * present; `git` pins a private CA for the Git-HTTPS transport (D64).
  */
 export const connectionConfigSchema = z
   .object({
     database: databaseConnectionConfigSchema.optional(),
     ssh: sshConnectionConfigSchema.optional(),
     mail: mailConnectionConfigSchema.optional(),
+    git: gitConnectionConfigSchema.optional(),
   })
   .superRefine((data, ctx) => {
-    if (!data.database && !data.ssh && !data.mail) {
+    if (!data.database && !data.ssh && !data.mail && !data.git) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "connection config must set at least one of database, ssh or mail",
+        message: "connection config must set at least one of database, ssh, mail or git",
         path: [],
       });
     }

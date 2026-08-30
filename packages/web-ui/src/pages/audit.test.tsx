@@ -30,9 +30,7 @@ function api(over: Partial<ApiClient> = {}): ApiClient {
         event({}),
         event({ id: 2, event_type: "access.denied", success: false }),
       ]),
-    verifyAuditChain: vi
-      .fn()
-      .mockResolvedValue({ valid: true, checked: 5, legacy: 1, first_broken_id: null }),
+    verifyAuditChain: vi.fn().mockResolvedValue({ valid: true, checked: 5, first_broken_id: null }),
     ...over,
   } as ApiClient;
 }
@@ -125,14 +123,14 @@ describe("AuditPage", () => {
   it("verify renders an intact chain", async () => {
     render(<AuditPage api={api()} />);
     fireEvent.click(screen.getByRole("button", { name: "Verify chain" }));
-    await waitFor(() => expect(screen.getByText(/chain intact/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/chain intact — 5 rows checked/)).toBeTruthy());
   });
 
   it("verify renders a break with its row id", async () => {
     const fake = api({
       verifyAuditChain: vi
         .fn()
-        .mockResolvedValue({ valid: false, checked: 5, legacy: 0, first_broken_id: 42 }),
+        .mockResolvedValue({ valid: false, checked: 5, first_broken_id: 42 }),
     });
     render(<AuditPage api={fake} />);
     fireEvent.click(screen.getByRole("button", { name: "Verify chain" }));

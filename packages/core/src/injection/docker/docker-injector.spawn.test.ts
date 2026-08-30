@@ -25,6 +25,7 @@ const OK_RESULT: SpawnCapturedResult = {
   truncated: false,
   signal: null,
   spawn_failed: false,
+  redacted: false,
 };
 
 function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {

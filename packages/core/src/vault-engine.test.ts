@@ -1892,8 +1892,20 @@ describe("connection config", () => {
       .filter((e) => e.detail?.policy === "connection");
     // queryAudit is newest-first.
     expect(grants[0]?.detail?.has_mail).toBe(true);
+    expect(grants[0]?.detail?.has_git).toBe(false);
     expect(grants[0]?.detail?.mail_tls).toBe("require");
     expect(grants[1]?.detail?.mail_tls).toBe("disable");
+  });
+
+  it("audits the git group's presence as has_git", async () => {
+    await engine.setConnectionConfig("secret://conn", {
+      git: { ca_pem: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n" },
+    });
+    const grants = engine
+      .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
+      .filter((e) => e.detail?.policy === "connection");
+    expect(grants[0]?.detail?.has_git).toBe(true);
+    expect(grants[0]?.detail?.has_mail).toBe(false);
   });
 });
 

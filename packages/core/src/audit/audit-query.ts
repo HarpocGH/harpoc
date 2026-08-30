@@ -37,13 +37,11 @@ export interface AuditChainTailLink {
 
 /** Result of verifying the audit HMAC chain. */
 export interface AuditChainVerification {
-  /** All chained rows link correctly AND (when an anchor was supplied) the anchored row is intact. */
+  /** Every row carries a link that verifies AND (when an anchor was supplied) the anchored row is intact. */
   valid: boolean;
-  /** Number of chained (post-migration) rows checked. */
+  /** Rows whose link was verified (an unlinked row is a break and is not counted). */
   checked: number;
-  /** Number of legacy (pre-migration, unchained) rows skipped. */
-  legacy: number;
-  /** Id of the first row whose link failed, if any. */
+  /** Id of the first row whose link is missing or does not verify, else null. */
   firstBrokenId: number | null;
   /** Present only when an anchor was supplied. */
   anchor?: { lastId: number; status: AuditAnchorStatus };
@@ -68,7 +66,7 @@ export interface AuditQueryOptions {
 export class AuditQuery {
   constructor(
     private readonly store: SqliteStore,
-    private readonly auditKey: Uint8Array | null,
+    private readonly auditKey: Uint8Array,
   ) {}
 
   query(options?: AuditQueryOptions): DecryptedAuditEvent[] {
@@ -88,16 +86,21 @@ export class AuditQuery {
     return events.map((event) => this.decryptEvent(event));
   }
 
-  /** The newest chained row's link (the anchorable tail), or null if none exists. */
+  /** The newest row's link — the anchorable tail — or null when the log is empty or its last row carries no link. */
   chainTail(): AuditChainTailLink | null {
-    const row = this.store.getLastChainedAuditRow();
-    if (!row) return null;
+    const row = this.store.getLastAuditRow();
+    if (!row || row.row_hmac === null) return null;
     return { lastId: row.id, timestamp: row.timestamp, rowHmac: row.row_hmac };
   }
 
   /**
-   * Verify the audit HMAC chain. Legacy (pre-migration) rows carry no link and
-   * are counted but not checked; the chain's genesis is the first chained row.
+   * Verify the audit HMAC chain. Every row carries a link — the column has
+   * been written by every logger since migration 010 and no vault created
+   * before it can open under v1.5 (audit C30) — so a NULL link is an erased
+   * link and breaks the chain at that row. The row after a missing link is
+   * verified against genesis — what the writer chains from over an unlinked
+   * tail — so rows appended after the break still verify, while a mid-chain
+   * erasure also breaks the row that was chained onto the erased link.
    *
    * With an anchor, additionally assert the anchored row still exists with
    * exactly that link — a valid-but-shorter chain (tail truncation, database
@@ -106,43 +109,26 @@ export class AuditQuery {
    */
   verifyChain(anchor?: AuditChainAnchorInput): AuditChainVerification {
     const rows = this.store.getAuditChainRows();
-    const chainKey = this.auditKey ? deriveAuditChainKey(this.auditKey) : null;
+    const chainKey = deriveAuditChainKey(this.auditKey);
 
     let prev: Uint8Array = AUDIT_CHAIN_GENESIS_BYTES;
     let checked = 0;
-    let legacy = 0;
     let firstBrokenId: number | null = null;
     let valid = true;
     let anchorStatus: AuditAnchorStatus = "row_missing";
 
     for (const row of rows) {
       if (anchor && row.id === anchor.lastId) {
-        // A legacy row at the anchored id counts as a mismatch: a genuine
-        // anchor is always taken from a chained row.
         anchorStatus =
           row.row_hmac !== null && auditHmacEqual(row.row_hmac, anchor.rowHmac)
             ? "ok"
             : "hmac_mismatch";
       }
       if (row.row_hmac === null) {
-        // Legacy rows may only be a PREFIX: on a migrated vault every row
-        // written since carries a link, so a NULL link after a chained row is
-        // not history, it is an erased link. Treating it as legacy would let a
-        // database-writing attacker null the column on a suffix and then
-        // insert, delete and edit those rows with `audit verify` still green.
-        if (checked > 0) {
-          valid = false;
-          if (firstBrokenId === null) firstBrokenId = row.id;
-        }
-        legacy++;
-        prev = AUDIT_CHAIN_GENESIS_BYTES;
-        continue;
-      }
-      if (!chainKey) {
-        // Chained rows exist but no audit key is available to verify them.
         valid = false;
         if (firstBrokenId === null) firstBrokenId = row.id;
-        break;
+        prev = AUDIT_CHAIN_GENESIS_BYTES;
+        continue;
       }
       const expected = computeAuditRowHmac(chainKey, row, prev);
       if (!auditHmacEqual(expected, row.row_hmac)) {
@@ -153,23 +139,12 @@ export class AuditQuery {
       checked++;
     }
 
-    // Nulling EVERY link satisfies the prefix rule above and would report
-    // {valid:true, checked:0}. A key-holding verifier that finds no linked row
-    // at all in a non-empty log is looking at an erased chain: since migration
-    // 010 every audited operation writes one, and reaching this code requires
-    // an unlocked vault, whose own vault.unlock row is linked.
-    if (chainKey && checked === 0 && legacy > 0) {
-      valid = false;
-      if (firstBrokenId === null) firstBrokenId = rows[0]?.id ?? null;
-    }
-
     if (!anchor) {
-      return { valid, checked, legacy, firstBrokenId };
+      return { valid, checked, firstBrokenId };
     }
     return {
       valid: valid && anchorStatus === "ok",
       checked,
-      legacy,
       firstBrokenId,
       anchor: { lastId: anchor.lastId, status: anchorStatus },
     };
@@ -179,7 +154,7 @@ export class AuditQuery {
     let detail: Record<string, unknown> | null = null;
     let detailUnreadable = false;
 
-    if (event.detail_encrypted && event.detail_iv && event.detail_tag && this.auditKey) {
+    if (event.detail_encrypted && event.detail_iv && event.detail_tag) {
       try {
         const plaintext = decrypt(
           this.auditKey,

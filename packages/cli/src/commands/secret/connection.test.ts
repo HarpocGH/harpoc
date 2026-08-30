@@ -169,6 +169,36 @@ describe("mergeConnectionConfig — mail TLS group (v1.3)", () => {
   });
 });
 
+describe("mergeConnectionConfig — git CA group (D64)", () => {
+  it("--git-ca pins a CA for the Git-HTTPS transport, other groups untouched", () => {
+    const caPath = join(tempDir, "git-ca.pem");
+    writeFileSync(caPath, CA_PEM);
+    const merged = mergeConnectionConfig(STORED, { gitCa: caPath });
+    expect(merged.git).toEqual({ ca_pem: CA_PEM });
+    expect(merged.database).toEqual(STORED.database);
+    expect(merged.ssh).toEqual(STORED.ssh);
+    expect(merged.mail).toEqual(STORED.mail);
+  });
+
+  it("keeps a stored git group when --git-ca is omitted", () => {
+    const stored: ConnectionConfig = { ...STORED, git: { ca_pem: CA_PEM } };
+    const merged = mergeConnectionConfig(stored, { dbTls: "disable" });
+    expect(merged.git).toEqual({ ca_pem: CA_PEM });
+  });
+
+  it("--clear drops a stored git group", () => {
+    const stored: ConnectionConfig = { ...STORED, git: { ca_pem: CA_PEM } };
+    const merged = mergeConnectionConfig(stored, { clear: true, dbTls: "require" });
+    expect(merged.git).toBeUndefined();
+  });
+
+  it("builds a git group from --git-ca alone when nothing is stored", () => {
+    const caPath = join(tempDir, "git-ca2.pem");
+    writeFileSync(caPath, CA_PEM);
+    expect(mergeConnectionConfig(null, { gitCa: caPath })).toEqual({ git: { ca_pem: CA_PEM } });
+  });
+});
+
 describe("mergeConnectionConfig against a real engine", () => {
   it("a tls-only update no longer drops a stored CA pin", async () => {
     const engine = new VaultEngine({

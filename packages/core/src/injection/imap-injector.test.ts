@@ -248,6 +248,60 @@ describe("ImapInjector — fetched content sanitization", () => {
     expect(JSON.stringify(out)).not.toContain("s3cr3tpass");
   });
 
+  // E70: the redaction is invisible in the wire result, so the execution
+  // reports it and the engine stamps its success row from that.
+  it("reports sanitized when a fetched message carried the credential", async () => {
+    const messages: ImapMessage[] = [
+      { uid: 1, flags: [], headers: "Subject: leak\r\n", text: "password: s3cr3tpass" },
+    ];
+    const client = makeFakeClient({ fetch: () => Promise.resolve(messages) });
+    const { fn } = connectReturning(client);
+    const injector = new ImapInjector({ connectImap: fn });
+
+    const execution = await injector.run(
+      baseAction({ operation: { kind: "fetch", uids: [1], parts: "full" } }),
+      "imapuser:s3cr3tpass",
+      basePolicy({}),
+      undefined,
+      undefined,
+    );
+
+    expect(execution.sanitized).toBe(true);
+  });
+
+  it("reports sanitized false when nothing was redacted", async () => {
+    const messages: ImapMessage[] = [{ uid: 1, flags: [], text: "hello world" }];
+    const client = makeFakeClient({ fetch: () => Promise.resolve(messages) });
+    const { fn } = connectReturning(client);
+    const injector = new ImapInjector({ connectImap: fn });
+
+    const execution = await injector.run(
+      baseAction({ operation: { kind: "fetch", uids: [1], parts: "text" } }),
+      SECRET,
+      basePolicy({}),
+      undefined,
+      undefined,
+    );
+
+    expect(execution.sanitized).toBe(false);
+  });
+
+  it("reports sanitized false for an operation that returns no messages", async () => {
+    const client = makeFakeClient({ searchUids: () => Promise.resolve([1, 2]) });
+    const { fn } = connectReturning(client);
+    const injector = new ImapInjector({ connectImap: fn });
+
+    const execution = await injector.run(
+      baseAction({ operation: { kind: "search", unseen: true } }),
+      SECRET,
+      basePolicy({}),
+      undefined,
+      undefined,
+    );
+
+    expect(execution.sanitized).toBe(false);
+  });
+
   it("redacts a username at the shared floor (MIN_REDACTABLE_FRAGMENT)", async () => {
     const messages: ImapMessage[] = [
       { uid: 1, flags: [], headers: "Subject: leak\r\n", text: "logged in as abc" },

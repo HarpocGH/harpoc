@@ -35,9 +35,7 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     getOAuthStatus: vi.fn().mockResolvedValue({}),
     getCertificateStatus: vi.fn().mockResolvedValue({}),
     queryAudit: vi.fn().mockResolvedValue([]),
-    verifyAuditChain: vi
-      .fn()
-      .mockResolvedValue({ valid: true, checked: 0, legacy: 0, first_broken_id: null }),
+    verifyAuditChain: vi.fn().mockResolvedValue({ valid: true, checked: 0, first_broken_id: null }),
     listAgents: vi.fn().mockResolvedValue([]),
     getAgent: vi.fn().mockResolvedValue({
       id: "id-1",

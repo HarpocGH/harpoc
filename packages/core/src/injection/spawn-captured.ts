@@ -22,6 +22,8 @@ export interface SpawnCapturedResult {
   truncated: boolean;
   signal: string | null;
   spawn_failed: boolean;
+  /** True when the credential redaction changed stdout or stderr. */
+  redacted: boolean;
   /** Set when the spawn ran inside the network-isolation wrapper. */
   isolation_mechanism?: NetworkIsolationMechanism;
   /** Set when the spawn ran inside the filesystem-isolation wrapper. */
@@ -209,6 +211,7 @@ export async function spawnCaptured(
         truncated: false,
         signal: null,
         spawn_failed: true,
+        redacted: false,
         isolation_mechanism: isolationMechanism,
         fs_isolation_mechanism: fsIsolationMechanism,
       });
@@ -231,22 +234,28 @@ export async function spawnCaptured(
     };
 
     const finish = (code: number | null, signal: string | null, spawnFailed: boolean): void => {
-      const emit = (): void =>
+      const emit = (): void => {
+        const rawOut = stdout.toString();
+        const rawErr = stderr.toString();
+        const out = redactAll(rawOut);
+        const errText = redactAll(rawErr);
         settle({
           // A timed-out child was killed by the vault, so it reports as killed on
           // every platform: Windows has no signals and surfaces the taskkill as
           // an ordinary non-zero exit, which would otherwise read as the payload
           // having chosen that status.
           exit_code: timedOut ? null : code,
-          stdout: redactAll(stdout.toString()),
-          stderr: redactAll(stderr.toString()),
+          stdout: out,
+          stderr: errText,
           timed_out: timedOut,
           truncated: stdout.truncated || stderr.truncated,
           signal: timedOut ? (signal ?? "SIGKILL") : signal,
           spawn_failed: spawnFailed,
+          redacted: out !== rawOut || errText !== rawErr,
           isolation_mechanism: isolationMechanism,
           fs_isolation_mechanism: fsIsolationMechanism,
         });
+      };
       if (sweep) void sweep.then(emit, emit);
       else emit();
     };
