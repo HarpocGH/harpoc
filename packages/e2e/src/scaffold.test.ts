@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import { VaultEngine } from "@harpoc/core";
 import { SecretType } from "@harpoc/shared";
-import { describeWorkspaceDeps } from "../../shared/src/scaffold-helpers.js";
+import { describeWorkspaceDeps } from "@harpoc/test-utils";
 
 const PKG_ROOT = join(import.meta.dirname, "..");
 

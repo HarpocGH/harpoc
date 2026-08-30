@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import {
   WS_SCHEMES,
   isLoopback,
@@ -7,7 +8,6 @@ import {
   validateHostPort,
   validateUrl,
 } from "./url-validator.js";
-import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 describe("isPrivateIp", () => {
   it.each([

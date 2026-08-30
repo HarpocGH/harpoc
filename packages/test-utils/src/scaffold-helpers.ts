@@ -1,6 +1,7 @@
 /**
  * Shared test helpers for scaffold.test.ts files across all packages.
- * Excluded from the build via tsconfig.json — test-time only.
+ * Test-time only: `@harpoc/test-utils` is a private, source-only package
+ * with no build — consumers resolve this file straight from `src/`.
  */
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";

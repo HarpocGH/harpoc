@@ -1,9 +1,5 @@
 import { describe } from "vitest";
-import {
-  describeCrossPackageImports,
-  describeWorkspaceDeps,
-  getPkgRoot,
-} from "../../shared/src/scaffold-helpers.js";
+import { describeCrossPackageImports, describeWorkspaceDeps, getPkgRoot } from "@harpoc/test-utils";
 
 const pkgRoot = getPkgRoot(import.meta.url);
 

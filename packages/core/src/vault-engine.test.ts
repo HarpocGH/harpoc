@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, VaultError, VaultState, VAULT_VERSION } from "@harpoc/shared";
 import { AAD_INJECTION_POLICY } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { encrypt } from "./crypto/aes-gcm.js";
 import { forceNetworkIsolationUnavailableForTests } from "./injection/network-isolation.js";
@@ -14,7 +15,6 @@ import type { McpConnectionEntry, McpConnectionRegistry } from "./injection/mcp-
 import { SqliteStore } from "./storage/sqlite-store.js";
 import { DpapiSessionKeyProtector } from "./session/session-key-protector.js";
 import type { SessionKeyProtector } from "./session/session-key-protector.js";
-import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();

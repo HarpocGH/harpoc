@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "noEmit": true },
-  "exclude": ["src/scaffold.test.ts", "src/dependency-confinement.test.ts"]
+  "exclude": []
 }

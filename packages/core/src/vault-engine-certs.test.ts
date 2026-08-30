@@ -8,9 +8,9 @@ import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, PrincipalType, SecretType, VaultError } from "@harpoc/shared";
 import type { Permission } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
-import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();

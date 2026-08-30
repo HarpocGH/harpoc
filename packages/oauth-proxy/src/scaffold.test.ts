@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { describeWorkspaceDeps } from "../../shared/src/scaffold-helpers.js";
+import { describeWorkspaceDeps } from "@harpoc/test-utils";
 
 const PKG_ROOT = join(import.meta.dirname, "..");
 const DIST_ROOT = join(PKG_ROOT, "dist");

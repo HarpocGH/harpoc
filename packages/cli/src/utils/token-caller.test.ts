@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { VaultApiToken } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import {
   refuseEmptyToken,
   resolveTokenCaller,
   resolveTokenCallerForHandle,
 } from "./token-caller.js";
-import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 function payload(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
   return {

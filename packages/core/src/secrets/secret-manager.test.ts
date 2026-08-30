@@ -1,9 +1,9 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { createVaultKeys } from "../crypto/key-hierarchy.js";
 import { SqliteStore } from "../storage/sqlite-store.js";
 import { SecretManager } from "./secret-manager.js";
-import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 let store: SqliteStore;
 let manager: SecretManager;

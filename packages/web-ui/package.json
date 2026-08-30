@@ -27,7 +27,8 @@
     "@testing-library/preact": "^3.2.4",
     "@types/node": "^22.15.0",
     "jsdom": "^26.1.0",
-    "vite": "^7.0.0"
+    "vite": "^7.0.0",
+    "@harpoc/test-utils": "workspace:*"
   },
   "scripts": {
     "build": "vite build",

@@ -17,9 +17,9 @@ import {
   LOCKOUT_MAX_ATTEMPTS,
   LOCKOUT_DURATIONS_MS,
 } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
-import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = join(__filename, "..");

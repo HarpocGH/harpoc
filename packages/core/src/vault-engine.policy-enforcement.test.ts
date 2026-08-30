@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { vi } from "vitest";
 import type { CallerContext, Permission, PrincipalType } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
-import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();

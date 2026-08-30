@@ -16,13 +16,13 @@ import type {
   WebsocketResult,
 } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { DockerExecution } from "./injection/docker/docker-injector.js";
 import type { ImapExecution, ImapOAuth } from "./injection/imap-injector.js";
 import type { SftpExecution } from "./injection/sftp-injector.js";
 import type { MailTlsConfig, SmtpExecution, SmtpOAuth } from "./injection/smtp-injector.js";
 import type { WebsocketExecution } from "./injection/websocket-injector.js";
-import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();

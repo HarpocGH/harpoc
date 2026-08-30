@@ -3,6 +3,7 @@ import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import {
   controlledPathDirs,
   matchesHostAllowlist,
@@ -11,7 +12,6 @@ import {
   resolveAndMatchCommand,
   resolveExecutable,
 } from "./allowlist.js";
-import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 // ---------------------------------------------------------------------------
 // Host / host:port allowlist

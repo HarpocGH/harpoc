@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Secret } from "@harpoc/shared";
 import { ErrorCode, SecretStatus, SecretType } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { SqliteStore } from "../storage/sqlite-store.js";
 import { PolicyEngine } from "./policy-engine.js";
-import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 let store: SqliteStore;
 let engine: PolicyEngine;

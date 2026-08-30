@@ -9,10 +9,10 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ErrorCode, VaultError } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { describe, expect, it } from "vitest";
 import { analyzeKeyMaterial, decryptKeyForImport } from "./key-import.js";
 import { loadPrivateKey } from "./key-loader.js";
-import { expectVaultError } from "../../test-helpers/expect-vault-error.js";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "..", "__fixtures__", "ssh");
 const readFixture = (name: string): string => readFileSync(join(FIXTURES, name), "utf8");

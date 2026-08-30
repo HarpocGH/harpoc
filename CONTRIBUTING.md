@@ -21,18 +21,21 @@ pnpm test
 
 ## Project Structure
 
-| Package               | Path                   | Description                                                   |
-| --------------------- | ---------------------- | ------------------------------------------------------------- |
-| `@harpoc/shared`      | `packages/shared`      | Types, error codes, Zod schemas, constants                    |
-| `@harpoc/core`        | `packages/core`        | VaultEngine, crypto, SQLite storage, HTTP + process injection |
-| `@harpoc/cli`         | `packages/cli`         | `harpoc` CLI binary (Commander.js)                            |
-| `@harpoc/mcp-server`  | `packages/mcp-server`  | MCP server with tools, resources, and guards                  |
-| `@harpoc/rest-api`    | `packages/rest-api`    | Hono HTTP API with JWT auth and rate limiting                 |
-| `@harpoc/sdk`         | `packages/sdk`         | VaultClient with direct and REST modes                        |
-| `@harpoc/oauth-proxy` | `packages/oauth-proxy` | OAuth 2.1 proxy: PKCE flows, provider presets, token refresh  |
-| `@harpoc/integration` | `packages/integration` | Cross-package integration tests                               |
-| `@harpoc/e2e`         | `packages/e2e`         | End-to-end evaluation harness (Linux + Docker; `test:e2e`)    |
-| `@harpoc/benchmarks`  | `packages/benchmarks`  | Baseline latency benchmarks (`pnpm bench`; real Argon2id)     |
+| Package                | Path                    | Description                                                                                                  |
+| ---------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `@harpoc/shared`       | `packages/shared`       | Types, error codes, Zod schemas, constants                                                                   |
+| `@harpoc/core`         | `packages/core`         | VaultEngine, crypto, SQLite storage, HTTP + process injection                                                |
+| `@harpoc/cli`          | `packages/cli`          | `harpoc` CLI binary (Commander.js)                                                                           |
+| `@harpoc/mcp-server`   | `packages/mcp-server`   | MCP server with tools, resources, and guards                                                                 |
+| `@harpoc/rest-api`     | `packages/rest-api`     | Hono HTTP API with JWT auth and rate limiting                                                                |
+| `@harpoc/sdk`          | `packages/sdk`          | VaultClient with direct and REST modes                                                                       |
+| `@harpoc/oauth-proxy`  | `packages/oauth-proxy`  | OAuth 2.1 proxy: PKCE flows, provider presets, token refresh                                                 |
+| `@harpoc/cert-manager` | `packages/cert-manager` | Certificate lifecycle: PKCS#10 CSR builder, ACME client, renewal scheduler                                   |
+| `@harpoc/web-ui`       | `packages/web-ui`       | Preact + Vite SPA served by the REST API at `/ui`                                                            |
+| `@harpoc/integration`  | `packages/integration`  | Cross-package integration tests                                                                              |
+| `@harpoc/e2e`          | `packages/e2e`          | End-to-end evaluation harness (Linux + Docker; `test:e2e`)                                                   |
+| `@harpoc/benchmarks`   | `packages/benchmarks`   | Baseline latency benchmarks (`pnpm bench`; real Argon2id)                                                    |
+| `@harpoc/test-utils`   | `packages/test-utils`   | Test-only helpers (`expectVaultError`, the scaffold helpers); source-only, never built, a devDependency only |
 
 ## Code Style
 
@@ -48,6 +51,9 @@ pnpm test
 - Passwords in tests must be at least 8 characters (`MIN_PASSWORD_LENGTH`)
 - Mock Argon2 in unit tests for performance (see existing test suites for examples)
 - Run all tests: `pnpm test`
+- Cross-package test helpers — `expectVaultError` and the `scaffold.test.ts` helpers — come from
+  `@harpoc/test-utils`, a private source-only package (`exports: "./src/index.ts"`, no build) that every
+  package with a test suite except `@harpoc/shared` lists under `devDependencies`, never `dependencies`
 - The E2E evaluation harness is **not** part of `pnpm test`. It needs Docker and is Linux-only, so its
   script is `test:e2e` rather than `test` — `turbo run test` therefore skips it and a contributor
   without Docker gets a green run. To run it: `pnpm --filter @harpoc/e2e fleet:up`, then

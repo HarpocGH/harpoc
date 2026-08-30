@@ -13,8 +13,8 @@ import {
 } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
 import type { SecretInfo, DecryptedAuditEvent } from "@harpoc/core";
+import { expectVaultError } from "@harpoc/test-utils";
 import { resolveSecretId } from "../utils/vault-loader.js";
-import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 // Mock argon2 for speed (the connect.e2e / core / oauth-proxy stand-in): nothing
 // here depends on the KDF's cost, and the real RFC 9106 profile made the

@@ -25,6 +25,9 @@
     "@harpoc/core": "workspace:*",
     "open": "^10.1.0"
   },
+  "devDependencies": {
+    "@harpoc/test-utils": "workspace:*"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",

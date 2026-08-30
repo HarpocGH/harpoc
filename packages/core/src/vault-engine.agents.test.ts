@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretType, TOKEN_LABEL_MAX_LENGTH } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import type { DecryptedAuditEvent } from "./audit/audit-query.js";
 import type { IssuedTokenRow, SqliteStore } from "./storage/sqlite-store.js";
 import { VaultEngine } from "./vault-engine.js";
-import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();

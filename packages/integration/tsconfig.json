@@ -4,6 +4,5 @@
     "noEmit": true,
     "rootDir": "src"
   },
-  "include": ["src"],
-  "exclude": ["src/scaffold.test.ts"]
+  "include": ["src"]
 }

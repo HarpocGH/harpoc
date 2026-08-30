@@ -5,7 +5,7 @@ import {
   describeCrossPackageImports,
   describeWorkspaceDeps,
   getPkgRoot,
-} from "../../shared/src/scaffold-helpers.js";
+} from "@harpoc/test-utils";
 
 const pkgRoot = getPkgRoot(import.meta.url);
 const distDir = resolve(pkgRoot, "dist");

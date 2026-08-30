@@ -21,6 +21,9 @@
     "pg": "^8.22.0",
     "zod": "^3.25.76"
   },
+  "devDependencies": {
+    "@harpoc/test-utils": "workspace:*"
+  },
   "scripts": {
     "pki": "node scripts/generate-fixtures.mjs pki",
     "keys": "node scripts/generate-fixtures.mjs keys",

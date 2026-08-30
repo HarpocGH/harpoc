@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import { describeRuntimeDependencyConfinement } from "../../shared/src/scaffold-helpers.js";
+import { describeRuntimeDependencyConfinement } from "@harpoc/test-utils";
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = resolve(pkgRoot, "dist");

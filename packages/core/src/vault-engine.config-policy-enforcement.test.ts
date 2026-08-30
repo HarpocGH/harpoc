@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext, McpServerConfig, Permission, PrincipalType } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
-import { expectVaultError } from "./test-helpers/expect-vault-error.js";
 
 /**
  * W1: secret-scoped *configuration* under the per-secret policy layer.

@@ -4,9 +4,9 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { SqliteStore } from "./sqlite-store.js";
 import { LATEST_SCHEMA_VERSION } from "./schema.js";
-import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 let dir: string;
 let dbPath: string;

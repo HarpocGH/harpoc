@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, DatabaseAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode, MAX_DB_RESULT_BYTES } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
 import { DatabaseInjector } from "./database-injector.js";
 import type {
@@ -10,7 +11,6 @@ import type {
   DbEngineAdapter,
   DbQueryResult,
 } from "./db-adapters.js";
-import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 // Lazy-driver pin (mirrors the pg mock in database-injector.tls.test.ts):
 // running a non-redis action through the REAL default adapters must never

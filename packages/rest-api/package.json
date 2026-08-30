@@ -29,6 +29,9 @@
     "@hono/node-server": "^1.14.0",
     "zod": "^3.24.0"
   },
+  "devDependencies": {
+    "@harpoc/test-utils": "workspace:*"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",

@@ -9,10 +9,10 @@ import {
   SecretStatus,
   SecretType,
 } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import type { IssuedTokenRow } from "../storage/sqlite-store.js";
 import { SqliteStore } from "../storage/sqlite-store.js";
 import { AgentRegistry } from "./agent-registry.js";
-import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 let store: SqliteStore;
 let registry: AgentRegistry;

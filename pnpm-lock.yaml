@@ -47,6 +47,9 @@ importers:
         specifier: workspace:*
         version: link:../shared
     devDependencies:
+      "@harpoc/test-utils":
+        specifier: workspace:*
+        version: link:../test-utils
       "@types/node":
         specifier: ^22.15.0
         version: 22.19.13
@@ -81,6 +84,9 @@ importers:
         specifier: ^13.1.0
         version: 13.1.0
     devDependencies:
+      "@harpoc/test-utils":
+        specifier: workspace:*
+        version: link:../test-utils
       "@types/node":
         specifier: ^22.15.0
         version: 22.19.13
@@ -115,6 +121,9 @@ importers:
         specifier: ^7.28.0
         version: 7.28.0
     devDependencies:
+      "@harpoc/test-utils":
+        specifier: workspace:*
+        version: link:../test-utils
       "@types/better-sqlite3":
         specifier: ^7.6.13
         version: 7.6.13
@@ -163,6 +172,10 @@ importers:
       zod:
         specifier: ^3.25.76
         version: 3.25.76
+    devDependencies:
+      "@harpoc/test-utils":
+        specifier: workspace:*
+        version: link:../test-utils
 
   packages/integration:
     dependencies:
@@ -197,6 +210,9 @@ importers:
       "@harpoc/cli":
         specifier: workspace:*
         version: link:../cli
+      "@harpoc/test-utils":
+        specifier: workspace:*
+        version: link:../test-utils
 
   packages/mcp-server:
     dependencies:
@@ -218,6 +234,10 @@ importers:
       zod:
         specifier: ^3.25.76
         version: 3.25.76
+    devDependencies:
+      "@harpoc/test-utils":
+        specifier: workspace:*
+        version: link:../test-utils
 
   packages/oauth-proxy:
     dependencies:
@@ -230,6 +250,10 @@ importers:
       open:
         specifier: ^10.1.0
         version: 10.2.0
+    devDependencies:
+      "@harpoc/test-utils":
+        specifier: workspace:*
+        version: link:../test-utils
 
   packages/rest-api:
     dependencies:
@@ -254,6 +278,10 @@ importers:
       zod:
         specifier: ^3.24.0
         version: 3.25.76
+    devDependencies:
+      "@harpoc/test-utils":
+        specifier: workspace:*
+        version: link:../test-utils
 
   packages/sdk:
     dependencies:
@@ -270,12 +298,25 @@ importers:
       "@harpoc/oauth-proxy":
         specifier: workspace:*
         version: link:../oauth-proxy
+      "@harpoc/test-utils":
+        specifier: workspace:*
+        version: link:../test-utils
 
   packages/shared:
     dependencies:
       zod:
         specifier: ^3.24.0
         version: 3.25.76
+
+  packages/test-utils:
+    dependencies:
+      "@harpoc/shared":
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      "@types/node":
+        specifier: ^22.15.0
+        version: 22.19.13
 
   packages/web-ui:
     dependencies:
@@ -289,6 +330,9 @@ importers:
         specifier: ^10.26.9
         version: 10.29.8
     devDependencies:
+      "@harpoc/test-utils":
+        specifier: workspace:*
+        version: link:../test-utils
       "@preact/preset-vite":
         specifier: ^2.10.1
         version: 2.10.6(@babel/core@7.29.7)(preact@10.29.8)(rollup@4.59.0)(vite@7.3.1(@types/node@22.19.13))

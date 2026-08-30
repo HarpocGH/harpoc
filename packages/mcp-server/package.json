@@ -32,6 +32,9 @@
     "@modelcontextprotocol/sdk": "^1.27.1",
     "zod": "^3.25.76"
   },
+  "devDependencies": {
+    "@harpoc/test-utils": "workspace:*"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",

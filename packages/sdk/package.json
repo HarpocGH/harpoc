@@ -26,7 +26,8 @@
   "devDependencies": {
     "@harpoc/core": "workspace:*",
     "@harpoc/oauth-proxy": "workspace:*",
-    "@harpoc/cert-manager": "workspace:*"
+    "@harpoc/cert-manager": "workspace:*",
+    "@harpoc/test-utils": "workspace:*"
   },
   "peerDependencies": {
     "@harpoc/core": "^1.0.0",

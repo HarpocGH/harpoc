@@ -1,7 +1,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe } from "vitest";
-import { describeRuntimeDependencyConfinement } from "../../shared/src/scaffold-helpers.js";
+import { describeRuntimeDependencyConfinement } from "@harpoc/test-utils";
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 

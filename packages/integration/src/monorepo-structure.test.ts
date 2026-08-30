@@ -1,16 +1,16 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { describeBuildOutput, getPkgRoot } from "./scaffold-helpers.js";
+import { describeBuildOutput, getPkgRoot } from "@harpoc/test-utils";
 
 const pkgRoot = getPkgRoot(import.meta.url);
-const distDir = resolve(pkgRoot, "dist");
-const monorepoRoot = resolve(pkgRoot, "../..");
+const monorepoRoot = resolve(pkgRoot, "..", "..");
+const sharedDistDir = resolve(monorepoRoot, "packages", "shared", "dist");
 
 const PACKAGES = ["shared", "core", "mcp-server", "rest-api", "sdk", "cli"] as const;
 
 describe("shared", () => {
-  describeBuildOutput(distDir);
+  describeBuildOutput(sharedDistDir);
 });
 
 describe("monorepo structure", () => {
@@ -31,8 +31,9 @@ describe("monorepo structure", () => {
         expect(pkgJson.exports).toBeDefined();
         const exports = pkgJson.exports as Record<string, Record<string, string>>;
         expect(exports["."]).toBeDefined();
-        expect(exports["."].types).toBe("./dist/index.d.ts");
-        expect(exports["."].import).toBe("./dist/index.js");
+        const entry = exports["."] as Record<string, string>;
+        expect(entry.types).toBe("./dist/index.d.ts");
+        expect(entry.import).toBe("./dist/index.js");
       });
 
       it('has "build" script', () => {

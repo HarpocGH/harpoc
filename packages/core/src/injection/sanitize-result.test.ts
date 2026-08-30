@@ -1,9 +1,9 @@
 import { ErrorCode } from "@harpoc/shared";
 import type { UseSecretResponse } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { describe, expect, it } from "vitest";
 import { InjectionGuard } from "./injection-guard.js";
 import { sanitizeUseSecretResult } from "./sanitize-result.js";
-import { expectVaultError } from "../test-helpers/expect-vault-error.js";
 
 describe("sanitizeUseSecretResult", () => {
   const guard = new InjectionGuard();

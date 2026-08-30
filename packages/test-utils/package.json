@@ -1,0 +1,31 @@
+{
+  "name": "@harpoc/test-utils",
+  "version": "1.0.0",
+  "description": "Test-only helpers shared by every Harpoc package's test suite — never built, never published",
+  "license": "BUSL-1.1",
+  "author": "Stefan Gönitzer",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HarpocGH/harpoc.git",
+    "directory": "packages/test-utils"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@harpoc/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src/"
+  }
+}

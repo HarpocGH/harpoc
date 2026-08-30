@@ -36,7 +36,8 @@
     "commander": "^13.1.0"
   },
   "devDependencies": {
-    "@types/node": "^22.15.0"
+    "@types/node": "^22.15.0",
+    "@harpoc/test-utils": "workspace:*"
   },
   "scripts": {
     "build": "tsc",

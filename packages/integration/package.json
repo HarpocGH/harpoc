@@ -26,7 +26,8 @@
     "@modelcontextprotocol/sdk": "^1.27.1"
   },
   "devDependencies": {
-    "@harpoc/cli": "workspace:*"
+    "@harpoc/cli": "workspace:*",
+    "@harpoc/test-utils": "workspace:*"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
