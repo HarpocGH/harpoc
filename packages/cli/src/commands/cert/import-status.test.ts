@@ -495,7 +495,11 @@ describe("cert status", () => {
   it("prints the certificate record", async () => {
     await run(["status", "secret://web"]);
 
-    expect(mockEngine.getCertificateStatus).toHaveBeenCalledWith("secret-id-1", undefined);
+    expect(mockEngine.getCertificateStatus).toHaveBeenCalledWith(
+      "secret-id-1",
+      undefined,
+      "secret://web",
+    );
     const printed = logSpy.mock.calls.flat().join("\n");
     expect(printed).toContain("Subject");
     expect(printed).toContain("CN=fixture.example.com");
@@ -545,11 +549,15 @@ describe("cert status", () => {
 
     await run(["status", "secret://web", "--token", "jwt-value"]);
 
-    expect(mockEngine.getCertificateStatus).toHaveBeenCalledWith("secret-id-1", {
-      principal_type: "agent",
-      principal_id: "agent-1",
-      interface: "cli",
-    });
+    expect(mockEngine.getCertificateStatus).toHaveBeenCalledWith(
+      "secret-id-1",
+      {
+        principal_type: "agent",
+        principal_id: "agent-1",
+        interface: "cli",
+      },
+      "secret://web",
+    );
   });
 
   it("a rotate-only token is denied with ACCESS_DENIED before the engine read", async () => {

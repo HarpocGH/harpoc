@@ -364,6 +364,9 @@ describe("MCP proxy context — Streamable HTTP transport (request-mediated)", (
       transport: "http",
       url: baseUrl,
     });
+    await vault.engine.setInjectionPolicy(handle, {
+      url_allowlist: [`${baseUrl.replace(/\/mcp$/, "")}/*`],
+    });
   });
 
   afterEach(async () => {

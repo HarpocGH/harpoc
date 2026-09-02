@@ -18,8 +18,8 @@ import {
 // ---------------------------------------------------------------------------
 
 describe("matchesHostAllowlist", () => {
-  it("is not enforced when the allowlist is empty", () => {
-    expect(matchesHostAllowlist("evil.example.com", [])).toBe(true);
+  it("denies by default when the allowlist is empty", () => {
+    expect(matchesHostAllowlist("evil.example.com", [])).toBe(false);
   });
 
   it("matches an exact host (case-insensitive)", () => {
@@ -34,8 +34,8 @@ describe("matchesHostAllowlist", () => {
 });
 
 describe("matchesHostPortAllowlist", () => {
-  it("is not enforced when the allowlist is empty", () => {
-    expect(matchesHostPortAllowlist("db.example.com", 5432, [])).toBe(true);
+  it("denies by default when the allowlist is empty", () => {
+    expect(matchesHostPortAllowlist("db.example.com", 5432, [])).toBe(false);
   });
 
   it("matches host:port exactly", () => {
@@ -63,8 +63,23 @@ describe("matchesHostPortAllowlist", () => {
 // ---------------------------------------------------------------------------
 
 describe("matchesUrlAllowlist", () => {
-  it("is not enforced when the allowlist is empty", () => {
-    expect(matchesUrlAllowlist("https://anywhere.example/x", [])).toBe(true);
+  it("denies by default when the allowlist is empty", () => {
+    expect(matchesUrlAllowlist("https://anywhere.example/x", [])).toBe(false);
+  });
+
+  it("matches a bracketed IPv6 literal host in its WHATWG-canonical form", () => {
+    expect(matchesUrlAllowlist("https://[fc00::1]/api", ["https://[fc00::1]/*"])).toBe(true);
+    expect(matchesUrlAllowlist("https://[fc00::1]/api", ["https://[FC00:0::1]/*"])).toBe(true);
+    expect(matchesUrlAllowlist("http://[::1]:8443/x", ["http://[0:0::1]:8443/*"])).toBe(true);
+    expect(
+      matchesUrlAllowlist("wss://[::ffff:192.168.1.1]/x", ["wss://[::ffff:192.168.1.1]/*"]),
+    ).toBe(true);
+  });
+
+  it("a bracketed pattern binds its port and scheme like any other", () => {
+    expect(matchesUrlAllowlist("http://[::1]:8443/x", ["http://[::1]/*"])).toBe(false);
+    expect(matchesUrlAllowlist("http://[::1]:8443/x", ["https://[::1]:8443/*"])).toBe(false);
+    expect(matchesUrlAllowlist("https://[fc00::1]/api", ["https://[fc00::2]/*"])).toBe(false);
   });
 
   it("matches an exact URL", () => {

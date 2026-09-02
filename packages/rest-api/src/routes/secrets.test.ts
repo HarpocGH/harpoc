@@ -21,7 +21,7 @@ const NON_OBJECT_BODIES = [
 const MOCK_TOKEN: VaultApiToken = {
   sub: "test-agent",
   vault_id: "vault-1",
-  scope: ["list", "read", "create", "rotate", "revoke", "use"],
+  scope: ["list", "read", "create", "rotate", "revoke", "use", "admin"],
   iat: Math.floor(Date.now() / 1000),
   exp: Math.floor(Date.now() / 1000) + 3600,
   jti: "jti-1",
@@ -134,6 +134,7 @@ describe("secret routes", () => {
         principal_type: "agent",
         principal_id: "test-agent",
         interface: "rest",
+        admin_scope: true,
       });
     });
 
@@ -239,6 +240,7 @@ describe("secret routes", () => {
         principal_type: "agent",
         principal_id: "test-agent",
         interface: "rest",
+        admin_scope: true,
       });
     });
 
@@ -269,6 +271,7 @@ describe("secret routes", () => {
         principal_type: "agent",
         principal_id: "test-agent",
         interface: "rest",
+        admin_scope: true,
       });
     });
 
@@ -1027,7 +1030,8 @@ describe("secret routes", () => {
 
   describe("scope denial on sensitive routes", () => {
     const JSON_HEADERS = { ...AUTH, "content-type": "application/json" };
-    const withoutScope = (missing: string) => MOCK_TOKEN.scope.filter((s) => s !== missing);
+    const withoutScope = (missing: string) =>
+      MOCK_TOKEN.scope.filter((s) => s !== missing && s !== "admin");
 
     const cases: {
       title: string;
@@ -1083,8 +1087,8 @@ describe("secret routes", () => {
         request: () => app.request("/api/v1/secrets/test-key/injection-policy", { headers: AUTH }),
       },
       {
-        title: "PUT /:handle/injection-policy requires rotate",
-        missing: "rotate",
+        title: "PUT /:handle/injection-policy requires admin",
+        missing: "admin",
         engineFn: "setInjectionPolicy",
         request: () =>
           app.request("/api/v1/secrets/test-key/injection-policy", {
@@ -1230,6 +1234,7 @@ describe("engine-level policy enforcement wiring (thesis §4.6)", () => {
     principal_type: "agent",
     principal_id: "test-agent",
     interface: "rest",
+    admin_scope: true,
   };
   const JSON_HEADERS = { ...AUTH, "content-type": "application/json" };
 
@@ -1301,6 +1306,15 @@ describe("engine-level policy enforcement wiring (thesis §4.6)", () => {
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe(ErrorCode.ACCESS_DENIED);
+  });
+
+  it("an engine SECRET_NOT_FOUND on a policy-concealed refusal maps to 404 like an unknown handle (R5)", async () => {
+    engine.getSecretValue.mockRejectedValue(VaultError.secretNotFound("secret://test-key"));
+    const res = await app.request("/api/v1/secrets/test-key/value", { headers: AUTH });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe(ErrorCode.SECRET_NOT_FOUND);
+    expect(body.message).toBe("Secret not found: secret://test-key");
   });
 
   // W1: the secret-scoped configuration routes sat outside the policy layer —
@@ -1408,7 +1422,7 @@ describe("engine-level policy enforcement wiring (thesis §4.6)", () => {
 
   it("a config-route ACCESS_DENIED maps to 403", async () => {
     engine.setInjectionPolicy.mockRejectedValue(
-      VaultError.accessDenied("Principal lacks 'rotate' permission on this secret"),
+      VaultError.accessDenied("Principal lacks 'admin' permission on this secret"),
     );
     const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
       method: "PUT",

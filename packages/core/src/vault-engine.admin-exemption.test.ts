@@ -137,11 +137,11 @@ describe("R7 admin-user exemption", () => {
     );
   });
 
-  it("a user caller without admin scope stays gated", async () => {
+  it("a user caller without admin scope is gated like any other — told not-found", async () => {
     const caller = callerFor("viewer", ["read", "list"], "user");
 
     await expect(engine.getSecretInfo("secret://gated-key", caller)).rejects.toMatchObject({
-      code: ErrorCode.ACCESS_DENIED,
+      code: ErrorCode.SECRET_NOT_FOUND,
     });
   });
 

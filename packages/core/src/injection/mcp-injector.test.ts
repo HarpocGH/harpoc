@@ -159,6 +159,7 @@ describe("McpInjector — validation", () => {
     await expect(
       run(mcpAction("echo"), {
         config: { server_name: "test-mcp", transport: "http", url: "http://api.example.com/mcp" },
+        policy: { ...POLICY, url_allowlist: ["http://api.example.com/*"] },
       }),
     ).rejects.toMatchObject({ code: ErrorCode.URL_HTTPS_REQUIRED });
   });
@@ -386,7 +387,7 @@ describe("McpInjector — network isolation (§4.5.3 layer 4)", () => {
     // that the failure is NOT the isolation refusal: the D1/D2 boundary.
     const err = await run(mcpAction("echo"), {
       config: { server_name: "test-mcp", transport: "http", url: "http://127.0.0.1:9/mcp" },
-      policy: { ...POLICY, network_isolation: true },
+      policy: { ...POLICY, network_isolation: true, url_allowlist: ["http://127.0.0.1:9/*"] },
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(VaultError);
     expect((err as VaultError).code).not.toBe(ErrorCode.NETWORK_ISOLATION_UNAVAILABLE);
@@ -437,7 +438,7 @@ describe("McpInjector — filesystem isolation", () => {
     const terminateSpy = vi.spyOn(registry, "terminate");
     const err = await run(mcpAction("echo"), {
       config: { server_name: "test-mcp", transport: "http", url: "http://127.0.0.1:9/mcp" },
-      policy: { ...POLICY, fs_isolation: true },
+      policy: { ...POLICY, fs_isolation: true, url_allowlist: ["http://127.0.0.1:9/*"] },
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(VaultError);
     expect((err as VaultError).code).not.toBe(ErrorCode.FS_ISOLATION_UNAVAILABLE);

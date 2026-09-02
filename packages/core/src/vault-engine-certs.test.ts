@@ -803,6 +803,9 @@ describe("generic certificate-typed secrets keep working", () => {
   });
 
   it("injects its value through a useSecret http action", async () => {
+    await engine.setInjectionPolicy("secret://legacy-cert", {
+      url_allowlist: [`${targetUrl}/*`],
+    });
     const res = await engine.useSecret("secret://legacy-cert", {
       type: "http",
       method: "GET",
@@ -1563,7 +1566,7 @@ describe("updateCertificate", () => {
         principal_id: "other-agent",
         interface: "cli",
       }),
-    ).rejects.toMatchObject({ code: ErrorCode.ACCESS_DENIED });
+    ).rejects.toMatchObject({ code: ErrorCode.SECRET_NOT_FOUND });
 
     expect(engine.queryAudit({ secretId, eventType: AuditEventType.SECRET_READ }).length).toBe(0);
     expect(storedCert(secretId)?.certificate_pem).toBeNull();
@@ -1672,7 +1675,7 @@ describe("certificate accessors — caller policy enforcement", () => {
           principal_id: "other-agent",
           interface: "cli",
         }),
-      ErrorCode.ACCESS_DENIED,
+      ErrorCode.SECRET_NOT_FOUND,
     );
 
     const denials = engine
@@ -1691,6 +1694,33 @@ describe("certificate accessors — caller policy enforcement", () => {
     expect(engine.getCertificateStatus(secretId).subject).toBe("CN=fixture.example.com");
   });
 
+  it("names the handle the interface resolved with, byte-identical to an unknown handle", async () => {
+    const err = await expectVaultError(
+      () =>
+        Promise.resolve().then(() =>
+          engine.getCertificateStatus(
+            secretId,
+            { principal_type: PrincipalType.AGENT, principal_id: "other-agent" },
+            "secret://gated-cert",
+          ),
+        ),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
+    expect(err.message).toBe("Secret not found: secret://gated-cert");
+
+    const bare = await expectVaultError(
+      () =>
+        Promise.resolve().then(() =>
+          engine.getCertificateStatus(secretId, {
+            principal_type: PrincipalType.AGENT,
+            principal_id: "other-agent",
+          }),
+        ),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
+    expect(bare.message).toBe("Secret not found");
+  });
+
   it("getCertificatePrivateKey refuses an ungranted caller before decrypting", async () => {
     await expect(
       engine.getCertificatePrivateKey(secretId, {
@@ -1698,7 +1728,7 @@ describe("certificate accessors — caller policy enforcement", () => {
         principal_id: "other-agent",
         interface: "cli",
       }),
-    ).rejects.toMatchObject({ code: ErrorCode.ACCESS_DENIED });
+    ).rejects.toMatchObject({ code: ErrorCode.SECRET_NOT_FOUND });
 
     const denials = engine
       .queryAudit({ eventType: AuditEventType.SECRET_READ })
@@ -1736,7 +1766,7 @@ describe("certificate accessors — caller policy enforcement", () => {
         principal_id: "other-agent",
         interface: "cli",
       }),
-    ).toThrow(expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }));
+    ).toThrow(expect.objectContaining({ code: ErrorCode.SECRET_NOT_FOUND }));
 
     const denials = engine
       .queryAudit({ eventType: AuditEventType.SECRET_READ })
@@ -1772,7 +1802,7 @@ describe("certificate accessors — caller policy enforcement", () => {
         principal_id: "other-agent",
         interface: "cli",
       }),
-    ).toThrow(expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }));
+    ).toThrow(expect.objectContaining({ code: ErrorCode.SECRET_NOT_FOUND }));
 
     const denials = engine
       .queryAudit({ eventType: AuditEventType.SECRET_READ })

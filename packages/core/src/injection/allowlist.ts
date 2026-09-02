@@ -9,6 +9,9 @@ import { VaultError } from "@harpoc/shared";
  * be injected into. Command allowlisting (process-mediated) constrains which
  * binaries may be spawned with a credential; enforcement pins the request to a
  * resolved absolute path so bypass requires replacing the binary on disk.
+ * Every allowlist here denies by default (R1, 2026-09-01): an empty list
+ * permits nothing, so a credential reaches a target only once an
+ * administrator has named it.
  */
 
 // ---------------------------------------------------------------------------
@@ -16,16 +19,18 @@ import { VaultError } from "@harpoc/shared";
 // ---------------------------------------------------------------------------
 
 /**
- * Returns true if `url` is permitted by `patterns`. An empty allowlist is not
- * enforced (returns true) — URL allowlisting is an optional, opt-in layer atop
- * the mandatory SSRF validation.
+ * Returns true if `url` is permitted by `patterns`. Deny-by-default: an empty
+ * allowlist permits no URL (Saltzer fail-safe defaults) — the mandatory SSRF
+ * validation still runs underneath for every URL that passes.
  *
  * A pattern matches when scheme, host and port match and the pattern path (with
  * `*` wildcards) matches the URL path. A leading `*.` in the pattern host is a
- * subdomain wildcard. Query and fragment are not considered.
+ * subdomain wildcard; an IPv6 literal host is written in brackets, as in a URL
+ * (`https://[::1]:8443/*`), and compared in its canonical form. Query and
+ * fragment are not considered.
  */
 export function matchesUrlAllowlist(url: string, patterns: string[]): boolean {
-  if (patterns.length === 0) return true;
+  if (patterns.length === 0) return false;
   let target: URL;
   try {
     target = new URL(url);
@@ -35,9 +40,10 @@ export function matchesUrlAllowlist(url: string, patterns: string[]): boolean {
   return patterns.some((pattern) => matchesUrlPattern(target, pattern));
 }
 
-// scheme://host[:port][/path] — host and path may contain `*` wildcards. The
-// pattern is parsed directly (not via URL) so wildcards survive intact.
-const PATTERN_RE = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/([^/:]+)(?::(\d+))?(\/.*)?$/;
+// scheme://host[:port][/path] — host and path may contain `*` wildcards; an
+// IPv6 literal host is bracketed. The pattern is parsed directly (not via URL)
+// so wildcards survive intact.
+const PATTERN_RE = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/(\[[^\]/]+\]|[^/:]+)(?::(\d+))?(\/.*)?$/;
 
 function matchesUrlPattern(target: URL, pattern: string): boolean {
   const match = PATTERN_RE.exec(pattern.trim());
@@ -55,7 +61,7 @@ function matchesUrlPattern(target: URL, pattern: string): boolean {
 }
 
 function matchHost(patternHost: string, host: string): boolean {
-  const p = patternHost.toLowerCase();
+  const p = canonicalPatternHost(patternHost);
   const h = host.toLowerCase();
   if (p === h) return true;
   if (p.startsWith("*.")) {
@@ -65,31 +71,46 @@ function matchHost(patternHost: string, host: string): boolean {
   return false;
 }
 
+/**
+ * A bracketed IPv6 pattern host in the form `URL.hostname` serializes — the
+ * target side always arrives that way, so `[FC00:0::1]` and `[fc00::1]` are the
+ * same host. Anything else is lowercased only.
+ */
+function canonicalPatternHost(patternHost: string): string {
+  const lower = patternHost.toLowerCase();
+  if (!lower.startsWith("[")) return lower;
+  try {
+    return new URL(`http://${lower}/`).hostname;
+  } catch {
+    return lower;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Host / host:port allowlist (SSH, Git-over-SSH, database targets)
 // ---------------------------------------------------------------------------
 
 /**
  * Returns true if `host` is permitted by `patterns` (bare-host patterns with an
- * optional `*.` subdomain wildcard). An empty allowlist is not enforced (returns
- * true) — like the URL allowlist, this is an optional layer; process-mediated
- * callers (SSH, Git-over-SSH) additionally reject an empty allowlist themselves
- * for fail-safe deny.
+ * optional `*.` subdomain wildcard). Deny-by-default: an empty allowlist permits
+ * no host — the fail-safe posture the process-mediated callers (SSH, SFTP,
+ * Git-over-SSH, docker registry) always carried, now the rule for every
+ * consumer.
  */
 export function matchesHostAllowlist(host: string, patterns: string[]): boolean {
-  if (patterns.length === 0) return true;
+  if (patterns.length === 0) return false;
   return patterns.some((p) => matchHost(p.trim(), host));
 }
 
 /**
  * Returns true if `host`:`port` is permitted by `patterns`. A pattern may be a
  * bare host (matches any port) or `host:port` (port must match exactly). Host
- * matching supports the `*.` subdomain wildcard. An empty allowlist is not
- * enforced (returns true) — the mandatory floor for the database context is the
- * SSRF check plus TLS verification.
+ * matching supports the `*.` subdomain wildcard. Deny-by-default: an empty
+ * allowlist permits no target — the SSRF check and TLS verification stay the
+ * mandatory floor underneath for the database, SMTP and IMAP contexts.
  */
 export function matchesHostPortAllowlist(host: string, port: number, patterns: string[]): boolean {
-  if (patterns.length === 0) return true;
+  if (patterns.length === 0) return false;
   return patterns.some((raw) => {
     const p = raw.trim();
     const colon = p.lastIndexOf(":");

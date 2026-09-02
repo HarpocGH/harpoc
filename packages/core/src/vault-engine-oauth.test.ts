@@ -928,6 +928,9 @@ describe("useSecret with OAuth", () => {
     await engine.initVault("password");
     const result = await engine.createOAuthSecret("use-test", defaultProviderConfig());
     secretId = result.secretId;
+    await engine.setInjectionPolicy("secret://use-test", {
+      url_allowlist: [`${targetServerUrl}/*`],
+    });
   });
 
   it("uses OAuth access token for HTTP injection (bearer)", async () => {
@@ -1038,7 +1041,7 @@ describe("OAuth entry points — caller policy enforcement (token-cli-parity)", 
         principal_id: "other-agent",
         interface: "cli",
       }),
-    ).rejects.toMatchObject({ code: ErrorCode.ACCESS_DENIED });
+    ).rejects.toMatchObject({ code: ErrorCode.SECRET_NOT_FOUND });
     expect(hits).toBe(0);
     const denials = engine
       .queryAudit({ eventType: AuditEventType.OAUTH_REFRESH })
@@ -1072,7 +1075,7 @@ describe("OAuth entry points — caller policy enforcement (token-cli-parity)", 
           principal_id: "other-agent",
           interface: "cli",
         }),
-      ErrorCode.ACCESS_DENIED,
+      ErrorCode.SECRET_NOT_FOUND,
     );
 
     const status = engine.getOAuthTokenStatus(secretId, {
@@ -1082,5 +1085,32 @@ describe("OAuth entry points — caller policy enforcement (token-cli-parity)", 
     });
     expect(status.provider).toBe("github");
     expect(engine.getOAuthTokenStatus(secretId).provider).toBe("github");
+  });
+
+  it("names the handle the interface resolved with, byte-identical to an unknown handle", async () => {
+    const err = await expectVaultError(
+      () =>
+        Promise.resolve().then(() =>
+          engine.getOAuthTokenStatus(
+            secretId,
+            { principal_type: PrincipalType.AGENT, principal_id: "other-agent" },
+            "secret://gated-oauth",
+          ),
+        ),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
+    expect(err.message).toBe("Secret not found: secret://gated-oauth");
+
+    const bare = await expectVaultError(
+      () =>
+        Promise.resolve().then(() =>
+          engine.getOAuthTokenStatus(secretId, {
+            principal_type: PrincipalType.AGENT,
+            principal_id: "other-agent",
+          }),
+        ),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
+    expect(bare.message).toBe("Secret not found");
   });
 });

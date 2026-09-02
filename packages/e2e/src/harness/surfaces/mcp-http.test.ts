@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { Permission } from "@harpoc/shared";
-import { createHarnessVault, storeSecret } from "../vault.js";
+import { createHarnessVault, grantOn, storeSecret } from "../vault.js";
 import type { HarnessVault } from "../vault.js";
 import { startMcpHttpSurface } from "./mcp-http.js";
 import type { McpHttpSurface } from "./mcp-http.js";
@@ -31,6 +31,7 @@ describe("mcp-http surface", () => {
       env_allowlist: [],
       host_allowlist: [],
     });
+    await grantOn(vault, handle, "e2e-agent", [Permission.USE]);
 
     surface = await startMcpHttpSurface(vault, "e2e-agent", [Permission.USE]);
     const outcome = await surface.callUseSecret(handle, {
@@ -58,6 +59,7 @@ describe("mcp-http surface", () => {
       env_allowlist: [],
       host_allowlist: [],
     });
+    await grantOn(vault, handle, "e2e-agent", [Permission.USE]);
 
     surface = await startMcpHttpSurface(vault, "e2e-agent", [Permission.USE]);
     const outcome = await surface.callUseSecret(handle, {

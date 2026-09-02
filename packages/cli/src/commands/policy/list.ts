@@ -34,7 +34,7 @@ export function registerPolicyListCommand(policy: Command): void {
               resolved = resolveTokenCaller(engine, { permission: "read" }, tokenValue);
             }
 
-            const policies = engine.listPolicies(secretId, resolved?.caller);
+            const policies = engine.listPolicies(secretId, resolved?.caller, handle);
 
             if (options.json) {
               printJson(policies);

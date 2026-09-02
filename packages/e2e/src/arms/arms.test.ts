@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Permission } from "@harpoc/shared";
-import { createHarnessVault, storeSecret } from "../harness/vault.js";
+import { createHarnessVault, grantOn, storeSecret } from "../harness/vault.js";
 import type { HarnessVault } from "../harness/vault.js";
 import { assertOpaque, assertPresent } from "../assert/opacity.js";
 import { ECHO_HTTPS, assertFleetUp } from "../harness/backends.js";
@@ -62,6 +62,11 @@ describe("two-arm harness (C-3)", () => {
       env_allowlist: ["HARPOC_E2E_ARMS_MARKER"],
       host_allowlist: [],
     });
+    await grantOn(vault, handle, "arms-selfcheck-principal", [
+      Permission.READ,
+      Permission.USE,
+      Permission.LIST,
+    ]);
 
     baseline = await startBaselineArm(CREDENTIAL);
     harpoc = await startHarpocArm(vault, "arms-selfcheck-principal", [

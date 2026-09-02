@@ -25,10 +25,11 @@ export function registerRenewCertificate(
     async (args) => {
       const parsed = parseHandle(args.handle);
       scopeGuard.checkAccess(PERMISSION, parsed.project, parsed.name);
+      rateLimiter.checkLimit(args.handle);
       const secretId = await engine.resolveSecretId(args.handle);
-      rateLimiter.checkLimit(secretId);
       const status = await certManager.renewCertificate(secretId, {
         caller: scopeGuard.caller,
+        handle: args.handle,
       });
       return { content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }] };
     },

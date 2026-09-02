@@ -105,6 +105,12 @@ export interface IssueOptions {
 export interface RenewOptions {
   httpPort?: number;
   caller?: CallerContext;
+  /**
+   * The handle the interface resolved `secretId` from. Threaded into every
+   * engine read and the write so a policy refusal names it exactly as an
+   * unknown handle would (R5).
+   */
+  handle?: string;
 }
 
 export interface CertificateRef {
@@ -275,14 +281,15 @@ export class CertManager {
   async renewCertificate(secretId: string, options?: RenewOptions): Promise<CertificateStatus> {
     assertHttpPort(options?.httpPort);
     const caller = options?.caller;
+    const handle = options?.handle;
 
-    const stored = this.engine.getAcmeAccount(secretId, caller);
+    const stored = this.engine.getAcmeAccount(secretId, caller, handle);
     if (stored === null) {
       throw VaultError.certAcmeFailed("no ACME account for this certificate");
     }
     const account = parseAcmeAccount(stored);
 
-    const material = this.engine.getCertificatePem(secretId, caller);
+    const material = this.engine.getCertificatePem(secretId, caller, handle);
     if (material.csrPem === null) throw VaultError.certCsrFailed("no stored CSR");
     if (material.certificatePem === null) {
       throw VaultError.certInvalid("no stored certificate to renew");
@@ -316,11 +323,11 @@ export class CertManager {
       secretId,
       leaf,
       chain ?? undefined,
-      { renewed: true },
+      { renewed: true, handle },
       caller,
     );
 
-    return this.engine.getCertificateStatus(secretId, caller);
+    return this.engine.getCertificateStatus(secretId, caller, handle);
   }
 
   getCertificateInfo(secretId: string, caller?: CallerContext): CertificateStatus {

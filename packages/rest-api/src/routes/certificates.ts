@@ -70,11 +70,13 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
       throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
     }
     const engine = c.get("engine");
-    const secretId = await engine.resolveSecretId(buildHandle(c.req.param("handle")));
-    c.get("limiter").checkSecret(secretId);
+    const handle = buildHandle(c.req.param("handle"));
+    c.get("limiter").checkSecret(handle);
+    const secretId = await engine.resolveSecretId(handle);
     const status = await c.get("certManager").renewCertificate(secretId, {
       httpPort: parsed.data.http_port,
       caller: callerFromToken(token, "rest"),
+      handle,
     });
     return c.json({ data: status });
   });
@@ -84,9 +86,10 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
     const { project, name } = parseHandleParam(c.req.param("handle"));
     checkTokenScope(token, "read", project, name);
     const engine = c.get("engine");
-    const secretId = await engine.resolveSecretId(buildHandle(c.req.param("handle")));
-    c.get("limiter").checkSecret(secretId);
-    const status = engine.getCertificateStatus(secretId, callerFromToken(token, "rest"));
+    const handle = buildHandle(c.req.param("handle"));
+    c.get("limiter").checkSecret(handle);
+    const secretId = await engine.resolveSecretId(handle);
+    const status = engine.getCertificateStatus(secretId, callerFromToken(token, "rest"), handle);
     return c.json({ data: status });
   });
 

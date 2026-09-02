@@ -188,11 +188,13 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     return c.json({ data: policy });
   });
 
-  // Set injection policy (trusted administrative operation)
+  // Set injection policy — the widening half of a secret's configuration, so
+  // it takes `admin` at the interface and per secret (R1); the endpoint pins
+  // (mcp-server, connection-config) stay `rotate`.
   router.put("/:handle/injection-policy", async (c) => {
     const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "rotate", project, name);
+    checkTokenScope(token, "admin", project, name);
 
     const engine = c.get("engine");
     const body = await readJsonBody(c);

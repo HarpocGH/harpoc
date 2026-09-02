@@ -334,13 +334,17 @@ describe("GET /api/v1/oauth/:handle/status", () => {
     const body = await res.json();
     expect(body.data).toEqual(OAUTH_STATUS);
     expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://gh-app");
-    expect(engine.getOAuthTokenStatus).toHaveBeenCalledWith("secret-uuid-1", EXPECTED_CALLER);
+    expect(engine.getOAuthTokenStatus).toHaveBeenCalledWith(
+      "secret-uuid-1",
+      EXPECTED_CALLER,
+      "secret://gh-app",
+    );
   });
 
-  it("charges the per-secret rate limiter", async () => {
+  it("charges the per-secret rate limiter on the handle, before resolution", async () => {
     const checkSecret = vi.spyOn(limiter, "checkSecret");
     await app.request("/api/v1/oauth/gh-app/status", { headers: AUTH });
-    expect(checkSecret).toHaveBeenCalledWith("secret-uuid-1");
+    expect(checkSecret).toHaveBeenCalledWith("secret://gh-app");
   });
 
   it("requires the read scope (403, engine untouched)", async () => {
@@ -374,13 +378,17 @@ describe("POST /api/v1/oauth/:handle/refresh", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.data).toEqual({ refreshed: true, expires_at: 1_700_000_003_600 });
-    expect(engine.refreshOAuthToken).toHaveBeenCalledWith("secret-uuid-1", EXPECTED_CALLER);
+    expect(engine.refreshOAuthToken).toHaveBeenCalledWith(
+      "secret-uuid-1",
+      EXPECTED_CALLER,
+      "secret://gh-app",
+    );
   });
 
-  it("charges the per-secret rate limiter", async () => {
+  it("charges the per-secret rate limiter on the handle, before resolution", async () => {
     const checkSecret = vi.spyOn(limiter, "checkSecret");
     await app.request("/api/v1/oauth/gh-app/refresh", { method: "POST", headers: AUTH });
-    expect(checkSecret).toHaveBeenCalledWith("secret-uuid-1");
+    expect(checkSecret).toHaveBeenCalledWith("secret://gh-app");
   });
 
   it("requires the rotate scope (403, engine untouched)", async () => {

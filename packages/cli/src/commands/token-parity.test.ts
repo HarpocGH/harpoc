@@ -275,7 +275,7 @@ const ROWS: Row[] = [
   },
   {
     argv: ["secret", "allow", "secret://k", "--url", "https://api.example.com/*"],
-    permission: "rotate",
+    permission: "admin",
     call: "setInjectionPolicy",
   },
   {

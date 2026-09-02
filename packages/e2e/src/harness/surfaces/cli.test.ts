@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { Permission, useSecretActionSchema } from "@harpoc/shared";
-import { createHarnessVault, storeSecret } from "../vault.js";
+import { createHarnessVault, grantOn, storeSecret } from "../vault.js";
 import type { HarnessVault } from "../vault.js";
 import { actionToFlags, startCliSurface } from "./cli.js";
 import type { CliSurface } from "./cli.js";
@@ -31,6 +31,7 @@ describe("cli surface", () => {
       env_allowlist: [],
       host_allowlist: [],
     });
+    await grantOn(vault, handle, "e2e-cli-agent", [Permission.USE, Permission.READ]);
     return handle;
   }
 

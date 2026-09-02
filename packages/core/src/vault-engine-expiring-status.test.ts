@@ -276,11 +276,11 @@ describe("getExpiringOAuthTokenStatuses", () => {
     expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS, agent("any"))).toEqual([]);
   });
 
-  it("an ungated secret stays visible to a token-derived caller", async () => {
+  it("a secret with no grant is invisible to a token-derived caller", async () => {
     const { secretId } = await engine.createOAuthSecret("open", oauthConfig());
     await engine.completeOAuthFlow(secretId, "at-1", "rt-1", Date.now() + 30 * MINUTE_MS);
 
-    expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS, agent("anyone"))).toHaveLength(1);
+    expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS, agent("anyone"))).toHaveLength(0);
   });
 
   it("refuses while the vault is locked", async () => {

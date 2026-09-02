@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { spawn } from "node:child_process";
 import { Permission } from "@harpoc/shared";
-import { createHarnessVault, storeSecret } from "../vault.js";
+import { createHarnessVault, grantOn, storeSecret } from "../vault.js";
 import type { HarnessVault } from "../vault.js";
 import { startMcpStdioSurface } from "./mcp-stdio.js";
 import type { McpStdioSurface } from "./mcp-stdio.js";
@@ -32,6 +32,7 @@ describe("mcp-stdio surface", () => {
       env_allowlist: [],
       host_allowlist: [],
     });
+    await grantOn(vault, handle, "e2e-stdio-agent", [Permission.USE]);
     return handle;
   }
 
@@ -104,6 +105,7 @@ describe("mcp-stdio surface", () => {
         env_allowlist: ["HARPOC_E2E_ENV_PROBE"],
         host_allowlist: [],
       });
+      await grantOn(harness, handle, "e2e-stdio-agent", [Permission.USE]);
 
       surface = await startMcpStdioSurface(harness, "e2e-stdio-agent", [Permission.USE]);
       const outcome = await surface.callUseSecret(handle, {

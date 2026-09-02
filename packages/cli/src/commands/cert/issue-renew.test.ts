@@ -656,6 +656,7 @@ describe("cert renew", () => {
       principal_id: "agent-1",
       interface: "cli",
     });
+    expect(renewOptions().handle).toBe("secret://web");
   });
 
   it("a read-only token is denied with ACCESS_DENIED before the renewal runs", async () => {
@@ -678,6 +679,7 @@ describe("cert renew", () => {
     await run(["renew", "secret://web"]);
 
     expect(renewOptions().caller).toBeUndefined();
+    expect(renewOptions().handle).toBe("secret://web");
   });
 
   it("an ambient HARPOC_TOKEN is honoured when --token is absent", async () => {

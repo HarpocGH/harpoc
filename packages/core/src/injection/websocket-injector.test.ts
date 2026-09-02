@@ -23,7 +23,10 @@ function baseAction(partial: Record<string, unknown> = {}): WebsocketAction {
 }
 
 function basePolicy(partial: Partial<InjectionPolicyInput> = {}): InjectionPolicy {
-  return injectionPolicyInputSchema.parse(partial);
+  return injectionPolicyInputSchema.parse({
+    url_allowlist: server ? [`ws://127.0.0.1:${server.port}/*`] : [],
+    ...partial,
+  });
 }
 
 function secretBytes(value = SECRET): Uint8Array {
@@ -281,9 +284,13 @@ describe("executeWebsocketAction — non-101 / connection failure", () => {
   it("refuses a refused connection (nothing listening) as WEBSOCKET_CONNECT_FAILED", async () => {
     const action = baseAction({ url: "ws://127.0.0.1:1/" });
 
-    await expect(executeWebsocketAction(action, secretBytes(), basePolicy())).rejects.toMatchObject(
-      { code: ErrorCode.WEBSOCKET_CONNECT_FAILED },
-    );
+    await expect(
+      executeWebsocketAction(
+        action,
+        secretBytes(),
+        basePolicy({ url_allowlist: ["ws://127.0.0.1:1/*"] }),
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.WEBSOCKET_CONNECT_FAILED });
   });
 
   it("does not leak the credential in a thrown error's message", async () => {
@@ -335,5 +342,34 @@ describe("buildWsAuditDetails", () => {
     const action = baseAction({ url: "ws://127.0.0.1:9/" });
     const details = buildWsAuditDetails(action, { messages: [], close_code: 1000 });
     expect(details.sent).toBe(0);
+  });
+});
+
+describe("executeWebsocketAction — URL allowlist (deny-by-default, R1)", () => {
+  it("refuses an empty url_allowlist before any socket work", async () => {
+    const fake = await start({});
+    const action = baseAction({ url: `ws://127.0.0.1:${fake.port}/` });
+
+    await expect(
+      executeWebsocketAction(action, secretBytes(), basePolicy({ url_allowlist: [] })),
+    ).rejects.toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
+    expect(fake.requests()).toHaveLength(0);
+  });
+
+  it("refuses a URL outside the allowlist, naming the URL and nothing else", async () => {
+    const fake = await start({});
+    const action = baseAction({ url: `ws://127.0.0.1:${fake.port}/feed` });
+
+    await expect(
+      executeWebsocketAction(
+        action,
+        secretBytes(),
+        basePolicy({ url_allowlist: ["wss://stream.example.com/*"] }),
+      ),
+    ).rejects.toMatchObject({
+      code: ErrorCode.URL_NOT_ALLOWED,
+      message: `URL not in secret allowlist: ws://127.0.0.1:${fake.port}/feed`,
+    });
+    expect(fake.requests()).toHaveLength(0);
   });
 });

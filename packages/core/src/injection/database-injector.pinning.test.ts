@@ -39,7 +39,7 @@ const POLICY: InjectionPolicy = {
   url_allowlist: [],
   command_allowlist: [],
   env_allowlist: [],
-  host_allowlist: [],
+  host_allowlist: ["db.pinned.test"],
   response_mode: "filtered",
   response_header_allowlist: [],
   network_isolation: false,

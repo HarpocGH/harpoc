@@ -102,22 +102,24 @@ async function secretGranting(permission: Permission): Promise<{ handle: string;
   return { handle: `secret://${name}`, id };
 }
 
-function isAccessDenied(err: unknown): boolean {
-  return err instanceof VaultError && err.code === ErrorCode.ACCESS_DENIED;
-}
-
 /**
- * Runs the operation and reports only whether the policy layer refused it.
- * Downstream failures (no allowlist, absent config, unusable secret) are not
- * the subject: the gate is, and it runs before all of them.
+ * Runs the operation and reports the policy layer's refusal code, or null when
+ * the gate let it through. Downstream failures (no allowlist, absent config,
+ * unusable secret) are not the subject: the gate is, and it runs before all
+ * of them.
  */
-async function refused(op: () => unknown): Promise<boolean> {
+async function refusalCode(op: () => unknown): Promise<string | null> {
   try {
     await op();
-    return false;
+    return null;
   } catch (err) {
-    if (isAccessDenied(err)) return true;
-    return false;
+    if (
+      err instanceof VaultError &&
+      (err.code === ErrorCode.ACCESS_DENIED || err.code === ErrorCode.SECRET_NOT_FOUND)
+    ) {
+      return err.code;
+    }
+    return null;
   }
 }
 
@@ -154,7 +156,7 @@ const METHODS: GatedMethod[] = [
   },
   {
     name: "setInjectionPolicy",
-    required: "rotate",
+    required: "admin",
     invoke: (h, _i, c) => engine.setInjectionPolicy(h, { url_allowlist: ["https://ok/*"] }, {}, c),
   },
   {
@@ -215,15 +217,19 @@ describe("per-secret permission matrix (T7)", () => {
   it.each(METHODS)("$name demands exactly '$required'", async ({ required, invoke }) => {
     for (const held of GRANTABLE) {
       const { handle, id } = await secretGranting(held);
-      const denied = await refused(() => invoke(handle, id, caller()));
+      const code = await refusalCode(() => invoke(handle, id, caller()));
       const shouldPass = held === required || held === "admin";
+      const knows = held === "read" || held === "list";
+      const expected = shouldPass
+        ? null
+        : knows || required === "admin"
+          ? ErrorCode.ACCESS_DENIED
+          : ErrorCode.SECRET_NOT_FOUND;
 
       expect(
-        denied,
-        `holding '${held}' the call was ${denied ? "refused" : "allowed"}, expected ${
-          shouldPass ? "allowed" : "refused"
-        }`,
-      ).toBe(!shouldPass);
+        code,
+        `holding '${held}' the call answered ${String(code)}, expected ${String(expected)}`,
+      ).toBe(expected);
     }
   });
 
@@ -253,7 +259,7 @@ describe("per-secret permission matrix (T7)", () => {
 
     // And the escalation target really is closed: reading the value still fails.
     await expect(engine.getSecretValue(handle, caller())).rejects.toMatchObject({
-      code: ErrorCode.ACCESS_DENIED,
+      code: ErrorCode.SECRET_NOT_FOUND,
     });
     expect(engine.listPolicies(id).filter((p) => p.permissions.includes("admin"))).toHaveLength(0);
   });
@@ -284,13 +290,13 @@ describe("per-secret permission matrix (T7)", () => {
   });
 
   /**
-   * Control: with no policy rows at all the gate is not in play (V1 presence
-   * rule), so none of these calls may be refused — otherwise the matrix above
-   * would be passing for the wrong reason. `revokePolicy` is excluded because
-   * its precondition *is* a policy row: writing one is exactly what turns the
-   * presence gate on, which the next case asserts.
+   * Control: with no policy rows at all a token-derived caller reaches nothing
+   * (R1 explicit grant), so *every* one of these calls is refused — which is
+   * what proves the matrix above is not passing for the wrong reason: the
+   * grants it writes are the only thing letting a call through.
+   * `revokePolicy` is excluded because its precondition *is* a policy row.
    */
-  it("control: a secret with no policy rows refuses none of the operations", async () => {
+  it("control: a secret with no policy rows refuses every operation — not-found, or access-denied for the admin checks", async () => {
     for (const method of METHODS) {
       if (method.name === "revokePolicy") continue;
       const name = `mx-free-${counter++}`;
@@ -300,12 +306,14 @@ describe("per-secret permission matrix (T7)", () => {
         value: new Uint8Array(Buffer.from("value", "utf8")),
       });
       const id = await engine.resolveSecretId(`secret://${name}`);
-      const denied = await refused(() => method.invoke(`secret://${name}`, id, caller()));
-      expect(denied, `${method.name} was refused on an ungated secret`).toBe(false);
+      const code = await refusalCode(() => method.invoke(`secret://${name}`, id, caller()));
+      expect(code, `${method.name} on a row-less secret`).toBe(
+        method.required === "admin" ? ErrorCode.ACCESS_DENIED : ErrorCode.SECRET_NOT_FOUND,
+      );
     }
   });
 
-  it("the first policy row closes the gate on a caller the row does not name", async () => {
+  it("a secret is closed before any row exists, and a row naming someone else leaves it closed", async () => {
     const name = `mx-presence-${counter++}`;
     await engine.createSecret({
       name,
@@ -315,7 +323,9 @@ describe("per-secret permission matrix (T7)", () => {
     const handle = `secret://${name}`;
     const id = await engine.resolveSecretId(handle);
 
-    await expect(engine.getSecretInfo(handle, caller())).resolves.toBeDefined();
+    await expect(engine.getSecretInfo(handle, caller())).rejects.toMatchObject({
+      code: ErrorCode.SECRET_NOT_FOUND,
+    });
 
     engine.grantPolicy(
       { secretId: id, principalType: "agent", principalId: "someone-else", permissions: ["read"] },
@@ -323,7 +333,7 @@ describe("per-secret permission matrix (T7)", () => {
     );
 
     await expect(engine.getSecretInfo(handle, caller())).rejects.toMatchObject({
-      code: ErrorCode.ACCESS_DENIED,
+      code: ErrorCode.SECRET_NOT_FOUND,
     });
   });
 });

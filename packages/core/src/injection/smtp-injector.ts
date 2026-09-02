@@ -147,7 +147,7 @@ export class SmtpInjector {
   ): Promise<SmtpExecution> {
     const { host, port } = resolveHostPort(action);
 
-    // 1. Host allowlist (optional layer atop the mandatory SSRF floor).
+    // 1. Host allowlist (deny-by-default, atop the mandatory SSRF floor).
     if (!matchesHostPortAllowlist(host, port, policy.host_allowlist)) {
       throw VaultError.hostNotAllowed(`${host}:${port}`);
     }

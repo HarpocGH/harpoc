@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Permission } from "@harpoc/shared";
 import { assertOpaque } from "./assert/opacity.js";
-import { createHarnessVault, storeSecret } from "./harness/vault.js";
+import { createHarnessVault, grantOn, storeSecret } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
 import { expectAttributedSuccess } from "./harness/audit.js";
 import type { AuditRow } from "./harness/audit.js";
@@ -148,6 +148,17 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
     await vault.engine.setConnectionConfig(altPortBareWrongPinHandle, {
       ssh: { known_hosts: [knownHostPin("127.0.0.1", "rogue")] },
     });
+
+    for (const h of [
+      happyHandle,
+      mismatchHandle,
+      notAllowedHandle,
+      altPortHandle,
+      altPortBarePinHandle,
+      altPortBareWrongPinHandle,
+    ]) {
+      await grantOn(vault, h, "e2e-ssh-agent", [Permission.USE]);
+    }
 
     surface = await startMcpHttpSurface(vault, "e2e-ssh-agent", [Permission.USE]);
   });

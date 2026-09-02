@@ -55,7 +55,11 @@ describe("WebSocket DNS-rebinding IP pinning", () => {
       injection: { type: "bearer" },
     } as unknown as WebsocketAction;
 
-    await executeWebsocketAction(action, secretBytes(), basePolicy());
+    await executeWebsocketAction(
+      action,
+      secretBytes(),
+      basePolicy({ url_allowlist: [`ws://a.pinned.test:${port}/*`] }),
+    );
 
     expect(server.requests()).toHaveLength(1);
     expect(server.requests()[0]?.headers.host).toBe(`a.pinned.test:${port}`);
@@ -71,9 +75,13 @@ describe("WebSocket SSRF pinning — literal IPs (no DNS)", () => {
       injection: { type: "bearer" },
     } as unknown as WebsocketAction;
 
-    await expect(executeWebsocketAction(action, secretBytes(), basePolicy())).rejects.toMatchObject(
-      { code: ErrorCode.SSRF_BLOCKED },
-    );
+    await expect(
+      executeWebsocketAction(
+        action,
+        secretBytes(),
+        basePolicy({ url_allowlist: ["wss://10.0.0.1/*"] }),
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.SSRF_BLOCKED });
   });
 
   it("blocks an IPv4-mapped IPv6 private literal under wss: before dialing", async () => {
@@ -83,8 +91,12 @@ describe("WebSocket SSRF pinning — literal IPs (no DNS)", () => {
       injection: { type: "bearer" },
     } as unknown as WebsocketAction;
 
-    await expect(executeWebsocketAction(action, secretBytes(), basePolicy())).rejects.toMatchObject(
-      { code: ErrorCode.SSRF_BLOCKED },
-    );
+    await expect(
+      executeWebsocketAction(
+        action,
+        secretBytes(),
+        basePolicy({ url_allowlist: ["wss://[::ffff:192.168.1.1]/*"] }),
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.SSRF_BLOCKED });
   });
 });

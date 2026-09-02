@@ -73,7 +73,7 @@ describe("HTTP context — response modes (structural I2a)", () => {
 
   it("status_only returns the outcome alone over the real policy round-trip", async () => {
     await vault.engine.setInjectionPolicy(handle, {
-      url_allowlist: [],
+      url_allowlist: [`${baseUrl}/*`],
       command_allowlist: [],
       env_allowlist: [],
       host_allowlist: [],
@@ -95,7 +95,7 @@ describe("HTTP context — response modes (structural I2a)", () => {
 
   it("rejects a loosening override; the request never leaves the vault", async () => {
     await vault.engine.setInjectionPolicy(handle, {
-      url_allowlist: [],
+      url_allowlist: [`${baseUrl}/*`],
       command_allowlist: [],
       env_allowlist: [],
       host_allowlist: [],
@@ -122,7 +122,8 @@ describe("HTTP context — response modes (structural I2a)", () => {
     expect(denied?.detail?.policy_mode).toBe("status_only");
   });
 
-  it("filtered (default, no policy row) redacts the raw credential echo", async () => {
+  it("filtered (default response mode) redacts the raw credential echo", async () => {
+    await vault.engine.setInjectionPolicy(handle, { url_allowlist: [`${baseUrl}/*`] });
     const res = await vault.engine.useSecret(handle, {
       type: "http",
       method: "GET",
@@ -135,6 +136,7 @@ describe("HTTP context — response modes (structural I2a)", () => {
   });
 
   it("filtered redacts encoded echoes (base64 / hex)", async () => {
+    await vault.engine.setInjectionPolicy(handle, { url_allowlist: [`${baseUrl}/*`] });
     const res = await vault.engine.useSecret(handle, {
       type: "http",
       method: "GET",
@@ -149,7 +151,7 @@ describe("HTTP context — response modes (structural I2a)", () => {
 
   it("full is the policy-gated raw opt-out", async () => {
     await vault.engine.setInjectionPolicy(handle, {
-      url_allowlist: [],
+      url_allowlist: [`${baseUrl}/*`],
       command_allowlist: [],
       env_allowlist: [],
       host_allowlist: [],
@@ -168,6 +170,7 @@ describe("HTTP context — response modes (structural I2a)", () => {
   });
 
   it("an agent may tighten the default floor to status_only per invocation", async () => {
+    await vault.engine.setInjectionPolicy(handle, { url_allowlist: [`${baseUrl}/*`] });
     const res = await vault.engine.useSecret(handle, {
       type: "http",
       method: "GET",

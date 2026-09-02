@@ -40,11 +40,11 @@ function preselectedSecret(route: string): string | null {
 }
 
 /**
- * The command that lifts a refusal on a policy-gated secret. Once the secret
- * holds its first agent row, a token caller needs a grant of its own on it —
- * an agent- or tool-type admin token included — and only the trusted local CLI
- * path can write that first one. The principal is read off the session's own
- * bearer; every verified token carries the `principal_type` claim, so the
+ * The command that lifts a refusal on a secret. Every token caller needs a
+ * grant of its own on every secret it touches — an agent- or tool-type admin
+ * token included — and only the trusted local CLI path or a user-type admin
+ * token can write the first one (R1). The principal is read off the session's
+ * own bearer; every verified token carries the `principal_type` claim, so the
  * `agent` fallback below covers only an un-decodable bearer, where web-ui's
  * local decode yields no claims at all.
  */
@@ -153,15 +153,15 @@ function CellEditor({
       setError("Expiry is not a valid date and time.");
       return;
     }
-    const willGate = !secretGated && next.length > 0;
-    const willUngate = secretGated && next.length === 0 && onlyHolder;
-    if (willGate || willUngate) {
+    const firstGrant = !secretGated && next.length > 0;
+    const lastGrant = secretGated && next.length === 0 && onlyHolder;
+    if (firstGrant || lastGrant) {
       setPending({
         permissions: next,
         expiresAt,
-        message: willGate
-          ? `${secret.handle} becomes policy-gated: token callers without a grant are refused`
-          : `${secret.handle} becomes ungated: token scope alone governs`,
+        message: firstGrant
+          ? `${secret.handle}: first grant — until now no agent or tool token could reach this secret`
+          : `${secret.handle}: last grant — no agent or tool token will be able to reach this secret`,
       });
       return;
     }
@@ -233,9 +233,8 @@ function CellEditor({
       {error !== null && <p class="error-text">{error}</p>}
       {denied && (
         <p class="empty">
-          This session's token holds no grant on {secret.handle}; once a secret is policy-gated,
-          token callers need their own grant. From a trusted CLI:{" "}
-          <code>{grantCommand(secret.handle)}</code>
+          This session's token holds no grant on {secret.handle}; every token caller needs its own
+          grant on every secret. From a trusted CLI: <code>{grantCommand(secret.handle)}</code>
         </p>
       )}
     </section>
@@ -293,12 +292,12 @@ export function PermissionsPage({ api }: { api: ApiClient }) {
     setNotice(
       result.gated_before !== result.gated_after
         ? result.gated_after
-          ? `${secret.handle} is now policy-gated: token callers without a grant are refused.`
-          : `${secret.handle} is now ungated: token scope alone governs.`
+          ? `${secret.handle} received its first grant: agent and tool tokens with a cell can now reach it.`
+          : `${secret.handle} has no grants left: no agent or tool token can reach it.`
         : predicted
           ? result.gated_after
-            ? `No change: ${secret.handle} is still policy-gated.`
-            : `No change: ${secret.handle} is still ungated.`
+            ? `No change: ${secret.handle} already had grants.`
+            : `No change: ${secret.handle} still has no grants.`
           : null,
     );
     setTarget(null);
@@ -311,8 +310,9 @@ export function PermissionsPage({ api }: { api: ApiClient }) {
     <>
       <h1>Permissions</h1>
       <p class="empty">
-        Rows are agents, columns secrets. A secret any agent holds a grant on is policy-gated: a
-        token caller without a matching grant is refused. Empty cells are never written.
+        Rows are agents, columns secrets. Every secret is gated: a token caller is refused unless it
+        holds a matching cell here, and a secret with no grants is reachable only from the trusted
+        CLI or a user-type admin token. Empty cells are never written.
       </p>
       <div class="panel">
         <label for="secret-filter">Filter secrets</label>
@@ -366,11 +366,11 @@ export function PermissionsPage({ api }: { api: ApiClient }) {
                     <span class="muted">{s.project ?? "-"}</span>
                     <br />
                     {holders(s.handle).length > 0 ? (
-                      <span class="chip" data-tone="warn">
-                        agent-gated
-                      </span>
+                      <span class="chip">granted</span>
                     ) : (
-                      <span class="chip">ungated</span>
+                      <span class="chip" data-tone="warn">
+                        no grants
+                      </span>
                     )}
                   </th>
                 ))}

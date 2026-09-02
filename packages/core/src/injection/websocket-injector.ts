@@ -13,6 +13,7 @@ import {
 } from "@harpoc/shared";
 import { Agent, WebSocket } from "undici";
 import type { CloseEvent, MessageEvent } from "undici";
+import { matchesUrlAllowlist } from "./allowlist.js";
 import { applyInjectionConfig, createPinnedLookup } from "./http-injector.js";
 import { redactErrorMessage, redactSecretEncodings } from "./output-sanitizer.js";
 import { isResponseModeAllowed } from "./response-mode.js";
@@ -277,16 +278,19 @@ async function dialAndCollect(
  * is hit first), then close(1000).
  *
  * Enforcement order, load-bearing: (1) the tighten-only `response_mode`
- * override, checked before any network activity; (2) SSRF pre-flight via the
- * same `validateUrl` the HTTP injector uses (here parameterized with
- * {@link WS_SCHEMES} — `wss:` anywhere, `ws:` loopback-only, matching the
- * schema); (3) the DNS-rebinding pinned dispatcher, so the hostname cannot
- * re-resolve between validation and connect; (4) the credential is placed via
- * the same `applyInjectionConfig` the HTTP injector hoists — bearer/basic_auth
- * set a header, `header` sets a named header, `query` sets a URL search param
- * — all applied to the handshake request, never sent as a frame. A non-101
- * handshake response (including a 3xx — undici's WebSocket never follows a
- * redirect; see `waitForOpen`'s doc comment) surfaces as
+ * override, checked before any network activity; (2) the per-secret URL
+ * allowlist — deny-by-default, so an unconfigured secret refuses every
+ * endpoint before any DNS or socket work (R1, 2026-09-01; the v1.3 design
+ * named `url_allowlist` for this context and the check was never wired);
+ * (3) SSRF pre-flight via the same `validateUrl` the HTTP injector uses (here
+ * parameterized with {@link WS_SCHEMES} — `wss:` anywhere, `ws:` loopback-only,
+ * matching the schema); (4) the DNS-rebinding pinned dispatcher, so the
+ * hostname cannot re-resolve between validation and connect; (5) the credential
+ * is placed via the same `applyInjectionConfig` the HTTP injector hoists —
+ * bearer/basic_auth set a header, `header` sets a named header, `query` sets a
+ * URL search param — all applied to the handshake request, never sent as a
+ * frame. A non-101 handshake response (including a 3xx — undici's WebSocket
+ * never follows a redirect; see `waitForOpen`'s doc comment) surfaces as
  * `websocketConnectFailed(origin)`, origin-only, with the credential stripped
  * from any residual error text via `redactErrorMessage`.
  */
@@ -296,6 +300,11 @@ export async function executeWebsocketAction(
   policy: InjectionPolicy,
 ): Promise<WebsocketExecution> {
   const responseMode = resolveResponseMode(action, policy);
+
+  if (!matchesUrlAllowlist(action.url, policy.url_allowlist)) {
+    throw VaultError.urlNotAllowed(action.url);
+  }
+
   const valueStr = Buffer.from(secretValue).toString("utf8");
 
   const validated = await validateUrl(action.url, WS_SCHEMES);

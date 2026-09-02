@@ -109,12 +109,13 @@ describe("PermissionsPage", () => {
     expect(cell("ci-bot", UNGATED.handle).textContent).toBe("—");
   });
 
-  it("marks a secret any loaded agent holds a row on as agent-gated", async () => {
+  it("marks a secret no loaded agent holds a row on as having no grants", async () => {
     render(<PermissionsPage api={api()} />);
-    await waitFor(() => expect(screen.getByText("agent-gated")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("no grants")).toBeTruthy());
     const marked = document.querySelectorAll('thead th .chip[data-tone="warn"]');
     expect(marked.length).toBe(1);
-    expect(marked[0]?.closest("th")?.textContent).toContain("test-key");
+    expect(marked[0]?.closest("th")?.textContent).toContain("open-key");
+    expect(screen.getByText("granted").closest("th")?.textContent).toContain("test-key");
   });
 
   it("includes inactive agents on request and makes their cells read-only", async () => {
@@ -143,7 +144,7 @@ describe("PermissionsPage", () => {
     expect(screen.queryByLabelText("create")).toBeNull();
   });
 
-  it("predicts the gating flip before the PUT and writes only after Confirm", async () => {
+  it("predicts the first-grant flip before the PUT and writes only after Confirm", async () => {
     const setAgentPermissions = vi
       .fn()
       .mockResolvedValue({ policy: null, gated_before: false, gated_after: true });
@@ -152,7 +153,7 @@ describe("PermissionsPage", () => {
     fireEvent.click(cell("ci-bot", UNGATED.handle));
     fireEvent.click(screen.getByLabelText("use"));
     fireEvent.click(screen.getByText("Save"));
-    const prediction = screen.getByText(/becomes policy-gated/);
+    const prediction = screen.getByText(/first grant/);
     expect(prediction.textContent).toContain(UNGATED.handle);
     // The prediction is what the operator confirms — nothing is written yet.
     expect(setAgentPermissions).not.toHaveBeenCalled();
@@ -165,7 +166,7 @@ describe("PermissionsPage", () => {
     );
   });
 
-  it("predicts the ungating flip when the secret's only grant is cleared", async () => {
+  it("predicts the last-grant flip when the secret's only grant is cleared", async () => {
     const setAgentPermissions = vi
       .fn()
       .mockResolvedValue({ policy: null, gated_before: true, gated_after: false });
@@ -173,7 +174,7 @@ describe("PermissionsPage", () => {
     await waitFor(() => expect(cell("ci-bot", GATED.handle)).toBeTruthy());
     fireEvent.click(cell("ci-bot", GATED.handle));
     fireEvent.click(screen.getByText("Clear"));
-    const prediction = screen.getByText(/becomes ungated/);
+    const prediction = screen.getByText(/last grant/);
     expect(prediction.textContent).toContain(GATED.handle);
     expect(setAgentPermissions).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("Confirm"));
@@ -242,7 +243,7 @@ describe("PermissionsPage", () => {
     fireEvent.click(screen.getByText("Save"));
     fireEvent.click(screen.getByText("Confirm"));
     // The response is the truth — the prediction was only advisory.
-    await waitFor(() => expect(screen.getByText(/is now policy-gated/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/received its first grant/)).toBeTruthy());
     await waitFor(() => expect(listAgents).toHaveBeenCalledTimes(2));
   });
 
@@ -367,11 +368,11 @@ describe("PermissionsPage", () => {
     fireEvent.click(screen.getByText("Clear"));
     fireEvent.click(screen.getByText("Confirm"));
     await waitFor(() =>
-      expect(screen.getByText(`No change: ${GATED.handle} is still policy-gated.`)).toBeTruthy(),
+      expect(screen.getByText(`No change: ${GATED.handle} already had grants.`)).toBeTruthy(),
     );
   });
 
-  it("states that nothing changed when a confirmed gating did not happen", async () => {
+  it("states that nothing changed when a confirmed first grant did not happen", async () => {
     const setAgentPermissions = vi
       .fn()
       .mockResolvedValue({ policy: null, gated_before: false, gated_after: false });
@@ -382,7 +383,7 @@ describe("PermissionsPage", () => {
     fireEvent.click(screen.getByText("Save"));
     fireEvent.click(screen.getByText("Confirm"));
     await waitFor(() =>
-      expect(screen.getByText(`No change: ${UNGATED.handle} is still ungated.`)).toBeTruthy(),
+      expect(screen.getByText(`No change: ${UNGATED.handle} still has no grants.`)).toBeTruthy(),
     );
   });
 
@@ -393,5 +394,12 @@ describe("PermissionsPage", () => {
       />,
     );
     await waitFor(() => expect(screen.getByText("ACCESS_DENIED")).toBeTruthy());
+  });
+
+  it("never describes a secret as governed by token scope alone", async () => {
+    render(<PermissionsPage api={api()} />);
+    await waitFor(() => expect(cell("ci-bot", GATED.handle)).toBeTruthy());
+    expect(document.body.textContent).not.toContain("ungated");
+    expect(document.body.textContent).not.toContain("policy-gated");
   });
 });

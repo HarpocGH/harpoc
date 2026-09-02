@@ -307,8 +307,8 @@ export interface AgentPolicy {
 
 /**
  * Result of setting an agent's permissions on a secret: the resulting policy
- * (null when the set permissions were empty — the presence gate) plus the
- * secret's gated-before/after state.
+ * (null when the set permissions were empty — no row is written) plus whether
+ * any principal held an active row on the secret before and after the write.
  */
 export interface SetAgentPermissionsResult {
   policy: AccessPolicy | null;
@@ -372,8 +372,8 @@ export interface CallerContext {
   interface?: AccessInterface;
   /**
    * Set only by callerFromToken when the token's scope claim includes
-   * `admin`. R7 (v1.4.1): a user-type caller carrying it bypasses the
-   * per-secret presence gate and the W2 enumeration filter.
+   * `admin`. R7 (v1.4.1): a user-type caller carrying it is exempt from the
+   * per-secret grant check and the W2 enumeration filter.
    */
   admin_scope?: true;
 }

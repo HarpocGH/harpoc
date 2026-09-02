@@ -418,25 +418,25 @@ describe("harpoc agent group", () => {
       expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
     });
 
-    it("prints the gating note when the secret becomes policy-gated", async () => {
+    it("prints the note when the secret receives its first grant", async () => {
       mockEngine.setAgentPermissions.mockReturnValue(
         result({ gated_before: false, gated_after: true }),
       );
       await run(["permissions", "bot", "secret://k", "--permissions", "use"]);
-      expect(stderr()).toContain("Note: secret://k is now policy-gated");
+      expect(stderr()).toContain("received its first grant");
     });
 
-    it("prints the gating note when the secret stops being policy-gated", async () => {
+    it("prints the note when the secret loses its last grant", async () => {
       mockEngine.setAgentPermissions.mockReturnValue(
         result({ policy: null, gated_before: true, gated_after: false }),
       );
       await run(["permissions", "bot", "secret://k", "--clear"]);
-      expect(stderr()).toContain("no longer policy-gated: token scope alone governs");
+      expect(stderr()).toContain("has no grants left");
     });
 
     it("prints no gating note when the gate did not flip", async () => {
       await run(["permissions", "bot", "secret://k", "--permissions", "use"]);
-      expect(stderr()).not.toContain("policy-gated");
+      expect(stderr()).not.toContain("Note:");
     });
 
     it("names the cell in the human output", async () => {

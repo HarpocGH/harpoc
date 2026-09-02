@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { OAuthManager } from "@harpoc/oauth-proxy";
-import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
+import {
+  createTestVault,
+  destroyTestVault,
+  grantOn,
+  registerAgents,
+} from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
@@ -110,6 +115,7 @@ afterAll(async () => {
 describe("REST background authorization-code flow", () => {
   it("1. authorize answers 201 pending_authorization with an auth URL and no flow internals", async () => {
     const res = await postAuthorize(OK_NAME);
+    await grantOn(vault.engine, `secret://${OK_NAME}`, PRINCIPAL, ["read", "rotate"]);
 
     expect(res.status).toBe(201);
     const raw = await res.text();
@@ -195,6 +201,7 @@ describe("REST background authorization-code flow", () => {
 
   it("4. an unfetched callback leaves the secret pending, and a re-POST resumes the same handle", async () => {
     const firstRes = await postAuthorize(PENDING_NAME);
+    await grantOn(vault.engine, `secret://${PENDING_NAME}`, PRINCIPAL, ["read", "rotate"]);
     expect(firstRes.status).toBe(201);
     const first = (await firstRes.json()) as {
       data: { handle: string; auth_url: string };

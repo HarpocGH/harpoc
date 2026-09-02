@@ -98,7 +98,7 @@ async function failure(config: McpServerConfig, tool: string): Promise<Error> {
     .executeWithSecret(
       action(config.server_name, tool),
       new Uint8Array(Buffer.from(SECRET, "utf8")),
-      POLICY,
+      config.transport === "http" ? { ...POLICY, url_allowlist: [config.url as string] } : POLICY,
       config,
       "secret-errchan-1",
     )

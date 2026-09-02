@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Mock } from "vitest";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CertManager } from "@harpoc/cert-manager";
 import type { VaultEngine } from "@harpoc/core";
@@ -154,6 +155,7 @@ describe("renew_certificate", () => {
     expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://prod/my-cert");
     expect(certManager.renewCertificate).toHaveBeenCalledWith("uuid-123", {
       caller: EXPECTED_CALLER,
+      handle: "secret://prod/my-cert",
     });
   });
 
@@ -171,6 +173,7 @@ describe("renew_certificate", () => {
     expect(result.isError ?? false).toBe(false);
     expect(certManager.renewCertificate).toHaveBeenCalledWith("uuid-123", {
       caller: EXPECTED_CALLER,
+      handle: "secret://my-cert",
     });
   });
 
@@ -194,12 +197,18 @@ describe("renew_certificate", () => {
     expect(data).toEqual(STATUS);
   });
 
-  it("charges the per-secret rate limit tier, keyed by the resolved secretId — a different secret still proceeds", async () => {
+  it("charges the per-secret rate limit tier on the handle before resolution — a different secret still proceeds", async () => {
     const limiter = new RateLimiter(10_000, 1);
-    const { server, certManager } = harness({ rateLimiter: limiter });
+    const checkLimit = vi.spyOn(limiter, "checkLimit");
+    const { server, certManager, engine } = harness({ rateLimiter: limiter });
 
     const first = await callTool(server, "renew_certificate", { handle: "secret://my-cert" });
     expect(first.isError ?? false).toBe(false);
+    expect(checkLimit).toHaveBeenCalledWith("secret://my-cert");
+    const resolveSecretId = engine.resolveSecretId as unknown as Mock;
+    expect(checkLimit.mock.invocationCallOrder[0]).toBeLessThan(
+      resolveSecretId.mock.invocationCallOrder[0] as number,
+    );
 
     const second = await callTool(server, "renew_certificate", { handle: "secret://my-cert" });
     expect(second.isError).toBe(true);

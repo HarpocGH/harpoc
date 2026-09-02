@@ -2,7 +2,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CallerContext, UseSecretAction } from "@harpoc/shared";
+import type { CallerContext, Permission, UseSecretAction } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
 
@@ -72,6 +72,15 @@ async function makeProcessSecret(name: string): Promise<void> {
   );
 }
 
+async function grantTo(
+  name: string,
+  principalId: string,
+  permissions: Permission[],
+): Promise<void> {
+  const secretId = await engine.resolveSecretId(`secret://${name}`);
+  engine.grantPolicy({ secretId, principalType: "agent", principalId, permissions }, "test-admin");
+}
+
 const PROCESS_ACTION: UseSecretAction = {
   type: "process",
   command: NODE,
@@ -82,6 +91,7 @@ const PROCESS_ACTION: UseSecretAction = {
 describe("use_secret success-row attribution (V2 end-to-end)", () => {
   it("a caller-attributed use stamps principal, session and interface on the injector-written success row", async () => {
     await makeProcessSecret("attr-proc");
+    await grantTo("attr-proc", "alice", ["use"]);
     await engine.useSecret("secret://attr-proc", PROCESS_ACTION, REST_CALLER);
 
     const uses = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
@@ -111,6 +121,7 @@ describe("use_secret success-row attribution (V2 end-to-end)", () => {
 
   it("the audit chain stays green over attributed rows", async () => {
     await makeProcessSecret("chain-proc");
+    await grantTo("chain-proc", "alice", ["use"]);
     await engine.useSecret("secret://chain-proc", PROCESS_ACTION, REST_CALLER);
     await engine.useSecret("secret://chain-proc", PROCESS_ACTION);
 
@@ -123,6 +134,7 @@ describe("use_secret success-row attribution (V2 end-to-end)", () => {
 describe("engine-row interface stamping", () => {
   it("read success rows carry detail.interface for an interface-tagged caller", async () => {
     await makeProcessSecret("attr-read");
+    await grantTo("attr-read", "alice", ["read"]);
     await engine.getSecretValue("secret://attr-read", REST_CALLER);
 
     const reads = engine.queryAudit({ eventType: AuditEventType.SECRET_READ });
@@ -153,7 +165,7 @@ describe("engine-row interface stamping", () => {
 
     await expect(
       engine.useSecret("secret://attr-gated", PROCESS_ACTION, REST_CALLER),
-    ).rejects.toMatchObject({ code: ErrorCode.ACCESS_DENIED });
+    ).rejects.toMatchObject({ code: ErrorCode.SECRET_NOT_FOUND });
 
     const uses = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
     const denial = uses.find((e) => e.success === false);
@@ -188,9 +200,9 @@ describe("interface is never load-bearing for policy matching (D3 pin)", () => {
     ).resolves.toBeDefined();
     await expect(
       engine.useSecret("secret://iface-neutral", PROCESS_ACTION, bobTagged),
-    ).rejects.toMatchObject({ code: ErrorCode.ACCESS_DENIED });
+    ).rejects.toMatchObject({ code: ErrorCode.SECRET_NOT_FOUND });
     await expect(
       engine.useSecret("secret://iface-neutral", PROCESS_ACTION, bobPlain),
-    ).rejects.toMatchObject({ code: ErrorCode.ACCESS_DENIED });
+    ).rejects.toMatchObject({ code: ErrorCode.SECRET_NOT_FOUND });
   });
 });

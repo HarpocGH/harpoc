@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Permission } from "@harpoc/shared";
-import { createHarnessVault, PREREGISTRATION_FILE } from "./harness/vault.js";
+import { createHarnessVault, grantOn, PREREGISTRATION_FILE } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
 import { loadExpectations } from "./evidence/preregistration.js";
 import type { EvidenceRecord } from "./evidence/record.js";
@@ -83,6 +83,14 @@ describe("attack scenarios — baseline versus Harpoc", () => {
     vault = await createHarnessVault(PASSWORD);
     for (const arm of SCENARIO_ARMS) {
       setups.set(armSetupKey(arm), await arm.setup(vault));
+    }
+
+    for (const setup of setups.values()) {
+      await grantOn(vault, setup.handle, "scenario-principal", [
+        Permission.READ,
+        Permission.USE,
+        Permission.LIST,
+      ]);
     }
 
     harpoc = await startHarpocArm(vault, "scenario-principal", [

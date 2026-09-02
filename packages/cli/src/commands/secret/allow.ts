@@ -169,11 +169,12 @@ export function registerSecretAllowCommand(secret: Command): void {
             return;
           }
 
-          const resolved = resolveTokenCallerForHandle(engine, "rotate", handle, tokenValue);
+          const resolved = resolveTokenCallerForHandle(engine, "admin", handle, tokenValue);
           // The merge read is the command's own mechanics, deliberately
           // caller-less (its result never reaches the caller); the caller's
-          // gate is the rotate check inside setInjectionPolicy — the REST
-          // membership-check precedent.
+          // gate is the admin check inside setInjectionPolicy (R1: the
+          // injection policy is the widening half of a secret's configuration)
+          // — the REST membership-check precedent.
           const current = await engine.getInjectionPolicy(handle);
           const parsed = injectionPolicyInputSchema.safeParse(mergePolicy(current, options));
           if (!parsed.success) {

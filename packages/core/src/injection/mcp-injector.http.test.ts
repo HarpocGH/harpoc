@@ -52,11 +52,19 @@ function httpConfig(url: string): McpServerConfig {
   return { server_name: "http-mcp", transport: "http", url };
 }
 
+function policyFor(url: string): InjectionPolicy {
+  const target = new URL(url);
+  return {
+    ...POLICY,
+    url_allowlist: [`${target.protocol}//${target.host}/*`],
+  };
+}
+
 function run(injector: McpInjector, config: McpServerConfig, tool = "echo") {
   return injector.executeWithSecret(
     mcpAction(tool),
     new Uint8Array(Buffer.from(SECRET, "utf8")),
-    POLICY,
+    policyFor(config.url as string),
     config,
     "secret-http-1",
   );

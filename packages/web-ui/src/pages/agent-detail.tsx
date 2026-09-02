@@ -193,7 +193,7 @@ export function AgentDetailPage({ api, name }: { api: ApiClient; name: string })
       {policies.error && <p class="error-text">{policies.error.message}</p>}
       {policies.data?.length === 0 && (
         <p class="empty">
-          No grants — this agent reaches only what its token scope allows on ungated secrets.
+          No grants — this agent cannot reach any secret. Grant it a cell in the permission matrix.
         </p>
       )}
       {policies.data !== null && policies.data.length > 0 && (

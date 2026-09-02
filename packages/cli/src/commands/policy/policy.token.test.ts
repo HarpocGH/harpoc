@@ -167,6 +167,7 @@ describe("policy commands — token path", () => {
     expect(mockEngine.listPolicies).toHaveBeenCalledWith(
       "sid-1",
       expect.objectContaining({ interface: "cli" }),
+      "secret://k",
     );
   });
 
@@ -176,6 +177,7 @@ describe("policy commands — token path", () => {
     expect(mockEngine.listPolicies).toHaveBeenCalledWith(
       undefined,
       expect.objectContaining({ interface: "cli" }),
+      undefined,
     );
   });
 });

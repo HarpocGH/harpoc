@@ -89,6 +89,7 @@ describe("Memory Wiping", () => {
       type: SecretType.API_KEY,
       value: new Uint8Array(Buffer.from(secretValue)),
     });
+    await vault.engine.setInjectionPolicy(result.handle, { url_allowlist: [`${echoUrl}/*`] });
 
     // useSecret should complete without error (value decrypted, injected, then wiped)
     const response = await vault.engine.useSecret(result.handle, {
@@ -848,6 +849,16 @@ describe("SSRF E2E via useSecret", () => {
     });
     const addr = echoServer.address() as AddressInfo;
     echoUrl = `http://127.0.0.1:${addr.port}`;
+
+    await vault.engine.setInjectionPolicy(handle, {
+      url_allowlist: [
+        "https://10.0.0.1/*",
+        "https://192.168.1.1/*",
+        "https://[fc00::1]/*",
+        `${echoUrl}/*`,
+        "http://[::1]:1/*",
+      ],
+    });
   });
 
   afterAll(async () => {

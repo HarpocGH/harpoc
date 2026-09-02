@@ -1113,9 +1113,9 @@ export const updateAgentInputSchema = z.object({
 
 /**
  * Set-agent-permissions request body: an empty `permissions` array is valid
- * (it clears the grant — the presence gate: a matrix cell with no permissions
- * writes nothing); `create` is never grantable per secret and is refused at
- * the engine, not here.
+ * (it clears the grant — a matrix cell with no permissions writes nothing);
+ * `create` is never grantable per secret and is refused at the engine, not
+ * here.
  */
 export const setAgentPermissionsInputSchema = z.object({
   permissions: z.array(permissionSchema),

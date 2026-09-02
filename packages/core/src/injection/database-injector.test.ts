@@ -132,7 +132,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     url_allowlist: [],
     command_allowlist: [],
     env_allowlist: [],
-    host_allowlist: [],
+    host_allowlist: ["8.8.8.8", "10.0.0.1", "127.0.0.1"],
     response_mode: "filtered",
     response_header_allowlist: [],
     network_isolation: false,

@@ -21,7 +21,7 @@ export function registerOAuthRefreshCommand(oauth: Command): void {
             options.token ?? process.env.HARPOC_TOKEN,
           );
           const secretId = await resolveSecretId(engine, handle);
-          const newExpiresAt = await engine.refreshOAuthToken(secretId, resolved?.caller);
+          const newExpiresAt = await engine.refreshOAuthToken(secretId, resolved?.caller, handle);
           if (options.json) {
             printJson({ handle, new_expires_at: newExpiresAt });
           } else if (newExpiresAt === null) {

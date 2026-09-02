@@ -88,7 +88,9 @@ describe("v1.3 contexts — lifecycle through the real engine", () => {
     cleanups.push(fake.close);
 
     const handle = await makeSecret("v13-smtp-ok", "smtp-user:smtp-pass-lifecycle");
-    await vault.engine.setInjectionPolicy(handle, {});
+    await vault.engine.setInjectionPolicy(handle, {
+      host_allowlist: [`${LOOPBACK_HOST}:${fake.port}`],
+    });
     await vault.engine.setConnectionConfig(handle, { mail: { tls: { ca: FIXTURE_CA_PEM } } });
 
     const action: UseSecretAction = {
@@ -135,7 +137,10 @@ describe("v1.3 contexts — lifecycle through the real engine", () => {
     writeFileSync(attachmentPath, attachmentBytes);
 
     const handle = await makeSecret("v13-smtp-attach", "smtp-user:smtp-pass-attach");
-    await vault.engine.setInjectionPolicy(handle, { smtp_recipient_allowlist: ["*@example.com"] });
+    await vault.engine.setInjectionPolicy(handle, {
+      smtp_recipient_allowlist: ["*@example.com"],
+      host_allowlist: [`${LOOPBACK_HOST}:${fake.port}`],
+    });
     await vault.engine.setConnectionConfig(handle, { mail: { tls: { ca: FIXTURE_CA_PEM } } });
 
     const action: UseSecretAction = {
@@ -170,7 +175,9 @@ describe("v1.3 contexts — lifecycle through the real engine", () => {
     cleanups.push(fake.close);
 
     const handle = await makeSecret("v13-imap-ok", "imap-user:imap-pass-lifecycle");
-    await vault.engine.setInjectionPolicy(handle, {});
+    await vault.engine.setInjectionPolicy(handle, {
+      host_allowlist: [`${LOOPBACK_HOST}:${fake.port}`],
+    });
     await vault.engine.setConnectionConfig(handle, { mail: { tls: { ca: FIXTURE_CA_PEM } } });
 
     const action: UseSecretAction = {
@@ -229,7 +236,9 @@ describe("v1.3 contexts — lifecycle through the real engine", () => {
     cleanups.push(fake.close);
 
     const handle = await makeSecret("v13-ws-ok", "ws-token-do-not-log");
-    await vault.engine.setInjectionPolicy(handle, {});
+    await vault.engine.setInjectionPolicy(handle, {
+      url_allowlist: [`ws://127.0.0.1:${fake.port}/*`],
+    });
 
     const url = `ws://127.0.0.1:${fake.port}/feed`;
     const action: UseSecretAction = {
@@ -320,7 +329,9 @@ describe("v1.3 contexts — the two thesis-mandated end-to-end refusals", () => 
   it("smtp recipient coupling: attachments without a recipient allowlist are refused", async () => {
     const handle = await makeSecret("v13-refuse-attach", "smtp-user:smtp-pass-refuse");
     // No smtp_recipient_allowlist configured.
-    await vault.engine.setInjectionPolicy(handle, {});
+    await vault.engine.setInjectionPolicy(handle, {
+      host_allowlist: [`${LOOPBACK_HOST}:465`],
+    });
     await vault.engine.setConnectionConfig(handle, { mail: { tls: { ca: FIXTURE_CA_PEM } } });
 
     const action: UseSecretAction = {

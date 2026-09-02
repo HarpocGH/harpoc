@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Permission } from "@harpoc/shared";
 import { assertOpaque } from "./assert/opacity.js";
-import { createHarnessVault, storeSecret } from "./harness/vault.js";
+import { createHarnessVault, grantOn, storeSecret } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
 import { expectAttributedSuccess } from "./harness/audit.js";
 import { recordArm } from "./harness/evidence.js";
@@ -107,6 +107,9 @@ describe("git context — live clones over http and ssh", () => {
     await vault.engine.setConnectionConfig(sshHandle, {
       ssh: { known_hosts: [knownHostPin(SSHD_PINNED.host, "pinned")] },
     });
+
+    await grantOn(vault, httpHandle, "e2e-git-agent", [Permission.USE]);
+    await grantOn(vault, sshHandle, "e2e-git-agent", [Permission.USE]);
 
     surface = await startMcpHttpSurface(vault, "e2e-git-agent", [Permission.USE]);
   });

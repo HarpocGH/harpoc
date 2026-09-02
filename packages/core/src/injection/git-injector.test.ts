@@ -253,10 +253,24 @@ describeGit("GitInjector target enforcement (git resolvable)", () => {
       injector.executeWithSecret(
         gitAction({ operation: "pull", repository: "https://8.8.8.8/repo.git" }),
         SECRET,
-        allowGit(),
+        allowGit({ url_allowlist: ["https://8.8.8.8/*"] }),
         undefined,
       ),
     ).rejects.toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
+  });
+
+  it("refuses an HTTPS remote when the url_allowlist is empty (deny-by-default)", async () => {
+    await expect(
+      injector.executeWithSecret(
+        gitAction({
+          operation: "clone",
+          repository: "https://8.8.8.8/repo.git",
+        }),
+        SECRET,
+        allowGit(),
+        undefined,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
   });
 
   it("accepts an allowlisted SSH remote config shape (reaches agent start)", async () => {

@@ -13,8 +13,9 @@ import { VaultEngine } from "./vault-engine.js";
  * V1 gated the six credential operations; the config operations stayed on
  * token scope alone, so a principal denied `rotate` could still rewrite the
  * allowlists that bound where the credential may be injected, and a principal
- * denied `read` could still read them. Read → `read`, mutate → `rotate`,
- * policy grant/revoke → `admin`, all presence-gated exactly like V1.
+ * denied `read` could still read them. Read → `read`, endpoint mutations →
+ * `rotate`, the injection policy and policy grant/revoke → `admin` (R1,
+ * 2026-09-01), all explicit-grant exactly like V1.
  */
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
@@ -103,6 +104,13 @@ async function expectDenied(promise: Promise<unknown> | (() => unknown)): Promis
   );
 }
 
+async function expectNotFound(promise: Promise<unknown> | (() => unknown)): Promise<void> {
+  await expectVaultError(
+    () => (typeof promise === "function" ? promise() : promise),
+    ErrorCode.SECRET_NOT_FOUND,
+  );
+}
+
 /** Every config read + mutation, driven with one caller. */
 async function readAll(handle: string, caller?: CallerContext): Promise<void> {
   await engine.getInjectionPolicy(handle, caller);
@@ -110,49 +118,56 @@ async function readAll(handle: string, caller?: CallerContext): Promise<void> {
   await engine.getConnectionConfig(handle, caller);
 }
 
-async function mutateAll(handle: string, caller?: CallerContext): Promise<void> {
-  await engine.setInjectionPolicy(handle, { url_allowlist: ["https://ok.example/*"] }, {}, caller);
+async function mutateEndpoints(handle: string, caller?: CallerContext): Promise<void> {
   await engine.setMcpServerConfig(handle, MCP_CONFIG, caller);
   await engine.deleteMcpServerConfig(handle, caller);
   await engine.setConnectionConfig(handle, { database: { tls_mode: "require" } }, caller);
   await engine.deleteConnectionConfig(handle, caller);
 }
 
-describe("presence gate", () => {
-  it("a secret without policy rows: every config op passes for a token caller", async () => {
+async function mutateAll(handle: string, caller?: CallerContext): Promise<void> {
+  await engine.setInjectionPolicy(handle, { url_allowlist: ["https://ok.example/*"] }, {}, caller);
+  await mutateEndpoints(handle, caller);
+}
+
+describe("explicit grant (R1)", () => {
+  it("a secret without policy rows refuses every config op for a token caller", async () => {
     const handle = "secret://open";
     await makeSecret("open");
     const caller = agent("anyone");
 
-    await expect(readAll(handle, caller)).resolves.toBeUndefined();
-    await expect(mutateAll(handle, caller)).resolves.toBeUndefined();
+    await expectNotFound(engine.getInjectionPolicy(handle, caller));
+    await expectNotFound(engine.getMcpServerConfig(handle, caller));
+    await expectNotFound(engine.getConnectionConfig(handle, caller));
+    await expectDenied(engine.setInjectionPolicy(handle, { url_allowlist: ["*"] }, {}, caller));
+    await expectNotFound(engine.setMcpServerConfig(handle, MCP_CONFIG, caller));
+    await expectNotFound(engine.setConnectionConfig(handle, {}, caller));
   });
 
-  it("a secret with policy rows restricts the config ops", async () => {
+  it("a secret with rows for someone else restricts the config ops", async () => {
     const id = await makeSecret("gated");
     grant(id, "agent", "alice", ["use"]);
     const bob = agent("bob");
 
-    await expectDenied(engine.getInjectionPolicy("secret://gated", bob));
-    await expectDenied(engine.getMcpServerConfig("secret://gated", bob));
-    await expectDenied(engine.getConnectionConfig("secret://gated", bob));
+    await expectNotFound(engine.getInjectionPolicy("secret://gated", bob));
+    await expectNotFound(engine.getMcpServerConfig("secret://gated", bob));
+    await expectNotFound(engine.getConnectionConfig("secret://gated", bob));
     await expectDenied(
       engine.setInjectionPolicy("secret://gated", { url_allowlist: ["*"] }, {}, bob),
     );
-    await expectDenied(engine.setMcpServerConfig("secret://gated", MCP_CONFIG, bob));
-    await expectDenied(engine.deleteMcpServerConfig("secret://gated", bob));
-    await expectDenied(engine.setConnectionConfig("secret://gated", {}, bob));
-    await expectDenied(engine.deleteConnectionConfig("secret://gated", bob));
-    await expectDenied(() => engine.listPolicies(id, bob));
+    await expectNotFound(engine.setMcpServerConfig("secret://gated", MCP_CONFIG, bob));
+    await expectNotFound(engine.deleteMcpServerConfig("secret://gated", bob));
+    await expectNotFound(engine.setConnectionConfig("secret://gated", {}, bob));
+    await expectNotFound(engine.deleteConnectionConfig("secret://gated", bob));
+    await expectNotFound(() => engine.listPolicies(id, bob));
   });
 
-  it("expired rows neither grant nor gate", async () => {
+  it("expired rows count for nothing — the secret stays closed", async () => {
     const id = await makeSecret("expired-rows");
     grant(id, "agent", "alice", ["admin"], Date.now() - 1000);
 
-    // No *active* row ⇒ presence gate off ⇒ any caller proceeds.
-    await expect(readAll("secret://expired-rows", agent("bob"))).resolves.toBeUndefined();
-    await expect(mutateAll("secret://expired-rows", agent("bob"))).resolves.toBeUndefined();
+    await expectNotFound(engine.getInjectionPolicy("secret://expired-rows", agent("bob")));
+    await expectNotFound(engine.getInjectionPolicy("secret://expired-rows", agent("alice")));
   });
 
   it("the trusted local path (no caller) is never checked", async () => {
@@ -183,16 +198,24 @@ describe("permission granularity (D2: read→read, mutate→rotate)", () => {
     await expectDenied(engine.deleteConnectionConfig("secret://read-only", reader));
   });
 
-  it("a rotate grant opens the mutations but not the reads", async () => {
+  it("a rotate grant opens the endpoint mutations, not the injection policy nor the reads", async () => {
     const id = await makeSecret("rotate-only");
     grant(id, "agent", "rotator", ["rotate"]);
     const rotator = agent("rotator");
 
-    await expect(mutateAll("secret://rotate-only", rotator)).resolves.toBeUndefined();
+    await expect(mutateEndpoints("secret://rotate-only", rotator)).resolves.toBeUndefined();
+    await expectDenied(
+      engine.setInjectionPolicy(
+        "secret://rotate-only",
+        { url_allowlist: ["https://ok.example/*"] },
+        {},
+        rotator,
+      ),
+    );
 
-    await expectDenied(engine.getInjectionPolicy("secret://rotate-only", rotator));
-    await expectDenied(engine.getConnectionConfig("secret://rotate-only", rotator));
-    await expectDenied(() => engine.listPolicies(id, rotator));
+    await expectNotFound(engine.getInjectionPolicy("secret://rotate-only", rotator));
+    await expectNotFound(engine.getConnectionConfig("secret://rotate-only", rotator));
+    await expectNotFound(() => engine.listPolicies(id, rotator));
   });
 
   it("admin implies read and rotate on the config surface", async () => {
@@ -210,33 +233,46 @@ describe("permission granularity (D2: read→read, mutate→rotate)", () => {
     grant(id, "project", "api", ["rotate"]);
 
     await expect(
-      engine.setInjectionPolicy(
+      engine.setConnectionConfig(
         "secret://project-scoped",
-        { url_allowlist: ["https://api.example/*"] },
-        {},
+        { database: { tls_mode: "require" } },
         agent("any-agent", "api"),
       ),
     ).resolves.toBeUndefined();
-    await expectDenied(
-      engine.setInjectionPolicy("secret://project-scoped", {}, {}, agent("any-agent", "other")),
+    await expectNotFound(
+      engine.setConnectionConfig("secret://project-scoped", {}, agent("any-agent", "other")),
     );
   });
 });
 
 describe("policy administration (D3: grant/revoke require admin)", () => {
-  it("the first grant is ungated, later ones require an admin grant", async () => {
+  it("every grant requires an admin grant — the first one included (R1)", async () => {
     const id = await makeSecret("bootstrap");
     const bob = agent("bob");
     registerAgents("alice", "bob");
 
-    // No rows yet ⇒ presence gate off.
-    expect(() =>
+    // No rows yet — and no exemption for that: bob is a token caller holding nothing.
+    await expectDenied(() =>
       engine.grantPolicy(
         { secretId: id, principalType: "agent", principalId: "alice", permissions: ["use"] },
         "bob",
         bob,
       ),
-    ).not.toThrow();
+    );
+    expect(engine.listPolicies(id)).toHaveLength(0);
+
+    // The trusted path writes the first row; bob still holds no admin.
+    engine.grantPolicy(
+      { secretId: id, principalType: "agent", principalId: "alice", permissions: ["use"] },
+      "operator",
+    );
+    await expectDenied(() =>
+      engine.grantPolicy(
+        { secretId: id, principalType: "agent", principalId: "bob", permissions: ["use"] },
+        "bob",
+        bob,
+      ),
+    );
 
     // A row now exists and bob holds no admin grant.
     expect(() =>
@@ -298,6 +334,33 @@ describe("policy administration (D3: grant/revoke require admin)", () => {
     // The trusted path keeps the vault-wide listing.
     expect(() => engine.listPolicies()).not.toThrow();
   });
+
+  it("R6(iii): acknowledging an interpreter rides the admin check — a rotate+use grant is refused before the interpreter gate", async () => {
+    const id = await makeSecret("ack-gate");
+    grant(id, "agent", "rotator", ["rotate", "use"]);
+
+    await expectDenied(
+      engine.setInjectionPolicy(
+        "secret://ack-gate",
+        { command_allowlist: ["python"] },
+        { acknowledge_interpreters: true },
+        agent("rotator"),
+      ),
+    );
+    expect(
+      engine.queryAudit({
+        eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED,
+        secretId: id,
+      }),
+    ).toHaveLength(0);
+    expect(
+      engine.queryAudit({
+        eventType: AuditEventType.POLICY_INTERPRETER_REFUSED,
+        secretId: id,
+      }),
+    ).toHaveLength(0);
+    expect((await engine.getInjectionPolicy("secret://ack-gate")).command_allowlist).toEqual([]);
+  });
 });
 
 describe("denial ordering (D4: nothing happens before the check)", () => {
@@ -339,8 +402,8 @@ describe("denial ordering (D4: nothing happens before the check)", () => {
       .mcpRegistry;
     const terminate = vi.spyOn(registry, "terminate");
 
-    await expectDenied(engine.setMcpServerConfig("secret://registry", MCP_CONFIG, agent("bob")));
-    await expectDenied(engine.deleteMcpServerConfig("secret://registry", agent("bob")));
+    await expectNotFound(engine.setMcpServerConfig("secret://registry", MCP_CONFIG, agent("bob")));
+    await expectNotFound(engine.deleteMcpServerConfig("secret://registry", agent("bob")));
 
     expect(terminate).not.toHaveBeenCalled();
     await expect(engine.getMcpServerConfig("secret://registry")).resolves.toMatchObject({
@@ -361,7 +424,7 @@ describe("audit attribution", () => {
     expect(denial?.principal_type).toBe("agent");
     expect(denial?.principal_id).toBe("bob");
     expect(denial?.detail?.policy).toBe("injection");
-    expect(denial?.detail?.required_permission).toBe("rotate");
+    expect(denial?.detail?.required_permission).toBe("admin");
     expect(denial?.detail?.error).toBe(ErrorCode.ACCESS_DENIED);
     expect(denial?.detail?.interface).toBe("rest");
   });
@@ -370,7 +433,7 @@ describe("audit attribution", () => {
     const id = await makeSecret("read-denial-row");
     grant(id, "agent", "alice", ["use"]);
 
-    await expectDenied(engine.getConnectionConfig("secret://read-denial-row", agent("bob")));
+    await expectNotFound(engine.getConnectionConfig("secret://read-denial-row", agent("bob")));
 
     const rows = engine.queryAudit({ eventType: AuditEventType.SECRET_READ, secretId: id });
     const denial = rows.find((r) => !r.success);
@@ -408,11 +471,11 @@ describe("audit attribution", () => {
 
   it("the audit chain stays valid across denied and allowed config operations", async () => {
     const id = await makeSecret("chain");
-    grant(id, "agent", "alice", ["rotate"]);
+    grant(id, "agent", "alice", ["admin"]);
 
     await expectDenied(engine.setInjectionPolicy("secret://chain", {}, {}, agent("bob")));
     await engine.setInjectionPolicy("secret://chain", {}, {}, agent("alice"));
-    await expectDenied(engine.getInjectionPolicy("secret://chain", agent("bob")));
+    await expectNotFound(engine.getInjectionPolicy("secret://chain", agent("bob")));
 
     expect(engine.verifyAuditChain().valid).toBe(true);
   });

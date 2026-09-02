@@ -41,7 +41,7 @@ type ResolvedAdapter =
  * sanitized result set.
  *
  * Security controls realized here:
- *  - Host:port target allowlist (optional layer atop the mandatory SSRF floor).
+ *  - Host:port target allowlist (deny-by-default, atop the mandatory SSRF floor).
  *  - SSRF: private/internal targets rejected before any connection; the
  *    connection is pinned to the pre-flight-validated address (DNS rebinding).
  *  - TLS by default; a non-TLS connection requires the audited per-secret opt-out.
@@ -94,7 +94,7 @@ export class DatabaseInjector {
 
     const { host, port } = parseHostPort(action.host, action.port, defaultDbPort(action.engine));
 
-    // Target allowlist (optional) — reject a redirected host:port before connecting.
+    // Target allowlist — deny-by-default; an unlisted or redirected host:port is refused before connecting.
     if (!matchesHostPortAllowlist(host, port, policy.host_allowlist)) {
       this.audit(action, secretId, { host, port, error: "HOST_NOT_ALLOWED" }, false, attribution);
       throw VaultError.hostNotAllowed(`${host}:${port}`);

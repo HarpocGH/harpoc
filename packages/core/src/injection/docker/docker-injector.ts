@@ -286,12 +286,9 @@ async function runDocker(
 
   const { registry } = parseImageReference(action.image);
 
-  // Registry host allowlist — fail-safe deny (process-mediated posture). The
+  // Registry host allowlist — deny-by-default (an empty list refuses). The
   // default Docker Hub host is not exempt.
-  if (
-    policy.host_allowlist.length === 0 ||
-    !matchesHostAllowlist(registry, policy.host_allowlist)
-  ) {
+  if (!matchesHostAllowlist(registry, policy.host_allowlist)) {
     throw VaultError.hostNotAllowed(registry);
   }
 

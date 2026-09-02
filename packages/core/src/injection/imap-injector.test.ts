@@ -26,7 +26,10 @@ function baseAction(partial: Record<string, unknown> = {}): ImapAction {
 }
 
 function basePolicy(partial: Partial<InjectionPolicyInput> = {}): InjectionPolicy {
-  return injectionPolicyInputSchema.parse(partial);
+  return injectionPolicyInputSchema.parse({
+    host_allowlist: ["127.0.0.1"],
+    ...partial,
+  });
 }
 
 interface FakeClient extends ImapClientLike {
@@ -187,19 +190,14 @@ describe("ImapInjector — host allowlist", () => {
     expect(calls).toEqual([]);
   });
 
-  it("an empty allowlist permits any host (optional-atop-floor)", async () => {
-    const client = makeFakeClient();
-    const { fn } = connectReturning(client);
+  it("an empty allowlist refuses every host before any socket (deny-by-default)", async () => {
+    const { fn, calls } = connectMustNotBeCalled();
     const injector = new ImapInjector({ connectImap: fn });
 
-    await injector.run(
-      baseAction(),
-      SECRET,
-      basePolicy({ host_allowlist: [] }),
-      undefined,
-      undefined,
-    );
-    expect(client.selectCalls.length).toBe(1);
+    await expect(
+      injector.run(baseAction(), SECRET, basePolicy({ host_allowlist: [] }), undefined, undefined),
+    ).rejects.toMatchObject({ code: ErrorCode.HOST_NOT_ALLOWED });
+    expect(calls).toEqual([]);
   });
 
   it("a matching host is permitted", async () => {

@@ -49,6 +49,7 @@ export function registerCertRenewCommand(cert: Command): void {
           const status = await manager.renewCertificate(secretId, {
             httpPort,
             caller: resolved?.caller,
+            handle,
           });
 
           if (options.json) {

@@ -85,7 +85,11 @@ describe("HTTP DNS-rebinding IP pinning", () => {
   it("re-validates and re-pins every redirect hop independently", async () => {
     const injector = new HttpInjector(null);
     const result = await injector.executeWithSecret(
-      { method: "GET", url: `http://a.pinned.test:${port}/hop` },
+      {
+        method: "GET",
+        url: `http://a.pinned.test:${port}/hop`,
+        urlAllowlist: [`http://a.pinned.test:${port}/*`, `http://b.pinned.test:${port}/*`],
+      },
       new TextEncoder().encode("pin-secret"),
       { type: "bearer" },
       "any",

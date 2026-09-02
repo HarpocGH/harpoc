@@ -31,7 +31,10 @@ function baseAction(partial: Record<string, unknown> = {}): SmtpAction {
 }
 
 function basePolicy(partial: Partial<InjectionPolicyInput> = {}): InjectionPolicy {
-  return injectionPolicyInputSchema.parse(partial);
+  return injectionPolicyInputSchema.parse({
+    host_allowlist: ["127.0.0.1"],
+    ...partial,
+  });
 }
 
 /** Fake sendSmtp that records every call and reports all recipients accepted. */

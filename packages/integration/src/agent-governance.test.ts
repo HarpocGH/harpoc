@@ -12,7 +12,12 @@ import {
   SecretType,
 } from "@harpoc/shared";
 import type { Agent, AccessPolicy, IssuedToken } from "@harpoc/shared";
-import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
+import {
+  createTestVault,
+  destroyTestVault,
+  grantOn,
+  registerAgents,
+} from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
@@ -48,7 +53,7 @@ function jtiOf(token: string): string {
  * token-bearing stdio harness in this package (`launchToken` rather than
  * `allowTokenless`, which is what makes the per-call revocation recheck
  * observable). One vault for every scenario; each owns its own agents and
- * secrets so the presence gate one scenario flips is invisible to the others.
+ * secrets so the cells one scenario writes are invisible to the others.
  */
 describe("agent governance end to end", () => {
   let vault: TestVault;
@@ -212,6 +217,7 @@ describe("agent governance end to end", () => {
     beforeAll(async () => {
       await createSecret("grant-target");
       handle = "grant-target";
+      await grantOn(vault.engine, `secret://${handle}`, "gov-admin", ["admin"]);
     });
 
     it("refuses an unregistered agent principal with 404 AGENT_NOT_FOUND", async () => {
@@ -273,33 +279,57 @@ describe("agent governance end to end", () => {
       secretId = await createSecret(handle);
       registerAgents(vault.engine, "reader", "other");
       readerToken = vault.engine.createToken("reader", ["read"]);
+      vault.engine.setAgentPermissions(
+        "gov-admin",
+        secretId,
+        ["admin"],
+        undefined,
+        "integration-test",
+      );
     });
 
-    it("reads the value while the secret is ungated", async () => {
-      expect((await readValue()).status).toBe(200);
+    it("the reader is told not-found while it holds no cell", async () => {
+      const refused = await readValue();
+      expect(refused.status).toBe(404);
+      expect((await bodyOf<ErrorBody>(refused)).error).toBe(ErrorCode.SECRET_NOT_FOUND);
     });
 
-    it("the first cell write gates the secret and locks the reader out", async () => {
+    it("an agent-type admin token cannot write the first cell on a fresh secret (R1's universal consequence)", async () => {
+      const freshId = await createSecret("matrix-fresh");
+      const refused = await api(`/agents/other/secrets/matrix-fresh/permissions`, {
+        method: "PUT",
+        headers: jsonHeaders(adminToken),
+        body: JSON.stringify({ permissions: ["read"] }),
+      });
+      expect(refused.status).toBe(403);
+      expect((await bodyOf<ErrorBody>(refused)).message).toBe(
+        "Access denied: Principal lacks 'admin' permission on this secret",
+      );
+      expect(vault.engine.listPolicies(freshId)).toHaveLength(0);
+    });
+
+    it("a cell for another agent leaves the reader locked out", async () => {
       const res = await setCell("other", ["read"]);
       expect(res.status).toBe(200);
       const flip = (await bodyOf<DataBody<MatrixResult>>(res)).data;
-      expect(flip.gated_before).toBe(false);
+      expect(flip.gated_before).toBe(true);
       expect(flip.gated_after).toBe(true);
       expect(flip.policy?.principal_id).toBe("other");
-      expect([...(flip.policy?.permissions ?? [])].sort()).toEqual(["read"]);
 
       const denied = await readValue();
-      expect(denied.status).toBe(403);
-      expect((await bodyOf<ErrorBody>(denied)).error).toBe(ErrorCode.ACCESS_DENIED);
+      expect(denied.status).toBe(404);
+      expect((await bodyOf<ErrorBody>(denied)).error).toBe(ErrorCode.SECRET_NOT_FOUND);
     });
 
     it("the gate then applies to the matrix editor itself, as grantPolicy's does", async () => {
       // Design § 5.3: the per-secret `admin` check runs exactly as in
-      // grantPolicy — "first grant on a policy-free secret ungated by
-      // construction". Once the cell write above gated the secret, the REST
-      // admin token is a token-derived caller like any other and needs its own
-      // grant; the trusted local path (no caller) is what can still write one.
-      const refused = await setCell("reader", ["read"]);
+      // grantPolicy — every cell write, the first included (R1). A second
+      // agent-type admin token holding no cell of its own on this secret is a
+      // token-derived caller like any other; the trusted local path (no
+      // caller) is what seeded `gov-admin`'s.
+      registerAgents(vault.engine, "other-admin");
+      const otherAdminToken = vault.engine.createToken("other-admin", ["admin"]);
+      const refused = await setCell("reader", ["read"], otherAdminToken);
       expect(refused.status).toBe(403);
       const failure = await bodyOf<ErrorBody>(refused);
       expect(failure.error).toBe(ErrorCode.ACCESS_DENIED);
@@ -312,16 +342,6 @@ describe("agent governance end to end", () => {
         .filter((event) => event.secret_id === secretId && event.detail?.via === "matrix");
       expect(denials).toHaveLength(1);
       expect(denials[0]?.detail?.required_permission).toBe("admin");
-
-      const seeded = vault.engine.setAgentPermissions(
-        "gov-admin",
-        secretId,
-        ["admin"],
-        undefined,
-        "integration-test",
-      );
-      expect(seeded.gated_before).toBe(true);
-      expect(seeded.gated_after).toBe(true);
     });
 
     it("granting the reader its cell restores the value read", async () => {
@@ -335,7 +355,7 @@ describe("agent governance end to end", () => {
       expect((await readValue()).status).toBe(200);
     });
 
-    it("clearing every cell ungates the secret and the reader reads without a grant", async () => {
+    it("clearing every cell leaves the secret closed — the reader is told not-found", async () => {
       for (const agent of ["reader", "other"]) {
         const cleared = await setCell(agent, []);
         expect(cleared.status).toBe(200);
@@ -354,7 +374,7 @@ describe("agent governance end to end", () => {
       expect(listed.status).toBe(200);
       expect((await bodyOf<DataBody<unknown[]>>(listed)).data).toHaveLength(0);
 
-      expect((await readValue()).status).toBe(200);
+      expect((await readValue()).status).toBe(404);
     });
   });
 

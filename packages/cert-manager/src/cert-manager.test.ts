@@ -223,17 +223,19 @@ function makeEngine() {
         secretId: string,
         certificatePem: string,
         chainPem?: string,
-        opts?: { renewed?: boolean },
+        opts?: { renewed?: boolean; handle?: string },
         caller?: CallerContext,
       ) => Promise<void>
     >(async () => undefined),
-    getCertificatePem: vi.fn<(secretId: string, caller?: CallerContext) => CertificateMaterial>(
-      () => ({ certificatePem: null, chainPem: null, csrPem: null }),
-    ),
-    getCertificateStatus: vi.fn<(secretId: string, caller?: CallerContext) => CertificateStatus>(
-      () => STATUS,
-    ),
-    getAcmeAccount: vi.fn<(secretId: string, caller?: CallerContext) => string | null>(() => null),
+    getCertificatePem: vi.fn<
+      (secretId: string, caller?: CallerContext, handle?: string) => CertificateMaterial
+    >(() => ({ certificatePem: null, chainPem: null, csrPem: null })),
+    getCertificateStatus: vi.fn<
+      (secretId: string, caller?: CallerContext, handle?: string) => CertificateStatus
+    >(() => STATUS),
+    getAcmeAccount: vi.fn<
+      (secretId: string, caller?: CallerContext, handle?: string) => string | null
+    >(() => null),
   };
 }
 
@@ -1009,8 +1011,8 @@ describe("CertManager", () => {
 
       await manager.renewCertificate(SECRET_ID, { caller: CALLER });
 
-      expect(engine.getAcmeAccount).toHaveBeenCalledWith(SECRET_ID, CALLER);
-      expect(engine.getCertificatePem).toHaveBeenCalledWith(SECRET_ID, CALLER);
+      expect(engine.getAcmeAccount).toHaveBeenCalledWith(SECRET_ID, CALLER, undefined);
+      expect(engine.getCertificatePem).toHaveBeenCalledWith(SECRET_ID, CALLER, undefined);
       expect(engine.updateCertificate).toHaveBeenCalledWith(
         SECRET_ID,
         RENEWED_LEAF,
@@ -1018,7 +1020,27 @@ describe("CertManager", () => {
         { renewed: true },
         CALLER,
       );
-      expect(engine.getCertificateStatus).toHaveBeenCalledWith(SECRET_ID, CALLER);
+      expect(engine.getCertificateStatus).toHaveBeenCalledWith(SECRET_ID, CALLER, undefined);
+    });
+
+    it("threads the handle into every engine read and the write (R5)", async () => {
+      primeRenewal();
+
+      await manager.renewCertificate(SECRET_ID, {
+        caller: CALLER,
+        handle: "secret://web",
+      });
+
+      expect(engine.getAcmeAccount).toHaveBeenCalledWith(SECRET_ID, CALLER, "secret://web");
+      expect(engine.getCertificatePem).toHaveBeenCalledWith(SECRET_ID, CALLER, "secret://web");
+      expect(engine.updateCertificate).toHaveBeenCalledWith(
+        SECRET_ID,
+        expect.any(String),
+        expect.anything(),
+        expect.objectContaining({ renewed: true, handle: "secret://web" }),
+        CALLER,
+      );
+      expect(engine.getCertificateStatus).toHaveBeenCalledWith(SECRET_ID, CALLER, "secret://web");
     });
 
     it("passes no caller on the trusted local path", async () => {
@@ -1026,7 +1048,7 @@ describe("CertManager", () => {
 
       await manager.renewCertificate(SECRET_ID);
 
-      expect(engine.getAcmeAccount).toHaveBeenCalledWith(SECRET_ID, undefined);
+      expect(engine.getAcmeAccount).toHaveBeenCalledWith(SECRET_ID, undefined, undefined);
       expect(engine.updateCertificate).toHaveBeenCalledWith(
         SECRET_ID,
         RENEWED_LEAF,

@@ -8,7 +8,12 @@ import { createApp } from "@harpoc/rest-api";
 import { DirectClient, RestClient } from "@harpoc/sdk";
 import { AuditEventType, SecretType, VaultState } from "@harpoc/shared";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
+import {
+  createTestVault,
+  destroyTestVault,
+  grantOn,
+  registerAgents,
+} from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
@@ -56,6 +61,8 @@ describe("Full Lifecycle", () => {
       value: new Uint8Array(Buffer.from(SECRET_VALUE)),
     });
     handle = result.handle;
+    await grantOn(vault.engine, handle, "test-agent", ["list", "read", "use", "rotate", "admin"]);
+    await vault.engine.setInjectionPolicy(handle, { url_allowlist: [`${echoUrl}/*`] });
 
     // 3. Create JWT token for REST API auth
     token = vault.engine.createToken("test-agent", ["admin"]);

@@ -96,8 +96,8 @@ export function registerAgentPermissionsCommand(agent: Command): void {
             if (result.gated_before !== result.gated_after) {
               console.error(
                 result.gated_after
-                  ? `Note: ${handle} is now policy-gated: token callers without a grant are refused.`
-                  : `Note: ${handle} is no longer policy-gated: token scope alone governs.`,
+                  ? `Note: ${handle} received its first grant — until now no agent or tool token could reach it.`
+                  : `Note: ${handle} has no grants left — no agent or tool token can reach it until one is written.`,
               );
             }
             printSuccess(permissions.length > 0 ? "Permissions set." : "Permissions cleared.");

@@ -459,6 +459,15 @@ describe("queryAudit principal filter", () => {
     engine.registerAgent({ name: "gamma" });
     engine.registerAgent({ name: "target" });
 
+    engine.grantPolicy(
+      { secretId: first, principalType: "agent", principalId: "alpha", permissions: ["admin"] },
+      "operator",
+    );
+    engine.grantPolicy(
+      { secretId: second, principalType: "agent", principalId: "gamma", permissions: ["admin"] },
+      "operator",
+    );
+
     engine.setAgentPermissions("target", first, ["read"], undefined, "admin", agent("alpha"));
     engine.setAgentPermissions("target", second, ["read"], undefined, "admin", agent("gamma"));
 
@@ -477,6 +486,15 @@ describe("queryAudit principal filter", () => {
     const theirs = await makeSecret("api-key", "ops");
     engine.registerAgent({ name: "alpha" });
     engine.registerAgent({ name: "target" });
+
+    engine.grantPolicy(
+      { secretId: mine, principalType: "agent", principalId: "alpha", permissions: ["admin"] },
+      "operator",
+    );
+    engine.grantPolicy(
+      { secretId: theirs, principalType: "agent", principalId: "alpha", permissions: ["admin"] },
+      "operator",
+    );
 
     engine.setAgentPermissions("target", mine, ["read"], undefined, "admin", agent("alpha"));
     engine.setAgentPermissions("target", theirs, ["read"], undefined, "admin", agent("alpha"));

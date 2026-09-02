@@ -224,7 +224,11 @@ describe("policy routes", () => {
 
     it("GET passes the token-derived caller to listPolicies", async () => {
       await app.request("/api/v1/secrets/test-key/policies", { headers: AUTH });
-      expect(engine.listPolicies).toHaveBeenCalledWith("secret-uuid-1", EXPECTED_CALLER);
+      expect(engine.listPolicies).toHaveBeenCalledWith(
+        "secret-uuid-1",
+        EXPECTED_CALLER,
+        "secret://test-key",
+      );
     });
 
     it("POST passes the caller to grantPolicy", async () => {

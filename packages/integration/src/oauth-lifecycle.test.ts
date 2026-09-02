@@ -6,7 +6,12 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { providerConfigFromFlowInput } from "@harpoc/oauth-proxy";
 import { AuditEventType, ErrorCode } from "@harpoc/shared";
-import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
+import {
+  createTestVault,
+  destroyTestVault,
+  grantOn,
+  registerAgents,
+} from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
@@ -102,6 +107,7 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
     const body = JSON.parse(raw) as { data: { handle: string; status: string; message: string } };
     expect(body.data.status).toBe("authorized");
     expect(body.data.handle).toBe(`secret://${CC_NAME}`);
+    await grantOn(vault.engine, body.data.handle, PRINCIPAL, ["read", "rotate", "use"]);
 
     // The client secret was POSTed to the provider (client_secret_post is the
     // default auth method) and the access token was stored — neither crosses
@@ -175,6 +181,7 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
     });
     const created = await vault.engine.createOAuthSecret(AC_NAME, config);
     acSecretId = created.secretId;
+    await grantOn(vault.engine, `secret://${AC_NAME}`, PRINCIPAL, ["read", "rotate", "use"]);
     seededExpiresAt = Date.now() + 30_000;
     await vault.engine.completeOAuthFlow(acSecretId, "at-1", "rt-1", seededExpiresAt);
 

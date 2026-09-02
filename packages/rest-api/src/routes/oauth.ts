@@ -30,9 +30,10 @@ export function createOAuthRoutes(): Hono<HarpocEnv> {
     const { project, name } = parseHandleParam(c.req.param("handle"));
     checkTokenScope(token, "read", project, name);
     const engine = c.get("engine");
-    const secretId = await engine.resolveSecretId(buildHandle(c.req.param("handle")));
-    c.get("limiter").checkSecret(secretId);
-    const status = engine.getOAuthTokenStatus(secretId, callerFromToken(token, "rest"));
+    const handle = buildHandle(c.req.param("handle"));
+    c.get("limiter").checkSecret(handle);
+    const secretId = await engine.resolveSecretId(handle);
+    const status = engine.getOAuthTokenStatus(secretId, callerFromToken(token, "rest"), handle);
     return c.json({ data: status });
   });
 
@@ -41,9 +42,14 @@ export function createOAuthRoutes(): Hono<HarpocEnv> {
     const { project, name } = parseHandleParam(c.req.param("handle"));
     checkTokenScope(token, "rotate", project, name);
     const engine = c.get("engine");
-    const secretId = await engine.resolveSecretId(buildHandle(c.req.param("handle")));
-    c.get("limiter").checkSecret(secretId);
-    const expiresAt = await engine.refreshOAuthToken(secretId, callerFromToken(token, "rest"));
+    const handle = buildHandle(c.req.param("handle"));
+    c.get("limiter").checkSecret(handle);
+    const secretId = await engine.resolveSecretId(handle);
+    const expiresAt = await engine.refreshOAuthToken(
+      secretId,
+      callerFromToken(token, "rest"),
+      handle,
+    );
     return c.json({ data: { refreshed: true, expires_at: expiresAt } });
   });
 

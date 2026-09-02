@@ -21,7 +21,12 @@ import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { InjectionType, PrincipalType, SecretType, VaultState } from "@harpoc/shared";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
+import {
+  createTestVault,
+  destroyTestVault,
+  grantOn,
+  registerAgents,
+} from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 import { assertTierAvailable } from "./helpers/platform-tiers.js";
@@ -63,6 +68,8 @@ describe("Session Sharing", () => {
       value: new Uint8Array(Buffer.from(SECRET_VALUE)),
     });
     handle = result.handle;
+    await vault1.engine.setInjectionPolicy(handle, { url_allowlist: [`${echoUrl}/*`] });
+    await grantOn(vault1.engine, handle, "test-agent", ["list", "read"]);
 
     // Create JWT token from Engine1
     token = vault1.engine.createToken("test-agent", ["admin"]);

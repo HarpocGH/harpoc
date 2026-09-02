@@ -149,7 +149,9 @@ beforeAll(async () => {
   });
   try {
     const handle = await makeSecret("v13p-smtp", SMTP_VALUE);
-    await vault.engine.setInjectionPolicy(handle, {});
+    await vault.engine.setInjectionPolicy(handle, {
+      host_allowlist: [`${LOOPBACK_HOST}:${smtp.port}`],
+    });
     await vault.engine.setConnectionConfig(handle, { mail: { tls: { ca: FIXTURE_CA_PEM } } });
     await recordUse("smtp", handle, {
       type: "smtp",
@@ -170,7 +172,9 @@ beforeAll(async () => {
   const imap = await startFakeImap({ auth: "ok", searchResults: [201, 202, 203] });
   try {
     const handle = await makeSecret("v13p-imap", IMAP_VALUE);
-    await vault.engine.setInjectionPolicy(handle, {});
+    await vault.engine.setInjectionPolicy(handle, {
+      host_allowlist: [`${LOOPBACK_HOST}:${imap.port}`],
+    });
     await vault.engine.setConnectionConfig(handle, { mail: { tls: { ca: FIXTURE_CA_PEM } } });
     await recordUse("imap", handle, {
       type: "imap",
@@ -188,7 +192,9 @@ beforeAll(async () => {
   const ws = await startFakeWsServer({ messages: ["pong"] });
   try {
     const handle = await makeSecret("v13p-ws", WS_VALUE);
-    await vault.engine.setInjectionPolicy(handle, {});
+    await vault.engine.setInjectionPolicy(handle, {
+      url_allowlist: [`ws://127.0.0.1:${ws.port}/*`],
+    });
     await recordUse("websocket", handle, {
       type: "websocket",
       url: `ws://127.0.0.1:${ws.port}/feed`,

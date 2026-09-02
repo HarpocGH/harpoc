@@ -21,7 +21,7 @@ export function registerCertStatusCommand(cert: Command): void {
             options.token ?? process.env.HARPOC_TOKEN,
           );
           const secretId = await resolveSecretId(engine, handle);
-          const status = engine.getCertificateStatus(secretId, resolved?.caller);
+          const status = engine.getCertificateStatus(secretId, resolved?.caller, handle);
           if (options.json) {
             printJson(status);
           } else {

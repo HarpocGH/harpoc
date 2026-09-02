@@ -282,6 +282,7 @@ describe("POST /api/v1/certificates/:handle/renew", () => {
     expect(certManager.renewCertificate).toHaveBeenCalledWith("secret-uuid-1", {
       httpPort: undefined,
       caller: EXPECTED_CALLER,
+      handle: "secret://my-cert",
     });
   });
 
@@ -293,10 +294,10 @@ describe("POST /api/v1/certificates/:handle/renew", () => {
     );
   });
 
-  it("charges the per-secret rate limiter", async () => {
+  it("charges the per-secret rate limiter on the handle, before resolution", async () => {
     const checkSecret = vi.spyOn(limiter, "checkSecret");
     await post("/api/v1/certificates/my-cert/renew", {});
-    expect(checkSecret).toHaveBeenCalledWith("secret-uuid-1");
+    expect(checkSecret).toHaveBeenCalledWith("secret://my-cert");
   });
 
   it("requires the rotate scope (403, manager untouched)", async () => {
@@ -327,13 +328,17 @@ describe("GET /api/v1/certificates/:handle/status", () => {
     const body = await res.json();
     expect(body.data).toEqual(CERT_STATUS);
     expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://my-cert");
-    expect(engine.getCertificateStatus).toHaveBeenCalledWith("secret-uuid-1", EXPECTED_CALLER);
+    expect(engine.getCertificateStatus).toHaveBeenCalledWith(
+      "secret-uuid-1",
+      EXPECTED_CALLER,
+      "secret://my-cert",
+    );
   });
 
-  it("charges the per-secret rate limiter", async () => {
+  it("charges the per-secret rate limiter on the handle, before resolution", async () => {
     const checkSecret = vi.spyOn(limiter, "checkSecret");
     await app.request("/api/v1/certificates/my-cert/status", { headers: AUTH });
-    expect(checkSecret).toHaveBeenCalledWith("secret-uuid-1");
+    expect(checkSecret).toHaveBeenCalledWith("secret://my-cert");
   });
 
   it("requires the read scope (403, engine untouched)", async () => {

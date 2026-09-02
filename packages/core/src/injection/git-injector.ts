@@ -161,7 +161,7 @@ export class GitInjector {
     secretId: string | undefined,
     attribution: AuditAttribution | undefined,
   ): Promise<GitResult> {
-    // Mandatory floor: HTTPS + SSRF. Optional layer: per-secret URL allowlist.
+    // Mandatory floor: HTTPS + SSRF. Above it the per-secret URL allowlist, deny-by-default.
     try {
       await validateUrl(action.repository);
     } catch (err) {
@@ -268,8 +268,8 @@ export class GitInjector {
       this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
       throw VaultError.invalidGitConfig("could not parse SSH host from repository");
     }
-    // Host allowlist — fail-safe deny (process-mediated posture).
-    if (policy.host_allowlist.length === 0 || !matchesHostAllowlist(host, policy.host_allowlist)) {
+    // Host allowlist — deny-by-default (an empty list refuses).
+    if (!matchesHostAllowlist(host, policy.host_allowlist)) {
       this.audit(action, secretId, { host, error: "HOST_NOT_ALLOWED" }, false, attribution);
       throw VaultError.hostNotAllowed(host);
     }

@@ -176,7 +176,7 @@ describe("DatabaseInjector attribution", () => {
     await injector.executeWithSecret(
       action,
       new Uint8Array(Buffer.from("dbuser:dbpassword", "utf8")),
-      EMPTY_POLICY,
+      { ...EMPTY_POLICY, host_allowlist: ["8.8.8.8"] },
       undefined,
       "secret-1",
       ATTRIBUTION,

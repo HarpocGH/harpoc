@@ -9,6 +9,7 @@ import {
   SecretType,
   VaultError,
 } from "@harpoc/shared";
+import type { Permission } from "@harpoc/shared";
 
 export { EVIDENCE_FILE, PREREGISTRATION_FILE } from "../evidence/paths.js";
 
@@ -47,6 +48,26 @@ export function ensureAgent(vault: HarnessVault, name: string): void {
   } catch (err) {
     if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
   }
+}
+
+/**
+ * Grant `permissions` on `handle` to the principal a surface mints its token
+ * for. Under the explicit-grant model (R1, 2026-09-01) a token reaches a
+ * secret only through a row, so every surface start pairs with a grant on the
+ * handles it will drive. Trusted-path write; registers the agent first.
+ */
+export async function grantOn(
+  vault: HarnessVault,
+  handle: string,
+  principal: string,
+  permissions: Permission[],
+): Promise<void> {
+  ensureAgent(vault, principal);
+  const secretId = await vault.engine.resolveSecretId(handle);
+  vault.engine.grantPolicy(
+    { secretId, principalType: "agent", principalId: principal, permissions },
+    "e2e-harness",
+  );
 }
 
 /** Store a credential and return its opaque handle. */

@@ -74,7 +74,11 @@ describe("oauth status / oauth refresh", () => {
   it("status prints token health for the resolved secret", async () => {
     await run(["status", "secret://gh-token"]);
 
-    expect(mockEngine.getOAuthTokenStatus).toHaveBeenCalledWith("secret-id-1", undefined);
+    expect(mockEngine.getOAuthTokenStatus).toHaveBeenCalledWith(
+      "secret-id-1",
+      undefined,
+      "secret://gh-token",
+    );
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("github"));
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("ok"));
     expect(mockEngine.destroy).toHaveBeenCalled();
@@ -98,7 +102,11 @@ describe("oauth status / oauth refresh", () => {
   it("refresh calls engine.refreshOAuthToken and prints the new expiry", async () => {
     await run(["refresh", "secret://gh-token"]);
 
-    expect(mockEngine.refreshOAuthToken).toHaveBeenCalledWith("secret-id-1", undefined);
+    expect(mockEngine.refreshOAuthToken).toHaveBeenCalledWith(
+      "secret-id-1",
+      undefined,
+      "secret://gh-token",
+    );
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("OK: Token refreshed"));
     expect(mockEngine.destroy).toHaveBeenCalled();
   });

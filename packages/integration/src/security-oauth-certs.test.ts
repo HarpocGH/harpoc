@@ -10,7 +10,12 @@ import {
   startOAuthFlowInputSchema,
 } from "@harpoc/shared";
 import type { ExpiringCertificateInfo, ExpiringOAuthTokenInfo } from "@harpoc/shared";
-import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
+import {
+  createTestVault,
+  destroyTestVault,
+  grantOn,
+  registerAgents,
+} from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
@@ -352,6 +357,7 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
       },
     );
     expect(authorized.status).toBe(201);
+    await grantOn(vault.engine, `secret://${CC_NAME}`, PRINCIPAL, ["read", "rotate", "list"]);
 
     const oauthStatus = await restCall(
       "rest GET /oauth/:handle/status",
@@ -379,6 +385,7 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
       AC_REFRESH_TOKEN,
       Date.now() + 30 * 60 * 1000,
     );
+    await grantOn(vault.engine, `secret://${AC_NAME}`, PRINCIPAL, ["read", "rotate", "list"]);
 
     // Positive control for the seeded-access-token needle, taken here because
     // the refresh below overwrites it: the value the sweep looks for is the
@@ -417,6 +424,7 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
     );
     expect(imported.status).toBe(201);
     importedSecretId = (JSON.parse(imported.raw) as { data: { secret_id: string } }).data.secret_id;
+    await grantOn(vault.engine, `secret://${IMPORTED_NAME}`, PRINCIPAL, ["read", "rotate", "list"]);
 
     const expiring = await postJson(
       "rest POST /certificates/import (in renewal window)",

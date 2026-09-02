@@ -2,7 +2,7 @@ import { rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Permission } from "@harpoc/shared";
-import { createHarnessVault, PREREGISTRATION_FILE } from "./harness/vault.js";
+import { createHarnessVault, grantOn, PREREGISTRATION_FILE } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
 import { loadExpectations } from "./evidence/preregistration.js";
 import type { EvidenceRecord } from "./evidence/record.js";
@@ -80,6 +80,18 @@ describe("demonstration matrix — six contexts × four interfaces", () => {
     vault = await createHarnessVault(PASSWORD);
     for (const arm of CONTEXT_ARMS) {
       fixtures.set(arm.scenario, await arm.setup(vault));
+    }
+
+    for (const principal of [
+      "e2e-demo-mcp-http",
+      "e2e-demo-mcp-stdio",
+      "e2e-demo-rest",
+      "e2e-demo-sdk",
+      "e2e-demo-cli",
+    ]) {
+      for (const fixture of fixtures.values()) {
+        await grantOn(vault, fixture.handle, principal, [Permission.USE]);
+      }
     }
 
     // Started AFTER the fixtures: the out-of-process surfaces inherit the

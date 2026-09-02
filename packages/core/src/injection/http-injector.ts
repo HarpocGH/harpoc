@@ -133,10 +133,11 @@ export interface HttpInjectorRequest {
   responseMode?: ResponseMode;
   responseHeaderAllowlist?: string[];
   /**
-   * The secret's URL allowlist (empty = not enforced). The engine validates the
-   * initial URL before injection; the injector re-validates every redirect hop
-   * against the same patterns, so a redirect can never carry the request to a
-   * non-allowlisted target — whichever follow_redirects mode is active.
+   * The secret's URL allowlist (deny-by-default: an empty list refuses every
+   * hop). The engine validates the initial URL before injection; the injector
+   * re-validates every redirect hop against the same patterns, so a redirect
+   * can never carry the request to a non-allowlisted target — whichever
+   * follow_redirects mode is active.
    */
   urlAllowlist?: string[];
 }
@@ -401,7 +402,7 @@ export class HttpInjector {
         }
 
         // §4.5.2: every hop is independently re-validated against the secret's
-        // URL allowlist (empty = not enforced) — a redirect can never carry the
+        // URL allowlist (deny-by-default) — a redirect can never carry the
         // request to a non-allowlisted target, whichever follow_redirects mode
         // is active. Checked before the hop executes.
         if (!matchesUrlAllowlist(redirectUrl.toString(), urlAllowlist)) {

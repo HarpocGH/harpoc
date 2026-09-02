@@ -6,7 +6,12 @@ import { createMcpServer } from "@harpoc/mcp-server";
 import { DirectClient, RestClient } from "@harpoc/sdk";
 import { ErrorCode, SecretStatus, SecretType } from "@harpoc/shared";
 import type { CertificateStatus } from "@harpoc/shared";
-import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
+import {
+  createTestVault,
+  destroyTestVault,
+  grantOn,
+  registerAgents,
+} from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
@@ -109,6 +114,7 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
 
     expect(res.status).toBe(201);
     const created = (await res.json()) as { data: { handle: string; secret_id: string } };
+    await grantOn(vault.engine, created.data.handle, PRINCIPAL, ["read", "rotate", "admin"]);
     // Wire names are snake_case: the route projects the manager's camelCase
     // `secretId` onto `secret_id`, the same field name the status route uses.
     expect(Object.keys(created.data).sort()).toEqual(["handle", "secret_id"]);
@@ -149,6 +155,7 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
 
     expect(res.status).toBe(201);
     const created = (await res.json()) as { data: { handle: string; csr_pem: string } };
+    await grantOn(vault.engine, created.data.handle, PRINCIPAL, ["read", "rotate", "admin"]);
     // The response carries the handle and the request, and nothing else — the
     // key the CSR was built from stays in the vault.
     expect(Object.keys(created.data).sort()).toEqual(["csr_pem", "handle"]);

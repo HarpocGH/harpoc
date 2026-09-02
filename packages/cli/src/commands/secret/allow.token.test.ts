@@ -85,8 +85,8 @@ describe("secret allow — token path", () => {
     );
   });
 
-  it("set mode checks rotate scope; the merge read is caller-less; the caller reaches setInjectionPolicy", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+  it("set mode checks admin scope; the merge read is caller-less; the caller reaches setInjectionPolicy", async () => {
+    mockEngine.verifyToken.mockReturnValue(token({ scope: ["admin"] }));
     await run(["secret://k", "--url", "https://api.example.com/*", "--token", "jwt-value"]);
     expect(mockEngine.getInjectionPolicy).toHaveBeenCalledWith("secret://k");
     expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
@@ -106,6 +106,15 @@ describe("secret allow — token path", () => {
     expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
   });
 
+  it("a rotate-scoped token cannot set either — the injection policy is the widening half (R1)", async () => {
+    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    await expect(
+      run(["secret://k", "--url", "https://api.example.com/*", "--token", "jwt-value"]),
+    ).rejects.toThrow("process.exit");
+    expect(mockEngine.getInjectionPolicy).not.toHaveBeenCalled();
+    expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
+  });
+
   it("tokenless set path is unchanged (three-argument call)", async () => {
     await run(["secret://k", "--url", "https://api.example.com/*"]);
     expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
@@ -116,10 +125,8 @@ describe("secret allow — token path", () => {
     );
   });
 
-  // v1.3: --recipient / --imap-read-only ride the existing rotate scope —
-  // no new token-parity entry (token-parity.test.ts is unchanged by this task).
-  it("--imap-read-only rides the existing rotate scope", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+  it("--imap-read-only rides the admin scope like every other write", async () => {
+    mockEngine.verifyToken.mockReturnValue(token({ scope: ["admin"] }));
     await run(["secret://k", "--imap-read-only", "--token", "jwt-value"]);
     expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
       "secret://k",

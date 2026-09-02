@@ -43,11 +43,8 @@ export class SshInjector {
       throw VaultError.invalidSshConfig("host and user must not start with '-'");
     }
 
-    // Host target allowlist — fail-safe deny (process-mediated posture).
-    if (
-      policy.host_allowlist.length === 0 ||
-      !matchesHostAllowlist(action.host, policy.host_allowlist)
-    ) {
+    // Host target allowlist — deny-by-default (an empty list refuses).
+    if (!matchesHostAllowlist(action.host, policy.host_allowlist)) {
       this.audit(action, secretId, { error: "HOST_NOT_ALLOWED" }, false, attribution);
       throw VaultError.hostNotAllowed(action.host);
     }

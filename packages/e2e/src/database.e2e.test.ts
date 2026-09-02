@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Permission } from "@harpoc/shared";
 import { assertOpaque } from "./assert/opacity.js";
-import { createHarnessVault, storeSecret } from "./harness/vault.js";
+import { createHarnessVault, grantOn, storeSecret } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
 import { expectAttributedSuccess } from "./harness/audit.js";
 import { recordArm } from "./harness/evidence.js";
@@ -33,6 +33,8 @@ describe("database context — live PostgreSQL over fixture TLS", () => {
     await vault.engine.setConnectionConfig(handle, {
       database: { tls_mode: "require", ca_pem: caPem() },
     });
+
+    await grantOn(vault, handle, "e2e-db-agent", [Permission.USE]);
 
     surface = await startMcpHttpSurface(vault, "e2e-db-agent", [Permission.USE]);
   });
@@ -102,6 +104,8 @@ describe("database context — M3: IP-literal targets have no name to verify", (
       database: { tls_mode: "require", ca_pem: caPem() },
     });
 
+    await grantOn(vault, handle, "e2e-db-ip-agent", [Permission.USE]);
+
     surface = await startMcpHttpSurface(vault, "e2e-db-ip-agent", [Permission.USE]);
   });
 
@@ -151,6 +155,8 @@ describe("database context — a plaintext target is refused by default", () => 
       env_allowlist: [],
       host_allowlist: [`${PG.host}:${PG.plainPort}`],
     });
+    await grantOn(vault, handle, "e2e-db-plain-agent", [Permission.USE]);
+
     // No connection config at all: the DEFAULT posture is what is on trial.
     surface = await startMcpHttpSurface(vault, "e2e-db-plain-agent", [Permission.USE]);
   });

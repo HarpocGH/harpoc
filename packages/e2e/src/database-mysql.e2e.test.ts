@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Permission } from "@harpoc/shared";
 import { assertOpaque } from "./assert/opacity.js";
-import { createHarnessVault, storeSecret } from "./harness/vault.js";
+import { createHarnessVault, grantOn, storeSecret } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
 import { recordArm } from "./harness/evidence.js";
 import { startMcpHttpSurface } from "./harness/surfaces/mcp-http.js";
@@ -36,6 +36,8 @@ describe("database context — live MySQL over fixture TLS", () => {
     await vault.engine.setConnectionConfig(handle, {
       database: { tls_mode: "require", ca_pem: caPem() },
     });
+
+    await grantOn(vault, handle, "e2e-mysql-agent", [Permission.USE]);
 
     surface = await startMcpHttpSurface(vault, "e2e-mysql-agent", [Permission.USE]);
   });

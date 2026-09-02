@@ -109,7 +109,7 @@ export function SecretDetailPage({ api, handle }: { api: ApiClient; handle: stri
       <h2>Access policies</h2>
       {grants.data && grants.data.length === 0 && (
         <p class="empty">
-          No per-secret grants — token scope alone governs access. Grant with{" "}
+          No per-secret grants — no agent or tool token can reach this secret. Grant with{" "}
           <code>harpoc policy grant</code> or in the <a href={matrixLink}>permission matrix</a>.
         </p>
       )}

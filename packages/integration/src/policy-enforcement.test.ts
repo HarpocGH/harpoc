@@ -104,7 +104,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
     return (content ?? []).map((c) => c.text ?? "").join("\n");
   }
 
-  it("REST: the granted principal reads the gated secret; another principal is denied 403 and audited", async () => {
+  it("REST: the granted principal reads the gated secret; another principal is told not-found and audited as denied", async () => {
     const allowed = vault.engine.createToken("allowed-agent", ["read", "list"]);
     const denied = vault.engine.createToken("other-agent", ["read", "list"]);
 
@@ -118,9 +118,9 @@ describe("per-secret access policy enforcement end-to-end", () => {
     const res = await app.request("/api/v1/secrets/db-prod/value", {
       headers: { authorization: `Bearer ${denied}` },
     });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(404);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toBe(ErrorCode.ACCESS_DENIED);
+    expect(body.error).toBe(ErrorCode.SECRET_NOT_FOUND);
 
     const rows = vault.engine.queryAudit({
       eventType: AuditEventType.SECRET_READ,
@@ -135,12 +135,12 @@ describe("per-secret access policy enforcement end-to-end", () => {
     expect(vault.engine.verifyAuditChain().valid).toBe(true);
   });
 
-  it("REST: a secret without policy rows stays open to any in-scope principal", async () => {
+  it("REST: a secret without policy rows is closed to every in-scope principal — as not-found", async () => {
     const token = vault.engine.createToken("other-agent", ["read", "list"]);
     const res = await app.request("/api/v1/secrets/open-key/value", {
       headers: { authorization: `Bearer ${token}` },
     });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(404);
   });
 
   it("REST: a project grant matches through the token's project claim, not the subject", async () => {
@@ -158,7 +158,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
     const res = await app.request("/api/v1/secrets/api%2Fsvc-key/value", {
       headers: { authorization: `Bearer ${bare}` },
     });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(404);
   });
 
   it("MCP wire: use_secret is denied for an ungranted principal and passes the gate for the granted one", async () => {
@@ -174,7 +174,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
       arguments: { handle: "secret://db-prod", action },
     });
     expect(deniedResult.isError).toBe(true);
-    expect(textOf(deniedResult)).toContain("Principal lacks 'use' permission");
+    expect(textOf(deniedResult)).toBe("Secret not found: secret://db-prod");
 
     // The granted principal clears the policy gate and fails deterministically
     // one layer down, at the fail-safe command allowlist.
@@ -191,7 +191,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
     expect(text).toContain("Command not in secret allowlist");
   });
 
-  it("revoking the policy rows reopens the gate (presence semantics live)", async () => {
+  it("revoking the last policy row closes the gate (explicit grant)", async () => {
     const gatedId = (
       await vault.engine.createSecret({
         name: "temp-gated",
@@ -202,22 +202,22 @@ describe("per-secret access policy enforcement end-to-end", () => {
     expect(gatedId).toBeTruthy();
     const secretId = await vault.engine.resolveSecretId("secret://temp-gated");
     const policy = vault.engine.grantPolicy(
-      { secretId, principalType: "agent", principalId: "someone-else", permissions: ["read"] },
+      { secretId, principalType: "agent", principalId: "other-agent", permissions: ["read"] },
       "it-admin",
     );
 
     const token = vault.engine.createToken("other-agent", ["read", "list"]);
-    const denied = await app.request("/api/v1/secrets/temp-gated/value", {
+    const granted = await app.request("/api/v1/secrets/temp-gated/value", {
       headers: { authorization: `Bearer ${token}` },
     });
-    expect(denied.status).toBe(403);
+    expect(granted.status).toBe(200);
 
     vault.engine.revokePolicy(policy.id);
 
-    const open = await app.request("/api/v1/secrets/temp-gated/value", {
+    const closed = await app.request("/api/v1/secrets/temp-gated/value", {
       headers: { authorization: `Bearer ${token}` },
     });
-    expect(open.status).toBe(200);
+    expect(closed.status).toBe(404);
   });
 
   /**
@@ -232,8 +232,8 @@ describe("per-secret access policy enforcement end-to-end", () => {
         url_allowlist: ["https://api.example.com/*"],
       });
 
-      // Token scope says rotate; the secret's policy row does not.
-      const token = vault.engine.createToken("allowed-agent", ["read", "rotate", "list"]);
+      // Token scope says admin; the secret's policy row does not.
+      const token = vault.engine.createToken("allowed-agent", ["read", "admin", "list"]);
       const res = await app.request("/api/v1/secrets/db-prod/injection-policy", {
         method: "PUT",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
@@ -254,7 +254,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
         .queryAudit({ eventType: AuditEventType.POLICY_GRANT, secretId: dbProdId })
         .find((r) => !r.success && r.principal_id === "allowed-agent");
       expect(denial?.detail?.policy).toBe("injection");
-      expect(denial?.detail?.required_permission).toBe("rotate");
+      expect(denial?.detail?.required_permission).toBe("admin");
       expect(denial?.detail?.interface).toBe("rest");
       expect(vault.engine.verifyAuditChain().valid).toBe(true);
     });
@@ -272,7 +272,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
         const denied = await app.request(`/api/v1/secrets/db-prod/${path}`, {
           headers: { authorization: `Bearer ${other}` },
         });
-        expect(denied.status, `denied ${path}`).toBe(403);
+        expect(denied.status, `denied ${path}`).toBe(404);
       }
     });
 
@@ -304,7 +304,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
         method: "DELETE",
         headers: { authorization: `Bearer ${outsider}` },
       });
-      expect(denied.status).toBe(403);
+      expect(denied.status).toBe(404);
       expect(await vault.engine.getConnectionConfig("secret://cfg-gated")).toBeDefined();
     });
 
@@ -339,7 +339,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
 
   /**
    * W2: enumeration was outside the gate — `db-prod` is read-denied to
-   * `other-agent` (403 above), yet its complete metadata row still came back
+   * `other-agent` (404 above), yet its complete metadata row still came back
    * from every listing surface, which is the payload `get_secret_info`
    * refuses. Enumeration now follows the `list` permission.
    */
@@ -379,18 +379,19 @@ describe("per-secret access policy enforcement end-to-end", () => {
       return body.data.map((s) => s.name);
     }
 
-    it("REST: the read-denied secret is no longer enumerable, the open one still is", async () => {
+    it("REST: neither the read-denied secret nor the row-less one is enumerable", async () => {
       const other = vault.engine.createToken("other-agent", ["read", "list"]);
 
       const info = await app.request("/api/v1/secrets/db-prod", {
         headers: { authorization: `Bearer ${other}` },
       });
-      expect(info.status).toBe(403);
+      expect(info.status).toBe(404);
 
       const names = await restList(other);
       expect(names).not.toContain("db-prod");
       expect(names).not.toContain("w2-gated");
-      expect(names).toContain("w2-open");
+      expect(names).not.toContain("w2-open");
+      expect(names).toEqual([]);
     });
 
     it("REST: the `list` grant — and only it — restores the row", async () => {
@@ -424,7 +425,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
       const listed = textOf(await deniedClient.callTool({ name: "list_secrets", arguments: {} }));
       expect(listed).not.toContain("w2-gated");
       expect(listed).not.toContain("db-prod");
-      expect(listed).toContain("w2-open");
+      expect(listed).not.toContain("w2-open");
 
       const health = textOf(
         await deniedClient.callTool({ name: "check_secret_health", arguments: {} }),

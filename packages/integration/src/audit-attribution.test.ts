@@ -5,7 +5,12 @@ import { createApp } from "@harpoc/rest-api";
 import { startMcpHttpServer } from "@harpoc/mcp-server";
 import type { McpHttpServer } from "@harpoc/mcp-server";
 import { AuditEventType, SecretType } from "@harpoc/shared";
-import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
+import {
+  createTestVault,
+  destroyTestVault,
+  grantOn,
+  registerAgents,
+} from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 
 const PASSWORD = "audit-attribution-pw";
@@ -48,6 +53,8 @@ describe("credential-access audit attribution end-to-end", () => {
       { url_allowlist: [], command_allowlist: [NODE], env_allowlist: [] },
       { acknowledge_interpreters: true },
     );
+    await grantOn(vault.engine, "secret://attr-key", "rest-agent", ["use"]);
+    await grantOn(vault.engine, "secret://attr-key", "mcp-agent", ["use"], "tool");
     app = createApp(vault.engine);
     mcpServer = await startMcpHttpServer({ engine: vault.engine, port: 0 });
   });

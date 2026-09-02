@@ -36,13 +36,13 @@ describe("REST scope enforcement end-to-end", () => {
     await destroyTestVault(vault).catch(() => {});
   });
 
-  it("read/list-scoped token can read but not use or set injection policy", async () => {
+  it("read/list-scoped token without a grant is told not-found; its use and policy writes stay scope-refused", async () => {
     const token = vault.engine.createToken("scoped-agent", ["read", "list"]);
     const auth = { authorization: `Bearer ${token}` };
     const jsonAuth = { ...auth, "content-type": "application/json" };
 
     const info = await app.request("/api/v1/secrets/db-prod", { headers: auth });
-    expect(info.status).toBe(200);
+    expect(info.status).toBe(404);
 
     const use = await app.request("/api/v1/secrets/db-prod/use", {
       method: "POST",
@@ -68,11 +68,7 @@ describe("REST scope enforcement end-to-end", () => {
     const policyRes = await app.request("/api/v1/secrets/db-prod/injection-policy", {
       headers: auth,
     });
-    expect(policyRes.status).toBe(200);
-    const policyBody = (await policyRes.json()) as {
-      data?: { url_allowlist?: string[] } | null;
-    };
-    expect(policyBody.data?.url_allowlist ?? []).toEqual([]);
+    expect(policyRes.status).toBe(404);
   });
 
   it("name-pattern token is denied on out-of-pattern secrets", async () => {

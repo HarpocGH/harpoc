@@ -729,9 +729,10 @@ export class VaultEngine {
 
   /**
    * List secrets (metadata only). A token-derived caller sees only what its
-   * principals may enumerate (thesis §4.6 `list`): a secret carrying active
-   * policy rows is omitted unless a grant matches, so a read-gated secret's
-   * metadata row cannot be recovered from the listing. Filtering is silent —
+   * principals may enumerate (thesis §4.6 `list`): a secret is listed only
+   * when a grant to one of the caller's principals carries `list` or `admin`
+   * (R1, 2026-09-01: a secret with no rows is listed to no token caller), so a
+   * read-gated secret's metadata row cannot be recovered from the listing. Filtering is silent —
    * enumeration writes no audit row, here as before. An absent caller is the
    * trusted local path (CLI, in-process SDK) and sees everything; so does an
    * admin-scoped user-type token since R7 (v1.4.1), the one caller class the
@@ -896,10 +897,15 @@ export class VaultEngine {
 
     // Per-secret policy enforcement (thesis §4.6) — before the injection
     // policy is read, any OAuth refresh runs, or the value is decrypted.
-    this.checkResolvedCallerPolicy(s, secret.id, caller, "use", AuditEventType.SECRET_USE, {
+    this.checkResolvedCallerPolicy(
+      s,
+      secret.id,
+      caller,
+      "use",
+      AuditEventType.SECRET_USE,
+      { handle, context: action.type },
       handle,
-      context: action.type,
-    });
+    );
 
     // Attribution for the injector-written audit rows ("by whom" / "through
     // which interface", thesis §4.3.4) — per invocation, never injector state.
@@ -1579,10 +1585,11 @@ export class VaultEngine {
 
   /**
    * Load a secret's injection policy, decrypting the allowlists. Returns empty
-   * allowlists when no policy is set (URL allowlisting is then not enforced;
-   * command allowlisting denies by default — see ProcessInjector). A stored
-   * blob is parsed strictly (R2/C43): the writer always emits all ten fields,
-   * so a miss or an extra key is corruption.
+   * allowlists when no policy is set — and every allowlist denies by default
+   * (R1, 2026-09-01), so an unconfigured secret is usable in no target context
+   * until an administrator writes its policy. A stored blob is parsed strictly
+   * (R2/C43): the writer always emits all ten fields, so a miss or an extra
+   * key is corruption.
    */
   private loadInjectionPolicy(s: UnlockedState, secretId: string): InjectionPolicy {
     const row = s.store.getInjectionPolicy(secretId);
@@ -1655,14 +1662,21 @@ export class VaultEngine {
 
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
-    // Configuration of a gated secret is itself gated (W1): the allowlists
-    // bound where the credential may go, so loosening them must require the
-    // same grant as replacing the value. Before the stored policy is
-    // decrypted, before the interpreter gate, before any registry terminate.
-    this.checkResolvedCallerPolicy(s, secret.id, caller, "rotate", AuditEventType.POLICY_GRANT, {
-      policy: "injection",
+    // Configuration of a secret is itself gated (W1) and the injection policy
+    // is the widening half of it (R1): the allowlists bound where the
+    // credential may go, so loosening them needs the same grant as writing a
+    // policy row — `admin`, at the interface and per secret. Before the stored
+    // policy is decrypted, before the interpreter gate, before any registry
+    // terminate.
+    this.checkResolvedCallerPolicy(
+      s,
+      secret.id,
+      caller,
+      "admin",
+      AuditEventType.POLICY_GRANT,
+      { policy: "injection", handle },
       handle,
-    });
+    );
 
     const stored = new Set(this.loadInjectionPolicy(s, secret.id).command_allowlist);
     const pathDirs = controlledPathDirs();
@@ -1781,10 +1795,15 @@ export class VaultEngine {
   async getInjectionPolicy(handle: string, caller?: CallerContext): Promise<InjectionPolicy> {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
-    this.checkResolvedCallerPolicy(s, secret.id, caller, "read", AuditEventType.SECRET_READ, {
+    this.checkResolvedCallerPolicy(
+      s,
+      secret.id,
+      caller,
+      "read",
+      AuditEventType.SECRET_READ,
+      { handle, config: "injection" },
       handle,
-      config: "injection",
-    });
+    );
     return this.loadInjectionPolicy(s, secret.id);
   }
 
@@ -1817,10 +1836,15 @@ export class VaultEngine {
     const secret = await s.secretManager.resolveHandle(handle);
     // Before the terminate below: a denied caller must not be able to kill
     // another principal's live downstream child by calling this repeatedly.
-    this.checkResolvedCallerPolicy(s, secret.id, caller, "rotate", AuditEventType.POLICY_GRANT, {
-      policy: "mcp_server",
+    this.checkResolvedCallerPolicy(
+      s,
+      secret.id,
+      caller,
+      "rotate",
+      AuditEventType.POLICY_GRANT,
+      { policy: "mcp_server", handle },
       handle,
-    });
+    );
 
     const json = JSON.stringify(config);
     const enc = encrypt(
@@ -1868,10 +1892,15 @@ export class VaultEngine {
   ): Promise<McpServerConfig | undefined> {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
-    this.checkResolvedCallerPolicy(s, secret.id, caller, "read", AuditEventType.SECRET_READ, {
+    this.checkResolvedCallerPolicy(
+      s,
+      secret.id,
+      caller,
+      "read",
+      AuditEventType.SECRET_READ,
+      { handle, config: "mcp_server" },
       handle,
-      config: "mcp_server",
-    });
+    );
     return this.loadMcpServerConfig(s, secret.id);
   }
 
@@ -1880,10 +1909,15 @@ export class VaultEngine {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
     // Before the terminate: a denied caller must not reach the registry.
-    this.checkResolvedCallerPolicy(s, secret.id, caller, "rotate", AuditEventType.POLICY_REVOKE, {
-      policy: "mcp_server",
+    this.checkResolvedCallerPolicy(
+      s,
+      secret.id,
+      caller,
+      "rotate",
+      AuditEventType.POLICY_REVOKE,
+      { policy: "mcp_server", handle },
       handle,
-    });
+    );
     await s.mcpRegistry.terminate(
       secret.id,
       "config_removed",
@@ -1937,10 +1971,15 @@ export class VaultEngine {
     const secret = await s.secretManager.resolveHandle(handle);
     // Endpoint-authentication pins (DB TLS/CA, SSH host keys) bound the
     // allowlist decision — dropping them is a rotate-class change.
-    this.checkResolvedCallerPolicy(s, secret.id, caller, "rotate", AuditEventType.POLICY_GRANT, {
-      policy: "connection",
+    this.checkResolvedCallerPolicy(
+      s,
+      secret.id,
+      caller,
+      "rotate",
+      AuditEventType.POLICY_GRANT,
+      { policy: "connection", handle },
       handle,
-    });
+    );
 
     const json = JSON.stringify(config);
     const enc = encrypt(
@@ -1995,10 +2034,15 @@ export class VaultEngine {
   ): Promise<ConnectionConfig | undefined> {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
-    this.checkResolvedCallerPolicy(s, secret.id, caller, "read", AuditEventType.SECRET_READ, {
+    this.checkResolvedCallerPolicy(
+      s,
+      secret.id,
+      caller,
+      "read",
+      AuditEventType.SECRET_READ,
+      { handle, config: "connection" },
       handle,
-      config: "connection",
-    });
+    );
     return this.loadConnectionConfig(s, secret.id);
   }
 
@@ -2006,10 +2050,15 @@ export class VaultEngine {
   async deleteConnectionConfig(handle: string, caller?: CallerContext): Promise<boolean> {
     const s = this.assertUnlocked();
     const secret = await s.secretManager.resolveHandle(handle);
-    this.checkResolvedCallerPolicy(s, secret.id, caller, "rotate", AuditEventType.POLICY_REVOKE, {
-      policy: "connection",
+    this.checkResolvedCallerPolicy(
+      s,
+      secret.id,
+      caller,
+      "rotate",
+      AuditEventType.POLICY_REVOKE,
+      { policy: "connection", handle },
       handle,
-    });
+    );
     return s.store.transaction(() => {
       const deleted = s.store.deleteConnectionConfig(secret.id);
       if (deleted) {
@@ -2265,14 +2314,28 @@ export class VaultEngine {
    * Concurrent callers for the same secret coalesce onto one in-flight refresh:
    * the refresh_token must be POSTed exactly once — providers with refresh-token
    * rotation treat a replay as theft and revoke the whole token family.
+   *
+   * `handle` is the string the interface resolved the id from — it lets a
+   * concealed refusal read exactly like an unknown handle (R5); absent, the
+   * refusal reads "Secret not found".
    */
-  async refreshOAuthToken(secretId: string, caller?: CallerContext): Promise<number | null> {
+  async refreshOAuthToken(
+    secretId: string,
+    caller?: CallerContext,
+    handle?: string,
+  ): Promise<number | null> {
     const s = this.assertUnlocked();
     // Deny before joining an in-flight refresh: a denied caller must neither
     // trigger a refresh_token POST nor await another principal's result.
-    this.checkResolvedCallerPolicy(s, secretId, caller, "rotate", AuditEventType.OAUTH_REFRESH, {
-      action: "refresh",
-    });
+    this.checkResolvedCallerPolicy(
+      s,
+      secretId,
+      caller,
+      "rotate",
+      AuditEventType.OAUTH_REFRESH,
+      { action: "refresh" },
+      handle,
+    );
     const existing = this.oauthRefreshInFlight.get(secretId);
     if (existing) return existing;
 
@@ -2460,12 +2523,22 @@ export class VaultEngine {
 
   /**
    * Get OAuth token status without decrypting sensitive fields.
+   *
+   * `handle` is the string the interface resolved the id from — it lets a
+   * concealed refusal read exactly like an unknown handle (R5); absent, the
+   * refusal reads "Secret not found".
    */
-  getOAuthTokenStatus(secretId: string, caller?: CallerContext): OAuthTokenStatus {
+  getOAuthTokenStatus(secretId: string, caller?: CallerContext, handle?: string): OAuthTokenStatus {
     const s = this.assertUnlocked();
-    this.checkResolvedCallerPolicy(s, secretId, caller, "read", AuditEventType.SECRET_READ, {
-      config: "oauth_status",
-    });
+    this.checkResolvedCallerPolicy(
+      s,
+      secretId,
+      caller,
+      "read",
+      AuditEventType.SECRET_READ,
+      { config: "oauth_status" },
+      handle,
+    );
 
     const oauthRow = s.store.getOAuthToken(secretId);
     if (!oauthRow) throw VaultError.oauthNotConfigured();
@@ -2863,20 +2936,30 @@ export class VaultEngine {
    * — the engine reads it to verify the pair, the caller never sees it. Every
    * refusal below the gate is audited as a failed row of the same event, so a
    * rejected renewal is as visible as an accepted one.
+   *
+   * `opts.handle` is the string the interface resolved the id from — it lets a
+   * concealed refusal read exactly like an unknown handle (R5); absent, the
+   * refusal reads "Secret not found".
    */
   async updateCertificate(
     secretId: string,
     certificatePem: string,
     chainPem?: string,
-    opts?: { renewed?: boolean },
+    opts?: { renewed?: boolean; handle?: string },
     caller?: CallerContext,
   ): Promise<void> {
     const s = this.assertUnlocked();
     const eventType =
       opts?.renewed === true ? AuditEventType.CERT_RENEW : AuditEventType.CERT_ISSUE;
-    this.checkResolvedCallerPolicy(s, secretId, caller, "rotate", eventType, {
-      action: "update_certificate",
-    });
+    this.checkResolvedCallerPolicy(
+      s,
+      secretId,
+      caller,
+      "rotate",
+      eventType,
+      { action: "update_certificate" },
+      opts?.handle,
+    );
 
     try {
       await this.doUpdateCertificate(s, secretId, certificatePem, eventType, chainPem, caller);
@@ -2956,12 +3039,26 @@ export class VaultEngine {
    * `renew_before_days`, so a status read never touches the private key — the
    * `secret.read` gate still applies, because subject/issuer/validity are the
    * metadata a policy-gated caller is being gated on.
+   *
+   * `handle` is the string the interface resolved the id from — it lets a
+   * concealed refusal read exactly like an unknown handle (R5); absent, the
+   * refusal reads "Secret not found".
    */
-  getCertificateStatus(secretId: string, caller?: CallerContext): CertificateStatus {
+  getCertificateStatus(
+    secretId: string,
+    caller?: CallerContext,
+    handle?: string,
+  ): CertificateStatus {
     const s = this.assertUnlocked();
-    this.checkResolvedCallerPolicy(s, secretId, caller, "read", AuditEventType.SECRET_READ, {
-      config: "certificate_status",
-    });
+    this.checkResolvedCallerPolicy(
+      s,
+      secretId,
+      caller,
+      "read",
+      AuditEventType.SECRET_READ,
+      { config: "certificate_status" },
+      handle,
+    );
 
     const row = s.store.getCertificate(secretId);
     if (!row) throw VaultError.certNotConfigured();
@@ -2985,19 +3082,30 @@ export class VaultEngine {
    * The `read` gate still applies: policy enforcement lives in the engine (V1),
    * so a gated secret cannot have its material read out by an interface that
    * happens to reach this method, and the refusal is audited like every other.
+   *
+   * `handle` is the string the interface resolved the id from — it lets a
+   * concealed refusal read exactly like an unknown handle (R5); absent, the
+   * refusal reads "Secret not found".
    */
   getCertificatePem(
     secretId: string,
     caller?: CallerContext,
+    handle?: string,
   ): {
     certificatePem: string | null;
     chainPem: string | null;
     csrPem: string | null;
   } {
     const s = this.assertUnlocked();
-    this.checkResolvedCallerPolicy(s, secretId, caller, "read", AuditEventType.SECRET_READ, {
-      config: "certificate_pem",
-    });
+    this.checkResolvedCallerPolicy(
+      s,
+      secretId,
+      caller,
+      "read",
+      AuditEventType.SECRET_READ,
+      { config: "certificate_pem" },
+      handle,
+    );
 
     const row = s.store.getCertificate(secretId);
     if (!row) throw VaultError.certNotConfigured();
@@ -3011,12 +3119,26 @@ export class VaultEngine {
    * read writes its own `secret.read` row: `checkResolvedCallerPolicy` audits
    * denials only, so without this the granted reads of the most sensitive
    * field in the vault would be the ones missing from the trail (V2).
+   *
+   * `handle` is the string the interface resolved the id from — it lets a
+   * concealed refusal read exactly like an unknown handle (R5); absent, the
+   * refusal reads "Secret not found".
    */
-  async getCertificatePrivateKey(secretId: string, caller?: CallerContext): Promise<string> {
+  async getCertificatePrivateKey(
+    secretId: string,
+    caller?: CallerContext,
+    handle?: string,
+  ): Promise<string> {
     const s = this.assertUnlocked();
-    this.checkResolvedCallerPolicy(s, secretId, caller, "read", AuditEventType.SECRET_READ, {
-      config: "certificate_private_key",
-    });
+    this.checkResolvedCallerPolicy(
+      s,
+      secretId,
+      caller,
+      "read",
+      AuditEventType.SECRET_READ,
+      { config: "certificate_private_key" },
+      handle,
+    );
 
     const row = s.store.getCertificate(secretId);
     if (!row) throw VaultError.certNotConfigured();
@@ -3104,12 +3226,22 @@ export class VaultEngine {
    * the same `read` gate and writes the same explicit `secret.read` row as
    * `getCertificatePrivateKey` (V2) — the absent-account case decrypts nothing
    * and therefore records nothing.
+   *
+   * `handle` is the string the interface resolved the id from — it lets a
+   * concealed refusal read exactly like an unknown handle (R5); absent, the
+   * refusal reads "Secret not found".
    */
-  getAcmeAccount(secretId: string, caller?: CallerContext): string | null {
+  getAcmeAccount(secretId: string, caller?: CallerContext, handle?: string): string | null {
     const s = this.assertUnlocked();
-    this.checkResolvedCallerPolicy(s, secretId, caller, "read", AuditEventType.SECRET_READ, {
-      config: "acme_account",
-    });
+    this.checkResolvedCallerPolicy(
+      s,
+      secretId,
+      caller,
+      "read",
+      AuditEventType.SECRET_READ,
+      { config: "acme_account" },
+      handle,
+    );
 
     const row = s.store.getCertificate(secretId);
     if (!row) throw VaultError.certNotConfigured();
@@ -3346,12 +3478,12 @@ export class VaultEngine {
   // ---------------------------------------------------------------------------
 
   /**
-   * Grant a per-secret access policy. Administrative operation: on a secret
-   * that already carries active policy rows, a token-derived caller needs an
-   * `admin` grant — otherwise a principal denied every other permission could
-   * grant itself one. The first grant on a secret is ungated by construction
-   * (no active rows yet ⇒ the presence gate is off); the trusted local path
-   * (CLI, in-process SDK) is never checked and is always the recovery.
+   * Grant a per-secret access policy. Administrative operation: a
+   * token-derived caller needs an `admin` grant on the secret — the first row
+   * included (R1, 2026-09-01), which is why the first grant on every secret
+   * comes from the trusted local path (CLI, in-process SDK) or an admin-scoped
+   * user-type token; otherwise a principal denied every other permission could
+   * grant itself one.
    *
    * `create` is refused: a policy row is keyed by an existing secret, so the
    * permission to *add* secrets has no per-secret referent and is enforced
@@ -3378,6 +3510,7 @@ export class VaultEngine {
       "admin",
       AuditEventType.POLICY_GRANT,
       { policy: "access", principal: `${input.principalType}:${input.principalId}` },
+      undefined,
     );
     return s.store.transaction(() => {
       const policy = s.policyEngine.grantPolicy({ ...input, createdBy });
@@ -3414,6 +3547,7 @@ export class VaultEngine {
       "admin",
       AuditEventType.POLICY_REVOKE,
       { policy: "access", policy_id: policyId },
+      undefined,
     );
     s.store.transaction(() => {
       s.policyEngine.revokePolicy(policyId);
@@ -3429,7 +3563,12 @@ export class VaultEngine {
     });
   }
 
-  listPolicies(secretId?: string, caller?: CallerContext): AccessPolicy[] {
+  /**
+   * `handle` is the string the interface resolved the id from — it lets a
+   * concealed refusal read exactly like an unknown handle (R5); absent, the
+   * refusal reads "Secret not found".
+   */
+  listPolicies(secretId?: string, caller?: CallerContext, handle?: string): AccessPolicy[] {
     const s = this.assertUnlocked();
     // A token-derived caller must name the secret it is asking about: the
     // vault-wide listing cannot be checked against a single secret's policies.
@@ -3437,9 +3576,15 @@ export class VaultEngine {
       throw VaultError.invalidInput("A secret id is required to list access policies");
     }
     if (secretId) {
-      this.checkResolvedCallerPolicy(s, secretId, caller, "read", AuditEventType.SECRET_READ, {
-        config: "access_policies",
-      });
+      this.checkResolvedCallerPolicy(
+        s,
+        secretId,
+        caller,
+        "read",
+        AuditEventType.SECRET_READ,
+        { config: "access_policies" },
+        handle,
+      );
     }
     return s.policyEngine.listPolicies(secretId);
   }
@@ -3452,10 +3597,11 @@ export class VaultEngine {
    * row the agent holds on the secret and writes at most one back, in a single
    * transaction with its audit rows.
    *
-   * Empty `permissions` clears the cell, and when it held the secret's last
-   * row the presence gate flips off with it. `gated_before`/`gated_after` are
-   * both read inside the transaction, so the caller is told what the engine
-   * did rather than left to predict it. `create` is refused exactly as in
+   * Empty `permissions` clears the cell. `gated_before`/`gated_after` report
+   * whether any principal held an active row on the secret before and after the write,
+   * both read inside the transaction — under R1 (2026-09-01) they describe the
+   * matrix, not an enforcement mode: a secret with no cells is reachable by no
+   * agent- or tool-type token. `create` is refused exactly as in
    * {@link grantPolicy} — same reason, same message — and the per-secret
    * `admin` check runs for a token-derived caller before anything is written.
    */
@@ -3472,11 +3618,15 @@ export class VaultEngine {
     }
     const s = this.assertUnlocked();
     s.agentRegistry.assertActive(agentName);
-    this.checkResolvedCallerPolicy(s, secretId, caller, "admin", AuditEventType.POLICY_GRANT, {
-      policy: "access",
-      principal: `agent:${agentName}`,
-      via: "matrix",
-    });
+    this.checkResolvedCallerPolicy(
+      s,
+      secretId,
+      caller,
+      "admin",
+      AuditEventType.POLICY_GRANT,
+      { policy: "access", principal: `agent:${agentName}`, via: "matrix" },
+      undefined,
+    );
 
     return s.store.transaction(() => {
       const gatedBefore = s.policyEngine.hasActivePolicies(secretId);
@@ -4048,9 +4198,11 @@ export class VaultEngine {
   /**
    * Every secret the caller may enumerate, keyed by internal id — the join
    * table the row-shaped expiry accessors project through. Same filter as
-   * `listSecrets` (W2): `list`/`admin` over the caller's principal set, silent,
-   * and an absent caller (trusted local path) — or an admin-scoped user-type
-   * token, exempt since R7 (v1.4.1) — sees everything.
+   * `listSecrets` (W2): a secret is listed only when a grant to one of the
+   * caller's principals carries `list` or `admin` (R1, 2026-09-01: a secret
+   * with no rows is listed to no token caller), silent, and an absent caller
+   * (trusted local path) — or an admin-scoped user-type token, exempt since R7
+   * (v1.4.1) — sees everything.
    *
    * Certificate and OAuth rows are keyed by secret id and carry no handle or
    * name, so the metadata has to come from here; a missing entry means the
@@ -4094,18 +4246,26 @@ export class VaultEngine {
 
   /**
    * Per-secret access-policy enforcement on an already-resolved secret
-   * (thesis §4.6). Presence-gated restriction: a secret with at least one
-   * active policy row requires the token-derived caller to hold a matching
-   * grant — checked against the caller's principal set (the token subject
-   * under its issued principal type, plus a derived project principal when
-   * the token is project-scoped; `admin` implies every permission). A secret
-   * without policy rows stays governed by token scope alone. An absent
-   * caller is the trusted local path (thesis §4.7) and is never checked.
-   * R7 (v1.4.1) adds one further exempt class: an admin-scoped user-type
-   * token, the operator's own proxy, passes without a per-secret grant —
-   * agent- and tool-type callers stay gated whatever their token scope.
+   * (thesis §4.6). Explicit-grant (R1, 2026-09-01): a token-derived caller
+   * needs a matching, unexpired grant — checked against the caller's
+   * principal set (the token subject under its issued principal type, plus a
+   * derived project principal when the token is project-scoped; `admin`
+   * implies every permission) — and a secret without policy rows is reachable
+   * by no such caller. An absent caller is the trusted local path (thesis
+   * §4.7) and is never checked. R7 (v1.4.1) adds one further exempt class: an
+   * admin-scoped user-type token, the operator's own proxy, passes without a
+   * per-secret grant — agent- and tool-type callers stay gated whatever their
+   * token scope.
    * Denials are audited under the operation's event type with the requesting
-   * principal before anything is decrypted, injected or mutated.
+   * principal before anything is decrypted, injected or mutated — always as
+   * `ACCESS_DENIED` with the real secret id. What the caller is told follows
+   * R5: holding none of `read`/`list`/`admin` on the secret it gets
+   * `SECRET_NOT_FOUND` naming `handle`, byte-identical to the unknown-handle
+   * refusal, so a right name and a wrong one are indistinguishable on the
+   * wire — except on a policy-write (`admin`) check, which stays
+   * `ACCESS_DENIED` so the matrix editor's `harpoc policy grant …` remedy
+   * survives; a caller that may already know the secret exists (it holds
+   * `read` or `list`) is told which permission it lacks.
    */
   private checkResolvedCallerPolicy(
     s: UnlockedState,
@@ -4114,18 +4274,15 @@ export class VaultEngine {
     permission: Permission,
     eventType: AuditEventType,
     detail: Record<string, unknown>,
+    handle: string | undefined,
   ): void {
     if (!caller) return;
     // R7 (v1.4.1): an admin-scoped user-type token is the operator's proxy —
     // exempt from per-secret rows, still bound by 3-dim token scope upstream.
     if (isAdminUserCaller(caller)) return;
-    if (!s.policyEngine.hasActivePolicies(secretId)) return;
 
-    const granted = this.callerPrincipals(caller).some((principal) =>
-      s.policyEngine.checkPermission(secretId, principal.type, principal.id, permission),
-    );
-
-    if (granted) return;
+    const held = s.policyEngine.grantedPermissions(secretId, this.callerPrincipals(caller));
+    if (held.has("admin") || held.has(permission)) return;
 
     s.auditLogger.log({
       eventType,
@@ -4141,6 +4298,10 @@ export class VaultEngine {
       success: false,
       sessionId: this.sessionId ?? undefined,
     });
+
+    if (permission !== "admin" && !held.has("read") && !held.has("list")) {
+      throw VaultError.secretNotFound(handle);
+    }
     throw VaultError.accessDenied(`Principal lacks '${permission}' permission on this secret`);
   }
 
@@ -4167,7 +4328,7 @@ export class VaultEngine {
       this.auditDenied(s, eventType, err, detail, undefined, caller);
       throw err;
     }
-    this.checkResolvedCallerPolicy(s, secret.id, caller, permission, eventType, detail);
+    this.checkResolvedCallerPolicy(s, secret.id, caller, permission, eventType, detail, handle);
   }
 
   private assertUnlocked(): UnlockedState {

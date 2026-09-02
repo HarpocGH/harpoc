@@ -17,7 +17,7 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
     const secretId = await engine.resolveSecretId(handle);
-    const policies = engine.listPolicies(secretId, callerFromToken(token, "rest"));
+    const policies = engine.listPolicies(secretId, callerFromToken(token, "rest"), handle);
 
     return c.json({ data: policies });
   });

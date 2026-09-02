@@ -99,6 +99,7 @@ describe("oauth status / refresh — token path", () => {
     expect(mockEngine.getOAuthTokenStatus).toHaveBeenCalledWith(
       "sid-1",
       expect.objectContaining({ principal_id: "agent-1", interface: "cli" }),
+      "secret://gh",
     );
   });
 
@@ -108,6 +109,7 @@ describe("oauth status / refresh — token path", () => {
     expect(mockEngine.refreshOAuthToken).toHaveBeenCalledWith(
       "sid-1",
       expect.objectContaining({ interface: "cli" }),
+      "secret://gh",
     );
   });
 
@@ -119,8 +121,16 @@ describe("oauth status / refresh — token path", () => {
     expect(mockEngine.refreshOAuthToken).not.toHaveBeenCalled();
 
     await run(["status", "secret://gh"]);
-    expect(mockEngine.getOAuthTokenStatus).toHaveBeenLastCalledWith("sid-1", undefined);
+    expect(mockEngine.getOAuthTokenStatus).toHaveBeenLastCalledWith(
+      "sid-1",
+      undefined,
+      "secret://gh",
+    );
     await run(["refresh", "secret://gh"]);
-    expect(mockEngine.refreshOAuthToken).toHaveBeenLastCalledWith("sid-1", undefined);
+    expect(mockEngine.refreshOAuthToken).toHaveBeenLastCalledWith(
+      "sid-1",
+      undefined,
+      "secret://gh",
+    );
   });
 });

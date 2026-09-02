@@ -639,11 +639,14 @@ describe("error propagation through VaultEngine", () => {
     );
   });
 
-  it("useSecret throws URL_INVALID for invalid URL", async () => {
+  it("useSecret refuses an unparseable URL through the allowlist (URL_NOT_ALLOWED precedes the validator)", async () => {
     await engine.createSecret({
       name: "url-test",
       type: "api_key",
       value: new Uint8Array(Buffer.from("v")),
+    });
+    await engine.setInjectionPolicy("secret://url-test", {
+      url_allowlist: ["https://api.example.com/*"],
     });
 
     await expectVaultError(
@@ -654,7 +657,7 @@ describe("error propagation through VaultEngine", () => {
           url: "not-a-url",
           injection: { type: "bearer" },
         }),
-      ErrorCode.URL_INVALID,
+      ErrorCode.URL_NOT_ALLOWED,
     );
   });
 
@@ -663,6 +666,9 @@ describe("error propagation through VaultEngine", () => {
       name: "ssrf-test",
       type: "api_key",
       value: new Uint8Array(Buffer.from("v")),
+    });
+    await engine.setInjectionPolicy("secret://ssrf-test", {
+      url_allowlist: ["https://10.0.0.1/*"],
     });
 
     await expectVaultError(
@@ -688,6 +694,9 @@ describe("useSecret (HTTP injection)", () => {
       name: "api-token",
       type: "api_key",
       value: new Uint8Array(Buffer.from("my-bearer-token")),
+    });
+    await engine.setInjectionPolicy("secret://api-token", {
+      url_allowlist: [`${baseUrl}/*`],
     });
 
     const response = await engine.useSecret("secret://api-token", {
@@ -985,6 +994,15 @@ describe("injection policy", () => {
     const secretId = await engine.resolveSecretId("secret://pol");
     await seedLiveStdioEntry(secretId);
     registerAgents("policy-admin");
+    engine.grantPolicy(
+      {
+        secretId,
+        principalType: "agent",
+        principalId: "policy-admin",
+        permissions: ["admin"],
+      },
+      "operator",
+    );
 
     await engine.setInjectionPolicy("secret://pol", { fs_isolation: true }, undefined, {
       principal_type: "agent",
@@ -1435,6 +1453,7 @@ describe("response mode enforcement (HTTP)", () => {
       type: "api_key",
       value: new Uint8Array(Buffer.from(secretValue)),
     });
+    await engine.setInjectionPolicy("secret://rm", { url_allowlist: [`${baseUrl}/*`] });
   });
 
   it("defaults to filtered: body and headers returned, value redacted", async () => {
@@ -1466,7 +1485,10 @@ describe("response mode enforcement (HTTP)", () => {
   });
 
   it("status_only policy strips body and headers", async () => {
-    await engine.setInjectionPolicy("secret://rm", { response_mode: "status_only" });
+    await engine.setInjectionPolicy("secret://rm", {
+      url_allowlist: [`${baseUrl}/*`],
+      response_mode: "status_only",
+    });
     const res = await engine.useSecret("secret://rm", {
       type: "http",
       method: "GET",
@@ -1481,6 +1503,7 @@ describe("response mode enforcement (HTTP)", () => {
 
   it("status_only returns only allowlisted headers", async () => {
     await engine.setInjectionPolicy("secret://rm", {
+      url_allowlist: [`${baseUrl}/*`],
       response_mode: "status_only",
       response_header_allowlist: ["Content-Type"],
     });
@@ -1509,7 +1532,10 @@ describe("response mode enforcement (HTTP)", () => {
   });
 
   it("an equal-mode override is accepted", async () => {
-    await engine.setInjectionPolicy("secret://rm", { response_mode: "status_only" });
+    await engine.setInjectionPolicy("secret://rm", {
+      url_allowlist: [`${baseUrl}/*`],
+      response_mode: "status_only",
+    });
     const res = await engine.useSecret("secret://rm", {
       type: "http",
       method: "GET",
@@ -1522,7 +1548,10 @@ describe("response mode enforcement (HTTP)", () => {
   });
 
   it("rejects a loosening override without executing the request", async () => {
-    await engine.setInjectionPolicy("secret://rm", { response_mode: "status_only" });
+    await engine.setInjectionPolicy("secret://rm", {
+      url_allowlist: [`${baseUrl}/*`],
+      response_mode: "status_only",
+    });
     const before = requestCount;
     await expectVaultError(
       () =>
@@ -1558,7 +1587,10 @@ describe("response mode enforcement (HTTP)", () => {
   });
 
   it("full policy returns the raw echo unredacted", async () => {
-    await engine.setInjectionPolicy("secret://rm", { response_mode: "full" });
+    await engine.setInjectionPolicy("secret://rm", {
+      url_allowlist: [`${baseUrl}/*`],
+      response_mode: "full",
+    });
     const res = await engine.useSecret("secret://rm", {
       type: "http",
       method: "GET",
@@ -1571,7 +1603,10 @@ describe("response mode enforcement (HTTP)", () => {
   });
 
   it("full policy may be tightened to filtered per invocation", async () => {
-    await engine.setInjectionPolicy("secret://rm", { response_mode: "full" });
+    await engine.setInjectionPolicy("secret://rm", {
+      url_allowlist: [`${baseUrl}/*`],
+      response_mode: "full",
+    });
     const res = await engine.useSecret("secret://rm", {
       type: "http",
       method: "GET",
@@ -1745,6 +1780,7 @@ describe("useSecret (database) — engine dispatch", () => {
   });
 
   it("blocks SSRF to a private database host", async () => {
+    await engine.setInjectionPolicy("secret://db", { host_allowlist: ["10.0.0.5"] });
     await expectVaultError(
       () =>
         engine.useSecret("secret://db", {
@@ -2467,6 +2503,13 @@ describe("audit trail for failed useSecret", () => {
       name: "audit-use",
       type: "api_key",
       value: new Uint8Array(Buffer.from("val")),
+    });
+    await engine.setInjectionPolicy("secret://audit-use", {
+      url_allowlist: [
+        "https://this-host-does-not-exist-xyz123.invalid/*",
+        `${baseUrl}/*`,
+        "http://127.0.0.1:2/*",
+      ],
     });
   });
 

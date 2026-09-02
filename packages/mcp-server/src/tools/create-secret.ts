@@ -71,8 +71,10 @@ export function registerCreateSecret(
         }
         if (value) {
           try {
-            // The caller is attribution only here: a fresh secret has no policy
-            // rows, so setSecretValue's presence-gated check does not run (N17).
+            // The caller is attribution only here: the row is written by the
+            // token that just created the secret (`create` is interface-scoped),
+            // and under R1 that token holds no grant on the fresh secret — the
+            // set is part of creation, not a later access (N17).
             await engine.setSecretValue(result.handle, value, scopeGuard.caller);
           } finally {
             value.fill(0);

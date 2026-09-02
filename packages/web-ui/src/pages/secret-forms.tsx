@@ -301,6 +301,10 @@ export function PolicyEditor({
         Saving replaces the whole policy (REST PUT semantics) — omitted lists reset.
       </p>
       <p class="empty">
+        An empty allowlist refuses every target: a secret is usable against a URL, host or command
+        only once it is listed here.
+      </p>
+      <p class="empty">
         <code>env_allowlist</code>, <code>response_header_allowlist</code>,{" "}
         <code>smtp_recipient_allowlist</code> and <code>imap_read_only</code> are not editable here
         and are sent back unchanged.

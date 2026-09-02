@@ -250,7 +250,7 @@ describe("hasActivePolicies", () => {
     expect(engine.hasActivePolicies("s2")).toBe(false);
   });
 
-  it("is false when every row is expired (the gate reopens)", () => {
+  it("is false when every row is expired (nothing is granted)", () => {
     engine.grantPolicy({
       secretId: "s1",
       principalType: "agent",
@@ -261,5 +261,143 @@ describe("hasActivePolicies", () => {
     });
 
     expect(engine.hasActivePolicies("s1")).toBe(false);
+  });
+});
+
+describe("grantedPermissions", () => {
+  it("unions the unexpired permissions of every principal on the secret", () => {
+    engine.grantPolicy({
+      secretId: "s1",
+      principalType: "agent",
+      principalId: "alice",
+      permissions: ["read"],
+      createdBy: "t",
+    });
+    engine.grantPolicy({
+      secretId: "s1",
+      principalType: "project",
+      principalId: "api",
+      permissions: ["use"],
+      createdBy: "t",
+    });
+    engine.grantPolicy({
+      secretId: "s1",
+      principalType: "agent",
+      principalId: "alice",
+      permissions: ["rotate"],
+      expiresAt: Date.now() - 1,
+      createdBy: "t",
+    });
+    engine.grantPolicy({
+      secretId: "s2",
+      principalType: "agent",
+      principalId: "alice",
+      permissions: ["admin"],
+      createdBy: "t",
+    });
+
+    const held = engine.grantedPermissions("s1", [
+      { type: "agent", id: "alice" },
+      { type: "project", id: "api" },
+    ]);
+    expect([...held].sort()).toEqual(["read", "use"]);
+  });
+
+  it("is empty for a principal with no row on the secret", () => {
+    engine.grantPolicy({
+      secretId: "s1",
+      principalType: "agent",
+      principalId: "bob",
+      permissions: ["admin"],
+      createdBy: "t",
+    });
+    expect(engine.grantedPermissions("s1", [{ type: "agent", id: "alice" }]).size).toBe(0);
+  });
+});
+
+describe("filterPermitted (explicit grant, R1)", () => {
+  beforeEach(() => {
+    for (const id of [
+      "granted",
+      "by-admin",
+      "other-perm",
+      "someone-else",
+      "no-rows",
+      "stale",
+      "via-project",
+    ]) {
+      store.insertSecret(makeSecret(id));
+    }
+  });
+
+  it("returns only the ids the principals hold a matching or admin row on", () => {
+    engine.grantPolicy({
+      secretId: "granted",
+      principalType: "agent",
+      principalId: "alice",
+      permissions: ["list"],
+      createdBy: "t",
+    });
+    engine.grantPolicy({
+      secretId: "by-admin",
+      principalType: "agent",
+      principalId: "alice",
+      permissions: ["admin"],
+      createdBy: "t",
+    });
+    engine.grantPolicy({
+      secretId: "other-perm",
+      principalType: "agent",
+      principalId: "alice",
+      permissions: ["use"],
+      createdBy: "t",
+    });
+    engine.grantPolicy({
+      secretId: "someone-else",
+      principalType: "agent",
+      principalId: "bob",
+      permissions: ["list"],
+      createdBy: "t",
+    });
+
+    const permitted = engine.filterPermitted(
+      ["granted", "by-admin", "other-perm", "someone-else", "no-rows"],
+      [{ type: "agent", id: "alice" }],
+      "list",
+    );
+    expect([...permitted].sort()).toEqual(["by-admin", "granted"]);
+  });
+
+  it("drops an id whose only row for the caller has expired", () => {
+    engine.grantPolicy({
+      secretId: "stale",
+      principalType: "agent",
+      principalId: "alice",
+      permissions: ["list"],
+      expiresAt: Date.now() - 1,
+      createdBy: "t",
+    });
+    expect(engine.filterPermitted(["stale"], [{ type: "agent", id: "alice" }], "list").size).toBe(
+      0,
+    );
+  });
+
+  it("matches through any of the caller's principals", () => {
+    engine.grantPolicy({
+      secretId: "via-project",
+      principalType: "project",
+      principalId: "api",
+      permissions: ["list"],
+      createdBy: "t",
+    });
+    const permitted = engine.filterPermitted(
+      ["via-project"],
+      [
+        { type: "agent", id: "alice" },
+        { type: "project", id: "api" },
+      ],
+      "list",
+    );
+    expect(permitted.has("via-project")).toBe(true);
   });
 });

@@ -207,7 +207,7 @@ export class ImapInjector {
       throw VaultError.imapMutationNotAllowed(kind);
     }
 
-    // 2. Host allowlist (optional layer atop the mandatory SSRF floor).
+    // 2. Host allowlist (deny-by-default, atop the mandatory SSRF floor).
     if (!matchesHostPortAllowlist(host, port, policy.host_allowlist)) {
       throw VaultError.hostNotAllowed(`${host}:${port}`);
     }

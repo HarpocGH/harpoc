@@ -454,6 +454,22 @@ describe("compiled binary smoke: token-scoped secret use (D1)", () => {
     ]);
     expect(allow.code).toBe(0);
 
+    // R1 explicit grant: a token-derived caller reaches a secret only through a
+    // matching row, so the token's own principal is granted before any
+    // token-bearing case runs. The grant itself rides the trusted local path.
+    const grant = await runCli([
+      "policy",
+      "grant",
+      "secret://token-scoped",
+      "--principal-type",
+      "agent",
+      "--principal-id",
+      "demo-agent",
+      "--permissions",
+      "use",
+    ]);
+    expect(grant.code).toBe(0);
+
     const minted = await runCli([
       "auth",
       "token",
@@ -568,6 +584,22 @@ describe("compiled binary smoke: token-scoped credential commands", () => {
   it("secret get --value honors read scope and refuses a use-scoped token", async () => {
     const set = await runCli(["secret", "set", "smoke-token-target"], { stdin: "value-123\n" });
     expect(set.code).toBe(0);
+
+    // R1 explicit grant: both tokens below carry the default subject
+    // "cli-user", which needs a row on this secret before token scope can
+    // decide anything.
+    const grant = await runCli([
+      "policy",
+      "grant",
+      "secret://smoke-token-target",
+      "--principal-type",
+      "agent",
+      "--principal-id",
+      "cli-user",
+      "--permissions",
+      "read",
+    ]);
+    expect(grant.code).toBe(0);
 
     const mintRead = await runCli(["auth", "token", "--scope", "read", "--json"]);
     expect(mintRead.code).toBe(0);

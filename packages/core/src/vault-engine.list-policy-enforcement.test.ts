@@ -11,8 +11,8 @@ import { VaultEngine } from "./vault-engine.js";
 /**
  * W2 — `list` as live policy vocabulary: enumeration is filtered by the
  * secret's own policies, so a read-gated secret's metadata row cannot be
- * recovered from a listing. Same presence-gated semantics as V1's point
- * checks, evaluated in batch.
+ * recovered from a listing. Same explicit-grant semantics as V1's point
+ * checks (R1, 2026-09-01), evaluated in batch.
  */
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
@@ -101,41 +101,42 @@ function listedNames(caller?: CallerContext, project?: string): string[] {
     .sort();
 }
 
-describe("presence gate", () => {
-  it("a vault without policy rows enumerates fully for a token caller", async () => {
+describe("explicit grant (R1)", () => {
+  it("a vault without policy rows enumerates nothing for a token caller", async () => {
     await makeSecret("alpha");
     await makeSecret("beta");
 
-    expect(listedNames(agent("anyone"))).toEqual(["alpha", "beta"]);
+    expect(listedNames(agent("anyone"))).toEqual([]);
+    expect(listedNames()).toEqual(["alpha", "beta"]);
   });
 
-  it("only the secrets carrying rows are restricted — the rest stay visible", async () => {
+  it("only a list or admin grant makes a secret enumerable — rows for other permissions do not", async () => {
     const gated = await makeSecret("gated");
     await makeSecret("open");
     grant(gated, "agent", "alice", ["use"]);
 
-    expect(listedNames(agent("bob"))).toEqual(["open"]);
-    expect(listedNames(agent("alice"))).toEqual(["open"]);
+    expect(listedNames(agent("bob"))).toEqual([]);
+    expect(listedNames(agent("alice"))).toEqual([]);
   });
 
-  it("expired rows count for nothing — neither grant nor presence", async () => {
+  it("expired rows count for nothing", async () => {
     const id = await makeSecret("expired-rows");
     grant(id, "agent", "alice", ["list"], Date.now() - 1000);
 
-    expect(listedNames(agent("bob"))).toEqual(["expired-rows"]);
+    expect(listedNames(agent("alice"))).toEqual([]);
   });
 
-  it("revoking the last row reopens enumeration", async () => {
+  it("revoking the last row closes enumeration", async () => {
     const id = await makeSecret("reopen");
     registerAgents("alice");
     const policy = engine.grantPolicy(
-      { secretId: id, principalType: "agent", principalId: "alice", permissions: ["use"] },
+      { secretId: id, principalType: "agent", principalId: "alice", permissions: ["list"] },
       "test-admin",
     );
-    expect(listedNames(agent("bob"))).toEqual([]);
+    expect(listedNames(agent("alice"))).toEqual(["reopen"]);
 
     engine.revokePolicy(policy.id);
-    expect(listedNames(agent("bob"))).toEqual(["reopen"]);
+    expect(listedNames(agent("alice"))).toEqual([]);
   });
 });
 
@@ -211,8 +212,8 @@ describe("project principal derivation", () => {
     await makeSecret("other", "web");
     grant(gated, "agent", "alice", ["list"]);
 
-    expect(listedNames(agent("alice"), "api")).toEqual(["api-key", "api-open"]);
-    expect(listedNames(agent("bob"), "api")).toEqual(["api-open"]);
+    expect(listedNames(agent("alice"), "api")).toEqual(["api-key"]);
+    expect(listedNames(agent("bob"), "api")).toEqual([]);
   });
 });
 
@@ -258,7 +259,7 @@ describe("filter/gate agreement (shared principal set)", () => {
 
     expect(listedNames(agent("mallory"))).toEqual([]);
     await expect(engine.getSecretInfo("secret://hidden", agent("mallory"))).rejects.toMatchObject({
-      code: ErrorCode.ACCESS_DENIED,
+      code: ErrorCode.SECRET_NOT_FOUND,
     });
   });
 });
@@ -310,9 +311,9 @@ describe("grantPolicy refuses `create`", () => {
       ErrorCode.INVALID_INPUT,
     );
 
-    // Nothing written: the secret stays ungated.
+    // Nothing written: the secret stays closed to every token caller.
     expect(engine.listPolicies(id)).toHaveLength(0);
-    expect(listedNames(agent("anyone"))).toEqual(["no-create"]);
+    expect(listedNames(agent("anyone"))).toEqual([]);
   });
 
   it("still accepts the six per-secret permissions", async () => {

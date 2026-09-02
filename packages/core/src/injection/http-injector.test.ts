@@ -208,6 +208,7 @@ afterAll(() => {
 
 describe("HttpInjector", () => {
   const injector = new HttpInjector(null);
+  const port = () => new URL(baseUrl).port;
 
   // The placement pins below read the credential back off the wire, so each
   // asks for `full` — the injector redacts its own result under every other
@@ -284,7 +285,11 @@ describe("HttpInjector", () => {
   describe("redirect handling", () => {
     it("follows same-origin redirects by default", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect` },
+        {
+          method: "GET",
+          url: `${baseUrl}/redirect`,
+          urlAllowlist: [`${baseUrl}/*`, `http://localhost:${port()}/*`],
+        },
         new Uint8Array(Buffer.from("token")),
         { type: "bearer" },
         "same-origin",
@@ -428,8 +433,6 @@ describe("HttpInjector", () => {
   });
 
   describe("redirect URL-allowlist enforcement (thesis §4.5.2)", () => {
-    const port = () => new URL(baseUrl).port;
-
     it("blocks a credential-bearing cross-origin redirect to a non-allowlisted target (any mode)", async () => {
       const before = requestPaths.length;
       await expect(
@@ -488,15 +491,15 @@ describe("HttpInjector", () => {
       ).rejects.toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
     });
 
-    it("leaves hops unconstrained when no allowlist is configured", async () => {
-      const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect` },
-        new Uint8Array(Buffer.from("token")),
-        { type: "bearer" },
-        "any",
-      );
-
-      expect(response.status).toBe(200);
+    it("refuses every hop when no allowlist is configured (deny-by-default)", async () => {
+      await expect(
+        injector.executeWithSecret(
+          { method: "GET", url: `${baseUrl}/redirect` },
+          new Uint8Array(Buffer.from("token")),
+          { type: "bearer" },
+          "any",
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
     });
   });
 
@@ -516,7 +519,12 @@ describe("HttpInjector", () => {
 
     it("the Authorization header does not reach the cross-origin hop", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect`, responseMode: "full" },
+        {
+          method: "GET",
+          url: `${baseUrl}/redirect`,
+          responseMode: "full",
+          urlAllowlist: [`${baseUrl}/*`, `http://localhost:${port()}/*`],
+        },
         new Uint8Array(Buffer.from(CREDENTIAL)),
         { type: "bearer" },
         "same-origin",
@@ -530,7 +538,12 @@ describe("HttpInjector", () => {
 
     it("the injected custom header does not reach the cross-origin hop", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect`, responseMode: "full" },
+        {
+          method: "GET",
+          url: `${baseUrl}/redirect`,
+          responseMode: "full",
+          urlAllowlist: [`${baseUrl}/*`, `http://localhost:${port()}/*`],
+        },
         new Uint8Array(Buffer.from(CREDENTIAL)),
         { type: "header", header_name: "X-Api-Key" },
         "same-origin",
@@ -545,7 +558,12 @@ describe("HttpInjector", () => {
     // value, so a redaction-shaped defence would not catch it — only the strip.
     it("basic_auth credentials do not reach the cross-origin hop", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect`, responseMode: "full" },
+        {
+          method: "GET",
+          url: `${baseUrl}/redirect`,
+          responseMode: "full",
+          urlAllowlist: [`${baseUrl}/*`, `http://localhost:${port()}/*`],
+        },
         new Uint8Array(Buffer.from(`user:${CREDENTIAL}`)),
         { type: "basic_auth" },
         "same-origin",
@@ -557,7 +575,12 @@ describe("HttpInjector", () => {
 
     it("the injected query parameter does not survive the cross-origin hop", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect-keep-query`, responseMode: "full" },
+        {
+          method: "GET",
+          url: `${baseUrl}/redirect-keep-query`,
+          responseMode: "full",
+          urlAllowlist: [`${baseUrl}/*`, `http://localhost:${port()}/*`],
+        },
         new Uint8Array(Buffer.from(CREDENTIAL)),
         { type: "query", query_param: "api_key" },
         "same-origin",
@@ -573,7 +596,12 @@ describe("HttpInjector", () => {
     // that deliberately carries the credential across origins.
     it("control: a same-origin hop still receives the credential", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect-same`, responseMode: "full" },
+        {
+          method: "GET",
+          url: `${baseUrl}/redirect-same`,
+          responseMode: "full",
+          urlAllowlist: [`${baseUrl}/*`, `http://localhost:${port()}/*`],
+        },
         new Uint8Array(Buffer.from(CREDENTIAL)),
         { type: "bearer" },
         "same-origin",
@@ -585,7 +613,12 @@ describe("HttpInjector", () => {
 
     it("control: `any` carries the credential across origins by design", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect`, responseMode: "full" },
+        {
+          method: "GET",
+          url: `${baseUrl}/redirect`,
+          responseMode: "full",
+          urlAllowlist: [`${baseUrl}/*`, `http://localhost:${port()}/*`],
+        },
         new Uint8Array(Buffer.from(CREDENTIAL)),
         { type: "bearer" },
         "any",
@@ -640,7 +673,12 @@ describe("HttpInjector", () => {
 
     it("status_only preserves redirect_warning across a followed cross-origin redirect", async () => {
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/redirect`, responseMode: "status_only" },
+        {
+          method: "GET",
+          url: `${baseUrl}/redirect`,
+          responseMode: "status_only",
+          urlAllowlist: [`${baseUrl}/*`, `http://localhost:${port()}/*`],
+        },
         new Uint8Array(Buffer.from("shape-tok")),
         { type: "bearer" },
         "same-origin",
@@ -863,7 +901,7 @@ describe("HttpInjector", () => {
 
       await expect(
         injector.executeWithSecret(
-          { method: "GET", url: `${baseUrl}/chain/6` },
+          { method: "GET", url: `${baseUrl}/chain/6`, urlAllowlist: [`${baseUrl}/*`] },
           new Uint8Array(Buffer.from("token")),
           { type: "bearer" },
           "same-origin",
@@ -888,7 +926,7 @@ describe("HttpInjector", () => {
       const before = requestPaths.length;
 
       const response = await injector.executeWithSecret(
-        { method: "GET", url: `${baseUrl}/chain/5` },
+        { method: "GET", url: `${baseUrl}/chain/5`, urlAllowlist: [`${baseUrl}/*`] },
         new Uint8Array(Buffer.from("token")),
         { type: "bearer" },
         "same-origin",
