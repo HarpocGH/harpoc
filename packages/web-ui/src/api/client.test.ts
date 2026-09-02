@@ -83,33 +83,32 @@ describe("api client", () => {
     expect(callOf(fetchFn).init.body).toBeUndefined();
   });
 
-  it("expiringReport merges the sibling aggregate keys", async () => {
+  it("expiringReport reads the three lists from data (B19)", async () => {
     const api = createApiClient(
       () => "t",
       stubFetch(200, {
-        data: [],
-        oauth_refresh_needed: [{ handle: "secret://o1" }],
-        certificates_nearing_renewal: [],
+        data: {
+          expiring: [{ name: "k1" }],
+          oauth_refresh_needed: [{ handle: "secret://o1" }],
+          certificates_nearing_renewal: [],
+        },
       }),
     );
     const report = await api.expiringReport();
+    expect(report.expiring).toEqual([{ name: "k1" }]);
     expect(report.oauth_refresh_needed).toHaveLength(1);
+    expect(report.certificates_nearing_renewal).toEqual([]);
   });
 
   it("expiringReport defaults to a 7-day window and honors an explicit one", async () => {
-    const fetchFn = stubFetch(200, { data: [] });
+    const fetchFn = stubFetch(200, {
+      data: { expiring: [], oauth_refresh_needed: [], certificates_nearing_renewal: [] },
+    });
     const api = createApiClient(() => "t", fetchFn);
     await api.expiringReport();
     await api.expiringReport(30);
     expect(callOf(fetchFn, 0).url).toBe("/api/v1/health/expiring?days=7");
     expect(callOf(fetchFn, 1).url).toBe("/api/v1/health/expiring?days=30");
-  });
-
-  it("defaults the sibling aggregates to empty arrays when absent", async () => {
-    const api = createApiClient(() => "t", stubFetch(200, { data: [] }));
-    const report = await api.expiringReport();
-    expect(report.oauth_refresh_needed).toEqual([]);
-    expect(report.certificates_nearing_renewal).toEqual([]);
   });
 
   it("strips a secret:// prefix from handles in paths", async () => {
@@ -179,21 +178,28 @@ describe("api client", () => {
     expect(init.method).toBe("DELETE");
   });
 
-  it("putInjectionPolicy PUTs the policy body", async () => {
+  it("putInjectionPolicy PUTs the whole policy body", async () => {
     const fetchFn = stubFetch(200, { data: { updated: true } });
     const api = createApiClient(() => "t", fetchFn);
-    await api.putInjectionPolicy("secret://k1", {
+    const policy = {
       url_allowlist: ["https://api.example.com"],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: [],
+      response_mode: "filtered" as const,
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: false,
+      smtp_recipient_allowlist: [],
+      imap_read_only: false,
       acknowledge_interpreters: true,
-    });
+    };
+    await api.putInjectionPolicy("secret://k1", policy);
     const { url, init } = callOf(fetchFn);
     expect(url).toBe("/api/v1/secrets/k1/injection-policy");
     expect(init.method).toBe("PUT");
     expect(headersOf(init)["Content-Type"]).toBe("application/json");
-    expect(JSON.parse(init.body as string)).toEqual({
-      url_allowlist: ["https://api.example.com"],
-      acknowledge_interpreters: true,
-    });
+    expect(JSON.parse(init.body as string)).toEqual(policy);
   });
 
   it("reads the policy, oauth and certificate detail routes", async () => {
@@ -227,15 +233,15 @@ describe("api client", () => {
     expect(headersOf(init)["Content-Type"]).toBeUndefined();
   });
 
-  it("renewCertificate POSTs an empty JSON object (http-01 default port)", async () => {
+  it("renewCertificate POSTs with no body — the route reads none (B23/B24)", async () => {
     const fetchFn = stubFetch(200, { data: { subject: "CN=x" } });
     const api = createApiClient(() => "jwt-1", fetchFn);
     const status = await api.renewCertificate("secret://web-cert");
     const { url, init } = callOf(fetchFn);
     expect(url).toBe("/api/v1/certificates/web-cert/renew");
     expect(init.method).toBe("POST");
-    expect(init.body).toBe("{}");
-    expect(headersOf(init)["Content-Type"]).toBe("application/json");
+    expect(init.body).toBeUndefined();
+    expect(headersOf(init)["Content-Type"]).toBeUndefined();
     expect(status).toEqual({ subject: "CN=x" });
   });
 

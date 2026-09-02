@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { z } from "zod";
+import { z } from "zod";
 
 import {
   accessPolicyInputSchema,
@@ -35,8 +35,8 @@ import {
   principalTypeSchema,
   processActionSchema,
   registerAgentInputSchema,
-  renewCertificateRequestSchema,
   responseModeSchema,
+  rotateSecretInputSchema,
   secretStatusSchema,
   secretTypeSchema,
   sessionFileSchema,
@@ -48,11 +48,12 @@ import {
   startOAuthFlowInputSchema,
   updateAgentInputSchema,
   useSecretActionSchema,
+  useSecretBodySchema,
   useSecretRequestSchema,
   vaultStateSchema,
   websocketActionSchema,
 } from "./schemas.js";
-import type { InjectionPolicy } from "./schemas.js";
+import type { InjectionPolicy, SetInjectionPolicyRequest } from "./schemas.js";
 
 // ---------------------------------------------------------------------------
 // Enum schemas
@@ -258,15 +259,17 @@ describe("createSecretInputSchema", () => {
     expect(result.project).toBe("my-api");
   });
 
-  it("strips a legacy create-time injection config instead of storing or rejecting it", () => {
-    // The field was accepted-and-discarded before its removal; old clients
-    // sending it must not start failing, but nothing may pretend to store it.
-    const result = createSecretInputSchema.parse({
+  it("refuses the legacy create-time injection key instead of stripping it (R10/A5)", () => {
+    // Accepted-and-discarded from v1.0 until 2026-09-02: a client still sending
+    // it now learns so from the 400 rather than from a policy that never
+    // existed.
+    const result = createSecretInputSchema.safeParse({
       name: "github-token",
       type: "api_key",
       injection: { type: "bearer" },
     });
-    expect(result).not.toHaveProperty("injection");
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.issues[0]?.message).toContain("'injection'");
   });
 
   it("rejects missing name", () => {
@@ -653,6 +656,34 @@ describe("useSecretRequestSchema", () => {
   });
 });
 
+describe("useSecretBodySchema (REST POST /secrets/:handle/use body)", () => {
+  const action = {
+    type: "http",
+    method: "GET",
+    url: "https://api.example.com/x",
+    injection: { type: "bearer" },
+  };
+
+  it("accepts { action } and nothing else", () => {
+    expect(useSecretBodySchema.safeParse({ action }).success).toBe(true);
+  });
+
+  it("refuses a stray top-level key (strict)", () => {
+    const result = useSecretBodySchema.safeParse({
+      action,
+      handle: "secret://k",
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.issues[0]?.message).toContain("'handle'");
+  });
+
+  it("refuses a missing action, naming it", () => {
+    const result = useSecretBodySchema.safeParse({});
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.issues[0]?.path).toEqual(["action"]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // injectionPolicyInputSchema
 // ---------------------------------------------------------------------------
@@ -810,34 +841,85 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
 // ---------------------------------------------------------------------------
 
 describe("setInjectionPolicyRequestSchema", () => {
-  it("defaults acknowledge_interpreters to false", () => {
-    const result = setInjectionPolicyRequestSchema.parse({ command_allowlist: ["gh"] });
-    expect(result.acknowledge_interpreters).toBe(false);
-    expect(result.command_allowlist).toEqual(["gh"]);
+  const complete = {
+    url_allowlist: ["https://api.github.com/*"],
+    command_allowlist: ["gh"],
+    env_allowlist: ["HOME"],
+    host_allowlist: ["db.internal:5432"],
+    response_mode: "filtered",
+    response_header_allowlist: ["Content-Type"],
+    network_isolation: false,
+    fs_isolation: false,
+    smtp_recipient_allowlist: ["*@corp.example"],
+    imap_read_only: false,
+  };
+
+  it("is the stored policy shape plus the acknowledgement flag (key-set pin)", () => {
+    expect(Object.keys(setInjectionPolicyRequestSchema.shape)).toEqual([
+      ...Object.keys(injectionPolicySchema.shape),
+      "acknowledge_interpreters",
+    ]);
   });
 
-  it("accepts an explicit acknowledgement", () => {
-    const result = setInjectionPolicyRequestSchema.parse({
-      command_allowlist: ["python"],
-      acknowledge_interpreters: true,
+  it.each(Object.keys(injectionPolicySchema.shape))(
+    "refuses a body omitting %s, naming the field (R3)",
+    (field) => {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { [field]: _omitted, ...partial } = complete as Record<string, unknown>;
+      const result = setInjectionPolicyRequestSchema.safeParse(partial);
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.map((i) => i.path.join("."))).toContain(field);
+      }
+    },
+  );
+
+  it("refuses an unknown key (strict — inherited from injectionPolicySchema through .extend)", () => {
+    const result = setInjectionPolicyRequestSchema.safeParse({
+      ...complete,
+      fs_isolaton: true,
     });
-    expect(result.acknowledge_interpreters).toBe(true);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.message).toContain("'fs_isolaton'");
+    }
   });
 
-  it("rejects a non-boolean acknowledgement", () => {
-    expect(() =>
-      setInjectionPolicyRequestSchema.parse({ acknowledge_interpreters: "yes" }),
-    ).toThrow();
+  it("acknowledge_interpreters is optional and defaults to false", () => {
+    const result = setInjectionPolicyRequestSchema.parse(complete);
+    expect(result.acknowledge_interpreters).toBe(false);
+    expect(
+      setInjectionPolicyRequestSchema.parse({
+        ...complete,
+        acknowledge_interpreters: true,
+      }).acknowledge_interpreters,
+    ).toBe(true);
   });
 
-  it("legacy bodies without fs_isolation still parse", () => {
-    const parsed = setInjectionPolicyRequestSchema.parse({ url_allowlist: [] });
-    expect(parsed.fs_isolation).toBe(false);
+  it("refuses a non-boolean acknowledge_interpreters", () => {
+    expect(
+      setInjectionPolicyRequestSchema.safeParse({
+        ...complete,
+        acknowledge_interpreters: "yes",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("compile-time pin: SetInjectionPolicyRequest requires every policy key and leaves the flag optional", () => {
+    const full: SetInjectionPolicyRequest = {
+      ...complete,
+      response_mode: "filtered",
+    };
+    // @ts-expect-error — a partial policy is not a request body
+    const partial: SetInjectionPolicyRequest = { url_allowlist: [] };
+    expect(full.acknowledge_interpreters).toBeUndefined();
+    expect(partial).toBeDefined();
   });
 
   it("still validates the policy fields", () => {
     expect(() =>
       setInjectionPolicyRequestSchema.parse({
+        ...complete,
         command_allowlist: [""],
         acknowledge_interpreters: true,
       }),
@@ -1577,7 +1659,7 @@ describe("certificateImportSchema", () => {
 });
 
 // ---------------------------------------------------------------------------
-// generateCsrRequestSchema / renewCertificateRequestSchema
+// generateCsrRequestSchema
 // ---------------------------------------------------------------------------
 
 describe("generateCsrRequestSchema", () => {
@@ -1610,15 +1692,6 @@ describe("generateCsrRequestSchema", () => {
         curve: "P-256",
       }).success,
     ).toBe(false);
-  });
-});
-
-describe("renewCertificateRequestSchema", () => {
-  it("accepts an empty body and a valid port; refuses port 0 and 65536", () => {
-    expect(renewCertificateRequestSchema.safeParse({}).success).toBe(true);
-    expect(renewCertificateRequestSchema.safeParse({ http_port: 8080 }).success).toBe(true);
-    expect(renewCertificateRequestSchema.safeParse({ http_port: 0 }).success).toBe(false);
-    expect(renewCertificateRequestSchema.safeParse({ http_port: 65536 }).success).toBe(false);
   });
 });
 
@@ -2259,5 +2332,129 @@ describe("connectionConfigSchema", () => {
       connectionConfigSchema.safeParse({ ssh: { known_hosts: ["h ssh-ed25519 AAAA"] } }).success,
     ).toBe(true);
     expect(connectionConfigSchema.safeParse({ mail: { tls: false } }).success).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Request-body strictness (compromise audit R10/A5): every object reachable
+// from a REST request-body schema refuses unknown keys; records stay open by
+// construction. The walker pins the rule once instead of one sample per object.
+// ---------------------------------------------------------------------------
+
+function collectObjects(
+  schema: z.ZodTypeAny,
+  path: string,
+  out: Array<[string, z.ZodObject<z.ZodRawShape>]>,
+): void {
+  if (schema instanceof z.ZodObject) {
+    out.push([path, schema as z.ZodObject<z.ZodRawShape>]);
+    for (const [key, child] of Object.entries(schema.shape as Record<string, z.ZodTypeAny>)) {
+      collectObjects(child, `${path}.${key}`, out);
+    }
+    return;
+  }
+  if (
+    schema instanceof z.ZodOptional ||
+    schema instanceof z.ZodNullable ||
+    schema instanceof z.ZodDefault
+  ) {
+    collectObjects(schema._def.innerType as z.ZodTypeAny, path, out);
+    return;
+  }
+  if (schema instanceof z.ZodEffects) {
+    collectObjects(schema._def.schema as z.ZodTypeAny, path, out);
+    return;
+  }
+  if (schema instanceof z.ZodArray) {
+    collectObjects(schema.element as z.ZodTypeAny, `${path}[]`, out);
+    return;
+  }
+  if (schema instanceof z.ZodUnion || schema instanceof z.ZodDiscriminatedUnion) {
+    (schema.options as z.ZodTypeAny[]).forEach((option, i) =>
+      collectObjects(option, `${path}|${i}`, out),
+    );
+  }
+}
+
+const REQUEST_BODY_SCHEMAS: Array<[string, z.ZodTypeAny]> = [
+  ["createSecretInputSchema", createSecretInputSchema],
+  ["rotateSecretInputSchema", rotateSecretInputSchema],
+  ["useSecretBodySchema", useSecretBodySchema],
+  ["setInjectionPolicyRequestSchema", setInjectionPolicyRequestSchema],
+  ["mcpServerConfigSchema", mcpServerConfigSchema],
+  ["connectionConfigSchema", connectionConfigSchema],
+  ["accessPolicyInputSchema", accessPolicyInputSchema],
+  ["registerAgentInputSchema", registerAgentInputSchema],
+  ["updateAgentInputSchema", updateAgentInputSchema],
+  ["setAgentPermissionsInputSchema", setAgentPermissionsInputSchema],
+  ["certificateImportSchema", certificateImportSchema],
+  ["generateCsrRequestSchema", generateCsrRequestSchema],
+  ["startOAuthFlowInputSchema", startOAuthFlowInputSchema],
+];
+
+describe("request-body schemas refuse unknown keys at every level (R10/A5)", () => {
+  it.each(REQUEST_BODY_SCHEMAS)("%s: every reachable object is strict", (_name, schema) => {
+    const objects: Array<[string, z.ZodObject<z.ZodRawShape>]> = [];
+    collectObjects(schema, "$", objects);
+    expect(objects.length).toBeGreaterThan(0);
+    const lax = objects
+      .filter(([, object]) => object._def.unknownKeys !== "strict")
+      .map(([path]) => path);
+    expect(lax).toEqual([]);
+  });
+
+  it("the walker reaches useSecretActionSchema's nested unions (self-check)", () => {
+    const objects: Array<[string, z.ZodObject<z.ZodRawShape>]> = [];
+    collectObjects(useSecretBodySchema, "$", objects);
+    const paths = objects.map(([path]) => path);
+    expect(paths).toContain("$.action|0.injection|2"); // http → header injection
+    expect(paths).toContain("$.action|7.operation|1"); // imap → fetch operation
+    expect(paths.length).toBeGreaterThanOrEqual(24);
+  });
+
+  it("a top-level unknown key is refused (create)", () => {
+    const result = createSecretInputSchema.safeParse({
+      name: "k",
+      type: "api_key",
+      extra: 1,
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.issues[0]?.message).toContain("'extra'");
+  });
+
+  it("an unknown key inside a nested action object is refused (http injection)", () => {
+    const result = useSecretActionSchema.safeParse({
+      type: "http",
+      method: "GET",
+      url: "https://api.example.com/x",
+      injection: { type: "bearer", header_name: "X" },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((i) => i.message).join(" ")).toContain("'header_name'");
+    }
+  });
+
+  it("an unknown key inside a connection group's union arm is refused (mail.tls)", () => {
+    const result = connectionConfigSchema.safeParse({
+      mail: { tls: { ca: "x", verify: false } },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const issue = result.error.issues.find((i) => i.path[0] === "mail" && i.path[1] === "tls");
+      expect(issue?.message).toContain("'verify'");
+    }
+  });
+
+  it("a record field stays open (http headers are keys by construction)", () => {
+    expect(
+      httpActionSchema.safeParse({
+        type: "http",
+        method: "GET",
+        url: "https://api.example.com/x",
+        injection: { type: "bearer" },
+        headers: { "x-anything": "v" },
+      }).success,
+    ).toBe(true);
   });
 });

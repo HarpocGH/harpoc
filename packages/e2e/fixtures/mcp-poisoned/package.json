@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Tool-poisoning MCP server fixture: the injection lives in the tool description",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.27.1",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "zod": "3.25.76"
   }
 }

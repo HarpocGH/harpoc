@@ -6,6 +6,19 @@ import { RestClient } from "./rest-client.js";
 const BASE_URL = "http://localhost:3000";
 const TOKEN = "test-jwt-token";
 
+const FULL_POLICY = {
+  url_allowlist: [] as string[],
+  command_allowlist: ["gh"],
+  env_allowlist: [] as string[],
+  host_allowlist: [] as string[],
+  response_mode: "filtered" as const,
+  response_header_allowlist: [] as string[],
+  network_isolation: false,
+  fs_isolation: false,
+  smtp_recipient_allowlist: [] as string[],
+  imap_read_only: false,
+};
+
 let client: RestClient;
 let fetchSpy: ReturnType<typeof vi.fn>;
 
@@ -174,9 +187,9 @@ describe("RestClient", () => {
     it("setInjectionPolicy sends PUT with the allowlists", async () => {
       mockFetchResponse({ updated: true });
       await client.setInjectionPolicy("secret://k", {
+        ...FULL_POLICY,
         url_allowlist: ["https://api.github.com/*"],
         command_allowlist: ["gh"],
-        env_allowlist: [],
       });
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];
       expect(call[0]).toContain("/api/v1/secrets/k/injection-policy");
@@ -188,10 +201,7 @@ describe("RestClient", () => {
     it("setInjectionPolicy forwards response_mode and response_header_allowlist", async () => {
       mockFetchResponse({ updated: true });
       await client.setInjectionPolicy("secret://k", {
-        url_allowlist: [],
-        command_allowlist: [],
-        env_allowlist: [],
-        host_allowlist: [],
+        ...FULL_POLICY,
         response_mode: "status_only",
         response_header_allowlist: ["Content-Type"],
       });
@@ -204,9 +214,7 @@ describe("RestClient", () => {
     it("setInjectionPolicy forwards network_isolation in the body", async () => {
       mockFetchResponse({ updated: true });
       await client.setInjectionPolicy("secret://k", {
-        url_allowlist: [],
-        command_allowlist: [],
-        env_allowlist: [],
+        ...FULL_POLICY,
         network_isolation: true,
       });
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];
@@ -217,9 +225,7 @@ describe("RestClient", () => {
     it("setInjectionPolicy forwards fs_isolation in the body", async () => {
       mockFetchResponse({ updated: true });
       await client.setInjectionPolicy("secret://k", {
-        url_allowlist: [],
-        command_allowlist: [],
-        env_allowlist: [],
+        ...FULL_POLICY,
         fs_isolation: true,
       });
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];
@@ -227,26 +233,27 @@ describe("RestClient", () => {
       expect(body.fs_isolation).toBe(true);
     });
 
-    // The client must not invent a value for an omitted flag — REST PUT is a
-    // whole-policy replace and the schema default (false) owns the reset.
-    it("setInjectionPolicy leaves fs_isolation out of the body when the caller omits it", async () => {
+    it("compile-time pin: setInjectionPolicy takes the whole policy — a partial is refused by the type (R3)", async () => {
       mockFetchResponse({ updated: true });
-      await client.setInjectionPolicy("secret://k", {
-        url_allowlist: [],
-        command_allowlist: ["gh"],
-        env_allowlist: [],
-      });
+      // @ts-expect-error — InjectionPolicy requires every field
+      await client.setInjectionPolicy("secret://k", { url_allowlist: [] });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("setInjectionPolicy sends every policy field on every call — nothing is left for a server default", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", FULL_POLICY);
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];
       const body = JSON.parse(call[1].body as string) as Record<string, unknown>;
-      expect("fs_isolation" in body).toBe(false);
+      expect(Object.keys(body).sort()).toEqual(
+        [...Object.keys(injectionPolicyInputSchema.shape), "acknowledge_interpreters"].sort(),
+      );
     });
 
     it("setInjectionPolicy forwards the v1.3 mail fields", async () => {
       mockFetchResponse({ updated: true });
       await client.setInjectionPolicy("secret://k", {
-        url_allowlist: [],
-        command_allowlist: [],
-        env_allowlist: [],
+        ...FULL_POLICY,
         smtp_recipient_allowlist: ["*@corp.example"],
         imap_read_only: true,
       });
@@ -280,11 +287,7 @@ describe("RestClient", () => {
 
     it("setInjectionPolicy defaults acknowledge_interpreters to false in the body", async () => {
       mockFetchResponse({ updated: true });
-      await client.setInjectionPolicy("secret://k", {
-        url_allowlist: [],
-        command_allowlist: ["gh"],
-        env_allowlist: [],
-      });
+      await client.setInjectionPolicy("secret://k", FULL_POLICY);
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];
       const body = JSON.parse(call[1].body as string);
       expect(body.acknowledge_interpreters).toBe(false);
@@ -294,7 +297,7 @@ describe("RestClient", () => {
       mockFetchResponse({ updated: true });
       await client.setInjectionPolicy(
         "secret://k",
-        { url_allowlist: [], command_allowlist: ["python"], env_allowlist: [] },
+        { ...FULL_POLICY, command_allowlist: ["python"] },
         { acknowledge_interpreters: true },
       );
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];
@@ -761,7 +764,7 @@ describe("RestClient", () => {
       });
     });
 
-    it("renewCertificate posts http_port to the renew route", async () => {
+    it("renewCertificate posts to the renew route with no body (B23/B24)", async () => {
       const status = {
         secret_id: "uuid-1",
         subject: "CN=web.example.com",
@@ -773,23 +776,14 @@ describe("RestClient", () => {
       };
       mockFetchResponse(status);
 
-      const result = await client.renewCertificate("secret://web", { httpPort: 8080 });
+      const result = await client.renewCertificate("secret://web");
 
       expect(result).toEqual(status);
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];
       expect(call[0]).toBe(`${BASE_URL}/api/v1/certificates/web/renew`);
       expect(call[1].method).toBe("POST");
-      expect(JSON.parse(call[1].body as string)).toEqual({ http_port: 8080 });
-    });
-
-    // The route reads its body with c.req.json(), so a body must always be
-    // sent — the port is simply absent from it.
-    it("renewCertificate still sends a JSON body when no options are given", async () => {
-      mockFetchResponse({ renewal_status: "ok" });
-      await client.renewCertificate("secret://web");
-
-      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
-      expect(JSON.parse(call[1].body as string)).toEqual({});
+      expect(call[1].body).toBeUndefined();
+      expect((call[1].headers as Record<string, string>)["content-type"]).toBeUndefined();
     });
 
     it("getCertificateStatus sends GET /api/v1/certificates/:handle/status", async () => {

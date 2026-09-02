@@ -239,7 +239,15 @@ describe("per-secret access policy enforcement end-to-end", () => {
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
         body: JSON.stringify({
           url_allowlist: ["https://evil.example/*"],
+          command_allowlist: [],
+          env_allowlist: [],
+          host_allowlist: [],
           response_mode: "full",
+          response_header_allowlist: [],
+          network_isolation: false,
+          fs_isolation: false,
+          smtp_recipient_allowlist: [],
+          imap_read_only: false,
         }),
       });
       expect(res.status).toBe(403);
@@ -409,15 +417,15 @@ describe("per-secret access policy enforcement end-to-end", () => {
         headers: { authorization: `Bearer ${other}` },
       });
       expect(res.status).toBe(200);
-      const body = (await res.json()) as { data: Array<{ name: string }> };
-      expect(body.data.map((s) => s.name)).not.toContain("w2-gated");
+      const body = (await res.json()) as { data: { expiring: Array<{ name: string }> } };
+      expect(body.data.expiring.map((s) => s.name)).not.toContain("w2-gated");
 
       const lister = vault.engine.createToken("w2-lister", ["list"]);
       const ok = await app.request("/api/v1/health/expiring?days=7", {
         headers: { authorization: `Bearer ${lister}` },
       });
-      const okBody = (await ok.json()) as { data: Array<{ name: string }> };
-      expect(okBody.data.map((s) => s.name)).toContain("w2-gated");
+      const okBody = (await ok.json()) as { data: { expiring: Array<{ name: string }> } };
+      expect(okBody.data.expiring.map((s) => s.name)).toContain("w2-gated");
     });
 
     it("MCP wire: list_secrets and check_secret_health follow the same gate", async () => {

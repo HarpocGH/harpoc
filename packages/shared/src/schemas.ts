@@ -105,19 +105,23 @@ export const recipientPatternSchema = z
 // ---------------------------------------------------------------------------
 
 export const injectionConfigSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal(InjectionType.BEARER) }),
-  z.object({ type: z.literal(InjectionType.BASIC_AUTH) }),
-  z.object({
-    type: z.literal(InjectionType.HEADER),
-    header_name: z
-      .string()
-      .min(1)
-      .regex(/^[a-zA-Z0-9\-_]+$/, "Invalid header name characters"),
-  }),
-  z.object({
-    type: z.literal(InjectionType.QUERY),
-    query_param: z.string().min(1),
-  }),
+  z.object({ type: z.literal(InjectionType.BEARER) }).strict(),
+  z.object({ type: z.literal(InjectionType.BASIC_AUTH) }).strict(),
+  z
+    .object({
+      type: z.literal(InjectionType.HEADER),
+      header_name: z
+        .string()
+        .min(1)
+        .regex(/^[a-zA-Z0-9\-_]+$/, "Invalid header name characters"),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal(InjectionType.QUERY),
+      query_param: z.string().min(1),
+    })
+    .strict(),
 ]);
 
 /** How a secret value is injected into an HTTP request. */
@@ -135,13 +139,15 @@ const namePattern = z
 /** Agent name: same charset/length as other resource names (`namePattern`). */
 export const agentNameSchema = namePattern;
 
-export const createSecretInputSchema = z.object({
-  name: namePattern,
-  type: secretTypeSchema,
-  project: namePattern.optional(),
-  value: z.string().base64().optional(),
-  expires_at: z.number().int().positive().optional(),
-});
+export const createSecretInputSchema = z
+  .object({
+    name: namePattern,
+    type: secretTypeSchema,
+    project: namePattern.optional(),
+    value: z.string().base64().optional(),
+    expires_at: z.number().int().positive().optional(),
+  })
+  .strict();
 
 /**
  * Create-secret request body (wire shape): the binary secret value travels
@@ -155,9 +161,11 @@ export type CreateSecretRequest = z.infer<typeof createSecretInputSchema>;
  * so a truthiness check alone let a malformed value irreversibly rotate the
  * credential to garbage while the API answered 200 (L7).
  */
-export const rotateSecretInputSchema = z.object({
-  value: z.string().base64(),
-});
+export const rotateSecretInputSchema = z
+  .object({
+    value: z.string().base64(),
+  })
+  .strict();
 
 export type RotateSecretRequest = z.infer<typeof rotateSecretInputSchema>;
 
@@ -212,17 +220,19 @@ const httpHeadersSchema = z
  * HTTP action — request-mediated injection. The vault assembles an outbound
  * HTTP request with the credential placed in a structured field.
  */
-export const httpActionSchema = z.object({
-  type: z.literal(ActionType.HTTP),
-  method: httpMethodSchema,
-  url: httpishUrlSchema,
-  headers: httpHeadersSchema.optional(),
-  body: z.string().optional(),
-  injection: injectionConfigSchema,
-  follow_redirects: followRedirectsSchema.optional(),
-  timeout_ms: z.number().int().positive().max(300_000).optional(),
-  response_mode: responseModeSchema.optional(),
-});
+export const httpActionSchema = z
+  .object({
+    type: z.literal(ActionType.HTTP),
+    method: httpMethodSchema,
+    url: httpishUrlSchema,
+    headers: httpHeadersSchema.optional(),
+    body: z.string().optional(),
+    injection: injectionConfigSchema,
+    follow_redirects: followRedirectsSchema.optional(),
+    timeout_ms: z.number().int().positive().max(300_000).optional(),
+    response_mode: responseModeSchema.optional(),
+  })
+  .strict();
 
 export type HttpAction = z.infer<typeof httpActionSchema>;
 
@@ -231,17 +241,19 @@ export type HttpAction = z.infer<typeof httpActionSchema>;
  * with the credential placed in its environment under `env_var`. The command
  * and args are passed as data; no shell interpretation is performed.
  */
-export const processActionSchema = z.object({
-  type: z.literal(ActionType.PROCESS),
-  command: z.string().min(1).max(4096),
-  args: z.array(z.string().max(4096)).max(MAX_PROCESS_ARGS).optional(),
-  working_directory: z.string().min(1).max(4096).optional(),
-  env_var: z
-    .string()
-    .min(1)
-    .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Invalid environment variable name"),
-  timeout_ms: z.number().int().positive().max(300_000).optional(),
-});
+export const processActionSchema = z
+  .object({
+    type: z.literal(ActionType.PROCESS),
+    command: z.string().min(1).max(4096),
+    args: z.array(z.string().max(4096)).max(MAX_PROCESS_ARGS).optional(),
+    working_directory: z.string().min(1).max(4096).optional(),
+    env_var: z
+      .string()
+      .min(1)
+      .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Invalid environment variable name"),
+    timeout_ms: z.number().int().positive().max(300_000).optional(),
+  })
+  .strict();
 
 export type ProcessAction = z.infer<typeof processActionSchema>;
 
@@ -251,16 +263,18 @@ export type ProcessAction = z.infer<typeof processActionSchema>;
  * launch/endpoint configuration come from the secret's McpServerConfig (trusted
  * admin path), never from the action.
  */
-export const mcpActionSchema = z.object({
-  type: z.literal(ActionType.MCP),
-  server: z
-    .string()
-    .regex(/^[a-zA-Z0-9_-]+$/, "Invalid server name format")
-    .max(MAX_NAME_LENGTH),
-  tool: z.string().min(1).max(MAX_NAME_LENGTH),
-  arguments: z.record(z.unknown()).optional(),
-  timeout_ms: z.number().int().positive().max(300_000).optional(),
-});
+export const mcpActionSchema = z
+  .object({
+    type: z.literal(ActionType.MCP),
+    server: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/, "Invalid server name format")
+      .max(MAX_NAME_LENGTH),
+    tool: z.string().min(1).max(MAX_NAME_LENGTH),
+    arguments: z.record(z.unknown()).optional(),
+    timeout_ms: z.number().int().positive().max(300_000).optional(),
+  })
+  .strict();
 
 export type McpAction = z.infer<typeof mcpActionSchema>;
 
@@ -305,23 +319,25 @@ const SQL_DATABASE_ENGINES: readonly DatabaseEngine[] = [
  * below, applied both to the standalone export (`databaseActionSchema`) and,
  * via the same function reference, to the outer union's `superRefine`.
  */
-const bareDatabaseActionSchema = z.object({
-  type: z.literal(ActionType.DATABASE),
-  engine: databaseEngineSchema,
-  host: hostPattern,
-  port: z.number().int().positive().max(65_535).optional(),
-  database: z
-    .string()
-    .min(1)
-    .max(255)
-    .regex(/^[a-zA-Z0-9_.$-]+$/, "Invalid database name"),
-  query: z.string().min(1).max(1_000_000).optional(),
-  params: z.array(z.unknown()).max(1_000).optional(),
-  command: z
-    .union([z.array(z.string().max(65_536)).min(1).max(1_000), z.record(z.unknown())])
-    .optional(),
-  timeout_ms: z.number().int().positive().max(300_000).optional(),
-});
+const bareDatabaseActionSchema = z
+  .object({
+    type: z.literal(ActionType.DATABASE),
+    engine: databaseEngineSchema,
+    host: hostPattern,
+    port: z.number().int().positive().max(65_535).optional(),
+    database: z
+      .string()
+      .min(1)
+      .max(255)
+      .regex(/^[a-zA-Z0-9_.$-]+$/, "Invalid database name"),
+    query: z.string().min(1).max(1_000_000).optional(),
+    params: z.array(z.unknown()).max(1_000).optional(),
+    command: z
+      .union([z.array(z.string().max(65_536)).min(1).max(1_000), z.record(z.unknown())])
+      .optional(),
+    timeout_ms: z.number().int().positive().max(300_000).optional(),
+  })
+  .strict();
 
 type BareDatabaseAction = z.infer<typeof bareDatabaseActionSchema>;
 
@@ -408,14 +424,16 @@ export type DatabaseAction = z.infer<typeof databaseActionSchema>;
  * over SSH (ephemeral ssh-agent), selected by the `repository` transport. The
  * credential never appears in the command output or the agent's context.
  */
-export const gitActionSchema = z.object({
-  type: z.literal(ActionType.GIT),
-  operation: gitOperationSchema,
-  repository: z.string().min(1).max(2048),
-  args: z.array(z.string().max(4096)).max(MAX_PROCESS_ARGS).optional(),
-  working_directory: z.string().min(1).max(4096).optional(),
-  timeout_ms: z.number().int().positive().max(300_000).optional(),
-});
+export const gitActionSchema = z
+  .object({
+    type: z.literal(ActionType.GIT),
+    operation: gitOperationSchema,
+    repository: z.string().min(1).max(2048),
+    args: z.array(z.string().max(4096)).max(MAX_PROCESS_ARGS).optional(),
+    working_directory: z.string().min(1).max(4096).optional(),
+    timeout_ms: z.number().int().positive().max(300_000).optional(),
+  })
+  .strict();
 
 export type GitAction = z.infer<typeof gitActionSchema>;
 
@@ -444,14 +462,16 @@ const sshUserSchema = z
  * bare pin binds a non-22 port too. The operator stores the line; the vault
  * never rewrites a pin.
  */
-export const sshActionSchema = z.object({
-  type: z.literal(ActionType.SSH),
-  host: sshHostSchema,
-  user: sshUserSchema,
-  port: z.number().int().min(1).max(65_535).optional(),
-  command: z.string().min(1).max(65_536),
-  timeout_ms: z.number().int().positive().max(300_000).optional(),
-});
+export const sshActionSchema = z
+  .object({
+    type: z.literal(ActionType.SSH),
+    host: sshHostSchema,
+    user: sshUserSchema,
+    port: z.number().int().min(1).max(65_535).optional(),
+    command: z.string().min(1).max(65_536),
+    timeout_ms: z.number().int().positive().max(300_000).optional(),
+  })
+  .strict();
 
 export type SshAction = z.infer<typeof sshActionSchema>;
 
@@ -513,11 +533,13 @@ const attachmentPathSchema = z
   });
 
 /** One SMTP attachment: an absolute file path plus optional wire metadata. */
-export const smtpAttachmentSchema = z.object({
-  path: attachmentPathSchema,
-  filename: z.string().min(1).max(255).optional(),
-  content_type: z.string().min(1).max(255).optional(),
-});
+export const smtpAttachmentSchema = z
+  .object({
+    path: attachmentPathSchema,
+    filename: z.string().min(1).max(255).optional(),
+    content_type: z.string().min(1).max(255).optional(),
+  })
+  .strict();
 
 /**
  * SMTP action shape — request-mediated injection. The vault dials the mail
@@ -532,22 +554,24 @@ export const smtpAttachmentSchema = z.object({
  * reason `bareDatabaseActionSchema` documents above; the at-least-one-of
  * text/html and total-recipient-count rules live in `refineSmtpAction`.
  */
-const bareSmtpActionSchema = z.object({
-  type: z.literal(ActionType.SMTP),
-  host: hostPattern,
-  port: z.number().int().positive().max(65_535).optional(),
-  security: z.enum(["tls", "starttls"]).optional().default("tls"),
-  from: emailAddressSchema,
-  to: z.array(emailAddressSchema).min(1).max(MAX_SMTP_RECIPIENTS),
-  cc: z.array(emailAddressSchema).max(MAX_SMTP_RECIPIENTS).optional(),
-  bcc: z.array(emailAddressSchema).max(MAX_SMTP_RECIPIENTS).optional(),
-  subject: z.string().min(1).max(998),
-  text: z.string().optional(),
-  html: z.string().optional(),
-  headers: smtpHeadersSchema.optional(),
-  attachments: z.array(smtpAttachmentSchema).max(MAX_SMTP_ATTACHMENTS).optional(),
-  timeout_ms: z.number().int().positive().max(300_000).optional(),
-});
+const bareSmtpActionSchema = z
+  .object({
+    type: z.literal(ActionType.SMTP),
+    host: hostPattern,
+    port: z.number().int().positive().max(65_535).optional(),
+    security: z.enum(["tls", "starttls"]).optional().default("tls"),
+    from: emailAddressSchema,
+    to: z.array(emailAddressSchema).min(1).max(MAX_SMTP_RECIPIENTS),
+    cc: z.array(emailAddressSchema).max(MAX_SMTP_RECIPIENTS).optional(),
+    bcc: z.array(emailAddressSchema).max(MAX_SMTP_RECIPIENTS).optional(),
+    subject: z.string().min(1).max(998),
+    text: z.string().optional(),
+    html: z.string().optional(),
+    headers: smtpHeadersSchema.optional(),
+    attachments: z.array(smtpAttachmentSchema).max(MAX_SMTP_ATTACHMENTS).optional(),
+    timeout_ms: z.number().int().positive().max(300_000).optional(),
+  })
+  .strict();
 
 type BareSmtpAction = z.infer<typeof bareSmtpActionSchema>;
 
@@ -587,38 +611,50 @@ const imapMailboxSchema = z.string().min(1).max(255);
  * convention, mirrors the process/git/ssh contexts).
  */
 const imapOperationSchema = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("search"),
-    unseen: z.boolean().optional(),
-    since: z.string().date().optional(),
-    from: z.string().min(1).max(320).optional(),
-    subject: z.string().min(1).max(998).optional(),
-    text: z.string().min(1).max(1024).optional(),
-  }),
-  z.object({
-    kind: z.literal("fetch"),
-    uids: imapUidsSchema,
-    parts: z.enum(["envelope", "headers", "text", "full"]),
-  }),
-  z.object({
-    kind: z.literal("store"),
-    uids: imapUidsSchema,
-    add_flags: z.array(imapFlagSchema).optional(),
-    remove_flags: z.array(imapFlagSchema).optional(),
-  }),
-  z.object({
-    kind: z.literal("move"),
-    uids: imapUidsSchema,
-    target_mailbox: imapMailboxSchema,
-  }),
-  z.object({
-    kind: z.literal("copy"),
-    uids: imapUidsSchema,
-    target_mailbox: imapMailboxSchema,
-  }),
-  z.object({
-    kind: z.literal("expunge"),
-  }),
+  z
+    .object({
+      kind: z.literal("search"),
+      unseen: z.boolean().optional(),
+      since: z.string().date().optional(),
+      from: z.string().min(1).max(320).optional(),
+      subject: z.string().min(1).max(998).optional(),
+      text: z.string().min(1).max(1024).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("fetch"),
+      uids: imapUidsSchema,
+      parts: z.enum(["envelope", "headers", "text", "full"]),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("store"),
+      uids: imapUidsSchema,
+      add_flags: z.array(imapFlagSchema).optional(),
+      remove_flags: z.array(imapFlagSchema).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("move"),
+      uids: imapUidsSchema,
+      target_mailbox: imapMailboxSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("copy"),
+      uids: imapUidsSchema,
+      target_mailbox: imapMailboxSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("expunge"),
+    })
+    .strict(),
 ]);
 
 /**
@@ -627,32 +663,36 @@ const imapOperationSchema = z.discriminatedUnion("kind", [
  * `imap_read_only` (policy field) refuses the mutating operation kinds
  * before this schema is even consulted by the injector.
  */
-export const imapActionSchema = z.object({
-  type: z.literal(ActionType.IMAP),
-  host: hostPattern,
-  port: z.number().int().positive().max(65_535).optional().default(DEFAULT_IMAP_PORT),
-  mailbox: imapMailboxSchema.optional().default("INBOX"),
-  // XOAUTH2 identity: the mailbox account the access token is bound to.
-  // Required by the engine for an OAuth-type secret (SMTP reads the same
-  // identity off `from`; IMAP has no envelope, so it is its own field) and
-  // refused for the username:password arm, whose username lives in the value.
-  account: emailAddressSchema.optional(),
-  operation: imapOperationSchema,
-  timeout_ms: z.number().int().positive().max(300_000).optional(),
-});
+export const imapActionSchema = z
+  .object({
+    type: z.literal(ActionType.IMAP),
+    host: hostPattern,
+    port: z.number().int().positive().max(65_535).optional().default(DEFAULT_IMAP_PORT),
+    mailbox: imapMailboxSchema.optional().default("INBOX"),
+    // XOAUTH2 identity: the mailbox account the access token is bound to.
+    // Required by the engine for an OAuth-type secret (SMTP reads the same
+    // identity off `from`; IMAP has no envelope, so it is its own field) and
+    // refused for the username:password arm, whose username lives in the value.
+    account: emailAddressSchema.optional(),
+    operation: imapOperationSchema,
+    timeout_ms: z.number().int().positive().max(300_000).optional(),
+  })
+  .strict();
 
 export type ImapAction = z.infer<typeof imapActionSchema>;
 
-const websocketCollectSchema = z.object({
-  max_messages: z.number().int().positive().max(MAX_WS_COLLECT_MESSAGES).optional().default(1),
-  window_ms: z
-    .number()
-    .int()
-    .positive()
-    .max(MAX_WS_COLLECT_WINDOW_MS)
-    .optional()
-    .default(DEFAULT_WS_COLLECT_WINDOW_MS),
-});
+const websocketCollectSchema = z
+  .object({
+    max_messages: z.number().int().positive().max(MAX_WS_COLLECT_MESSAGES).optional().default(1),
+    window_ms: z
+      .number()
+      .int()
+      .positive()
+      .max(MAX_WS_COLLECT_WINDOW_MS)
+      .optional()
+      .default(DEFAULT_WS_COLLECT_WINDOW_MS),
+  })
+  .strict();
 
 /** Mirrors the loopback set the OAuth endpoint schema and core's `validateUrl` use. */
 const WS_LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
@@ -683,16 +723,18 @@ const websocketUrlSchema = z
  * only; `collect` bounds how many frames are gathered before the vault
  * closes the connection and returns them.
  */
-export const websocketActionSchema = z.object({
-  type: z.literal(ActionType.WEBSOCKET),
-  url: websocketUrlSchema,
-  injection: injectionConfigSchema,
-  message: z.string().max(1_048_576).optional(),
-  subprotocols: z.array(z.string().min(1).max(255)).max(16).optional(),
-  collect: websocketCollectSchema.optional(),
-  response_mode: responseModeSchema.optional(),
-  timeout_ms: z.number().int().positive().max(300_000).optional(),
-});
+export const websocketActionSchema = z
+  .object({
+    type: z.literal(ActionType.WEBSOCKET),
+    url: websocketUrlSchema,
+    injection: injectionConfigSchema,
+    message: z.string().max(1_048_576).optional(),
+    subprotocols: z.array(z.string().min(1).max(255)).max(16).optional(),
+    collect: websocketCollectSchema.optional(),
+    response_mode: responseModeSchema.optional(),
+    timeout_ms: z.number().int().positive().max(300_000).optional(),
+  })
+  .strict();
 
 export type WebsocketAction = z.infer<typeof websocketActionSchema>;
 
@@ -712,16 +754,18 @@ const sftpPathSchema = z
  * same `discriminatedUnion`-member reason `bareDatabaseActionSchema`
  * documents above; the `local_path` requirement lives in `refineSftpAction`.
  */
-const bareSftpActionSchema = z.object({
-  type: z.literal(ActionType.SFTP),
-  host: sshHostSchema,
-  user: sshUserSchema,
-  port: z.number().int().min(1).max(65_535).optional(),
-  operation: z.enum(["upload", "download", "list"]),
-  remote_path: sftpPathSchema,
-  local_path: sftpPathSchema.optional(),
-  timeout_ms: z.number().int().positive().max(300_000).optional(),
-});
+const bareSftpActionSchema = z
+  .object({
+    type: z.literal(ActionType.SFTP),
+    host: sshHostSchema,
+    user: sshUserSchema,
+    port: z.number().int().min(1).max(65_535).optional(),
+    operation: z.enum(["upload", "download", "list"]),
+    remote_path: sftpPathSchema,
+    local_path: sftpPathSchema.optional(),
+    timeout_ms: z.number().int().positive().max(300_000).optional(),
+  })
+  .strict();
 
 type BareSftpAction = z.infer<typeof bareSftpActionSchema>;
 
@@ -771,12 +815,14 @@ const dockerImageSchema = z
  * spawn) — the daemon, not the spawned CLI, performs the actual registry
  * I/O, so wrapping the CLI would isolate the messenger, not the actor.
  */
-export const dockerRegistryActionSchema = z.object({
-  type: z.literal(ActionType.DOCKER_REGISTRY),
-  operation: z.enum(["pull", "push"]),
-  image: dockerImageSchema,
-  timeout_ms: z.number().int().positive().max(MAX_DOCKER_TIMEOUT_MS).optional().default(300_000),
-});
+export const dockerRegistryActionSchema = z
+  .object({
+    type: z.literal(ActionType.DOCKER_REGISTRY),
+    operation: z.enum(["pull", "push"]),
+    image: dockerImageSchema,
+    timeout_ms: z.number().int().positive().max(MAX_DOCKER_TIMEOUT_MS).optional().default(300_000),
+  })
+  .strict();
 
 export type DockerRegistryAction = z.infer<typeof dockerRegistryActionSchema>;
 
@@ -788,6 +834,11 @@ export type DockerRegistryAction = z.infer<typeof dockerRegistryActionSchema>;
  * (database/smtp/sftp) get it applied here, in one outer `.superRefine`
  * dispatching by `type`, calling the exact same refine function their
  * standalone exports use — defined once, enforced both ways.
+ *
+ * Every member is `.strict()` (compromise audit R10/A5): an unknown key
+ * inside an action is refused on REST (400), the CLI and MCP (`-32602`)
+ * alike; the `headers`, `arguments` and mongodb `command` records stay open
+ * by construction.
  *
  * `discriminatedUnion` (not a plain `z.union`) matters beyond dispatch speed:
  * it keeps field-level errors (a missing/invalid required field on any
@@ -825,13 +876,21 @@ export const useSecretActionSchema = z
 /** Discriminated union of context-specific use_secret action specifications. */
 export type UseSecretAction = z.infer<typeof useSecretActionSchema>;
 
-export const useSecretRequestSchema = z.object({
-  handle: handleSchema,
-  action: useSecretActionSchema,
-});
+export const useSecretRequestSchema = z
+  .object({
+    handle: handleSchema,
+    action: useSecretActionSchema,
+  })
+  .strict();
 
 /** Request to use a secret via a context-specific action. */
 export type UseSecretRequest = z.infer<typeof useSecretRequestSchema>;
+
+/**
+ * REST `POST /secrets/:handle/use` body: the handle rides the path, so the
+ * body is the action alone — and nothing else (compromise audit R10/A5).
+ */
+export const useSecretBodySchema = z.object({ action: useSecretActionSchema }).strict();
 
 const urlAllowlistSchema = z.array(z.string().min(1).max(2048)).max(100);
 const commandAllowlistSchema = z.array(z.string().min(1).max(4096)).max(100);
@@ -922,35 +981,47 @@ export type InjectionPolicy = z.output<typeof injectionPolicySchema>;
 export type InjectionPolicyInput = z.input<typeof injectionPolicyInputSchema>;
 
 /**
- * PUT injection-policy request body: the policy plus the per-operation
- * interpreter acknowledgement flag (thesis §4.5.3). The flag is a request
- * field, never stored on the policy.
+ * PUT injection-policy request body (wire shape): the stored policy shape —
+ * every field required, no defaults, unknown keys refused — plus the
+ * per-operation interpreter acknowledgement flag (thesis §4.5.3), which is a
+ * request field, never stored on the policy. Built by `.extend()` on the
+ * strict `injectionPolicySchema`, so the wire and the stored shape cannot
+ * drift; the strictness is inherited and pinned by test (compromise audit R3,
+ * R10/A5). An omitting client is told which field it dropped instead of
+ * having an isolation flag or a mail guard silently reset.
  */
-export const setInjectionPolicyRequestSchema = injectionPolicyInputSchema.extend({
+export const setInjectionPolicyRequestSchema = injectionPolicySchema.extend({
   acknowledge_interpreters: z.boolean().optional().default(false),
 });
+
+/** The PUT injection-policy body as a client must send it. */
+export type SetInjectionPolicyRequest = z.input<typeof setInjectionPolicyRequestSchema>;
 
 /**
  * Database endpoint-authentication config. TLS is required by default; `disable`
  * is the audited per-secret opt-out for trusted local sockets (thesis §4.5.5).
  */
-export const databaseConnectionConfigSchema = z.object({
-  tls_mode: z.enum(["require", "disable"]).optional(),
-  ca_pem: z.string().min(1).max(65_536).optional(),
-  servername: z
-    .string()
-    .min(1)
-    .max(255)
-    .regex(/^[a-zA-Z0-9._-]+$/, "Invalid servername")
-    .optional(),
-});
+export const databaseConnectionConfigSchema = z
+  .object({
+    tls_mode: z.enum(["require", "disable"]).optional(),
+    ca_pem: z.string().min(1).max(65_536).optional(),
+    servername: z
+      .string()
+      .min(1)
+      .max(255)
+      .regex(/^[a-zA-Z0-9._-]+$/, "Invalid servername")
+      .optional(),
+  })
+  .strict();
 
 export type DatabaseConnectionConfig = z.infer<typeof databaseConnectionConfigSchema>;
 
 /** SSH endpoint-authentication config: host keys pinned at secret creation. */
-export const sshConnectionConfigSchema = z.object({
-  known_hosts: z.array(z.string().min(1).max(4096)).min(1).max(50),
-});
+export const sshConnectionConfigSchema = z
+  .object({
+    known_hosts: z.array(z.string().min(1).max(4096)).min(1).max(50),
+  })
+  .strict();
 
 export type SshConnectionConfig = z.infer<typeof sshConnectionConfigSchema>;
 
@@ -965,11 +1036,16 @@ export type SshConnectionConfig = z.infer<typeof sshConnectionConfigSchema>;
  * at use time on a secret carrying `tls: false` rather than silently ignoring
  * an opt-out the admin believes is in force.
  */
-export const mailConnectionConfigSchema = z.object({
-  tls: z
-    .union([z.literal(false), z.object({ ca: z.string().min(1).max(65_536).optional() })])
-    .optional(),
-});
+export const mailConnectionConfigSchema = z
+  .object({
+    tls: z
+      .union([
+        z.literal(false),
+        z.object({ ca: z.string().min(1).max(65_536).optional() }).strict(),
+      ])
+      .optional(),
+  })
+  .strict();
 
 export type MailConnectionConfig = z.infer<typeof mailConnectionConfigSchema>;
 
@@ -979,9 +1055,11 @@ export type MailConnectionConfig = z.infer<typeof mailConnectionConfigSchema>;
  * backends — `http.schannelUseSSLCAInfo` covers Windows). Git-over-SSH uses
  * the `ssh` group's host keys instead.
  */
-export const gitConnectionConfigSchema = z.object({
-  ca_pem: z.string().min(1).max(65_536),
-});
+export const gitConnectionConfigSchema = z
+  .object({
+    ca_pem: z.string().min(1).max(65_536),
+  })
+  .strict();
 
 export type GitConnectionConfig = z.infer<typeof gitConnectionConfigSchema>;
 
@@ -1000,6 +1078,7 @@ export const connectionConfigSchema = z
     mail: mailConnectionConfigSchema.optional(),
     git: gitConnectionConfigSchema.optional(),
   })
+  .strict()
   .superRefine((data, ctx) => {
     if (!data.database && !data.ssh && !data.mail && !data.git) {
       ctx.addIssue({
@@ -1035,6 +1114,7 @@ export const mcpServerConfigSchema = z
     working_directory: z.string().min(1).max(4096).optional(),
     url: httpishUrlSchema.optional(),
   })
+  .strict()
   .superRefine((data, ctx) => {
     if (data.transport === McpTransport.STDIO) {
       if (!data.command) {
@@ -1077,6 +1157,7 @@ export const accessPolicyInputSchema = z
     permissions: z.array(permissionSchema).min(1),
     expires_at: z.number().int().positive().optional(),
   })
+  .strict()
   .superRefine((data, ctx) => {
     if (data.principal_type === "agent" && !agentNameSchema.safeParse(data.principal_id).success) {
       ctx.addIssue({
@@ -1099,17 +1180,21 @@ export const agentStatusFilterSchema = z.enum(["active", "inactive", "all"]);
 export const issuedTokenStatusFilterSchema = z.enum(["active", "expired", "revoked", "all"]);
 
 /** Register-agent request body. */
-export const registerAgentInputSchema = z.object({
-  name: agentNameSchema,
-  description: z.string().max(AGENT_DESCRIPTION_MAX_LENGTH).optional(),
-  owner: z.string().max(AGENT_OWNER_MAX_LENGTH).optional(),
-});
+export const registerAgentInputSchema = z
+  .object({
+    name: agentNameSchema,
+    description: z.string().max(AGENT_DESCRIPTION_MAX_LENGTH).optional(),
+    owner: z.string().max(AGENT_OWNER_MAX_LENGTH).optional(),
+  })
+  .strict();
 
 /** Update-agent request body: description/owner only — renaming an agent is not supported. */
-export const updateAgentInputSchema = z.object({
-  description: z.string().max(AGENT_DESCRIPTION_MAX_LENGTH).optional(),
-  owner: z.string().max(AGENT_OWNER_MAX_LENGTH).optional(),
-});
+export const updateAgentInputSchema = z
+  .object({
+    description: z.string().max(AGENT_DESCRIPTION_MAX_LENGTH).optional(),
+    owner: z.string().max(AGENT_OWNER_MAX_LENGTH).optional(),
+  })
+  .strict();
 
 /**
  * Set-agent-permissions request body: an empty `permissions` array is valid
@@ -1117,10 +1202,12 @@ export const updateAgentInputSchema = z.object({
  * `create` is never grantable per secret and is refused at the engine, not
  * here.
  */
-export const setAgentPermissionsInputSchema = z.object({
-  permissions: z.array(permissionSchema),
-  expires_at: z.number().int().positive().optional(),
-});
+export const setAgentPermissionsInputSchema = z
+  .object({
+    permissions: z.array(permissionSchema),
+    expires_at: z.number().int().positive().optional(),
+  })
+  .strict();
 
 export const listAgentsQuerySchema = z.object({
   status: agentStatusFilterSchema.optional(),
@@ -1290,19 +1377,21 @@ export const oauthProviderConfigSchema = z
 /** OAuth provider configuration (stored alongside secret). */
 export type OAuthProviderConfig = z.infer<typeof oauthProviderConfigSchema>;
 
-export const startOAuthFlowInputSchema = z.object({
-  name: namePattern,
-  provider: oauthProviderPresetSchema,
-  grant_type: oauthGrantTypeSchema,
-  client_id: z.string().min(1),
-  client_secret: z.string().min(1).optional(),
-  token_endpoint_auth_method: z.enum(["client_secret_post", "client_secret_basic"]).optional(),
-  scopes: z.array(z.string().min(1)).optional(),
-  project: namePattern.optional(),
-  auth_endpoint: oauthEndpointUrlSchema.optional(),
-  token_endpoint: oauthEndpointUrlSchema.optional(),
-  device_authorization_endpoint: oauthEndpointUrlSchema.optional(),
-});
+export const startOAuthFlowInputSchema = z
+  .object({
+    name: namePattern,
+    provider: oauthProviderPresetSchema,
+    grant_type: oauthGrantTypeSchema,
+    client_id: z.string().min(1),
+    client_secret: z.string().min(1).optional(),
+    token_endpoint_auth_method: z.enum(["client_secret_post", "client_secret_basic"]).optional(),
+    scopes: z.array(z.string().min(1)).optional(),
+    project: namePattern.optional(),
+    auth_endpoint: oauthEndpointUrlSchema.optional(),
+    token_endpoint: oauthEndpointUrlSchema.optional(),
+    device_authorization_endpoint: oauthEndpointUrlSchema.optional(),
+  })
+  .strict();
 
 export type StartOAuthFlowInput = z.infer<typeof startOAuthFlowInputSchema>;
 
@@ -1315,15 +1404,17 @@ const pemPattern = z
   .min(1)
   .refine((s) => s.startsWith("-----BEGIN "), "Value must be PEM-encoded");
 
-export const certificateImportSchema = z.object({
-  name: namePattern,
-  private_key_pem: pemPattern,
-  certificate_pem: pemPattern,
-  chain_pem: pemPattern.optional(),
-  project: namePattern.optional(),
-  auto_renew: z.boolean().optional().default(false),
-  renew_before_days: z.number().int().positive().max(365).optional().default(30),
-});
+export const certificateImportSchema = z
+  .object({
+    name: namePattern,
+    private_key_pem: pemPattern,
+    certificate_pem: pemPattern,
+    chain_pem: pemPattern.optional(),
+    project: namePattern.optional(),
+    auto_renew: z.boolean().optional().default(false),
+    renew_before_days: z.number().int().positive().max(365).optional().default(30),
+  })
+  .strict();
 
 export type CertificateImportRequest = z.infer<typeof certificateImportSchema>;
 
@@ -1345,6 +1436,7 @@ export const generateCsrRequestSchema = z
     curve: z.enum(["P-256", "P-384"]).optional(),
     project: namePattern.optional(),
   })
+  .strict()
   .superRefine((data, ctx) => {
     const algorithm = data.algorithm ?? "ec"; // the CLI's default: EC P-256
     if (data.bits !== undefined && algorithm !== "rsa") {
@@ -1363,8 +1455,3 @@ export const generateCsrRequestSchema = z
     }
   });
 export type GenerateCsrRequest = z.infer<typeof generateCsrRequestSchema>;
-
-export const renewCertificateRequestSchema = z.object({
-  http_port: z.number().int().min(1).max(65535).optional(),
-});
-export type RenewCertificateRequest = z.infer<typeof renewCertificateRequestSchema>;

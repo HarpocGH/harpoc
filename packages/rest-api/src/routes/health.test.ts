@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
-import { VaultState, VAULT_VERSION } from "@harpoc/shared";
+import { ErrorCode, VaultError, VaultState, VAULT_VERSION } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
 import { createHealthRoutes, createExpiringSecretsRoute } from "./health.js";
 import { authMiddleware } from "../middleware/auth.js";
@@ -89,13 +89,16 @@ describe("health routes", () => {
     expect(res.status).toBe(401);
   });
 
-  it("GET /api/v1/health/expiring returns empty count when sealed", async () => {
-    const { app } = createTestApp(VaultState.SEALED);
+  it("GET /api/v1/health/expiring on a sealed vault is 503 VAULT_LOCKED — the auth middleware refuses before the route (B19)", async () => {
+    const { app, engine } = createTestApp(VaultState.SEALED);
+    engine.verifyToken.mockImplementation(() => {
+      throw VaultError.vaultLocked();
+    });
 
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.data).toEqual({ count: 0 });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.VAULT_LOCKED);
+    expect(engine.listSecrets).not.toHaveBeenCalled();
   });
 
   it("GET /api/v1/health/expiring returns secrets expiring within default 7 days", async () => {
@@ -111,8 +114,8 @@ describe("health routes", () => {
 
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
     const body = await res.json();
-    expect(body.data).toHaveLength(1);
-    expect(body.data[0].name).toBe("key0");
+    expect(body.data.expiring).toHaveLength(1);
+    expect(body.data.expiring[0].name).toBe("key0");
   });
 
   it("GET /api/v1/health/expiring respects custom days param", async () => {
@@ -125,11 +128,11 @@ describe("health routes", () => {
 
     const res = await app.request("/api/v1/health/expiring?days=1", { headers: AUTH });
     const body = await res.json();
-    expect(body.data).toHaveLength(0);
+    expect(body.data.expiring).toHaveLength(0);
 
     const res2 = await app.request("/api/v1/health/expiring?days=30", { headers: AUTH });
     const body2 = await res2.json();
-    expect(body2.data).toHaveLength(1);
+    expect(body2.data.expiring).toHaveLength(1);
   });
 
   it("GET /api/v1/health/expiring excludes non-active secrets", async () => {
@@ -142,7 +145,7 @@ describe("health routes", () => {
 
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
     const body = await res.json();
-    expect(body.data).toHaveLength(0);
+    expect(body.data.expiring).toHaveLength(0);
   });
 
   it("GET /api/v1/health/expiring denies tokens without list permission", async () => {
@@ -173,8 +176,8 @@ describe("health routes", () => {
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.data).toHaveLength(1);
-    expect(body.data[0].name).toBe("db-prod");
+    expect(body.data.expiring).toHaveLength(1);
+    expect(body.data.expiring[0].name).toBe("db-prod");
   });
 
   it("GET /api/v1/health/expiring scopes the listing to the token's project", async () => {
@@ -202,9 +205,9 @@ describe("health routes", () => {
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(Array.isArray(body.data)).toBe(true);
-    expect(body.oauth_refresh_needed).toEqual([]);
-    expect(body.certificates_nearing_renewal).toEqual([]);
+    expect(Array.isArray(body.data.expiring)).toBe(true);
+    expect(body.data.oauth_refresh_needed).toEqual([]);
+    expect(body.data.certificates_nearing_renewal).toEqual([]);
     expect(engine.getExpiringOAuthTokenStatuses).toHaveBeenCalledWith(
       60 * 60 * 1000,
       expect.anything(),
@@ -253,8 +256,8 @@ describe("health routes", () => {
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.oauth_refresh_needed).toHaveLength(1);
-    expect(body.oauth_refresh_needed[0].name).toBe("db-prod");
+    expect(body.data.oauth_refresh_needed).toHaveLength(1);
+    expect(body.data.oauth_refresh_needed[0].name).toBe("db-prod");
   });
 
   it("GET /api/v1/health/expiring scopes certificates_nearing_renewal to the token's project/name pattern", async () => {
@@ -301,8 +304,8 @@ describe("health routes", () => {
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.certificates_nearing_renewal).toHaveLength(1);
-    expect(body.certificates_nearing_renewal[0].name).toBe("db-prod");
+    expect(body.data.certificates_nearing_renewal).toHaveLength(1);
+    expect(body.data.certificates_nearing_renewal[0].name).toBe("db-prod");
   });
 
   it("GET /api/v1/health/expiring rejects out-of-range and malformed days", async () => {

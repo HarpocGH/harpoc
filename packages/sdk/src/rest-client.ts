@@ -9,7 +9,6 @@ import type {
   CreateSecretResponse,
   GenerateCsrRequest,
   InjectionPolicy,
-  InjectionPolicyInput,
   IssuedToken,
   McpServerConfig,
   OAuthFlowResult,
@@ -104,7 +103,7 @@ export class RestClient implements VaultClient {
 
   async setInjectionPolicy(
     handle: string,
-    policy: InjectionPolicyInput,
+    policy: InjectionPolicy,
     options?: SetInjectionPolicyOptions,
   ): Promise<void> {
     await this.request<{ updated: boolean }>(
@@ -324,16 +323,10 @@ export class RestClient implements VaultClient {
     return { handle: result.handle, csrPem: result.csr_pem };
   }
 
-  async renewCertificate(
-    handle: string,
-    options?: { httpPort?: number },
-  ): Promise<CertificateStatus> {
-    // The route parses a body unconditionally, so one is always sent — an
-    // omitted port is simply absent from it (the ACME default applies).
+  async renewCertificate(handle: string): Promise<CertificateStatus> {
     return this.request<CertificateStatus>(
       "POST",
       `/api/v1/certificates/${this.encodeHandle(handle)}/renew`,
-      { http_port: options?.httpPort },
     );
   }
 

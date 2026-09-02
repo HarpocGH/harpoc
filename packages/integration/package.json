@@ -23,7 +23,7 @@
     "@harpoc/oauth-proxy": "workspace:*",
     "@harpoc/cert-manager": "workspace:*",
     "@hono/node-server": "^1.14.0",
-    "@modelcontextprotocol/sdk": "^1.27.1"
+    "@modelcontextprotocol/sdk": "^1.30.0"
   },
   "devDependencies": {
     "@harpoc/cli": "workspace:*",

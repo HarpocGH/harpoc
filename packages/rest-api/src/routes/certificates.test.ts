@@ -280,18 +280,9 @@ describe("POST /api/v1/certificates/:handle/renew", () => {
     const body = await res.json();
     expect(body.data).toEqual(CERT_STATUS);
     expect(certManager.renewCertificate).toHaveBeenCalledWith("secret-uuid-1", {
-      httpPort: undefined,
       caller: EXPECTED_CALLER,
       handle: "secret://my-cert",
     });
-  });
-
-  it("passes http_port through to the manager", async () => {
-    await post("/api/v1/certificates/my-cert/renew", { http_port: 8080 });
-    expect(certManager.renewCertificate).toHaveBeenCalledWith(
-      "secret-uuid-1",
-      expect.objectContaining({ httpPort: 8080 }),
-    );
   });
 
   it("charges the per-secret rate limiter on the handle, before resolution", async () => {
@@ -307,17 +298,27 @@ describe("POST /api/v1/certificates/:handle/renew", () => {
     expect(certManager.renewCertificate).not.toHaveBeenCalled();
   });
 
-  // `post()` always stringifies, so the bodyless request is built by hand.
-  it("a bodyless POST is a descriptive 400, not a generic 500", async () => {
+  it("a bodyless POST renews (the route reads no body — B23/B24)", async () => {
     const res = await app.request("/api/v1/certificates/my-cert/renew", {
       method: "POST",
-      headers: JSON_HEADERS,
+      headers: AUTH,
     });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string; message: string };
-    expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
-    expect(body.message).toBe("Request body must be valid JSON");
-    expect(certManager.renewCertificate).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(certManager.renewCertificate).toHaveBeenCalledWith("secret-uuid-1", {
+      caller: EXPECTED_CALLER,
+      handle: "secret://my-cert",
+    });
+  });
+
+  it("a body carrying http_port is ignored — the port is a CLI affordance (B23)", async () => {
+    const res = await post("/api/v1/certificates/my-cert/renew", {
+      http_port: 8080,
+    });
+    expect(res.status).toBe(200);
+    expect(certManager.renewCertificate).toHaveBeenCalledWith("secret-uuid-1", {
+      caller: EXPECTED_CALLER,
+      handle: "secret://my-cert",
+    });
   });
 });
 

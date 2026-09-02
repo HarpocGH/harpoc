@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { auditQuerySchema, auditScopeFromToken } from "@harpoc/shared";
-import { VaultError } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope } from "../middleware/scope.js";
+import { schemaValidationError } from "../utils/schema-error.js";
 
 export function createAuditRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
@@ -42,7 +42,7 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
 
     const parsed = auditQuerySchema.safeParse(raw);
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsed.error);
     }
 
     // The permission dimension alone is not the token's scope: a project- or

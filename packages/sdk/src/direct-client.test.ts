@@ -9,6 +9,19 @@ import {
 import type { OAuthTokenStatus } from "@harpoc/shared";
 import { DirectClient } from "./direct-client.js";
 
+const FULL_POLICY = {
+  url_allowlist: [] as string[],
+  command_allowlist: ["gh"],
+  env_allowlist: [] as string[],
+  host_allowlist: [] as string[],
+  response_mode: "filtered" as const,
+  response_header_allowlist: [] as string[],
+  network_isolation: false,
+  fs_isolation: false,
+  smtp_recipient_allowlist: [] as string[],
+  imap_read_only: false,
+};
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -338,9 +351,9 @@ describe("DirectClient", () => {
     const client = new DirectClient(engine as never);
 
     const policy = {
+      ...FULL_POLICY,
       url_allowlist: ["https://api.github.com/*"],
       command_allowlist: ["gh"],
-      env_allowlist: [],
     };
     await client.setInjectionPolicy("secret://key", policy);
     expect(engine.setInjectionPolicy).toHaveBeenCalledWith("secret://key", policy, undefined);
@@ -354,7 +367,7 @@ describe("DirectClient", () => {
     const engine = createMockEngine();
     const client = new DirectClient(engine as never);
 
-    const policy = { url_allowlist: [], command_allowlist: ["python"], env_allowlist: [] };
+    const policy = { ...FULL_POLICY, command_allowlist: ["python"] };
     await client.setInjectionPolicy("secret://key", policy, { acknowledge_interpreters: true });
     expect(engine.setInjectionPolicy).toHaveBeenCalledWith("secret://key", policy, {
       acknowledge_interpreters: true,
@@ -1134,16 +1147,18 @@ describe("DirectClient", () => {
       );
     });
 
-    it("renewCertificate resolves the handle and forwards the http port", async () => {
+    it("renewCertificate resolves the handle and calls the manager with the id alone (B23)", async () => {
       const engine = createMockEngine();
       const certManager = createFakeCertManager();
-      const client = new DirectClient(engine as never, { certManager: certManager as never });
+      const client = new DirectClient(engine as never, {
+        certManager: certManager as never,
+      });
 
-      const status = await client.renewCertificate("secret://web", { httpPort: 8080 });
+      const status = await client.renewCertificate("secret://web");
 
       expect(status.renewal_status).toBe("ok");
       expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://web");
-      expect(certManager.renewCertificate).toHaveBeenCalledWith("uuid-1", { httpPort: 8080 });
+      expect(certManager.renewCertificate).toHaveBeenCalledWith("uuid-1");
     });
 
     it("getCertificateStatus resolves the handle and passes no caller", async () => {

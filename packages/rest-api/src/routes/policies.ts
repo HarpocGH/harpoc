@@ -4,6 +4,7 @@ import { VaultError, ErrorCode, accessPolicyInputSchema, callerFromToken } from 
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
 import { readJsonBody } from "../utils/read-json-body.js";
+import { schemaValidationError } from "../utils/schema-error.js";
 
 export function createPolicyRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
@@ -35,7 +36,7 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
     const body = await readJsonBody(c);
     const parsed = accessPolicyInputSchema.safeParse(body);
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsed.error);
     }
 
     const policy = engine.grantPolicy(

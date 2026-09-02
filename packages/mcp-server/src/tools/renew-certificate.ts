@@ -18,7 +18,7 @@ export function registerRenewCertificate(
 ): void {
   server.tool(
     "renew_certificate",
-    "Renew a certificate secret via ACME (http-01 on the default port 80). Returns certificate metadata; never key material. The challenge responder's port is not selectable here — use `harpoc cert renew --http-port` or POST /api/v1/certificates/:handle/renew.",
+    "Renew a certificate secret via ACME (http-01 on the default port 80). Returns certificate metadata; never key material. The challenge responder's port is not selectable here — `harpoc cert renew --http-port` is the only path that selects one.",
     {
       handle: z.string().describe("Secret handle (secret://[project/]name)"),
     },

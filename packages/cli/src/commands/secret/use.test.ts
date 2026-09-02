@@ -923,6 +923,23 @@ describe("secret use — --action-file", () => {
     await run(["secret://k", "--action-file", filePath]);
     expect(mockEngine.useSecret).toHaveBeenCalled();
   });
+
+  it("--action-file: an unknown key inside the action is refused, naming it (R10/A5)", async () => {
+    const filePath = join(tempDir, "action.json");
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        type: "http",
+        method: "GET",
+        url: "https://api.example.com/x",
+        injection: { type: "bearer" },
+        injecton: { type: "bearer" },
+      }),
+    );
+    await expect(run(["secret://k", "--action-file", filePath])).rejects.toThrow("process.exit");
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("'injecton'"));
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+  });
 });
 
 describe("secret use — --action is a closed set", () => {

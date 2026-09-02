@@ -18,6 +18,20 @@ const NON_OBJECT_BODIES = [
   ["an array", "[1,2]"],
 ] as const;
 
+// R3: the PUT body is the whole policy — every field, no defaults.
+const FULL_POLICY = {
+  url_allowlist: ["https://api.github.com/*"],
+  command_allowlist: ["gh"],
+  env_allowlist: [],
+  host_allowlist: [],
+  response_mode: "status_only",
+  response_header_allowlist: ["Content-Type"],
+  network_isolation: false,
+  fs_isolation: false,
+  smtp_recipient_allowlist: [],
+  imap_read_only: false,
+};
+
 const MOCK_TOKEN: VaultApiToken = {
   sub: "test-agent",
   vault_id: "vault-1",
@@ -568,6 +582,27 @@ describe("secret routes", () => {
       expect(body.data.structured_content.note).toContain("[REDACTED]");
     });
 
+    it("POST /use refuses a stray top-level key beside action (R10/A5)", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/use", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          action: {
+            type: "http",
+            method: "GET",
+            url: "https://api.example.com/x",
+            injection: { type: "bearer" },
+          },
+          handle: "secret://other",
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; message: string };
+      expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+      expect(body.message).toContain("'handle'");
+      expect(engine.useSecret).not.toHaveBeenCalled();
+    });
+
     it.each(NON_OBJECT_BODIES)(
       "refuses %s body with the framing message and never reaches the engine",
       async (_kind, raw) => {
@@ -608,12 +643,7 @@ describe("secret routes", () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({
-          command_allowlist: ["gh"],
-          url_allowlist: ["https://api.github.com/*"],
-          response_mode: "status_only",
-          response_header_allowlist: ["Content-Type"],
-        }),
+        body: JSON.stringify(FULL_POLICY),
       });
       expect(res.status).toBe(200);
       const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
@@ -624,68 +654,69 @@ describe("secret routes", () => {
       expect(policy.response_header_allowlist).toEqual(["Content-Type"]);
     });
 
-    it("PUT omitting response_mode defaults it to filtered (whole-policy replace)", async () => {
+    it.each(Object.keys(FULL_POLICY))(
+      "PUT omitting %s is a 400 naming the field, engine untouched (R3)",
+      async (field) => {
+        const partial = Object.fromEntries(
+          Object.entries(FULL_POLICY).filter(([key]) => key !== field),
+        );
+        const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+          method: "PUT",
+          headers: { ...AUTH, "content-type": "application/json" },
+          body: JSON.stringify(partial),
+        });
+        expect(res.status).toBe(400);
+        const body = (await res.json()) as { error: string; message: string };
+        expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+        expect(body.message).toContain(`${field}: Required`);
+        expect(engine.setInjectionPolicy).not.toHaveBeenCalled();
+      },
+    );
+
+    it("PUT with an unknown key is a 400 naming it, engine untouched (R10/A5)", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ url_allowlist: ["https://api.github.com/*"] }),
+        body: JSON.stringify({ ...FULL_POLICY, fs_isolaton: true }),
       });
-      expect(res.status).toBe(200);
-      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
-      expect((call[1] as { response_mode: string }).response_mode).toBe("filtered");
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; message: string };
+      expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+      expect(body.message).toContain("Unrecognized key(s) in object: 'fs_isolaton'");
+      expect(engine.setInjectionPolicy).not.toHaveBeenCalled();
     });
 
     it("PUT forwards network_isolation: true to the engine", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ command_allowlist: ["gh"], network_isolation: true }),
+        body: JSON.stringify({ ...FULL_POLICY, network_isolation: true }),
       });
       expect(res.status).toBe(200);
       const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
       expect((call[1] as { network_isolation: boolean }).network_isolation).toBe(true);
     });
 
-    it("PUT omitting network_isolation resets it to false (whole-policy replace)", async () => {
-      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
-        method: "PUT",
-        headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ url_allowlist: ["https://api.github.com/*"] }),
-      });
-      expect(res.status).toBe(200);
-      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
-      expect((call[1] as { network_isolation: boolean }).network_isolation).toBe(false);
-    });
-
     it("PUT forwards fs_isolation: true to the engine", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ command_allowlist: ["gh"], fs_isolation: true }),
+        body: JSON.stringify({ ...FULL_POLICY, fs_isolation: true }),
       });
       expect(res.status).toBe(200);
       const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
       expect((call[1] as { fs_isolation: boolean }).fs_isolation).toBe(true);
     });
 
-    it("PUT omitting fs_isolation resets it to false (whole-policy replace)", async () => {
-      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
-        method: "PUT",
-        headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ url_allowlist: ["https://api.github.com/*"] }),
-      });
-      expect(res.status).toBe(200);
-      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
-      expect((call[1] as { fs_isolation: boolean }).fs_isolation).toBe(false);
-    });
-
     it("PUT rejects a non-boolean fs_isolation", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ fs_isolation: "yes" }),
+        body: JSON.stringify({ ...FULL_POLICY, fs_isolation: "yes" }),
       });
       expect(res.status).toBe(400);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toContain("fs_isolation:");
     });
 
     it("GET returns fs_isolation", async () => {
@@ -712,43 +743,51 @@ describe("secret routes", () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ network_isolation: "yes" }),
+        body: JSON.stringify({ ...FULL_POLICY, network_isolation: "yes" }),
       });
       expect(res.status).toBe(400);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toContain("network_isolation:");
     });
 
     it("PUT rejects an invalid env var name", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ env_allowlist: ["1BAD"] }),
+        body: JSON.stringify({ ...FULL_POLICY, env_allowlist: ["1BAD"] }),
       });
       expect(res.status).toBe(400);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toContain("env_allowlist.0:");
     });
 
     it("PUT rejects an invalid response_mode", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ response_mode: "raw" }),
+        body: JSON.stringify({ ...FULL_POLICY, response_mode: "raw" }),
       });
       expect(res.status).toBe(400);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toContain("response_mode:");
     });
 
     it("PUT rejects an invalid response header name", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ response_header_allowlist: ["Bad: Header"] }),
+        body: JSON.stringify({ ...FULL_POLICY, response_header_allowlist: ["Bad: Header"] }),
       });
       expect(res.status).toBe(400);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toContain("response_header_allowlist.0:");
     });
 
     it("PUT passes the interpreter acknowledgement to the engine, not the policy", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ command_allowlist: ["python"], acknowledge_interpreters: true }),
+        body: JSON.stringify({ ...FULL_POLICY, acknowledge_interpreters: true }),
       });
       expect(res.status).toBe(200);
       const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
@@ -760,7 +799,7 @@ describe("secret routes", () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ command_allowlist: ["gh"] }),
+        body: JSON.stringify(FULL_POLICY),
       });
       expect(res.status).toBe(200);
       const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
@@ -771,9 +810,11 @@ describe("secret routes", () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ acknowledge_interpreters: "yes" }),
+        body: JSON.stringify({ ...FULL_POLICY, acknowledge_interpreters: "yes" }),
       });
       expect(res.status).toBe(400);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toContain("acknowledge_interpreters:");
     });
 
     it("PUT maps an unacknowledged interpreter refusal to 400", async () => {
@@ -783,22 +824,23 @@ describe("secret routes", () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ command_allowlist: ["python"] }),
+        body: JSON.stringify({ ...FULL_POLICY, command_allowlist: ["python"] }),
       });
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.error).toBe(ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED);
     });
 
-    // v1.3: smtp_recipient_allowlist / imap_read_only — same replace-semantics
-    // precedent as network_isolation/fs_isolation above (set → stored; a
-    // second PUT omitting the field → reset to its default, not left as-is).
+    // R3: smtp_recipient_allowlist / imap_read_only follow the same rule as
+    // every other policy field — the PUT body is the whole policy, so each is
+    // required and a body omitting one is a 400 naming it (the it.each
+    // omission table above), never a silent reset to a default.
     it("PUT forwards smtp_recipient_allowlist to the engine", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
         body: JSON.stringify({
-          command_allowlist: ["gh"],
+          ...FULL_POLICY,
           smtp_recipient_allowlist: ["ops@example.com", "*@example.com"],
         }),
       });
@@ -810,50 +852,30 @@ describe("secret routes", () => {
       ]);
     });
 
-    it("PUT omitting smtp_recipient_allowlist resets it to [] (whole-policy replace)", async () => {
-      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
-        method: "PUT",
-        headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ url_allowlist: ["https://api.github.com/*"] }),
-      });
-      expect(res.status).toBe(200);
-      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
-      expect((call[1] as { smtp_recipient_allowlist: string[] }).smtp_recipient_allowlist).toEqual(
-        [],
-      );
-    });
-
     it("PUT forwards imap_read_only: true to the engine", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ command_allowlist: ["gh"], imap_read_only: true }),
+        body: JSON.stringify({ ...FULL_POLICY, imap_read_only: true }),
       });
       expect(res.status).toBe(200);
       const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
       expect((call[1] as { imap_read_only: boolean }).imap_read_only).toBe(true);
     });
 
-    it("PUT omitting imap_read_only resets it to false (whole-policy replace)", async () => {
-      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
-        method: "PUT",
-        headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ url_allowlist: ["https://api.github.com/*"] }),
-      });
-      expect(res.status).toBe(200);
-      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
-      expect((call[1] as { imap_read_only: boolean }).imap_read_only).toBe(false);
-    });
-
     it("PUT rejects a malformed recipient pattern with SCHEMA_VALIDATION_ERROR", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ smtp_recipient_allowlist: ["not-a-valid-pattern"] }),
+        body: JSON.stringify({
+          ...FULL_POLICY,
+          smtp_recipient_allowlist: ["not-a-valid-pattern"],
+        }),
       });
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+      expect(body.message).toContain("smtp_recipient_allowlist.0:");
     });
   });
 
@@ -1338,11 +1360,11 @@ describe("engine-level policy enforcement wiring (thesis §4.6)", () => {
         app.request("/api/v1/secrets/test-key/injection-policy", {
           method: "PUT",
           headers: JSON_HEADERS,
-          body: JSON.stringify({ url_allowlist: ["https://api.example.com/*"] }),
+          body: JSON.stringify(FULL_POLICY),
         }),
       args: [
         "secret://test-key",
-        expect.objectContaining({ url_allowlist: ["https://api.example.com/*"] }),
+        expect.objectContaining({ url_allowlist: FULL_POLICY.url_allowlist }),
         expect.anything(),
         EXPECTED_CALLER,
       ],
@@ -1364,7 +1386,6 @@ describe("engine-level policy enforcement wiring (thesis §4.6)", () => {
             server_name: "docs",
             transport: "http",
             url: "https://mcp.example.com/mcp",
-            auth: { type: "bearer" },
           }),
         }),
       args: [
@@ -1427,7 +1448,7 @@ describe("engine-level policy enforcement wiring (thesis §4.6)", () => {
     const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
       method: "PUT",
       headers: JSON_HEADERS,
-      body: JSON.stringify({ url_allowlist: [] }),
+      body: JSON.stringify(FULL_POLICY),
     });
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: string };

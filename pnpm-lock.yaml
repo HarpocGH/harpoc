@@ -78,8 +78,8 @@ importers:
         specifier: workspace:*
         version: link:../web-ui
       "@modelcontextprotocol/sdk":
-        specifier: ^1.27.1
-        version: 1.27.1(zod@3.25.76)
+        specifier: ^1.30.0
+        version: 1.30.0(zod@3.25.76)
       commander:
         specifier: ^13.1.0
         version: 13.1.0
@@ -97,8 +97,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
       "@modelcontextprotocol/sdk":
-        specifier: ^1.27.1
-        version: 1.27.1(zod@3.25.76)
+        specifier: ^1.30.0
+        version: 1.30.0(zod@3.25.76)
       argon2:
         specifier: ^0.43.0
         version: 0.43.1
@@ -164,8 +164,8 @@ importers:
         specifier: ^1.14.0
         version: 1.19.10(hono@4.12.5)
       "@modelcontextprotocol/sdk":
-        specifier: ^1.27.1
-        version: 1.27.1(zod@3.25.76)
+        specifier: ^1.30.0
+        version: 1.30.0(zod@3.25.76)
       pg:
         specifier: ^8.22.0
         version: 8.22.0
@@ -204,8 +204,8 @@ importers:
         specifier: ^1.14.0
         version: 1.19.10(hono@4.12.5)
       "@modelcontextprotocol/sdk":
-        specifier: ^1.27.1
-        version: 1.27.1(zod@3.25.76)
+        specifier: ^1.30.0
+        version: 1.30.0(zod@3.25.76)
     devDependencies:
       "@harpoc/cli":
         specifier: workspace:*
@@ -229,8 +229,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
       "@modelcontextprotocol/sdk":
-        specifier: ^1.27.1
-        version: 1.27.1(zod@3.25.76)
+        specifier: ^1.30.0
+        version: 1.30.0(zod@3.25.76)
       zod:
         specifier: ^3.25.76
         version: 3.25.76
@@ -978,10 +978,10 @@ packages:
         integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==,
       }
 
-  "@modelcontextprotocol/sdk@1.27.1":
+  "@modelcontextprotocol/sdk@1.30.0":
     resolution:
       {
-        integrity: sha512-sr6GbP+4edBwFndLbM60gf07z0FQ79gaExpnsjMGePXqFcSSb7t6iscpjk9DhFhwd+mTEQrzNafGP8/iGGFYaA==,
+        integrity: sha512-xKd8OIzlqNzcqcNumGAa6g+PW2kjD5vrpcKOnfldAUPP3j7lnqMPwlTXQm8gF+UwH72z0lqaRbjr9hqGz0eITA==,
       }
     engines: { node: ">=18" }
     peerDependencies:
@@ -4988,7 +4988,7 @@ snapshots:
       "@jridgewell/resolve-uri": 3.1.2
       "@jridgewell/sourcemap-codec": 1.5.5
 
-  "@modelcontextprotocol/sdk@1.27.1(zod@3.25.76)":
+  "@modelcontextprotocol/sdk@1.30.0(zod@3.25.76)":
     dependencies:
       "@hono/node-server": 1.19.10(hono@4.12.5)
       ajv: 8.18.0

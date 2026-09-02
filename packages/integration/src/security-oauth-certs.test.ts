@@ -4,11 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { providerConfigFromFlowInput } from "@harpoc/oauth-proxy";
 import { DirectClient, RestClient } from "@harpoc/sdk";
-import {
-  ErrorCode,
-  renewCertificateRequestSchema,
-  startOAuthFlowInputSchema,
-} from "@harpoc/shared";
+import { ErrorCode, startOAuthFlowInputSchema } from "@harpoc/shared";
 import type { ExpiringCertificateInfo, ExpiringOAuthTokenInfo } from "@harpoc/shared";
 import {
   createTestVault,
@@ -335,11 +331,10 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
     expect(renew).toBeDefined();
     expect(Object.keys(renew?.inputSchema.properties ?? {})).toEqual(["handle"]);
 
-    // Same shape of asymmetry as the client secret above: the trusted admin
-    // paths (CLI `--http-port`, REST renew body) still choose the http-01
-    // responder's port, so the field lives on in the shared request schema —
-    // what an agent may ask for is what shrank.
-    expect(Object.keys(renewCertificateRequestSchema.shape)).toContain("http_port");
+    // Since 2026-09-02 (B23) the REST renew route reads no body either: the
+    // http-01 responder's port is chosen on the CLI alone (`cert renew
+    // --http-port`, `server start --cert-renew-port`) — what an agent may ask
+    // for and what a REST client may ask for are now the same thing.
   });
 
   it("2. the OAuth and certificate flows run over REST, MCP and both SDK clients", async () => {

@@ -162,6 +162,14 @@ describe("register", () => {
     expect(err.message).toContain("name");
   });
 
+  it("refuses an unknown key on register — the shared schema is strict, off the wire too (R10/A5)", async () => {
+    const err = await expectVaultError(
+      () => registry.register({ name: "bot", extra: 1 } as never),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toContain("'extra'");
+  });
+
   it("maps a duplicate name to AGENT_EXISTS, whatever the existing status", async () => {
     registry.register({ name: "alpha" }, NOW);
     await expectVaultError(() => registry.register({ name: "alpha" }), ErrorCode.AGENT_EXISTS);

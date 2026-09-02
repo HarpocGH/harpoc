@@ -216,6 +216,22 @@ describe("MCP Tools", () => {
       expect(data.body).toBe('{"ok":true}');
     });
 
+    it("refuses an unknown key inside the action — the shared schema is strict (R10/A5)", async () => {
+      const result = await callTool(server, "use_secret", {
+        handle: "secret://k",
+        action: {
+          type: "http",
+          method: "GET",
+          url: "https://api.example.com/x",
+          injection: { type: "bearer" },
+          injecton: { type: "bearer" },
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("'injecton'");
+      expect(engine.useSecret).not.toHaveBeenCalled();
+    });
+
     it("sanitizes credential patterns in an HTTP response", async () => {
       (engine.useSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
         type: "http",
@@ -526,7 +542,7 @@ describe("MCP Tools", () => {
       expect(data.message).toContain("harpoc secret set");
     });
 
-    it("passes project to engine and drops a legacy injection config", async () => {
+    it("passes project to engine; the MCP SDK strips an undeclared top-level key such as a legacy injection config (REST refuses it — R10/A5)", async () => {
       await callTool(server, "create_secret", {
         name: "new-key",
         type: "api_key",

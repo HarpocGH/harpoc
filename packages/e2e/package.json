@@ -17,7 +17,7 @@
     "@harpoc/sdk": "workspace:*",
     "@harpoc/cli": "workspace:*",
     "@hono/node-server": "^1.14.0",
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "pg": "^8.22.0",
     "zod": "^3.25.76"
   },

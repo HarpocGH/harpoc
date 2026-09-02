@@ -8,12 +8,13 @@ import {
   mcpServerConfigSchema,
   rotateSecretInputSchema,
   setInjectionPolicyRequestSchema,
-  useSecretActionSchema,
+  useSecretBodySchema,
 } from "@harpoc/shared";
 import { InjectionGuard, sanitizeUseSecretResult } from "@harpoc/core";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
 import { readJsonBody } from "../utils/read-json-body.js";
+import { schemaValidationError } from "../utils/schema-error.js";
 
 export function createSecretRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
@@ -57,7 +58,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const parsed = createSecretInputSchema.safeParse(body);
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsed.error);
     }
 
     checkTokenScope(token, "create", parsed.data.project, parsed.data.name);
@@ -141,7 +142,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     // garbage — irreversibly — and the route answered 200 (L7).
     const parsedBody = rotateSecretInputSchema.safeParse(body);
     if (!parsedBody.success) {
-      throw VaultError.schemaValidation(parsedBody.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsedBody.error);
     }
 
     const handle = buildHandle(c.req.param("handle"));
@@ -161,14 +162,18 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     const body = await readJsonBody(c);
 
-    const parsed = useSecretActionSchema.safeParse(body.action);
+    const parsed = useSecretBodySchema.safeParse(body);
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsed.error);
     }
 
     const handle = buildHandle(c.req.param("handle"));
     c.get("limiter").checkSecret(handle, true);
-    const result = await engine.useSecret(handle, parsed.data, callerFromToken(token, "rest"));
+    const result = await engine.useSecret(
+      handle,
+      parsed.data.action,
+      callerFromToken(token, "rest"),
+    );
 
     // Sanitize response to prevent credential leakage (parity across interfaces)
     sanitizeUseSecretResult(result, injectionGuard);
@@ -200,7 +205,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const body = await readJsonBody(c);
     const parsed = setInjectionPolicyRequestSchema.safeParse(body);
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsed.error);
     }
 
     const handle = buildHandle(c.req.param("handle"));
@@ -236,7 +241,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const body = await readJsonBody(c);
     const parsed = mcpServerConfigSchema.safeParse(body);
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsed.error);
     }
 
     const handle = buildHandle(c.req.param("handle"));
@@ -278,7 +283,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const body = await readJsonBody(c);
     const parsed = connectionConfigSchema.safeParse(body);
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsed.error);
     }
 
     const handle = buildHandle(c.req.param("handle"));

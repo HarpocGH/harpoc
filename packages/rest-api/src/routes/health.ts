@@ -1,11 +1,5 @@
 import { Hono } from "hono";
-import {
-  callerFromToken,
-  matchesSecretNameScope,
-  VAULT_VERSION,
-  VaultError,
-  VaultState,
-} from "@harpoc/shared";
+import { callerFromToken, matchesSecretNameScope, VAULT_VERSION, VaultError } from "@harpoc/shared";
 import type {
   ExpiringCertificateInfo,
   ExpiringOAuthTokenInfo,
@@ -40,9 +34,6 @@ export function createExpiringSecretsRoute(): Hono<HarpocEnv> {
     checkTokenScope(token, "list");
 
     const engine = c.get("engine");
-    if (engine.getState() !== VaultState.UNLOCKED) {
-      return c.json({ data: { count: 0 } });
-    }
 
     const daysParam = c.req.query("days");
     const days = daysParam === undefined ? 7 : Number(daysParam);
@@ -72,13 +63,15 @@ export function createExpiringSecretsRoute(): Hono<HarpocEnv> {
       );
 
     return c.json({
-      data: expiring,
-      oauth_refresh_needed: scoped<ExpiringOAuthTokenInfo>(
-        engine.getExpiringOAuthTokenStatuses(OAUTH_WINDOW_MS, caller),
-      ),
-      certificates_nearing_renewal: scoped<ExpiringCertificateInfo>(
-        engine.getExpiringCertificateStatuses(caller),
-      ),
+      data: {
+        expiring,
+        oauth_refresh_needed: scoped<ExpiringOAuthTokenInfo>(
+          engine.getExpiringOAuthTokenStatuses(OAUTH_WINDOW_MS, caller),
+        ),
+        certificates_nearing_renewal: scoped<ExpiringCertificateInfo>(
+          engine.getExpiringCertificateStatuses(caller),
+        ),
+      },
     });
   });
 

@@ -12,7 +12,6 @@ import type {
   GenerateCsrRequest,
   HealthResponse,
   InjectionPolicy,
-  InjectionPolicyInput,
   IssuedToken,
   IssuedTokenStatusFilter,
   McpServerConfig,
@@ -80,7 +79,7 @@ export interface VaultClient {
   useSecret(handle: string, action: UseSecretAction): Promise<UseSecretResponse>;
   setInjectionPolicy(
     handle: string,
-    policy: InjectionPolicyInput,
+    policy: InjectionPolicy,
     options?: SetInjectionPolicyOptions,
   ): Promise<void>;
   getInjectionPolicy(handle: string): Promise<InjectionPolicy>;
@@ -117,6 +116,6 @@ export interface VaultClient {
     input: Omit<CertificateImportRequestInput, "name">,
   ): Promise<CertificateRef>;
   generateCsr(name: string, input: Omit<GenerateCsrRequest, "name">): Promise<GeneratedCsrRef>;
-  renewCertificate(handle: string, options?: { httpPort?: number }): Promise<CertificateStatus>;
+  renewCertificate(handle: string): Promise<CertificateStatus>;
   getCertificateStatus(handle: string): Promise<CertificateStatus>;
 }

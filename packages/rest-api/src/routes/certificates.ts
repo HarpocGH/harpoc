@@ -4,13 +4,13 @@ import {
   callerFromToken,
   certificateImportSchema,
   generateCsrRequestSchema,
-  renewCertificateRequestSchema,
   isEncryptedPrivateKeyPem,
   ENCRYPTED_KEY_IMPORT_REFUSAL,
 } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
 import { readJsonBody } from "../utils/read-json-body.js";
+import { schemaValidationError } from "../utils/schema-error.js";
 
 export function createCertificateRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
@@ -21,7 +21,7 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
     const body = await readJsonBody(c);
     const parsed = certificateImportSchema.safeParse(body);
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsed.error);
     }
     checkTokenScope(token, "create", parsed.data.project, parsed.data.name);
     if (isEncryptedPrivateKeyPem(parsed.data.private_key_pem)) {
@@ -45,7 +45,7 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
     const body = await readJsonBody(c);
     const parsed = generateCsrRequestSchema.safeParse(body);
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsed.error);
     }
     checkTokenScope(token, "create", parsed.data.project, parsed.data.name);
     const r = await c.get("certManager").generateCsr(parsed.data.name, {
@@ -64,17 +64,11 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
     const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
     checkTokenScope(token, "rotate", project, name);
-    const body = await readJsonBody(c);
-    const parsed = renewCertificateRequestSchema.safeParse(body);
-    if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
-    }
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
     c.get("limiter").checkSecret(handle);
     const secretId = await engine.resolveSecretId(handle);
     const status = await c.get("certManager").renewCertificate(secretId, {
-      httpPort: parsed.data.http_port,
       caller: callerFromToken(token, "rest"),
       handle,
     });

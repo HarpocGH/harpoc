@@ -11,7 +11,6 @@ import type {
   ExpiringOAuthTokenInfo,
   HealthResponse,
   InjectionPolicy,
-  InjectionPolicyInput,
   IssuedToken,
   IssuedTokenStatusFilter,
   OAuthTokenStatus,
@@ -20,6 +19,7 @@ import type {
   SecretType,
   SetAgentPermissionsInput,
   SetAgentPermissionsResult,
+  SetInjectionPolicyRequest,
   UpdateAgentInput,
 } from "@harpoc/shared";
 
@@ -72,7 +72,7 @@ export interface AuditEventWire {
   success: boolean;
 }
 
-/** `GET /health/expiring`: expiring secrets in `data`, the two aggregates as siblings. */
+/** `GET /health/expiring`: the three lists, all under `data`. */
 export interface ExpiringReport {
   expiring: SecretInfo[];
   oauth_refresh_needed: ExpiringOAuthTokenInfo[];
@@ -114,10 +114,7 @@ export interface DeleteAgentResult {
   removed_grants: number;
 }
 
-/** PUT injection-policy body: the policy plus the per-operation interpreter waiver. */
-export type SetInjectionPolicyRequest = InjectionPolicyInput & {
-  acknowledge_interpreters?: boolean;
-};
+export type { SetInjectionPolicyRequest } from "@harpoc/shared";
 
 export interface ApiClient {
   health(): Promise<HealthResponse>;
@@ -238,15 +235,8 @@ export function createApiClient(
 
   return {
     health: () => get<HealthResponse>("/api/v1/health"),
-    expiringReport: async (days = 7) => {
-      const body = await call<SecretInfo[]>(`/api/v1/health/expiring?days=${String(days)}`);
-      return {
-        expiring: body.data,
-        oauth_refresh_needed: (body["oauth_refresh_needed"] ?? []) as ExpiringOAuthTokenInfo[],
-        certificates_nearing_renewal: (body["certificates_nearing_renewal"] ??
-          []) as ExpiringCertificateInfo[],
-      };
-    },
+    expiringReport: (days = 7) =>
+      get<ExpiringReport>(`/api/v1/health/expiring?days=${String(days)}`),
     listSecrets: (project) =>
       get<SecretInfo[]>(
         `/api/v1/secrets${project !== undefined ? `?project=${encodeURIComponent(project)}` : ""}`,
@@ -282,7 +272,7 @@ export function createApiClient(
     getCertificateStatus: (handle) =>
       get<CertificateStatus>(`/api/v1/certificates/${handlePath(handle)}/status`),
     renewCertificate: (handle) =>
-      post<CertificateStatus>(`/api/v1/certificates/${handlePath(handle)}/renew`, {}),
+      post<CertificateStatus>(`/api/v1/certificates/${handlePath(handle)}/renew`),
     // Spread, not passed straight through: an interface carries no implicit
     // index signature, so the anonymous copy is what `queryString` can read.
     queryAudit: (filters) => get<AuditEventWire[]>(`/api/v1/audit${queryString({ ...filters })}`),

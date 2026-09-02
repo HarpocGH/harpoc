@@ -1,7 +1,8 @@
 import { Hono } from "hono";
-import { VaultError, callerFromToken, listTokensQuerySchema } from "@harpoc/shared";
+import { callerFromToken, listTokensQuerySchema } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope } from "../middleware/scope.js";
+import { schemaValidationError } from "../utils/schema-error.js";
 
 /**
  * The issued-token registry (v1.4): claims metadata only — the JWT itself is
@@ -22,7 +23,7 @@ export function createTokenRoutes(): Hono<HarpocEnv> {
       agent: agent ?? undefined,
     });
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsed.error);
     }
 
     const engine = c.get("engine");

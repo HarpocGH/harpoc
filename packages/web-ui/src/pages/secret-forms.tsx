@@ -298,7 +298,8 @@ export function PolicyEditor({
     <form onSubmit={onSubmit}>
       <h2>Edit injection policy</h2>
       <p class="empty">
-        Saving replaces the whole policy (REST PUT semantics) — omitted lists reset.
+        Saving replaces the whole policy — every field is sent, so a list left empty here is
+        cleared.
       </p>
       <p class="empty">
         An empty allowlist refuses every target: a secret is usable against a URL, host or command

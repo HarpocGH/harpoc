@@ -2,7 +2,6 @@ import { Hono } from "hono";
 import type { Permission } from "@harpoc/shared";
 import {
   AgentStatus,
-  VaultError,
   agentNameSchema,
   callerFromToken,
   listAgentsQuerySchema,
@@ -13,6 +12,7 @@ import {
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
 import { readJsonBody } from "../utils/read-json-body.js";
+import { schemaValidationError } from "../utils/schema-error.js";
 
 /**
  * A malformed name never reaches the registry: the lookup would answer
@@ -22,7 +22,7 @@ import { readJsonBody } from "../utils/read-json-body.js";
 function parseAgentName(raw: string): string {
   const parsed = agentNameSchema.safeParse(raw);
   if (!parsed.success) {
-    throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+    throw schemaValidationError(parsed.error);
   }
   return parsed.data;
 }
@@ -43,7 +43,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
     const status = c.req.query("status");
     const parsed = listAgentsQuerySchema.safeParse({ status: status ?? undefined });
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsed.error);
     }
 
     const engine = c.get("engine");
@@ -62,7 +62,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
     const body = await readJsonBody(c);
     const parsed = registerAgentInputSchema.safeParse(body);
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsed.error);
     }
 
     const engine = c.get("engine");
@@ -89,7 +89,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
     const body = await readJsonBody(c);
     const parsed = updateAgentInputSchema.safeParse(body);
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsed.error);
     }
 
     const engine = c.get("engine");
@@ -156,7 +156,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
     const body = await readJsonBody(c);
     const parsed = setAgentPermissionsInputSchema.safeParse(body);
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw schemaValidationError(parsed.error);
     }
 
     const engine = c.get("engine");

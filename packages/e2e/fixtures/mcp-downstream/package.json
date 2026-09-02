@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Downstream MCP server fixture: real Streamable HTTP transport, records the Authorization values it receives",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.27.1",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "zod": "3.25.76"
   }
 }

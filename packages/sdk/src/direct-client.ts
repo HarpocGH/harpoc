@@ -10,7 +10,6 @@ import type {
   CreateSecretResponse,
   GenerateCsrRequest,
   InjectionPolicy,
-  InjectionPolicyInput,
   IssuedToken,
   McpServerConfig,
   OAuthFlowResult,
@@ -138,7 +137,7 @@ export class DirectClient implements VaultClient {
 
   async setInjectionPolicy(
     handle: string,
-    policy: InjectionPolicyInput,
+    policy: InjectionPolicy,
     options?: SetInjectionPolicyOptions,
   ): Promise<void> {
     return this.engine.setInjectionPolicy(handle, policy, options);
@@ -344,14 +343,11 @@ export class DirectClient implements VaultClient {
     return { handle: csr.handle, csrPem: csr.csrPem };
   }
 
-  async renewCertificate(
-    handle: string,
-    options?: { httpPort?: number },
-  ): Promise<CertificateStatus> {
+  async renewCertificate(handle: string): Promise<CertificateStatus> {
     const secretId = await this.engine.resolveSecretId(handle);
     const manager = await this.loadCertManager();
     if (this.closed) throw VaultError.invalidInput("DirectClient is closed");
-    return manager.renewCertificate(secretId, { httpPort: options?.httpPort });
+    return manager.renewCertificate(secretId);
   }
 
   async getCertificateStatus(handle: string): Promise<CertificateStatus> {

@@ -74,10 +74,12 @@ const HEALTHY = { data: { state: "unlocked", version: "1.0.0" } };
  * Wraps a per-test `/api/v1/health` stub. DashboardPage renders as soon as the
  * shell reaches "unlocked" and immediately calls `listSecrets()`/
  * `expiringReport()`/`queryAudit()`, so every health-focused stub below also
- * needs those three routes answered with array-shaped envelopes — a
- * path-agnostic stub that only knows about health responses feeds the dashboard
- * a non-array `data` and throws mid-render (unhandled rejection) once it
- * iterates the result. Routing them away from `healthHandler` also keeps the
+ * needs those three routes answered with the envelope each one expects — an
+ * array `data` for the secrets and audit routes, the three-list object
+ * (`expiring`/`oauth_refresh_needed`/`certificates_nearing_renewal`) for
+ * `/health/expiring`. A path-agnostic stub that only knows about health
+ * responses hands at least one of them the wrong shape and throws mid-render
+ * (unhandled rejection). Routing them away from `healthHandler` also keeps the
  * call-counting handlers below counting health calls only.
  */
 function routeFetch(healthHandler: () => Response): typeof fetch {
@@ -86,9 +88,7 @@ function routeFetch(healthHandler: () => Response): typeof fetch {
     if (url.includes("/api/v1/health/expiring")) {
       return Promise.resolve(
         jsonResponse(200, {
-          data: [],
-          oauth_refresh_needed: [],
-          certificates_nearing_renewal: [],
+          data: { expiring: [], oauth_refresh_needed: [], certificates_nearing_renewal: [] },
         }),
       );
     }
