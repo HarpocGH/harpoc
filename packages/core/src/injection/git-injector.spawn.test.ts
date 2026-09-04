@@ -1,9 +1,18 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { delimiter, dirname, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
@@ -11,8 +20,23 @@ import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
+import { system32Path } from "../win32-paths.js";
 
 vi.mock("./spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
+
+// On Windows the ephemeral agent listens on a named pipe, which only the native
+// Win32-OpenSSH client consumes through SSH_AUTH_SOCK; an MSYS build (the
+// Git-bundled ssh a Git-Bash PATH resolves first) finds no agent and is refused
+// before any spawn (D58). The git injector resolves ssh for GIT_SSH_COMMAND against
+// the process PATH, so the native directory has to lead there
+// (ssh-live-auth.test.ts pins the same client for the same reason).
+if (process.platform === "win32") {
+  const nativeSshDir = system32Path("OpenSSH");
+  process.env.PATH = [
+    nativeSshDir,
+    ...controlledPathDirs().filter((d) => d.toLowerCase() !== nativeSshDir.toLowerCase()),
+  ].join(delimiter);
+}
 
 const GIT = resolveExecutable("git", controlledPathDirs());
 const SSH = resolveExecutable("ssh", controlledPathDirs());
@@ -75,7 +99,11 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
   };
 }
 
-type SpawnCall = [string, string[], { env: Record<string, string>; redact?: string[] }];
+type SpawnCall = [
+  string,
+  string[],
+  { env: Record<string, string>; cwd?: string; redact?: string[] },
+];
 
 // Positive-path assertions on the spawned git command (code review 2026-07-07,
 // M13): the credential must reach git via the vault-authored GIT_ASKPASS helper
@@ -114,6 +142,8 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
     expect(args).toEqual([
       "-c",
       "http.followRedirects=false",
+      "-c",
+      expect.stringMatching(/^core\.hooksPath=.+harpoc-git-hooks-/),
       "clone",
       "https://8.8.8.8/org/repo.git",
     ]);
@@ -285,7 +315,9 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
       "-c",
       "http.schannelUseSSLCAInfo=true",
     ]);
-    expect(args.indexOf("clone")).toBe(6);
+    expect(args[6]).toBe("-c");
+    expect(args[7]).toMatch(/^core\.hooksPath=/);
+    expect(args.indexOf("clone")).toBe(8);
     expect(caContent).toBe(CA_PEM);
     if (process.platform !== "win32") expect(caMode).toBe(0o600);
     expect(existsSync(caPathSeen as string)).toBe(false);
@@ -300,7 +332,56 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
     );
     const [, args] = spawnMock.mock.calls[0] as SpawnCall;
     expect(args.join(" ")).not.toContain("sslCAInfo");
-    expect(args.indexOf("clone")).toBe(2);
+    expect(args.indexOf("clone")).toBe(4);
+  });
+
+  it("N11: forces core.hooksPath to an empty vault-authored directory that exists only for the run", async () => {
+    let hooksDir: string | undefined;
+    let entriesAtSpawn: string[] | undefined;
+    spawnMock.mockImplementationOnce(async (_cmd: string, args: string[]) => {
+      const at = args.findIndex((a) => a.startsWith("core.hooksPath="));
+      hooksDir = args[at]?.slice("core.hooksPath=".length);
+      expect(args[at - 1]).toBe("-c");
+      expect(at).toBeLessThan(args.indexOf("clone"));
+      if (hooksDir) entriesAtSpawn = readdirSync(hooksDir);
+      return OK_RESULT;
+    });
+
+    await injector.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      undefined,
+    );
+
+    expect(hooksDir).toBeDefined();
+    expect(entriesAtSpawn).toEqual([]);
+    expect(existsSync(hooksDir as string)).toBe(false);
+  });
+
+  it("N11: a pull into a caller-supplied working tree carries the forced hooksPath too", async () => {
+    const wd = mkdtempSync(join(tmpdir(), "harpoc-git-wd-"));
+    try {
+      await injector.executeWithSecret(
+        {
+          type: "git",
+          operation: "pull",
+          repository: REPO,
+          working_directory: wd,
+        },
+        new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+        httpsPolicy(),
+        undefined,
+      );
+      const [, args, opts] = spawnMock.mock.calls[0] as SpawnCall;
+      const at = args.findIndex((a) => a.startsWith("core.hooksPath="));
+      expect(at).toBeGreaterThan(0);
+      expect(args[at - 1]).toBe("-c");
+      expect(at).toBeLessThan(args.indexOf("pull"));
+      expect(opts.cwd).toBe(wd);
+    } finally {
+      rmSync(wd, { recursive: true, force: true });
+    }
   });
 
   it("marks the audited result row ca_pinned when a stored CA is pinned", async () => {
@@ -491,7 +572,12 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
     const [command, args, opts] = spawnMock.mock.calls[0] as SpawnCall;
 
     expect(command).toBe(GIT);
-    expect(args).toEqual(["clone", "git@github.com:org/repo.git"]);
+    expect(args).toEqual([
+      "-c",
+      expect.stringMatching(/^core\.hooksPath=.+harpoc-git-hooks-/),
+      "clone",
+      "git@github.com:org/repo.git",
+    ]);
 
     const sshCommand = opts.env.GIT_SSH_COMMAND ?? "";
     expect(sshCommand).toContain("StrictHostKeyChecking=yes");
@@ -508,6 +594,41 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
     expect(args.every((a) => !a.includes("PRIVATE KEY"))).toBe(true);
     expect(Object.values(opts.env).every((v) => !v.includes("PRIVATE KEY"))).toBe(true);
     expect(opts.redact).toContain(keyPem);
+  });
+
+  it("N11: the SSH transport forces core.hooksPath as well, and removes the directory after the run", async () => {
+    const { privateKey: keyPem } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: "pkcs1", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    let hooksDir: string | undefined;
+    let entriesAtSpawn: string[] | undefined;
+    spawnMock.mockImplementationOnce(async (_cmd: string, args: string[]) => {
+      hooksDir = args.find((a) => a.startsWith("core.hooksPath="))?.slice("core.hooksPath=".length);
+      if (hooksDir) entriesAtSpawn = readdirSync(hooksDir);
+      return OK_RESULT;
+    });
+
+    await injector.executeWithSecret(
+      {
+        type: "git",
+        operation: "clone",
+        repository: "git@github.com:org/repo.git",
+      },
+      new Uint8Array(Buffer.from(keyPem)),
+      policy({
+        command_allowlist: [GIT as string],
+        host_allowlist: ["github.com"],
+      }),
+      {
+        ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] },
+      },
+    );
+
+    expect(hooksDir).toBeDefined();
+    expect(entriesAtSpawn).toEqual([]);
+    expect(existsSync(hooksDir as string)).toBe(false);
   });
 
   it("normalizes GIT_SSH_COMMAND to forward-slash paths git's bundled sh can exec", async () => {
@@ -1138,6 +1259,91 @@ describeGitSsh("GitInjector SSH-transport filesystem isolation (§4.5.3 layer 4)
         success: true,
         detail: expect.objectContaining({ transport: "ssh", fs_isolation: false }),
       }),
+    );
+  });
+});
+
+const describeGitSshWin32 = GIT && SSH && process.platform === "win32" ? describe : describe.skip;
+
+describeGitSshWin32("GitInjector refuses an MSYS/Cygwin ssh client (D58)", () => {
+  const spawnMock = vi.mocked(spawnCaptured);
+
+  const { privateKey: msysKeyPem } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  const msysConfig: ConnectionConfig = {
+    ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] },
+  };
+  const msysAction: GitAction = {
+    type: "git",
+    operation: "clone",
+    repository: "git@github.com:org/repo.git",
+  };
+  const msysPolicy = () =>
+    policy({ command_allowlist: [GIT as string], host_allowlist: ["github.com"] });
+
+  let fixtureDir: string;
+  let stub: string;
+  const savedPath = process.env.PATH;
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+    spawnMock.mockResolvedValue(OK_RESULT);
+    fixtureDir = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-msys-git-ssh-")));
+    stub = join(fixtureDir, "ssh.exe");
+    writeFileSync(stub, "");
+    writeFileSync(join(fixtureDir, "msys-2.0.dll"), "");
+    // The stub shadows the real ssh; git must still resolve for the transport dispatch.
+    process.env.PATH = `${fixtureDir}${delimiter}${dirname(GIT as string)}`;
+  });
+
+  afterEach(() => {
+    process.env.PATH = savedPath;
+    rmSync(fixtureDir, { recursive: true, force: true });
+  });
+
+  it("refuses before any spawn, with a failed secret.use row naming the code", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    await expect(
+      audited.executeWithSecret(
+        msysAction,
+        new Uint8Array(Buffer.from(msysKeyPem)),
+        msysPolicy(),
+        msysConfig,
+        "secret-1",
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.SSH_CLIENT_UNSUPPORTED });
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "secret.use",
+        success: false,
+        detail: expect.objectContaining({
+          context: "git",
+          host: "github.com",
+          error: "SSH_CLIENT_UNSUPPORTED",
+        }),
+      }),
+    );
+  });
+
+  it("guard-flip: without the DLL the same stub drives GIT_SSH_COMMAND", async () => {
+    rmSync(join(fixtureDir, "msys-2.0.dll"));
+    const injector = new GitInjector(null);
+    await injector.executeWithSecret(
+      msysAction,
+      new Uint8Array(Buffer.from(msysKeyPem)),
+      msysPolicy(),
+      msysConfig,
+    );
+    expect(spawnMock).toHaveBeenCalledOnce();
+    const [command, , opts] = spawnMock.mock.calls[0] as SpawnCall;
+    expect(command).toBe(GIT);
+    expect((opts.env.GIT_SSH_COMMAND ?? "").toLowerCase()).toContain(
+      stub.replaceAll("\\", "/").toLowerCase(),
     );
   });
 });

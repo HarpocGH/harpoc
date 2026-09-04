@@ -7,7 +7,13 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { CertManager } from "@harpoc/cert-manager";
 import type { VaultEngine } from "@harpoc/core";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import {
+  assertBindAllowed,
+  buildAllowedHostSet,
+  checkRequestHost,
+  ErrorCode,
+  VaultError,
+} from "@harpoc/shared";
 import { InjectionGuard } from "./guards/injection-guard.js";
 import { RateLimiter } from "./guards/rate-limiter.js";
 import { createDefaultOAuthManager, createMcpServer } from "./server.js";
@@ -17,7 +23,6 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_ENDPOINT = "/mcp";
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_SESSIONS = 128;
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 /** A session untouched for this long is abandoned — its client is gone. */
 const SESSION_IDLE_TTL_MS = 10 * 60 * 1000;
 /** Cadence of the background reclamation sweep. */
@@ -45,6 +50,13 @@ export interface McpHttpServerOptions {
   engine: VaultEngine;
   port?: number;
   host?: string;
+  /**
+   * Host names clients reach this listener by (R11/D61). Required for a
+   * non-loopback bind; additive on loopback, where 127.0.0.1, ::1 and
+   * localhost are always allowed. Matched on the parsed hostname of Host and
+   * Origin, port-agnostic.
+   */
+  allowedHosts?: readonly string[];
   endpoint?: string;
   sessionLimits?: McpHttpSessionLimits;
 }
@@ -78,12 +90,18 @@ interface McpHttpSession {
  * stdio launch token) and is pinned to the session via a SHA-256 fingerprint;
  * subsequent requests must present the identical token and are re-verified so
  * expiry and revocation take effect mid-session, matching the REST API.
+ *
+ * Every request's Host (and Origin, when present) is checked against the
+ * listener's allowed-host set before anything else — the vault's own check
+ * since 2026-09-04 (R11/D61), the SDK's deprecated transport options no longer
+ * used.
  */
 export async function startMcpHttpServer(options: McpHttpServerOptions): Promise<McpHttpServer> {
   const { engine } = options;
   const host = options.host ?? DEFAULT_HOST;
   const endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
-  const rebindingProtection = LOOPBACK_HOSTS.has(host);
+  assertBindAllowed(host, options.allowedHosts ?? []);
+  const allowedHosts = buildAllowedHostSet(host, options.allowedHosts ?? []);
 
   const sessions = new Map<string, McpHttpSession>();
   const rateLimiter = new RateLimiter();
@@ -95,9 +113,6 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
   const idleTtlMs = options.sessionLimits?.idleTtlMs ?? SESSION_IDLE_TTL_MS;
   const sweepIntervalMs = options.sessionLimits?.sweepIntervalMs ?? SESSION_SWEEP_INTERVAL_MS;
   const evictionGraceMs = options.sessionLimits?.evictionGraceMs ?? SESSION_EVICTION_GRACE_MS;
-
-  let allowedHosts: string[] = [];
-  let allowedOrigins: string[] = [];
 
   function dropSession(id: string, session: McpHttpSession): void {
     sessions.delete(id);
@@ -149,6 +164,22 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
   if (sweepTimer.unref) sweepTimer.unref();
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // The listener's host allowlist answers first (R11/D61): a DNS-rebinding
+    // request never reaches the path, the token gate or a session, and the
+    // refusal names the parsed hostname only — the SDK's own wording, kept.
+    const hostCheck = checkRequestHost(
+      { host: req.headers.host, origin: req.headers.origin },
+      allowedHosts,
+    );
+    if (!hostCheck.ok) {
+      sendJsonRpcError(
+        res,
+        403,
+        `Invalid ${hostCheck.header} header: ${hostCheck.hostname ?? "(missing)"}`,
+      );
+      return;
+    }
+
     const path = (req.url ?? "/").split("?")[0];
     if (path !== endpoint) {
       sendJsonRpcError(res, 404, "Not found");
@@ -244,9 +275,6 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
     const tokenFingerprint = fingerprint(token);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
-      enableDnsRebindingProtection: rebindingProtection,
-      allowedHosts: rebindingProtection ? allowedHosts : undefined,
-      allowedOrigins: rebindingProtection ? allowedOrigins : undefined,
       onsessioninitialized: (id) => {
         sessions.set(id, {
           transport,
@@ -271,8 +299,8 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
     await transport.handleRequest(req, res, body);
 
     if (transport.sessionId === undefined) {
-      // Initialization was rejected (e.g. DNS-rebinding check) — no session
-      // was registered, so tear the orphaned server down.
+      // Initialization was rejected (a malformed initialize request) — no
+      // session was registered, so tear the orphaned server down.
       await server.close();
     }
   }
@@ -314,21 +342,6 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
     throw err;
   }
-
-  allowedHosts = [
-    "127.0.0.1",
-    `127.0.0.1:${boundPort}`,
-    "localhost",
-    `localhost:${boundPort}`,
-    "[::1]",
-    `[::1]:${boundPort}`,
-  ];
-  allowedOrigins = [
-    `http://127.0.0.1:${boundPort}`,
-    `http://localhost:${boundPort}`,
-    `https://127.0.0.1:${boundPort}`,
-    `https://localhost:${boundPort}`,
-  ];
 
   return {
     port: boundPort,

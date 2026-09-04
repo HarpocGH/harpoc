@@ -69,6 +69,13 @@ export interface UidFetchMessageSpec {
 export interface ImapScript {
   /** Advertised capabilities (default `["IMAP4rev1"]`). */
   capabilities?: string[];
+  /**
+   * Capabilities advertised once LOGIN/AUTHENTICATE has succeeded, i.e. the
+   * set a client re-reading CAPABILITY after authentication sees (RFC 3501
+   * 6.1.1 lets the set change; Gmail advertises MOVE and UIDPLUS only once
+   * authenticated). Absent, the authenticated set equals `capabilities`.
+   */
+  postLoginCapabilities?: string[];
   /** Answer LOGIN / AUTHENTICATE with a tagged NO instead of OK. */
   auth?: "ok" | "fail";
   /** Greeting shape: normal `* OK`, never greet, or a hostile `* BYE`. */
@@ -115,6 +122,7 @@ class Connection {
   private curTextChunks: string[] = [];
   private curLiterals: Buffer[] = [];
   private awaitingSaslTag: string | null = null;
+  private authenticated = false;
   private readonly received: Buffer[] = [];
   private readonly recorded: RecordedCommand[] = [];
 
@@ -154,7 +162,9 @@ class Connection {
   }
 
   private capabilityList(): string {
-    const caps = this.script.capabilities ?? ["IMAP4rev1"];
+    const post = this.script.postLoginCapabilities;
+    const caps =
+      this.authenticated && post !== undefined ? post : (this.script.capabilities ?? ["IMAP4rev1"]);
     return caps.join(" ");
   }
 
@@ -285,6 +295,9 @@ class Connection {
     if (this.script.auth === "fail" && (op === "login" || op === "authenticate")) {
       this.send(`${tag} NO [AUTHENTICATIONFAILED] credentials rejected\r\n`);
       return;
+    }
+    if (op === "login" || op === "authenticate") {
+      this.authenticated = true;
     }
     this.send(`${tag} OK ${op} completed\r\n`);
   }

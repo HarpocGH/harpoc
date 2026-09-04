@@ -205,6 +205,58 @@ describe("server start", () => {
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--token-file requires --mcp"));
   });
 
+  it("D61: refuses a non-loopback --host without --allowed-host before the vault opens", async () => {
+    const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+    await expect(run(["--rest", "--host", "0.0.0.0"])).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("requires --allowed-host"));
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+  });
+
+  it("D61: hands every --allowed-host to startServer with the bind address", async () => {
+    const { startServer } = await import("@harpoc/rest-api");
+    await run([
+      "--rest",
+      "--host",
+      "0.0.0.0",
+      "--allowed-host",
+      "vault.example",
+      "--allowed-host",
+      "api.example",
+    ]);
+    expect(startServer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hostname: "0.0.0.0",
+        allowedHosts: ["vault.example", "api.example"],
+      }),
+    );
+  });
+
+  it("D61: --allowed-host on a loopback bind is accepted and additive", async () => {
+    const { startServer } = await import("@harpoc/rest-api");
+    await run(["--rest", "--allowed-host", "vault.example"]);
+    expect(startServer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hostname: "127.0.0.1",
+        allowedHosts: ["vault.example"],
+      }),
+    );
+  });
+
+  it("D61: --allowed-host requires --rest, and an entry with a port is refused", async () => {
+    await expect(run(["--mcp", "--allowed-host", "vault.example"])).rejects.toThrow("process.exit");
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--allowed-host requires --rest"),
+    );
+    errorSpy.mockClear();
+    await expect(run(["--rest", "--allowed-host", "vault.example:3000"])).rejects.toThrow(
+      "process.exit",
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid allowed host "vault.example:3000"'),
+    );
+  });
+
   it("refuses the removed --token flag with the pointer to the two channels", async () => {
     const { createMcpServer } = await import("@harpoc/mcp-server");
 
@@ -452,6 +504,7 @@ describe("server start", () => {
       engine: mockEngine,
       port: 3000,
       hostname: "127.0.0.1",
+      allowedHosts: [],
       oauthManager: mockRestOAuthManager,
     });
   });
@@ -465,19 +518,7 @@ describe("server start", () => {
       engine: mockEngine,
       port: 8080,
       hostname: "127.0.0.1",
-      oauthManager: mockRestOAuthManager,
-    });
-  });
-
-  it("starts REST server with custom bind address", async () => {
-    const { startServer } = await import("@harpoc/rest-api");
-
-    await run(["--rest", "--host", "0.0.0.0"]);
-
-    expect(startServer).toHaveBeenCalledWith({
-      engine: mockEngine,
-      port: 3000,
-      hostname: "0.0.0.0",
+      allowedHosts: [],
       oauthManager: mockRestOAuthManager,
     });
   });

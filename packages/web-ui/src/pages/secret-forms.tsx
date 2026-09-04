@@ -366,7 +366,7 @@ export function PolicyEditor({
           checked={ack}
           onChange={(e) => setAck(e.currentTarget.checked)}
         />
-        Acknowledge adding a known interpreter (audited)
+        Acknowledge adding a known interpreter or exec wrapper (audited)
       </label>
       {error && <p class="error-text">{error.message}</p>}
       {error instanceof ApiError && error.code === "INTERPRETER_NOT_ACKNOWLEDGED" && (

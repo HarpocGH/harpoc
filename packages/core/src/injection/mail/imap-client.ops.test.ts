@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { VaultError } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 import { ImapClient } from "./imap-client.js";
 import type { ImapConnectOptions } from "./imap-client.js";
 import { getFixtureCaPem, FIXTURE_HOST, startFakeImap } from "./__fixtures__/fake-imap-server.js";
@@ -73,7 +73,7 @@ describe("ImapClient — searchUids (UID SEARCH)", () => {
     await client.searchUids({ from: payload });
 
     const names = srv.commands().map((c) => c.name);
-    expect(names).toEqual(["CAPABILITY", "LOGIN", "UID SEARCH"]);
+    expect(names).toEqual(["CAPABILITY", "LOGIN", "CAPABILITY", "UID SEARCH"]);
     expect(names).not.toContain("LOGOUT");
 
     const search = srv.commands().find((c) => c.name === "UID SEARCH");
@@ -241,7 +241,7 @@ describe("ImapClient — store (UID STORE)", () => {
   });
 });
 
-describe("ImapClient — move (UID MOVE, or COPY+STORE+[UID ]EXPUNGE fallback)", () => {
+describe("ImapClient — move (UID MOVE, COPY+STORE+UID EXPUNGE under UIDPLUS, refused otherwise)", () => {
   it("(a) uses UID MOVE when the MOVE capability is present", async () => {
     const srv = await fake({ capabilities: ["IMAP4rev1", "MOVE"] });
     const client = await connect(srv);
@@ -250,7 +250,7 @@ describe("ImapClient — move (UID MOVE, or COPY+STORE+[UID ]EXPUNGE fallback)",
     expect(moved).toBe(2);
 
     const names = srv.commands().map((c) => c.name);
-    expect(names).toEqual(["CAPABILITY", "LOGIN", "UID MOVE"]);
+    expect(names).toEqual(["CAPABILITY", "LOGIN", "CAPABILITY", "UID MOVE"]);
     const cmd = srv.commands().find((c) => c.name === "UID MOVE");
     expect(cmd?.text).toContain('UID MOVE 1,2 "Archive"');
   });
@@ -268,18 +268,71 @@ describe("ImapClient — move (UID MOVE, or COPY+STORE+[UID ]EXPUNGE fallback)",
     expect(moved).toBe(2);
 
     const names = srv.commands().map((c) => c.name);
-    expect(names).toEqual(["CAPABILITY", "LOGIN", "UID COPY", "UID STORE", "UID EXPUNGE"]);
+    expect(names).toEqual([
+      "CAPABILITY",
+      "LOGIN",
+      "CAPABILITY",
+      "UID COPY",
+      "UID STORE",
+      "UID EXPUNGE",
+    ]);
     expect(names).not.toContain("EXPUNGE");
-    expect(srv.commands()[2]?.text).toContain('UID COPY 1,2 "Archive"');
-    expect(srv.commands()[3]?.text).toContain("UID STORE 1,2 +FLAGS (\\Deleted)");
-    expect(srv.commands()[4]?.text).toContain("UID EXPUNGE 1,2");
+    expect(srv.commands()[3]?.text).toContain('UID COPY 1,2 "Archive"');
+    expect(srv.commands()[4]?.text).toContain("UID STORE 1,2 +FLAGS (\\Deleted)");
+    expect(srv.commands()[5]?.text).toContain("UID EXPUNGE 1,2");
   });
 
-  it("(c) without MOVE and without UIDPLUS: COPY+STORE+blanket EXPUNGE (no scoping is possible)", async () => {
+  it("(c) without MOVE and without UIDPLUS: refused before any COPY — no blanket EXPUNGE (E83)", async () => {
+    const srv = await fake({ capabilities: ["IMAP4rev1"], expungeCount: 5 });
+    const client = await connect(srv);
+
+    await expect(client.move([1, 2], "Archive")).rejects.toMatchObject({
+      code: ErrorCode.IMAP_OPERATION_FAILED,
+      message: expect.stringMatching(/neither MOVE .* nor UIDPLUS .* use 'copy'/),
+    });
+
+    const names = srv.commands().map((c) => c.name);
+    expect(names).toEqual(["CAPABILITY", "LOGIN", "CAPABILITY"]);
+    expect(names).not.toContain("UID COPY");
+    expect(names).not.toContain("EXPUNGE");
+  });
+
+  it("(d) MOVE advertised only after authentication is used — the set is re-read post-login", async () => {
+    const srv = await fake({ capabilities: [], postLoginCapabilities: ["IMAP4rev1", "MOVE"] });
+    const client = await connect(srv);
+
+    const moved = await client.move([1, 2], "Archive");
+    expect(moved).toBe(2);
+
+    const names = srv.commands().map((c) => c.name);
+    expect(names).toEqual(["CAPABILITY", "LOGIN", "CAPABILITY", "UID MOVE"]);
+    const cmd = srv.commands().find((c) => c.name === "UID MOVE");
+    expect(cmd?.text).toContain('UID MOVE 1,2 "Archive"');
+  });
+
+  it("(e) UIDPLUS advertised pre-login but withdrawn after it is refused before any COPY (E83)", async () => {
     const srv = await fake({
-      capabilities: ["IMAP4rev1"],
-      // Same uncorrelated-count proof as (b), on the blanket-EXPUNGE path.
+      capabilities: ["IMAP4rev1", "UIDPLUS"],
+      postLoginCapabilities: [],
       expungeCount: 5,
+    });
+    const client = await connect(srv);
+
+    await expect(client.move([1, 2], "Archive")).rejects.toMatchObject({
+      code: ErrorCode.IMAP_OPERATION_FAILED,
+      message: expect.stringMatching(/neither MOVE .* nor UIDPLUS .* use 'copy'/),
+    });
+
+    const names = srv.commands().map((c) => c.name);
+    expect(names).toEqual(["CAPABILITY", "LOGIN", "CAPABILITY"]);
+    expect(names).not.toContain("UID COPY");
+    expect(names).not.toContain("EXPUNGE");
+  });
+
+  it("(f) an unchanged set across both reads still takes the UID MOVE branch", async () => {
+    const srv = await fake({
+      capabilities: ["IMAP4rev1", "MOVE"],
+      postLoginCapabilities: ["IMAP4rev1", "MOVE"],
     });
     const client = await connect(srv);
 
@@ -287,10 +340,7 @@ describe("ImapClient — move (UID MOVE, or COPY+STORE+[UID ]EXPUNGE fallback)",
     expect(moved).toBe(2);
 
     const names = srv.commands().map((c) => c.name);
-    expect(names).toEqual(["CAPABILITY", "LOGIN", "UID COPY", "UID STORE", "EXPUNGE"]);
-    expect(names).not.toContain("UID EXPUNGE");
-    expect(srv.commands()[2]?.text).toContain('UID COPY 1,2 "Archive"');
-    expect(srv.commands()[3]?.text).toContain("UID STORE 1,2 +FLAGS (\\Deleted)");
+    expect(names).toEqual(["CAPABILITY", "LOGIN", "CAPABILITY", "UID MOVE"]);
   });
 
   it("guard-flip: a CRLF-bearing target mailbox arrives as a literal, not a second command", async () => {
@@ -301,7 +351,7 @@ describe("ImapClient — move (UID MOVE, or COPY+STORE+[UID ]EXPUNGE fallback)",
     await client.move([1], payload);
 
     const names = srv.commands().map((c) => c.name);
-    expect(names).toEqual(["CAPABILITY", "LOGIN", "UID MOVE"]);
+    expect(names).toEqual(["CAPABILITY", "LOGIN", "CAPABILITY", "UID MOVE"]);
     const cmd = srv.commands().find((c) => c.name === "UID MOVE");
     expect(cmd?.literals).toHaveLength(1);
     expect(cmd?.literals[0]?.toString("utf8")).toBe(payload);
@@ -329,7 +379,12 @@ describe("ImapClient — expunge", () => {
     const count = await client.expunge();
     expect(count).toBe(3);
 
-    expect(srv.commands().map((c) => c.name)).toEqual(["CAPABILITY", "LOGIN", "EXPUNGE"]);
+    expect(srv.commands().map((c) => c.name)).toEqual([
+      "CAPABILITY",
+      "LOGIN",
+      "CAPABILITY",
+      "EXPUNGE",
+    ]);
   });
 
   it("reports zero when nothing was expunged", async () => {

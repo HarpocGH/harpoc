@@ -516,7 +516,9 @@ describe("PUT /api/v1/agents/:name/secrets/:handle/permissions", () => {
   });
 
   // The cell touches one named secret, so the token's project/name dimensions
-  // apply on top of the governance `admin` check.
+  // apply on top of the governance `admin` check. At the route level the
+  // cell's own scope check refuses; in createApp the group middleware refuses
+  // every governance route first (app.test.ts, R11/N12).
   it("refuses a handle outside a project-scoped admin token", async () => {
     engine = createMockEngine({ ...ADMIN_TOKEN, project: "p" });
     app = buildApp(engine);

@@ -136,7 +136,7 @@ export function registerSecretAllowCommand(secret: Command): void {
     .option("--no-imap-read-only", "Remove a stored IMAP read-only requirement")
     .option(
       "--acknowledge-interpreter",
-      "Explicitly acknowledge allowlisting a known interpreter (sh, bash, python, node, ...) — collapses the capability ladder for this secret; refused and audited otherwise",
+      "Explicitly acknowledge allowlisting a known interpreter (sh, bash, python, node, ...) or exec wrapper (sudo, xargs, find, tar, ...) — collapses the capability ladder for this secret; refused and audited otherwise",
     )
     .option("--clear", "Reset the whole policy to defaults before applying the other flags")
     .option("--show", "Show the current policy instead of setting it")

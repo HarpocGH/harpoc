@@ -59,6 +59,7 @@ import {
   isValidSecretNamePattern,
   isVaultVersionSupported,
   IssuedTokenStatus,
+  execWrapperName,
   knownInterpreterName,
   LOCKOUT_DURATIONS_MS,
   LOCKOUT_MAX_ATTEMPTS,
@@ -1724,18 +1725,25 @@ export class VaultEngine {
 
     const stored = new Set(this.loadInjectionPolicy(s, secret.id).command_allowlist);
     const pathDirs = controlledPathDirs();
-    const addedInterpreters = [
-      ...new Set(
-        (policy.command_allowlist ?? [])
-          .filter((entry) => !stored.has(entry))
-          .filter((entry) => {
-            if (knownInterpreterName(entry) !== null) return true;
-            const resolved = resolveExecutable(entry, pathDirs);
-            return resolved !== null && knownInterpreterName(resolved) !== null;
-          }),
-      ),
+    const added = [
+      ...new Set((policy.command_allowlist ?? []).filter((entry) => !stored.has(entry))),
     ];
-    if (addedInterpreters.length > 0 && options?.acknowledge_interpreters !== true) {
+    // Two tiers, one flag (R6(ii)): the raw name first, then the entry
+    // resolved on the controlled PATH (a symlink to `sh` is `sh`, E71i). An
+    // entry is counted in exactly one tier.
+    const tierOf = (entry: string): "interpreter" | "wrapper" | null => {
+      if (knownInterpreterName(entry) !== null) return "interpreter";
+      if (execWrapperName(entry) !== null) return "wrapper";
+      const resolved = resolveExecutable(entry, pathDirs);
+      if (resolved === null) return null;
+      if (knownInterpreterName(resolved) !== null) return "interpreter";
+      return execWrapperName(resolved) !== null ? "wrapper" : null;
+    };
+    const tiers = new Map(added.map((entry) => [entry, tierOf(entry)] as const));
+    const addedInterpreters = added.filter((entry) => tiers.get(entry) === "interpreter");
+    const addedWrappers = added.filter((entry) => tiers.get(entry) === "wrapper");
+    const gated = addedInterpreters.length > 0 || addedWrappers.length > 0;
+    if (gated && options?.acknowledge_interpreters !== true) {
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_INTERPRETER_REFUSED,
         secretId: secret.id,
@@ -1743,11 +1751,12 @@ export class VaultEngine {
         detail: {
           policy: "injection",
           interpreters: addedInterpreters,
+          exec_wrappers: addedWrappers,
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
       });
-      throw VaultError.interpreterNotAcknowledged(addedInterpreters);
+      throw VaultError.interpreterNotAcknowledged(addedInterpreters, addedWrappers);
     }
 
     const json = JSON.stringify({
@@ -1801,7 +1810,7 @@ export class VaultEngine {
         sessionId: this.sessionId ?? undefined,
       });
 
-      if (addedInterpreters.length > 0) {
+      if (gated) {
         s.auditLogger.log({
           eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED,
           secretId: secret.id,
@@ -1809,6 +1818,7 @@ export class VaultEngine {
           detail: {
             policy: "injection",
             interpreters: addedInterpreters,
+            exec_wrappers: addedWrappers,
             ...callerInterfaceDetail(caller),
           },
           sessionId: this.sessionId ?? undefined,
@@ -3410,14 +3420,28 @@ export class VaultEngine {
   // ---------------------------------------------------------------------------
 
   /**
+   * Governance is vault-wide by definition (R11/N12, 2026-09-04): a token
+   * carrying a `project` claim administers nothing here. The trusted path
+   * passes no caller and is exempt; the refusal writes no row, like every
+   * interface scope refusal. R7's admin_scope does not waive it.
+   */
+  private assertUnscopedGovernanceCaller(caller: CallerContext | undefined): void {
+    if (caller?.project !== undefined) {
+      throw VaultError.accessDenied("governance requires an unscoped admin token");
+    }
+  }
+
+  /**
    * Register an agent — the named identity a token may later be issued to
    * (design §5.1). Governance operations have no per-secret referent, so the
-   * `admin` check lives at the interface (REST route / CLI token path) and the
-   * `caller` here is audit attribution only (§5.6): NULL principal columns mark
-   * the trusted local path.
+   * `admin` check lives at the interface (REST route / CLI token path); the
+   * engine adds the one vault-wide rule — a project-claimed caller is refused
+   * (N12) — and otherwise treats the `caller` as audit attribution only
+   * (§5.6): NULL principal columns mark the trusted local path.
    */
   registerAgent(input: RegisterAgentInput, caller?: CallerContext): Agent {
     const s = this.assertUnlocked();
+    this.assertUnscopedGovernanceCaller(caller);
     return s.store.transaction(() => {
       const row = s.agentRegistry.register(input);
 
@@ -3436,17 +3460,17 @@ export class VaultEngine {
     });
   }
 
-  /** Governance read: unaudited on success (design §5.6); the caller is signature parity only. */
+  /** Governance read: unaudited on success (design §5.6); the caller is consulted only for the unscoped-token rule (N12). */
   getAgent(name: string, caller?: CallerContext): Agent {
     const s = this.assertUnlocked();
-    void caller;
+    this.assertUnscopedGovernanceCaller(caller);
     return s.agentRegistry.toAgent(s.agentRegistry.getByName(name));
   }
 
-  /** Governance read: unaudited on success (design §5.6); the caller is signature parity only. */
+  /** Governance read: unaudited on success (design §5.6); the caller is consulted only for the unscoped-token rule (N12). */
   listAgents(status: AgentStatus | "all" = AgentStatus.ACTIVE, caller?: CallerContext): Agent[] {
     const s = this.assertUnlocked();
-    void caller;
+    this.assertUnscopedGovernanceCaller(caller);
     const now = Date.now();
     return s.agentRegistry.list(status).map((row) => s.agentRegistry.toAgent(row, now));
   }
@@ -3458,6 +3482,7 @@ export class VaultEngine {
    */
   updateAgent(name: string, input: UpdateAgentInput, caller?: CallerContext): Agent {
     const s = this.assertUnlocked();
+    this.assertUnscopedGovernanceCaller(caller);
     const fields = (["description", "owner"] as const).filter(
       (field) => input[field] !== undefined,
     );
@@ -3479,6 +3504,7 @@ export class VaultEngine {
   /** Reactivate a deactivated agent. Status only: tokens revoked on the way out stay revoked. */
   activateAgent(name: string, caller?: CallerContext): Agent {
     const s = this.assertUnlocked();
+    this.assertUnscopedGovernanceCaller(caller);
     return s.store.transaction(() => {
       const row = s.agentRegistry.setStatus(name, AgentStatus.ACTIVE);
 
@@ -3503,6 +3529,7 @@ export class VaultEngine {
    */
   deactivateAgent(name: string, caller?: CallerContext): { revoked_tokens: number } {
     const s = this.assertUnlocked();
+    this.assertUnscopedGovernanceCaller(caller);
     return s.store.transaction(() => {
       const existing = s.agentRegistry.getByName(name);
       const row =
@@ -3534,6 +3561,7 @@ export class VaultEngine {
     caller?: CallerContext,
   ): { revoked_tokens: number; removed_grants: number } {
     const s = this.assertUnlocked();
+    this.assertUnscopedGovernanceCaller(caller);
     return s.store.transaction(() => {
       const row = s.agentRegistry.getByName(name);
       const revokedTokens = this.revokeLiveTokensForAgent(s, row.id, "agent_deleted", caller);
@@ -3755,6 +3783,7 @@ export class VaultEngine {
       throw VaultError.invalidInput(CREATE_NOT_GRANTABLE_MESSAGE);
     }
     const s = this.assertUnlocked();
+    this.assertUnscopedGovernanceCaller(caller);
     s.agentRegistry.assertActive(agentName);
     this.checkResolvedCallerPolicy(
       s,
@@ -3815,15 +3844,15 @@ export class VaultEngine {
   /**
    * The agent's row of the matrix: its non-expired grants with the secret
    * handle resolved. Governance read — unaudited on success (design §5.6) and
-   * the caller is attribution parity only. Registration is checked with
-   * `getByName`, not `assertActive`: deactivation keeps an agent's grants (see
-   * {@link deactivateAgent}), so hiding them would misreport what a
-   * reactivation would restore. A grant whose secret no longer resolves is
-   * skipped rather than reported handle-less.
+   * the caller is consulted only for the unscoped-token rule (N12).
+   * Registration is checked with `getByName`, not `assertActive`: deactivation
+   * keeps an agent's grants (see {@link deactivateAgent}), so hiding them would
+   * misreport what a reactivation would restore. A grant whose secret no longer
+   * resolves is skipped rather than reported handle-less.
    */
   listAgentPolicies(agentName: string, caller?: CallerContext): AgentPolicy[] {
     const s = this.assertUnlocked();
-    void caller;
+    this.assertUnscopedGovernanceCaller(caller);
     const name = s.agentRegistry.getByName(agentName).name;
     const now = Date.now();
 
@@ -4199,6 +4228,7 @@ export class VaultEngine {
    */
   revokeToken(jti: string, caller?: CallerContext): void {
     const s = this.assertUnlocked();
+    this.assertUnscopedGovernanceCaller(caller);
     const issued = s.store.getIssuedToken(jti);
     if (!issued) {
       throw VaultError.invalidInput(`Unknown token jti: ${jti}`);
@@ -4224,14 +4254,14 @@ export class VaultEngine {
    * an elapsed expiry, so a token revoked before it lapsed reads `revoked`.
    *
    * Governance read: unaudited on success (design §5.6); the caller is
-   * attribution parity only.
+   * consulted only for the unscoped-token rule (N12).
    */
   listIssuedTokens(
     filter?: { agent?: string; status?: IssuedTokenStatusFilter },
     caller?: CallerContext,
   ): IssuedToken[] {
     const s = this.assertUnlocked();
-    void caller;
+    this.assertUnscopedGovernanceCaller(caller);
 
     const agentId =
       filter?.agent !== undefined ? s.agentRegistry.getByName(filter.agent).id : undefined;

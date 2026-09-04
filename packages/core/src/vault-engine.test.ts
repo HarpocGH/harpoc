@@ -1191,6 +1191,7 @@ describe("interpreter acknowledgement (thesis §4.5.3)", () => {
     expect(refused).toHaveLength(1);
     expect(refused[0]?.detail?.policy).toBe("injection");
     expect(refused[0]?.detail?.interpreters).toEqual(["python"]);
+    expect(refused[0]?.detail?.exec_wrappers).toEqual([]);
   });
 
   it("accepts an acknowledged interpreter addition and audits it", async () => {
@@ -1207,6 +1208,68 @@ describe("interpreter acknowledgement (thesis §4.5.3)", () => {
     });
     expect(acked).toHaveLength(1);
     expect(acked[0]?.detail?.interpreters).toEqual(["python"]);
+    expect(acked[0]?.detail?.exec_wrappers).toEqual([]);
+    expect(engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })).toHaveLength(1);
+  });
+
+  it("R6(ii): refuses an exec wrapper without acknowledgement and audits the tier", async () => {
+    const err = await expectVaultError(
+      () =>
+        engine.setInjectionPolicy("secret://interp", {
+          url_allowlist: [],
+          command_allowlist: ["sudo"],
+          env_allowlist: [],
+        }),
+      ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED,
+    );
+    expect(err.message).toContain("exec wrapper(s): sudo");
+    expect(err.message).not.toContain("known interpreter(s)");
+    expect((await engine.getInjectionPolicy("secret://interp")).command_allowlist).toEqual([]);
+
+    const refused = engine.queryAudit({
+      eventType: AuditEventType.POLICY_INTERPRETER_REFUSED,
+    });
+    expect(refused).toHaveLength(1);
+    expect(refused[0]?.detail?.interpreters).toEqual([]);
+    expect(refused[0]?.detail?.exec_wrappers).toEqual(["sudo"]);
+  });
+
+  it("R6(ii): names both tiers when one write adds an interpreter and a wrapper", async () => {
+    const err = await expectVaultError(
+      () =>
+        engine.setInjectionPolicy("secret://interp", {
+          url_allowlist: [],
+          command_allowlist: ["python", "/usr/bin/tar"],
+          env_allowlist: [],
+        }),
+      ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED,
+    );
+    expect(err.message).toContain("known interpreter(s): python and exec wrapper(s): /usr/bin/tar");
+
+    const refused = engine.queryAudit({
+      eventType: AuditEventType.POLICY_INTERPRETER_REFUSED,
+    });
+    expect(refused).toHaveLength(1);
+    expect(refused[0]?.detail?.interpreters).toEqual(["python"]);
+    expect(refused[0]?.detail?.exec_wrappers).toEqual(["/usr/bin/tar"]);
+  });
+
+  it("R6(ii): accepts an acknowledged exec wrapper under the same flag and audits it", async () => {
+    await engine.setInjectionPolicy(
+      "secret://interp",
+      { url_allowlist: [], command_allowlist: ["xargs"], env_allowlist: [] },
+      { acknowledge_interpreters: true },
+    );
+    expect((await engine.getInjectionPolicy("secret://interp")).command_allowlist).toEqual([
+      "xargs",
+    ]);
+
+    const acked = engine.queryAudit({
+      eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED,
+    });
+    expect(acked).toHaveLength(1);
+    expect(acked[0]?.detail?.interpreters).toEqual([]);
+    expect(acked[0]?.detail?.exec_wrappers).toEqual(["xargs"]);
     expect(engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })).toHaveLength(1);
   });
 

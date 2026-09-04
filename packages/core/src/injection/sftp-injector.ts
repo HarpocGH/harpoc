@@ -5,6 +5,7 @@ import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
 import {
+  assertNativeWin32SshClient,
   buildSshEnv,
   isHostKeyFailure,
   sshHardeningArgs,
@@ -234,6 +235,7 @@ export async function executeSftpAction(
 
   // Resolve + allowlist the sftp binary (fail-safe deny, absolute-path pinned).
   const sftpPath = resolveAndMatchCommand("sftp", policy.command_allowlist, controlledPathDirs());
+  assertNativeWin32SshClient(sftpPath);
 
   // The scripted command is built (and its paths validated) before any
   // temp resource is created, so a refused path never leaves a file behind.

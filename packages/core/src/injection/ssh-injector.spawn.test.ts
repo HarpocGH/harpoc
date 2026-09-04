@@ -1,6 +1,15 @@
 import { generateKeyPairSync } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, InjectionPolicy, SshAction } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
@@ -8,8 +17,23 @@ import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { SshInjector } from "./ssh-injector.js";
+import { system32Path } from "../win32-paths.js";
 
 vi.mock("./spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
+
+// On Windows the ephemeral agent listens on a named pipe, which only the native
+// Win32-OpenSSH client consumes through SSH_AUTH_SOCK; an MSYS build (the
+// Git-bundled ssh a Git-Bash PATH resolves first) finds no agent and is refused
+// before any spawn (D58). The ssh injector resolves the bare name against the process
+// PATH itself, so the native directory has to lead there, not only in the allowlist
+// entry this suite pins (ssh-live-auth.test.ts pins the same client for the same reason).
+if (process.platform === "win32") {
+  const nativeSshDir = system32Path("OpenSSH");
+  process.env.PATH = [
+    nativeSshDir,
+    ...controlledPathDirs().filter((d) => d.toLowerCase() !== nativeSshDir.toLowerCase()),
+  ].join(delimiter);
+}
 
 const SSH = resolveExecutable("ssh", controlledPathDirs());
 const describeSsh = SSH ? describe : describe.skip;
@@ -530,3 +554,68 @@ describeSsh("SshInjector output sanitization on the row (Wave 2, E70)", () => {
     expect("sanitized" in row.detail).toBe(false);
   });
 });
+
+describe.runIf(process.platform === "win32")(
+  "SshInjector refuses an MSYS/Cygwin ssh client (D58)",
+  () => {
+    const spawnMock = vi.mocked(spawnCaptured);
+    let fixtureDir: string;
+    let stub: string;
+    const savedPath = process.env.PATH;
+
+    beforeEach(() => {
+      spawnMock.mockReset();
+      spawnMock.mockResolvedValue(OK_RESULT);
+      fixtureDir = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-msys-ssh-")));
+      stub = join(fixtureDir, "ssh.exe");
+      writeFileSync(stub, "");
+      writeFileSync(join(fixtureDir, "msys-2.0.dll"), "");
+      process.env.PATH = fixtureDir;
+    });
+
+    afterEach(() => {
+      process.env.PATH = savedPath;
+      rmSync(fixtureDir, { recursive: true, force: true });
+    });
+
+    it("refuses before any spawn, with a failed secret.use row naming the code", async () => {
+      const log = vi.fn();
+      const injector = new SshInjector({ log } as unknown as AuditLogger);
+      await expect(
+        injector.executeWithSecret(
+          ACTION,
+          new Uint8Array(Buffer.from(makeKeyPem())),
+          policy({
+            host_allowlist: ["deploy.example.com"],
+            command_allowlist: [stub],
+          }),
+          SSH_CONFIG,
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.SSH_CLIENT_UNSUPPORTED });
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log.mock.calls[0]?.[0]).toMatchObject({
+        eventType: "secret.use",
+        success: false,
+        detail: expect.objectContaining({ error: "SSH_CLIENT_UNSUPPORTED" }),
+      });
+    });
+
+    it("guard-flip: without the DLL the same stub is spawned", async () => {
+      rmSync(join(fixtureDir, "msys-2.0.dll"));
+      const injector = new SshInjector(null);
+      await injector.executeWithSecret(
+        ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        policy({
+          host_allowlist: ["deploy.example.com"],
+          command_allowlist: [stub],
+        }),
+        SSH_CONFIG,
+      );
+      expect(spawnMock).toHaveBeenCalledOnce();
+      const [command] = spawnMock.mock.calls[0] as [string, string[], unknown];
+      expect(command.toLowerCase()).toBe(stub.toLowerCase());
+    });
+  },
+);

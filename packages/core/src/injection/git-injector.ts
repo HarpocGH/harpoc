@@ -21,6 +21,7 @@ import {
 import { spawnCaptured } from "./spawn-captured.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
 import {
+  assertNativeWin32SshClient,
   buildSshEnv,
   isHostKeyFailure,
   sshHardeningArgs,
@@ -34,7 +35,9 @@ import { validateUrl } from "./url-validator.js";
 /** git args that turn data into an instruction vehicle (config/hook/transport execution).
  *  Matched by name prefix, so both `--template=<dir>` and `--template <dir>` are caught
  *  (the value arg on its own is inert). `--template`/`--separate-git-dir` run hooks /
- *  relocate the git dir at clone time — clone-time local code execution vectors. */
+ *  relocate the git dir at clone time — clone-time local code execution vectors.
+ *  A pre-existing hook in a caller-supplied working tree is a separate vector — closed
+ *  by the vault-authored core.hooksPath every run carries (N11, createEmptyHooksDir). */
 const DANGEROUS_ARG_PREFIXES = [
   "-c",
   "--config",
@@ -99,6 +102,11 @@ process.stdout.write(out + "\\n");
  * (D64) adds `http.sslCAInfo=<0600 temp file>` and
  * `http.schannelUseSSLCAInfo=true` — vault-authored, since `-c` is denied to
  * callers and both curl backends honor the pair.
+ *
+ * Both transports additionally carry -c core.hooksPath=<empty temp dir>, prepended
+ * by buildGitArgs, so no hook of the caller's tree — post-merge on pull, pre-push on
+ * push, a template's post-checkout on clone — runs with the credential or the agent
+ * socket in its environment (N11).
  */
 const HTTPS_FORCED_CONFIG = ["-c", "http.followRedirects=false"];
 
@@ -175,7 +183,14 @@ export class GitInjector {
     }
 
     const { user, password } = parseGitCredential(secretValue);
-    const built = buildGitArgs(action);
+    const hooks = createEmptyHooksDir();
+    let built: { args: string[]; cwd: string | undefined };
+    try {
+      built = buildGitArgs(action, hooks.dir);
+    } catch (err) {
+      hooks.dispose();
+      throw err;
+    }
     const cwd = built.cwd;
     const timeoutMs = action.timeout_ms ?? DEFAULT_GIT_TIMEOUT_MS;
     const askpass = writeAskpass();
@@ -249,6 +264,7 @@ export class GitInjector {
       );
       return result;
     } finally {
+      hooks.dispose();
       askpass.dispose();
       ca?.dispose();
     }
@@ -282,9 +298,24 @@ export class GitInjector {
     if (!sshPath) {
       throw VaultError.invalidGitConfig("ssh binary not found on the controlled PATH");
     }
+    try {
+      assertNativeWin32SshClient(sshPath);
+    } catch (err) {
+      if (err instanceof VaultError)
+        this.audit(action, secretId, { host, error: err.code }, false, attribution);
+      throw err;
+    }
 
     const keyPem = Buffer.from(secretValue).toString("utf8");
-    const { args, cwd } = buildGitArgs(action);
+    const hooks = createEmptyHooksDir();
+    let args: string[];
+    let cwd: string | undefined;
+    try {
+      ({ args, cwd } = buildGitArgs(action, hooks.dir));
+    } catch (err) {
+      hooks.dispose();
+      throw err;
+    }
     const timeoutMs = action.timeout_ms ?? DEFAULT_GIT_TIMEOUT_MS;
     const kh = writeKnownHosts(knownHosts);
 
@@ -293,6 +324,7 @@ export class GitInjector {
       agent = await EphemeralSshAgent.start(keyPem);
     } catch (err) {
       kh.dispose();
+      hooks.dispose();
       if (err instanceof VaultError)
         this.audit(action, secretId, { host, error: err.code }, false, attribution);
       throw err;
@@ -377,6 +409,7 @@ export class GitInjector {
       );
       return result;
     } finally {
+      hooks.dispose();
       agent.dispose();
       kh.dispose();
       identity?.dispose();
@@ -466,18 +499,28 @@ function parseGitCredential(value: Uint8Array): { user: string; password: string
   return { user: s.slice(0, i), password: s.slice(i + 1) };
 }
 
-function buildGitArgs(action: GitAction): { args: string[]; cwd: string | undefined } {
+function buildGitArgs(
+  action: GitAction,
+  hooksDir: string,
+): { args: string[]; cwd: string | undefined } {
+  const hooks = ["-c", `core.hooksPath=${hooksDir}`];
   const safeArgs = action.args ?? [];
   if (action.operation === "clone") {
     const dest = action.working_directory ? [action.working_directory] : [];
-    return { args: ["clone", ...safeArgs, action.repository, ...dest], cwd: undefined };
+    return {
+      args: [...hooks, "clone", ...safeArgs, action.repository, ...dest],
+      cwd: undefined,
+    };
   }
   const wd = action.working_directory;
   if (!wd) {
     throw VaultError.invalidGitConfig(`working_directory is required for ${action.operation}`);
   }
   assertDirectory(wd);
-  return { args: [action.operation, ...safeArgs, action.repository], cwd: wd };
+  return {
+    args: [...hooks, action.operation, ...safeArgs, action.repository],
+    cwd: wd,
+  };
 }
 
 function assertDirectory(dir: string): void {
@@ -504,6 +547,25 @@ function baseGitEnv(envAllowlist: string[]): Record<string, string> {
     if (v !== undefined) env[name] = v;
   }
   return env;
+}
+
+/**
+ * An empty directory git is pointed at through `core.hooksPath` for one run
+ * (N11): git looks hooks up there and nowhere else, so nothing in the
+ * caller's `.git/hooks` executes. Vault-authored and empty by construction.
+ */
+function createEmptyHooksDir(): { dir: string; dispose: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), "harpoc-git-hooks-"));
+  return {
+    dir,
+    dispose: () => {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* best effort */
+      }
+    },
+  };
 }
 
 /** Vault-authored askpass launcher + helper in a temp dir; credential passed via env, not argv. */

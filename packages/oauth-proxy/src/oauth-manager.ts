@@ -113,6 +113,25 @@ function waitForCallbackOrAbort(
   });
 }
 
+/**
+ * `client_secret_basic` puts the client credentials in an Authorization
+ * header; without a secret there is nothing to put there and the helper would
+ * fall through to a public-client body — an RFC-consistent fall-through for
+ * refresh, but a configuration mistake at flow start (R11/B26, 2026-09-04).
+ * Checked on the resolved config, after the preset merge and before the
+ * pending secret is created, so no row and no network precede the refusal.
+ */
+function assertAuthMethodPairing(config: OAuthProviderConfig): void {
+  if (
+    config.token_endpoint_auth_method === "client_secret_basic" &&
+    (config.client_secret === undefined || config.client_secret === "")
+  ) {
+    throw VaultError.invalidInput(
+      "client_secret_basic requires a client secret: the method sends the client credentials in an Authorization header, which a public client cannot form — supply the secret, or choose client_secret_post (the default) for a public client",
+    );
+  }
+}
+
 export class OAuthManager {
   private engine: VaultEngine;
   private openBrowser: (url: string) => Promise<void>;
@@ -188,6 +207,7 @@ export class OAuthManager {
     caller?: CallerContext,
   ): Promise<AuthorizationCodeStart> {
     const resolved = resolveProvider(config);
+    assertAuthMethodPairing(resolved);
     const { handle, secretId } = await this.engine.createOAuthSecret(
       name,
       resolved,
@@ -390,6 +410,7 @@ export class OAuthManager {
     caller?: CallerContext,
   ): Promise<OAuthFlowResult> {
     const resolved = resolveProvider(config);
+    assertAuthMethodPairing(resolved);
     const { handle, secretId } = await this.engine.createOAuthSecret(
       name,
       resolved,
@@ -428,6 +449,7 @@ export class OAuthManager {
     caller?: CallerContext,
   ): Promise<DeviceCodeFlowResult> {
     const resolved = resolveProvider(config);
+    assertAuthMethodPairing(resolved);
     const { handle, secretId } = await this.engine.createOAuthSecret(
       name,
       resolved,

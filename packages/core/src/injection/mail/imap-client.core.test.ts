@@ -50,7 +50,7 @@ describe("ImapClient — command injection is impossible by construction", () =>
 
     const names = srv.commands().map((c) => c.name);
     // Exactly the three commands connect+select issue — no injected fourth.
-    expect(names).toEqual(["CAPABILITY", "LOGIN", "SELECT"]);
+    expect(names).toEqual(["CAPABILITY", "LOGIN", "CAPABILITY", "SELECT"]);
     expect(names).not.toContain("DELETE");
 
     const select = srv.commands().find((c) => c.name === "SELECT");
@@ -73,7 +73,7 @@ describe("ImapClient — command injection is impossible by construction", () =>
 });
 
 describe("ImapClient — connect: TLS, greeting, CAPABILITY, auth", () => {
-  it("happy path: greeting → CAPABILITY → LOGIN, capabilities exposed", async () => {
+  it("happy path: greeting → CAPABILITY → LOGIN → CAPABILITY, capabilities exposed", async () => {
     const srv = await fake({ capabilities: ["IMAP4rev1", "IDLE", "MOVE"] });
     const client = await connect(srv);
 
@@ -81,7 +81,7 @@ describe("ImapClient — connect: TLS, greeting, CAPABILITY, auth", () => {
     expect(client.capabilities().has("MOVE")).toBe(true);
 
     const names = srv.commands().map((c) => c.name);
-    expect(names).toEqual(["CAPABILITY", "LOGIN"]);
+    expect(names).toEqual(["CAPABILITY", "LOGIN", "CAPABILITY"]);
     const raw = srv.raw().toString("latin1");
     // The password rides as an IMAP string argument, never as an atom on the verb line.
     expect(raw).toContain("LOGIN");

@@ -6,7 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { VaultEngine } from "@harpoc/core";
 import { OAuthManager } from "@harpoc/oauth-proxy";
-import { VaultError } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 import { startMcpHttpServer } from "./http.js";
 import type { McpHttpServer } from "./http.js";
 
@@ -436,6 +436,80 @@ describe("startMcpHttpServer", () => {
       JSON.stringify(INIT_BODY),
     );
     expect(res.status).toBe(403);
+  });
+
+  it("D61: refuses a non-loopback bind without an allowed host before anything is bound", async () => {
+    const engine = mockEngine();
+    await expect(startMcpHttpServer({ engine, port: 0, host: "0.0.0.0" })).rejects.toMatchObject({
+      code: ErrorCode.INVALID_INPUT,
+    });
+    expect(engine.auditServerStart).not.toHaveBeenCalled();
+  });
+
+  it("D61: an allowed host admits its name with any port and refuses the rest — ahead of the token gate", async () => {
+    server = await startMcpHttpServer({
+      engine: mockEngine(),
+      port: 0,
+      allowedHosts: ["Vault.Example"],
+    });
+    const { port } = server;
+
+    const ok = await rawRequest(
+      port,
+      rpcHeaders({
+        authorization: `Bearer ${TOKEN}`,
+        host: `vault.example:${String(port)}`,
+      }),
+      JSON.stringify(INIT_BODY),
+    );
+    expect(ok.status).toBe(200);
+
+    // No token at all: the Host check answers first, so a rebinding probe
+    // learns nothing about the token gate.
+    const evil = await rawRequest(
+      port,
+      rpcHeaders({ host: "evil.example:8080" }),
+      JSON.stringify(INIT_BODY),
+    );
+    expect(evil.status).toBe(403);
+    expect(evil.body).toContain("Invalid Host header: evil.example");
+    expect(evil.body).not.toContain("8080");
+
+    const origin = await rawRequest(
+      port,
+      rpcHeaders({
+        authorization: `Bearer ${TOKEN}`,
+        host: "vault.example",
+        origin: "http://evil.example",
+      }),
+      JSON.stringify(INIT_BODY),
+    );
+    expect(origin.status).toBe(403);
+    expect(origin.body).toContain("Invalid Origin header: evil.example");
+
+    // The loopback names stay allowed on a loopback bind, flag or no flag.
+    const loopback = await rawRequest(
+      port,
+      rpcHeaders({
+        authorization: `Bearer ${TOKEN}`,
+        host: `127.0.0.1:${String(port)}`,
+      }),
+      JSON.stringify(INIT_BODY),
+    );
+    expect(loopback.status).toBe(200);
+  });
+
+  it("D61: the Host check covers GET and DELETE as well as POST", async () => {
+    const { port } = await start(mockEngine());
+    for (const method of ["POST", "GET", "DELETE"]) {
+      const res = await rawRequest(
+        port,
+        rpcHeaders({ authorization: `Bearer ${TOKEN}`, host: "evil.example" }),
+        method === "POST" ? JSON.stringify(INIT_BODY) : "",
+        method,
+      );
+      expect(res.status, method).toBe(403);
+    }
   });
 
   it("terminates a session on DELETE and rejects subsequent use", async () => {

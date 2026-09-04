@@ -190,7 +190,13 @@ export class CertManager {
    * process before the vault holds them.
    *
    * A rate-limited or unavailable CA surfaces as a terminal CERT_ACME_FAILED:
-   * backoff belongs to the RenewalScheduler, not to a single issuance.
+   * backoff belongs to the RenewalScheduler, not to a single issuance. Every
+   * issuance registers its own ACME account (one per certificate, kept
+   * encrypted beside it — C44 KEEP), which meets Let's Encrypt's "10 new
+   * accounts per IP per 3 hours" limit at the eleventh issuance from one host
+   * in that window; a shared, KEK-wrapped account per directory URL is
+   * deferred until multi-certificate issuance from one host is a demonstrated
+   * use case.
    *
    * The ACME account travels inside the certificate import and commits in the
    * same transaction as the certificate row (E86b): a crash, or a session TTL

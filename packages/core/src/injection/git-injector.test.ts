@@ -1,8 +1,24 @@
+import { delimiter } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { GitInjector } from "./git-injector.js";
+import { system32Path } from "../win32-paths.js";
+
+// On Windows the ephemeral agent listens on a named pipe, which only the native
+// Win32-OpenSSH client consumes through SSH_AUTH_SOCK; an MSYS build (the
+// Git-bundled ssh a Git-Bash PATH resolves first) finds no agent and is refused
+// before any spawn (D58). The git injector resolves ssh for GIT_SSH_COMMAND against
+// the process PATH, so the native directory has to lead there
+// (ssh-live-auth.test.ts pins the same client for the same reason).
+if (process.platform === "win32") {
+  const nativeSshDir = system32Path("OpenSSH");
+  process.env.PATH = [
+    nativeSshDir,
+    ...controlledPathDirs().filter((d) => d.toLowerCase() !== nativeSshDir.toLowerCase()),
+  ].join(delimiter);
+}
 
 const GIT = resolveExecutable("git", controlledPathDirs());
 const describeGit = GIT ? describe : describe.skip;

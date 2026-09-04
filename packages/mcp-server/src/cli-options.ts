@@ -1,5 +1,5 @@
 import { readFileSync, statSync } from "node:fs";
-import { isDecimalInteger } from "@harpoc/shared";
+import { isDecimalInteger, normalizeAllowedHost } from "@harpoc/shared";
 import { DEFAULT_MCP_HTTP_PORT } from "./http.js";
 
 export type PortParse = { ok: true; port: number } | { ok: false; message: string };
@@ -71,4 +71,33 @@ export function readLaunchTokenFile(path: string): TokenFileRead {
     return { ok: false, message: `Error: --token-file ${path} is empty.\n` };
   }
   return { ok: true, token };
+}
+
+export type AllowedHostsParse = { ok: true; hosts: string[] } | { ok: false; message: string };
+
+/**
+ * `--allowed-host <name>` (repeatable) for the Streamable HTTP transport
+ * (R11/D61) — validated before any vault is opened, in the same result shape
+ * as the port and token-file parsers. Entries are host names or IP literals
+ * only; the listener adds the loopback names itself on a loopback bind. The
+ * parameter admits the booleans `parseArgs` yields under `strict: false` — a
+ * value-less `--allowed-host` parses as `true` — so such an entry is refused
+ * by the flag's own message rather than crashing the launcher.
+ */
+export function parseAllowedHostsOption(
+  raw: string | boolean | readonly (string | boolean)[] | undefined,
+): AllowedHostsParse {
+  const entries = raw === undefined ? [] : Array.isArray(raw) ? raw : [raw];
+  const hosts: string[] = [];
+  for (const entry of entries) {
+    const normalized = typeof entry === "string" ? normalizeAllowedHost(entry) : null;
+    if (normalized === null) {
+      return {
+        ok: false,
+        message: `Error: Invalid --allowed-host "${String(entry)}": a host name or IP address, without scheme, path or port.\n`,
+      };
+    }
+    hosts.push(normalized);
+  }
+  return { ok: true, hosts };
 }

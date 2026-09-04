@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { findKnownInterpreters, KNOWN_INTERPRETERS, knownInterpreterName } from "./interpreters.js";
+import {
+  EXEC_WRAPPERS,
+  execWrapperName,
+  KNOWN_INTERPRETERS,
+  knownInterpreterName,
+} from "./interpreters.js";
 
 // ---------------------------------------------------------------------------
 // knownInterpreterName
@@ -103,26 +108,6 @@ describe("knownInterpreterName", () => {
 });
 
 // ---------------------------------------------------------------------------
-// findKnownInterpreters
-// ---------------------------------------------------------------------------
-
-describe("findKnownInterpreters", () => {
-  it("returns the raw entries that name interpreters, in order", () => {
-    const entries = ["gh", "/usr/bin/python3", "git", "C:\\nodejs\\node.exe"];
-    expect(findKnownInterpreters(entries)).toEqual(["/usr/bin/python3", "C:\\nodejs\\node.exe"]);
-  });
-
-  it("returns an empty array when no entry is an interpreter", () => {
-    expect(findKnownInterpreters(["gh", "git", "curl"])).toEqual([]);
-    expect(findKnownInterpreters([])).toEqual([]);
-  });
-
-  it("deduplicates repeated entries", () => {
-    expect(findKnownInterpreters(["python", "python", "gh"])).toEqual(["python"]);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // KNOWN_INTERPRETERS
 // ---------------------------------------------------------------------------
 
@@ -137,6 +122,53 @@ describe("KNOWN_INTERPRETERS", () => {
   it("covers the thesis §4.5.3 examples and the common MCP launchers", () => {
     for (const name of ["sh", "bash", "python", "node", "npx"]) {
       expect(KNOWN_INTERPRETERS.has(name)).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// execWrapperName / EXEC_WRAPPERS (R6(ii))
+// ---------------------------------------------------------------------------
+
+describe("execWrapperName", () => {
+  it.each([
+    ["sudo", "sudo"],
+    ["xargs", "xargs"],
+    ["/usr/bin/find", "find"],
+    ["C:\\Windows\\System32\\forfiles.exe", "forfiles"],
+    ["systemd-run", "systemd-run"],
+    ["timeout", "timeout"],
+    ["/usr/bin/tar", "tar"],
+    ["Rsync.EXE", "rsync"],
+  ] as const)("detects %s", (entry, expected) => {
+    expect(execWrapperName(entry)).toBe(expected);
+  });
+
+  it.each(["gh", "git", "curl", "python", "sh", "env", "busybox", ""])(
+    "does not classify %j as an exec wrapper",
+    (entry) => {
+      expect(execWrapperName(entry)).toBeNull();
+    },
+  );
+});
+
+describe("EXEC_WRAPPERS", () => {
+  it("contains only normalized (lowercase, unversioned) basenames", () => {
+    for (const name of EXEC_WRAPPERS) {
+      expect(name).toBe(name.toLowerCase());
+      expect(execWrapperName(name)).toBe(name);
+    }
+  });
+
+  it("is disjoint from KNOWN_INTERPRETERS — a name belongs to exactly one tier", () => {
+    for (const name of EXEC_WRAPPERS) {
+      expect(KNOWN_INTERPRETERS.has(name), name).toBe(false);
+    }
+  });
+
+  it("covers the ruling's examples on both platforms", () => {
+    for (const name of ["xargs", "find", "sudo", "tar", "rsync", "make", "forfiles", "runas"]) {
+      expect(EXEC_WRAPPERS.has(name), name).toBe(true);
     }
   });
 });

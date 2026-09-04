@@ -83,6 +83,22 @@ async function run(args: string[]): Promise<void> {
   await program.parseAsync(["node", "harpoc", "cert", ...args]);
 }
 
+/** vitest's stdin is not a TTY; every --dns case decides explicitly (R11/E86e). */
+function stubStdinTty(value: boolean | undefined): () => void {
+  const saved = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+  Object.defineProperty(process.stdin, "isTTY", {
+    value,
+    configurable: true,
+    writable: true,
+  });
+  return () => {
+    if (saved) Object.defineProperty(process.stdin, "isTTY", saved);
+    else Reflect.deleteProperty(process.stdin, "isTTY");
+  };
+}
+
+let restoreTty: () => void = () => {};
+
 /** The IssueOptions object the command handed the manager. */
 function issueOptions(): IssueOptions {
   return mockIssueWithAcme.mock.calls[0]?.[1] as IssueOptions;
@@ -109,9 +125,11 @@ beforeEach(() => {
   });
   errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  restoreTty = stubStdinTty(true);
 });
 
 afterEach(() => {
+  restoreTty();
   exitSpy.mockRestore();
   errorSpy.mockRestore();
   logSpy.mockRestore();
@@ -408,6 +426,57 @@ describe("cert issue", () => {
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
     expect(mockIssueWithAcme).not.toHaveBeenCalled();
+  });
+
+  it("--dns is refused on a non-TTY stdin before the vault opens (R11/E86e)", async () => {
+    restoreTty();
+    restoreTty = stubStdinTty(undefined);
+    await expect(
+      run(["issue", "web", "--domains", "example.com", "--email", "ops@example.com", "--dns"]),
+    ).rejects.toThrow("process.exit");
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--dns needs an interactive terminal"),
+    );
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    expect(mockIssueWithAcme).not.toHaveBeenCalled();
+  });
+
+  it("--dns on a non-TTY stdin reports INVALID_INPUT under --json, as does the --http-port pairing", async () => {
+    restoreTty();
+    restoreTty = stubStdinTty(false);
+    await expect(
+      run([
+        "issue",
+        "web",
+        "--domains",
+        "example.com",
+        "--email",
+        "ops@example.com",
+        "--dns",
+        "--json",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"error":"INVALID_INPUT"'));
+
+    errorSpy.mockClear();
+    restoreTty();
+    restoreTty = stubStdinTty(true);
+    await expect(
+      run([
+        "issue",
+        "web",
+        "--domains",
+        "example.com",
+        "--email",
+        "ops@example.com",
+        "--dns",
+        "--http-port",
+        "8080",
+        "--json",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"error":"INVALID_INPUT"'));
   });
 
   it("a missing --domains is refused by commander before the vault opens", async () => {

@@ -49,3 +49,25 @@ describe("harpoc-mcp --token-file and the removed --token (spawned binary)", () 
     expect(result.stderr).not.toContain("Vault is locked");
   }, 30_000);
 });
+
+describe("harpoc-mcp --http --allowed-host (spawned binary)", () => {
+  it("refuses a non-loopback bind without --allowed-host before touching any vault", async () => {
+    const result = await runMcp(["--http", "--host", "0.0.0.0"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("requires --allowed-host");
+    expect(result.stderr).not.toContain("Vault is locked");
+  }, 30_000);
+
+  it("refuses an entry carrying a port, naming it", async () => {
+    const result = await runMcp(["--http", "--allowed-host", "vault.example:3000"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('Invalid --allowed-host "vault.example:3000"');
+    expect(result.stderr).not.toContain("Vault is locked");
+  }, 30_000);
+
+  it("refuses --allowed-host without --http", async () => {
+    const result = await runMcp(["--allowed-host", "vault.example"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--allowed-host requires --http");
+  }, 30_000);
+});

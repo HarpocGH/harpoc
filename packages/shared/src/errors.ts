@@ -72,6 +72,7 @@ export enum ErrorCode {
   SSH_AGENT_FAILED = "SSH_AGENT_FAILED",
   SSH_NOT_CONFIGURED = "SSH_NOT_CONFIGURED",
   INVALID_SSH_CONFIG = "INVALID_SSH_CONFIG",
+  SSH_CLIENT_UNSUPPORTED = "SSH_CLIENT_UNSUPPORTED",
   GIT_OPERATION_FAILED = "GIT_OPERATION_FAILED",
   GIT_UNSUPPORTED_TRANSPORT = "GIT_UNSUPPORTED_TRANSPORT",
   INVALID_GIT_CONFIG = "INVALID_GIT_CONFIG",
@@ -132,6 +133,9 @@ export enum ErrorCode {
 
   // Rate limiting
   RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED",
+
+  // Listener host allowlist (D61)
+  MISDIRECTED_REQUEST = "MISDIRECTED_REQUEST",
 
   // System
   INTERNAL_ERROR = "INTERNAL_ERROR",
@@ -213,6 +217,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.SSH_AGENT_FAILED]: 500,
   [ErrorCode.SSH_NOT_CONFIGURED]: 400,
   [ErrorCode.INVALID_SSH_CONFIG]: 400,
+  [ErrorCode.SSH_CLIENT_UNSUPPORTED]: 501,
   [ErrorCode.GIT_OPERATION_FAILED]: 502,
   [ErrorCode.GIT_UNSUPPORTED_TRANSPORT]: 400,
   [ErrorCode.INVALID_GIT_CONFIG]: 400,
@@ -274,6 +279,9 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   // Rate limiting
   [ErrorCode.RATE_LIMIT_EXCEEDED]: 429,
 
+  // Listener host allowlist (D61)
+  [ErrorCode.MISDIRECTED_REQUEST]: 421,
+
   // System
   [ErrorCode.INTERNAL_ERROR]: 500,
   [ErrorCode.DATABASE_ERROR]: 500,
@@ -320,6 +328,17 @@ export class VaultError extends Error {
   static accessDenied(detail?: string): VaultError {
     const msg = detail ? `Access denied: ${detail}` : "Access denied";
     return new VaultError(ErrorCode.ACCESS_DENIED, msg);
+  }
+
+  static misdirectedRequest(header: "Host" | "Origin", hostname: string | null): VaultError {
+    const subject =
+      hostname === null
+        ? `the ${header} header is missing or unparsable`
+        : `the ${header} header names ${hostname}, which this listener does not serve`;
+    return new VaultError(
+      ErrorCode.MISDIRECTED_REQUEST,
+      `Misdirected request: ${subject} — start the server with --allowed-host <name> for every name clients use to reach it`,
+    );
   }
 
   static invalidInput(message: string): VaultError {
@@ -450,10 +469,14 @@ export class VaultError extends Error {
     );
   }
 
-  static interpreterNotAcknowledged(entries: string[]): VaultError {
+  static interpreterNotAcknowledged(interpreters: string[], wrappers: string[] = []): VaultError {
+    const tiers = [
+      ...(interpreters.length > 0 ? [`known interpreter(s): ${interpreters.join(", ")}`] : []),
+      ...(wrappers.length > 0 ? [`exec wrapper(s): ${wrappers.join(", ")}`] : []),
+    ];
     return new VaultError(
       ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED,
-      `Refusing to allowlist known interpreter(s): ${entries.join(", ")} — allowlisting an interpreter collapses the capability ladder for this secret; pass the explicit acknowledgement (--acknowledge-interpreter / acknowledge_interpreters) to proceed`,
+      `Refusing to allowlist ${tiers.join(" and ")} — allowlisting an interpreter or exec wrapper collapses the capability ladder for this secret; pass the explicit acknowledgement (--acknowledge-interpreter / acknowledge_interpreters) to proceed`,
     );
   }
 
@@ -660,6 +683,13 @@ export class VaultError extends Error {
     return new VaultError(ErrorCode.SSH_NOT_CONFIGURED, msg);
   }
 
+  static sshClientUnsupported(directory: string): VaultError {
+    return new VaultError(
+      ErrorCode.SSH_CLIENT_UNSUPPORTED,
+      `Unsupported ssh client: the binary resolved under ${directory} is an MSYS/Cygwin build (msys-2.0.dll or cygwin1.dll beside it), which cannot reach the vault's named-pipe ssh-agent; allowlist the native Win32-OpenSSH client (C:\\Windows\\System32\\OpenSSH\\ssh.exe) and put its directory ahead of Git's usr\\bin on PATH`,
+    );
+  }
+
   static invalidSshConfig(message: string): VaultError {
     return new VaultError(ErrorCode.INVALID_SSH_CONFIG, message);
   }
@@ -759,6 +789,13 @@ export class VaultError extends Error {
     return new VaultError(
       ErrorCode.IMAP_OPERATION_FAILED,
       `IMAP operation '${operation}' failed: ${origin}`,
+    );
+  }
+
+  static imapMoveUnsupported(origin: string): VaultError {
+    return new VaultError(
+      ErrorCode.IMAP_OPERATION_FAILED,
+      `IMAP operation 'move' refused: ${origin} advertises neither MOVE (RFC 6851) nor UIDPLUS (RFC 4315), so a move could only complete with a mailbox-wide EXPUNGE; use 'copy', then 'store' (\\Deleted) and 'expunge' explicitly if that is acceptable`,
     );
   }
 

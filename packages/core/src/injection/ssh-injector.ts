@@ -7,6 +7,7 @@ import { controlledPathDirs, matchesHostAllowlist, resolveAndMatchCommand } from
 import { spawnCaptured } from "./spawn-captured.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
 import {
+  assertNativeWin32SshClient,
   buildSshEnv,
   isHostKeyFailure,
   sshHardeningArgs,
@@ -60,6 +61,7 @@ export class SshInjector {
     let sshPath: string;
     try {
       sshPath = resolveAndMatchCommand("ssh", policy.command_allowlist, controlledPathDirs());
+      assertNativeWin32SshClient(sshPath);
     } catch (err) {
       if (err instanceof VaultError)
         this.audit(action, secretId, { error: err.code }, false, attribution);

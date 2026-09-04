@@ -4,6 +4,8 @@ import { CertManager } from "@harpoc/cert-manager";
 import { OAuthManager } from "@harpoc/oauth-proxy";
 import { errorHandler } from "./middleware/error-handler.js";
 import { authMiddleware } from "./middleware/auth.js";
+import { hostAllowlistMiddleware } from "./middleware/host-allowlist.js";
+import { unscopedTokenMiddleware } from "./middleware/governance-scope.js";
 import { RateLimiter, createRateLimitMiddleware } from "./middleware/rate-limit.js";
 import { auditMiddleware } from "./middleware/audit.js";
 import { createHealthRoutes, createExpiringSecretsRoute } from "./routes/health.js";
@@ -31,6 +33,12 @@ export interface CreateAppOptions {
    * still crosses the authed /api/v1 surface.
    */
   uiDir?: string;
+  /**
+   * The listener's allowed-host set (R11/D61) — `startServer` builds it from
+   * the bind address and `--allowed-host`; an embedder that passes none gets
+   * no Host check, as before.
+   */
+  allowedHostSet?: ReadonlySet<string>;
 }
 
 /**
@@ -61,6 +69,11 @@ export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono
 
   // Global error handler
   app.onError(errorHandler);
+
+  // The listener's host allowlist answers first, health included (R11/D61).
+  if (options?.allowedHostSet !== undefined) {
+    app.use("*", hostAllowlistMiddleware(options.allowedHostSet));
+  }
 
   // Rate limiter (created early so it can be injected into context)
   const limiter = new RateLimiter();
@@ -111,6 +124,11 @@ export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono
   app.use("/api/v1/certificates/*", authMiddleware);
   app.use("/api/v1/agents/*", authMiddleware);
   app.use("/api/v1/tokens/*", authMiddleware);
+
+  // Governance is vault-wide: a project-claimed token is refused on both
+  // prefixes before any route reads a body (R11/N12).
+  app.use("/api/v1/agents/*", unscopedTokenMiddleware);
+  app.use("/api/v1/tokens/*", unscopedTokenMiddleware);
 
   // Routes
   app.route("/api/v1/secrets", createSecretRoutes());

@@ -11,6 +11,7 @@ import { VaultEngine } from "@harpoc/core";
 import { CallbackServer } from "./callback-server.js";
 import { DEFAULT_MAX_PENDING_AUTHORIZATIONS, OAuthManager } from "./oauth-manager.js";
 import type { OAuthManagerOptions } from "./oauth-manager.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 // Mock argon2 for speed (same approach as core tests)
 vi.mock("argon2", () => ({
@@ -120,6 +121,92 @@ function makeDeviceCodeConfig(): OAuthProviderConfig {
     client_id: "device-client",
   };
 }
+
+describe("B26: client_secret_basic with no client secret is refused at flow start", () => {
+  const MESSAGE =
+    "client_secret_basic requires a client secret: the method sends the client credentials in an Authorization header, which a public client cannot form — supply the secret, or choose client_secret_post (the default) for a public client";
+
+  async function expectRefusedWithoutRow(name: string, start: () => Promise<unknown>) {
+    const err = await expectVaultError(start, ErrorCode.INVALID_INPUT);
+    expect(err.message).toBe(MESSAGE);
+    await expectVaultError(
+      () => engine.resolveSecretId(`secret://${name}`),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
+  }
+
+  it("client_credentials", async () => {
+    const manager = new OAuthManager(engine);
+    const config = {
+      ...makeClientCredentialsConfig(),
+      token_endpoint_auth_method: "client_secret_basic" as const,
+    };
+    delete (config as { client_secret?: string }).client_secret;
+    await expectRefusedWithoutRow("cc-basic", () =>
+      manager.startClientCredentials("cc-basic", config),
+    );
+  });
+
+  it("client_credentials with an empty secret", async () => {
+    const manager = new OAuthManager(engine);
+    const config = {
+      ...makeClientCredentialsConfig(),
+      client_secret: "",
+      token_endpoint_auth_method: "client_secret_basic" as const,
+    };
+    await expectRefusedWithoutRow("cc-empty", () =>
+      manager.startClientCredentials("cc-empty", config),
+    );
+  });
+
+  it("authorization_code (deferred)", async () => {
+    const manager = new OAuthManager(engine);
+    const config = {
+      ...makeAuthCodeConfig(),
+      token_endpoint_auth_method: "client_secret_basic" as const,
+    };
+    delete (config as { client_secret?: string }).client_secret;
+    await expectRefusedWithoutRow("ac-basic", () =>
+      manager.startAuthorizationCodeDeferred("ac-basic", config),
+    );
+  });
+
+  it("device_code", async () => {
+    const manager = new OAuthManager(engine);
+    const config = {
+      ...makeDeviceCodeConfig(),
+      token_endpoint_auth_method: "client_secret_basic" as const,
+    };
+    await expectRefusedWithoutRow("dc-basic", () => manager.startDeviceCode("dc-basic", config));
+  });
+
+  it("client_secret_basic with a secret, and client_secret_post without one, still start", async () => {
+    const manager = new OAuthManager(engine);
+    const withSecret = {
+      ...makeClientCredentialsConfig(),
+      token_endpoint_auth_method: "client_secret_basic" as const,
+    };
+    await expect(manager.startClientCredentials("cc-ok", withSecret)).resolves.toMatchObject({
+      status: "authorized",
+    });
+    deviceHandler = (_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          device_code: "DEV-CODE-PUBLIC",
+          user_code: "PUBLIC-1234",
+          verification_uri: "https://example.com/device",
+          expires_in: 900,
+          interval: 5,
+        }),
+      );
+    };
+    const publicDevice = makeDeviceCodeConfig();
+    const started = await manager.startDeviceCode("dc-public", publicDevice);
+    expect(started.handle).toBe("secret://dc-public");
+    manager.cancelPendingFlows();
+  });
+});
 
 describe("OAuthManager.startClientCredentials", () => {
   it("completes client_credentials flow end-to-end", async () => {

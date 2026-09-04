@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { Option } from "commander";
 import type { Command } from "commander";
-import { MAX_TOKEN_TTL_MS, Permission, isDecimalInteger } from "@harpoc/shared";
+import { MAX_TOKEN_TTL_MS, Permission, assertBindAllowed, isDecimalInteger } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError } from "../utils/output.js";
 
@@ -20,6 +20,10 @@ function resolveUiDistDir(): string {
   return join(dirname(require.resolve("@harpoc/web-ui/package.json")), "dist");
 }
 
+function collect(value: string, acc: string[]): string[] {
+  return [...acc, value];
+}
+
 export function registerServerCommand(program: Command): void {
   program
     .command("server")
@@ -32,6 +36,12 @@ export function registerServerCommand(program: Command): void {
     .option("--rest", "Start REST API server")
     .option("--port <port>", "REST API port", "3000")
     .option("--host <address>", "REST API bind address (loopback by default)", "127.0.0.1")
+    .option(
+      "--allowed-host <name>",
+      "Host name or IP clients use to reach the REST listener (repeatable; required for a non-loopback --host, additive on loopback, where 127.0.0.1, ::1 and localhost are always allowed)",
+      collect,
+      [],
+    )
     .option("--ui", "Serve the Web UI at /ui (requires --rest); prints a one-time admin launch URL")
     .option(
       "--ui-token-ttl <minutes>",
@@ -65,6 +75,7 @@ export function registerServerCommand(program: Command): void {
           rest?: boolean;
           port: string;
           host: string;
+          allowedHost: string[];
           ui?: boolean;
           uiTokenTtl?: string;
           token?: string;
@@ -122,6 +133,21 @@ export function registerServerCommand(program: Command): void {
               "Error: --token was removed: pass the launch token via the HARPOC_TOKEN environment variable or --token-file <path> — command-line arguments are visible to other local processes.",
             );
             process.exit(1);
+          }
+
+          if (opts.allowedHost.length > 0 && !opts.rest) {
+            console.error("Error: --allowed-host requires --rest.");
+            process.exit(1);
+          }
+          if (opts.rest) {
+            // Refused before the vault opens, like every other launch typo:
+            // a misconfigured listener must not cost a session (R11/D61).
+            try {
+              assertBindAllowed(opts.host, opts.allowedHost);
+            } catch (err) {
+              console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+              process.exit(1);
+            }
           }
 
           if (opts.tokenFile !== undefined && !opts.mcp) {
@@ -307,7 +333,14 @@ export function registerServerCommand(program: Command): void {
             const oauthManager = createDefaultOAuthManager(engine);
             restOAuthManager = oauthManager;
             const uiDir = opts.ui ? resolveUiDistDir() : undefined;
-            restServer = startServer({ engine, port, hostname: opts.host, oauthManager, uiDir });
+            restServer = startServer({
+              engine,
+              port,
+              hostname: opts.host,
+              allowedHosts: opts.allowedHost,
+              oauthManager,
+              uiDir,
+            });
             if (opts.ui) {
               // Fragment, not query: the token must never appear in a request
               // line a server or proxy could log.

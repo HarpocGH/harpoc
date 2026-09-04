@@ -239,6 +239,67 @@ describe("createApp integration", () => {
   });
 });
 
+describe("listener host allowlist (R11/D61)", () => {
+  it("refuses a Host outside the set on every route, health included", async () => {
+    const app = createApp(createMockEngine() as never, {
+      allowedHostSet: new Set(["vault.example"]),
+    });
+    const res = await app.request("/api/v1/health", {
+      headers: { host: "evil.example:3000" },
+    });
+    expect(res.status).toBe(421);
+    expect(((await res.json()) as { error: string }).error).toBe("MISDIRECTED_REQUEST");
+    expect(
+      (
+        await app.request("/api/v1/health", {
+          headers: { host: "vault.example:3000" },
+        })
+      ).status,
+    ).toBe(200);
+  });
+
+  it("without a set, no Host is checked (an embedder building its own listener)", async () => {
+    const app = createApp(createMockEngine() as never);
+    expect(
+      (
+        await app.request("/api/v1/health", {
+          headers: { host: "anything.example" },
+        })
+      ).status,
+    ).toBe(200);
+  });
+});
+
+describe("governance requires an unscoped token (R11/N12)", () => {
+  it.each(["/api/v1/agents", "/api/v1/tokens"])(
+    "%s refuses a project-claimed admin token before the engine is reached",
+    async (path) => {
+      const engine = createMockEngine();
+      engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, project: "acme" });
+      const app = createApp(engine as never);
+      const res = await app.request(path, {
+        headers: { authorization: "Bearer valid-jwt" },
+      });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string; message: string };
+      expect(body.error).toBe("ACCESS_DENIED");
+      expect(body.message).toBe("Access denied: governance requires an unscoped admin token");
+      expect(engine.listAgents).not.toHaveBeenCalled();
+      expect(engine.listIssuedTokens).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a project-claimed token still reaches the secrets routes", async () => {
+    const engine = createMockEngine();
+    engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, project: "acme" });
+    const app = createApp(engine as never);
+    const res = await app.request("/api/v1/secrets", {
+      headers: { authorization: "Bearer valid-jwt" },
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
 describe("createDefaultOAuthManager", () => {
   it("builds the REST-shaped manager an owner can dispose", () => {
     const engine = createMockEngine();

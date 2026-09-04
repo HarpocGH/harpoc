@@ -1,5 +1,6 @@
 import type { Command } from "commander";
 import { CertManager } from "@harpoc/cert-manager";
+import { VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord, formatTimestamp } from "../../utils/output.js";
 import { parseIntOption } from "../../utils/options.js";
@@ -50,8 +51,9 @@ function parseDomains(value: string): string[] {
 /**
  * The dns-01 solver. The record goes to stderr so a `--json` run keeps stdout
  * machine-readable, and the wait uses the same single-line reader every other
- * CLI prompt uses: a closed or piped stdin settles it at EOF instead of
- * dangling, so a non-interactive run fails at the CA rather than hanging.
+ * CLI prompt uses. A non-interactive run never reaches it: `--dns` is refused
+ * on a non-TTY stdin before any ACME request (R11/E86e), because a piped or
+ * closed stdin would answer the prompt at once and burn a validation.
  */
 async function publishDnsRecord(domain: string, txtValue: string): Promise<void> {
   console.error(`_acme-challenge.${domain} TXT ${txtValue}`);
@@ -94,8 +96,13 @@ export function registerCertIssueCommand(cert: Command): void {
         // silently dropped — the same rule `cert csr` applies to a --bits that
         // doesn't pair with the resolved algorithm.
         if (options.dns === true && options.httpPort !== undefined) {
-          throw new Error(
+          throw VaultError.invalidInput(
             "--http-port only applies to the http-01 challenge; it has no effect with --dns.",
+          );
+        }
+        if (options.dns === true && process.stdin.isTTY !== true) {
+          throw VaultError.invalidInput(
+            "--dns needs an interactive terminal: the dns-01 challenge waits for you to publish the TXT record, and a piped or closed stdin would answer that prompt at once and burn a validation against the CA's rate limit",
           );
         }
         // The manager range-checks the port too; parsing here only turns a

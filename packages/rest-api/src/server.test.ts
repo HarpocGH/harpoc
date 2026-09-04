@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { ErrorCode, VaultState } from "@harpoc/shared";
+import { ErrorCode, VaultError, VaultState } from "@harpoc/shared";
 
 // ── Hoisted mocks (available inside vi.mock factories) ─────────────
 
@@ -65,6 +65,48 @@ describe("startServer", () => {
     const rowOrder = auditServerStart.mock.invocationCallOrder[0] as number;
     const serveOrder = serveSpy.mock.invocationCallOrder[0] as number;
     expect(rowOrder).toBeLessThan(serveOrder);
+  });
+
+  it("D61: refuses a non-loopback bind without an allowed host before the app is built", () => {
+    const auditServerStart = vi.fn();
+    const engine = {
+      getState: () => VaultState.UNLOCKED,
+      auditServerStart,
+    } as never;
+    let thrown: unknown;
+    try {
+      startServer({ engine, hostname: "0.0.0.0" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(VaultError);
+    expect((thrown as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
+    expect(createAppSpy).not.toHaveBeenCalled();
+    expect(serveSpy).not.toHaveBeenCalled();
+    expect(auditServerStart).not.toHaveBeenCalled();
+  });
+
+  it("D61: hands the listener's allowed-host set to createApp and no longer warns", () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const engine = {
+      getState: () => VaultState.UNLOCKED,
+      auditServerStart: vi.fn(),
+    } as never;
+
+    startServer({ engine, hostname: "0.0.0.0", allowedHosts: ["Vault.Example"] });
+    const [, nonLoopback] = createAppSpy.mock.calls[0] ?? [];
+    expect(
+      [...(nonLoopback as { allowedHostSet: ReadonlySet<string> }).allowedHostSet].sort(),
+    ).toEqual(["vault.example"]);
+    expect(warn).not.toHaveBeenCalled();
+
+    createAppSpy.mockClear();
+    startServer({ engine, hostname: "127.0.0.1" });
+    const [, loopback] = createAppSpy.mock.calls[0] ?? [];
+    expect(
+      [...(loopback as { allowedHostSet: ReadonlySet<string> }).allowedHostSet].sort(),
+    ).toEqual(["127.0.0.1", "::1", "localhost"]);
   });
 
   it("a sealed engine refuses before the app is built (D1)", () => {

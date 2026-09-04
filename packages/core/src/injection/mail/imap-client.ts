@@ -649,6 +649,17 @@ export class ImapClient {
     private readonly host: string,
   ) {}
 
+  /**
+   * Dials, greets, reads CAPABILITY, authenticates — and then clears the
+   * capability set and reads CAPABILITY a second time. RFC 3501 6.1.1 lets a
+   * server's capability set change once the session is authenticated (Gmail
+   * advertises MOVE and UIDPLUS only post-login), so the pre-authentication
+   * set is not the set `move` may decide on: E83's refusal would otherwise
+   * claim a server "advertises neither" on evidence it had already
+   * superseded. The cost is one extra round trip per connection; parsing the
+   * `[CAPABILITY ...]` response code of the tagged LOGIN/AUTHENTICATE OK
+   * would remove it and is a documented follow-up.
+   */
   static async connect(opts: ImapConnectOptions): Promise<ImapClient> {
     const origin = `${opts.host}:${opts.port}`;
     const socket = tlsConnect({ host: opts.address, port: opts.port, ...tlsOptions(opts) });
@@ -665,6 +676,8 @@ export class ImapClient {
       await client.readGreeting();
       await client.loadCapabilities();
       await client.authenticate(opts.auth);
+      client.caps.clear();
+      await client.loadCapabilities();
       return client;
     } catch (error) {
       channel.destroy();
@@ -765,19 +778,24 @@ export class ImapClient {
 
   /**
    * Moves messages to `targetMailbox`. Uses RFC 6851 `UID MOVE` when
-   * advertised. Otherwise falls back to COPY + STORE(\Deleted) + EXPUNGE:
-   * when the server also advertises RFC 4315 UIDPLUS, the EXPUNGE is scoped
-   * to exactly the just-copied UIDs (`UID EXPUNGE <set>`). Without UIDPLUS,
-   * IMAP has no way to scope an EXPUNGE, so a **blanket** `EXPUNGE` runs
-   * instead — this removes EVERY `\Deleted`-flagged message in the mailbox,
-   * not just the ones this call copied. Any other `\Deleted` messages already
-   * pending cleanup (the user's own, or a concurrent session's) are destroyed
-   * as collateral damage on that path; it is unavoidable without UIDPLUS.
+   * advertised; otherwise COPY + STORE(\Deleted) + RFC 4315 `UID EXPUNGE
+   * <set>`, scoped to exactly the just-copied UIDs. Both decisions read the
+   * authenticated capability set `connect` re-reads after login, never the
+   * greeting's. A server advertising neither capability there is refused
+   * before any command (E83, 2026-09-04): IMAP
+   * has no way to scope a plain `EXPUNGE`, and a blanket one would destroy
+   * every `\Deleted` message in the mailbox — the caller's own or a concurrent
+   * session's — as collateral damage. The refusal points at `copy`, which the
+   * caller can follow with an explicit `store` and `expunge` if that cost is
+   * acceptable.
    *
    * The returned count is the requested UID count in every branch, not a
    * server-confirmed count.
    */
   async move(uids: number[], targetMailbox: string): Promise<number> {
+    if (!this.caps.has("MOVE") && !this.caps.has("UIDPLUS")) {
+      throw VaultError.imapMoveUnsupported(this.origin);
+    }
     const uidSet = formatUidSet(uids);
     if (this.caps.has("MOVE")) {
       const response = await this.command("UID MOVE", [
@@ -789,9 +807,9 @@ export class ImapClient {
       }
       return uids.length;
     }
-    // RFC 6851 MOVE is unavailable: COPY, mark \Deleted, then EXPUNGE — issued
-    // sequentially (command() has a single response waiter; these must never
-    // race each other or anything else on this connection).
+    // RFC 6851 MOVE is unavailable: COPY, mark \Deleted, then UID EXPUNGE —
+    // issued sequentially (command() has a single response waiter; these must
+    // never race each other or anything else on this connection).
     const copyResponse = await this.command("UID COPY", [
       { kind: "atom", value: uidSet },
       { kind: "string", value: targetMailbox },
@@ -800,11 +818,7 @@ export class ImapClient {
       throw VaultError.imapOperationFailed(this.origin, "move");
     }
     await this.runStore(uidSet, "+FLAGS", ["\\Deleted"]);
-    if (this.caps.has("UIDPLUS")) {
-      await this.uidExpunge(uidSet);
-    } else {
-      await this.expunge();
-    }
+    await this.uidExpunge(uidSet);
     return uids.length;
   }
 

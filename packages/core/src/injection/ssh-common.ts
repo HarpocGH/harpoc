@@ -1,6 +1,7 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { VaultError } from "@harpoc/shared";
 
 /** A file written for one ssh invocation, removed with its directory on dispose. */
 export interface TempSshFile {
@@ -137,4 +138,30 @@ export function buildSshEnv(authSock: string, envAllowlist: string[]): Record<st
   }
   env.SSH_AUTH_SOCK = authSock;
   return env;
+}
+
+const NON_NATIVE_RUNTIME_DLLS = ["msys-2.0.dll", "cygwin1.dll"];
+
+/**
+ * Refuse an MSYS or Cygwin ssh/sftp build on Windows before it is spawned
+ * (R11/D58). Only the native Win32-OpenSSH client can open the agent's named
+ * pipe; an MSYS build (the Git-bundled `ssh.exe`) finds no agent, offers the
+ * one identity it cannot sign for and dies as exit 255 "Permission denied
+ * (publickey)" — a misleading SSH_CONNECT_FAILED. The runtime DLL sits beside
+ * the binary in every such distribution, so one stat per name decides. The
+ * message names the directory, never the binary path or any argument. A
+ * no-op off win32.
+ */
+export function assertNativeWin32SshClient(resolvedPath: string): void {
+  if (process.platform !== "win32") return;
+  const directory = dirname(resolvedPath);
+  for (const dll of NON_NATIVE_RUNTIME_DLLS) {
+    let isFile = false;
+    try {
+      isFile = statSync(join(directory, dll)).isFile();
+    } catch {
+      // not here — the next name
+    }
+    if (isFile) throw VaultError.sshClientUnsupported(directory);
+  }
 }

@@ -93,6 +93,7 @@ const STATUS_CASES = [
   [ErrorCode.SSH_AGENT_FAILED, 500],
   [ErrorCode.SSH_NOT_CONFIGURED, 400],
   [ErrorCode.INVALID_SSH_CONFIG, 400],
+  [ErrorCode.SSH_CLIENT_UNSUPPORTED, 501],
   [ErrorCode.GIT_OPERATION_FAILED, 502],
   [ErrorCode.GIT_UNSUPPORTED_TRANSPORT, 400],
   [ErrorCode.INVALID_GIT_CONFIG, 400],
@@ -146,6 +147,8 @@ const STATUS_CASES = [
   [ErrorCode.MISSING_DEPENDENCY, 501],
   // Rate limiting
   [ErrorCode.RATE_LIMIT_EXCEEDED, 429],
+  // Listener host allowlist (D61)
+  [ErrorCode.MISDIRECTED_REQUEST, 421],
   // System
   [ErrorCode.INTERNAL_ERROR, 500],
   [ErrorCode.DATABASE_ERROR, 500],
@@ -170,7 +173,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(107);
+    expect(members).toHaveLength(109);
   });
 
   it("STATUS_MAP has a row for every ErrorCode member", () => {
@@ -390,6 +393,36 @@ describe("factory methods", () => {
     );
   });
 
+  it("sshClientUnsupported() names the directory and the native client only", () => {
+    const err = VaultError.sshClientUnsupported("C:\\Program Files\\Git\\usr\\bin");
+    expect(err.code).toBe(ErrorCode.SSH_CLIENT_UNSUPPORTED);
+    expect(err.statusCode).toBe(501);
+    expect(err.message).toBe(
+      "Unsupported ssh client: the binary resolved under C:\\Program Files\\Git\\usr\\bin is an MSYS/Cygwin build (msys-2.0.dll or cygwin1.dll beside it), which cannot reach the vault's named-pipe ssh-agent; allowlist the native Win32-OpenSSH client (C:\\Windows\\System32\\OpenSSH\\ssh.exe) and put its directory ahead of Git's usr\\bin on PATH",
+    );
+  });
+
+  it("misdirectedRequest() names the parsed hostname, or the missing header", () => {
+    const host = VaultError.misdirectedRequest("Host", "evil.example");
+    expect(host.code).toBe(ErrorCode.MISDIRECTED_REQUEST);
+    expect(host.statusCode).toBe(421);
+    expect(host.message).toBe(
+      "Misdirected request: the Host header names evil.example, which this listener does not serve — start the server with --allowed-host <name> for every name clients use to reach it",
+    );
+    expect(VaultError.misdirectedRequest("Origin", null).message).toBe(
+      "Misdirected request: the Origin header is missing or unparsable — start the server with --allowed-host <name> for every name clients use to reach it",
+    );
+  });
+
+  it("imapMoveUnsupported() keeps IMAP_OPERATION_FAILED and points at copy", () => {
+    const err = VaultError.imapMoveUnsupported("mail.example:993");
+    expect(err.code).toBe(ErrorCode.IMAP_OPERATION_FAILED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toBe(
+      "IMAP operation 'move' refused: mail.example:993 advertises neither MOVE (RFC 6851) nor UIDPLUS (RFC 4315), so a move could only complete with a mailbox-wide EXPUNGE; use 'copy', then 'store' (\\Deleted) and 'expunge' explicitly if that is acceptable",
+    );
+  });
+
   it("weakPassword()", () => {
     const err = VaultError.weakPassword(8);
     expect(err.code).toBe(ErrorCode.WEAK_PASSWORD);
@@ -574,12 +607,21 @@ describe("factory methods", () => {
     expect(err.message).toBe("Command not in secret allowlist: curl");
   });
 
-  it("interpreterNotAcknowledged()", () => {
+  it("interpreterNotAcknowledged() names each non-empty tier", () => {
     const err = VaultError.interpreterNotAcknowledged(["python", "/usr/bin/node"]);
     expect(err.code).toBe(ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED);
     expect(err.statusCode).toBe(400);
     expect(err.message).toContain("python, /usr/bin/node");
     expect(err.message).toContain("--acknowledge-interpreter");
+    expect(VaultError.interpreterNotAcknowledged(["python"]).message).toBe(
+      "Refusing to allowlist known interpreter(s): python — allowlisting an interpreter or exec wrapper collapses the capability ladder for this secret; pass the explicit acknowledgement (--acknowledge-interpreter / acknowledge_interpreters) to proceed",
+    );
+    expect(VaultError.interpreterNotAcknowledged([], ["sudo", "tar"]).message).toContain(
+      "Refusing to allowlist exec wrapper(s): sudo, tar — ",
+    );
+    const both = VaultError.interpreterNotAcknowledged(["python"], ["sudo"]);
+    expect(both.code).toBe(ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED);
+    expect(both.message).toContain("known interpreter(s): python and exec wrapper(s): sudo");
   });
 
   it("networkIsolationUnavailable()", () => {

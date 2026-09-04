@@ -1,14 +1,39 @@
 import { generateKeyPairSync } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, InjectionPolicy, SftpAction } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { executeSftpAction } from "./sftp-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
+import { system32Path } from "../win32-paths.js";
 
 vi.mock("./spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
+
+// On Windows the ephemeral agent listens on a named pipe, which only the native
+// Win32-OpenSSH client consumes through SSH_AUTH_SOCK; an MSYS build (the
+// Git-bundled ssh a Git-Bash PATH resolves first) finds no agent and is refused
+// before any spawn (D58). The sftp injector resolves the bare name against the process
+// PATH itself, so the native directory has to lead there, not only in the allowlist
+// entry this suite pins (ssh-live-auth.test.ts pins the same client for the same reason).
+if (process.platform === "win32") {
+  const nativeSshDir = system32Path("OpenSSH");
+  process.env.PATH = [
+    nativeSshDir,
+    ...controlledPathDirs().filter((d) => d.toLowerCase() !== nativeSshDir.toLowerCase()),
+  ].join(delimiter);
+}
 
 const SFTP = resolveExecutable("sftp", controlledPathDirs());
 const describeSftp = SFTP ? describe : describe.skip;
@@ -509,3 +534,59 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     ).rejects.toMatchObject({ code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE });
   });
 });
+
+describe.runIf(process.platform === "win32")(
+  "executeSftpAction refuses an MSYS/Cygwin sftp client (D58)",
+  () => {
+    const spawnMock = vi.mocked(spawnCaptured);
+    let fixtureDir: string;
+    let stub: string;
+    const savedPath = process.env.PATH;
+
+    beforeEach(() => {
+      spawnMock.mockReset();
+      spawnMock.mockResolvedValue(OK_RESULT);
+      fixtureDir = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-msys-sftp-")));
+      stub = join(fixtureDir, "sftp.exe");
+      writeFileSync(stub, "");
+      writeFileSync(join(fixtureDir, "msys-2.0.dll"), "");
+      process.env.PATH = fixtureDir;
+    });
+
+    afterEach(() => {
+      process.env.PATH = savedPath;
+      rmSync(fixtureDir, { recursive: true, force: true });
+    });
+
+    it("refuses before any spawn", async () => {
+      await expect(
+        executeSftpAction(
+          LIST_ACTION,
+          new Uint8Array(Buffer.from(makeKeyPem())),
+          policy({
+            host_allowlist: ["deploy.example.com"],
+            command_allowlist: [stub],
+          }),
+          SFTP_CONFIG,
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.SSH_CLIENT_UNSUPPORTED });
+      expect(spawnMock).not.toHaveBeenCalled();
+    });
+
+    it("guard-flip: without the DLL the same stub is spawned", async () => {
+      rmSync(join(fixtureDir, "msys-2.0.dll"));
+      await executeSftpAction(
+        LIST_ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        policy({
+          host_allowlist: ["deploy.example.com"],
+          command_allowlist: [stub],
+        }),
+        SFTP_CONFIG,
+      );
+      expect(spawnMock).toHaveBeenCalledOnce();
+      const [command] = spawnMock.mock.calls[0] as [string, string[], unknown];
+      expect(command.toLowerCase()).toBe(stub.toLowerCase());
+    });
+  },
+);

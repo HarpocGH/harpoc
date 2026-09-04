@@ -6,9 +6,18 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { VaultEngine } from "@harpoc/core";
-import { VAULT_DB_NAME, VAULT_DIR_NAME, SESSION_FILE_NAME } from "@harpoc/shared";
+import {
+  assertBindAllowed,
+  VAULT_DB_NAME,
+  VAULT_DIR_NAME,
+  SESSION_FILE_NAME,
+} from "@harpoc/shared";
 import { DEFAULT_MCP_HTTP_PORT, startMcpHttpServer } from "./http.js";
-import { parseHttpPortOption, readLaunchTokenFile } from "./cli-options.js";
+import {
+  parseAllowedHostsOption,
+  parseHttpPortOption,
+  readLaunchTokenFile,
+} from "./cli-options.js";
 import { createMcpServer } from "./server.js";
 
 export { createMcpServer } from "./server.js";
@@ -18,8 +27,12 @@ export type { McpHttpServer, McpHttpServerOptions } from "./http.js";
 export { RateLimiter } from "./guards/rate-limiter.js";
 export { ScopeGuard } from "./guards/scope-guard.js";
 export { InjectionGuard } from "./guards/injection-guard.js";
-export { readLaunchTokenFile, MAX_LAUNCH_TOKEN_FILE_BYTES } from "./cli-options.js";
-export type { TokenFileRead } from "./cli-options.js";
+export {
+  parseAllowedHostsOption,
+  readLaunchTokenFile,
+  MAX_LAUNCH_TOKEN_FILE_BYTES,
+} from "./cli-options.js";
+export type { AllowedHostsParse, TokenFileRead } from "./cli-options.js";
 
 function resolveVaultDir(vaultDirOption?: string): string {
   if (vaultDirOption) return vaultDirOption;
@@ -38,6 +51,7 @@ async function main(): Promise<void> {
       http: { type: "boolean" },
       port: { type: "string" },
       host: { type: "string" },
+      "allowed-host": { type: "string", multiple: true },
     },
     strict: false,
   });
@@ -80,6 +94,27 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const port = parsedPort.ok ? parsedPort.port : DEFAULT_MCP_HTTP_PORT;
+
+  const parsedHosts = parseAllowedHostsOption(values["allowed-host"]);
+  if (!parsedHosts.ok) {
+    process.stderr.write(parsedHosts.message);
+    process.exit(1);
+  }
+  if (!values.http && parsedHosts.hosts.length > 0) {
+    process.stderr.write("Error: --allowed-host requires --http.\n");
+    process.exit(1);
+  }
+  const host = (values.host as string | undefined) ?? "127.0.0.1";
+  // Refused here, before the vault opens, for the same reason as the port:
+  // a misconfigured listener must not cost a session (R11/D61).
+  if (values.http) {
+    try {
+      assertBindAllowed(host, parsedHosts.hosts);
+    } catch (err) {
+      process.stderr.write(`Error: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.exit(1);
+    }
+  }
 
   // Read before any vault is opened, like the port refusal: a bad file never
   // touches the session.
@@ -134,8 +169,12 @@ async function main(): Promise<void> {
   };
 
   if (values.http) {
-    const host = (values.host as string | undefined) ?? "127.0.0.1";
-    const httpServer = await startMcpHttpServer({ engine, port, host });
+    const httpServer = await startMcpHttpServer({
+      engine,
+      port,
+      host,
+      allowedHosts: parsedHosts.hosts,
+    });
     close = httpServer.close;
     transport = "http";
     boundPort = httpServer.port;

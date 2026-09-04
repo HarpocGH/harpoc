@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_MCP_HTTP_PORT } from "./http.js";
 import {
   MAX_LAUNCH_TOKEN_FILE_BYTES,
+  parseAllowedHostsOption,
   parseHttpPortOption,
   readLaunchTokenFile,
 } from "./cli-options.js";
@@ -101,5 +102,46 @@ describe("readLaunchTokenFile (R9/A10)", () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     expect(source).toContain("readLaunchTokenFile(");
     expect(source).not.toMatch(/launchToken:\s*\(?values\.token\b/);
+  });
+});
+
+describe("parseAllowedHostsOption", () => {
+  it("is empty when --allowed-host is absent", () => {
+    expect(parseAllowedHostsOption(undefined)).toEqual({ ok: true, hosts: [] });
+  });
+
+  it("normalizes one or many entries", () => {
+    expect(parseAllowedHostsOption("Vault.Example")).toEqual({
+      ok: true,
+      hosts: ["vault.example"],
+    });
+    expect(parseAllowedHostsOption(["a.example", "[::1]"])).toEqual({
+      ok: true,
+      hosts: ["a.example", "::1"],
+    });
+  });
+
+  it.each(["vault.example:3000", "https://vault.example", "vault.example/x", "", "--port"])(
+    "refuses %j before any vault is opened, naming the entry",
+    (raw) => {
+      expect(parseAllowedHostsOption(["ok.example", raw])).toEqual({
+        ok: false,
+        message: `Error: Invalid --allowed-host "${raw}": a host name or IP address, without scheme, path or port.\n`,
+      });
+    },
+  );
+
+  // Under `strict: false` a value-less `--allowed-host` parses as `true`, and
+  // an option-like value is swallowed as the entry — both are refused by the
+  // flag's own message, naming the offending value, never crashing.
+  it("refuses a non-string entry, naming it in its String() form", () => {
+    expect(parseAllowedHostsOption([true])).toEqual({
+      ok: false,
+      message: `Error: Invalid --allowed-host "true": a host name or IP address, without scheme, path or port.\n`,
+    });
+    expect(parseAllowedHostsOption(true)).toEqual({
+      ok: false,
+      message: `Error: Invalid --allowed-host "true": a host name or IP address, without scheme, path or port.\n`,
+    });
   });
 });
