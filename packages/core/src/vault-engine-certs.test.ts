@@ -895,9 +895,16 @@ describe("certificate accessors", () => {
     expect(st.issuer).toBeNull();
   });
 
-  it("getCertificateStatus writes no audit row on the trusted (caller-less) path", () => {
+  it("getCertificateStatus on the trusted (caller-less) path writes one NULL-principal secret.read row (E75a)", () => {
     engine.getCertificateStatus(secretId);
-    expect(engine.queryAudit({ eventType: AuditEventType.SECRET_READ }).length).toBe(0);
+    const reads = engine.queryAudit({
+      eventType: AuditEventType.SECRET_READ,
+      secretId,
+    });
+    expect(reads.length).toBe(1);
+    expect(reads[0]?.success).toBe(true);
+    expect(reads[0]?.principal_type).toBeNull();
+    expect(reads[0]?.detail).toEqual({ config: "certificate_status" });
   });
 
   it("getCertificatePrivateKey returns the PEM and writes one secret.read audit row", async () => {
@@ -907,7 +914,12 @@ describe("certificate accessors", () => {
 
     const reads = engine
       .queryAudit({ limit: 50 })
-      .filter((e) => e.event_type === "secret.read" && e.secret_id === secretId);
+      .filter(
+        (e) =>
+          e.event_type === "secret.read" &&
+          e.secret_id === secretId &&
+          e.detail?.config === "certificate_private_key",
+      );
     expect(reads.length).toBe(1);
     expect(reads[0]?.success).toBe(true);
     expect(reads[0]?.detail).toMatchObject({ config: "certificate_private_key" });
@@ -921,12 +933,18 @@ describe("certificate accessors", () => {
     expect(await engine.getCertificatePrivateKey(ecId)).toBe(fx("ec-key.pem"));
   });
 
-  it("getCertificatePem returns cert, chain and csr without auditing a read", () => {
+  it("getCertificatePem returns cert, chain and csr and audits the read (E75a)", () => {
     const pems = engine.getCertificatePem(secretId);
     expect(pems.certificatePem).toBe(fx("rsa-cert.pem"));
     expect(pems.chainPem).toBeNull();
     expect(pems.csrPem).toBeNull();
-    expect(engine.queryAudit({ eventType: AuditEventType.SECRET_READ }).length).toBe(0);
+    const reads = engine.queryAudit({
+      eventType: AuditEventType.SECRET_READ,
+      secretId,
+    });
+    expect(reads.length).toBe(1);
+    expect(reads[0]?.detail).toEqual({ config: "certificate_pem" });
+    expect(JSON.stringify(reads[0]?.detail)).not.toContain("CERTIFICATE");
   });
 
   it("getCertificatePem returns the stored chain and csr when present", async () => {
@@ -1081,7 +1099,7 @@ describe("certificate accessors", () => {
 
     const reads = engine
       .queryAudit({ eventType: AuditEventType.SECRET_READ })
-      .filter((e) => e.secret_id === acmeId);
+      .filter((e) => e.secret_id === acmeId && e.detail?.config === "acme_account");
     expect(reads.length).toBe(1);
     expect(reads[0]?.success).toBe(true);
     expect(reads[0]?.detail).toMatchObject({ config: "acme_account" });
@@ -1748,7 +1766,7 @@ describe("certificate accessors — caller policy enforcement", () => {
 
     const reads = engine
       .queryAudit({ eventType: AuditEventType.SECRET_READ })
-      .filter((e) => e.success);
+      .filter((e) => e.success && e.detail?.config === "certificate_private_key");
     expect(reads.length).toBe(1);
     expect(reads[0]?.principal_id).toBe("reader");
     expect(reads[0]?.detail).toMatchObject({
@@ -1789,13 +1807,13 @@ describe("certificate accessors — caller policy enforcement", () => {
 
     const reads = engine
       .queryAudit({ eventType: AuditEventType.SECRET_READ })
-      .filter((e) => e.success);
+      .filter((e) => e.success && e.detail?.config === "acme_account");
     expect(reads.length).toBe(1);
     expect(reads[0]?.principal_id).toBe("reader");
     expect(reads[0]?.detail).toMatchObject({ config: "acme_account", interface: "cli" });
   });
 
-  it("getCertificatePem refuses an ungranted caller and stays unaudited when granted", () => {
+  it("getCertificatePem refuses an ungranted caller and audits the granted read", () => {
     expect(() =>
       engine.getCertificatePem(secretId, {
         principal_type: PrincipalType.AGENT,
@@ -1816,10 +1834,15 @@ describe("certificate accessors — caller policy enforcement", () => {
       interface: "cli",
     });
     expect(pems.certificatePem).toBe(fx("rsa-cert.pem"));
-    // Public material: the granted read deliberately writes no row.
-    expect(
-      engine.queryAudit({ eventType: AuditEventType.SECRET_READ }).filter((e) => e.success).length,
-    ).toBe(0);
+    const granted = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_READ })
+      .filter((e) => e.success);
+    expect(granted.length).toBe(1);
+    expect(granted[0]?.principal_id).toBe("reader");
+    expect(granted[0]?.detail).toMatchObject({
+      config: "certificate_pem",
+      interface: "cli",
+    });
   });
 
   it("no caller stays the trusted path", async () => {

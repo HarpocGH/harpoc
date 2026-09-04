@@ -1,5 +1,7 @@
+import type { AddressInfo } from "node:net";
 import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
+import { serve } from "@hono/node-server";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
 import { authMiddleware } from "./auth.js";
@@ -33,7 +35,7 @@ function createTestApp(verifyResult: VaultApiToken | VaultError) {
   app.use("*", authMiddleware);
   app.get("/test", (c) => {
     const token = c.get("token");
-    return c.json({ sub: token.sub });
+    return c.json({ sub: token.sub, peer: c.get("remoteAddress") ?? null });
   });
 
   return { app, engine };
@@ -103,5 +105,32 @@ describe("authMiddleware", () => {
     });
 
     expect(engine.verifyToken).toHaveBeenCalledWith("my-jwt-value");
+  });
+
+  it("stores no remote address under app.request, and the socket peer off a real listener (E75i)", async () => {
+    const { app } = createTestApp(MOCK_TOKEN);
+    const local = await app.request("/test", {
+      headers: { Authorization: "Bearer any" },
+    });
+    expect(((await local.json()) as { peer: string | null }).peer).toBeNull();
+
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    let server: ReturnType<typeof serve> | undefined;
+    const port = await new Promise<number>((resolve) => {
+      server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, (info: AddressInfo) =>
+        resolve(info.port),
+      );
+    });
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/test`, {
+        headers: {
+          Authorization: "Bearer any",
+          "x-forwarded-for": "203.0.113.9",
+        },
+      });
+      expect(((await res.json()) as { peer: string | null }).peer).toBe("127.0.0.1");
+    } finally {
+      await new Promise<void>((resolve) => server?.close(() => resolve()));
+    }
   });
 });

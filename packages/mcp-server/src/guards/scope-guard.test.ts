@@ -225,9 +225,21 @@ describe("caller (engine-level policy enforcement)", () => {
     expect(guard.caller?.interface).toBe("mcp-http");
   });
 
-  it("is undefined without a token — the local full-access mode is the trusted path", () => {
+  it("without a token is the synthetic tokenless-stdio caller — attribution-only, admin-scoped (R4/E78b)", () => {
     const guard = new ScopeGuard(null);
-    expect(guard.caller).toBeUndefined();
+    expect(guard.caller).toEqual({
+      principal_type: "user",
+      principal_id: "tokenless-stdio",
+      interface: "mcp",
+      admin_scope: true,
+    });
+  });
+
+  it("carries the socket peer into the caller, only when given (E75i)", () => {
+    const token = makeToken({ sub: "alice" });
+    const withPeer = new ScopeGuard(token, "mcp-http", undefined, "127.0.0.1");
+    expect(withPeer.caller.remote_address).toBe("127.0.0.1");
+    expect("remote_address" in new ScopeGuard(token).caller).toBe(false);
   });
 
   it("the interface tag never affects scope enforcement", () => {

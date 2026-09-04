@@ -159,7 +159,14 @@ describe("MCP Tools", () => {
 
     it("filters by project", async () => {
       await callTool(server, "list_secrets", { project: "prod" });
-      expect(engine.listSecrets).toHaveBeenCalledWith("prod", undefined);
+      expect(engine.listSecrets).toHaveBeenCalledWith(
+        "prod",
+        expect.objectContaining({
+          principal_type: "user",
+          principal_id: "tokenless-stdio",
+          admin_scope: true,
+        }),
+      );
     });
 
     it("filters by type", async () => {
@@ -284,8 +291,7 @@ describe("MCP Tools", () => {
         },
       });
 
-      // Tokenless (local full-access) mode passes no caller — the engine's
-      // trusted local path, exempt from per-secret policies.
+      // Tokenless (local full-access) mode passes the synthetic tokenless-stdio caller (R4/E78b) — attribution-only, exempt like an admin-scoped user token.
       expect(engine.useSecret).toHaveBeenCalledWith(
         "secret://my-key",
         expect.objectContaining({
@@ -297,7 +303,11 @@ describe("MCP Tools", () => {
           follow_redirects: "none",
           response_mode: "status_only",
         }),
-        undefined,
+        expect.objectContaining({
+          principal_type: "user",
+          principal_id: "tokenless-stdio",
+          admin_scope: true,
+        }),
       );
     });
 
@@ -355,7 +365,11 @@ describe("MCP Tools", () => {
       expect(engine.useSecret).toHaveBeenCalledWith(
         "secret://my-key",
         expect.objectContaining({ type: "mcp", server: "github-mcp", tool: "list_repositories" }),
-        undefined,
+        expect.objectContaining({
+          principal_type: "user",
+          principal_id: "tokenless-stdio",
+          admin_scope: true,
+        }),
       );
     });
 
@@ -552,9 +566,12 @@ describe("MCP Tools", () => {
 
       expect(engine.createSecret).toHaveBeenCalledWith(
         expect.objectContaining({ name: "new-key", type: "api_key", project: "prod" }),
-        // Tokenless guard in this suite: the trusted local path passes no
-        // caller, so the row stays NULL-principal (L3 control).
-        undefined,
+        // Tokenless (local full-access) mode passes the synthetic tokenless-stdio caller (R4/E78b) — attribution-only, exempt like an admin-scoped user token.
+        expect.objectContaining({
+          principal_type: "user",
+          principal_id: "tokenless-stdio",
+          admin_scope: true,
+        }),
       );
       const calls = (engine.createSecret as ReturnType<typeof vi.fn>).mock.calls;
       const call = (calls[0] as [Record<string, unknown>])[0];
@@ -623,7 +640,14 @@ describe("MCP Tools", () => {
 
     it("calls engine.revokeSecret", async () => {
       await callTool(server, "revoke_secret", { handle: "secret://my-key" });
-      expect(engine.revokeSecret).toHaveBeenCalledWith("secret://my-key", undefined);
+      expect(engine.revokeSecret).toHaveBeenCalledWith(
+        "secret://my-key",
+        expect.objectContaining({
+          principal_type: "user",
+          principal_id: "tokenless-stdio",
+          admin_scope: true,
+        }),
+      );
     });
 
     it("returns confirmation", async () => {

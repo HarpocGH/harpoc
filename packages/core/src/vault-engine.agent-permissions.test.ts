@@ -348,7 +348,9 @@ describe("setAgentPermissions", () => {
     expect(stored).toHaveLength(1);
     expect(stored[0]?.id).toBe(first.policy?.id);
     expect(stored[0]?.permissions).toEqual(["read"]);
-    expect(engine.queryAudit()).toHaveLength(auditBefore);
+    expect(engine.queryAudit().filter((r) => r.detail?.config !== "access_policies")).toHaveLength(
+      auditBefore,
+    );
   });
 
   it("refuses on a sealed vault", async () => {

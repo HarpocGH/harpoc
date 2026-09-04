@@ -479,7 +479,7 @@ describe("PUT /api/v1/agents/:name/secrets/:handle/permissions", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.data).toEqual({ policy: null, gated_before: false, gated_after: true });
-    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://test-key");
+    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://test-key", ADMIN_CALLER);
     expect(engine.setAgentPermissions).toHaveBeenCalledWith(
       "deploy-bot",
       "secret-uuid-1",
@@ -512,7 +512,7 @@ describe("PUT /api/v1/agents/:name/secrets/:handle/permissions", () => {
       headers: JSON_AUTH,
       body: JSON.stringify({ permissions: ["read"] }),
     });
-    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://myproj/test-key");
+    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://myproj/test-key", ADMIN_CALLER);
   });
 
   // The cell touches one named secret, so the token's project/name dimensions

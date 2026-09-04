@@ -170,12 +170,10 @@ export function registerSecretAllowCommand(secret: Command): void {
           }
 
           const resolved = resolveTokenCallerForHandle(engine, "admin", handle, tokenValue);
-          // The merge read is the command's own mechanics, deliberately
-          // caller-less (its result never reaches the caller); the caller's
-          // gate is the admin check inside setInjectionPolicy (R1: the
-          // injection policy is the widening half of a secret's configuration)
-          // — the REST membership-check precedent.
-          const current = await engine.getInjectionPolicy(handle);
+          // The merge read is attributed like the write it feeds: `admin`
+          // satisfies the `read` gate this call runs, so nothing a caller
+          // could not already reach is read and the row names the principal.
+          const current = await engine.getInjectionPolicy(handle, resolved?.caller);
           const parsed = injectionPolicyInputSchema.safeParse(mergePolicy(current, options));
           if (!parsed.success) {
             throw new Error(parsed.error.issues.map((i) => i.message).join(", "));

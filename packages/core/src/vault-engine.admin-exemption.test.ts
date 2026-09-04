@@ -34,9 +34,10 @@ let tempDir: string;
 let engine: VaultEngine;
 
 /**
- * Derive callers the way the interface layers do. `callerFromToken` is the only
- * producer of `admin_scope`, so a hand-built caller literal could never be
- * exempt — minting a real token is what makes these tests prove the seam.
+ * Derive callers the way the interface layers do. `callerFromToken` and
+ * `tokenlessStdioCaller` are the only producers of `admin_scope` (pinned by the
+ * E77 tripwire in `@harpoc/integration`), so a hand-built caller literal could
+ * never be exempt by accident.
  */
 function callerFor(
   subject: string,

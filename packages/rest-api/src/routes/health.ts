@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { callerFromToken, matchesSecretNameScope, VAULT_VERSION, VaultError } from "@harpoc/shared";
+import { matchesSecretNameScope, VAULT_VERSION, VaultError } from "@harpoc/shared";
 import type {
   ExpiringCertificateInfo,
   ExpiringOAuthTokenInfo,
@@ -7,6 +7,7 @@ import type {
 } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope } from "../middleware/scope.js";
+import { callerOf } from "../utils/caller.js";
 
 const MAX_EXPIRING_WINDOW_DAYS = 365;
 const OAUTH_WINDOW_MS = 60 * 60 * 1000; // mirrors mcp-server check-health
@@ -44,7 +45,7 @@ export function createExpiringSecretsRoute(): Hono<HarpocEnv> {
     }
     const threshold = Date.now() + days * 24 * 60 * 60 * 1000;
 
-    const caller = callerFromToken(token, "rest");
+    const caller = callerOf(c);
     let secrets = engine.listSecrets(token.project, caller);
     if (token.secrets?.length) {
       secrets = secrets.filter((s) => matchesSecretNameScope(s.name, token.secrets));

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createMcpServer } from "@harpoc/mcp-server";
-import { AuditEventType, ErrorCode } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 
 const PASSWORD = "integration-password";
 
@@ -86,12 +87,53 @@ describe("tokenless MCP server start lands in the audit trail", () => {
     expect(report.valid).toBe(true);
   });
 
-  it("a token-bearing start writes no row (D2)", () => {
+  it("a token-bearing start writes tokenless: false with the subject, unattributed (R4/B22)", () => {
     const token = vault.engine.createToken("agent-1", ["read", "list", "use"]);
 
     createMcpServer({ engine: vault.engine, launchToken: token });
 
-    expect(vault.engine.queryAudit({ eventType: AuditEventType.SERVER_START })).toHaveLength(0);
+    const rows = vault.engine.queryAudit({
+      eventType: AuditEventType.SERVER_START,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.detail).toMatchObject({
+      transport: "stdio",
+      tokenless: false,
+      subject: "agent-1",
+    });
+    expect(rows[0]?.principal_type).toBeNull();
     expect(stderrWrites.join("")).not.toContain("WARNING");
+  });
+
+  it("a tokenless server attributes its rows to tokenless-stdio (R4/E78b)", async () => {
+    await vault.engine.createSecret({
+      name: "tl-key",
+      type: SecretType.API_KEY,
+      value: new Uint8Array(Buffer.from("v")),
+    });
+    const server = createMcpServer({
+      engine: vault.engine,
+      allowTokenless: true,
+    });
+    try {
+      parseToolResult(
+        await callTool(server, "get_secret_info", { handle: "secret://tl-key" }),
+        "get_secret_info",
+      );
+    } finally {
+      await server.close();
+    }
+
+    const row = vault.engine
+      .queryAudit({ eventType: AuditEventType.SECRET_READ })
+      .find((r) => r.success);
+    expect(row?.principal_type).toBe("user");
+    expect(row?.principal_id).toBe("tokenless-stdio");
+    expect(row?.detail?.interface).toBe("mcp");
+    // The waiver row itself stays unattributed — it takes no caller.
+    const start = vault.engine.queryAudit({
+      eventType: AuditEventType.SERVER_START,
+    })[0];
+    expect(start?.principal_type).toBeNull();
   });
 });

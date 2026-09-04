@@ -453,26 +453,27 @@ describe("DirectClient", () => {
     );
   });
 
-  it("revokePolicy verifies ownership before revoking (REST parity)", async () => {
+  it("revokePolicy hands the engine the secret id it resolved (REST parity)", async () => {
     const engine = createMockEngine();
-    engine.listPolicies.mockReturnValue([{ id: "p1" }]);
     const client = new DirectClient(engine as never);
 
     await client.revokePolicy("secret://key", "p1");
     expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://key");
-    expect(engine.listPolicies).toHaveBeenCalledWith("uuid-1");
-    expect(engine.revokePolicy).toHaveBeenCalledWith("p1");
+    expect(engine.listPolicies).not.toHaveBeenCalled();
+    expect(engine.revokePolicy).toHaveBeenCalledWith("p1", undefined, "uuid-1");
   });
 
   it("revokePolicy refuses a policy belonging to another secret (IDOR guard)", async () => {
     const engine = createMockEngine();
-    engine.listPolicies.mockReturnValue([{ id: "other-policy" }]);
+    engine.revokePolicy.mockImplementation(() => {
+      throw new VaultError(ErrorCode.POLICY_NOT_FOUND, "Policy not found: p1");
+    });
     const client = new DirectClient(engine as never);
 
     await expect(client.revokePolicy("secret://key", "p1")).rejects.toMatchObject({
       code: "POLICY_NOT_FOUND",
     });
-    expect(engine.revokePolicy).not.toHaveBeenCalled();
+    expect(engine.listPolicies).not.toHaveBeenCalled();
   });
 
   it("listPolicies resolves secret ID and delegates", async () => {

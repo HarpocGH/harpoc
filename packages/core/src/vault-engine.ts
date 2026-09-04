@@ -86,6 +86,7 @@ import type { GrantPolicyInput, PolicyPrincipal } from "./access/policy-engine.j
 import type { AuditAttribution } from "./audit/attribution.js";
 import {
   attributionFromCaller,
+  callerColumns,
   callerInterfaceDetail,
   withAttribution,
 } from "./audit/attribution.js";
@@ -191,6 +192,9 @@ interface UnlockedState {
 }
 
 const DAY_MS = 86_400_000;
+
+type ServerTransport = "stdio" | "http" | "rest";
+type ServerStopTrigger = "SIGINT" | "SIGTERM" | "transport_closed";
 
 /**
  * Engine-enforced ceiling for `renew_before_days`, matching the REST schema's
@@ -648,8 +652,7 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.SECRET_CREATE,
         secretId,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: { handle: result.handle, status: result.status, ...callerInterfaceDetail(caller) },
         sessionId: this.sessionId ?? undefined,
       });
@@ -678,14 +681,13 @@ export class VaultEngine {
       info = await s.secretManager.getSecretInfo(handle, (id) => (secretId = id));
     } catch (err) {
       this.auditDenied(s, AuditEventType.SECRET_READ, err, { handle }, secretId, caller);
-      throw err;
+      throw await this.concealHandleError(s, err, handle, caller);
     }
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_READ,
       secretId,
-      principalType: caller?.principal_type,
-      principalId: caller?.principal_id,
+      ...callerColumns(caller),
       detail: { handle, ...callerInterfaceDetail(caller) },
       sessionId: this.sessionId ?? undefined,
     });
@@ -712,14 +714,13 @@ export class VaultEngine {
         secretId,
         caller,
       );
-      throw err;
+      throw await this.concealHandleError(s, err, handle, caller);
     }
 
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_READ,
       secretId,
-      principalType: caller?.principal_type,
-      principalId: caller?.principal_id,
+      ...callerColumns(caller),
       detail: { handle, action: "get_value", ...callerInterfaceDetail(caller) },
       sessionId: this.sessionId ?? undefined,
     });
@@ -767,8 +768,7 @@ export class VaultEngine {
           s.auditLogger.log({
             eventType: AuditEventType.SECRET_CREATE,
             secretId,
-            principalType: caller?.principal_type,
-            principalId: caller?.principal_id,
+            ...callerColumns(caller),
             detail: { handle, action: "set_value", ...callerInterfaceDetail(caller) },
             sessionId: this.sessionId ?? undefined,
           });
@@ -784,7 +784,7 @@ export class VaultEngine {
         resolvedId,
         caller,
       );
-      throw err;
+      throw await this.concealHandleError(s, err, handle, caller);
     }
   }
 
@@ -802,8 +802,7 @@ export class VaultEngine {
           s.auditLogger.log({
             eventType: AuditEventType.SECRET_ROTATE,
             secretId,
-            principalType: caller?.principal_type,
-            principalId: caller?.principal_id,
+            ...callerColumns(caller),
             detail: { handle, ...callerInterfaceDetail(caller) },
             sessionId: this.sessionId ?? undefined,
           });
@@ -812,7 +811,7 @@ export class VaultEngine {
       );
     } catch (err) {
       this.auditDenied(s, AuditEventType.SECRET_ROTATE, err, { handle }, resolvedId, caller);
-      throw err;
+      throw await this.concealHandleError(s, err, handle, caller);
     }
   }
 
@@ -828,15 +827,14 @@ export class VaultEngine {
         s.auditLogger.log({
           eventType: AuditEventType.SECRET_REVOKE,
           secretId,
-          principalType: caller?.principal_type,
-          principalId: caller?.principal_id,
+          ...callerColumns(caller),
           detail: { handle, ...callerInterfaceDetail(caller) },
           sessionId: this.sessionId ?? undefined,
         });
       });
     } catch (err) {
       this.auditDenied(s, AuditEventType.SECRET_REVOKE, err, { handle }, undefined, caller);
-      throw err;
+      throw await this.concealHandleError(s, err, handle, caller);
     }
 
     // A downstream stdio MCP child spawned with this credential outlives the
@@ -892,20 +890,32 @@ export class VaultEngine {
         undefined,
         caller,
       );
-      throw err;
+      throw await this.concealHandleError(s, err, handle, caller);
     }
 
     // Per-secret policy enforcement (thesis §4.6) — before the injection
-    // policy is read, any OAuth refresh runs, or the value is decrypted.
-    this.checkResolvedCallerPolicy(
-      s,
-      secret.id,
-      caller,
-      "use",
-      AuditEventType.SECRET_USE,
-      { handle, context: action.type },
-      handle,
-    );
+    // policy is read, any OAuth refresh runs, or the value is decrypted. A
+    // refusal also ends this secret's live downstream child (E73): the grant
+    // it was spawned under no longer covers the caller, so the credential in
+    // its environment must not outlive the refusal.
+    try {
+      this.checkResolvedCallerPolicy(
+        s,
+        secret.id,
+        caller,
+        "use",
+        AuditEventType.SECRET_USE,
+        { handle, context: action.type },
+        handle,
+      );
+    } catch (err) {
+      await s.mcpRegistry.terminate(
+        secret.id,
+        "use_denied",
+        attributionFromCaller(caller, this.sessionId),
+      );
+      throw err;
+    }
 
     // Attribution for the injector-written audit rows ("by whom" / "through
     // which interface", thesis §4.3.4) — per invocation, never injector state.
@@ -1033,8 +1043,7 @@ export class VaultEngine {
             s.auditLogger.log({
               eventType: AuditEventType.SECRET_USE,
               secretId: secret.id,
-              principalType: caller?.principal_type,
-              principalId: caller?.principal_id,
+              ...callerColumns(caller),
               detail: {
                 context: "http",
                 url: action.url,
@@ -1055,8 +1064,7 @@ export class VaultEngine {
             s.auditLogger.log({
               eventType: AuditEventType.SECRET_USE,
               secretId: secret.id,
-              principalType: caller?.principal_type,
-              principalId: caller?.principal_id,
+              ...callerColumns(caller),
               detail: {
                 context: "http",
                 url: action.url,
@@ -1661,7 +1669,20 @@ export class VaultEngine {
     }
 
     const s = this.assertUnlocked();
-    const secret = await s.secretManager.resolveHandle(handle);
+    let secret: Secret;
+    try {
+      secret = await s.secretManager.resolveHandle(handle);
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.POLICY_GRANT,
+        err,
+        { policy: "injection", handle },
+        undefined,
+        caller,
+      );
+      throw await this.concealHandleError(s, err, handle, caller);
+    }
     // Configuration of a secret is itself gated (W1) and the injection policy
     // is the widening half of it (R1): the allowlists bound where the
     // credential may go, so loosening them needs the same grant as writing a
@@ -1695,8 +1716,7 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_INTERPRETER_REFUSED,
         secretId: secret.id,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: {
           policy: "injection",
           interpreters: addedInterpreters,
@@ -1740,8 +1760,7 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_GRANT,
         secretId: secret.id,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: {
           policy: "injection",
           url_count: policy.url_allowlist?.length ?? 0,
@@ -1763,8 +1782,7 @@ export class VaultEngine {
         s.auditLogger.log({
           eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED,
           secretId: secret.id,
-          principalType: caller?.principal_type,
-          principalId: caller?.principal_id,
+          ...callerColumns(caller),
           detail: {
             policy: "injection",
             interpreters: addedInterpreters,
@@ -1794,7 +1812,20 @@ export class VaultEngine {
   /** Read a secret's injection policy (empty allowlists when unset). */
   async getInjectionPolicy(handle: string, caller?: CallerContext): Promise<InjectionPolicy> {
     const s = this.assertUnlocked();
-    const secret = await s.secretManager.resolveHandle(handle);
+    let secret: Secret;
+    try {
+      secret = await s.secretManager.resolveHandle(handle);
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.SECRET_READ,
+        err,
+        { handle, config: "injection" },
+        undefined,
+        caller,
+      );
+      throw await this.concealHandleError(s, err, handle, caller);
+    }
     this.checkResolvedCallerPolicy(
       s,
       secret.id,
@@ -1804,7 +1835,9 @@ export class VaultEngine {
       { handle, config: "injection" },
       handle,
     );
-    return this.loadInjectionPolicy(s, secret.id);
+    const policy = this.loadInjectionPolicy(s, secret.id);
+    this.auditConfigRead(s, secret.id, caller, { handle, config: "injection" });
+    return policy;
   }
 
   /** Load a secret's downstream MCP server config, or undefined when unset. */
@@ -1833,7 +1866,20 @@ export class VaultEngine {
     caller?: CallerContext,
   ): Promise<void> {
     const s = this.assertUnlocked();
-    const secret = await s.secretManager.resolveHandle(handle);
+    let secret: Secret;
+    try {
+      secret = await s.secretManager.resolveHandle(handle);
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.POLICY_GRANT,
+        err,
+        { policy: "mcp_server", handle },
+        undefined,
+        caller,
+      );
+      throw await this.concealHandleError(s, err, handle, caller);
+    }
     // Before the terminate below: a denied caller must not be able to kill
     // another principal's live downstream child by calling this repeatedly.
     this.checkResolvedCallerPolicy(
@@ -1866,8 +1912,7 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_GRANT,
         secretId: secret.id,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: {
           policy: "mcp_server",
           server_name: config.server_name,
@@ -1891,7 +1936,20 @@ export class VaultEngine {
     caller?: CallerContext,
   ): Promise<McpServerConfig | undefined> {
     const s = this.assertUnlocked();
-    const secret = await s.secretManager.resolveHandle(handle);
+    let secret: Secret;
+    try {
+      secret = await s.secretManager.resolveHandle(handle);
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.SECRET_READ,
+        err,
+        { handle, config: "mcp_server" },
+        undefined,
+        caller,
+      );
+      throw await this.concealHandleError(s, err, handle, caller);
+    }
     this.checkResolvedCallerPolicy(
       s,
       secret.id,
@@ -1901,13 +1959,28 @@ export class VaultEngine {
       { handle, config: "mcp_server" },
       handle,
     );
-    return this.loadMcpServerConfig(s, secret.id);
+    const config = this.loadMcpServerConfig(s, secret.id);
+    this.auditConfigRead(s, secret.id, caller, { handle, config: "mcp_server" });
+    return config;
   }
 
   /** Remove a secret's downstream MCP server config, terminating any live connection. */
   async deleteMcpServerConfig(handle: string, caller?: CallerContext): Promise<boolean> {
     const s = this.assertUnlocked();
-    const secret = await s.secretManager.resolveHandle(handle);
+    let secret: Secret;
+    try {
+      secret = await s.secretManager.resolveHandle(handle);
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.POLICY_REVOKE,
+        err,
+        { policy: "mcp_server", handle },
+        undefined,
+        caller,
+      );
+      throw await this.concealHandleError(s, err, handle, caller);
+    }
     // Before the terminate: a denied caller must not reach the registry.
     this.checkResolvedCallerPolicy(
       s,
@@ -1929,8 +2002,7 @@ export class VaultEngine {
         s.auditLogger.log({
           eventType: AuditEventType.POLICY_REVOKE,
           secretId: secret.id,
-          principalType: caller?.principal_type,
-          principalId: caller?.principal_id,
+          ...callerColumns(caller),
           detail: { policy: "mcp_server", ...callerInterfaceDetail(caller) },
           sessionId: this.sessionId ?? undefined,
         });
@@ -1968,7 +2040,20 @@ export class VaultEngine {
     caller?: CallerContext,
   ): Promise<void> {
     const s = this.assertUnlocked();
-    const secret = await s.secretManager.resolveHandle(handle);
+    let secret: Secret;
+    try {
+      secret = await s.secretManager.resolveHandle(handle);
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.POLICY_GRANT,
+        err,
+        { policy: "connection", handle },
+        undefined,
+        caller,
+      );
+      throw await this.concealHandleError(s, err, handle, caller);
+    }
     // Endpoint-authentication pins (DB TLS/CA, SSH host keys) bound the
     // allowlist decision — dropping them is a rotate-class change.
     this.checkResolvedCallerPolicy(
@@ -2001,8 +2086,7 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_GRANT,
         secretId: secret.id,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: {
           policy: "connection",
           has_database: config.database !== undefined,
@@ -2033,7 +2117,20 @@ export class VaultEngine {
     caller?: CallerContext,
   ): Promise<ConnectionConfig | undefined> {
     const s = this.assertUnlocked();
-    const secret = await s.secretManager.resolveHandle(handle);
+    let secret: Secret;
+    try {
+      secret = await s.secretManager.resolveHandle(handle);
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.SECRET_READ,
+        err,
+        { handle, config: "connection" },
+        undefined,
+        caller,
+      );
+      throw await this.concealHandleError(s, err, handle, caller);
+    }
     this.checkResolvedCallerPolicy(
       s,
       secret.id,
@@ -2043,13 +2140,28 @@ export class VaultEngine {
       { handle, config: "connection" },
       handle,
     );
-    return this.loadConnectionConfig(s, secret.id);
+    const config = this.loadConnectionConfig(s, secret.id);
+    this.auditConfigRead(s, secret.id, caller, { handle, config: "connection" });
+    return config;
   }
 
   /** Remove a secret's endpoint-authentication config. */
   async deleteConnectionConfig(handle: string, caller?: CallerContext): Promise<boolean> {
     const s = this.assertUnlocked();
-    const secret = await s.secretManager.resolveHandle(handle);
+    let secret: Secret;
+    try {
+      secret = await s.secretManager.resolveHandle(handle);
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.POLICY_REVOKE,
+        err,
+        { policy: "connection", handle },
+        undefined,
+        caller,
+      );
+      throw await this.concealHandleError(s, err, handle, caller);
+    }
     this.checkResolvedCallerPolicy(
       s,
       secret.id,
@@ -2065,8 +2177,7 @@ export class VaultEngine {
         s.auditLogger.log({
           eventType: AuditEventType.POLICY_REVOKE,
           secretId: secret.id,
-          principalType: caller?.principal_type,
-          principalId: caller?.principal_id,
+          ...callerColumns(caller),
           detail: { policy: "connection", ...callerInterfaceDetail(caller) },
           sessionId: this.sessionId ?? undefined,
         });
@@ -2181,8 +2292,7 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.OAUTH_AUTHORIZE,
         secretId,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: {
           handle,
           provider: providerConfig.provider,
@@ -2510,8 +2620,7 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.OAUTH_REFRESH,
         secretId,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: { new_expires_at: newExpiresAt, ...callerInterfaceDetail(caller) },
         sessionId: this.sessionId ?? undefined,
         success: true,
@@ -2545,7 +2654,7 @@ export class VaultEngine {
 
     const secret = s.store.getSecret(secretId);
 
-    return {
+    const status: OAuthTokenStatus = {
       secret_id: secretId,
       provider: oauthRow.provider as OAuthProviderPreset,
       has_access_token: oauthRow.access_token_encrypted !== null,
@@ -2555,6 +2664,8 @@ export class VaultEngine {
       refresh_status: computeOAuthRefreshStatus(oauthRow),
       token_endpoint_auth_method: this.storedAuthMethod(oauthRow),
     };
+    this.auditConfigRead(s, secretId, caller, { config: "oauth_status" });
+    return status;
   }
 
   /**
@@ -2836,8 +2947,7 @@ export class VaultEngine {
         s.auditLogger.log({
           eventType: AuditEventType.SECRET_CREATE,
           secretId: id,
-          principalType: caller?.principal_type,
-          principalId: caller?.principal_id,
+          ...callerColumns(caller),
           detail: {
             handle: result.handle,
             status: result.status,
@@ -2899,8 +3009,7 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.CERT_ISSUE,
         secretId: secret.id,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: {
           handle,
           action: "import_certificate",
@@ -3019,8 +3128,7 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType,
         secretId,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: {
           action: "update_certificate",
           subject: cert.subject,
@@ -3063,7 +3171,7 @@ export class VaultEngine {
     const row = s.store.getCertificate(secretId);
     if (!row) throw VaultError.certNotConfigured();
 
-    return {
+    const status: CertificateStatus = {
       secret_id: secretId,
       subject: row.subject,
       issuer: row.issuer,
@@ -3072,15 +3180,17 @@ export class VaultEngine {
       auto_renew: row.auto_renew,
       renewal_status: computeCertificateRenewalStatus(row),
     };
+    this.auditConfigRead(s, secretId, caller, { config: "certificate_status" });
+    return status;
   }
 
   /**
    * The certificate's public material, stored verbatim: leaf, chain and the
-   * pending CSR. None of it is confidential — a certificate is presented to
-   * every peer that connects — so a granted read deliberately writes no audit
-   * row; the private key is the audited half (`getCertificatePrivateKey`).
-   * The `read` gate still applies: policy enforcement lives in the engine (V1),
-   * so a gated secret cannot have its material read out by an interface that
+   * pending CSR. A granted read is audited like every other configuration
+   * read (E75a, 2026-09-02) — the material is public, the fact that a
+   * principal read it is not; the private key is `getCertificatePrivateKey`.
+   * The `read` gate applies: policy enforcement lives in the engine (V1), so a
+   * gated secret cannot have its material read out by an interface that
    * happens to reach this method, and the refusal is audited like every other.
    *
    * `handle` is the string the interface resolved the id from — it lets a
@@ -3109,7 +3219,13 @@ export class VaultEngine {
 
     const row = s.store.getCertificate(secretId);
     if (!row) throw VaultError.certNotConfigured();
-    return { certificatePem: row.certificate_pem, chainPem: row.chain_pem, csrPem: row.csr_pem };
+    const pems = {
+      certificatePem: row.certificate_pem,
+      chainPem: row.chain_pem,
+      csrPem: row.csr_pem,
+    };
+    this.auditConfigRead(s, secretId, caller, { config: "certificate_pem" });
+    return pems;
   }
 
   /**
@@ -3154,8 +3270,7 @@ export class VaultEngine {
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_READ,
       secretId,
-      principalType: caller?.principal_type,
-      principalId: caller?.principal_id,
+      ...callerColumns(caller),
       detail: { config: "certificate_private_key", ...callerInterfaceDetail(caller) },
       sessionId: this.sessionId ?? undefined,
       success: true,
@@ -3258,8 +3373,7 @@ export class VaultEngine {
     s.auditLogger.log({
       eventType: AuditEventType.SECRET_READ,
       secretId,
-      principalType: caller?.principal_type,
-      principalId: caller?.principal_id,
+      ...callerColumns(caller),
       detail: { config: "acme_account", ...callerInterfaceDetail(caller) },
       sessionId: this.sessionId ?? undefined,
       success: true,
@@ -3286,8 +3400,7 @@ export class VaultEngine {
 
       s.auditLogger.log({
         eventType: AuditEventType.AGENT_REGISTER,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: {
           name: row.name,
           ...(row.owner !== null ? { owner: row.owner } : {}),
@@ -3331,8 +3444,7 @@ export class VaultEngine {
 
       s.auditLogger.log({
         eventType: AuditEventType.AGENT_UPDATE,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: { name: row.name, fields, ...callerInterfaceDetail(caller) },
         sessionId: this.sessionId ?? undefined,
       });
@@ -3349,8 +3461,7 @@ export class VaultEngine {
 
       s.auditLogger.log({
         eventType: AuditEventType.AGENT_ACTIVATE,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: { name: row.name, ...callerInterfaceDetail(caller) },
         sessionId: this.sessionId ?? undefined,
       });
@@ -3379,8 +3490,7 @@ export class VaultEngine {
 
       s.auditLogger.log({
         eventType: AuditEventType.AGENT_DEACTIVATE,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: { name: row.name, revoked_tokens: revokedTokens, ...callerInterfaceDetail(caller) },
         sessionId: this.sessionId ?? undefined,
       });
@@ -3410,8 +3520,7 @@ export class VaultEngine {
         s.auditLogger.log({
           eventType: AuditEventType.POLICY_REVOKE,
           secretId: policy.secret_id,
-          principalType: caller?.principal_type,
-          principalId: caller?.principal_id,
+          ...callerColumns(caller),
           detail: {
             policy_id: policy.id,
             reason: "agent_deleted",
@@ -3425,8 +3534,7 @@ export class VaultEngine {
 
       s.auditLogger.log({
         eventType: AuditEventType.AGENT_DELETE,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: {
           name: row.name,
           revoked_tokens: revokedTokens,
@@ -3463,8 +3571,7 @@ export class VaultEngine {
 
       s.auditLogger.log({
         eventType: AuditEventType.TOKEN_REVOKE,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: { jti, reason, ...callerInterfaceDetail(caller) },
         sessionId: this.sessionId ?? undefined,
       });
@@ -3518,8 +3625,7 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_GRANT,
         secretId: input.secretId,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: {
           policy_id: policy.id,
           principal: `${input.principalType}:${input.principalId}`,
@@ -3532,12 +3638,20 @@ export class VaultEngine {
     });
   }
 
-  revokePolicy(policyId: string, caller?: CallerContext): void {
+  /**
+   * `expectedSecretId` is the secret the interface resolved from its own path
+   * — a policy belonging to any other secret refuses exactly like an unknown
+   * id, so the cross-secret IDOR guard needs no caller-less membership read.
+   */
+  revokePolicy(policyId: string, caller?: CallerContext, expectedSecretId?: string): void {
     const s = this.assertUnlocked();
     // Resolved up front for the caller check; the lookup also lets the audit
     // row name the secret the revoked grant belonged to.
     const existing = s.store.getPolicy(policyId);
     if (!existing) {
+      throw new VaultError(ErrorCode.POLICY_NOT_FOUND, `Policy not found: ${policyId}`);
+    }
+    if (expectedSecretId !== undefined && existing.secret_id !== expectedSecretId) {
       throw new VaultError(ErrorCode.POLICY_NOT_FOUND, `Policy not found: ${policyId}`);
     }
     this.checkResolvedCallerPolicy(
@@ -3555,8 +3669,7 @@ export class VaultEngine {
       s.auditLogger.log({
         eventType: AuditEventType.POLICY_REVOKE,
         secretId: existing.secret_id,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: { policy_id: policyId, ...callerInterfaceDetail(caller) },
         sessionId: this.sessionId ?? undefined,
       });
@@ -3586,7 +3699,9 @@ export class VaultEngine {
         handle,
       );
     }
-    return s.policyEngine.listPolicies(secretId);
+    const policies = s.policyEngine.listPolicies(secretId);
+    if (secretId) this.auditConfigRead(s, secretId, caller, { config: "access_policies" });
+    return policies;
   }
 
   /**
@@ -3636,8 +3751,7 @@ export class VaultEngine {
         s.auditLogger.log({
           eventType: AuditEventType.POLICY_REVOKE,
           secretId,
-          principalType: caller?.principal_type,
-          principalId: caller?.principal_id,
+          ...callerColumns(caller),
           detail: { policy_id: row.id, replaced: true, ...callerInterfaceDetail(caller) },
           sessionId: this.sessionId ?? undefined,
         });
@@ -3657,8 +3771,7 @@ export class VaultEngine {
         s.auditLogger.log({
           eventType: AuditEventType.POLICY_GRANT,
           secretId,
-          principalType: caller?.principal_type,
-          principalId: caller?.principal_id,
+          ...callerColumns(caller),
           detail: {
             policy_id: policy.id,
             principal: `agent:${agentName}`,
@@ -3749,26 +3862,33 @@ export class VaultEngine {
   }
 
   /**
-   * Record an unrestricted (tokenless) MCP server start — the `--allow-tokenless`
-   * waiver, in the tamper-evident trail (review finding W6). The waiver and the
-   * refusal reach this method (a failed `server.start` carries the refusal
-   * code): a token-bearing start writes no row, because every operation it
-   * serves is attributed to the requesting principal instead.
+   * Record a server start in the tamper-evident trail — one row per process
+   * or listener start on every transport (R4/B22, 2026-09-02; review finding
+   * W6 introduced the row for the tokenless waiver alone). The stdio MCP
+   * server writes it before its guard and server are constructed: the waiver
+   * (`tokenless: true`), the token-bearing start (`tokenless: false` plus the
+   * launch token's `subject`) and the refused start (`success: false` with
+   * the refusal code). The MCP Streamable HTTP and REST listeners write it
+   * once per listener with the bound `port` and `host`, never per session.
    *
    * Deliberately unattributed (NULL principal columns, `vault.unlock` shape):
-   * the operator at the console is the trusted local path, not a requesting
-   * principal. No state mutation accompanies it, so no outer transaction is
-   * needed — chain linearity is handled inside the logger.
+   * a server start is a process-level event, not a requesting principal's
+   * operation — the subject rides in the detail. No state mutation
+   * accompanies it, so no outer transaction is needed — chain linearity is
+   * handled inside the logger.
    *
    * Fail-closed by omission: this method does not swallow write failures, so a
-   * caller that cannot record the waiver must not proceed to serve. On the
+   * caller that cannot record the start must not proceed to serve. On the
    * refusal branch that means an audit-write failure replaces `TOKEN_REQUIRED`
    * as the thrown error — both outcomes refuse the start (D5).
    */
   auditServerStart(options: {
-    transport: "stdio";
+    transport: ServerTransport;
     tokenless: boolean;
     ttyPrompt?: boolean;
+    subject?: string;
+    port?: number;
+    host?: string;
     success?: false;
     error?: ErrorCode;
   }): void {
@@ -3779,9 +3899,41 @@ export class VaultEngine {
         transport: options.transport,
         tokenless: options.tokenless,
         tty_prompt: options.ttyPrompt ?? false,
+        ...(options.subject !== undefined ? { subject: options.subject } : {}),
+        ...(options.port !== undefined ? { port: options.port } : {}),
+        ...(options.host !== undefined ? { host: options.host } : {}),
         ...(options.error ? { error: options.error } : {}),
       },
       success: options.success ?? true,
+      sessionId: this.sessionId ?? undefined,
+    });
+  }
+
+  /**
+   * The graceful counterpart of `auditServerStart` (R4/D67, 2026-09-02): one
+   * row per started listener, written by the process's shutdown path before
+   * `destroy()`. Unattributed like the start. Throws on a sealed vault exactly
+   * as the start does — the caller decides that a stop it cannot record must
+   * not block the shutdown (the CLI and `harpoc-mcp` wrap it in a try/catch);
+   * a crash or SIGKILL leaves a start without a stop, and that is the record.
+   */
+  auditServerStop(options: {
+    transport: ServerTransport;
+    tokenless: boolean;
+    port?: number;
+    uptimeMs: number;
+    trigger: ServerStopTrigger;
+  }): void {
+    const s = this.assertUnlocked();
+    s.auditLogger.log({
+      eventType: AuditEventType.SERVER_STOP,
+      detail: {
+        transport: options.transport,
+        tokenless: options.tokenless,
+        ...(options.port !== undefined ? { port: options.port } : {}),
+        uptime_ms: options.uptimeMs,
+        trigger: options.trigger,
+      },
       sessionId: this.sessionId ?? undefined,
     });
   }
@@ -4038,8 +4190,7 @@ export class VaultEngine {
 
       s.auditLogger.log({
         eventType: AuditEventType.TOKEN_REVOKE,
-        principalType: caller?.principal_type,
-        principalId: caller?.principal_id,
+        ...callerColumns(caller),
         detail: { jti, ...callerInterfaceDetail(caller) },
         sessionId: this.sessionId ?? undefined,
       });
@@ -4156,17 +4307,75 @@ export class VaultEngine {
   }
 
   /**
-   * Resolve a secret handle to its internal UUID.
+   * Resolve a secret handle to its internal UUID. A failed resolution is
+   * audited as a failed `secret.read { handle }` — the row `getSecretInfo`
+   * writes for an unknown handle — so a probe through a route that resolves
+   * before an id-addressed call leaves the trace a probe through the secrets
+   * routes leaves (2026-09-02); an ambiguous handle is concealed for a
+   * grantless token caller (concealHandleError).
    */
-  async resolveSecretId(handle: string): Promise<string> {
+  async resolveSecretId(handle: string, caller?: CallerContext): Promise<string> {
     const s = this.assertUnlocked();
-    const secret = await s.secretManager.resolveHandle(handle);
-    return secret.id;
+    try {
+      const secret = await s.secretManager.resolveHandle(handle);
+      return secret.id;
+    } catch (err) {
+      this.auditDenied(s, AuditEventType.SECRET_READ, err, { handle }, undefined, caller);
+      throw await this.concealHandleError(s, err, handle, caller);
+    }
   }
 
   // ---------------------------------------------------------------------------
   // Private: state management
   // ---------------------------------------------------------------------------
+
+  /**
+   * The success row of a per-secret configuration read (E75a, 2026-09-02) —
+   * the row `getSecretInfo` writes, with the read's `config` kind in the
+   * detail: unconditional, so the trusted local path leaves the same
+   * NULL-principal trace it leaves for `harpoc secret info`. The detail is
+   * the read's own denial detail minus `required_permission` and `error`.
+   */
+  private auditConfigRead(
+    s: UnlockedState,
+    secretId: string,
+    caller: CallerContext | undefined,
+    detail: Record<string, unknown>,
+  ): void {
+    s.auditLogger.log({
+      eventType: AuditEventType.SECRET_READ,
+      secretId,
+      ...callerColumns(caller),
+      detail: { ...detail, ...callerInterfaceDetail(caller) },
+      sessionId: this.sessionId ?? undefined,
+    });
+  }
+
+  /**
+   * R5's existence rule applied to an ambiguous handle (ruled 2026-09-02): a
+   * bare name that resolves to more than one secret answered AMBIGUOUS_HANDLE
+   * to any caller — for a token caller holding none of read/list/admin on any
+   * candidate, that 409 said "two or more secrets of this name exist" where
+   * an unknown name says nothing. Such a caller now reads the byte-identical
+   * SECRET_NOT_FOUND; the audit row written beside it keeps the true code.
+   * Every other caller — a candidate's grant holder, an admin-scoped user
+   * token, the trusted path — keeps the 409 it can act on.
+   */
+  private async concealHandleError(
+    s: UnlockedState,
+    err: unknown,
+    handle: string,
+    caller: CallerContext | undefined,
+  ): Promise<unknown> {
+    if (!(err instanceof VaultError) || err.code !== ErrorCode.AMBIGUOUS_HANDLE) return err;
+    if (!caller || isAdminUserCaller(caller)) return err;
+    const principals = this.callerPrincipals(caller);
+    for (const candidate of await s.secretManager.findByHandle(handle)) {
+      const held = s.policyEngine.grantedPermissions(candidate.id, principals);
+      if (held.has("read") || held.has("list") || held.has("admin")) return err;
+    }
+    return VaultError.secretNotFound(handle);
+  }
 
   /**
    * Audit a denied operation (`success: false`, error code in detail) without
@@ -4187,8 +4396,7 @@ export class VaultEngine {
     s.auditLogger.log({
       eventType,
       secretId,
-      principalType: caller?.principal_type,
-      principalId: caller?.principal_id,
+      ...callerColumns(caller),
       detail: { ...detail, error: code, ...callerInterfaceDetail(caller) },
       success: false,
       sessionId: this.sessionId ?? undefined,
@@ -4287,8 +4495,7 @@ export class VaultEngine {
     s.auditLogger.log({
       eventType,
       secretId,
-      principalType: caller.principal_type,
-      principalId: caller.principal_id,
+      ...callerColumns(caller),
       detail: {
         ...detail,
         required_permission: permission,
@@ -4308,9 +4515,11 @@ export class VaultEngine {
   /**
    * Handle-resolving wrapper around checkResolvedCallerPolicy for engine
    * methods whose secret manager call resolves internally. With no caller
-   * (trusted local path) this is a no-op — no extra handle resolution, byte
-   * -identical behavior; with a caller, a resolution failure is audited as
-   * the denied operation (with the requesting principal) and rethrown.
+   * (trusted local path) this is a no-op — no extra handle resolution,
+   * byte-identical behavior; with a caller — the tokenless stdio server's
+   * synthetic caller included (R4/E78b) — a resolution failure is audited as
+   * the denied operation (with the requesting principal), concealed for a
+   * grantless token caller when ambiguous, and rethrown.
    */
   private async enforceCallerPolicy(
     s: UnlockedState,
@@ -4326,7 +4535,7 @@ export class VaultEngine {
       secret = await s.secretManager.resolveHandle(handle);
     } catch (err) {
       this.auditDenied(s, eventType, err, detail, undefined, caller);
-      throw err;
+      throw await this.concealHandleError(s, err, handle, caller);
     }
     this.checkResolvedCallerPolicy(s, secret.id, caller, permission, eventType, detail, handle);
   }

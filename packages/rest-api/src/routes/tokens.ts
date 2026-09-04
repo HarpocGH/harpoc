@@ -1,7 +1,8 @@
 import { Hono } from "hono";
-import { callerFromToken, listTokensQuerySchema } from "@harpoc/shared";
+import { listTokensQuerySchema } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope } from "../middleware/scope.js";
+import { callerOf } from "../utils/caller.js";
 import { schemaValidationError } from "../utils/schema-error.js";
 
 /**
@@ -29,7 +30,7 @@ export function createTokenRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     const tokens = engine.listIssuedTokens(
       { status: parsed.data.status, agent: parsed.data.agent },
-      callerFromToken(token, "rest"),
+      callerOf(c),
     );
 
     return c.json({ data: tokens });
@@ -43,7 +44,7 @@ export function createTokenRoutes(): Hono<HarpocEnv> {
     // No expiry argument — the engine floors the denylist entry at
     // MAX_TOKEN_TTL_MS, which outlives every mintable token; the registry
     // row's expiry is not consulted.
-    engine.revokeToken(c.req.param("jti"), undefined, callerFromToken(token, "rest"));
+    engine.revokeToken(c.req.param("jti"), undefined, callerOf(c));
 
     return c.json({ data: { revoked: true } });
   });

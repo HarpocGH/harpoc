@@ -442,6 +442,23 @@ describe("audit attribution", () => {
     expect(denial?.principal_id).toBe("bob");
   });
 
+  it("a granted config read is audited as secret.read naming the config (E75a)", async () => {
+    const id = await makeSecret("read-success-row");
+    grant(id, "agent", "alice", ["read"]);
+
+    await engine.getConnectionConfig("secret://read-success-row", agent("alice"));
+
+    const row = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_READ, secretId: id })
+      .find((r) => r.success);
+    expect(row?.principal_id).toBe("alice");
+    expect(row?.detail).toEqual({
+      handle: "secret://read-success-row",
+      config: "connection",
+      interface: "rest",
+    });
+  });
+
   it("an allowed config mutation carries the principal on its success row", async () => {
     const id = await makeSecret("success-row");
     grant(id, "agent", "alice", ["rotate"]);

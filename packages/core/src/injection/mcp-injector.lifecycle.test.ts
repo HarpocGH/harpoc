@@ -226,6 +226,7 @@ describe("McpConnectionRegistry — connect racing a seal (M8)", () => {
         credentialFingerprint: "f",
         configFingerprint: "g",
         spawnedAt: Date.now(),
+        lastUsedAt: Date.now(),
       };
     });
 
@@ -256,6 +257,7 @@ describe("McpConnectionRegistry — connect racing a seal (M8)", () => {
         credentialFingerprint: "f",
         configFingerprint: "g",
         spawnedAt: Date.now(),
+        lastUsedAt: Date.now(),
       }),
     );
 

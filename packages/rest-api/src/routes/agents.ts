@@ -3,7 +3,6 @@ import type { Permission } from "@harpoc/shared";
 import {
   AgentStatus,
   agentNameSchema,
-  callerFromToken,
   listAgentsQuerySchema,
   registerAgentInputSchema,
   setAgentPermissionsInputSchema,
@@ -11,6 +10,7 @@ import {
 } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
+import { callerOf } from "../utils/caller.js";
 import { readJsonBody } from "../utils/read-json-body.js";
 import { schemaValidationError } from "../utils/schema-error.js";
 
@@ -47,10 +47,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
     }
 
     const engine = c.get("engine");
-    const agents = engine.listAgents(
-      parsed.data.status ?? AgentStatus.ACTIVE,
-      callerFromToken(token, "rest"),
-    );
+    const agents = engine.listAgents(parsed.data.status ?? AgentStatus.ACTIVE, callerOf(c));
 
     return c.json({ data: agents });
   });
@@ -66,7 +63,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
     }
 
     const engine = c.get("engine");
-    const agent = engine.registerAgent(parsed.data, callerFromToken(token, "rest"));
+    const agent = engine.registerAgent(parsed.data, callerOf(c));
 
     return c.json({ data: agent }, 201);
   });
@@ -77,7 +74,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
     const name = parseAgentName(c.req.param("name"));
 
     const engine = c.get("engine");
-    return c.json({ data: engine.getAgent(name, callerFromToken(token, "rest")) });
+    return c.json({ data: engine.getAgent(name, callerOf(c)) });
   });
 
   // Replace semantics: an omitted field is cleared (the CLI merges instead).
@@ -93,7 +90,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
     }
 
     const engine = c.get("engine");
-    const agent = engine.updateAgent(name, parsed.data, callerFromToken(token, "rest"));
+    const agent = engine.updateAgent(name, parsed.data, callerOf(c));
 
     return c.json({ data: agent });
   });
@@ -105,7 +102,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
     const name = parseAgentName(c.req.param("name"));
 
     const engine = c.get("engine");
-    const result = engine.deactivateAgent(name, callerFromToken(token, "rest"));
+    const result = engine.deactivateAgent(name, callerOf(c));
 
     return c.json({ data: result });
   });
@@ -116,7 +113,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
     const name = parseAgentName(c.req.param("name"));
 
     const engine = c.get("engine");
-    const agent = engine.activateAgent(name, callerFromToken(token, "rest"));
+    const agent = engine.activateAgent(name, callerOf(c));
 
     return c.json({ data: agent });
   });
@@ -127,7 +124,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
     const name = parseAgentName(c.req.param("name"));
 
     const engine = c.get("engine");
-    const result = engine.deleteAgent(name, callerFromToken(token, "rest"));
+    const result = engine.deleteAgent(name, callerOf(c));
 
     return c.json({ data: result });
   });
@@ -138,7 +135,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
     const name = parseAgentName(c.req.param("name"));
 
     const engine = c.get("engine");
-    const policies = engine.listAgentPolicies(name, callerFromToken(token, "rest"));
+    const policies = engine.listAgentPolicies(name, callerOf(c));
 
     return c.json({ data: policies });
   });
@@ -162,14 +159,14 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     // Resolve the handle here so an unknown secret answers SECRET_NOT_FOUND
     // rather than reaching the policy insert as a dangling reference.
-    const secretId = await engine.resolveSecretId(buildHandle(handleParam));
+    const secretId = await engine.resolveSecretId(buildHandle(handleParam), callerOf(c));
     const result = engine.setAgentPermissions(
       name,
       secretId,
       parsed.data.permissions as Permission[],
       parsed.data.expires_at,
       token.sub,
-      callerFromToken(token, "rest"),
+      callerOf(c),
     );
 
     return c.json({ data: result });

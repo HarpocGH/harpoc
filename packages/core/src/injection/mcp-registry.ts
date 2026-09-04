@@ -1,5 +1,11 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { AuditEventType, MCP_SHUTDOWN_TIMEOUT_MS, VaultError } from "@harpoc/shared";
+import {
+  AuditEventType,
+  MCP_IDLE_SWEEP_INTERVAL_MS,
+  MCP_IDLE_TTL_MS,
+  MCP_SHUTDOWN_TIMEOUT_MS,
+  VaultError,
+} from "@harpoc/shared";
 import type { AuditAttribution } from "../audit/attribution.js";
 import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
@@ -40,13 +46,29 @@ export interface McpConnectionEntry {
   credentialFingerprint: string;
   configFingerprint: string;
   spawnedAt: number;
+  /**
+   * Epoch ms of the last `acquire` that returned this entry — stamped by the
+   * registry at publish and on every reuse hit, the clock the idle sweep reads
+   * (E73). A factory's value is overwritten at publish.
+   */
+  lastUsedAt: number;
+}
+
+export interface McpRegistryOptions {
+  /** Idle bound on a live entry; `MCP_IDLE_TTL_MS` by default. */
+  idleTtlMs?: number;
+  /** Sweep cadence; `MCP_IDLE_SWEEP_INTERVAL_MS` by default. */
+  sweepIntervalMs?: number;
 }
 
 /**
  * In-memory lifecycle table for downstream MCP servers (thesis §4.5.4):
- * spawn on first use, reuse across calls, terminate on session end. On
- * unexpected exit the entry is removed and the crash audit-logged; respawn
- * happens only on the NEXT invocation — never automatically.
+ * spawn on first use, reuse across calls, terminate on session end — and,
+ * since E73 (2026-09-02), on idleness: an entry no use has touched for the
+ * idle bound is terminated, so a credential-holding child never outlives its
+ * last use by more than that bound plus one sweep interval. On unexpected
+ * exit the entry is removed and the crash audit-logged; respawn happens only
+ * on the NEXT invocation — never automatically.
  */
 export class McpConnectionRegistry {
   /** Coalesces concurrent first-use connects per secret. */
@@ -61,8 +83,18 @@ export class McpConnectionRegistry {
    * it with no teardown path left.
    */
   private generation = 0;
+  private readonly idleTtlMs: number;
+  private readonly sweepIntervalMs: number;
+  /** Runs exactly while `live` is non-empty; `unref`'d, so it never holds the process open. */
+  private sweepTimer: NodeJS.Timeout | undefined;
 
-  constructor(private readonly auditLogger: AuditLogger | null) {}
+  constructor(
+    private readonly auditLogger: AuditLogger | null,
+    options: McpRegistryOptions = {},
+  ) {
+    this.idleTtlMs = options.idleTtlMs ?? MCP_IDLE_TTL_MS;
+    this.sweepIntervalMs = options.sweepIntervalMs ?? MCP_IDLE_SWEEP_INTERVAL_MS;
+  }
 
   /** The ready entry for a secret, if one exists (undefined while connecting). */
   get(secretId: string): McpConnectionEntry | undefined {
@@ -79,7 +111,11 @@ export class McpConnectionRegistry {
     factory: () => Promise<McpConnectionEntry>,
   ): Promise<McpConnectionEntry> {
     const existing = this.connections.get(secretId);
-    if (existing) return existing;
+    if (existing) {
+      const ready = this.live.get(secretId);
+      if (ready) ready.lastUsedAt = Date.now();
+      return existing;
+    }
 
     const promise = this.connect(secretId, factory);
     this.connections.set(secretId, promise);
@@ -136,6 +172,7 @@ export class McpConnectionRegistry {
       entry.stdioTransport?.killSync();
     }
     this.live.clear();
+    this.stopSweep();
   }
 
   /**
@@ -152,6 +189,7 @@ export class McpConnectionRegistry {
     }
     this.live.clear();
     this.connections.clear();
+    this.stopSweep();
   }
 
   private async connect(
@@ -172,7 +210,9 @@ export class McpConnectionRegistry {
       throw VaultError.mcpConnectFailed(entry.serverName, "vault session ended while connecting");
     }
     entry.state = "ready";
+    entry.lastUsedAt = Date.now();
     this.live.set(secretId, entry);
+    this.ensureSweep();
 
     // Protocol assigns transport.onclose internally; the client-level hook is
     // the supported observation point for both crash and deliberate close.
@@ -186,6 +226,7 @@ export class McpConnectionRegistry {
       this.live.delete(secretId);
     }
     this.connections.delete(secretId);
+    this.stopSweepIfIdle();
     entry.dispose?.();
 
     if (entry.state === "closing") return;
@@ -220,6 +261,7 @@ export class McpConnectionRegistry {
     if (this.live.get(entry.secretId) === entry) {
       this.live.delete(entry.secretId);
     }
+    this.stopSweepIfIdle();
 
     this.auditLogger?.log(
       withAttribution(
@@ -244,6 +286,39 @@ export class McpConnectionRegistry {
       entry.stdioTransport?.killSync();
     } finally {
       entry.dispose?.();
+    }
+  }
+
+  private ensureSweep(): void {
+    if (this.sweepTimer) return;
+    this.sweepTimer = setInterval(() => this.sweepIdle(), this.sweepIntervalMs);
+    if (this.sweepTimer.unref) this.sweepTimer.unref();
+  }
+
+  private stopSweep(): void {
+    if (!this.sweepTimer) return;
+    clearInterval(this.sweepTimer);
+    this.sweepTimer = undefined;
+  }
+
+  private stopSweepIfIdle(): void {
+    if (this.live.size === 0) this.stopSweep();
+  }
+
+  /**
+   * The idle bound (E73): a ready entry no `acquire` has returned for
+   * `idleTtlMs` is terminated with reason `idle`, unattributed — a
+   * vault-initiated teardown like session end. A call in flight is never
+   * older than the per-invocation ceiling (300 s), well inside the
+   * ten-minute default, and the stamp is taken at acquire, so the sweep never
+   * ends a child mid-call. Entries still connecting are left to `connect`.
+   */
+  private sweepIdle(): void {
+    const now = Date.now();
+    for (const entry of [...this.live.values()]) {
+      if (entry.state !== "ready") continue;
+      if (now - entry.lastUsedAt < this.idleTtlMs) continue;
+      void this.terminate(entry.secretId, "idle").catch(() => undefined);
     }
   }
 

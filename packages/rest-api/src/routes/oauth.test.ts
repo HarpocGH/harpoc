@@ -333,7 +333,7 @@ describe("GET /api/v1/oauth/:handle/status", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.data).toEqual(OAUTH_STATUS);
-    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://gh-app");
+    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://gh-app", EXPECTED_CALLER);
     expect(engine.getOAuthTokenStatus).toHaveBeenCalledWith(
       "secret-uuid-1",
       EXPECTED_CALLER,
@@ -356,7 +356,7 @@ describe("GET /api/v1/oauth/:handle/status", () => {
 
   it("resolves a project-qualified handle", async () => {
     await app.request("/api/v1/oauth/myproj%2Fgh-app/status", { headers: AUTH });
-    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://myproj/gh-app");
+    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://myproj/gh-app", EXPECTED_CALLER);
   });
 
   it("propagates OAUTH_NOT_CONFIGURED as its mapped status", async () => {

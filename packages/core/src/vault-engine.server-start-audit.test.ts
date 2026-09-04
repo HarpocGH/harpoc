@@ -138,3 +138,133 @@ describe("auditServerStart (W6)", () => {
     }
   });
 });
+
+describe("auditServerStart on every transport (R4/B22)", () => {
+  it("a token-bearing stdio start writes tokenless: false with the subject, unattributed", () => {
+    engine.auditServerStart({
+      transport: "stdio",
+      tokenless: false,
+      subject: "agent-1",
+    });
+    const rows = engine.queryAudit({ eventType: AuditEventType.SERVER_START });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.success).toBe(true);
+    expect(rows[0]?.principal_type).toBeNull();
+    expect(rows[0]?.detail).toEqual({
+      transport: "stdio",
+      tokenless: false,
+      tty_prompt: false,
+      subject: "agent-1",
+    });
+  });
+
+  it("a listener start carries its transport, port and host", () => {
+    engine.auditServerStart({
+      transport: "http",
+      tokenless: false,
+      port: 3001,
+      host: "127.0.0.1",
+    });
+    engine.auditServerStart({
+      transport: "rest",
+      tokenless: false,
+      port: 3000,
+      host: "::1",
+    });
+    const byTransport = new Map(
+      engine
+        .queryAudit({ eventType: AuditEventType.SERVER_START })
+        .map((r) => [r.detail?.transport, r.detail]),
+    );
+    expect(byTransport.get("http")).toEqual({
+      transport: "http",
+      tokenless: false,
+      tty_prompt: false,
+      port: 3001,
+      host: "127.0.0.1",
+    });
+    expect(byTransport.get("rest")).toEqual({
+      transport: "rest",
+      tokenless: false,
+      tty_prompt: false,
+      port: 3000,
+      host: "::1",
+    });
+  });
+
+  it("the waiver row keeps its exact shape", () => {
+    engine.auditServerStart({
+      transport: "stdio",
+      tokenless: true,
+      ttyPrompt: true,
+    });
+    const [row] = engine.queryAudit({ eventType: AuditEventType.SERVER_START });
+    expect(row?.detail).toEqual({
+      transport: "stdio",
+      tokenless: true,
+      tty_prompt: true,
+    });
+  });
+});
+
+describe("auditServerStop (R4/D67)", () => {
+  it("writes an unattributed server.stop row after the start, chain intact", () => {
+    engine.auditServerStart({
+      transport: "http",
+      tokenless: false,
+      port: 3001,
+      host: "127.0.0.1",
+    });
+    engine.auditServerStop({
+      transport: "http",
+      tokenless: false,
+      port: 3001,
+      uptimeMs: 1234,
+      trigger: "SIGTERM",
+    });
+    const [start] = engine.queryAudit({
+      eventType: AuditEventType.SERVER_START,
+    });
+    const stops = engine.queryAudit({ eventType: AuditEventType.SERVER_STOP });
+    expect(stops).toHaveLength(1);
+    expect(stops[0]?.success).toBe(true);
+    expect(stops[0]?.principal_type).toBeNull();
+    expect(stops[0]?.detail).toEqual({
+      transport: "http",
+      tokenless: false,
+      port: 3001,
+      uptime_ms: 1234,
+      trigger: "SIGTERM",
+    });
+    expect(stops[0]?.id).toBeGreaterThan(start?.id ?? Number.MAX_SAFE_INTEGER);
+    expect(engine.verifyAuditChain().valid).toBe(true);
+  });
+
+  it("omits port for the stdio server", () => {
+    engine.auditServerStop({
+      transport: "stdio",
+      tokenless: true,
+      uptimeMs: 10,
+      trigger: "transport_closed",
+    });
+    const [row] = engine.queryAudit({ eventType: AuditEventType.SERVER_STOP });
+    expect(row?.detail).toEqual({
+      transport: "stdio",
+      tokenless: true,
+      uptime_ms: 10,
+      trigger: "transport_closed",
+    });
+  });
+
+  it("refuses on a sealed vault — the callers make it best-effort", async () => {
+    await engine.lock();
+    expect(() =>
+      engine.auditServerStop({
+        transport: "stdio",
+        tokenless: true,
+        uptimeMs: 1,
+        trigger: "SIGINT",
+      }),
+    ).toThrow(expect.objectContaining({ code: ErrorCode.VAULT_LOCKED }));
+  });
+});

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { Command } from "commander";
 import type { VaultApiToken } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -14,7 +15,11 @@ const { mockEngine } = vi.hoisted(() => ({
       created_at: 0,
       expires_at: null,
     }),
-    revokePolicy: vi.fn().mockReturnValue(undefined),
+    revokePolicy: vi.fn((policyId: string) => {
+      if (policyId !== "pol-1") {
+        throw new VaultError(ErrorCode.POLICY_NOT_FOUND, `Policy not found: ${policyId}`);
+      }
+    }),
     listPolicies: vi.fn().mockReturnValue([
       {
         id: "pol-1",
@@ -138,27 +143,33 @@ describe("policy commands — token path", () => {
     expect(mockEngine.listPolicies).not.toHaveBeenCalled();
   });
 
-  it("revoke: with --secret it scope-checks, membership-checks caller-less and passes the caller", async () => {
+  it("revoke: with --secret it scope-checks and hands the engine the caller and the secret id", async () => {
     mockEngine.verifyToken.mockReturnValue(token({ scope: ["admin"] }));
     await run(["revoke", "pol-1", "--secret", "secret://k", "--token", "jwt-value"]);
-    expect(mockEngine.listPolicies).toHaveBeenCalledWith("sid-1");
+    expect(mockEngine.listPolicies).not.toHaveBeenCalled();
     expect(mockEngine.revokePolicy).toHaveBeenCalledWith(
       "pol-1",
       expect.objectContaining({ interface: "cli" }),
+      "sid-1",
     );
   });
 
-  it("revoke: a policy id not belonging to --secret is refused", async () => {
+  it("revoke: a policy id not belonging to --secret is refused by the engine", async () => {
     mockEngine.verifyToken.mockReturnValue(token({ scope: ["admin"] }));
     await expect(
       run(["revoke", "pol-other", "--secret", "secret://k", "--token", "jwt-value"]),
     ).rejects.toThrow("process.exit");
-    expect(mockEngine.revokePolicy).not.toHaveBeenCalled();
+    expect(mockEngine.listPolicies).not.toHaveBeenCalled();
+    expect(mockEngine.revokePolicy).toHaveBeenCalledWith(
+      "pol-other",
+      expect.objectContaining({ interface: "cli" }),
+      "sid-1",
+    );
   });
 
   it("revoke: tokenless without --secret is unchanged", async () => {
     await run(["revoke", "pol-1"]);
-    expect(mockEngine.revokePolicy).toHaveBeenCalledWith("pol-1", undefined);
+    expect(mockEngine.revokePolicy).toHaveBeenCalledWith("pol-1", undefined, undefined);
   });
 
   it("list: with a handle, read scope is checked and the caller passed", async () => {

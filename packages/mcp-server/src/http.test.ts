@@ -1,4 +1,6 @@
 import { request as httpRequest } from "node:http";
+import { createServer as createNetServer } from "node:net";
+import type { AddressInfo } from "node:net";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -81,6 +83,16 @@ function rawRequest(
     });
     req.on("error", reject);
     req.end(body);
+  });
+}
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createNetServer();
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address() as AddressInfo;
+      srv.close((err) => (err ? reject(err) : resolve(port)));
+    });
   });
 }
 
@@ -174,17 +186,52 @@ describe("startMcpHttpServer", () => {
     expect(engine.listSecrets).toHaveBeenCalled();
   });
 
-  it("writes no server.start row per HTTP session (W6/D2 pin)", async () => {
+  it("writes exactly one server.start row at the bind — none per session (R4/B22)", async () => {
     const engine = mockEngine();
     const { port } = await start(engine);
+    expect(engine.auditServerStart).toHaveBeenCalledTimes(1);
+    expect(engine.auditServerStart).toHaveBeenCalledWith({
+      transport: "http",
+      tokenless: false,
+      port,
+      host: "127.0.0.1",
+    });
 
+    const first = await connectClient(port, TOKEN);
+    clients.push(first.client);
+    const second = await connectClient(port, TOKEN);
+    clients.push(second.client);
+    expect(engine.auditServerStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed when the listener row cannot be written — the bind is undone", async () => {
+    const engine = mockEngine({
+      auditServerStart: vi.fn().mockImplementation(() => {
+        throw new Error("audit log unwritable");
+      }),
+    });
+    const port = await freePort();
+    await expect(startMcpHttpServer({ engine, port })).rejects.toThrow("audit log unwritable");
+    await expect(rawRequest(port, rpcHeaders(), "{}")).rejects.toMatchObject({
+      code: "ECONNREFUSED",
+    });
+  });
+
+  it("stamps the socket peer on the session's caller (E75i)", async () => {
+    const engine = mockEngine();
+    const { port } = await start(engine);
     const { client } = await connectClient(port, TOKEN);
     clients.push(client);
 
-    // Every HTTP session constructs its own McpServer; logging each one would
-    // put up to 128 rows per client into the trail for a mode that already
-    // authenticates every request. Only the stdio tokenless waiver is audited.
-    expect(engine.auditServerStart).not.toHaveBeenCalled();
+    await client.callTool({ name: "list_secrets", arguments: {} });
+
+    expect(engine.listSecrets).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({
+        interface: "mcp-http",
+        remote_address: "127.0.0.1",
+      }),
+    );
   });
 
   it("enforces token scope across the HTTP transport", async () => {

@@ -1,7 +1,6 @@
 import { Hono } from "hono";
 import {
   VaultError,
-  callerFromToken,
   certificateImportSchema,
   generateCsrRequestSchema,
   isEncryptedPrivateKeyPem,
@@ -9,6 +8,7 @@ import {
 } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
+import { callerOf } from "../utils/caller.js";
 import { readJsonBody } from "../utils/read-json-body.js";
 import { schemaValidationError } from "../utils/schema-error.js";
 
@@ -34,7 +34,7 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
       project: parsed.data.project,
       autoRenew: parsed.data.auto_renew,
       renewBeforeDays: parsed.data.renew_before_days,
-      caller: callerFromToken(token, "rest"),
+      caller: callerOf(c),
     });
     return c.json({ data: { handle: ref.handle, secret_id: ref.secretId } }, 201);
   });
@@ -55,7 +55,7 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
       modulusLength: parsed.data.bits,
       namedCurve: parsed.data.curve,
       project: parsed.data.project,
-      caller: callerFromToken(token, "rest"),
+      caller: callerOf(c),
     });
     return c.json({ data: { handle: r.handle, csr_pem: r.csrPem } }, 201);
   });
@@ -67,9 +67,9 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
     c.get("limiter").checkSecret(handle);
-    const secretId = await engine.resolveSecretId(handle);
+    const secretId = await engine.resolveSecretId(handle, callerOf(c));
     const status = await c.get("certManager").renewCertificate(secretId, {
-      caller: callerFromToken(token, "rest"),
+      caller: callerOf(c),
       handle,
     });
     return c.json({ data: status });
@@ -82,8 +82,8 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
     c.get("limiter").checkSecret(handle);
-    const secretId = await engine.resolveSecretId(handle);
-    const status = engine.getCertificateStatus(secretId, callerFromToken(token, "rest"), handle);
+    const secretId = await engine.resolveSecretId(handle, callerOf(c));
+    const status = engine.getCertificateStatus(secretId, callerOf(c), handle);
     return c.json({ data: status });
   });
 

@@ -6,9 +6,9 @@ export const auditMiddleware: MiddlewareHandler<HarpocEnv> = async (c, next) => 
 
   const token = c.get("token");
   const principal = token?.sub ?? "anonymous";
-  const ip = c.req.header("x-forwarded-for") ?? "unknown";
+  const ip = c.get("remoteAddress") ?? "unknown";
 
-  console.debug(
+  console.error(
     "[audit] %s %s → %d principal=%s ip=%s",
     c.req.method,
     c.req.path,

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext, Permission, UseSecretAction } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();
@@ -204,5 +205,57 @@ describe("interface is never load-bearing for policy matching (D3 pin)", () => {
     await expect(
       engine.useSecret("secret://iface-neutral", PROCESS_ACTION, bobPlain),
     ).rejects.toMatchObject({ code: ErrorCode.SECRET_NOT_FOUND });
+  });
+});
+
+describe("ip_address from the caller's socket peer (E75i)", () => {
+  const PEER_CALLER: CallerContext = {
+    ...REST_CALLER,
+    remote_address: "10.0.0.7",
+  };
+
+  async function grantedSecret(name: string): Promise<string> {
+    await engine.createSecret({ name, type: SecretType.API_KEY, value: VALUE });
+    const secretId = await engine.resolveSecretId(`secret://${name}`);
+    engine.grantPolicy(
+      {
+        secretId,
+        principalType: "agent",
+        principalId: "alice",
+        permissions: ["read"],
+      },
+      "test",
+    );
+    return secretId;
+  }
+
+  it("a success row carries the peer; the same caller without one leaves NULL", async () => {
+    const secretId = await grantedSecret("peer-key");
+    await engine.getSecretInfo("secret://peer-key", PEER_CALLER);
+    await engine.getSecretInfo("secret://peer-key", REST_CALLER);
+
+    const rows = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_READ, secretId })
+      .filter((r) => r.success);
+    expect(rows.map((r) => r.ip_address).sort()).toEqual([null, "10.0.0.7"].sort());
+    expect(engine.verifyAuditChain().valid).toBe(true);
+  });
+
+  it("a denial row carries the peer too", async () => {
+    await grantedSecret("peer-denied");
+    await expectVaultError(
+      () =>
+        engine.getSecretInfo("secret://peer-denied", {
+          principal_type: "agent",
+          principal_id: "someone-else",
+          interface: "rest",
+          remote_address: "10.0.0.9",
+        }),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
+    const denial = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_READ })
+      .find((r) => !r.success);
+    expect(denial?.ip_address).toBe("10.0.0.9");
   });
 });

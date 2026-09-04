@@ -44,7 +44,11 @@ function createMockEngine(token: VaultApiToken = ADMIN_TOKEN) {
     resolveSecretId: vi.fn().mockResolvedValue("secret-uuid-1"),
     listPolicies: vi.fn().mockReturnValue([MOCK_POLICY]),
     grantPolicy: vi.fn().mockReturnValue(MOCK_POLICY),
-    revokePolicy: vi.fn(),
+    revokePolicy: vi.fn((policyId: string) => {
+      if (policyId !== MOCK_POLICY.id) {
+        throw new VaultError(ErrorCode.POLICY_NOT_FOUND, `Policy not found: ${policyId}`);
+      }
+    }),
   };
 }
 
@@ -73,7 +77,10 @@ describe("policy routes", () => {
       const body = await res.json();
       expect(body.data).toHaveLength(1);
       expect(body.data[0].id).toBe("policy-1");
-      expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://test-key");
+      expect(engine.resolveSecretId).toHaveBeenCalledWith(
+        "secret://test-key",
+        expect.objectContaining({ principal_id: ADMIN_TOKEN.sub, interface: "rest" }),
+      );
     });
 
     it("requires read scope", async () => {
@@ -167,7 +174,9 @@ describe("policy routes", () => {
       expect(engine.revokePolicy).toHaveBeenCalledWith(
         "policy-1",
         expect.objectContaining({ principal_id: "admin-agent" }),
+        "secret-uuid-1",
       );
+      expect(engine.listPolicies).not.toHaveBeenCalled();
     });
 
     it("returns 404 for unknown policy", async () => {
@@ -179,8 +188,8 @@ describe("policy routes", () => {
     });
 
     it("returns 404 for policy belonging to a different secret (IDOR prevention)", async () => {
-      // listPolicies returns MOCK_POLICY with id "policy-1" for secret "secret-uuid-1"
-      // Trying to delete "other-policy-id" through this secret should fail
+      // The membership check now lives in the engine: the route hands it the
+      // secret id it resolved, and a foreign policy refuses POLICY_NOT_FOUND.
       const res = await app.request("/api/v1/secrets/test-key/policies/other-policy-id", {
         method: "DELETE",
         headers: AUTH,
@@ -188,6 +197,12 @@ describe("policy routes", () => {
       expect(res.status).toBe(404);
       const body = await res.json();
       expect(body.error).toBe("POLICY_NOT_FOUND");
+      expect(engine.listPolicies).not.toHaveBeenCalled();
+      expect(engine.revokePolicy).toHaveBeenCalledWith(
+        "other-policy-id",
+        expect.objectContaining({ principal_id: "admin-agent" }),
+        "secret-uuid-1",
+      );
     });
 
     it("requires admin scope", async () => {

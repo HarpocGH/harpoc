@@ -16,10 +16,14 @@ import { matchesSecretNameScope } from "./name-pattern.js";
  * `verifyToken` refuses a payload without one — so the caller's type is the
  * claim, verbatim; the `project` claim rides along so the engine can derive
  * the (project, <claim>) principal. The optional `iface` tags which interface
- * the request arrived through — audit attribution only, never consulted by
- * policy matching.
+ * the request arrived through and `remoteAddress` its socket peer — audit
+ * attribution only, never consulted by policy matching.
  */
-export function callerFromToken(token: VaultApiToken, iface?: AccessInterface): CallerContext {
+export function callerFromToken(
+  token: VaultApiToken,
+  iface?: AccessInterface,
+  remoteAddress?: string,
+): CallerContext {
   const caller: CallerContext = {
     principal_type: token.principal_type,
     principal_id: token.sub,
@@ -30,16 +34,41 @@ export function callerFromToken(token: VaultApiToken, iface?: AccessInterface): 
   if (iface) {
     caller.interface = iface;
   }
+  if (remoteAddress) {
+    caller.remote_address = remoteAddress;
+  }
   if (token.scope.includes("admin")) {
     caller.admin_scope = true;
   }
   return caller;
 }
 
+/** The principal id every row of a `--allow-tokenless` stdio server carries (R4/E78b). */
+export const TOKENLESS_STDIO_PRINCIPAL = "tokenless-stdio";
+
+/**
+ * The attribution-only caller of a `--allow-tokenless` stdio MCP server
+ * (R4/E78b, 2026-09-02): a user-type principal carrying `admin_scope`, so the
+ * engine treats it exactly as it treated the absent caller it replaces —
+ * exempt from per-secret grants and the W2 enumeration filter (R7) — while
+ * every row it writes names the unrestricted server instead of blending into
+ * the CLI's NULL-principal rows.
+ */
+export function tokenlessStdioCaller(iface: AccessInterface): CallerContext {
+  return {
+    principal_type: TokenPrincipalType.USER,
+    principal_id: TOKENLESS_STDIO_PRINCIPAL,
+    interface: iface,
+    admin_scope: true,
+  };
+}
+
 /**
  * R7 (v1.4.1): the one caller class exempt from per-secret access policies —
- * a user-type principal whose token carried admin scope. The flag exists only
- * on callerFromToken-built contexts, so hand-built callers are never exempt.
+ * a user-type principal whose token carried admin scope, or the tokenless
+ * stdio server's synthetic caller. The flag exists only on contexts built by
+ * callerFromToken and tokenlessStdioCaller, so hand-built callers are never
+ * exempt (pinned by the E77 tripwire in @harpoc/integration).
  */
 export function isAdminUserCaller(caller: CallerContext): boolean {
   return caller.principal_type === TokenPrincipalType.USER && caller.admin_scope === true;

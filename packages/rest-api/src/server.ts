@@ -2,7 +2,7 @@ import { serve } from "@hono/node-server";
 import type { VaultEngine } from "@harpoc/core";
 import type { CertManager } from "@harpoc/cert-manager";
 import type { OAuthManager } from "@harpoc/oauth-proxy";
-import { VaultState } from "@harpoc/shared";
+import { VaultError, VaultState } from "@harpoc/shared";
 import { createApp } from "./app.js";
 
 export interface ServerOptions {
@@ -21,7 +21,7 @@ export function startServer(options: ServerOptions): ReturnType<typeof serve> {
   const { engine, port = 3000, hostname = "127.0.0.1" } = options;
 
   if (engine.getState() === VaultState.SEALED) {
-    console.warn("[harpoc] Warning: Vault is SEALED. All protected endpoints will return 503.");
+    throw VaultError.vaultLocked();
   }
 
   if (!["127.0.0.1", "::1", "localhost"].includes(hostname)) {
@@ -31,6 +31,16 @@ export function startServer(options: ServerOptions): ReturnType<typeof serve> {
   }
 
   const app = createApp(engine, options);
+
+  // One row per listener start (R4/B22), before the bind like the stdio
+  // waiver: no record, no listener. The port is the configured one — the CLI
+  // never passes an ephemeral port here.
+  engine.auditServerStart({
+    transport: "rest",
+    tokenless: false,
+    port,
+    host: hostname,
+  });
 
   const server = serve({ fetch: app.fetch, port, hostname });
   console.log(`[harpoc] REST API listening on ${hostname}:${port}`);

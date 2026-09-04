@@ -167,7 +167,7 @@ A launch token restricts what the MCP server can do — which permissions, secre
 npx harpoc server start --mcp --allow-tokenless
 ```
 
-The waiver is recorded: each such start writes a `server.start` audit event (`{ tokenless: true, transport: "stdio" }`) into the tamper-evident trail, visible with `harpoc audit --event server.start`. It is fail-closed — if the row cannot be written, the server does not start. Only the tokenless opt-in produces this event; token-bearing starts, the HTTP transports and the REST API write no row, since their operations are attributed per access.
+The waiver is recorded: each such start writes a `server.start` audit event (`{ tokenless: true, transport: "stdio" }`) into the tamper-evident trail, visible with `harpoc audit --event server.start`. It is fail-closed — if the row cannot be written, the server does not start. Every start writes the row (token-bearing stdio starts carry the token's subject; the MCP HTTP and REST listeners carry their bound port), and every graceful stop writes a `server.stop` — so the waiver row is the one carrying `tokenless: true`, and `harpoc audit --event server.start` lists every server that ran.
 
 Create a scoped token with:
 

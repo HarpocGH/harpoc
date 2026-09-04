@@ -34,8 +34,8 @@ describe("enum member counts", () => {
     expect(Object.values(Permission)).toHaveLength(7);
   });
 
-  it("AuditEventType has 35 members", () => {
-    expect(Object.values(AuditEventType)).toHaveLength(35);
+  it("AuditEventType has 36 members", () => {
+    expect(Object.values(AuditEventType)).toHaveLength(36);
   });
 
   it("PrincipalType has 4 members", () => {

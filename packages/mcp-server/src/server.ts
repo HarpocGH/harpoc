@@ -33,8 +33,9 @@ export interface CreateMcpServerOptions {
    * --allow-tokenless flag — the Streamable HTTP transport always carries a
    * per-request token and never sets it.
    *
-   * Taking this branch writes a `server.start` audit row (W6) and fails closed
-   * if that row cannot be written.
+   * Taking this branch writes the `tokenless: true` `server.start` row (W6) and
+   * fails closed if that row cannot be written; a token-bearing stdio start
+   * writes the `tokenless: false` row the same way (R4/B22).
    */
   allowTokenless?: boolean;
   /** Shared across per-session servers (Streamable HTTP) so limits span sessions. */
@@ -61,6 +62,12 @@ export interface CreateMcpServerOptions {
    * "mcp-http" per session.
    */
   accessInterface?: Extract<AccessInterface, "mcp" | "mcp-http">;
+  /**
+   * Socket peer of the session's connection — set by the Streamable HTTP
+   * listener per session, stamped on the derived caller as `remote_address`
+   * and landing in `ip_address` (E75i). Never set for stdio.
+   */
+  remoteAddress?: string;
 }
 
 /**
@@ -95,10 +102,27 @@ export function createMcpServer(options: CreateMcpServerOptions): McpServer {
   let scopeGuard: ScopeGuard;
   if (launchToken) {
     const token = engine.verifyToken(launchToken);
+    if (accessInterface === "mcp") {
+      // One row per stdio process start (R4/B22), before the guard and the
+      // server like the waiver: no record, no server. The Streamable HTTP
+      // listener writes its own row at bind and builds a server per session,
+      // none of which is a start.
+      engine.auditServerStart({
+        transport: "stdio",
+        tokenless: false,
+        ttyPrompt: options.enableTtyPrompt ?? false,
+        subject: token.sub,
+      });
+    }
     // Revocation is re-consulted per call: this token is verified once, here,
     // and the server it launches can outlive the operator's decision to revoke
     // it (H7). The HTTP transport re-verifies per request and needs no hook.
-    scopeGuard = new ScopeGuard(token, accessInterface, (jti) => engine.isTokenRevoked(jti));
+    scopeGuard = new ScopeGuard(
+      token,
+      accessInterface,
+      (jti) => engine.isTokenRevoked(jti),
+      options.remoteAddress,
+    );
   } else if (options.allowTokenless) {
     // The waiver goes into the tamper-evident trail before anything else
     // happens (W6): a failed write must leave neither a warning on stderr nor

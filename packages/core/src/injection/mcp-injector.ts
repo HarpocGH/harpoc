@@ -375,6 +375,7 @@ export class McpInjector {
       crashed: false,
       ...fingerprints,
       spawnedAt: Date.now(),
+      lastUsedAt: Date.now(),
     };
   }
 

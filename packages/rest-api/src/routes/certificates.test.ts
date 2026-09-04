@@ -328,7 +328,7 @@ describe("GET /api/v1/certificates/:handle/status", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.data).toEqual(CERT_STATUS);
-    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://my-cert");
+    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://my-cert", EXPECTED_CALLER);
     expect(engine.getCertificateStatus).toHaveBeenCalledWith(
       "secret-uuid-1",
       EXPECTED_CALLER,
@@ -351,7 +351,7 @@ describe("GET /api/v1/certificates/:handle/status", () => {
 
   it("resolves a project-qualified handle", async () => {
     await app.request("/api/v1/certificates/myproj%2Fmy-cert/status", { headers: AUTH });
-    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://myproj/my-cert");
+    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://myproj/my-cert", EXPECTED_CALLER);
   });
 });
 

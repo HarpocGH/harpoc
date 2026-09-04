@@ -166,7 +166,34 @@ export function registerServerCommand(program: Command): void {
           let renewalScheduler: { stop(): Promise<void> } | undefined;
           let shuttingDown = false;
 
-          const shutdown = async (): Promise<void> => {
+          type StopTrigger = "SIGINT" | "SIGTERM" | "transport_closed";
+          const startedAt = Date.now();
+          let mcpHttpBoundPort: number | undefined;
+          let stdioClosed = false;
+
+          // The stop row mirrors the start row (R4/D67): one per started
+          // listener, before its close. A sealed vault cannot take the row,
+          // and a stop that cannot be recorded must not block the stop.
+          const auditStop = (
+            transport: "stdio" | "http" | "rest",
+            tokenless: boolean,
+            listenerPort: number | undefined,
+            trigger: StopTrigger,
+          ): void => {
+            try {
+              engine?.auditServerStop({
+                transport,
+                tokenless,
+                ...(listenerPort !== undefined ? { port: listenerPort } : {}),
+                uptimeMs: Date.now() - startedAt,
+                trigger,
+              });
+            } catch {
+              // Best-effort on the sealed path.
+            }
+          };
+
+          const shutdown = async (trigger: StopTrigger): Promise<void> => {
             if (shuttingDown) return;
             shuttingDown = true;
             // Drain an in-flight refresh tick before the store closes — a
@@ -176,9 +203,18 @@ export function registerServerCommand(program: Command): void {
             // Same reasoning for certificate renewal: an order abandoned
             // between issuance and storage is lost for good.
             if (renewalScheduler) await renewalScheduler.stop();
-            if (mcpServer) await mcpServer.close();
-            if (mcpHttpServer) await mcpHttpServer.close();
-            if (restServer) restServer.close();
+            if (mcpServer && !stdioClosed) {
+              auditStop("stdio", opts.allowTokenless === true, undefined, trigger);
+              await mcpServer.close();
+            }
+            if (mcpHttpServer) {
+              auditStop("http", false, mcpHttpBoundPort, trigger);
+              await mcpHttpServer.close();
+            }
+            if (restServer) {
+              auditStop("rest", false, port, trigger);
+              restServer.close();
+            }
             // Abort the REST app's pending background OAuth flows before the
             // store closes: each authorization-code flow pins a loopback
             // listener and a 5-minute timer, and its completion writes to the
@@ -189,8 +225,8 @@ export function registerServerCommand(program: Command): void {
             process.exit(0);
           };
 
-          process.on("SIGINT", () => void shutdown());
-          process.on("SIGTERM", () => void shutdown());
+          process.on("SIGINT", () => void shutdown("SIGINT"));
+          process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
           // When stdio MCP runs alongside an HTTP server, MCP owns stdout for JSON-RPC.
           // Redirect console.log to stderr so HTTP startup messages don't corrupt the stream.
@@ -214,6 +250,19 @@ export function registerServerCommand(program: Command): void {
             const transport = new StdioServerTransport();
             await server.connect(transport);
             mcpServer = server;
+            // The SDK transport listens for data and error only: an MCP host
+            // that hangs up (stdin EOF) closes nothing. That hang-up is the
+            // stdio server's graceful stop (R4/D67) — alone, it ends the
+            // process; beside a listener or a scheduler it ends only the stdio
+            // server, and the rest keeps serving.
+            process.stdin.once("end", () => {
+              if (stdioClosed || shuttingDown) return;
+              stdioClosed = true;
+              auditStop("stdio", opts.allowTokenless === true, undefined, "transport_closed");
+              const alone = !opts.rest && !opts.mcpHttp && !opts.oauthRefresh && !opts.certRenew;
+              const closed = server.close().catch(() => undefined);
+              if (alone) void closed.then(() => shutdown("transport_closed"));
+            });
             console.error("[harpoc] MCP server running on stdio");
           }
 
@@ -221,6 +270,7 @@ export function registerServerCommand(program: Command): void {
             const { startMcpHttpServer } = await import("@harpoc/mcp-server");
             const server = await startMcpHttpServer({ engine, port: mcpHttpPort });
             mcpHttpServer = server;
+            mcpHttpBoundPort = server.port;
             console.error(
               `[harpoc] MCP server (Streamable HTTP) listening on http://127.0.0.1:${server.port}${server.endpoint}`,
             );

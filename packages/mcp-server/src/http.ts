@@ -232,6 +232,9 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
         oauthManager,
         certManager,
         accessInterface: "mcp-http",
+        ...(req.socket.remoteAddress !== undefined
+          ? { remoteAddress: req.socket.remoteAddress }
+          : {}),
       });
     } catch (err) {
       sendAuthError(res, err);
@@ -296,6 +299,22 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
   });
 
   const boundPort = (httpServer.address() as AddressInfo).port;
+
+  try {
+    // One row per listener (R4/B22), after the bind so it carries the bound
+    // port; an unwritable row undoes the bind — no record, no listener.
+    engine.auditServerStart({
+      transport: "http",
+      tokenless: false,
+      port: boundPort,
+      host,
+    });
+  } catch (err) {
+    clearInterval(sweepTimer);
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    throw err;
+  }
+
   allowedHosts = [
     "127.0.0.1",
     `127.0.0.1:${boundPort}`,

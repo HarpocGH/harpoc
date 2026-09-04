@@ -9,6 +9,7 @@ import {
   auditScopeFromToken,
   callerFromToken,
   matchesSecretNameScope,
+  tokenlessStdioCaller,
   VaultError,
 } from "@harpoc/shared";
 
@@ -33,6 +34,8 @@ export class ScopeGuard {
      * re-verifies per request anyway, where this is a redundant second line.
      */
     private readonly isRevoked?: (jti: string) => boolean,
+    /** Socket peer of the session's connection — Streamable HTTP only (E75i). */
+    private readonly remoteAddress?: string,
   ) {}
 
   /**
@@ -100,12 +103,17 @@ export class ScopeGuard {
   }
 
   /**
-   * Token-derived caller identity for engine-level policy enforcement
-   * (thesis §4.6). Undefined without a token — the local full-access mode is
-   * the trusted path and is not subject to per-secret policies.
+   * Caller identity for engine-level policy enforcement and audit attribution
+   * (thesis §4.6, §4.3.4): the token's, stamped with this transport and — on
+   * Streamable HTTP — the socket peer (E75i); without a token, the synthetic
+   * `tokenless-stdio` caller (R4/E78b): attribution-only and exempt like an
+   * admin-scoped user token, so an unrestricted server's rows name it instead
+   * of blending into the CLI's NULL-principal rows.
    */
-  get caller(): CallerContext | undefined {
-    return this.token ? callerFromToken(this.token, this.accessInterface) : undefined;
+  get caller(): CallerContext {
+    return this.token
+      ? callerFromToken(this.token, this.accessInterface, this.remoteAddress)
+      : tokenlessStdioCaller(this.accessInterface);
   }
 
   /**

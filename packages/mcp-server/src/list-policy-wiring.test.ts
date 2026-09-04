@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SecretInfo, VaultEngine } from "@harpoc/core";
-import type { VaultApiToken } from "@harpoc/shared";
+import type { CallerContext, VaultApiToken } from "@harpoc/shared";
+import { isAdminUserCaller } from "@harpoc/shared";
 import { RateLimiter } from "./guards/rate-limiter.js";
 import { ScopeGuard } from "./guards/scope-guard.js";
 import { registerListSecrets } from "./tools/list-secrets.js";
@@ -58,11 +59,11 @@ const GATED: SecretInfo = {
   rotatedAt: null,
 };
 
-/** Stands in for the engine's policy filter: a caller sees only VISIBLE. */
+/** Stands in for the engine's policy filter: a gated caller sees only VISIBLE. */
 function mockEngine(): VaultEngine {
   return {
-    listSecrets: vi.fn((_project?: string, caller?: unknown) =>
-      caller ? [VISIBLE] : [VISIBLE, GATED],
+    listSecrets: vi.fn((_project?: string, caller?: CallerContext) =>
+      caller && !isAdminUserCaller(caller) ? [VISIBLE] : [VISIBLE, GATED],
     ),
     getSecretInfo: vi.fn().mockResolvedValue(VISIBLE),
     getState: vi.fn().mockReturnValue("unlocked"),
@@ -196,12 +197,15 @@ describe("resources", () => {
 });
 
 describe("trusted local path", () => {
-  it("a tokenless guard forwards no caller — the full-access mode is unfiltered", async () => {
+  it("a tokenless guard forwards the synthetic caller — the full-access mode is still unfiltered", async () => {
     const tokenless = new ScopeGuard(null);
     registerListSecrets(server, engine, tokenless, rateLimiter);
 
     const result = await callTool(server, "list_secrets", {});
-    expect(engine.listSecrets).toHaveBeenCalledWith(undefined, undefined);
+    expect(engine.listSecrets).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({ principal_id: "tokenless-stdio", admin_scope: true }),
+    );
 
     const data = JSON.parse(result.content[0]?.text ?? "[]") as Array<{ name: string }>;
     expect(data.map((s) => s.name).sort()).toEqual(["gated", "visible"]);

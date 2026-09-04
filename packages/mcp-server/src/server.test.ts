@@ -83,11 +83,42 @@ describe("createMcpServer", () => {
     });
   });
 
-  it("writes no server.start row on the token path (D2 pin)", () => {
+  it("a token-bearing stdio start writes tokenless: false with the subject (R4/B22)", () => {
     const engine = mockEngine();
-    createMcpServer({ engine, launchToken: "valid.jwt.token" });
+    createMcpServer({
+      engine,
+      launchToken: "valid.jwt.token",
+      enableTtyPrompt: true,
+    });
 
+    expect(engine.auditServerStart).toHaveBeenCalledTimes(1);
+    expect(engine.auditServerStart).toHaveBeenCalledWith({
+      transport: "stdio",
+      tokenless: false,
+      ttyPrompt: true,
+      subject: "agent",
+    });
+  });
+
+  it("a per-session server on the Streamable HTTP transport writes no row — the listener does", () => {
+    const engine = mockEngine();
+    createMcpServer({
+      engine,
+      launchToken: "valid.jwt.token",
+      accessInterface: "mcp-http",
+    });
     expect(engine.auditServerStart).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the token-bearing row cannot be written — no server", () => {
+    const engine = mockEngine({
+      auditServerStart: vi.fn().mockImplementation(() => {
+        throw new Error("audit log unwritable");
+      }),
+    });
+    expect(() => createMcpServer({ engine, launchToken: "valid.jwt.token" })).toThrow(
+      "audit log unwritable",
+    );
   });
 
   it("writes a failed server.start row when the token gate refuses", () => {

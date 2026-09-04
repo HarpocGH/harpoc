@@ -35,7 +35,6 @@ import type {
 } from "./client.js";
 import {
   ENCRYPTED_KEY_IMPORT_REFUSAL,
-  ErrorCode,
   VAULT_VERSION,
   VaultError,
   certificateImportSchema,
@@ -182,14 +181,11 @@ export class DirectClient implements VaultClient {
   }
 
   async revokePolicy(handle: string, policyId: string): Promise<void> {
-    // Verify the policy belongs to this secret (cross-secret IDOR guard) —
-    // REST-path parity: the two client modes must enforce the same contract.
+    // The cross-secret IDOR guard is the engine's, as on the REST path: a
+    // policy on another secret refuses exactly like an unknown id, and the
+    // membership check needs no caller-less read of its own.
     const secretId = await this.engine.resolveSecretId(handle);
-    const policies = this.engine.listPolicies(secretId);
-    if (!policies.some((p) => p.id === policyId)) {
-      throw new VaultError(ErrorCode.POLICY_NOT_FOUND, "Policy not found for this secret");
-    }
-    this.engine.revokePolicy(policyId);
+    this.engine.revokePolicy(policyId, undefined, secretId);
   }
 
   async listPolicies(handle: string): Promise<AccessPolicy[]> {

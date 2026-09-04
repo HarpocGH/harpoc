@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { describe, it, expect, beforeAll, afterAll, vi, beforeEach, afterEach } from "vitest";
@@ -815,6 +815,46 @@ describe("No-Logging Static Audit", () => {
         }
       }
     }
+  });
+
+  // E77 tripwire: `admin_scope` is a plain optional field any in-process
+  // embedder could set, and a caller carrying it is exempt from per-secret
+  // policy. The two writers are callerFromToken and tokenlessStdioCaller; a
+  // third anywhere in product source is a new exemption path.
+  it("admin_scope is written at exactly two sites in product source — both in shared/src/caller.ts (E77)", () => {
+    const packages = [
+      "cert-manager",
+      "cli",
+      "core",
+      "mcp-server",
+      "oauth-proxy",
+      "rest-api",
+      "sdk",
+      "shared",
+      "web-ui",
+    ];
+    const writePattern = /\badmin_scope\s*(?::|=(?!=))/;
+    const writes: string[] = [];
+    let scanned = 0;
+    for (const pkg of packages) {
+      const srcDir = join(REPO_ROOT, "packages", pkg, "src");
+      for (const filePath of collectTsFiles(srcDir)) {
+        scanned++;
+        const lines = readFileSync(filePath, "utf8").split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (writePattern.test(lines[i] as string)) {
+            const rel = relative(srcDir, filePath).split(sep).join("/");
+            writes.push(`${pkg}/src/${rel}:${i + 1}`);
+          }
+        }
+      }
+    }
+    expect(scanned).toBeGreaterThan(100);
+    expect(writes.map((w) => w.replace(/:\d+$/, ""))).toEqual([
+      "shared/src/caller.ts",
+      "shared/src/caller.ts",
+    ]);
+    expect(new Set(writes).size).toBe(2);
   });
 });
 

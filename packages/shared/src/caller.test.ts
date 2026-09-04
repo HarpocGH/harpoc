@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { callerFromToken, checkTokenScope, isAdminUserCaller } from "./caller.js";
+import {
+  callerFromToken,
+  checkTokenScope,
+  isAdminUserCaller,
+  TOKENLESS_STDIO_PRINCIPAL,
+  tokenlessStdioCaller,
+} from "./caller.js";
 import { ErrorCode } from "./errors.js";
 import type { VaultApiToken } from "./types.js";
 import { TokenPrincipalType } from "./types.js";
@@ -157,5 +163,33 @@ describe("admin_scope (R7)", () => {
 
   it("isAdminUserCaller ignores a hand-built caller without the flag", () => {
     expect(isAdminUserCaller({ principal_type: "user", principal_id: "x" })).toBe(false);
+  });
+});
+
+describe("tokenlessStdioCaller (R4/E78b)", () => {
+  it("is a user-type, admin-scoped caller named tokenless-stdio on the given interface", () => {
+    expect(tokenlessStdioCaller("mcp")).toEqual({
+      principal_type: "user",
+      principal_id: TOKENLESS_STDIO_PRINCIPAL,
+      interface: "mcp",
+      admin_scope: true,
+    });
+    expect(TOKENLESS_STDIO_PRINCIPAL).toBe("tokenless-stdio");
+  });
+
+  it("is exempt exactly like an admin-scoped user token (R7)", () => {
+    expect(isAdminUserCaller(tokenlessStdioCaller("mcp"))).toBe(true);
+  });
+});
+
+describe("remote_address (E75i)", () => {
+  it("callerFromToken carries a supplied socket peer", () => {
+    expect(callerFromToken(baseToken(), "rest", "10.0.0.7").remote_address).toBe("10.0.0.7");
+  });
+
+  it("omits the remote_address key entirely when none is supplied", () => {
+    expect("remote_address" in callerFromToken(baseToken(), "rest")).toBe(false);
+    expect("remote_address" in callerFromToken(baseToken(), "rest", undefined)).toBe(false);
+    expect("remote_address" in callerFromToken(baseToken(), "rest", "")).toBe(false);
   });
 });

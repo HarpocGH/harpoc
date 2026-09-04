@@ -11,5 +11,7 @@ export type HarpocEnv = {
     limiter: RateLimiter;
     oauthManager: OAuthManager;
     certManager: CertManager;
+    /** Socket peer captured by the auth middleware; absent off a real listener (E75i). */
+    remoteAddress?: string;
   };
 };

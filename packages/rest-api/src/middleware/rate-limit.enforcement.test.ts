@@ -76,12 +76,12 @@ async function hammer(
 }
 
 // The audit middleware writes a line per request; these cases make thousands.
-let debugSpy: ReturnType<typeof vi.spyOn>;
+let auditLineSpy: ReturnType<typeof vi.spyOn>;
 beforeAll(() => {
-  debugSpy = vi.spyOn(console, "debug").mockImplementation(() => undefined);
+  auditLineSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 });
 afterAll(() => {
-  debugSpy.mockRestore();
+  auditLineSpy.mockRestore();
 });
 
 // The bucket refills continuously (limit/minute), so a thousand-request loop
@@ -224,11 +224,11 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
   ])("each middleware runs once per request on the %s route (%s)", async (path) => {
     const engine = createMockEngine();
     const instance = createApp(engine as never);
-    debugSpy.mockClear();
+    auditLineSpy.mockClear();
 
     await instance.request(path, { headers: AUTH });
 
     expect(engine.verifyToken).toHaveBeenCalledTimes(1);
-    expect(debugSpy).toHaveBeenCalledTimes(1);
+    expect(auditLineSpy).toHaveBeenCalledTimes(1);
   });
 });

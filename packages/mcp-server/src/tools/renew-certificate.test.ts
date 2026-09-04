@@ -152,7 +152,7 @@ describe("renew_certificate", () => {
 
     await callTool(server, "renew_certificate", { handle: "secret://prod/my-cert" });
 
-    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://prod/my-cert");
+    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://prod/my-cert", EXPECTED_CALLER);
     expect(certManager.renewCertificate).toHaveBeenCalledWith("uuid-123", {
       caller: EXPECTED_CALLER,
       handle: "secret://prod/my-cert",

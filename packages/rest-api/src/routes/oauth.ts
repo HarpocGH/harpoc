@@ -1,8 +1,9 @@
 import { Hono } from "hono";
-import { callerFromToken, startOAuthFlowInputSchema } from "@harpoc/shared";
+import { startOAuthFlowInputSchema } from "@harpoc/shared";
 import { startOAuthFlowResult } from "@harpoc/oauth-proxy";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
+import { callerOf } from "../utils/caller.js";
 import { readJsonBody } from "../utils/read-json-body.js";
 import { schemaValidationError } from "../utils/schema-error.js";
 
@@ -18,7 +19,7 @@ export function createOAuthRoutes(): Hono<HarpocEnv> {
       throw schemaValidationError(parsed.error);
     }
     checkTokenScope(token, "create", parsed.data.project, parsed.data.name);
-    const caller = callerFromToken(token, "rest");
+    const caller = callerOf(c);
     const manager = c.get("oauthManager");
     // The grant dispatch and its wire-safe projections (never secretId, never
     // a completion promise — D2) live in oauth-proxy, shared with the SDK.
@@ -33,8 +34,8 @@ export function createOAuthRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
     c.get("limiter").checkSecret(handle);
-    const secretId = await engine.resolveSecretId(handle);
-    const status = engine.getOAuthTokenStatus(secretId, callerFromToken(token, "rest"), handle);
+    const secretId = await engine.resolveSecretId(handle, callerOf(c));
+    const status = engine.getOAuthTokenStatus(secretId, callerOf(c), handle);
     return c.json({ data: status });
   });
 
@@ -45,12 +46,8 @@ export function createOAuthRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
     c.get("limiter").checkSecret(handle);
-    const secretId = await engine.resolveSecretId(handle);
-    const expiresAt = await engine.refreshOAuthToken(
-      secretId,
-      callerFromToken(token, "rest"),
-      handle,
-    );
+    const secretId = await engine.resolveSecretId(handle, callerOf(c));
+    const expiresAt = await engine.refreshOAuthToken(secretId, callerOf(c), handle);
     return c.json({ data: { refreshed: true, expires_at: expiresAt } });
   });
 

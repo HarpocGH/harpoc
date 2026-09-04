@@ -373,7 +373,11 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       expect(engine.setSecretValue).toHaveBeenCalledWith(
         "secret://api-key",
         expect.anything(),
-        undefined,
+        expect.objectContaining({
+          principal_type: "user",
+          principal_id: "tokenless-stdio",
+          admin_scope: true,
+        }),
       );
       expect(captured).toBe("browser-entered-value");
       expect(result.content[0]?.text).not.toContain("browser-entered-value");

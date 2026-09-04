@@ -1,7 +1,6 @@
 import { Hono } from "hono";
 import { VaultError } from "@harpoc/shared";
 import {
-  callerFromToken,
   connectionConfigSchema,
   createSecretInputSchema,
   matchesSecretNameScope,
@@ -13,6 +12,7 @@ import {
 import { InjectionGuard, sanitizeUseSecretResult } from "@harpoc/core";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
+import { callerOf } from "../utils/caller.js";
 import { readJsonBody } from "../utils/read-json-body.js";
 import { schemaValidationError } from "../utils/schema-error.js";
 
@@ -38,7 +38,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     }
     const effectiveProject = project ?? token.project;
 
-    let secrets = engine.listSecrets(effectiveProject, callerFromToken(token, "rest"));
+    let secrets = engine.listSecrets(effectiveProject, callerOf(c));
 
     // If token is secret-name-scoped, filter results (name patterns, thesis §4.7)
     if (token.secrets?.length) {
@@ -73,7 +73,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
           : undefined,
         expiresAt: parsed.data.expires_at,
       },
-      callerFromToken(token, "rest"),
+      callerOf(c),
     );
 
     return c.json({ data: result }, 201);
@@ -90,7 +90,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     // Keyed on the handle, not a resolved id: resolving before the audited
     // engine path let an unknown-handle probe leave no row (N3).
     c.get("limiter").checkSecret(handle);
-    const info = await engine.getSecretInfo(handle, callerFromToken(token, "rest"));
+    const info = await engine.getSecretInfo(handle, callerOf(c));
 
     return c.json({ data: info });
   });
@@ -104,7 +104,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
     c.get("limiter").checkSecret(handle);
-    const value = await engine.getSecretValue(handle, callerFromToken(token, "rest"));
+    const value = await engine.getSecretValue(handle, callerOf(c));
 
     return c.json({ data: { value: Buffer.from(value).toString("base64") } });
   });
@@ -123,7 +123,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
     c.get("limiter").checkSecret(handle);
-    await engine.revokeSecret(handle, callerFromToken(token, "rest"));
+    await engine.revokeSecret(handle, callerOf(c));
 
     return c.json({ data: { revoked: true } });
   });
@@ -148,7 +148,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     const handle = buildHandle(c.req.param("handle"));
     c.get("limiter").checkSecret(handle);
     const newValue = new Uint8Array(Buffer.from(parsedBody.data.value, "base64"));
-    await engine.rotateSecret(handle, newValue, callerFromToken(token, "rest"));
+    await engine.rotateSecret(handle, newValue, callerOf(c));
 
     return c.json({ data: { rotated: true } });
   });
@@ -169,11 +169,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const handle = buildHandle(c.req.param("handle"));
     c.get("limiter").checkSecret(handle, true);
-    const result = await engine.useSecret(
-      handle,
-      parsed.data.action,
-      callerFromToken(token, "rest"),
-    );
+    const result = await engine.useSecret(handle, parsed.data.action, callerOf(c));
 
     // Sanitize response to prevent credential leakage (parity across interfaces)
     sanitizeUseSecretResult(result, injectionGuard);
@@ -189,7 +185,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const policy = await engine.getInjectionPolicy(handle, callerFromToken(token, "rest"));
+    const policy = await engine.getInjectionPolicy(handle, callerOf(c));
     return c.json({ data: policy });
   });
 
@@ -210,12 +206,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const handle = buildHandle(c.req.param("handle"));
     const { acknowledge_interpreters, ...policy } = parsed.data;
-    await engine.setInjectionPolicy(
-      handle,
-      policy,
-      { acknowledge_interpreters },
-      callerFromToken(token, "rest"),
-    );
+    await engine.setInjectionPolicy(handle, policy, { acknowledge_interpreters }, callerOf(c));
     return c.json({ data: { updated: true } });
   });
 
@@ -227,7 +218,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const config = await engine.getMcpServerConfig(handle, callerFromToken(token, "rest"));
+    const config = await engine.getMcpServerConfig(handle, callerOf(c));
     return c.json({ data: config ?? null });
   });
 
@@ -245,7 +236,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     }
 
     const handle = buildHandle(c.req.param("handle"));
-    await engine.setMcpServerConfig(handle, parsed.data, callerFromToken(token, "rest"));
+    await engine.setMcpServerConfig(handle, parsed.data, callerOf(c));
     return c.json({ data: { updated: true } });
   });
 
@@ -257,7 +248,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const deleted = await engine.deleteMcpServerConfig(handle, callerFromToken(token, "rest"));
+    const deleted = await engine.deleteMcpServerConfig(handle, callerOf(c));
     return c.json({ data: { deleted } });
   });
 
@@ -269,7 +260,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const config = await engine.getConnectionConfig(handle, callerFromToken(token, "rest"));
+    const config = await engine.getConnectionConfig(handle, callerOf(c));
     return c.json({ data: config ?? null });
   });
 
@@ -287,7 +278,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     }
 
     const handle = buildHandle(c.req.param("handle"));
-    await engine.setConnectionConfig(handle, parsed.data, callerFromToken(token, "rest"));
+    await engine.setConnectionConfig(handle, parsed.data, callerOf(c));
     return c.json({ data: { updated: true } });
   });
 
@@ -299,7 +290,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const deleted = await engine.deleteConnectionConfig(handle, callerFromToken(token, "rest"));
+    const deleted = await engine.deleteConnectionConfig(handle, callerOf(c));
     return c.json({ data: { deleted } });
   });
 

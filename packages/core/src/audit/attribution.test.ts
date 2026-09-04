@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { CallerContext } from "@harpoc/shared";
-import { attributionFromCaller, callerInterfaceDetail, withAttribution } from "./attribution.js";
+import {
+  attributionFromCaller,
+  callerColumns,
+  callerInterfaceDetail,
+  withAttribution,
+} from "./attribution.js";
 import type { AuditLogOptions } from "./audit-logger.js";
 
 const CALLER: CallerContext = {
@@ -101,5 +106,42 @@ describe("callerInterfaceDetail", () => {
 
   it("carries the interface when set", () => {
     expect(callerInterfaceDetail(CALLER)).toEqual({ interface: "rest" });
+  });
+});
+
+describe("remote_address → ip_address (E75i)", () => {
+  it("attributionFromCaller carries the caller's socket peer", () => {
+    expect(attributionFromCaller({ ...CALLER, remote_address: "10.0.0.7" }, "sess-1")).toEqual({
+      principal_type: "agent",
+      principal_id: "alice",
+      interface: "rest",
+      remote_address: "10.0.0.7",
+      session_id: "sess-1",
+    });
+    expect("remote_address" in (attributionFromCaller(CALLER, "sess-1") ?? {})).toBe(false);
+  });
+
+  it("withAttribution lands the peer in ipAddress", () => {
+    const base: AuditLogOptions = { eventType: "secret.use" };
+    expect(withAttribution(base, { remote_address: "10.0.0.7" }).ipAddress).toBe("10.0.0.7");
+    expect("ipAddress" in withAttribution(base, { principal_id: "alice" })).toBe(false);
+  });
+});
+
+describe("callerColumns", () => {
+  it("is empty for the trusted local path", () => {
+    expect(callerColumns(undefined)).toEqual({});
+  });
+
+  it("carries type and id, and the peer only when the caller has one", () => {
+    expect(callerColumns(CALLER)).toEqual({
+      principalType: "agent",
+      principalId: "alice",
+    });
+    expect(callerColumns({ ...CALLER, remote_address: "10.0.0.7" })).toEqual({
+      principalType: "agent",
+      principalId: "alice",
+      ipAddress: "10.0.0.7",
+    });
   });
 });

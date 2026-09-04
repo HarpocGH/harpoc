@@ -85,10 +85,13 @@ describe("secret allow — token path", () => {
     );
   });
 
-  it("set mode checks admin scope; the merge read is caller-less; the caller reaches setInjectionPolicy", async () => {
+  it("set mode checks admin scope; the merge read is attributed like the write", async () => {
     mockEngine.verifyToken.mockReturnValue(token({ scope: ["admin"] }));
     await run(["secret://k", "--url", "https://api.example.com/*", "--token", "jwt-value"]);
-    expect(mockEngine.getInjectionPolicy).toHaveBeenCalledWith("secret://k");
+    expect(mockEngine.getInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ principal_id: "agent-1", interface: "cli" }),
+    );
     expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
       "secret://k",
       expect.objectContaining({ url_allowlist: ["https://api.example.com/*"] }),
@@ -117,6 +120,7 @@ describe("secret allow — token path", () => {
 
   it("tokenless set path is unchanged (three-argument call)", async () => {
     await run(["secret://k", "--url", "https://api.example.com/*"]);
+    expect(mockEngine.getInjectionPolicy).toHaveBeenCalledWith("secret://k", undefined);
     expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
       "secret://k",
       expect.anything(),

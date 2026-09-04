@@ -431,36 +431,35 @@ export class SecretManager {
     return this.resolveHandleToSecret(handle);
   }
 
+  /**
+   * Every secret a handle names — the non-revoked matches when any exist,
+   * otherwise the revoked ones (the preference `resolveHandle` applies). The
+   * engine's ambiguity concealment (R5, 2026-09-02) needs the set the
+   * resolver discards when it throws AMBIGUOUS_HANDLE.
+   */
+  async findByHandle(handle: string): Promise<Secret[]> {
+    const parsed: ParsedHandle = parseHandle(handle);
+    const nameHmac = await computeNameHmac(this.kek, parsed.name, parsed.project ?? null);
+    const matches = this.store.getSecretsByNameHmac(nameHmac);
+    // Prefer non-revoked matches to avoid AMBIGUOUS_HANDLE when a revoked
+    // secret coexists with an active one of the same name.
+    const nonRevoked = matches.filter((s) => s.status !== SecretStatus.REVOKED);
+    return nonRevoked.length > 0 ? nonRevoked : matches;
+  }
+
   // ---------------------------------------------------------------------------
   // Private
   // ---------------------------------------------------------------------------
 
   private async resolveHandleToSecret(handle: string): Promise<Secret> {
-    const parsed: ParsedHandle = parseHandle(handle);
-    const nameHmac = await computeNameHmac(this.kek, parsed.name, parsed.project ?? null);
-    const matches = this.store.getSecretsByNameHmac(nameHmac);
-
-    if (matches.length === 0) {
+    const candidates = await this.findByHandle(handle);
+    if (candidates.length === 0) {
       throw VaultError.secretNotFound(handle);
     }
-
-    // Prefer non-revoked matches to avoid AMBIGUOUS_HANDLE when a revoked
-    // secret coexists with an active one of the same name.
-    const nonRevoked = matches.filter((s) => s.status !== SecretStatus.REVOKED);
-
-    if (nonRevoked.length === 1) {
-      return nonRevoked[0] as Secret;
-    }
-    if (nonRevoked.length > 1) {
+    if (candidates.length > 1) {
       throw new VaultError(ErrorCode.AMBIGUOUS_HANDLE, `Ambiguous handle: ${handle}`);
     }
-
-    // All matches are revoked — fall through to single/multi logic
-    if (matches.length > 1) {
-      throw new VaultError(ErrorCode.AMBIGUOUS_HANDLE, `Ambiguous handle: ${handle}`);
-    }
-
-    return matches[0] as Secret;
+    return candidates[0] as Secret;
   }
 
   private effectiveStatus(secret: Secret): string {

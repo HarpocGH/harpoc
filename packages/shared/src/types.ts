@@ -59,12 +59,21 @@ export const AuditEventType = {
   MCP_CRASH: "mcp.crash",
   MCP_TERMINATE: "mcp.terminate",
   /**
-   * An unrestricted (tokenless) MCP server start — the `--allow-tokenless`
-   * waiver, on the record. Token-bearing starts write no row: their operations
-   * are attributed per access. Absence of this event therefore means no
-   * unrestricted server started.
+   * A vault server started serving — one row per process or listener start on
+   * every transport (R4/B22, 2026-09-02): the stdio MCP server (token-bearing,
+   * `tokenless: false` plus the launch token's `subject`; or the
+   * `--allow-tokenless` waiver, `tokenless: true`), the MCP Streamable HTTP
+   * listener (`transport: "http"`) and the REST listener (`transport:
+   * "rest"`), each with its bound port. A refused stdio start writes the same
+   * row with `success: false` and the refusal code.
    */
   SERVER_START: "server.start",
+  /**
+   * The graceful counterpart of `server.start` (R4/D67, 2026-09-02): one row
+   * per started listener on shutdown, written before the engine is destroyed
+   * — best-effort, so a crash or SIGKILL leaves a start without a stop.
+   */
+  SERVER_STOP: "server.stop",
   /** A new agent was registered in the agent registry (v1.4). */
   AGENT_REGISTER: "agent.register",
   /** An agent's description or owner was updated (v1.4). */
@@ -371,9 +380,17 @@ export interface CallerContext {
   /** Interface the request arrived through; audit attribution only. */
   interface?: AccessInterface;
   /**
-   * Set only by callerFromToken when the token's scope claim includes
-   * `admin`. R7 (v1.4.1): a user-type caller carrying it is exempt from the
-   * per-secret grant check and the W2 enumeration filter.
+   * Socket peer of the connection the request arrived on — REST and MCP
+   * Streamable HTTP only, never a forwarded header (E75i, 2026-09-02): behind
+   * a reverse proxy the trail records the proxy. Lands in the audit row's
+   * `ip_address` column; absent for stdio, the CLI and the SDK.
+   */
+  remote_address?: string;
+  /**
+   * Set only by callerFromToken (when the token's scope claim includes
+   * `admin`) and by tokenlessStdioCaller. R7 (v1.4.1): a user-type caller
+   * carrying it is exempt from the per-secret grant check and the W2
+   * enumeration filter.
    */
   admin_scope?: true;
 }

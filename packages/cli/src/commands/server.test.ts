@@ -19,6 +19,7 @@ const {
   mockEngine: {
     destroy: vi.fn().mockResolvedValue(undefined),
     createToken: vi.fn().mockReturnValue("mock-launch-jwt"),
+    auditServerStop: vi.fn(),
   },
   mockMcpServer: {
     connect: vi.fn().mockResolvedValue(undefined),
@@ -127,6 +128,7 @@ describe("server start", () => {
   let errorSpy: ReturnType<typeof vi.spyOn>;
   let priorSigintListeners: NodeJS.SignalsListener[];
   let priorSigtermListeners: NodeJS.SignalsListener[];
+  let priorStdinEndListeners: ((...args: unknown[]) => void)[];
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -135,6 +137,7 @@ describe("server start", () => {
     renewalSchedulerCtorCalls.length = 0;
     priorSigintListeners = process.listeners("SIGINT");
     priorSigtermListeners = process.listeners("SIGTERM");
+    priorStdinEndListeners = process.stdin.listeners("end") as ((...args: unknown[]) => void)[];
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit");
     });
@@ -149,6 +152,9 @@ describe("server start", () => {
     }
     for (const listener of process.listeners("SIGTERM")) {
       if (!priorSigtermListeners.includes(listener)) process.removeListener("SIGTERM", listener);
+    }
+    for (const listener of process.stdin.listeners("end") as ((...args: unknown[]) => void)[]) {
+      if (!priorStdinEndListeners.includes(listener)) process.stdin.removeListener("end", listener);
     }
     exitSpy.mockRestore();
     errorSpy.mockRestore();
@@ -969,5 +975,114 @@ describe("server start", () => {
     expect(events).toContain("SIGTERM");
 
     onSpy.mockRestore();
+  });
+
+  it("SIGINT shutdown writes one server.stop per started listener, each before its close, all before destroy (R4/D67)", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    exitSpy.mockImplementation(() => undefined as never);
+
+    await run(["--rest", "--mcp-http", "--port", "3000", "--mcp-http-port", "3001"]);
+    const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
+    (sigintCall?.[1] as () => void)();
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+
+    expect(mockEngine.auditServerStop).toHaveBeenCalledTimes(2);
+    expect(mockEngine.auditServerStop).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transport: "http",
+        tokenless: false,
+        port: 3001,
+        trigger: "SIGINT",
+      }),
+    );
+    expect(mockEngine.auditServerStop).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transport: "rest",
+        tokenless: false,
+        port: 3000,
+        trigger: "SIGINT",
+      }),
+    );
+    const [httpRow, restRow] = mockEngine.auditServerStop.mock.invocationCallOrder as number[];
+    const httpClose = mockMcpHttpServer.close.mock.invocationCallOrder[0] as number;
+    const restClose = mockRestServer.close.mock.invocationCallOrder[0] as number;
+    const destroy = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+    expect(httpRow).toBeLessThan(httpClose);
+    expect(restRow).toBeLessThan(restClose);
+    expect(restClose).toBeLessThan(destroy);
+
+    onSpy.mockRestore();
+  });
+
+  it("a stop row that cannot be written does not block the shutdown", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    exitSpy.mockImplementation(() => undefined as never);
+    mockEngine.auditServerStop.mockImplementationOnce(() => {
+      throw new Error("vault locked");
+    });
+
+    await run(["--rest"]);
+    const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
+    (sigintCall?.[1] as () => void)();
+
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+    onSpy.mockRestore();
+  });
+
+  it("stdin EOF alone: the stdio stop row with trigger transport_closed, then the full shutdown", async () => {
+    const onceSpy = vi.spyOn(process.stdin, "once");
+    exitSpy.mockImplementation(() => undefined as never);
+
+    await run(["--mcp", "--allow-tokenless"]);
+    const endCall = onceSpy.mock.calls.find((call) => (call[0] as string) === "end");
+    expect(endCall).toBeDefined();
+    (endCall?.[1] as () => void)();
+
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    expect(mockEngine.auditServerStop).toHaveBeenCalledTimes(1);
+    expect(mockEngine.auditServerStop).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transport: "stdio",
+        tokenless: true,
+        trigger: "transport_closed",
+      }),
+    );
+    expect(mockMcpServer.close).toHaveBeenCalledTimes(1);
+    expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+    onceSpy.mockRestore();
+  });
+
+  it("stdin EOF beside --rest: only the stdio server stops, the REST listener keeps serving", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    const onceSpy = vi.spyOn(process.stdin, "once");
+    exitSpy.mockImplementation(() => undefined as never);
+
+    await run(["--mcp", "--allow-tokenless", "--rest"]);
+    const endCall = onceSpy.mock.calls.find((call) => (call[0] as string) === "end");
+    (endCall?.[1] as () => void)();
+    await vi.waitFor(() => expect(mockMcpServer.close).toHaveBeenCalledTimes(1));
+
+    expect(mockEngine.auditServerStop).toHaveBeenCalledTimes(1);
+    expect(mockEngine.auditServerStop).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transport: "stdio",
+        trigger: "transport_closed",
+      }),
+    );
+    expect(mockRestServer.close).not.toHaveBeenCalled();
+    expect(exitSpy).not.toHaveBeenCalled();
+
+    const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
+    (sigintCall?.[1] as () => void)();
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    expect(mockEngine.auditServerStop).toHaveBeenCalledTimes(2);
+    expect(mockEngine.auditServerStop).toHaveBeenLastCalledWith(
+      expect.objectContaining({ transport: "rest", trigger: "SIGINT" }),
+    );
+    expect(mockMcpServer.close).toHaveBeenCalledTimes(1);
+
+    onSpy.mockRestore();
+    onceSpy.mockRestore();
   });
 });

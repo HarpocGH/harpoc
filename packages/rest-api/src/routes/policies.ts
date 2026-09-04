@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import type { PrincipalType, Permission } from "@harpoc/shared";
-import { VaultError, ErrorCode, accessPolicyInputSchema, callerFromToken } from "@harpoc/shared";
+import { accessPolicyInputSchema } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
+import { callerOf } from "../utils/caller.js";
 import { readJsonBody } from "../utils/read-json-body.js";
 import { schemaValidationError } from "../utils/schema-error.js";
 
@@ -17,8 +18,8 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const secretId = await engine.resolveSecretId(handle);
-    const policies = engine.listPolicies(secretId, callerFromToken(token, "rest"), handle);
+    const secretId = await engine.resolveSecretId(handle, callerOf(c));
+    const policies = engine.listPolicies(secretId, callerOf(c), handle);
 
     return c.json({ data: policies });
   });
@@ -31,7 +32,7 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const secretId = await engine.resolveSecretId(handle);
+    const secretId = await engine.resolveSecretId(handle, callerOf(c));
 
     const body = await readJsonBody(c);
     const parsed = accessPolicyInputSchema.safeParse(body);
@@ -48,7 +49,7 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
         expiresAt: parsed.data.expires_at,
       },
       token.sub,
-      callerFromToken(token, "rest"),
+      callerOf(c),
     );
 
     return c.json({ data: policy }, 201);
@@ -62,20 +63,12 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const secretId = await engine.resolveSecretId(handle);
+    const secretId = await engine.resolveSecretId(handle, callerOf(c));
     const policyId = c.req.param("policyId");
 
-    // Verify the policy belongs to this secret to prevent cross-secret IDOR.
-    // Deliberately caller-less: this is an internal membership check whose
-    // result never reaches the client — the caller's own gate is the `admin`
-    // check inside revokePolicy, and passing a caller here would emit a
-    // spurious `read` denial before it.
-    const policies = engine.listPolicies(secretId);
-    if (!policies.some((p) => p.id === policyId)) {
-      throw new VaultError(ErrorCode.POLICY_NOT_FOUND, "Policy not found for this secret");
-    }
-
-    engine.revokePolicy(policyId, callerFromToken(token, "rest"));
+    // The cross-secret IDOR guard is the engine's: a policy on another secret
+    // refuses exactly like an unknown id, with no caller-less membership read.
+    engine.revokePolicy(policyId, callerOf(c), secretId);
 
     return c.json({ data: { revoked: true } });
   });

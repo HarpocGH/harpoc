@@ -79,12 +79,40 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const startedAt = Date.now();
+  const tokenless = values["allow-tokenless"] === true;
   let close: () => Promise<void>;
+  let transport: "stdio" | "http";
+  let boundPort: number | undefined;
+  let shuttingDown = false;
+
+  // The stop row mirrors the start row (R4/D67). A sealed vault cannot take
+  // it, and a stop that cannot be recorded must not block the stop.
+  const shutdown = async (trigger: "SIGINT" | "SIGTERM" | "transport_closed"): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      engine.auditServerStop({
+        transport,
+        tokenless,
+        ...(boundPort !== undefined ? { port: boundPort } : {}),
+        uptimeMs: Date.now() - startedAt,
+        trigger,
+      });
+    } catch {
+      // Best-effort on the sealed path.
+    }
+    await close();
+    await engine.destroy();
+    process.exit(0);
+  };
 
   if (values.http) {
     const host = (values.host as string | undefined) ?? "127.0.0.1";
     const httpServer = await startMcpHttpServer({ engine, port, host });
     close = httpServer.close;
+    transport = "http";
+    boundPort = httpServer.port;
     process.stderr.write(
       `Harpoc MCP server listening on http://${host}:${httpServer.port}${httpServer.endpoint} (Streamable HTTP)\n`,
     );
@@ -99,20 +127,19 @@ async function main(): Promise<void> {
       allowTokenless: values["allow-tokenless"] as boolean | undefined,
       enableTtyPrompt: true,
     });
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
+    const stdio = new StdioServerTransport();
+    await server.connect(stdio);
     close = () => server.close();
+    transport = "stdio";
+    // The SDK transport listens for data and error only: an MCP host that
+    // hangs up (stdin EOF) closes nothing. That hang-up is this server's
+    // graceful stop.
+    process.stdin.once("end", () => void shutdown("transport_closed"));
     process.stderr.write("Harpoc MCP server running on stdio\n");
   }
 
-  const shutdown = async (): Promise<void> => {
-    await close();
-    await engine.destroy();
-    process.exit(0);
-  };
-
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
 // Only run main when executed directly (not imported)
