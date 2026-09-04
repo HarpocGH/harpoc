@@ -778,7 +778,7 @@ describe("No-Logging Static Audit", () => {
    * memory. A `console.error("tokens", body)` added to a flow kept the suite
    * green. All three are console-free today, so they carry the strict rule
    * (any diagnostic they need goes through an injected callback, as core does
-   * with `onSessionKeyProtectionFallback`).
+   * with `onSessionFilePermissionRepairFailure`).
    */
   it.each(["oauth-proxy", "sdk", "shared"])("%s/src/ has zero console calls", (pkg) => {
     const files = collectTsFiles(join(REPO_ROOT, "packages", pkg, "src"));

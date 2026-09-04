@@ -125,9 +125,8 @@ describe("MCP Streamable HTTP transport (real engine, real tokens)", () => {
     const [, payloadB64] = token.split(".");
     const payload = JSON.parse(Buffer.from(payloadB64 as string, "base64url").toString("utf8")) as {
       jti: string;
-      exp: number;
     };
-    engine.revokeToken(payload.jti, payload.exp * 1000);
+    engine.revokeToken(payload.jti);
 
     await expect(client.callTool({ name: "list_secrets", arguments: {} })).rejects.toThrow();
   });

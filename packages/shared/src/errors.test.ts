@@ -153,6 +153,7 @@ const STATUS_CASES = [
   [ErrorCode.KEY_DERIVATION_ERROR, 500],
   [ErrorCode.FILE_IO_ERROR, 500],
   [ErrorCode.SESSION_FILE_ERROR, 500],
+  [ErrorCode.SESSION_KEYSTORE_UNAVAILABLE, 501],
 ] as const;
 
 describe("HTTP status mapping", () => {
@@ -169,7 +170,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(106);
+    expect(members).toHaveLength(107);
   });
 
   it("STATUS_MAP has a row for every ErrorCode member", () => {
@@ -364,6 +365,8 @@ describe("factory methods", () => {
     expect(err.message).toContain("harpoc auth token");
     expect(err.message).toContain("HARPOC_TOKEN");
     expect(err.message).toContain("--allow-tokenless");
+    expect(err.message).toContain("--token-file <path>");
+    expect(err.message).not.toContain("(or --token)");
   });
 
   it("sessionFileError() without detail", () => {
@@ -376,6 +379,15 @@ describe("factory methods", () => {
   it("sessionFileError() with detail", () => {
     const err = VaultError.sessionFileError("parse failed");
     expect(err.message).toBe("Session file error: parse failed");
+  });
+
+  it("sessionKeystoreUnavailable() names the scheme, the cause and the opt-out", () => {
+    const err = VaultError.sessionKeystoreUnavailable("dpapi", "helper timed out");
+    expect(err.code).toBe(ErrorCode.SESSION_KEYSTORE_UNAVAILABLE);
+    expect(err.statusCode).toBe(501);
+    expect(err.message).toBe(
+      "Session keystore unavailable: the dpapi keystore could not protect the session key (helper timed out). Repair the keystore and unlock again, or set HARPOC_SESSION_KEYSTORE=off to keep the session under file permissions only",
+    );
   });
 
   it("weakPassword()", () => {

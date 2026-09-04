@@ -77,6 +77,8 @@ export const DEFAULT_SESSION_TTL_MS = 15 * 60 * 1_000; // 15 minutes
 export const MAX_SESSION_TTL_MS = 24 * 60 * 60 * 1_000; // 24 hours
 export const SESSION_SLIDE_INTERVAL_MS = 30 * 1_000; // 30 seconds
 export const SESSION_CLEANUP_INTERVAL_MS = 30 * 1_000; // 30 seconds
+export const SESSION_LOCK_STALE_MS = 10 * 1_000; // 10 seconds — a lock older than this was left by a dead process
+export const SESSION_LOCK_POLL_MS = 25;
 
 // -- Rate limits -------------------------------------------------------------
 

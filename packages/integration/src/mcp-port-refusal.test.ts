@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -26,6 +27,25 @@ describe("harpoc-mcp --http --port (spawned binary)", () => {
     const result = await runMcp(["--http", "--port", "0x10"]);
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('Invalid port "0x10". Must be 1-65535.');
+    expect(result.stderr).not.toContain("Vault is locked");
+  }, 30_000);
+});
+
+describe("harpoc-mcp --token-file and the removed --token (spawned binary)", () => {
+  it("refuses an unreadable token file before touching any vault", async () => {
+    const missing = join(tmpdir(), `harpoc-no-such-token-${String(process.pid)}`);
+    const result = await runMcp(["--token-file", missing]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`Cannot read --token-file ${missing}`);
+    expect(result.stderr).not.toContain("Vault is locked");
+  }, 30_000);
+
+  it("refuses the removed --token flag, never echoing its value", async () => {
+    const result = await runMcp(["--token", "not.a.jwt"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--token was removed");
+    expect(result.stderr).toContain("--token-file <path>");
+    expect(result.stderr).not.toContain("not.a.jwt");
     expect(result.stderr).not.toContain("Vault is locked");
   }, 30_000);
 });

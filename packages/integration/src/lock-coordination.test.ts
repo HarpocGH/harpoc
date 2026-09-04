@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { VaultEngine } from "@harpoc/core";
 import { createMcpServer } from "@harpoc/mcp-server";
@@ -10,6 +11,29 @@ import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool } from "./helpers/mcp-helpers.js";
 
 const PASSWORD = "lock-coord-test-pw";
+
+// Captured before any vi.useFakeTimers(): the yield below must run on the real
+// clock, and so must its own bound.
+const realSetTimeout: typeof setTimeout = setTimeout;
+const realDateNow: typeof Date.now = Date.now;
+
+/**
+ * R8/D56: an authenticated call on engine B fires a slide that holds
+ * `session.json.lock` across its read, and engine A's erase waits for that
+ * lock by sleeping on `setTimeout` — which this file has faked, and nothing
+ * here advances it. So the erase must only start once the slide has released,
+ * and this yield is real-clocked for that reason.
+ */
+async function awaitSessionLockRelease(sessionPath: string): Promise<void> {
+  const lockPath = `${sessionPath}.lock`;
+  const deadline = realDateNow() + 5_000;
+  while (existsSync(lockPath)) {
+    if (realDateNow() > deadline) {
+      throw new Error(`session lock still held after 5s: ${lockPath}`);
+    }
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 10));
+  }
+}
 
 /**
  * Fire engine B's session monitor and wait for the real seal. The interval
@@ -109,6 +133,7 @@ describe("Lock Coordination", () => {
       await engine2.loadSession();
       const mcpServer: McpServer = createMcpServer({ engine: engine2, allowTokenless: true });
 
+      await awaitSessionLockRelease(vault.sessionPath);
       await engine1.lock();
       await advanceMonitorAndAwaitSeal(engine2);
 

@@ -61,7 +61,9 @@ export interface SecretServiceWrappingKeyStoreOptions {
  * Secret Service (libsecret) store for the session wrapping key — the D-Bus
  * desktop tier on Linux. Bridges via `secret-tool`; the hex wrapping key
  * crosses on stdin (store) / stdout (lookup), never argv. A locked or absent
- * keyring throws and takes the caller's fallback/fail-closed paths.
+ * keyring throws: the session write then fails with
+ * `SESSION_KEYSTORE_UNAVAILABLE` (R8/D54) and a read falls closed to a fresh
+ * unlock — never a silent downgrade to `none`.
  */
 export class SecretServiceWrappingKeyStore implements WrappingKeyStore {
   readonly scheme = "secret-service" as const;

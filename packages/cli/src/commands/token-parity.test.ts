@@ -213,10 +213,9 @@ function buildProgram(): Command {
   registerAgentPermissionsCommand(agent);
 
   // Only `auth list` from the auth group (R4): `auth token` declares no
-  // --token flag at all, so the pin below never sees it; `auth revoke` does
-  // declare one, but it is the JWT whose expiry the command extracts — not a
-  // scoped caller — so it stays out of the map, and registering it here would
-  // red the exhaustiveness pin.
+  // --token flag at all, and since R9 (2026-09-04) neither does `auth
+  // revoke` — the registry supplies the expiry — so the pin below never
+  // sees either.
   const auth = program.command("auth");
   registerAuthListCommand(auth);
 

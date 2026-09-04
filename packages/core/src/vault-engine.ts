@@ -141,8 +141,13 @@ export interface VaultEngineOptions {
   sessionPath: string;
   /** Override the session-key protector (default: platform keystore — DPAPI on Windows, none elsewhere). */
   sessionKeyProtector?: SessionKeyProtector;
-  /** Surface session-file protection downgrades — keystore fallback or failed permission repair (default: silent — core never logs). */
-  onSessionKeyProtectionFallback?: (error: Error) => void;
+  /**
+   * Surface a failed owner-only permission repair on the session file — the
+   * POSIX chmod or the Windows icacls step (default: silent — core never
+   * logs). A keystore failure is not reported here: it fails the unlock with
+   * `SESSION_KEYSTORE_UNAVAILABLE` (R8/D54).
+   */
+  onSessionFilePermissionRepairFailure?: (error: Error) => void;
   /** Sliding session TTL in ms (default DEFAULT_SESSION_TTL_MS, capped at MAX_SESSION_TTL_MS). Operator knob / test seam. */
   sessionTtlMs?: number;
 }
@@ -325,7 +330,7 @@ export class VaultEngine {
   constructor(private readonly options: VaultEngineOptions) {
     this.sessionManager = new SessionManager(options.sessionPath, {
       protector: options.sessionKeyProtector,
-      onProtectionFallback: options.onSessionKeyProtectionFallback,
+      onPermissionRepairFailure: options.onSessionFilePermissionRepairFailure,
     });
     this.sessionTtlMs = Math.min(
       options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS,
@@ -382,8 +387,15 @@ export class VaultEngine {
 
     this.initManagers();
 
-    // Write session
-    await this.writeNewSession();
+    // Write session — fail closed (R8/D54): the vault exists on disk, but an
+    // engine whose session could not be written protected does not stay
+    // unlocked in memory on the keys it just installed.
+    try {
+      await this.writeNewSession();
+    } catch (err) {
+      this.sealAfterFailedSessionWrite();
+      throw err;
+    }
     // Enforce the session TTL for long-lived engines too (SDK direct mode),
     // not only loadSession-created ones.
     this.startSessionMonitor();
@@ -435,6 +447,8 @@ export class VaultEngine {
 
     this.assertVaultVersionOpenable(store, isNewStore);
 
+    let sealedOnFailedWrite = false;
+
     try {
       // Lockout and meta reads live inside the try so any throw (lockout
       // active, corrupted meta) closes the store we opened in this call.
@@ -480,7 +494,16 @@ export class VaultEngine {
       store.setMeta("failed_attempts", "0");
 
       this.initManagers();
-      await this.writeNewSession();
+      try {
+        await this.writeNewSession();
+      } catch (err) {
+        // Fail closed (R8/D54): no protected session file, no unlocked engine.
+        // The seal closes the store this call holds; the catch below must not
+        // close it a second time.
+        this.sealAfterFailedSessionWrite();
+        sealedOnFailedWrite = true;
+        throw err;
+      }
       // Enforce the session TTL for long-lived engines too (SDK direct mode),
       // not only loadSession-created ones.
       this.startSessionMonitor();
@@ -499,7 +522,7 @@ export class VaultEngine {
         throw VaultError.invalidPassword();
       }
       // Non-password error: close store if we opened it in this call
-      if (isNewStore) store.close();
+      if (isNewStore && !sealedOnFailedWrite) store.close();
       throw err;
     }
   }
@@ -3552,8 +3575,9 @@ export class VaultEngine {
    * Revoke every live token of one agent, mirroring the revocation onto its
    * issued-token row. Run inside the agent-lifecycle transactions, so the
    * revocations commit with the status change that caused them. `revoked_tokens`
-   * stays the revocation truth `verifyToken` consults — the floor is
-   * `revokeToken`'s, so the entry always outlives any token it names.
+   * stays the revocation truth `verifyToken` consults — each entry carries its
+   * token's own registry expiry (R9/C33-A), which outlives the token by
+   * construction.
    */
   private revokeLiveTokensForAgent(
     s: UnlockedState,
@@ -3562,11 +3586,10 @@ export class VaultEngine {
     caller?: CallerContext,
   ): number {
     const now = Date.now();
-    const floor = now + MAX_TOKEN_TTL_MS;
-    const jtis = s.store.listLiveTokenJtisForAgent(agentId, now);
+    const live = s.store.listLiveTokensForAgent(agentId, now);
 
-    for (const jti of jtis) {
-      s.store.insertRevokedToken(jti, floor);
+    for (const { jti, expires_at } of live) {
+      s.store.insertRevokedToken(jti, expires_at);
       s.store.markIssuedTokenRevoked(jti, now);
 
       s.auditLogger.log({
@@ -3577,7 +3600,7 @@ export class VaultEngine {
       });
     }
 
-    return jtis.length;
+    return live.length;
   }
 
   // ---------------------------------------------------------------------------
@@ -4158,34 +4181,32 @@ export class VaultEngine {
   }
 
   /**
-   * Revoke a JWT token by JTI.
-   *
-   * `expiresAt` is milliseconds since the epoch (R2/C36 — the same unit as
-   * every other timestamp); a caller decoding a JWT `exp` multiplies by 1000.
+   * Revoke a JWT token by JTI — registry-authoritative (R9/C33-A): the
+   * issued-token registry supplies the token's expiry, so the denylist entry
+   * lives exactly as long as the token it names, and a jti the registry does
+   * not know is refused with `INVALID_INPUT` (an input check ahead of any
+   * write — unaudited, like the schema gates). `verifyToken` prunes entries
+   * whose `expires_at` has passed before it consults them; `createToken`
+   * stores `expires_at = exp × 1000` and a token is accepted only while
+   * `exp > ⌊now / 1000⌋`, so a still-valid token's entry is never pruned. A
+   * repeat revocation is idempotent; an already-expired token is accepted
+   * (its mirror stamps, its entry prunes).
    *
    * `caller` is attribution only (v1.4 R6): a token-derived revocation — REST
    * `DELETE /tokens/:jti`, and the Web UI through it — names its principal on
    * the `token.revoke` row. The trusted local paths (`harpoc auth revoke`, the
    * in-process SDK) pass none and keep the NULL principal columns.
    */
-  revokeToken(jti: string, expiresAt?: number, caller?: CallerContext): void {
+  revokeToken(jti: string, caller?: CallerContext): void {
     const s = this.assertUnlocked();
-    // Floor: MAX_TOKEN_TTL_MS from now ensures the revocation entry always
-    // outlives any token (since createToken caps TTL at MAX_TOKEN_TTL_MS).
-    // Clamped, never merely defaulted — verifyToken prunes entries whose
-    // expires_at has passed *before* consulting them, so a supplied expiry
-    // that is too early (a caller decoding the wrong JWT) would silently
-    // un-revoke the token. A larger supplied expiry is still honored — and a
-    // seconds-valued one is simply clamped up to the floor, so a caller that
-    // forgot the unit cannot shorten a revocation.
-    const floor = Date.now() + MAX_TOKEN_TTL_MS;
-    const effectiveExpiresAt = Math.max(expiresAt ?? 0, floor);
+    const issued = s.store.getIssuedToken(jti);
+    if (!issued) {
+      throw VaultError.invalidInput(`Unknown token jti: ${jti}`);
+    }
     s.store.transaction(() => {
-      s.store.insertRevokedToken(jti, effectiveExpiresAt);
+      s.store.insertRevokedToken(jti, issued.expires_at);
       // History mirror; revoked_tokens stays the revocation truth verifyToken
-      // consults. A jti with no registry row is a no-op — every token
-      // verifyToken accepts carries the principal_type claim, so none
-      // predates the registry.
+      // consults.
       s.store.markIssuedTokenRevoked(jti, Date.now());
 
       s.auditLogger.log({
@@ -4755,6 +4776,17 @@ export class VaultEngine {
     this.state = VaultState.SEALED;
     this.sessionExpiresAt = null;
     this.stopSessionMonitor();
+  }
+
+  /**
+   * Seal after a session write that failed once the keys were installed
+   * (R8/D54): the engine must not stay unlocked with no protected session
+   * file behind it. The same wipe-close-seal as sealExpired, so the SDK
+   * direct client and the CLI see exactly the sealed engine the thrown
+   * SESSION_KEYSTORE_UNAVAILABLE describes.
+   */
+  private sealAfterFailedSessionWrite(): void {
+    this.sealExpired();
   }
 
   /**

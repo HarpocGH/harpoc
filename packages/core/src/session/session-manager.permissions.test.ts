@@ -85,18 +85,18 @@ describe("session file permissions (owner-only from creation)", () => {
     expect(tmpWrite?.[2]).toMatchObject({ mode: 0o600 });
   });
 
-  it("surfaces a failed permission repair via onProtectionFallback (POSIX branch)", async () => {
+  it("surfaces a failed permission repair via onPermissionRepairFailure (POSIX branch)", async () => {
     await withPlatform("linux", async () => {
       vi.mocked(chmod).mockRejectedValueOnce(new Error("EPERM: operation not permitted"));
-      const fallbacks: Error[] = [];
+      const failures: Error[] = [];
       const manager = new SessionManager(sessionPath, {
-        onProtectionFallback: (err) => fallbacks.push(err),
+        onPermissionRepairFailure: (err) => failures.push(err),
       });
 
       await manager.writeSession(makeValidSession());
 
-      expect(fallbacks).toHaveLength(1);
-      expect(fallbacks[0]?.message).toContain("session file permissions");
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.message).toContain("session file permissions");
       expect(await manager.readSession()).not.toBeNull();
     });
   });
@@ -155,7 +155,7 @@ describe("session file permissions (owner-only from creation)", () => {
       });
     });
 
-    it("reports a failed ACL restriction through onProtectionFallback", async () => {
+    it("reports a failed ACL restriction through onPermissionRepairFailure", async () => {
       await withPlatform("win32", async () => {
         vi.mocked(spawnSync).mockReturnValue({
           status: 5,
@@ -166,14 +166,14 @@ describe("session file permissions (owner-only from creation)", () => {
           stderr: Buffer.from("Access is denied."),
         } as unknown as ReturnType<typeof spawnSync>);
 
-        const fallbacks: Error[] = [];
+        const failures: Error[] = [];
         const manager = new SessionManager(sessionPath, {
-          onProtectionFallback: (err) => fallbacks.push(err),
+          onPermissionRepairFailure: (err) => failures.push(err),
         });
         await manager.writeSession(makeValidSession());
 
-        expect(fallbacks).toHaveLength(1);
-        expect(fallbacks[0]?.message).toContain("session file permissions");
+        expect(failures).toHaveLength(1);
+        expect(failures[0]?.message).toContain("session file permissions");
         // The session itself is still written — availability over hardening.
         expect(await manager.readSession()).not.toBeNull();
       });
@@ -188,7 +188,7 @@ describe("session file permissions (owner-only from creation)", () => {
         );
         const fallbacks: Error[] = [];
         await new SessionManager(sessionPath, {
-          onProtectionFallback: (err) => fallbacks.push(err),
+          onPermissionRepairFailure: (err) => fallbacks.push(err),
         }).writeSession(makeValidSession());
         expect(fallbacks).toHaveLength(0);
 
@@ -212,7 +212,7 @@ describe("session file permissions (owner-only from creation)", () => {
       vi.mocked(chmod).mockRejectedValueOnce(new Error("EPERM: operation not permitted"));
       const fallbacks: Error[] = [];
       const manager = new SessionManager(sessionPath, {
-        onProtectionFallback: (err) => fallbacks.push(err),
+        onPermissionRepairFailure: (err) => fallbacks.push(err),
       });
 
       await manager.writeSession(makeValidSession());

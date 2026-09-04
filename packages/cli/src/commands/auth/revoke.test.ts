@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -13,12 +13,8 @@ vi.mock("../../utils/vault-loader.js", () => ({
 }));
 
 import { Command } from "commander";
+import { VaultError } from "@harpoc/shared";
 import { registerAuthRevokeCommand } from "./revoke.js";
-
-function jwtWithExp(exp: number, jti = "some-jti"): string {
-  const payload = Buffer.from(JSON.stringify({ exp, jti })).toString("base64url");
-  return `header.${payload}.signature`;
-}
 
 async function run(args: string[]): Promise<void> {
   const program = new Command();
@@ -30,16 +26,20 @@ async function run(args: string[]): Promise<void> {
   await program.parseAsync(["node", "harpoc", "auth", "revoke", ...args]);
 }
 
-describe("auth revoke token sources", () => {
+describe("auth revoke (registry-authoritative, R9/C33-A)", () => {
   const savedEnv = process.env.HARPOC_TOKEN;
   let logSpy: ReturnType<typeof vi.spyOn>;
   let errSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
 
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.HARPOC_TOKEN;
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
   });
 
   afterEach(() => {
@@ -50,45 +50,38 @@ describe("auth revoke token sources", () => {
     }
     logSpy.mockRestore();
     errSpy.mockRestore();
+    exitSpy.mockRestore();
   });
 
-  it("extracts the expiry from HARPOC_TOKEN when --token is not given", async () => {
-    process.env.HARPOC_TOKEN = jwtWithExp(12345);
+  it("revokes by jti alone — no expiry, no token", async () => {
     await run(["some-jti"]);
-    expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti", 12_345_000);
+    expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti");
+    expect(mockEngine.revokeToken.mock.calls[0]).toHaveLength(1);
+    expect(mockEngine.destroy).toHaveBeenCalled();
   });
 
-  it("an explicit --token wins over HARPOC_TOKEN", async () => {
-    process.env.HARPOC_TOKEN = jwtWithExp(11111);
-    await run(["some-jti", "--token", jwtWithExp(22222)]);
-    expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti", 22_222_000);
-  });
-
-  it("revokes without an expiry when no token is available anywhere", async () => {
+  it("ignores an ambient HARPOC_TOKEN entirely — the registry knows the expiry", async () => {
+    process.env.HARPOC_TOKEN = "header.payload.signature";
     await run(["some-jti"]);
-    expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti", undefined);
-  });
-
-  // M1: HARPOC_TOKEN authenticates other commands too, so it is routinely a
-  // token OTHER than the revocation target. Forwarding its (earlier) expiry
-  // shortened or nullified the revocation entry.
-  it("ignores the expiry of a token whose jti is not the revocation target", async () => {
-    process.env.HARPOC_TOKEN = jwtWithExp(12345, "other-jti");
-    await run(["some-jti"]);
-    expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti", undefined);
-  });
-
-  it("warns when the supplied token is not the revocation target", async () => {
-    await run(["some-jti", "--token", jwtWithExp(12345, "other-jti")]);
+    expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti");
     const warned = errSpy.mock.calls.some(
       (call) => typeof call[0] === "string" && call[0].startsWith("Warning:"),
     );
-    expect(warned).toBe(true);
+    expect(warned).toBe(false);
   });
 
-  it("ignores a matching-jti token that carries no numeric exp", async () => {
-    const payload = Buffer.from(JSON.stringify({ jti: "some-jti" })).toString("base64url");
-    await run(["some-jti", "--token", `header.${payload}.signature`]);
-    expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti", undefined);
+  it("--token is an unknown option", async () => {
+    await expect(run(["some-jti", "--token", "header.payload.signature"])).rejects.toThrow();
+    expect(mockEngine.revokeToken).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the engine's refusal of an unknown jti", async () => {
+    mockEngine.revokeToken.mockImplementationOnce(() => {
+      throw VaultError.invalidInput("Unknown token jti: nope");
+    });
+    await expect(run(["nope"])).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Unknown token jti: nope"));
+    expect(mockEngine.destroy).toHaveBeenCalled();
   });
 });

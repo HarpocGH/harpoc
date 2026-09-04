@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -8,6 +8,7 @@ import { DEFAULT_SESSION_TTL_MS, ErrorCode, MAX_SESSION_TTL_MS, VaultError } fro
 import { SessionManager } from "./session-manager.js";
 import type { WrappingKeyStore } from "./wrapping-key-store.js";
 import { KeystoreWrappedSessionKeyProtector, WRAPPING_KEY_LENGTH } from "./wrapping-key-store.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 class InMemoryWrappingKeyStore implements WrappingKeyStore {
   key: Uint8Array | null = null;
@@ -251,21 +252,18 @@ describe("KeystoreWrappedSessionKeyProtector through SessionManager", () => {
     expect(await reader.readSession()).toBeNull();
   });
 
-  it("falls back to an unwrapped file when the keystore fails at write time", async () => {
+  it("refuses the write when the keystore fails at write time (SESSION_KEYSTORE_UNAVAILABLE, no file)", async () => {
     const store = new InMemoryWrappingKeyStore("keychain");
     store.failStorePersistence = true;
-    const fallbacks: Error[] = [];
     const manager = new SessionManager(sessionPath, {
       protector: new KeystoreWrappedSessionKeyProtector(store),
-      onProtectionFallback: (err) => fallbacks.push(err),
     });
-    const session = makeValidSession();
-    await manager.writeSession(session);
 
-    expect(fallbacks).toHaveLength(1);
-    const onDisk = JSON.parse(readFileSync(sessionPath, "utf8")) as SessionFile;
-    expect(onDisk.key_protection).toBe("none");
-    expect(onDisk.session_key).toBe(session.session_key);
-    expect(await manager.readSession()).not.toBeNull();
+    const err = await expectVaultError(
+      () => manager.writeSession(makeValidSession()),
+      ErrorCode.SESSION_KEYSTORE_UNAVAILABLE,
+    );
+    expect(err.message).toContain("keychain keystore did not persist");
+    expect(existsSync(sessionPath)).toBe(false);
   });
 });

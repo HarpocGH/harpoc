@@ -844,6 +844,14 @@ export class SqliteStore {
       .run(revokedAt, jti);
   }
 
+  /** One issued-token row by jti, or null — the registry is authoritative for revocation (R9/C33-A). */
+  getIssuedToken(jti: string): IssuedTokenRow | null {
+    const row = this.db.prepare("SELECT * FROM issued_tokens WHERE jti = ?").get(jti) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? this.rowToIssuedToken(row) : null;
+  }
+
   /** Newest first; agent_name is null for tool/user tokens and for deleted agents. */
   listIssuedTokens(
     filter?: IssuedTokenFilter,
@@ -868,16 +876,18 @@ export class SqliteStore {
     }));
   }
 
-  /** jtis of this agent's tokens that are neither expired at `now` (ms) nor revoked. */
-  listLiveTokenJtisForAgent(agentId: string, now: number): string[] {
-    const rows = this.db
+  /** jti and expiry of this agent's tokens that are neither expired at `now` (ms) nor revoked. */
+  listLiveTokensForAgent(
+    agentId: string,
+    now: number,
+  ): Array<Pick<IssuedTokenRow, "jti" | "expires_at">> {
+    return this.db
       .prepare(
-        `SELECT jti FROM issued_tokens
+        `SELECT jti, expires_at FROM issued_tokens
          WHERE agent_id = ? AND expires_at > ? AND revoked_at IS NULL
          ORDER BY issued_at DESC`,
       )
-      .all(agentId, now) as { jti: string }[];
-    return rows.map((row) => row.jti);
+      .all(agentId, now) as Array<{ jti: string; expires_at: number }>;
   }
 
   countActiveTokensForAgent(agentId: string, now: number): number {

@@ -49,6 +49,8 @@ describe("createMcpServer", () => {
       expect(message).toContain("harpoc auth token");
       expect(message).toContain("HARPOC_TOKEN");
       expect(message).toContain("--allow-tokenless");
+      expect(message).toContain("--token-file <path>");
+      expect(message).not.toContain("(or --token)");
     }
   });
 

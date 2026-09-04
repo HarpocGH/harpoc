@@ -8,7 +8,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { VaultEngine } from "@harpoc/core";
 import { VAULT_DB_NAME, VAULT_DIR_NAME, SESSION_FILE_NAME } from "@harpoc/shared";
 import { DEFAULT_MCP_HTTP_PORT, startMcpHttpServer } from "./http.js";
-import { parseHttpPortOption } from "./cli-options.js";
+import { parseHttpPortOption, readLaunchTokenFile } from "./cli-options.js";
 import { createMcpServer } from "./server.js";
 
 export { createMcpServer } from "./server.js";
@@ -18,6 +18,8 @@ export type { McpHttpServer, McpHttpServerOptions } from "./http.js";
 export { RateLimiter } from "./guards/rate-limiter.js";
 export { ScopeGuard } from "./guards/scope-guard.js";
 export { InjectionGuard } from "./guards/injection-guard.js";
+export { readLaunchTokenFile, MAX_LAUNCH_TOKEN_FILE_BYTES } from "./cli-options.js";
+export type { TokenFileRead } from "./cli-options.js";
 
 function resolveVaultDir(vaultDirOption?: string): string {
   if (vaultDirOption) return vaultDirOption;
@@ -30,6 +32,7 @@ async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
       token: { type: "string" },
+      "token-file": { type: "string" },
       "allow-tokenless": { type: "boolean" },
       "vault-dir": { type: "string" },
       http: { type: "boolean" },
@@ -39,9 +42,20 @@ async function main(): Promise<void> {
     strict: false,
   });
 
-  if (values.http && values.token !== undefined) {
+  // `--token` is declared only to be refused: under `strict: false` an
+  // undeclared flag would be swallowed and the JWT silently ignored (R9/A10).
+  if (values.token !== undefined) {
     process.stderr.write(
-      "Error: --token is not supported with --http. HTTP clients authenticate per request via Authorization: Bearer.\n",
+      "Error: --token was removed: pass the launch token via the HARPOC_TOKEN environment variable or --token-file <path> — command-line arguments are visible to other local processes.\n",
+    );
+    process.exit(1);
+  }
+
+  const tokenFile = values["token-file"] as string | undefined;
+
+  if (values.http && tokenFile !== undefined) {
+    process.stderr.write(
+      "Error: --token-file is not supported with --http. HTTP clients authenticate per request via Authorization: Bearer.\n",
     );
     process.exit(1);
   }
@@ -53,9 +67,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  if (values["allow-tokenless"] && (values.token !== undefined || process.env.HARPOC_TOKEN)) {
+  if (values["allow-tokenless"] && (tokenFile !== undefined || process.env.HARPOC_TOKEN)) {
     process.stderr.write(
-      "Error: --allow-tokenless conflicts with a launch token (--token / HARPOC_TOKEN). Provide one or the other.\n",
+      "Error: --allow-tokenless conflicts with a launch token (--token-file / HARPOC_TOKEN). Provide one or the other.\n",
     );
     process.exit(1);
   }
@@ -66,6 +80,18 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const port = parsedPort.ok ? parsedPort.port : DEFAULT_MCP_HTTP_PORT;
+
+  // Read before any vault is opened, like the port refusal: a bad file never
+  // touches the session.
+  let fileToken: string | undefined;
+  if (tokenFile !== undefined) {
+    const read = readLaunchTokenFile(tokenFile);
+    if (!read.ok) {
+      process.stderr.write(read.message);
+      process.exit(1);
+    }
+    fileToken = read.token;
+  }
 
   const vaultDir = resolveVaultDir(values["vault-dir"] as string | undefined);
   const dbPath = join(vaultDir, VAULT_DB_NAME);
@@ -117,13 +143,13 @@ async function main(): Promise<void> {
       `Harpoc MCP server listening on http://${host}:${httpServer.port}${httpServer.endpoint} (Streamable HTTP)\n`,
     );
   } else {
-    // An ambient HARPOC_TOKEN is the preferred non-argv channel for the stdio
-    // launch token; an explicit --token wins. It is only read for stdio — a
-    // profile-set variable must not affect --http, which authenticates per
-    // request.
+    // The launch token arrives through --token-file or the ambient
+    // HARPOC_TOKEN (the file wins) — never argv (R9/A10). It is only read for
+    // stdio — a profile-set variable must not affect --http, which
+    // authenticates per request.
     const server = createMcpServer({
       engine,
-      launchToken: (values.token as string | undefined) ?? (process.env.HARPOC_TOKEN || undefined),
+      launchToken: fileToken ?? (process.env.HARPOC_TOKEN || undefined),
       allowTokenless: values["allow-tokenless"] as boolean | undefined,
       enableTtyPrompt: true,
     });

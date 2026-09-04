@@ -35,9 +35,10 @@ export interface KeychainWrappingKeyStoreOptions {
  * the OS-shipped `security` binary in interactive mode (`security -i`): the
  * full command — including the hex-encoded wrapping key on `add-generic-password
  * -w` — crosses on stdin, never argv, so key material is invisible to `ps`.
- * A locked keychain (headless SSH, `errSecInteractionNotAllowed`) throws and
- * takes the caller's existing fallback/fail-closed paths; the timeout guards a
- * hung UI unlock prompt.
+ * A locked keychain (headless SSH, `errSecInteractionNotAllowed`) throws: the
+ * session write then fails with `SESSION_KEYSTORE_UNAVAILABLE` (R8/D54) and a
+ * read falls closed to a fresh unlock — never a silent downgrade to `none`;
+ * the timeout guards a hung UI unlock prompt.
  */
 export class KeychainWrappingKeyStore implements WrappingKeyStore {
   readonly scheme = "keychain" as const;

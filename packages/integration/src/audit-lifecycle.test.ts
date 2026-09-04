@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -70,11 +70,13 @@ describe("server lifecycle rows through the spawned CLI", () => {
   it("stdin EOF is a graceful stop: a server.stop row with trigger transport_closed, exit 0", async () => {
     registerAgents(engine, "eof-agent");
     const token = engine.createToken("eof-agent", ["read", "list"]);
+    const tokenFile = join(vaultDir, "launch-token");
+    writeFileSync(tokenFile, `${token}\n`, { encoding: "utf8", mode: 0o600 });
     const env = { ...process.env };
     delete env.HARPOC_TOKEN;
     const child = spawn(
       process.execPath,
-      [CLI_ENTRY, "--vault-dir", vaultDir, "server", "start", "--mcp", "--token", token],
+      [CLI_ENTRY, "--vault-dir", vaultDir, "server", "start", "--mcp", "--token-file", tokenFile],
       { stdio: ["pipe", "pipe", "pipe"], env, windowsHide: true },
     );
     try {

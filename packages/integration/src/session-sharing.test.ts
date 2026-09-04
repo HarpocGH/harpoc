@@ -222,8 +222,9 @@ describe("Session Sharing", () => {
 describe.runIf(process.platform === "win32")("DPAPI-protected session sharing (Windows)", () => {
   it("shares a DPAPI-wrapped session file between engines", async () => {
     // Generous helper timeout: a cold PowerShell + BCL load on a thrashed CI
-    // runner has exceeded the 15 s default, tripping writeSession's fallback
-    // and failing the scheme assertion with key_protection "none".
+    // runner has exceeded the 15 s default, and since R8/D54 that overrun
+    // throws SESSION_KEYSTORE_UNAVAILABLE out of initVault instead of writing
+    // a `none` file — the budget carries the same weight.
     await expectSharedWrappedSession(
       () => new DpapiSessionKeyProtector({ timeoutMs: 45_000 }),
       "dpapi",

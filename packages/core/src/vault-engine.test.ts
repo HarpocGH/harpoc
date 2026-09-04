@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import type { Server } from "node:http";
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -2354,66 +2354,75 @@ describe("JWT tokens", () => {
     ).toThrow(VaultError);
   });
 
-  it("revocation with explicit expiresAt still revokes the token", () => {
+  // R9/C33-A: the issued-token registry supplies the expiry, so the denylist
+  // entry lives exactly as long as the token it names. verifyToken prunes
+  // entries whose expires_at has passed before consulting them, and the
+  // argument that no still-valid token is ever un-revoked rests on
+  // createToken's `expires_at = exp × 1000` against the `exp <= ⌊now/1000⌋`
+  // expiry check — pinned below at the last valid millisecond.
+  it("stores the registry expiry on the denylist entry, in milliseconds", () => {
     const token = engine.createToken("user-1", ["read"]);
     const decoded = engine.verifyToken(token);
 
-    engine.revokeToken(decoded.jti, decoded.exp * 1000);
-    expect(() => engine.verifyToken(token)).toThrow("revoked");
-  });
-
-  // M1: verifyToken prunes revocation entries whose expires_at has passed
-  // *before* consulting them, so an expiry earlier than the token's own
-  // silently un-revoked it. The stored lifetime is clamped to the maximum
-  // token TTL, which no token can outlive. Since R2 the column is milliseconds.
-  it("clamps a past expiresAt so the revocation still holds", () => {
-    const token = engine.createToken("user-1", ["read"]);
-    const decoded = engine.verifyToken(token);
-
-    engine.revokeToken(decoded.jti, Date.now() - 60_000);
-
-    expect(() => engine.verifyToken(token)).toThrow("revoked");
-  });
-
-  it("clamps an expiresAt that falls short of the token's own expiry (stored in ms)", () => {
-    const token = engine.createToken("user-1", ["read"]);
-    const decoded = engine.verifyToken(token);
-
-    engine.revokeToken(decoded.jti, decoded.exp * 1000 - 3_600_000);
+    engine.revokeToken(decoded.jti);
 
     const db = new Database(dbPath, { readonly: true });
     const row = db
       .prepare("SELECT expires_at FROM revoked_tokens WHERE jti = ?")
       .get(decoded.jti) as { expires_at: number } | undefined;
     db.close();
-    expect(row?.expires_at).toBeGreaterThanOrEqual(decoded.exp * 1000);
-  });
-
-  it("honors an expiresAt beyond the clamp floor, in milliseconds", () => {
-    const farFuture = Date.now() + 365 * 24 * 60 * 60 * 1000;
-    engine.revokeToken("manual-jti", farFuture);
-
-    const db = new Database(dbPath, { readonly: true });
-    const row = db
-      .prepare("SELECT expires_at FROM revoked_tokens WHERE jti = ?")
-      .get("manual-jti") as { expires_at: number } | undefined;
-    db.close();
-    expect(row?.expires_at).toBe(farFuture);
-  });
-
-  it("a seconds-valued expiresAt (a caller still decoding JWT exp raw) is clamped up, never trusted", () => {
-    const token = engine.createToken("user-1", ["read"]);
-    const decoded = engine.verifyToken(token);
-
-    engine.revokeToken(decoded.jti, decoded.exp);
-
-    const db = new Database(dbPath, { readonly: true });
-    const row = db
-      .prepare("SELECT expires_at FROM revoked_tokens WHERE jti = ?")
-      .get(decoded.jti) as { expires_at: number } | undefined;
-    db.close();
-    expect(row?.expires_at).toBeGreaterThanOrEqual(Date.now() + 23 * 60 * 60 * 1000);
+    expect(row?.expires_at).toBe(decoded.exp * 1000);
     expect(() => engine.verifyToken(token)).toThrow("revoked");
+  });
+
+  it("a revoked token stays revoked through its last valid millisecond", () => {
+    vi.useFakeTimers();
+    try {
+      const token = engine.createToken("user-1", ["read"], 60_000);
+      const decoded = engine.verifyToken(token);
+      engine.revokeToken(decoded.jti);
+
+      vi.setSystemTime(decoded.exp * 1000 - 1);
+      expect(() => engine.verifyToken(token)).toThrow("revoked");
+
+      vi.setSystemTime(decoded.exp * 1000);
+      expect(() => engine.verifyToken(token)).toThrow("revoked");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses an unknown jti with INVALID_INPUT and writes nothing", async () => {
+    const err = await expectVaultError(
+      () => Promise.resolve().then(() => engine.revokeToken("manual-jti")),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe("Unknown token jti: manual-jti");
+
+    const db = new Database(dbPath, { readonly: true });
+    const row = db.prepare("SELECT jti FROM revoked_tokens WHERE jti = ?").get("manual-jti");
+    const audit = db
+      .prepare("SELECT COUNT(*) AS c FROM audit_log WHERE event_type = ?")
+      .get(AuditEventType.TOKEN_REVOKE) as { c: number };
+    db.close();
+    expect(row).toBeUndefined();
+    expect(audit.c).toBe(0);
+  });
+
+  it("accepts an already-expired token: the mirror stamps and the entry prunes", () => {
+    vi.useFakeTimers();
+    try {
+      const token = engine.createToken("user-1", ["read"], 1_000);
+      const decoded = engine.verifyToken(token);
+
+      vi.setSystemTime(decoded.exp * 1000 + 1);
+      engine.revokeToken(decoded.jti);
+
+      expect(engine.listIssuedTokens({ status: "revoked" })[0]?.jti).toBe(decoded.jti);
+      expect(() => engine.verifyToken(token)).toThrow(VaultError);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -3333,7 +3342,7 @@ describe("session keystore protection", () => {
     file["key_protection"] = "none";
     writeFileSync(sessionPath, JSON.stringify(file), "utf8");
 
-    // The wrapped blob is now presented as a raw key — the KEK unwrap must fail.
+    // A none tag under a keystore protector is refused before any unwrap (R8/D54) — the file reads as no session.
     const engineB = new VaultEngine({
       dbPath,
       sessionPath,
@@ -3344,11 +3353,57 @@ describe("session keystore protection", () => {
     await engineA.destroy();
   });
 
+  it("fails closed when the keystore cannot protect the session: SESSION_KEYSTORE_UNAVAILABLE, sealed, no file", async () => {
+    class FailingProtector implements SessionKeyProtector {
+      readonly scheme = "dpapi" as const;
+      async protect(): Promise<Uint8Array> {
+        throw new Error("helper timed out");
+      }
+      async unprotect(blob: Uint8Array): Promise<Uint8Array> {
+        return blob;
+      }
+    }
+
+    const failing = new VaultEngine({
+      dbPath,
+      sessionPath,
+      sessionKeyProtector: new FailingProtector(),
+    });
+    const err = await expectVaultError(
+      () => failing.initVault("password"),
+      ErrorCode.SESSION_KEYSTORE_UNAVAILABLE,
+    );
+    expect(err.message).toContain("HARPOC_SESSION_KEYSTORE=off");
+    expect(failing.getState()).toBe(VaultState.SEALED);
+    expect(existsSync(sessionPath)).toBe(false);
+    expect(() => failing.listSecrets()).toThrow(VaultError);
+
+    // The vault itself was initialised; the none protector (the vitest
+    // HARPOC_SESSION_KEYSTORE=off environment) opens it.
+    const plain = new VaultEngine({ dbPath, sessionPath });
+    await plain.unlock("password");
+    expect(plain.getState()).toBe(VaultState.UNLOCKED);
+    await plain.lock();
+
+    const again = new VaultEngine({
+      dbPath,
+      sessionPath,
+      sessionKeyProtector: new FailingProtector(),
+    });
+    await expectVaultError(() => again.unlock("password"), ErrorCode.SESSION_KEYSTORE_UNAVAILABLE);
+    expect(again.getState()).toBe(VaultState.SEALED);
+    expect(existsSync(sessionPath)).toBe(false);
+
+    await failing.destroy();
+    await plain.destroy();
+    await again.destroy();
+  });
+
   describe.runIf(process.platform === "win32")("DPAPI end-to-end (Windows)", () => {
     // Generous helper timeout (test budget raised to match): a cold
     // PowerShell + BCL load on a thrashed CI runner has exceeded the 15 s
-    // default, tripping the write-time fallback and failing the scheme
-    // assertion with key_protection "none".
+    // default. Since R8/D54 that overrun is a thrown SESSION_KEYSTORE_UNAVAILABLE
+    // out of initVault, not a silent `none` file — the budget carries the same weight.
     it("wraps the session key via DPAPI and shares it across engines", async () => {
       const engineA = new VaultEngine({
         dbPath,

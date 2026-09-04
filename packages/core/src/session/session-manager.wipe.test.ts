@@ -1,10 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SessionFile, SessionKeyProtectionScheme } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import { SessionManager } from "./session-manager.js";
 import type { SessionKeyProtector } from "./session-key-protector.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 /** Protector that records the raw key it was handed, then fails. */
 class RecordingFailingProtector implements SessionKeyProtector {
@@ -50,23 +52,20 @@ afterEach(() => {
 });
 
 describe("writeSession raw-key wiping on protector failure", () => {
-  it("wipes the raw session key and falls back to file permissions when protect() throws", async () => {
+  it("wipes the raw session key and refuses the write when protect() throws", async () => {
     const protector = new RecordingFailingProtector();
-    const fallbacks: Error[] = [];
-    const manager = new SessionManager(sessionPath, {
-      protector,
-      onProtectionFallback: (err) => fallbacks.push(err),
-    });
+    const manager = new SessionManager(sessionPath, { protector });
 
-    await manager.writeSession(sampleSession());
+    await expectVaultError(
+      () => manager.writeSession(sampleSession()),
+      ErrorCode.SESSION_KEYSTORE_UNAVAILABLE,
+    );
 
     // The raw key buffer handed to the (failing) protector must be zeroed.
     expect(protector.captured).toBeInstanceOf(Uint8Array);
     expect((protector.captured as Uint8Array).every((b) => b === 0)).toBe(true);
 
-    // Availability over hardening: the file is still written, unwrapped.
-    expect(fallbacks).toHaveLength(1);
-    const written = JSON.parse(readFileSync(sessionPath, "utf8")) as SessionFile;
-    expect(written.key_protection).toBe("none");
+    // Fail closed (R8/D54): nothing is written, unwrapped or otherwise.
+    expect(existsSync(sessionPath)).toBe(false);
   });
 });

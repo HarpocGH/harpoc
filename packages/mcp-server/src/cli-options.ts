@@ -1,3 +1,4 @@
+import { readFileSync, statSync } from "node:fs";
 import { isDecimalInteger } from "@harpoc/shared";
 import { DEFAULT_MCP_HTTP_PORT } from "./http.js";
 
@@ -19,4 +20,55 @@ export function parseHttpPortOption(raw: string | undefined): PortParse {
     };
   }
   return { ok: true, port };
+}
+
+export const MAX_LAUNCH_TOKEN_FILE_BYTES = 16 * 1024;
+
+export type TokenFileRead = { ok: true; token: string } | { ok: false; message: string };
+
+/**
+ * `--token-file <path>` — the on-disk channel for the stdio launch token
+ * (R9/A10): argv is readable by every local process for the server's whole
+ * lifetime, so the token travels in a file or in `HARPOC_TOKEN`, never as an
+ * argument. Read once at start, before any vault is opened; the content is
+ * trimmed and never echoed — a refusal names the path only. The same result
+ * shape as `parseHttpPortOption`, so `harpoc server start` and `harpoc-mcp`
+ * refuse identically.
+ */
+export function readLaunchTokenFile(path: string): TokenFileRead {
+  let size: number;
+  try {
+    const stat = statSync(path);
+    if (!stat.isFile()) {
+      return {
+        ok: false,
+        message: `Error: --token-file ${path} is not a regular file.\n`,
+      };
+    }
+    size = stat.size;
+  } catch (err) {
+    return {
+      ok: false,
+      message: `Error: Cannot read --token-file ${path}: ${err instanceof Error ? err.message : String(err)}\n`,
+    };
+  }
+  if (size > MAX_LAUNCH_TOKEN_FILE_BYTES) {
+    return {
+      ok: false,
+      message: `Error: --token-file ${path} exceeds the 16 KiB launch-token limit.\n`,
+    };
+  }
+  let token: string;
+  try {
+    token = readFileSync(path, "utf8").trim();
+  } catch (err) {
+    return {
+      ok: false,
+      message: `Error: Cannot read --token-file ${path}: ${err instanceof Error ? err.message : String(err)}\n`,
+    };
+  }
+  if (token === "") {
+    return { ok: false, message: `Error: --token-file ${path} is empty.\n` };
+  }
+  return { ok: true, token };
 }

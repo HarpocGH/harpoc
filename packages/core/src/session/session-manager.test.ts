@@ -12,9 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SessionFile } from "@harpoc/shared";
-import { DEFAULT_SESSION_TTL_MS, MAX_SESSION_TTL_MS } from "@harpoc/shared";
+import { DEFAULT_SESSION_TTL_MS, ErrorCode, MAX_SESSION_TTL_MS } from "@harpoc/shared";
 import { SessionManager } from "./session-manager.js";
 import type { SessionKeyProtector } from "./session-key-protector.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 let sessionDir: string;
 let sessionPath: string;
@@ -277,12 +278,14 @@ describe("secure erase", () => {
     await expect(manager.eraseSession()).resolves.not.toThrow();
   });
 
-  it("after erase, no tmp files remain in the directory", async () => {
+  it("after erase, neither a tmp file nor the lock directory remains", async () => {
     const session = makeValidSession();
     await manager.writeSession(session);
     await manager.eraseSession();
 
-    const remaining = readdirSync(sessionDir).filter((f) => f.includes(".tmp"));
+    const remaining = readdirSync(sessionDir).filter(
+      (f) => f.includes(".tmp") || f.endsWith(".lock"),
+    );
     expect(remaining).toHaveLength(0);
   });
 });
@@ -365,23 +368,20 @@ describe("session-key protection", () => {
     expect(read?.session_key).toBe(session.session_key);
   });
 
-  it("falls back to an unwrapped write when the keystore fails", async () => {
+  it("refuses the write with SESSION_KEYSTORE_UNAVAILABLE when the keystore fails, writing nothing", async () => {
     const protector = new FakeKeystoreProtector();
     protector.failProtect = true;
-    const fallbacks: Error[] = [];
-    const mgr = new SessionManager(sessionPath, {
-      protector,
-      onProtectionFallback: (err) => fallbacks.push(err),
-    });
-    const session = makeValidSession();
+    const mgr = new SessionManager(sessionPath, { protector });
 
-    await mgr.writeSession(session);
-
-    expect(fallbacks).toHaveLength(1);
-    const raw = readRawFile();
-    expect(raw.key_protection).toBe("none");
-    expect(raw.session_key).toBe(session.session_key);
-    expect((await mgr.readSession())?.session_key).toBe(session.session_key);
+    const err = await expectVaultError(
+      () => mgr.writeSession(makeValidSession()),
+      ErrorCode.SESSION_KEYSTORE_UNAVAILABLE,
+    );
+    expect(err.message).toContain("the dpapi keystore could not protect the session key");
+    expect(err.message).toContain("keystore unavailable");
+    expect(err.message).toContain("HARPOC_SESSION_KEYSTORE=off");
+    expect(existsSync(sessionPath)).toBe(false);
+    expect(readdirSync(sessionDir)).toEqual([]);
   });
 
   it("fails closed (null) when unwrapping fails", async () => {
@@ -415,15 +415,21 @@ describe("session-key protection", () => {
     expect(protector.unprotectCalls).toBe(0);
   });
 
-  it("reads none-tagged files under a keystore protector without unwrapping", async () => {
+  it("refuses a none-tagged file under a keystore protector (null → re-unlock), never unwrapping", async () => {
     const session = makeValidSession();
     await new SessionManager(sessionPath).writeSession(session);
     expect(readRawFile().key_protection).toBe("none");
 
     const protector = new FakeKeystoreProtector();
     const wrapped = new SessionManager(sessionPath, { protector });
-    const read = await wrapped.readSession();
-    expect(read?.session_key).toBe(session.session_key);
+    expect(await wrapped.readSession()).toBeNull();
     expect(protector.unprotectCalls).toBe(0);
+
+    // The file is left for the process that wrote it under the opt-out: the
+    // none protector (HARPOC_SESSION_KEYSTORE=off in tests) still reads it.
+    expect(existsSync(sessionPath)).toBe(true);
+    expect((await new SessionManager(sessionPath).readSession())?.session_key).toBe(
+      session.session_key,
+    );
   });
 });

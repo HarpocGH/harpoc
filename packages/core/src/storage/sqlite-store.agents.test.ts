@@ -255,10 +255,19 @@ describe("issued_tokens", () => {
     );
     store.insertIssuedToken(makeToken({ jti: "boundary", expires_at: NOW }));
 
-    expect(store.listLiveTokenJtisForAgent("agent-id-1", NOW)).toEqual(["live"]);
+    expect(store.listLiveTokensForAgent("agent-id-1", NOW)).toEqual([
+      { jti: "live", expires_at: NOW + 60_000 },
+    ]);
     expect(store.countActiveTokensForAgent("agent-id-1", NOW)).toBe(1);
     expect(store.countActiveTokensForAgent("agent-id-1", NOW + 120_000)).toBe(0);
     expect(store.countActiveTokensForAgent("agent-id-2", NOW)).toBe(0);
+  });
+
+  it("getIssuedToken returns one row by jti and null for an unknown one", () => {
+    store.insertIssuedToken(makeToken());
+
+    expect(store.getIssuedToken("jti-1")).toEqual(makeToken());
+    expect(store.getIssuedToken("nope")).toBeNull();
   });
 });
 

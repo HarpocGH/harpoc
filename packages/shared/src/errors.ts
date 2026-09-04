@@ -140,6 +140,7 @@ export enum ErrorCode {
   KEY_DERIVATION_ERROR = "KEY_DERIVATION_ERROR",
   FILE_IO_ERROR = "FILE_IO_ERROR",
   SESSION_FILE_ERROR = "SESSION_FILE_ERROR",
+  SESSION_KEYSTORE_UNAVAILABLE = "SESSION_KEYSTORE_UNAVAILABLE",
 }
 
 const STATUS_MAP: Record<ErrorCode, number> = {
@@ -280,6 +281,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.KEY_DERIVATION_ERROR]: 500,
   [ErrorCode.FILE_IO_ERROR]: 500,
   [ErrorCode.SESSION_FILE_ERROR]: 500,
+  [ErrorCode.SESSION_KEYSTORE_UNAVAILABLE]: 501,
 };
 
 export class VaultError extends Error {
@@ -386,13 +388,20 @@ export class VaultError extends Error {
   static tokenRequired(): VaultError {
     return new VaultError(
       ErrorCode.TOKEN_REQUIRED,
-      "A launch token is required: issue one with `harpoc auth token` and pass it via the HARPOC_TOKEN environment variable (or --token), or start with --allow-tokenless to explicitly accept unrestricted local full access",
+      "A launch token is required: issue one with `harpoc auth token` and pass it via the HARPOC_TOKEN environment variable (or --token-file <path>), or start with --allow-tokenless to explicitly accept unrestricted local full access",
     );
   }
 
   static sessionFileError(detail?: string): VaultError {
     const msg = detail ? `Session file error: ${detail}` : "Session file error";
     return new VaultError(ErrorCode.SESSION_FILE_ERROR, msg);
+  }
+
+  static sessionKeystoreUnavailable(scheme: string, cause: string): VaultError {
+    return new VaultError(
+      ErrorCode.SESSION_KEYSTORE_UNAVAILABLE,
+      `Session keystore unavailable: the ${scheme} keystore could not protect the session key (${cause}). Repair the keystore and unlock again, or set HARPOC_SESSION_KEYSTORE=off to keep the session under file permissions only`,
+    );
   }
 
   static weakPassword(minLength: number): VaultError {

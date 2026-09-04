@@ -25,7 +25,7 @@ export function createEngine(vaultDir: string): VaultEngine {
   return new VaultEngine({
     dbPath,
     sessionPath,
-    onSessionKeyProtectionFallback: (error) => {
+    onSessionFilePermissionRepairFailure: (error) => {
       console.error(`Warning: ${error.message}`);
     },
   });

@@ -143,23 +143,36 @@ describe("DELETE /api/v1/tokens/:jti", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.data).toEqual({ revoked: true });
-    expect(engine.revokeToken).toHaveBeenCalledWith("jti-1", undefined, ADMIN_CALLER);
+    expect(engine.revokeToken).toHaveBeenCalledWith("jti-1", ADMIN_CALLER);
   });
 
   /**
-   * No expiry argument — the engine floors the denylist entry at
-   * `MAX_TOKEN_TTL_MS`, which outlives every mintable token; the registry
-   * row's expiry is not consulted. The caller follows it so the `token.revoke`
-   * row names the principal that asked for the revocation (R6).
+   * No expiry argument — the engine reads it from the issued-token registry
+   * (R9/C33-A). The caller follows the jti so the `token.revoke` row names the
+   * principal that asked for the revocation (R6).
    */
   it("passes no expiry and attributes the revocation to the caller", async () => {
     await app.request("/api/v1/tokens/jti-1", { method: "DELETE", headers: AUTH });
-    expect(engine.revokeToken.mock.calls[0]).toEqual(["jti-1", undefined, ADMIN_CALLER]);
+    expect(engine.revokeToken.mock.calls[0]).toEqual(["jti-1", ADMIN_CALLER]);
   });
 
   it("decodes a percent-encoded jti", async () => {
     await app.request("/api/v1/tokens/jti%2F1", { method: "DELETE", headers: AUTH });
-    expect(engine.revokeToken).toHaveBeenCalledWith("jti/1", undefined, ADMIN_CALLER);
+    expect(engine.revokeToken).toHaveBeenCalledWith("jti/1", ADMIN_CALLER);
+  });
+
+  it("an unknown jti is refused 400 INVALID_INPUT — the registry is authoritative", async () => {
+    engine.revokeToken.mockImplementationOnce(() => {
+      throw VaultError.invalidInput("Unknown token jti: jti-9");
+    });
+    const res = await app.request("/api/v1/tokens/jti-9", {
+      method: "DELETE",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("INVALID_INPUT");
+    expect(body.message).toBe("Unknown token jti: jti-9");
   });
 
   it("requires admin scope before the engine call", async () => {

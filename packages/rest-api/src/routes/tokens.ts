@@ -41,10 +41,10 @@ export function createTokenRoutes(): Hono<HarpocEnv> {
     checkTokenScope(token, "admin");
 
     const engine = c.get("engine");
-    // No expiry argument — the engine floors the denylist entry at
-    // MAX_TOKEN_TTL_MS, which outlives every mintable token; the registry
-    // row's expiry is not consulted.
-    engine.revokeToken(c.req.param("jti"), undefined, callerOf(c));
+    // The issued-token registry supplies the expiry (R9/C33-A), and a jti it
+    // does not know is refused by the engine as INVALID_INPUT (400) — this is
+    // no longer a blind denylist write.
+    engine.revokeToken(c.req.param("jti"), callerOf(c));
 
     return c.json({ data: { revoked: true } });
   });

@@ -325,9 +325,10 @@ describe("deactivateAgent", () => {
     expect(liveStore().listIssuedTokens()[0]?.revoked_at).toBeNull();
   });
 
-  it("a deactivated agent's token is refused by verifyToken, whose prune runs first (R2: the denylist floor is in ms)", () => {
+  it("a deactivated agent's token is refused by verifyToken, whose prune runs first (R9/C33-A: the entry carries the token's own registry expiry, in ms)", () => {
     engine.registerAgent({ name: "alpha" });
     const token = engine.createToken("alpha", ["read"]);
+    const { exp } = engine.verifyToken(token);
 
     engine.deactivateAgent("alpha");
 
@@ -337,7 +338,7 @@ describe("deactivateAgent", () => {
       expires_at: number;
     }[];
     expect(denylist).toHaveLength(1);
-    expect(denylist[0]?.expires_at).toBeGreaterThanOrEqual(Date.now() + 23 * 60 * 60 * 1000);
+    expect(denylist[0]?.expires_at).toBe(exp * 1000);
   });
 
   it("attributes the cascade rows to the caller", () => {
@@ -769,7 +770,7 @@ describe("revokeToken attribution", () => {
     engine.createToken("ghost", ["use"]);
     const jti = engine.listIssuedTokens()[0]?.jti as string;
 
-    engine.revokeToken(jti, undefined, CALLER);
+    engine.revokeToken(jti, CALLER);
 
     const row = rows(AuditEventType.TOKEN_REVOKE)[0];
     expect(row?.principal_type).toBe("user");

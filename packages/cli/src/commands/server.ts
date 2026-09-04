@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { Option } from "commander";
 import type { Command } from "commander";
 import { MAX_TOKEN_TTL_MS, Permission, isDecimalInteger } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
@@ -37,9 +38,10 @@ export function registerServerCommand(program: Command): void {
       "Web UI launch-token validity in minutes (requires --ui; 1-1440, default 24 h)",
     )
     .option(
-      "--token <jwt>",
-      "Launch token for MCP scope enforcement (stdio only); prefer the HARPOC_TOKEN environment variable — command-line arguments are visible to other local processes",
+      "--token-file <path>",
+      "File holding the launch token for MCP scope enforcement (stdio only); the HARPOC_TOKEN environment variable is the other channel — command-line arguments are visible to other local processes",
     )
+    .addOption(new Option("--token <jwt>").hideHelp())
     .option(
       "--allow-tokenless",
       "Explicitly run the stdio MCP server without a launch token — all tools and resources are unrestricted (local full-access mode)",
@@ -66,6 +68,7 @@ export function registerServerCommand(program: Command): void {
           ui?: boolean;
           uiTokenTtl?: string;
           token?: string;
+          tokenFile?: string;
           allowTokenless?: boolean;
           oauthRefresh?: boolean;
           certRenew?: boolean;
@@ -114,9 +117,16 @@ export function registerServerCommand(program: Command): void {
           const mcpHttpPort = parsePort(opts.mcpHttpPort, "MCP HTTP port");
           const certRenewPort = parsePort(opts.certRenewPort, "cert renewal port");
 
-          if (opts.token && !opts.mcp) {
+          if (opts.token !== undefined) {
             console.error(
-              "Error: --token requires --mcp. The Streamable HTTP transport authenticates per request via Authorization: Bearer.",
+              "Error: --token was removed: pass the launch token via the HARPOC_TOKEN environment variable or --token-file <path> — command-line arguments are visible to other local processes.",
+            );
+            process.exit(1);
+          }
+
+          if (opts.tokenFile !== undefined && !opts.mcp) {
+            console.error(
+              "Error: --token-file requires --mcp. The Streamable HTTP transport authenticates per request via Authorization: Bearer.",
             );
             process.exit(1);
           }
@@ -128,9 +138,9 @@ export function registerServerCommand(program: Command): void {
             process.exit(1);
           }
 
-          if (opts.allowTokenless && (opts.token ?? process.env.HARPOC_TOKEN)) {
+          if (opts.allowTokenless && (opts.tokenFile !== undefined || process.env.HARPOC_TOKEN)) {
             console.error(
-              "Error: --allow-tokenless conflicts with a launch token (--token / HARPOC_TOKEN). Provide one or the other.",
+              "Error: --allow-tokenless conflicts with a launch token (--token-file / HARPOC_TOKEN). Provide one or the other.",
             );
             process.exit(1);
           }
@@ -153,6 +163,19 @@ export function registerServerCommand(program: Command): void {
               `Error: --mcp-http-port and --cert-renew-port must differ (both are ${String(mcpHttpPort)}).`,
             );
             process.exit(1);
+          }
+
+          // Read before the vault is loaded, like every other refusal above: a
+          // bad file never touches the session.
+          let fileToken: string | undefined;
+          if (opts.tokenFile !== undefined) {
+            const { readLaunchTokenFile } = await import("@harpoc/mcp-server");
+            const read = readLaunchTokenFile(opts.tokenFile);
+            if (!read.ok) {
+              console.error(read.message.trimEnd());
+              process.exit(1);
+            }
+            fileToken = read.token;
           }
 
           const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir as string | undefined);
@@ -238,12 +261,13 @@ export function registerServerCommand(program: Command): void {
             const { createMcpServer } = await import("@harpoc/mcp-server");
             const { StdioServerTransport } =
               await import("@modelcontextprotocol/sdk/server/stdio.js");
-            // An ambient HARPOC_TOKEN only applies to the stdio launch token; an
-            // explicit --token wins. (A profile-set variable must not error out
-            // --rest-only starts, so the env var is never checked without --mcp.)
+            // The launch token arrives through --token-file or the ambient
+            // HARPOC_TOKEN (the file wins) — never argv (R9/A10). A profile-set
+            // variable must not error out --rest-only starts, so the env var
+            // is never checked without --mcp.
             const server = createMcpServer({
               engine,
-              launchToken: opts.token ?? process.env.HARPOC_TOKEN,
+              launchToken: fileToken ?? process.env.HARPOC_TOKEN,
               allowTokenless: opts.allowTokenless,
               enableTtyPrompt: true,
             });

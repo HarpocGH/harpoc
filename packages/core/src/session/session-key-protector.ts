@@ -149,8 +149,9 @@ export class DpapiSessionKeyProtector implements SessionKeyProtector {
  * Linux tier selection is factory-time and synchronous: Secret Service iff a
  * D-Bus session address is present AND `secret-tool` exists at a fixed
  * candidate path; else the kernel keyring iff `keyctl` exists; else none. A
- * runtime failure of the selected tier degrades through the existing
- * write-fallback — never a mid-write cascade to the other tier.
+ * runtime failure of the selected tier fails the write with
+ * `SESSION_KEYSTORE_UNAVAILABLE` (R8/D54) — never a mid-write cascade to the
+ * other tier, never a silent downgrade to `none`.
  */
 export function createSessionKeyProtector(
   platform: NodeJS.Platform = process.platform,

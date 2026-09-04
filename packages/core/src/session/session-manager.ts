@@ -3,8 +3,11 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  mkdirSync,
   openSync,
   renameSync,
+  rmdirSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -16,6 +19,8 @@ import type { SessionFile } from "@harpoc/shared";
 import {
   DEFAULT_SESSION_TTL_MS,
   MAX_SESSION_TTL_MS,
+  SESSION_LOCK_POLL_MS,
+  SESSION_LOCK_STALE_MS,
   VaultError,
   sessionFileSchema,
 } from "@harpoc/shared";
@@ -28,13 +33,19 @@ export interface SessionManagerOptions {
   /** Session-key protector (default: platform-selected — DPAPI on Windows, none elsewhere). */
   protector?: SessionKeyProtector;
   /**
-   * Invoked when session-file protection degrades at write time: keystore
-   * wrapping failed (the file falls back to `key_protection: "none"`) or the
-   * POSIX owner-only permission repair failed. The error message is
-   * self-descriptive. Default: silent — core never logs; interactive entry
-   * points (the CLI) supply a callback that surfaces the downgrade.
+   * Invoked when the owner-only permission repair after a write failed — the
+   * POSIX chmod or the Windows icacls step; the file itself is created with
+   * mode 0o600 from the first instant. The error message is self-descriptive.
+   * Default: silent — core never logs; interactive entry points (the CLI)
+   * supply a callback that surfaces the warning. A keystore failure is not a
+   * warning: `writeSession` throws `SESSION_KEYSTORE_UNAVAILABLE` (R8/D54).
    */
-  onProtectionFallback?: (error: Error) => void;
+  onPermissionRepairFailure?: (error: Error) => void;
+  /**
+   * Age after which a `session.json.lock` left behind by a dead process is
+   * reclaimed (default `SESSION_LOCK_STALE_MS`; a test seam).
+   */
+  lockStaleMs?: number;
 }
 
 /** Does this read failure mean the session file is genuinely absent? */
@@ -43,12 +54,19 @@ function isMissingFileError(err: unknown): boolean {
   return code === "ENOENT" || code === "ENOTDIR";
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+type SessionLockMode<T> = { mode: "wait" } | { mode: "try"; onContention: () => Promise<T> };
+
 /**
  * Manages the session file at ~/.harpoc/session.json.
  *
  * - Atomic writes: write to .tmp, fsync, rename.
  * - Secure erase: overwrite with random bytes, fsync, unlink.
  * - Sliding window TTL with absolute ceiling.
+ * - A `session.json.lock` directory beside the file serialises the slide, the
+ *   fresh write and the erase across processes (R8/D56): `mkdir` is atomic
+ *   on every platform, so no native addon is needed.
  * - At rest, `session_key` is wrapped by the platform key store where one is
  *   implemented (thesis §4.6 off-host hardening); `key_protection` records the
  *   scheme so a copy of the file alone does not yield the session key.
@@ -56,21 +74,27 @@ function isMissingFileError(err: unknown): boolean {
 export class SessionManager {
   private static nextWriteId = 0;
   private readonly protector: SessionKeyProtector;
-  private readonly onProtectionFallback: (error: Error) => void;
+  private readonly onPermissionRepairFailure: (error: Error) => void;
+  private readonly lockPath: string;
+  private readonly lockStaleMs: number;
 
   constructor(
     private readonly sessionPath: string,
     options: SessionManagerOptions = {},
   ) {
     this.protector = options.protector ?? createSessionKeyProtector();
-    this.onProtectionFallback = options.onProtectionFallback ?? ((): void => {});
+    this.onPermissionRepairFailure = options.onPermissionRepairFailure ?? ((): void => {});
+    this.lockPath = `${sessionPath}.lock`;
+    this.lockStaleMs = options.lockStaleMs ?? SESSION_LOCK_STALE_MS;
   }
 
   /**
    * Write a new session file atomically with `session_key` wrapped by the
-   * configured protector. The input's `session_key` must be the raw key; if
-   * wrapping fails, the file is written unwrapped (`key_protection: "none"`)
-   * and the fallback callback fires — availability over the optional hardening.
+   * configured protector. The input's `session_key` must be the raw key. A
+   * protector failure is fatal (R8/D54): nothing is written and the caller
+   * gets `SESSION_KEYSTORE_UNAVAILABLE`, whose message names
+   * `HARPOC_SESSION_KEYSTORE=off` as the explicit opt-out — the file never
+   * silently downgrades to `key_protection: "none"`.
    */
   async writeSession(session: SessionFile): Promise<void> {
     let stored: SessionFile = { ...session, key_protection: "none" };
@@ -88,10 +112,9 @@ export class SessionManager {
           key_protection: this.protector.scheme,
         };
       } catch (err) {
-        this.onProtectionFallback(
-          new Error(
-            `platform keystore unavailable — session file protected by file permissions only (${err instanceof Error ? err.message : String(err)})`,
-          ),
+        throw VaultError.sessionKeystoreUnavailable(
+          this.protector.scheme,
+          err instanceof Error ? err.message : String(err),
         );
       } finally {
         if (rawKey) {
@@ -100,14 +123,15 @@ export class SessionManager {
       }
     }
 
-    await this.writeStoredSession(stored);
+    await this.withSessionLock({ mode: "wait" }, () => this.writeStoredSession(stored));
   }
 
   /**
    * Read and validate the session file, unwrapping `session_key`. Returns null
    * if the file is missing, expired, corrupted, wrapped under a scheme the
-   * configured protector does not handle, or if unwrapping fails — fail closed;
-   * a fresh unlock is the recovery path.
+   * configured protector does not handle, tagged `none` while a keystore
+   * protector is configured (R8/D54 — a downgrade, not a session), or if
+   * unwrapping fails — fail closed; a fresh unlock is the recovery path.
    */
   async readSession(): Promise<SessionFile | null> {
     // A load attempt tears nothing down, so a transient read failure degrades
@@ -123,7 +147,10 @@ export class SessionManager {
 
     const scheme = stored.key_protection;
     if (scheme === "none") {
-      return stored;
+      // Legitimate only where no keystore is selected — no platform tier, or
+      // HARPOC_SESSION_KEYSTORE=off chose the none protector at construction.
+      // Under a keystore protector it is the sticky downgrade N7 described.
+      return this.protector.scheme === "none" ? stored : null;
     }
     if (scheme !== this.protector.scheme) {
       return null;
@@ -195,65 +222,74 @@ export class SessionManager {
    * Operates on the stored form: the (possibly keystore-wrapped) session key is
    * carried over untouched, so the frequent monitor path never does a keystore
    * roundtrip. The returned file is the stored form.
+   *
+   * The read, the check and the rename run under the session mutex (R8/D56),
+   * so a lock or a fresh unlock in another process cannot interleave. A slide
+   * is expendable: on contention the file is returned as stored and the next
+   * throttled slide retries — a skip is never a "session gone" signal.
    */
   async extendSession(
     ttlMs: number = DEFAULT_SESSION_TTL_MS,
     requireExisting = false,
   ): Promise<SessionFile | null> {
-    const session = await this.readStoredSession();
-    if (!session) return null;
+    return this.withSessionLock(
+      { mode: "try", onContention: () => this.readStoredSession() },
+      async () => {
+        const session = await this.readStoredSession();
+        if (!session) return null;
 
-    const now = Date.now();
-    const newExpiresAt = Math.min(now + ttlMs, session.max_expires_at);
+        const now = Date.now();
+        const newExpiresAt = Math.min(now + ttlMs, session.max_expires_at);
 
-    // Don't write if the extension is negligible (< 1 second)
-    if (newExpiresAt - session.expires_at < 1000) {
-      return session;
-    }
+        // Don't write if the extension is negligible (< 1 second)
+        if (newExpiresAt - session.expires_at < 1000) {
+          return session;
+        }
 
-    const updated: SessionFile = {
-      ...session,
-      expires_at: newExpiresAt,
-    };
+        const updated: SessionFile = {
+          ...session,
+          expires_at: newExpiresAt,
+        };
 
-    // requireExisting closes the slide/lock race: if a concurrent lock erased
-    // the file between the read above and the rename below, the slide must not
-    // resurrect it.
-    const wrote = await this.writeStoredSession(updated, requireExisting);
-    return wrote ? updated : null;
+        const wrote = await this.writeStoredSession(updated, requireExisting);
+        return wrote ? updated : null;
+      },
+    );
   }
 
   /**
    * Securely erase the session file: overwrite with random bytes, fsync, unlink.
    */
   async eraseSession(): Promise<void> {
-    try {
-      // Read file size
-      const content = await readFile(this.sessionPath);
-
-      // Overwrite with random bytes
-      const randomData = Buffer.alloc(content.length);
-      randomFillSync(randomData);
-      writeFileSync(this.sessionPath, randomData);
-
-      // fsync
-      const fd = openSync(this.sessionPath, "r+");
+    await this.withSessionLock({ mode: "wait" }, async () => {
       try {
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
-      }
+        // Read file size
+        const content = await readFile(this.sessionPath);
 
-      // Delete
-      unlinkSync(this.sessionPath);
-    } catch {
-      // If file doesn't exist, that's fine
-      try {
+        // Overwrite with random bytes
+        const randomData = Buffer.alloc(content.length);
+        randomFillSync(randomData);
+        writeFileSync(this.sessionPath, randomData);
+
+        // fsync
+        const fd = openSync(this.sessionPath, "r+");
+        try {
+          fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
+
+        // Delete
         unlinkSync(this.sessionPath);
       } catch {
-        // Already gone
+        // If file doesn't exist, that's fine
+        try {
+          unlinkSync(this.sessionPath);
+        } catch {
+          // Already gone
+        }
       }
-    }
+    });
   }
 
   /**
@@ -261,7 +297,7 @@ export class SessionManager {
    * created with mode 0o600 (POSIX: applied at creation and preserved by the
    * rename, so the raw session key is never readable by other users at any
    * instant — the trailing chmod is only a repair, and its failure fires the
-   * fallback callback). The temp name is unique per write (pid + counter), so
+   * permission-repair callback). The temp name is unique per write (pid + counter), so
    * overlapping writers — a use-driven expiry slide racing a session rewrite —
    * never share a temp file; last rename wins.
    *
@@ -291,12 +327,9 @@ export class SessionManager {
         closeSync(fd);
       }
 
-      // Checked as close to the rename as possible: if the session file is
-      // gone, do not recreate it. A microsecond check→rename window remains
-      // (no cross-platform conditional rename exists) — a cross-process
-      // `harpoc lock` landing in it is resurrected until the TTL ceiling (the
-      // monitor seals only on a *missing* file); to be closed by the session
-      // mutex ruling (R8).
+      // Under the session mutex this check cannot race a cross-process erase
+      // any more (R8/D56); it stays as the guard for a writer that reached
+      // here without the lock — the bounded wait that proceeded unlocked.
       if (requireExisting && !existsSync(this.sessionPath)) {
         unlinkSync(tmpPath);
         return false;
@@ -310,7 +343,7 @@ export class SessionManager {
         this.restrictWindowsAcl();
       } else {
         await chmod(this.sessionPath, 0o600).catch((err: unknown) => {
-          this.onProtectionFallback(
+          this.onPermissionRepairFailure(
             new Error(
               `failed to restrict session file permissions to owner-only (${err instanceof Error ? err.message : String(err)})`,
             ),
@@ -342,10 +375,11 @@ export class SessionManager {
    * the vault path as an *argument* — the previous `execSync` built a cmd.exe
    * string with the path interpolated into it, against the project's own
    * "never a shell; args are data" doctrine, and swallowed every failure while
-   * the POSIX sibling reported through the fallback callback. That matters
-   * precisely on the DPAPI write-failure path, whose stated protection *is*
-   * file permissions. `%USERNAME%` was a cmd.exe expansion and cannot survive
-   * the shell's removal, so the account name comes from the process itself.
+   * the POSIX sibling reported through the permission-repair callback. The ACL
+   * is the file's on-host protection beside the DPAPI wrap, so a failed
+   * restriction is reported, not swallowed. `%USERNAME%` was a cmd.exe
+   * expansion and cannot survive the shell's removal, so the account name
+   * comes from the process itself.
    */
   private restrictWindowsAcl(): void {
     const icacls = system32Path("icacls.exe");
@@ -365,11 +399,75 @@ export class SessionManager {
         throw new Error(`icacls exited ${String(res.status)}${detail ? `: ${detail}` : ""}`);
       }
     } catch (err) {
-      this.onProtectionFallback(
+      this.onPermissionRepairFailure(
         new Error(
           `failed to restrict session file permissions to owner-only (${err instanceof Error ? err.message : String(err)})`,
         ),
       );
+    }
+  }
+
+  /**
+   * The cross-process session mutex (R8/D56): `session.json.lock` is a
+   * directory, because `mkdir` fails atomically on EEXIST on every platform.
+   * `try` gives up at once and runs `onContention` (the slide is expendable);
+   * `wait` polls until the lock is free or a holder older than `lockStaleMs`
+   * is reclaimed, and past that bound proceeds without it — the fresh write
+   * and the erase must never hang on a directory nobody can release. Any
+   * other `mkdir` failure counts as "not acquired": the write that follows
+   * reports the real error.
+   */
+  private async withSessionLock<T>(lock: SessionLockMode<T>, body: () => Promise<T>): Promise<T> {
+    let held = this.tryAcquireLock();
+    if (!held) {
+      if (lock.mode === "try") return lock.onContention();
+      const deadline = Date.now() + this.lockStaleMs + SESSION_LOCK_POLL_MS;
+      while (!held && Date.now() < deadline) {
+        await sleep(SESSION_LOCK_POLL_MS);
+        held = this.tryAcquireLock();
+      }
+      // One attempt at or past the bound: a dead holder is reclaimed however
+      // long the attempts themselves took.
+      if (!held) held = this.tryAcquireLock();
+    }
+    try {
+      return await body();
+    } finally {
+      if (held) this.releaseLock();
+    }
+  }
+
+  private tryAcquireLock(): boolean {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        mkdirSync(this.lockPath);
+        return true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException | null)?.code !== "EEXIST") return false;
+        if (!this.isLockStale()) return false;
+        try {
+          rmdirSync(this.lockPath);
+        } catch {
+          // Another process reclaimed it first; the retry decides.
+        }
+      }
+    }
+    return false;
+  }
+
+  private isLockStale(): boolean {
+    try {
+      return Date.now() - statSync(this.lockPath).mtimeMs > this.lockStaleMs;
+    } catch {
+      return false;
+    }
+  }
+
+  private releaseLock(): void {
+    try {
+      rmdirSync(this.lockPath);
+    } catch {
+      // Already reclaimed as stale by another process.
     }
   }
 
