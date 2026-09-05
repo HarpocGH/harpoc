@@ -68,7 +68,7 @@ pnpm build
 pnpm test
 ```
 
-The released state is the `v1.5.0` tag (`git clone --branch v1.5.0 …`); `main` moves ahead of it. `npx harpoc --version` prints the version you built.
+The next release is `v1.5.0`, prepared on `main` (`CHANGELOG.md` § `[1.5.0]`, `.github/releases/v1.5.0.md`); its tag is not yet pushed, so `main` is the reference state until it is. `npx harpoc --version` prints the version you built.
 
 ## MCP Configuration
 
