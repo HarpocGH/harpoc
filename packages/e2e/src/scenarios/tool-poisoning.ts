@@ -20,10 +20,11 @@ const NONCE = "p4s3";
 const ECHO_ORIGIN = `https://${ECHO_HTTPS.host}:${String(ECHO_HTTPS.port)}`;
 
 /**
- * The vault's refusal of the poisoned payload, by name. Pinned in-tree at
- * mcp-server/src/tools/tools.test.ts ("rejects a malformed … action at the
- * schema boundary (-32602)"); an arm that accepted any `ok: false` would also
- * accept a vault that failed for an unrelated reason.
+ * The vault's refusal of the poisoned payload, by name. Pinned in-tree on the
+ * MCP path at mcp-server/src/tools/tools.test.ts ("refuses an undeclared key on
+ * the mcp action by name at the schema boundary (-32602)") and by this arm's own
+ * unit test (tool-poisoning.test.ts, `REFUSAL`); an arm that accepted any
+ * `ok: false` would also accept a vault that failed for an unrelated reason.
  */
 const UNDECLARED_TARGET_REFUSAL = /Unrecognized key\(s\) in object: 'url'/;
 
