@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-09-05
+
+**The first release the project stands behind.** `v1.0.0` (2026-03-09) had no users — 0 stars, 0 forks, every package `private: true`, nothing on npm — and stays on its tag as the historical pre-release; nothing between it and this release was ever published. `1.5` continues the internal milestone labels (v1.1 → v1.4.1) the entries below carry rather than the semver-literal `2.0.0`, which the roadmap reserves for cloud sync and team vaults (`docs/decisions.md` § "Release numbering — the current state ships as v1.5.0"). Every entry below is relative to `v1.0.0`. The **Breaking** entries under _Changed_ fall in two classes, settled here per entry:
+
+**Breaking relative to `v1.0.0`** — a 1.0.0-era vault, token, client, script or MCP host configuration stops working:
+
+1. **Breaking: the stdio launch token no longer travels on argv** — v1.0.0 accepted `--token <jwt>` on both `harpoc server start --mcp` and `harpoc-mcp`, so a launcher line carrying it is now refused.
+2. **Breaking: token revocation is registry-authoritative** — v1.0.0's `harpoc auth revoke <jti> --token <jwt>` decoded the expiry out of that JWT; the option is gone and a JTI the issued-token registry does not know is refused.
+3. **Breaking: per-secret access policies are explicit-grant** — v1.0.0 stored policy rows but never enforced them, so a scoped token reached every secret; each secret now needs a matching, unexpired grant.
+4. **Breaking: every target allowlist denies by default** — no allowlist existed in v1.0.0, so a 1.0.0-era `use_secret` HTTP call that cleared the SSRF floor ran; the same script is now refused until an operator configures the secret's `url_allowlist`.
+5. **Breaking: a token caller holding none of `read`/`list`/`admin` on a secret is told `SECRET_NOT_FOUND` (404), byte-identical to an unknown handle, on every direct-address route** — v1.0.0's `GET /api/v1/secrets/:handle/value` answered 200 to a scoped token with no grant.
+6. **Breaking: v1.5 opens only vaults it created** — a 1.0.0-era vault directory does not open at all; export what you need with the previous release and re-`init`.
+7. **Breaking (REST, adjust your clients): every JSON request body refuses unknown keys, and a schema refusal names the field** — v1.0.0's `POST /api/v1/secrets` accepted the create-time `injection` key, which is now a 400.
+8. **Breaking (REST): `GET /api/v1/health/expiring` nests its three lists under `data`** — the v1.0.0 route existed and answered `{ data: [ … ] }`, so a client reading `data` as an array breaks.
+9. **Breaking: the `principal_type` JWT claim is mandatory** — v1.0.0's `createToken` wrote no such claim, so every token it minted is now refused at verification.
+10. **Breaking: an `agent`-type principal must be registered before a token or a policy can name it** — v1.0.0's `harpoc auth token` defaulted to the subject `cli-user`, so the bare command now refuses until `harpoc agent register cli-user` has run.
+11. **Breaking: the Argon2id key-derivation defaults flip to the RFC 9106 first recommended (high-security) profile** — a vault created under v1.0.0's 64 MiB / 3 iterations / 4 lanes derives a different master key and no longer unlocks.
+12. **Breaking: the stdio MCP server requires a launch token by default** — v1.0.0's `createMcpServer` took an optional launch token, so a tokenless MCP host entry now exits `TOKEN_REQUIRED` unless `--allow-tokenless` is added.
+13. **Breaking (SDK):** the SDK's input types are schema-derived too — v1.0.0 exported hand-written `CreateSecretInput` (`expiresAt`), `GrantPolicyInput` (camelCase) and `HealthResponse`, so an embedder's call sites move to the wire shape.
+14. **Breaking:** `use_secret` request shape changed from `{ request, injection, follow_redirects }` to `{ action }` — that was exactly the v1.0.0 tool and route body, so every 1.0.0-era `use_secret` caller must be rewritten.
+
+**Breaking relative to the unreleased 1.1–1.4.1 milestones only** — the behavior these entries change did not exist in `v1.0.0`, so no released artifact relied on it:
+
+1. **Breaking: a non-loopback bind is refused without `--allowed-host`, and every request to either HTTP listener must carry an allowed `Host`** — v1.0.0's REST listener was hard-bound to `127.0.0.1` with no `--host` flag and there was no MCP HTTP transport; both arrived in the 1.1–1.4.1 line.
+2. **Breaking: a second acknowledgement tier** — v1.0.0 had no `command_allowlist` and no interpreter acknowledgement gate; both arrived in v1.1, and this tier extends them.
+3. **Breaking: governance refuses a token that carries a `project` claim** — the agent registry, its REST routes and the `harpoc agent` group arrived in v1.4.
+4. **Breaking: an OAuth flow declaring `token_endpoint_auth_method: "client_secret_basic"` without a client secret is refused at start with `INVALID_INPUT`** — v1.0.0 shipped no OAuth surface; `@harpoc/oauth-proxy` arrived in v1.1.
+5. **Breaking: a keystore that cannot protect the session key fails `harpoc unlock` (and `init`) with the new `SESSION_KEYSTORE_UNAVAILABLE`** — v1.0.0 wrote a plain session file with no `key_protection` tag; keystore wrapping and the write-time fallback this closes arrived in v1.1.
+6. **Breaking: `POST /api/v1/audit/verify` no longer returns `legacy`, and an audit row without a chain link is now a break rather than a tolerated legacy row** — v1.0.0 had neither the audit HMAC chain nor a verify route; both arrived in v1.1.
+7. **Breaking: `PUT /api/v1/secrets/:handle/injection-policy` requires every policy field and refuses unknown keys** — v1.0.0 exposed no injection-policy route and stored no per-secret policy; both arrived in v1.1.
+8. **Breaking (REST + SDK): `POST /api/v1/certificates/:handle/renew` reads no body, and `renewCertificate(handle)` takes the handle alone** — certificates arrived in v1.1 with `@harpoc/cert-manager`.
+9. **Breaking: `harpoc cert issue` generates an EC P-256 key by default** — the `harpoc cert` group arrived in v1.1.
+10. **Breaking: `auto_renew` requires an ACME-issued certificate** — certificate import and the renewal scheduler arrived in v1.1.
+11. **Breaking (MCP): `renew_certificate` no longer accepts `http_port`** — v1.0.0's MCP server carried seven tools and no certificate surface; the tool arrived in v1.1.
+
+A script author should also read the _Behavioral_ notes under _Changed_ — the REST `readJsonBody` change (a malformed body answers 400 where 1.0.0 answered 500) among them.
+
 ### Added
 
 - **A second Linux isolation tier on bubblewrap (`bwrap`) — mechanism `bwrap` on `isolation_mechanism` / `fs_isolation_mechanism`.** Each dimension's resolver now falls back to `bwrap` when its primary is absent or its live probe fails: `bwrap --bind / / --unshare-net --die-with-parent --` for the network (a fresh namespace whose empty loopback bwrap raises, nothing listening behind it), `bwrap --ro-bind / / --dev /dev --die-with-parent --` for the filesystem (the whole tree read-only, a fresh `/dev` so `/dev/null` stays writable), and ONE `bwrap` wrapper for both when either primary fell to it — never nested inside `unshare` or around `setpriv`. Unlike the primaries, bwrap does not exec the payload in place: it stays as a monitor that returns the payload's exit status, and `--die-with-parent` takes the payload down with it, so pid (the kill target), kill and exit-code semantics hold. Availability, stated honestly: bubblewrap needs the same unprivileged user-namespace grant as `unshare` (Ubuntu 24.04 ships no AppArmor profile for it), so the tier does not escape that restriction — what it buys is filesystem isolation on hosts whose util-linux predates 2.40, Ubuntu 24.04 LTS among them, where `setpriv` has no Landlock, and a network fallback where an operator grants `userns` to `/usr/bin/bwrap` alone. A refusal with both tiers out names both. `bwrap` and `setpriv` join the `EXEC_WRAPPERS` acknowledgement tier beside `unshare` (compromise audit D50, Wave 3 step 9; `implementation-plan-compromise-wave3-isolation-r7-2026-09-04.md`).
@@ -352,4 +389,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 7-package monorepo: shared, core, cli, mcp-server, rest-api, sdk, integration
 - 1009 tests across all packages
 
+[1.5.0]: https://github.com/HarpocGH/harpoc/releases/tag/v1.5.0
 [1.0.0]: https://github.com/HarpocGH/harpoc/releases/tag/v1.0.0

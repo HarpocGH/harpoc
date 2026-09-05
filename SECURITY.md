@@ -4,8 +4,10 @@
 
 | Version | Supported |
 | ------- | --------- |
-| 1.0.x   | Yes       |
-| < 1.0   | No        |
+| 1.5.x   | Yes       |
+| < 1.5   | No        |
+
+`1.0.x` was a pre-release with no users and no upgrade path — a 1.0.x vault is not opened by 1.5, which only opens vaults it created (`CHANGELOG.md` § `[1.5.0]`).
 
 ## Reporting a Vulnerability
 

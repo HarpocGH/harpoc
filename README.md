@@ -68,6 +68,8 @@ pnpm build
 pnpm test
 ```
 
+The released state is the `v1.5.0` tag (`git clone --branch v1.5.0 …`); `main` moves ahead of it. `npx harpoc --version` prints the version you built.
+
 ## MCP Configuration
 
 To use Harpoc as an MCP server with Claude Desktop or Claude Code:
