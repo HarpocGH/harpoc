@@ -116,6 +116,15 @@ export const VAULT_VERSION = "1.5.0";
  * reset, not a stamp that must match.
  */
 export const VAULT_VERSION_FLOOR = "1.5.0";
+/**
+ * The product version — what `harpoc --version`, the MCP serverInfo and
+ * GET /health report. Distinct from VAULT_VERSION (the format stamped into a
+ * vault) and VAULT_VERSION_FLOOR (the oldest format this binary opens): the
+ * three are equal strings at 1.5.0 and diverge the first time a release
+ * changes nothing in the vault format. Pinned to every workspace manifest by
+ * constants.test.ts.
+ */
+export const HARPOC_VERSION = "1.5.0";
 export const VAULT_AUDIT_ENABLED = true;
 
 // -- HTTP / use_secret defaults ----------------------------------------------

@@ -1,6 +1,6 @@
 {
   "name": "@harpoc/core",
-  "version": "1.0.0",
+  "version": "1.5.0",
   "description": "Vault engine with AES-256-GCM encryption, Argon2id key derivation, and SQLite storage",
   "license": "BUSL-1.1",
   "author": "Stefan Gönitzer",

@@ -3,7 +3,7 @@ import { CertManager } from "@harpoc/cert-manager";
 import type { VaultEngine } from "@harpoc/core";
 import { OAuthManager } from "@harpoc/oauth-proxy";
 import type { AccessInterface } from "@harpoc/shared";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode, HARPOC_VERSION, VaultError } from "@harpoc/shared";
 import { InjectionGuard } from "./guards/injection-guard.js";
 import { RateLimiter } from "./guards/rate-limiter.js";
 import { ScopeGuard } from "./guards/scope-guard.js";
@@ -155,7 +155,7 @@ export function createMcpServer(options: CreateMcpServerOptions): McpServer {
   const certManager = options.certManager ?? new CertManager(engine);
 
   const server = new McpServer(
-    { name: "harpoc", version: "0.0.0" },
+    { name: "harpoc", version: HARPOC_VERSION },
     {
       capabilities: {
         tools: { listChanged: false },

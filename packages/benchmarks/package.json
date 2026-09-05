@@ -1,6 +1,6 @@
 {
   "name": "@harpoc/benchmarks",
-  "version": "1.0.0",
+  "version": "1.5.0",
   "description": "Baseline latency benchmarks: per-use_secret overhead, unlock, end-to-end, session load",
   "license": "BUSL-1.1",
   "author": "Stefan Gönitzer",

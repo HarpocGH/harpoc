@@ -1,6 +1,6 @@
 {
   "name": "@harpoc/e2e",
-  "version": "1.0.0",
+  "version": "1.5.0",
   "description": "End-to-end evaluation harness: live backends, real surfaces, evidence emission",
   "license": "BUSL-1.1",
   "author": "Stefan Gönitzer",

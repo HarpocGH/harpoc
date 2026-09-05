@@ -2,7 +2,7 @@ import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   ENCRYPTED_KEY_IMPORT_REFUSAL,
   ErrorCode,
-  VAULT_VERSION,
+  HARPOC_VERSION,
   VaultError,
   VaultState,
 } from "@harpoc/shared";
@@ -689,7 +689,7 @@ describe("DirectClient", () => {
 
     const health = await client.getHealth();
     expect(health.state).toBe(VaultState.UNLOCKED);
-    expect(health.version).toBe(VAULT_VERSION);
+    expect(health.version).toBe(HARPOC_VERSION);
   });
 
   describe("oauth flows (injected manager)", () => {

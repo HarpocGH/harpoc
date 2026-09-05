@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import {
   AAD_CERT_ACME_ACCOUNT,
   AAD_CERT_PRIVATE_KEY,
@@ -23,6 +27,7 @@ import {
   CONFIG_FILE_NAME,
   DEFAULT_HTTP_TIMEOUT_MS,
   DEFAULT_SESSION_TTL_MS,
+  HARPOC_VERSION,
   MAX_HTTP_RESPONSE_BYTES,
   MAX_NAME_LENGTH,
   MIN_REDACTABLE_FRAGMENT,
@@ -336,5 +341,37 @@ describe("vault defaults", () => {
 describe("output sanitization constants", () => {
   it("MIN_REDACTABLE_FRAGMENT is 3", () => {
     expect(MIN_REDACTABLE_FRAGMENT).toBe(3);
+  });
+});
+
+/**
+ * The product version is one constant and fourteen manifests. A bump that
+ * misses one, or a manifest bumped without the constant, fails here — so
+ * `harpoc --version`, the MCP serverInfo and GET /health can never disagree
+ * with the package they ship in.
+ */
+describe("HARPOC_VERSION", () => {
+  const packagesDir = fileURLToPath(new URL("../../", import.meta.url));
+  const manifests = [
+    join(packagesDir, "..", "package.json"),
+    ...readdirSync(packagesDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(packagesDir, entry.name, "package.json")),
+  ];
+
+  it("is a dotted decimal", () => {
+    expect(HARPOC_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it("covers the root and all thirteen packages", () => {
+    expect(manifests).toHaveLength(14);
+  });
+
+  it.each(manifests)("%s carries the product version", (manifest) => {
+    const pkg = JSON.parse(readFileSync(manifest, "utf8")) as {
+      name: string;
+      version: string;
+    };
+    expect(pkg.version).toBe(HARPOC_VERSION);
   });
 });

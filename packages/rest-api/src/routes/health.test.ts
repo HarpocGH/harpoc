@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
-import { ErrorCode, VaultError, VaultState, VAULT_VERSION } from "@harpoc/shared";
+import { ErrorCode, VaultError, VaultState, HARPOC_VERSION } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
 import { createHealthRoutes, createExpiringSecretsRoute } from "./health.js";
 import { authMiddleware } from "../middleware/auth.js";
@@ -71,7 +71,7 @@ describe("health routes", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.data.state).toBe("unlocked");
-    expect(body.data.version).toBe(VAULT_VERSION);
+    expect(body.data.version).toBe(HARPOC_VERSION);
   });
 
   it("GET /api/v1/health returns sealed state", async () => {

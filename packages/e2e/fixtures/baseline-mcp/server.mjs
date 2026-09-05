@@ -415,8 +415,9 @@ function unmediatedSsh(action) {
  * That is the whole of §6.2.3's contrast. A server that forwards wherever the
  * tool call says can be re-aimed by anything that can influence the call — a
  * poisoned tool description, for instance. The vault takes the downstream
- * endpoint from the secret's stored configuration and ignores any target in the
- * action, so the same poisoned description moves nothing.
+ * endpoint from the secret's stored configuration; its action declares no
+ * target field, and an undeclared one is refused at the boundary (since
+ * 2026-09-02), so the same poisoned description moves nothing.
  */
 async function unmediatedMcp(action) {
   const url = String(action.url ?? action.endpoint ?? "");

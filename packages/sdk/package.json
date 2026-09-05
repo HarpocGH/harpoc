@@ -1,6 +1,6 @@
 {
   "name": "@harpoc/sdk",
-  "version": "1.0.0",
+  "version": "1.5.0",
   "description": "TypeScript SDK for Harpoc — direct and REST client modes",
   "license": "BUSL-1.1",
   "author": "Stefan Gönitzer",
@@ -30,9 +30,9 @@
     "@harpoc/test-utils": "workspace:*"
   },
   "peerDependencies": {
-    "@harpoc/core": "^1.0.0",
-    "@harpoc/oauth-proxy": "^1.1.0",
-    "@harpoc/cert-manager": "^1.1.0"
+    "@harpoc/core": "^1.5.0",
+    "@harpoc/oauth-proxy": "^1.5.0",
+    "@harpoc/cert-manager": "^1.5.0"
   },
   "peerDependenciesMeta": {
     "@harpoc/core": {

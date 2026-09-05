@@ -1,6 +1,6 @@
 {
   "name": "@harpoc/shared",
-  "version": "1.0.0",
+  "version": "1.5.0",
   "description": "Shared types, Zod schemas, error codes, and constants for Harpoc",
   "license": "BUSL-1.1",
   "author": "Stefan Gönitzer",

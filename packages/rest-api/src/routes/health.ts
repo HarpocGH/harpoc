@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { matchesSecretNameScope, VAULT_VERSION, VaultError } from "@harpoc/shared";
+import { matchesSecretNameScope, HARPOC_VERSION, VaultError } from "@harpoc/shared";
 import type {
   ExpiringCertificateInfo,
   ExpiringOAuthTokenInfo,
@@ -19,7 +19,7 @@ export function createHealthRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     const health: HealthResponse = {
       state: engine.getState(),
-      version: VAULT_VERSION,
+      version: HARPOC_VERSION,
     };
     return c.json({ data: health });
   });

@@ -6,6 +6,7 @@ export {
   resolveSecretId,
 } from "./utils/vault-loader.js";
 import { Command } from "commander";
+import { HARPOC_VERSION } from "@harpoc/shared";
 import { registerInitCommand } from "./commands/init.js";
 import { registerUnlockCommand } from "./commands/unlock.js";
 import { registerLockCommand } from "./commands/lock.js";
@@ -49,7 +50,7 @@ const program = new Command();
 program
   .name("harpoc")
   .description("Secret vault for AI agents")
-  .version("0.0.0")
+  .version(HARPOC_VERSION)
   .option("--vault-dir <path>", "Path to vault directory");
 
 // Top-level commands

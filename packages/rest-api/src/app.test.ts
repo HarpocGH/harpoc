@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { ErrorCode, VaultError, VaultState, VAULT_VERSION } from "@harpoc/shared";
+import { ErrorCode, VaultError, VaultState, HARPOC_VERSION } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
 import { OAuthManager, defaultOpenBrowser } from "@harpoc/oauth-proxy";
 import { createApp, createDefaultOAuthManager } from "./app.js";
@@ -82,7 +82,7 @@ describe("createApp integration", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.data.state).toBe("unlocked");
-    expect(body.data.version).toBe(VAULT_VERSION);
+    expect(body.data.version).toBe(HARPOC_VERSION);
   });
 
   it("protected routes require auth", async () => {

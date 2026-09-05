@@ -1,6 +1,6 @@
 {
   "name": "@harpoc/test-utils",
-  "version": "1.0.0",
+  "version": "1.5.0",
   "description": "Test-only helpers shared by every Harpoc package's test suite — never built, never published",
   "license": "BUSL-1.1",
   "author": "Stefan Gönitzer",
