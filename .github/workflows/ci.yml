@@ -32,6 +32,54 @@ jobs:
           echo 746573746b6579 | keyctl padd user harpoc-ci-probe @u || echo "::warning::kernel keyring probe failed"
           keyctl search @u user harpoc-ci-probe || true
           keyctl purge user harpoc-ci-probe || true
+      - name: "R7 probe (diagnostic, temporary): bwrap tiers on ubuntu-24.04 - stock, after the sysctl relax, under a targeted AppArmor profile"
+        if: runner.os == 'Linux'
+        # Wave 3 step 9 / Task 1 (implementation-plan-compromise-wave3-isolation-r7-2026-09-04.md).
+        # Every line is diagnostic; the step never fails the leg. The "R7 "
+        # lines in the log are the record; Task 6 removes this step and turns
+        # the findings into the leg's real provisioning.
+        run: |
+          set +e
+          sudo apt-get install -y bubblewrap
+          echo "R7 bwrap version: $(bwrap --version 2>&1)"
+          echo "R7 sysctl: $(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>&1)"
+          form() {
+            label="$1"; shift
+            bwrap "$@" -- /bin/true; echo "R7 $label true (expect 0): $?"
+            bwrap "$@" -- /bin/sh -c 'exit 7'; echo "R7 $label exit propagation (expect 7): $?"
+          }
+          forms() {
+            form "network" --bind / / --unshare-net --die-with-parent
+            form "fs" --ro-bind / / --dev /dev --die-with-parent
+            form "combined" --ro-bind / / --dev /dev --unshare-net --die-with-parent
+            bwrap --ro-bind / / --dev /dev --die-with-parent -- /bin/sh -c 'echo x > /dev/null'; echo "R7 fs /dev/null write (expect 0): $?"
+            rm -f "$HOME/r7-probe-marker"
+            bwrap --ro-bind / / --dev /dev --die-with-parent -- /bin/sh -c "echo x > $HOME/r7-probe-marker"; echo "R7 fs host-dir write (expect non-zero): $?"
+            if [ -e "$HOME/r7-probe-marker" ]; then echo "R7 fs marker: PRESENT (bad)"; rm -f "$HOME/r7-probe-marker"; else echo "R7 fs marker: absent (good)"; fi
+            bwrap --bind / / --unshare-net --die-with-parent -- /bin/sh -c 'cat /proc/net/dev' | sed 's/^/R7 netns view: /'
+            bwrap --bind / / --unshare-net --die-with-parent -- /bin/sleep 300 &
+            monitor=$!
+            sleep 1
+            echo "R7 kill chain: sleep pids before kill: $(pgrep -x sleep | tr '\n' ' ')"
+            kill -KILL "$monitor"
+            sleep 1
+            if pgrep -x sleep >/dev/null; then echo "R7 kill chain: FAILED (sleep survived)"; pkill -KILL -x sleep; else echo "R7 kill chain: OK (payload gone with the monitor)"; fi
+          }
+          echo "R7 ===== pass 1: stock ====="
+          forms
+          echo "R7 ===== pass 2: after sysctl kernel.apparmor_restrict_unprivileged_userns=0 ====="
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          forms
+          echo "R7 ===== pass 3: sysctl back to 1, targeted profile for /usr/bin/bwrap ====="
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' 'profile harpoc-bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' | sudo tee /etc/apparmor.d/harpoc-bwrap >/dev/null
+          sudo apparmor_parser -r /etc/apparmor.d/harpoc-bwrap; echo "R7 profile load (expect 0): $?"
+          unshare -rn -- /bin/true; echo "R7 unshare under the profile route (expect non-zero): $?"
+          forms
+          sudo apparmor_parser -R /etc/apparmor.d/harpoc-bwrap
+          sudo rm -f /etc/apparmor.d/harpoc-bwrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          exit 0
       - name: Probe network isolation (diagnostic)
         if: runner.os == 'Linux'
         # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor
@@ -74,6 +122,25 @@ jobs:
         run: |
           /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny file-write*)' /usr/bin/true && echo "sandbox-exec deny-write OK" || echo "::warning::sandbox-exec deny-write probe failed"
           /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)(deny file-write*)' /usr/bin/true && echo "sandbox-exec deny-network+write OK" || echo "::warning::sandbox-exec combined probe failed"
+      - name: "R7 probe (diagnostic, temporary): the sandbox-exec /dev/null allow clause, two spellings, under node and sh"
+        if: runner.os == 'macOS'
+        # Wave 3 step 9 / Task 1. Diagnostic only; removed by Task 6.
+        run: |
+          set +e
+          marker="$RUNNER_TEMP/r7-probe-marker"
+          for clause in '(allow file-write-data (literal "/dev/null"))' '(allow file-write* (literal "/dev/null"))'; do
+            for base in '(version 1)(allow default)(deny file-write*)' '(version 1)(allow default)(deny network*)(deny file-write*)'; do
+              profile="${base}${clause}"
+              echo "R7 profile: $profile"
+              /usr/bin/sandbox-exec -p "$profile" /usr/bin/true; echo "R7   true (expect 0): $?"
+              /usr/bin/sandbox-exec -p "$profile" node -e 'try { require("node:fs").writeFileSync("/dev/null", "x"); process.exit(0); } catch { process.exit(7); }'; echo "R7   node writeFileSync /dev/null (expect 0): $?"
+              /usr/bin/sandbox-exec -p "$profile" /bin/sh -c 'echo x > /dev/null'; echo "R7   sh echo > /dev/null (expect 0): $?"
+              rm -f "$marker"
+              /usr/bin/sandbox-exec -p "$profile" node -e 'try { require("node:fs").writeFileSync(process.argv[1], "x"); process.exit(0); } catch { process.exit(7); }' "$marker"; echo "R7   node writeFileSync temp file (expect 7): $?"
+              if [ -e "$marker" ]; then echo "R7   marker: PRESENT (bad)"; rm -f "$marker"; else echo "R7   marker: absent (good)"; fi
+            done
+          done
+          exit 0
       - name: Provision disposable unlocked macOS test keychain
         if: runner.os == 'macOS'
         run: |
