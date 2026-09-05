@@ -156,6 +156,24 @@ describe("spawnCaptured — filesystem isolation seam", () => {
     expect(r.fs_isolation_mechanism).toBe("landlock");
   });
 
+  it("reports bwrap for both dimensions when the composer took the one-wrapper form", async () => {
+    composerMock.mockResolvedValueOnce({
+      command: NODE,
+      args: ["-e", "process.exit(0)"],
+      networkMechanism: "bwrap",
+      fsMechanism: "bwrap",
+    });
+    const r = await spawnCaptured("/audited/original-command", ["original-arg"], {
+      env: ENV,
+      timeoutMs: 30_000,
+      networkIsolation: true,
+      fsIsolation: true,
+    });
+    expect(r.exit_code).toBe(0);
+    expect(r.isolation_mechanism).toBe("bwrap");
+    expect(r.fs_isolation_mechanism).toBe("bwrap");
+  });
+
   it("fails closed before any spawn when the composer refuses fs isolation", async () => {
     composerMock.mockRejectedValueOnce(VaultError.fsIsolationUnavailable("mocked"));
     await expect(

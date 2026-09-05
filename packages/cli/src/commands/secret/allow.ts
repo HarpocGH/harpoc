@@ -115,12 +115,12 @@ export function registerSecretAllowCommand(secret: Command): void {
     )
     .option(
       "--network-isolation",
-      "Require every child process spawned with this secret to run without network access (Linux: unshare user+net namespaces; macOS: sandbox-exec deny-network; Windows: unsupported — uses are refused fail-closed)",
+      "Require every child process spawned with this secret, stdio MCP downstream servers included, to run without network access (Linux: unshare user+net namespaces, or bwrap behind it; macOS: sandbox-exec deny-network; Windows: unsupported, uses are refused fail-closed)",
     )
     .option("--no-network-isolation", "Remove a stored network-isolation requirement")
     .option(
       "--fs-isolation",
-      "demand write-denying filesystem isolation for every process-mediated spawn (Linux: setpriv Landlock, util-linux >= 2.40; macOS: sandbox-exec; Windows: unsupported — uses are refused fail-closed)",
+      "Demand write-denying filesystem isolation for every process-mediated spawn and stdio MCP downstream (Linux: setpriv Landlock, util-linux >= 2.40, or bwrap's read-only root bind behind it; macOS: sandbox-exec; Windows: unsupported, uses are refused fail-closed)",
     )
     .option("--no-fs-isolation", "Remove a stored filesystem-isolation requirement")
     .option(

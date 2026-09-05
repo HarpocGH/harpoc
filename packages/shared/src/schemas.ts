@@ -957,9 +957,11 @@ export const injectionPolicyInputSchema = z.object({
  * §4.5.3 layer 4, default `false`) demands that every child process spawned
  * with this secret runs without network access — fail-closed: platforms that
  * cannot deliver it refuse the use. `fs_isolation` (default `false`) demands
- * write-deny filesystem isolation for every process-mediated child: Linux via
- * setpriv with Landlock support, macOS via sandbox-exec, Windows refused
- * fail-closed (unsupported by design); writes to `/dev/null` are exempt.
+ * write-deny filesystem isolation for every process-mediated child and every
+ * stdio MCP downstream: Linux via setpriv with Landlock support or, behind it,
+ * bubblewrap's read-only root bind, macOS via sandbox-exec, Windows refused
+ * fail-closed (unsupported by design); writes to `/dev/null` are exempt on
+ * every mechanism.
  * `smtp_recipient_allowlist` (v1.3, default `[]`) bounds SMTP recipients
  * (exact addresses or `*@domain` patterns, design §5.2): absent, any
  * recipient is allowed for a body-only send; configured, every recipient

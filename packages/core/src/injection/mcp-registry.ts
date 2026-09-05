@@ -10,6 +10,7 @@ import type { AuditAttribution } from "../audit/attribution.js";
 import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { InjectionGuard } from "./injection-guard.js";
+import type { IsolationDimensions } from "./isolation.js";
 import type { StdioChildTransport } from "./mcp-stdio-transport.js";
 import { redactSecretEncodings } from "./output-sanitizer.js";
 
@@ -45,6 +46,13 @@ export interface McpConnectionEntry {
   crashed: boolean;
   credentialFingerprint: string;
   configFingerprint: string;
+  /**
+   * The isolation posture the child was spawned with (D51): compared against
+   * the policy on every call, so a dimension demanded after the spawn — from
+   * this process or another — terminates and respawns the child wrapped.
+   * HTTP entries carry both false; the flags do not apply to them.
+   */
+  isolation: IsolationDimensions;
   spawnedAt: number;
   /**
    * Epoch ms of the last `acquire` that returned this entry — stamped by the

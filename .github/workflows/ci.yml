@@ -21,9 +21,9 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
-      - name: Enable Linux keystore tiers (keyutils + Secret Service)
+      - name: Enable Linux keystore tiers and the bwrap isolation tier (keyutils + Secret Service + bubblewrap)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y keyutils gnome-keyring libsecret-tools dbus-x11
+        run: sudo apt-get update && sudo apt-get install -y keyutils gnome-keyring libsecret-tools dbus-x11 bubblewrap
       - name: Probe Linux keystores (diagnostic)
         if: runner.os == 'Linux'
         run: |
@@ -32,62 +32,30 @@ jobs:
           echo 746573746b6579 | keyctl padd user harpoc-ci-probe @u || echo "::warning::kernel keyring probe failed"
           keyctl search @u user harpoc-ci-probe || true
           keyctl purge user harpoc-ci-probe || true
-      - name: "R7 probe (diagnostic, temporary): bwrap tiers on ubuntu-24.04 - stock, after the sysctl relax, under a targeted AppArmor profile"
-        if: runner.os == 'Linux'
-        # Wave 3 step 9 / Task 1 (implementation-plan-compromise-wave3-isolation-r7-2026-09-04.md).
-        # Every line is diagnostic; the step never fails the leg. The "R7 "
-        # lines in the log are the record; Task 6 removes this step and turns
-        # the findings into the leg's real provisioning.
+      - name: Grant bwrap user namespaces through a targeted AppArmor profile (node 22 leg - the operator's second route)
+        if: runner.os == 'Linux' && matrix.node-version == 22
+        # The node 24 leg relaxes the global sysctl (next step) and so
+        # exercises `unshare` for the network tier; this leg grants `userns`
+        # to /usr/bin/bwrap alone, so `unshare -rn` keeps failing and the vault
+        # falls to bwrap for BOTH dimensions - the second tier's live proof,
+        # and the route getting-started.md documents for operators who will
+        # not relax the restriction host-wide. Verified by the step 9 probe
+        # (implementation-plan-compromise-wave3-isolation-r7-2026-09-04.md).
         run: |
-          set +e
-          sudo apt-get install -y bubblewrap
-          echo "R7 bwrap version: $(bwrap --version 2>&1)"
-          echo "R7 sysctl: $(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>&1)"
-          form() {
-            label="$1"; shift
-            bwrap "$@" -- /bin/true; echo "R7 $label true (expect 0): $?"
-            bwrap "$@" -- /bin/sh -c 'exit 7'; echo "R7 $label exit propagation (expect 7): $?"
-          }
-          forms() {
-            form "network" --bind / / --unshare-net --die-with-parent
-            form "fs" --ro-bind / / --dev /dev --die-with-parent
-            form "combined" --ro-bind / / --dev /dev --unshare-net --die-with-parent
-            bwrap --ro-bind / / --dev /dev --die-with-parent -- /bin/sh -c 'echo x > /dev/null'; echo "R7 fs /dev/null write (expect 0): $?"
-            rm -f "$HOME/r7-probe-marker"
-            bwrap --ro-bind / / --dev /dev --die-with-parent -- /bin/sh -c "echo x > $HOME/r7-probe-marker"; echo "R7 fs host-dir write (expect non-zero): $?"
-            if [ -e "$HOME/r7-probe-marker" ]; then echo "R7 fs marker: PRESENT (bad)"; rm -f "$HOME/r7-probe-marker"; else echo "R7 fs marker: absent (good)"; fi
-            bwrap --bind / / --unshare-net --die-with-parent -- /bin/sh -c 'cat /proc/net/dev' | sed 's/^/R7 netns view: /'
-            bwrap --bind / / --unshare-net --die-with-parent -- /bin/sleep 300 &
-            monitor=$!
-            sleep 1
-            echo "R7 kill chain: sleep pids before kill: $(pgrep -x sleep | tr '\n' ' ')"
-            kill -KILL "$monitor"
-            sleep 1
-            if pgrep -x sleep >/dev/null; then echo "R7 kill chain: FAILED (sleep survived)"; pkill -KILL -x sleep; else echo "R7 kill chain: OK (payload gone with the monitor)"; fi
-          }
-          echo "R7 ===== pass 1: stock ====="
-          forms
-          echo "R7 ===== pass 2: after sysctl kernel.apparmor_restrict_unprivileged_userns=0 ====="
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          forms
-          echo "R7 ===== pass 3: sysctl back to 1, targeted profile for /usr/bin/bwrap ====="
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
           printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' 'profile harpoc-bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' | sudo tee /etc/apparmor.d/harpoc-bwrap >/dev/null
-          sudo apparmor_parser -r /etc/apparmor.d/harpoc-bwrap; echo "R7 profile load (expect 0): $?"
-          unshare -rn -- /bin/true; echo "R7 unshare under the profile route (expect non-zero): $?"
-          forms
-          sudo apparmor_parser -R /etc/apparmor.d/harpoc-bwrap
-          sudo rm -f /etc/apparmor.d/harpoc-bwrap
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          exit 0
-      - name: Probe network isolation (diagnostic)
-        if: runner.os == 'Linux'
+          sudo apparmor_parser -r /etc/apparmor.d/harpoc-bwrap
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true
+          unshare -rn -- /bin/true && echo "::warning::unshare -rn passes on this leg - the bwrap network tier will not be exercised" || echo "unshare -rn refused (expected on this leg)"
+          bwrap --bind / / --unshare-net --die-with-parent -- /bin/true && echo "bwrap --unshare-net OK under the profile" || echo "::warning::bwrap --unshare-net failed under the profile"
+      - name: Probe network isolation (diagnostic; relaxes the userns restriction on the node 24 leg)
+        if: runner.os == 'Linux' && matrix.node-version == 24
         # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor
         # (apparmor_restrict_unprivileged_userns). The suite's live probe
         # skips gracefully either way; this step surfaces the real error so
         # a skipped leg is diagnosable from the log. If it reports denial,
         # relax the restriction for the runner:
         #   sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        # The node 22 leg takes the targeted-profile route instead (previous step).
         run: |
           sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true
           unshare -rn -- /bin/true && echo "unshare -rn OK" || {
@@ -95,20 +63,23 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
             unshare -rn -- /bin/true && echo "unshare -rn OK after sysctl" || echo "::warning::unshare -rn still failing"
           }
-      - name: Probe filesystem isolation (diagnostic — expected unavailable on ubuntu-24.04)
+      - name: Probe filesystem isolation (diagnostic - setpriv expected unavailable on ubuntu-24.04, bwrap expected OK)
         if: runner.os == 'Linux'
         # ubuntu-24.04 (today's ubuntu-latest image) ships util-linux 2.39,
-        # whose `setpriv` has no `--landlock-*` options, so filesystem
-        # isolation cannot be delivered on this leg: "fs-isolation" is
-        # deliberately ABSENT from this leg's HARPOC_REQUIRE_PLATFORM_TESTS
-        # and the suite's live probe skips the enforcement describe. Add the
-        # tier below once the runner image carries util-linux >= 2.40
-        # (Ubuntu 24.10+/Debian 13+) — the argv is already kernel-verified
-        # (debian trixie, util-linux 2.41). The fail-closed refusal path is
-        # ungated and runs here regardless. Diagnostic only: never fails.
+        # whose `setpriv` has no `--landlock-*` options; the filesystem tier on
+        # this leg is delivered by bubblewrap's read-only root bind (the second
+        # tier, Wave 3 step 9) under the userns grant the step above arranged.
+        # "fs-isolation" is REQUIRED on this leg, so a bwrap warning here
+        # foretells a test failure below. The argv are byte-identical to
+        # LANDLOCK_PREFIX_ARGS, BWRAP_FS_PREFIX_ARGS and
+        # BWRAP_COMBINED_PREFIX_ARGS in packages/core/src/injection/.
+        # Diagnostic only: never fails.
         run: |
           setpriv --version || true
           setpriv --landlock-access fs --landlock-rule path-beneath:execute,read-file,read-dir:/ --landlock-rule path-beneath:write-file:/dev/null -- /bin/true && echo "setpriv Landlock OK" || echo "::notice::setpriv Landlock unavailable (expected on util-linux 2.39)"
+          bwrap --version || true
+          bwrap --ro-bind / / --dev /dev --die-with-parent -- /bin/true && echo "bwrap read-only root OK" || echo "::warning::bwrap filesystem probe failed"
+          bwrap --ro-bind / / --dev /dev --unshare-net --die-with-parent -- /bin/true && echo "bwrap combined OK" || echo "::warning::bwrap combined probe failed"
       - name: Probe network isolation (diagnostic)
         if: runner.os == 'macOS'
         run: /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)' /usr/bin/true && echo "sandbox-exec OK" || echo "::warning::sandbox-exec probe failed"
@@ -120,27 +91,8 @@ jobs:
         # vault's own live probes run. The "fs-isolation" tier is REQUIRED on
         # this leg, so a warning here foretells a test failure below.
         run: |
-          /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny file-write*)' /usr/bin/true && echo "sandbox-exec deny-write OK" || echo "::warning::sandbox-exec deny-write probe failed"
-          /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)(deny file-write*)' /usr/bin/true && echo "sandbox-exec deny-network+write OK" || echo "::warning::sandbox-exec combined probe failed"
-      - name: "R7 probe (diagnostic, temporary): the sandbox-exec /dev/null allow clause, two spellings, under node and sh"
-        if: runner.os == 'macOS'
-        # Wave 3 step 9 / Task 1. Diagnostic only; removed by Task 6.
-        run: |
-          set +e
-          marker="$RUNNER_TEMP/r7-probe-marker"
-          for clause in '(allow file-write-data (literal "/dev/null"))' '(allow file-write* (literal "/dev/null"))'; do
-            for base in '(version 1)(allow default)(deny file-write*)' '(version 1)(allow default)(deny network*)(deny file-write*)'; do
-              profile="${base}${clause}"
-              echo "R7 profile: $profile"
-              /usr/bin/sandbox-exec -p "$profile" /usr/bin/true; echo "R7   true (expect 0): $?"
-              /usr/bin/sandbox-exec -p "$profile" node -e 'try { require("node:fs").writeFileSync("/dev/null", "x"); process.exit(0); } catch { process.exit(7); }'; echo "R7   node writeFileSync /dev/null (expect 0): $?"
-              /usr/bin/sandbox-exec -p "$profile" /bin/sh -c 'echo x > /dev/null'; echo "R7   sh echo > /dev/null (expect 0): $?"
-              rm -f "$marker"
-              /usr/bin/sandbox-exec -p "$profile" node -e 'try { require("node:fs").writeFileSync(process.argv[1], "x"); process.exit(0); } catch { process.exit(7); }' "$marker"; echo "R7   node writeFileSync temp file (expect 7): $?"
-              if [ -e "$marker" ]; then echo "R7   marker: PRESENT (bad)"; rm -f "$marker"; else echo "R7   marker: absent (good)"; fi
-            done
-          done
-          exit 0
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny file-write*)(allow file-write-data (literal "/dev/null"))' /usr/bin/true && echo "sandbox-exec deny-write OK" || echo "::warning::sandbox-exec deny-write probe failed"
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)(deny file-write*)(allow file-write-data (literal "/dev/null"))' /usr/bin/true && echo "sandbox-exec deny-network+write OK" || echo "::warning::sandbox-exec combined probe failed"
       - name: Provision disposable unlocked macOS test keychain
         if: runner.os == 'macOS'
         run: |
@@ -175,12 +127,12 @@ jobs:
         # No "--" before the flag: pnpm's arg separator would route it through
         # turbo's pass-through to vitest, which rejects it.
         run: pnpm test --concurrency=1
-      - name: Test (Linux, D-Bus session with unlocked keyring — required Secret Service/keyring/isolation)
+      - name: Test (Linux, D-Bus session with unlocked keyring - required Secret Service/keyring/isolation/fs-isolation)
         if: runner.os == 'Linux'
         # keyctl link @u @s grants the CI shell possession of the user keyring
         # (non-login processes lack the pam_keyinit link, so @u operations get
         # EACCES without it); gnome-keyring provides the Secret Service.
         env:
-          HARPOC_REQUIRE_PLATFORM_TESTS: secret-service,keyring,isolation,ssh-live
+          HARPOC_REQUIRE_PLATFORM_TESTS: secret-service,keyring,isolation,fs-isolation,ssh-live
         run: dbus-run-session -- sh -c 'echo harpoc-ci | gnome-keyring-daemon --unlock; keyctl link @u @s || true; pnpm test'
       - run: pnpm format:check

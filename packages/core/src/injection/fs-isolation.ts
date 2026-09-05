@@ -1,6 +1,11 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { VaultError } from "@harpoc/shared";
+import {
+  BWRAP_COMBINED_PREFIX_ARGS,
+  BWRAP_FS_PREFIX_ARGS,
+  LINUX_BWRAP_CANDIDATES,
+} from "./bwrap.js";
 
 /**
  * Filesystem isolation for process-mediated spawns (thesis §4.5.3 layer 4).
@@ -21,6 +26,11 @@ import { VaultError } from "@harpoc/shared";
  *    (Landlock needs at least one rule per handled access class, and a
  *    write-anywhere-else child would defeat the point). Needs util-linux
  *    >= 2.40 for the `--landlock-*` options and a Landlock-enabled kernel.
+ *    Behind it, only when setpriv is absent or lacks Landlock: bubblewrap,
+ *    `bwrap --ro-bind / / --dev /dev --die-with-parent -- <command>
+ *    <args...>` — the whole tree read-only with a fresh devtmpfs, so
+ *    `/dev/null` stays writable; bwrap stays as a monitor process (see
+ *    bwrap.ts).
  *  - macOS:  `sandbox-exec -p '<deny-write profile>' <command> <args...>` —
  *    deprecated by Apple but functional; availability is probed live, never
  *    assumed, so a future removal fails closed.
@@ -30,19 +40,21 @@ import { VaultError } from "@harpoc/shared";
  *
  * When a secret demands network AND filesystem isolation at once, macOS can
  * express both in a SINGLE sandbox profile — see `requireCombinedIsolation`,
- * which lives here because it shares this module's probe machinery. Linux has
- * no single wrapper for both and composes `unshare` around `setpriv` at the
- * spawn seam instead.
+ * which lives here because it shares this module's probe machinery. Linux
+ * composes `unshare` around `setpriv` at the spawn seam when both primaries
+ * resolve, and takes ONE bwrap wrapper (this module's linux combined branch)
+ * when either fell to the second tier — never bwrap nested inside another
+ * wrapper.
  *
  * Wrapper binaries resolve from pinned absolute candidate paths only, never
  * PATH (the keystore-bridge doctrine). Capability is a live probe — a wrapper
  * binary can be present yet blocked (kernel without CONFIG_SECURITY_LANDLOCK,
  * a util-linux too old to know `--landlock-access`) — cached per process;
  * environment drift after a passing probe still fails closed by construction,
- * because the wrapper errors out without exec-ing the payload.
+ * because the wrapper errors out without starting the payload.
  */
 
-export type FsIsolationMechanism = "landlock" | "sandbox-exec";
+export type FsIsolationMechanism = "landlock" | "sandbox-exec" | "bwrap";
 
 export interface FsIsolationWrap {
   /** The pinned wrapper binary (absolute path). */
@@ -82,8 +94,12 @@ export const LANDLOCK_PREFIX_ARGS = [
  * Minimal deny-write sandbox profile (macOS). A single constant passed as
  * one argv element — never interpolated, so no injection surface.
  * `(deny file-write*)` covers create, write, unlink, rename and chmod.
+ * The trailing allow clause wins over the blanket deny (a later SBPL rule
+ * takes precedence) and keeps `/dev/null` writable, as Landlock's explicit
+ * rule and bwrap's fresh `/dev` do (D49, 2026-09-05).
  */
-export const SANDBOX_EXEC_DENY_WRITE_PROFILE = "(version 1)(allow default)(deny file-write*)";
+export const SANDBOX_EXEC_DENY_WRITE_PROFILE =
+  '(version 1)(allow default)(deny file-write*)(allow file-write-data (literal "/dev/null"))';
 
 /**
  * Combined deny-network + deny-write sandbox profile (macOS). A single
@@ -91,9 +107,12 @@ export const SANDBOX_EXEC_DENY_WRITE_PROFILE = "(version 1)(allow default)(deny 
  * surface. macOS expresses both demands in ONE wrapper; nesting two
  * `sandbox-exec` invocations is not supported, hence this third profile
  * rather than a composition of the other two.
+ * The trailing allow clause wins over the blanket deny (a later SBPL rule
+ * takes precedence) and keeps `/dev/null` writable, as Landlock's explicit
+ * rule and bwrap's fresh `/dev` do (D49, 2026-09-05).
  */
 export const SANDBOX_EXEC_DENY_NETWORK_AND_WRITE_PROFILE =
-  "(version 1)(allow default)(deny network*)(deny file-write*)";
+  '(version 1)(allow default)(deny network*)(deny file-write*)(allow file-write-data (literal "/dev/null"))';
 
 /** Pinned absolute candidates for the Linux wrapper — PATH is never consulted. */
 export const LINUX_SETPRIV_CANDIDATES = ["/usr/bin/setpriv", "/bin/setpriv"] as const;
@@ -129,6 +148,33 @@ function requireProbePayload(probeBinary: (path: string) => boolean): string {
   return trueBin;
 }
 
+/**
+ * The second Linux tier for a filesystem-bearing demand: bwrap over a
+ * read-only root bind, probed like the primary. `primaryReason` is what the
+ * refusal says first when this tier is out too.
+ */
+async function resolveBwrap(
+  probeBinary: (path: string) => boolean,
+  runProbe: (command: string, args: string[]) => Promise<boolean>,
+  primaryReason: string,
+  prefixArgs: readonly string[],
+  probeFailure: string,
+): Promise<ResolvedIsolation> {
+  const bwrap = findPinnedBinary(LINUX_BWRAP_CANDIDATES, probeBinary);
+  if (!bwrap) {
+    throw VaultError.fsIsolationUnavailable(
+      `${primaryReason}; bwrap not found in /usr/bin or /bin`,
+    );
+  }
+  const trueBin = requireProbePayload(probeBinary);
+  if (!(await runProbe(bwrap, [...prefixArgs, trueBin]))) {
+    throw VaultError.fsIsolationUnavailable(
+      `${primaryReason}; ${probeFailure} (bubblewrap needs the unprivileged user-namespace grant)`,
+    );
+  }
+  return { wrapper: bwrap, prefixArgs: [...prefixArgs], mechanism: "bwrap" };
+}
+
 /** Run a capability probe: exit 0 within the timeout means available. */
 function runProbeDefault(command: string, args: string[]): Promise<boolean> {
   return new Promise((resolve) => {
@@ -159,16 +205,22 @@ async function resolveFsIsolation(seams?: FsIsolationSeams): Promise<ResolvedIso
 
   if (platform === "linux") {
     const setpriv = findPinnedBinary(LINUX_SETPRIV_CANDIDATES, probeBinary);
-    if (!setpriv) {
-      throw VaultError.fsIsolationUnavailable("setpriv not found in /usr/bin or /bin");
+    let primaryReason = "setpriv not found in /usr/bin or /bin";
+    if (setpriv) {
+      const trueBin = requireProbePayload(probeBinary);
+      if (await runProbe(setpriv, [...LANDLOCK_PREFIX_ARGS, trueBin])) {
+        return { wrapper: setpriv, prefixArgs: [...LANDLOCK_PREFIX_ARGS], mechanism: "landlock" };
+      }
+      primaryReason =
+        "Landlock unavailable (setpriv --landlock-access probe failed; needs util-linux >= 2.40 on a Landlock-enabled kernel)";
     }
-    const trueBin = requireProbePayload(probeBinary);
-    if (!(await runProbe(setpriv, [...LANDLOCK_PREFIX_ARGS, trueBin]))) {
-      throw VaultError.fsIsolationUnavailable(
-        "Landlock unavailable (setpriv --landlock-access probe failed; needs util-linux >= 2.40 on a Landlock-enabled kernel)",
-      );
-    }
-    return { wrapper: setpriv, prefixArgs: [...LANDLOCK_PREFIX_ARGS], mechanism: "landlock" };
+    return resolveBwrap(
+      probeBinary,
+      runProbe,
+      primaryReason,
+      BWRAP_FS_PREFIX_ARGS,
+      "bwrap --ro-bind probe failed",
+    );
   }
 
   if (platform === "darwin") {
@@ -194,12 +246,17 @@ async function resolveCombinedIsolation(seams?: FsIsolationSeams): Promise<Resol
   const probeBinary = seams?.probeBinary ?? existsSync;
   const runProbe = seams?.runProbe ?? runProbeDefault;
 
-  if (platform !== "darwin") {
-    throw VaultError.fsIsolationUnavailable(
-      platform === "linux"
-        ? "combined network+filesystem isolation is composed from unshare + setpriv on linux, not a single wrapper"
-        : `unsupported platform: ${platform}`,
+  if (platform === "linux") {
+    return resolveBwrap(
+      probeBinary,
+      runProbe,
+      "combined network+filesystem isolation on linux takes one bwrap wrapper when unshare and Landlock are not both available",
+      BWRAP_COMBINED_PREFIX_ARGS,
+      "bwrap --ro-bind --unshare-net probe failed",
     );
+  }
+  if (platform !== "darwin") {
+    throw VaultError.fsIsolationUnavailable(`unsupported platform: ${platform}`);
   }
   if (!probeBinary(DARWIN_SANDBOX_EXEC)) {
     throw VaultError.fsIsolationUnavailable(`sandbox-exec not found at ${DARWIN_SANDBOX_EXEC}`);
@@ -285,11 +342,11 @@ export async function requireFsIsolation(
 }
 
 /**
- * Wrap an already-resolved command in ONE macOS sandbox that denies network
- * AND filesystem writes, for a secret demanding both isolations. darwin-only:
- * Linux has no equivalent single wrapper and composes `unshare` around
- * `setpriv` at the spawn seam instead, so this refuses there (and everywhere
- * else) rather than silently delivering half the demand.
+ * Wrap an already-resolved command in ONE wrapper that denies network
+ * AND filesystem writes, for a secret demanding both isolations — on darwin
+ * the combined sandbox profile, on linux ONE bwrap wrapper (the composer's
+ * form when unshare and Landlock do not both resolve). Everywhere else it
+ * refuses rather than silently delivering half the demand.
  */
 export async function requireCombinedIsolation(
   command: string,

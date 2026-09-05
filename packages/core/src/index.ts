@@ -127,6 +127,12 @@ export {
   SANDBOX_EXEC_DENY_WRITE_PROFILE,
   SANDBOX_EXEC_DENY_NETWORK_AND_WRITE_PROFILE,
 } from "./injection/fs-isolation.js";
+export {
+  LINUX_BWRAP_CANDIDATES,
+  BWRAP_NETWORK_PREFIX_ARGS,
+  BWRAP_FS_PREFIX_ARGS,
+  BWRAP_COMBINED_PREFIX_ARGS,
+} from "./injection/bwrap.js";
 export type {
   FsIsolationMechanism,
   FsIsolationWrap,

@@ -11,7 +11,10 @@ export interface ChildExitInfo {
 }
 
 export interface StdioChildParams {
-  /** Absolute binary path already pinned by resolveAndMatchCommand — spawned verbatim. */
+  /**
+   * The pinned resolved path, or the vault-authored isolation wrapper carrying
+   * it as the payload (D51) — spawned verbatim either way.
+   */
   resolvedCommand: string;
   args: string[];
   /** Clean environment (buildCleanEnv output) carrying the injected credential. */

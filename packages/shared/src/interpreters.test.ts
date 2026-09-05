@@ -140,6 +140,9 @@ describe("execWrapperName", () => {
     ["timeout", "timeout"],
     ["/usr/bin/tar", "tar"],
     ["Rsync.EXE", "rsync"],
+    ["/usr/bin/bwrap", "bwrap"],
+    ["setpriv", "setpriv"],
+    ["/bin/unshare", "unshare"],
   ] as const)("detects %s", (entry, expected) => {
     expect(execWrapperName(entry)).toBe(expected);
   });
@@ -166,8 +169,20 @@ describe("EXEC_WRAPPERS", () => {
     }
   });
 
-  it("covers the ruling's examples on both platforms", () => {
-    for (const name of ["xargs", "find", "sudo", "tar", "rsync", "make", "forfiles", "runas"]) {
+  it("covers the ruling's examples on both platforms and the vault's own wrapper binaries", () => {
+    for (const name of [
+      "xargs",
+      "find",
+      "sudo",
+      "tar",
+      "rsync",
+      "make",
+      "forfiles",
+      "runas",
+      "unshare",
+      "setpriv",
+      "bwrap",
+    ]) {
       expect(EXEC_WRAPPERS.has(name), name).toBe(true);
     }
   });

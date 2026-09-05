@@ -987,7 +987,10 @@ export class VaultEngine {
     // socket survives `unshare -rn`, so wrapping the CLI would isolate the
     // messenger, not the actor. Documenting-and-allowing would make the audit
     // row assert an isolation that was never enforced. Same fail-closed answer
-    // the MCP stdio arm gives, and network keeps precedence over fs there too.
+    // an isolation-incapable host gives, and network keeps precedence on the
+    // terminate reason there too — though the composer answers with the
+    // filesystem code when both flags are demanded; here the network code
+    // keeps precedence, matching that terminate reason.
     this.assertDockerIsolationAllowed(s, action, policy, secret.id, caller);
 
     // SMTP STARTTLS × the mail TLS opt-out — the same pre-dispatch,
@@ -1410,7 +1413,8 @@ export class VaultEngine {
    * refusals, this one is architectural — the Docker daemon, not the spawned
    * CLI, performs the registry egress and writes the layers, and the daemon
    * socket survives `unshare -rn`. Fail closed, audited like every denial.
-   * Network takes precedence when both flags are set, matching the MCP arm.
+   * Network takes precedence when both flags are set, matching the terminate
+   * reason in setInjectionPolicy.
    */
   private assertDockerIsolationAllowed(
     s: UnlockedState,
@@ -1828,11 +1832,13 @@ export class VaultEngine {
 
     // Thesis §4.5.3 layer 4: a live stdio downstream child predates the
     // isolation demand and holds the credential with full egress (and with
-    // write access to the filesystem) — refusing only new invocations would
-    // leave it running until seal. Idempotent no-op when nothing is live; the
-    // use-time refusal in McpInjector is the backstop for a policy tightened
-    // from a separate process, whose engine cannot reach this registry. One
-    // terminate covers both demands; the network reason keeps precedence.
+    // write access to the filesystem) — leaving it to the next invocation
+    // would keep it running until then. Idempotent no-op when nothing is
+    // live; the next use respawns the child wrapped (D51), and the posture
+    // recorded on the registry entry is McpInjector's backstop for a policy
+    // tightened from a separate process, whose engine cannot reach this
+    // registry. One terminate covers both demands; the network reason keeps
+    // precedence.
     if (policy.network_isolation === true || policy.fs_isolation === true) {
       await s.mcpRegistry.terminate(
         secret.id,

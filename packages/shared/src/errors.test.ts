@@ -624,18 +624,20 @@ describe("factory methods", () => {
     expect(both.message).toContain("known interpreter(s): python and exec wrapper(s): sudo");
   });
 
-  it("networkIsolationUnavailable()", () => {
+  it("networkIsolationUnavailable() names the reason, both Linux tiers and the remediation", () => {
     const err = VaultError.networkIsolationUnavailable("unsupported platform: win32");
     expect(err.code).toBe(ErrorCode.NETWORK_ISOLATION_UNAVAILABLE);
     expect(err.statusCode).toBe(501);
     expect(err.message).toContain("unsupported platform: win32");
+    expect(err.message).toContain("unshare, or bubblewrap's bwrap as the second tier");
     expect(err.message).toContain("--no-network-isolation");
   });
 
-  it("fsIsolationUnavailable names the reason, the platforms and the remediation", () => {
+  it("fsIsolationUnavailable names the reason, both Linux tiers, the platforms and the remediation", () => {
     const err = VaultError.fsIsolationUnavailable("unsupported platform: win32");
     expect(err.code).toBe(ErrorCode.FS_ISOLATION_UNAVAILABLE);
     expect(err.message).toContain("unsupported platform: win32");
+    expect(err.message).toContain("or bubblewrap's bwrap as the second tier");
     expect(err.message).toContain("--no-fs-isolation");
     expect(err.message).not.toMatch(/secret value/i);
   });

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AuditEventType, ErrorCode } from "@harpoc/shared";
@@ -15,10 +15,12 @@ import { assertTierAvailable } from "./helpers/platform-tiers.js";
  * policy must not be able to persist anything — it may read what it needs to
  * run, but a write leaves no file behind — while the identical un-isolated
  * control writes its marker. Linux exercises `setpriv` with a Landlock
- * ruleset, macOS `sandbox-exec` with the deny-write profile — attempt-and-skip
- * on the live probe, so a runner whose util-linux predates the `--landlock-*`
- * options (ubuntu-24.04 ships 2.39) skips visibly instead of failing (the
- * keystore-suite pattern). The refusal path runs everywhere: natively on
+ * ruleset (or the bwrap tier behind it, a read-only root bind), macOS
+ * `sandbox-exec` with the deny-write profile — attempt-and-skip on the live
+ * probe, so a runner whose util-linux predates the `--landlock-*` options
+ * (ubuntu-24.04 ships 2.39) falls to bwrap where bubblewrap is installed and
+ * skips visibly otherwise (the keystore-suite pattern). The refusal path runs
+ * everywhere: natively on
  * Windows (the platform genuinely cannot isolate) and via the core force-hook
  * elsewhere.
  */
@@ -45,8 +47,8 @@ async function setupVault(fsIsolation: boolean): Promise<{ vault: TestVault; han
 
 /**
  * Write `target` and exit 0, or exit 7 when the write is refused. Exactly 7
- * pins BOTH halves the way the network suite's exit code does: the wrapper
- * exec'd the payload in place (a broken wrapper would exit with its own code
+ * pins BOTH halves the way the network suite's exit code does: the wrapper ran
+ * the payload and returned its status (a broken wrapper would exit with its own code
  * without ever running the payload) and the write failed inside the
  * ruleset/sandbox rather than the child never starting.
  */
@@ -111,30 +113,46 @@ describe.skipIf(!posixWithIsolation)("filesystem isolation — real kernel (Linu
       const used = vault.engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
       const isolated = used.find((e) => e.detail?.fs_isolation === true);
       expect(isolated).toBeDefined();
-      expect(["landlock", "sandbox-exec"]).toContain(isolated?.detail?.fs_isolation_mechanism);
+      expect(["landlock", "sandbox-exec", "bwrap"]).toContain(
+        isolated?.detail?.fs_isolation_mechanism,
+      );
     } finally {
       await destroyTestVault(vault);
     }
   });
 
-  it("isolated: /dev/null follows the wrapper's own write grant", async (ctx) => {
+  it("isolated under bwrap: a write into an existing host directory is refused by the read-only bind and leaves nothing behind", async (ctx) => {
+    if (!available || mechanism !== "bwrap") return ctx.skip();
+    // The vault's marker under /tmp is refused too, but a directory that
+    // exists on the host and inside the bind proves the bind itself (EROFS),
+    // not a missing path — the package root is that directory under vitest.
+    const dir = mkdtempSync(join(process.cwd(), ".r7-bwrap-marker-"));
+    const marker = join(dir, "ran.marker");
+    const { vault, handle } = await setupVault(true);
+    try {
+      const res = await vault.engine.useSecret(handle, writeAction(marker));
+      if (res.type !== "process") throw new Error("expected process result");
+      expect(res.exit_code).toBe(7);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      await destroyTestVault(vault);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("isolated: /dev/null stays writable under every mechanism", async (ctx) => {
     if (!available) return ctx.skip();
-    // The two mechanisms carve /dev/null out differently, and both are pinned
-    // here rather than one being skipped. Landlock REQUIRES a rule for every
-    // handled access class, so `LANDLOCK_PREFIX_ARGS` grants
-    // `path-beneath:write-file:/dev/null` explicitly and the write succeeds
-    // (verified against a real kernel: debian trixie, util-linux 2.41).
-    // `SANDBOX_EXEC_DENY_WRITE_PROFILE` is a blanket `(deny file-write*)` with
-    // no allow clause, and Apple's sandbox needs an explicit
-    // `(allow file-write* … "/dev/null")` for the device node, so the same
-    // write is refused there. Either constant edited to say otherwise trips
-    // this test.
-    const expected = mechanism === "landlock" ? 0 : 7;
+    // Landlock grants `path-beneath:write-file:/dev/null` explicitly (a
+    // handled access class needs at least one rule); bwrap mounts a fresh
+    // devtmpfs (`--dev /dev`) over the read-only root bind; the sandbox-exec
+    // write profiles end in an allow clause for the literal "/dev/null", the
+    // last rule winning (D49, 2026-09-05 — the macOS asymmetry is gone). Any
+    // constant edited to say otherwise trips this test.
     const { vault, handle } = await setupVault(true);
     try {
       const res = await vault.engine.useSecret(handle, writeAction("/dev/null"));
       if (res.type !== "process") throw new Error("expected process result");
-      expect(res.exit_code).toBe(expected);
+      expect(res.exit_code).toBe(0);
     } finally {
       await destroyTestVault(vault);
     }

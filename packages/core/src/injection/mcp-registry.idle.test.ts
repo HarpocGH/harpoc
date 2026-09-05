@@ -27,6 +27,7 @@ function fakeEntry(secretId: string, close: () => Promise<void>): McpConnectionE
     crashed: false,
     credentialFingerprint: "f",
     configFingerprint: "g",
+    isolation: { network: false, fs: false },
     spawnedAt: Date.now(),
     lastUsedAt: Date.now(),
   };

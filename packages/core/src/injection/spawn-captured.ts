@@ -47,7 +47,8 @@ export interface SpawnCapturedOptions {
    * Wrap the spawn in the platform filesystem-isolation prefix (thesis §4.5.3
    * layer 4). Fail closed: an unavailable platform throws
    * FS_ISOLATION_UNAVAILABLE before any process is spawned. Combines with
-   * `networkIsolation` — the composer nests the two wrappers.
+   * `networkIsolation` — the composer nests the two primaries or takes one
+   * bwrap wrapper.
    */
   fsIsolation?: boolean;
 }
@@ -157,8 +158,11 @@ function killTree(child: ChildProcess): Promise<void> {
  * context can forget it: the vault-authored wrapper prefixes the argv, and the
  * resolved pinned command stays the audited payload. Composing the two
  * dimensions belongs to `requireIsolation`; the seam only reports which
- * mechanisms it got. Each wrapper execs the payload in-place (no fork), so
- * PID, kill and exit-code semantics are unchanged.
+ * mechanisms it got. unshare, setpriv and sandbox-exec exec the payload in
+ * place; bwrap stays as a monitor that returns the payload's status and takes
+ * it down when the monitor is killed (`--die-with-parent`), and the
+ * process-group kill below reaches both — so pid (the kill target), kill and
+ * exit-code semantics hold for every wrapper.
  */
 export async function spawnCaptured(
   command: string,

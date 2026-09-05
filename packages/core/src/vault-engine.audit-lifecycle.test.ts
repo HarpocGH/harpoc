@@ -110,6 +110,7 @@ async function seedLiveStdioEntry(secretId: string): Promise<void> {
       crashed: false,
       credentialFingerprint: "cred-fp",
       configFingerprint: "config-fp",
+      isolation: { network: false, fs: false },
       spawnedAt: Date.now(),
       lastUsedAt: Date.now(),
     } satisfies McpConnectionEntry),

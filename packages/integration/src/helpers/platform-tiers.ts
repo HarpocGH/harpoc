@@ -14,15 +14,14 @@
  *
  *  - `keychain` — macOS only.
  *  - `secret-service`, `keyring` — Linux only.
- *  - `isolation` (network isolation) — Linux (`unshare -rn`) and macOS
- *    (`sandbox-exec`).
- *  - `fs-isolation` (filesystem isolation) — **macOS only** (`sandbox-exec`
- *    deny-write). The Linux leg deliberately omits it: ubuntu-24.04 ships
- *    util-linux 2.39, whose `setpriv` has no `--landlock-*` options, so the
- *    tier is expected-unavailable there until the runner image carries
- *    util-linux >= 2.40. Omitting it does NOT disable the suite on a capable
- *    Linux host — the live probe, not this list, gates the enforcement
- *    describe; the list only decides whether a failed probe is fatal.
+ *  - `isolation` (network isolation) — Linux (`unshare -rn`, or `bwrap
+ *    --unshare-net` as the second tier) and macOS (`sandbox-exec`).
+ *  - `fs-isolation` (filesystem isolation) — macOS (`sandbox-exec`
+ *    deny-write) and Linux: ubuntu-24.04 ships util-linux 2.39, whose
+ *    `setpriv` has no `--landlock-*` options, so the leg installs bubblewrap
+ *    and the tier is delivered by `bwrap --ro-bind / /` (Wave 3 step 9,
+ *    2026-09-05). The list only decides whether a failed probe is fatal; the
+ *    live probe gates the enforcement describe.
  *  - `ssh-live` — every leg.
  */
 export function tierRequired(tier: string): boolean {

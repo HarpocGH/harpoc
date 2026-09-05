@@ -1,5 +1,6 @@
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { BWRAP_COMBINED_PREFIX_ARGS, BWRAP_FS_PREFIX_ARGS } from "./bwrap.js";
 import {
   LANDLOCK_PREFIX_ARGS,
   SANDBOX_EXEC_DENY_NETWORK_AND_WRITE_PROFILE,
@@ -147,6 +148,91 @@ describe("requireIsolation — both dimensions", () => {
       expect(wrap.args.slice(-3)).toEqual([PAYLOAD, ...PAYLOAD_ARGS]);
       expect(wrap.networkMechanism).toBe("unshare");
       expect(wrap.fsMechanism).toBe("landlock");
+    }));
+
+  it("takes ONE bwrap wrapper on linux when the filesystem tier fell to bwrap, never nesting it", () =>
+    withPlatform("linux", async () => {
+      fsMock.mockResolvedValueOnce({
+        command: "/usr/bin/bwrap",
+        args: [...BWRAP_FS_PREFIX_ARGS, PAYLOAD, ...PAYLOAD_ARGS],
+        mechanism: "bwrap",
+      });
+      netMock.mockImplementation((command: string, args: string[]) =>
+        Promise.resolve({
+          command: "/usr/bin/unshare",
+          args: ["-rn", "--", command, ...args],
+          mechanism: "unshare" as const,
+        }),
+      );
+      combinedMock.mockResolvedValueOnce({
+        command: "/usr/bin/bwrap",
+        args: [...BWRAP_COMBINED_PREFIX_ARGS, PAYLOAD, ...PAYLOAD_ARGS],
+        mechanism: "bwrap",
+      });
+
+      const wrap = await requireIsolation(PAYLOAD, PAYLOAD_ARGS, { network: true, fs: true });
+
+      expect(combinedMock).toHaveBeenCalledTimes(1);
+      expect(combinedMock).toHaveBeenCalledWith(PAYLOAD, PAYLOAD_ARGS);
+      expect(wrap.command).toBe("/usr/bin/bwrap");
+      expect(wrap.args).toEqual([...BWRAP_COMBINED_PREFIX_ARGS, PAYLOAD, ...PAYLOAD_ARGS]);
+      expect(
+        wrap.args.filter((a) =>
+          ["/usr/bin/bwrap", "/usr/bin/unshare", "/usr/bin/setpriv"].includes(a),
+        ),
+      ).toHaveLength(0);
+      expect(wrap.networkMechanism).toBe("bwrap");
+      expect(wrap.fsMechanism).toBe("bwrap");
+    }));
+
+  it("takes ONE bwrap wrapper on linux when the network tier fell to bwrap", () =>
+    withPlatform("linux", async () => {
+      fsMock.mockResolvedValueOnce({
+        command: "/usr/bin/setpriv",
+        args: LANDLOCK_ARGS,
+        mechanism: "landlock",
+      });
+      netMock.mockImplementation((command: string, args: string[]) =>
+        Promise.resolve({
+          command: "/usr/bin/bwrap",
+          args: ["--bind", "/", "/", "--unshare-net", "--die-with-parent", "--", command, ...args],
+          mechanism: "bwrap" as const,
+        }),
+      );
+      combinedMock.mockResolvedValueOnce({
+        command: "/usr/bin/bwrap",
+        args: [...BWRAP_COMBINED_PREFIX_ARGS, PAYLOAD, ...PAYLOAD_ARGS],
+        mechanism: "bwrap",
+      });
+
+      const wrap = await requireIsolation(PAYLOAD, PAYLOAD_ARGS, { network: true, fs: true });
+
+      expect(combinedMock).toHaveBeenCalledWith(PAYLOAD, PAYLOAD_ARGS);
+      expect(wrap.args).toEqual([...BWRAP_COMBINED_PREFIX_ARGS, PAYLOAD, ...PAYLOAD_ARGS]);
+      expect(wrap.args).not.toContain("/usr/bin/setpriv");
+      expect(wrap.networkMechanism).toBe("bwrap");
+      expect(wrap.fsMechanism).toBe("bwrap");
+    }));
+
+  it("propagates the combined resolver's refusal when the one-wrapper form cannot be delivered", () =>
+    withPlatform("linux", async () => {
+      fsMock.mockResolvedValueOnce({
+        command: "/usr/bin/bwrap",
+        args: [...BWRAP_FS_PREFIX_ARGS, PAYLOAD, ...PAYLOAD_ARGS],
+        mechanism: "bwrap",
+      });
+      netMock.mockResolvedValueOnce({
+        command: "/usr/bin/unshare",
+        args: ["-rn", "--", "/usr/bin/bwrap", ...BWRAP_FS_PREFIX_ARGS, PAYLOAD, ...PAYLOAD_ARGS],
+        mechanism: "unshare",
+      });
+      combinedMock.mockRejectedValueOnce(
+        VaultError.fsIsolationUnavailable("bwrap --ro-bind --unshare-net probe failed"),
+      );
+
+      await expect(
+        requireIsolation(PAYLOAD, PAYLOAD_ARGS, { network: true, fs: true }),
+      ).rejects.toMatchObject({ code: ErrorCode.FS_ISOLATION_UNAVAILABLE });
     }));
 
   it("uses ONE combined sandbox-exec wrapper on darwin, never nesting two sandboxes", () =>

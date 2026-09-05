@@ -453,8 +453,8 @@ export class VaultError extends Error {
     return new VaultError(
       ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
       `Network isolation is required by this secret's policy but unavailable: ${reason}. ` +
-        "Linux needs unprivileged user namespaces (unshare); macOS needs sandbox-exec; " +
-        "Windows is unsupported by design. Remove the requirement via the admin path: " +
+        "Linux needs unprivileged user namespaces (unshare, or bubblewrap's bwrap as the second tier, both under the same userns grant); " +
+        "macOS needs sandbox-exec; Windows is unsupported by design. Remove the requirement via the admin path: " +
         "secret allow <handle> --no-network-isolation",
     );
   }
@@ -463,7 +463,7 @@ export class VaultError extends Error {
     return new VaultError(
       ErrorCode.FS_ISOLATION_UNAVAILABLE,
       `Filesystem isolation was demanded by policy but cannot be delivered: ${reason}. ` +
-        `Linux needs setpriv with Landlock support (util-linux >= 2.40) on a Landlock-enabled kernel; ` +
+        `Linux needs setpriv with Landlock support (util-linux >= 2.40) on a Landlock-enabled kernel, or bubblewrap's bwrap as the second tier (a read-only root bind, under the userns grant); ` +
         `macOS needs /usr/bin/sandbox-exec; Windows is unsupported by design. ` +
         `Lift the demand via: secret allow <handle> --no-fs-isolation`,
     );

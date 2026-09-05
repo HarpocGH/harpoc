@@ -15,7 +15,9 @@ import { assertTierAvailable } from "./helpers/platform-tiers.js";
  * The real-kernel proof: a credentialed child spawned under an isolation
  * policy must not reach even a loopback listener (D5 — loopback stays
  * blocked), while the identical un-isolated control does. Linux exercises
- * `unshare -rn`, macOS `sandbox-exec` — attempt-and-skip on the live probe,
+ * `unshare -rn` (or the bwrap tier behind it, whose fresh namespace carries an
+ * empty loopback of its own — the connect is refused instead of unreachable,
+ * exit 7 either way), macOS `sandbox-exec` — attempt-and-skip on the live probe,
  * so a runner with restricted user namespaces skips visibly instead of
  * failing (the keystore-suite pattern). The refusal path runs everywhere:
  * natively on Windows (the platform genuinely cannot isolate) and via the
@@ -113,10 +115,11 @@ describe.skipIf(!posixWithIsolation)("network isolation — real kernel (Linux/m
     try {
       const res = await vault.engine.useSecret(handle, fetchAction(port));
       if (res.type !== "process") throw new Error("expected process result");
-      // Exactly 7 pins BOTH halves: the wrapper exec'd the payload in place
-      // (exit-code semantics unchanged — a broken wrapper would exit with
-      // its own code without ever running the payload), and the fetch
-      // failed inside the namespace/sandbox (review fix T4).
+      // Exactly 7 pins BOTH halves: the wrapper ran the payload and returned
+      // its status (exec in place for unshare and sandbox-exec, a monitor for
+      // bwrap — a broken wrapper would exit with its own code without ever
+      // running the payload), and the connect failed inside the namespace
+      // rather than the child never starting.
       expect(res.exit_code).toBe(7);
       expect(hits).toBe(0);
 
@@ -124,7 +127,7 @@ describe.skipIf(!posixWithIsolation)("network isolation — real kernel (Linux/m
       const used = vault.engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
       const isolated = used.find((e) => e.detail?.network_isolation === true);
       expect(isolated).toBeDefined();
-      expect(["unshare", "sandbox-exec"]).toContain(isolated?.detail?.isolation_mechanism);
+      expect(["unshare", "sandbox-exec", "bwrap"]).toContain(isolated?.detail?.isolation_mechanism);
     } finally {
       await destroyTestVault(vault);
     }

@@ -1,5 +1,6 @@
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BWRAP_NETWORK_PREFIX_ARGS } from "./bwrap.js";
 import {
   SANDBOX_EXEC_DENY_NETWORK_PROFILE,
   forceNetworkIsolationUnavailableForTests,
@@ -19,6 +20,9 @@ function expectIsolationUnavailable(err: unknown, reasonFragment: string): void 
   expect((err as VaultError).code).toBe(ErrorCode.NETWORK_ISOLATION_UNAVAILABLE);
   expect((err as VaultError).message).toContain(reasonFragment);
 }
+
+/** Every pinned binary present except bwrap — keeps a single-tier case single-tier. */
+const noBwrap = (path: string): boolean => !path.endsWith("/bwrap");
 
 describe("requireNetworkIsolation", () => {
   beforeEach(() => resetNetworkIsolationProbeForTests());
@@ -69,17 +73,123 @@ describe("requireNetworkIsolation", () => {
     expect(runProbe).not.toHaveBeenCalled();
   });
 
-  it("refuses on linux when the userns capability probe fails", async () => {
+  it("refuses on linux when the userns capability probe fails and no bwrap is pinned", async () => {
     await expect(
       requireNetworkIsolation("/usr/bin/tool", [], {
         platform: "linux",
-        probeBinary: () => true,
+        probeBinary: noBwrap,
         runProbe: vi.fn().mockResolvedValue(false),
       }),
     ).rejects.toSatisfy((err: unknown) => {
       expectIsolationUnavailable(err, "user namespaces unavailable");
       return true;
     });
+  });
+
+  it("falls back to bwrap --unshare-net when the unshare probe fails (exact argv, payload last)", async () => {
+    const runProbe = vi.fn((command: string) => Promise.resolve(command.endsWith("/bwrap")));
+    const wrap = await requireNetworkIsolation("/usr/bin/tool", ["--flag", "value"], {
+      platform: "linux",
+      probeBinary: () => true,
+      runProbe,
+    });
+    expect(wrap).toEqual({
+      command: "/usr/bin/bwrap",
+      args: [
+        "--bind",
+        "/",
+        "/",
+        "--unshare-net",
+        "--die-with-parent",
+        "--",
+        "/usr/bin/tool",
+        "--flag",
+        "value",
+      ],
+      mechanism: "bwrap",
+    });
+    expect(runProbe).toHaveBeenCalledTimes(2);
+    expect(runProbe).toHaveBeenNthCalledWith(1, "/usr/bin/unshare", ["-rn", "--", "/usr/bin/true"]);
+    expect(runProbe).toHaveBeenNthCalledWith(2, "/usr/bin/bwrap", [
+      ...BWRAP_NETWORK_PREFIX_ARGS,
+      "/usr/bin/true",
+    ]);
+  });
+
+  it("falls back to bwrap when unshare is absent, probing bwrap alone", async () => {
+    const runProbe = vi.fn().mockResolvedValue(true);
+    const wrap = await requireNetworkIsolation("/usr/bin/tool", [], {
+      platform: "linux",
+      probeBinary: (p) => !p.endsWith("/unshare"),
+      runProbe,
+    });
+    expect(wrap.mechanism).toBe("bwrap");
+    expect(runProbe).toHaveBeenCalledTimes(1);
+    expect(runProbe).toHaveBeenCalledWith("/usr/bin/bwrap", [
+      ...BWRAP_NETWORK_PREFIX_ARGS,
+      "/usr/bin/true",
+    ]);
+  });
+
+  it("falls back to /bin/bwrap when /usr/bin/bwrap is absent", async () => {
+    const wrap = await requireNetworkIsolation("/usr/bin/tool", [], {
+      platform: "linux",
+      probeBinary: (p) => !p.endsWith("/unshare") && p !== "/usr/bin/bwrap",
+      runProbe: vi.fn().mockResolvedValue(true),
+    });
+    expect(wrap.command).toBe("/bin/bwrap");
+  });
+
+  it("prefers unshare when its probe passes — bwrap is never probed on the happy path", async () => {
+    const runProbe = vi.fn().mockResolvedValue(true);
+    const wrap = await requireNetworkIsolation("/usr/bin/tool", [], {
+      platform: "linux",
+      probeBinary: () => true,
+      runProbe,
+    });
+    expect(wrap.mechanism).toBe("unshare");
+    expect(runProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses naming both tiers when both probes fail, two probes per attempt", async () => {
+    const runProbe = vi.fn().mockResolvedValue(false);
+    await expect(
+      requireNetworkIsolation("/usr/bin/tool", [], {
+        platform: "linux",
+        probeBinary: () => true,
+        runProbe,
+      }),
+    ).rejects.toSatisfy((err: unknown) => {
+      expectIsolationUnavailable(err, "unshare -rn probe failed");
+      expect((err as VaultError).message).toContain("bwrap --unshare-net probe failed");
+      return true;
+    });
+    expect(runProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses naming the absent bwrap when the unshare probe fails and no bwrap is pinned", async () => {
+    await expect(
+      requireNetworkIsolation("/usr/bin/tool", [], {
+        platform: "linux",
+        probeBinary: noBwrap,
+        runProbe: vi.fn().mockResolvedValue(false),
+      }),
+    ).rejects.toSatisfy((err: unknown) => {
+      expectIsolationUnavailable(err, "bwrap not found in /usr/bin or /bin");
+      return true;
+    });
+  });
+
+  it("a persistently failing pair still refuses every call — four probes over two calls", async () => {
+    const runProbe = vi.fn().mockResolvedValue(false);
+    const seams = { platform: "linux" as const, probeBinary: () => true, runProbe };
+    await expect(requireNetworkIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(
+      VaultError,
+    );
+    await expect(requireNetworkIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(
+      VaultError,
+    );
+    expect(runProbe).toHaveBeenCalledTimes(4);
   });
 
   it("wraps with sandbox-exec -p <profile> on darwin (profile byte-exact)", async () => {
@@ -166,7 +276,7 @@ describe("requireNetworkIsolation", () => {
     // loaded-host probe timeout permanently disabled every isolation-
     // demanding spawn until the vault restarted.
     const runProbe = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
-    const seams = { platform: "linux" as const, probeBinary: () => true, runProbe };
+    const seams = { platform: "linux" as const, probeBinary: noBwrap, runProbe };
     await expect(requireNetworkIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(
       VaultError,
     );
@@ -177,7 +287,7 @@ describe("requireNetworkIsolation", () => {
 
   it("a persistently failing probe still refuses every call (fail closed, re-probed)", async () => {
     const runProbe = vi.fn().mockResolvedValue(false);
-    const seams = { platform: "linux" as const, probeBinary: () => true, runProbe };
+    const seams = { platform: "linux" as const, probeBinary: noBwrap, runProbe };
     await expect(requireNetworkIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(
       VaultError,
     );
@@ -189,7 +299,7 @@ describe("requireNetworkIsolation", () => {
 
   it("concurrent callers coalesce on one in-flight probe even when it fails", async () => {
     const runProbe = vi.fn().mockResolvedValue(false);
-    const seams = { platform: "linux" as const, probeBinary: () => true, runProbe };
+    const seams = { platform: "linux" as const, probeBinary: noBwrap, runProbe };
     const [a, b] = await Promise.allSettled([
       requireNetworkIsolation("/usr/bin/one", [], seams),
       requireNetworkIsolation("/usr/bin/two", [], seams),

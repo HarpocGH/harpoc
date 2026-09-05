@@ -16,11 +16,15 @@ import { requireNetworkIsolation } from "./network-isolation.js";
  *    single-dimension era (byte-identical: the pinned tests hold).
  *  - fs only → `requireFsIsolation`.
  *  - both, linux → the fs wrap is built FIRST and the network wrap goes
- *    AROUND it: `unshare -rn -- setpriv <landlock args> -- <payload>`. The
- *    order is load-bearing in both directions: `unshare` must create the
- *    namespaces before Landlock restricts the process (a Landlock ruleset is
- *    inherited and irrevocable, and `unshare -r` still needs to write the
- *    uid/gid maps), and the payload stays last and unmodified either way.
+ *    AROUND it when both primaries resolved:
+ *    `unshare -rn -- setpriv <landlock args> -- <payload>`. The order is
+ *    load-bearing in both directions: `unshare` must create the namespaces
+ *    before Landlock restricts the process (a Landlock ruleset is inherited
+ *    and irrevocable, and `unshare -r` still needs to write the uid/gid
+ *    maps), and the payload stays last and unmodified either way. When either
+ *    dimension fell to the second tier, ONE bwrap wrapper carries both
+ *    (`requireCombinedIsolation`'s linux branch) — bwrap is never nested
+ *    inside `unshare`, nor `setpriv` inside bwrap.
  *  - both, darwin → ONE `sandbox-exec` wrapper carrying the combined
  *    deny-network + deny-write profile (`requireCombinedIsolation`); macOS
  *    does not support nesting two sandboxes, so this is a single profile with
@@ -83,11 +87,20 @@ export async function requireIsolation(
     }
     const fsWrap = await requireFsIsolation(command, args);
     const netWrap = await requireNetworkIsolation(fsWrap.command, fsWrap.args);
+    if (fsWrap.mechanism === "landlock" && netWrap.mechanism === "unshare") {
+      return {
+        command: netWrap.command,
+        args: netWrap.args,
+        networkMechanism: netWrap.mechanism,
+        fsMechanism: fsWrap.mechanism,
+      };
+    }
+    const combined = await requireCombinedIsolation(command, args);
     return {
-      command: netWrap.command,
-      args: netWrap.args,
-      networkMechanism: netWrap.mechanism,
-      fsMechanism: fsWrap.mechanism,
+      command: combined.command,
+      args: combined.args,
+      networkMechanism: "bwrap",
+      fsMechanism: combined.mechanism,
     };
   }
 

@@ -1,5 +1,6 @@
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BWRAP_COMBINED_PREFIX_ARGS, BWRAP_FS_PREFIX_ARGS } from "./bwrap.js";
 import {
   LANDLOCK_PREFIX_ARGS,
   LINUX_SETPRIV_CANDIDATES,
@@ -24,6 +25,9 @@ function expectFsIsolationUnavailable(err: unknown, reasonFragment: string): voi
   expect((err as VaultError).message).toContain(reasonFragment);
 }
 
+/** Every pinned binary present except bwrap — keeps a single-tier case single-tier. */
+const noBwrap = (path: string): boolean => !path.endsWith("/bwrap");
+
 describe("fs-isolation wrapper constants", () => {
   it("pins the Landlock prefix argv one token per element (never joined)", () => {
     expect(LANDLOCK_PREFIX_ARGS).toEqual([
@@ -41,10 +45,12 @@ describe("fs-isolation wrapper constants", () => {
     expect(LINUX_SETPRIV_CANDIDATES).toEqual(["/usr/bin/setpriv", "/bin/setpriv"]);
   });
 
-  it("pins both sandbox-exec profiles byte-exactly", () => {
-    expect(SANDBOX_EXEC_DENY_WRITE_PROFILE).toBe("(version 1)(allow default)(deny file-write*)");
+  it("pins both sandbox-exec write profiles byte-exactly — the /dev/null allow clause last (D49)", () => {
+    expect(SANDBOX_EXEC_DENY_WRITE_PROFILE).toBe(
+      '(version 1)(allow default)(deny file-write*)(allow file-write-data (literal "/dev/null"))',
+    );
     expect(SANDBOX_EXEC_DENY_NETWORK_AND_WRITE_PROFILE).toBe(
-      "(version 1)(allow default)(deny network*)(deny file-write*)",
+      '(version 1)(allow default)(deny network*)(deny file-write*)(allow file-write-data (literal "/dev/null"))',
     );
   });
 });
@@ -112,17 +118,104 @@ describe("requireFsIsolation", () => {
     expect(runProbe).not.toHaveBeenCalled();
   });
 
-  it("refuses on linux when the Landlock capability probe fails", async () => {
+  it("refuses on linux when the Landlock capability probe fails and no bwrap is pinned", async () => {
     await expect(
       requireFsIsolation("/usr/bin/tool", [], {
         platform: "linux",
-        probeBinary: () => true,
+        probeBinary: noBwrap,
         runProbe: vi.fn().mockResolvedValue(false),
       }),
     ).rejects.toSatisfy((err: unknown) => {
       expectFsIsolationUnavailable(err, "Landlock unavailable");
       return true;
     });
+  });
+
+  it("falls back to bwrap --ro-bind when the Landlock probe fails (exact argv, payload last)", async () => {
+    const runProbe = vi.fn((command: string) => Promise.resolve(command.endsWith("/bwrap")));
+    const wrap = await requireFsIsolation("/usr/bin/tool", ["--flag", "value"], {
+      platform: "linux",
+      probeBinary: () => true,
+      runProbe,
+    });
+    expect(wrap).toEqual({
+      command: "/usr/bin/bwrap",
+      args: [
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--die-with-parent",
+        "--",
+        "/usr/bin/tool",
+        "--flag",
+        "value",
+      ],
+      mechanism: "bwrap",
+    });
+    expect(runProbe).toHaveBeenCalledTimes(2);
+    expect(runProbe).toHaveBeenNthCalledWith(1, "/usr/bin/setpriv", [
+      ...LANDLOCK_PREFIX_ARGS,
+      "/usr/bin/true",
+    ]);
+    expect(runProbe).toHaveBeenNthCalledWith(2, "/usr/bin/bwrap", [
+      ...BWRAP_FS_PREFIX_ARGS,
+      "/usr/bin/true",
+    ]);
+  });
+
+  it("falls back to bwrap when setpriv is absent, probing bwrap alone", async () => {
+    const runProbe = vi.fn().mockResolvedValue(true);
+    const wrap = await requireFsIsolation("/usr/bin/tool", [], {
+      platform: "linux",
+      probeBinary: (p) => !p.endsWith("/setpriv"),
+      runProbe,
+    });
+    expect(wrap.mechanism).toBe("bwrap");
+    expect(runProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it("prefers Landlock when its probe passes — bwrap is never probed on the happy path", async () => {
+    const runProbe = vi.fn().mockResolvedValue(true);
+    const wrap = await requireFsIsolation("/usr/bin/tool", [], {
+      platform: "linux",
+      probeBinary: () => true,
+      runProbe,
+    });
+    expect(wrap.mechanism).toBe("landlock");
+    expect(runProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses naming both tiers when both probes fail", async () => {
+    const runProbe = vi.fn().mockResolvedValue(false);
+    await expect(
+      requireFsIsolation("/usr/bin/tool", [], {
+        platform: "linux",
+        probeBinary: () => true,
+        runProbe,
+      }),
+    ).rejects.toSatisfy((err: unknown) => {
+      expectFsIsolationUnavailable(err, "Landlock unavailable");
+      expect((err as VaultError).message).toContain("bwrap --ro-bind probe failed");
+      return true;
+    });
+    expect(runProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses naming the absent bwrap when setpriv is absent too, without running a probe", async () => {
+    const runProbe = vi.fn();
+    await expect(
+      requireFsIsolation("/usr/bin/tool", [], {
+        platform: "linux",
+        probeBinary: () => false,
+        runProbe,
+      }),
+    ).rejects.toSatisfy((err: unknown) => {
+      expectFsIsolationUnavailable(err, "setpriv not found in /usr/bin or /bin; bwrap not found");
+      return true;
+    });
+    expect(runProbe).not.toHaveBeenCalled();
   });
 
   it("wraps with sandbox-exec -p <deny-write profile> on darwin (profile byte-exact)", async () => {
@@ -132,7 +225,9 @@ describe("requireFsIsolation", () => {
       probeBinary: () => true,
       runProbe,
     });
-    expect(SANDBOX_EXEC_DENY_WRITE_PROFILE).toBe("(version 1)(allow default)(deny file-write*)");
+    expect(SANDBOX_EXEC_DENY_WRITE_PROFILE).toBe(
+      '(version 1)(allow default)(deny file-write*)(allow file-write-data (literal "/dev/null"))',
+    );
     expect(wrap).toEqual({
       command: "/usr/bin/sandbox-exec",
       args: ["-p", SANDBOX_EXEC_DENY_WRITE_PROFILE, "/usr/bin/tool", "arg"],
@@ -209,7 +304,7 @@ describe("requireFsIsolation", () => {
     // loaded-host probe timeout permanently disabled every isolation-
     // demanding spawn until the vault restarted.
     const runProbe = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
-    const seams = { platform: "linux" as const, probeBinary: () => true, runProbe };
+    const seams = { platform: "linux" as const, probeBinary: noBwrap, runProbe };
     await expect(requireFsIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(VaultError);
     const wrap = await requireFsIsolation("/usr/bin/tool", [], seams);
     expect(wrap.mechanism).toBe("landlock");
@@ -218,7 +313,7 @@ describe("requireFsIsolation", () => {
 
   it("a persistently failing probe still refuses every call (fail closed, re-probed)", async () => {
     const runProbe = vi.fn().mockResolvedValue(false);
-    const seams = { platform: "linux" as const, probeBinary: () => true, runProbe };
+    const seams = { platform: "linux" as const, probeBinary: noBwrap, runProbe };
     await expect(requireFsIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(VaultError);
     await expect(requireFsIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(VaultError);
     expect(runProbe).toHaveBeenCalledTimes(2);
@@ -226,7 +321,7 @@ describe("requireFsIsolation", () => {
 
   it("concurrent callers coalesce on one in-flight probe even when it fails", async () => {
     const runProbe = vi.fn().mockResolvedValue(false);
-    const seams = { platform: "linux" as const, probeBinary: () => true, runProbe };
+    const seams = { platform: "linux" as const, probeBinary: noBwrap, runProbe };
     const [a, b] = await Promise.allSettled([
       requireFsIsolation("/usr/bin/one", [], seams),
       requireFsIsolation("/usr/bin/two", [], seams),
@@ -284,7 +379,7 @@ describe("requireCombinedIsolation", () => {
       runProbe,
     });
     expect(SANDBOX_EXEC_DENY_NETWORK_AND_WRITE_PROFILE).toBe(
-      "(version 1)(allow default)(deny network*)(deny file-write*)",
+      '(version 1)(allow default)(deny network*)(deny file-write*)(allow file-write-data (literal "/dev/null"))',
     );
     expect(wrap).toEqual({
       command: "/usr/bin/sandbox-exec",
@@ -338,17 +433,79 @@ describe("requireCombinedIsolation", () => {
     expect(runProbe).not.toHaveBeenCalled();
   });
 
-  it("refuses on linux without consulting any binary or probe (linux composes instead)", async () => {
-    const probeBinary = vi.fn();
+  it("resolves ONE bwrap wrapper on linux (exact argv, payload last) — the composer's form when the primaries do not both resolve", async () => {
+    const runProbe = vi.fn().mockResolvedValue(true);
+    const wrap = await requireCombinedIsolation("/usr/bin/tool", ["--flag", "value"], {
+      platform: "linux",
+      probeBinary: () => true,
+      runProbe,
+    });
+    expect(wrap).toEqual({
+      command: "/usr/bin/bwrap",
+      args: [
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--unshare-net",
+        "--die-with-parent",
+        "--",
+        "/usr/bin/tool",
+        "--flag",
+        "value",
+      ],
+      mechanism: "bwrap",
+    });
+    expect(wrap.args.filter((a) => a === "/usr/bin/bwrap")).toHaveLength(0);
+    expect(runProbe).toHaveBeenCalledTimes(1);
+    expect(runProbe).toHaveBeenCalledWith("/usr/bin/bwrap", [
+      ...BWRAP_COMBINED_PREFIX_ARGS,
+      "/usr/bin/true",
+    ]);
+  });
+
+  it("refuses on linux when bwrap is absent or its combined probe fails, never consulting setpriv or unshare", async () => {
+    const probeBinary = vi.fn((p: string) => !p.endsWith("/bwrap"));
     const runProbe = vi.fn();
     await expect(
       requireCombinedIsolation("/usr/bin/tool", [], { platform: "linux", probeBinary, runProbe }),
     ).rejects.toSatisfy((err: unknown) => {
-      expectFsIsolationUnavailable(err, "composed");
+      expectFsIsolationUnavailable(err, "bwrap not found in /usr/bin or /bin");
       return true;
     });
-    expect(probeBinary).not.toHaveBeenCalled();
     expect(runProbe).not.toHaveBeenCalled();
+    expect(probeBinary.mock.calls.map((c) => c[0])).not.toContain("/usr/bin/setpriv");
+    expect(probeBinary.mock.calls.map((c) => c[0])).not.toContain("/usr/bin/unshare");
+    resetFsIsolationProbeForTests();
+    await expect(
+      requireCombinedIsolation("/usr/bin/tool", [], {
+        platform: "linux",
+        probeBinary: () => true,
+        runProbe: vi.fn().mockResolvedValue(false),
+      }),
+    ).rejects.toSatisfy((err: unknown) => {
+      expectFsIsolationUnavailable(err, "bwrap --ro-bind --unshare-net probe failed");
+      return true;
+    });
+  });
+
+  it("keeps its own cache slot on linux too — the filesystem and combined bwrap probes never share", async () => {
+    const runProbe = vi.fn((command: string) => Promise.resolve(command.endsWith("/bwrap")));
+    const seams = { platform: "linux" as const, probeBinary: () => true, runProbe };
+    const fsWrap = await requireFsIsolation("/usr/bin/tool", [], seams);
+    const combinedWrap = await requireCombinedIsolation("/usr/bin/tool", [], seams);
+    expect(runProbe).toHaveBeenCalledTimes(3);
+    expect(runProbe).toHaveBeenNthCalledWith(2, "/usr/bin/bwrap", [
+      ...BWRAP_FS_PREFIX_ARGS,
+      "/usr/bin/true",
+    ]);
+    expect(runProbe).toHaveBeenNthCalledWith(3, "/usr/bin/bwrap", [
+      ...BWRAP_COMBINED_PREFIX_ARGS,
+      "/usr/bin/true",
+    ]);
+    expect(fsWrap.args).not.toContain("--unshare-net");
+    expect(combinedWrap.args).toContain("--unshare-net");
   });
 
   it("probes exactly once across concurrent and sequential calls (cached)", async () => {

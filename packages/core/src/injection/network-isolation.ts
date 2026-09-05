@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { VaultError } from "@harpoc/shared";
+import { BWRAP_NETWORK_PREFIX_ARGS, LINUX_BWRAP_CANDIDATES } from "./bwrap.js";
 
 /**
  * Network isolation for process-mediated spawns (thesis §4.5.3 layer 4).
@@ -15,6 +16,12 @@ import { VaultError } from "@harpoc/shared";
  *    namespace (unprivileged on modern kernels); `lo` stays down, so even
  *    loopback is unreachable. `-r` maps the caller to root inside the userns
  *    so `getpwuid`/DAC behave for children like `ssh` that stat their files.
+ *    Behind it, only when unshare is absent or its probe fails: bubblewrap,
+ *    `bwrap --bind / / --unshare-net --die-with-parent -- <command> <args...>`
+ *    — the same fresh namespace (bwrap raises an empty loopback inside it,
+ *    nothing listens there) under the same userns grant, with bwrap staying
+ *    as a monitor that returns the payload's status and takes it down when
+ *    the monitor dies (see bwrap.ts).
  *  - macOS:  `sandbox-exec -p '<deny-network profile>' <command> <args...>` —
  *    deprecated by Apple but functional; availability is probed live, never
  *    assumed, so a future removal fails closed.
@@ -26,10 +33,10 @@ import { VaultError } from "@harpoc/shared";
  * binary can be present yet blocked (kernel.unprivileged_userns_clone=0,
  * AppArmor userns restrictions) — cached per process; environment drift after
  * a passing probe still fails closed by construction, because the wrapper
- * errors out without exec-ing the payload.
+ * errors out without starting the payload.
  */
 
-export type NetworkIsolationMechanism = "unshare" | "sandbox-exec";
+export type NetworkIsolationMechanism = "unshare" | "sandbox-exec" | "bwrap";
 
 export interface NetworkIsolationWrap {
   /** The pinned wrapper binary (absolute path). */
@@ -64,11 +71,25 @@ interface ResolvedIsolation {
   mechanism: NetworkIsolationMechanism;
 }
 
-function findPinnedBinary(candidates: string[], probe: (path: string) => boolean): string | null {
+function findPinnedBinary(
+  candidates: readonly string[],
+  probe: (path: string) => boolean,
+): string | null {
   for (const candidate of candidates) {
     if (probe(candidate)) return candidate;
   }
   return null;
+}
+
+/** The no-op payload every capability probe execs; refusal is fail-closed. */
+function requireProbePayload(probeBinary: (path: string) => boolean): string {
+  const trueBin = findPinnedBinary(POSIX_TRUE_CANDIDATES, probeBinary);
+  if (!trueBin) {
+    throw VaultError.networkIsolationUnavailable(
+      "no /usr/bin/true or /bin/true available for the capability probe",
+    );
+  }
+  return trueBin;
 }
 
 /** Run a capability probe: exit 0 within the timeout means available. */
@@ -101,21 +122,31 @@ async function resolveIsolation(seams?: NetworkIsolationSeams): Promise<Resolved
 
   if (platform === "linux") {
     const unshare = findPinnedBinary(LINUX_UNSHARE_CANDIDATES, probeBinary);
-    if (!unshare) {
-      throw VaultError.networkIsolationUnavailable("unshare not found in /usr/bin or /bin");
+    let primaryReason = "unshare not found in /usr/bin or /bin";
+    if (unshare) {
+      const trueBin = requireProbePayload(probeBinary);
+      if (await runProbe(unshare, ["-rn", "--", trueBin])) {
+        return { wrapper: unshare, prefixArgs: ["-rn", "--"], mechanism: "unshare" };
+      }
+      primaryReason = "unprivileged user namespaces unavailable (unshare -rn probe failed)";
     }
-    const trueBin = findPinnedBinary(POSIX_TRUE_CANDIDATES, probeBinary);
-    if (!trueBin) {
+    // Second tier (D50): consulted only once the primary is out. bwrap needs
+    // the same userns grant, so it rarely rescues a network demand on its
+    // own; the tier exists for the filesystem dimension and for hosts that
+    // grant `userns` to bwrap alone.
+    const bwrap = findPinnedBinary(LINUX_BWRAP_CANDIDATES, probeBinary);
+    if (!bwrap) {
       throw VaultError.networkIsolationUnavailable(
-        "no /usr/bin/true or /bin/true available for the capability probe",
+        `${primaryReason}; bwrap not found in /usr/bin or /bin`,
       );
     }
-    if (!(await runProbe(unshare, ["-rn", "--", trueBin]))) {
+    const trueBin = requireProbePayload(probeBinary);
+    if (!(await runProbe(bwrap, [...BWRAP_NETWORK_PREFIX_ARGS, trueBin]))) {
       throw VaultError.networkIsolationUnavailable(
-        "unprivileged user namespaces unavailable (unshare -rn probe failed)",
+        `${primaryReason}; bwrap --unshare-net probe failed (bubblewrap needs the same unprivileged user-namespace grant as unshare)`,
       );
     }
-    return { wrapper: unshare, prefixArgs: ["-rn", "--"], mechanism: "unshare" };
+    return { wrapper: bwrap, prefixArgs: [...BWRAP_NETWORK_PREFIX_ARGS], mechanism: "bwrap" };
   }
 
   if (platform === "darwin") {
@@ -124,12 +155,7 @@ async function resolveIsolation(seams?: NetworkIsolationSeams): Promise<Resolved
         `sandbox-exec not found at ${DARWIN_SANDBOX_EXEC}`,
       );
     }
-    const trueBin = findPinnedBinary(POSIX_TRUE_CANDIDATES, probeBinary);
-    if (!trueBin) {
-      throw VaultError.networkIsolationUnavailable(
-        "no /usr/bin/true or /bin/true available for the capability probe",
-      );
-    }
+    const trueBin = requireProbePayload(probeBinary);
     if (
       !(await runProbe(DARWIN_SANDBOX_EXEC, ["-p", SANDBOX_EXEC_DENY_NETWORK_PROFILE, trueBin]))
     ) {

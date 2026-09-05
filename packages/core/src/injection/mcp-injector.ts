@@ -18,9 +18,13 @@ import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, matchesUrlAllowlist, resolveAndMatchCommand } from "./allowlist.js";
 import { buildCleanEnv } from "./clean-env.js";
+import type { FsIsolationMechanism } from "./fs-isolation.js";
 import { createPinnedLookup } from "./http-injector.js";
+import type { IsolationDimensions } from "./isolation.js";
+import { requireIsolation } from "./isolation.js";
 import type { McpConnectionEntry, McpConnectionRegistry } from "./mcp-registry.js";
 import { StdioChildTransport } from "./mcp-stdio-transport.js";
+import type { NetworkIsolationMechanism } from "./network-isolation.js";
 import { mapStringLeavesTracked, redactSecretEncodings } from "./output-sanitizer.js";
 import { validateUrl } from "./url-validator.js";
 
@@ -38,6 +42,21 @@ interface McpSdk {
   CallToolResultSchema: McpSdkTypesModule["CallToolResultSchema"];
   McpError: McpSdkTypesModule["McpError"];
   McpErrorCode: McpSdkTypesModule["ErrorCode"];
+}
+
+/**
+ * What the stdio transport spawns (thesis §4.5.3 layer 4, D51): the
+ * allowlist-resolved command bare, or the platform isolation wrapper carrying
+ * it as the payload. `isolation` is the posture the child is spawned with,
+ * recorded on the registry entry so a dimension demanded later — from this
+ * process or another — is noticed on the next call.
+ */
+interface StdioLaunch {
+  command: string;
+  args: string[];
+  isolation: IsolationDimensions;
+  networkMechanism?: NetworkIsolationMechanism;
+  fsMechanism?: FsIsolationMechanism;
 }
 
 /**
@@ -69,7 +88,11 @@ async function loadMcpSdk(): Promise<McpSdk> {
  *  - stdio (process-mediated): the downstream server is spawned with the
  *    credential in a clean environment; the launch command is validated
  *    against the secret's command allowlist (fail-safe deny, pinned resolved
- *    absolute path) on EVERY call.
+ *    absolute path) on EVERY call. Under `network_isolation` / `fs_isolation`
+ *    the spawn goes through the same isolation wrappers as the process
+ *    contexts (`requireIsolation`), the mechanisms recorded on `mcp.spawn`; a
+ *    host that cannot deliver a demanded dimension refuses before any spawn,
+ *    any live child terminated first.
  *  - Streamable HTTP (request-mediated): the credential is injected as an
  *    `Authorization: Bearer` header; the endpoint is validated against the
  *    secret's URL allowlist and SSRF checks on every outbound request, the
@@ -101,54 +124,6 @@ export class McpInjector {
       throw err;
     }
 
-    // Network isolation (thesis §4.5.3 layer 4) — fail closed: the stdio
-    // downstream server is a credential-holding child, but it is spawned by
-    // the connection lifecycle (StdioChildTransport), not the spawnCaptured
-    // seam where the isolation wrapper lives. Until that transport can
-    // isolate, a policy demanding isolation refuses the spawn outright —
-    // before any registry acquire/reuse, so a live un-isolated connection
-    // cannot keep serving either. HTTP-transport downstreams are
-    // request-mediated from the vault process (no child) and unaffected.
-    if (policy.network_isolation === true && config.transport === McpTransport.STDIO) {
-      // A live child predating the isolation demand still holds the
-      // credential with full egress — terminate it before refusing, so a
-      // policy tightened from a separate process (unreachable registry)
-      // takes effect on the next invocation attempt at the latest.
-      await this.registry.terminate(secretId, "network_isolation_enabled", attribution);
-      const err = VaultError.networkIsolationUnavailable(
-        "MCP stdio downstream servers cannot be network-isolated yet",
-      );
-      this.audit(
-        action,
-        secretId,
-        config,
-        { error: err.code, network_isolation: true },
-        false,
-        attribution,
-      );
-      throw err;
-    }
-
-    // Filesystem isolation (same seam gap, same fail-closed answer): the
-    // isolation wrapper is composed at spawnCaptured, which StdioChildTransport
-    // does not go through. Checked after the network branch, so a policy
-    // demanding both keeps the network refusal's code and reason.
-    if (policy.fs_isolation === true && config.transport === McpTransport.STDIO) {
-      await this.registry.terminate(secretId, "fs_isolation_enabled", attribution);
-      const err = VaultError.fsIsolationUnavailable(
-        "MCP stdio downstream servers cannot be fs-isolated yet",
-      );
-      this.audit(
-        action,
-        secretId,
-        config,
-        { error: err.code, fs_isolation: true },
-        false,
-        attribution,
-      );
-      throw err;
-    }
-
     // Target validation on every call — complete mediation, independent of
     // whether a live connection is reused.
     let resolvedCommand: string | undefined;
@@ -173,20 +148,40 @@ export class McpInjector {
       throw err;
     }
 
+    let launch: StdioLaunch | undefined;
+    if (config.transport === McpTransport.STDIO) {
+      launch = await this.resolveStdioLaunch(
+        action,
+        secretId,
+        config,
+        policy,
+        resolvedCommand as string,
+        attribution,
+      );
+    }
+
     const sdk = await loadMcpSdk();
     const valueStr = Buffer.from(secretValue).toString("utf8");
     const credentialFingerprint = sha256Hex(secretValue);
     const configFingerprint = sha256Hex(Buffer.from(JSON.stringify(config), "utf8"));
 
-    // Staleness: a live server holding a rotated/refreshed credential or an
-    // outdated config is deliberately terminated; the fresh connect below
-    // re-injects the newly resolved credential.
+    // Staleness: a live server holding a rotated/refreshed credential, an
+    // outdated config, or spawned without a dimension the policy now demands
+    // is deliberately terminated; the fresh connect below re-injects the
+    // newly resolved credential, wrapped as demanded. The posture branch is
+    // the backstop for a policy tightened from a separate process, whose
+    // engine cannot reach this registry (the same-process flip already
+    // terminated at setInjectionPolicy); loosening leaves the child alone.
     const existing = this.registry.get(secretId);
     if (existing) {
       if (existing.credentialFingerprint !== credentialFingerprint) {
         await this.registry.terminate(secretId, "credential_rotated", attribution);
       } else if (existing.configFingerprint !== configFingerprint) {
         await this.registry.terminate(secretId, "config_changed", attribution);
+      } else if (launch?.isolation.network === true && !existing.isolation.network) {
+        await this.registry.terminate(secretId, "network_isolation_enabled", attribution);
+      } else if (launch?.isolation.fs === true && !existing.isolation.fs) {
+        await this.registry.terminate(secretId, "fs_isolation_enabled", attribution);
       }
     }
 
@@ -197,7 +192,7 @@ export class McpInjector {
           sdk,
           secretId,
           config,
-          resolvedCommand,
+          launch,
           valueStr,
           policy,
           {
@@ -257,7 +252,7 @@ export class McpInjector {
     sdk: McpSdk,
     secretId: string,
     config: McpServerConfig,
-    resolvedCommand: string | undefined,
+    launch: StdioLaunch | undefined,
     valueStr: string,
     policy: InjectionPolicy,
     fingerprints: { credentialFingerprint: string; configFingerprint: string },
@@ -273,7 +268,7 @@ export class McpInjector {
         client,
         secretId,
         config,
-        resolvedCommand,
+        launch,
         valueStr,
         policy,
         fingerprints,
@@ -299,7 +294,7 @@ export class McpInjector {
     client: Client,
     secretId: string,
     config: McpServerConfig,
-    resolvedCommand: string | undefined,
+    launch: StdioLaunch | undefined,
     valueStr: string,
     policy: InjectionPolicy,
     fingerprints: { credentialFingerprint: string; configFingerprint: string },
@@ -310,9 +305,10 @@ export class McpInjector {
     let stdioTransport: StdioChildTransport | undefined;
     let dispose: (() => void) | undefined;
     if (config.transport === McpTransport.STDIO) {
+      const stdioLaunch = launch as StdioLaunch;
       stdioTransport = new StdioChildTransport({
-        resolvedCommand: resolvedCommand as string,
-        args: config.args ?? [],
+        resolvedCommand: stdioLaunch.command,
+        args: stdioLaunch.args,
         env: buildCleanEnv(config.env_var as string, valueStr, policy.env_allowlist),
         cwd: config.working_directory,
       });
@@ -352,7 +348,17 @@ export class McpInjector {
             server: config.server_name,
             transport: config.transport,
             ...(config.transport === McpTransport.STDIO
-              ? { command: config.command, pid: stdioTransport?.pid ?? null }
+              ? {
+                  // The configured command stays the audited one; the pid is
+                  // the process the vault holds — under bwrap the monitor's,
+                  // which is the kill target (D51).
+                  command: config.command,
+                  pid: stdioTransport?.pid ?? null,
+                  ...(launch?.networkMechanism
+                    ? { isolation_mechanism: launch.networkMechanism }
+                    : {}),
+                  ...(launch?.fsMechanism ? { fs_isolation_mechanism: launch.fsMechanism } : {}),
+                }
               : { url: config.url }),
           },
           success: true,
@@ -374,9 +380,73 @@ export class McpInjector {
       redact: valueStr,
       crashed: false,
       ...fingerprints,
+      isolation: launch?.isolation ?? { network: false, fs: false },
       spawnedAt: Date.now(),
       lastUsedAt: Date.now(),
     };
+  }
+
+  /**
+   * The stdio launch argv — bare, or wrapped in the platform isolation
+   * wrappers when the policy demands a dimension (thesis §4.5.3 layer 4,
+   * D51). Resolved on every call right after the allowlist match, like the
+   * match itself (complete mediation; a successful probe is cached by the
+   * resolvers), and applied at the spawn. Fail closed: a host that cannot
+   * deliver a demanded dimension refuses before any acquire — and a live
+   * child predating the demand still holds the credential un-isolated, so it
+   * is terminated first, which makes a policy tightened from a separate
+   * process take effect at this invocation at the latest. The network reason
+   * keeps precedence on the terminate; the audit row carries every demanded
+   * flag; the error code is the composer's (the filesystem dimension is
+   * resolved first off darwin).
+   */
+  private async resolveStdioLaunch(
+    action: McpAction,
+    secretId: string,
+    config: McpServerConfig,
+    policy: InjectionPolicy,
+    resolvedCommand: string,
+    attribution: AuditAttribution | undefined,
+  ): Promise<StdioLaunch> {
+    const isolation: IsolationDimensions = {
+      network: policy.network_isolation === true,
+      fs: policy.fs_isolation === true,
+    };
+    const args = config.args ?? [];
+    if (!isolation.network && !isolation.fs) {
+      return { command: resolvedCommand, args, isolation };
+    }
+    try {
+      const wrapped = await requireIsolation(resolvedCommand, args, isolation);
+      return {
+        command: wrapped.command,
+        args: wrapped.args,
+        isolation,
+        ...(wrapped.networkMechanism ? { networkMechanism: wrapped.networkMechanism } : {}),
+        ...(wrapped.fsMechanism ? { fsMechanism: wrapped.fsMechanism } : {}),
+      };
+    } catch (err) {
+      await this.registry.terminate(
+        secretId,
+        isolation.network ? "network_isolation_enabled" : "fs_isolation_enabled",
+        attribution,
+      );
+      if (err instanceof VaultError) {
+        this.audit(
+          action,
+          secretId,
+          config,
+          {
+            error: err.code,
+            ...(isolation.network ? { network_isolation: true } : {}),
+            ...(isolation.fs ? { fs_isolation: true } : {}),
+          },
+          false,
+          attribution,
+        );
+      }
+      throw err;
+    }
   }
 
   /**

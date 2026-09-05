@@ -6,6 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import { DirectClient } from "@harpoc/sdk";
+import { requireNetworkIsolation } from "@harpoc/core";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 
@@ -225,10 +226,31 @@ describe("MCP proxy context — stdio transport (thesis §4.5.4)", () => {
     expect(terminates).toHaveLength(1);
     expect(terminates[0]?.detail?.reason).toBe("network_isolation_enabled");
 
-    // Fail-closed follow-through: the next invocation is refused outright.
-    await expect(vault.engine.useSecret(handle, mcpAction("echo"))).rejects.toMatchObject({
-      code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
-    });
+    // Follow-through (D51, 2026-09-05): where the platform delivers the
+    // isolation, the next invocation respawns the child WRAPPED and the spawn
+    // row names the mechanism; where it cannot (Windows by design, a POSIX
+    // host with no working tier) the invocation is refused fail-closed.
+    let capable = true;
+    try {
+      await requireNetworkIsolation("/bin/true", []);
+    } catch {
+      capable = false;
+    }
+    if (capable) {
+      const res = await vault.engine.useSecret(handle, mcpAction("pid"));
+      expect(res.type).toBe("mcp");
+      const respawns = vault.engine.queryAudit({ eventType: AuditEventType.MCP_SPAWN });
+      expect(respawns).toHaveLength(2);
+      expect(
+        respawns.some((r) =>
+          ["unshare", "sandbox-exec", "bwrap"].includes(String(r.detail?.isolation_mechanism)),
+        ),
+      ).toBe(true);
+    } else {
+      await expect(vault.engine.useSecret(handle, mcpAction("echo"))).rejects.toMatchObject({
+        code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+      });
+    }
   });
 
   it("control: re-asserting the policy without the flag leaves the child alive", async () => {

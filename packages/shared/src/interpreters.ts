@@ -85,7 +85,10 @@ export const KNOWN_INTERPRETERS: ReadonlySet<string> = new Set([
 
 /**
  * Basenames of exec wrappers (matched after normalization) — the second
- * acknowledgement tier. Disjoint from KNOWN_INTERPRETERS by test.
+ * acknowledgement tier. Disjoint from KNOWN_INTERPRETERS by test. The vault's
+ * own isolation wrappers (`unshare`, `setpriv`, `bwrap`) belong here too: a
+ * user allowlisting one of them as a command hands it arbitrary argv exactly
+ * as `sudo` would.
  */
 export const EXEC_WRAPPERS: ReadonlySet<string> = new Set([
   // argv is itself a command
@@ -101,6 +104,8 @@ export const EXEC_WRAPPERS: ReadonlySet<string> = new Set([
   "chroot",
   "nsenter",
   "unshare",
+  "setpriv",
+  "bwrap",
   "systemd-run",
   "stdbuf",
   "chrt",
