@@ -14,6 +14,7 @@ import {
   VAULT_VERSION_FLOOR,
 } from "@harpoc/shared";
 import { AAD_INJECTION_POLICY } from "@harpoc/shared";
+import type { InjectionPolicyInput } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { encrypt } from "./crypto/aes-gcm.js";
@@ -953,6 +954,21 @@ describe("injection policy", () => {
     const p = await engine.getInjectionPolicy("secret://pol");
     expect(p.command_allowlist).toEqual(["gh"]);
     expect(p.env_allowlist).toEqual([]);
+  });
+
+  // D5/R7: zod's `invalid_enum_value` message quotes the rejected value back,
+  // so a refusal echoed whatever the caller sent. The shared renderer names the
+  // legal set instead; the value never reaches the message.
+  it("names the legal enum values without echoing the rejected one", async () => {
+    const err = await expectVaultError(
+      () =>
+        engine.setInjectionPolicy("secret://pol", {
+          response_mode: "1BAD",
+        } as unknown as InjectionPolicyInput),
+      ErrorCode.SCHEMA_VALIDATION_ERROR,
+    );
+    expect(err.message).toContain("response_mode: must be one of full, filtered, status_only");
+    expect(err.message).not.toContain("1BAD");
   });
 
   it("control: a complete stored policy round-trips unchanged", async () => {

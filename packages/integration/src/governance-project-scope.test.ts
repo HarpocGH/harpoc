@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import type { IssuedToken } from "@harpoc/shared";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
@@ -75,4 +76,30 @@ describe("Governance refuses a project-claimed admin token (R11/N12)", () => {
     expect(admitted.code).toBe(0);
     expect(admitted.stdout).toContain("gov-admin");
   }, 60_000);
+
+  // D4/R32: `access.denied` has existed since v1.0 with no product writer. The
+  // governance refusal is its first: whichever layer answers — this middleware
+  // at the REST edge, the engine assertion in direct mode — the trail carries
+  // exactly one row naming the principal and the operation.
+  it("REST: the 403 leaves one access.denied row naming the principal and the operation", async () => {
+    const res = await get("/api/v1/agents/gov-admin", scoped);
+    expect(res.status).toBe(403);
+
+    const rows = vault.engine
+      .queryAudit({ eventType: AuditEventType.ACCESS_DENIED })
+      .filter((r) => r.detail?.operation === "GET /api/v1/agents/gov-admin");
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    expect(row?.success).toBe(false);
+    expect(row?.principal_type).toBe("agent");
+    expect(row?.principal_id).toBe("gov-admin");
+    expect(row?.secret_id).toBeNull();
+    expect(row?.detail).toMatchObject({
+      error: ErrorCode.ACCESS_DENIED,
+      interface: "rest",
+    });
+    // The listener is loopback, so D9's peer normaliser is what makes a
+    // dual-stack `::ffff:127.0.0.1` read as the dotted form here.
+    expect(row?.ip_address).toBe("127.0.0.1");
+  });
 });

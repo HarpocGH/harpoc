@@ -27,9 +27,11 @@ export interface RenewalSchedulerOptions {
   checkIntervalMs?: number;
   /**
    * Called when a scheduled per-certificate renewal fails after all retries
-   * (once per quarantine escalation, not per skipped tick). Default: no-op —
-   * the package stays console-free; the host decides how to report.
-   * `renewNow` rethrows to its caller instead.
+   * (once per quarantine escalation, not per skipped tick) — and once more,
+   * first and carrying the audit error, when the failed-renewal audit row
+   * itself could not be written (D6, 2026-09-06). Default: no-op — the package
+   * stays console-free; the host decides how to report. `renewNow` rethrows to
+   * its caller instead.
    */
   onRenewError?: (secretId: string, err: unknown) => void;
 }
@@ -152,8 +154,12 @@ export class RenewalScheduler {
         // notified, remaining certificates are still processed.
         try {
           this.engine.auditCertRenewFailure(cert.secret_id, err);
-        } catch {
-          // A sealed engine mid-shutdown cannot take the row; the loop goes on.
+        } catch (auditErr) {
+          // A sealed engine mid-shutdown cannot take the row; the loop goes on
+          // (Wave 1 D3: the audit write is the one fail-open step here). The
+          // silence does not: the host hears the write failure first, then the
+          // renewal failure it was meant to record.
+          this.onRenewError?.(cert.secret_id, auditErr);
         }
         this.onRenewError?.(cert.secret_id, err);
       }

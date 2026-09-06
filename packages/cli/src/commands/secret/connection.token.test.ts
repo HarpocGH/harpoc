@@ -98,10 +98,14 @@ describe("secret connection — token path", () => {
     expect(mockEngine.setConnectionConfig).not.toHaveBeenCalled();
   });
 
-  it("set mode's merge read is caller-less", async () => {
+  it("set mode's merge read rides the write's permission and names the caller", async () => {
     mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
     await run(["secret://k", "--db-tls", "require", "--token", "jwt-value"]);
-    expect(mockEngine.getConnectionConfig).toHaveBeenCalledWith("secret://k");
+    expect(mockEngine.getConnectionConfig).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ interface: "cli" }),
+      { forPermission: "rotate" },
+    );
     expect(mockEngine.setConnectionConfig).toHaveBeenCalledWith(
       "secret://k",
       expect.objectContaining({ database: expect.objectContaining({ tls_mode: "require" }) }),

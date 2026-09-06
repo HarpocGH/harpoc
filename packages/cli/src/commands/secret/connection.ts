@@ -96,10 +96,13 @@ export function registerSecretConnectionCommand(secret: Command): void {
           }
 
           const resolved = resolveTokenCallerForHandle(engine, "rotate", handle, tokenValue);
-          // The merge read is the command's own mechanics, deliberately
-          // caller-less (its result never reaches the caller); the caller's
-          // gate is the rotate check inside setConnectionConfig.
-          const current = await engine.getConnectionConfig(handle);
+          // The merge read rides the write's permission (D8): `rotate` is the
+          // gate setConnectionConfig itself applies, so nothing a caller could
+          // not already write is read, and the `secret.read` row names the
+          // principal instead of landing NULL.
+          const current = await engine.getConnectionConfig(handle, resolved?.caller, {
+            forPermission: "rotate",
+          });
           const config = mergeConnectionConfig(current, options);
 
           const parsed = connectionConfigSchema.safeParse(config);

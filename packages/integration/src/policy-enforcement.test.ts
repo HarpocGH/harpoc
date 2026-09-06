@@ -109,14 +109,14 @@ describe("per-secret access policy enforcement end-to-end", () => {
     const denied = vault.engine.createToken("other-agent", ["read", "list"]);
 
     const ok = await app.request("/api/v1/secrets/db-prod/value", {
-      headers: { authorization: `Bearer ${allowed}` },
+      headers: { authorization: `Bearer ${allowed}`, host: "localhost" },
     });
     expect(ok.status).toBe(200);
     const okBody = (await ok.json()) as { data: { value: string } };
     expect(Buffer.from(okBody.data.value, "base64").toString("utf8")).toBe("s3cret-value");
 
     const res = await app.request("/api/v1/secrets/db-prod/value", {
-      headers: { authorization: `Bearer ${denied}` },
+      headers: { authorization: `Bearer ${denied}`, host: "localhost" },
     });
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: string };
@@ -138,7 +138,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
   it("REST: a secret without policy rows is closed to every in-scope principal — as not-found", async () => {
     const token = vault.engine.createToken("other-agent", ["read", "list"]);
     const res = await app.request("/api/v1/secrets/open-key/value", {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(res.status).toBe(404);
   });
@@ -148,7 +148,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
       project: "api",
     });
     const ok = await app.request("/api/v1/secrets/api%2Fsvc-key/value", {
-      headers: { authorization: `Bearer ${projectToken}` },
+      headers: { authorization: `Bearer ${projectToken}`, host: "localhost" },
     });
     expect(ok.status).toBe(200);
 
@@ -156,7 +156,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
     // is absent, and no other row matches: engine denies.
     const bare = vault.engine.createToken("charlie", ["read", "list"]);
     const res = await app.request("/api/v1/secrets/api%2Fsvc-key/value", {
-      headers: { authorization: `Bearer ${bare}` },
+      headers: { authorization: `Bearer ${bare}`, host: "localhost" },
     });
     expect(res.status).toBe(404);
   });
@@ -208,14 +208,14 @@ describe("per-secret access policy enforcement end-to-end", () => {
 
     const token = vault.engine.createToken("other-agent", ["read", "list"]);
     const granted = await app.request("/api/v1/secrets/temp-gated/value", {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(granted.status).toBe(200);
 
     vault.engine.revokePolicy(policy.id);
 
     const closed = await app.request("/api/v1/secrets/temp-gated/value", {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(closed.status).toBe(404);
   });
@@ -236,7 +236,11 @@ describe("per-secret access policy enforcement end-to-end", () => {
       const token = vault.engine.createToken("allowed-agent", ["read", "admin", "list"]);
       const res = await app.request("/api/v1/secrets/db-prod/injection-policy", {
         method: "PUT",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          host: "localhost",
+        },
         body: JSON.stringify({
           url_allowlist: ["https://evil.example/*"],
           command_allowlist: [],
@@ -273,12 +277,12 @@ describe("per-secret access policy enforcement end-to-end", () => {
 
       for (const path of ["injection-policy", "mcp-server", "connection-config", "policies"]) {
         const ok = await app.request(`/api/v1/secrets/db-prod/${path}`, {
-          headers: { authorization: `Bearer ${granted}` },
+          headers: { authorization: `Bearer ${granted}`, host: "localhost" },
         });
         expect(ok.status, `granted ${path}`).toBe(200);
 
         const denied = await app.request(`/api/v1/secrets/db-prod/${path}`, {
-          headers: { authorization: `Bearer ${other}` },
+          headers: { authorization: `Bearer ${other}`, host: "localhost" },
         });
         expect(denied.status, `denied ${path}`).toBe(404);
       }
@@ -299,7 +303,11 @@ describe("per-secret access policy enforcement end-to-end", () => {
       const admin = vault.engine.createToken("cfg-admin", ["rotate", "list"]);
       const ok = await app.request("/api/v1/secrets/cfg-gated/connection-config", {
         method: "PUT",
-        headers: { authorization: `Bearer ${admin}`, "content-type": "application/json" },
+        headers: {
+          authorization: `Bearer ${admin}`,
+          "content-type": "application/json",
+          host: "localhost",
+        },
         body: JSON.stringify({ database: { tls_mode: "require" } }),
       });
       expect(ok.status).toBe(200);
@@ -310,7 +318,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
       const outsider = vault.engine.createToken("other-agent", ["rotate", "list"]);
       const denied = await app.request("/api/v1/secrets/cfg-gated/connection-config", {
         method: "DELETE",
-        headers: { authorization: `Bearer ${outsider}` },
+        headers: { authorization: `Bearer ${outsider}`, host: "localhost" },
       });
       expect(denied.status).toBe(404);
       expect(await vault.engine.getConnectionConfig("secret://cfg-gated")).toBeDefined();
@@ -320,7 +328,11 @@ describe("per-secret access policy enforcement end-to-end", () => {
       const token = vault.engine.createToken("other-agent", ["admin", "list"]);
       const res = await app.request("/api/v1/secrets/db-prod/policies", {
         method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          host: "localhost",
+        },
         body: JSON.stringify({
           principal_type: "agent",
           principal_id: "other-agent",
@@ -380,7 +392,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
 
     async function restList(token: string): Promise<string[]> {
       const res = await app.request("/api/v1/secrets", {
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token}`, host: "localhost" },
       });
       expect(res.status).toBe(200);
       const body = (await res.json()) as { data: Array<{ name: string }> };
@@ -391,7 +403,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
       const other = vault.engine.createToken("other-agent", ["read", "list"]);
 
       const info = await app.request("/api/v1/secrets/db-prod", {
-        headers: { authorization: `Bearer ${other}` },
+        headers: { authorization: `Bearer ${other}`, host: "localhost" },
       });
       expect(info.status).toBe(404);
 
@@ -414,7 +426,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
     it("REST: /health/expiring drops the gated secret for an ungranted principal", async () => {
       const other = vault.engine.createToken("other-agent", ["list"]);
       const res = await app.request("/api/v1/health/expiring?days=7", {
-        headers: { authorization: `Bearer ${other}` },
+        headers: { authorization: `Bearer ${other}`, host: "localhost" },
       });
       expect(res.status).toBe(200);
       const body = (await res.json()) as { data: { expiring: Array<{ name: string }> } };
@@ -422,7 +434,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
 
       const lister = vault.engine.createToken("w2-lister", ["list"]);
       const ok = await app.request("/api/v1/health/expiring?days=7", {
-        headers: { authorization: `Bearer ${lister}` },
+        headers: { authorization: `Bearer ${lister}`, host: "localhost" },
       });
       const okBody = (await ok.json()) as { data: { expiring: Array<{ name: string }> } };
       expect(okBody.data.expiring.map((s) => s.name)).toContain("w2-gated");

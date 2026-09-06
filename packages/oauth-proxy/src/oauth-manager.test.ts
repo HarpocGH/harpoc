@@ -1073,6 +1073,67 @@ describe("OAuthManager pending-flow cap (D3)", () => {
       startSpy.mockRestore();
     }
   });
+
+  it("a chained supersede whose middle bind fails still cancels the first flow", async () => {
+    const fake = makePerNameFakeEngine();
+    const manager = fakeEngineManager(fake, { callbackPort: 0, callbackTimeoutMs: 3_000 });
+
+    let releaseBind: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseBind = resolve;
+    });
+    const realStart = CallbackServer.prototype.start;
+    let binds = 0;
+    const startSpy = vi.spyOn(CallbackServer.prototype, "start").mockImplementation(async function (
+      this: CallbackServer,
+      state: string,
+      timeoutMs?: number,
+    ) {
+      binds += 1;
+      if (binds === 2) {
+        await gate;
+        throw new Error("EADDRINUSE");
+      }
+      return realStart.call(this, state, timeoutMs);
+    });
+
+    try {
+      // One name → one secretId → each start displaces the entry before it, so
+      // the per-secret map only ever names the newest of the three.
+      const first = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+      const second = manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+      await vi.waitFor(() => expect(startSpy).toHaveBeenCalledTimes(2));
+      const third = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
+
+      // The third start's successful bind aborts its own predecessor — the
+      // second — and the second's failed bind rolls back nothing, because it no
+      // longer owns the entry. Nothing in that chain ever reaches the first.
+      releaseBind();
+      await expect(second).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+
+      manager.cancelPendingFlows();
+
+      const settled: unknown = await Promise.race([
+        first.completion.then(
+          () => "resolved" as const,
+          (err: unknown) => err,
+        ),
+        new Promise<"pending">((resolve) => {
+          setTimeout(() => {
+            resolve("pending");
+          }, 500);
+        }),
+      ]);
+      expect(settled).not.toBe("pending");
+      expect(settled).toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+
+      await expect(third.completion).rejects.toMatchObject({
+        code: ErrorCode.OAUTH_FLOW_FAILED,
+      });
+    } finally {
+      startSpy.mockRestore();
+    }
+  });
 });
 
 describe("OAuthManager caller threading (D9)", () => {

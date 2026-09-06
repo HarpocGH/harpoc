@@ -1,4 +1,4 @@
-import type { Agent, AgentPolicy } from "@harpoc/shared";
+import type { AccessPolicy, Agent, AgentPolicy } from "@harpoc/shared";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, SecretInfo } from "../api/client";
@@ -67,6 +67,26 @@ const policy = (over: Partial<AgentPolicy> = {}): AgentPolicy => ({
 
 const POLICIES: Record<string, AgentPolicy[]> = { "ci-bot": [policy()], "old-bot": [] };
 
+const access = (over: Partial<AccessPolicy> = {}): AccessPolicy => ({
+  id: "ap-1",
+  secret_id: "s-1",
+  principal_type: "agent",
+  principal_id: "ci-bot",
+  permissions: ["read", "use"],
+  created_at: 0,
+  expires_at: null,
+  created_by: "cli",
+  ...over,
+});
+
+/**
+ * What `GET /secrets/:handle/policies` answers per column — agent rows
+ * included, because that route lists every principal. `UNGATED` answers the
+ * empty list, which is what keeps the no-grants marker and both grant
+ * predictions saying what they said before the column read existed.
+ */
+const ACCESS: Record<string, AccessPolicy[]> = { [GATED.handle]: [access()] };
+
 const api = (over: Partial<ApiClient> = {}): ApiClient =>
   ({
     listAgents: vi.fn((status?: string) =>
@@ -74,6 +94,7 @@ const api = (over: Partial<ApiClient> = {}): ApiClient =>
     ),
     listSecrets: vi.fn().mockResolvedValue([GATED, UNGATED]),
     listAgentPolicies: vi.fn((name: string) => Promise.resolve(POLICIES[name] ?? [])),
+    getAccessPolicies: vi.fn((handle: string) => Promise.resolve(ACCESS[handle] ?? [])),
     setAgentPermissions: vi
       .fn()
       .mockResolvedValue({ policy: null, gated_before: false, gated_after: false }),
@@ -326,6 +347,103 @@ describe("PermissionsPage", () => {
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() => expect(screen.getByText("Bad expiry")).toBeTruthy());
     expect(screen.queryByText(/harpoc policy grant/)).toBeNull();
+  });
+
+  it("names the grant command when a loaded secret's cell write is refused 404", async () => {
+    // The engine conceals a policy refusal on a secret the caller holds no row
+    // on as SECRET_NOT_FOUND (R5), so on a handle the page is still listing the
+    // remedy is the same grant the 403 branch already names.
+    window.sessionStorage.setItem(
+      "harpoc.ui.token",
+      jwt({ sub: "web-ui", principal_type: "user", jti: "j-1" }),
+    );
+    const setAgentPermissions = vi
+      .fn()
+      .mockRejectedValue(new ApiError(404, "SECRET_NOT_FOUND", "Secret not found"));
+    render(<PermissionsPage api={api({ setAgentPermissions })} />);
+    await waitFor(() => expect(cell("ci-bot", GATED.handle)).toBeTruthy());
+    fireEvent.click(cell("ci-bot", GATED.handle));
+    fireEvent.click(screen.getByLabelText("read"));
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          `harpoc policy grant ${GATED.handle} --principal-type user --principal-id web-ui --permissions admin`,
+        ),
+      ).toBeTruthy(),
+    );
+  });
+
+  it("keeps no grant hint when the refused handle is no longer a loaded secret", async () => {
+    // A genuinely deleted secret answers 404 too, and no grant brings it back.
+    // The page tells the two apart by whether it is still listing the handle —
+    // here the column vanishes under the open editor.
+    const listSecrets = vi
+      .fn()
+      .mockResolvedValueOnce([GATED, UNGATED])
+      .mockResolvedValue([UNGATED]);
+    const setAgentPermissions = vi
+      .fn()
+      .mockRejectedValue(new ApiError(404, "SECRET_NOT_FOUND", "Secret not found"));
+    render(<PermissionsPage api={api({ listSecrets, setAgentPermissions })} />);
+    await waitFor(() => expect(cell("ci-bot", GATED.handle)).toBeTruthy());
+    fireEvent.click(cell("ci-bot", GATED.handle));
+    fireEvent.click(screen.getByLabelText(/Show inactive/));
+    // The reloaded matrix must be on screen, not the loading gap `useAsync`
+    // opens when a dep changes: with no data the editor's own first-grant
+    // prediction fires and the write never leaves.
+    await waitFor(() => {
+      expect(document.querySelector(`td[data-secret="${UNGATED.handle}"]`)).toBeTruthy();
+      expect(document.querySelector(`td[data-secret="${GATED.handle}"]`)).toBeNull();
+    });
+    fireEvent.click(screen.getByLabelText("read"));
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(screen.getByText("Secret not found")).toBeTruthy());
+    expect(screen.queryByText(/harpoc policy grant/)).toBeNull();
+  });
+
+  it("marks a secret held only by a tool principal as granted", async () => {
+    render(
+      <PermissionsPage
+        api={api({
+          getAccessPolicies: vi.fn((handle: string) =>
+            Promise.resolve(
+              handle === UNGATED.handle
+                ? [access({ id: "ap-2", principal_type: "tool", principal_id: "ci-runner" })]
+                : (ACCESS[handle] ?? []),
+            ),
+          ),
+        })}
+      />,
+    );
+    await waitFor(() => expect(cell("ci-bot", UNGATED.handle)).toBeTruthy());
+    const column = screen.getByText("open-key").closest("th");
+    await waitFor(() => expect(column?.textContent).toContain("granted"));
+    expect(document.querySelectorAll('thead th .chip[data-tone="warn"]').length).toBe(0);
+    // The holder is named: no agent row explains the marker, and an operator
+    // reading "granted" over a column of em dashes needs to know which
+    // principal accounts for it.
+    expect(screen.getByText(/\+1 other principal/).textContent).toContain("tool:ci-runner");
+    expect(cell("ci-bot", UNGATED.handle).textContent).toBe("—");
+  });
+
+  it("falls back to the agent rows for a column the caller may not read", async () => {
+    // A scoped admin token is refused per secret. The column then says what the
+    // agent listings already said rather than claiming the secret has no
+    // holders — a refusal is not an answer.
+    render(
+      <PermissionsPage
+        api={api({
+          getAccessPolicies: vi
+            .fn()
+            .mockRejectedValue(new ApiError(403, "ACCESS_DENIED", "Access denied")),
+        })}
+      />,
+    );
+    await waitFor(() => expect(cell("ci-bot", GATED.handle)).toBeTruthy());
+    expect(screen.getByText("granted").closest("th")?.textContent).toContain("test-key");
+    expect(document.querySelectorAll('thead th .chip[data-tone="warn"]').length).toBe(1);
+    expect(screen.queryByText(/other principal/)).toBeNull();
   });
 
   it("clears one holder's cell without a confirm while another agent still holds the secret", async () => {

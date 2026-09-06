@@ -2,6 +2,8 @@ import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ErrorCode } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { SqliteStore } from "./sqlite-store.js";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -42,5 +44,12 @@ describe("database file mode at creation (D55)", () => {
   it("does not create a file for an in-memory store", () => {
     store = new SqliteStore(":memory:");
     expect(existsSync(":memory:")).toBe(false);
+  });
+
+  // R5: the empty path is not the in-memory sentinel — the 0600 pre-create
+  // opens `""`, which is ENOENT, and the store refuses. Pinned so the refusal
+  // cannot quietly become SQLite's anonymous on-disk temporary database.
+  it("refuses an empty path as a database error", async () => {
+    await expectVaultError(() => new SqliteStore(""), ErrorCode.DATABASE_ERROR);
   });
 });

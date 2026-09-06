@@ -3,8 +3,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext, Permission, PrincipalType, UseSecretAction } from "@harpoc/shared";
-import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
+import {
+  AuditEventType,
+  ErrorCode,
+  SecretType,
+  tokenlessStdioCaller,
+  VaultError,
+} from "@harpoc/shared";
 import type { McpConnectionEntry, McpConnectionRegistry } from "./injection/mcp-registry.js";
+import type { SqliteStore } from "./storage/sqlite-store.js";
 import { VaultEngine } from "./vault-engine.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
@@ -95,6 +102,11 @@ function grant(secretId: string, principalId: string, permissions: Permission[])
 /** The engine's live MCP connection registry (test seam — private field). */
 function registryOf(e: VaultEngine): McpConnectionRegistry {
   return (e as unknown as { mcpRegistry: McpConnectionRegistry }).mcpRegistry;
+}
+
+/** The engine's live store (test seam — private field), for counting handle resolutions. */
+function storeOf(e: VaultEngine): SqliteStore {
+  return (e as unknown as { store: SqliteStore }).store;
 }
 
 /** Publish a ready stdio entry without spawning a child — something live to tear down. */
@@ -374,6 +386,26 @@ describe("an unknown-handle probe is audited on every resolving surface", () => 
     });
   });
 
+  // D3: a probe through a route whose semantics are not a read left a
+  // `secret.read` row, so `harpoc audit --event secret.read` showed six routes'
+  // probes and `--event cert.renew` showed none of them.
+  it("resolveSecretId carries the route's own event type into the failed row", async () => {
+    await expectVaultError(
+      () => engine.resolveSecretId(H, agent("bob"), AuditEventType.CERT_RENEW),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
+
+    expect(engine.queryAudit({ eventType: AuditEventType.SECRET_READ })).toHaveLength(0);
+    const row = engine.queryAudit({ eventType: AuditEventType.CERT_RENEW }).find((r) => !r.success);
+    expect(row?.principal_id).toBe("bob");
+    expect(row?.secret_id).toBeNull();
+    expect(row?.detail).toEqual({
+      handle: H,
+      error: ErrorCode.SECRET_NOT_FOUND,
+      interface: "rest",
+    });
+  });
+
   interface ConfigSite {
     name: string;
     eventType: AuditEventType;
@@ -588,5 +620,63 @@ describe("revokePolicy's membership check is inside the engine (E75a fallout)", 
     engine.revokePolicy(policyId, undefined);
 
     expect(engine.listPolicies(idA).some((p) => p.id === policyId)).toBe(false);
+  });
+});
+
+// R16(a): a caller-ful wrapped method resolved the handle twice — once in
+// `enforceCallerPolicy`, once inside the manager — so every `--allow-tokenless`
+// stdio call paid a second name-HMAC lookup for a record it already held.
+describe("the gate's resolved secret is reused by the wrapped method (R16)", () => {
+  const REUSE: Array<{
+    name: string;
+    permission: Permission;
+    call: (handle: string, caller: CallerContext) => Promise<unknown>;
+  }> = [
+    { name: "getSecretInfo", permission: "read", call: (h, c) => engine.getSecretInfo(h, c) },
+    {
+      name: "rotateSecret",
+      permission: "rotate",
+      call: (h, c) => engine.rotateSecret(h, VALUE, c),
+    },
+    { name: "revokeSecret", permission: "revoke", call: (h, c) => engine.revokeSecret(h, c) },
+  ];
+
+  it.each(REUSE)(
+    "$name resolves the handle once, not twice",
+    async ({ name, permission, call }) => {
+      const id = await makeSecret(`reuse-${name}`);
+      grant(id, "alice", [permission]);
+      const spy = vi.spyOn(storeOf(engine), "getSecretsByNameHmac");
+
+      await call(`secret://reuse-${name}`, agent("alice"));
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      spy.mockRestore();
+    },
+  );
+});
+
+// R16(b): the vault-wide form refused every caller, so the synthetic
+// `tokenless-stdio` caller lost a listing the absent caller it replaces had.
+// It is an admin-user caller (R7); only a genuinely scoped token is refused.
+describe("the vault-wide listPolicies form admits the admin-user classes (R16)", () => {
+  it("the tokenless-stdio caller lists vault-wide and writes no row", async () => {
+    const id = await makeSecret("vault-wide");
+    grant(id, "alice", ["read"]);
+    const before = engine.queryAudit({ eventType: AuditEventType.SECRET_READ }).length;
+
+    const policies = engine.listPolicies(undefined, tokenlessStdioCaller("mcp"));
+
+    expect(policies.map((p) => p.secret_id)).toEqual([id]);
+    expect(engine.queryAudit({ eventType: AuditEventType.SECRET_READ })).toHaveLength(before);
+  });
+
+  it("a scoped token caller must still name the secret", async () => {
+    await makeSecret("vault-wide-denied");
+    const err = await expectVaultError(
+      () => engine.listPolicies(undefined, agent("bob")),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe("A secret id is required to list access policies");
   });
 });

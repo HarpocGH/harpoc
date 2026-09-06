@@ -12,6 +12,7 @@ import {
   buildAllowedHostSet,
   checkRequestHost,
   ErrorCode,
+  normalizeSocketPeer,
   VaultError,
 } from "@harpoc/shared";
 import { InjectionGuard } from "./guards/injection-guard.js";
@@ -263,8 +264,10 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
         oauthManager,
         certManager,
         accessInterface: "mcp-http",
+        // A dual-stack listener reports an IPv4 peer as `::ffff:127.0.0.1`;
+        // the row records the dotted form so one client is one value (D9).
         ...(req.socket.remoteAddress !== undefined
-          ? { remoteAddress: req.socket.remoteAddress }
+          ? { remoteAddress: normalizeSocketPeer(req.socket.remoteAddress) }
           : {}),
       });
     } catch (err) {

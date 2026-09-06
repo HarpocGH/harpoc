@@ -15,7 +15,7 @@ import { readFile, chmod } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { randomFillSync } from "node:crypto";
-import type { SessionFile } from "@harpoc/shared";
+import type { SessionFile, SessionKeyProtectionScheme } from "@harpoc/shared";
 import {
   DEFAULT_SESSION_TTL_MS,
   MAX_SESSION_TTL_MS,
@@ -35,7 +35,10 @@ export interface SessionManagerOptions {
   /**
    * Invoked when the owner-only permission repair after a write failed — the
    * POSIX chmod or the Windows icacls step; the file itself is created with
-   * mode 0o600 from the first instant. The error message is self-descriptive.
+   * mode 0o600 from the first instant — and when the session mutex could not
+   * be taken for a reason other than contention (an EACCES on the lock
+   * directory, say), so the bounded wait proceeded without it rather than
+   * failing silently (R30). The error message is self-descriptive.
    * Default: silent — core never logs; interactive entry points (the CLI)
    * supply a callback that surfaces the warning. A keystore failure is not a
    * warning: `writeSession` throws `SESSION_KEYSTORE_UNAVAILABLE` (R8/D54).
@@ -54,7 +57,29 @@ function isMissingFileError(err: unknown): boolean {
   return code === "ENOENT" || code === "ENOTDIR";
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * What a caller believes the session file on disk is. An absent field matches
+ * anything; a `session_id` that differs means another process unlocked over
+ * the file, and a `key_protection` that differs means the copy on disk is not
+ * the one this protector writes — R8/D54's downgrade, seen from the slide
+ * instead of the load path (D7).
+ */
+export interface SessionExpectation {
+  sessionId?: string;
+  scheme?: SessionKeyProtectionScheme;
+}
+
+/**
+ * The lock wait's clock, captured at module load and used by nothing else. A
+ * cross-process wait another process is expected to end must not be stallable
+ * by a suite that installed fake timers — the never-hang bound is the whole
+ * point of the wait (R31). Session expiry itself stays on the global clock:
+ * tests fake time to expire sessions, and must keep being able to.
+ */
+const realSetTimeout: typeof setTimeout = setTimeout;
+const realDateNow: typeof Date.now = Date.now;
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => realSetTimeout(resolve, ms));
 
 type SessionLockMode<T> = { mode: "wait" } | { mode: "try"; onContention: () => Promise<T> };
 
@@ -77,6 +102,7 @@ export class SessionManager {
   private readonly onPermissionRepairFailure: (error: Error) => void;
   private readonly lockPath: string;
   private readonly lockStaleMs: number;
+  private lastLockError: Error | null = null;
 
   constructor(
     private readonly sessionPath: string,
@@ -86,6 +112,22 @@ export class SessionManager {
     this.onPermissionRepairFailure = options.onPermissionRepairFailure ?? ((): void => {});
     this.lockPath = `${sessionPath}.lock`;
     this.lockStaleMs = options.lockStaleMs ?? SESSION_LOCK_STALE_MS;
+  }
+
+  /** The scheme this manager's protector tags a freshly written file with. */
+  get protectionScheme(): SessionKeyProtectionScheme {
+    return this.protector.scheme;
+  }
+
+  /**
+   * Does the stored file match what the caller believes it wrote? The engine's
+   * monitor applies this to its own read, so the slide and the monitor never
+   * disagree about whose session the file describes.
+   */
+  matchesExpectation(session: SessionFile, expect?: SessionExpectation): boolean {
+    if (expect?.sessionId !== undefined && session.session_id !== expect.sessionId) return false;
+    if (expect?.scheme !== undefined && session.key_protection !== expect.scheme) return false;
+    return true;
   }
 
   /**
@@ -223,6 +265,12 @@ export class SessionManager {
    * carried over untouched, so the frequent monitor path never does a keystore
    * roundtrip. The returned file is the stored form.
    *
+   * `expect` is what the caller believes it wrote: a stored file whose
+   * `session_id` or `key_protection` differs belongs to another process's
+   * session (or is a downgraded copy of this one), and the slide returns null
+   * without writing rather than pushing a stranger's expiry out — the null is
+   * the caller's signal to seal (D7).
+   *
    * The read, the check and the rename run under the session mutex (R8/D56),
    * so a lock or a fresh unlock in another process cannot interleave. A slide
    * is expendable: on contention the file is returned as stored and the next
@@ -231,11 +279,12 @@ export class SessionManager {
   async extendSession(
     ttlMs: number = DEFAULT_SESSION_TTL_MS,
     requireExisting = false,
+    expect?: SessionExpectation,
   ): Promise<SessionFile | null> {
     return this.withSessionLock(
-      { mode: "try", onContention: () => this.readStoredSession() },
+      { mode: "try", onContention: () => this.readMatchingSession(expect) },
       async () => {
-        const session = await this.readStoredSession();
+        const session = await this.readMatchingSession(expect);
         if (!session) return null;
 
         const now = Date.now();
@@ -255,6 +304,17 @@ export class SessionManager {
         return wrote ? updated : null;
       },
     );
+  }
+
+  /**
+   * The stored session file, or null when it is missing, expired, corrupted —
+   * or not the file `expect` describes. Throws exactly what `readStoredSession`
+   * throws: a transient read failure is still not proof the session is gone.
+   */
+  private async readMatchingSession(expect?: SessionExpectation): Promise<SessionFile | null> {
+    const session = await this.readStoredSession();
+    if (!session) return null;
+    return this.matchesExpectation(session, expect) ? session : null;
   }
 
   /**
@@ -415,20 +475,32 @@ export class SessionManager {
    * is reclaimed, and past that bound proceeds without it — the fresh write
    * and the erase must never hang on a directory nobody can release. Any
    * other `mkdir` failure counts as "not acquired": the write that follows
-   * reports the real error.
+   * reports the real error, and the proceed-unlocked step reports the lock
+   * failure itself through the permission seam, so an EACCES on the lock
+   * directory is no longer silent (R30). The poll runs on the module-captured
+   * real clock (R31).
    */
   private async withSessionLock<T>(lock: SessionLockMode<T>, body: () => Promise<T>): Promise<T> {
     let held = this.tryAcquireLock();
     if (!held) {
       if (lock.mode === "try") return lock.onContention();
-      const deadline = Date.now() + this.lockStaleMs + SESSION_LOCK_POLL_MS;
-      while (!held && Date.now() < deadline) {
+      const deadline = realDateNow() + this.lockStaleMs + SESSION_LOCK_POLL_MS;
+      while (!held && realDateNow() < deadline) {
         await sleep(SESSION_LOCK_POLL_MS);
         held = this.tryAcquireLock();
       }
       // One attempt at or past the bound: a dead holder is reclaimed however
       // long the attempts themselves took.
       if (!held) held = this.tryAcquireLock();
+      // Read synchronously after the last attempt, before any await: the field
+      // cannot have been rewritten by an interleaved caller.
+      if (!held && this.lastLockError) {
+        this.onPermissionRepairFailure(
+          new Error(
+            `proceeding without the session lock at ${this.lockPath} (${this.lastLockError.message})`,
+          ),
+        );
+      }
     }
     try {
       return await body();
@@ -438,12 +510,20 @@ export class SessionManager {
   }
 
   private tryAcquireLock(): boolean {
+    this.lastLockError = null;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         mkdirSync(this.lockPath);
         return true;
       } catch (err) {
-        if ((err as NodeJS.ErrnoException | null)?.code !== "EEXIST") return false;
+        if ((err as NodeJS.ErrnoException | null)?.code !== "EEXIST") {
+          this.lastLockError = err instanceof Error ? err : new Error(String(err));
+          return false;
+        }
+        // The holder released between our own mkdir and this check: the lock
+        // is free, not held, so the one retry takes it instead of reporting
+        // contention over a directory that is no longer there (R30).
+        if (this.lockVanished()) continue;
         if (!this.isLockStale()) return false;
         try {
           rmdirSync(this.lockPath);
@@ -453,6 +533,20 @@ export class SessionManager {
       }
     }
     return false;
+  }
+
+  /**
+   * Is `session.json.lock` gone? Distinguishes a holder that released between
+   * our mkdir and the staleness check — where the lock is free — from a lock
+   * we merely cannot stat, which keeps counting as held.
+   */
+  private lockVanished(): boolean {
+    try {
+      statSync(this.lockPath);
+      return false;
+    } catch (err) {
+      return isMissingFileError(err);
+    }
   }
 
   private isLockStale(): boolean {

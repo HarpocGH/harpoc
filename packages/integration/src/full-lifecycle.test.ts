@@ -138,7 +138,7 @@ describe("Full Lifecycle", () => {
   it("REST list secrets returns the secret", async () => {
     const app = createApp(vault.engine);
     const res = await app.request("/api/v1/secrets", {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { data: Array<{ handle: string }> };
@@ -151,7 +151,7 @@ describe("Full Lifecycle", () => {
     const app = createApp(vault.engine);
     const encodedName = encodeURIComponent(SECRET_NAME);
     const res = await app.request(`/api/v1/secrets/${encodedName}`, {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { data: { name: string; type: string; version: number } };
@@ -232,7 +232,7 @@ describe("Full Lifecycle", () => {
     // REST should return 503
     const app = createApp(vault.engine);
     const res = await app.request("/api/v1/secrets", {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(res.status).toBe(503);
   });

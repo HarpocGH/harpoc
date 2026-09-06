@@ -9,6 +9,7 @@ import { AuditEventType, ErrorCode, PrincipalType, VaultError } from "@harpoc/sh
 import type { CallerContext, OAuthProviderConfig, Permission } from "@harpoc/shared";
 import { dropOAuthAuthMethodConstraint, expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
+import type { McpConnectionRegistry } from "./injection/mcp-registry.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();
@@ -46,6 +47,21 @@ function registerAgents(...names: string[]): void {
     } catch (err) {
       if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
     }
+  }
+}
+
+/** The engine's live MCP connection registry (test seam — private field). */
+function registryOf(e: VaultEngine): McpConnectionRegistry {
+  return (e as unknown as { mcpRegistry: McpConnectionRegistry }).mcpRegistry;
+}
+
+/** Expire a secret out of band — the lazy transition is what is under test. */
+function expireSecret(secretId: string): void {
+  const db = new Database(dbPath);
+  try {
+    db.prepare("UPDATE secrets SET expires_at = ? WHERE id = ?").run(Date.now() - 1000, secretId);
+  } finally {
+    db.close();
   }
 }
 
@@ -914,6 +930,56 @@ describe("getOAuthAccessToken", () => {
     await expect(engine.getOAuthAccessToken(apiKeyId)).rejects.toMatchObject({
       code: ErrorCode.OAUTH_NOT_CONFIGURED,
     });
+  });
+
+  // D5/R1: this method carried its own copy of the status ladder — no handle in
+  // the expire row, no L2 registry terminate, no handle in the messages — so a
+  // downstream child kept an expired credential and `audit --secret` showed an
+  // expire row that named nothing.
+  it("a lazy expiry writes the handle into the expire row and ends the downstream child", async () => {
+    await engine.completeOAuthFlow(secretId, "tok", "refresh", Date.now() + 3600_000);
+    expireSecret(secretId);
+    const terminate = vi.spyOn(registryOf(engine), "terminate");
+
+    const err = await expectVaultError(
+      () => engine.getOAuthAccessToken(secretId),
+      ErrorCode.SECRET_EXPIRED,
+    );
+    expect(err.message).toBe("Secret expired: secret://access-test");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const rows = engine.queryAudit({ eventType: AuditEventType.SECRET_EXPIRE });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.secret_id).toBe(secretId);
+    expect(rows[0]?.detail).toMatchObject({ handle: "secret://access-test" });
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(terminate).toHaveBeenCalledWith(secretId, "secret_expired");
+    terminate.mockRestore();
+  });
+
+  it("uses the handle the caller passed instead of rebuilding one", async () => {
+    await engine.completeOAuthFlow(secretId, "tok", "refresh", Date.now() + 3600_000);
+    expireSecret(secretId);
+
+    const err = await expectVaultError(
+      () => engine.getOAuthAccessToken(secretId, "secret://passed-in"),
+      ErrorCode.SECRET_EXPIRED,
+    );
+    expect(err.message).toBe("Secret expired: secret://passed-in");
+    expect(engine.queryAudit({ eventType: AuditEventType.SECRET_EXPIRE })[0]?.detail).toMatchObject(
+      { handle: "secret://passed-in" },
+    );
+  });
+
+  it("a revoked secret refuses with the handle in the message", async () => {
+    await engine.completeOAuthFlow(secretId, "tok", "refresh", Date.now() + 3600_000);
+    await engine.revokeSecret("secret://access-test");
+
+    const err = await expectVaultError(
+      () => engine.getOAuthAccessToken(secretId),
+      ErrorCode.SECRET_REVOKED,
+    );
+    expect(err.message).toBe("Secret revoked: secret://access-test");
   });
 });
 

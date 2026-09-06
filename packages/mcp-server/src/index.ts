@@ -12,6 +12,7 @@ import {
   VAULT_DIR_NAME,
   SESSION_FILE_NAME,
 } from "@harpoc/shared";
+import type { ServerStopTrigger, ServerTransport } from "@harpoc/shared";
 import { DEFAULT_MCP_HTTP_PORT, startMcpHttpServer } from "./http.js";
 import {
   parseAllowedHostsOption,
@@ -143,13 +144,16 @@ async function main(): Promise<void> {
   const startedAt = Date.now();
   const tokenless = values["allow-tokenless"] === true;
   let close: () => Promise<void>;
-  let transport: "stdio" | "http";
+  // `harpoc-mcp` serves two of the three transports; `rest` is the CLI's.
+  // The narrowing is deliberate (R21/D1) — the union is shared, the subset
+  // is local.
+  let transport: Extract<ServerTransport, "stdio" | "http">;
   let boundPort: number | undefined;
   let shuttingDown = false;
 
   // The stop row mirrors the start row (R4/D67). A sealed vault cannot take
   // it, and a stop that cannot be recorded must not block the stop.
-  const shutdown = async (trigger: "SIGINT" | "SIGTERM" | "transport_closed"): Promise<void> => {
+  const shutdown = async (trigger: ServerStopTrigger): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     try {

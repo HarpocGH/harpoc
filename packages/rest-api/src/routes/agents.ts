@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Permission } from "@harpoc/shared";
 import {
+  AuditEventType,
   AgentStatus,
   agentNameSchema,
   listAgentsQuerySchema,
@@ -159,7 +160,11 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     // Resolve the handle here so an unknown secret answers SECRET_NOT_FOUND
     // rather than reaching the policy insert as a dangling reference.
-    const secretId = await engine.resolveSecretId(buildHandle(handleParam), callerOf(c));
+    const secretId = await engine.resolveSecretId(
+      buildHandle(handleParam),
+      callerOf(c),
+      AuditEventType.POLICY_GRANT,
+    );
     const result = engine.setAgentPermissions(
       name,
       secretId,

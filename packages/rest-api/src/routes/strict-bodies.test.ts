@@ -185,6 +185,7 @@ function send(app: ReturnType<typeof build>["app"], method: string, path: string
   return app.request(path, {
     method,
     headers: {
+      host: "localhost",
       authorization: "Bearer valid-jwt",
       "content-type": "application/json",
     },

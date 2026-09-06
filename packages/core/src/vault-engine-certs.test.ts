@@ -832,6 +832,77 @@ describe("generic certificate-typed secrets keep working", () => {
   });
 });
 
+/**
+ * One predicate, four paths. The certificates ROW — not the type — is what
+ * marks a secret as vault-managed: `certificate` has always been a legal type
+ * on the generic create paths, and those secrets carry a real payload. Each
+ * case drives both arms of one path, so keying on the type alone reds all four.
+ */
+describe("the vault-managed discriminator on all four value paths", () => {
+  const LEGACY = new Uint8Array(Buffer.from("legacy-credential", "utf8"));
+
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.importCertificate("managed", fx("rsa-key.pem"), {
+      certificatePem: fx("rsa-cert.pem"),
+    });
+  });
+
+  it("getSecretValue: refuses the managed certificate, returns the generic one", async () => {
+    await engine.createSecret({ name: "plain", type: SecretType.CERTIFICATE, value: LEGACY });
+
+    await expectVaultError(
+      () => engine.getSecretValue("secret://managed"),
+      ErrorCode.CERT_VALUE_UNSUPPORTED,
+    );
+    expect(Buffer.from(await engine.getSecretValue("secret://plain")).toString("utf8")).toBe(
+      "legacy-credential",
+    );
+  });
+
+  it("setSecretValue: refuses the managed certificate, accepts the generic one", async () => {
+    await engine.createSecret({ name: "plain", type: SecretType.CERTIFICATE });
+
+    await expectVaultError(
+      () => engine.setSecretValue("secret://managed", LEGACY),
+      ErrorCode.CERT_VALUE_UNSUPPORTED,
+    );
+    await engine.setSecretValue("secret://plain", LEGACY);
+    expect(engine.listSecrets().find((x) => x.name === "plain")?.status).toBe("active");
+  });
+
+  it("rotateSecret: refuses the managed certificate, rotates the generic one", async () => {
+    await engine.createSecret({ name: "plain", type: SecretType.CERTIFICATE, value: LEGACY });
+
+    await expectVaultError(
+      () => engine.rotateSecret("secret://managed", LEGACY),
+      ErrorCode.CERT_VALUE_UNSUPPORTED,
+    );
+    await engine.rotateSecret("secret://plain", new Uint8Array(Buffer.from("v2", "utf8")));
+    expect(Buffer.from(await engine.getSecretValue("secret://plain")).toString("utf8")).toBe("v2");
+  });
+
+  it("useSecret: refuses the managed certificate, injects the generic one", async () => {
+    await engine.createSecret({ name: "plain", type: SecretType.CERTIFICATE, value: LEGACY });
+    await engine.setInjectionPolicy("secret://plain", { url_allowlist: [`${targetUrl}/*`] });
+    await engine.setInjectionPolicy("secret://managed", { url_allowlist: [`${targetUrl}/*`] });
+    const action = {
+      type: "http",
+      method: "GET",
+      url: `${targetUrl}/x`,
+      injection: { type: "bearer" },
+    } as const;
+
+    await expectVaultError(
+      () => engine.useSecret("secret://managed", action),
+      ErrorCode.CERT_VALUE_UNSUPPORTED,
+    );
+    const res = await engine.useSecret("secret://plain", action);
+    if (res.type !== "http") throw new Error("expected http result");
+    expect(lastAuthHeader).toBe("Bearer legacy-credential");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Certificate read accessors + ACME account storage
 // ---------------------------------------------------------------------------

@@ -20,9 +20,12 @@ const realDateNow: typeof Date.now = Date.now;
 /**
  * R8/D56: an authenticated call on engine B fires a slide that holds
  * `session.json.lock` across its read, and engine A's erase waits for that
- * lock by sleeping on `setTimeout` — which this file has faked, and nothing
- * here advances it. So the erase must only start once the slide has released,
- * and this yield is real-clocked for that reason.
+ * lock. Since the standing-rides tranche (2026-09-06, D7) `withSessionLock`
+ * polls on a module-captured `setTimeout`/`Date.now`, so that wait no longer
+ * depends on this file's fake timers being advanced — the erase would settle
+ * on its own. The yield stays as a belt-and-braces pin: it keeps the two
+ * engines' order explicit (the slide releases, then the erase starts) and
+ * fails loudly, naming the lock path, if the product ever loses that capture.
  */
 async function awaitSessionLockRelease(sessionPath: string): Promise<void> {
   const lockPath = `${sessionPath}.lock`;
@@ -109,7 +112,7 @@ describe("Lock Coordination", () => {
       await advanceMonitorAndAwaitSeal(engine2);
 
       const res = await app.request("/api/v1/secrets", {
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token}`, host: "localhost" },
       });
       expect(res.status).toBe(503);
     } finally {

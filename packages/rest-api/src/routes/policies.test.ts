@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 import type { VaultApiToken, AccessPolicy } from "@harpoc/shared";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
 import { authMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { createPolicyRoutes } from "./policies.js";
@@ -115,6 +115,23 @@ describe("policy routes", () => {
       expect(body.data.id).toBe("policy-1");
     });
 
+    it("probes the handle as policy.grant, not secret.read (D3)", async () => {
+      await app.request("/api/v1/secrets/test-key/policies", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          principal_type: "agent",
+          principal_id: "agent-1",
+          permissions: ["read"],
+        }),
+      });
+      expect(engine.resolveSecretId).toHaveBeenCalledWith(
+        "secret://test-key",
+        expect.objectContaining({ principal_id: ADMIN_TOKEN.sub, interface: "rest" }),
+        AuditEventType.POLICY_GRANT,
+      );
+    });
+
     it("requires admin scope", async () => {
       engine = createMockEngine(READ_TOKEN);
       app = new Hono<HarpocEnv>();
@@ -177,6 +194,18 @@ describe("policy routes", () => {
         "secret-uuid-1",
       );
       expect(engine.listPolicies).not.toHaveBeenCalled();
+    });
+
+    it("probes the handle as policy.revoke, not secret.read (D3)", async () => {
+      await app.request("/api/v1/secrets/test-key/policies/policy-1", {
+        method: "DELETE",
+        headers: AUTH,
+      });
+      expect(engine.resolveSecretId).toHaveBeenCalledWith(
+        "secret://test-key",
+        expect.objectContaining({ principal_id: ADMIN_TOKEN.sub, interface: "rest" }),
+        AuditEventType.POLICY_REVOKE,
+      );
     });
 
     it("returns 404 for unknown policy", async () => {

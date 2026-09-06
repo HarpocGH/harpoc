@@ -131,6 +131,7 @@ export function AuditPage({ api }: { api: ApiClient }) {
               <th>time</th>
               <th>event</th>
               <th>principal</th>
+              <th>ip</th>
               <th>outcome</th>
             </tr>
           </thead>
@@ -140,6 +141,7 @@ export function AuditPage({ api }: { api: ApiClient }) {
                 <td>{new Date(e.timestamp).toISOString()}</td>
                 <td>{e.event_type}</td>
                 <td>{e.principal_id ?? "-"}</td>
+                <td>{e.ip_address ?? "-"}</td>
                 <td>
                   <span class="chip" data-tone={e.success ? "ok" : "bad"}>
                     {e.success ? "ok" : "failed"}

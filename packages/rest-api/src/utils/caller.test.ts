@@ -69,4 +69,48 @@ describe("socketPeer / callerOf (E75i)", () => {
       await new Promise<void>((resolve) => server?.close(() => resolve()));
     }
   });
+
+  /**
+   * A dual-stack listener (`::`) reports an IPv4 peer as `::ffff:127.0.0.1`
+   * (D9): one client would then occupy two `audit_log.ip_address` values
+   * depending on which address the operator bound. Null where the host has no
+   * IPv6 stack, or binds `::` v6-only, so the shape cannot arise at all.
+   */
+  async function dualStackPeerBody(): Promise<unknown | null> {
+    const app = peerApp();
+    let server: ReturnType<typeof serve> | undefined;
+    try {
+      const port = await new Promise<number>((resolve, reject) => {
+        const started = serve({ fetch: app.fetch, port: 0, hostname: "::" }, (info: AddressInfo) =>
+          resolve(info.port),
+        );
+        server = started;
+        started.once("error", reject);
+      });
+      const res = await fetch(`http://127.0.0.1:${String(port)}/peer`);
+      return await res.json();
+    } catch {
+      return null;
+    } finally {
+      const started = server;
+      if (started !== undefined) {
+        await new Promise<void>((resolve) => started.close(() => resolve()));
+      }
+    }
+  }
+
+  it("records a dual-stack IPv4 peer in dotted form (D9)", async (ctx) => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const body = await dualStackPeerBody();
+    if (body === null) return ctx.skip();
+    expect(body).toEqual({
+      peer: "127.0.0.1",
+      caller: {
+        principal_type: "agent",
+        principal_id: "test-agent",
+        interface: "rest",
+        remote_address: "127.0.0.1",
+      },
+    });
+  });
 });

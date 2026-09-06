@@ -140,6 +140,14 @@ export class OAuthManager {
   private onBackgroundFlowError?: (secretId: string, err: unknown) => void;
   private maxPendingAuthorizations: number;
   private readonly pendingFlows = new Map<string, PendingFlow>();
+  /**
+   * Every flow that can still run. The per-secret map holds only the newest
+   * flow for each secret, so a chained supersede whose middle bind fails leaves
+   * its predecessor live but unreachable from the map — its callback listener
+   * would then stand for the whole callback timeout, past the dispose that was
+   * supposed to have cancelled it, and the cap would under-count it (D6).
+   */
+  private readonly liveFlows = new Set<PendingFlow>();
 
   constructor(engine: VaultEngine, options?: OAuthManagerOptions) {
     this.engine = engine;
@@ -169,10 +177,11 @@ export class OAuthManager {
 
   /**
    * Abort every pending background flow, device-code polls and
-   * authorization-code flows alike (owner dispose path).
+   * authorization-code flows alike (owner dispose path) — over the live set, so
+   * a flow the per-secret map no longer names is cancelled too.
    */
   cancelPendingFlows(): void {
-    for (const flow of this.pendingFlows.values()) {
+    for (const flow of this.liveFlows) {
       flow.controller.abort();
     }
   }
@@ -180,7 +189,7 @@ export class OAuthManager {
   /** Pending flows currently pinning a loopback callback listener. */
   private countSocketFlows(): number {
     let count = 0;
-    for (const flow of this.pendingFlows.values()) {
+    for (const flow of this.liveFlows) {
       if (flow.holdsSocket) count++;
     }
     return count;
@@ -196,9 +205,9 @@ export class OAuthManager {
    * 6. Exchange code for tokens
    * 7. Complete OAuth flow (secret → ACTIVE)
    *
-   * The flow is registered in `pendingFlows`, so `cancelFlow`/`cancelPendingFlows`
-   * abort it and stop the callback server. A failing flow leaves the secret
-   * PENDING — the user can retry or delete it.
+   * The flow is registered in `pendingFlows` and the live set, so
+   * `cancelFlow`/`cancelPendingFlows` abort it and stop the callback server. A
+   * failing flow leaves the secret PENDING — the user can retry or delete it.
    */
   async startAuthorizationCodeDeferred(
     name: string,
@@ -239,6 +248,7 @@ export class OAuthManager {
     const controller = new AbortController();
     const pending: PendingFlow = { controller, holdsSocket: true, settled: false };
     this.pendingFlows.set(secretId, pending);
+    this.liveFlows.add(pending);
 
     const callbackServer = new CallbackServer(this.callbackPort);
     const flow = new AuthorizationCodeFlow();
@@ -275,6 +285,7 @@ export class OAuthManager {
 
       return { handle, secretId, authUrl, completion };
     } catch (err) {
+      this.liveFlows.delete(pending);
       if (this.pendingFlows.get(secretId)?.controller === controller) {
         if (controller.signal.aborted) {
           predecessor?.controller.abort();
@@ -365,7 +376,7 @@ export class OAuthManager {
       })
       .finally(() => {
         pending.settled = true;
-        this.unregisterPendingFlow(secretId, pending.controller);
+        this.unregisterPendingFlow(secretId, pending);
       });
     return completion;
   }
@@ -387,12 +398,18 @@ export class OAuthManager {
       settled: false,
     };
     this.pendingFlows.set(secretId, pending);
+    this.liveFlows.add(pending);
     return pending;
   }
 
-  /** Drop a settled flow's entry — never a successor's (same-secretId restart). */
-  private unregisterPendingFlow(secretId: string, controller: AbortController): void {
-    if (this.pendingFlows.get(secretId)?.controller === controller) {
+  /**
+   * Drop a settled flow: out of the live set always, out of the per-secret map
+   * only while it still owns that entry — never a successor's (same-secretId
+   * restart).
+   */
+  private unregisterPendingFlow(secretId: string, flow: PendingFlow): void {
+    this.liveFlows.delete(flow);
+    if (this.pendingFlows.get(secretId) === flow) {
       this.pendingFlows.delete(secretId);
     }
   }
@@ -521,7 +538,7 @@ export class OAuthManager {
       })
       .finally(() => {
         pending.settled = true;
-        this.unregisterPendingFlow(secretId, pending.controller);
+        this.unregisterPendingFlow(secretId, pending);
       });
     return completion;
   }

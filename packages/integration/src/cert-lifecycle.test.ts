@@ -251,4 +251,24 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
     const names = (await vault.engine.listSecrets()).map((s) => s.name).sort();
     expect(names).toEqual([CSR_NAME, IMPORTED_NAME].sort());
   });
+
+  it("6. auto_renew on an imported certificate is refused 400 and creates nothing", async () => {
+    const res = await post("/import", {
+      name: "auto-renew-refused",
+      private_key_pem: KEY_PEM,
+      certificate_pem: CERT_PEM,
+      auto_renew: true,
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe(ErrorCode.INVALID_INPUT);
+    expect(body.message).toContain("harpoc cert issue");
+    await expect(vault.engine.resolveSecretId("secret://auto-renew-refused")).rejects.toThrow();
+
+    // Wave 1 made auto_renew ACME-only; the refusal is ahead of every write, so
+    // the vault still holds exactly what case 5 left.
+    const names = (await vault.engine.listSecrets()).map((s) => s.name).sort();
+    expect(names).toEqual([CSR_NAME, IMPORTED_NAME].sort());
+  });
 });

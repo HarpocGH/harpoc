@@ -632,3 +632,158 @@ describe("compiled binary smoke: token-scoped credential commands", () => {
     expect(denied.stdout).not.toContain("value-123");
   }, 60_000);
 });
+
+// R13/D8: the two rules a token-bearing `secret use` meets first, neither
+// walked through the real binary until now — the explicit-grant model (a
+// secret with no policy row is reachable by no agent-type token, R1
+// 2026-09-01) and the deny-by-default command allowlist (an empty one refuses
+// every command). The existing token cases all grant first and allow first,
+// so both refusals were only ever pinned in-process.
+describe("compiled binary smoke: the explicit grant and the empty allowlist (D8)", () => {
+  let grantlessToken: string;
+  let allowlistToken: string;
+
+  beforeAll(async () => {
+    const set = await runCli(["secret", "set", "new-rule"], { stdin: "new-rule-value\n" });
+    expect(set.code).toBe(0);
+    const allow = await runCli([
+      "secret",
+      "allow",
+      "secret://new-rule",
+      "--command",
+      process.execPath,
+      "--acknowledge-interpreter",
+    ]);
+    expect(allow.code).toBe(0);
+    const minted = await runCli([
+      "auth",
+      "token",
+      "--scope",
+      "use",
+      "--secrets",
+      "new-rule",
+      "--agent",
+      "demo-agent",
+      "--json",
+    ]);
+    expect(minted.code).toBe(0);
+    grantlessToken = (JSON.parse(minted.stdout) as { token: string }).token;
+
+    const set2 = await runCli(["secret", "set", "no-allowlist"], {
+      stdin: "no-allowlist-value\n",
+    });
+    expect(set2.code).toBe(0);
+    const grant = await runCli([
+      "policy",
+      "grant",
+      "secret://no-allowlist",
+      "--principal-type",
+      "agent",
+      "--principal-id",
+      "demo-agent",
+      "--permissions",
+      "use",
+    ]);
+    expect(grant.code).toBe(0);
+    const minted2 = await runCli([
+      "auth",
+      "token",
+      "--scope",
+      "use",
+      "--secrets",
+      "no-allowlist",
+      "--agent",
+      "demo-agent",
+      "--json",
+    ]);
+    expect(minted2.code).toBe(0);
+    allowlistToken = (JSON.parse(minted2.stdout) as { token: string }).token;
+  }, 60_000);
+
+  function useArgsFor(name: string): string[] {
+    return [
+      "secret",
+      "use",
+      `secret://${name}`,
+      "--action",
+      "process",
+      "--command",
+      process.execPath,
+      "--arg=-e",
+      "--arg=process.exit(0)",
+      "--env-var",
+      "TOKEN",
+    ];
+  }
+
+  interface AuditRow {
+    event_type: string;
+    success?: boolean | number;
+    principal_id: string | null;
+    detail?: Record<string, unknown> | null;
+  }
+
+  async function useRows(): Promise<AuditRow[]> {
+    const audit = await runCli(["audit", "--json", "--event", "secret.use", "--limit", "50"]);
+    expect(audit.code).toBe(0);
+    return JSON.parse(audit.stdout) as AuditRow[];
+  }
+
+  it("a use-scoped token whose agent holds no grant is refused, and the grant fixes it", async () => {
+    const denied = await runCli([...useArgsFor("new-rule"), "--token", grantlessToken, "--json"]);
+    expect(denied.code).toBe(1);
+    expect(denied.stderr).toContain("SECRET_NOT_FOUND");
+    expect(denied.stdout).not.toContain("exit_code");
+
+    const refused = (await useRows()).find(
+      (r) => r.detail?.handle === "secret://new-rule" && r.principal_id === "demo-agent",
+    );
+    expect(refused).toBeDefined();
+    expect(Boolean(refused?.success)).toBe(false);
+    expect(refused?.detail?.error).toBe("ACCESS_DENIED");
+    expect(refused?.detail?.required_permission).toBe("use");
+
+    const grant = await runCli([
+      "policy",
+      "grant",
+      "secret://new-rule",
+      "--principal-type",
+      "agent",
+      "--principal-id",
+      "demo-agent",
+      "--permissions",
+      "use",
+    ]);
+    expect(grant.code).toBe(0);
+
+    const allowed = await runCli([...useArgsFor("new-rule"), "--token", grantlessToken, "--json"]);
+    expect(allowed.code).toBe(0);
+    expect((JSON.parse(allowed.stdout) as { exit_code: number }).exit_code).toBe(0);
+
+    const verify = await runCli(["audit", "verify"]);
+    expect(verify.code).toBe(0);
+  }, 60_000);
+
+  it("a granted token still cannot spawn a command the secret never allowed", async () => {
+    const denied = await runCli([
+      ...useArgsFor("no-allowlist"),
+      "--token",
+      allowlistToken,
+      "--json",
+    ]);
+    expect(denied.code).toBe(1);
+    expect(denied.stderr).toContain("COMMAND_NOT_ALLOWED");
+    expect(denied.stdout).not.toContain("exit_code");
+
+    // The refusal row is the injector's, not the engine's, so it carries the
+    // command and no handle (process-injector.ts's own detail shape) — found
+    // by its code, the way the network-isolation case above finds its own.
+    const refused = (await useRows()).find((r) => r.detail?.error === "COMMAND_NOT_ALLOWED");
+    expect(refused).toBeDefined();
+    expect(refused?.detail?.command).toBe(process.execPath);
+    expect(Boolean(refused?.success)).toBe(false);
+
+    const verify = await runCli(["audit", "verify"]);
+    expect(verify.code).toBe(0);
+  }, 60_000);
+});

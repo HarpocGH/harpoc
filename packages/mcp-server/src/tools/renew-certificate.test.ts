@@ -3,6 +3,7 @@ import type { Mock } from "vitest";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CertManager } from "@harpoc/cert-manager";
 import type { VaultEngine } from "@harpoc/core";
+import { AuditEventType } from "@harpoc/shared";
 import type { CertificateStatus } from "@harpoc/shared";
 import { RateLimiter } from "../guards/rate-limiter.js";
 import { createMcpServer } from "../server.js";
@@ -152,7 +153,11 @@ describe("renew_certificate", () => {
 
     await callTool(server, "renew_certificate", { handle: "secret://prod/my-cert" });
 
-    expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://prod/my-cert", EXPECTED_CALLER);
+    expect(engine.resolveSecretId).toHaveBeenCalledWith(
+      "secret://prod/my-cert",
+      EXPECTED_CALLER,
+      AuditEventType.CERT_RENEW,
+    );
     expect(certManager.renewCertificate).toHaveBeenCalledWith("uuid-123", {
       caller: EXPECTED_CALLER,
       handle: "secret://prod/my-cert",

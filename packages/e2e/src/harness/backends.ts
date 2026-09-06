@@ -75,6 +75,22 @@ export const GIT_HTTP = {
 } as const;
 
 /**
+ * The same fixture served over TLS, published as its own compose service (D12).
+ * `host` is the SAN-covered name the arms address — the leaf is the fleet's
+ * echo-https certificate (DNS:echo-https, DNS:localhost, IP:127.0.0.1), reused
+ * as the mail service reuses it, so `git.ca_pem` pins the one fixture CA. `ip`
+ * is what the reachability probe dials: the container is published on
+ * 127.0.0.1 only. The credential is GIT_HTTP's — one image, one htpasswd.
+ */
+export const GIT_HTTPS = {
+  host: "localhost",
+  ip: "127.0.0.1",
+  port: 55081,
+  user: GIT_HTTP.user,
+  password: GIT_HTTP.password,
+} as const;
+
+/**
  * TLS echo backend for the `http` context. `host` is the SAN-covered name the
  * cells connect to; the certificate also carries an IP SAN for 127.0.0.1, so
  * addressing the literal stays available if a host resolves localhost to ::1
@@ -233,6 +249,7 @@ export type FleetService =
   | "sshd-pinned"
   | "sshd-rogue"
   | "git-http"
+  | "git-https"
   | "echo-https"
   | "mcp-downstream"
   | "mcp-poisoned"

@@ -1,4 +1,5 @@
 import type { AccessInterface, CallerContext, PrincipalType } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogOptions } from "./audit-logger.js";
 
 /**
@@ -90,4 +91,16 @@ export function withAttribution(
     };
   }
   return merged;
+}
+
+/**
+ * The code a failed row records for a thrown value. A non-VaultError is
+ * recorded as INTERNAL_ERROR — a raw failure is still a denial the trail must
+ * show. One derivation for both engine writers (`auditDenied`,
+ * `auditCertRenewFailure`), so a row can never disagree with the other.
+ *
+ * @internal Engine seam, not part of the `@harpoc/core` public API.
+ */
+export function errorCodeOf(err: unknown): ErrorCode {
+  return err instanceof VaultError ? err.code : ErrorCode.INTERNAL_ERROR;
 }

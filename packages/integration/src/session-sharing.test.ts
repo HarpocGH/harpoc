@@ -127,7 +127,7 @@ describe("Session Sharing", () => {
   it("REST app on Engine2 serves Engine1's secrets", async () => {
     const app = createApp(engine2);
     const res = await app.request("/api/v1/secrets", {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { data: Array<{ handle: string }> };
@@ -158,7 +158,7 @@ describe("Session Sharing", () => {
   it("token created by Engine1 is valid on Engine2 for REST auth", async () => {
     const app = createApp(engine2);
     const res = await app.request("/api/v1/secrets", {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(res.status).toBe(200);
   });

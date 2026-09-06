@@ -14,6 +14,10 @@ const MOCK_TOKEN: VaultApiToken = {
   principal_type: "agent",
 };
 
+// Hono's in-process `app.request` sends no Host header; a default-built app
+// checks one (R33/D9), so every request below carries the loopback Host.
+const HOST = { host: "localhost" };
+
 function createMockEngine() {
   return {
     getState: vi.fn().mockReturnValue(VaultState.UNLOCKED),
@@ -67,6 +71,7 @@ function createMockEngine() {
     queryAudit: vi.fn().mockReturnValue([]),
     listAgents: vi.fn().mockReturnValue([]),
     listIssuedTokens: vi.fn().mockReturnValue([]),
+    auditGovernanceRefusal: vi.fn(),
     // Only reached through the default OAuth manager: a real manager calls
     // this first, before any network leg.
     createOAuthSecret: vi.fn().mockRejectedValue(VaultError.invalidInput("stub engine")),
@@ -78,7 +83,7 @@ describe("createApp integration", () => {
     const engine = createMockEngine();
     const app = createApp(engine as never);
 
-    const res = await app.request("/api/v1/health");
+    const res = await app.request("/api/v1/health", { headers: HOST });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.data.state).toBe("unlocked");
@@ -89,7 +94,7 @@ describe("createApp integration", () => {
     const engine = createMockEngine();
     const app = createApp(engine as never);
 
-    const res = await app.request("/api/v1/secrets");
+    const res = await app.request("/api/v1/secrets", { headers: HOST });
     expect(res.status).toBe(401);
   });
 
@@ -102,9 +107,10 @@ describe("createApp integration", () => {
       const engine = createMockEngine();
       const app = createApp(engine as never);
 
-      expect((await app.request(path)).status).toBe(401);
+      expect((await app.request(path, { headers: HOST })).status).toBe(401);
       expect(
-        (await app.request(path, { headers: { authorization: "Bearer valid-jwt" } })).status,
+        (await app.request(path, { headers: { ...HOST, authorization: "Bearer valid-jwt" } }))
+          .status,
       ).toBe(200);
     },
   );
@@ -114,7 +120,7 @@ describe("createApp integration", () => {
     const app = createApp(engine as never);
 
     const res = await app.request("/api/v1/secrets", {
-      headers: { authorization: "Bearer valid" },
+      headers: { ...HOST, authorization: "Bearer valid" },
     });
     expect(res.status).toBe(200);
   });
@@ -122,7 +128,7 @@ describe("createApp integration", () => {
   it("secret CRUD flow works end-to-end", async () => {
     const engine = createMockEngine();
     const app = createApp(engine as never);
-    const headers = { authorization: "Bearer valid", "content-type": "application/json" };
+    const headers = { ...HOST, authorization: "Bearer valid", "content-type": "application/json" };
 
     // Create
     const createRes = await app.request("/api/v1/secrets", {
@@ -134,13 +140,13 @@ describe("createApp integration", () => {
 
     // Read info
     const infoRes = await app.request("/api/v1/secrets/k", {
-      headers: { authorization: "Bearer valid" },
+      headers: { ...HOST, authorization: "Bearer valid" },
     });
     expect(infoRes.status).toBe(200);
 
     // Read value
     const valueRes = await app.request("/api/v1/secrets/k/value", {
-      headers: { authorization: "Bearer valid" },
+      headers: { ...HOST, authorization: "Bearer valid" },
     });
     expect(valueRes.status).toBe(200);
 
@@ -155,7 +161,7 @@ describe("createApp integration", () => {
     // Revoke
     const revokeRes = await app.request("/api/v1/secrets/k?confirm=true", {
       method: "DELETE",
-      headers: { authorization: "Bearer valid" },
+      headers: { ...HOST, authorization: "Bearer valid" },
     });
     expect(revokeRes.status).toBe(200);
   });
@@ -163,7 +169,7 @@ describe("createApp integration", () => {
   it("policy flow works through app", async () => {
     const engine = createMockEngine();
     const app = createApp(engine as never);
-    const headers = { authorization: "Bearer valid", "content-type": "application/json" };
+    const headers = { ...HOST, authorization: "Bearer valid", "content-type": "application/json" };
 
     // Grant
     const grantRes = await app.request("/api/v1/secrets/k/policies", {
@@ -179,14 +185,14 @@ describe("createApp integration", () => {
 
     // List
     const listRes = await app.request("/api/v1/secrets/k/policies", {
-      headers: { authorization: "Bearer valid" },
+      headers: { ...HOST, authorization: "Bearer valid" },
     });
     expect(listRes.status).toBe(200);
 
     // Revoke
     const revokeRes = await app.request("/api/v1/secrets/k/policies/p1", {
       method: "DELETE",
-      headers: { authorization: "Bearer valid" },
+      headers: { ...HOST, authorization: "Bearer valid" },
     });
     expect(revokeRes.status).toBe(200);
   });
@@ -196,7 +202,7 @@ describe("createApp integration", () => {
     const app = createApp(engine as never);
 
     const res = await app.request("/api/v1/audit", {
-      headers: { authorization: "Bearer valid" },
+      headers: { ...HOST, authorization: "Bearer valid" },
     });
     expect(res.status).toBe(200);
   });
@@ -207,7 +213,7 @@ describe("createApp integration", () => {
 
     const res = await app.request("/api/v1/oauth/authorize", {
       method: "POST",
-      headers: { authorization: "Bearer valid", "content-type": "application/json" },
+      headers: { ...HOST, authorization: "Bearer valid", "content-type": "application/json" },
       body: JSON.stringify({
         name: "gh-app",
         provider: "github",
@@ -233,7 +239,7 @@ describe("createApp integration", () => {
     const app = createApp(engine as never);
 
     const res = await app.request("/api/v1/secrets", {
-      headers: { authorization: "Bearer valid" },
+      headers: { ...HOST, authorization: "Bearer valid" },
     });
     expect(res.status).toBe(503);
   });
@@ -258,14 +264,39 @@ describe("listener host allowlist (R11/D61)", () => {
     ).toBe(200);
   });
 
-  it("without a set, no Host is checked (an embedder building its own listener)", async () => {
+  /**
+   * Inverted 2026-09-06 (R33/D9). An embedder that passed no set used to get
+   * no Host check at all; it now gets the loopback set, so an app built the
+   * default way refuses a rebinding Host exactly as the listener `startServer`
+   * builds does. The opt-out is explicit and empty.
+   */
+  it("without a set, a non-loopback Host is refused 421", async () => {
     const app = createApp(createMockEngine() as never);
+    const res = await app.request("/api/v1/health", {
+      headers: { host: "anything.example" },
+    });
+    expect(res.status).toBe(421);
+    expect(((await res.json()) as { error: string }).error).toBe("MISDIRECTED_REQUEST");
+  });
+
+  it("without a set, Host: localhost is served — every harness caller's Host", async () => {
+    const app = createApp(createMockEngine() as never);
+    // Hono's in-process `app.request` carries no Host header at all, so the
+    // real callers that matter are the loopback listeners — integration's
+    // `rest-helpers.ts` and e2e's `surfaces/rest.ts` — which send
+    // `127.0.0.1:<port>`.
+    expect((await app.request("/api/v1/health", { headers: { host: "localhost" } })).status).toBe(
+      200,
+    );
     expect(
-      (
-        await app.request("/api/v1/health", {
-          headers: { host: "anything.example" },
-        })
-      ).status,
+      (await app.request("/api/v1/health", { headers: { host: "127.0.0.1:3000" } })).status,
+    ).toBe(200);
+  });
+
+  it("an explicit empty set checks nothing (the documented opt-out)", async () => {
+    const app = createApp(createMockEngine() as never, { allowedHostSet: new Set<string>() });
+    expect(
+      (await app.request("/api/v1/health", { headers: { host: "anything.example" } })).status,
     ).toBe(200);
   });
 });
@@ -278,7 +309,7 @@ describe("governance requires an unscoped token (R11/N12)", () => {
       engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, project: "acme" });
       const app = createApp(engine as never);
       const res = await app.request(path, {
-        headers: { authorization: "Bearer valid-jwt" },
+        headers: { ...HOST, authorization: "Bearer valid-jwt" },
       });
       expect(res.status).toBe(403);
       const body = (await res.json()) as { error: string; message: string };
@@ -294,10 +325,42 @@ describe("governance requires an unscoped token (R11/N12)", () => {
     engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, project: "acme" });
     const app = createApp(engine as never);
     const res = await app.request("/api/v1/secrets", {
-      headers: { authorization: "Bearer valid-jwt" },
+      headers: { ...HOST, authorization: "Bearer valid-jwt" },
     });
     expect(res.status).toBe(200);
   });
+
+  /**
+   * D4: the middleware refuses before the engine's own governance assertion
+   * can, so without this call a project-scoped probe of the governance surface
+   * left no trace at all — `access.denied` had no product writer. One row
+   * whichever layer refuses.
+   */
+  it.each(["/api/v1/agents", "/api/v1/tokens"])(
+    "%s writes one access.denied row before the 403 (D4)",
+    async (path) => {
+      const engine = createMockEngine();
+      engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, project: "acme" });
+      const app = createApp(engine as never);
+
+      const res = await app.request(path, {
+        headers: { ...HOST, authorization: "Bearer valid-jwt" },
+      });
+
+      expect(res.status).toBe(403);
+      expect(engine.auditGovernanceRefusal).toHaveBeenCalledTimes(1);
+      expect(engine.auditGovernanceRefusal).toHaveBeenCalledWith(
+        {
+          principal_type: "agent",
+          principal_id: "test-agent",
+          project: "acme",
+          interface: "rest",
+          admin_scope: true,
+        },
+        `GET ${path}`,
+      );
+    },
+  );
 });
 
 describe("createDefaultOAuthManager", () => {

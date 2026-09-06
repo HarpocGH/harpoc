@@ -92,7 +92,7 @@ export class PolicyEngine {
   }
 
   /**
-   * Batch form of {@link checkPermission} for enumeration (thesis §4.6
+   * Batch form of {@link grantedPermissions} for enumeration (thesis §4.6
    * `list`): given the secret ids a caller would see under token scope alone,
    * return those its principals hold a matching, unexpired grant on (or
    * `admin`). Explicit-grant (R1, 2026-09-01): an id with no row for the
@@ -131,9 +131,9 @@ export class PolicyEngine {
   /**
    * The union of permissions the caller's principals hold on one secret,
    * expired rows excluded and `admin` kept as the literal it is. The single
-   * derivation behind {@link checkPermission} and the engine's point check,
-   * which also needs "does the caller hold `read` or `list`" for the R5
-   * existence-oracle mapping.
+   * derivation behind {@link filterPermitted}'s per-id test and the engine's
+   * point check, which also needs "does the caller hold `read` or `list`" for
+   * the R5 existence-oracle mapping.
    */
   grantedPermissions(secretId: string, principals: readonly PolicyPrincipal[]): Set<Permission> {
     const held = new Set<Permission>();
@@ -146,19 +146,5 @@ export class PolicyEngine {
       }
     }
     return held;
-  }
-
-  /**
-   * Check if a principal has a specific permission on a secret.
-   * Admin permission implies all other permissions.
-   */
-  checkPermission(
-    secretId: string,
-    principalType: PrincipalType,
-    principalId: string,
-    permission: Permission,
-  ): boolean {
-    const held = this.grantedPermissions(secretId, [{ type: principalType, id: principalId }]);
-    return held.has("admin" as Permission) || held.has(permission);
   }
 }

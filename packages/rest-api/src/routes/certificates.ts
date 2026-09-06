@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import {
+  AuditEventType,
   VaultError,
   certificateImportSchema,
   generateCsrRequestSchema,
@@ -67,7 +68,7 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
     c.get("limiter").checkSecret(handle);
-    const secretId = await engine.resolveSecretId(handle, callerOf(c));
+    const secretId = await engine.resolveSecretId(handle, callerOf(c), AuditEventType.CERT_RENEW);
     const status = await c.get("certManager").renewCertificate(secretId, {
       caller: callerOf(c),
       handle,

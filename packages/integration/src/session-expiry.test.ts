@@ -76,7 +76,7 @@ describe("Session Expiry", () => {
 
       // REST should return 503
       const res = await app.request("/api/v1/secrets", {
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token}`, host: "localhost" },
       });
       expect(res.status).toBe(503);
 
@@ -135,7 +135,7 @@ describe("Session Expiry", () => {
     const app = createApp(engine2);
 
     const res = await app.request("/api/v1/secrets", {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(res.status).toBe(503);
     await engine2.destroy();

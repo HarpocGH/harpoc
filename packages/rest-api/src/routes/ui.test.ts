@@ -74,13 +74,15 @@ describe("createUiRoutes", () => {
 describe("createApp uiDir wiring", () => {
   const engineStub = {} as VaultEngine; // createApp only stores the reference at construction
 
+  const HOST = { host: "localhost" };
+
   it("mounts /ui when uiDir is set", async () => {
     const wired = createApp(engineStub, { uiDir });
-    expect((await wired.request("/ui")).status).toBe(200);
+    expect((await wired.request("/ui", { headers: HOST })).status).toBe(200);
   });
 
   it("does not mount /ui without uiDir", async () => {
     const bare = createApp(engineStub, {});
-    expect((await bare.request("/ui")).status).toBe(404);
+    expect((await bare.request("/ui", { headers: HOST })).status).toBe(404);
   });
 });

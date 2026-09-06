@@ -218,6 +218,37 @@ describe("permission granularity (D2: read→read, mutate→rotate)", () => {
     await expectNotFound(() => engine.listPolicies(id, rotator));
   });
 
+  // D8/R25: `secret connection --token` merges the stored config into the
+  // write, and that read used to run caller-less (a NULL-principal row) because
+  // gating it on `read` would have refused the rotate grant that authorises the
+  // write. The read rides the write's permission instead.
+  it("a rotate-only grant reads the connection config for its own write and the row names the principal", async () => {
+    const id = await makeSecret("merge-read");
+    grant(id, "agent", "rotator", ["rotate"]);
+    const rotator = agent("rotator");
+    await engine.setConnectionConfig(
+      "secret://merge-read",
+      { database: { tls_mode: "require" } },
+      rotator,
+    );
+
+    const config = await engine.getConnectionConfig("secret://merge-read", rotator, {
+      forPermission: "rotate",
+    });
+    expect(config?.database?.tls_mode).toBe("require");
+
+    const reads = engine
+      .queryAudit({ secretId: id, eventType: AuditEventType.SECRET_READ })
+      .filter((r) => r.success);
+    expect(reads).toHaveLength(1);
+    expect(reads[0]?.principal_id).toBe("rotator");
+    expect(reads[0]?.detail).toMatchObject({
+      handle: "secret://merge-read",
+      config: "connection",
+      interface: "rest",
+    });
+  });
+
   it("admin implies read and rotate on the config surface", async () => {
     const id = await makeSecret("admin-grant");
     grant(id, "agent", "root", ["admin"]);

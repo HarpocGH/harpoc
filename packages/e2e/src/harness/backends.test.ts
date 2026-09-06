@@ -8,6 +8,7 @@ import {
   SSHD_PINNED_ALT_PORT,
   SSHD_ROGUE,
   GIT_HTTP,
+  GIT_HTTPS,
   ECHO_HTTPS,
   MCP_DOWNSTREAM,
   ATTACKER,
@@ -97,6 +98,12 @@ describe("backend fleet", () => {
   it("keeps the git-http credential distinct from the database password", () => {
     expect(GIT_HTTP.port).toBe(55080);
     expect(GIT_HTTP.password).not.toBe(PG.password);
+    // The TLS publication of the same fixture: its own 55xxx port and the
+    // SAN-covered name the certificate presents. The credential is the same
+    // baked htpasswd entry, so it is derived rather than restated.
+    expect(GIT_HTTPS.port).toBe(55081);
+    expect(GIT_HTTPS.host).toBe("localhost");
+    expect(GIT_HTTPS.password).not.toBe(PG.password);
   });
 
   it("reaches the postgres container", async () => {
@@ -116,9 +123,15 @@ describe("backend fleet", () => {
     expect(await canOpenTcp(SSHD_ROGUE.host, SSHD_ROGUE.port)).toBe(true);
   });
 
-  it("reaches the git-http container", async () => {
+  it("reaches the git-http containers on their plain and TLS ports", async () => {
     assertFleetUp("git-http");
     expect(await canOpenTcp(GIT_HTTP.host, GIT_HTTP.port)).toBe(true);
+    // Dialled by IP, not by name: the container is published on 127.0.0.1 only,
+    // and a host that resolves localhost to ::1 first would read a healthy
+    // service as down. The arms use the name — the certificate's SAN covers
+    // both, and curl falls back across the resolved addresses.
+    assertFleetUp("git-https");
+    expect(await canOpenTcp(GIT_HTTPS.ip, GIT_HTTPS.port)).toBe(true);
   });
 
   it("reaches the echo-https container on its own offset port", async () => {

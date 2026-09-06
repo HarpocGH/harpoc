@@ -26,7 +26,8 @@ const MOCK_TOKEN: VaultApiToken = {
   principal_type: "agent",
 };
 
-const AUTH = { authorization: "Bearer valid" };
+const HOST = { host: "localhost" };
+const AUTH = { ...HOST, authorization: "Bearer valid" };
 
 function createMockEngine() {
   return {
@@ -199,7 +200,7 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
 
     // Global bucket is empty, yet health still answers — it is registered
     // before the limiter and must stay reachable for liveness probes.
-    const res = await instance.request("/api/v1/health");
+    const res = await instance.request("/api/v1/health", { headers: HOST });
     expect(res.status).toBe(200);
   });
 

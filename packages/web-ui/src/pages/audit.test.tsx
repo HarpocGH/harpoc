@@ -136,4 +136,28 @@ describe("AuditPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Verify chain" }));
     await waitFor(() => expect(screen.getByText(/chain broken at row 42/)).toBeTruthy());
   });
+
+  it("renders the recorded peer address, and a dash where none was recorded", async () => {
+    const fake = api({
+      queryAudit: vi
+        .fn()
+        .mockResolvedValue([
+          event({ ip_address: "127.0.0.1" }),
+          event({ id: 2, event_type: "access.denied", success: false }),
+        ]),
+    });
+    render(<AuditPage api={fake} />);
+    await waitFor(() => expect(screen.getByText("127.0.0.1")).toBeTruthy());
+    // The second row's peer is NULL — the trail's own answer for a row written
+    // off the wire, and the table's placeholder for it is the dash.
+    const second = document.querySelectorAll("tbody tr:nth-child(2) td");
+    expect(second[3]?.textContent).toBe("-");
+  });
+
+  it("carries an ip column between principal and outcome", async () => {
+    render(<AuditPage api={api()} />);
+    await waitFor(() => expect(screen.getByText("access.denied")).toBeTruthy());
+    const headers = [...document.querySelectorAll("thead th")].map((th) => th.textContent);
+    expect(headers).toEqual(["time", "event", "principal", "ip", "outcome"]);
+  });
 });

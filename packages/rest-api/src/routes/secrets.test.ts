@@ -1249,6 +1249,69 @@ describe("secret routes", () => {
       });
     }
   });
+
+  /**
+   * R14/D6: both endpoint-configuration writes take `rotate`, not `admin`.
+   * The denial table above only proves that a token *missing* `rotate` is
+   * refused — a route re-gated on `admin` would satisfy it too. This is the
+   * other half, and the only place the tree states the endpoint scope
+   * positively.
+   */
+  describe("a rotate-only token completes both configuration writes (R14/D6)", () => {
+    const ROTATE_CALLER = {
+      principal_type: "agent",
+      principal_id: "test-agent",
+      interface: "rest",
+    };
+
+    const cases: {
+      title: string;
+      path: string;
+      engineFn: keyof ReturnType<typeof createMockEngine>;
+      body: Record<string, unknown>;
+    }[] = [
+      {
+        title: "PUT /:handle/mcp-server",
+        path: "mcp-server",
+        engineFn: "setMcpServerConfig",
+        body: {
+          server_name: "github-mcp",
+          transport: "stdio",
+          command: "node",
+          args: ["server.js"],
+          env_var: "GITHUB_TOKEN",
+        },
+      },
+      {
+        title: "PUT /:handle/connection-config",
+        path: "connection-config",
+        engineFn: "setConnectionConfig",
+        body: { database: { tls_mode: "require" } },
+      },
+    ];
+
+    for (const tc of cases) {
+      it(`${tc.title} succeeds on scope ["rotate"] and the engine setter is called`, async () => {
+        engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: ["rotate"] });
+
+        const res = await app.request(`/api/v1/secrets/test-key/${tc.path}`, {
+          method: "PUT",
+          headers: { ...AUTH, "content-type": "application/json" },
+          body: JSON.stringify(tc.body),
+        });
+
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ data: { updated: true } });
+        // No `admin_scope` on the caller: the rotate-only token is not the
+        // admin-user class, so this is the endpoint scope alone.
+        expect(engine[tc.engineFn]).toHaveBeenCalledWith(
+          "secret://test-key",
+          tc.body,
+          ROTATE_CALLER,
+        );
+      });
+    }
+  });
 });
 
 describe("engine-level policy enforcement wiring (thesis §4.6)", () => {

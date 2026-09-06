@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { startOAuthFlowInputSchema } from "@harpoc/shared";
+import { AuditEventType, startOAuthFlowInputSchema } from "@harpoc/shared";
 import { startOAuthFlowResult } from "@harpoc/oauth-proxy";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
@@ -46,7 +46,11 @@ export function createOAuthRoutes(): Hono<HarpocEnv> {
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
     c.get("limiter").checkSecret(handle);
-    const secretId = await engine.resolveSecretId(handle, callerOf(c));
+    const secretId = await engine.resolveSecretId(
+      handle,
+      callerOf(c),
+      AuditEventType.OAUTH_REFRESH,
+    );
     const expiresAt = await engine.refreshOAuthToken(secretId, callerOf(c), handle);
     return c.json({ data: { refreshed: true, expires_at: expiresAt } });
   });

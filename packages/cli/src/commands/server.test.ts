@@ -75,7 +75,7 @@ vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
 }));
 
 vi.mock("@harpoc/rest-api", () => ({
-  startServer: vi.fn().mockReturnValue(mockRestServer),
+  startServer: vi.fn().mockResolvedValue(mockRestServer),
   createDefaultOAuthManager: vi.fn().mockReturnValue(mockRestOAuthManager),
 }));
 
@@ -754,6 +754,23 @@ describe("server start", () => {
 
     expect(TokenRefreshScheduler).not.toHaveBeenCalled();
     expect(mockScheduler.start).not.toHaveBeenCalled();
+  });
+
+  // D9/R26: startServer binds first and writes its row after, so a bind that
+  // fails rejects instead of killing the process on an unhandled 'error'
+  // event. The command's own fatal path is what the operator sees.
+  it("a rejected REST bind reaches the fatal path: the error on stderr, exit 1, engine destroyed", async () => {
+    const { startServer } = await import("@harpoc/rest-api");
+    (startServer as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("listen EADDRINUSE: address already in use 127.0.0.1:3000"),
+    );
+
+    await expect(run(["--rest"])).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Error: listen EADDRINUSE: address already in use 127.0.0.1:3000",
+    );
+    expect(mockEngine.destroy).toHaveBeenCalled();
   });
 
   it("onRefreshError prints a Warning: line to stderr", async () => {

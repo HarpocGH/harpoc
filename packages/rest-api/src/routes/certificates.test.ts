@@ -1,7 +1,12 @@
 import { generateKeyPairSync } from "node:crypto";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import { ENCRYPTED_KEY_IMPORT_REFUSAL, ErrorCode, VaultError } from "@harpoc/shared";
+import {
+  AuditEventType,
+  ENCRYPTED_KEY_IMPORT_REFUSAL,
+  ErrorCode,
+  VaultError,
+} from "@harpoc/shared";
 import type { CertificateStatus, VaultApiToken } from "@harpoc/shared";
 import { authMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
@@ -285,6 +290,15 @@ describe("POST /api/v1/certificates/:handle/renew", () => {
     });
   });
 
+  it("probes the handle as cert.renew, not secret.read (D3)", async () => {
+    await post("/api/v1/certificates/my-cert/renew", {});
+    expect(engine.resolveSecretId).toHaveBeenCalledWith(
+      "secret://my-cert",
+      EXPECTED_CALLER,
+      AuditEventType.CERT_RENEW,
+    );
+  });
+
   it("charges the per-secret rate limiter on the handle, before resolution", async () => {
     const checkSecret = vi.spyOn(limiter, "checkSecret");
     await post("/api/v1/certificates/my-cert/renew", {});
@@ -356,6 +370,8 @@ describe("GET /api/v1/certificates/:handle/status", () => {
 });
 
 describe("createApp certificate wiring", () => {
+  const WIRED_JSON_HEADERS = { ...JSON_HEADERS, host: "localhost" };
+
   it("mounts the routes and serves the injected manager from context", async () => {
     const appEngine = createMockEngine();
     const injected = createMockCertManager();
@@ -366,7 +382,7 @@ describe("createApp certificate wiring", () => {
 
     const res = await wired.request("/api/v1/certificates/import", {
       method: "POST",
-      headers: JSON_HEADERS,
+      headers: WIRED_JSON_HEADERS,
       body: JSON.stringify(IMPORT_BODY),
     });
     expect(res.status).toBe(201);
@@ -381,14 +397,16 @@ describe("createApp certificate wiring", () => {
       certManager: injected as never,
     });
 
-    const status = await wired.request("/api/v1/certificates/my-cert/status");
+    const status = await wired.request("/api/v1/certificates/my-cert/status", {
+      headers: { host: "localhost" },
+    });
     expect(status.status).toBe(401);
 
     // The `/*` middleware pattern must cover the single-segment import/csr
     // paths too — an unguarded route would read an unset `token` from context.
     const imported = await wired.request("/api/v1/certificates/import", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { host: "localhost", "content-type": "application/json" },
       body: JSON.stringify(IMPORT_BODY),
     });
     expect(imported.status).toBe(401);
@@ -401,7 +419,7 @@ describe("createApp certificate wiring", () => {
 
     const res = await wired.request("/api/v1/certificates/import", {
       method: "POST",
-      headers: JSON_HEADERS,
+      headers: WIRED_JSON_HEADERS,
       body: JSON.stringify(IMPORT_BODY),
     });
 

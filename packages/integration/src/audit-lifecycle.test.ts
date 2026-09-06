@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { VaultEngine } from "@harpoc/core";
 import { createApp } from "@harpoc/rest-api";
@@ -19,7 +22,13 @@ import {
   registerAgents,
 } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
-import { CLI_ENTRY, runCli, startCliServerOnFreePort } from "./helpers/spawn-cli.js";
+import {
+  CLI_ENTRY,
+  freePort,
+  runCli,
+  startCliServer,
+  startCliServerOnFreePort,
+} from "./helpers/spawn-cli.js";
 
 const PASSWORD = "audit-lifecycle-pw";
 const VALUE = new Uint8Array(Buffer.from("lifecycle-value"));
@@ -159,6 +168,34 @@ describe("server lifecycle rows through the spawned CLI", () => {
       await server.stop();
     }
   }, 60_000);
+
+  // D9/R26: the start row is written after the bind now, so a bind that fails
+  // leaves nothing behind and the operator gets the error instead of an
+  // unhandled 'error' event killing the process mid-start.
+  it("a REST start on an occupied port leaves no start row and reports the bind error", async () => {
+    const port = await freePort();
+    const blocker = createServer();
+    await new Promise<void>((resolve) => blocker.listen(port, "127.0.0.1", () => resolve()));
+    const server = startCliServer(["server", "start", "--rest", "--port", String(port)], {
+      vaultDir,
+    });
+    try {
+      const code = await new Promise<number | null>((resolve) =>
+        server.child.once("close", resolve),
+      );
+      expect(code).not.toBe(0);
+      expect(server.stderrSoFar()).toMatch(/EADDRINUSE/);
+    } finally {
+      await server.stop();
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+
+    const starts = engine
+      .queryAudit({ eventType: AuditEventType.SERVER_START })
+      .filter((r) => r.detail?.port === port);
+    expect(starts).toHaveLength(0);
+    expect(engine.verifyAuditChain().valid).toBe(true);
+  }, 60_000);
 });
 
 // D7 over the REST wire: an unknown-handle probe on a route that resolves
@@ -168,7 +205,7 @@ describe("unknown-handle probes and ambiguity over the REST wire", () => {
   let vault: TestVault;
   let app: ReturnType<typeof createApp>;
 
-  const auth = (token: string) => ({ authorization: `Bearer ${token}` });
+  const auth = (token: string) => ({ authorization: `Bearer ${token}`, host: "localhost" });
 
   beforeAll(async () => {
     vault = createTestVault();
@@ -196,6 +233,31 @@ describe("unknown-handle probes and ambiguity over the REST wire", () => {
       error: ErrorCode.SECRET_NOT_FOUND,
       interface: "rest",
     });
+  });
+
+  // D3/R19: the six routes whose semantics are not a read pass their own event
+  // type to resolveSecretId, so an operator filtering `--event secret.read` no
+  // longer sees a renewal attempt, and `--event cert.renew` finally does.
+  it("an unknown handle on the certificate renew route writes a failed cert.renew row, not a read", async () => {
+    const token = vault.engine.createToken("probe-agent", ["rotate"]);
+    const res = await app.request("/api/v1/certificates/ghost-cert/renew", {
+      method: "POST",
+      headers: auth(token),
+    });
+    expect(res.status).toBe(404);
+
+    const renew = vault.engine
+      .queryAudit({ eventType: AuditEventType.CERT_RENEW })
+      .find((r) => !r.success && r.principal_id === "probe-agent");
+    expect(renew?.detail).toMatchObject({
+      handle: "secret://ghost-cert",
+      error: ErrorCode.SECRET_NOT_FOUND,
+      interface: "rest",
+    });
+    const reads = vault.engine
+      .queryAudit({ eventType: AuditEventType.SECRET_READ })
+      .filter((r) => r.detail?.handle === "secret://ghost-cert");
+    expect(reads).toHaveLength(0);
   });
 
   it("two revoked secrets of one name: a grantless token reads the unknown-handle 404, a holder reads 409", async () => {
@@ -264,4 +326,118 @@ describe("unknown-handle probes and ambiguity over the REST wire", () => {
     expect(revoked?.principal_type).toBe("agent");
     expect(revoked?.principal_id).toBe("revoker");
   });
+});
+
+const MCP_ENTRY = join(
+  dirname(createRequire(import.meta.url).resolve("@harpoc/mcp-server/package.json")),
+  "dist",
+  "index.js",
+);
+
+// R23/D9: `harpoc server start --mcp` has had its stdin-EOF twin since R4/D67,
+// but the standalone `harpoc-mcp` binary — the entry an MCP host actually
+// launches — had no test of its own at all. Same shape as the CLI twin above:
+// the built binary, the real banner, the row read back by an in-process engine.
+describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
+  let vaultDir: string;
+  let engine: VaultEngine;
+  let tokenFile: string;
+
+  function spawnMcp(): ChildProcess {
+    const env = { ...process.env };
+    delete env.HARPOC_TOKEN;
+    return spawn(
+      process.execPath,
+      [MCP_ENTRY, "--vault-dir", vaultDir, "--token-file", tokenFile],
+      { stdio: ["pipe", "pipe", "pipe"], env, windowsHide: true },
+    );
+  }
+
+  async function awaitBanner(child: ChildProcess): Promise<void> {
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
+    await waitFor(
+      () => stderr.includes("Harpoc MCP server running on stdio"),
+      30_000,
+      () => stderr,
+    );
+  }
+
+  beforeAll(async () => {
+    vaultDir = mkdtempSync(join(tmpdir(), "harpoc-mcp-lifecycle-"));
+    const init = new VaultEngine({
+      dbPath: join(vaultDir, VAULT_DB_NAME),
+      sessionPath: join(vaultDir, SESSION_FILE_NAME),
+    });
+    await init.initVault(PASSWORD);
+    await init.destroy();
+    // `harpoc-mcp` opens an existing session and refuses a locked vault, so the
+    // twin unlocks through the CLI exactly as the one above does.
+    const unlock = await runCli(["unlock"], { vaultDir, stdin: `${PASSWORD}\n` });
+    expect(unlock.code).toBe(0);
+    engine = new VaultEngine({
+      dbPath: join(vaultDir, VAULT_DB_NAME),
+      sessionPath: join(vaultDir, SESSION_FILE_NAME),
+    });
+    expect(await engine.loadSession()).toBe(true);
+    registerAgents(engine, "mcp-eof-agent");
+    const token = engine.createToken("mcp-eof-agent", ["read", "list"]);
+    tokenFile = join(vaultDir, "launch-token");
+    writeFileSync(tokenFile, `${token}\n`, { encoding: "utf8", mode: 0o600 });
+  }, 120_000);
+
+  afterAll(async () => {
+    await engine.destroy();
+    rmSync(vaultDir, { recursive: true, force: true });
+  });
+
+  it("stdin EOF is a graceful stop: exit 0 and one transport_closed row", async () => {
+    const child = spawnMcp();
+    try {
+      await awaitBanner(child);
+      child.stdin?.end();
+      const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
+      expect(code).toBe(0);
+    } finally {
+      if (child.exitCode === null) child.kill();
+    }
+
+    const start = engine
+      .queryAudit({ eventType: AuditEventType.SERVER_START })
+      .find((r) => r.detail?.subject === "mcp-eof-agent");
+    expect(start?.detail).toMatchObject({ transport: "stdio", tokenless: false });
+    const stops = engine.queryAudit({ eventType: AuditEventType.SERVER_STOP });
+    expect(stops).toHaveLength(1);
+    expect(stops[0]?.detail).toMatchObject({
+      transport: "stdio",
+      tokenless: false,
+      trigger: "transport_closed",
+    });
+    expect(stops[0]?.principal_type).toBeNull();
+    expect(engine.verifyAuditChain().valid).toBe(true);
+  }, 60_000);
+
+  // win32 `child.kill("SIGTERM")` terminates the process without delivering a
+  // signal, so there is no handler to observe there.
+  it.runIf(process.platform !== "win32")(
+    "SIGTERM is a graceful stop: exit 0 and a SIGTERM row",
+    async () => {
+      const child = spawnMcp();
+      try {
+        await awaitBanner(child);
+        child.kill("SIGTERM");
+        const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
+        expect(code).toBe(0);
+      } finally {
+        if (child.exitCode === null) child.kill();
+      }
+
+      const stops = engine.queryAudit({ eventType: AuditEventType.SERVER_STOP });
+      expect(stops.filter((r) => r.detail?.trigger === "SIGTERM")).toHaveLength(1);
+      const sigterm = stops.find((r) => r.detail?.trigger === "SIGTERM");
+      expect(sigterm?.detail).toMatchObject({ transport: "stdio", tokenless: false });
+      expect(engine.verifyAuditChain().valid).toBe(true);
+    },
+    60_000,
+  );
 });

@@ -1,4 +1,4 @@
-import { GIT_HTTP, PG, SSHD_PINNED, SSHD_ROGUE } from "./backends.js";
+import { GIT_HTTP, GIT_HTTPS, PG, SSHD_PINNED, SSHD_ROGUE } from "./backends.js";
 
 /**
  * The calls the targeted refusal arms issue, written once.
@@ -15,6 +15,7 @@ import { GIT_HTTP, PG, SSHD_PINNED, SSHD_ROGUE } from "./backends.js";
  * reaching a socket.
  */
 export const GIT_HTTP_BASE = `http://${GIT_HTTP.host}:${String(GIT_HTTP.port)}`;
+export const GIT_HTTPS_BASE = `https://${GIT_HTTPS.host}:${String(GIT_HTTPS.port)}`;
 export const GIT_HTTP_CREDENTIAL = `${GIT_HTTP.user}:${GIT_HTTP.password}`;
 export const DB_CREDENTIAL = `${PG.user}:${PG.password}`;
 export const DB_QUERY = "SELECT 42 AS answer";

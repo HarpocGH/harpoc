@@ -1,4 +1,10 @@
-import type { Agent, AgentPolicy, Permission, SetAgentPermissionsResult } from "@harpoc/shared";
+import type {
+  AccessPolicy,
+  Agent,
+  AgentPolicy,
+  Permission,
+  SetAgentPermissionsResult,
+} from "@harpoc/shared";
 import { useState } from "preact/hooks";
 import type { ApiClient, SecretInfo } from "../api/client";
 import { secretPath } from "../api/client";
@@ -17,10 +23,18 @@ const GRANTABLE: Permission[] = ["list", "read", "use", "rotate", "revoke", "adm
 
 type GrantMap = Map<string, Map<string, AgentPolicy>>;
 
+/**
+ * Per-secret access rows by handle. `null` is "the caller was refused this
+ * column", which is not the same answer as an empty list and must not read as
+ * one.
+ */
+type HolderMap = Map<string, AccessPolicy[] | null>;
+
 interface Matrix {
   agents: Agent[];
   secrets: SecretInfo[];
   grants: GrantMap;
+  holders: HolderMap;
 }
 
 interface EditorTarget {
@@ -37,6 +51,19 @@ function preselectedSecret(route: string): string | null {
   const query = route.indexOf("?");
   if (query === -1) return null;
   return new URLSearchParams(route.slice(query + 1)).get("secret");
+}
+
+/** The columns on screen: the `?secret=` preselect if there is one, else the filter. */
+function columnSecrets(
+  secrets: SecretInfo[],
+  preselect: string | null,
+  filter: string,
+): SecretInfo[] {
+  return secrets.filter((s) => {
+    if (preselect !== null) return secretPath(s.handle) === preselect;
+    if (filter === "") return true;
+    return s.name.includes(filter) || (s.project?.includes(filter) ?? false);
+  });
 }
 
 /**
@@ -81,6 +108,7 @@ function CellEditor({
   current,
   secretGated,
   onlyHolder,
+  hintsGrant,
   onClose,
   onSaved,
 }: {
@@ -90,6 +118,13 @@ function CellEditor({
   current: AgentPolicy | undefined;
   secretGated: boolean;
   onlyHolder: boolean;
+  /**
+   * Whether a refusal carrying this code is the missing-grant one the hint
+   * remedies. Owned by the page: `SECRET_NOT_FOUND` is the concealed form of
+   * the same refusal (R5) on a secret the page is still listing, and the plain
+   * 404 of a secret that has since gone.
+   */
+  hintsGrant: (code: string | null) => boolean;
   onClose: () => void;
   onSaved: (result: SetAgentPermissionsResult, predicted: boolean) => void;
 }) {
@@ -128,7 +163,7 @@ function CellEditor({
       },
       (err: unknown) => {
         setError(err instanceof Error ? err.message : String(err));
-        setDenied(errorCode(err) === "ACCESS_DENIED");
+        setDenied(hintsGrant(errorCode(err)));
         setPending(null);
         setBusy(false);
       },
@@ -243,9 +278,18 @@ function CellEditor({
 
 /**
  * The permission matrix: agents down, secrets across. One `listAgentPolicies`
- * per agent is loaded alongside the two listings, so the gated marker on each
- * column is computed from rows actually on screen — it therefore sees `agent`
- * principals only, which is what the marker says.
+ * per agent drives the cells; one `getAccessPolicies` per COLUMN drives the
+ * header marker, so a secret held only by a `tool`, `user` or `project`
+ * principal reads as granted instead of as reachable from the CLI alone. A
+ * column the caller is refused keeps `null` and falls back to the agent rows —
+ * the agents-only view, which is what a scoped admin token sees. The cells and
+ * the first-/last-grant confirmation stay agent-keyed: a confirmation step that
+ * appeared or vanished with a per-secret refusal would be worse than one
+ * computed from the rows on screen. So a secret held only by a `tool`
+ * principal reads `granted` while the editor still predicts "first grant"
+ * (`gated_before` counts every principal type), which the notice after the PUT
+ * corrects; the alternative — keying the prediction on the column read —
+ * was rejected because it would appear or vanish with a per-secret refusal.
  */
 export function PermissionsPage({ api }: { api: ApiClient }) {
   const route = useHashRoute();
@@ -253,6 +297,7 @@ export function PermissionsPage({ api }: { api: ApiClient }) {
   const [filter, setFilter] = useState("");
   const [target, setTarget] = useState<EditorTarget | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const preselect = preselectedSecret(route);
 
   const matrix = useAsync<Matrix>(async () => {
     const [agents, secrets] = await Promise.all([
@@ -266,20 +311,50 @@ export function PermissionsPage({ api }: { api: ApiClient }) {
       for (const p of lists[index] ?? []) byHandle.set(p.handle, p);
       grants.set(a.name, byHandle);
     });
-    return { agents, secrets, grants };
-  }, [showInactive]);
+    // One read per COLUMN, never per loaded secret: the route writes a
+    // secret.read { config: "access_policies" } row per call. A caller without
+    // the per-secret exemption is refused each one, and `null` records that
+    // rather than an empty list. `preselect` is a dep — widening back to every
+    // column needs the other columns' rows — while `filter` is read here and is
+    // not: it only ever narrows a set already fetched, and a load per keystroke
+    // would be an audit row per keystroke.
+    const columns = columnSecrets(secrets, preselect, filter);
+    const rows = await Promise.all(
+      columns.map((s) => api.getAccessPolicies(s.handle).catch(() => null)),
+    );
+    const holders: HolderMap = new Map();
+    columns.forEach((s, index) => holders.set(s.handle, rows[index] ?? null));
+    return { agents, secrets, grants, holders };
+  }, [showInactive, preselect]);
 
   const agents = matrix.data?.agents ?? [];
   const loadedSecrets = matrix.data?.secrets ?? [];
-  const preselect = preselectedSecret(route);
-  const visibleSecrets = loadedSecrets.filter((s) => {
-    if (preselect !== null) return secretPath(s.handle) === preselect;
-    if (filter === "") return true;
-    return s.name.includes(filter) || (s.project?.includes(filter) ?? false);
-  });
+  const visibleSecrets = columnSecrets(loadedSecrets, preselect, filter);
 
   const holders = (handle: string): Agent[] =>
     agents.filter((a) => matrix.data?.grants.get(a.name)?.has(handle) === true);
+
+  /**
+   * The unexpired rows on a secret from every principal type — `undefined`
+   * where the page has no answer for that column (never fetched, or refused).
+   */
+  const principalHolders = (handle: string): AccessPolicy[] | undefined => {
+    const rows = matrix.data?.holders.get(handle);
+    if (rows === undefined || rows === null) return undefined;
+    const now = Date.now();
+    return rows.filter((p) => p.expires_at === null || p.expires_at > now);
+  };
+
+  const granted = (handle: string): boolean => {
+    const rows = principalHolders(handle);
+    return rows === undefined ? holders(handle).length > 0 : rows.length > 0;
+  };
+
+  /** `tool:ci-runner` — the holders no agent row on screen accounts for. */
+  const otherPrincipals = (handle: string): string[] =>
+    (principalHolders(handle) ?? [])
+      .filter((p) => p.principal_type !== "agent")
+      .map((p) => `${p.principal_type}:${p.principal_id}`);
 
   // `predicted` says a confirmation step was shown. A prediction the engine
   // then disproves is stated rather than dropped: the operator confirmed one
@@ -359,21 +434,33 @@ export function PermissionsPage({ api }: { api: ApiClient }) {
             <thead>
               <tr>
                 <th>agent</th>
-                {visibleSecrets.map((s) => (
-                  <th key={s.handle}>
-                    <span class="mono">{s.name}</span>
-                    <br />
-                    <span class="muted">{s.project ?? "-"}</span>
-                    <br />
-                    {holders(s.handle).length > 0 ? (
-                      <span class="chip">granted</span>
-                    ) : (
-                      <span class="chip" data-tone="warn">
-                        no grants
-                      </span>
-                    )}
-                  </th>
-                ))}
+                {visibleSecrets.map((s) => {
+                  const others = otherPrincipals(s.handle);
+                  return (
+                    <th key={s.handle}>
+                      <span class="mono">{s.name}</span>
+                      <br />
+                      <span class="muted">{s.project ?? "-"}</span>
+                      <br />
+                      {granted(s.handle) ? (
+                        <span class="chip">granted</span>
+                      ) : (
+                        <span class="chip" data-tone="warn">
+                          no grants
+                        </span>
+                      )}
+                      {others.length > 0 && (
+                        <>
+                          <br />
+                          <span class="muted">
+                            +{others.length} other principal{others.length === 1 ? "" : "s"}:{" "}
+                            {others.join(", ")}
+                          </span>
+                        </>
+                      )}
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>
@@ -431,6 +518,11 @@ export function PermissionsPage({ api }: { api: ApiClient }) {
           current={matrix.data?.grants.get(target.agent.name)?.get(target.secret.handle)}
           secretGated={targetHolders.length > 0}
           onlyHolder={targetHolders.length === 1 && targetHolders[0]?.name === target.agent.name}
+          hintsGrant={(code) =>
+            code === "ACCESS_DENIED" ||
+            (code === "SECRET_NOT_FOUND" &&
+              loadedSecrets.some((s) => s.handle === target.secret.handle))
+          }
           onClose={() => setTarget(null)}
           onSaved={(result, predicted) => onSaved(target.secret, result, predicted)}
         />

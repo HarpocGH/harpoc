@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext } from "@harpoc/shared";
-import { ErrorCode, SecretType } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 
@@ -87,15 +87,18 @@ const CASES: Array<[string, (caller: CallerContext | undefined) => unknown]> = [
 ];
 
 describe("N12: governance is vault-wide — a project-claimed caller is refused", () => {
-  it.each(CASES)("%s refuses ACCESS_DENIED and writes nothing", async (_name, call) => {
-    const before = snapshot();
-    const err = await expectVaultError(
-      () => Promise.resolve().then(() => call(PROJECT_SCOPED)),
-      ErrorCode.ACCESS_DENIED,
-    );
-    expect(err.message).toBe(MESSAGE);
-    expect(snapshot()).toBe(before);
-  });
+  it.each(CASES)(
+    "%s refuses ACCESS_DENIED and mutates no governance state",
+    async (_name, call) => {
+      const before = snapshot();
+      const err = await expectVaultError(
+        () => Promise.resolve().then(() => call(PROJECT_SCOPED)),
+        ErrorCode.ACCESS_DENIED,
+      );
+      expect(err.message).toBe(MESSAGE);
+      expect(snapshot()).toBe(before);
+    },
+  );
 
   it.each(CASES)("%s admits an unscoped admin caller", async (_name, call) => {
     await expect(Promise.resolve().then(() => call(UNSCOPED))).resolves.not.toThrow();
@@ -103,5 +106,33 @@ describe("N12: governance is vault-wide — a project-claimed caller is refused"
 
   it.each(CASES)("%s keeps the trusted path (no caller) exempt", async (_name, call) => {
     await expect(Promise.resolve().then(() => call(undefined))).resolves.not.toThrow();
+  });
+
+  // R32: the refusal threw and wrote nothing, so a project-scoped token could
+  // probe every governance operation and leave no trace. `access.denied` has
+  // existed since v1.0 with no product writer; this is the first.
+  it.each(CASES)("%s writes one access.denied row naming the operation", async (name, call) => {
+    await expectVaultError(
+      () => Promise.resolve().then(() => call(PROJECT_SCOPED)),
+      ErrorCode.ACCESS_DENIED,
+    );
+
+    const rows = engine.queryAudit({ eventType: AuditEventType.ACCESS_DENIED });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.success).toBe(false);
+    expect(rows[0]?.secret_id).toBeNull();
+    expect(rows[0]?.principal_type).toBe("user");
+    expect(rows[0]?.principal_id).toBe("admin-1");
+    expect(rows[0]?.detail).toEqual({
+      operation: name,
+      error: ErrorCode.ACCESS_DENIED,
+      interface: "rest",
+    });
+  });
+
+  it("an admitted call and the trusted path leave no access.denied row", () => {
+    engine.listAgents("all", UNSCOPED);
+    engine.listAgents("all");
+    expect(engine.queryAudit({ eventType: AuditEventType.ACCESS_DENIED })).toHaveLength(0);
   });
 });

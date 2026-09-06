@@ -22,6 +22,8 @@ import type {
   Permission,
   RegisterAgentInput,
   Secret,
+  ServerStopTrigger,
+  ServerTransport,
   SessionFile,
   SetAgentPermissionsResult,
   SetInjectionPolicyOptions,
@@ -70,6 +72,7 @@ import {
   MIN_PASSWORD_LENGTH,
   OAuthProviderPreset,
   PrincipalType,
+  renderSchemaIssues,
   SecretStatus,
   SecretType,
   SESSION_CLEANUP_INTERVAL_MS,
@@ -89,6 +92,7 @@ import {
   attributionFromCaller,
   callerColumns,
   callerInterfaceDetail,
+  errorCodeOf,
   withAttribution,
 } from "./audit/attribution.js";
 import { AuditLogger } from "./audit/audit-logger.js";
@@ -100,7 +104,12 @@ import type {
 } from "./audit/audit-query.js";
 import { decrypt, encrypt } from "./crypto/aes-gcm.js";
 import type { WrappedKey } from "./crypto/key-hierarchy.js";
-import { changePassword, createVaultKeys, unlockVault } from "./crypto/key-hierarchy.js";
+import {
+  changePassword,
+  createVaultKeys,
+  decryptName,
+  unlockVault,
+} from "./crypto/key-hierarchy.js";
 import { assertNever } from "./assert-never.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
 import {
@@ -132,7 +141,9 @@ import { validateUrl } from "./injection/url-validator.js";
 import { buildWsAuditDetails, executeWebsocketAction } from "./injection/websocket-injector.js";
 import type { SecretInfo } from "./secrets/secret-manager.js";
 import { SecretManager } from "./secrets/secret-manager.js";
+import { isVaultManagedCertificate } from "./secrets/vault-managed-certificate.js";
 import { SessionManager } from "./session/session-manager.js";
+import type { SessionExpectation } from "./session/session-manager.js";
 import type { SessionKeyProtector } from "./session/session-key-protector.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
 import type { CertificateRow, OAuthTokenRow } from "./storage/sqlite-store.js";
@@ -198,9 +209,6 @@ interface UnlockedState {
 }
 
 const DAY_MS = 86_400_000;
-
-type ServerTransport = "stdio" | "http" | "rest";
-type ServerStopTrigger = "SIGINT" | "SIGTERM" | "transport_closed";
 
 /**
  * Engine-enforced ceiling for `renew_before_days`, matching the REST schema's
@@ -299,6 +307,13 @@ export class VaultEngine {
   private auditKey: Uint8Array | null = null;
   private vaultId: string | null = null;
   private sessionId: string | null = null;
+  /**
+   * Suspends the session-file identity check while this engine's own fresh
+   * write (initVault / unlock / changePassword) is between the id assignment
+   * and the rename, so the monitor and the slide sustain the engine through
+   * its own write on the scheme check alone (D7 fix round, 2026-09-06).
+   */
+  private sessionWriteInFlight = false;
 
   private secretManager: SecretManager | null = null;
   private policyEngine: PolicyEngine | null = null;
@@ -685,9 +700,14 @@ export class VaultEngine {
 
   async getSecretInfo(handle: string, caller?: CallerContext): Promise<SecretInfo> {
     const s = this.assertUnlocked();
-    await this.enforceCallerPolicy(s, handle, caller, "read", AuditEventType.SECRET_READ, {
+    const resolved = await this.enforceCallerPolicy(
+      s,
       handle,
-    });
+      caller,
+      "read",
+      AuditEventType.SECRET_READ,
+      { handle },
+    );
     // The resolved id, reported by the manager's read hook: without it the
     // success rows left `audit_log.secret_id` NULL, so `audit --secret <id>`
     // omitted exactly the successful reads of that secret (L4).
@@ -702,7 +722,7 @@ export class VaultEngine {
     let secretId: string | undefined;
     let info: SecretInfo;
     try {
-      info = await s.secretManager.getSecretInfo(handle, (id) => (secretId = id));
+      info = await s.secretManager.getSecretInfo(handle, (id) => (secretId = id), resolved);
     } catch (err) {
       this.auditDenied(s, AuditEventType.SECRET_READ, err, { handle }, secretId, caller);
       throw await this.concealHandleError(s, err, handle, caller);
@@ -814,9 +834,14 @@ export class VaultEngine {
 
   async rotateSecret(handle: string, newValue: Uint8Array, caller?: CallerContext): Promise<void> {
     const s = this.assertUnlocked();
-    await this.enforceCallerPolicy(s, handle, caller, "rotate", AuditEventType.SECRET_ROTATE, {
+    const resolved = await this.enforceCallerPolicy(
+      s,
       handle,
-    });
+      caller,
+      "rotate",
+      AuditEventType.SECRET_ROTATE,
+      { handle },
+    );
     let resolvedId: string | undefined;
     try {
       await s.secretManager.rotateSecret(
@@ -832,6 +857,7 @@ export class VaultEngine {
           });
         },
         (id) => (resolvedId = id),
+        resolved,
       );
     } catch (err) {
       this.auditDenied(s, AuditEventType.SECRET_ROTATE, err, { handle }, resolvedId, caller);
@@ -841,21 +867,30 @@ export class VaultEngine {
 
   async revokeSecret(handle: string, caller?: CallerContext): Promise<void> {
     const s = this.assertUnlocked();
-    await this.enforceCallerPolicy(s, handle, caller, "revoke", AuditEventType.SECRET_REVOKE, {
+    const resolved = await this.enforceCallerPolicy(
+      s,
       handle,
-    });
+      caller,
+      "revoke",
+      AuditEventType.SECRET_REVOKE,
+      { handle },
+    );
     let revokedId: string | undefined;
     try {
-      await s.secretManager.revokeSecret(handle, (secretId) => {
-        revokedId = secretId;
-        s.auditLogger.log({
-          eventType: AuditEventType.SECRET_REVOKE,
-          secretId,
-          ...callerColumns(caller),
-          detail: { handle, ...callerInterfaceDetail(caller) },
-          sessionId: this.sessionId ?? undefined,
-        });
-      });
+      await s.secretManager.revokeSecret(
+        handle,
+        (secretId) => {
+          revokedId = secretId;
+          s.auditLogger.log({
+            eventType: AuditEventType.SECRET_REVOKE,
+            secretId,
+            ...callerColumns(caller),
+            detail: { handle, ...callerInterfaceDetail(caller) },
+            sessionId: this.sessionId ?? undefined,
+          });
+        },
+        resolved,
+      );
     } catch (err) {
       this.auditDenied(s, AuditEventType.SECRET_REVOKE, err, { handle }, undefined, caller);
       throw await this.concealHandleError(s, err, handle, caller);
@@ -957,7 +992,7 @@ export class VaultEngine {
     // transition run here would drop the expired certificate out of the very
     // set `server start --cert-renew` retries.
     try {
-      if (secret.type === SecretType.CERTIFICATE && s.store.getCertificate(secret.id)) {
+      if (isVaultManagedCertificate(s.store, secret)) {
         throw VaultError.certValueUnsupported(handle);
       }
 
@@ -1012,7 +1047,7 @@ export class VaultEngine {
     let value: Uint8Array;
     try {
       if (secret.type === SecretType.OAUTH_TOKEN) {
-        const accessToken = await this.getOAuthAccessToken(secret.id);
+        const accessToken = await this.getOAuthAccessToken(secret.id, handle);
         value = new Uint8Array(Buffer.from(accessToken, "utf8"));
       } else {
         value = await s.secretManager.getSecretValue(handle);
@@ -1690,41 +1725,28 @@ export class VaultEngine {
   ): Promise<void> {
     const validated = injectionPolicyInputSchema.safeParse(policy);
     if (!validated.success) {
-      const issues = validated.error.issues.map(
-        (issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`,
+      throw VaultError.schemaValidation(
+        `Invalid injection policy: ${renderSchemaIssues(validated.error)}`,
       );
-      throw VaultError.schemaValidation(`Invalid injection policy: ${issues.join("; ")}`);
     }
 
     const s = this.assertUnlocked();
-    let secret: Secret;
-    try {
-      secret = await s.secretManager.resolveHandle(handle);
-    } catch (err) {
-      this.auditDenied(
-        s,
-        AuditEventType.POLICY_GRANT,
-        err,
-        { policy: "injection", handle },
-        undefined,
-        caller,
-      );
-      throw await this.concealHandleError(s, err, handle, caller);
-    }
     // Configuration of a secret is itself gated (W1) and the injection policy
     // is the widening half of it (R1): the allowlists bound where the
     // credential may go, so loosening them needs the same grant as writing a
     // policy row — `admin`, at the interface and per secret. Before the stored
     // policy is decrypted, before the interpreter gate, before any registry
     // terminate.
-    this.checkResolvedCallerPolicy(
+    const secret = await this.resolveForConfig(
       s,
-      secret.id,
+      handle,
       caller,
       "admin",
       AuditEventType.POLICY_GRANT,
-      { policy: "injection", handle },
-      handle,
+      {
+        policy: "injection",
+        handle,
+      },
     );
 
     const stored = new Set(this.loadInjectionPolicy(s, secret.id).command_allowlist);
@@ -1851,28 +1873,16 @@ export class VaultEngine {
   /** Read a secret's injection policy (empty allowlists when unset). */
   async getInjectionPolicy(handle: string, caller?: CallerContext): Promise<InjectionPolicy> {
     const s = this.assertUnlocked();
-    let secret: Secret;
-    try {
-      secret = await s.secretManager.resolveHandle(handle);
-    } catch (err) {
-      this.auditDenied(
-        s,
-        AuditEventType.SECRET_READ,
-        err,
-        { handle, config: "injection" },
-        undefined,
-        caller,
-      );
-      throw await this.concealHandleError(s, err, handle, caller);
-    }
-    this.checkResolvedCallerPolicy(
+    const secret = await this.resolveForConfig(
       s,
-      secret.id,
+      handle,
       caller,
       "read",
       AuditEventType.SECRET_READ,
-      { handle, config: "injection" },
-      handle,
+      {
+        handle,
+        config: "injection",
+      },
     );
     const policy = this.loadInjectionPolicy(s, secret.id);
     this.auditConfigRead(s, secret.id, caller, { handle, config: "injection" });
@@ -1905,30 +1915,18 @@ export class VaultEngine {
     caller?: CallerContext,
   ): Promise<void> {
     const s = this.assertUnlocked();
-    let secret: Secret;
-    try {
-      secret = await s.secretManager.resolveHandle(handle);
-    } catch (err) {
-      this.auditDenied(
-        s,
-        AuditEventType.POLICY_GRANT,
-        err,
-        { policy: "mcp_server", handle },
-        undefined,
-        caller,
-      );
-      throw await this.concealHandleError(s, err, handle, caller);
-    }
     // Before the terminate below: a denied caller must not be able to kill
     // another principal's live downstream child by calling this repeatedly.
-    this.checkResolvedCallerPolicy(
+    const secret = await this.resolveForConfig(
       s,
-      secret.id,
+      handle,
       caller,
       "rotate",
       AuditEventType.POLICY_GRANT,
-      { policy: "mcp_server", handle },
-      handle,
+      {
+        policy: "mcp_server",
+        handle,
+      },
     );
 
     const json = JSON.stringify(config);
@@ -1975,28 +1973,16 @@ export class VaultEngine {
     caller?: CallerContext,
   ): Promise<McpServerConfig | undefined> {
     const s = this.assertUnlocked();
-    let secret: Secret;
-    try {
-      secret = await s.secretManager.resolveHandle(handle);
-    } catch (err) {
-      this.auditDenied(
-        s,
-        AuditEventType.SECRET_READ,
-        err,
-        { handle, config: "mcp_server" },
-        undefined,
-        caller,
-      );
-      throw await this.concealHandleError(s, err, handle, caller);
-    }
-    this.checkResolvedCallerPolicy(
+    const secret = await this.resolveForConfig(
       s,
-      secret.id,
+      handle,
       caller,
       "read",
       AuditEventType.SECRET_READ,
-      { handle, config: "mcp_server" },
-      handle,
+      {
+        handle,
+        config: "mcp_server",
+      },
     );
     const config = this.loadMcpServerConfig(s, secret.id);
     this.auditConfigRead(s, secret.id, caller, { handle, config: "mcp_server" });
@@ -2006,29 +1992,17 @@ export class VaultEngine {
   /** Remove a secret's downstream MCP server config, terminating any live connection. */
   async deleteMcpServerConfig(handle: string, caller?: CallerContext): Promise<boolean> {
     const s = this.assertUnlocked();
-    let secret: Secret;
-    try {
-      secret = await s.secretManager.resolveHandle(handle);
-    } catch (err) {
-      this.auditDenied(
-        s,
-        AuditEventType.POLICY_REVOKE,
-        err,
-        { policy: "mcp_server", handle },
-        undefined,
-        caller,
-      );
-      throw await this.concealHandleError(s, err, handle, caller);
-    }
     // Before the terminate: a denied caller must not reach the registry.
-    this.checkResolvedCallerPolicy(
+    const secret = await this.resolveForConfig(
       s,
-      secret.id,
+      handle,
       caller,
       "rotate",
       AuditEventType.POLICY_REVOKE,
-      { policy: "mcp_server", handle },
-      handle,
+      {
+        policy: "mcp_server",
+        handle,
+      },
     );
     await s.mcpRegistry.terminate(
       secret.id,
@@ -2079,30 +2053,18 @@ export class VaultEngine {
     caller?: CallerContext,
   ): Promise<void> {
     const s = this.assertUnlocked();
-    let secret: Secret;
-    try {
-      secret = await s.secretManager.resolveHandle(handle);
-    } catch (err) {
-      this.auditDenied(
-        s,
-        AuditEventType.POLICY_GRANT,
-        err,
-        { policy: "connection", handle },
-        undefined,
-        caller,
-      );
-      throw await this.concealHandleError(s, err, handle, caller);
-    }
     // Endpoint-authentication pins (DB TLS/CA, SSH host keys) bound the
     // allowlist decision — dropping them is a rotate-class change.
-    this.checkResolvedCallerPolicy(
+    const secret = await this.resolveForConfig(
       s,
-      secret.id,
+      handle,
       caller,
       "rotate",
       AuditEventType.POLICY_GRANT,
-      { policy: "connection", handle },
-      handle,
+      {
+        policy: "connection",
+        handle,
+      },
     );
 
     const json = JSON.stringify(config);
@@ -2150,34 +2112,28 @@ export class VaultEngine {
     });
   }
 
-  /** Read a secret's endpoint-authentication config (undefined when unset). */
+  /**
+   * Read a secret's endpoint-authentication config (undefined when unset).
+   * `options.forPermission` overrides the default `read` gate for a caller
+   * reading the stored config as part of its own write — `secret connection`
+   * merges before it replaces, and gating that read on `read` would refuse the
+   * `rotate` grant that authorises the write (D8/R25). The success row is
+   * unchanged either way; a refusal's `required_permission` names the
+   * permission actually required.
+   */
   async getConnectionConfig(
     handle: string,
     caller?: CallerContext,
+    options?: { forPermission?: Permission },
   ): Promise<ConnectionConfig | undefined> {
     const s = this.assertUnlocked();
-    let secret: Secret;
-    try {
-      secret = await s.secretManager.resolveHandle(handle);
-    } catch (err) {
-      this.auditDenied(
-        s,
-        AuditEventType.SECRET_READ,
-        err,
-        { handle, config: "connection" },
-        undefined,
-        caller,
-      );
-      throw await this.concealHandleError(s, err, handle, caller);
-    }
-    this.checkResolvedCallerPolicy(
+    const secret = await this.resolveForConfig(
       s,
-      secret.id,
+      handle,
       caller,
-      "read",
+      options?.forPermission ?? "read",
       AuditEventType.SECRET_READ,
       { handle, config: "connection" },
-      handle,
     );
     const config = this.loadConnectionConfig(s, secret.id);
     this.auditConfigRead(s, secret.id, caller, { handle, config: "connection" });
@@ -2187,28 +2143,16 @@ export class VaultEngine {
   /** Remove a secret's endpoint-authentication config. */
   async deleteConnectionConfig(handle: string, caller?: CallerContext): Promise<boolean> {
     const s = this.assertUnlocked();
-    let secret: Secret;
-    try {
-      secret = await s.secretManager.resolveHandle(handle);
-    } catch (err) {
-      this.auditDenied(
-        s,
-        AuditEventType.POLICY_REVOKE,
-        err,
-        { policy: "connection", handle },
-        undefined,
-        caller,
-      );
-      throw await this.concealHandleError(s, err, handle, caller);
-    }
-    this.checkResolvedCallerPolicy(
+    const secret = await this.resolveForConfig(
       s,
-      secret.id,
+      handle,
       caller,
       "rotate",
       AuditEventType.POLICY_REVOKE,
-      { policy: "connection", handle },
-      handle,
+      {
+        policy: "connection",
+        handle,
+      },
     );
     return s.store.transaction(() => {
       const deleted = s.store.deleteConnectionConfig(secret.id);
@@ -2708,10 +2652,14 @@ export class VaultEngine {
   }
 
   /**
-   * Get the decrypted OAuth access token. Auto-refreshes if expired or within 60s of expiry.
-   * NEVER return this to the LLM — only use within the injection pipeline.
+   * Get the decrypted OAuth access token. Auto-refreshes if expired or within
+   * 60s of expiry. NEVER return this to the LLM — only use within the injection
+   * pipeline. `handle` is the one the caller already resolved (`useSecret`
+   * holds it); without it the handle is rebuilt from the secret's own name, so
+   * a lazy expiry here writes the same `secret.expire { handle }` row and
+   * queues the same downstream terminate as every other lazy-expiry path (D5).
    */
-  async getOAuthAccessToken(secretId: string): Promise<string> {
+  async getOAuthAccessToken(secretId: string, handle?: string): Promise<string> {
     const s = this.assertUnlocked();
 
     // No denial row here: the only caller is `useSecret`, whose own catch
@@ -2723,30 +2671,18 @@ export class VaultEngine {
       throw VaultError.oauthNotConfigured();
     }
 
-    // Lazy expiry check — status write + audit row in one transaction (NM3)
-    if (
-      secret.status !== SecretStatus.EXPIRED &&
-      secret.expires_at !== null &&
-      secret.expires_at <= Date.now()
-    ) {
-      s.store.transaction(() => {
-        s.store.updateSecret(secretId, {
-          status: SecretStatus.EXPIRED,
-          updated_at: Date.now(),
-        });
-        s.auditLogger.log({
-          eventType: AuditEventType.SECRET_EXPIRE,
-          secretId,
-          sessionId: this.sessionId ?? undefined,
-        });
-      });
-      throw VaultError.secretExpired();
-    }
-    if (secret.status === SecretStatus.EXPIRED) throw VaultError.secretExpired();
-    if (secret.status === SecretStatus.REVOKED) throw VaultError.secretRevoked();
-    if (secret.status === SecretStatus.PENDING) {
-      throw VaultError.oauthNotConfigured("OAuth flow not completed");
-    }
+    const forHandle =
+      handle ??
+      formatHandle(
+        decryptName(s.kek, secret.name_encrypted, secret.name_iv, secret.name_tag, secret.id),
+        secret.project ?? undefined,
+      );
+    // The one status ladder (B21): the lazy EXPIRED transition writes its row
+    // and ends the live downstream child in the same place every other value
+    // path does, and the PENDING error stays this method's own.
+    s.secretManager.assertUsable(secret, forHandle, {
+      pending: () => VaultError.oauthNotConfigured("OAuth flow not completed"),
+    });
 
     const oauthRow = s.store.getOAuthToken(secretId);
     if (!oauthRow) throw VaultError.oauthNotConfigured();
@@ -3428,13 +3364,43 @@ export class VaultEngine {
   /**
    * Governance is vault-wide by definition (R11/N12, 2026-09-04): a token
    * carrying a `project` claim administers nothing here. The trusted path
-   * passes no caller and is exempt; the refusal writes no row, like every
-   * interface scope refusal. R7's admin_scope does not waive it.
+   * passes no caller and is exempt; R7's admin_scope does not waive it. Since
+   * R32 (2026-09-06) the refusal is audited before it throws — the standing
+   * "interface scope refusals are unaudited" rule keeps holding for every
+   * other route, but a probe across the governance surface must leave a trace.
    */
-  private assertUnscopedGovernanceCaller(caller: CallerContext | undefined): void {
+  private assertUnscopedGovernanceCaller(
+    caller: CallerContext | undefined,
+    operation: string,
+  ): void {
     if (caller?.project !== undefined) {
+      this.auditGovernanceRefusal(caller, operation);
       throw VaultError.accessDenied("governance requires an unscoped admin token");
     }
+  }
+
+  /**
+   * The row a governance-scope refusal leaves: `access.denied`'s first product
+   * writer, `success: false`, no `secretId` (governance has no per-secret
+   * referent), the operation in the detail. Public because the REST
+   * governance-scope middleware refuses before the engine assertion is ever
+   * reached and writes the same row from there — so a project-scoped token
+   * probing `/api/v1/agents/*` leaves exactly one row whichever layer refuses
+   * it; the engine's own row is the SDK/direct-mode row.
+   */
+  auditGovernanceRefusal(caller: CallerContext | undefined, operation: string): void {
+    const s = this.assertUnlocked();
+    s.auditLogger.log({
+      eventType: AuditEventType.ACCESS_DENIED,
+      ...callerColumns(caller),
+      detail: {
+        operation,
+        error: ErrorCode.ACCESS_DENIED,
+        ...callerInterfaceDetail(caller),
+      },
+      success: false,
+      sessionId: this.sessionId ?? undefined,
+    });
   }
 
   /**
@@ -3447,7 +3413,7 @@ export class VaultEngine {
    */
   registerAgent(input: RegisterAgentInput, caller?: CallerContext): Agent {
     const s = this.assertUnlocked();
-    this.assertUnscopedGovernanceCaller(caller);
+    this.assertUnscopedGovernanceCaller(caller, "registerAgent");
     return s.store.transaction(() => {
       const row = s.agentRegistry.register(input);
 
@@ -3469,14 +3435,14 @@ export class VaultEngine {
   /** Governance read: unaudited on success (design §5.6); the caller is consulted only for the unscoped-token rule (N12). */
   getAgent(name: string, caller?: CallerContext): Agent {
     const s = this.assertUnlocked();
-    this.assertUnscopedGovernanceCaller(caller);
+    this.assertUnscopedGovernanceCaller(caller, "getAgent");
     return s.agentRegistry.toAgent(s.agentRegistry.getByName(name));
   }
 
   /** Governance read: unaudited on success (design §5.6); the caller is consulted only for the unscoped-token rule (N12). */
   listAgents(status: AgentStatus | "all" = AgentStatus.ACTIVE, caller?: CallerContext): Agent[] {
     const s = this.assertUnlocked();
-    this.assertUnscopedGovernanceCaller(caller);
+    this.assertUnscopedGovernanceCaller(caller, "listAgents");
     const now = Date.now();
     return s.agentRegistry.list(status).map((row) => s.agentRegistry.toAgent(row, now));
   }
@@ -3488,7 +3454,7 @@ export class VaultEngine {
    */
   updateAgent(name: string, input: UpdateAgentInput, caller?: CallerContext): Agent {
     const s = this.assertUnlocked();
-    this.assertUnscopedGovernanceCaller(caller);
+    this.assertUnscopedGovernanceCaller(caller, "updateAgent");
     const fields = (["description", "owner"] as const).filter(
       (field) => input[field] !== undefined,
     );
@@ -3510,7 +3476,7 @@ export class VaultEngine {
   /** Reactivate a deactivated agent. Status only: tokens revoked on the way out stay revoked. */
   activateAgent(name: string, caller?: CallerContext): Agent {
     const s = this.assertUnlocked();
-    this.assertUnscopedGovernanceCaller(caller);
+    this.assertUnscopedGovernanceCaller(caller, "activateAgent");
     return s.store.transaction(() => {
       const row = s.agentRegistry.setStatus(name, AgentStatus.ACTIVE);
 
@@ -3535,7 +3501,7 @@ export class VaultEngine {
    */
   deactivateAgent(name: string, caller?: CallerContext): { revoked_tokens: number } {
     const s = this.assertUnlocked();
-    this.assertUnscopedGovernanceCaller(caller);
+    this.assertUnscopedGovernanceCaller(caller, "deactivateAgent");
     return s.store.transaction(() => {
       const existing = s.agentRegistry.getByName(name);
       const row =
@@ -3567,7 +3533,7 @@ export class VaultEngine {
     caller?: CallerContext,
   ): { revoked_tokens: number; removed_grants: number } {
     const s = this.assertUnlocked();
-    this.assertUnscopedGovernanceCaller(caller);
+    this.assertUnscopedGovernanceCaller(caller, "deleteAgent");
     return s.store.transaction(() => {
       const row = s.agentRegistry.getByName(name);
       const revokedTokens = this.revokeLiveTokensForAgent(s, row.id, "agent_deleted", caller);
@@ -3740,9 +3706,12 @@ export class VaultEngine {
    */
   listPolicies(secretId?: string, caller?: CallerContext, handle?: string): AccessPolicy[] {
     const s = this.assertUnlocked();
-    // A token-derived caller must name the secret it is asking about: the
+    // A scoped token caller must name the secret it is asking about: the
     // vault-wide listing cannot be checked against a single secret's policies.
-    if (caller && !secretId) {
+    // The exempt class (R7) is not scoped — an admin-scoped user token and the
+    // `--allow-tokenless` stdio server's synthetic caller list vault-wide
+    // exactly as the absent caller they stand in for does (R16).
+    if (caller && !isAdminUserCaller(caller) && !secretId) {
       throw VaultError.invalidInput("A secret id is required to list access policies");
     }
     if (secretId) {
@@ -3789,7 +3758,7 @@ export class VaultEngine {
       throw VaultError.invalidInput(CREATE_NOT_GRANTABLE_MESSAGE);
     }
     const s = this.assertUnlocked();
-    this.assertUnscopedGovernanceCaller(caller);
+    this.assertUnscopedGovernanceCaller(caller, "setAgentPermissions");
     s.agentRegistry.assertActive(agentName);
     this.checkResolvedCallerPolicy(
       s,
@@ -3858,7 +3827,7 @@ export class VaultEngine {
    */
   listAgentPolicies(agentName: string, caller?: CallerContext): AgentPolicy[] {
     const s = this.assertUnlocked();
-    this.assertUnscopedGovernanceCaller(caller);
+    this.assertUnscopedGovernanceCaller(caller, "listAgentPolicies");
     const name = s.agentRegistry.getByName(agentName).name;
     const now = Date.now();
 
@@ -4008,10 +3977,7 @@ export class VaultEngine {
     s.auditLogger.log({
       eventType: AuditEventType.CERT_RENEW,
       secretId,
-      detail: {
-        action: "scheduled_renewal",
-        error: error instanceof VaultError ? error.code : ErrorCode.INTERNAL_ERROR,
-      },
+      detail: { action: "scheduled_renewal", error: errorCodeOf(error) },
       success: false,
       sessionId: this.sessionId ?? undefined,
     });
@@ -4234,7 +4200,7 @@ export class VaultEngine {
    */
   revokeToken(jti: string, caller?: CallerContext): void {
     const s = this.assertUnlocked();
-    this.assertUnscopedGovernanceCaller(caller);
+    this.assertUnscopedGovernanceCaller(caller, "revokeToken");
     const issued = s.store.getIssuedToken(jti);
     if (!issued) {
       throw VaultError.invalidInput(`Unknown token jti: ${jti}`);
@@ -4267,7 +4233,7 @@ export class VaultEngine {
     caller?: CallerContext,
   ): IssuedToken[] {
     const s = this.assertUnlocked();
-    this.assertUnscopedGovernanceCaller(caller);
+    this.assertUnscopedGovernanceCaller(caller, "listIssuedTokens");
 
     const agentId =
       filter?.agent !== undefined ? s.agentRegistry.getByName(filter.agent).id : undefined;
@@ -4359,25 +4325,40 @@ export class VaultEngine {
       });
     });
 
-    // Write new session with updated keys
-    await this.writeNewSession();
+    // Write new session with updated keys — fail closed (R8/D54), exactly as
+    // initVault and unlock do. The salt and the wrapped-KEK triple are already
+    // committed, so an engine whose new session could not be written must not
+    // stay unlocked on keys no session file describes.
+    try {
+      await this.writeNewSession();
+    } catch (err) {
+      this.sealAfterFailedSessionWrite();
+      throw err;
+    }
   }
 
   /**
    * Resolve a secret handle to its internal UUID. A failed resolution is
-   * audited as a failed `secret.read { handle }` — the row `getSecretInfo`
-   * writes for an unknown handle — so a probe through a route that resolves
-   * before an id-addressed call leaves the trace a probe through the secrets
-   * routes leaves (2026-09-02); an ambiguous handle is concealed for a
-   * grantless token caller (concealHandleError).
+   * audited as a failed row under `eventType` — `secret.read { handle }` by
+   * default, the row `getSecretInfo` writes for an unknown handle, so a probe
+   * through a route that resolves before an id-addressed call leaves the trace
+   * a probe through the secrets routes leaves (2026-09-02); a route whose
+   * semantics are not a read passes its own event type (D3, 2026-09-06) so the
+   * probe lands where an operator filtering that route's events will see it.
+   * An ambiguous handle is concealed for a grantless token caller
+   * (concealHandleError).
    */
-  async resolveSecretId(handle: string, caller?: CallerContext): Promise<string> {
+  async resolveSecretId(
+    handle: string,
+    caller?: CallerContext,
+    eventType: AuditEventType = AuditEventType.SECRET_READ,
+  ): Promise<string> {
     const s = this.assertUnlocked();
     try {
       const secret = await s.secretManager.resolveHandle(handle);
       return secret.id;
     } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_READ, err, { handle }, undefined, caller);
+      this.auditDenied(s, eventType, err, { handle }, undefined, caller);
       throw await this.concealHandleError(s, err, handle, caller);
     }
   }
@@ -4438,8 +4419,7 @@ export class VaultEngine {
    * Audit a denied operation (`success: false`, error code in detail) without
    * altering the thrown error. Denied access must be as visible in the trail
    * as granted access — a scoped token probing revoked/expired secrets is
-   * exactly what the audit trail exists to catch. A non-VaultError is recorded
-   * as INTERNAL_ERROR — a raw failure is still a denial the trail must show.
+   * exactly what the audit trail exists to catch.
    */
   private auditDenied(
     s: UnlockedState,
@@ -4449,7 +4429,7 @@ export class VaultEngine {
     secretId?: string,
     caller?: CallerContext,
   ): void {
-    const code = err instanceof VaultError ? err.code : ErrorCode.INTERNAL_ERROR;
+    const code = errorCodeOf(err);
     s.auditLogger.log({
       eventType,
       secretId,
@@ -4570,23 +4550,23 @@ export class VaultEngine {
   }
 
   /**
-   * Handle-resolving wrapper around checkResolvedCallerPolicy for engine
-   * methods whose secret manager call resolves internally. With no caller
-   * (trusted local path) this is a no-op — no extra handle resolution,
-   * byte-identical behavior; with a caller — the tokenless stdio server's
-   * synthetic caller included (R4/E78b) — a resolution failure is audited as
-   * the denied operation (with the requesting principal), concealed for a
-   * grantless token caller when ambiguous, and rethrown.
+   * The audited resolve every secret-scoped configuration accessor performs
+   * (W1, R1), as one call: resolve the handle; audit a failed resolution under
+   * the operation's own event type and conceal an ambiguity for a grantless
+   * token caller; then run the per-secret gate — before anything is decrypted,
+   * written, or terminated. Nine callers, byte-identical in behavior — the
+   * eight secret-scoped configuration accessors and `enforceCallerPolicy`,
+   * which adds only the caller-less short-circuit in front of it; the
+   * regression net is the `SITES` table of vault-engine.audit-lifecycle.test.ts.
    */
-  private async enforceCallerPolicy(
+  private async resolveForConfig(
     s: UnlockedState,
     handle: string,
     caller: CallerContext | undefined,
     permission: Permission,
     eventType: AuditEventType,
     detail: Record<string, unknown>,
-  ): Promise<void> {
-    if (!caller) return;
+  ): Promise<Secret> {
     let secret: Secret;
     try {
       secret = await s.secretManager.resolveHandle(handle);
@@ -4595,6 +4575,31 @@ export class VaultEngine {
       throw await this.concealHandleError(s, err, handle, caller);
     }
     this.checkResolvedCallerPolicy(s, secret.id, caller, permission, eventType, detail, handle);
+    return secret;
+  }
+
+  /**
+   * Handle-resolving wrapper around checkResolvedCallerPolicy for engine
+   * methods whose secret manager call resolves internally. With no caller
+   * (trusted local path) this is a no-op — no extra handle resolution,
+   * byte-identical behavior; with a caller — the tokenless stdio server's
+   * synthetic caller included (R4/E78b) — a resolution failure is audited as
+   * the denied operation (with the requesting principal), concealed for a
+   * grantless token caller when ambiguous, and rethrown. The resolved record is
+   * returned so the wrapped method does not resolve the same handle a second
+   * time (R16); `undefined` marks the caller-less path, which never resolved
+   * here at all.
+   */
+  private async enforceCallerPolicy(
+    s: UnlockedState,
+    handle: string,
+    caller: CallerContext | undefined,
+    permission: Permission,
+    eventType: AuditEventType,
+    detail: Record<string, unknown>,
+  ): Promise<Secret | undefined> {
+    if (!caller) return undefined;
+    return await this.resolveForConfig(s, handle, caller, permission, eventType, detail);
   }
 
   private assertUnlocked(): UnlockedState {
@@ -4717,46 +4722,51 @@ export class VaultEngine {
   // ---------------------------------------------------------------------------
 
   private async writeNewSession(): Promise<void> {
-    // A use-driven expiry slide may be writing the session file right now
-    // (e.g. changePassword's own assertUnlocked started one) — settle it so
-    // the two writers cannot collide on the write-then-rename.
-    await this.settleSessionSlide();
-
-    const kek = this.kek as Uint8Array;
-    const jwtKey = this.jwtKey as Uint8Array;
-    const auditKey = this.auditKey as Uint8Array;
-    const vaultId = this.vaultId as string;
-
-    const sessionKey = generateRandomBytes(AES_KEY_LENGTH);
+    this.sessionWriteInFlight = true;
     try {
-      const sessionIdVal = generateUUIDv7();
-      this.sessionId = sessionIdVal;
+      // A use-driven expiry slide may be writing the session file right now
+      // (e.g. changePassword's own assertUnlocked started one) — settle it so
+      // the two writers cannot collide on the write-then-rename.
+      await this.settleSessionSlide();
 
-      // Wrap KEK, JWT key, and audit key with session key
-      const wrappedKek = encrypt(sessionKey, kek, AAD_SESSION_KEK);
-      const wrappedJwt = encrypt(sessionKey, jwtKey, AAD_SESSION_JWT);
-      const wrappedAudit = encrypt(sessionKey, auditKey, AAD_SESSION_AUDIT);
+      const kek = this.kek as Uint8Array;
+      const jwtKey = this.jwtKey as Uint8Array;
+      const auditKey = this.auditKey as Uint8Array;
+      const vaultId = this.vaultId as string;
 
-      const session = SessionManager.createSessionData(
-        sessionIdVal,
-        vaultId,
-        Buffer.from(sessionKey).toString("base64"),
-        Buffer.from(wrappedKek.ciphertext).toString("base64"),
-        Buffer.from(wrappedKek.iv).toString("base64"),
-        Buffer.from(wrappedKek.tag).toString("base64"),
-        Buffer.from(wrappedJwt.ciphertext).toString("base64"),
-        Buffer.from(wrappedJwt.iv).toString("base64"),
-        Buffer.from(wrappedJwt.tag).toString("base64"),
-        Buffer.from(wrappedAudit.ciphertext).toString("base64"),
-        Buffer.from(wrappedAudit.iv).toString("base64"),
-        Buffer.from(wrappedAudit.tag).toString("base64"),
-        this.sessionTtlMs,
-      );
+      const sessionKey = generateRandomBytes(AES_KEY_LENGTH);
+      try {
+        const sessionIdVal = generateUUIDv7();
+        this.sessionId = sessionIdVal;
 
-      await this.sessionManager.writeSession(session);
-      this.sessionExpiresAt = session.expires_at;
+        // Wrap KEK, JWT key, and audit key with session key
+        const wrappedKek = encrypt(sessionKey, kek, AAD_SESSION_KEK);
+        const wrappedJwt = encrypt(sessionKey, jwtKey, AAD_SESSION_JWT);
+        const wrappedAudit = encrypt(sessionKey, auditKey, AAD_SESSION_AUDIT);
+
+        const session = SessionManager.createSessionData(
+          sessionIdVal,
+          vaultId,
+          Buffer.from(sessionKey).toString("base64"),
+          Buffer.from(wrappedKek.ciphertext).toString("base64"),
+          Buffer.from(wrappedKek.iv).toString("base64"),
+          Buffer.from(wrappedKek.tag).toString("base64"),
+          Buffer.from(wrappedJwt.ciphertext).toString("base64"),
+          Buffer.from(wrappedJwt.iv).toString("base64"),
+          Buffer.from(wrappedJwt.tag).toString("base64"),
+          Buffer.from(wrappedAudit.ciphertext).toString("base64"),
+          Buffer.from(wrappedAudit.iv).toString("base64"),
+          Buffer.from(wrappedAudit.tag).toString("base64"),
+          this.sessionTtlMs,
+        );
+
+        await this.sessionManager.writeSession(session);
+        this.sessionExpiresAt = session.expires_at;
+      } finally {
+        wipeBuffer(sessionKey);
+      }
     } finally {
-      wipeBuffer(sessionKey);
+      this.sessionWriteInFlight = false;
     }
   }
 
@@ -4778,6 +4788,12 @@ export class VaultEngine {
    * the TTL slides exclusively on authenticated use (touchSession), so an
    * idle-but-running engine process reaches expiry and seals instead of
    * keeping the session alive to the absolute ceiling by mere liveness.
+   *
+   * It also enforces identity, not merely presence (D7): a file carrying a
+   * different `session_id` was written by another process's unlock, and one
+   * whose `key_protection` is not this protector's scheme is a downgraded
+   * copy. Either way the keys in memory belong to a session that is gone, so
+   * the tick seals instead of running on.
    */
   private async sessionMonitorTick(): Promise<void> {
     let session: SessionFile | null;
@@ -4790,7 +4806,9 @@ export class VaultEngine {
       // enforced synchronously by assertUnlocked and by the next tick.
       return;
     }
-    if (session) return;
+    if (session && this.sessionManager.matchesExpectation(session, this.sessionExpectation())) {
+      return;
+    }
     // Session expired or removed — close store and seal
     await this.mcpRegistry?.closeAll("session_expired");
     this.wipeKeys();
@@ -4826,6 +4844,23 @@ export class VaultEngine {
   }
 
   /**
+   * What this engine believes its session file is: the session it holds keys
+   * for, under the tag its own protector writes. The slide and the monitor
+   * compare against the same object, so they can never disagree about whose
+   * session the file describes (D7). During this engine's own write the
+   * expectation carries the scheme only, because the file on disk is
+   * legitimately either the old session or the new one.
+   */
+  private sessionExpectation(): SessionExpectation {
+    return {
+      ...(this.sessionId !== null && !this.sessionWriteInFlight
+        ? { sessionId: this.sessionId }
+        : {}),
+      scheme: this.sessionManager.protectionScheme,
+    };
+  }
+
+  /**
    * Slide the session's expiry window on authenticated use, throttled to one
    * write per SESSION_SLIDE_INTERVAL_MS per process — the same file-write
    * cadence the monitor produced when it did the sliding. Called from
@@ -4844,10 +4879,12 @@ export class VaultEngine {
     }
     this.lastSessionSlideAt = now;
     this.sessionSlide = this.sessionManager
-      .extendSession(this.sessionTtlMs, true)
+      .extendSession(this.sessionTtlMs, true, this.sessionExpectation())
       .then((updated) => {
-        // Track the new expiry; a null result means the file is gone (another
-        // process locked/erased it) — mark expired so the next op seals.
+        // Track the new expiry; a null result means the file this engine holds
+        // keys for is gone — erased by another process's lock, or replaced by
+        // another process's unlock (a different session_id) or a downgraded
+        // key_protection tag (D7) — so mark expired and let the next op seal.
         this.sessionExpiresAt = updated ? updated.expires_at : 0;
       })
       .catch(() => undefined)

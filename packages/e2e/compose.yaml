@@ -263,6 +263,36 @@ services:
       timeout: 5s
       retries: 45
 
+  # The same fixture image over TLS, for the CA-pinning git arms (D12). A second
+  # SERVICE rather than a second port on git-http: only this container mounts
+  # the fixture PKI and enables the TLS vhost, so the plain-HTTP arms keep a
+  # container that cannot fail to start on a certificate file. The leaf is the
+  # echo-https one (SAN localhost + 127.0.0.1), reused as `mail` reuses it, and
+  # 55081 is free across the 55xxx map.
+  git-https:
+    build:
+      context: ./fixtures/git-http
+    image: harpoc-e2e-git-http
+    volumes:
+      - ./fixtures/repos/out:/srv-src:ro
+      - ./fixtures/pki/out:/pki:ro
+    command:
+      - bash
+      - -c
+      - >-
+        rm -rf /srv/git &&
+        cp -r /srv-src /srv/git &&
+        chown -R www-data:www-data /srv/git &&
+        a2enconf git-https &&
+        exec apache2ctl -D FOREGROUND
+    ports:
+      - "127.0.0.1:55081:443"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/443"]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+
   # Exfiltration sink for the two-arm attack scenarios (C-3). The baseline arm
   # must genuinely move the credential off-box, or "baseline leaks / Harpoc
   # blocks" is an assertion rather than a comparison with a visible effect; the

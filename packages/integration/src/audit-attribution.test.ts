@@ -84,7 +84,11 @@ describe("credential-access audit attribution end-to-end", () => {
 
     const res = await app.request("/api/v1/secrets/attr-key/use", {
       method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        host: "localhost",
+      },
       body: JSON.stringify({ action: USE_ACTION }),
     });
     expect(res.status).toBe(200);

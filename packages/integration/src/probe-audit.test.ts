@@ -52,7 +52,7 @@ describe("unknown-handle probes write an attributed denial row (N3)", () => {
   it("REST GET /secrets/:handle on an unknown name: 404 and one secret.read denial", async () => {
     const before = deniedRows(AuditEventType.SECRET_READ).length;
     const res = await app.request("/api/v1/secrets/nope", {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(res.status).toBe(404);
     const rows = deniedRows(AuditEventType.SECRET_READ);
@@ -67,7 +67,11 @@ describe("unknown-handle probes write an attributed denial row (N3)", () => {
     const before = deniedRows(AuditEventType.SECRET_USE).length;
     const res = await app.request("/api/v1/secrets/nope/use", {
       method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        host: "localhost",
+      },
       body: JSON.stringify({ action: USE_ACTION }),
     });
     expect(res.status).toBe(404);

@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createApp } from "@harpoc/rest-api";
 import { SecretType } from "@harpoc/shared";
-import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
+import {
+  createTestVault,
+  destroyTestVault,
+  grantOn,
+  registerAgents,
+} from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 
 const PASSWORD = "rest-scope-denial-pw";
@@ -38,7 +43,7 @@ describe("REST scope enforcement end-to-end", () => {
 
   it("read/list-scoped token without a grant is told not-found; its use and policy writes stay scope-refused", async () => {
     const token = vault.engine.createToken("scoped-agent", ["read", "list"]);
-    const auth = { authorization: `Bearer ${token}` };
+    const auth = { authorization: `Bearer ${token}`, host: "localhost" };
     const jsonAuth = { ...auth, "content-type": "application/json" };
 
     const info = await app.request("/api/v1/secrets/db-prod", { headers: auth });
@@ -78,7 +83,7 @@ describe("REST scope enforcement end-to-end", () => {
       undefined,
       { secrets: ["api-*"] },
     );
-    const auth = { authorization: `Bearer ${token}` };
+    const auth = { authorization: `Bearer ${token}`, host: "localhost" };
 
     const denied = await app.request("/api/v1/secrets/db-prod", { headers: auth });
     expect(denied.status).toBe(403);
@@ -92,7 +97,7 @@ describe("REST scope enforcement end-to-end", () => {
   it("expired token is rejected with 401", async () => {
     const token = vault.engine.createToken("expired-agent", ["admin"], 0);
     const res = await app.request("/api/v1/secrets", {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(res.status).toBe(401);
   });
@@ -101,8 +106,51 @@ describe("REST scope enforcement end-to-end", () => {
     const token = vault.engine.createToken("revoked-agent", ["admin"]);
     vault.engine.revokeToken(decodeJti(token));
     const res = await app.request("/api/v1/secrets", {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(res.status).toBe(401);
+  });
+
+  // D6/R14: both config PUTs are deliberately `rotate`, not `admin` (the
+  // asymmetry the route file documents). The denial matrix pinned the refusals
+  // only, so nothing proved a rotate-only holder can actually complete them.
+  it("a rotate-only agent completes both config PUTs end to end", async () => {
+    await grantOn(vault.engine, "secret://db-prod", "rotate-agent", ["rotate"]);
+    const token = vault.engine.createToken("rotate-agent", ["rotate"]);
+    const jsonAuth = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      host: "localhost",
+    };
+
+    const mcp = await app.request("/api/v1/secrets/db-prod/mcp-server", {
+      method: "PUT",
+      headers: jsonAuth,
+      body: JSON.stringify({
+        server_name: "rotate-only-mcp",
+        transport: "stdio",
+        command: "node",
+        args: ["server.js"],
+        env_var: "GITHUB_TOKEN",
+      }),
+    });
+    expect(mcp.status).toBe(200);
+    expect((await mcp.json()) as { data: { updated: boolean } }).toEqual({
+      data: { updated: true },
+    });
+
+    const connection = await app.request("/api/v1/secrets/db-prod/connection-config", {
+      method: "PUT",
+      headers: jsonAuth,
+      body: JSON.stringify({ database: { tls_mode: "require" } }),
+    });
+    expect(connection.status).toBe(200);
+
+    // Read back on the trusted path: a 200 that stored nothing would pass the
+    // route assertions above.
+    const storedMcp = await vault.engine.getMcpServerConfig("secret://db-prod");
+    expect(storedMcp?.server_name).toBe("rotate-only-mcp");
+    const storedConnection = await vault.engine.getConnectionConfig("secret://db-prod");
+    expect(storedConnection?.database?.tls_mode).toBe("require");
   });
 });

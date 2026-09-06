@@ -107,6 +107,7 @@ export function registerAuditCommand(program: Command): void {
                   e.principal_type && e.principal_id
                     ? `${e.principal_type}:${e.principal_id}`
                     : "-",
+                IP: e.ip_address ?? "-",
                 Session: e.session_id ? e.session_id.slice(0, 8) + "..." : "-",
                 Success: e.success ? "yes" : "no",
               }));

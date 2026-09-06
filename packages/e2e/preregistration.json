@@ -84,6 +84,20 @@
     "expected": "REJECTED"
   },
   {
+    "scenario": "git-https-ca-pinned",
+    "context": "git",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "git-https-unpinned",
+    "context": "git",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "REJECTED"
+  },
+  {
     "scenario": "demo-http",
     "context": "http",
     "surface": "mcp-http",

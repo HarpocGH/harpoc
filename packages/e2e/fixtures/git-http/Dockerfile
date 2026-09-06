@@ -2,13 +2,16 @@
 # basic auth so the vault's GIT_ASKPASS credential injection is genuinely
 # exercised — a 401 on the /git/ location triggers the helper. A /redirect
 # location 302s off-box for the H6a redirect-refusal arm. The credential baked
-# into the htpasswd matches the harness GIT_HTTP constant.
+# into the htpasswd matches the harness GIT_HTTP constant. The image also ships
+# a TLS vhost (git-https.conf, conf-available) which only the `git-https`
+# compose service enables — one image, two publications (D12).
 FROM debian:stable-slim
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends apache2 apache2-utils git \
  && rm -rf /var/lib/apt/lists/* \
- && a2enmod cgid alias env rewrite auth_basic authn_file authz_user \
+ && a2enmod cgid alias env rewrite auth_basic authn_file authz_user ssl \
  && htpasswd -bBc /etc/apache2/git-htpasswd harpoc git-e2e-pw
 
 COPY git-http.conf /etc/apache2/conf-enabled/git-http.conf
+COPY git-https.conf /etc/apache2/conf-available/git-https.conf

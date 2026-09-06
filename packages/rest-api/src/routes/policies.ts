@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { PrincipalType, Permission } from "@harpoc/shared";
-import { accessPolicyInputSchema } from "@harpoc/shared";
+import { AuditEventType, accessPolicyInputSchema } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
 import { callerOf } from "../utils/caller.js";
@@ -32,7 +32,7 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const secretId = await engine.resolveSecretId(handle, callerOf(c));
+    const secretId = await engine.resolveSecretId(handle, callerOf(c), AuditEventType.POLICY_GRANT);
 
     const body = await readJsonBody(c);
     const parsed = accessPolicyInputSchema.safeParse(body);
@@ -63,7 +63,11 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
-    const secretId = await engine.resolveSecretId(handle, callerOf(c));
+    const secretId = await engine.resolveSecretId(
+      handle,
+      callerOf(c),
+      AuditEventType.POLICY_REVOKE,
+    );
     const policyId = c.req.param("policyId");
 
     // The cross-secret IDOR guard is the engine's: a policy on another secret

@@ -1,6 +1,12 @@
+import { chmodSync, existsSync, writeFileSync } from "node:fs";
 import type { Command } from "commander";
 import type { Permission } from "@harpoc/shared";
-import { MAX_TOKEN_TTL_MS, permissionSchema, tokenPrincipalTypeSchema } from "@harpoc/shared";
+import {
+  MAX_TOKEN_TTL_MS,
+  VaultError,
+  permissionSchema,
+  tokenPrincipalTypeSchema,
+} from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord } from "../../utils/output.js";
 
@@ -25,6 +31,7 @@ export function registerAuthTokenCommand(auth: Command): void {
       "Comma-separated secret names or patterns with * wildcards (e.g. db-*) the token can access",
     )
     .option("--label <text>", "Label for the issued token (shown in token listings)")
+    .option("--out <file>", "Write the bare token to <file> (0600) instead of printing it")
     .option("--json", "Output as JSON")
     .action(
       async (
@@ -36,6 +43,7 @@ export function registerAuthTokenCommand(auth: Command): void {
           project?: string;
           secrets?: string;
           label?: string;
+          out?: string;
           json?: boolean;
         },
         cmd: Command,
@@ -80,6 +88,16 @@ export function registerAuthTokenCommand(auth: Command): void {
             }
             const ttlMs = ttlMinutes * 60 * 1000;
 
+            // Checked before the mint: a refused write must not leave a row in
+            // the issued-token registry for a token nobody ever received. No
+            // --force — the flag writes a credential, and silently replacing
+            // one is how a live launch token gets orphaned.
+            if (options.out !== undefined && existsSync(options.out)) {
+              throw VaultError.invalidInput(
+                `--out ${options.out} already exists; remove it or choose another path`,
+              );
+            }
+
             const project = options.project;
             const secrets = options.secrets
               ? options.secrets.split(",").map((s) => s.trim())
@@ -91,9 +109,29 @@ export function registerAuthTokenCommand(auth: Command): void {
               label: options.label,
             });
 
+            if (options.out !== undefined) {
+              // 0600 at creation, like the session file beside it: open(2)
+              // applies the mode and umask can only tighten it; "wx" (O_EXCL)
+              // refuses any existing path, a symlink included, so the check
+              // above can be neither raced nor redirected. The POSIX chmod
+              // repair mirrors init.ts and is skipped on win32, where the file
+              // inherits the directory ACL as the vault does.
+              writeFileSync(options.out, token + "\n", { flag: "wx", mode: 0o600 });
+              if (process.platform !== "win32") {
+                try {
+                  chmodSync(options.out, 0o600);
+                } catch (err) {
+                  console.error(
+                    `Warning: could not restrict ${options.out} to owner-only access (${err instanceof Error ? err.message : String(err)})`,
+                  );
+                }
+              }
+              console.error(`Token written to ${options.out}`);
+            }
+
             if (options.json) {
               printJson({
-                token,
+                ...(options.out !== undefined ? { token_file: options.out } : { token }),
                 subject,
                 principal_type: principalType,
                 scope,
@@ -104,7 +142,7 @@ export function registerAuthTokenCommand(auth: Command): void {
               });
             } else {
               printRecord({
-                Token: token,
+                ...(options.out !== undefined ? {} : { Token: token }),
                 Subject: subject,
                 "Principal type": principalType,
                 Scope: scope.join(", "),

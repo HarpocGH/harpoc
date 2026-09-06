@@ -7,6 +7,8 @@ const schema = z
   .object({ name: z.string(), nested: z.object({ n: z.number() }).strict() })
   .strict();
 
+const enumSchema = z.object({ response_mode: z.enum(["full", "filtered", "status_only"]) });
+
 describe("schemaValidationError", () => {
   it("renders each issue as path: message, joined by '; ', with <root> for a path-less issue", () => {
     const parsed = schema.safeParse({
@@ -32,5 +34,18 @@ describe("schemaValidationError", () => {
     expect(schemaValidationError(parsed.error).message).toBe(
       "<root>: Unrecognized key(s) in object: 'sk-live-not-a-key'",
     );
+  });
+
+  /**
+   * D5: an enum refusal names the options, never the value the caller sent.
+   * zod 3.25.76 renders `Invalid enum value. Expected 'full' | … ,
+   * received '1BAD'`, and a rejected value can be a fragment of a credential.
+   */
+  it("an enum issue names the options and never the rejected value (D5)", () => {
+    const parsed = enumSchema.safeParse({ response_mode: "1BAD" });
+    if (parsed.success) throw new Error("expected a refusal");
+    const { message } = schemaValidationError(parsed.error);
+    expect(message).toBe("response_mode: must be one of full, filtered, status_only");
+    expect(message).not.toContain("1BAD");
   });
 });

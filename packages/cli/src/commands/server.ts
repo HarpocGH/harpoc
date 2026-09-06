@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { Option } from "commander";
 import type { Command } from "commander";
 import { MAX_TOKEN_TTL_MS, Permission, assertBindAllowed, isDecimalInteger } from "@harpoc/shared";
+import type { ServerStopTrigger, ServerTransport } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError } from "../utils/output.js";
 
@@ -215,7 +216,6 @@ export function registerServerCommand(program: Command): void {
           let renewalScheduler: { stop(): Promise<void> } | undefined;
           let shuttingDown = false;
 
-          type StopTrigger = "SIGINT" | "SIGTERM" | "transport_closed";
           const startedAt = Date.now();
           let mcpHttpBoundPort: number | undefined;
           let stdioClosed = false;
@@ -224,10 +224,10 @@ export function registerServerCommand(program: Command): void {
           // listener, before its close. A sealed vault cannot take the row,
           // and a stop that cannot be recorded must not block the stop.
           const auditStop = (
-            transport: "stdio" | "http" | "rest",
+            transport: ServerTransport,
             tokenless: boolean,
             listenerPort: number | undefined,
-            trigger: StopTrigger,
+            trigger: ServerStopTrigger,
           ): void => {
             try {
               engine?.auditServerStop({
@@ -242,7 +242,7 @@ export function registerServerCommand(program: Command): void {
             }
           };
 
-          const shutdown = async (trigger: StopTrigger): Promise<void> => {
+          const shutdown = async (trigger: ServerStopTrigger): Promise<void> => {
             if (shuttingDown) return;
             shuttingDown = true;
             // Drain an in-flight refresh tick before the store closes — a
@@ -333,7 +333,7 @@ export function registerServerCommand(program: Command): void {
             const oauthManager = createDefaultOAuthManager(engine);
             restOAuthManager = oauthManager;
             const uiDir = opts.ui ? resolveUiDistDir() : undefined;
-            restServer = startServer({
+            restServer = await startServer({
               engine,
               port,
               hostname: opts.host,

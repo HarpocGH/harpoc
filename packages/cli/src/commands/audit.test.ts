@@ -139,6 +139,87 @@ describe("audit table Principal column (by whom, thesis §4.3.4)", () => {
   });
 });
 
+/**
+ * D8/R18: `ip_address` has been on the row since E75i (2026-09-02) and in
+ * `--json` since, but the table showed seven of the eight "who and from where"
+ * columns. The Web UI table gains the same column in the same position.
+ */
+describe("audit table IP column (from where, E75i)", () => {
+  let exitSpy: MockInstance;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  const savedEnvToken = process.env.HARPOC_TOKEN;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.HARPOC_TOKEN;
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+    else process.env.HARPOC_TOKEN = savedEnvToken;
+  });
+
+  // printTable pads every cell, so two or more spaces separate columns and
+  // nothing inside a cell (the timestamp's single space included) splits.
+  const cells = (line: string): string[] => line.trim().split(/\s{2,}/);
+
+  it("renders the socket peer after Principal and '-' for a NULL one", async () => {
+    mockEngine.queryAudit.mockReturnValue([
+      {
+        id: 1,
+        timestamp: 1784306411000,
+        event_type: "secret.read",
+        secret_id: "s-1",
+        principal_type: "agent",
+        principal_id: "alice",
+        ip_address: "127.0.0.1",
+        detail: { interface: "rest" },
+        session_id: "sess-1234567890",
+        success: true,
+      },
+      {
+        id: 2,
+        timestamp: 1784306412000,
+        event_type: "secret.read",
+        secret_id: "s-2",
+        principal_type: "agent",
+        principal_id: "bob",
+        ip_address: null,
+        detail: { interface: "cli" },
+        session_id: "sess-2234567890",
+        success: true,
+      },
+    ]);
+
+    await run([]);
+    const lines = logSpy.mock.calls
+      .map((c) => c.join(" "))
+      .join("\n")
+      .split("\n");
+    expect(cells(lines[0] ?? "")).toEqual([
+      "ID",
+      "Time",
+      "Event",
+      "Secret",
+      "Principal",
+      "IP",
+      "Session",
+      "Success",
+    ]);
+    expect(cells(lines[2] ?? "")[5]).toBe("127.0.0.1");
+    expect(cells(lines[3] ?? "")[5]).toBe("-");
+  });
+});
+
 const validAnchor = {
   format: "harpoc-audit-anchor/1",
   vault_id: "vault-a",

@@ -12,11 +12,13 @@ import { startMcpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import type { CallOutcome, McpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import { preferNativeSsh, resolveGit } from "./harness/fixtures.js";
 import { clientKeyPem, knownHostPin } from "./harness/ssh.js";
-import { GIT_HTTP, SSHD_PINNED, assertFleetUp } from "./harness/backends.js";
+import { GIT_HTTP, GIT_HTTPS, SSHD_PINNED, assertFleetUp } from "./harness/backends.js";
+import { caPem } from "./harness/pki.js";
 import { resetSink, sinkRequests } from "./harness/attacker.js";
 import {
   GIT_HTTP_BASE,
   GIT_HTTP_CREDENTIAL,
+  GIT_HTTPS_BASE,
   gitRedirectPayload,
   gitSubmodulePayload,
 } from "./harness/payloads.js";
@@ -35,26 +37,32 @@ function gitResult(outcome: CallOutcome): { exit_code?: number; stderr?: string 
 }
 
 /**
- * The `git` context over both transports it derives — HTTP and SSH — through the
- * real MCP Streamable-HTTP wire with a scoped token. The first completed `git`
- * executions in the repository, plus the two targeted arms the 2026-07-25 review
- * proved do not transfer from the deep-tested HTTP path: the H6a redirect refusal
- * and the H6b submodule-recursion denial.
+ * The `git` context over all three transports it derives — HTTP, HTTPS and SSH —
+ * through the real MCP Streamable-HTTP wire with a scoped token. The first
+ * completed `git` executions in the repository, plus the two targeted arms the
+ * 2026-07-25 review proved do not transfer from the deep-tested HTTP path: the
+ * H6a redirect refusal and the H6b submodule-recursion denial.
  *
- * git-http runs over loopback http with basic auth (D2: no TLS on the git path —
- * criterion 3's handshake is the database arms' job). The ambient credential
- * helpers are neutralized (GIT_CONFIG_NOSYSTEM + an empty GIT_CONFIG_GLOBAL,
- * forwarded through env_allowlist on BOTH handles — the ssh clone reads ambient
- * gitconfig too, where a url.*.insteadOf rewrite would divert it) so the vault's
- * askpass is the sole credential source and the arm behaves identically on Linux
- * CI and a Windows dev host, where Git-for-Windows would otherwise inject
- * credential.helper=manager.
+ * git-http runs over loopback http with basic auth; since 2026-09-06 the same
+ * fixture is also published over TLS as `git-https`, and the last two arms are
+ * the CA-pinning pair D2 deferred (D12). They share one handle and run in that
+ * order on purpose: git carries its own CA bundle and never reads
+ * NODE_EXTRA_CA_CERTS, so the fixture CA the rest of the harness trusts
+ * process-wide does not reach it, and the unpinned clone fails at certificate
+ * verification while the same clone succeeds once `git.ca_pem` is stored on the
+ * secret. The ambient credential helpers are neutralized (GIT_CONFIG_NOSYSTEM +
+ * an empty GIT_CONFIG_GLOBAL, forwarded through env_allowlist on ALL THREE
+ * handles — the ssh clone reads ambient gitconfig too, where a url.*.insteadOf
+ * rewrite would divert it) so the vault's askpass is the sole credential source
+ * and the arms behave identically on Linux CI and a Windows dev host, where
+ * Git-for-Windows would otherwise inject credential.helper=manager.
  */
-describe("git context — live clones over http and ssh", () => {
+describe("git context — live clones over http, https and ssh", () => {
   let vault: HarnessVault;
   let surface: McpHttpSurface;
   let httpHandle: string;
   let sshHandle: string;
+  let httpsHandle: string;
   let sshKey: string;
   let emptyGitConfig: string;
   const cloneDirs: string[] = [];
@@ -68,6 +76,7 @@ describe("git context — live clones over http and ssh", () => {
 
   beforeAll(async () => {
     assertFleetUp("git-http");
+    assertFleetUp("git-https");
     assertFleetUp("sshd-pinned");
     // The H6a redirect and the H6b .gitmodules both point at the sink, and both
     // arms read it back: a missing sink must fail loudly, never silently turn
@@ -97,6 +106,14 @@ describe("git context — live clones over http and ssh", () => {
       host_allowlist: [],
     });
 
+    httpsHandle = await storeSecret(vault, "git-https-cred", GIT_HTTP_SECRET);
+    await vault.engine.setInjectionPolicy(httpsHandle, {
+      url_allowlist: [`${GIT_HTTPS_BASE}/*`],
+      command_allowlist: [gitBin],
+      env_allowlist: ["GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"],
+      host_allowlist: [],
+    });
+
     sshHandle = await storeSecret(vault, "git-ssh-key", sshKey);
     await vault.engine.setInjectionPolicy(sshHandle, {
       url_allowlist: [],
@@ -110,6 +127,7 @@ describe("git context — live clones over http and ssh", () => {
 
     await grantOn(vault, httpHandle, "e2e-git-agent", [Permission.USE]);
     await grantOn(vault, sshHandle, "e2e-git-agent", [Permission.USE]);
+    await grantOn(vault, httpsHandle, "e2e-git-agent", [Permission.USE]);
 
     surface = await startMcpHttpSurface(vault, "e2e-git-agent", [Permission.USE]);
   });
@@ -271,6 +289,88 @@ describe("git context — live clones over http and ssh", () => {
         arm: "harpoc",
       },
       "REJECTED",
+    );
+    expect(record.match).toBe(true);
+  });
+
+  it("refuses a TLS clone whose CA the vault was never given", async () => {
+    const dest = freshCloneDir();
+    const outcome = await surface.callUseSecret(httpsHandle, {
+      type: "git",
+      operation: "clone",
+      repository: `${GIT_HTTPS_BASE}/git/clean.git`,
+      working_directory: dest,
+    });
+
+    // The control for the arm below, and it must run first: the two share one
+    // handle, and this one is evidence only while no `git.ca_pem` is stored.
+    // git never reads NODE_EXTRA_CA_CERTS, so the fixture CA the harness trusts
+    // process-wide is invisible here — there is nothing to verify the fleet
+    // leaf against. The process runs (the URL is allowlisted and https) and
+    // fails at the handshake: non-zero exit, no working tree.
+    expect(outcome.ok).toBe(true);
+    const r = gitResult(outcome);
+    expect(r.exit_code).not.toBe(0);
+    expect(existsSync(join(dest, "README.md"))).toBe(false);
+    // The DISCRIMINATING signal: the failure is certificate verification, not a
+    // refused connection or a 401. Both curl backends are accepted — OpenSSL
+    // says "SSL certificate problem: unable to get local issuer certificate",
+    // GnuTLS "server certificate verification failed" / "The certificate is NOT
+    // trusted" — because which one a runner's git links against is not a
+    // property this arm is about.
+    expect(r.stderr ?? "").toMatch(/certificate|SSL/);
+
+    const auditRows = vault.engine.queryAudit({ eventType: "secret.use" });
+    const observation = { result: outcome.result, auditRows, parentEnv: process.env };
+    assertOpaque(GIT_HTTP_SECRET, observation);
+    assertOpaque(GIT_HTTPS.password, observation);
+
+    const record = recordArm(
+      {
+        scenario: "git-https-unpinned",
+        context: "git",
+        surface: "mcp-http",
+        interface: "mcp",
+        arm: "harpoc",
+      },
+      "REJECTED",
+    );
+    expect(record.match).toBe(true);
+  });
+
+  it("clones over TLS once the fleet CA is pinned on the secret", async () => {
+    // The only change from the arm above is the stored CA — which is what makes
+    // the pair evidence for the pin rather than for the fixture.
+    await vault.engine.setConnectionConfig(httpsHandle, { git: { ca_pem: caPem() } });
+
+    const dest = freshCloneDir();
+    const outcome = await surface.callUseSecret(httpsHandle, {
+      type: "git",
+      operation: "clone",
+      repository: `${GIT_HTTPS_BASE}/git/clean.git`,
+      working_directory: dest,
+    });
+
+    expect(outcome.ok).toBe(true);
+    expect(gitResult(outcome).exit_code).toBe(0);
+    // The clone really completed over a verified TLS connection to a private-CA
+    // endpoint — the first on the git path.
+    expect(existsSync(join(dest, "README.md"))).toBe(true);
+
+    const auditRows = vault.engine.queryAudit({ eventType: "secret.use" });
+    const observation = { result: outcome.result, auditRows, parentEnv: process.env };
+    assertOpaque(GIT_HTTP_SECRET, observation);
+    assertOpaque(GIT_HTTPS.password, observation);
+
+    const record = recordArm(
+      {
+        scenario: "git-https-ca-pinned",
+        context: "git",
+        surface: "mcp-http",
+        interface: "mcp",
+        arm: "harpoc",
+      },
+      "SUCCEEDED",
     );
     expect(record.match).toBe(true);
   });

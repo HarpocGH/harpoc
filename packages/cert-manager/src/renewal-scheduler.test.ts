@@ -399,6 +399,32 @@ describe("RenewalScheduler onRenewError", () => {
     expect(renewer.renewCertificate).toHaveBeenCalledTimes(6);
   });
 
+  it("forwards a swallowed audit-write failure to onRenewError, ahead of the renewal error", async () => {
+    const engine = engineWith([row("broken")]);
+    const auditError = new Error("vault is locked");
+    engine.auditCertRenewFailure.mockImplementation(() => {
+      throw auditError;
+    });
+    const renewError = new Error("challenge never validated");
+    const reported: { secretId: string; err: unknown }[] = [];
+
+    scheduler = new RenewalScheduler(
+      engine as never,
+      { renewCertificate: vi.fn().mockRejectedValue(renewError) },
+      {
+        onRenewError: (secretId, err) => {
+          reported.push({ secretId, err });
+        },
+      },
+    );
+    await drive(scheduler.tick());
+
+    expect(reported).toEqual([
+      { secretId: "broken", err: auditError },
+      { secretId: "broken", err: renewError },
+    ]);
+  });
+
   it("renewNow rethrows to the caller without invoking onRenewError", async () => {
     const onRenewError = vi.fn();
     scheduler = new RenewalScheduler(engineWith([]) as never, failingRenewer("still dead"), {

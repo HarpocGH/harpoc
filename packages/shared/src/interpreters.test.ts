@@ -143,6 +143,10 @@ describe("execWrapperName", () => {
     ["/usr/bin/bwrap", "bwrap"],
     ["setpriv", "setpriv"],
     ["/bin/unshare", "unshare"],
+    ["find.exe", "find"],
+    ["C:\\Program Files\\Git\\usr\\bin\\find.exe", "find"],
+    ["Windows\\System32\\find.exe", "find"],
+    ["C:\\Windows\\System32\\drivers\\find.exe", "find"],
   ] as const)("detects %s", (entry, expected) => {
     expect(execWrapperName(entry)).toBe(expected);
   });
@@ -153,6 +157,16 @@ describe("execWrapperName", () => {
       expect(execWrapperName(entry)).toBeNull();
     },
   );
+
+  it.each([
+    "C:\\Windows\\System32\\find.exe",
+    "c:/windows/syswow64/timeout.exe",
+    "D:\\WINDOWS\\SysWOW64\\Find.EXE",
+    "C:\\Windows\\System32\\timeout",
+    "C:/Windows\\System32/find.exe",
+  ])("exempts the Windows system-directory entry %j (D10)", (entry) => {
+    expect(execWrapperName(entry)).toBeNull();
+  });
 });
 
 describe("EXEC_WRAPPERS", () => {
@@ -169,7 +183,7 @@ describe("EXEC_WRAPPERS", () => {
     }
   });
 
-  it("covers the ruling's examples on both platforms and the vault's own wrapper binaries", () => {
+  it("covers the ruling's examples on every host and the vault's own wrapper binaries", () => {
     for (const name of [
       "xargs",
       "find",
@@ -185,5 +199,8 @@ describe("EXEC_WRAPPERS", () => {
     ]) {
       expect(EXEC_WRAPPERS.has(name), name).toBe(true);
     }
+    // The D10 exemption is keyed on the entry's path, never on the name.
+    expect(execWrapperName("find")).toBe("find");
+    expect(execWrapperName("timeout")).toBe("timeout");
   });
 });

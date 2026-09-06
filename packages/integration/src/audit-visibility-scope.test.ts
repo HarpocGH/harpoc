@@ -68,7 +68,7 @@ describe("audit visibility scope end-to-end (L10)", () => {
 
   async function readAudit(token: string, query = ""): Promise<AuditRow[]> {
     const res = await app.request(`/api/v1/audit${query}`, {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { data: AuditRow[] };

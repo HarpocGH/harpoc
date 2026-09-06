@@ -234,6 +234,40 @@ describe("startMcpHttpServer", () => {
     );
   });
 
+  /**
+   * D9: a dual-stack listener (`::`) reports an IPv4 client as
+   * `::ffff:127.0.0.1`, so the same client would occupy two
+   * `audit_log.ip_address` values depending on which address the operator
+   * bound. The peer is read out of the session's caller — the only place this
+   * server exposes it — and skipped where the host has no IPv6 stack, or binds
+   * `::` v6-only, so the shape cannot arise at all.
+   */
+  it("records a dual-stack IPv4 peer in dotted form (D9)", async (ctx) => {
+    const engine = mockEngine();
+    const started = await startMcpHttpServer({
+      engine,
+      port: 0,
+      host: "::",
+      allowedHosts: ["127.0.0.1"],
+    }).catch(() => null);
+    if (started === null) return ctx.skip();
+    server = started;
+
+    const connected = await connectClient(started.port, TOKEN).catch(() => null);
+    if (connected === null) return ctx.skip();
+    clients.push(connected.client);
+
+    await connected.client.callTool({ name: "list_secrets", arguments: {} });
+
+    expect(engine.listSecrets).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({
+        interface: "mcp-http",
+        remote_address: "127.0.0.1",
+      }),
+    );
+  });
+
   it("enforces token scope across the HTTP transport", async () => {
     const engine = mockEngine();
     const { port } = await start(engine);

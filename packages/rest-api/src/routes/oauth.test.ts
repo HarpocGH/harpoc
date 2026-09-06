@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
 import type { OAuthProviderConfig, VaultApiToken } from "@harpoc/shared";
 import { authMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
@@ -385,6 +385,15 @@ describe("POST /api/v1/oauth/:handle/refresh", () => {
     );
   });
 
+  it("probes the handle as oauth.refresh, not secret.read (D3)", async () => {
+    await app.request("/api/v1/oauth/gh-app/refresh", { method: "POST", headers: AUTH });
+    expect(engine.resolveSecretId).toHaveBeenCalledWith(
+      "secret://gh-app",
+      EXPECTED_CALLER,
+      AuditEventType.OAUTH_REFRESH,
+    );
+  });
+
   it("charges the per-secret rate limiter on the handle, before resolution", async () => {
     const checkSecret = vi.spyOn(limiter, "checkSecret");
     await app.request("/api/v1/oauth/gh-app/refresh", { method: "POST", headers: AUTH });
@@ -424,6 +433,8 @@ describe("POST /api/v1/oauth/:handle/refresh", () => {
 });
 
 describe("createApp OAuth wiring", () => {
+  const WIRED_JSON_HEADERS = { ...JSON_HEADERS, host: "localhost" };
+
   it("mounts the routes and serves the injected manager from context", async () => {
     const appEngine = createMockEngine();
     const injected = createMockOAuthManager();
@@ -434,7 +445,7 @@ describe("createApp OAuth wiring", () => {
 
     const res = await wired.request("/api/v1/oauth/authorize", {
       method: "POST",
-      headers: JSON_HEADERS,
+      headers: WIRED_JSON_HEADERS,
       body: JSON.stringify(CLIENT_CREDENTIALS_BODY),
     });
     expect(res.status).toBe(201);
@@ -449,14 +460,16 @@ describe("createApp OAuth wiring", () => {
       certManager: {} as never,
     });
 
-    const status = await wired.request("/api/v1/oauth/gh-app/status");
+    const status = await wired.request("/api/v1/oauth/gh-app/status", {
+      headers: { host: "localhost" },
+    });
     expect(status.status).toBe(401);
 
     // The `/*` middleware pattern must cover the single-segment authorize path
     // too — an unguarded route would read an unset `token` from context.
     const authorized = await wired.request("/api/v1/oauth/authorize", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { host: "localhost", "content-type": "application/json" },
       body: JSON.stringify(CLIENT_CREDENTIALS_BODY),
     });
     expect(authorized.status).toBe(401);
@@ -469,7 +482,7 @@ describe("createApp OAuth wiring", () => {
 
     const res = await wired.request("/api/v1/oauth/authorize", {
       method: "POST",
-      headers: JSON_HEADERS,
+      headers: WIRED_JSON_HEADERS,
       body: JSON.stringify(CLIENT_CREDENTIALS_BODY),
     });
 

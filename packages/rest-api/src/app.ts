@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { VaultEngine } from "@harpoc/core";
 import { CertManager } from "@harpoc/cert-manager";
 import { OAuthManager } from "@harpoc/oauth-proxy";
+import { buildAllowedHostSet } from "@harpoc/shared";
 import { errorHandler } from "./middleware/error-handler.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { hostAllowlistMiddleware } from "./middleware/host-allowlist.js";
@@ -34,9 +35,13 @@ export interface CreateAppOptions {
    */
   uiDir?: string;
   /**
-   * The listener's allowed-host set (R11/D61) — `startServer` builds it from
-   * the bind address and `--allowed-host`; an embedder that passes none gets
-   * no Host check, as before.
+   * The host names this listener answers to (R11/D61). `startServer` builds
+   * the set from the bind address and `--allowed-host`. An embedder that
+   * passes none gets the loopback set — `buildAllowedHostSet("127.0.0.1", [])`,
+   * i.e. `{127.0.0.1, ::1, localhost}` — so an app built the default way still
+   * refuses a rebinding Host with 421 (R33/D9, 2026-09-06). An explicit
+   * **empty** set is the documented opt-out: no check is mounted, for an
+   * embedder whose own front end validates the Host.
    */
   allowedHostSet?: ReadonlySet<string>;
 }
@@ -71,8 +76,11 @@ export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono
   app.onError(errorHandler);
 
   // The listener's host allowlist answers first, health included (R11/D61).
-  if (options?.allowedHostSet !== undefined) {
-    app.use("*", hostAllowlistMiddleware(options.allowedHostSet));
+  // Absent means loopback, not unchecked (R33/D9); only an explicit empty set
+  // mounts nothing.
+  const allowedHostSet = options?.allowedHostSet ?? buildAllowedHostSet("127.0.0.1", []);
+  if (allowedHostSet.size > 0) {
+    app.use("*", hostAllowlistMiddleware(allowedHostSet));
   }
 
   // Rate limiter (created early so it can be injected into context)

@@ -6,13 +6,39 @@ import {
   readdirSync,
   rmSync,
   rmdirSync,
+  statSync,
   utimesSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionFile } from "@harpoc/shared";
 import { SessionManager } from "./session-manager.js";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, mkdirSync: vi.fn(actual.mkdirSync), statSync: vi.fn(actual.statSync) };
+});
+
+// Captured before any vi.useFakeTimers(): the real-clock case below must be
+// able to poll while the fake clock stands still, and vi.waitFor cannot serve
+// — it advances fake timers between its own polls, which would drive the very
+// setTimeout the product must be proven not to use.
+const realSetTimeout: typeof setTimeout = setTimeout;
+const realDateNow: typeof Date.now = Date.now;
+
+async function waitOnRealClock(done: () => boolean, budgetMs = 5_000): Promise<void> {
+  const deadline = realDateNow() + budgetMs;
+  while (!done() && realDateNow() < deadline) {
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 10));
+  }
+}
+
+function ioError(code: string): NodeJS.ErrnoException {
+  const err = new Error(`${code}: injected`) as NodeJS.ErrnoException;
+  err.code = code;
+  return err;
+}
 
 let tempDir: string;
 let sessionPath: string;
@@ -48,6 +74,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.mocked(mkdirSync).mockReset();
+  vi.mocked(statSync).mockReset();
   rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -115,5 +143,80 @@ describe("session.json.lock (R8/D56)", () => {
     expect(existsSync(lockPath)).toBe(false);
     await manager.eraseSession();
     expect(readdirSync(tempDir)).toEqual([]);
+  });
+
+  it("the wait poll runs on the real clock: an erase settles under fake timers (R31)", async () => {
+    const manager = new SessionManager(sessionPath, { lockStaleMs: 200 });
+    await manager.writeSession(sessionExpiringSoon());
+    mkdirSync(lockPath);
+    const started = realDateNow();
+    vi.useFakeTimers();
+    try {
+      const settled = { done: false };
+      const erase = manager.eraseSession().then(() => {
+        settled.done = true;
+      });
+
+      await waitOnRealClock(() => settled.done);
+
+      expect(settled.done).toBe(true);
+      await erase;
+      expect(realDateNow() - started).toBeGreaterThanOrEqual(200);
+      expect(existsSync(sessionPath)).toBe(false);
+      // The foreign lock is never reclaimed: isLockStale keeps the fakeable
+      // clock (D7 captures the real one for the poll only), so the erase takes
+      // the documented proceed-unlocked path out of the bounded wait.
+      expect(existsSync(lockPath)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a non-EEXIST mkdir errno proceeds unlocked and is reported through the seam (R30)", async () => {
+    const failures: Error[] = [];
+    const manager = new SessionManager(sessionPath, {
+      lockStaleMs: 50,
+      onPermissionRepairFailure: (err) => failures.push(err),
+    });
+    await manager.writeSession(sessionExpiringSoon());
+    vi.mocked(mkdirSync).mockImplementation(() => {
+      throw ioError("EACCES");
+    });
+
+    await manager.eraseSession();
+
+    expect(existsSync(sessionPath)).toBe(false);
+    expect(existsSync(lockPath)).toBe(false);
+    const lockFailures = failures.filter((err) => err.message.includes("EACCES"));
+    expect(lockFailures).toHaveLength(1);
+    expect(lockFailures[0]?.message).toContain("session lock");
+  });
+
+  it("a lock released between the mkdir and the stat is acquired on the retry (R30)", async () => {
+    const manager = new SessionManager(sessionPath, { lockStaleMs: 5_000 });
+    await manager.writeSession(sessionExpiringSoon());
+    const before = JSON.parse(readFileSync(sessionPath, "utf8")) as SessionFile;
+    mkdirSync(lockPath);
+    // The holder releases exactly between our mkdir and our stat.
+    vi.mocked(statSync).mockImplementationOnce((target) => {
+      rmdirSync(target);
+      throw ioError("ENOENT");
+    });
+
+    const result = await manager.extendSession(60_000, true);
+
+    expect(result?.expires_at).toBeGreaterThan(before.expires_at);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it("a contended slide over a missing session file writes nothing and reports no session", async () => {
+    const manager = new SessionManager(sessionPath, { lockStaleMs: 200 });
+    mkdirSync(lockPath);
+
+    const result = await manager.extendSession(60_000, true);
+
+    expect(result).toBeNull();
+    expect(existsSync(sessionPath)).toBe(false);
+    expect(existsSync(lockPath)).toBe(true);
   });
 });
