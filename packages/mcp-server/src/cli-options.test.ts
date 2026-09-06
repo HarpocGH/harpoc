@@ -145,3 +145,19 @@ describe("parseAllowedHostsOption", () => {
     });
   });
 });
+
+describe("index.ts lifecycle ordering", () => {
+  // The banner is the readiness signal a launcher keys on: a stop sent on seeing it
+  // must find the handlers installed — the race the Linux CI leg caught at 0100d3e.
+  it("registers the SIGINT/SIGTERM handlers before writing the readiness banner (P32)", () => {
+    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    const banner = source.indexOf("process.stderr.write(banner)");
+    const sigint = source.indexOf('process.on("SIGINT"');
+    const sigterm = source.indexOf('process.on("SIGTERM"');
+    expect(banner).toBeGreaterThanOrEqual(0);
+    expect(sigint).toBeGreaterThanOrEqual(0);
+    expect(sigterm).toBeGreaterThanOrEqual(0);
+    expect(banner).toBeGreaterThan(sigint);
+    expect(banner).toBeGreaterThan(sigterm);
+  });
+});

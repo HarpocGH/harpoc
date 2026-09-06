@@ -249,6 +249,7 @@ A script author should also read the _Behavioral_ notes under _Changed_ — the 
 
 ### Fixed
 
+- **`harpoc-mcp` registers its SIGINT / SIGTERM handlers before printing its readiness banner.** A launcher that stops the server the moment the banner appears could still meet the signal's default disposition and kill it without a `server.stop` row; the ubuntu / Node 22 leg of the 2026-09-06 tranche's CI run caught the race in the spawned-binary SIGTERM twin.
 - **`secret connection --token` attributes its merge read.** The read that feeds a token-bearing connection-config write is gated on the write's own `rotate` permission and names the principal; every such write used to leave one NULL-principal `secret.read { config: "connection" }` row. A rotate-only grant keeps working.
 - **`changePassword` seals on a failed session rewrite.** A `SESSION_KEYSTORE_UNAVAILABLE` while rewriting the session left the engine unlocked on a session no file described (and the stale file kept being slid); it now seals exactly as `init` and `unlock` do.
 - **A three-deep chained OAuth supersede can no longer orphan the first flow's callback listener.** `OAuthManager` tracks every live flow in a set beside its per-secret map, so `cancelPendingFlows` (the `close()` and shutdown path) and the socket cap see a flow whose successor's successor failed to bind.

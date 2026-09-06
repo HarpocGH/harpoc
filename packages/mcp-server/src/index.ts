@@ -149,6 +149,7 @@ async function main(): Promise<void> {
   // is local.
   let transport: Extract<ServerTransport, "stdio" | "http">;
   let boundPort: number | undefined;
+  let banner: string;
   let shuttingDown = false;
 
   // The stop row mirrors the start row (R4/D67). A sealed vault cannot take
@@ -182,9 +183,7 @@ async function main(): Promise<void> {
     close = httpServer.close;
     transport = "http";
     boundPort = httpServer.port;
-    process.stderr.write(
-      `Harpoc MCP server listening on http://${host}:${httpServer.port}${httpServer.endpoint} (Streamable HTTP)\n`,
-    );
+    banner = `Harpoc MCP server listening on http://${host}:${httpServer.port}${httpServer.endpoint} (Streamable HTTP)\n`;
   } else {
     // The launch token arrives through --token-file or the ambient
     // HARPOC_TOKEN (the file wins) — never argv (R9/A10). It is only read for
@@ -204,11 +203,18 @@ async function main(): Promise<void> {
     // hangs up (stdin EOF) closes nothing. That hang-up is this server's
     // graceful stop.
     process.stdin.once("end", () => void shutdown("transport_closed"));
-    process.stderr.write("Harpoc MCP server running on stdio\n");
+    banner = "Harpoc MCP server running on stdio\n";
   }
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
+  // The banner is the readiness signal a launcher keys on (the integration
+  // twin sends SIGTERM the moment it appears), so it must follow the
+  // handlers: written first, a stop sent on seeing it could still meet
+  // SIGTERM's default disposition and kill the server without its stop row
+  // — the race the Linux CI leg caught at 0100d3e.
+  process.stderr.write(banner);
 }
 
 // Only run main when executed directly (not imported)
