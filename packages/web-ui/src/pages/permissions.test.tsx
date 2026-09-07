@@ -453,6 +453,9 @@ describe("PermissionsPage", () => {
     const open = screen.getByText("open-key").closest("th");
     await waitFor(() => expect(open?.textContent).toContain("no grants"));
     expect(open?.textContent).not.toContain("old-runner");
+    // The agent's cell agrees with the header on the expired-only column: no
+    // row of its own on `open-key`, so the dash and never a chip.
+    expect(cell("ci-bot", UNGATED.handle).textContent).toBe("—");
     const gated = screen.getByText("test-key").closest("th");
     await waitFor(() => expect(gated?.textContent).toContain("granted"));
     expect(gated?.textContent).toContain("tool:ci-runner");
@@ -463,7 +466,10 @@ describe("PermissionsPage", () => {
     const getAccessPolicies = vi.fn((handle: string) => Promise.resolve(ACCESS[handle] ?? []));
     render(<PermissionsPage api={api({ getAccessPolicies })} />);
     await waitFor(() => expect(cell("ci-bot", GATED.handle)).toBeTruthy());
-    await waitFor(() => expect(columns()).toBe(2));
+    // Settled with the cell above: the preselect narrows in the render that
+    // mounts the table (the preselect case's register), so a barrier on the
+    // count has nothing to wait for — the pin is the one read below.
+    expect(columns()).toBe(2);
     // One `secret.read { config: "access_policies" }` row per column on
     // screen, none for the column the preselect hides.
     expect(getAccessPolicies.mock.calls.map((c) => c[0])).toEqual([GATED.handle]);

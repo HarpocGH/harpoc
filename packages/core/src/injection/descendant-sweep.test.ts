@@ -177,17 +177,73 @@ const exitOf = (child: ChildProcess): Promise<void> =>
 
 const POLL_INTERVAL_MS = 250;
 const POLL_DEADLINE_MS = 10_000;
+/**
+ * At least one retry after a non-empty listing, whatever the clock says: on
+ * the windows-latest runners one listing outlasts the whole deadline (warm
+ * 19–33 s against 10 s — decisions.md § "The WMI listing series"), so without
+ * this floor the poll was a single listing with no retry exactly where the
+ * retry matters (2026-09-07).
+ */
+const POLL_MIN_LISTINGS = 2;
 
-/** Polls until the listing is empty or the deadline passes; resolves the last listing either way. */
-async function untilEmpty(list: () => Promise<DescendantProcess[]>): Promise<DescendantProcess[]> {
-  const deadline = Date.now() + POLL_DEADLINE_MS;
+interface PollClock {
+  now(): number;
+  sleep(ms: number): Promise<void>;
+}
+
+const realClock: PollClock = {
+  now: () => Date.now(),
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+};
+
+/**
+ * Polls until the listing is empty, taking `POLL_MIN_LISTINGS` listings before
+ * the deadline is consulted; resolves the last listing either way, so a
+ * survivor stays visible in the failure.
+ */
+async function untilEmpty(
+  list: () => Promise<DescendantProcess[]>,
+  clock: PollClock = realClock,
+): Promise<DescendantProcess[]> {
+  const deadline = clock.now() + POLL_DEADLINE_MS;
   let last = await list();
-  while (last.length > 0 && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  let listings = 1;
+  while (last.length > 0 && (listings < POLL_MIN_LISTINGS || clock.now() < deadline)) {
+    await clock.sleep(POLL_INTERVAL_MS);
     last = await list();
+    listings += 1;
   }
   return last;
 }
+
+// Runs on every platform: the helper is the live cases' instrument, and its
+// floor is what makes the "poll" a poll on a host whose listing is slow.
+describe("untilEmpty — the live cases' poll", () => {
+  it("retries once after a non-empty listing even when one listing outlasts the deadline", async () => {
+    let t = 0;
+    let calls = 0;
+    const clock: PollClock = { now: () => t, sleep: () => Promise.resolve() };
+    const list = vi.fn((): Promise<DescendantProcess[]> => {
+      calls += 1;
+      t += POLL_DEADLINE_MS * 3;
+      return Promise.resolve(calls === 1 ? [{ pid: 11, createdAtMs: SPAWNED_AT }] : []);
+    });
+    await expect(untilEmpty(list, clock)).resolves.toEqual([]);
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops at the deadline once the floor is met, resolving the survivor", async () => {
+    let t = 0;
+    const clock: PollClock = { now: () => t, sleep: () => Promise.resolve() };
+    const survivor: DescendantProcess[] = [{ pid: 11, createdAtMs: SPAWNED_AT }];
+    const list = vi.fn((): Promise<DescendantProcess[]> => {
+      t += POLL_DEADLINE_MS * 3;
+      return Promise.resolve(survivor);
+    });
+    await expect(untilEmpty(list, clock)).resolves.toEqual(survivor);
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe.runIf(process.platform === "win32")("win32SweepDeps — live helpers", () => {
   it("killPid tolerates a process that is already gone (taskkill exit 128)", async () => {
@@ -215,18 +271,23 @@ describe.runIf(process.platform === "win32")("win32SweepDeps — live helpers", 
 
 // The live test proves the sweep's logic against a real process tree; it does
 // not certify the CI runner's WMI latency. windows-latest under the full gate
-// has answered `Get-CimInstance Win32_Process` in > 10 s on every run since
-// a7ec9fc and in > 20 s on 18b58b9's windows-22 leg (an idle host: ~250 ms;
-// the same leg's DPAPI round-trips — a fresh powershell.exe each — 0.3–0.7 s,
-// so the cost is the CIM/WMI listing, not PowerShell start-up). The product
-// keeps its 20 s / 30 s bounds and fails open past them by design; here the
-// helpers get 60 s and the sweep 90 s, so a slow provider stretches the test
-// instead of failing it, and the one-time cold cost is paid by a warm-up
-// whose duration — with the warm listing's — is printed for the CI log.
+// answers `Get-CimInstance Win32_Process` in 19–33 s warm and 30–52 s cold,
+// with the cold call at the 60 s bound on four of thirty-one legs between
+// 2026-09-02 and 2026-09-07 (decisions.md § "The WMI listing series"; an idle
+// host: ~250 ms; the same leg's DPAPI round-trips — a fresh powershell.exe
+// each — 0.3–0.7 s, so the cost is the CIM/WMI listing, not PowerShell
+// start-up). The product keeps its 20 s / 30 s bounds and fails open past
+// them by design; here the helpers get 60 s and the sweep 90 s, so a slow
+// provider stretches the test instead of failing it, and the one-time cold
+// cost is paid by a warm-up whose duration — with the warm listing's — is
+// printed to stderr for the CI log; a cold call at the bound is absorbed there.
 const LIVE_HELPER_TIMEOUT_MS = 60_000;
 const LIVE_SWEEP_TIMEOUT_MS = 90_000;
-// Outlasts the pre-listing and the sweep's own listing at their 60 s bounds.
-const LIVE_LISTING_LIFETIME_MS = 150_000;
+// Outlasts every bound the case waits on before its last listing — the
+// pre-listing (60 s), the sweep (90 s) and a two-listing poll (120 s) — and
+// equals the budget, so a grandchild that self-terminates can never pass as
+// swept: the budget expires first.
+const LIVE_LISTING_LIFETIME_MS = 300_000;
 
 describe.runIf(process.platform === "win32")("sweepDescendants — live win32 orphan", () => {
   const live = win32SweepDeps({ helperTimeoutMs: LIVE_HELPER_TIMEOUT_MS });
@@ -254,50 +315,56 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
   // written on the grandchild's own clock would race that. The grandchild's
   // lifetime only keeps it findable past the pre-listing and the sweep's own
   // listing, and self-terminates it if the sweep never reaches it.
-  it("kills a grandchild orphaned by a plain (non-tree) kill of its parent", async () => {
-    const grandchild = `setTimeout(() => {}, ${String(LIVE_LISTING_LIFETIME_MS)})`;
-    // `detached` keeps the grandchild out of the parent's libuv job object,
-    // which would otherwise kill it with the parent — the survivor the sweep
-    // targets is one no job ever claimed.
-    const parentScript = `
+  it(
+    "kills a grandchild orphaned by a plain (non-tree) kill of its parent",
+    async () => {
+      const grandchild = `setTimeout(() => {}, ${String(LIVE_LISTING_LIFETIME_MS)})`;
+      // `detached` keeps the grandchild out of the parent's libuv job object,
+      // which would otherwise kill it with the parent — the survivor the sweep
+      // targets is one no job ever claimed.
+      const parentScript = `
       const { spawn } = require("node:child_process");
       const gc = spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore", windowsHide: true, detached: true });
       gc.unref();
       console.log("child-done");
       setTimeout(() => {}, 60000);
     `;
-    const spawnedAt = Date.now();
-    const parent = spawn(process.execPath, ["-e", parentScript], {
-      stdio: ["ignore", "pipe", "ignore"],
-      windowsHide: true,
-    });
-    await new Promise<void>((resolve) => {
-      parent.stdout.on("data", (chunk: Buffer) => {
-        if (chunk.toString().includes("child-done")) resolve();
+      const spawnedAt = Date.now();
+      const parent = spawn(process.execPath, ["-e", parentScript], {
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
       });
-    });
-    const pid = parent.pid as number;
-    const exited = exitOf(parent);
-    parent.kill();
-    await exited;
-    const exitedAt = Date.now();
+      await new Promise<void>((resolve) => {
+        parent.stdout.on("data", (chunk: Buffer) => {
+          if (chunk.toString().includes("child-done")) resolve();
+        });
+      });
+      const pid = parent.pid as number;
+      const exited = exitOf(parent);
+      parent.kill();
+      await exited;
+      const exitedAt = Date.now();
 
-    const before = await live.listDescendants(pid);
-    expect(before.length).toBeGreaterThanOrEqual(1);
+      const before = await live.listDescendants(pid);
+      expect(before.length).toBeGreaterThanOrEqual(1);
 
-    const result = await sweepDescendants(
-      pid,
-      { spawnedAtMs: spawnedAt, exitedAtMs: exitedAt },
-      live,
-      LIVE_SWEEP_TIMEOUT_MS,
-    );
+      const result = await sweepDescendants(
+        pid,
+        { spawnedAtMs: spawnedAt, exitedAtMs: exitedAt },
+        live,
+        LIVE_SWEEP_TIMEOUT_MS,
+      );
 
-    expect(result.killed).toBeGreaterThanOrEqual(1);
-    // taskkill reports success once the kill is delivered, not once the
-    // process is gone: under load the listing can still see the grandchild
-    // for a moment, so wait for it to disappear rather than for a fixed
-    // settle. The last listing is what fails, so a survivor stays visible.
-    await expect(untilEmpty(() => live.listDescendants(pid))).resolves.toEqual([]);
-    // Budget: pre-listing (≤ 60 s) + sweep (≤ 90 s) + poll (10 s) + spawn.
-  }, 180_000);
+      expect(result.killed).toBeGreaterThanOrEqual(1);
+      // taskkill reports success once the kill is delivered, not once the
+      // process is gone: under load the listing can still see the grandchild
+      // for a moment, so wait for it to disappear rather than for a fixed
+      // settle — at least one retry even where a listing outlasts the deadline.
+      // The last listing is what fails, so a survivor stays visible.
+      await expect(untilEmpty(() => live.listDescendants(pid))).resolves.toEqual([]);
+      // Budget: pre-listing (≤ 60 s) + sweep (≤ 90 s) + poll (≤ 2 × 60 s) + spawn —
+      // a bound; measured 2026-09-02 → 07 at ~100–130 s on the runners.
+    },
+    LIVE_LISTING_LIFETIME_MS,
+  );
 });

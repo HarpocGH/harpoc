@@ -80,7 +80,9 @@ describe("socketPeer / callerOf (E75i)", () => {
    * and only there: any other failure is the test's to report (R6,
    * 2026-09-07). `fetchImpl` is the seam for the pin that says so.
    */
-  async function dualStackPeerBody(fetchImpl: typeof fetch = fetch): Promise<unknown | null> {
+  async function dualStackPeerBody(
+    fetchImpl: typeof fetch = fetch,
+  ): Promise<Record<string, unknown> | null> {
     const app = peerApp();
     let server: ReturnType<typeof serve> | undefined;
     try {
@@ -105,7 +107,7 @@ describe("socketPeer / callerOf (E75i)", () => {
         if (!isConnectionRefused(err)) throw err;
         return null;
       }
-      return await res.json();
+      return (await res.json()) as Record<string, unknown>;
     } finally {
       const started = server;
       if (started !== undefined) {

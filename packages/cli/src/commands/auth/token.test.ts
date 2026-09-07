@@ -232,6 +232,8 @@ describe("auth token --out", () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(existsSync(out)).toBe(false);
     expect(stdout()).not.toContain("jwt-token");
+    // The happy unlink path is silent: the warning is for an unlink that failed.
+    expect(stderr()).not.toContain("could not remove the empty");
   });
 
   it.runIf(process.platform !== "win32")("writes it 0600 on POSIX", async () => {

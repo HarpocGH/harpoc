@@ -14,6 +14,13 @@ const fetchFailed = (cause: unknown): TypeError => {
   return err;
 };
 
+/** A bind wrapper: an `Error` with the errno on `cause` (a listener's `error` re-thrown with context). */
+const wrapped = (cause: unknown): Error => {
+  const err = new Error("bind failed") as Error & { cause?: unknown };
+  err.cause = cause;
+  return err;
+};
+
 describe("isIpv6BindUnavailable (D7)", () => {
   it.each(["EAFNOSUPPORT", "EADDRNOTAVAIL"])("is true for a `::` bind refused with %s", (code) => {
     expect(isIpv6BindUnavailable(errno(code))).toBe(true);
@@ -31,6 +38,18 @@ describe("isIpv6BindUnavailable (D7)", () => {
     expect(isIpv6BindUnavailable(null)).toBe(false);
     expect(isIpv6BindUnavailable(undefined)).toBe(false);
     expect(isIpv6BindUnavailable("EAFNOSUPPORT")).toBe(false);
+  });
+
+  it("is true for a wrapped bind failure whose cause carries EADDRNOTAVAIL", () => {
+    expect(isIpv6BindUnavailable(wrapped(errno("EADDRNOTAVAIL")))).toBe(true);
+  });
+
+  it("is true for an AggregateError carrying EAFNOSUPPORT beside another code", () => {
+    expect(
+      isIpv6BindUnavailable(
+        new AggregateError([errno("EADDRINUSE"), errno("EAFNOSUPPORT")], "all failed"),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -62,5 +81,25 @@ describe("isConnectionRefused (D7)", () => {
     a.cause = b;
     b.cause = a;
     expect(isConnectionRefused(a)).toBe(false);
+  });
+});
+
+// One walk under both predicates; its cycle guard covers the `errors[]`
+// branch as well as `cause` (2026-09-07 — the previous cases cycled through
+// `cause` only).
+describe("errnoCodes walk — cycles through errors[]", () => {
+  it("does not loop on an AggregateError that contains itself, and still reads the code beside the loop", () => {
+    const loop = new AggregateError([], "loop");
+    loop.errors.push(loop, errno("ECONNREFUSED"));
+    expect(isConnectionRefused(loop)).toBe(true);
+    expect(isIpv6BindUnavailable(loop)).toBe(false);
+  });
+
+  it("does not loop on a cause that points back through errors[]", () => {
+    const outer = new Error("outer") as Error & { cause?: unknown };
+    const inner = new AggregateError([outer], "inner");
+    outer.cause = inner;
+    expect(isConnectionRefused(outer)).toBe(false);
+    expect(isIpv6BindUnavailable(outer)).toBe(false);
   });
 });

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -19,7 +19,19 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "harpoc-spawn-lifecycle-"));
 });
 
+/** The grandchild's pid when the tree-kill case has read it and not yet seen it gone. */
+let survivor: number | undefined;
+
 afterEach(() => {
+  // A survivor is the failure the tree-kill case reports; never let it outlive the test.
+  if (survivor !== undefined) {
+    try {
+      process.kill(survivor, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+    survivor = undefined;
+  }
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -27,18 +39,16 @@ afterEach(() => {
  * Child that spawns a grandchild inheriting its stdio, then behaves as told.
  * `escape` detaches and unrefs the grandchild so the child can exit while the
  * grandchild still holds the inherited pipes — the shape that stalled `'close'`.
+ * `pidPath` makes the child write the grandchild's pid the moment it exists,
+ * before any kill can land.
  */
 function grandchildScript(opts: {
   holdMs: number;
-  markerPath?: string;
+  pidPath?: string;
   parentWaits: boolean;
   escape?: boolean;
 }): string {
-  const inner = opts.markerPath
-    ? `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(
-        opts.markerPath,
-      )}, 'survived'), ${opts.holdMs})`
-    : `setTimeout(() => {}, ${opts.holdMs})`;
+  const inner = `setTimeout(() => {}, ${String(opts.holdMs)})`;
   return `
     const { spawn } = require("node:child_process");
     const gc = spawn(process.execPath, ["-e", ${JSON.stringify(inner)}], {
@@ -47,12 +57,42 @@ function grandchildScript(opts: {
       detached: ${opts.escape ? "true" : "false"},
     });
     ${opts.escape ? "gc.unref();" : ""}
+    ${opts.pidPath ? `require("node:fs").writeFileSync(${JSON.stringify(opts.pidPath)}, String(gc.pid));` : ""}
     console.log("child-done");
     ${opts.parentWaits ? "setTimeout(() => {}, 60000);" : ""}
   `;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Far beyond every settlement bound (a 5 s timeout plus up to 42 s of win32
+ * taskkill wait and sweep): a grandchild alive after settlement escaped the
+ * kill, one that is gone was killed — it cannot have exited on its own.
+ */
+const GRANDCHILD_HOLD_MS = 120_000;
+const GONE_POLL_MS = 250;
+const GONE_DEADLINE_MS = 10_000;
+
+const isAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: exists but not ours (never for a grandchild this test spawned); ESRCH: gone.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+/** Polls liveness after settlement; true once the pid is gone, false at the deadline. */
+async function untilGone(pid: number): Promise<boolean> {
+  const deadline = Date.now() + GONE_DEADLINE_MS;
+  while (isAlive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await sleep(GONE_POLL_MS);
+  }
+  return true;
+}
 
 describe("spawnCaptured lifecycle (M4)", () => {
   it("pins the vulnerability: a surviving grandchild cannot hold the promise open", async () => {
@@ -72,35 +112,40 @@ describe("spawnCaptured lifecycle (M4)", () => {
     expect(elapsed).toBeLessThan(4_000);
   }, 25_000);
 
-  // Discriminating on both platforms only if the grandchild already exists when
-  // the timeout fires: `killTree` on win32 is one `taskkill /T` whose descendant
-  // snapshot is taken once, so a grandchild created after that snapshot escapes
-  // it (observed under the parallel root gate with a 300 ms timeout, where node
-  // start-up outran the kill). Hence the wide timeout below — that
-  // spawn-during-kill window is the descendant sweep's to close (pinned in
-  // descendant-sweep.test.ts and spawn-captured.sweep.test.ts), not what this
-  // case pins.
+  // Discriminating only if the grandchild exists when the timeout fires (on
+  // win32 `taskkill /T`'s descendant snapshot is taken once — the
+  // spawn-during-kill window is the descendant sweep's to close, pinned in
+  // descendant-sweep.test.ts and spawn-captured.sweep.test.ts, not here); the
+  // 5 s timeout leaves the child's boot and its spawn well inside. Survival is
+  // pinned by liveness after settlement, not by a marker on the grandchild's
+  // own clock, which raced taskkill's delivery under load (the forced gate's
+  // sole miss at three tranches, 2026-08-30 → 09-01): the grandchild holds far
+  // longer than any settlement bound, so one alive here escaped the kill
+  // whatever the delivery latency, and one gone was killed. On win32 a
+  // non-detached grandchild sits in the child's libuv job object, which ends
+  // it with the child whether or not taskkill's /T reached it (probed
+  // 2026-09-07); the /T-only shape is a detached grandchild, the sweep's case.
+  // On POSIX the group signal is the whole mechanism.
   it("the timeout kills the whole process tree, not just the direct child", async () => {
-    const marker = join(dir, "grandchild-marker.txt");
+    const pidFile = join(dir, "grandchild.pid");
     const result = await spawnCaptured(
       process.execPath,
-      ["-e", grandchildScript({ holdMs: 6_000, markerPath: marker, parentWaits: true })],
-      { env: {}, timeoutMs: 2_000 },
+      ["-e", grandchildScript({ holdMs: GRANDCHILD_HOLD_MS, pidPath: pidFile, parentWaits: true })],
+      { env: {}, timeoutMs: 5_000 },
     );
 
     expect(result.timed_out).toBe(true);
 
-    // Well past the grandchild's own deadline: if it had survived the kill it
-    // would have written the marker with the credential still in its env. The
-    // kill fires at t+2 s; the grandchild's 6 s timer starts at its own boot,
-    // allowed the same 2 s the child had, so the marker would land by t+10 s
-    // at the latest. On win32 the spawn itself settles only after the taskkill
-    // wait and the descendant sweep — up to 42 s past the timeout, the bound
-    // spawnCaptured documents — so this 9 s wait starts after that, and the
-    // budget below covers 2 + 42 + 9 plus scheduler margin (42 s already is the
-    // cold-host worst case).
-    await sleep(9_000);
-    expect(existsSync(marker)).toBe(false);
+    // Written by the child the moment it spawned the grandchild, well before
+    // the 5 s kill: a missing file is a child that never got that far — a
+    // different failure from a survivor.
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    expect(Number.isInteger(pid) && pid > 0).toBe(true);
+    survivor = pid;
+
+    await expect(untilGone(pid)).resolves.toBe(true);
+    survivor = undefined;
+    // Budget: 5 s timeout + up to 42 s of win32 taskkill wait and sweep + a 10 s poll.
   }, 60_000);
 
   it("control: an ordinary command still returns its full output and exit code", async () => {
