@@ -47,4 +47,4 @@ export type { KeyPairOptions } from "./key-pair.js";
 export { assertKeyMatchesCert, parseCertificate, splitChain } from "./pem-parser.js";
 export type { ParsedCertificate } from "./pem-parser.js";
 export { RenewalScheduler } from "./renewal-scheduler.js";
-export type { RenewalSchedulerOptions } from "./renewal-scheduler.js";
+export type { RenewalErrorPhase, RenewalSchedulerOptions } from "./renewal-scheduler.js";

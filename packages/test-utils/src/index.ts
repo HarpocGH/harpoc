@@ -6,6 +6,7 @@ export {
   describeWorkspaceDeps,
   getPkgRoot,
 } from "./scaffold-helpers.js";
+export { isConnectionRefused, isIpv6BindUnavailable } from "./skip-reasons.js";
 export {
   dropAuditRowHmacConstraint,
   dropOAuthAuthMethodConstraint,

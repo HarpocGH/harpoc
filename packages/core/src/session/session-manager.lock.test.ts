@@ -192,6 +192,43 @@ describe("session.json.lock (R8/D56)", () => {
     expect(lockFailures[0]?.message).toContain("session lock");
   });
 
+  it("a non-EEXIST mkdir errno on the slide path is reported through the seam and the slide skipped (R5)", async () => {
+    const failures: Error[] = [];
+    const manager = new SessionManager(sessionPath, {
+      lockStaleMs: 200,
+      onPermissionRepairFailure: (err) => failures.push(err),
+    });
+    await manager.writeSession(sessionExpiringSoon());
+    const before = readFileSync(sessionPath, "utf8");
+    vi.mocked(mkdirSync).mockImplementation(() => {
+      throw ioError("EACCES");
+    });
+
+    const result = await manager.extendSession(60_000, true);
+
+    // The slide stays expendable: the stored file comes back, nothing written.
+    expect(result).toEqual(JSON.parse(before));
+    expect(readFileSync(sessionPath, "utf8")).toBe(before);
+    const lockFailures = failures.filter((err) => err.message.includes("EACCES"));
+    expect(lockFailures).toHaveLength(1);
+    expect(lockFailures[0]?.message).toContain("session lock");
+    expect(lockFailures[0]?.message).toContain("skipping the session slide");
+  });
+
+  it("control: plain EEXIST contention on the slide path reports nothing (R5)", async () => {
+    const failures: Error[] = [];
+    const manager = new SessionManager(sessionPath, {
+      lockStaleMs: 5_000,
+      onPermissionRepairFailure: (err) => failures.push(err),
+    });
+    await manager.writeSession(sessionExpiringSoon());
+    mkdirSync(lockPath);
+
+    await manager.extendSession(60_000, true);
+
+    expect(failures).toEqual([]);
+  });
+
   it("a lock released between the mkdir and the stat is acquired on the retry (R30)", async () => {
     const manager = new SessionManager(sessionPath, { lockStaleMs: 5_000 });
     await manager.writeSession(sessionExpiringSoon());

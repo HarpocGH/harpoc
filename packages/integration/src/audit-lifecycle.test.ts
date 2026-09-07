@@ -88,9 +88,11 @@ describe("server lifecycle rows through the spawned CLI", () => {
       [CLI_ENTRY, "--vault-dir", vaultDir, "server", "start", "--mcp", "--token-file", tokenFile],
       { stdio: ["pipe", "pipe", "pipe"], env, windowsHide: true },
     );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
     try {
-      let stderr = "";
-      child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
       await waitFor(
         () => stderr.includes("MCP server running on stdio"),
         30_000,
@@ -103,6 +105,7 @@ describe("server lifecycle rows through the spawned CLI", () => {
     } finally {
       if (child.exitCode === null) child.kill();
     }
+    expect(stdout).toBe("");
 
     const start = engine
       .queryAudit({ eventType: AuditEventType.SERVER_START })
@@ -343,23 +346,36 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
   let engine: VaultEngine;
   let tokenFile: string;
 
-  function spawnMcp(): ChildProcess {
+  interface SpawnedMcp {
+    child: ChildProcess;
+    stdout(): string;
+    stderr(): string;
+  }
+
+  // Both pipes are drained from the first tick (R4, 2026-09-07): an undrained
+  // stdout blocks the child once the pipe buffer fills and `close` then never
+  // fires — the twin would hang to its timeout instead of failing. The bytes
+  // are kept: a shutdown twin sends no request, so its stdout must stay empty.
+  function spawnMcp(): SpawnedMcp {
     const env = { ...process.env };
     delete env.HARPOC_TOKEN;
-    return spawn(
+    const child = spawn(
       process.execPath,
       [MCP_ENTRY, "--vault-dir", vaultDir, "--token-file", tokenFile],
       { stdio: ["pipe", "pipe", "pipe"], env, windowsHide: true },
     );
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
+    child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
+    return { child, stdout: () => stdout, stderr: () => stderr };
   }
 
-  async function awaitBanner(child: ChildProcess): Promise<void> {
-    let stderr = "";
-    child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
+  async function awaitBanner(mcp: SpawnedMcp): Promise<void> {
     await waitFor(
-      () => stderr.includes("Harpoc MCP server running on stdio"),
+      () => mcp.stderr().includes("Harpoc MCP server running on stdio"),
       30_000,
-      () => stderr,
+      () => mcp.stderr(),
     );
   }
 
@@ -392,15 +408,18 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
   });
 
   it("stdin EOF is a graceful stop: exit 0 and one transport_closed row", async () => {
-    const child = spawnMcp();
+    const mcp = spawnMcp();
+    const { child } = mcp;
     try {
-      await awaitBanner(child);
+      await awaitBanner(mcp);
       child.stdin?.end();
       const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
       expect(code).toBe(0);
     } finally {
       if (child.exitCode === null) child.kill();
     }
+    // No request was sent, so the JSON-RPC stream carried nothing.
+    expect(mcp.stdout()).toBe("");
 
     const start = engine
       .queryAudit({ eventType: AuditEventType.SERVER_START })
@@ -422,15 +441,17 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
   it.runIf(process.platform !== "win32")(
     "SIGTERM is a graceful stop: exit 0 and a SIGTERM row",
     async () => {
-      const child = spawnMcp();
+      const mcp = spawnMcp();
+      const { child } = mcp;
       try {
-        await awaitBanner(child);
+        await awaitBanner(mcp);
         child.kill("SIGTERM");
         const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
         expect(code).toBe(0);
       } finally {
         if (child.exitCode === null) child.kill();
       }
+      expect(mcp.stdout()).toBe("");
 
       const stops = engine.queryAudit({ eventType: AuditEventType.SERVER_STOP });
       expect(stops.filter((r) => r.detail?.trigger === "SIGTERM")).toHaveLength(1);

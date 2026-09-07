@@ -390,10 +390,13 @@ export function registerServerCommand(program: Command): void {
                   certManager.renewCertificate(secretId, { httpPort: certRenewPort }),
               },
               {
-                onRenewError: (secretId, err) => {
+                onRenewError: (secretId, err, phase) => {
                   if (shuttingDown) return;
+                  const detail = err instanceof Error ? err.message : String(err);
                   console.error(
-                    `Warning: certificate renewal failed (${secretId}): ${err instanceof Error ? err.message : String(err)}`,
+                    phase === "audit"
+                      ? `Warning: the failed-renewal audit row could not be written (${secretId}): ${detail}`
+                      : `Warning: certificate renewal failed (${secretId}): ${detail}`,
                   );
                 },
               },

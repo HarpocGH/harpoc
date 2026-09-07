@@ -212,6 +212,28 @@ describe("auth token --out", () => {
     expect(readFileSync(out, "utf8")).toBe("keep-me\n");
   });
 
+  it("mints no token when the --out path cannot be opened (a missing directory)", async () => {
+    const out = join(dir, "no-such-dir", "launch-token");
+
+    await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(stderr()).toContain("ENOENT");
+    expect(mockEngine.createToken).not.toHaveBeenCalled();
+    expect(stdout()).not.toContain("jwt-token");
+  });
+
+  it("removes the opened file when the mint itself is refused", async () => {
+    const out = join(dir, "refused-mint");
+    mockEngine.createToken.mockImplementationOnce(() => {
+      throw new Error("Agent not found: bot-1");
+    });
+
+    await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(existsSync(out)).toBe(false);
+    expect(stdout()).not.toContain("jwt-token");
+  });
+
   it.runIf(process.platform !== "win32")("writes it 0600 on POSIX", async () => {
     const out = join(dir, "mode-checked");
     await run(["--agent", "bot-1", "--out", out]);
@@ -229,6 +251,7 @@ describe("auth token --out", () => {
       expect(exitSpy).toHaveBeenCalledWith(1);
       expect(stderr()).toContain("EEXIST");
       expect(existsSync(target)).toBe(false);
+      expect(mockEngine.createToken).not.toHaveBeenCalled();
       expect(stdout()).not.toContain("jwt-token");
     },
   );

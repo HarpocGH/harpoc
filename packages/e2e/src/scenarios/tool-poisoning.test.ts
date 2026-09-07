@@ -152,6 +152,22 @@ describe("tool-poisoning / downstream-target-fixed — the two-call contract", (
     await expect(observe(arm, SETUP)).rejects.toThrow(/refused by name at the boundary/);
   });
 
+  it("throws when call 1 failed for an unrelated reason, not by name (an -32603 the arm must not accept)", async () => {
+    fleet.authorizations = [`Bearer ${CREDENTIAL}`];
+    const unrelated = "MCP error -32603: boom";
+    const arm = fakeArm("harpoc", [
+      { ok: false, result: { isError: true }, text: unrelated, errorText: unrelated },
+      reflected("[REDACTED]"),
+    ]);
+
+    await expect(observe(arm, SETUP)).rejects.toThrow(
+      /neither exfiltrated nor refused by name at the boundary/,
+    );
+    // Both calls are issued before the discrimination check: the arm must
+    // not short-circuit on a failed call 1.
+    expect(arm.calls).toEqual([LITERAL_CALL, VALID_CALL]);
+  });
+
   it("throws when the configured downstream never saw the credential", async () => {
     const arm = fakeArm("harpoc", [refused(), reflected("[REDACTED]")]);
 

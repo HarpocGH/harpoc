@@ -5,6 +5,7 @@ import { serve } from "@hono/node-server";
 import type { VaultApiToken } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { callerOf, socketPeer } from "./caller.js";
+import { isConnectionRefused, isIpv6BindUnavailable } from "@harpoc/test-utils";
 
 const TOKEN: VaultApiToken = {
   sub: "test-agent",
@@ -74,23 +75,37 @@ describe("socketPeer / callerOf (E75i)", () => {
    * A dual-stack listener (`::`) reports an IPv4 peer as `::ffff:127.0.0.1`
    * (D9): one client would then occupy two `audit_log.ip_address` values
    * depending on which address the operator bound. Null where the host has no
-   * IPv6 stack, or binds `::` v6-only, so the shape cannot arise at all.
+   * IPv6 stack (the bind refuses EAFNOSUPPORT / EADDRNOTAVAIL), or binds `::`
+   * v6-only (the IPv4 connect is refused), so the shape cannot arise at all —
+   * and only there: any other failure is the test's to report (R6,
+   * 2026-09-07). `fetchImpl` is the seam for the pin that says so.
    */
-  async function dualStackPeerBody(): Promise<unknown | null> {
+  async function dualStackPeerBody(fetchImpl: typeof fetch = fetch): Promise<unknown | null> {
     const app = peerApp();
     let server: ReturnType<typeof serve> | undefined;
     try {
-      const port = await new Promise<number>((resolve, reject) => {
-        const started = serve({ fetch: app.fetch, port: 0, hostname: "::" }, (info: AddressInfo) =>
-          resolve(info.port),
-        );
-        server = started;
-        started.once("error", reject);
-      });
-      const res = await fetch(`http://127.0.0.1:${String(port)}/peer`);
+      let port: number;
+      try {
+        port = await new Promise<number>((resolve, reject) => {
+          const started = serve(
+            { fetch: app.fetch, port: 0, hostname: "::" },
+            (info: AddressInfo) => resolve(info.port),
+          );
+          server = started;
+          started.once("error", reject);
+        });
+      } catch (err) {
+        if (!isIpv6BindUnavailable(err)) throw err;
+        return null;
+      }
+      let res: Response;
+      try {
+        res = await fetchImpl(`http://127.0.0.1:${String(port)}/peer`);
+      } catch (err) {
+        if (!isConnectionRefused(err)) throw err;
+        return null;
+      }
       return await res.json();
-    } catch {
-      return null;
     } finally {
       const started = server;
       if (started !== undefined) {
@@ -112,5 +127,15 @@ describe("socketPeer / callerOf (E75i)", () => {
         remote_address: "127.0.0.1",
       },
     });
+  });
+
+  // A post-bind failure is a failure, not a skip: the helper's tolerant
+  // catches are gated on the two host conditions the docblock names, and
+  // nothing else (R6, 2026-09-07).
+  it("a failure after the bind rejects instead of skipping", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await expect(dualStackPeerBody(() => Promise.reject(new Error("boom")))).rejects.toThrow(
+      "boom",
+    );
   });
 });

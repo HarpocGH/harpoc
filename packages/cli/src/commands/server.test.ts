@@ -956,12 +956,28 @@ describe("server start", () => {
     await run(["--cert-renew"]);
 
     const options = renewalSchedulerCtorCalls[0]?.options as {
-      onRenewError: (secretId: string, err: unknown) => void;
+      onRenewError: (secretId: string, err: unknown, phase: "renewal" | "audit") => void;
     };
-    options.onRenewError("secret-1", new Error("CA unreachable"));
+    options.onRenewError("secret-1", new Error("CA unreachable"), "renewal");
 
     expect(errorSpy).toHaveBeenCalledWith(
       "Warning: certificate renewal failed (secret-1): CA unreachable",
+    );
+  });
+
+  it("onRenewError labels an audit-write failure as such, never as a renewal failure", async () => {
+    await run(["--cert-renew"]);
+
+    const options = renewalSchedulerCtorCalls[0]?.options as {
+      onRenewError: (secretId: string, err: unknown, phase: "renewal" | "audit") => void;
+    };
+    options.onRenewError("secret-1", new Error("Vault is locked"), "audit");
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Warning: the failed-renewal audit row could not be written (secret-1): Vault is locked",
+    );
+    expect(errorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("certificate renewal failed"),
     );
   });
 
@@ -971,7 +987,7 @@ describe("server start", () => {
 
     await run(["--cert-renew"]);
     const options = renewalSchedulerCtorCalls[0]?.options as {
-      onRenewError: (secretId: string, err: unknown) => void;
+      onRenewError: (secretId: string, err: unknown, phase: "renewal" | "audit") => void;
     };
 
     const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
@@ -979,7 +995,7 @@ describe("server start", () => {
     await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
 
     errorSpy.mockClear();
-    options.onRenewError("secret-1", new Error("vault locked"));
+    options.onRenewError("secret-1", new Error("vault locked"), "renewal");
     expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Warning:"));
 
     onSpy.mockRestore();

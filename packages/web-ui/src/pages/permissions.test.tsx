@@ -427,6 +427,60 @@ describe("PermissionsPage", () => {
     expect(cell("ci-bot", UNGATED.handle).textContent).toBe("—");
   });
 
+  it("drops an expired policy row: an expired-only column reads no grants and names no holder", async () => {
+    const expired = access({
+      id: "ap-3",
+      principal_type: "tool",
+      principal_id: "old-runner",
+      expires_at: Date.now() - 60_000,
+    });
+    const live = access({
+      id: "ap-4",
+      principal_type: "tool",
+      principal_id: "ci-runner",
+      expires_at: Date.now() + 60_000,
+    });
+    render(
+      <PermissionsPage
+        api={api({
+          getAccessPolicies: vi.fn((handle: string) =>
+            Promise.resolve(handle === UNGATED.handle ? [expired] : [live]),
+          ),
+        })}
+      />,
+    );
+    await waitFor(() => expect(cell("ci-bot", UNGATED.handle)).toBeTruthy());
+    const open = screen.getByText("open-key").closest("th");
+    await waitFor(() => expect(open?.textContent).toContain("no grants"));
+    expect(open?.textContent).not.toContain("old-runner");
+    const gated = screen.getByText("test-key").closest("th");
+    await waitFor(() => expect(gated?.textContent).toContain("granted"));
+    expect(gated?.textContent).toContain("tool:ci-runner");
+  });
+
+  it("reads the access policies of the preselected column only", async () => {
+    window.location.hash = "#/permissions?secret=myproj%2Ftest-key";
+    const getAccessPolicies = vi.fn((handle: string) => Promise.resolve(ACCESS[handle] ?? []));
+    render(<PermissionsPage api={api({ getAccessPolicies })} />);
+    await waitFor(() => expect(cell("ci-bot", GATED.handle)).toBeTruthy());
+    await waitFor(() => expect(columns()).toBe(2));
+    // One `secret.read { config: "access_policies" }` row per column on
+    // screen, none for the column the preselect hides.
+    expect(getAccessPolicies.mock.calls.map((c) => c[0])).toEqual([GATED.handle]);
+  });
+
+  it("reads each visible column once and never again on a filter keystroke", async () => {
+    const getAccessPolicies = vi.fn((handle: string) => Promise.resolve(ACCESS[handle] ?? []));
+    render(<PermissionsPage api={api({ getAccessPolicies })} />);
+    await waitFor(() => expect(cell("ci-bot", UNGATED.handle)).toBeTruthy());
+    expect(getAccessPolicies.mock.calls.map((c) => c[0]).sort()).toEqual(
+      [GATED.handle, UNGATED.handle].sort(),
+    );
+    fireEvent.input(screen.getByLabelText("Filter secrets"), { target: { value: "myproj" } });
+    await waitFor(() => expect(columns()).toBe(2));
+    expect(getAccessPolicies).toHaveBeenCalledTimes(2);
+  });
+
   it("falls back to the agent rows for a column the caller may not read", async () => {
     // A scoped admin token is refused per secret. The column then says what the
     // agent listings already said rather than claiming the secret has no

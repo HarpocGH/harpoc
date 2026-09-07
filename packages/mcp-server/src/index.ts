@@ -20,6 +20,7 @@ import {
   readLaunchTokenFile,
 } from "./cli-options.js";
 import { createMcpServer } from "./server.js";
+import { installSignalLatch } from "./signal-latch.js";
 
 export { createMcpServer } from "./server.js";
 export type { CreateMcpServerOptions } from "./server.js";
@@ -43,6 +44,9 @@ function resolveVaultDir(vaultDirOption?: string): string {
 }
 
 async function main(): Promise<void> {
+  // First, before argv: a stop that lands anywhere in the start-up meets a
+  // handler, never the signal's default disposition (D8, 2026-09-07).
+  const latch = installSignalLatch();
   const { values } = parseArgs({
     options: {
       token: { type: "string" },
@@ -133,12 +137,26 @@ async function main(): Promise<void> {
   const dbPath = join(vaultDir, VAULT_DB_NAME);
   const sessionPath = join(vaultDir, SESSION_FILE_NAME);
 
-  const engine = new VaultEngine({ dbPath, sessionPath });
+  // stdout is the transport; a session-file warning goes where the banner goes.
+  const engine = new VaultEngine({
+    dbPath,
+    sessionPath,
+    onSessionFilePermissionRepairFailure: (error) => {
+      process.stderr.write(`Warning: ${error.message}\n`);
+    },
+  });
 
   const loaded = await engine.loadSession();
   if (!loaded) {
     process.stderr.write("Error: Vault is locked. Run `harpoc unlock` first.\n");
     process.exit(1);
+  }
+
+  // A stop that arrived while the session loaded: nothing has started and
+  // nothing is recorded, so the start is skipped rather than begun.
+  if (latch.pending() !== null) {
+    await engine.destroy();
+    process.exit(0);
   }
 
   const startedAt = Date.now();
@@ -206,14 +224,15 @@ async function main(): Promise<void> {
     banner = "Harpoc MCP server running on stdio\n";
   }
 
-  process.on("SIGINT", () => void shutdown("SIGINT"));
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
-
-  // The banner is the readiness signal a launcher keys on (the integration
-  // twin sends SIGTERM the moment it appears), so it must follow the
-  // handlers: written first, a stop sent on seeing it could still meet
-  // SIGTERM's default disposition and kill the server without its stop row
-  // — the race the Linux CI leg caught at 0100d3e.
+  // Armed after the transport is up and its start row written: a stop that
+  // arrived during the setup runs the normal shutdown now, so the start row
+  // pairs with its stop row. The banner is the readiness signal a launcher
+  // keys on (the integration twin sends SIGTERM the moment it appears), so it
+  // follows the arming — written first, a stop sent on seeing it could still
+  // meet SIGTERM's default disposition, the race the Linux CI leg caught at
+  // 0100d3e — and is not written at all for a server already stopping.
+  latch.arm((trigger) => void shutdown(trigger));
+  if (shuttingDown) return;
   process.stderr.write(banner);
 }
 

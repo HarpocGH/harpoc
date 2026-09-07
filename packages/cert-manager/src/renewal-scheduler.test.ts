@@ -399,30 +399,43 @@ describe("RenewalScheduler onRenewError", () => {
     expect(renewer.renewCertificate).toHaveBeenCalledTimes(6);
   });
 
-  it("forwards a swallowed audit-write failure to onRenewError, ahead of the renewal error", async () => {
+  it("forwards a swallowed audit-write failure to onRenewError, ahead of the renewal error, each with its phase", async () => {
     const engine = engineWith([row("broken")]);
     const auditError = new Error("vault is locked");
     engine.auditCertRenewFailure.mockImplementation(() => {
       throw auditError;
     });
     const renewError = new Error("challenge never validated");
-    const reported: { secretId: string; err: unknown }[] = [];
+    const reported: { secretId: string; err: unknown; phase: string }[] = [];
 
     scheduler = new RenewalScheduler(
       engine as never,
       { renewCertificate: vi.fn().mockRejectedValue(renewError) },
       {
-        onRenewError: (secretId, err) => {
-          reported.push({ secretId, err });
+        onRenewError: (secretId, err, phase) => {
+          reported.push({ secretId, err, phase });
         },
       },
     );
     await drive(scheduler.tick());
 
     expect(reported).toEqual([
-      { secretId: "broken", err: auditError },
-      { secretId: "broken", err: renewError },
+      { secretId: "broken", err: auditError, phase: "audit" },
+      { secretId: "broken", err: renewError, phase: "renewal" },
     ]);
+  });
+
+  it("an ordinary renewal failure reports the renewal phase alone", async () => {
+    const phases: string[] = [];
+
+    scheduler = new RenewalScheduler(engineWith([row("broken")]) as never, failingRenewer(), {
+      onRenewError: (_secretId, _err, phase) => {
+        phases.push(phase);
+      },
+    });
+    await drive(scheduler.tick());
+
+    expect(phases).toEqual(["renewal"]);
   });
 
   it("renewNow rethrows to the caller without invoking onRenewError", async () => {

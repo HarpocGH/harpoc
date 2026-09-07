@@ -37,8 +37,9 @@ export interface SessionManagerOptions {
    * POSIX chmod or the Windows icacls step; the file itself is created with
    * mode 0o600 from the first instant — and when the session mutex could not
    * be taken for a reason other than contention (an EACCES on the lock
-   * directory, say), so the bounded wait proceeded without it rather than
-   * failing silently (R30). The error message is self-descriptive.
+   * directory, say), so the bounded wait proceeded without it, or the expiry
+   * slide was skipped, rather than failing silently (R30; the slide since R5,
+   * 2026-09-07). The error message is self-descriptive.
    * Default: silent — core never logs; interactive entry points (the CLI)
    * supply a callback that surfaces the warning. A keystore failure is not a
    * warning: `writeSession` throws `SESSION_KEYSTORE_UNAVAILABLE` (R8/D54).
@@ -475,15 +476,27 @@ export class SessionManager {
    * is reclaimed, and past that bound proceeds without it — the fresh write
    * and the erase must never hang on a directory nobody can release. Any
    * other `mkdir` failure counts as "not acquired": the write that follows
-   * reports the real error, and the proceed-unlocked step reports the lock
-   * failure itself through the permission seam, so an EACCES on the lock
-   * directory is no longer silent (R30). The poll runs on the module-captured
-   * real clock (R31).
+   * reports the real error, and both the proceed-unlocked step and the skipped
+   * slide report the lock failure itself through the permission seam, so an
+   * EACCES on the lock directory is silent on neither path (R30, R5). The poll
+   * runs on the module-captured real clock (R31).
    */
   private async withSessionLock<T>(lock: SessionLockMode<T>, body: () => Promise<T>): Promise<T> {
     let held = this.tryAcquireLock();
     if (!held) {
-      if (lock.mode === "try") return lock.onContention();
+      if (lock.mode === "try") {
+        // Contention (EEXIST) is the slide's designed steady state and stays
+        // silent; any other mkdir failure is the fault the wait path reports
+        // below, recorded here and — until R5 (2026-09-07) — dropped unread.
+        if (this.lastLockError) {
+          this.onPermissionRepairFailure(
+            new Error(
+              `skipping the session slide: the session lock at ${this.lockPath} could not be taken (${this.lastLockError.message})`,
+            ),
+          );
+        }
+        return lock.onContention();
+      }
       const deadline = realDateNow() + this.lockStaleMs + SESSION_LOCK_POLL_MS;
       while (!held && realDateNow() < deadline) {
         await sleep(SESSION_LOCK_POLL_MS);

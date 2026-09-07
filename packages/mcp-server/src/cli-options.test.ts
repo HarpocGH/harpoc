@@ -147,17 +147,52 @@ describe("parseAllowedHostsOption", () => {
 });
 
 describe("index.ts lifecycle ordering", () => {
-  // The banner is the readiness signal a launcher keys on: a stop sent on seeing it
-  // must find the handlers installed — the race the Linux CI leg caught at 0100d3e.
-  it("registers the SIGINT/SIGTERM handlers before writing the readiness banner (P32)", () => {
-    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
-    const banner = source.indexOf("process.stderr.write(banner)");
-    const sigint = source.indexOf('process.on("SIGINT"');
-    const sigterm = source.indexOf('process.on("SIGTERM"');
-    expect(banner).toBeGreaterThanOrEqual(0);
-    expect(sigint).toBeGreaterThanOrEqual(0);
-    expect(sigterm).toBeGreaterThanOrEqual(0);
-    expect(banner).toBeGreaterThan(sigint);
-    expect(banner).toBeGreaterThan(sigterm);
+  const source = (): string => readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+
+  // The latch is the first act of main(): a stop that lands while argv is
+  // parsed, the session loads or the transport comes up meets a handler, not
+  // the signal's default disposition (D8, 2026-09-07).
+  it("installs the signal latch before parsing argv and loading the session", () => {
+    const text = source();
+    const latch = text.indexOf("installSignalLatch()");
+    const argv = text.indexOf("parseArgs({");
+    const load = text.indexOf("await engine.loadSession()");
+    expect(latch).toBeGreaterThanOrEqual(0);
+    expect(argv).toBeGreaterThan(latch);
+    expect(load).toBeGreaterThan(latch);
+    // Rename-proof: index.ts registers no signal listener of its own.
+    expect(text).not.toMatch(/process\.on\("SIG(INT|TERM)"/);
+  });
+
+  it("checks the latch once the session is loaded, before any transport starts", () => {
+    const text = source();
+    const check = text.indexOf("latch.pending()");
+    const load = text.indexOf("await engine.loadSession()");
+    const http = text.indexOf("await startMcpHttpServer(");
+    expect(check).toBeGreaterThan(load);
+    expect(check).toBeLessThan(http);
+  });
+
+  // The banner is the readiness signal a launcher keys on: a stop sent on
+  // seeing it must find the handlers armed — the race the Linux CI leg caught
+  // at 0100d3e (P32); and arming after the transport start is what pairs a
+  // start row written during the setup with its stop row.
+  it("arms the latch after the transport is up and before writing the readiness banner", () => {
+    const text = source();
+    const connect = text.indexOf("await server.connect(stdio)");
+    const arm = text.indexOf("latch.arm(");
+    const banner = text.indexOf("process.stderr.write(banner)");
+    expect(connect).toBeGreaterThanOrEqual(0);
+    expect(arm).toBeGreaterThan(connect);
+    expect(banner).toBeGreaterThan(arm);
+  });
+
+  // stdout is the stdio transport; a session-file warning goes where the
+  // banner goes (R5 / D4, 2026-09-07).
+  it("wires the session-file warning seam to stderr and never writes to stdout", () => {
+    const text = source();
+    expect(text).toContain("onSessionFilePermissionRepairFailure");
+    expect(text).not.toMatch(/console\.log\(/);
+    expect(text).not.toMatch(/process\.stdout\.write\(/);
   });
 });

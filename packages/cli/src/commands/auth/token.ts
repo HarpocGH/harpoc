@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fchmodSync, openSync, unlinkSync, writeSync } from "node:fs";
 import type { Command } from "commander";
 import type { Permission } from "@harpoc/shared";
 import {
@@ -92,41 +92,65 @@ export function registerAuthTokenCommand(auth: Command): void {
             // the issued-token registry for a token nobody ever received. No
             // --force — the flag writes a credential, and silently replacing
             // one is how a live launch token gets orphaned.
-            if (options.out !== undefined && existsSync(options.out)) {
+            const out = options.out;
+            if (out !== undefined && existsSync(out)) {
               throw VaultError.invalidInput(
-                `--out ${options.out} already exists; remove it or choose another path`,
+                `--out ${out} already exists; remove it or choose another path`,
               );
             }
+            // Opened before the mint as well (R3, 2026-09-07): 0600 at
+            // creation, like the session file beside it — open(2) applies the
+            // mode and umask can only tighten it — and "wx" (O_EXCL) refuses
+            // any existing path, a symlink included, so the check above can be
+            // neither raced nor redirected. A path that cannot be opened (a
+            // missing directory, a permission) therefore mints nothing.
+            const outFd = out === undefined ? undefined : openSync(out, "wx", 0o600);
 
             const project = options.project;
             const secrets = options.secrets
               ? options.secrets.split(",").map((s) => s.trim())
               : undefined;
-            const token = engine.createToken(subject, scope, ttlMs, {
-              project,
-              secrets,
-              principalType,
-              label: options.label,
-            });
-
-            if (options.out !== undefined) {
-              // 0600 at creation, like the session file beside it: open(2)
-              // applies the mode and umask can only tighten it; "wx" (O_EXCL)
-              // refuses any existing path, a symlink included, so the check
-              // above can be neither raced nor redirected. The POSIX chmod
-              // repair mirrors init.ts and is skipped on win32, where the file
-              // inherits the directory ACL as the vault does.
-              writeFileSync(options.out, token + "\n", { flag: "wx", mode: 0o600 });
-              if (process.platform !== "win32") {
+            let token: string;
+            try {
+              token = engine.createToken(subject, scope, ttlMs, {
+                project,
+                secrets,
+                principalType,
+                label: options.label,
+              });
+            } catch (err) {
+              if (out !== undefined && outFd !== undefined) {
+                closeSync(outFd);
                 try {
-                  chmodSync(options.out, 0o600);
-                } catch (err) {
+                  unlinkSync(out);
+                } catch (unlinkErr) {
                   console.error(
-                    `Warning: could not restrict ${options.out} to owner-only access (${err instanceof Error ? err.message : String(err)})`,
+                    `Warning: could not remove the empty ${out} after the token was refused (${unlinkErr instanceof Error ? unlinkErr.message : String(unlinkErr)})`,
                   );
                 }
               }
-              console.error(`Token written to ${options.out}`);
+              throw err;
+            }
+
+            if (out !== undefined && outFd !== undefined) {
+              try {
+                writeSync(outFd, token + "\n");
+                // The POSIX chmod repair mirrors init.ts and is skipped on
+                // win32, where the file inherits the directory ACL as the
+                // vault does.
+                if (process.platform !== "win32") {
+                  try {
+                    fchmodSync(outFd, 0o600);
+                  } catch (err) {
+                    console.error(
+                      `Warning: could not restrict ${out} to owner-only access (${err instanceof Error ? err.message : String(err)})`,
+                    );
+                  }
+                }
+              } finally {
+                closeSync(outFd);
+              }
+              console.error(`Token written to ${out}`);
             }
 
             if (options.json) {

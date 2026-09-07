@@ -23,17 +23,22 @@ interface CertificateRenewer {
   renewCertificate(secretId: string): Promise<unknown>;
 }
 
+/** Which step failed: the renewal itself, or the audit row recording a failed renewal. */
+export type RenewalErrorPhase = "renewal" | "audit";
+
 export interface RenewalSchedulerOptions {
   checkIntervalMs?: number;
   /**
    * Called when a scheduled per-certificate renewal fails after all retries
-   * (once per quarantine escalation, not per skipped tick) — and once more,
-   * first and carrying the audit error, when the failed-renewal audit row
-   * itself could not be written (D6, 2026-09-06). Default: no-op — the package
-   * stays console-free; the host decides how to report. `renewNow` rethrows to
-   * its caller instead.
+   * (once per quarantine escalation, not per skipped tick) — `phase`
+   * `"renewal"` — and once more, first and with `phase` `"audit"`, when the
+   * failed-renewal audit row itself could not be written (D6, 2026-09-06; the
+   * phase since 2026-09-07: a sealed engine yields the same `VAULT_LOCKED` from
+   * both steps, so a host cannot tell them apart by the error alone). Default:
+   * no-op — the package stays console-free; the host decides how to report.
+   * `renewNow` rethrows to its caller instead.
    */
-  onRenewError?: (secretId: string, err: unknown) => void;
+  onRenewError?: (secretId: string, err: unknown, phase: RenewalErrorPhase) => void;
 }
 
 export class RenewalScheduler {
@@ -41,7 +46,7 @@ export class RenewalScheduler {
   private renewer: CertificateRenewer;
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private checkIntervalMs: number;
-  private onRenewError?: (secretId: string, err: unknown) => void;
+  private onRenewError?: (secretId: string, err: unknown, phase: RenewalErrorPhase) => void;
   private tickInProgress = false;
   private currentTick: Promise<void> | null = null;
   /**
@@ -159,9 +164,9 @@ export class RenewalScheduler {
           // (Wave 1 D3: the audit write is the one fail-open step here). The
           // silence does not: the host hears the write failure first, then the
           // renewal failure it was meant to record.
-          this.onRenewError?.(cert.secret_id, auditErr);
+          this.onRenewError?.(cert.secret_id, auditErr, "audit");
         }
-        this.onRenewError?.(cert.secret_id, err);
+        this.onRenewError?.(cert.secret_id, err, "renewal");
       }
     }
   }

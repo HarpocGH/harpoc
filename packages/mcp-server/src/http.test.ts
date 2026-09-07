@@ -1,6 +1,8 @@
 import { request as httpRequest } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import type { AddressInfo } from "node:net";
+import { readFileSync } from "node:fs";
+import { isConnectionRefused, isIpv6BindUnavailable } from "@harpoc/test-utils";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -239,22 +241,34 @@ describe("startMcpHttpServer", () => {
    * `::ffff:127.0.0.1`, so the same client would occupy two
    * `audit_log.ip_address` values depending on which address the operator
    * bound. The peer is read out of the session's caller — the only place this
-   * server exposes it — and skipped where the host has no IPv6 stack, or binds
-   * `::` v6-only, so the shape cannot arise at all.
+   * server exposes it — and skipped only where the host has no IPv6 stack (the
+   * bind refuses EAFNOSUPPORT / EADDRNOTAVAIL) or binds `::` v6-only (the IPv4
+   * connect is refused), so the shape cannot arise at all; every other failure
+   * is this test's to report (R6, 2026-09-07).
    */
   it("records a dual-stack IPv4 peer in dotted form (D9)", async (ctx) => {
     const engine = mockEngine();
-    const started = await startMcpHttpServer({
-      engine,
-      port: 0,
-      host: "::",
-      allowedHosts: ["127.0.0.1"],
-    }).catch(() => null);
-    if (started === null) return ctx.skip();
+    let started: McpHttpServer;
+    try {
+      started = await startMcpHttpServer({
+        engine,
+        port: 0,
+        host: "::",
+        allowedHosts: ["127.0.0.1"],
+      });
+    } catch (err) {
+      if (!isIpv6BindUnavailable(err)) throw err;
+      return ctx.skip();
+    }
     server = started;
 
-    const connected = await connectClient(started.port, TOKEN).catch(() => null);
-    if (connected === null) return ctx.skip();
+    let connected: Awaited<ReturnType<typeof connectClient>>;
+    try {
+      connected = await connectClient(started.port, TOKEN);
+    } catch (err) {
+      if (!isConnectionRefused(err)) throw err;
+      return ctx.skip();
+    }
     clients.push(connected.client);
 
     await connected.client.callTool({ name: "list_secrets", arguments: {} });
@@ -266,6 +280,16 @@ describe("startMcpHttpServer", () => {
         remote_address: "127.0.0.1",
       }),
     );
+  });
+
+  // The two skips in the D9 case are the only skips this file may take, each
+  // gated on a named errno from @harpoc/test-utils: a blanket catch would turn
+  // a refused audit row, an occupied port or a rejected handshake into a green
+  // run with one more skip, and nothing in the tree counts skips (R6,
+  // 2026-09-07).
+  it("carries no blanket catch that could downgrade a failure to a skip", () => {
+    const text = readFileSync(new URL("./http.test.ts", import.meta.url), "utf8");
+    expect(text).not.toMatch(/\.catch\(\(\)\s*=>\s*null\)/);
   });
 
   it("enforces token scope across the HTTP transport", async () => {
