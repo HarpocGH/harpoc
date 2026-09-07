@@ -96,3 +96,44 @@ describe("descendant sweep bounds (ruled 2026-08-29)", () => {
     expect(settled).toBe("rejected");
   });
 });
+
+/** A helper process that answers `stdout` in one chunk and closes with `code`. */
+function answeringChild(stdout: string, code: number): ReturnType<typeof spawn> {
+  const child = new EventEmitter() as ReturnType<typeof spawn> & {
+    kill: () => boolean;
+  };
+  const out = new EventEmitter();
+  Object.assign(child, { pid: 4243, stdout: out, kill: vi.fn(() => true) });
+  queueMicrotask(() => {
+    out.emit("data", Buffer.from(stdout));
+    child.emit("close", code);
+  });
+  return child;
+}
+
+describe("win32SweepDeps — the listing's parse", () => {
+  afterEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it("maps `<pid> <unix-ms>` lines and skips everything else", async () => {
+    spawnMock.mockImplementation(() =>
+      answeringChild(
+        "4242 1700000000000\r\nStatus: noise\r\n  17 1700000000001  \r\n\r\n0 5\r\n",
+        0,
+      ),
+    );
+    await expect(win32SweepDeps().listDescendants(1)).resolves.toEqual([
+      { pid: 4242, createdAtMs: 1700000000000 },
+      { pid: 17, createdAtMs: 1700000000001 },
+      { pid: 0, createdAtMs: 5 },
+    ]);
+  });
+
+  it("rejects a listing whose helper exits non-zero", async () => {
+    spawnMock.mockImplementation(() => answeringChild("", 2));
+    await expect(win32SweepDeps().listDescendants(1)).rejects.toThrow(
+      "descendant sweep listing exited 2",
+    );
+  });
+});

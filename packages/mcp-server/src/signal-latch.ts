@@ -11,10 +11,10 @@ export type StopSignal = (typeof STOP_SIGNALS)[number];
  * with under the signal's default disposition, which is what the second
  * signal restores (2026-09-07).
  */
-export const REPEAT_EXIT_CODES: Readonly<Record<StopSignal, number>> = {
+export const REPEAT_EXIT_CODES: Readonly<Record<StopSignal, number>> = Object.freeze({
   SIGINT: 130,
   SIGTERM: 143,
-};
+});
 
 /** The one stderr line the default escalation writes before it exits. */
 export function repeatStopLine(trigger: StopSignal): string {

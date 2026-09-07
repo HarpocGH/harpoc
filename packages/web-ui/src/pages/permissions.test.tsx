@@ -461,6 +461,71 @@ describe("PermissionsPage", () => {
     expect(gated?.textContent).toContain("tool:ci-runner");
   });
 
+  it("an agent's own expired row renders no chips: the cell agrees with the header", async () => {
+    const expiredOwn = policy({
+      policy_id: "p-2",
+      secret_id: "s-2",
+      handle: UNGATED.handle,
+      expires_at: Date.now() - 60_000,
+    });
+    render(
+      <PermissionsPage
+        api={api({
+          listAgentPolicies: vi.fn((name: string) =>
+            Promise.resolve(name === "ci-bot" ? [policy(), expiredOwn] : []),
+          ),
+          getAccessPolicies: vi.fn((handle: string) =>
+            Promise.resolve(
+              handle === UNGATED.handle
+                ? [
+                    access({
+                      id: "ap-5",
+                      secret_id: "s-2",
+                      expires_at: Date.now() - 60_000,
+                    }),
+                  ]
+                : [access()],
+            ),
+          ),
+        })}
+      />,
+    );
+    await waitFor(() => expect(cell("ci-bot", UNGATED.handle)).toBeTruthy());
+    const open = screen.getByText("open-key").closest("th");
+    await waitFor(() => expect(open?.textContent).toContain("no grants"));
+    // The agent's own row on `open-key` has expired: the cell reads what the
+    // header reads, and the live grant on the other column is untouched.
+    expect(cell("ci-bot", UNGATED.handle).textContent).toBe("—");
+    expect(cell("ci-bot", GATED.handle).textContent).toContain("read");
+  });
+
+  it("the holders fallback ignores an agent's expired row when the column read is refused", async () => {
+    const expiredOwn = policy({
+      policy_id: "p-2",
+      secret_id: "s-2",
+      handle: UNGATED.handle,
+      expires_at: Date.now() - 60_000,
+    });
+    render(
+      <PermissionsPage
+        api={api({
+          listAgentPolicies: vi.fn((name: string) =>
+            Promise.resolve(name === "ci-bot" ? [policy(), expiredOwn] : []),
+          ),
+          getAccessPolicies: vi.fn((handle: string) =>
+            handle === UNGATED.handle
+              ? Promise.reject(new ApiError(403, "ACCESS_DENIED", "Access denied"))
+              : Promise.resolve([access()]),
+          ),
+        })}
+      />,
+    );
+    await waitFor(() => expect(cell("ci-bot", UNGATED.handle)).toBeTruthy());
+    expect(cell("ci-bot", UNGATED.handle).textContent).toBe("—");
+    const open = screen.getByText("open-key").closest("th");
+    expect(open?.textContent).not.toContain("granted");
+  });
+
   it("reads the access policies of the preselected column only", async () => {
     window.location.hash = "#/permissions?secret=myproj%2Ftest-key";
     const getAccessPolicies = vi.fn((handle: string) => Promise.resolve(ACCESS[handle] ?? []));

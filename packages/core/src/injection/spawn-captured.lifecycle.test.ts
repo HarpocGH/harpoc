@@ -79,8 +79,12 @@ const isAlive = (pid: number): boolean => {
     process.kill(pid, 0);
     return true;
   } catch (err) {
-    // EPERM: exists but not ours (never for a grandchild this test spawned); ESRCH: gone.
-    return (err as NodeJS.ErrnoException).code === "EPERM";
+    // Gone only on ESRCH. EPERM is a process that exists but is not ours
+    // (never one this test spawned), and any other errno is a state the poll
+    // must report as alive, so an unexpected answer reds the pin rather than
+    // passing it. A POSIX zombie answers kill(0) and so reads alive until it
+    // is reaped — a dead child's grandchild is reparented and reaped at once.
+    return (err as NodeJS.ErrnoException).code !== "ESRCH";
   }
 };
 
@@ -134,14 +138,15 @@ describe("spawnCaptured lifecycle (M4)", () => {
       { env: {}, timeoutMs: 5_000 },
     );
 
-    expect(result.timed_out).toBe(true);
-
     // Written by the child the moment it spawned the grandchild, well before
     // the 5 s kill: a missing file is a child that never got that far — a
-    // different failure from a survivor.
+    // different failure from a survivor. Read and recorded before any
+    // assertion, so a red below never leaves the grandchild to nobody.
     const pid = Number(readFileSync(pidFile, "utf8"));
-    expect(Number.isInteger(pid) && pid > 0).toBe(true);
-    survivor = pid;
+    survivor = Number.isInteger(pid) && pid > 0 ? pid : undefined;
+    expect(survivor).toBeDefined();
+
+    expect(result.timed_out).toBe(true);
 
     await expect(untilGone(pid)).resolves.toBe(true);
     survivor = undefined;

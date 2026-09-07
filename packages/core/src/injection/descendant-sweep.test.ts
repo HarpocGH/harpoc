@@ -3,7 +3,6 @@ import type { ChildProcess } from "node:child_process";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { sweepDescendants, win32SweepDeps } from "./descendant-sweep.js";
 import type { DescendantProcess, DescendantSweepDeps } from "./descendant-sweep.js";
-import { system32Path } from "../win32-paths.js";
 
 const SPAWNED_AT = 900_000;
 const EXITED_AT = 1_000_000;
@@ -292,6 +291,22 @@ const LIVE_LISTING_LIFETIME_MS = 300_000;
 
 describe.runIf(process.platform === "win32")("sweepDescendants — live win32 orphan", () => {
   const live = win32SweepDeps({ helperTimeoutMs: LIVE_HELPER_TIMEOUT_MS });
+  /** Every process the live case spawned: the parent, then the grandchild it printed. */
+  const liveProcesses: number[] = [];
+
+  afterEach(() => {
+    // A red run leaves the detached grandchild (and, before the kill, the
+    // parent) standing; end them here so nothing outlives the case. A green
+    // run has proved both gone and empties the list itself, so no freed pid
+    // is ever signalled.
+    for (const pid of liveProcesses.splice(0)) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  });
 
   beforeAll(
     async () => {
@@ -312,10 +327,12 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
   );
 
   // Survival is pinned by a second listing, not by a marker file: a cold
-  // WMI provider plus taskkill can take seconds under load, and a marker
-  // written on the grandchild's own clock would race that. The grandchild's
-  // lifetime only keeps it findable past the pre-listing and the sweep's own
-  // listing, and self-terminates it if the sweep never reaches it.
+  // provider plus taskkill can take seconds under load, and a marker written
+  // on the grandchild's own clock would race that. The grandchild's lifetime
+  // equals the case's budget (LIVE_LISTING_LIFETIME_MS): it stays findable
+  // past the pre-listing, the sweep's own listing and the poll, and a
+  // grandchild that self-terminates can never pass as swept — the budget
+  // expires first. A red run leaves it standing; the afterEach above ends it.
   it(
     "kills a grandchild orphaned by a plain (non-tree) kill of its parent",
     async () => {
@@ -327,7 +344,7 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
       const { spawn } = require("node:child_process");
       const gc = spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore", windowsHide: true, detached: true });
       gc.unref();
-      console.log("child-done");
+      console.log("child-done " + gc.pid);
       setTimeout(() => {}, 60000);
     `;
       const spawnedAt = Date.now();
@@ -335,15 +352,21 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
       });
-      await new Promise<void>((resolve) => {
+      const pid = parent.pid as number;
+      liveProcesses.push(pid);
+      const grandchildPid = await new Promise<number>((resolve) => {
+        let buffered = "";
         parent.stdout.on("data", (chunk: Buffer) => {
-          if (chunk.toString().includes("child-done")) resolve();
+          buffered += chunk.toString();
+          const match = /child-done (\d+)/.exec(buffered);
+          if (match) resolve(Number(match[1]));
         });
       });
-      const pid = parent.pid as number;
+      liveProcesses.push(grandchildPid);
       const exited = exitOf(parent);
       parent.kill();
       await exited;
+      liveProcesses.splice(liveProcesses.indexOf(pid), 1);
       const exitedAt = Date.now();
 
       const before = await live.listDescendants(pid);
@@ -363,164 +386,10 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
       // settle — at least one retry even where a listing outlasts the deadline.
       // The last listing is what fails, so a survivor stays visible.
       await expect(untilEmpty(() => live.listDescendants(pid))).resolves.toEqual([]);
+      liveProcesses.length = 0;
       // Budget: pre-listing (≤ 60 s) + sweep (≤ 90 s) + poll (≤ 2 × 60 s) + spawn —
       // a bound; measured 2026-09-02 → 07 at ~100–130 s on the runners.
     },
     LIVE_LISTING_LIFETIME_MS,
   );
 });
-
-// Diagnostics only (D2 / D3 of docs/implementation-plan-recorded-minors-wmi-2026-09-07.md):
-// the PDH performance-counter listing timed beside the WMI listing on one live
-// parent with a detached grandchild, on the windows-latest legs. Prints one
-// stderr line, asserts nothing, and is removed by the tranche commit either way.
-describe.runIf(process.platform === "win32")(
-  "PDH listing probe — diagnostics only (2026-09-07)",
-  () => {
-    const PROBE_HELPER_TIMEOUT_MS = 60_000;
-    const PROBE_HOLD_MS = 300_000;
-    const probePids: number[] = [];
-
-    afterEach(() => {
-      for (const pid of probePids.splice(0)) {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {
-          // Already gone.
-        }
-      }
-    });
-
-    // The candidate: byte-identical to what descendant-sweep.ts ships on GO.
-    function pdhListingScript(pid: number): string {
-      return [
-        "$t = (Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Perflib\\CurrentLanguage').Counter",
-        "function N($i) { $t[[Array]::IndexOf($t, [string]$i) + 1] }",
-        "$o = N 230; $ip = N 784; $pp = N 1410; $et = N 684",
-        "$s = Get-Counter -Counter ('\\{0}(*)\\{1}' -f $o, $ip), ('\\{0}(*)\\{1}' -f $o, $pp), ('\\{0}(*)\\{1}' -f $o, $et) -MaxSamples 1 -ErrorAction SilentlyContinue",
-        "$v = @($s.CounterSamples | Where-Object { $_.Status -eq 0 })",
-        "if ($v.Count -eq 0) { exit 2 }",
-        "$m = @{}",
-        "foreach ($x in $v) {",
-        "  $c = $x.Path.LastIndexOf('\\'); $k = $x.Path.Substring(0, $c); $n = $x.Path.Substring($c + 1)",
-        "  if (-not $m.ContainsKey($k)) { $m[$k] = @{} }",
-        "  if ($n -eq $ip) { $m[$k].pid = [int64]$x.CookedValue }",
-        "  elseif ($n -eq $pp) { $m[$k].ppid = [int64]$x.CookedValue }",
-        "  elseif ($n -eq $et) { $m[$k].created = ([DateTimeOffset]$x.Timestamp).AddSeconds(-[double]$x.CookedValue).ToUnixTimeMilliseconds() }",
-        "}",
-        `foreach ($r in $m.Values) { if ($r.ppid -eq ${String(pid)} -and $r.pid -gt 0) { '{0} {1}' -f $r.pid, $r.created } }`,
-      ].join("\n");
-    }
-
-    function runProbeHelper(script: string): Promise<{ code: number | null; stdout: string }> {
-      return new Promise((resolve, reject) => {
-        const child = spawn(
-          system32Path("WindowsPowerShell", "v1.0", "powershell.exe"),
-          ["-NoProfile", "-NonInteractive", "-Command", script],
-          {
-            shell: false,
-            windowsHide: true,
-            stdio: ["ignore", "pipe", "ignore"],
-          },
-        );
-        const chunks: Buffer[] = [];
-        let settled = false;
-        const finish = (err: Error | null, code: number | null): void => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          if (err) reject(err);
-          else resolve({ code, stdout: Buffer.concat(chunks).toString("utf8") });
-        };
-        const timer = setTimeout(() => {
-          child.kill();
-          finish(new Error("probe helper timed out"), null);
-        }, PROBE_HELPER_TIMEOUT_MS);
-        child.stdout?.on("data", (chunk: Buffer) => chunks.push(chunk));
-        child.on("error", (err) => finish(err, null));
-        child.on("close", (code) => finish(null, code));
-      });
-    }
-
-    function parseListing(stdout: string): DescendantProcess[] {
-      const found: DescendantProcess[] = [];
-      for (const line of stdout.split(/\r?\n/)) {
-        const match = /^(\d+) (\d+)$/.exec(line.trim());
-        if (match) found.push({ pid: Number(match[1]), createdAtMs: Number(match[2]) });
-      }
-      return found;
-    }
-
-    it(
-      "prints the WMI and PDH listings of one live parent: durations, rows, agreement",
-      async () => {
-        const grandchild = `setTimeout(() => {}, ${String(PROBE_HOLD_MS)})`;
-        const parentScript = `
-      const { spawn } = require("node:child_process");
-      const gc = spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore", windowsHide: true, detached: true });
-      gc.unref();
-      console.log("child-done " + gc.pid);
-      setTimeout(() => {}, ${String(PROBE_HOLD_MS)});
-    `;
-        const parent = spawn(process.execPath, ["-e", parentScript], {
-          stdio: ["ignore", "pipe", "ignore"],
-          windowsHide: true,
-        });
-        const pid = parent.pid as number;
-        probePids.push(pid);
-        const grandchildPid = await new Promise<number>((resolve) => {
-          let buffered = "";
-          parent.stdout.on("data", (chunk: Buffer) => {
-            buffered += chunk.toString();
-            const match = /child-done (\d+)/.exec(buffered);
-            if (match) resolve(Number(match[1]));
-          });
-        });
-        probePids.push(grandchildPid);
-
-        const wmi = win32SweepDeps({
-          helperTimeoutMs: PROBE_HELPER_TIMEOUT_MS,
-        });
-        const samples: string[] = [];
-        const pidSets: string[] = [];
-        const take = async (
-          label: string,
-          list: () => Promise<DescendantProcess[]>,
-        ): Promise<void> => {
-          const started = Date.now();
-          try {
-            const rows = await list();
-            pidSets.push(
-              rows
-                .map((r) => r.pid)
-                .sort((a, b) => a - b)
-                .join(","),
-            );
-            samples.push(
-              `${label}=${String(Date.now() - started)}ms (ok, rows ${String(rows.length)})`,
-            );
-          } catch (err) {
-            pidSets.push("error");
-            samples.push(
-              `${label}=${String(Date.now() - started)}ms (${err instanceof Error ? err.message : String(err)})`,
-            );
-          }
-        };
-        const pdh = async (): Promise<DescendantProcess[]> => {
-          const { code, stdout } = await runProbeHelper(pdhListingScript(pid));
-          if (code !== 0) throw new Error(`pdh listing exited ${String(code)}`);
-          return parseListing(stdout);
-        };
-        await take("wmi", () => wmi.listDescendants(pid));
-        await take("pdh cold", pdh);
-        await take("pdh warm", pdh);
-        const first = pidSets[0];
-        const equal = first !== undefined && first !== "error" && pidSets.every((s) => s === first);
-        console.error(
-          `[descendant-sweep live] PDH probe: ${samples.join("; ")}; pids equal=${String(equal)} (grandchild ${String(grandchildPid)})`,
-        );
-      },
-      PROBE_HELPER_TIMEOUT_MS * 3 + 30_000,
-    );
-  },
-);

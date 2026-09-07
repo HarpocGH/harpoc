@@ -66,6 +66,12 @@ function columnSecrets(
   });
 }
 
+/** An agent's grant on a secret only while unexpired — the header's rule (`principalHolders`), applied to the agent's own row. */
+function liveGrant(grant: AgentPolicy | undefined, now: number): AgentPolicy | undefined {
+  if (grant === undefined) return undefined;
+  return grant.expires_at === null || grant.expires_at > now ? grant : undefined;
+}
+
 /**
  * The command that lifts a refusal on a secret. Every token caller needs a
  * grant of its own on every secret it touches — an agent- or tool-type admin
@@ -330,9 +336,12 @@ export function PermissionsPage({ api }: { api: ApiClient }) {
   const agents = matrix.data?.agents ?? [];
   const loadedSecrets = matrix.data?.secrets ?? [];
   const visibleSecrets = columnSecrets(loadedSecrets, preselect, filter);
+  const now = Date.now();
 
   const holders = (handle: string): Agent[] =>
-    agents.filter((a) => matrix.data?.grants.get(a.name)?.has(handle) === true);
+    agents.filter(
+      (a) => liveGrant(matrix.data?.grants.get(a.name)?.get(handle), now) !== undefined,
+    );
 
   /**
    * The unexpired rows on a secret from every principal type — `undefined`
@@ -474,7 +483,7 @@ export function PermissionsPage({ api }: { api: ApiClient }) {
                       {readonly && <StatusChip status={a.status} />}
                     </th>
                     {visibleSecrets.map((s) => {
-                      const grant = row?.get(s.handle);
+                      const grant = liveGrant(row?.get(s.handle), now);
                       return (
                         <td
                           key={s.handle}
@@ -515,7 +524,10 @@ export function PermissionsPage({ api }: { api: ApiClient }) {
           api={api}
           agent={target.agent}
           secret={target.secret}
-          current={matrix.data?.grants.get(target.agent.name)?.get(target.secret.handle)}
+          current={liveGrant(
+            matrix.data?.grants.get(target.agent.name)?.get(target.secret.handle),
+            now,
+          )}
           secretGated={targetHolders.length > 0}
           onlyHolder={targetHolders.length === 1 && targetHolders[0]?.name === target.agent.name}
           hintsGrant={(code) =>

@@ -160,8 +160,8 @@ describe("auth token --out", () => {
   let logSpy: ReturnType<typeof vi.spyOn>;
   let dir: string;
 
-  const stdout = (): string => logSpy.mock.calls.map((c) => String(c[0])).join("\n");
-  const stderr = (): string => errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+  const stdout = (): string => logSpy.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
+  const stderr = (): string => errorSpy.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
 
   beforeEach(() => {
     vi.clearAllMocks();
