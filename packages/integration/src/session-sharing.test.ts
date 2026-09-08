@@ -20,7 +20,7 @@ import type { SessionKeyProtector } from "@harpoc/core";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { InjectionType, PrincipalType, SecretType, VaultState } from "@harpoc/shared";
-import { protectorTimer } from "@harpoc/test-utils";
+import { protectorTimer, recordSeriesLine } from "@harpoc/test-utils";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   createTestVault,
@@ -226,9 +226,10 @@ describe("Session Sharing", () => {
 // the protector gets 90 s and the case 240 s — two protector calls plus two
 // Argon2id inits — so a loaded windows-latest runner (the 45 s budget tripped
 // three times, 2026-09-02 → 07) stretches the case instead of failing it;
-// every call's duration is printed for the CI log and extends the DPAPI series
-// in decisions.md, where a call over 60 s is the trigger to discuss the budget
-// (D3, 2026-09-08).
+// every call's duration is printed for the CI log — and, on a runner, to the
+// job summary with the 60 s trigger judged on the slowest call — and extends
+// the DPAPI series in decisions.md, where a call over 60 s is the trigger to
+// discuss the budget (D3 and D4, 2026-09-08).
 const DPAPI_PROTECT_BUDGET_MS = 90_000;
 const DPAPI_CASE_BUDGET_MS = 240_000;
 
@@ -244,7 +245,7 @@ describe.runIf(process.platform === "win32")("DPAPI-protected session sharing (W
           "dpapi-integ-pw",
         );
       } finally {
-        console.error(timer.report());
+        recordSeriesLine(timer.report(), { judgedMs: timer.slowestMs() });
       }
     },
     DPAPI_CASE_BUDGET_MS,

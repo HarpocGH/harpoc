@@ -26,23 +26,30 @@ export interface ProtectorTimer {
   wrap<S extends string>(inner: TimedProtectorTarget & { readonly scheme: S }): TimedProtector<S>;
   /** One line for the CI log, the calls in order: `[label] protect=1234ms (ok), unprotect=980ms (ok)`. */
   report(): string;
+  /** The slowest call so far in ms, failed calls included; 0 before any call — the sample the series trigger is judged on. */
+  slowestMs(): number;
 }
 
 export function protectorTimer(label: string): ProtectorTimer {
   const samples: string[] = [];
+  let slowest = 0;
   const timed = async <S extends string>(
     inner: TimedProtectorTarget & { readonly scheme: S },
     method: "protect" | "unprotect",
     input: Uint8Array,
   ): Promise<Uint8Array> => {
     const started = Date.now();
+    const record = (outcome: string): void => {
+      const elapsed = Date.now() - started;
+      slowest = Math.max(slowest, elapsed);
+      samples.push(`${method}=${String(elapsed)}ms (${outcome})`);
+    };
     try {
       const output = await inner[method](input);
-      samples.push(`${method}=${String(Date.now() - started)}ms (ok)`);
+      record("ok");
       return output;
     } catch (err) {
-      const outcome = err instanceof Error ? err.message : String(err);
-      samples.push(`${method}=${String(Date.now() - started)}ms (${outcome})`);
+      record(err instanceof Error ? err.message : String(err));
       throw err;
     }
   };
@@ -53,5 +60,6 @@ export function protectorTimer(label: string): ProtectorTimer {
       unprotect: (blob) => timed(inner, "unprotect", blob),
     }),
     report: () => `[${label}] ${samples.length === 0 ? "no calls" : samples.join(", ")}`,
+    slowestMs: () => slowest,
   };
 }

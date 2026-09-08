@@ -15,7 +15,7 @@ import {
 } from "@harpoc/shared";
 import { AAD_INJECTION_POLICY } from "@harpoc/shared";
 import type { InjectionPolicyInput } from "@harpoc/shared";
-import { expectVaultError, protectorTimer } from "@harpoc/test-utils";
+import { expectVaultError, protectorTimer, recordSeriesLine } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { encrypt } from "./crypto/aes-gcm.js";
 import { forceNetworkIsolationUnavailableForTests } from "./injection/network-isolation.js";
@@ -3484,7 +3484,9 @@ describe("session keystore protection", () => {
   // `none` file). Here the protector gets 90 s and the case 240 s — two
   // protector calls plus two Argon2id inits — so a loaded windows-latest runner
   // stretches the case instead of failing it; every call's duration is printed
-  // for the CI log and extends the DPAPI series in decisions.md (D3, 2026-09-08).
+  // for the CI log — and, on a runner, to the job summary with the 60 s trigger
+  // judged on the slowest call — and extends the DPAPI series in decisions.md
+  // (D3 and D4, 2026-09-08).
   const DPAPI_PROTECT_BUDGET_MS = 90_000;
   const DPAPI_CASE_BUDGET_MS = 240_000;
 
@@ -3523,7 +3525,7 @@ describe("session keystore protection", () => {
           await engineB.destroy();
           await engineA.destroy();
         } finally {
-          console.error(timer.report());
+          recordSeriesLine(timer.report(), { judgedMs: timer.slowestMs() });
         }
       },
       DPAPI_CASE_BUDGET_MS,

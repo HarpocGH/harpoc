@@ -32,9 +32,11 @@ export interface SpawnCapturedResult {
   /**
    * Set only when the win32 descendant sweep ran after a timed-out spawn: the
    * survivors it killed and whether it failed open — a listing failure, a
-   * helper at its bound, the whole sweep at its bound, or a rejected sweep.
-   * Absent on POSIX, on a normal exit, on a spawn failure and on the settle
-   * backstop (a kill whose exit never landed).
+   * helper at its bound, the whole sweep at its bound, a rejected sweep, or a
+   * child whose exit had still not landed when the spawn settled (the settle
+   * backstop starts the sweep itself; a kill the vault never saw take is
+   * unconfirmed, whatever the sweep found). Absent on POSIX, on a normal exit
+   * and on a spawn failure.
    */
   descendant_sweep?: { killed: number; failed: boolean };
 }
@@ -73,7 +75,9 @@ const STREAM_FLUSH_GRACE_MS = 1_000;
  * Backstop after a timeout kill has been delivered: settle even if neither
  * exit nor close lands. Armed once `killTree` resolves, not at dispatch — a
  * backstop that raced the kill itself settled the spawn before the child's
- * exit under load, and with it skipped the descendant sweep.
+ * exit under load, and with it skipped the descendant sweep. On win32 the
+ * backstop starts the sweep itself before settling (2026-09-08), so a late or
+ * missing exit no longer means no sweep.
  */
 const KILL_SETTLE_MS = 2_000;
 
@@ -85,9 +89,12 @@ const KILL_HELPER_TIMEOUT_MS = 10_000;
  * leaves a grandchild holding the inherited stdio — and, since the child is a
  * process-group leader (POSIX `detached`), the group signal is what reaches
  * the whole tree. On Windows the same job is done by the OS-shipped `taskkill
- * /T`, pinned to System32 and given nothing but a numeric pid. Resolves once
- * the kill has been delivered: on Windows when the taskkill helper closes
- * (bounded by KILL_HELPER_TIMEOUT_MS), immediately on every other path.
+ * /T`, pinned to System32 and given nothing but a numeric pid.
+ * Resolves once the kill has been delivered: on Windows when the taskkill
+ * helper closes (bounded by KILL_HELPER_TIMEOUT_MS) — a helper that ran and
+ * exited non-zero first falls back to a direct kill of the child, as a helper
+ * that could not be started does (128, a process already gone, is a no-op
+ * there) — and immediately on every other path.
  */
 function killTree(child: ChildProcess): Promise<void> {
   const pid = child.pid;
@@ -130,7 +137,10 @@ function killTree(child: ChildProcess): Promise<void> {
         killDirect();
         delivered();
       });
-      killer.on("close", delivered);
+      killer.on("close", (code) => {
+        if (code !== 0) killDirect();
+        delivered();
+      });
     });
   }
   try {
@@ -152,12 +162,15 @@ function killTree(child: ChildProcess): Promise<void> {
  * bounded flush grace (not by `'close'`, which a surviving grandchild holding
  * the inherited stdio can withhold forever), and a post-kill backstop settles
  * even if the kill itself does not take. On win32 — where the kill is a
- * taskkill helper and a timed-out exit starts the descendant sweep — a spawn
- * whose exit never lands settles within KILL_HELPER_TIMEOUT_MS +
- * KILL_SETTLE_MS (12 s) of the timeout, and one whose exit does land settles
- * within DESCENDANT_SWEEP_TIMEOUT_MS (30 s) of that exit; since the exit
- * itself lands inside the first bound, the collapsed worst case is
- * timeout + 42 s. POSIX has no helper and no sweep: timeout + KILL_SETTLE_MS.
+ * taskkill helper and a timed-out spawn is swept for descendants, from the
+ * exit when it lands and from the backstop when it does not — the sweep
+ * starts within KILL_HELPER_TIMEOUT_MS + KILL_SETTLE_MS (12 s) of the timeout
+ * on either path and settlement follows within DESCENDANT_SWEEP_TIMEOUT_MS
+ * (30 s) of its start: the worst case is timeout + 42 s. POSIX has no helper
+ * and no sweep: timeout + KILL_SETTLE_MS — a pending SIGKILL is delivered
+ * before a process returns to user mode, so a child that outlives the group
+ * kill by KILL_SETTLE_MS is in an uninterruptible wait and never executes
+ * again; the credential it holds is inert (struck 2026-09-08, D3).
  * A pending promise here would strand the caller's `finally` — the plaintext
  * wipe, the ephemeral ssh-agent socket and the identity/known-hosts temp
  * files all hang off it.
@@ -232,6 +245,7 @@ export async function spawnCaptured(
     }
 
     let timedOut = false;
+    let exited = false;
     let settled = false;
     let flushTimer: NodeJS.Timeout | undefined;
     let backstopTimer: NodeJS.Timeout | undefined;
@@ -244,6 +258,18 @@ export async function spawnCaptured(
       if (flushTimer) clearTimeout(flushTimer);
       if (backstopTimer) clearTimeout(backstopTimer);
       resolvePromise(result);
+    };
+
+    // win32 only, after a timeout kill: taskkill /T's descendant snapshot is
+    // taken once, so a grandchild created inside that gap outlives the tree
+    // kill with the credential in its inherited env. Started once — from the
+    // child's exit or, when that never lands, from the settle backstop; the
+    // sweep is bounded and every settlement path waits for it (see finish).
+    const startSweep = (exitedAtMs: number): void => {
+      if (!timedOut || process.platform !== "win32" || child.pid === undefined || sweep) return;
+      sweep = sweepDescendants(child.pid, { spawnedAtMs, exitedAtMs }).catch(
+        (): DescendantSweepResult => ({ killed: 0, failed: true }),
+      );
     };
 
     const finish = (code: number | null, signal: string | null, spawnFailed: boolean): void => {
@@ -267,7 +293,16 @@ export async function spawnCaptured(
           redacted: out !== rawOut || errText !== rawErr,
           isolation_mechanism: isolationMechanism,
           fs_isolation_mechanism: fsIsolationMechanism,
-          ...(descendantSweep ? { descendant_sweep: descendantSweep } : {}),
+          // A sweep the child's exit never confirmed is unconfirmed whatever it
+          // found: the kill was delivered, but the vault did not see it take.
+          ...(descendantSweep
+            ? {
+                descendant_sweep: {
+                  killed: descendantSweep.killed,
+                  failed: descendantSweep.failed || !exited,
+                },
+              }
+            : {}),
         });
       };
       if (sweep) void sweep.then(emit, () => emit({ killed: 0, failed: true }));
@@ -279,10 +314,14 @@ export async function spawnCaptured(
       // A kill that does not take (an unkillable state, a failed taskkill)
       // must not strand the caller: settle with what was captured — but only
       // once the kill has been delivered, so a slow taskkill cannot settle the
-      // spawn ahead of the exit that starts the descendant sweep.
+      // spawn ahead of the exit that starts the descendant sweep, and with the
+      // sweep run from here when that exit never comes.
       void killTree(child).then(() => {
         if (settled) return;
-        backstopTimer = setTimeout(() => finish(null, "SIGKILL", false), KILL_SETTLE_MS);
+        backstopTimer = setTimeout(() => {
+          startSweep(Date.now());
+          finish(null, "SIGKILL", false);
+        }, KILL_SETTLE_MS);
         if (backstopTimer.unref) backstopTimer.unref();
       });
     }, opts.timeoutMs);
@@ -300,16 +339,9 @@ export async function spawnCaptured(
     // bounded flush window instead. On the normal path 'close' follows within
     // microseconds and settles immediately with the complete output.
     child.on("exit", (code, signal) => {
+      exited = true;
       if (settled) return;
-      // win32 only, after a timeout kill: taskkill /T's descendant snapshot is
-      // taken once, so a grandchild created inside that gap outlives the tree
-      // kill with the credential in its inherited env. The sweep is bounded and
-      // every settlement path waits for it (see finish).
-      if (timedOut && process.platform === "win32" && child.pid !== undefined && !sweep) {
-        sweep = sweepDescendants(child.pid, { spawnedAtMs, exitedAtMs: Date.now() }).catch(
-          (): DescendantSweepResult => ({ killed: 0, failed: true }),
-        );
-      }
+      startSweep(Date.now());
       if (flushTimer) return;
       flushTimer = setTimeout(() => finish(code, signal ?? null, false), STREAM_FLUSH_GRACE_MS);
       if (flushTimer.unref) flushTimer.unref();

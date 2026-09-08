@@ -71,3 +71,21 @@ describe("bin entries", () => {
     expect(bin["harpoc-mcp"]).toBe("./dist/index.js");
   });
 });
+
+// RED before turbo.json named them: turbo 2 runs tasks in strict env mode, so
+// the two variables ci.yml sets for the test step — the required-tier gate
+// (review T3, 2026-07-16) and the provisioned macOS keychain — never reached a
+// vitest worker under `pnpm test`; the gate was inert and the keychain suites
+// ran against the runner's login keychain (found 2026-09-08, D5).
+describe("turbo env pass-through (D5, 2026-09-08)", () => {
+  it("the test task names the two variables ci.yml sets for it", () => {
+    const raw = readFileSync(resolve(monorepoRoot, "turbo.json"), "utf-8");
+    const turbo = JSON.parse(raw) as {
+      tasks: Record<string, { env?: string[] }>;
+    };
+    expect(turbo.tasks["test"]?.env).toEqual([
+      "HARPOC_REQUIRE_PLATFORM_TESTS",
+      "HARPOC_TEST_KEYCHAIN",
+    ]);
+  });
+});

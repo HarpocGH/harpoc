@@ -49,4 +49,27 @@ describe("protectorTimer (D3, 2026-09-08)", () => {
     await expect(timed.unprotect(Uint8Array.from([1]))).rejects.toBe("boom");
     expect(timer.report()).toMatch(/^\[t\] unprotect=\d+ms \(boom\)$/);
   });
+
+  it("slowestMs is 0 before any call", () => {
+    expect(protectorTimer("t").slowestMs()).toBe(0);
+  });
+
+  it("slowestMs is the slowest call so far, a failed call included", async () => {
+    const timer = protectorTimer("t");
+    const slow = timer.wrap({
+      ...reversing("fake"),
+      protect: () =>
+        new Promise<Uint8Array>((resolve) => setTimeout(() => resolve(Uint8Array.from([1])), 30)),
+      unprotect: () =>
+        new Promise<Uint8Array>((_, reject) =>
+          setTimeout(() => reject(new Error("slow fail")), 60),
+        ),
+    });
+    await slow.protect(Uint8Array.from([1]));
+    const afterProtect = timer.slowestMs();
+    expect(afterProtect).toBeGreaterThanOrEqual(25);
+    await expect(slow.unprotect(Uint8Array.from([1]))).rejects.toThrow("slow fail");
+    expect(timer.slowestMs()).toBeGreaterThanOrEqual(55);
+    expect(timer.slowestMs()).toBeGreaterThanOrEqual(afterProtect);
+  });
 });

@@ -9,7 +9,8 @@
       "dependsOn": ["^build"]
     },
     "test": {
-      "dependsOn": ["build", "^build"]
+      "dependsOn": ["build", "^build"],
+      "env": ["HARPOC_REQUIRE_PLATFORM_TESTS", "HARPOC_TEST_KEYCHAIN"]
     },
     "lint": {},
     "dev": {

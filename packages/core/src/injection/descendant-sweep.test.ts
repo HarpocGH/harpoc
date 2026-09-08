@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { recordSeriesLine } from "@harpoc/test-utils";
 import { sweepDescendants, win32SweepDeps } from "./descendant-sweep.js";
 import type { DescendantProcess, DescendantSweepDeps } from "./descendant-sweep.js";
 
@@ -280,7 +281,9 @@ describe.runIf(process.platform === "win32")("win32SweepDeps — live helpers", 
 // them by design; here the helpers get 60 s and the sweep 90 s, so a slow
 // provider stretches the test instead of failing it, and the one-time cold
 // cost is paid by a warm-up whose duration — with the warm listing's — is
-// printed to stderr for the CI log; a cold call at the bound is absorbed there.
+// printed to stderr for the CI log and, on a runner, to the job summary with
+// the 60 s trigger judged on the warm listing (D4, 2026-09-08); a cold call
+// at the bound is absorbed there.
 const LIVE_HELPER_TIMEOUT_MS = 60_000;
 const LIVE_SWEEP_TIMEOUT_MS = 90_000;
 // Outlasts every bound the case waits on before its last listing — the
@@ -311,6 +314,7 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
   beforeAll(
     async () => {
       const timings: string[] = [];
+      let warmMs = 0;
       for (const label of ["cold", "warm"]) {
         const started = Date.now();
         let outcome = "ok";
@@ -319,9 +323,16 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
         } catch (err) {
           outcome = err instanceof Error ? err.message : String(err);
         }
-        timings.push(`${label}=${String(Date.now() - started)}ms (${outcome})`);
+        const elapsed = Date.now() - started;
+        if (label === "warm") warmMs = elapsed;
+        timings.push(`${label}=${String(elapsed)}ms (${outcome})`);
       }
-      console.error(`[descendant-sweep live] WMI listing warm-up: ${timings.join(", ")}`);
+      // Judged on the warm listing alone: the 2026-08-29 rule discusses a
+      // listing mechanism when a WARM listing exceeds 60 s, and a cold call at
+      // the bound is absorbed here by design.
+      recordSeriesLine(`[descendant-sweep live] WMI listing warm-up: ${timings.join(", ")}`, {
+        judgedMs: warmMs,
+      });
     },
     LIVE_HELPER_TIMEOUT_MS * 2 + 5_000,
   );
