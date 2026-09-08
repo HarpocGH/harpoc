@@ -66,7 +66,10 @@ function columnSecrets(
   });
 }
 
-/** An agent's grant on a secret only while unexpired — the header's rule (`principalHolders`), applied to the agent's own row. */
+/**
+ * An agent's grant on a secret only while unexpired — the header's rule
+ * (`principalHolders`), applied to the agent's own row.
+ */
 function liveGrant(grant: AgentPolicy | undefined, now: number): AgentPolicy | undefined {
   if (grant === undefined) return undefined;
   return grant.expires_at === null || grant.expires_at > now ? grant : undefined;
@@ -112,6 +115,7 @@ function CellEditor({
   agent,
   secret,
   current,
+  stored,
   secretGated,
   onlyHolder,
   hintsGrant,
@@ -122,6 +126,12 @@ function CellEditor({
   agent: Agent;
   secret: SecretInfo;
   current: AgentPolicy | undefined;
+  /**
+   * Whether a row is stored for this cell at all, expired or not — `current`
+   * is the live grant. A stored row that has expired is cleared by the same
+   * PUT that clears a live one.
+   */
+  stored: boolean;
   secretGated: boolean;
   onlyHolder: boolean;
   /**
@@ -179,9 +189,10 @@ function CellEditor({
   const attempt = (next: Permission[]): void => {
     setError(null);
     setDenied(false);
-    // Empty cells are never written: there is no row to delete and none to
-    // insert, so the editor just closes.
-    if (next.length === 0 && current === undefined) {
+    // A cell with no stored row is never written: there is nothing to delete
+    // and nothing to insert, so the editor just closes. A stored row that has
+    // expired is still a row, and clearing it is the PUT below.
+    if (next.length === 0 && !stored) {
       onClose();
       return;
     }
@@ -350,7 +361,6 @@ export function PermissionsPage({ api }: { api: ApiClient }) {
   const principalHolders = (handle: string): AccessPolicy[] | undefined => {
     const rows = matrix.data?.holders.get(handle);
     if (rows === undefined || rows === null) return undefined;
-    const now = Date.now();
     return rows.filter((p) => p.expires_at === null || p.expires_at > now);
   };
 
@@ -524,6 +534,7 @@ export function PermissionsPage({ api }: { api: ApiClient }) {
           api={api}
           agent={target.agent}
           secret={target.secret}
+          stored={matrix.data?.grants.get(target.agent.name)?.has(target.secret.handle) === true}
           current={liveGrant(
             matrix.data?.grants.get(target.agent.name)?.get(target.secret.handle),
             now,

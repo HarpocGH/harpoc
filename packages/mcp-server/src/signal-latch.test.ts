@@ -5,7 +5,8 @@ import { installSignalLatch, REPEAT_EXIT_CODES, repeatStopLine } from "./signal-
 // The latch is pinned over a bare EventEmitter, never over `process`: no
 // spawn, no real signal, no race, and nothing a test runner's own handlers
 // could intercept — the same on win32, where the kernel delivers no SIGTERM.
-// `onRepeat` is injected here, except in the one case that spies `process.exit`: the default exits the process.
+// `onRepeat` is injected here, except in the one case that spies
+// `process.exit`: the default exits the process.
 describe("installSignalLatch (D8)", () => {
   it("remembers the first stop signal until armed, escalates every further one, then delivers the first at once", () => {
     const source = new EventEmitter();

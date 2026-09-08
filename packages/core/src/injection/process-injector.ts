@@ -78,6 +78,7 @@ export class ProcessInjector {
       isolationMechanism?: string;
       fsIsolationMechanism?: string;
       redacted: boolean;
+      descendantSweep?: { killed: number; failed: boolean };
     };
     try {
       run = await this.runProcess(
@@ -119,6 +120,7 @@ export class ProcessInjector {
         fs_isolation: fsIsolation,
         ...(run.fsIsolationMechanism ? { fs_isolation_mechanism: run.fsIsolationMechanism } : {}),
         ...(run.redacted ? { sanitized: true } : {}),
+        ...(run.descendantSweep ? { descendant_sweep: run.descendantSweep } : {}),
       },
       result.error === undefined,
       attribution,
@@ -141,6 +143,7 @@ export class ProcessInjector {
     isolationMechanism?: string;
     fsIsolationMechanism?: string;
     redacted: boolean;
+    descendantSweep?: { killed: number; failed: boolean };
   }> {
     const r = await spawnCaptured(command, args, {
       env,
@@ -168,6 +171,7 @@ export class ProcessInjector {
       isolationMechanism: r.isolation_mechanism,
       fsIsolationMechanism: r.fs_isolation_mechanism,
       redacted: r.redacted,
+      ...(r.descendant_sweep ? { descendantSweep: r.descendant_sweep } : {}),
     };
   }
 

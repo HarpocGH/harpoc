@@ -1348,10 +1348,11 @@ export class VaultEngine {
           // (design §7.2: host, operation, remote/local paths — no result-derived
           // counter to zero on a denial), so the same projection covers the
           // attempt and the outcome (Task 12's rule, applied where nothing needs
-          // zeroing). `sanitized` is the one result-derived key, folded in below
-          // onto whichever row the spawn produced — a success, or a graceful
-          // non-throwing failure such as PROCESS_TIMEOUT; a refusal row (the
-          // catch arm, which never reached a spawn) is never flagged.
+          // zeroing). `sanitized` and `descendant_sweep` are the two
+          // result-derived keys, folded in below onto whichever row the spawn
+          // produced — a success, or a graceful non-throwing failure such as
+          // PROCESS_TIMEOUT; a refusal row (the catch arm, which never reached
+          // a spawn) is never flagged.
           const auditDetail = { context: "sftp", ...buildSftpAuditDetails(action) };
 
           let execution: SftpExecution;
@@ -1363,9 +1364,11 @@ export class VaultEngine {
             throw mapped;
           }
           const result = execution.result;
-          const spawnedDetail = execution.sanitized
-            ? { ...auditDetail, sanitized: true }
-            : auditDetail;
+          const spawnedDetail = {
+            ...auditDetail,
+            ...(execution.sanitized ? { sanitized: true } : {}),
+            ...(execution.descendantSweep ? { descendant_sweep: execution.descendantSweep } : {}),
+          };
 
           // A process-shaped result can carry a graceful, non-throwing
           // failure (e.g. PROCESS_TIMEOUT) in `error` — mirrors the ssh arm's
@@ -1387,10 +1390,11 @@ export class VaultEngine {
           // (the registry is parsed from the image, plus image + operation — no
           // result-derived counter to zero on a denial), so the same projection
           // covers the attempt and the outcome, exactly like the sftp arm.
-          // `sanitized` is the one result-derived key, folded in below onto
-          // whichever row the spawn produced — a success, or a graceful
-          // non-throwing failure such as PROCESS_TIMEOUT; a refusal row (the
-          // catch arm, which never reached a spawn) is never flagged.
+          // `sanitized` and `descendant_sweep` are the two result-derived keys,
+          // folded in below onto whichever row the spawn produced — a success,
+          // or a graceful non-throwing failure such as PROCESS_TIMEOUT; a
+          // refusal row (the catch arm, which never reached a spawn) is never
+          // flagged.
           const auditDetail = { context: "docker_registry", ...buildDockerAuditDetails(action) };
 
           let execution: DockerExecution;
@@ -1402,9 +1406,11 @@ export class VaultEngine {
             throw mapped;
           }
           const result = execution.result;
-          const spawnedDetail = execution.sanitized
-            ? { ...auditDetail, sanitized: true }
-            : auditDetail;
+          const spawnedDetail = {
+            ...auditDetail,
+            ...(execution.sanitized ? { sanitized: true } : {}),
+            ...(execution.descendantSweep ? { descendant_sweep: execution.descendantSweep } : {}),
+          };
 
           // A process-shaped result can carry a graceful, non-throwing failure
           // (a PROCESS_TIMEOUT) in `error`; a non-zero docker exit throws

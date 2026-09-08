@@ -354,19 +354,29 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
       });
       const pid = parent.pid as number;
       liveProcesses.push(pid);
-      const grandchildPid = await new Promise<number>((resolve) => {
+      const grandchildPid = await new Promise<number>((resolve, reject) => {
         let buffered = "";
         parent.stdout.on("data", (chunk: Buffer) => {
           buffered += chunk.toString();
           const match = /child-done (\d+)/.exec(buffered);
           if (match) resolve(Number(match[1]));
         });
+        // A parent that dies before printing fails the case now, not at its
+        // 300 s budget; its pid is on the teardown list already.
+        parent.once("exit", (code, signal) => {
+          reject(
+            new Error(
+              `parent exited before child-done (code ${String(code)}, signal ${String(signal)})`,
+            ),
+          );
+        });
+        parent.once("error", reject);
       });
       liveProcesses.push(grandchildPid);
       const exited = exitOf(parent);
       parent.kill();
       await exited;
-      liveProcesses.splice(liveProcesses.indexOf(pid), 1);
+      liveProcesses.shift();
       const exitedAt = Date.now();
 
       const before = await live.listDescendants(pid);

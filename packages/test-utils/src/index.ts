@@ -7,6 +7,8 @@ export {
   getPkgRoot,
 } from "./scaffold-helpers.js";
 export { isConnectionRefused, isIpv6BindUnavailable } from "./skip-reasons.js";
+export { protectorTimer } from "./protector-timer.js";
+export type { ProtectorTimer, TimedProtector, TimedProtectorTarget } from "./protector-timer.js";
 export {
   dropAuditRowHmacConstraint,
   dropOAuthAuthMethodConstraint,

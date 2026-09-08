@@ -20,6 +20,7 @@ import type { SessionKeyProtector } from "@harpoc/core";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { InjectionType, PrincipalType, SecretType, VaultState } from "@harpoc/shared";
+import { protectorTimer } from "@harpoc/test-utils";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   createTestVault,
@@ -219,18 +220,35 @@ describe("Session Sharing", () => {
 // Thesis §4.6 off-host session-file hardening: the real platform keystore path.
 // Tests above run with HARPOC_SESSION_KEYSTORE=off; this suite opts back in with
 // explicit DPAPI protectors and therefore only runs on Windows.
+//
+// The product keeps its 15 s helper bound and fails closed past it (R8/D54:
+// SESSION_KEYSTORE_UNAVAILABLE out of initVault, never a `none` file). Here
+// the protector gets 90 s and the case 240 s — two protector calls plus two
+// Argon2id inits — so a loaded windows-latest runner (the 45 s budget tripped
+// three times, 2026-09-02 → 07) stretches the case instead of failing it;
+// every call's duration is printed for the CI log and extends the DPAPI series
+// in decisions.md, where a call over 60 s is the trigger to discuss the budget
+// (D3, 2026-09-08).
+const DPAPI_PROTECT_BUDGET_MS = 90_000;
+const DPAPI_CASE_BUDGET_MS = 240_000;
+
 describe.runIf(process.platform === "win32")("DPAPI-protected session sharing (Windows)", () => {
-  it("shares a DPAPI-wrapped session file between engines", async () => {
-    // Generous helper timeout: a cold PowerShell + BCL load on a thrashed CI
-    // runner has exceeded the 15 s default, and since R8/D54 that overrun
-    // throws SESSION_KEYSTORE_UNAVAILABLE out of initVault instead of writing
-    // a `none` file — the budget carries the same weight.
-    await expectSharedWrappedSession(
-      () => new DpapiSessionKeyProtector({ timeoutMs: 45_000 }),
-      "dpapi",
-      "dpapi-integ-pw",
-    );
-  });
+  it(
+    "shares a DPAPI-wrapped session file between engines",
+    async () => {
+      const timer = protectorTimer("session-sharing dpapi");
+      try {
+        await expectSharedWrappedSession(
+          () => timer.wrap(new DpapiSessionKeyProtector({ timeoutMs: DPAPI_PROTECT_BUDGET_MS })),
+          "dpapi",
+          "dpapi-integ-pw",
+        );
+      } finally {
+        console.error(timer.report());
+      }
+    },
+    DPAPI_CASE_BUDGET_MS,
+  );
 });
 
 /**

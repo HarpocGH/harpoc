@@ -406,6 +406,26 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     expect(result.result).not.toHaveProperty("sanitized");
   });
 
+  it("carries the descendant sweep's outcome on the envelope, never the wire result", async () => {
+    spawnMock.mockResolvedValue({
+      ...OK_RESULT,
+      exit_code: null,
+      timed_out: true,
+      signal: "SIGKILL",
+      descendant_sweep: { killed: 0, failed: true },
+    });
+
+    const result = await executeSftpAction(
+      LIST_ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      allowedPolicy(),
+      SFTP_CONFIG,
+    );
+
+    expect(result.descendantSweep).toEqual({ killed: 0, failed: true });
+    expect(result.result).not.toHaveProperty("descendant_sweep");
+  });
+
   it("maps a non-zero exit to SFTP_OPERATION_FAILED", async () => {
     spawnMock.mockResolvedValue({ ...OK_RESULT, exit_code: 1, stderr: "No such file" });
 
@@ -453,6 +473,7 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
 
     expect(result.result.timed_out).toBe(true);
     expect(result.result.error).toBe(ErrorCode.PROCESS_TIMEOUT);
+    expect("descendantSweep" in result).toBe(false);
   });
 
   it("prefers PROCESS_TIMEOUT over the 255 connect classification (ssh-injector ordering)", async () => {

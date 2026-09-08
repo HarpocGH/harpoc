@@ -526,6 +526,107 @@ describe("PermissionsPage", () => {
     expect(open?.textContent).not.toContain("granted");
   });
 
+  it("clears an expired-only cell with a PUT of no permissions and no confirm", async () => {
+    const expiredOwn = policy({
+      policy_id: "p-2",
+      secret_id: "s-2",
+      handle: UNGATED.handle,
+      expires_at: Date.now() - 60_000,
+    });
+    const setAgentPermissions = vi
+      .fn()
+      .mockResolvedValue({ policy: null, gated_before: false, gated_after: false });
+    render(
+      <PermissionsPage
+        api={api({
+          listAgentPolicies: vi.fn((name: string) =>
+            Promise.resolve(name === "ci-bot" ? [policy(), expiredOwn] : []),
+          ),
+          setAgentPermissions,
+        })}
+      />,
+    );
+    await waitFor(() => expect(cell("ci-bot", UNGATED.handle)).toBeTruthy());
+    expect(cell("ci-bot", UNGATED.handle).textContent).toBe("—");
+    fireEvent.click(cell("ci-bot", UNGATED.handle));
+    fireEvent.click(screen.getByText("Clear"));
+    // No live grant gates the column, so there is no ungating to confirm —
+    // but the expired row is stored, so the clear is written.
+    expect(screen.queryByText("Confirm")).toBeNull();
+    await waitFor(() =>
+      expect(setAgentPermissions).toHaveBeenCalledWith("ci-bot", UNGATED.handle, {
+        permissions: [],
+        expires_at: undefined,
+      }),
+    );
+    await waitFor(() => expect(screen.queryByText("Clear")).toBeNull());
+  });
+
+  it("predicts the first-grant flip when granting on an expired-only cell", async () => {
+    const expiredOwn = policy({
+      policy_id: "p-2",
+      secret_id: "s-2",
+      handle: UNGATED.handle,
+      expires_at: Date.now() - 60_000,
+    });
+    const setAgentPermissions = vi
+      .fn()
+      .mockResolvedValue({ policy: null, gated_before: false, gated_after: true });
+    render(
+      <PermissionsPage
+        api={api({
+          listAgentPolicies: vi.fn((name: string) =>
+            Promise.resolve(name === "ci-bot" ? [policy(), expiredOwn] : []),
+          ),
+          setAgentPermissions,
+        })}
+      />,
+    );
+    await waitFor(() => expect(cell("ci-bot", UNGATED.handle)).toBeTruthy());
+    fireEvent.click(cell("ci-bot", UNGATED.handle));
+    fireEvent.click(screen.getByLabelText("use"));
+    fireEvent.click(screen.getByText("Save"));
+    // An expired row is no grant: the prediction says what the engine's
+    // `gated_before` will say.
+    expect(screen.getByText(/first grant/).textContent).toContain(UNGATED.handle);
+    expect(setAgentPermissions).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("Confirm"));
+    await waitFor(() =>
+      expect(setAgentPermissions).toHaveBeenCalledWith("ci-bot", UNGATED.handle, {
+        permissions: ["use"],
+        expires_at: undefined,
+      }),
+    );
+  });
+
+  it("renders the chips of a grant that expires in the future", async () => {
+    const future = policy({
+      policy_id: "p-2",
+      secret_id: "s-2",
+      handle: UNGATED.handle,
+      expires_at: Date.now() + 60_000,
+    });
+    render(
+      <PermissionsPage
+        api={api({
+          listAgentPolicies: vi.fn((name: string) =>
+            Promise.resolve(name === "ci-bot" ? [policy(), future] : []),
+          ),
+          getAccessPolicies: vi.fn((handle: string) =>
+            Promise.resolve(
+              handle === UNGATED.handle
+                ? [access({ id: "ap-5", secret_id: "s-2", expires_at: Date.now() + 60_000 })]
+                : [access()],
+            ),
+          ),
+        })}
+      />,
+    );
+    await waitFor(() => expect(cell("ci-bot", UNGATED.handle)).toBeTruthy());
+    await waitFor(() => expect(cell("ci-bot", UNGATED.handle).textContent).toContain("read"));
+    expect(cell("ci-bot", UNGATED.handle).textContent).toContain("use");
+  });
+
   it("reads the access policies of the preselected column only", async () => {
     window.location.hash = "#/permissions?secret=myproj%2Ftest-key";
     const getAccessPolicies = vi.fn((handle: string) => Promise.resolve(ACCESS[handle] ?? []));

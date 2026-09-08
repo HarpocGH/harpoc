@@ -20,10 +20,10 @@ import type { TempSshFile } from "./ssh-common.js";
  * credential or file content. Every field the builder writes is request-derived
  * (available before the operation runs), so the same projection covers both a
  * successful use and a denial: `buildSftpAuditDetails` needs only the action,
- * not a result. The optional `sanitized` is the one result-derived key: the
- * engine folds it onto whichever row the spawn produced — a success, or a
- * graceful non-throwing failure such as PROCESS_TIMEOUT — never onto a
- * refusal row, which never reached a spawn.
+ * not a result. The optional `sanitized` and `descendant_sweep` are the two
+ * result-derived keys: the engine folds them onto whichever row the spawn
+ * produced — a success, or a graceful non-throwing failure such as
+ * PROCESS_TIMEOUT — never onto a refusal row, which never reached a spawn.
  */
 export interface SftpAuditDetails {
   host: string;
@@ -33,16 +33,21 @@ export interface SftpAuditDetails {
   local_path: string | null;
   /** Present only when the credential redaction changed the captured output (E70). */
   sanitized?: true;
+  /** Present only when the win32 descendant sweep ran after a timed-out spawn (2026-09-08). */
+  descendant_sweep?: { killed: number; failed: boolean };
 }
 
 /**
- * The sftp executor's return to the engine: the wire result plus whether the
- * spawn seam's redaction changed the captured output. `sanitized` rides the
- * engine's post-spawn audit row only — {@link SftpResult} stays byte-identical.
+ * The sftp executor's return to the engine: the wire result plus the two
+ * result-derived keys the engine folds onto its post-spawn audit row —
+ * whether the spawn seam's redaction changed the captured output and, when a
+ * sweep ran, its outcome. {@link SftpResult} stays byte-identical.
  */
 export interface SftpExecution {
   result: SftpResult;
   sanitized: boolean;
+  /** Set only when the win32 descendant sweep ran — rides the audit row, never the wire result. */
+  descendantSweep?: { killed: number; failed: boolean };
 }
 
 /** Builds the metadata-only audit projection for an SFTP action. Pure — the
@@ -279,7 +284,11 @@ export async function executeSftpAction(
       fsIsolation,
     });
 
-    return { result: toSftpResult(r, action.host), sanitized: r.redacted };
+    return {
+      result: toSftpResult(r, action.host),
+      sanitized: r.redacted,
+      ...(r.descendant_sweep ? { descendantSweep: r.descendant_sweep } : {}),
+    };
   } finally {
     agent.dispose();
     kh.dispose();

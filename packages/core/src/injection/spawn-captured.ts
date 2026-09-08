@@ -4,6 +4,7 @@ import { MAX_PROCESS_OUTPUT_BYTES } from "@harpoc/shared";
 import { system32Path } from "../win32-paths.js";
 import { CappedOutput } from "./capped-output.js";
 import { sweepDescendants } from "./descendant-sweep.js";
+import type { DescendantSweepResult } from "./descendant-sweep.js";
 import type { FsIsolationMechanism } from "./fs-isolation.js";
 import { requireIsolation } from "./isolation.js";
 import type { NetworkIsolationMechanism } from "./network-isolation.js";
@@ -28,6 +29,14 @@ export interface SpawnCapturedResult {
   isolation_mechanism?: NetworkIsolationMechanism;
   /** Set when the spawn ran inside the filesystem-isolation wrapper. */
   fs_isolation_mechanism?: FsIsolationMechanism;
+  /**
+   * Set only when the win32 descendant sweep ran after a timed-out spawn: the
+   * survivors it killed and whether it failed open — a listing failure, a
+   * helper at its bound, the whole sweep at its bound, or a rejected sweep.
+   * Absent on POSIX, on a normal exit, on a spawn failure and on the settle
+   * backstop (a kill whose exit never landed).
+   */
+  descendant_sweep?: { killed: number; failed: boolean };
 }
 
 export interface SpawnCapturedOptions {
@@ -226,7 +235,7 @@ export async function spawnCaptured(
     let settled = false;
     let flushTimer: NodeJS.Timeout | undefined;
     let backstopTimer: NodeJS.Timeout | undefined;
-    let sweep: Promise<unknown> | undefined;
+    let sweep: Promise<DescendantSweepResult> | undefined;
 
     const settle = (result: SpawnCapturedResult): void => {
       if (settled) return;
@@ -238,7 +247,7 @@ export async function spawnCaptured(
     };
 
     const finish = (code: number | null, signal: string | null, spawnFailed: boolean): void => {
-      const emit = (): void => {
+      const emit = (descendantSweep?: DescendantSweepResult): void => {
         const rawOut = stdout.toString();
         const rawErr = stderr.toString();
         const out = redactAll(rawOut);
@@ -258,9 +267,10 @@ export async function spawnCaptured(
           redacted: out !== rawOut || errText !== rawErr,
           isolation_mechanism: isolationMechanism,
           fs_isolation_mechanism: fsIsolationMechanism,
+          ...(descendantSweep ? { descendant_sweep: descendantSweep } : {}),
         });
       };
-      if (sweep) void sweep.then(emit, emit);
+      if (sweep) void sweep.then(emit, () => emit({ killed: 0, failed: true }));
       else emit();
     };
 
@@ -297,7 +307,7 @@ export async function spawnCaptured(
       // every settlement path waits for it (see finish).
       if (timedOut && process.platform === "win32" && child.pid !== undefined && !sweep) {
         sweep = sweepDescendants(child.pid, { spawnedAtMs, exitedAtMs: Date.now() }).catch(
-          () => undefined,
+          (): DescendantSweepResult => ({ killed: 0, failed: true }),
         );
       }
       if (flushTimer) return;

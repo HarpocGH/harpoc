@@ -130,6 +130,16 @@ describe("win32SweepDeps — the listing's parse", () => {
     ]);
   });
 
+  it("maps a bare-LF listing without a trailing newline and skips a three-field line", async () => {
+    spawnMock.mockImplementation(() =>
+      answeringChild("4242 1700000000000\n17 1700000000001 extra\n99 1700000000002", 0),
+    );
+    await expect(win32SweepDeps().listDescendants(1)).resolves.toEqual([
+      { pid: 4242, createdAtMs: 1700000000000 },
+      { pid: 99, createdAtMs: 1700000000002 },
+    ]);
+  });
+
   it("rejects a listing whose helper exits non-zero", async () => {
     spawnMock.mockImplementation(() => answeringChild("", 2));
     await expect(win32SweepDeps().listDescendants(1)).rejects.toThrow(

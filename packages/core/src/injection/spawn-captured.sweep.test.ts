@@ -46,7 +46,7 @@ describe("spawnCaptured → descendant sweep wiring", () => {
       sweepMock.mockImplementation(async () => {
         await new Promise((r) => setTimeout(r, 300));
         sweepDone = true;
-        return { killed: 0, failed: false };
+        return { killed: 2, failed: false };
       });
 
       const before = Date.now();
@@ -66,6 +66,7 @@ describe("spawnCaptured → descendant sweep wiring", () => {
       expect(window.spawnedAtMs).toBeLessThanOrEqual(window.exitedAtMs);
       expect(window.exitedAtMs).toBeLessThanOrEqual(Date.now());
       expect(sweepDone).toBe(true);
+      expect(result.descendant_sweep).toEqual({ killed: 2, failed: false });
     },
     15_000,
   );
@@ -105,6 +106,21 @@ describe("spawnCaptured → descendant sweep wiring", () => {
       });
       expect(result.timed_out).toBe(true);
       expect(result.stdout).toContain("before");
+      expect(result.descendant_sweep).toEqual({ killed: 0, failed: true });
+    },
+    15_000,
+  );
+
+  it.runIf(process.platform === "win32")(
+    "a sweep that fails open reports its partial count and the flag",
+    async () => {
+      sweepMock.mockResolvedValue({ killed: 1, failed: true });
+      const result = await spawnCaptured(NODE, ["-e", HANG], {
+        env: {},
+        timeoutMs: 300,
+      });
+      expect(result.timed_out).toBe(true);
+      expect(result.descendant_sweep).toEqual({ killed: 1, failed: true });
     },
     15_000,
   );
@@ -116,6 +132,7 @@ describe("spawnCaptured → descendant sweep wiring", () => {
     });
     expect(result.exit_code).toBe(0);
     expect(sweepMock).not.toHaveBeenCalled();
+    expect("descendant_sweep" in result).toBe(false);
   }, 15_000);
 
   it.skipIf(process.platform === "win32")(
@@ -127,6 +144,7 @@ describe("spawnCaptured → descendant sweep wiring", () => {
       });
       expect(result.timed_out).toBe(true);
       expect(sweepMock).not.toHaveBeenCalled();
+      expect("descendant_sweep" in result).toBe(false);
     },
     15_000,
   );

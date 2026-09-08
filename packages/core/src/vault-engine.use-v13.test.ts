@@ -149,8 +149,10 @@ interface SeamOutcomes {
   wsSanitized?: boolean;
   sftp?: SftpOutcome;
   sftpSanitized?: boolean;
+  sftpDescendantSweep?: { killed: number; failed: boolean };
   docker?: DockerOutcome;
   dockerSanitized?: boolean;
+  dockerDescendantSweep?: { killed: number; failed: boolean };
   process?: () => never;
   database?: () => never;
   ssh?: () => never;
@@ -235,7 +237,11 @@ function installSeams(e: VaultEngine, outcomes: SeamOutcomes): Seams {
     const result: SftpResult = resolveOutcome(
       outcomes.sftp ?? { type: "sftp", exit_code: 0, stdout: "", stderr: "" },
     );
-    return { result, sanitized: outcomes.sftpSanitized ?? false };
+    return {
+      result,
+      sanitized: outcomes.sftpSanitized ?? false,
+      ...(outcomes.sftpDescendantSweep ? { descendantSweep: outcomes.sftpDescendantSweep } : {}),
+    };
   };
 
   seams.dockerExecutor = async (...args: unknown[]) => {
@@ -253,7 +259,13 @@ function installSeams(e: VaultEngine, outcomes: SeamOutcomes): Seams {
         stderr: "",
       },
     );
-    return { result, sanitized: outcomes.dockerSanitized ?? false };
+    return {
+      result,
+      sanitized: outcomes.dockerSanitized ?? false,
+      ...(outcomes.dockerDescendantSweep
+        ? { descendantSweep: outcomes.dockerDescendantSweep }
+        : {}),
+    };
   };
 
   if (outcomes.process) seams.processInjector = { executeWithSecret: outcomes.process };
@@ -1089,6 +1101,35 @@ describe("useSecret (sftp) — engine dispatch", () => {
     });
   });
 
+  it("carries the descendant sweep's outcome onto the graceful-timeout row", async () => {
+    installSeams(engine, {
+      sftp: {
+        type: "sftp",
+        exit_code: null,
+        stdout: "",
+        stderr: "",
+        timed_out: true,
+        error: ErrorCode.PROCESS_TIMEOUT,
+      },
+      sftpDescendantSweep: { killed: 0, failed: true },
+    });
+
+    const res = await engine.useSecret("secret://deploy", SFTP_ACTION);
+
+    expect(res).toMatchObject({ error: ErrorCode.PROCESS_TIMEOUT });
+    expect(res).not.toHaveProperty("descendant_sweep");
+    expect(useRows(false)[0]?.detail).toEqual({
+      context: "sftp",
+      host: "deploy.example.com",
+      operation: "list",
+      port: null,
+      remote_path: "/srv/reports",
+      local_path: null,
+      error: ErrorCode.PROCESS_TIMEOUT,
+      descendant_sweep: { killed: 0, failed: true },
+    });
+  });
+
   it("maps a non-VaultError executor throw to a redacted INTERNAL_ERROR and still audits the denial", async () => {
     installSeams(engine, {
       sftp: () => {
@@ -1323,6 +1364,34 @@ describe("useSecret (docker_registry) — engine dispatch", () => {
       image: "registry.example.com/app:1.0",
       operation: "pull",
       error: ErrorCode.PROCESS_TIMEOUT,
+    });
+  });
+
+  it("carries the descendant sweep's outcome onto the graceful-timeout row", async () => {
+    installSeams(engine, {
+      docker: {
+        type: "docker_registry",
+        operation: "pull",
+        exit_code: null,
+        stdout: "",
+        stderr: "",
+        timed_out: true,
+        error: ErrorCode.PROCESS_TIMEOUT,
+      },
+      dockerDescendantSweep: { killed: 1, failed: true },
+    });
+
+    const res = await engine.useSecret("secret://reg", DOCKER_ACTION);
+
+    expect(res).toMatchObject({ error: ErrorCode.PROCESS_TIMEOUT });
+    expect(res).not.toHaveProperty("descendant_sweep");
+    expect(useRows(false)[0]?.detail).toEqual({
+      context: "docker_registry",
+      registry: "registry.example.com",
+      image: "registry.example.com/app:1.0",
+      operation: "pull",
+      error: ErrorCode.PROCESS_TIMEOUT,
+      descendant_sweep: { killed: 1, failed: true },
     });
   });
 

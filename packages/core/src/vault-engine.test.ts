@@ -15,7 +15,7 @@ import {
 } from "@harpoc/shared";
 import { AAD_INJECTION_POLICY } from "@harpoc/shared";
 import type { InjectionPolicyInput } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectVaultError, protectorTimer } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { encrypt } from "./crypto/aes-gcm.js";
 import { forceNetworkIsolationUnavailableForTests } from "./injection/network-isolation.js";
@@ -3479,36 +3479,54 @@ describe("session keystore protection", () => {
     await again.destroy();
   });
 
+  // The product keeps its 15 s helper bound and fails closed past it (R8/D54:
+  // a thrown SESSION_KEYSTORE_UNAVAILABLE out of initVault, never a silent
+  // `none` file). Here the protector gets 90 s and the case 240 s — two
+  // protector calls plus two Argon2id inits — so a loaded windows-latest runner
+  // stretches the case instead of failing it; every call's duration is printed
+  // for the CI log and extends the DPAPI series in decisions.md (D3, 2026-09-08).
+  const DPAPI_PROTECT_BUDGET_MS = 90_000;
+  const DPAPI_CASE_BUDGET_MS = 240_000;
+
   describe.runIf(process.platform === "win32")("DPAPI end-to-end (Windows)", () => {
-    // Generous helper timeout (test budget raised to match): a cold
-    // PowerShell + BCL load on a thrashed CI runner has exceeded the 15 s
-    // default. Since R8/D54 that overrun is a thrown SESSION_KEYSTORE_UNAVAILABLE
-    // out of initVault, not a silent `none` file — the budget carries the same weight.
-    it("wraps the session key via DPAPI and shares it across engines", async () => {
-      const engineA = new VaultEngine({
-        dbPath,
-        sessionPath,
-        sessionKeyProtector: new DpapiSessionKeyProtector({ timeoutMs: 45_000 }),
-      });
-      await engineA.initVault("password");
+    it(
+      "wraps the session key via DPAPI and shares it across engines",
+      async () => {
+        const timer = protectorTimer("vault-engine dpapi");
+        try {
+          const engineA = new VaultEngine({
+            dbPath,
+            sessionPath,
+            sessionKeyProtector: timer.wrap(
+              new DpapiSessionKeyProtector({ timeoutMs: DPAPI_PROTECT_BUDGET_MS }),
+            ),
+          });
+          await engineA.initVault("password");
 
-      const file = JSON.parse(readFileSync(sessionPath, "utf8")) as {
-        key_protection?: string;
-        session_key?: string;
-      };
-      expect(file.key_protection).toBe("dpapi");
-      // A DPAPI blob is far larger than the 32-byte raw key (44 base64 chars).
-      expect((file.session_key ?? "").length).toBeGreaterThan(100);
+          const file = JSON.parse(readFileSync(sessionPath, "utf8")) as {
+            key_protection?: string;
+            session_key?: string;
+          };
+          expect(file.key_protection).toBe("dpapi");
+          // A DPAPI blob is far larger than the 32-byte raw key (44 base64 chars).
+          expect((file.session_key ?? "").length).toBeGreaterThan(100);
 
-      const engineB = new VaultEngine({
-        dbPath,
-        sessionPath,
-        sessionKeyProtector: new DpapiSessionKeyProtector({ timeoutMs: 45_000 }),
-      });
-      expect(await engineB.loadSession()).toBe(true);
-      expect(engineB.getState()).toBe(VaultState.UNLOCKED);
-      await engineB.destroy();
-      await engineA.destroy();
-    }, 120_000);
+          const engineB = new VaultEngine({
+            dbPath,
+            sessionPath,
+            sessionKeyProtector: timer.wrap(
+              new DpapiSessionKeyProtector({ timeoutMs: DPAPI_PROTECT_BUDGET_MS }),
+            ),
+          });
+          expect(await engineB.loadSession()).toBe(true);
+          expect(engineB.getState()).toBe(VaultState.UNLOCKED);
+          await engineB.destroy();
+          await engineA.destroy();
+        } finally {
+          console.error(timer.report());
+        }
+      },
+      DPAPI_CASE_BUDGET_MS,
+    );
   });
 });

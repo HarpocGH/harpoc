@@ -154,4 +154,42 @@ describe("ProcessInjector output sanitization on the row (Wave 2, E70)", () => {
     const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
     expect("sanitized" in row.detail).toBe(false);
   });
+
+  it("carries the descendant sweep's outcome onto the audited row of a timed-out spawn", async () => {
+    const log = vi.fn();
+    const audited = new ProcessInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({
+      ...OK_RESULT,
+      exit_code: null,
+      timed_out: true,
+      signal: "SIGKILL",
+      descendant_sweep: { killed: 1, failed: true },
+    });
+    await audited.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(SECRET, "utf8")),
+      { command_allowlist: [NODE], env_allowlist: [] },
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail).toMatchObject({
+      context: "process",
+      timed_out: true,
+      descendant_sweep: { killed: 1, failed: true },
+    });
+  });
+
+  it("writes no descendant_sweep key when no sweep ran", async () => {
+    const log = vi.fn();
+    const audited = new ProcessInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue(OK_RESULT);
+    await audited.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(SECRET, "utf8")),
+      { command_allowlist: [NODE], env_allowlist: [] },
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect("descendant_sweep" in row.detail).toBe(false);
+  });
 });

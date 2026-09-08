@@ -453,6 +453,32 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
     );
     const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
     expect("sanitized" in row.detail).toBe(false);
+    expect("descendant_sweep" in row.detail).toBe(false);
+  });
+
+  it("carries the descendant sweep's outcome onto the https row of a timed-out spawn", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({
+      ...OK_RESULT,
+      exit_code: null,
+      timed_out: true,
+      signal: "SIGKILL",
+      descendant_sweep: { killed: 0, failed: true },
+    });
+    await audited.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      undefined,
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail).toMatchObject({
+      transport: "https",
+      exit_code: null,
+      descendant_sweep: { killed: 0, failed: true },
+    });
   });
 
   it("binds the credential to the validated host", async () => {
@@ -1051,6 +1077,33 @@ describeGitSsh("GitInjector SSH-transport network isolation (review fixes T1/F8)
         }),
       }),
     );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect("descendant_sweep" in row.detail).toBe(false);
+  });
+
+  it("carries the descendant sweep's outcome onto the ssh-transport row of a timed-out spawn", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({
+      ...OK_RESULT,
+      exit_code: null,
+      timed_out: true,
+      signal: "SIGKILL",
+      descendant_sweep: { killed: 2, failed: false },
+    });
+    await audited.executeWithSecret(
+      sshAction,
+      new Uint8Array(Buffer.from(sshKeyPem)),
+      isolatedSshPolicy(),
+      sshConfig,
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail).toMatchObject({
+      transport: "ssh",
+      exit_code: null,
+      descendant_sweep: { killed: 2, failed: false },
+    });
   });
 
   it("audits and rethrows the fail-closed refusal from the seam (transport ssh)", async () => {

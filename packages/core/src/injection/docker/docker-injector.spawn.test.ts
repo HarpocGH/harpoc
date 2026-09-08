@@ -269,6 +269,21 @@ describe("executeDockerRegistryAction spawn shape", () => {
   });
 });
 
+it("carries the descendant sweep's outcome on the envelope, never the wire result", async () => {
+  vi.mocked(spawnCaptured).mockResolvedValue({
+    ...OK_RESULT,
+    exit_code: null,
+    timed_out: true,
+    signal: "SIGKILL",
+    descendant_sweep: { killed: 1, failed: false },
+  });
+
+  const result = await executeDockerRegistryAction(PULL_ACTION, SECRET, allowed());
+
+  expect(result.descendantSweep).toEqual({ killed: 1, failed: false });
+  expect(result.result).not.toHaveProperty("descendant_sweep");
+});
+
 // A guard against a regression that would drop the redaction wrapper entirely.
 it("surfaces a redacted VaultError, not a raw one, when the spawn rejects with the secret", async () => {
   const err = new VaultError(

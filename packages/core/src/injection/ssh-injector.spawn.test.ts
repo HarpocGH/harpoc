@@ -539,6 +539,31 @@ describeSsh("SshInjector output sanitization on the row (Wave 2, E70)", () => {
     expect(row.detail).toMatchObject({ context: "ssh", sanitized: true });
   });
 
+  it("carries the descendant sweep's outcome onto the row of a timed-out spawn", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({
+      ...OK_RESULT,
+      exit_code: null,
+      timed_out: true,
+      signal: "SIGKILL",
+      descendant_sweep: { killed: 0, failed: true },
+    });
+    await audited.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      policy({ host_allowlist: ["deploy.example.com"], command_allowlist: [SSH as string] }),
+      SSH_CONFIG,
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail).toMatchObject({
+      context: "ssh",
+      timed_out: true,
+      descendant_sweep: { killed: 0, failed: true },
+    });
+  });
+
   it("leaves sanitized out of the row entirely when nothing was redacted", async () => {
     const log = vi.fn();
     const audited = new SshInjector({ log } as unknown as AuditLogger);
@@ -552,6 +577,7 @@ describeSsh("SshInjector output sanitization on the row (Wave 2, E70)", () => {
     );
     const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
     expect("sanitized" in row.detail).toBe(false);
+    expect("descendant_sweep" in row.detail).toBe(false);
   });
 });
 
