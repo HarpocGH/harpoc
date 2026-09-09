@@ -4,6 +4,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { recordSeriesLine } from "@harpoc/test-utils";
 import { sweepDescendants, win32SweepDeps } from "./descendant-sweep.js";
 import type { DescendantProcess, DescendantSweepDeps } from "./descendant-sweep.js";
+import { system32Path } from "../win32-paths.js";
 
 const SPAWNED_AT = 900_000;
 const EXITED_AT = 1_000_000;
@@ -414,3 +415,257 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
     LIVE_LISTING_LIFETIME_MS,
   );
 });
+
+// Diagnostics only (D1 / D2 of docs/implementation-plan-listing-probe-series-artifact-2026-09-09.md):
+// the NtQuerySystemInformation listing — bound through Add-Type and through
+// Reflection.Emit — timed beside the WMI listing and a bare host start-up on
+// one live parent with a detached grandchild, on the windows-latest legs.
+// Prints one stderr line, asserts nothing, and is removed by the tranche
+// commit either way.
+describe.runIf(process.platform === "win32")(
+  "listing probe — diagnostics only (2026-09-09)",
+  () => {
+    const PROBE_HELPER_TIMEOUT_MS = 60_000;
+    const PROBE_HOLD_MS = 600_000;
+    const probePids: number[] = [];
+
+    afterEach(() => {
+      for (const pid of probePids.splice(0)) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already gone.
+        }
+      }
+    });
+
+    // The Add-Type candidate's syscall block: byte-identical to what
+    // descendant-sweep.ts ships on GO (D3), minus the header line.
+    const ADD_TYPE_BLOCK = [
+      "Add-Type -TypeDefinition @'",
+      "using System;",
+      "using System.Runtime.InteropServices;",
+      "public static class HarpocProcList {",
+      '  [DllImport("ntdll.dll")]',
+      "  static extern int NtQuerySystemInformation(int cls, IntPtr buf, int len, out int needed);",
+      "  public static string Children(long parent) {",
+      "    int len = 1 << 20; int needed; int st;",
+      "    IntPtr buf = Marshal.AllocHGlobal(len);",
+      "    try {",
+      "      while ((st = NtQuerySystemInformation(5, buf, len, out needed)) == unchecked((int)0xC0000004)) {",
+      "        Marshal.FreeHGlobal(buf); len = needed + (64 << 10); buf = Marshal.AllocHGlobal(len);",
+      "      }",
+      '      if (st != 0) throw new Exception("NtQuerySystemInformation failed: 0x" + st.ToString("x8"));',
+      "      var sb = new System.Text.StringBuilder();",
+      "      long off = 0;",
+      "      while (true) {",
+      "        IntPtr e = new IntPtr(buf.ToInt64() + off);",
+      "        int next = Marshal.ReadInt32(e, 0);",
+      "        long create = Marshal.ReadInt64(e, 32);",
+      "        long pid = Marshal.ReadInt64(e, 80);",
+      "        long ppid = Marshal.ReadInt64(e, 88);",
+      "        if (ppid == parent && pid > 0) sb.Append(pid).Append(' ').Append((create - 116444736000000000L) / 10000L).Append('\\n');",
+      "        if (next == 0) break;",
+      "        off += next;",
+      "      }",
+      "      return sb.ToString();",
+      "    } finally { Marshal.FreeHGlobal(buf); }",
+      "  }",
+      "}",
+      "'@",
+    ];
+
+    function addTypeScript(pid: number): string {
+      return [
+        "$ErrorActionPreference = 'Stop'",
+        "$sw = [System.Diagnostics.Stopwatch]::StartNew()",
+        ...ADD_TYPE_BLOCK,
+        "$compile = $sw.ElapsedMilliseconds; $sw.Restart()",
+        `$rows = [HarpocProcList]::Children(${String(pid)})`,
+        "$call = $sw.ElapsedMilliseconds",
+        "'# compile={0} call={1} lang={2}' -f $compile, $call, $ExecutionContext.SessionState.LanguageMode",
+        "$rows",
+      ].join("\n");
+    }
+
+    // The Reflection.Emit candidate: the same syscall bound without csc.exe.
+    function emitScript(pid: number): string {
+      return [
+        "$ErrorActionPreference = 'Stop'",
+        "$sw = [System.Diagnostics.Stopwatch]::StartNew()",
+        "$an = New-Object System.Reflection.AssemblyName 'HarpocNtQ'",
+        "$ab = [System.AppDomain]::CurrentDomain.DefineDynamicAssembly($an, [System.Reflection.Emit.AssemblyBuilderAccess]::Run)",
+        "$mb = $ab.DefineDynamicModule('HarpocNtQ', $false)",
+        "$tb = $mb.DefineType('HarpocNtQ.Native', 'Public, Class, Abstract, Sealed, BeforeFieldInit')",
+        "$pm = $tb.DefinePInvokeMethod('NtQuerySystemInformation', 'ntdll.dll', 'Public, Static, PinvokeImpl', [System.Reflection.CallingConventions]::Standard, [int], [Type[]]@([int], [IntPtr], [int], [int].MakeByRefType()), [System.Runtime.InteropServices.CallingConvention]::Winapi, [System.Runtime.InteropServices.CharSet]::Auto)",
+        "$pm.SetImplementationFlags($pm.GetMethodImplementationFlags() -bor [System.Reflection.MethodImplAttributes]::PreserveSig)",
+        "$t = $tb.CreateType()",
+        "$emit = $sw.ElapsedMilliseconds; $sw.Restart()",
+        "$len = 1048576; $needed = 0",
+        "$buf = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($len)",
+        "$out = @()",
+        "try {",
+        "  while (($st = $t::NtQuerySystemInformation(5, $buf, $len, [ref]$needed)) -eq -1073741820) {",
+        "    [System.Runtime.InteropServices.Marshal]::FreeHGlobal($buf); $len = $needed + 65536",
+        "    $buf = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($len)",
+        "  }",
+        "  if ($st -ne 0) { throw ('NtQuerySystemInformation failed: 0x{0:x8}' -f $st) }",
+        "  $off = [int64]0",
+        "  while ($true) {",
+        "    $e = [IntPtr]($buf.ToInt64() + $off)",
+        "    $next = [System.Runtime.InteropServices.Marshal]::ReadInt32($e, 0)",
+        "    $create = [System.Runtime.InteropServices.Marshal]::ReadInt64($e, 32)",
+        "    $p = [System.Runtime.InteropServices.Marshal]::ReadInt64($e, 80)",
+        "    $pp = [System.Runtime.InteropServices.Marshal]::ReadInt64($e, 88)",
+        `    if ($pp -eq ${String(pid)} -and $p -gt 0) { $out += ('{0} {1}' -f $p, [int64][math]::Floor(($create - 116444736000000000) / 10000)) }`,
+        "    if ($next -eq 0) { break }",
+        "    $off += $next",
+        "  }",
+        "} finally { [System.Runtime.InteropServices.Marshal]::FreeHGlobal($buf) }",
+        "$call = $sw.ElapsedMilliseconds",
+        "'# emit={0} call={1} lang={2}' -f $emit, $call, $ExecutionContext.SessionState.LanguageMode",
+        "$out",
+      ].join("\n");
+    }
+
+    function runProbeHelper(script: string): Promise<{ code: number | null; stdout: string }> {
+      return new Promise((resolve, reject) => {
+        const child = spawn(
+          system32Path("WindowsPowerShell", "v1.0", "powershell.exe"),
+          ["-NoProfile", "-NonInteractive", "-Command", script],
+          {
+            shell: false,
+            windowsHide: true,
+            stdio: ["ignore", "pipe", "ignore"],
+          },
+        );
+        const chunks: Buffer[] = [];
+        let settled = false;
+        const finish = (err: Error | null, code: number | null): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (err) reject(err);
+          else resolve({ code, stdout: Buffer.concat(chunks).toString("utf8") });
+        };
+        const timer = setTimeout(() => {
+          child.kill();
+          finish(new Error("probe helper timed out"), null);
+        }, PROBE_HELPER_TIMEOUT_MS);
+        child.stdout?.on("data", (chunk: Buffer) => chunks.push(chunk));
+        child.on("error", (err) => finish(err, null));
+        child.on("close", (code) => finish(null, code));
+      });
+    }
+
+    function parseListing(stdout: string): DescendantProcess[] {
+      const found: DescendantProcess[] = [];
+      for (const line of stdout.split(/\r?\n/)) {
+        const match = /^(\d+) (\d+)$/.exec(line.trim());
+        if (match) found.push({ pid: Number(match[1]), createdAtMs: Number(match[2]) });
+      }
+      return found;
+    }
+
+    /** The `# …` header a candidate prints ahead of its rows, without the `# `. */
+    function parseHeader(stdout: string): string {
+      const line = stdout.split(/\r?\n/).find((l) => l.startsWith("#"));
+      return line === undefined ? "" : line.trim().slice(2);
+    }
+
+    it(
+      "prints the start-up, WMI, Add-Type and Reflection.Emit listings of one live parent: durations, rows, agreement",
+      async () => {
+        const grandchild = `setTimeout(() => {}, ${String(PROBE_HOLD_MS)})`;
+        const parentScript = `
+      const { spawn } = require("node:child_process");
+      const gc = spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore", windowsHide: true, detached: true });
+      gc.unref();
+      console.log("child-done " + gc.pid);
+      setTimeout(() => {}, ${String(PROBE_HOLD_MS)});
+    `;
+        const parent = spawn(process.execPath, ["-e", parentScript], {
+          stdio: ["ignore", "pipe", "ignore"],
+          windowsHide: true,
+        });
+        const pid = parent.pid as number;
+        probePids.push(pid);
+        const grandchildPid = await new Promise<number>((resolve) => {
+          let buffered = "";
+          parent.stdout.on("data", (chunk: Buffer) => {
+            buffered += chunk.toString();
+            const match = /child-done (\d+)/.exec(buffered);
+            if (match) resolve(Number(match[1]));
+          });
+        });
+        probePids.push(grandchildPid);
+
+        const wmi = win32SweepDeps({
+          helperTimeoutMs: PROBE_HELPER_TIMEOUT_MS,
+        });
+        const samples: string[] = [];
+        const pidSets: string[] = [];
+        let lang = "";
+
+        const startupStarted = Date.now();
+        try {
+          const { code } = await runProbeHelper("exit");
+          samples.push(`startup=${String(Date.now() - startupStarted)}ms (exit ${String(code)})`);
+        } catch (err) {
+          samples.push(
+            `startup=${String(Date.now() - startupStarted)}ms (${err instanceof Error ? err.message : String(err)})`,
+          );
+        }
+
+        const take = async (
+          label: string,
+          list: () => Promise<{ rows: DescendantProcess[]; header: string }>,
+        ): Promise<void> => {
+          const started = Date.now();
+          try {
+            const { rows, header } = await list();
+            pidSets.push(
+              rows
+                .map((r) => r.pid)
+                .sort((a, b) => a - b)
+                .join(","),
+            );
+            const langMatch = /lang=(\S+)/.exec(header);
+            if (langMatch?.[1] !== undefined) lang = langMatch[1];
+            const timing = header.replace(/ ?lang=\S+/, "");
+            samples.push(
+              `${label}=${String(Date.now() - started)}ms (ok, rows ${String(rows.length)}${timing === "" ? "" : `, ${timing}`})`,
+            );
+          } catch (err) {
+            pidSets.push("error");
+            samples.push(
+              `${label}=${String(Date.now() - started)}ms (${err instanceof Error ? err.message : String(err)})`,
+            );
+          }
+        };
+        const viaScript =
+          (script: string) => async (): Promise<{ rows: DescendantProcess[]; header: string }> => {
+            const { code, stdout } = await runProbeHelper(script);
+            if (code !== 0) throw new Error(`listing exited ${String(code)}`);
+            return { rows: parseListing(stdout), header: parseHeader(stdout) };
+          };
+
+        await take("wmi", async () => ({
+          rows: await wmi.listDescendants(pid),
+          header: "",
+        }));
+        await take("addtype cold", viaScript(addTypeScript(pid)));
+        await take("addtype warm", viaScript(addTypeScript(pid)));
+        await take("emit cold", viaScript(emitScript(pid)));
+        await take("emit warm", viaScript(emitScript(pid)));
+
+        const first = pidSets[0];
+        const equal = first !== undefined && first !== "error" && pidSets.every((s) => s === first);
+        console.error(
+          `[descendant-sweep live] listing probe: ${samples.join("; ")}; lang=${lang}; pids equal=${String(equal)} (grandchild ${String(grandchildPid)})`,
+        );
+      },
+      PROBE_HELPER_TIMEOUT_MS * 6 + 30_000,
+    );
+  },
+);
