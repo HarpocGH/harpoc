@@ -77,8 +77,8 @@ describe("bin entries", () => {
 // (review T3, 2026-07-16) and the provisioned macOS keychain — never reached a
 // vitest worker under `pnpm test`; the gate was inert and the keychain suites
 // ran against the runner's login keychain (found 2026-09-08, D5).
-describe("turbo env pass-through (D5, 2026-09-08)", () => {
-  it("the test task names the two variables ci.yml sets for it", () => {
+describe("turbo env pass-through (D5, 2026-09-08; the series file 2026-09-09)", () => {
+  it("the test task names the three variables ci.yml sets for it", () => {
     const raw = readFileSync(resolve(monorepoRoot, "turbo.json"), "utf-8");
     const turbo = JSON.parse(raw) as {
       tasks: Record<string, { env?: string[] }>;
@@ -86,6 +86,7 @@ describe("turbo env pass-through (D5, 2026-09-08)", () => {
     expect(turbo.tasks["test"]?.env).toEqual([
       "HARPOC_REQUIRE_PLATFORM_TESTS",
       "HARPOC_TEST_KEYCHAIN",
+      "HARPOC_SERIES_FILE",
     ]);
   });
 });

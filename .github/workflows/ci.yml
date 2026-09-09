@@ -108,7 +108,21 @@ jobs:
         if: runner.os == 'Windows'
         env:
           HARPOC_REQUIRE_PLATFORM_TESTS: ssh-live
+          HARPOC_SERIES_FILE: ${{ runner.temp }}/harpoc-series.md
         run: pnpm test
+      # The three CI series lines (the listing warm-up, the two DPAPI cases)
+      # reach the job summary and this file; the summary renders only for a
+      # signed-in browser and no API returns it, so the file is uploaded and
+      # harvested with `gh run download` (decisions.md § "Listing probe and
+      # series artifact tranche (2026-09-09) — rulings", D5).
+      - name: Upload the CI series lines (Windows)
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: series-${{ matrix.os }}-${{ matrix.node-version }}
+          path: ${{ runner.temp }}/harpoc-series.md
+          if-no-files-found: ignore
+          retention-days: 30
       # HARPOC_REQUIRE_PLATFORM_TESTS turns a failed availability probe on a
       # provisioned tier into a test FAILURE instead of a silent skip — a
       # regressed provisioning step above must not drop real-path coverage to
