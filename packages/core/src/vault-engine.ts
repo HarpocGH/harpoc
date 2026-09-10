@@ -1348,11 +1348,11 @@ export class VaultEngine {
           // (design §7.2: host, operation, remote/local paths — no result-derived
           // counter to zero on a denial), so the same projection covers the
           // attempt and the outcome (Task 12's rule, applied where nothing needs
-          // zeroing). `sanitized` and `descendant_sweep` are the two
-          // result-derived keys, folded in below onto whichever row the spawn
-          // produced — a success, or a graceful non-throwing failure such as
-          // PROCESS_TIMEOUT; a refusal row (the catch arm, which never reached
-          // a spawn) is never flagged.
+          // zeroing). The three result-derived keys (`sanitized`,
+          // `descendant_sweep`, `tree_kill`) are folded in below onto whichever
+          // row the spawn produced — a success, or a graceful non-throwing
+          // failure such as PROCESS_TIMEOUT; a refusal row (the catch arm,
+          // which never reached a spawn) is never flagged.
           const auditDetail = { context: "sftp", ...buildSftpAuditDetails(action) };
 
           let execution: SftpExecution;
@@ -1368,6 +1368,7 @@ export class VaultEngine {
             ...auditDetail,
             ...(execution.sanitized ? { sanitized: true } : {}),
             ...(execution.descendantSweep ? { descendant_sweep: execution.descendantSweep } : {}),
+            ...(execution.treeKill ? { tree_kill: execution.treeKill } : {}),
           };
 
           // A process-shaped result can carry a graceful, non-throwing
@@ -1390,11 +1391,11 @@ export class VaultEngine {
           // (the registry is parsed from the image, plus image + operation — no
           // result-derived counter to zero on a denial), so the same projection
           // covers the attempt and the outcome, exactly like the sftp arm.
-          // `sanitized` and `descendant_sweep` are the two result-derived keys,
-          // folded in below onto whichever row the spawn produced — a success,
-          // or a graceful non-throwing failure such as PROCESS_TIMEOUT; a
-          // refusal row (the catch arm, which never reached a spawn) is never
-          // flagged.
+          // The three result-derived keys (`sanitized`, `descendant_sweep`,
+          // `tree_kill`) are folded in below onto whichever row the spawn
+          // produced — a success, or a graceful non-throwing failure such as
+          // PROCESS_TIMEOUT; a refusal row (the catch arm, which never reached
+          // a spawn) is never flagged.
           const auditDetail = { context: "docker_registry", ...buildDockerAuditDetails(action) };
 
           let execution: DockerExecution;
@@ -1410,6 +1411,7 @@ export class VaultEngine {
             ...auditDetail,
             ...(execution.sanitized ? { sanitized: true } : {}),
             ...(execution.descendantSweep ? { descendant_sweep: execution.descendantSweep } : {}),
+            ...(execution.treeKill ? { tree_kill: execution.treeKill } : {}),
           };
 
           // A process-shaped result can carry a graceful, non-throwing failure

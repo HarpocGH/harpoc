@@ -222,4 +222,20 @@ describe("Process execution context (I2b / output-channel leakage)", () => {
       }),
     ).rejects.toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
   });
+
+  it.runIf(process.platform === "win32")(
+    "win32: the secret.use row names the spawn tier (2026-09-10)",
+    async () => {
+      const client = new DirectClient(vault.engine);
+      await client.useSecret(handle, procAction("process.exit(0)"));
+      const rows = vault.engine.queryAudit({
+        eventType: AuditEventType.SECRET_USE,
+        limit: 1,
+      });
+      expect(rows[0]?.detail).toMatchObject({
+        context: "process",
+        tree_kill: expect.stringMatching(/^(job|taskkill)$/),
+      });
+    },
+  );
 });

@@ -481,6 +481,36 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
     });
   });
 
+  it("carries the spawn tier onto the https row as tree_kill (2026-09-10)", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({ ...OK_RESULT, tree_kill: "job" });
+    await audited.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      undefined,
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail).toMatchObject({ transport: "https", tree_kill: "job" });
+  });
+
+  it("writes no tree_kill key on the https row when the result carries none (POSIX)", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue(OK_RESULT);
+    await audited.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      undefined,
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect("tree_kill" in row.detail).toBe(false);
+  });
+
   it("binds the credential to the validated host", async () => {
     await injector.executeWithSecret(
       { type: "git", operation: "clone", repository: REPO },
@@ -1104,6 +1134,36 @@ describeGitSsh("GitInjector SSH-transport network isolation (review fixes T1/F8)
       exit_code: null,
       descendant_sweep: { killed: 2, failed: false },
     });
+  });
+
+  it("carries the spawn tier onto the ssh-transport row as tree_kill (2026-09-10)", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({ ...OK_RESULT, tree_kill: "job" });
+    await audited.executeWithSecret(
+      sshAction,
+      new Uint8Array(Buffer.from(sshKeyPem)),
+      isolatedSshPolicy(),
+      sshConfig,
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail).toMatchObject({ transport: "ssh", tree_kill: "job" });
+  });
+
+  it("writes no tree_kill key on the ssh-transport row when the result carries none (POSIX)", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue(OK_RESULT);
+    await audited.executeWithSecret(
+      sshAction,
+      new Uint8Array(Buffer.from(sshKeyPem)),
+      isolatedSshPolicy(),
+      sshConfig,
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect("tree_kill" in row.detail).toBe(false);
   });
 
   it("audits and rethrows the fail-closed refusal from the seam (transport ssh)", async () => {

@@ -27,6 +27,8 @@ import { StdioChildTransport } from "./mcp-stdio-transport.js";
 import type { NetworkIsolationMechanism } from "./network-isolation.js";
 import { mapStringLeavesTracked, redactSecretEncodings } from "./output-sanitizer.js";
 import { validateUrl } from "./url-validator.js";
+import type { TreeKillMechanism } from "./win32-job-wrapper.js";
+import { wrapInJob } from "./win32-job-wrapper.js";
 
 /** Hard ceiling on a per-invocation timeout override (parity with http/process). */
 const MAX_TIMEOUT_MS = 300_000;
@@ -47,9 +49,14 @@ interface McpSdk {
 /**
  * What the stdio transport spawns (thesis §4.5.3 layer 4, D51): the
  * allowlist-resolved command bare, or the platform isolation wrapper carrying
- * it as the payload. `isolation` is the posture the child is spawned with,
+ * it as the payload, with the win32 job wrapper around whatever that produced
+ * (D4, 2026-09-10). `isolation` is the posture the child is spawned with,
  * recorded on the registry entry so a dimension demanded later — from this
- * process or another — is noticed on the next call.
+ * process or another — is noticed on the next call; `treeKill` is the tier
+ * that ends the child's tree, absent where neither applies (off win32). On an
+ * `mcp.spawn` row `taskkill` means "unwrapped: the transport's direct kill of
+ * the child, as before" — the transport's close is `stdin.end` → `SIGTERM` →
+ * `SIGKILL` on the child alone, and it runs no taskkill and no sweep.
  */
 interface StdioLaunch {
   command: string;
@@ -57,6 +64,7 @@ interface StdioLaunch {
   isolation: IsolationDimensions;
   networkMechanism?: NetworkIsolationMechanism;
   fsMechanism?: FsIsolationMechanism;
+  treeKill?: TreeKillMechanism;
 }
 
 /**
@@ -351,13 +359,15 @@ export class McpInjector {
               ? {
                   // The configured command stays the audited one; the pid is
                   // the process the vault holds — under bwrap the monitor's,
-                  // which is the kill target (D51).
+                  // under the job wrapper the wrapper's — which is the kill
+                  // target (D51; 2026-09-10).
                   command: config.command,
                   pid: stdioTransport?.pid ?? null,
                   ...(launch?.networkMechanism
                     ? { isolation_mechanism: launch.networkMechanism }
                     : {}),
                   ...(launch?.fsMechanism ? { fs_isolation_mechanism: launch.fsMechanism } : {}),
+                  ...(launch?.treeKill ? { tree_kill: launch.treeKill } : {}),
                 }
               : { url: config.url }),
           },
@@ -398,7 +408,11 @@ export class McpInjector {
    * process take effect at this invocation at the latest. The network reason
    * keeps precedence on the terminate; the audit row carries every demanded
    * flag; the error code is the composer's (the filesystem dimension is
-   * resolved first off darwin).
+   * resolved first off darwin). The win32 job wrapper then goes around
+   * whatever that produced (D4, 2026-09-10) — the outermost layer on every
+   * launch path, the un-isolated one included, so `close()` takes the whole
+   * tree; where the tier is unavailable the launch records the `taskkill`
+   * tier on win32 and nothing off it.
    */
   private async resolveStdioLaunch(
     action: McpAction,
@@ -413,40 +427,45 @@ export class McpInjector {
       fs: policy.fs_isolation === true,
     };
     const args = config.args ?? [];
-    if (!isolation.network && !isolation.fs) {
-      return { command: resolvedCommand, args, isolation };
-    }
-    try {
-      const wrapped = await requireIsolation(resolvedCommand, args, isolation);
-      return {
-        command: wrapped.command,
-        args: wrapped.args,
-        isolation,
-        ...(wrapped.networkMechanism ? { networkMechanism: wrapped.networkMechanism } : {}),
-        ...(wrapped.fsMechanism ? { fsMechanism: wrapped.fsMechanism } : {}),
-      };
-    } catch (err) {
-      await this.registry.terminate(
-        secretId,
-        isolation.network ? "network_isolation_enabled" : "fs_isolation_enabled",
-        attribution,
-      );
-      if (err instanceof VaultError) {
-        this.audit(
-          action,
+    let launch: StdioLaunch = { command: resolvedCommand, args, isolation };
+    if (isolation.network || isolation.fs) {
+      try {
+        const wrapped = await requireIsolation(resolvedCommand, args, isolation);
+        launch = {
+          command: wrapped.command,
+          args: wrapped.args,
+          isolation,
+          ...(wrapped.networkMechanism ? { networkMechanism: wrapped.networkMechanism } : {}),
+          ...(wrapped.fsMechanism ? { fsMechanism: wrapped.fsMechanism } : {}),
+        };
+      } catch (err) {
+        await this.registry.terminate(
           secretId,
-          config,
-          {
-            error: err.code,
-            ...(isolation.network ? { network_isolation: true } : {}),
-            ...(isolation.fs ? { fs_isolation: true } : {}),
-          },
-          false,
+          isolation.network ? "network_isolation_enabled" : "fs_isolation_enabled",
           attribution,
         );
+        if (err instanceof VaultError) {
+          this.audit(
+            action,
+            secretId,
+            config,
+            {
+              error: err.code,
+              ...(isolation.network ? { network_isolation: true } : {}),
+              ...(isolation.fs ? { fs_isolation: true } : {}),
+            },
+            false,
+            attribution,
+          );
+        }
+        throw err;
       }
-      throw err;
     }
+    // The job wrapper is the outermost layer (D4, 2026-09-10): killing it
+    // takes the isolation monitor and the payload alike. Off win32 it is null.
+    const job = await wrapInJob(launch.command, launch.args);
+    if (job) return { ...launch, command: job.command, args: job.args, treeKill: "job" };
+    return process.platform === "win32" ? { ...launch, treeKill: "taskkill" } : launch;
   }
 
   /**

@@ -426,6 +426,34 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     expect(result.result).not.toHaveProperty("descendant_sweep");
   });
 
+  it("carries the spawn tier on the envelope as treeKill (2026-09-10)", async () => {
+    spawnMock.mockResolvedValue({ ...OK_RESULT, tree_kill: "job" });
+
+    const result = await executeSftpAction(
+      LIST_ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      allowedPolicy(),
+      SFTP_CONFIG,
+    );
+
+    expect(result.treeKill).toBe("job");
+    // The tier rides the execution envelope only — the wire result is untouched.
+    expect(result.result).not.toHaveProperty("tree_kill");
+  });
+
+  it("leaves treeKill off the envelope when the result carries none (POSIX)", async () => {
+    spawnMock.mockResolvedValue(OK_RESULT);
+
+    const result = await executeSftpAction(
+      LIST_ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      allowedPolicy(),
+      SFTP_CONFIG,
+    );
+
+    expect("treeKill" in result).toBe(false);
+  });
+
   it("maps a non-zero exit to SFTP_OPERATION_FAILED", async () => {
     spawnMock.mockResolvedValue({ ...OK_RESULT, exit_code: 1, stderr: "No such file" });
 

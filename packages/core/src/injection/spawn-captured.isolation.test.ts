@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { ErrorCode, VaultError } from "@harpoc/shared";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { requireIsolation } from "./isolation.js";
 import { requireNetworkIsolation } from "./network-isolation.js";
 import { spawnCaptured } from "./spawn-captured.js";
+import { forceJobWrapperUnavailableForTests } from "./win32-job-wrapper.js";
 
 /**
  * Seam wiring (thesis §4.5.3 layer 4): `spawnCaptured` is the single choke
@@ -35,8 +36,13 @@ const spawnMock = vi.mocked(spawn);
 const composerMock = vi.mocked(requireIsolation);
 
 beforeEach(() => {
+  forceJobWrapperUnavailableForTests("test: the taskkill tier");
   isolationMock.mockReset();
   spawnMock.mockClear();
+});
+
+afterEach(() => {
+  forceJobWrapperUnavailableForTests(null);
 });
 
 describe("spawnCaptured — network isolation seam", () => {

@@ -284,6 +284,24 @@ it("carries the descendant sweep's outcome on the envelope, never the wire resul
   expect(result.result).not.toHaveProperty("descendant_sweep");
 });
 
+it("carries the spawn tier on the envelope as treeKill (2026-09-10)", async () => {
+  vi.mocked(spawnCaptured).mockResolvedValue({ ...OK_RESULT, tree_kill: "job" });
+
+  const result = await executeDockerRegistryAction(PULL_ACTION, SECRET, allowed());
+
+  expect(result.treeKill).toBe("job");
+  // The tier rides the execution envelope only — the wire result is untouched.
+  expect(result.result).not.toHaveProperty("tree_kill");
+});
+
+it("leaves treeKill off the envelope when the result carries none (POSIX)", async () => {
+  vi.mocked(spawnCaptured).mockResolvedValue(OK_RESULT);
+
+  const result = await executeDockerRegistryAction(PULL_ACTION, SECRET, allowed());
+
+  expect("treeKill" in result).toBe(false);
+});
+
 // A guard against a regression that would drop the redaction wrapper entirely.
 it("surfaces a redacted VaultError, not a raw one, when the spawn rejects with the secret", async () => {
   const err = new VaultError(

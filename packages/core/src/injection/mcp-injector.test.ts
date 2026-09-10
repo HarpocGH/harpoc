@@ -8,14 +8,23 @@ import type { IsolationDimensions, IsolationWrap } from "./isolation.js";
 import { McpInjector } from "./mcp-injector.js";
 import { McpConnectionRegistry } from "./mcp-registry.js";
 import { forceNetworkIsolationUnavailableForTests } from "./network-isolation.js";
+import { wrapInJob } from "./win32-job-wrapper.js";
 
 vi.mock("./isolation.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./isolation.js")>();
   return { ...actual, requireIsolation: vi.fn(actual.requireIsolation) };
 });
 
+vi.mock("./win32-job-wrapper.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./win32-job-wrapper.js")>();
+  return { ...actual, wrapInJob: vi.fn(actual.wrapInJob) };
+});
+
 const composerMock = vi.mocked(requireIsolation);
 const actualIsolation = await vi.importActual<typeof import("./isolation.js")>("./isolation.js");
+const jobMock = vi.mocked(wrapInJob);
+const actualJob =
+  await vi.importActual<typeof import("./win32-job-wrapper.js")>("./win32-job-wrapper.js");
 
 const NODE = process.execPath;
 const SECRET = "sk-mcp-supersecret-abcdef123456";
@@ -647,6 +656,83 @@ describe("McpInjector — isolation: the stdio child spawns wrapped (D51)", () =
       policy: { ...POLICY, network_isolation: true },
     });
     expect(JSON.stringify(leak)).not.toContain(SECRET);
+  });
+});
+
+describe("McpInjector — the stdio child spawns inside the job wrapper (2026-09-10)", () => {
+  /**
+   * A node-scripted stand-in for `harpoc-job.exe`: it keeps the wrapper's argv
+   * shape (`--keep <payload> <args...>`), stays as a monitor and returns the
+   * payload's exit status, so the wrapped spawn runs end to end on every
+   * platform. node's own `--` separator has to precede `--keep` — without it
+   * node claims the flag as its own (`bad option: --keep`, exit 9) — and node
+   * strips the separator, so the stand-in still reads `["--keep", command,
+   * ...args]` out of `process.argv.slice(1)`.
+   */
+  const JOB_MONITOR = `
+const [flag, command, ...args] = process.argv.slice(1);
+const child = require("node:child_process").spawn(command, args, { stdio: "inherit" });
+child.on("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
+`;
+  beforeEach(() => {
+    jobMock.mockReset();
+    jobMock.mockImplementation((command, args) =>
+      Promise.resolve({
+        command: NODE,
+        args: ["-e", JOB_MONITOR, "--", "--keep", command, ...args],
+        mechanism: "job" as const,
+      }),
+    );
+  });
+  afterEach(async () => {
+    await registry.closeAll("session_end");
+    freshInjector();
+    jobMock.mockReset();
+    jobMock.mockImplementation(actualJob.wrapInJob);
+  });
+
+  it("wraps the launch after isolation, spawns the WRAPPER, and records tree_kill on mcp.spawn", async () => {
+    const log = vi.fn();
+    const auditedInjector = new McpInjector({ log } as unknown as AuditLogger, registry);
+    const pidResult = await auditedInjector.executeWithSecret(
+      mcpAction("pid"),
+      secretBytes(),
+      POLICY,
+      STDIO_CONFIG,
+      "secret-1",
+    );
+    expect(jobMock).toHaveBeenCalledTimes(1);
+    expect(jobMock.mock.calls[0]?.[0]).toBe(NODE);
+    expect(jobMock.mock.calls[0]?.[1]).toEqual(["-e", TEST_SERVER]);
+    const spawnRow = spawnRowOf(log);
+    expect(spawnRow?.detail).toMatchObject({ command: NODE, transport: "stdio", tree_kill: "job" });
+    expect(payloadPidOf(pidResult)).not.toBe(spawnRow?.detail.pid);
+  });
+
+  it("wraps around the isolation wrapper when a dimension is demanded (the job is the outermost)", async () => {
+    composerMock.mockImplementation((command, args, dims) => monitorWrap(command, args, dims));
+    await run(mcpAction("echo"), { policy: { ...POLICY, network_isolation: true } });
+    const [command, args] = jobMock.mock.calls[0] as [string, readonly string[]];
+    expect(command).toBe(NODE);
+    expect(args.slice(0, 2)).toEqual(["-e", MONITOR_WRAPPER]);
+    composerMock.mockImplementation(actualIsolation.requireIsolation);
+  });
+
+  it("records no tree_kill when the wrapper is unavailable off win32", async () => {
+    jobMock.mockResolvedValue(null);
+    const log = vi.fn();
+    const auditedInjector = new McpInjector({ log } as unknown as AuditLogger, registry);
+    await auditedInjector.executeWithSecret(
+      mcpAction("echo"),
+      secretBytes(),
+      POLICY,
+      STDIO_CONFIG,
+      "secret-1",
+    );
+    const spawnRow = spawnRowOf(log);
+    if (process.platform === "win32")
+      expect(spawnRow?.detail).toMatchObject({ tree_kill: "taskkill" });
+    else expect(spawnRow !== undefined && "tree_kill" in spawnRow.detail).toBe(false);
   });
 });
 

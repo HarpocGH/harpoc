@@ -314,3 +314,76 @@ describe("StdioChildTransport — untrusted downstream stdout framing", () => {
     }
   }, 20_000);
 });
+
+// D4 (2026-09-10): the job wrapper is what the vault holds, so close()'s
+// escalation reaches every descendant the downstream server created — the
+// window taskkill /T's one-time snapshot leaves open.
+describe.runIf(process.platform === "win32")(
+  "StdioChildTransport — close() takes the tree under the job wrapper (2026-09-10)",
+  () => {
+    it("a grandchild of the downstream server dies with the wrapper", async () => {
+      const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
+      const { tmpdir } = await import("node:os");
+      const { join } = await import("node:path");
+      const { system32Path } = await import("../win32-paths.js");
+      const { wrapInJob } = await import("./win32-job-wrapper.js");
+      const dir = mkdtempSync(join(tmpdir(), "harpoc-mcp-job-"));
+      const pidFile = join(dir, "g.pid");
+      const ps = system32Path("WindowsPowerShell", "v1.0", "powershell.exe");
+      const script =
+        `$p = Start-Process -FilePath '${ps}' -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep 120' -PassThru -WindowStyle Hidden; ` +
+        `Set-Content -Path '${pidFile}' -Value $p.Id; Start-Sleep 120`;
+      const wrap = await wrapInJob(ps, ["-NoProfile", "-NonInteractive", "-Command", script]);
+      expect(wrap).not.toBeNull();
+      const transport = new StdioChildTransport({
+        resolvedCommand: (wrap as { command: string }).command,
+        args: (wrap as { args: string[] }).args,
+        env: { PATH: process.env.PATH ?? "" },
+      });
+      await transport.start();
+      let pid = 0;
+      let alive = true;
+      // A red run must leave nothing standing (the 2026-09-07 rule): a pid that never
+      // appears or a throwing close() would otherwise skip the teardown below.
+      try {
+        const deadline = Date.now() + 20_000;
+        while (Date.now() < deadline && pid === 0) {
+          try {
+            pid = Number(readFileSync(pidFile, "utf8").trim());
+          } catch {
+            // Not written yet.
+          }
+          // Set-Content creates the file before it writes, so an existing empty file
+          // reads as 0 — every iteration sleeps, not just the throwing one.
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        expect(pid).toBeGreaterThan(0);
+        await transport.close();
+        const gone = Date.now() + 10_000;
+        while (alive && Date.now() < gone) {
+          try {
+            process.kill(pid, 0);
+            await new Promise((r) => setTimeout(r, 250));
+          } catch {
+            alive = false;
+          }
+        }
+      } finally {
+        try {
+          transport.killSync();
+        } catch {
+          // Already closed.
+        }
+        if (pid > 0 && alive) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            // Gone.
+          }
+        }
+        rmSync(dir, { recursive: true, force: true });
+      }
+      expect(alive).toBe(false);
+    }, 60_000);
+  },
+);

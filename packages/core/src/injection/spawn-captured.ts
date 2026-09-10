@@ -9,6 +9,8 @@ import type { FsIsolationMechanism } from "./fs-isolation.js";
 import { requireIsolation } from "./isolation.js";
 import type { NetworkIsolationMechanism } from "./network-isolation.js";
 import { redactSecretEncodings } from "./output-sanitizer.js";
+import { isJobWrapperFailure, wrapInJob } from "./win32-job-wrapper.js";
+import type { TreeKillMechanism } from "./win32-job-wrapper.js";
 
 /**
  * Raw result of a captured subprocess spawn, before mapping to a context result.
@@ -39,6 +41,14 @@ export interface SpawnCapturedResult {
    * and on a spawn failure.
    */
   descendant_sweep?: { killed: number; failed: boolean };
+  /**
+   * The tier a win32 spawn ran under (2026-09-10): `job` — inside the vault's
+   * kill-on-close job wrapper, a timeout kill taking the whole tree with no
+   * taskkill, listing or sweep; `taskkill` — today's taskkill + descendant
+   * sweep path, because the wrapper was unavailable on this host. Set on every
+   * win32 result, the normal exit and the spawn failure included; absent on POSIX.
+   */
+  tree_kill?: TreeKillMechanism;
 }
 
 export interface SpawnCapturedOptions {
@@ -95,8 +105,10 @@ const KILL_HELPER_TIMEOUT_MS = 10_000;
  * exited non-zero first falls back to a direct kill of the child, as a helper
  * that could not be started does (128, a process already gone, is a no-op
  * there) — and immediately on every other path.
+ * On the job tier the kill is the direct kill of the wrapper — its job handle
+ * closes and the kernel takes the tree — and no taskkill helper runs.
  */
-function killTree(child: ChildProcess): Promise<void> {
+function killTree(child: ChildProcess, treeKill: TreeKillMechanism | undefined): Promise<void> {
   const pid = child.pid;
   const killDirect = (): void => {
     try {
@@ -110,6 +122,12 @@ function killTree(child: ChildProcess): Promise<void> {
     return Promise.resolve();
   }
   if (process.platform === "win32") {
+    if (treeKill === "job") {
+      // The wrapper holds the only handle to the job: terminating it closes
+      // the handle and the kernel takes every job member with it.
+      killDirect();
+      return Promise.resolve();
+    }
     return new Promise<void>((resolve) => {
       let killer: ChildProcess;
       try {
@@ -203,6 +221,17 @@ export async function spawnCaptured(
     isolationMechanism = wrapped.networkMechanism;
     fsIsolationMechanism = wrapped.fsMechanism;
   }
+  // Every win32 spawn runs inside the job wrapper when the host can build and
+  // run it (D4); off win32 wrapInJob answers null without probing.
+  let treeKill: TreeKillMechanism | undefined;
+  const job = await wrapInJob(command, args);
+  if (job) {
+    command = job.command;
+    args = job.args;
+    treeKill = "job";
+  } else if (process.platform === "win32") {
+    treeKill = "taskkill";
+  }
   const cap = opts.maxOutputBytes ?? MAX_PROCESS_OUTPUT_BYTES;
   const stdout = new CappedOutput(cap);
   const stderr = new CappedOutput(cap);
@@ -240,6 +269,7 @@ export async function spawnCaptured(
         redacted: false,
         isolation_mechanism: isolationMechanism,
         fs_isolation_mechanism: fsIsolationMechanism,
+        ...(treeKill ? { tree_kill: treeKill } : {}),
       });
       return;
     }
@@ -266,7 +296,7 @@ export async function spawnCaptured(
     // child's exit or, when that never lands, from the settle backstop; the
     // sweep is bounded and every settlement path waits for it (see finish).
     const startSweep = (exitedAtMs: number): void => {
-      if (!timedOut || process.platform !== "win32" || child.pid === undefined || sweep) return;
+      if (!timedOut || treeKill !== "taskkill" || child.pid === undefined || sweep) return;
       sweep = sweepDescendants(child.pid, { spawnedAtMs, exitedAtMs }).catch(
         (): DescendantSweepResult => ({ killed: 0, failed: true }),
       );
@@ -276,6 +306,9 @@ export async function spawnCaptured(
       const emit = (descendantSweep?: DescendantSweepResult): void => {
         const rawOut = stdout.toString();
         const rawErr = stderr.toString();
+        // The wrapper's own failure (its reserved code AND its marker) is a
+        // spawn that never ran — what a Node-level ENOENT is today.
+        const wrapperFailed = treeKill === "job" && !timedOut && isJobWrapperFailure(code, rawErr);
         const out = redactAll(rawOut);
         const errText = redactAll(rawErr);
         settle({
@@ -283,16 +316,17 @@ export async function spawnCaptured(
           // every platform: Windows has no signals and surfaces the taskkill as
           // an ordinary non-zero exit, which would otherwise read as the payload
           // having chosen that status.
-          exit_code: timedOut ? null : code,
+          exit_code: timedOut || wrapperFailed ? null : code,
           stdout: out,
           stderr: errText,
           timed_out: timedOut,
           truncated: stdout.truncated || stderr.truncated,
           signal: timedOut ? (signal ?? "SIGKILL") : signal,
-          spawn_failed: spawnFailed,
+          spawn_failed: spawnFailed || wrapperFailed,
           redacted: out !== rawOut || errText !== rawErr,
           isolation_mechanism: isolationMechanism,
           fs_isolation_mechanism: fsIsolationMechanism,
+          ...(treeKill ? { tree_kill: treeKill } : {}),
           // A sweep the child's exit never confirmed is unconfirmed whatever it
           // found: the kill was delivered, but the vault did not see it take.
           ...(descendantSweep
@@ -316,7 +350,7 @@ export async function spawnCaptured(
       // once the kill has been delivered, so a slow taskkill cannot settle the
       // spawn ahead of the exit that starts the descendant sweep, and with the
       // sweep run from here when that exit never comes.
-      void killTree(child).then(() => {
+      void killTree(child, treeKill).then(() => {
         if (settled) return;
         backstopTimer = setTimeout(() => {
           startSweep(Date.now());

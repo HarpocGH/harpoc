@@ -564,6 +564,36 @@ describeSsh("SshInjector output sanitization on the row (Wave 2, E70)", () => {
     });
   });
 
+  it("carries the spawn tier onto the row as tree_kill (2026-09-10)", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({ ...OK_RESULT, tree_kill: "job" });
+    await audited.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      policy({ host_allowlist: ["deploy.example.com"], command_allowlist: [SSH as string] }),
+      SSH_CONFIG,
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail).toMatchObject({ context: "ssh", tree_kill: "job" });
+  });
+
+  it("writes no tree_kill key when the result carries none (POSIX)", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue(OK_RESULT);
+    await audited.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      policy({ host_allowlist: ["deploy.example.com"], command_allowlist: [SSH as string] }),
+      SSH_CONFIG,
+      "secret-1",
+    );
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect("tree_kill" in row.detail).toBe(false);
+  });
+
   it("leaves sanitized out of the row entirely when nothing was redacted", async () => {
     const log = vi.fn();
     const audited = new SshInjector({ log } as unknown as AuditLogger);

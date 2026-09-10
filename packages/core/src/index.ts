@@ -107,6 +107,21 @@ export { ProcessInjector } from "./injection/process-injector.js";
 export { spawnCaptured } from "./injection/spawn-captured.js";
 export type { SpawnCapturedResult, SpawnCapturedOptions } from "./injection/spawn-captured.js";
 export {
+  resolveJobWrapper,
+  wrapInJob,
+  isJobWrapperFailure,
+  resetJobWrapperProbeForTests,
+  forceJobWrapperUnavailableForTests,
+  jobWrapperCacheDirs,
+  JOB_WRAPPER_SOURCE_SHA256,
+} from "./injection/win32-job-wrapper.js";
+export type {
+  TreeKillMechanism,
+  JobWrap,
+  JobWrapperSeams,
+  JobWrapperResolution,
+} from "./injection/win32-job-wrapper.js";
+export {
   requireNetworkIsolation,
   resetNetworkIsolationProbeForTests,
   forceNetworkIsolationUnavailableForTests,

@@ -13,6 +13,7 @@ import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveAndMatchCommand } from "./allowlist.js";
 import { buildCleanEnv } from "./clean-env.js";
 import { spawnCaptured } from "./spawn-captured.js";
+import type { TreeKillMechanism } from "./win32-job-wrapper.js";
 
 /**
  * Executes a subprocess with an injected credential (process-mediated injection,
@@ -79,6 +80,7 @@ export class ProcessInjector {
       fsIsolationMechanism?: string;
       redacted: boolean;
       descendantSweep?: { killed: number; failed: boolean };
+      treeKill?: TreeKillMechanism;
     };
     try {
       run = await this.runProcess(
@@ -121,6 +123,7 @@ export class ProcessInjector {
         ...(run.fsIsolationMechanism ? { fs_isolation_mechanism: run.fsIsolationMechanism } : {}),
         ...(run.redacted ? { sanitized: true } : {}),
         ...(run.descendantSweep ? { descendant_sweep: run.descendantSweep } : {}),
+        ...(run.treeKill ? { tree_kill: run.treeKill } : {}),
       },
       result.error === undefined,
       attribution,
@@ -144,6 +147,7 @@ export class ProcessInjector {
     fsIsolationMechanism?: string;
     redacted: boolean;
     descendantSweep?: { killed: number; failed: boolean };
+    treeKill?: TreeKillMechanism;
   }> {
     const r = await spawnCaptured(command, args, {
       env,
@@ -172,6 +176,7 @@ export class ProcessInjector {
       fsIsolationMechanism: r.fs_isolation_mechanism,
       redacted: r.redacted,
       ...(r.descendant_sweep ? { descendantSweep: r.descendant_sweep } : {}),
+      ...(r.tree_kill ? { treeKill: r.tree_kill } : {}),
     };
   }
 

@@ -7,6 +7,7 @@ import { controlledPathDirs, matchesHostAllowlist, resolveAndMatchCommand } from
 import { redactErrorMessage } from "../output-sanitizer.js";
 import { spawnCaptured } from "../spawn-captured.js";
 import type { SpawnCapturedResult } from "../spawn-captured.js";
+import type { TreeKillMechanism } from "../win32-job-wrapper.js";
 
 /**
  * The bundled docker credential helper (design §5.4). Docker resolves it as
@@ -68,11 +69,11 @@ process.stdout.write(out + "\\n");
  * Metadata-only audit projection of a docker-registry operation (spec §7.2) —
  * never a credential. Every field the builder writes is request-derived (the
  * registry is parsed from the image reference), so the same projection covers
- * both a successful use and a denial, exactly like the SFTP context. The
- * optional `sanitized` and `descendant_sweep` are the two result-derived keys:
- * the engine folds them onto whichever row the spawn produced — a success, or
- * a graceful non-throwing failure such as PROCESS_TIMEOUT — never onto a
- * refusal row, which never reached a spawn.
+ * both a successful use and a denial, exactly like the SFTP context. Optional
+ * are the three result-derived keys (`sanitized`, `descendant_sweep`,
+ * `tree_kill`): the engine folds them onto whichever row the spawn produced —
+ * a success, or a graceful non-throwing failure such as PROCESS_TIMEOUT —
+ * never onto a refusal row, which never reached a spawn.
  */
 export interface DockerAuditDetails {
   registry: string;
@@ -82,19 +83,24 @@ export interface DockerAuditDetails {
   sanitized?: true;
   /** Present only when the win32 descendant sweep ran after a timed-out spawn (2026-09-08). */
   descendant_sweep?: { killed: number; failed: boolean };
+  /** The win32 spawn tier (2026-09-10): the job wrapper, or the taskkill + sweep path behind it. */
+  tree_kill?: TreeKillMechanism;
 }
 
 /**
- * The docker executor's return to the engine: the wire result plus the two
+ * The docker executor's return to the engine: the wire result plus the three
  * result-derived keys the engine folds onto its post-spawn audit row —
- * whether the spawn seam's redaction changed the captured output and, when a
- * sweep ran, its outcome. {@link DockerResult} stays byte-identical.
+ * whether the spawn seam's redaction changed the captured output, when a
+ * sweep ran its outcome, and on win32 the tier the spawn ran under.
+ * {@link DockerResult} stays byte-identical.
  */
 export interface DockerExecution {
   result: DockerResult;
   sanitized: boolean;
   /** Set only when the win32 descendant sweep ran — rides the audit row, never the wire result. */
   descendantSweep?: { killed: number; failed: boolean };
+  /** Set only on win32 — the spawn tier; rides the audit row, never the wire result. */
+  treeKill?: TreeKillMechanism;
 }
 
 /** Builds the metadata-only audit projection for a docker action. Pure — the
@@ -332,6 +338,7 @@ async function runDocker(
       result: toDockerResult(action, r),
       sanitized: r.redacted,
       ...(r.descendant_sweep ? { descendantSweep: r.descendant_sweep } : {}),
+      ...(r.tree_kill ? { treeKill: r.tree_kill } : {}),
     };
   } finally {
     config.dispose();

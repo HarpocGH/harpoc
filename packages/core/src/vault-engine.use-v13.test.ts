@@ -23,6 +23,7 @@ import type { ImapExecution, ImapOAuth } from "./injection/imap-injector.js";
 import type { SftpExecution } from "./injection/sftp-injector.js";
 import type { MailTlsConfig, SmtpExecution, SmtpOAuth } from "./injection/smtp-injector.js";
 import type { WebsocketExecution } from "./injection/websocket-injector.js";
+import type { TreeKillMechanism } from "./injection/win32-job-wrapper.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();
@@ -150,9 +151,11 @@ interface SeamOutcomes {
   sftp?: SftpOutcome;
   sftpSanitized?: boolean;
   sftpDescendantSweep?: { killed: number; failed: boolean };
+  sftpTreeKill?: TreeKillMechanism;
   docker?: DockerOutcome;
   dockerSanitized?: boolean;
   dockerDescendantSweep?: { killed: number; failed: boolean };
+  dockerTreeKill?: TreeKillMechanism;
   process?: () => never;
   database?: () => never;
   ssh?: () => never;
@@ -241,6 +244,7 @@ function installSeams(e: VaultEngine, outcomes: SeamOutcomes): Seams {
       result,
       sanitized: outcomes.sftpSanitized ?? false,
       ...(outcomes.sftpDescendantSweep ? { descendantSweep: outcomes.sftpDescendantSweep } : {}),
+      ...(outcomes.sftpTreeKill ? { treeKill: outcomes.sftpTreeKill } : {}),
     };
   };
 
@@ -265,6 +269,7 @@ function installSeams(e: VaultEngine, outcomes: SeamOutcomes): Seams {
       ...(outcomes.dockerDescendantSweep
         ? { descendantSweep: outcomes.dockerDescendantSweep }
         : {}),
+      ...(outcomes.dockerTreeKill ? { treeKill: outcomes.dockerTreeKill } : {}),
     };
   };
 
@@ -1130,6 +1135,21 @@ describe("useSecret (sftp) — engine dispatch", () => {
     });
   });
 
+  it("carries the spawn tier onto the row as tree_kill (2026-09-10)", async () => {
+    installSeams(engine, {});
+    await engine.useSecret("secret://deploy", SFTP_ACTION);
+    const untiered = useRows(true);
+    expect(untiered).toHaveLength(1);
+    expect(untiered[0]?.detail).not.toHaveProperty("tree_kill");
+
+    installSeams(engine, { sftpTreeKill: "job" });
+    await engine.useSecret("secret://deploy", SFTP_ACTION);
+    const rows = useRows(true);
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((row) => row.detail?.tree_kill !== undefined)).toHaveLength(1);
+    expect(rows.map((row) => row.detail?.tree_kill)).toContain("job");
+  });
+
   it("maps a non-VaultError executor throw to a redacted INTERNAL_ERROR and still audits the denial", async () => {
     installSeams(engine, {
       sftp: () => {
@@ -1393,6 +1413,21 @@ describe("useSecret (docker_registry) — engine dispatch", () => {
       error: ErrorCode.PROCESS_TIMEOUT,
       descendant_sweep: { killed: 1, failed: true },
     });
+  });
+
+  it("carries the spawn tier onto the row as tree_kill (2026-09-10)", async () => {
+    installSeams(engine, {});
+    await engine.useSecret("secret://reg", DOCKER_ACTION);
+    const untiered = useRows(true);
+    expect(untiered).toHaveLength(1);
+    expect(untiered[0]?.detail).not.toHaveProperty("tree_kill");
+
+    installSeams(engine, { dockerTreeKill: "job" });
+    await engine.useSecret("secret://reg", DOCKER_ACTION);
+    const rows = useRows(true);
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((row) => row.detail?.tree_kill !== undefined)).toHaveLength(1);
+    expect(rows.map((row) => row.detail?.tree_kill)).toContain("job");
   });
 
   it("maps a non-VaultError executor throw to a redacted INTERNAL_ERROR and still audits the denial", async () => {

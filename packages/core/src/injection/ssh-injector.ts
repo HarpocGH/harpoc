@@ -167,6 +167,7 @@ export class SshInjector {
           ...(r.fs_isolation_mechanism ? { fs_isolation_mechanism: r.fs_isolation_mechanism } : {}),
           ...(r.redacted ? { sanitized: true } : {}),
           ...(r.descendant_sweep ? { descendant_sweep: r.descendant_sweep } : {}),
+          ...(r.tree_kill ? { tree_kill: r.tree_kill } : {}),
         },
         error === undefined,
         attribution,

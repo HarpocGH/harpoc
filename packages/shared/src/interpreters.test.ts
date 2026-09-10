@@ -196,11 +196,19 @@ describe("EXEC_WRAPPERS", () => {
       "unshare",
       "setpriv",
       "bwrap",
+      "harpoc-job",
     ]) {
       expect(EXEC_WRAPPERS.has(name), name).toBe(true);
     }
     // The D10 exemption is keyed on the entry's path, never on the name.
     expect(execWrapperName("find")).toBe("find");
     expect(execWrapperName("timeout")).toBe("timeout");
+    // The vault's own win32 wrapper: the version-suffix rule strips digits, so it
+    // would not eat a hex hash — a hash in the *filename* changes the basename this
+    // tier matches on, and `harpoc-job-0123456789abcdef` would escape EXEC_WRAPPERS
+    // altogether. That escape is why the hash sits in the directory instead.
+    expect(
+      execWrapperName("C:\\x\\dist\\win32\\harpoc-job\\0123456789abcdef\\harpoc-job.exe"),
+    ).toBe("harpoc-job");
   });
 });
