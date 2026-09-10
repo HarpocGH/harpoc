@@ -325,15 +325,20 @@ describe.runIf(process.platform === "win32")(
       const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
       const { tmpdir } = await import("node:os");
       const { join } = await import("node:path");
-      const { system32Path } = await import("../win32-paths.js");
       const { wrapInJob } = await import("./win32-job-wrapper.js");
       const dir = mkdtempSync(join(tmpdir(), "harpoc-mcp-job-"));
       const pidFile = join(dir, "g.pid");
-      const ps = system32Path("WindowsPowerShell", "v1.0", "powershell.exe");
-      const script =
-        `$p = Start-Process -FilePath '${ps}' -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep 120' -PassThru -WindowStyle Hidden; ` +
-        `Set-Content -Path '${pidFile}' -Value $p.Id; Start-Sleep 120`;
-      const wrap = await wrapInJob(ps, ["-NoProfile", "-NonInteractive", "-Command", script]);
+      // A node child that spawns a **detached** node grandchild and writes its pid,
+      // then holds. libuv puts only its non-detached children into the job it closes
+      // at exit, so the grandchild is OUTSIDE the child's libuv job — nothing but the
+      // wrapper can reach it — and INSIDE the wrapper's, whose job permits no
+      // breakaway (every descendant of a member is a member). Node, not PowerShell:
+      // two PowerShell start-ups do not fit the pid poll on the windows-2025 runners.
+      const script = `const g = require("node:child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 120000)"], { detached: true, stdio: "ignore", windowsHide: true });
+        g.unref();
+        require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));
+        setTimeout(() => {}, 120000);`;
+      const wrap = await wrapInJob(NODE, ["-e", script]);
       expect(wrap).not.toBeNull();
       const transport = new StdioChildTransport({
         resolvedCommand: (wrap as { command: string }).command,
@@ -353,7 +358,7 @@ describe.runIf(process.platform === "win32")(
           } catch {
             // Not written yet.
           }
-          // Set-Content creates the file before it writes, so an existing empty file
+          // writeFileSync creates the file before it writes, so an existing empty file
           // reads as 0 — every iteration sleeps, not just the throwing one.
           await new Promise((r) => setTimeout(r, 200));
         }

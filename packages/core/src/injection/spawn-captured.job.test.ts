@@ -3,7 +3,6 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { system32Path } from "../win32-paths.js";
 import { sweepDescendants } from "./descendant-sweep.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import {
@@ -185,7 +184,6 @@ describe("spawnCaptured — the job wrapper seam (D4)", () => {
   });
 });
 
-const PS = system32Path("WindowsPowerShell", "v1.0", "powershell.exe");
 const isAlive = (pid: number): boolean => {
   try {
     process.kill(pid, 0);
@@ -203,19 +201,35 @@ async function untilGone(pid: number, deadlineMs = 10_000): Promise<boolean> {
   }
   return true;
 }
-/** A PowerShell child that starts a PowerShell grandchild (no libuv job in the tree) and writes its pid to a file. */
-function psTree(pidFile: string, exitAfter: boolean): string[] {
+/**
+ * A node child that spawns a **detached** node grandchild, writes the
+ * grandchild's pid to a file the moment it exists, then holds (`exitAfter`
+ * false) or exits 0. libuv puts only its non-detached children into the job it
+ * closes at exit, so the grandchild is OUTSIDE the child's libuv job — nothing
+ * but the wrapper can reach it — and INSIDE the wrapper's, whose job permits no
+ * breakaway (every descendant of a member is a member). That is the orphan
+ * class the two live cases pin. Node, not PowerShell: two PowerShell start-ups
+ * do not fit inside the timeout case's budget on the windows-2025 runners.
+ */
+function nodeTree(pidFile: string, exitAfter: boolean): string[] {
   return [
-    "-NoProfile",
-    "-NonInteractive",
-    "-Command",
-    `$p = Start-Process -FilePath '${PS}' -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep 120' -PassThru -WindowStyle Hidden; ` +
-      `Set-Content -Path '${pidFile}' -Value $p.Id; ${exitAfter ? "exit 0" : "Start-Sleep 120"}`,
+    "-e",
+    `const g = require("node:child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 120000)"], { detached: true, stdio: "ignore", windowsHide: true });
+     g.unref();
+     require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));
+     ${exitAfter ? "process.exit(0);" : "setTimeout(() => {}, 120000);"}`,
   ];
 }
 
 describe.runIf(process.platform === "win32")("spawnCaptured — the real wrapper on win32", () => {
   let dir: string;
+  /**
+   * The grandchild's pid, only ever a real one: a kill landing between the
+   * child's `writeFileSync` truncate and its write leaves a 0-byte file, whose
+   * `Number("")` is 0 — and `process.kill(0, "SIGKILL")` below would take the
+   * vitest worker itself. Guarded at both recording sites, as in
+   * `spawn-captured.lifecycle.test.ts`.
+   */
   let survivor: number | undefined;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "harpoc-spawn-job-"));
@@ -235,9 +249,9 @@ describe.runIf(process.platform === "win32")("spawnCaptured — the real wrapper
 
   it("the timeout kill through the wrapper takes a grandchild that no libuv job would have", async () => {
     const pidFile = join(dir, "g.pid");
-    const r = await spawnCaptured(PS, psTree(pidFile, false), { env: ENV, timeoutMs: 5_000 });
+    const r = await spawnCaptured(NODE, nodeTree(pidFile, false), { env: ENV, timeoutMs: 5_000 });
     const pid = Number(readFileSync(pidFile, "utf8").trim());
-    survivor = pid;
+    survivor = Number.isInteger(pid) && pid > 0 ? pid : undefined;
     expect(r).toMatchObject({ timed_out: true, tree_kill: "job" });
     expect("descendant_sweep" in r).toBe(false);
     await expect(untilGone(pid)).resolves.toBe(true);
@@ -246,9 +260,9 @@ describe.runIf(process.platform === "win32")("spawnCaptured — the real wrapper
 
   it("keep: a grandchild outliving a normal exit is left alone, as today", async () => {
     const pidFile = join(dir, "g.pid");
-    const r = await spawnCaptured(PS, psTree(pidFile, true), { env: ENV, timeoutMs: 30_000 });
+    const r = await spawnCaptured(NODE, nodeTree(pidFile, true), { env: ENV, timeoutMs: 30_000 });
     const pid = Number(readFileSync(pidFile, "utf8").trim());
-    survivor = pid;
+    survivor = Number.isInteger(pid) && pid > 0 ? pid : undefined;
     expect(r).toMatchObject({ exit_code: 0, timed_out: false, tree_kill: "job" });
     await sleep(500);
     expect(isAlive(pid)).toBe(true);
