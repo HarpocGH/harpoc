@@ -118,41 +118,51 @@ describe("spawnCaptured — the job wrapper seam (D4)", () => {
     ).toBe(false);
   });
 
-  it("the wrapper's own failure reads as spawn_failed with a null exit code", async () => {
-    wrapMock.mockImplementation(() =>
-      Promise.resolve({
-        command: NODE,
-        args: [
-          "-e",
-          "process.stderr.write('harpoc-job: CreateProcess failed: 3'); process.exit(9009)",
-        ],
-        mechanism: "job" as const,
-      }),
-    );
-    const r = await spawnCaptured("C:\\no-such\\payload.exe", ["x"], {
-      env: ENV,
-      timeoutMs: 10_000,
-    });
-    expect(r).toMatchObject({
-      spawn_failed: true,
-      exit_code: null,
-      tree_kill: "job",
-      timed_out: false,
-    });
-  });
-
-  it("a payload exiting 9009 without the marker is an ordinary exit", async () => {
-    monitorWrap();
-    const r = await spawnCaptured(
-      NODE,
-      ["-e", "process.stderr.write('mine'); process.exit(9009)"],
-      {
+  // The wrapper's reserved codes exist only where the wrapper does: a POSIX exit
+  // status is eight bits, so a stand-in's `process.exit(9009)` arrives as 49 there
+  // and the pair (code AND marker) cannot be produced off win32 — where the job
+  // tier is never set in production either.
+  it.runIf(process.platform === "win32")(
+    "the wrapper's own failure reads as spawn_failed with a null exit code",
+    async () => {
+      wrapMock.mockImplementation(() =>
+        Promise.resolve({
+          command: NODE,
+          args: [
+            "-e",
+            "process.stderr.write('harpoc-job: CreateProcess failed: 3'); process.exit(9009)",
+          ],
+          mechanism: "job" as const,
+        }),
+      );
+      const r = await spawnCaptured("C:\\no-such\\payload.exe", ["x"], {
         env: ENV,
         timeoutMs: 10_000,
-      },
-    );
-    expect(r).toMatchObject({ spawn_failed: false, exit_code: 9009, stderr: "mine" });
-  });
+      });
+      expect(r).toMatchObject({
+        spawn_failed: true,
+        exit_code: null,
+        tree_kill: "job",
+        timed_out: false,
+      });
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "a payload exiting 9009 without the marker is an ordinary exit",
+    async () => {
+      monitorWrap();
+      const r = await spawnCaptured(
+        NODE,
+        ["-e", "process.stderr.write('mine'); process.exit(9009)"],
+        {
+          env: ENV,
+          timeoutMs: 10_000,
+        },
+      );
+      expect(r).toMatchObject({ spawn_failed: false, exit_code: 9009, stderr: "mine" });
+    },
+  );
 
   it("without a wrap: tree_kill is taskkill on win32 and absent elsewhere, and the sweep path is untouched", async () => {
     wrapMock.mockResolvedValue(null);
