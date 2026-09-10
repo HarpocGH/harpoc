@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -122,13 +122,13 @@ describe("recordSeriesLine (D4, 2026-09-08)", () => {
     ]);
   });
 
-  it("takes the series file from HARPOC_SERIES_FILE when none is passed, and writes no summary without one", () => {
+  it("takes the series file from HARPOC_SERIES_FILE when none is passed, and writes nothing else", () => {
     const series = join(dir, "env-series.md");
     process.env["HARPOC_SERIES_FILE"] = series;
     const printed: string[] = [];
     recordSeriesLine(LINE, { judgedMs: 5, print: (l) => printed.push(l) });
     expect(readFileSync(series, "utf8")).toBe(`- \`${LINE}\`\n`);
-    expect(existsSync(join(dir, "summary.md"))).toBe(false);
+    expect(readdirSync(dir)).toEqual(["env-series.md"]);
     expect(printed).toEqual([LINE]);
   });
 
@@ -145,6 +145,22 @@ describe("recordSeriesLine (D4, 2026-09-08)", () => {
     expect(readFileSync(summary, "utf8")).toBe(`- \`${LINE}\`\n`);
     expect(printed[0]).toBe(LINE);
     expect(printed[1]).toMatch(/^\[series\] series file write failed: /);
+    expect(printed).toHaveLength(2);
+  });
+
+  it("reports a summary it cannot write on the print channel, still writes the series file, and never throws", () => {
+    const series = join(dir, "series.md");
+    const printed: string[] = [];
+    const outcome = recordSeriesLine(LINE, {
+      judgedMs: 1,
+      summaryPath: join(dir, "missing", "dir", "summary.md"),
+      seriesPath: series,
+      print: (l) => printed.push(l),
+    });
+    expect(outcome).toEqual({ fired: false });
+    expect(readFileSync(series, "utf8")).toBe(`- \`${LINE}\`\n`);
+    expect(printed[0]).toBe(LINE);
+    expect(printed[1]).toMatch(/^\[series\] summary write failed: /);
     expect(printed).toHaveLength(2);
   });
 });
