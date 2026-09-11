@@ -9,12 +9,14 @@
  * construction: every process a job member creates is a job member, and
  * `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` terminates them all when the last
  * handle closes. Node cannot spawn a suspended child or call the job API, so
- * a vault-authored wrapper does: `harpoc-job.exe --keep <payload> <args...>`
- * creates the job, spawns the payload suspended inside it with the inherited
- * standard handles, resumes it and exits with its exit code, handing its own
- * command-line tail to the payload verbatim. Killed by the vault, its handle
- * closes and the kernel takes the tree; on a normal exit it clears the flag
- * first, so survivors are left exactly as before (the keep ruling).
+ * a vault-authored wrapper does: `harpoc-job.exe --keep|--strict <payload>
+ * <args...>` creates the job, spawns the payload suspended inside it with the
+ * inherited standard handles, resumes it and exits with its exit code, handing
+ * its own command-line tail to the payload verbatim. Killed by the vault, its
+ * handle closes and the kernel takes the tree; on a normal exit `--keep`
+ * clears the flag first (survivors left exactly as before, the default) and
+ * `--strict` leaves it set, so the exit closes the job on every survivor (the
+ * per-secret `strict_tree_exit` policy, 2026-09-10).
  *
  * The program is C# 5 — the `csc.exe` every Windows with PowerShell 5.1
  * carries under `%SystemRoot%\Microsoft.NET\Framework64\v4.0.30319` — held
@@ -119,7 +121,7 @@ export const JOB_WRAPPER_SOURCE_SHA256 = createHash("sha256")
 export const JOB_WRAPPER_DIR_NAME = "harpoc-job";
 export const JOB_WRAPPER_EXE = "harpoc-job.exe";
 export const JOB_WRAPPER_KEEP_FLAG = "--keep";
-/** The test flip of the keep pin; never passed by the product. */
+/** Strict normal-exit mode: the job closes on the whole tree when the payload exits (D2, 2026-09-10 — `strict_tree_exit`). */
 export const JOB_WRAPPER_STRICT_FLAG = "--strict";
 /** csc under the full parallel gate measured 25 s on the windows-latest legs (2026-09-09, the Add-Type compile). */
 export const JOB_WRAPPER_COMPILE_TIMEOUT_MS = 60_000;
@@ -133,10 +135,20 @@ export const JOB_WRAPPER_FAILURE_EXIT_CODES: ReadonlySet<number> = new Set([9009
 
 export type TreeKillMechanism = "job" | "taskkill";
 
+/** The normal-exit semantics a wrap is asked for (D2, 2026-09-10): `keep` leaves survivors as before, `strict` closes the job on them. */
+export type JobWrapMode = "keep" | "strict";
+
 export interface JobWrap {
   command: string;
   args: string[];
   mechanism: "job";
+  mode: JobWrapMode;
+}
+
+/** The tier is unavailable on this host, or the platform has none; `reason` is the resolver's verdict. */
+export interface JobWrapMiss {
+  mechanism: null;
+  reason: string;
 }
 
 export type JobWrapperResolution = { exe: string } | { unavailable: string };
@@ -214,18 +226,24 @@ function defaultRunHelper(
   });
 }
 
+/** The test seam of `restrictToOwner`; production callers pass nothing. */
+export interface RestrictSeams {
+  account?: string;
+  spawnSync?: typeof spawnSync;
+}
+
 /**
  * The session file's icacls step (`session-manager.ts`'s `restrictWindowsAcl`), for a
  * directory: owner-only, inherited by what is created inside. The outcome is thrown, never
- * swallowed — the source is written, compiled and then *executed* from this directory, and the
- * first loop finds that exe on every later process without re-running the ACL step, so one
- * silently failed restriction would be permanent. The caller's catch records it as a failed
- * candidate, skips the directory and leaves the tier behind the wrapper to run.
+ * swallowed — the source is written, compiled and then *executed* from this directory, and an
+ * adopted exe is re-restricted on every process (note 4, 2026-09-10), so one silently failed
+ * restriction is never permanent. The caller's catch records it as a failed candidate, skips the
+ * directory and leaves the tier behind the wrapper to run. Exported for its pins (note 3).
  */
-function restrictToOwner(dir: string): void {
-  const account = userInfo().username;
+export function restrictToOwner(dir: string, seams: RestrictSeams = {}): void {
+  const account = seams.account ?? userInfo().username;
   if (!account) throw new Error("could not determine the current account name");
-  const res = spawnSync(
+  const res = (seams.spawnSync ?? spawnSync)(
     system32Path("icacls.exe"),
     [dir, "/inheritance:r", "/grant:r", `${account}:(OI)(CI)F`],
     {
@@ -242,6 +260,18 @@ function restrictToOwner(dir: string): void {
   }
 }
 
+/** A compiler that ran and failed, or did not complete: host-wide, so the candidate loop stops (minor 2). */
+class CompilerFailure extends Error {}
+
+/** EPERM-tolerant: a tmp exe still mapped by a rejected helper's process cannot be unlinked on win32 (minor 1). */
+function removeQuietly(path: string): void {
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    // Left behind under a per-process name; the next compile in this directory is unaffected.
+  }
+}
+
 async function compileInto(
   exe: string,
   csc: string,
@@ -249,25 +279,52 @@ async function compileInto(
 ): Promise<void> {
   const dir = dirname(exe);
   mkdirSync(dir, { recursive: true });
-  const source = join(dir, "harpoc-job.cs");
-  writeFileSync(source, JOB_WRAPPER_SOURCE, "utf8");
+  // Per-process names (note 5, 2026-09-10): a concurrent first use never
+  // truncates a source a running csc is reading. The source write doubles as
+  // the writability probe — past it, a compiler failure is host-wide.
+  const source = join(dir, `harpoc-job.${String(process.pid)}.cs`);
   const tmp = join(dir, `harpoc-job.${String(process.pid)}.tmp.exe`);
-  const { code } = await runHelper(
-    csc,
-    ["-nologo", "-optimize", "-target:exe", "-platform:anycpu", `-out:${tmp}`, source],
-    JOB_WRAPPER_COMPILE_TIMEOUT_MS,
-  );
+  writeFileSync(source, JOB_WRAPPER_SOURCE, "utf8");
+  let code: number | null;
+  try {
+    ({ code } = await runHelper(
+      csc,
+      ["-nologo", "-optimize", "-target:exe", "-platform:anycpu", `-out:${tmp}`, source],
+      JOB_WRAPPER_COMPILE_TIMEOUT_MS,
+    ));
+  } catch (err) {
+    removeQuietly(tmp);
+    removeQuietly(source);
+    throw new CompilerFailure(
+      `csc did not complete: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
   if (code !== 0) {
-    rmSync(tmp, { force: true });
-    throw new Error(`csc exited ${String(code)}`);
+    removeQuietly(tmp);
+    removeQuietly(source);
+    throw new CompilerFailure(`csc exited ${String(code)}`);
   }
   try {
     renameSync(tmp, exe);
   } catch (err) {
     // A concurrent compile won the rename, or its exe is already running: use the winner.
-    rmSync(tmp, { force: true });
-    if (!existsSync(exe)) throw err;
+    removeQuietly(tmp);
+    if (!existsSync(exe)) {
+      removeQuietly(source);
+      throw err;
+    }
   }
+  // The record beside the exe: the winner's source stands, ours is dropped.
+  const record = join(dir, "harpoc-job.cs");
+  if (!existsSync(record)) {
+    try {
+      renameSync(source, record);
+      return;
+    } catch {
+      // The winner's rename landed first.
+    }
+  }
+  removeQuietly(source);
 }
 
 async function resolve(seams: JobWrapperSeams): Promise<JobWrapperResolution> {
@@ -279,12 +336,23 @@ async function resolve(seams: JobWrapperSeams): Promise<JobWrapperResolution> {
   const dirs = seams.cacheDirs ?? jobWrapperCacheDirs();
 
   let exe: string | undefined;
-  for (const dir of dirs) {
+  let lastError = "no cache directory";
+  for (const [index, dir] of dirs.entries()) {
     const candidate = jobWrapperExePath(dir);
-    if (probeBinary(candidate)) {
-      exe = candidate;
-      break;
+    if (!probeBinary(candidate)) continue;
+    if (index > 0) {
+      // An exe outside the package's own dist is executed from that directory
+      // on every later process: re-apply the owner-only ACL before trusting it
+      // (note 4, 2026-09-10) — idempotent, one icacls per process.
+      try {
+        restrictDir(dir);
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        continue;
+      }
     }
+    exe = candidate;
+    break;
   }
   if (exe === undefined) {
     const csc = (seams.compilerCandidates ?? jobWrapperCompilerCandidates()).find((p) =>
@@ -293,7 +361,6 @@ async function resolve(seams: JobWrapperSeams): Promise<JobWrapperResolution> {
     if (csc === undefined) {
       return { unavailable: "csc.exe not found under Microsoft.NET Framework v4.0.30319" };
     }
-    let lastError = "no cache directory";
     for (const [index, dir] of dirs.entries()) {
       const candidate = jobWrapperExePath(dir);
       try {
@@ -306,6 +373,9 @@ async function resolve(seams: JobWrapperSeams): Promise<JobWrapperResolution> {
         break;
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
+        // The source was written, so this directory is writable: a compiler
+        // that then fails or hangs is the host's, not the directory's.
+        if (err instanceof CompilerFailure) break;
       }
     }
     if (exe === undefined) return { unavailable: `compile failed: ${lastError}` };
@@ -331,6 +401,30 @@ let cachedResolution: Promise<JobWrapperResolution> | null = null;
 let unavailableUntil = 0;
 let lastUnavailable = "";
 let forcedUnavailableForTests: string | null = null;
+let unavailableHandler: ((reason: string) => void) | null = null;
+let unavailableWarned = false;
+
+/**
+ * Install the host's warning for an unavailable wrapper (note 2, 2026-09-10):
+ * the engine forwards `VaultEngineOptions.onJobWrapperUnavailable` here from
+ * its constructor (the last engine constructed wins — one engine per host
+ * process). Fires at most once per process, on the first win32 verdict, never
+ * off win32 and never under the forced test seam; the latch resets with
+ * `resetJobWrapperProbeForTests`. A throwing handler never fails a spawn.
+ */
+export function setJobWrapperUnavailableHandler(handler: ((reason: string) => void) | null): void {
+  unavailableHandler = handler;
+}
+
+function notifyUnavailable(reason: string, platform: NodeJS.Platform): void {
+  if (unavailableWarned || platform !== "win32" || unavailableHandler === null) return;
+  unavailableWarned = true;
+  try {
+    unavailableHandler(reason);
+  } catch {
+    // The host's warning sink is not the vault's concern.
+  }
+}
 
 /**
  * Resolve the wrapper: an existing or freshly compiled exe that passed its
@@ -351,7 +445,7 @@ export async function resolveJobWrapper(
     const attempt: Promise<JobWrapperResolution> = resolve(seams)
       .catch(
         (err: unknown): JobWrapperResolution => ({
-          unavailable: `compile failed: ${err instanceof Error ? err.message : String(err)}`,
+          unavailable: `resolution failed: ${err instanceof Error ? err.message : String(err)}`,
         }),
       )
       .then((result) => {
@@ -359,6 +453,7 @@ export async function resolveJobWrapper(
           cachedResolution = null;
           lastUnavailable = result.unavailable;
           unavailableUntil = now() + JOB_WRAPPER_RETRY_MS;
+          notifyUnavailable(result.unavailable, seams.platform ?? process.platform);
         }
         return result;
       });
@@ -368,20 +463,24 @@ export async function resolveJobWrapper(
 }
 
 /**
- * Wrap an already-resolved command in the job wrapper, or return null when the
- * tier is unavailable (the caller runs today's taskkill + sweep path).
+ * Wrap an already-resolved command in the job wrapper in the requested
+ * normal-exit mode, or report the miss with the resolver's reason (the caller
+ * runs today's taskkill + sweep path — or, for a strict spawn on win32,
+ * refuses: D2, 2026-09-10).
  */
 export async function wrapInJob(
   command: string,
   args: readonly string[],
+  mode: JobWrapMode,
   seams?: JobWrapperSeams,
-): Promise<JobWrap | null> {
+): Promise<JobWrap | JobWrapMiss> {
   const resolved = await resolveJobWrapper(seams);
-  if ("unavailable" in resolved) return null;
+  if ("unavailable" in resolved) return { mechanism: null, reason: resolved.unavailable };
   return {
     command: resolved.exe,
-    args: [JOB_WRAPPER_KEEP_FLAG, command, ...args],
+    args: [mode === "strict" ? JOB_WRAPPER_STRICT_FLAG : JOB_WRAPPER_KEEP_FLAG, command, ...args],
     mechanism: "job",
+    mode,
   };
 }
 
@@ -389,6 +488,7 @@ export function resetJobWrapperProbeForTests(): void {
   cachedResolution = null;
   unavailableUntil = 0;
   lastUnavailable = "";
+  unavailableWarned = false;
 }
 
 /** Force the fallback tier regardless of platform. Only unavailability can be forced (tightening). */

@@ -70,6 +70,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     fs_isolation: false,
     smtp_recipient_allowlist: [],
     imap_read_only: false,
+    strict_tree_exit: false,
     ...overrides,
   };
 }
@@ -592,6 +593,42 @@ describeSsh("SshInjector output sanitization on the row (Wave 2, E70)", () => {
     );
     const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
     expect("tree_kill" in row.detail).toBe(false);
+  });
+
+  it("threads the policy's strict_tree_exit into the spawn seam and onto the row (D2, 2026-09-10)", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({ ...OK_RESULT, tree_kill: "job", strict_tree_exit: true });
+    await audited.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      policy({
+        host_allowlist: ["deploy.example.com"],
+        command_allowlist: [SSH as string],
+        strict_tree_exit: true,
+      }),
+      SSH_CONFIG,
+      "secret-1",
+    );
+    expect(spawnMock.mock.calls[0]?.[2]).toMatchObject({ strictTreeExit: true });
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail).toMatchObject({ context: "ssh", tree_kill: "job", strict_tree_exit: true });
+  });
+
+  it("writes no strict_tree_exit key when the result carries none", async () => {
+    const log = vi.fn();
+    const audited = new SshInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue(OK_RESULT);
+    await audited.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      policy({ host_allowlist: ["deploy.example.com"], command_allowlist: [SSH as string] }),
+      SSH_CONFIG,
+      "secret-1",
+    );
+    expect(spawnMock.mock.calls[0]?.[2]).not.toHaveProperty("strictTreeExit", true);
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect("strict_tree_exit" in row.detail).toBe(false);
   });
 
   it("leaves sanitized out of the row entirely when nothing was redacted", async () => {

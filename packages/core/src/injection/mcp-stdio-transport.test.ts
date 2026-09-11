@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { MAX_MCP_STDERR_BYTES } from "@harpoc/shared";
 import { StdioChildTransport } from "./mcp-stdio-transport.js";
+import type { JobWrap } from "./win32-job-wrapper.js";
 
 const NODE = process.execPath;
 
@@ -61,6 +62,191 @@ describe("StdioChildTransport — protocol round trip", () => {
     await client.close();
   });
 });
+
+describe("StdioChildTransport — close() settles on exit or close, whichever lands first (note 7, 2026-09-10)", () => {
+  it("a grandchild holding the inherited pipes cannot withhold the vault's teardown", async () => {
+    // The server starts an unref'd grandchild that inherits its stdio ('inherit'),
+    // reports the grandchild's pid on stderr, and exits on stdin end; the
+    // grandchild keeps the pipes open for 30 s. `detached` is load-bearing on
+    // win32 (I3, 2026-09-10): libuv assigns every non-detached child to its
+    // parent's kill-on-close job, so an attached grandchild would die with the
+    // server and 'close' would land with 'exit' — the pin would be vacuous on
+    // both Windows CI legs. Detached, it keeps the inherited handles and
+    // withholds 'close' on every platform. POSIX is unaffected: a new session
+    // does not change pipe inheritance.
+    const script = `
+      const g = require("node:child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "inherit", detached: true, windowsHide: true });
+      g.unref();
+      process.stderr.write("pid=" + String(g.pid) + "\\n");
+      process.stdin.on("end", () => process.exit(0));
+      process.stdin.resume();
+    `;
+    const transport = makeTransport(script);
+    await transport.start();
+    let grandchild = 0;
+    const deadline = Date.now() + 10_000;
+    while (grandchild === 0 && Date.now() < deadline) {
+      const m = transport.stderrTail.toString().match(/pid=(\d+)/);
+      if (m) grandchild = Number(m[1]);
+      else await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(grandchild).toBeGreaterThan(0);
+    const t0 = Date.now();
+    try {
+      await transport.close();
+      expect(Date.now() - t0).toBeLessThan(6_000);
+      expect(transport.pid).toBeUndefined();
+    } finally {
+      try {
+        process.kill(grandchild, "SIGKILL");
+      } catch {
+        // Gone.
+      }
+    }
+  }, 20_000);
+
+  it("settles at once when the server already exited, its pipes still held (I2)", async () => {
+    // The server dies on its own timer, never on stdin end, so the transport's
+    // own 'close' listener has not run and `this.child` is still set — there is
+    // no future 'exit' left for close() to observe. 'whichever lands first'
+    // includes one that landed before the call (note 7).
+    const script = `
+      const g = require("node:child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "inherit", detached: true, windowsHide: true });
+      g.unref();
+      process.stderr.write("pid=" + String(g.pid) + "\\n");
+      setTimeout(() => process.exit(0), 200);
+    `;
+    const transport = makeTransport(script);
+    await transport.start();
+    let grandchild = 0;
+    const deadline = Date.now() + 10_000;
+    while (grandchild === 0 && Date.now() < deadline) {
+      const m = transport.stderrTail.toString().match(/pid=(\d+)/);
+      if (m) grandchild = Number(m[1]);
+      else await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(grandchild).toBeGreaterThan(0);
+    // Well past the server's own exit, and well short of the grandchild's life.
+    await new Promise((r) => setTimeout(r, 1_000));
+    const t0 = Date.now();
+    try {
+      expect(transport.exitInfo).toBeNull();
+      await transport.close();
+      expect(Date.now() - t0).toBeLessThan(6_000);
+      expect(transport.pid).toBeUndefined();
+    } finally {
+      try {
+        process.kill(grandchild, "SIGKILL");
+      } catch {
+        // Gone.
+      }
+    }
+  }, 20_000);
+});
+
+describe.runIf(process.platform !== "win32")(
+  "StdioChildTransport — the POSIX arm of strict_tree_exit (D2, 2026-09-10)",
+  () => {
+    it("a strict server leads its own process group, killed when the server exits", async () => {
+      const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
+      const { tmpdir } = await import("node:os");
+      const { join } = await import("node:path");
+      const dir = mkdtempSync(join(tmpdir(), "harpoc-mcp-strict-"));
+      const pidFile = join(dir, "g.pid");
+      const script = `const g = require("node:child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 120000)"], { stdio: "ignore" });
+      g.unref();
+      require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));
+      process.stdin.on("end", () => process.exit(0));
+      process.stdin.resume();`;
+      const transport = new StdioChildTransport({
+        resolvedCommand: NODE,
+        args: ["-e", script],
+        env: { PATH: process.env.PATH ?? "" },
+        strictTreeExit: true,
+      });
+      await transport.start();
+      let pid = 0;
+      let alive = true;
+      try {
+        const deadline = Date.now() + 20_000;
+        while (Date.now() < deadline && pid === 0) {
+          try {
+            pid = Number(readFileSync(pidFile, "utf8").trim());
+          } catch {
+            // Not written yet.
+          }
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        expect(pid).toBeGreaterThan(0);
+        await transport.close();
+        const gone = Date.now() + 10_000;
+        while (alive && Date.now() < gone) {
+          try {
+            process.kill(pid, 0);
+            await new Promise((r) => setTimeout(r, 250));
+          } catch {
+            alive = false;
+          }
+        }
+      } finally {
+        if (pid > 0 && alive) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            // Gone.
+          }
+        }
+        rmSync(dir, { recursive: true, force: true });
+      }
+      expect(alive).toBe(false);
+    }, 60_000);
+  },
+);
+
+describe.runIf(process.platform === "win32")(
+  "StdioChildTransport — the wrapper's own failure (note 1, 2026-09-10)",
+  () => {
+    it("under the job tier, a reserved code plus the marker is a null exit with the marker line", async () => {
+      const transport = new StdioChildTransport({
+        resolvedCommand: NODE,
+        args: [
+          "-e",
+          "process.stderr.write('harpoc-job: CreateProcess failed: 3\\r\\n'); process.exit(9009)",
+        ],
+        env: { PATH: process.env.PATH ?? "" },
+        treeKill: "job",
+      });
+      const closed = new Promise<void>((resolve) => {
+        transport.onclose = () => resolve();
+      });
+      await transport.start();
+      await closed;
+      expect(transport.exitInfo).toEqual({
+        code: null,
+        signal: null,
+        wrapper_failure: "harpoc-job: CreateProcess failed: 3",
+      });
+    });
+
+    it("on the taskkill tier the same exit is an ordinary 9009", async () => {
+      const transport = new StdioChildTransport({
+        resolvedCommand: NODE,
+        args: [
+          "-e",
+          "process.stderr.write('harpoc-job: CreateProcess failed: 3'); process.exit(9009)",
+        ],
+        env: { PATH: process.env.PATH ?? "" },
+        treeKill: "taskkill",
+      });
+      const closed = new Promise<void>((resolve) => {
+        transport.onclose = () => resolve();
+      });
+      await transport.start();
+      await closed;
+      expect(transport.exitInfo).toEqual({ code: 9009, signal: null });
+    });
+  },
+);
 
 describe("StdioChildTransport — exit forensics", () => {
   it("records exitInfo BEFORE onclose fires", async () => {
@@ -338,11 +524,11 @@ describe.runIf(process.platform === "win32")(
         g.unref();
         require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));
         setTimeout(() => {}, 120000);`;
-      const wrap = await wrapInJob(NODE, ["-e", script]);
-      expect(wrap).not.toBeNull();
+      const wrap = await wrapInJob(NODE, ["-e", script], "keep");
+      expect(wrap.mechanism).toBe("job");
       const transport = new StdioChildTransport({
-        resolvedCommand: (wrap as { command: string }).command,
-        args: (wrap as { args: string[] }).args,
+        resolvedCommand: (wrap as JobWrap).command,
+        args: (wrap as JobWrap).args,
         env: { PATH: process.env.PATH ?? "" },
       });
       await transport.start();

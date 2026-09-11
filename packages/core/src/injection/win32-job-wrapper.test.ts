@@ -1,4 +1,13 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import type { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +18,7 @@ import {
   JOB_WRAPPER_RETRY_MS,
   JOB_WRAPPER_SOURCE,
   JOB_WRAPPER_SOURCE_SHA256,
+  JOB_WRAPPER_STRICT_FLAG,
   forceJobWrapperUnavailableForTests,
   isJobWrapperFailure,
   jobWrapperCacheDirs,
@@ -16,9 +26,11 @@ import {
   jobWrapperExePath,
   resetJobWrapperProbeForTests,
   resolveJobWrapper,
+  restrictToOwner,
+  setJobWrapperUnavailableHandler,
   wrapInJob,
 } from "./win32-job-wrapper.js";
-import type { JobWrapperSeams } from "./win32-job-wrapper.js";
+import type { JobWrap, JobWrapperSeams } from "./win32-job-wrapper.js";
 
 const TRICKY = [
   "a b",
@@ -73,7 +85,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.useRealTimers();
   resetJobWrapperProbeForTests();
   forceJobWrapperUnavailableForTests(null);
   rmSync(dir, { recursive: true, force: true });
@@ -115,7 +126,6 @@ describe("resolveJobWrapper", () => {
 
   it("uses an existing exe from the first cache dir and only runs the probe", async () => {
     const exe = jobWrapperExePath(join(dir, "dist-win32"));
-    const { mkdirSync } = await import("node:fs");
     mkdirSync(join(exe, ".."), { recursive: true });
     writeFileSync(exe, "MZ-existing");
     const r = await resolveJobWrapper(seams());
@@ -126,6 +136,34 @@ describe("resolveJobWrapper", () => {
       args: [JOB_WRAPPER_KEEP_FLAG, expect.stringMatching(/cmd\.exe$/), "/c", "exit"],
       timeoutMs: JOB_WRAPPER_PROBE_TIMEOUT_MS,
     });
+  });
+
+  it("re-applies the owner-only ACL before adopting an exe from the home helpers dir (note 4)", async () => {
+    writeFileSync(join(dir, "dist-win32"), "a file where the dir should be");
+    const exe = jobWrapperExePath(join(dir, "home-helpers"));
+    mkdirSync(join(exe, ".."), { recursive: true });
+    writeFileSync(exe, "MZ-existing");
+    const restricted: string[] = [];
+    const r = await resolveJobWrapper(seams({ restrictDir: (d) => restricted.push(d) }));
+    expect(r).toEqual({ exe });
+    expect(restricted).toEqual([join(dir, "home-helpers")]);
+    expect(calls.filter((c) => c.command.endsWith("csc.exe"))).toHaveLength(0);
+  });
+
+  it("skips an adopted home-helpers exe whose ACL step fails, and compiles nothing there", async () => {
+    writeFileSync(join(dir, "dist-win32"), "a file where the dir should be");
+    const exe = jobWrapperExePath(join(dir, "home-helpers"));
+    mkdirSync(join(exe, ".."), { recursive: true });
+    writeFileSync(exe, "MZ-existing");
+    const r = await resolveJobWrapper(
+      seams({
+        restrictDir: () => {
+          throw new Error("icacls exited 5");
+        },
+      }),
+    );
+    expect(r).toEqual({ unavailable: expect.stringMatching(/icacls exited 5/) });
+    expect(calls).toHaveLength(0);
   });
 
   it("compiles into the first cache dir when the exe is missing, writing the source beside it", async () => {
@@ -141,11 +179,60 @@ describe("resolveJobWrapper", () => {
         "-target:exe",
         "-platform:anycpu",
         expect.stringMatching(/^-out:.*harpoc-job\.\d+\.tmp\.exe$/),
-        join(exe, "..", "harpoc-job.cs"),
+        expect.stringMatching(/harpoc-job\.\d+\.cs$/),
       ],
       timeoutMs: JOB_WRAPPER_COMPILE_TIMEOUT_MS,
     });
     expect(existsSync(exe)).toBe(true);
+    expect(readdirSync(join(exe, ".."))).toEqual(["harpoc-job.cs", "harpoc-job.exe"]);
+  });
+
+  it("a csc failure breaks the candidate loop — one compile, not one per directory (minor 2)", async () => {
+    const r = await resolveJobWrapper(seams({ runHelper: fakeHelper(1) }));
+    expect(r).toEqual({ unavailable: "compile failed: csc exited 1" });
+    expect(calls.filter((c) => c.command.endsWith("csc.exe"))).toHaveLength(1);
+    expect(existsSync(join(dir, "home-helpers"))).toBe(false);
+    expect(
+      readdirSync(join(dir, "dist-win32", "harpoc-job", JOB_WRAPPER_SOURCE_SHA256.slice(0, 16))),
+    ).toEqual([]);
+  });
+
+  it("a csc that does not complete removes its tmp exe and source, and breaks the loop too (minor 1)", async () => {
+    const r = await resolveJobWrapper(
+      seams({
+        runHelper: (command, args, timeoutMs) => {
+          calls.push({ command, args, timeoutMs });
+          const out = args.find((a) => a.startsWith("-out:"))?.slice(5);
+          if (out) writeFileSync(out, "MZ-partial");
+          return Promise.reject(new Error("job wrapper helper timed out"));
+        },
+      }),
+    );
+    expect(r).toEqual({
+      unavailable: "compile failed: csc did not complete: job wrapper helper timed out",
+    });
+    expect(calls).toHaveLength(1);
+    expect(
+      readdirSync(join(dir, "dist-win32", "harpoc-job", JOB_WRAPPER_SOURCE_SHA256.slice(0, 16))),
+    ).toEqual([]);
+  });
+
+  it("a source write that fails moves to the next candidate — the write is the writability probe", async () => {
+    writeFileSync(join(dir, "dist-win32"), "a file where the dir should be");
+    const r = await resolveJobWrapper(seams());
+    expect(r).toEqual({ exe: jobWrapperExePath(join(dir, "home-helpers")) });
+    expect(calls.filter((c) => c.command.endsWith("csc.exe"))).toHaveLength(1);
+  });
+
+  it("labels a throw outside the compile as a resolution failure (minor 3)", async () => {
+    const r = await resolveJobWrapper(
+      seams({
+        probeBinary: () => {
+          throw new Error("boom");
+        },
+      }),
+    );
+    expect(r).toEqual({ unavailable: "resolution failed: boom" });
   });
 
   it("falls through to the home helpers dir, restricted to the owner, when the first dir is not writable", async () => {
@@ -213,7 +300,7 @@ describe("resolveJobWrapper", () => {
     const r = await resolveJobWrapper(
       seams({ runHelper: () => Promise.reject(new Error("boom")) }),
     );
-    expect(r).toEqual({ unavailable: "compile failed: boom" });
+    expect(r).toEqual({ unavailable: "compile failed: csc did not complete: boom" });
   });
 
   it("honours the forced-unavailable seam ahead of everything", async () => {
@@ -223,18 +310,141 @@ describe("resolveJobWrapper", () => {
   });
 });
 
+describe("the unavailable handler (note 2, 2026-09-10)", () => {
+  afterEach(() => setJobWrapperUnavailableHandler(null));
+
+  it("fires once per process, on the first win32 unavailable verdict, with the reason", async () => {
+    const seen: string[] = [];
+    setJobWrapperUnavailableHandler((reason) => seen.push(reason));
+    let now = 1_000_000;
+    const s = seams({ runHelper: fakeHelper(0, 1), now: () => now });
+    expect(await resolveJobWrapper(s)).toEqual({ unavailable: "probe run exited 1" });
+    expect(await resolveJobWrapper(s)).toEqual({ unavailable: "probe run exited 1" });
+    now += JOB_WRAPPER_RETRY_MS + 1;
+    expect(await resolveJobWrapper(seams({ runHelper: fakeHelper(0, 2), now: () => now }))).toEqual(
+      {
+        unavailable: "probe run exited 2",
+      },
+    );
+    expect(seen).toEqual(["probe run exited 1"]);
+  });
+
+  it("never fires off win32, under the forced seam, or when no handler is installed", async () => {
+    const seen: string[] = [];
+    setJobWrapperUnavailableHandler((reason) => seen.push(reason));
+    await resolveJobWrapper(seams({ platform: "linux" }));
+    forceJobWrapperUnavailableForTests("test: forced");
+    await resolveJobWrapper(seams());
+    forceJobWrapperUnavailableForTests(null);
+    expect(seen).toEqual([]);
+    setJobWrapperUnavailableHandler(null);
+    resetJobWrapperProbeForTests();
+    await expect(resolveJobWrapper(seams({ runHelper: fakeHelper(0, 1) }))).resolves.toEqual({
+      unavailable: "probe run exited 1",
+    });
+  });
+
+  it("a throwing handler never fails the resolution, and the latch resets with the probe", async () => {
+    setJobWrapperUnavailableHandler(() => {
+      throw new Error("sink broke");
+    });
+    await expect(resolveJobWrapper(seams({ runHelper: fakeHelper(0, 1) }))).resolves.toEqual({
+      unavailable: "probe run exited 1",
+    });
+    const seen: string[] = [];
+    setJobWrapperUnavailableHandler((reason) => seen.push(reason));
+    resetJobWrapperProbeForTests();
+    await resolveJobWrapper(seams({ runHelper: fakeHelper(0, 3) }));
+    expect(seen).toEqual(["probe run exited 3"]);
+  });
+});
+
+describe("restrictToOwner (note 3, 2026-09-10)", () => {
+  const ok = { status: 0, error: undefined, stdout: Buffer.from(""), stderr: Buffer.from("") };
+  it("grants the account owner-only, inheritable, through icacls pinned under System32", () => {
+    const spawned: Array<{ command: string; args: string[] }> = [];
+    restrictToOwner("C:\\cache", {
+      account: "alice",
+      spawnSync: ((command: string, args: string[]) => {
+        spawned.push({ command, args });
+        return ok;
+      }) as unknown as typeof spawnSync,
+    });
+    expect(spawned).toEqual([
+      {
+        command: expect.stringMatching(/[\\/]System32[\\/]icacls\.exe$/),
+        args: ["C:\\cache", "/inheritance:r", "/grant:r", "alice:(OI)(CI)F"],
+      },
+    ]);
+  });
+
+  it("throws on an empty account name before spawning anything", () => {
+    const spawn = vi.fn(() => ok);
+    expect(() =>
+      restrictToOwner("C:\\cache", {
+        account: "",
+        spawnSync: spawn as unknown as typeof spawnSync,
+      }),
+    ).toThrow(/could not determine the current account name/);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("rethrows a spawn error, and turns a non-zero exit into a message with the capped detail", () => {
+    expect(() =>
+      restrictToOwner("C:\\cache", {
+        account: "alice",
+        spawnSync: (() => ({
+          ...ok,
+          error: new Error("spawnSync icacls ENOENT"),
+        })) as unknown as typeof spawnSync,
+      }),
+    ).toThrow(/spawnSync icacls ENOENT/);
+    expect(() =>
+      restrictToOwner("C:\\cache", {
+        account: "alice",
+        spawnSync: (() => ({
+          ...ok,
+          status: 5,
+          stderr: Buffer.from("x".repeat(300)),
+        })) as unknown as typeof spawnSync,
+      }),
+    ).toThrow(new RegExp(`^icacls exited 5: x{200}$`));
+  });
+});
+
 describe("wrapInJob", () => {
-  it("prefixes --keep and the payload, args untouched", async () => {
-    const wrap = await wrapInJob("C:\\bin\\tool.exe", ["a b", 'c"d', ""], seams());
+  it("prefixes --keep and the payload in keep mode, args untouched", async () => {
+    const wrap = await wrapInJob("C:\\bin\\tool.exe", ["a b", 'c"d', ""], "keep", seams());
     expect(wrap).toEqual({
       command: jobWrapperExePath(join(dir, "dist-win32")),
       args: [JOB_WRAPPER_KEEP_FLAG, "C:\\bin\\tool.exe", "a b", 'c"d', ""],
       mechanism: "job",
+      mode: "keep",
     });
   });
 
-  it("returns null when unavailable", async () => {
-    expect(await wrapInJob("x", [], seams({ platform: "darwin" }))).toBeNull();
+  it("prefixes --strict in strict mode; the probe run stays --keep (D2, 2026-09-10)", async () => {
+    const wrap = await wrapInJob("C:\\bin\\tool.exe", ["x"], "strict", seams());
+    expect(wrap).toEqual({
+      command: jobWrapperExePath(join(dir, "dist-win32")),
+      args: [JOB_WRAPPER_STRICT_FLAG, "C:\\bin\\tool.exe", "x"],
+      mechanism: "job",
+      mode: "strict",
+    });
+    const probe = calls.find((c) => c.command.endsWith("harpoc-job.exe"));
+    expect(probe?.args[0]).toBe(JOB_WRAPPER_KEEP_FLAG);
+  });
+
+  it("a miss carries the resolver's reason", async () => {
+    expect(await wrapInJob("x", [], "keep", seams({ platform: "darwin" }))).toEqual({
+      mechanism: null,
+      reason: "unsupported platform: darwin",
+    });
+    resetJobWrapperProbeForTests();
+    expect(await wrapInJob("x", [], "strict", seams({ runHelper: fakeHelper(0, 9010) }))).toEqual({
+      mechanism: null,
+      reason: "probe run exited 9010",
+    });
   });
 });
 
@@ -258,34 +468,33 @@ describe.runIf(process.platform === "win32")("win32 — the real wrapper", () =>
     const wrap = await wrapInJob(
       process.execPath,
       ["-e", "console.log(JSON.stringify(process.argv.slice(1)))", "--", ...TRICKY],
+      "keep",
       { cacheDirs: [join(dir, "live")] },
     );
-    expect(wrap).not.toBeNull();
+    expect(wrap.mechanism).toBe("job");
     const { spawnSync } = await import("node:child_process");
     const direct = spawnSync(
       process.execPath,
       ["-e", "console.log(JSON.stringify(process.argv.slice(1)))", "--", ...TRICKY],
       { windowsHide: true, encoding: "utf8" },
     );
-    const wrapped = spawnSync(
-      (wrap as { command: string }).command,
-      (wrap as { args: string[] }).args,
-      { windowsHide: true, encoding: "utf8" },
-    );
+    const wrapped = spawnSync((wrap as JobWrap).command, (wrap as JobWrap).args, {
+      windowsHide: true,
+      encoding: "utf8",
+    });
     expect(wrapped.status).toBe(0);
     expect(wrapped.stdout).toBe(direct.stdout);
   }, 120_000);
 
   it("a missing payload is the wrapper's 9009 with the marker", async () => {
-    const wrap = await wrapInJob("C:\\harpoc-no-such\\app.exe", ["x"], {
+    const wrap = await wrapInJob("C:\\harpoc-no-such\\app.exe", ["x"], "keep", {
       cacheDirs: [join(dir, "live")],
     });
     const { spawnSync } = await import("node:child_process");
-    const res = spawnSync(
-      (wrap as { command: string }).command,
-      (wrap as { args: string[] }).args,
-      { windowsHide: true, encoding: "utf8" },
-    );
+    const res = spawnSync((wrap as JobWrap).command, (wrap as JobWrap).args, {
+      windowsHide: true,
+      encoding: "utf8",
+    });
     expect(res.status).toBe(9009);
     expect(isJobWrapperFailure(res.status, res.stderr)).toBe(true);
   }, 60_000);

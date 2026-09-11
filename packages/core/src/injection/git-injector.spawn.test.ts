@@ -95,6 +95,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     fs_isolation: false,
     smtp_recipient_allowlist: [],
     imap_read_only: false,
+    strict_tree_exit: false,
     ...overrides,
   };
 }
@@ -509,6 +510,46 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
     );
     const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
     expect("tree_kill" in row.detail).toBe(false);
+  });
+
+  it("threads the policy's strict_tree_exit into the https spawn seam and onto the row (D2, 2026-09-10)", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({ ...OK_RESULT, tree_kill: "job", strict_tree_exit: true });
+    await audited.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      policy({
+        command_allowlist: [GIT as string],
+        url_allowlist: ["https://8.8.8.8/*"],
+        strict_tree_exit: true,
+      }),
+      undefined,
+      "secret-1",
+    );
+    expect(spawnMock.mock.calls[0]?.[2]).toMatchObject({ strictTreeExit: true });
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail).toMatchObject({
+      transport: "https",
+      tree_kill: "job",
+      strict_tree_exit: true,
+    });
+  });
+
+  it("writes no strict_tree_exit key on the https row when the result carries none", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue(OK_RESULT);
+    await audited.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      undefined,
+      "secret-1",
+    );
+    expect(spawnMock.mock.calls[0]?.[2]).not.toHaveProperty("strictTreeExit", true);
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect("strict_tree_exit" in row.detail).toBe(false);
   });
 
   it("binds the credential to the validated host", async () => {
@@ -1075,6 +1116,8 @@ describeGitSsh("GitInjector SSH-transport network isolation (review fixes T1/F8)
       host_allowlist: ["github.com"],
       network_isolation: true,
     });
+  const plainSshPolicy = () =>
+    policy({ command_allowlist: [GIT as string], host_allowlist: ["github.com"] });
 
   beforeEach(() => {
     spawnMock.mockReset();
@@ -1143,7 +1186,7 @@ describeGitSsh("GitInjector SSH-transport network isolation (review fixes T1/F8)
     await audited.executeWithSecret(
       sshAction,
       new Uint8Array(Buffer.from(sshKeyPem)),
-      isolatedSshPolicy(),
+      plainSshPolicy(),
       sshConfig,
       "secret-1",
     );
@@ -1158,12 +1201,48 @@ describeGitSsh("GitInjector SSH-transport network isolation (review fixes T1/F8)
     await audited.executeWithSecret(
       sshAction,
       new Uint8Array(Buffer.from(sshKeyPem)),
-      isolatedSshPolicy(),
+      plainSshPolicy(),
       sshConfig,
       "secret-1",
     );
     const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
     expect("tree_kill" in row.detail).toBe(false);
+  });
+
+  it("threads the policy's strict_tree_exit into the ssh-transport spawn seam and onto the row (D2, 2026-09-10)", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue({ ...OK_RESULT, tree_kill: "job", strict_tree_exit: true });
+    await audited.executeWithSecret(
+      sshAction,
+      new Uint8Array(Buffer.from(sshKeyPem)),
+      { ...plainSshPolicy(), strict_tree_exit: true },
+      sshConfig,
+      "secret-1",
+    );
+    expect(spawnMock.mock.calls[0]?.[2]).toMatchObject({ strictTreeExit: true });
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail).toMatchObject({
+      transport: "ssh",
+      tree_kill: "job",
+      strict_tree_exit: true,
+    });
+  });
+
+  it("writes no strict_tree_exit key on the ssh-transport row when the result carries none", async () => {
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    spawnMock.mockResolvedValue(OK_RESULT);
+    await audited.executeWithSecret(
+      sshAction,
+      new Uint8Array(Buffer.from(sshKeyPem)),
+      plainSshPolicy(),
+      sshConfig,
+      "secret-1",
+    );
+    expect(spawnMock.mock.calls[0]?.[2]).not.toHaveProperty("strictTreeExit", true);
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect("strict_tree_exit" in row.detail).toBe(false);
   });
 
   it("audits and rethrows the fail-closed refusal from the seam (transport ssh)", async () => {

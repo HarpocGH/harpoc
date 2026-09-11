@@ -28,6 +28,11 @@ export function createEngine(vaultDir: string): VaultEngine {
     onSessionFilePermissionRepairFailure: (error) => {
       console.error(`Warning: ${error.message}`);
     },
+    onJobWrapperUnavailable: (reason) => {
+      console.error(
+        `Warning: the Windows job wrapper is unavailable (${reason}); spawns run on the taskkill tier and strict_tree_exit secrets refuse`,
+      );
+    },
   });
 }
 

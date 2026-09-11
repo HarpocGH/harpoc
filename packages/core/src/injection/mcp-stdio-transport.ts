@@ -3,11 +3,19 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { MAX_MCP_STDERR_BYTES, MAX_MCP_STDOUT_BUFFER_BYTES } from "@harpoc/shared";
 import { CappedOutput } from "./capped-output.js";
+import type { TreeKillMechanism } from "./win32-job-wrapper.js";
+import { isJobWrapperFailure } from "./win32-job-wrapper.js";
 
 /** Exit code/signal of a terminated downstream MCP server child. */
 export interface ChildExitInfo {
   code: number | null;
   signal: string | null;
+  /**
+   * The wrapper's own failure line (2026-09-10): the reserved exit code plus
+   * the `harpoc-job: ` marker under the job tier — the server never started.
+   * `code` and `signal` are null then, as for a Node-level spawn failure.
+   */
+  wrapper_failure?: string;
 }
 
 export interface StdioChildParams {
@@ -20,10 +28,28 @@ export interface StdioChildParams {
   /** Clean environment (buildCleanEnv output) carrying the injected credential. */
   env: Record<string, string>;
   cwd?: string;
+  /** The tier the launch runs under (2026-09-10); under `job` a reserved exit is checked for the wrapper's marker. */
+  treeKill?: TreeKillMechanism;
+  /**
+   * The policy's strict tree exit (D2, 2026-09-10): on POSIX the server is
+   * spawned `detached` — its own process group — and the group is killed when
+   * the server exits, on its own or under close(). Off POSIX the job does it.
+   */
+  strictTreeExit?: boolean;
 }
 
 /** Grace period between shutdown escalation steps (stdin end → SIGTERM → SIGKILL). */
 const CLOSE_GRACE_MS = 2_000;
+
+/**
+ * Cap on the wrapper-failure line kept in `exitInfo` (I1, 2026-09-10). The
+ * line is downstream stderr — a payload faking the reserved exit code and the
+ * marker chooses it — and it reaches a `VaultError` message, hence the model's
+ * tool-result text and the REST error body. `stderrTail` bounds it only at
+ * `MAX_MCP_STDERR_BYTES` (64 KiB); a diagnostic line needs far less, and the
+ * wrapper's own lines are under 100 characters.
+ */
+const MAX_WRAPPER_FAILURE_CHARS = 512;
 
 type McpStdioModule = typeof import("@modelcontextprotocol/sdk/shared/stdio.js");
 
@@ -89,6 +115,7 @@ export class StdioChildTransport implements Transport {
         env: this.params.env,
         cwd: this.params.cwd,
         windowsHide: true,
+        detached: this.params.strictTreeExit === true && process.platform !== "win32",
         stdio: ["pipe", "pipe", "pipe"],
       });
       this.child = child;
@@ -117,8 +144,32 @@ export class StdioChildTransport implements Transport {
       // send()'s callback; exit forensics arrive via 'close'.
       child.stdin?.on("error", () => {});
 
+      if (this.params.strictTreeExit === true && process.platform !== "win32") {
+        child.on("exit", () => {
+          // The POSIX arm (D2): the server led its own group; nothing it
+          // started outlives it. ESRCH means nobody was left.
+          if (child.pid === undefined) return;
+          try {
+            process.kill(-child.pid, "SIGKILL");
+          } catch {
+            // The group is empty, or already gone.
+          }
+        });
+      }
+
       child.on("close", (code, signal) => {
-        this.exitInfo = { code, signal };
+        const stderrHead = this.stderrTail.toString();
+        const wrapperFailed =
+          this.params.treeKill === "job" && isJobWrapperFailure(code, stderrHead);
+        this.exitInfo = wrapperFailed
+          ? {
+              code: null,
+              signal: null,
+              wrapper_failure: (stderrHead.split(/\r?\n/, 1)[0] ?? stderrHead)
+                .trim()
+                .slice(0, MAX_WRAPPER_FAILURE_CHARS),
+            }
+          : { code, signal };
         this.child = null;
         this.stdoutBuffer = Buffer.alloc(0);
         this.onclose?.();
@@ -148,19 +199,40 @@ export class StdioChildTransport implements Transport {
     if (!child) return;
 
     await new Promise<void>((resolve) => {
+      // An exit that ALREADY fired is the one that landed first (I2,
+      // 2026-09-10): a server that died on its own while a grandchild held the
+      // pipes never ran the 'close' listener, so `this.child` is still set and
+      // there is no future 'exit' left to observe. Waiting on 'close' alone
+      // would block the caller — and burn the shutdown budget — for the
+      // grandchild's life, while the escalation timers signalled a dead pid.
+      if (child.exitCode !== null || child.signalCode !== null) {
+        child.stdin?.end();
+        resolve();
+        return;
+      }
+
       const term = setTimeout(() => child.kill("SIGTERM"), CLOSE_GRACE_MS);
       const kill = setTimeout(() => child.kill("SIGKILL"), CLOSE_GRACE_MS * 2);
       if (term.unref) term.unref();
       if (kill.unref) kill.unref();
 
-      child.once("close", () => {
+      // 'exit' or 'close', whichever lands first (note 7, 2026-09-10): a
+      // grandchild holding the inherited pipes can withhold 'close' for its
+      // whole life on the unwrapped tier; after SIGKILL 'exit' is certain.
+      let done = false;
+      const settle = (): void => {
+        if (done) return;
+        done = true;
         clearTimeout(term);
         clearTimeout(kill);
         resolve();
-      });
+      };
+      child.once("exit", settle);
+      child.once("close", settle);
 
       child.stdin?.end();
     });
+    this.child = null;
   }
 
   /** Best-effort synchronous kill for seal paths that cannot await. */

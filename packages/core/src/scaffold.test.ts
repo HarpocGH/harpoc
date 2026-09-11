@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -23,4 +24,20 @@ describe("core", () => {
     expect(pkg.scripts["build"]).toBe("tsc && node scripts/build-win32-helper.mjs");
     expect(existsSync(resolve(pkgRoot, "scripts", "build-win32-helper.mjs"))).toBe(true);
   });
+
+  it("the build helper exits 0 on every platform — it never fails the build (R8, 2026-09-10)", () => {
+    const res = spawnSync(
+      process.execPath,
+      [resolve(pkgRoot, "scripts", "build-win32-helper.mjs")],
+      {
+        cwd: pkgRoot,
+        encoding: "utf8",
+        timeout: 120_000,
+        windowsHide: true,
+      },
+    );
+    expect(res.status).toBe(0);
+    if (process.platform === "win32") expect(res.stdout + res.stderr).toMatch(/^\[harpoc-job\] /m);
+    else expect(res.stdout + res.stderr).toBe("");
+  }, 130_000);
 });

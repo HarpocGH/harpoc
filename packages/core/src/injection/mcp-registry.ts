@@ -53,6 +53,8 @@ export interface McpConnectionEntry {
    * HTTP entries carry both false; the flags do not apply to them.
    */
   isolation: IsolationDimensions;
+  /** Whether the child was spawned under the policy's strict tree exit (D2, 2026-09-10) — the same backstop shape as `isolation`. */
+  strictTreeExit: boolean;
   spawnedAt: number;
   /**
    * Epoch ms of the last `acquire` that returned this entry — stamped by the
@@ -233,7 +235,17 @@ export class McpConnectionRegistry {
     if (this.live.get(secretId) === entry) {
       this.live.delete(secretId);
     }
-    this.connections.delete(secretId);
+    // Only an UNEXPECTED close frees the slot (C1, 2026-09-10). Every
+    // deliberate teardown already removed it before this hook can run
+    // (`terminate`, `closeAll`, `killAllSync`, and the generation branch via
+    // `acquire`'s catch; `sweepIdle` goes through `terminate`), and a
+    // terminated child's 'close' can land arbitrarily late — a grandchild
+    // holding its inherited pipes withholds it for its whole life, which is
+    // exactly why close() settles on 'exit' (note 7). Deleting then would
+    // evict the SUCCESSOR's slot: the next call would miss, spawn a third
+    // child and overwrite `live`, leaving a credential-bearing child in
+    // neither map, reachable by no terminate, seal or sweep path.
+    if (entry.state !== "closing") this.connections.delete(secretId);
     this.stopSweepIfIdle();
     entry.dispose?.();
 
@@ -251,6 +263,7 @@ export class McpConnectionRegistry {
         transport: entry.transportKind,
         exit_code: exit?.code ?? null,
         signal: exit?.signal ?? null,
+        ...(exit?.wrapper_failure !== undefined ? { spawn_failed: true } : {}),
         uptime_ms: Date.now() - entry.spawnedAt,
         stderr_tail: this.sanitizedStderrTail(entry),
       },
@@ -330,22 +343,33 @@ export class McpConnectionRegistry {
     }
   }
 
-  /**
-   * Downstream stderr may contain the credential — a server logging its own
-   * environment is a common debug accident, and the audit detail is durable
-   * and served to admin-scoped MCP clients, which otherwise have no path to
-   * any secret value. Pattern sanitization alone does not recognize an
-   * arbitrary credential, so the tail is first passed through exact-value
-   * redaction against the value that was injected into this very child
-   * (`redact`, supplied by the injector that holds it), exactly as the result
-   * path does; the pattern pass and the cap then still apply.
-   */
+  /** The crash row's stderr tail — see `sanitizeDownstreamStderr`. */
   private sanitizedStderrTail(entry: McpConnectionEntry): string | undefined {
     const raw = entry.stdioTransport?.stderrTail.toString();
     if (!raw) return undefined;
-    const tail = raw.slice(-CRASH_STDERR_TAIL_BYTES);
-    const exact = entry.redact ? redactSecretEncodings(tail, entry.redact) : tail;
-    const guard = new InjectionGuard();
-    return guard.sanitize(exact);
+    return sanitizeDownstreamStderr(raw, entry.redact);
   }
+}
+
+/**
+ * Downstream stderr may contain the credential — a server logging its own
+ * environment is a common debug accident, and the audit detail is durable
+ * and served to admin-scoped MCP clients, which otherwise have no path to
+ * any secret value. Pattern sanitization alone does not recognize an
+ * arbitrary credential, so the text is first passed through exact-value
+ * redaction against the value that was injected into this very child
+ * (`redact`, supplied by the injector that holds it), exactly as the result
+ * path does; the pattern pass and the cap then still apply.
+ *
+ * Exported because the injector's two wrapper-failure sites put downstream
+ * stderr into a thrown `VaultError` message (I1, 2026-09-10), which reaches
+ * the model as tool-result text and the REST client as an error body — a
+ * surface no result-shaped redaction sees. They give it this same treatment
+ * rather than a third variant of it.
+ */
+export function sanitizeDownstreamStderr(raw: string, redact: string | undefined): string {
+  const tail = raw.slice(-CRASH_STDERR_TAIL_BYTES);
+  const exact = redact ? redactSecretEncodings(tail, redact) : tail;
+  const guard = new InjectionGuard();
+  return guard.sanitize(exact);
 }

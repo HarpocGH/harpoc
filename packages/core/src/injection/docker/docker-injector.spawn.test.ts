@@ -40,6 +40,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     fs_isolation: false,
     smtp_recipient_allowlist: [],
     imap_read_only: false,
+    strict_tree_exit: false,
     ...overrides,
   };
 }
@@ -300,6 +301,32 @@ it("leaves treeKill off the envelope when the result carries none (POSIX)", asyn
   const result = await executeDockerRegistryAction(PULL_ACTION, SECRET, allowed());
 
   expect("treeKill" in result).toBe(false);
+});
+
+it("threads the policy's strict tree exit into the seam and onto the envelope (D2, 2026-09-10)", async () => {
+  vi.mocked(spawnCaptured).mockResolvedValue({ ...OK_RESULT, strict_tree_exit: true });
+
+  const result = await executeDockerRegistryAction(
+    PULL_ACTION,
+    SECRET,
+    allowed({ strict_tree_exit: true }),
+  );
+
+  const [, , opts] = vi.mocked(spawnCaptured).mock.calls[0] as SpawnCall;
+  expect(opts).toMatchObject({ strictTreeExit: true });
+  expect(result.strictTreeExit).toBe(true);
+  // The flag rides the execution envelope only — the wire result is untouched.
+  expect(result.result).not.toHaveProperty("strict_tree_exit");
+});
+
+it("leaves strictTreeExit off the envelope when the result carries none", async () => {
+  vi.mocked(spawnCaptured).mockResolvedValue(OK_RESULT);
+
+  const result = await executeDockerRegistryAction(PULL_ACTION, SECRET, allowed());
+
+  const [, , opts] = vi.mocked(spawnCaptured).mock.calls[0] as SpawnCall;
+  expect(opts).not.toHaveProperty("strictTreeExit", true);
+  expect("strictTreeExit" in result).toBe(false);
 });
 
 // A guard against a regression that would drop the redaction wrapper entirely.

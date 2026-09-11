@@ -19,6 +19,20 @@ import { mergePolicy, registerSecretAllowCommand } from "./allow.js";
 
 const savedEnvToken = process.env.HARPOC_TOKEN;
 
+const STORED_POLICY: InjectionPolicy = {
+  url_allowlist: [],
+  command_allowlist: ["gh"],
+  env_allowlist: [],
+  host_allowlist: [],
+  response_mode: "filtered",
+  response_header_allowlist: [],
+  network_isolation: false,
+  fs_isolation: false,
+  smtp_recipient_allowlist: [],
+  imap_read_only: true,
+  strict_tree_exit: false,
+};
+
 const current: InjectionPolicy = {
   url_allowlist: ["https://api.github.com/*"],
   command_allowlist: ["gh"],
@@ -30,6 +44,7 @@ const current: InjectionPolicy = {
   fs_isolation: true,
   smtp_recipient_allowlist: [],
   imap_read_only: false,
+  strict_tree_exit: false,
 };
 
 describe("mergePolicy", () => {
@@ -111,6 +126,7 @@ describe("mergePolicy", () => {
       fs_isolation: false,
       smtp_recipient_allowlist: [],
       imap_read_only: false,
+      strict_tree_exit: false,
     });
   });
 
@@ -402,6 +418,7 @@ describe("secret allow command — recipient allowlist flag (v1.3)", () => {
       fs_isolation: false,
       smtp_recipient_allowlist: ["a@b.c"],
       imap_read_only: false,
+      strict_tree_exit: false,
     });
     errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
@@ -449,18 +466,7 @@ describe("secret allow command — imap read-only flag (v1.3)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.HARPOC_TOKEN;
-    mockEngine.getInjectionPolicy.mockResolvedValue({
-      url_allowlist: [],
-      command_allowlist: ["gh"],
-      env_allowlist: [],
-      host_allowlist: [],
-      response_mode: "filtered",
-      response_header_allowlist: [],
-      network_isolation: false,
-      fs_isolation: false,
-      smtp_recipient_allowlist: [],
-      imap_read_only: true,
-    });
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY });
     errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
@@ -481,18 +487,7 @@ describe("secret allow command — imap read-only flag (v1.3)", () => {
   }
 
   it("--imap-read-only alone is a set (not a show) and lands as true", async () => {
-    mockEngine.getInjectionPolicy.mockResolvedValue({
-      url_allowlist: [],
-      command_allowlist: ["gh"],
-      env_allowlist: [],
-      host_allowlist: [],
-      response_mode: "filtered",
-      response_header_allowlist: [],
-      network_isolation: false,
-      fs_isolation: false,
-      smtp_recipient_allowlist: [],
-      imap_read_only: false,
-    });
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY, imap_read_only: false });
     await run(["secret://k", "--imap-read-only"]);
     expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
       "secret://k",
@@ -520,5 +515,75 @@ describe("secret allow command — imap read-only flag (v1.3)", () => {
       { acknowledge_interpreters: false },
       undefined,
     );
+  });
+});
+
+describe("secret allow command — strict tree exit flag (2026-09-10)", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.HARPOC_TOKEN;
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY, strict_tree_exit: true });
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
+    else process.env.HARPOC_TOKEN = savedEnvToken;
+  });
+
+  async function run(args: string[]): Promise<void> {
+    const program = new Command();
+    program.option("--vault-dir <path>", "Path to vault directory");
+    const secret = program.command("secret");
+    registerSecretAllowCommand(secret);
+    program.exitOverride();
+    program.configureOutput({ writeErr: () => {} });
+    await program.parseAsync(["node", "harpoc", "secret", "allow", ...args]);
+  }
+
+  it("--strict-tree-exit alone is a set (not a show) and lands as true", async () => {
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY, strict_tree_exit: false });
+    await run(["secret://k", "--strict-tree-exit"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ strict_tree_exit: true }),
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+  });
+
+  it("--no-strict-tree-exit clears the stored requirement", async () => {
+    await run(["secret://k", "--no-strict-tree-exit"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ strict_tree_exit: false }),
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+  });
+
+  it("keeps the stored true when neither spelling is passed (commander tri-state pin)", async () => {
+    await run(["secret://k", "--url", "https://api.example.com/*"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ strict_tree_exit: true }),
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+  });
+
+  it("mergePolicy: --clear resets it to false unless the flag re-asserts it", () => {
+    expect(
+      mergePolicy({ ...STORED_POLICY, strict_tree_exit: true }, { clear: true }).strict_tree_exit,
+    ).toBe(false);
+    expect(
+      mergePolicy(
+        { ...STORED_POLICY, strict_tree_exit: false },
+        { clear: true, strictTreeExit: true },
+      ).strict_tree_exit,
+    ).toBe(true);
   });
 });

@@ -105,6 +105,7 @@ export class SshInjector {
           redact: [keyPem],
           networkIsolation,
           fsIsolation,
+          strictTreeExit: policy.strict_tree_exit === true,
         });
       } catch (err) {
         if (err instanceof VaultError) {
@@ -168,6 +169,7 @@ export class SshInjector {
           ...(r.redacted ? { sanitized: true } : {}),
           ...(r.descendant_sweep ? { descendant_sweep: r.descendant_sweep } : {}),
           ...(r.tree_kill ? { tree_kill: r.tree_kill } : {}),
+          ...(r.strict_tree_exit ? { strict_tree_exit: true } : {}),
         },
         error === undefined,
         attribution,

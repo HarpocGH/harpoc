@@ -39,6 +39,7 @@ export class ProcessInjector {
       env_allowlist: string[];
       network_isolation?: boolean;
       fs_isolation?: boolean;
+      strict_tree_exit?: boolean;
     },
     secretId?: string,
     attribution?: AuditAttribution,
@@ -73,6 +74,7 @@ export class ProcessInjector {
     const timeoutMs = action.timeout_ms ?? DEFAULT_PROCESS_TIMEOUT_MS;
     const networkIsolation = policy.network_isolation === true;
     const fsIsolation = policy.fs_isolation === true;
+    const strictTreeExit = policy.strict_tree_exit === true;
 
     let run: {
       result: ProcessResult;
@@ -81,6 +83,7 @@ export class ProcessInjector {
       redacted: boolean;
       descendantSweep?: { killed: number; failed: boolean };
       treeKill?: TreeKillMechanism;
+      strictTreeExit?: true;
     };
     try {
       run = await this.runProcess(
@@ -92,11 +95,12 @@ export class ProcessInjector {
         valueStr,
         networkIsolation,
         fsIsolation,
+        strictTreeExit,
       );
     } catch (err) {
-      // Fail-closed refusal from the spawn seam (NETWORK_ISOLATION_UNAVAILABLE
-      // or FS_ISOLATION_UNAVAILABLE): no process was spawned; audit the denial
-      // like an allowlist rejection.
+      // Fail-closed refusal from the spawn seam (NETWORK_ISOLATION_UNAVAILABLE,
+      // FS_ISOLATION_UNAVAILABLE or STRICT_TREE_EXIT_UNAVAILABLE): no process
+      // was spawned; audit the denial like an allowlist rejection.
       if (err instanceof VaultError) {
         this.audit(
           action,
@@ -124,6 +128,7 @@ export class ProcessInjector {
         ...(run.redacted ? { sanitized: true } : {}),
         ...(run.descendantSweep ? { descendant_sweep: run.descendantSweep } : {}),
         ...(run.treeKill ? { tree_kill: run.treeKill } : {}),
+        ...(run.strictTreeExit ? { strict_tree_exit: true } : {}),
       },
       result.error === undefined,
       attribution,
@@ -141,6 +146,7 @@ export class ProcessInjector {
     secretStr: string,
     networkIsolation: boolean,
     fsIsolation: boolean,
+    strictTreeExit: boolean,
   ): Promise<{
     result: ProcessResult;
     isolationMechanism?: string;
@@ -148,6 +154,7 @@ export class ProcessInjector {
     redacted: boolean;
     descendantSweep?: { killed: number; failed: boolean };
     treeKill?: TreeKillMechanism;
+    strictTreeExit?: true;
   }> {
     const r = await spawnCaptured(command, args, {
       env,
@@ -156,6 +163,7 @@ export class ProcessInjector {
       redact: [secretStr],
       networkIsolation,
       fsIsolation,
+      strictTreeExit,
     });
     return {
       result: {
@@ -177,6 +185,7 @@ export class ProcessInjector {
       redacted: r.redacted,
       ...(r.descendant_sweep ? { descendantSweep: r.descendant_sweep } : {}),
       ...(r.tree_kill ? { treeKill: r.tree_kill } : {}),
+      ...(r.strict_tree_exit ? { strictTreeExit: true } : {}),
     };
   }
 

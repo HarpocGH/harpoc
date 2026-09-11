@@ -189,9 +189,11 @@ describe("index.ts lifecycle ordering", () => {
 
   // stdout is the stdio transport; a session-file warning goes where the
   // banner goes (R5 / D4, 2026-09-07).
-  it("wires the session-file warning seam to stderr and never writes to stdout", () => {
+  it("wires both warning seams to stderr and never writes to stdout", () => {
     const text = source();
     expect(text).toContain("onSessionFilePermissionRepairFailure");
+    expect(text).toContain("onJobWrapperUnavailable");
+    expect(text).toContain("the Windows job wrapper is unavailable");
     expect(text).not.toMatch(/console\.log\(/);
     expect(text).not.toMatch(/process\.stdout\.write\(/);
   });

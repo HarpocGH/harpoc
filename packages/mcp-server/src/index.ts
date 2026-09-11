@@ -137,12 +137,17 @@ async function main(): Promise<void> {
   const dbPath = join(vaultDir, VAULT_DB_NAME);
   const sessionPath = join(vaultDir, SESSION_FILE_NAME);
 
-  // stdout is the transport; a session-file warning goes where the banner goes.
+  // stdout is the transport; a session-file or job-wrapper warning goes where the banner goes.
   const engine = new VaultEngine({
     dbPath,
     sessionPath,
     onSessionFilePermissionRepairFailure: (error) => {
       process.stderr.write(`Warning: ${error.message}\n`);
+    },
+    onJobWrapperUnavailable: (reason) => {
+      process.stderr.write(
+        `Warning: the Windows job wrapper is unavailable (${reason}); spawns run on the taskkill tier and strict_tree_exit secrets refuse\n`,
+      );
     },
   });
 

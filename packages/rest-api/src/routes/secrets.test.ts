@@ -30,6 +30,7 @@ const FULL_POLICY = {
   fs_isolation: false,
   smtp_recipient_allowlist: [],
   imap_read_only: false,
+  strict_tree_exit: false,
 };
 
 const MOCK_TOKEN: VaultApiToken = {
@@ -861,6 +862,17 @@ describe("secret routes", () => {
       expect(res.status).toBe(200);
       const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
       expect((call[1] as { imap_read_only: boolean }).imap_read_only).toBe(true);
+    });
+
+    it("PUT forwards strict_tree_exit: true to the engine (2026-09-10)", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ ...FULL_POLICY, strict_tree_exit: true }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+      expect((call[1] as { strict_tree_exit: boolean }).strict_tree_exit).toBe(true);
     });
 
     it("PUT rejects a malformed recipient pattern with SCHEMA_VALIDATION_ERROR", async () => {

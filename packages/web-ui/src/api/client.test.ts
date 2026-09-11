@@ -192,6 +192,7 @@ describe("api client", () => {
       fs_isolation: false,
       smtp_recipient_allowlist: [],
       imap_read_only: false,
+      strict_tree_exit: false,
       acknowledge_interpreters: true,
     };
     await api.putInjectionPolicy("secret://k1", policy);

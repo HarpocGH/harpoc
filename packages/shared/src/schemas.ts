@@ -911,9 +911,12 @@ const smtpRecipientAllowlistSchema = z.array(recipientPatternSchema).max(100);
 
 /**
  * Per-secret injection policy as stored and loaded: every field present, no
- * defaults, no unknown keys. The vault always writes all ten fields, so a
+ * defaults, no unknown keys. The vault always writes all eleven fields, so a
  * decrypted blob that fails this schema is corruption (R2/C43), not a policy
- * from before a field existed — no such vault opens under v1.5.
+ * from before a field existed — no such vault opens under v1.5. The one
+ * exception is read-side and lives in core: `strict_tree_exit` (2026-09-10)
+ * is defaulted to `false` by `loadInjectionPolicy` before this parse, because
+ * blobs written by the prepared v1.5.0 tree carry the baseline ten.
  */
 export const injectionPolicySchema = z
   .object({
@@ -927,6 +930,7 @@ export const injectionPolicySchema = z
     fs_isolation: z.boolean(),
     smtp_recipient_allowlist: smtpRecipientAllowlistSchema,
     imap_read_only: z.boolean(),
+    strict_tree_exit: z.boolean(),
   })
   .strict();
 
@@ -942,6 +946,7 @@ export const injectionPolicyInputSchema = z.object({
   fs_isolation: z.boolean().optional().default(false),
   smtp_recipient_allowlist: smtpRecipientAllowlistSchema.optional().default([]),
   imap_read_only: z.boolean().optional().default(false),
+  strict_tree_exit: z.boolean().optional().default(false),
 });
 
 /**
@@ -970,7 +975,16 @@ export const injectionPolicyInputSchema = z.object({
  * enforced by the SMTP injector, not this schema. `imap_read_only` (v1.3,
  * default `false`) is a tighten-only knob (same shape as `response_mode`):
  * set, it refuses the mutating IMAP operation kinds (`store`/`move`/`copy`/
- * `expunge`) before any socket opens. The shape the vault stores, loads and
+ * `expunge`) before any socket opens.
+ * `strict_tree_exit` (2026-09-10, default `false`) is a tighten-only knob for
+ * the process-mediated contexts and the stdio MCP downstream: nothing the
+ * child started outlives the call. Windows runs the child inside the vault's
+ * kill-on-close job wrapper in strict mode, so a normal exit closes the job
+ * on the whole tree, and a host without the wrapper refuses the use
+ * fail-closed (`STRICT_TREE_EXIT_UNAVAILABLE`); POSIX kills the child's
+ * process group after its own exit (a descendant that called `setsid`
+ * escapes, as on the timeout path). Request-mediated actions spawn no child
+ * and are unaffected. The shape the vault stores, loads and
  * returns: every field present, no defaults — defaults apply at
  * `InjectionPolicyInput` (the input schema), never on the stored blob.
  */

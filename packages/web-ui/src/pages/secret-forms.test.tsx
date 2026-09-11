@@ -429,6 +429,24 @@ describe("PolicyEditor", () => {
     expect(body["imap_read_only"]).toBe(true);
   });
 
+  it("edits strict_tree_exit as a checkbox and sends it on save (2026-09-10)", async () => {
+    const put = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PolicyEditor
+        api={{ putInjectionPolicy: put } as unknown as ApiClient}
+        handle="k1"
+        initial={{ strict_tree_exit: false }}
+        onDone={vi.fn()}
+      />,
+    );
+    const box = screen.getByLabelText(/Strict tree exit/) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    fireEvent.click(box);
+    fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    expect((put.mock.calls[0]?.[1] as Record<string, unknown>)["strict_tree_exit"]).toBe(true);
+  });
+
   it("sends every injectionPolicyInputSchema key on save (drift pin)", async () => {
     const put = vi.fn().mockResolvedValue(undefined);
     render(

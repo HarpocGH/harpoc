@@ -28,6 +28,7 @@ function fakeEntry(secretId: string, close: () => Promise<void>): McpConnectionE
     credentialFingerprint: "f",
     configFingerprint: "g",
     isolation: { network: false, fs: false },
+    strictTreeExit: false,
     spawnedAt: Date.now(),
     lastUsedAt: Date.now(),
   };

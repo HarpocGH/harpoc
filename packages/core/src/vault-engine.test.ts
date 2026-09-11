@@ -738,6 +738,7 @@ async function seedLiveStdioEntry(secretId: string): Promise<void> {
       credentialFingerprint: "cred-fp",
       configFingerprint: "config-fp",
       isolation: { network: false, fs: false },
+      strictTreeExit: false,
       spawnedAt: Date.now(),
       lastUsedAt: Date.now(),
     } satisfies McpConnectionEntry),
@@ -785,6 +786,7 @@ describe("injection policy", () => {
       fs_isolation: false,
       smtp_recipient_allowlist: [],
       imap_read_only: false,
+      strict_tree_exit: false,
     });
   });
 
@@ -869,6 +871,51 @@ describe("injection policy", () => {
     expect(grant?.detail?.imap_read_only).toBe(true);
   });
 
+  it("round-trips strict_tree_exit and defaults it to false when omitted (2026-09-10)", async () => {
+    await engine.setInjectionPolicy("secret://pol", { strict_tree_exit: true });
+    expect((await engine.getInjectionPolicy("secret://pol")).strict_tree_exit).toBe(true);
+    await engine.setInjectionPolicy("secret://pol", { url_allowlist: [] });
+    expect((await engine.getInjectionPolicy("secret://pol")).strict_tree_exit).toBe(false);
+    const grant = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0];
+    expect(grant?.detail?.strict_tree_exit).toBe(false);
+  });
+
+  it("loads a ten-field blob written before strict_tree_exit existed as false — the one post-baseline read default (D1)", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
+    const tenFields = JSON.stringify({
+      url_allowlist: [],
+      command_allowlist: ["gh"],
+      env_allowlist: [],
+      host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: true,
+      smtp_recipient_allowlist: [],
+      imap_read_only: false,
+    });
+    const enc = encrypt(
+      kek,
+      new Uint8Array(Buffer.from(tenFields, "utf8")),
+      AAD_INJECTION_POLICY(secretId),
+    );
+    const now = Date.now();
+    store.upsertInjectionPolicy({
+      secret_id: secretId,
+      policy_encrypted: enc.ciphertext,
+      policy_iv: enc.iv,
+      policy_tag: enc.tag,
+      created_at: now,
+      updated_at: now,
+    });
+    const loaded = await engine.getInjectionPolicy("secret://pol");
+    expect(loaded.strict_tree_exit).toBe(false);
+    expect(loaded.fs_isolation).toBe(true);
+    // No rewrite on read: the blob is the ten-field one until the next set.
+    expect(store.getInjectionPolicy(secretId)?.updated_at).toBe(now);
+  });
+
   it("refuses a stored policy blob missing a key as VAULT_CORRUPTED, naming the path (R2/C43)", async () => {
     const secretId = await engine.resolveSecretId("secret://pol");
     const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
@@ -902,6 +949,7 @@ describe("injection policy", () => {
     );
     expect(err.message).toContain(`injection policy for secret ${secretId} is malformed`);
     expect(err.message).toContain("fs_isolation");
+    expect(err.message).not.toContain("strict_tree_exit");
     expect(err.message).not.toContain("gh");
   });
 
@@ -1006,6 +1054,22 @@ describe("injection policy", () => {
     const terminates = engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
     expect(terminates).toHaveLength(1);
     expect(terminates[0]?.detail?.reason).toBe("fs_isolation_enabled");
+  });
+
+  it("terminates a live stdio child when strict_tree_exit is enabled (D2, 2026-09-10)", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    await seedLiveStdioEntry(secretId);
+    const terminate = vi.spyOn(registryOf(engine), "terminate");
+
+    await engine.setInjectionPolicy("secret://pol", { strict_tree_exit: true });
+
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(terminate).toHaveBeenCalledWith(secretId, "strict_tree_exit_enabled", {
+      session_id: expect.any(String),
+    });
+    const terminates = engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
+    expect(terminates).toHaveLength(1);
+    expect(terminates[0]?.detail?.reason).toBe("strict_tree_exit_enabled");
   });
 
   it("attributes the terminate row to the caller that flipped the policy", async () => {

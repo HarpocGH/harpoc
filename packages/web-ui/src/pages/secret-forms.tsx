@@ -265,6 +265,7 @@ export function PolicyEditor({
   const [mode, setMode] = useState<ResponseMode>(initial.response_mode ?? "filtered");
   const [networkIsolation, setNetworkIsolation] = useState(initial.network_isolation ?? false);
   const [fsIsolation, setFsIsolation] = useState(initial.fs_isolation ?? false);
+  const [strictTreeExit, setStrictTreeExit] = useState(initial.strict_tree_exit ?? false);
   const [ack, setAck] = useState(false);
 
   const { error, busy, onSubmit } = useSubmit(async () => {
@@ -283,6 +284,7 @@ export function PolicyEditor({
       response_mode: mode,
       network_isolation: networkIsolation,
       fs_isolation: fsIsolation,
+      strict_tree_exit: strictTreeExit,
       ...(ack ? { acknowledge_interpreters: true } : {}),
     };
     await api.putInjectionPolicy(handle, body);
@@ -358,6 +360,17 @@ export function PolicyEditor({
           onChange={(e) => setFsIsolation(e.currentTarget.checked)}
         />
         Filesystem isolation for process-mediated children
+      </label>
+      <label for="policy-strict">
+        <input
+          id="policy-strict"
+          type="checkbox"
+          checked={strictTreeExit}
+          onChange={(e) => setStrictTreeExit(e.currentTarget.checked)}
+        />
+        Strict tree exit: nothing a process-mediated child started outlives the call (Windows: the
+        job wrapper in strict mode, refused where unavailable; POSIX: the process group killed after
+        the child exits)
       </label>
       <label for="ack">
         <input

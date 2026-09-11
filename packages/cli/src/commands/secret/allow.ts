@@ -25,6 +25,8 @@ export interface AllowOptions {
   recipient?: string[];
   /** Tri-state: true (--imap-read-only), false (--no-imap-read-only), undefined (keep stored). */
   imapReadOnly?: boolean;
+  /** Tri-state: true (--strict-tree-exit), false (--no-strict-tree-exit), undefined (keep stored). */
+  strictTreeExit?: boolean;
   acknowledgeInterpreter?: boolean;
   clear?: boolean;
   show?: boolean;
@@ -43,6 +45,7 @@ const EMPTY_POLICY: InjectionPolicy = {
   fs_isolation: false,
   smtp_recipient_allowlist: [],
   imap_read_only: false,
+  strict_tree_exit: false,
 };
 
 /**
@@ -75,6 +78,7 @@ export function mergePolicy(current: InjectionPolicy, options: AllowOptions): In
       ? Array.from(new Set([...base.smtp_recipient_allowlist, ...options.recipient]))
       : base.smtp_recipient_allowlist,
     imap_read_only: options.imapReadOnly ?? base.imap_read_only,
+    strict_tree_exit: options.strictTreeExit ?? base.strict_tree_exit,
   };
 }
 
@@ -135,6 +139,11 @@ export function registerSecretAllowCommand(secret: Command): void {
     )
     .option("--no-imap-read-only", "Remove a stored IMAP read-only requirement")
     .option(
+      "--strict-tree-exit",
+      "Require that nothing a process-mediated child started outlives the call (process/git/ssh/sftp/docker and stdio MCP downstreams): Windows runs the child inside the vault's kill-on-close job in strict mode and refuses the use fail-closed where the wrapper is unavailable; POSIX kills the child's process group after it exits",
+    )
+    .option("--no-strict-tree-exit", "Remove a stored strict-tree-exit requirement")
+    .option(
       "--acknowledge-interpreter",
       "Explicitly acknowledge allowlisting a known interpreter (sh, bash, python, node, ...) or exec wrapper (sudo, xargs, find, tar, ...) — collapses the capability ladder for this secret; refused and audited otherwise",
     )
@@ -158,6 +167,7 @@ export function registerSecretAllowCommand(secret: Command): void {
             (options.fsIsolation !== undefined ? 1 : 0) +
             (options.recipient?.length ?? 0) +
             (options.imapReadOnly !== undefined ? 1 : 0) +
+            (options.strictTreeExit !== undefined ? 1 : 0) +
             (options.clear ? 1 : 0);
 
           const tokenValue = options.token ?? process.env.HARPOC_TOKEN;

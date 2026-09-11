@@ -152,10 +152,12 @@ interface SeamOutcomes {
   sftpSanitized?: boolean;
   sftpDescendantSweep?: { killed: number; failed: boolean };
   sftpTreeKill?: TreeKillMechanism;
+  sftpStrictTreeExit?: boolean;
   docker?: DockerOutcome;
   dockerSanitized?: boolean;
   dockerDescendantSweep?: { killed: number; failed: boolean };
   dockerTreeKill?: TreeKillMechanism;
+  dockerStrictTreeExit?: boolean;
   process?: () => never;
   database?: () => never;
   ssh?: () => never;
@@ -245,6 +247,7 @@ function installSeams(e: VaultEngine, outcomes: SeamOutcomes): Seams {
       sanitized: outcomes.sftpSanitized ?? false,
       ...(outcomes.sftpDescendantSweep ? { descendantSweep: outcomes.sftpDescendantSweep } : {}),
       ...(outcomes.sftpTreeKill ? { treeKill: outcomes.sftpTreeKill } : {}),
+      ...(outcomes.sftpStrictTreeExit ? { strictTreeExit: true } : {}),
     };
   };
 
@@ -270,6 +273,7 @@ function installSeams(e: VaultEngine, outcomes: SeamOutcomes): Seams {
         ? { descendantSweep: outcomes.dockerDescendantSweep }
         : {}),
       ...(outcomes.dockerTreeKill ? { treeKill: outcomes.dockerTreeKill } : {}),
+      ...(outcomes.dockerStrictTreeExit ? { strictTreeExit: true } : {}),
     };
   };
 
@@ -1135,19 +1139,21 @@ describe("useSecret (sftp) — engine dispatch", () => {
     });
   });
 
-  it("carries the spawn tier onto the row as tree_kill (2026-09-10)", async () => {
-    installSeams(engine, {});
-    await engine.useSecret("secret://deploy", SFTP_ACTION);
-    const untiered = useRows(true);
-    expect(untiered).toHaveLength(1);
-    expect(untiered[0]?.detail).not.toHaveProperty("tree_kill");
-
-    installSeams(engine, { sftpTreeKill: "job" });
+  it("carries the spawn tier and the strict flag onto the row (2026-09-10)", async () => {
+    installSeams(engine, { sftpTreeKill: "job", sftpStrictTreeExit: true });
     await engine.useSecret("secret://deploy", SFTP_ACTION);
     const rows = useRows(true);
-    expect(rows).toHaveLength(2);
-    expect(rows.filter((row) => row.detail?.tree_kill !== undefined)).toHaveLength(1);
-    expect(rows.map((row) => row.detail?.tree_kill)).toContain("job");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.detail).toMatchObject({ tree_kill: "job", strict_tree_exit: true });
+  });
+
+  it("writes neither key when the seam reports neither", async () => {
+    installSeams(engine, {});
+    await engine.useSecret("secret://deploy", SFTP_ACTION);
+    const rows = useRows(true);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.detail).not.toHaveProperty("tree_kill");
+    expect(rows[0]?.detail).not.toHaveProperty("strict_tree_exit");
   });
 
   it("maps a non-VaultError executor throw to a redacted INTERNAL_ERROR and still audits the denial", async () => {
@@ -1415,19 +1421,21 @@ describe("useSecret (docker_registry) — engine dispatch", () => {
     });
   });
 
-  it("carries the spawn tier onto the row as tree_kill (2026-09-10)", async () => {
-    installSeams(engine, {});
-    await engine.useSecret("secret://reg", DOCKER_ACTION);
-    const untiered = useRows(true);
-    expect(untiered).toHaveLength(1);
-    expect(untiered[0]?.detail).not.toHaveProperty("tree_kill");
-
-    installSeams(engine, { dockerTreeKill: "job" });
+  it("carries the spawn tier and the strict flag onto the row (2026-09-10)", async () => {
+    installSeams(engine, { dockerTreeKill: "job", dockerStrictTreeExit: true });
     await engine.useSecret("secret://reg", DOCKER_ACTION);
     const rows = useRows(true);
-    expect(rows).toHaveLength(2);
-    expect(rows.filter((row) => row.detail?.tree_kill !== undefined)).toHaveLength(1);
-    expect(rows.map((row) => row.detail?.tree_kill)).toContain("job");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.detail).toMatchObject({ tree_kill: "job", strict_tree_exit: true });
+  });
+
+  it("writes neither key when the seam reports neither", async () => {
+    installSeams(engine, {});
+    await engine.useSecret("secret://reg", DOCKER_ACTION);
+    const rows = useRows(true);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.detail).not.toHaveProperty("tree_kill");
+    expect(rows[0]?.detail).not.toHaveProperty("strict_tree_exit");
   });
 
   it("maps a non-VaultError executor throw to a redacted INTERNAL_ERROR and still audits the denial", async () => {

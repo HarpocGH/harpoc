@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode, VAULT_DB_NAME, VAULT_DIR_NAME } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
 import { expectVaultError } from "@harpoc/test-utils";
@@ -43,6 +43,31 @@ describe("createEngine", () => {
   it("returns a VaultEngine instance", () => {
     const engine = createEngine(tempDir);
     expect(engine).toBeInstanceOf(VaultEngine);
+  });
+
+  it("wires both warning seams to console.error (2026-09-10)", async () => {
+    const { resetJobWrapperProbeForTests, resolveJobWrapper, setJobWrapperUnavailableHandler } =
+      await import("@harpoc/core");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      createEngine(tempDir);
+      // The engine installed the loader's callback process-wide; drive the module to its
+      // first win32 unavailable verdict through the seams — no csc on the candidate list.
+      resetJobWrapperProbeForTests();
+      await resolveJobWrapper({
+        platform: "win32",
+        cacheDirs: [tempDir],
+        compilerCandidates: [],
+        probeBinary: () => false,
+      });
+      expect(errorSpy).toHaveBeenCalledWith(
+        "Warning: the Windows job wrapper is unavailable (csc.exe not found under Microsoft.NET Framework v4.0.30319); spawns run on the taskkill tier and strict_tree_exit secrets refuse",
+      );
+    } finally {
+      errorSpy.mockRestore();
+      setJobWrapperUnavailableHandler(null);
+      resetJobWrapperProbeForTests();
+    }
   });
 });
 

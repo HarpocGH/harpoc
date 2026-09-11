@@ -70,6 +70,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     fs_isolation: false,
     smtp_recipient_allowlist: [],
     imap_read_only: false,
+    strict_tree_exit: false,
     ...overrides,
   };
 }
@@ -452,6 +453,36 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     );
 
     expect("treeKill" in result).toBe(false);
+  });
+
+  it("threads the policy's strict tree exit into the seam and onto the envelope (D2, 2026-09-10)", async () => {
+    spawnMock.mockResolvedValue({ ...OK_RESULT, strict_tree_exit: true });
+
+    const result = await executeSftpAction(
+      LIST_ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      allowedPolicy({ strict_tree_exit: true }),
+      SFTP_CONFIG,
+    );
+
+    expect(spawnMock.mock.calls[0]?.[2]).toMatchObject({ strictTreeExit: true });
+    expect(result.strictTreeExit).toBe(true);
+    // The flag rides the execution envelope only — the wire result is untouched.
+    expect(result.result).not.toHaveProperty("strict_tree_exit");
+  });
+
+  it("leaves strictTreeExit off the envelope when the result carries none", async () => {
+    spawnMock.mockResolvedValue(OK_RESULT);
+
+    const result = await executeSftpAction(
+      LIST_ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      allowedPolicy(),
+      SFTP_CONFIG,
+    );
+
+    expect(spawnMock.mock.calls[0]?.[2]).not.toHaveProperty("strictTreeExit", true);
+    expect("strictTreeExit" in result).toBe(false);
   });
 
   it("maps a non-zero exit to SFTP_OPERATION_FAILED", async () => {

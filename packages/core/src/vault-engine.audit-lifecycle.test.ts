@@ -123,6 +123,7 @@ async function seedLiveStdioEntry(secretId: string): Promise<void> {
       credentialFingerprint: "cred-fp",
       configFingerprint: "config-fp",
       isolation: { network: false, fs: false },
+      strictTreeExit: false,
       spawnedAt: Date.now(),
       lastUsedAt: Date.now(),
     } satisfies McpConnectionEntry),

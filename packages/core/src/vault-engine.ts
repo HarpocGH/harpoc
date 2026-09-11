@@ -139,6 +139,7 @@ import { buildSmtpAuditDetails, SmtpInjector } from "./injection/smtp-injector.j
 import { SshInjector } from "./injection/ssh-injector.js";
 import { validateUrl } from "./injection/url-validator.js";
 import { buildWsAuditDetails, executeWebsocketAction } from "./injection/websocket-injector.js";
+import { setJobWrapperUnavailableHandler } from "./injection/win32-job-wrapper.js";
 import type { SecretInfo } from "./secrets/secret-manager.js";
 import { SecretManager } from "./secrets/secret-manager.js";
 import { isVaultManagedCertificate } from "./secrets/vault-managed-certificate.js";
@@ -160,6 +161,15 @@ export interface VaultEngineOptions {
    * `SESSION_KEYSTORE_UNAVAILABLE` (R8/D54).
    */
   onSessionFilePermissionRepairFailure?: (error: Error) => void;
+  /**
+   * Surface the first win32 verdict that the job wrapper is unavailable — no
+   * csc, a failed compile or probe run (default: silent — core never logs).
+   * Fires at most once per process; meanwhile every win32 spawn runs on the
+   * taskkill + sweep tier and a `strict_tree_exit` secret refuses
+   * (`STRICT_TREE_EXIT_UNAVAILABLE`). Installed process-wide at construction;
+   * the last engine constructed wins (2026-09-10).
+   */
+  onJobWrapperUnavailable?: (reason: string) => void;
   /** Sliding session TTL in ms (default DEFAULT_SESSION_TTL_MS, capped at MAX_SESSION_TTL_MS). Operator knob / test seam. */
   sessionTtlMs?: number;
 }
@@ -348,6 +358,7 @@ export class VaultEngine {
       protector: options.sessionKeyProtector,
       onPermissionRepairFailure: options.onSessionFilePermissionRepairFailure,
     });
+    setJobWrapperUnavailableHandler(options.onJobWrapperUnavailable ?? null);
     this.sessionTtlMs = Math.min(
       options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS,
       MAX_SESSION_TTL_MS,
@@ -1348,11 +1359,11 @@ export class VaultEngine {
           // (design §7.2: host, operation, remote/local paths — no result-derived
           // counter to zero on a denial), so the same projection covers the
           // attempt and the outcome (Task 12's rule, applied where nothing needs
-          // zeroing). The three result-derived keys (`sanitized`,
-          // `descendant_sweep`, `tree_kill`) are folded in below onto whichever
-          // row the spawn produced — a success, or a graceful non-throwing
-          // failure such as PROCESS_TIMEOUT; a refusal row (the catch arm,
-          // which never reached a spawn) is never flagged.
+          // zeroing). The four result-derived keys (`sanitized`,
+          // `descendant_sweep`, `tree_kill`, `strict_tree_exit`) are folded in
+          // below onto whichever row the spawn produced — a success, or a
+          // graceful non-throwing failure such as PROCESS_TIMEOUT; a refusal
+          // row (the catch arm, which never reached a spawn) is never flagged.
           const auditDetail = { context: "sftp", ...buildSftpAuditDetails(action) };
 
           let execution: SftpExecution;
@@ -1369,6 +1380,7 @@ export class VaultEngine {
             ...(execution.sanitized ? { sanitized: true } : {}),
             ...(execution.descendantSweep ? { descendant_sweep: execution.descendantSweep } : {}),
             ...(execution.treeKill ? { tree_kill: execution.treeKill } : {}),
+            ...(execution.strictTreeExit ? { strict_tree_exit: true } : {}),
           };
 
           // A process-shaped result can carry a graceful, non-throwing
@@ -1391,11 +1403,11 @@ export class VaultEngine {
           // (the registry is parsed from the image, plus image + operation — no
           // result-derived counter to zero on a denial), so the same projection
           // covers the attempt and the outcome, exactly like the sftp arm.
-          // The three result-derived keys (`sanitized`, `descendant_sweep`,
-          // `tree_kill`) are folded in below onto whichever row the spawn
-          // produced — a success, or a graceful non-throwing failure such as
-          // PROCESS_TIMEOUT; a refusal row (the catch arm, which never reached
-          // a spawn) is never flagged.
+          // The four result-derived keys (`sanitized`, `descendant_sweep`,
+          // `tree_kill`, `strict_tree_exit`) are folded in below onto whichever
+          // row the spawn produced — a success, or a graceful non-throwing
+          // failure such as PROCESS_TIMEOUT; a refusal row (the catch arm,
+          // which never reached a spawn) is never flagged.
           const auditDetail = { context: "docker_registry", ...buildDockerAuditDetails(action) };
 
           let execution: DockerExecution;
@@ -1412,6 +1424,7 @@ export class VaultEngine {
             ...(execution.sanitized ? { sanitized: true } : {}),
             ...(execution.descendantSweep ? { descendant_sweep: execution.descendantSweep } : {}),
             ...(execution.treeKill ? { tree_kill: execution.treeKill } : {}),
+            ...(execution.strictTreeExit ? { strict_tree_exit: true } : {}),
           };
 
           // A process-shaped result can carry a graceful, non-throwing failure
@@ -1667,7 +1680,8 @@ export class VaultEngine {
    * allowlists when no policy is set — and every allowlist denies by default
    * (R1, 2026-09-01), so an unconfigured secret is usable in no target context
    * until an administrator writes its policy. A stored blob is parsed strictly
-   * (R2/C43): the writer always emits all ten fields, so a miss or an extra
+   * (R2/C43): the writer always emits all eleven fields, so a miss (other
+   * than the post-baseline `strict_tree_exit`, defaulted below) or an extra
    * key is corruption.
    */
   private loadInjectionPolicy(s: UnlockedState, secretId: string): InjectionPolicy {
@@ -1684,6 +1698,7 @@ export class VaultEngine {
         fs_isolation: false,
         smtp_recipient_allowlist: [],
         imap_read_only: false,
+        strict_tree_exit: false,
       };
     }
     const bytes = decrypt(
@@ -1698,6 +1713,14 @@ export class VaultEngine {
       raw = JSON.parse(Buffer.from(bytes).toString("utf8"));
     } catch {
       throw VaultError.vaultCorrupted(`injection policy for secret ${secretId} is not JSON`);
+    }
+    // The post-baseline field (D1, 2026-09-10): blobs written by the prepared
+    // v1.5.0 tree carry the baseline ten and nothing else, so this one field
+    // — and only this one — defaults on read; no rewrite (policy writes are
+    // POLICY_GRANT events). The writer below writes all eleven; any other
+    // miss stays corruption (R2/C43).
+    if (typeof raw === "object" && raw !== null && !("strict_tree_exit" in raw)) {
+      (raw as Record<string, unknown>)["strict_tree_exit"] = false;
     }
     const parsed = injectionPolicySchema.safeParse(raw);
     if (!parsed.success) {
@@ -1804,6 +1827,7 @@ export class VaultEngine {
       fs_isolation: policy.fs_isolation ?? false,
       smtp_recipient_allowlist: policy.smtp_recipient_allowlist ?? [],
       imap_read_only: policy.imap_read_only ?? false,
+      strict_tree_exit: policy.strict_tree_exit ?? false,
     });
     const enc = encrypt(
       s.kek,
@@ -1839,6 +1863,7 @@ export class VaultEngine {
           fs_isolation: policy.fs_isolation ?? false,
           recipient_count: policy.smtp_recipient_allowlist?.length ?? 0,
           imap_read_only: policy.imap_read_only ?? false,
+          strict_tree_exit: policy.strict_tree_exit ?? false,
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
@@ -1863,16 +1888,26 @@ export class VaultEngine {
     // Thesis §4.5.3 layer 4: a live stdio downstream child predates the
     // isolation demand and holds the credential with full egress (and with
     // write access to the filesystem) — leaving it to the next invocation
-    // would keep it running until then. Idempotent no-op when nothing is
-    // live; the next use respawns the child wrapped (D51), and the posture
+    // would keep it running until then. A strict-tree-exit demand is the same
+    // shape (D2, 2026-09-10): the live child was spawned under --keep, so its
+    // survivors would outlive it. Idempotent no-op when nothing is live; the
+    // next use respawns the child wrapped as demanded, and the posture
     // recorded on the registry entry is McpInjector's backstop for a policy
     // tightened from a separate process, whose engine cannot reach this
-    // registry. One terminate covers both demands; the network reason keeps
-    // precedence.
-    if (policy.network_isolation === true || policy.fs_isolation === true) {
+    // registry. One terminate covers every demand; network, fs, strict is
+    // the precedence.
+    if (
+      policy.network_isolation === true ||
+      policy.fs_isolation === true ||
+      policy.strict_tree_exit === true
+    ) {
       await s.mcpRegistry.terminate(
         secret.id,
-        policy.network_isolation === true ? "network_isolation_enabled" : "fs_isolation_enabled",
+        policy.network_isolation === true
+          ? "network_isolation_enabled"
+          : policy.fs_isolation === true
+            ? "fs_isolation_enabled"
+            : "strict_tree_exit_enabled",
         attributionFromCaller(caller, this.sessionId),
       );
     }

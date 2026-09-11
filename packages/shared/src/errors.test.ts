@@ -74,6 +74,7 @@ const STATUS_CASES = [
   [ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED, 400],
   [ErrorCode.NETWORK_ISOLATION_UNAVAILABLE, 501],
   [ErrorCode.FS_ISOLATION_UNAVAILABLE, 501],
+  [ErrorCode.STRICT_TREE_EXIT_UNAVAILABLE, 501],
   // MCP proxy
   [ErrorCode.MCP_SERVER_NOT_CONFIGURED, 400],
   [ErrorCode.MCP_SERVER_MISMATCH, 400],
@@ -173,7 +174,7 @@ describe("HTTP status mapping", () => {
 
   it("covers all ErrorCode members", () => {
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(109);
+    expect(members).toHaveLength(110);
   });
 
   it("STATUS_MAP has a row for every ErrorCode member", () => {
@@ -769,6 +770,15 @@ describe("factory methods", () => {
     expect(err.statusCode).toBe(403);
     expect(err.message).toContain("delete");
     expect(err.message).toMatch(/read-only/i);
+  });
+
+  it("strictTreeExitUnavailable() names the reason and the flag that lifts it", () => {
+    const err = VaultError.strictTreeExitUnavailable("probe run exited 9010");
+    expect(err.code).toBe(ErrorCode.STRICT_TREE_EXIT_UNAVAILABLE);
+    expect(err.statusCode).toBe(501);
+    expect(err.message).toContain("probe run exited 9010");
+    expect(err.message).toContain("--no-strict-tree-exit");
+    expect(err.message).not.toMatch(/taskkill/);
   });
 
   it("smtpStarttlsUnavailable() names the host", () => {

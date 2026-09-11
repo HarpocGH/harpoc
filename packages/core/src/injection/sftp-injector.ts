@@ -21,10 +21,11 @@ import type { TreeKillMechanism } from "./win32-job-wrapper.js";
  * credential or file content. Every field the builder writes is request-derived
  * (available before the operation runs), so the same projection covers both a
  * successful use and a denial: `buildSftpAuditDetails` needs only the action,
- * not a result. Optional are the three result-derived keys (`sanitized`,
- * `descendant_sweep`, `tree_kill`): the engine folds them onto whichever row
- * the spawn produced — a success, or a graceful non-throwing failure such as
- * PROCESS_TIMEOUT — never onto a refusal row, which never reached a spawn.
+ * not a result. Optional are the four result-derived keys (`sanitized`,
+ * `descendant_sweep`, `tree_kill`, `strict_tree_exit`): the engine folds them
+ * onto whichever row the spawn produced — a success, or a graceful
+ * non-throwing failure such as PROCESS_TIMEOUT — never onto a refusal row,
+ * which never reached a spawn.
  */
 export interface SftpAuditDetails {
   host: string;
@@ -38,14 +39,16 @@ export interface SftpAuditDetails {
   descendant_sweep?: { killed: number; failed: boolean };
   /** The win32 spawn tier (2026-09-10): the job wrapper, or the taskkill + sweep path behind it. */
   tree_kill?: TreeKillMechanism;
+  /** Present when the policy's strict tree exit applied to the spawn (D2, 2026-09-10). */
+  strict_tree_exit?: true;
 }
 
 /**
- * The sftp executor's return to the engine: the wire result plus the three
+ * The sftp executor's return to the engine: the wire result plus the four
  * result-derived keys the engine folds onto its post-spawn audit row —
  * whether the spawn seam's redaction changed the captured output, when a
- * sweep ran its outcome, and on win32 the tier the spawn ran under.
- * {@link SftpResult} stays byte-identical.
+ * sweep ran its outcome, on win32 the tier the spawn ran under, and whether
+ * the policy's strict tree exit applied. {@link SftpResult} stays byte-identical.
  */
 export interface SftpExecution {
   result: SftpResult;
@@ -54,6 +57,8 @@ export interface SftpExecution {
   descendantSweep?: { killed: number; failed: boolean };
   /** Set only on win32 — the spawn tier; rides the audit row, never the wire result. */
   treeKill?: TreeKillMechanism;
+  /** Present when the policy's strict tree exit applied to the spawn (D2, 2026-09-10). */
+  strictTreeExit?: true;
 }
 
 /** Builds the metadata-only audit projection for an SFTP action. Pure — the
@@ -288,6 +293,7 @@ export async function executeSftpAction(
       redact: [keyPem],
       networkIsolation,
       fsIsolation,
+      strictTreeExit: policy.strict_tree_exit === true,
     });
 
     return {
@@ -295,6 +301,7 @@ export async function executeSftpAction(
       sanitized: r.redacted,
       ...(r.descendant_sweep ? { descendantSweep: r.descendant_sweep } : {}),
       ...(r.tree_kill ? { treeKill: r.tree_kill } : {}),
+      ...(r.strict_tree_exit ? { strictTreeExit: true } : {}),
     };
   } finally {
     agent.dispose();

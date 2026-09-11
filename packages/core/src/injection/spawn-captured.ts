@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { MAX_PROCESS_OUTPUT_BYTES } from "@harpoc/shared";
+import { MAX_PROCESS_OUTPUT_BYTES, VaultError } from "@harpoc/shared";
 import { system32Path } from "../win32-paths.js";
 import { CappedOutput } from "./capped-output.js";
 import { sweepDescendants } from "./descendant-sweep.js";
@@ -49,6 +49,13 @@ export interface SpawnCapturedResult {
    * win32 result, the normal exit and the spawn failure included; absent on POSIX.
    */
   tree_kill?: TreeKillMechanism;
+  /**
+   * Present only when the policy's `strict_tree_exit` applied to this spawn
+   * (D2, 2026-09-10): on win32 the job closed on the whole tree at the
+   * child's exit; on POSIX its process group was killed after it. Absent
+   * otherwise, on every platform.
+   */
+  strict_tree_exit?: true;
 }
 
 export interface SpawnCapturedOptions {
@@ -72,6 +79,16 @@ export interface SpawnCapturedOptions {
    * bwrap wrapper.
    */
   fsIsolation?: boolean;
+  /**
+   * The policy's `strict_tree_exit` (D2, 2026-09-10): nothing the child
+   * started outlives the call. win32 — the job wrapper in strict mode; a host
+   * without the wrapper refuses the spawn (STRICT_TREE_EXIT_UNAVAILABLE)
+   * before it starts. POSIX — the child's process group is killed after its
+   * own exit (the timeout path already kills it): a descendant that called
+   * `setsid`, or one running as another user (EPERM), escapes — as on the
+   * timeout path.
+   */
+  strictTreeExit?: boolean;
 }
 
 /**
@@ -222,14 +239,20 @@ export async function spawnCaptured(
     fsIsolationMechanism = wrapped.fsMechanism;
   }
   // Every win32 spawn runs inside the job wrapper when the host can build and
-  // run it (D4); off win32 wrapInJob answers null without probing.
+  // run it (D4), in the mode the policy asks for (D2, 2026-09-10); off win32
+  // wrapInJob answers a miss without probing.
+  const strict = opts.strictTreeExit === true;
   let treeKill: TreeKillMechanism | undefined;
-  const job = await wrapInJob(command, args);
-  if (job) {
+  const job = await wrapInJob(command, args, strict ? "strict" : "keep");
+  if (job.mechanism === "job") {
     command = job.command;
     args = job.args;
     treeKill = "job";
   } else if (process.platform === "win32") {
+    // A strict secret never runs on the taskkill tier: the job is the only
+    // mechanism that keeps the promise, so its absence refuses the use here —
+    // env built, nothing spawned — exactly where isolation refuses.
+    if (strict) throw VaultError.strictTreeExitUnavailable(job.reason);
     treeKill = "taskkill";
   }
   const cap = opts.maxOutputBytes ?? MAX_PROCESS_OUTPUT_BYTES;
@@ -270,6 +293,10 @@ export async function spawnCaptured(
         isolation_mechanism: isolationMechanism,
         fs_isolation_mechanism: fsIsolationMechanism,
         ...(treeKill ? { tree_kill: treeKill } : {}),
+        // The policy that was in force for this spawn, like the isolation
+        // booleans on the rows — copied from the policy, not from what the
+        // child did (L81, 2026-09-10). Nothing started, so nothing survived.
+        ...(strict ? { strict_tree_exit: true as const } : {}),
       });
       return;
     }
@@ -327,6 +354,7 @@ export async function spawnCaptured(
           isolation_mechanism: isolationMechanism,
           fs_isolation_mechanism: fsIsolationMechanism,
           ...(treeKill ? { tree_kill: treeKill } : {}),
+          ...(strict ? { strict_tree_exit: true as const } : {}),
           // A sweep the child's exit never confirmed is unconfirmed whatever it
           // found: the kill was delivered, but the vault did not see it take.
           ...(descendantSweep
@@ -374,6 +402,19 @@ export async function spawnCaptured(
     // microseconds and settles immediately with the complete output.
     child.on("exit", (code, signal) => {
       exited = true;
+      // POSIX strict tree exit (D2, 2026-09-10): the child left on its own —
+      // take the process group it led (`detached`) with it. The timeout path
+      // killed the group already; ESRCH means nobody was left. A descendant
+      // that called `setsid`, or one running as another user (EPERM), escapes
+      // — as on the timeout path. On win32 the job did this in the kernel.
+      if (strict && !timedOut && process.platform !== "win32" && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          // The group is empty, already gone — or EPERM: a member running as
+          // another user, which the escape clause above names (L82).
+        }
+      }
       if (settled) return;
       startSweep(Date.now());
       if (flushTimer) return;

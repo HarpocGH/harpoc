@@ -23,6 +23,7 @@ import { createPinnedLookup } from "./http-injector.js";
 import type { IsolationDimensions } from "./isolation.js";
 import { requireIsolation } from "./isolation.js";
 import type { McpConnectionEntry, McpConnectionRegistry } from "./mcp-registry.js";
+import { sanitizeDownstreamStderr } from "./mcp-registry.js";
 import { StdioChildTransport } from "./mcp-stdio-transport.js";
 import type { NetworkIsolationMechanism } from "./network-isolation.js";
 import { mapStringLeavesTracked, redactSecretEncodings } from "./output-sanitizer.js";
@@ -57,6 +58,9 @@ interface McpSdk {
  * `mcp.spawn` row `taskkill` means "unwrapped: the transport's direct kill of
  * the child, as before" — the transport's close is `stdin.end` → `SIGTERM` →
  * `SIGKILL` on the child alone, and it runs no taskkill and no sweep.
+ * `strictTreeExit` is set when the policy's strict tree exit applied to the
+ * launch (D2, 2026-09-10) — the mode the wrapper ran in on win32, the detached
+ * group on POSIX.
  */
 interface StdioLaunch {
   command: string;
@@ -65,6 +69,7 @@ interface StdioLaunch {
   networkMechanism?: NetworkIsolationMechanism;
   fsMechanism?: FsIsolationMechanism;
   treeKill?: TreeKillMechanism;
+  strictTreeExit?: true;
 }
 
 /**
@@ -190,6 +195,8 @@ export class McpInjector {
         await this.registry.terminate(secretId, "network_isolation_enabled", attribution);
       } else if (launch?.isolation.fs === true && !existing.isolation.fs) {
         await this.registry.terminate(secretId, "fs_isolation_enabled", attribution);
+      } else if (launch?.strictTreeExit === true && !existing.strictTreeExit) {
+        await this.registry.terminate(secretId, "strict_tree_exit_enabled", attribution);
       }
     }
 
@@ -293,7 +300,22 @@ export class McpInjector {
       stdioTransport?.killSync();
       void client.close().catch(() => undefined);
       dispose?.();
-      throw err;
+      // The wrapper's own failure is a spawn that never ran (note 1, 2026-09-10):
+      // the ENOENT twin, not a crash — the transport recorded the marker line
+      // before onclose fired, so it is readable here.
+      const wrapperFailure = stdioTransport?.exitInfo?.wrapper_failure;
+      throw wrapperFailure !== undefined
+        ? VaultError.mcpConnectFailed(
+            config.server_name,
+            // The line is downstream stderr: a payload faking the marker pair
+            // chooses it. Bounded where it is built (the transport) and given
+            // the crash row's own treatment here — exact-value redaction plus
+            // the guard's pattern pass — because this message reaches the model
+            // as tool-result text and the REST client as an error body (I4; I1,
+            // 2026-09-10).
+            `spawn failed: ${sanitizeDownstreamStderr(wrapperFailure, valueStr)}`,
+          )
+        : err;
     }
   }
 
@@ -319,6 +341,8 @@ export class McpInjector {
         args: stdioLaunch.args,
         env: buildCleanEnv(config.env_var as string, valueStr, policy.env_allowlist),
         cwd: config.working_directory,
+        ...(stdioLaunch.treeKill ? { treeKill: stdioLaunch.treeKill } : {}),
+        strictTreeExit: stdioLaunch.strictTreeExit === true,
       });
       setStdioTransport(stdioTransport);
       await client.connect(stdioTransport, { timeout: MCP_INIT_TIMEOUT_MS });
@@ -368,6 +392,7 @@ export class McpInjector {
                     : {}),
                   ...(launch?.fsMechanism ? { fs_isolation_mechanism: launch.fsMechanism } : {}),
                   ...(launch?.treeKill ? { tree_kill: launch.treeKill } : {}),
+                  ...(launch?.strictTreeExit ? { strict_tree_exit: true } : {}),
                 }
               : { url: config.url }),
           },
@@ -391,6 +416,7 @@ export class McpInjector {
       crashed: false,
       ...fingerprints,
       isolation: launch?.isolation ?? { network: false, fs: false },
+      strictTreeExit: launch?.strictTreeExit === true,
       spawnedAt: Date.now(),
       lastUsedAt: Date.now(),
     };
@@ -462,10 +488,39 @@ export class McpInjector {
       }
     }
     // The job wrapper is the outermost layer (D4, 2026-09-10): killing it
-    // takes the isolation monitor and the payload alike. Off win32 it is null.
-    const job = await wrapInJob(launch.command, launch.args);
-    if (job) return { ...launch, command: job.command, args: job.args, treeKill: "job" };
-    return process.platform === "win32" ? { ...launch, treeKill: "taskkill" } : launch;
+    // takes the isolation monitor and the payload alike, in the mode the
+    // policy asks for (D2). Off win32 it is a miss.
+    const strict = policy.strict_tree_exit === true;
+    const job = await wrapInJob(launch.command, launch.args, strict ? "strict" : "keep");
+    if (job.mechanism === "job") {
+      return {
+        ...launch,
+        command: job.command,
+        args: job.args,
+        treeKill: "job",
+        ...(strict ? { strictTreeExit: true as const } : {}),
+      };
+    }
+    if (process.platform === "win32") {
+      if (strict) {
+        // No job, no strict launch (D2): refused before the spawn, audited
+        // like the isolation refusals above; a live keep-mode child is taken
+        // down first so the demand is not left half-met.
+        await this.registry.terminate(secretId, "strict_tree_exit_enabled", attribution);
+        const err = VaultError.strictTreeExitUnavailable(job.reason);
+        this.audit(
+          action,
+          secretId,
+          config,
+          { error: err.code, strict_tree_exit: true },
+          false,
+          attribution,
+        );
+        throw err;
+      }
+      return { ...launch, treeKill: "taskkill" };
+    }
+    return strict ? { ...launch, strictTreeExit: true as const } : launch;
   }
 
   /**
@@ -519,6 +574,12 @@ export class McpInjector {
       if (err.code === (sdk.McpErrorCode.ConnectionClosed as number)) {
         if (entry.crashed) {
           const exit = entry.stdioTransport?.exitInfo ?? null;
+          if (exit?.wrapper_failure !== undefined)
+            // Bounded at the transport, then the crash row's treatment (I1).
+            return VaultError.mcpConnectFailed(
+              server,
+              `spawn failed: ${sanitizeDownstreamStderr(exit.wrapper_failure, valueStr)}`,
+            );
           return VaultError.mcpServerCrashed(server, exit?.code ?? null, exit?.signal ?? null);
         }
         return VaultError.mcpConnectFailed(server, "connection closed");

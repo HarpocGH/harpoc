@@ -61,6 +61,7 @@ const POLICY: InjectionPolicy = {
   fs_isolation: false,
   smtp_recipient_allowlist: [],
   imap_read_only: false,
+  strict_tree_exit: false,
 };
 
 function action(tool: string): McpAction {
@@ -226,6 +227,7 @@ describe("McpConnectionRegistry — connect racing a seal (M8)", () => {
         credentialFingerprint: "f",
         configFingerprint: "g",
         isolation: { network: false, fs: false },
+        strictTreeExit: false,
         spawnedAt: Date.now(),
         lastUsedAt: Date.now(),
       };
@@ -258,6 +260,7 @@ describe("McpConnectionRegistry — connect racing a seal (M8)", () => {
         credentialFingerprint: "f",
         configFingerprint: "g",
         isolation: { network: false, fs: false },
+        strictTreeExit: false,
         spawnedAt: Date.now(),
         lastUsedAt: Date.now(),
       }),

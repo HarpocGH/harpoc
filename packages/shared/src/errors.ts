@@ -51,6 +51,7 @@ export enum ErrorCode {
   INTERPRETER_NOT_ACKNOWLEDGED = "INTERPRETER_NOT_ACKNOWLEDGED",
   NETWORK_ISOLATION_UNAVAILABLE = "NETWORK_ISOLATION_UNAVAILABLE",
   FS_ISOLATION_UNAVAILABLE = "FS_ISOLATION_UNAVAILABLE",
+  STRICT_TREE_EXIT_UNAVAILABLE = "STRICT_TREE_EXIT_UNAVAILABLE",
 
   // MCP proxy
   MCP_SERVER_NOT_CONFIGURED = "MCP_SERVER_NOT_CONFIGURED",
@@ -196,6 +197,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED]: 400,
   [ErrorCode.NETWORK_ISOLATION_UNAVAILABLE]: 501,
   [ErrorCode.FS_ISOLATION_UNAVAILABLE]: 501,
+  [ErrorCode.STRICT_TREE_EXIT_UNAVAILABLE]: 501,
 
   // MCP proxy
   [ErrorCode.MCP_SERVER_NOT_CONFIGURED]: 400,
@@ -466,6 +468,15 @@ export class VaultError extends Error {
         `Linux needs setpriv with Landlock support (util-linux >= 2.40) on a Landlock-enabled kernel, or bubblewrap's bwrap as the second tier (a read-only root bind, under the userns grant); ` +
         `macOS needs /usr/bin/sandbox-exec; Windows is unsupported by design. ` +
         `Lift the demand via: secret allow <handle> --no-fs-isolation`,
+    );
+  }
+
+  static strictTreeExitUnavailable(reason: string): VaultError {
+    return new VaultError(
+      ErrorCode.STRICT_TREE_EXIT_UNAVAILABLE,
+      `Strict tree exit is required by this secret's policy but the Windows job wrapper is unavailable: ${reason}. ` +
+        "The wrapper is compiled by the .NET Framework compiler every Windows with PowerShell 5.1 carries; " +
+        "lift the demand via the admin path: secret allow <handle> --no-strict-tree-exit",
     );
   }
 

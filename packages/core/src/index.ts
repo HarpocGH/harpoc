@@ -112,14 +112,21 @@ export {
   isJobWrapperFailure,
   resetJobWrapperProbeForTests,
   forceJobWrapperUnavailableForTests,
+  setJobWrapperUnavailableHandler,
+  restrictToOwner,
   jobWrapperCacheDirs,
   JOB_WRAPPER_SOURCE_SHA256,
+  JOB_WRAPPER_KEEP_FLAG,
+  JOB_WRAPPER_STRICT_FLAG,
 } from "./injection/win32-job-wrapper.js";
 export type {
   TreeKillMechanism,
   JobWrap,
+  JobWrapMode,
+  JobWrapMiss,
   JobWrapperSeams,
   JobWrapperResolution,
+  RestrictSeams,
 } from "./injection/win32-job-wrapper.js";
 export {
   requireNetworkIsolation,

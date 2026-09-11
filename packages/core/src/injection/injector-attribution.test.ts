@@ -43,6 +43,7 @@ const EMPTY_POLICY: InjectionPolicy = {
   fs_isolation: false,
   smtp_recipient_allowlist: [],
   imap_read_only: false,
+  strict_tree_exit: false,
 };
 
 function captureLogger(): { log: ReturnType<typeof vi.fn>; logger: AuditLogger } {

@@ -238,4 +238,17 @@ describe("Process execution context (I2b / output-channel leakage)", () => {
       });
     },
   );
+
+  it("the secret.use row carries strict_tree_exit when the policy demands it (D2, 2026-09-10)", async () => {
+    await vault.engine.setInjectionPolicy(
+      handle,
+      { url_allowlist: [], command_allowlist: [NODE], env_allowlist: [], strict_tree_exit: true },
+      { acknowledge_interpreters: true },
+    );
+    const client = new DirectClient(vault.engine);
+    await client.useSecret(handle, procAction("process.exit(0)"));
+    const rows = vault.engine.queryAudit({ eventType: AuditEventType.SECRET_USE, limit: 1 });
+    expect(rows[0]?.detail).toMatchObject({ context: "process", strict_tree_exit: true });
+    if (process.platform === "win32") expect(rows[0]?.detail).toMatchObject({ tree_kill: "job" });
+  });
 });

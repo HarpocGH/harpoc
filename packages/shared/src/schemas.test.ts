@@ -702,6 +702,7 @@ describe("injectionPolicyInputSchema", () => {
       fs_isolation: false,
       smtp_recipient_allowlist: [],
       imap_read_only: false,
+      strict_tree_exit: false,
     });
   });
 
@@ -790,6 +791,7 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
     fs_isolation: true,
     smtp_recipient_allowlist: ["*@example.com"],
     imap_read_only: false,
+    strict_tree_exit: false,
   };
 
   it("accepts a complete policy unchanged", () => {
@@ -798,11 +800,11 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
 
   it("refuses a missing key, naming it", () => {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { imap_read_only: _dropped, ...partial } = complete;
+    const { strict_tree_exit: _dropped, ...partial } = complete;
     const result = injectionPolicySchema.safeParse(partial);
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error.issues.map((i) => i.path.join("."))).toContain("imap_read_only");
+      expect(result.error.issues.map((i) => i.path.join("."))).toContain("strict_tree_exit");
     }
   });
 
@@ -810,10 +812,10 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
     expect(injectionPolicySchema.safeParse({ ...complete, extra: 1 }).success).toBe(false);
   });
 
-  it("applies no defaults — an empty object is ten misses", () => {
+  it("applies no defaults — an empty object is eleven misses", () => {
     const result = injectionPolicySchema.safeParse({});
     expect(result.success).toBe(false);
-    if (!result.success) expect(result.error.issues).toHaveLength(10);
+    if (!result.success) expect(result.error.issues).toHaveLength(11);
   });
 
   it("shares the field validators with the input schema", () => {
@@ -852,6 +854,7 @@ describe("setInjectionPolicyRequestSchema", () => {
     fs_isolation: false,
     smtp_recipient_allowlist: ["*@corp.example"],
     imap_read_only: false,
+    strict_tree_exit: false,
   };
 
   it("is the stored policy shape plus the acknowledgement flag (key-set pin)", () => {
@@ -2185,6 +2188,22 @@ describe("v1.3 action schemas", () => {
     injectionPolicyInputSchema.parse({
       smtp_recipient_allowlist: ["ops@example.com", "*@example.com"],
     });
+  });
+  it("policy input gains strict_tree_exit with a replace default of false (2026-09-10)", () => {
+    expect(injectionPolicyInputSchema.parse({}).strict_tree_exit).toBe(false);
+    expect(injectionPolicyInputSchema.parse({ strict_tree_exit: true }).strict_tree_exit).toBe(
+      true,
+    );
+    expect(injectionPolicyInputSchema.safeParse({ strict_tree_exit: "yes" }).success).toBe(false);
+    // The wire shape inherits the field as required: an omitting PUT is told which field it dropped.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { strict_tree_exit: _omitted, ...tenFields } = injectionPolicySchema.parse({
+      ...injectionPolicyInputSchema.parse({}),
+    });
+    const wire = setInjectionPolicyRequestSchema.safeParse(tenFields);
+    expect(wire.success).toBe(false);
+    if (!wire.success)
+      expect(wire.error.issues.map((i) => i.path.join("."))).toEqual(["strict_tree_exit"]);
   });
 });
 
