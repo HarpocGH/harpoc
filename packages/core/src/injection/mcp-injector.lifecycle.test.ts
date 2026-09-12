@@ -3,10 +3,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InjectionPolicy, McpAction, McpServerConfig } from "@harpoc/shared";
-import { AuditEventType, ErrorCode } from "@harpoc/shared";
+import {
+  AuditEventType,
+  ErrorCode,
+  MAX_MCP_CRASH_STDERR_TAIL_CHARS,
+  MAX_MCP_WRAPPER_FAILURE_CHARS,
+} from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { McpInjector } from "./mcp-injector.js";
-import { McpConnectionRegistry } from "./mcp-registry.js";
+import { McpConnectionRegistry, sanitizeDownstreamStderr } from "./mcp-registry.js";
 
 const NODE = process.execPath;
 const SECRET = "sk-mcp-crash-supersecret-abcdef123456";
@@ -200,6 +205,28 @@ rl.on("line", (line) => {
     expect(tail).toContain("TAIL_MARKER_AT_THE_END");
     expect(tail).not.toContain("HEAD_MARKER_ONLY_AT_THE_START");
   }, 20_000);
+});
+
+// The wrapper's own failure line is bounded where it is built (the transport,
+// MAX_MCP_WRAPPER_FAILURE_CHARS) and then given the crash row's treatment on
+// its way into a VaultError message (I1, 2026-09-10). That treatment slices the
+// TAIL at MAX_MCP_CRASH_STDERR_TAIL_CHARS, so the head-anchored marker survives
+// only while the line's cap stays at or under the tail's — the chain shared pins.
+describe("sanitizeDownstreamStderr — the wrapper-failure line at its cap survives whole (2026-09-11)", () => {
+  const MARKER = "harpoc-job: ";
+
+  it("the tail slice is a no-op on a head-anchored line of exactly MAX_MCP_WRAPPER_FAILURE_CHARS code units", () => {
+    const line = MARKER + "x".repeat(MAX_MCP_WRAPPER_FAILURE_CHARS - MARKER.length);
+    expect(line).toHaveLength(MAX_MCP_WRAPPER_FAILURE_CHARS);
+    expect(sanitizeDownstreamStderr(line, undefined)).toBe(line);
+  });
+
+  it("control: a line longer than the crash tail loses its head", () => {
+    const line = MARKER + "x".repeat(MAX_MCP_CRASH_STDERR_TAIL_CHARS);
+    const out = sanitizeDownstreamStderr(line, undefined);
+    expect(out).toHaveLength(MAX_MCP_CRASH_STDERR_TAIL_CHARS);
+    expect(out.startsWith(MARKER)).toBe(false);
+  });
 });
 
 describe("McpConnectionRegistry — connect racing a seal (M8)", () => {

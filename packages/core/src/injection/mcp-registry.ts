@@ -1,6 +1,7 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   AuditEventType,
+  MAX_MCP_CRASH_STDERR_TAIL_CHARS,
   MCP_IDLE_SWEEP_INTERVAL_MS,
   MCP_IDLE_TTL_MS,
   MCP_SHUTDOWN_TIMEOUT_MS,
@@ -13,9 +14,6 @@ import { InjectionGuard } from "./injection-guard.js";
 import type { IsolationDimensions } from "./isolation.js";
 import type { StdioChildTransport } from "./mcp-stdio-transport.js";
 import { redactSecretEncodings } from "./output-sanitizer.js";
-
-/** Max bytes of pattern-sanitized downstream stderr recorded in a crash audit entry. */
-const CRASH_STDERR_TAIL_BYTES = 2_048;
 
 export type McpEntryState = "connecting" | "ready" | "closing";
 
@@ -113,8 +111,8 @@ export class McpConnectionRegistry {
 
   /**
    * Return the live connection for a secret, or establish one via `factory`.
-   * Concurrent callers coalesce onto the same connect; a failed connect is
-   * removed so the next invocation retries fresh.
+   * Concurrent callers coalesce onto the same connect; a failed connect frees
+   * its own slot — never a successor's — so the next invocation retries fresh.
    */
   async acquire(
     secretId: string,
@@ -132,7 +130,13 @@ export class McpConnectionRegistry {
     try {
       return await promise;
     } catch (err) {
-      this.connections.delete(secretId);
+      // Only this connect's own slot is freed (2026-09-11). A `terminate`
+      // that landed while the connect was in flight already deleted it, and
+      // a later `acquire` may have seated its successor there; deleting by
+      // key alone evicted that successor — C1's class (2026-09-10) through
+      // the other remover: the next call missed, spawned a third child and
+      // overwrote `live`, leaving a credential-bearing child in neither map.
+      if (this.connections.get(secretId) === promise) this.connections.delete(secretId);
       throw err;
     }
   }
@@ -368,7 +372,7 @@ export class McpConnectionRegistry {
  * rather than a third variant of it.
  */
 export function sanitizeDownstreamStderr(raw: string, redact: string | undefined): string {
-  const tail = raw.slice(-CRASH_STDERR_TAIL_BYTES);
+  const tail = raw.slice(-MAX_MCP_CRASH_STDERR_TAIL_CHARS);
   const exact = redact ? redactSecretEncodings(tail, redact) : tail;
   const guard = new InjectionGuard();
   return guard.sanitize(exact);

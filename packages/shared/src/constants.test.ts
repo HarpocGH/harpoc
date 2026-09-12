@@ -29,6 +29,9 @@ import {
   DEFAULT_SESSION_TTL_MS,
   HARPOC_VERSION,
   MAX_HTTP_RESPONSE_BYTES,
+  MAX_MCP_CRASH_STDERR_TAIL_CHARS,
+  MAX_MCP_STDERR_BYTES,
+  MAX_MCP_WRAPPER_FAILURE_CHARS,
   MAX_NAME_LENGTH,
   MIN_REDACTABLE_FRAGMENT,
   LOCKOUT_DURATIONS_MS,
@@ -341,6 +344,18 @@ describe("vault defaults", () => {
 describe("output sanitization constants", () => {
   it("MIN_REDACTABLE_FRAGMENT is 3", () => {
     expect(MIN_REDACTABLE_FRAGMENT).toBe(3);
+  });
+});
+
+describe("MCP stderr caps (2026-09-11)", () => {
+  it("the crash tail is 2 048 code units and the wrapper-failure line 512", () => {
+    expect(MAX_MCP_CRASH_STDERR_TAIL_CHARS).toBe(2_048);
+    expect(MAX_MCP_WRAPPER_FAILURE_CHARS).toBe(512);
+  });
+
+  it("chain: wrapper-failure line ≤ crash tail ≤ stderr ring — the tail slice is a no-op on the head-anchored marker line", () => {
+    expect(MAX_MCP_WRAPPER_FAILURE_CHARS).toBeLessThanOrEqual(MAX_MCP_CRASH_STDERR_TAIL_CHARS);
+    expect(MAX_MCP_CRASH_STDERR_TAIL_CHARS).toBeLessThanOrEqual(MAX_MCP_STDERR_BYTES);
   });
 });
 

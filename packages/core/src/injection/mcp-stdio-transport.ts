@@ -1,7 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
-import { MAX_MCP_STDERR_BYTES, MAX_MCP_STDOUT_BUFFER_BYTES } from "@harpoc/shared";
+import {
+  MAX_MCP_STDERR_BYTES,
+  MAX_MCP_STDOUT_BUFFER_BYTES,
+  MAX_MCP_WRAPPER_FAILURE_CHARS,
+} from "@harpoc/shared";
 import { CappedOutput } from "./capped-output.js";
 import type { TreeKillMechanism } from "./win32-job-wrapper.js";
 import { isJobWrapperFailure } from "./win32-job-wrapper.js";
@@ -40,16 +44,6 @@ export interface StdioChildParams {
 
 /** Grace period between shutdown escalation steps (stdin end → SIGTERM → SIGKILL). */
 const CLOSE_GRACE_MS = 2_000;
-
-/**
- * Cap on the wrapper-failure line kept in `exitInfo` (I1, 2026-09-10). The
- * line is downstream stderr — a payload faking the reserved exit code and the
- * marker chooses it — and it reaches a `VaultError` message, hence the model's
- * tool-result text and the REST error body. `stderrTail` bounds it only at
- * `MAX_MCP_STDERR_BYTES` (64 KiB); a diagnostic line needs far less, and the
- * wrapper's own lines are under 100 characters.
- */
-const MAX_WRAPPER_FAILURE_CHARS = 512;
 
 type McpStdioModule = typeof import("@modelcontextprotocol/sdk/shared/stdio.js");
 
@@ -167,7 +161,7 @@ export class StdioChildTransport implements Transport {
               signal: null,
               wrapper_failure: (stderrHead.split(/\r?\n/, 1)[0] ?? stderrHead)
                 .trim()
-                .slice(0, MAX_WRAPPER_FAILURE_CHARS),
+                .slice(0, MAX_MCP_WRAPPER_FAILURE_CHARS),
             }
           : { code, signal };
         this.child = null;

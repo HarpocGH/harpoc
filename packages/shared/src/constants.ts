@@ -147,6 +147,12 @@ export const MCP_IDLE_TTL_MS = 10 * 60 * 1_000; // a downstream child no use has
 export const MCP_IDLE_SWEEP_INTERVAL_MS = 30 * 1_000; // idle-sweep cadence (E73)
 export const MAX_MCP_RESULT_BYTES = 1_048_576; // 1 MiB serialized tool result
 export const MAX_MCP_STDERR_BYTES = 65_536; // capped downstream stderr ring (audit only)
+// Two slices of the ring's text, in UTF-16 code units (`String.prototype.slice`).
+// They chain — line ≤ tail ≤ ring — because the wrapper-failure line reaches a
+// VaultError message through the crash row's treatment (I1, 2026-09-10), whose
+// tail slice must stay a no-op on that head-anchored line. Pinned in constants.test.ts.
+export const MAX_MCP_CRASH_STDERR_TAIL_CHARS = 2_048; // the mcp.crash row's sanitized stderr tail
+export const MAX_MCP_WRAPPER_FAILURE_CHARS = 512; // the job wrapper's own failure line kept in exitInfo
 export const MAX_MCP_STDOUT_BUFFER_BYTES = 4_194_304; // 4 MiB unframed downstream stdout
 
 // -- Database / Git / SSH / use_secret defaults -------------------------------
