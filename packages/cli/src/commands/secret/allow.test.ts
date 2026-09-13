@@ -408,17 +408,8 @@ describe("secret allow command — recipient allowlist flag (v1.3)", () => {
     vi.clearAllMocks();
     delete process.env.HARPOC_TOKEN;
     mockEngine.getInjectionPolicy.mockResolvedValue({
-      url_allowlist: [],
-      command_allowlist: [],
-      env_allowlist: [],
-      host_allowlist: [],
-      response_mode: "filtered",
-      response_header_allowlist: [],
-      network_isolation: false,
-      fs_isolation: false,
+      ...STORED_POLICY,
       smtp_recipient_allowlist: ["a@b.c"],
-      imap_read_only: false,
-      strict_tree_exit: false,
     });
     errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
@@ -585,5 +576,19 @@ describe("secret allow command — strict tree exit flag (2026-09-10)", () => {
         { clear: true, strictTreeExit: true },
       ).strict_tree_exit,
     ).toBe(true);
+  });
+
+  it("a bare `secret allow <handle>` is a show: the stored policy printed, nothing set (2026-09-12)", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await run(["secret://k"]);
+      expect(mockEngine.getInjectionPolicy).toHaveBeenCalledTimes(1);
+      expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
+      expect(logSpy).toHaveBeenCalledWith(
+        JSON.stringify({ ...STORED_POLICY, strict_tree_exit: true }, null, 2),
+      );
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });

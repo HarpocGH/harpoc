@@ -150,7 +150,11 @@ export const MAX_MCP_STDERR_BYTES = 65_536; // capped downstream stderr ring (au
 // Two slices of the ring's text, in UTF-16 code units (`String.prototype.slice`).
 // They chain — line ≤ tail ≤ ring — because the wrapper-failure line reaches a
 // VaultError message through the crash row's treatment (I1, 2026-09-10), whose
-// tail slice must stay a no-op on that head-anchored line. Pinned in constants.test.ts.
+// tail slice must stay a no-op on that head-anchored line. The third link crosses
+// units (the ring is bytes), conservative: a string decoded from the ring has at
+// most as many code units as the ring has bytes. The line is the tightest of the
+// three because it reaches the model and the REST client as message text and
+// carries one head-anchored diagnostic line. Pinned in constants.test.ts.
 export const MAX_MCP_CRASH_STDERR_TAIL_CHARS = 2_048; // the mcp.crash row's sanitized stderr tail
 export const MAX_MCP_WRAPPER_FAILURE_CHARS = 512; // the job wrapper's own failure line kept in exitInfo
 export const MAX_MCP_STDOUT_BUFFER_BYTES = 4_194_304; // 4 MiB unframed downstream stdout

@@ -347,6 +347,10 @@ describe("output sanitization constants", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// MCP proxy
+// ---------------------------------------------------------------------------
+
 describe("MCP stderr caps (2026-09-11)", () => {
   it("the crash tail is 2 048 code units and the wrapper-failure line 512", () => {
     expect(MAX_MCP_CRASH_STDERR_TAIL_CHARS).toBe(2_048);

@@ -1719,7 +1719,12 @@ export class VaultEngine {
     // — and only this one — defaults on read; no rewrite (policy writes are
     // POLICY_GRANT events). The writer below writes all eleven; any other
     // miss stays corruption (R2/C43).
-    if (typeof raw === "object" && raw !== null && !("strict_tree_exit" in raw)) {
+    if (
+      typeof raw === "object" &&
+      raw !== null &&
+      !Array.isArray(raw) &&
+      !Object.hasOwn(raw, "strict_tree_exit")
+    ) {
       (raw as Record<string, unknown>)["strict_tree_exit"] = false;
     }
     const parsed = injectionPolicySchema.safeParse(raw);
@@ -1891,7 +1896,7 @@ export class VaultEngine {
     // would keep it running until then. A strict-tree-exit demand is the same
     // shape (D2, 2026-09-10): the live child was spawned under --keep, so its
     // survivors would outlive it. Idempotent no-op when nothing is live; the
-    // next use respawns the child wrapped as demanded, and the posture
+    // next use respawns the child wrapped as demanded (D51), and the posture
     // recorded on the registry entry is McpInjector's backstop for a policy
     // tightened from a separate process, whose engine cannot reach this
     // registry. One terminate covers every demand; network, fs, strict is

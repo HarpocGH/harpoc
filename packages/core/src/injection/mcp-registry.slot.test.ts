@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { AuditEventType, ErrorCode } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
+import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
 import type { McpConnectionEntry } from "./mcp-registry.js";
 import { McpConnectionRegistry } from "./mcp-registry.js";
+import type { StdioChildTransport } from "./mcp-stdio-transport.js";
 
 function fakeEntry(secretId: string, close: () => Promise<void>): McpConnectionEntry {
   return {
@@ -17,6 +21,29 @@ function fakeEntry(secretId: string, close: () => Promise<void>): McpConnectionE
     spawnedAt: Date.now(),
     lastUsedAt: Date.now(),
   };
+}
+
+function recordingLogger(): { logger: AuditLogger; rows: AuditLogOptions[] } {
+  const rows: AuditLogOptions[] = [];
+  const logger = {
+    log: (options: AuditLogOptions) => {
+      rows.push(options);
+    },
+  } as unknown as AuditLogger;
+  return { logger, rows };
+}
+
+// A stdio child as the registry reads it: the exit record (assigned by the
+// transport before its close hook fires), a kill, an empty stderr ring.
+function fakeStdio(
+  exitInfo: StdioChildTransport["exitInfo"],
+  killSync: () => void = vi.fn(),
+): StdioChildTransport {
+  return {
+    exitInfo,
+    killSync,
+    stderrTail: { toString: () => "" },
+  } as unknown as StdioChildTransport;
 }
 
 // The slot (`connections`) has four removers. `terminate` reads and deletes
@@ -70,6 +97,134 @@ describe("McpConnectionRegistry — a failed connect frees only its own slot (20
     const entry = await registry.acquire("s1", factory);
     expect(factory).toHaveBeenCalledTimes(1);
     expect(registry.get("s1")).toBe(entry);
+
+    await registry.closeAll("test_cleanup");
+  });
+});
+
+// The success-path sibling (2026-09-12): `connect` publishes only while the
+// slot holds no OTHER connect for the secret. An empty slot still publishes —
+// the terminate that freed it awaits this connect and closes it with its row.
+describe("McpConnectionRegistry — a connect publishes only while its slot is its own (2026-09-12)", () => {
+  it("a connect that resolves after a terminate seated its successor is torn down, never published", async () => {
+    const registry = new McpConnectionRegistry(null);
+    let resolveFirst: (entry: McpConnectionEntry) => void = () => undefined;
+    const first = registry.acquire(
+      "s1",
+      () => new Promise<McpConnectionEntry>((resolve) => (resolveFirst = resolve)),
+    );
+    // Frees the slot synchronously, then awaits the in-flight connect.
+    const terminated = registry.terminate("s1", "secret_revoked");
+    const closeSecond = vi.fn().mockResolvedValue(undefined);
+    const second = await registry.acquire("s1", () =>
+      Promise.resolve(fakeEntry("s1", closeSecond)),
+    );
+    expect(registry.get("s1")).toBe(second);
+
+    const closeFirst = vi.fn().mockResolvedValue(undefined);
+    const killFirst = vi.fn();
+    const late = { ...fakeEntry("s1", closeFirst), stdioTransport: fakeStdio(null, killFirst) };
+    resolveFirst(late);
+    await expect(first).rejects.toThrow("superseded while connecting");
+    await terminated;
+
+    // The late child is dead; the successor is untouched and still the seated connect.
+    expect(late.state).toBe("closing");
+    expect(killFirst).toHaveBeenCalledTimes(1);
+    expect(closeFirst).toHaveBeenCalledTimes(1);
+    expect(registry.get("s1")).toBe(second);
+    const third = await registry.acquire("s1", () =>
+      Promise.reject(new Error("must reuse, not reconnect")),
+    );
+    expect(third).toBe(second);
+    expect(closeSecond).not.toHaveBeenCalled();
+
+    await registry.closeAll("test_cleanup");
+    expect(closeSecond).toHaveBeenCalledTimes(1);
+  });
+
+  it("control: a connect that resolves into the empty slot a terminate freed publishes, and the pending terminate closes it with its row", async () => {
+    const { logger, rows } = recordingLogger();
+    const registry = new McpConnectionRegistry(logger);
+    let resolveFirst: (entry: McpConnectionEntry) => void = () => undefined;
+    const first = registry.acquire(
+      "s1",
+      () => new Promise<McpConnectionEntry>((resolve) => (resolveFirst = resolve)),
+    );
+    const terminated = registry.terminate("s1", "secret_revoked");
+    const closeFirst = vi.fn().mockResolvedValue(undefined);
+    resolveFirst(fakeEntry("s1", closeFirst));
+    const entry = await first;
+    await terminated;
+
+    expect(entry.state).toBe("closing");
+    expect(closeFirst).toHaveBeenCalledTimes(1);
+    expect(registry.get("s1")).toBeUndefined();
+    expect(rows.map((row) => row.eventType)).toEqual([AuditEventType.MCP_TERMINATE]);
+    expect(rows[0]?.detail).toMatchObject({ server: "slot-mcp", reason: "secret_revoked" });
+  });
+
+  it("a connect that resolves after a seal cleared the map and a post-seal acquire seated a successor leaves the successor alone (the catch's second beneficiary)", async () => {
+    const registry = new McpConnectionRegistry(null);
+    let resolveFirst: (entry: McpConnectionEntry) => void = () => undefined;
+    const first = registry.acquire(
+      "s1",
+      () => new Promise<McpConnectionEntry>((resolve) => (resolveFirst = resolve)),
+    );
+    registry.killAllSync();
+    const closeSecond = vi.fn().mockResolvedValue(undefined);
+    const second = await registry.acquire("s1", () =>
+      Promise.resolve(fakeEntry("s1", closeSecond)),
+    );
+    const closeFirst = vi.fn().mockResolvedValue(undefined);
+    resolveFirst(fakeEntry("s1", closeFirst));
+    await expect(first).rejects.toThrow("vault session ended while connecting");
+
+    expect(closeFirst).toHaveBeenCalledTimes(1);
+    expect(registry.get("s1")).toBe(second);
+    const third = await registry.acquire("s1", () =>
+      Promise.reject(new Error("must reuse, not reconnect")),
+    );
+    expect(third).toBe(second);
+    expect(closeSecond).not.toHaveBeenCalled();
+
+    await registry.closeAll("test_cleanup");
+    expect(closeSecond).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The transport assigns `exitInfo` before its close hook fires, and the SDK
+// runs the client hook nobody had installed yet: a child that exits between
+// the handshake and the publish leaves an exit record and a dead client.
+describe("McpConnectionRegistry — a child already dead at publish takes the crash path (2026-09-12)", () => {
+  it("the connect rejects MCP_SERVER_CRASHED with the forensics, one mcp.crash row is written, nothing is published, and the next acquire connects fresh", async () => {
+    const { logger, rows } = recordingLogger();
+    const registry = new McpConnectionRegistry(logger);
+    const closeDead = vi.fn().mockResolvedValue(undefined);
+    const dead = {
+      ...fakeEntry("s1", closeDead),
+      stdioTransport: fakeStdio({ code: 1, signal: null }),
+    };
+    const err = await expectVaultError(
+      () => registry.acquire("s1", () => Promise.resolve(dead)),
+      ErrorCode.MCP_SERVER_CRASHED,
+    );
+    expect(err.details).toEqual({ server: "slot-mcp", exit_code: 1, signal: null });
+    expect(dead.crashed).toBe(true);
+    expect(registry.get("s1")).toBeUndefined();
+    expect(rows.map((row) => row.eventType)).toEqual([AuditEventType.MCP_CRASH]);
+    expect(rows[0]).toMatchObject({
+      secretId: "s1",
+      success: false,
+      detail: { server: "slot-mcp", transport: "stdio", exit_code: 1, signal: null },
+    });
+
+    const factory = vi.fn(() =>
+      Promise.resolve(fakeEntry("s1", vi.fn().mockResolvedValue(undefined))),
+    );
+    const fresh = await registry.acquire("s1", factory);
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(registry.get("s1")).toBe(fresh);
 
     await registry.closeAll("test_cleanup");
   });

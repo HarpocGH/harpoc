@@ -321,7 +321,9 @@ async function compileInto(
       renameSync(source, record);
       return;
     } catch {
-      // The winner's rename landed first.
+      // The record is held open by a concurrent reader. A racing rename would
+      // not fail — win32 rename replaces — it would supersede the record with
+      // the same bytes.
     }
   }
   removeQuietly(source);

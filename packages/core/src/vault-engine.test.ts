@@ -873,6 +873,8 @@ describe("injection policy", () => {
 
   it("round-trips strict_tree_exit and defaults it to false when omitted (2026-09-10)", async () => {
     await engine.setInjectionPolicy("secret://pol", { strict_tree_exit: true });
+    const granted = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0];
+    expect(granted?.detail?.strict_tree_exit).toBe(true);
     expect((await engine.getInjectionPolicy("secret://pol")).strict_tree_exit).toBe(true);
     await engine.setInjectionPolicy("secret://pol", { url_allowlist: [] });
     expect((await engine.getInjectionPolicy("secret://pol")).strict_tree_exit).toBe(false);

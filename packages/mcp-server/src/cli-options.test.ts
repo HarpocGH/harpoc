@@ -187,8 +187,8 @@ describe("index.ts lifecycle ordering", () => {
     expect(banner).toBeGreaterThan(arm);
   });
 
-  // stdout is the stdio transport; a session-file warning goes where the
-  // banner goes (R5 / D4, 2026-09-07).
+  // stdout is the stdio transport; a session-file or job-wrapper warning goes
+  // where the banner goes (R5 / D4, 2026-09-07).
   it("wires both warning seams to stderr and never writes to stdout", () => {
     const text = source();
     expect(text).toContain("onSessionFilePermissionRepairFailure");

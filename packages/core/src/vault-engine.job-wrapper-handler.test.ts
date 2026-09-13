@@ -33,8 +33,10 @@ describe("VaultEngine — the job-wrapper warning seam (note 2, 2026-09-10)", ()
       sessionPath: join(dir, "a.session"),
       onJobWrapperUnavailable: warn,
     });
+    expect(installed).toHaveBeenCalledTimes(1);
     expect(installed).toHaveBeenLastCalledWith(warn);
     new VaultEngine({ dbPath: join(dir, "b.db"), sessionPath: join(dir, "b.session") });
+    expect(installed).toHaveBeenCalledTimes(2);
     expect(installed).toHaveBeenLastCalledWith(null);
   });
 });

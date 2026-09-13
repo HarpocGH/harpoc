@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode, VAULT_DB_NAME, VAULT_DIR_NAME } from "@harpoc/shared";
-import { VaultEngine } from "@harpoc/core";
+import {
+  resetJobWrapperProbeForTests,
+  resolveJobWrapper,
+  setJobWrapperUnavailableHandler,
+  VaultEngine,
+} from "@harpoc/core";
 import { expectVaultError } from "@harpoc/test-utils";
 import {
   createEngine,
@@ -45,9 +50,7 @@ describe("createEngine", () => {
     expect(engine).toBeInstanceOf(VaultEngine);
   });
 
-  it("wires both warning seams to console.error (2026-09-10)", async () => {
-    const { resetJobWrapperProbeForTests, resolveJobWrapper, setJobWrapperUnavailableHandler } =
-      await import("@harpoc/core");
+  it("wires the job-wrapper warning seam to console.error (2026-09-10)", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       createEngine(tempDir);

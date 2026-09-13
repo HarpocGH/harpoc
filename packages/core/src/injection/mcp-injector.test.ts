@@ -633,6 +633,18 @@ describe("McpInjector — isolation: the stdio child spawns wrapped (D51)", () =
     expect(registry.get("secret-1")?.isolation).toEqual({ network: true, fs: true });
   });
 
+  it("uses the filesystem reason when the filesystem dimension and strict tree exit are newly demanded together (fs outranks strict)", async () => {
+    await run(mcpAction("echo"));
+    const terminateSpy = vi.spyOn(registry, "terminate");
+    await run(mcpAction("echo"), {
+      policy: { ...POLICY, fs_isolation: true, strict_tree_exit: true },
+    });
+    expect(terminateSpy).toHaveBeenCalledTimes(1);
+    expect(terminateSpy).toHaveBeenCalledWith("secret-1", "fs_isolation_enabled", undefined);
+    expect(registry.get("secret-1")?.isolation).toEqual({ network: false, fs: true });
+    expect(registry.get("secret-1")?.strictTreeExit).toBe(true);
+  });
+
   it("leaves a wrapped child alone when the policy loosens or is re-asserted", async () => {
     await run(mcpAction("echo"), { policy: { ...POLICY, fs_isolation: true } });
     const entry = registry.get("secret-1");

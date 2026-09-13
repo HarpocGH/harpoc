@@ -519,11 +519,7 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
     await audited.executeWithSecret(
       { type: "git", operation: "clone", repository: REPO },
       new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
-      policy({
-        command_allowlist: [GIT as string],
-        url_allowlist: ["https://8.8.8.8/*"],
-        strict_tree_exit: true,
-      }),
+      { ...httpsPolicy(), strict_tree_exit: true },
       undefined,
       "secret-1",
     );

@@ -164,7 +164,9 @@ describe("spawnCaptured — the job wrapper seam (D4)", () => {
 
   it("a timeout on the job path kills the wrapper directly — no taskkill helper, no sweep", async () => {
     monitorWrap();
-    // 3 s, not 30: on win32 the node stand-in has no job, so this payload outlives the case's kill (note 6, 2026-09-10) — it must expire inside the suite's budget.
+    // 3 s, not 30: on win32 the node stand-in has no job, so this payload
+    // outlives the case's kill (note 6, 2026-09-10) — it must expire inside
+    // the suite's budget.
     const r = await spawnCaptured(NODE, ["-e", "setTimeout(() => {}, 3000)"], {
       env: ENV,
       timeoutMs: 500,

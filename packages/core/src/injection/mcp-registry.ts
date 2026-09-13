@@ -112,7 +112,8 @@ export class McpConnectionRegistry {
   /**
    * Return the live connection for a secret, or establish one via `factory`.
    * Concurrent callers coalesce onto the same connect; a failed connect frees
-   * its own slot — never a successor's — so the next invocation retries fresh.
+   * its own slot — never a successor's — so the next invocation retries fresh,
+   * and a connect publishes only while the slot is still its own (2026-09-12).
    */
   async acquire(
     secretId: string,
@@ -125,7 +126,10 @@ export class McpConnectionRegistry {
       return existing;
     }
 
-    const promise = this.connect(secretId, factory);
+    const promise: Promise<McpConnectionEntry> = this.connect(secretId, factory, () => {
+      const seated = this.connections.get(secretId);
+      return seated !== undefined && seated !== promise;
+    });
     this.connections.set(secretId, promise);
     try {
       return await promise;
@@ -209,6 +213,7 @@ export class McpConnectionRegistry {
   private async connect(
     secretId: string,
     factory: () => Promise<McpConnectionEntry>,
+    superseded: () => boolean,
   ): Promise<McpConnectionEntry> {
     const generation = this.generation;
     const entry = await factory();
@@ -223,14 +228,43 @@ export class McpConnectionRegistry {
       entry.dispose?.();
       throw VaultError.mcpConnectFailed(entry.serverName, "vault session ended while connecting");
     }
+    if (superseded()) {
+      // A `terminate` freed this connect's slot while it was in flight and a
+      // later `acquire` seated a successor there, which completed first
+      // (2026-09-12). Publishing would overwrite the successor in `live` and
+      // leave it in `connections` only, where neither the seal paths nor the
+      // idle sweep walk — its child, the credential in its environment, would
+      // outlive the seal. The seal branch's teardown; the pending terminate
+      // sees the rejection and returns; the caller's next call reuses the
+      // successor. An empty slot still publishes: the terminate that freed it
+      // awaits this connect and closes it with its own row.
+      entry.state = "closing";
+      entry.stdioTransport?.killSync();
+      void entry.client.close().catch(() => undefined);
+      entry.dispose?.();
+      throw VaultError.mcpConnectFailed(entry.serverName, "superseded while connecting");
+    }
     entry.state = "ready";
     entry.lastUsedAt = Date.now();
-    this.live.set(secretId, entry);
-    this.ensureSweep();
 
     // Protocol assigns transport.onclose internally; the client-level hook is
     // the supported observation point for both crash and deliberate close.
     entry.client.onclose = () => this.handleClose(secretId, entry);
+    const exit = entry.stdioTransport?.exitInfo;
+    if (exit) {
+      // The child exited between the handshake and this publish (2026-09-12):
+      // the transport recorded its exit and the SDK ran a close hook nobody
+      // had installed yet. Published, the entry would answer every call "Not
+      // connected" until the idle sweep, with no crash row. The crash path
+      // instead — the row, the slot freed (this connect's own; the slot check
+      // above ran) — and the connect fails as a crash; the next call
+      // reconnects fresh. A wrapper failure never reaches here: it completes
+      // no handshake.
+      this.handleClose(secretId, entry);
+      throw VaultError.mcpServerCrashed(entry.serverName, exit.code, exit.signal);
+    }
+    this.live.set(secretId, entry);
+    this.ensureSweep();
 
     return entry;
   }
@@ -241,14 +275,16 @@ export class McpConnectionRegistry {
     }
     // Only an UNEXPECTED close frees the slot (C1, 2026-09-10). Every
     // deliberate teardown already removed it before this hook can run
-    // (`terminate`, `closeAll`, `killAllSync`, and the generation branch via
-    // `acquire`'s catch; `sweepIdle` goes through `terminate`), and a
-    // terminated child's 'close' can land arbitrarily late — a grandchild
-    // holding its inherited pipes withholds it for its whole life, which is
-    // exactly why close() settles on 'exit' (note 7). Deleting then would
-    // evict the SUCCESSOR's slot: the next call would miss, spawn a third
-    // child and overwrite `live`, leaving a credential-bearing child in
-    // neither map, reachable by no terminate, seal or sweep path.
+    // (`terminate`; `closeAll` / `killAllSync`, which clear the map a connect
+    // on the generation branch then finds empty; `sweepIdle` goes through
+    // `terminate`), and a terminated child's 'close' can land arbitrarily
+    // late — a grandchild holding its inherited pipes withholds it for its
+    // whole life, which is exactly why close() settles on 'exit' (note 7).
+    // Deleting then would evict the SUCCESSOR's slot: the next call would
+    // miss, spawn a third child and overwrite `live`, leaving a
+    // credential-bearing child in neither map, reachable by no terminate,
+    // seal or sweep path. `connect` calls this hook itself for a child already
+    // dead at publish (2026-09-12); that slot is the connect's own.
     if (entry.state !== "closing") this.connections.delete(secretId);
     this.stopSweepIfIdle();
     entry.dispose?.();
