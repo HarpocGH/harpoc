@@ -107,7 +107,8 @@ describe("McpConnectionRegistry — a failed connect frees only its own slot (20
 // the terminate that freed it awaits this connect and closes it with its row.
 describe("McpConnectionRegistry — a connect publishes only while its slot is its own (2026-09-12)", () => {
   it("a connect that resolves after a terminate seated its successor is torn down, never published", async () => {
-    const registry = new McpConnectionRegistry(null);
+    const { logger, rows } = recordingLogger();
+    const registry = new McpConnectionRegistry(logger);
     let resolveFirst: (entry: McpConnectionEntry) => void = () => undefined;
     const first = registry.acquire(
       "s1",
@@ -127,6 +128,10 @@ describe("McpConnectionRegistry — a connect publishes only while its slot is i
     resolveFirst(late);
     await expect(first).rejects.toThrow("superseded while connecting");
     await terminated;
+    // No row for the superseded window: the pending terminate's await
+    // rejected before it held an entry, and the late child was torn down
+    // without the crash path.
+    expect(rows).toEqual([]);
 
     // The late child is dead; the successor is untouched and still the seated connect.
     expect(late.state).toBe("closing");
@@ -141,6 +146,7 @@ describe("McpConnectionRegistry — a connect publishes only while its slot is i
 
     await registry.closeAll("test_cleanup");
     expect(closeSecond).toHaveBeenCalledTimes(1);
+    expect(rows.map((row) => row.eventType)).toEqual([AuditEventType.MCP_TERMINATE]);
   });
 
   it("control: a connect that resolves into the empty slot a terminate freed publishes, and the pending terminate closes it with its row", async () => {
@@ -218,6 +224,65 @@ describe("McpConnectionRegistry — a child already dead at publish takes the cr
       success: false,
       detail: { server: "slot-mcp", transport: "stdio", exit_code: 1, signal: null },
     });
+
+    const factory = vi.fn(() =>
+      Promise.resolve(fakeEntry("s1", vi.fn().mockResolvedValue(undefined))),
+    );
+    const fresh = await registry.acquire("s1", factory);
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(registry.get("s1")).toBe(fresh);
+
+    await registry.closeAll("test_cleanup");
+  });
+});
+
+// The seal path's per-entry teardown, pinned on fake entries: `killAllSync`
+// cannot await, so each live entry is marked closing, its child killed, its
+// client's close swallowed and its resources disposed — once each — and both
+// tables are empty afterwards. The same idiom `connect`'s generation and
+// superseded branches take (`killEntrySync`, 2026-09-14).
+describe("McpConnectionRegistry — killAllSync tears every live entry down synchronously (2026-09-14)", () => {
+  function expectTornDown(
+    entry: McpConnectionEntry,
+    kill: () => void,
+    close: () => Promise<void>,
+    dispose: () => void,
+  ): void {
+    expect(entry.state).toBe("closing");
+    expect(kill).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
+  }
+
+  it("each live entry is closing, killed once, closed once and disposed once — a rejecting close swallowed — both maps are empty, no row, and the next acquire connects fresh", async () => {
+    const { logger, rows } = recordingLogger();
+    const registry = new McpConnectionRegistry(logger);
+    const closeA = vi.fn().mockResolvedValue(undefined);
+    const killA = vi.fn();
+    const disposeA = vi.fn();
+    const a = {
+      ...fakeEntry("s1", closeA),
+      stdioTransport: fakeStdio(null, killA),
+      dispose: disposeA,
+    };
+    const closeB = vi.fn().mockRejectedValue(new Error("already gone"));
+    const killB = vi.fn();
+    const disposeB = vi.fn();
+    const b = {
+      ...fakeEntry("s2", closeB),
+      stdioTransport: fakeStdio(null, killB),
+      dispose: disposeB,
+    };
+    expect(await registry.acquire("s1", () => Promise.resolve(a))).toBe(a);
+    expect(await registry.acquire("s2", () => Promise.resolve(b))).toBe(b);
+
+    registry.killAllSync();
+
+    expectTornDown(a, killA, closeA, disposeA);
+    expectTornDown(b, killB, closeB, disposeB);
+    expect(registry.get("s1")).toBeUndefined();
+    expect(registry.get("s2")).toBeUndefined();
+    expect(rows).toEqual([]);
 
     const factory = vi.fn(() =>
       Promise.resolve(fakeEntry("s1", vi.fn().mockResolvedValue(undefined))),

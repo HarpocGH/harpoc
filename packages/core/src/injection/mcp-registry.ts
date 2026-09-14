@@ -200,14 +200,24 @@ export class McpConnectionRegistry {
   killAllSync(): void {
     this.generation++;
     for (const entry of this.live.values()) {
-      entry.state = "closing";
-      entry.stdioTransport?.killSync();
-      void entry.client.close().catch(() => undefined);
-      entry.dispose?.();
+      this.killEntrySync(entry);
     }
     this.live.clear();
     this.connections.clear();
     this.stopSweep();
+  }
+
+  /**
+   * The synchronous hard teardown of one entry — the seal paths' idiom: marked
+   * closing so no later hook or terminate writes a row for it, the child
+   * killed, the client's close swallowed, the transport resources disposed.
+   * Never awaits and writes no row (2026-09-14).
+   */
+  private killEntrySync(entry: McpConnectionEntry): void {
+    entry.state = "closing";
+    entry.stdioTransport?.killSync();
+    void entry.client.close().catch(() => undefined);
+    entry.dispose?.();
   }
 
   private async connect(
@@ -222,10 +232,7 @@ export class McpConnectionRegistry {
       // flight. Tear the child down here — the same hard teardown the seal path
       // performs — instead of publishing it into a registry nothing will walk
       // again.
-      entry.state = "closing";
-      entry.stdioTransport?.killSync();
-      void entry.client.close().catch(() => undefined);
-      entry.dispose?.();
+      this.killEntrySync(entry);
       throw VaultError.mcpConnectFailed(entry.serverName, "vault session ended while connecting");
     }
     if (superseded()) {
@@ -238,10 +245,7 @@ export class McpConnectionRegistry {
       // sees the rejection and returns; the caller's next call reuses the
       // successor. An empty slot still publishes: the terminate that freed it
       // awaits this connect and closes it with its own row.
-      entry.state = "closing";
-      entry.stdioTransport?.killSync();
-      void entry.client.close().catch(() => undefined);
-      entry.dispose?.();
+      this.killEntrySync(entry);
       throw VaultError.mcpConnectFailed(entry.serverName, "superseded while connecting");
     }
     entry.state = "ready";
@@ -256,8 +260,8 @@ export class McpConnectionRegistry {
       // the transport recorded its exit and the SDK ran a close hook nobody
       // had installed yet. Published, the entry would answer every call "Not
       // connected" until the idle sweep, with no crash row. The crash path
-      // instead — the row, the slot freed (this connect's own; the slot check
-      // above ran) — and the connect fails as a crash; the next call
+      // instead — the row, the slot freed (its own or already empty; the slot
+      // check above ran) — and the connect fails as a crash; the next call
       // reconnects fresh. A wrapper failure never reaches here: it completes
       // no handshake.
       this.handleClose(secretId, entry);
@@ -284,7 +288,7 @@ export class McpConnectionRegistry {
     // miss, spawn a third child and overwrite `live`, leaving a
     // credential-bearing child in neither map, reachable by no terminate,
     // seal or sweep path. `connect` calls this hook itself for a child already
-    // dead at publish (2026-09-12); that slot is the connect's own.
+    // dead at publish (2026-09-12); that slot is the connect's own or empty.
     if (entry.state !== "closing") this.connections.delete(secretId);
     this.stopSweepIfIdle();
     entry.dispose?.();

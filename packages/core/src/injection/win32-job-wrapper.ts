@@ -321,9 +321,10 @@ async function compileInto(
       renameSync(source, record);
       return;
     } catch {
-      // The record is held open by a concurrent reader. A racing rename would
-      // not fail — win32 rename replaces — it would supersede the record with
-      // the same bytes.
+      // The record is typically held open by a concurrent reader; an AV lock
+      // or a sharing violation on the source lands here too. A racing rename
+      // would not fail — win32 rename replaces — it would supersede the
+      // record with the same bytes.
     }
   }
   removeQuietly(source);
