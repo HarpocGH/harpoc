@@ -14,6 +14,26 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         node-version: [22, 24]
+        arm: [standing]
+        # Probe P (docs/implementation-plan-concurrency-warmup-register-2026-09-14.md,
+        # D1): fourteen Windows twins - the gate at three turbo concurrencies, and
+        # one pre-gate warm-up call each on four more - per Node version; the
+        # standing legs are the control. Removed by the tranche commit either way.
+        include:
+          - { os: windows-latest, node-version: 22, arm: c1, test_flags: "--concurrency=1" }
+          - { os: windows-latest, node-version: 24, arm: c1, test_flags: "--concurrency=1" }
+          - { os: windows-latest, node-version: 22, arm: c2, test_flags: "--concurrency=2" }
+          - { os: windows-latest, node-version: 24, arm: c2, test_flags: "--concurrency=2" }
+          - { os: windows-latest, node-version: 22, arm: c4, test_flags: "--concurrency=4" }
+          - { os: windows-latest, node-version: 24, arm: c4, test_flags: "--concurrency=4" }
+          - { os: windows-latest, node-version: 22, arm: w-bare, pregate: bare }
+          - { os: windows-latest, node-version: 24, arm: w-bare, pregate: bare }
+          - { os: windows-latest, node-version: 22, arm: w-dpapi, pregate: dpapi }
+          - { os: windows-latest, node-version: 24, arm: w-dpapi, pregate: dpapi }
+          - { os: windows-latest, node-version: 22, arm: w-wmi, pregate: wmi }
+          - { os: windows-latest, node-version: 24, arm: w-wmi, pregate: wmi }
+          - { os: windows-latest, node-version: 22, arm: w-all, pregate: all }
+          - { os: windows-latest, node-version: 24, arm: w-all, pregate: all }
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -104,12 +124,20 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm lint
+      # Probe P: one pre-gate warm-up call on the w-* twins. The first DPAPI
+      # protect under the gate measured 0.6-0.9 s on every leg whose probe step
+      # had run before it (2026-09-14) and 5-36 s on every row without one; this
+      # isolates the call (docs/implementation-plan-concurrency-warmup-register-2026-09-14.md,
+      # D1). One stdout line, nothing asserted; removed by the tranche commit either way.
+      - name: Pre-gate warm-up (probe P - diagnostic; the w-* twins only)
+        if: runner.os == 'Windows' && startsWith(matrix.arm, 'w-')
+        run: node .github/scripts/pregate-warmup.mjs ${{ matrix.pregate }}
       - name: Test (Windows, native OpenSSH client required for the ssh-live tier)
         if: runner.os == 'Windows'
         env:
           HARPOC_REQUIRE_PLATFORM_TESTS: ssh-live
           HARPOC_SERIES_FILE: ${{ runner.temp }}/harpoc-series.md
-        run: pnpm test
+        run: pnpm test ${{ matrix.test_flags }}
       # The three CI series lines (the listing warm-up, the two DPAPI cases)
       # reach the job summary and this file; the summary renders only for a
       # signed-in browser and no API returns it, so the file is uploaded and
@@ -119,7 +147,7 @@ jobs:
         if: always() && runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: series-${{ matrix.os }}-${{ matrix.node-version }}
+          name: series-${{ matrix.os }}-${{ matrix.node-version }}-${{ matrix.arm }}
           path: ${{ runner.temp }}/harpoc-series.md
           if-no-files-found: ignore
           retention-days: 30
