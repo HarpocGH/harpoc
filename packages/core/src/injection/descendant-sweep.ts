@@ -56,7 +56,7 @@ const MAX_LISTING_BYTES = 64 * 1024;
  * Per helper (one PowerShell listing, one taskkill). A cold PowerShell host
  * exceeded 4 s under the local parallel gate (2026-08-26) and 10 s on every
  * windows-latest CI run since (PowerShell 5.1 start-up plus the CIM listing on
- * a two-core runner under the full gate; ~250 ms on an idle host) — a bound
+ * a four-vCPU runner under the full gate; ~250 ms on an idle host) — a bound
  * the helper cannot meet is a sweep that silently fails open (2026-08-29).
  */
 const HELPER_TIMEOUT_MS = 20_000;

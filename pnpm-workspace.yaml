@@ -1,6 +1,8 @@
 packages:
   - "packages/*"
 
+strictPeerDependencies: true
+
 # pnpm 10.x (the pinned packageManager) reads onlyBuiltDependencies; pnpm 11 removed
 # that key for allowBuilds and turns an undecided build script into a failed install
 # (ERR_PNPM_IGNORED_BUILDS), so every package with an install script needs a verdict.

@@ -327,9 +327,9 @@ describe.runIf(process.platform === "win32")("sweepDescendants — live win32 or
         if (label === "warm") warmMs = elapsed;
         timings.push(`${label}=${String(elapsed)}ms (${outcome})`);
       }
-      // Judged on the warm listing alone: the 2026-08-29 rule discusses a
-      // listing mechanism when a WARM listing exceeds 60 s, and a cold call at
-      // the bound is absorbed here by design.
+      // Judged on the warm listing alone: a WARM listing over 60 s marks the
+      // line TRIGGER — recorded, not re-discussed (2026-09-09) — and a cold call
+      // at the bound is absorbed here by design.
       recordSeriesLine(`[descendant-sweep live] WMI listing warm-up: ${timings.join(", ")}`, {
         judgedMs: warmMs,
       });

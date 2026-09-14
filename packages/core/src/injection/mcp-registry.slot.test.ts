@@ -254,7 +254,7 @@ describe("McpConnectionRegistry — killAllSync tears every live entry down sync
     expect(dispose).toHaveBeenCalledTimes(1);
   }
 
-  it("each live entry is closing, killed once, closed once and disposed once — both maps are empty, no row, and the next acquire connects fresh", async () => {
+  it("each live entry is closing, killed once, closed once and disposed once — both maps are empty, no row, and the next acquire of either slot connects fresh", async () => {
     const { logger, rows } = recordingLogger();
     const registry = new McpConnectionRegistry(logger);
     const closeA = vi.fn().mockResolvedValue(undefined);
@@ -290,6 +290,12 @@ describe("McpConnectionRegistry — killAllSync tears every live entry down sync
     const fresh = await registry.acquire("s1", factory);
     expect(factory).toHaveBeenCalledTimes(1);
     expect(registry.get("s1")).toBe(fresh);
+    const factory2 = vi.fn(() =>
+      Promise.resolve(fakeEntry("s2", vi.fn().mockResolvedValue(undefined))),
+    );
+    const fresh2 = await registry.acquire("s2", factory2);
+    expect(factory2).toHaveBeenCalledTimes(1);
+    expect(registry.get("s2")).toBe(fresh2);
 
     await registry.closeAll("test_cleanup");
   });
@@ -305,14 +311,15 @@ describe("McpConnectionRegistry — killAllSync tears every live entry down sync
     expect(await registry.acquire("s1", () => Promise.resolve(entry))).toBe(entry);
 
     // A spy's promise is always handled (tinyspy attaches its own settlement
-    // handlers), so only a plain function can show the swallow at :219 —
-    // Node emits unhandledRejection after the microtask queue drains.
+    // handlers), so only a plain function can show the swallow in
+    // killEntrySync's catch — Node emits unhandledRejection after the
+    // microtask queue drains.
     const unhandled = vi.fn();
     process.once("unhandledRejection", unhandled);
     try {
       registry.killAllSync();
       await new Promise((resolve) => setImmediate(resolve));
-      expect(unhandled).not.toHaveBeenCalled();
+      expect(unhandled.mock.calls).toEqual([]);
     } finally {
       process.off("unhandledRejection", unhandled);
     }
