@@ -14,18 +14,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         node-version: [22, 24]
-        defender: [rtp-on]
-        # Probe P (docs/implementation-plan-close-pin-wmi-cause-2026-09-14.md, D2):
-        # three Windows twins per Node version, each with one Defender setting
-        # changed for the length of its job; the rtp-on legs are the control.
-        # Removed by the tranche commit either way.
-        include:
-          - { os: windows-latest, node-version: 22, defender: rtp-off }
-          - { os: windows-latest, node-version: 24, defender: rtp-off }
-          - { os: windows-latest, node-version: 22, defender: script-scan-off }
-          - { os: windows-latest, node-version: 24, defender: script-scan-off }
-          - { os: windows-latest, node-version: 22, defender: path-excl }
-          - { os: windows-latest, node-version: 24, defender: path-excl }
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -33,26 +21,6 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
-      - name: Defender arm (probe P - diagnostic; the Windows twins only)
-        if: runner.os == 'Windows' && matrix.defender != 'rtp-on'
-        shell: pwsh
-        run: |
-          $arm = '${{ matrix.defender }}'
-          try {
-            switch ($arm) {
-              'rtp-off' { Set-MpPreference -DisableRealtimeMonitoring $true }
-              'script-scan-off' { Set-MpPreference -DisableScriptScanning $true }
-              'path-excl' {
-                $paths = @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:PNPM_HOME, "$env:LOCALAPPDATA\pnpm") | Where-Object { $_ }
-                Add-MpPreference -ExclusionPath $paths -ExclusionProcess 'node.exe', 'powershell.exe', 'harpoc-job.exe'
-              }
-            }
-          } catch {
-            Write-Host "[probe arm] $arm refused: $($_.Exception.Message)"
-          }
-          Write-Host "[probe arm] $arm"
-          Get-MpComputerStatus | Select-Object AMServiceEnabled, RealTimeProtectionEnabled, BehaviorMonitorEnabled, IsTamperProtected | Format-List
-          Get-MpPreference | Select-Object DisableRealtimeMonitoring, DisableScriptScanning, ExclusionPath, ExclusionProcess | Format-List
       - name: Enable Linux keystore tiers and the bwrap isolation tier (keyutils + Secret Service + bubblewrap)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y keyutils gnome-keyring libsecret-tools dbus-x11 bubblewrap
@@ -136,13 +104,6 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm lint
-      # Probe P: the product's exact listing spawn, a DPAPI protect, a Get-Process
-      # count and the Defender status, timed on the runner before the gate starts
-      # (docs/implementation-plan-close-pin-wmi-cause-2026-09-14.md, D2). One
-      # stdout line, nothing asserted; removed by the tranche commit either way.
-      - name: Probe the WMI listing on the idle runner (probe P - diagnostic)
-        if: runner.os == 'Windows'
-        run: node .github/scripts/wmi-idle-probe.mjs
       - name: Test (Windows, native OpenSSH client required for the ssh-live tier)
         if: runner.os == 'Windows'
         env:
@@ -158,7 +119,7 @@ jobs:
         if: always() && runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: series-${{ matrix.os }}-${{ matrix.node-version }}-${{ matrix.defender }}
+          name: series-${{ matrix.os }}-${{ matrix.node-version }}
           path: ${{ runner.temp }}/harpoc-series.md
           if-no-files-found: ignore
           retention-days: 30

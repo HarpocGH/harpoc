@@ -254,7 +254,7 @@ describe("McpConnectionRegistry — killAllSync tears every live entry down sync
     expect(dispose).toHaveBeenCalledTimes(1);
   }
 
-  it("each live entry is closing, killed once, closed once and disposed once — a rejecting close swallowed — both maps are empty, no row, and the next acquire connects fresh", async () => {
+  it("each live entry is closing, killed once, closed once and disposed once — both maps are empty, no row, and the next acquire connects fresh", async () => {
     const { logger, rows } = recordingLogger();
     const registry = new McpConnectionRegistry(logger);
     const closeA = vi.fn().mockResolvedValue(undefined);
@@ -292,5 +292,33 @@ describe("McpConnectionRegistry — killAllSync tears every live entry down sync
     expect(registry.get("s1")).toBe(fresh);
 
     await registry.closeAll("test_cleanup");
+  });
+
+  it("a close that rejects is swallowed: a plain rejecting close, not a spy, reaches no unhandledRejection listener and is called once", async () => {
+    const registry = new McpConnectionRegistry(null);
+    let closeCalls = 0;
+    const close = (): Promise<void> => {
+      closeCalls += 1;
+      return Promise.reject(new Error("already gone"));
+    };
+    const entry = { ...fakeEntry("s1", close), stdioTransport: fakeStdio(null) };
+    expect(await registry.acquire("s1", () => Promise.resolve(entry))).toBe(entry);
+
+    // A spy's promise is always handled (tinyspy attaches its own settlement
+    // handlers), so only a plain function can show the swallow at :219 —
+    // Node emits unhandledRejection after the microtask queue drains.
+    const unhandled = vi.fn();
+    process.once("unhandledRejection", unhandled);
+    try {
+      registry.killAllSync();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+
+    expect(closeCalls).toBe(1);
+    expect(entry.state).toBe("closing");
+    expect(registry.get("s1")).toBeUndefined();
   });
 });
