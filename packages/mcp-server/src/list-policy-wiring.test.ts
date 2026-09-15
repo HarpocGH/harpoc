@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { McpServer } from "@modelcontextprotocol/server";
+import { inMemoryClientFor, invokeHandler } from "@harpoc/test-utils";
 import type { SecretInfo, VaultEngine } from "@harpoc/core";
 import type { CallerContext, VaultApiToken } from "@harpoc/shared";
 import { isAdminUserCaller } from "@harpoc/shared";
@@ -72,39 +73,12 @@ function mockEngine(): VaultEngine {
   } as unknown as VaultEngine;
 }
 
-async function callTool(
-  server: McpServer,
-  name: string,
-  args: Record<string, unknown>,
-): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
-  const lowLevelServer = (
-    server as unknown as { server: { _requestHandlers: Map<string, unknown> } }
-  ).server;
-  const handler = lowLevelServer._requestHandlers.get("tools/call") as (
-    req: { method: string; params: { name: string; arguments?: Record<string, unknown> } },
-    extra: unknown,
-  ) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }>;
-  return handler(
-    { method: "tools/call", params: { name, arguments: args } },
-    { signal: new AbortController().signal, sessionId: "test" },
-  );
+async function callTool(server: McpServer, name: string, args: Record<string, unknown>) {
+  return (await inMemoryClientFor(server)).callTool(name, args);
 }
 
-async function readResource(
-  server: McpServer,
-  uri: string,
-): Promise<{ contents: Array<{ text?: string }> }> {
-  const lowLevelServer = (
-    server as unknown as { server: { _requestHandlers: Map<string, unknown> } }
-  ).server;
-  const handler = lowLevelServer._requestHandlers.get("resources/read") as (
-    req: { method: string; params: { uri: string } },
-    extra: unknown,
-  ) => Promise<{ contents: Array<{ text?: string }> }>;
-  return handler(
-    { method: "resources/read", params: { uri } },
-    { signal: new AbortController().signal, sessionId: "test" },
-  );
+async function readResource(server: McpServer, uri: string) {
+  return (await inMemoryClientFor(server)).readResource(uri);
 }
 
 function firstText(result: { contents: Array<{ text?: string }> }): string {
@@ -121,6 +95,10 @@ beforeEach(() => {
   engine = mockEngine();
   scopeGuard = new ScopeGuard(TOKEN);
   rateLimiter = new RateLimiter();
+});
+
+afterEach(async () => {
+  await server.close();
 });
 
 describe("tools", () => {
@@ -192,7 +170,9 @@ describe("resources", () => {
     ).mockRejectedValue(new Error("ACCESS_DENIED"));
     registerSecretsResource(server, engine, scopeGuard);
 
-    await expect(readResource(server, "secret://vault/secrets/visible")).rejects.toThrow();
+    await expect(
+      invokeHandler(server, "resources/read", { uri: "secret://vault/secrets/visible" }),
+    ).rejects.toThrow(/ACCESS_DENIED/);
   });
 });
 

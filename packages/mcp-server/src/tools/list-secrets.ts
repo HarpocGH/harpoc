@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
@@ -13,19 +13,21 @@ export function registerListSecrets(
   scopeGuard: ScopeGuard,
   rateLimiter: RateLimiter,
 ): void {
-  server.tool(
+  server.registerTool(
     "list_secrets",
-    "List all secrets in the vault (metadata only, never values)",
     {
-      project: z.string().optional().describe("Filter by project name"),
-      type: z
-        .string()
-        .optional()
-        .describe("Filter by secret type (api_key, oauth_token, certificate)"),
-      status: z
-        .string()
-        .optional()
-        .describe("Filter by status (active, pending, expired, revoked)"),
+      description: "List all secrets in the vault (metadata only, never values)",
+      inputSchema: z.object({
+        project: z.string().optional().describe("Filter by project name"),
+        type: z
+          .string()
+          .optional()
+          .describe("Filter by secret type (api_key, oauth_token, certificate)"),
+        status: z
+          .string()
+          .optional()
+          .describe("Filter by status (active, pending, expired, revoked)"),
+      }),
     },
     async (args) => {
       scopeGuard.checkAccess(PERMISSION, args.project);

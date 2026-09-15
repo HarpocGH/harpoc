@@ -1,8 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import type { Arm, CallOutcome } from "./arm.js";
 import { textOf } from "../harness/surfaces/mcp-http.js";
 import { resolveGit, resolveSsh } from "../harness/fixtures.js";

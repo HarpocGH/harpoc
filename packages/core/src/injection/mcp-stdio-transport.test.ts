@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { Client } from "@modelcontextprotocol/client";
 import { MAX_MCP_STDERR_BYTES } from "@harpoc/shared";
 import { StdioChildTransport } from "./mcp-stdio-transport.js";
 import type { JobWrap } from "./win32-job-wrapper.js";
@@ -46,7 +46,6 @@ describe("StdioChildTransport — protocol round trip", () => {
 
     const result = (await client.callTool(
       { name: "echo", arguments: { hello: "world" } },
-      undefined,
       { timeout: 5_000 },
     )) as { content: Array<{ type: string; text: string }> };
 

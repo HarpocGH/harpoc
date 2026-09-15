@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { CertManager } from "@harpoc/cert-manager";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { DirectClient, RestClient } from "@harpoc/sdk";

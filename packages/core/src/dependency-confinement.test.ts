@@ -17,6 +17,6 @@ describe("core", () => {
     entryUrl: pathToFileURL(resolve(pkgRoot, "dist", "index.js")).href,
     cwd: pkgRoot,
     forbidden: ["@modelcontextprotocol"],
-    control: "@modelcontextprotocol/sdk/types.js",
+    control: "@modelcontextprotocol/client",
   });
 });

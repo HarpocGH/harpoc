@@ -1,7 +1,17 @@
 import { describe, it, expect, vi } from "vitest";
+import type { McpServer } from "@modelcontextprotocol/server";
+import { inMemoryClientFor } from "@harpoc/test-utils";
 import type { VaultEngine } from "@harpoc/core";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { createMcpServer } from "./server.js";
+
+async function callTool(server: McpServer, name: string, args: Record<string, unknown>) {
+  return (await inMemoryClientFor(server)).callTool(name, args);
+}
+
+async function listTools(server: McpServer) {
+  return (await inMemoryClientFor(server)).listTools();
+}
 
 function mockEngine(overrides: Record<string, unknown> = {}): VaultEngine {
   return {
@@ -206,20 +216,8 @@ describe("createMcpServer", () => {
     const engine = mockEngine();
     const server = createMcpServer({ engine, allowTokenless: true });
 
-    // Access internal tool registry
-    const lowLevel = (server as unknown as { server: { _requestHandlers: Map<string, unknown> } })
-      .server;
-    const listHandler = lowLevel._requestHandlers.get("tools/list") as (
-      req: unknown,
-      extra: unknown,
-    ) => Promise<{ tools: Array<{ name: string }> }>;
-
-    expect(listHandler).toBeDefined();
-    const result = await listHandler(
-      { method: "tools/list", params: {} },
-      { signal: new AbortController().signal, sessionId: "test" },
-    );
-    expect(result.tools.map((t) => t.name).sort()).toEqual([
+    const tools = await listTools(server);
+    expect(tools.map((t) => t.name).sort()).toEqual([
       "check_secret_health",
       "create_secret",
       "get_secret_info",
@@ -248,21 +246,7 @@ describe("createMcpServer", () => {
 
       const server = createMcpServer({ engine, launchToken: "token" });
 
-      // Call tools/call through the server
-      const lowLevel = (server as unknown as { server: { _requestHandlers: Map<string, unknown> } })
-        .server;
-      const callHandler = lowLevel._requestHandlers.get("tools/call") as (
-        req: { method: string; params: { name: string; arguments?: Record<string, unknown> } },
-        extra: unknown,
-      ) => Promise<unknown>;
-
-      const result = (await callHandler(
-        {
-          method: "tools/call",
-          params: { name: "create_secret", arguments: { name: "x", type: "api_key" } },
-        },
-        { signal: new AbortController().signal, sessionId: "test" },
-      )) as { content: Array<{ text: string }>; isError?: boolean };
+      const result = await callTool(server, "create_secret", { name: "x", type: "api_key" });
       expect(result.isError).toBe(true);
       expect((result.content[0] as { text: string }).text).toContain("Access denied");
     });
@@ -282,17 +266,7 @@ describe("createMcpServer", () => {
 
       const server = createMcpServer({ engine, launchToken: "token" });
 
-      const lowLevel = (server as unknown as { server: { _requestHandlers: Map<string, unknown> } })
-        .server;
-      const callHandler = lowLevel._requestHandlers.get("tools/call") as (
-        req: { method: string; params: { name: string; arguments?: Record<string, unknown> } },
-        extra: unknown,
-      ) => Promise<{ content: Array<{ type: string; text: string }> }>;
-
-      const result = await callHandler(
-        { method: "tools/call", params: { name: "list_secrets", arguments: {} } },
-        { signal: new AbortController().signal, sessionId: "test" },
-      );
+      const result = await callTool(server, "list_secrets", {});
       expect(result.content).toBeDefined();
     });
   });
@@ -316,17 +290,7 @@ describe("createMcpServer — launch-token revocation wiring", () => {
     const engine = mockEngine({ isTokenRevoked });
     const server = createMcpServer({ engine, launchToken: "jwt" });
 
-    const lowLevel = (server as unknown as { server: { _requestHandlers: Map<string, unknown> } })
-      .server;
-    const callHandler = lowLevel._requestHandlers.get("tools/call") as (
-      req: { method: string; params: { name: string; arguments?: Record<string, unknown> } },
-      extra: unknown,
-    ) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
-    const call = (): Promise<{ content: Array<{ text: string }>; isError?: boolean }> =>
-      callHandler(
-        { method: "tools/call", params: { name: "list_secrets", arguments: {} } },
-        { signal: new AbortController().signal, sessionId: "test" },
-      );
+    const call = () => callTool(server, "list_secrets", {});
 
     // Before revocation the call succeeds.
     const before = await call();

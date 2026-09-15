@@ -1,6 +1,6 @@
 import { X509Certificate } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { providerConfigFromFlowInput } from "@harpoc/oauth-proxy";
 import { DirectClient, RestClient } from "@harpoc/sdk";

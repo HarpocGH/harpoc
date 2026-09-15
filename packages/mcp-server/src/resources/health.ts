@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import type { VaultEngine } from "@harpoc/core";
 import type { ScopeGuard } from "../guards/scope-guard.js";
 
@@ -9,7 +9,7 @@ export function registerHealthResource(
   engine: VaultEngine,
   scopeGuard: ScopeGuard,
 ): void {
-  server.resource(
+  server.registerResource(
     "vault-health",
     "secret://vault/health",
     { description: "Vault state and secret health summary", mimeType: "application/json" },

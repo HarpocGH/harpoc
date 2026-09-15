@@ -3,8 +3,8 @@ import { createServer } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
 import type { InjectionPolicy, McpAction, McpServerConfig } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 
@@ -80,10 +80,10 @@ describe("MCP Streamable HTTP DNS-rebinding pinning", () => {
   beforeEach(async () => {
     seenHosts.length = 0;
     const downstream = new McpServer({ name: "pinned-downstream", version: "1.0.0" });
-    downstream.tool("echo", "Echo a fixed marker", {}, async () => ({
+    downstream.registerTool("echo", { description: "Echo a fixed marker" }, async () => ({
       content: [{ type: "text" as const, text: "pinned-ok" }],
     }));
-    const transport = new StreamableHTTPServerTransport({
+    const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
     });
     await downstream.connect(transport);

@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createApp } from "@harpoc/rest-api";
 import { startMcpHttpServer } from "@harpoc/mcp-server";
 import type { McpHttpServer } from "@harpoc/mcp-server";

@@ -1,6 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import type { JSONRPCMessage, Transport } from "@modelcontextprotocol/client";
 import {
   MAX_MCP_STDERR_BYTES,
   MAX_MCP_STDOUT_BUFFER_BYTES,
@@ -45,7 +44,7 @@ export interface StdioChildParams {
 /** Grace period between shutdown escalation steps (stdin end → SIGTERM → SIGKILL). */
 const CLOSE_GRACE_MS = 2_000;
 
-type McpStdioModule = typeof import("@modelcontextprotocol/sdk/shared/stdio.js");
+type McpStdioModule = typeof import("@modelcontextprotocol/client");
 
 /**
  * MCP client transport over a vault-spawned stdio child (thesis §4.5.4).
@@ -99,7 +98,7 @@ export class StdioChildTransport implements Transport {
 
     // Lazy SDK import (dependency confinement, §5.2): SDK code enters the
     // process only once a downstream server is actually spawned.
-    const stdio = await import("@modelcontextprotocol/sdk/shared/stdio.js");
+    const stdio = await import("@modelcontextprotocol/client");
     this.serializeMessage = stdio.serializeMessage;
     this.deserializeMessage = stdio.deserializeMessage;
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { inMemoryClientFor } from "@harpoc/test-utils";
 import type { CertManager } from "@harpoc/cert-manager";
 import type { SecretInfo, VaultEngine } from "@harpoc/core";
 import type { OAuthManager } from "@harpoc/oauth-proxy";
@@ -57,22 +58,8 @@ function mockEngine(): VaultEngine {
   } as unknown as VaultEngine;
 }
 
-async function callTool(
-  server: McpServer,
-  name: string,
-  args: Record<string, unknown>,
-): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
-  const lowLevelServer = (
-    server as unknown as { server: { _requestHandlers: Map<string, unknown> } }
-  ).server;
-  const handler = lowLevelServer._requestHandlers.get("tools/call") as (
-    req: { method: string; params: { name: string; arguments?: Record<string, unknown> } },
-    extra: unknown,
-  ) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }>;
-  return handler(
-    { method: "tools/call", params: { name, arguments: args } },
-    { signal: new AbortController().signal, sessionId: "test" },
-  );
+async function callTool(server: McpServer, name: string, args: Record<string, unknown>) {
+  return (await inMemoryClientFor(server)).callTool(name, args);
 }
 
 const HTTP_ACTION = {

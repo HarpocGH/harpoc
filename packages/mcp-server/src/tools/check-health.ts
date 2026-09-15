@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
@@ -15,11 +15,13 @@ export function registerCheckHealth(
   scopeGuard: ScopeGuard,
   rateLimiter: RateLimiter,
 ): void {
-  server.tool(
+  server.registerTool(
     "check_secret_health",
-    "Check vault and secret health status",
     {
-      handle: z.string().optional().describe("Optional: check a specific secret (omit for all)"),
+      description: "Check vault and secret health status",
+      inputSchema: z.object({
+        handle: z.string().optional().describe("Optional: check a specific secret (omit for all)"),
+      }),
     },
     async (args) => {
       scopeGuard.checkAccess(PERMISSION);

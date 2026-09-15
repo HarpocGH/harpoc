@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
@@ -17,20 +17,23 @@ export function registerCreateSecret(
   rateLimiter: RateLimiter,
   enableTtyPrompt = false,
 ): void {
-  server.tool(
+  server.registerTool(
     "create_secret",
-    "Create a new secret. The value is collected out-of-band — via a one-time browser form (URL-mode elicitation) when the client supports it, otherwise set separately via CLI. Secret values never pass through the LLM.",
     {
-      name: z
-        .string()
-        .regex(/^[a-zA-Z0-9_-]+$/)
-        .describe("Secret name (alphanumeric, hyphens, underscores)"),
-      type: secretTypeSchema.describe("Secret type"),
-      project: z
-        .string()
-        .regex(/^[a-zA-Z0-9_-]+$/)
-        .optional()
-        .describe("Project namespace"),
+      description:
+        "Create a new secret. The value is collected out-of-band — via a one-time browser form (URL-mode elicitation) when the client supports it, otherwise set separately via CLI. Secret values never pass through the LLM.",
+      inputSchema: z.object({
+        name: z
+          .string()
+          .regex(/^[a-zA-Z0-9_-]+$/)
+          .describe("Secret name (alphanumeric, hyphens, underscores)"),
+        type: secretTypeSchema.describe("Secret type"),
+        project: z
+          .string()
+          .regex(/^[a-zA-Z0-9_-]+$/)
+          .optional()
+          .describe("Project namespace"),
+      }),
     },
     async (args) => {
       scopeGuard.checkAccess(PERMISSION, args.project, args.name);

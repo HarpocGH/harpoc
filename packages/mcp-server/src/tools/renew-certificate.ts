@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import type { CertManager } from "@harpoc/cert-manager";
 import type { VaultEngine } from "@harpoc/core";
@@ -16,11 +16,14 @@ export function registerRenewCertificate(
   rateLimiter: RateLimiter,
   certManager: CertManager,
 ): void {
-  server.tool(
+  server.registerTool(
     "renew_certificate",
-    "Renew a certificate secret via ACME (http-01 on the default port 80). Returns certificate metadata; never key material. The challenge responder's port is not selectable here — `harpoc cert renew --http-port` is the only path that selects one.",
     {
-      handle: z.string().describe("Secret handle (secret://[project/]name)"),
+      description:
+        "Renew a certificate secret via ACME (http-01 on the default port 80). Returns certificate metadata; never key material. The challenge responder's port is not selectable here — `harpoc cert renew --http-port` is the only path that selects one.",
+      inputSchema: z.object({
+        handle: z.string().describe("Secret handle (secret://[project/]name)"),
+      }),
     },
     async (args) => {
       const parsed = parseHandle(args.handle);

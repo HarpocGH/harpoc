@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/server";
 import type { VaultEngine } from "@harpoc/core";
 import { HARPOC_VERSION } from "@harpoc/shared";
 import { createMcpServer } from "./server.js";

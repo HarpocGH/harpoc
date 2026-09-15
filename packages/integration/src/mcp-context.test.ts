@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
 import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import { DirectClient } from "@harpoc/sdk";
 import { requireNetworkIsolation } from "@harpoc/core";
@@ -357,10 +357,14 @@ describe("MCP proxy context — Streamable HTTP transport (request-mediated)", (
 
     // Downstream MCP server over Streamable HTTP on loopback.
     const downstream = new McpServer({ name: "integ-http-downstream", version: "1.0.0" });
-    downstream.tool("whoami", "Echo the received Authorization header", {}, async () => ({
-      content: [{ type: "text" as const, text: receivedAuthHeaders.at(-1) ?? "none" }],
-    }));
-    const transport = new StreamableHTTPServerTransport({
+    downstream.registerTool(
+      "whoami",
+      { description: "Echo the received Authorization header" },
+      async () => ({
+        content: [{ type: "text" as const, text: receivedAuthHeaders.at(-1) ?? "none" }],
+      }),
+    );
+    const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
     });
     await downstream.connect(transport);

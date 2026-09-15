@@ -1,8 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/server";
+import type { McpServer } from "@modelcontextprotocol/server";
 import type { VaultEngine } from "@harpoc/core";
 import { createMcpServer } from "../server.js";
 import { startValueCollector, collectValueViaUrlElicitation } from "./value-collector.js";
@@ -347,7 +346,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
     const { client, close } = await connect(engine, {
       capabilities: { elicitation: { url: {} } },
     });
-    client.setRequestHandler(ElicitRequestSchema, async (request) => {
+    client.setRequestHandler("elicitation/create", async (request) => {
       const params = request.params as { mode?: string; url?: string };
       expect(params.mode).toBe("url");
       await fetch(params.url as string);
@@ -397,7 +396,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
     const { client, close } = await connect(engine, {
       capabilities: { elicitation: { url: {} } },
     });
-    client.setRequestHandler(ElicitRequestSchema, async (request) => {
+    client.setRequestHandler("elicitation/create", async (request) => {
       const params = request.params as { url?: string };
       await fetch(params.url as string, {
         method: "POST",

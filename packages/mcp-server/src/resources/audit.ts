@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import type { VaultEngine } from "@harpoc/core";
 import type { ScopeGuard } from "../guards/scope-guard.js";
 
@@ -7,7 +7,7 @@ export function registerAuditResource(
   engine: VaultEngine,
   scopeGuard: ScopeGuard,
 ): void {
-  server.resource(
+  server.registerResource(
     "audit-recent",
     "secret://vault/audit/recent",
     { description: "Last 50 audit log entries (metadata only)", mimeType: "application/json" },

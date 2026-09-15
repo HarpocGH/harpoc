@@ -1,5 +1,5 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import { ResourceTemplate } from "@modelcontextprotocol/server";
 import type { VaultEngine } from "@harpoc/core";
 import type { ScopeGuard } from "../guards/scope-guard.js";
 
@@ -9,7 +9,7 @@ export function registerSecretsResource(
   scopeGuard: ScopeGuard,
 ): void {
   // Static: list all secrets
-  server.resource(
+  server.registerResource(
     "secrets-list",
     "secret://vault/secrets",
     {
@@ -36,7 +36,7 @@ export function registerSecretsResource(
   );
 
   // Template: single secret by name
-  server.resource(
+  server.registerResource(
     "secret-by-name",
     new ResourceTemplate("secret://vault/secrets/{name}", {
       list: async () => {

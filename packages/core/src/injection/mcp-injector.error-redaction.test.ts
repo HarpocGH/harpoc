@@ -3,8 +3,8 @@ import { createServer } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
 import type { InjectionPolicy, McpAction, McpServerConfig } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import { McpInjector } from "./mcp-injector.js";
@@ -159,17 +159,19 @@ describe("McpInjector — HTTP transport error channel (T4)", () => {
   });
 
   /**
-   * Handshakes as a real MCP server, then answers the tool call with a 500
-   * whose body quotes the bearer credential it was given. The SDK wraps that
-   * body in a plain `StreamableHTTPError` — not an `McpError` — which is the
-   * third redaction site.
+   * Handshakes as a real MCP server, then answers the tool call with a 500 whose body quotes the
+   * bearer credential it was given. The SDK wraps that body in an `SdkHttpError` — an `SdkError`
+   * whose code is neither `ConnectionClosed` nor `RequestTimeout` — which the classifier's generic
+   * `SdkError` arm redacts: the third redaction site.
    */
   async function startHostileHttpServer(): Promise<void> {
     const downstream = new McpServer({ name: "hostile-http", version: "1.0.0" });
-    downstream.tool("echo", "Echo", {}, async () => ({
+    downstream.registerTool("echo", { description: "Echo" }, async () => ({
       content: [{ type: "text" as const, text: "never reached" }],
     }));
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() });
+    const transport = new NodeStreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+    });
     await downstream.connect(transport);
 
     const server = createServer((req, res) => {

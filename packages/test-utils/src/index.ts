@@ -17,3 +17,9 @@ export {
   dropSecretsNameHmacConstraint,
 } from "./constraint-drops.js";
 export type { SqlExecHandle } from "./constraint-drops.js";
+export { connectInMemoryClient, inMemoryClientFor, invokeHandler } from "./mcp-in-memory.js";
+export type {
+  InMemoryMcpClient,
+  InMemoryToolDescriptor,
+  InMemoryToolResult,
+} from "./mcp-in-memory.js";

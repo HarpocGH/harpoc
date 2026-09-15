@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import { inMemoryClientFor } from "@harpoc/test-utils";
+import type { InMemoryToolDescriptor } from "@harpoc/test-utils";
 import type { CertManager } from "@harpoc/cert-manager";
 import type { VaultEngine } from "@harpoc/core";
 import type { OAuthManager } from "@harpoc/oauth-proxy";
@@ -103,25 +105,8 @@ function harness(
   return { server, engine, oauthManager };
 }
 
-function requestHandler<T>(server: McpServer, method: string): (req: unknown, extra: unknown) => T {
-  const lowLevel = (server as unknown as { server: { _requestHandlers: Map<string, unknown> } })
-    .server;
-  const handler = lowLevel._requestHandlers.get(method);
-  if (!handler) throw new Error(`No ${method} handler found`);
-  return handler as (req: unknown, extra: unknown) => T;
-}
-
-const EXTRA = { signal: new AbortController().signal, sessionId: "test" };
-
-interface ToolDescriptor {
-  name: string;
-  inputSchema: { properties?: Record<string, unknown> };
-}
-
-async function listTools(server: McpServer): Promise<ToolDescriptor[]> {
-  const handler = requestHandler<Promise<{ tools: ToolDescriptor[] }>>(server, "tools/list");
-  const result = await handler({ method: "tools/list", params: {} }, EXTRA);
-  return result.tools;
+async function listTools(server: McpServer) {
+  return (await inMemoryClientFor(server)).listTools();
 }
 
 interface ToolResult {
@@ -129,13 +114,12 @@ interface ToolResult {
   isError?: boolean;
 }
 
-function callTool(
+async function callTool(
   server: McpServer,
   name: string,
   args: Record<string, unknown>,
 ): Promise<ToolResult> {
-  const handler = requestHandler<Promise<ToolResult>>(server, "tools/call");
-  return handler({ method: "tools/call", params: { name, arguments: args } }, EXTRA);
+  return (await inMemoryClientFor(server)).callTool(name, args);
 }
 
 function toolData(result: ToolResult): Record<string, unknown> {
@@ -152,7 +136,9 @@ describe("start_oauth_flow", () => {
     const { server } = harness();
     const tool = (await listTools(server)).find((t) => t.name === "start_oauth_flow");
     expect(tool).toBeDefined();
-    const properties = Object.keys((tool as ToolDescriptor).inputSchema.properties ?? {}).sort();
+    const properties = Object.keys(
+      (tool as InMemoryToolDescriptor).inputSchema.properties ?? {},
+    ).sort();
     expect(properties).toEqual(EXPECTED_INPUT_PROPERTIES);
   });
 
@@ -171,7 +157,7 @@ describe("start_oauth_flow", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain("-32602");
+    expect(result.content[0]?.text).toContain("Input validation error");
     expect(result.content[0]?.text).toContain("HTTPS");
     expect(engine.createOAuthSecret).not.toHaveBeenCalled();
   });
@@ -187,7 +173,8 @@ describe("start_oauth_flow", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain("-32602");
+    expect(result.content[0]?.text).toContain("Input validation error");
+    expect(result.content[0]?.text).toMatch(/name: Too big/);
     expect(engine.createOAuthSecret).not.toHaveBeenCalled();
   });
 

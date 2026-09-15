@@ -21,7 +21,7 @@ import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { InjectionType, PrincipalType, SecretType, VaultState } from "@harpoc/shared";
 import { protectorTimer, recordSeriesLine } from "@harpoc/test-utils";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import {
   createTestVault,
   destroyTestVault,

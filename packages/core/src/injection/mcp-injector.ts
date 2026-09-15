@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { Client, FetchLike } from "@modelcontextprotocol/client";
 import type { InjectionPolicy, McpAction, McpResult, McpServerConfig } from "@harpoc/shared";
 import {
   DEFAULT_MCP_TIMEOUT_MS,
@@ -34,17 +33,15 @@ import { wrapInJob } from "./win32-job-wrapper.js";
 /** Hard ceiling on a per-invocation timeout override (parity with http/process). */
 const MAX_TIMEOUT_MS = 300_000;
 
-type McpSdkClientModule = typeof import("@modelcontextprotocol/sdk/client/index.js");
-type McpSdkHttpModule = typeof import("@modelcontextprotocol/sdk/client/streamableHttp.js");
-type McpSdkTypesModule = typeof import("@modelcontextprotocol/sdk/types.js");
+type McpSdkClientModule = typeof import("@modelcontextprotocol/client");
 
 /** The slice of the MCP SDK the injector uses at runtime. */
 interface McpSdk {
   Client: McpSdkClientModule["Client"];
-  StreamableHTTPClientTransport: McpSdkHttpModule["StreamableHTTPClientTransport"];
-  CallToolResultSchema: McpSdkTypesModule["CallToolResultSchema"];
-  McpError: McpSdkTypesModule["McpError"];
-  McpErrorCode: McpSdkTypesModule["ErrorCode"];
+  StreamableHTTPClientTransport: McpSdkClientModule["StreamableHTTPClientTransport"];
+  SdkError: McpSdkClientModule["SdkError"];
+  SdkErrorCode: McpSdkClientModule["SdkErrorCode"];
+  ProtocolError: McpSdkClientModule["ProtocolError"];
 }
 
 /**
@@ -80,17 +77,13 @@ interface StdioLaunch {
  * pays the load cost.
  */
 async function loadMcpSdk(): Promise<McpSdk> {
-  const [client, http, types] = await Promise.all([
-    import("@modelcontextprotocol/sdk/client/index.js"),
-    import("@modelcontextprotocol/sdk/client/streamableHttp.js"),
-    import("@modelcontextprotocol/sdk/types.js"),
-  ]);
+  const client = await import("@modelcontextprotocol/client");
   return {
     Client: client.Client,
-    StreamableHTTPClientTransport: http.StreamableHTTPClientTransport,
-    CallToolResultSchema: types.CallToolResultSchema,
-    McpError: types.McpError,
-    McpErrorCode: types.ErrorCode,
+    StreamableHTTPClientTransport: client.StreamableHTTPClientTransport,
+    SdkError: client.SdkError,
+    SdkErrorCode: client.SdkErrorCode,
+    ProtocolError: client.ProtocolError,
   };
 }
 
@@ -237,7 +230,6 @@ export class McpInjector {
     try {
       rawResult = (await entry.client.callTool(
         { name: action.tool, arguments: action.arguments ?? {} },
-        sdk.CallToolResultSchema,
         { timeout },
       )) as { content?: unknown; structuredContent?: unknown; isError?: unknown };
     } catch (err) {
@@ -570,8 +562,8 @@ export class McpInjector {
     server: string,
     valueStr: string,
   ): VaultError {
-    if (err instanceof sdk.McpError) {
-      if (err.code === (sdk.McpErrorCode.ConnectionClosed as number)) {
+    if (err instanceof sdk.SdkError) {
+      if (err.code === sdk.SdkErrorCode.ConnectionClosed) {
         if (entry.crashed) {
           const exit = entry.stdioTransport?.exitInfo ?? null;
           if (exit?.wrapper_failure !== undefined)
@@ -584,10 +576,13 @@ export class McpInjector {
         }
         return VaultError.mcpConnectFailed(server, "connection closed");
       }
-      if (err.code === (sdk.McpErrorCode.RequestTimeout as number)) {
+      if (err.code === sdk.SdkErrorCode.RequestTimeout) {
         // A slow tool is not a crash: the server stays alive and the agent may retry.
         return VaultError.mcpTimeout(server);
       }
+      return VaultError.mcpProtocolError(server, redactSecretEncodings(err.message, valueStr));
+    }
+    if (err instanceof sdk.ProtocolError) {
       return VaultError.mcpProtocolError(server, redactSecretEncodings(err.message, valueStr));
     }
     if (err instanceof VaultError) return err;

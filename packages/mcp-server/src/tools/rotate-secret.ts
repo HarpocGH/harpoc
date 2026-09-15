@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
@@ -17,11 +17,14 @@ export function registerRotateSecret(
   rateLimiter: RateLimiter,
   enableTtyPrompt = false,
 ): void {
-  server.tool(
+  server.registerTool(
     "rotate_secret",
-    "Rotate a secret's value. The new value is collected out-of-band — via a one-time browser form (URL-mode elicitation) when the client supports it, otherwise set separately via CLI. Secret values never pass through the LLM.",
     {
-      handle: z.string().describe("Secret handle to rotate"),
+      description:
+        "Rotate a secret's value. The new value is collected out-of-band — via a one-time browser form (URL-mode elicitation) when the client supports it, otherwise set separately via CLI. Secret values never pass through the LLM.",
+      inputSchema: z.object({
+        handle: z.string().describe("Secret handle to rotate"),
+      }),
     },
     async (args) => {
       const parsed = parseHandle(args.handle);

@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import type { VaultEngine } from "@harpoc/core";
 import type { ScopeGuard } from "../guards/scope-guard.js";
 
@@ -7,7 +7,7 @@ export function registerProjectsResource(
   engine: VaultEngine,
   scopeGuard: ScopeGuard,
 ): void {
-  server.resource(
+  server.registerResource(
     "projects",
     "secret://vault/projects",
     { description: "Distinct projects with secret counts", mimeType: "application/json" },

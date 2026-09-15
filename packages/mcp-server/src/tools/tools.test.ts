@@ -1,5 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { McpServer } from "@modelcontextprotocol/server";
+import { inMemoryClientFor } from "@harpoc/test-utils";
+import type { InMemoryToolDescriptor } from "@harpoc/test-utils";
 import type { SecretInfo } from "@harpoc/core";
 import type { VaultEngine } from "@harpoc/core";
 import type { ExpiringCertificateInfo, ExpiringOAuthTokenInfo } from "@harpoc/shared";
@@ -80,46 +82,13 @@ function getToolText(result: { content: Array<{ type: string; text: string }> })
   return (result.content[0] as { text: string }).text;
 }
 
-interface McpToolDescriptor {
-  name: string;
-  inputSchema: { properties?: Record<string, unknown> };
+async function callTool(server: McpServer, name: string, args: Record<string, unknown>) {
+  return (await inMemoryClientFor(server)).callTool(name, args);
 }
 
 /** Advertised `tools/list` output — used by the v1.3 schema-widening pins below. */
-async function listTools(server: McpServer): Promise<McpToolDescriptor[]> {
-  const lowLevelServer = (
-    server as unknown as { server: { _requestHandlers: Map<string, unknown> } }
-  ).server;
-  const handler = lowLevelServer._requestHandlers.get("tools/list") as (
-    req: unknown,
-    extra: unknown,
-  ) => Promise<{ tools: McpToolDescriptor[] }>;
-  const result = await handler(
-    { method: "tools/list", params: {} },
-    { signal: new AbortController().signal, sessionId: "test" },
-  );
-  return result.tools;
-}
-
-async function callTool(
-  server: McpServer,
-  name: string,
-  args: Record<string, unknown>,
-): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
-  const lowLevelServer = (
-    server as unknown as { server: { _requestHandlers: Map<string, unknown> } }
-  ).server;
-  const handler = lowLevelServer._requestHandlers.get("tools/call") as (
-    req: { method: string; params: { name: string; arguments?: Record<string, unknown> } },
-    extra: unknown,
-  ) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }>;
-
-  if (!handler) throw new Error("No tools/call handler found");
-
-  return handler(
-    { method: "tools/call", params: { name, arguments: args } },
-    { signal: new AbortController().signal, sessionId: "test" },
-  );
+async function listTools(server: McpServer) {
+  return (await inMemoryClientFor(server)).listTools();
 }
 
 describe("MCP Tools", () => {
@@ -135,6 +104,10 @@ describe("MCP Tools", () => {
     scopeGuard = new ScopeGuard(null);
     rateLimiter = new RateLimiter();
     injectionGuard = new InjectionGuard();
+  });
+
+  afterEach(async () => {
+    await server.close();
   });
 
   describe("list_secrets", () => {
@@ -408,7 +381,7 @@ describe("MCP Tools", () => {
         const tools = await listTools(server);
         const tool = tools.find((t) => t.name === "use_secret");
         expect(tool).toBeDefined();
-        const actionSchema = (tool as McpToolDescriptor).inputSchema.properties?.action as
+        const actionSchema = (tool as InMemoryToolDescriptor).inputSchema.properties?.action as
           | { oneOf?: UnionArm[] }
           | undefined;
         expect(actionSchema?.oneOf).toBeDefined();
@@ -502,7 +475,7 @@ describe("MCP Tools", () => {
       });
     });
 
-    it("rejects a malformed smtp action at the schema boundary (-32602)", async () => {
+    it("rejects a malformed smtp action at the schema boundary (validation refusal)", async () => {
       const result = await callTool(server, "use_secret", {
         handle: "secret://my-key",
         action: {
@@ -515,11 +488,12 @@ describe("MCP Tools", () => {
         },
       });
       expect(result.isError).toBe(true);
-      expect(getToolText(result)).toContain("-32602");
+      expect(getToolText(result)).toContain("Input validation error");
+      expect(getToolText(result)).toMatch(/action\.from: Invalid email address/);
       expect(engine.useSecret).not.toHaveBeenCalled();
     });
 
-    it("refuses an undeclared key on the mcp action by name at the schema boundary (-32602)", async () => {
+    it("refuses an undeclared key on the mcp action by name at the schema boundary (validation refusal)", async () => {
       const result = await callTool(server, "use_secret", {
         handle: "secret://my-key",
         action: {
@@ -530,9 +504,8 @@ describe("MCP Tools", () => {
         },
       });
       expect(result.isError).toBe(true);
-      expect(getToolText(result)).toContain("-32602");
-      expect(getToolText(result)).toContain('Unrecognized key: "url"');
-      expect(getToolText(result)).toContain("action");
+      expect(getToolText(result)).toContain("Input validation error");
+      expect(getToolText(result)).toMatch(/action: Unrecognized key: "url"/);
       expect(engine.useSecret).not.toHaveBeenCalled();
     });
 
@@ -1115,6 +1088,10 @@ describe("token-derived caller wiring (engine-level policy enforcement)", () => 
     registerUseSecret(server, engine, scopeGuard, rateLimiter, injectionGuard);
     registerGetSecretInfo(server, engine, scopeGuard, rateLimiter);
     registerRevokeSecret(server, engine, scopeGuard, rateLimiter);
+  });
+
+  afterEach(async () => {
+    await server.close();
   });
 
   it("use_secret passes the token-derived caller to the engine", async () => {

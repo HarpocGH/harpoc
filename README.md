@@ -282,7 +282,7 @@ Summary — the detailed security policy, design overview and accepted risks liv
 
 ## Tech Stack
 
-TypeScript (strict mode, ESM-only) · pnpm + Turborepo · SQLite (better-sqlite3, WAL mode) · AES-256-GCM + Argon2id (`node:crypto` + `argon2`) · Zod · undici · `@modelcontextprotocol/sdk` · pg / mysql2 (lazy-loaded) · Vitest
+TypeScript (strict mode, ESM-only) · pnpm + Turborepo · SQLite (better-sqlite3, WAL mode) · AES-256-GCM + Argon2id (`node:crypto` + `argon2`) · Zod · undici · `@modelcontextprotocol/server` / `client` (MCP SDK v2) · pg / mysql2 (lazy-loaded) · Vitest
 
 ## License
 

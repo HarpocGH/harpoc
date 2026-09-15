@@ -70,7 +70,7 @@ vi.mock("@harpoc/mcp-server", () => ({
   readLaunchTokenFile: vi.fn().mockReturnValue({ ok: true, token: "file.jwt.token" }),
 }));
 
-vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
+vi.mock("@modelcontextprotocol/server/stdio", () => ({
   StdioServerTransport: vi.fn().mockReturnValue(mockTransport),
 }));
 
@@ -323,7 +323,7 @@ describe("server start", () => {
 
   it("starts MCP server with --mcp", async () => {
     const { createMcpServer } = await import("@harpoc/mcp-server");
-    const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+    const { StdioServerTransport } = await import("@modelcontextprotocol/server/stdio");
 
     await run(["--mcp"]);
 

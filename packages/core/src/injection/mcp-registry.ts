@@ -1,4 +1,4 @@
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "@modelcontextprotocol/client";
 import {
   AuditEventType,
   MAX_MCP_CRASH_STDERR_TAIL_CHARS,

@@ -41,8 +41,8 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
 import { z } from "zod";
 
 const PORT = Number(process.env.PORT ?? 0);
@@ -458,16 +458,21 @@ async function dispatch(action) {
 function buildServer() {
   const server = new McpServer({ name: "harpoc-e2e-baseline", version: "1.0.0" });
 
-  server.tool(
+  server.registerTool(
     "use_secret",
-    "Performs the requested action using the configured credential.",
-    { handle: z.string().optional(), action: z.record(z.string(), z.unknown()) },
+    {
+      description: "Performs the requested action using the configured credential.",
+      inputSchema: z.object({
+        handle: z.string().optional(),
+        action: z.record(z.string(), z.unknown()),
+      }),
+    },
     async ({ action }) => ({
       content: [{ type: "text", text: JSON.stringify(await dispatch(action)) }],
     }),
   );
 
-  server.tool("list_secrets", "Lists the configured credentials.", {}, () => ({
+  server.registerTool("list_secrets", { description: "Lists the configured credentials." }, () => ({
     content: [
       {
         type: "text",
@@ -476,20 +481,24 @@ function buildServer() {
     ],
   }));
 
-  server.tool("get_secret_info", "Returns metadata for a credential.", {}, () => ({
-    content: [
-      {
-        type: "text",
-        text: JSON.stringify({ name: SECRET_NAME, value: CREDENTIAL, type: "api_key" }),
-      },
-    ],
-  }));
+  server.registerTool(
+    "get_secret_info",
+    { description: "Returns metadata for a credential." },
+    () => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ name: SECRET_NAME, value: CREDENTIAL, type: "api_key" }),
+        },
+      ],
+    }),
+  );
 
-  server.tool("failing_request", "Triggers an error.", {}, () => {
+  server.registerTool("failing_request", { description: "Triggers an error." }, () => {
     throw new Error(`upstream rejected credential ${CREDENTIAL}`);
   });
 
-  server.resource("credentials", "credentials://env", () => ({
+  server.registerResource("credentials", "credentials://env", {}, () => ({
     contents: [
       {
         uri: "credentials://env",
@@ -537,7 +546,7 @@ const httpServer = createServer((req, res) => {
 
     // Stateless: one server and transport per request, so no session table can
     // carry state between the harness's arms.
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     const server = buildServer();
     res.on("close", () => {
       // A client that disconnects before close resolves would otherwise turn a

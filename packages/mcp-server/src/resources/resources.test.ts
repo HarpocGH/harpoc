@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { McpServer } from "@modelcontextprotocol/server";
+import { inMemoryClientFor, invokeHandler } from "@harpoc/test-utils";
 import type { SecretInfo } from "@harpoc/core";
 import type { VaultEngine } from "@harpoc/core";
 import type { VaultApiToken } from "@harpoc/shared";
@@ -67,24 +68,8 @@ function getResourceText(result: { contents: Array<{ uri: string; text?: string 
   return (result.contents[0] as { text: string }).text;
 }
 
-async function readResource(
-  server: McpServer,
-  uri: string,
-): Promise<{ contents: Array<{ uri: string; text?: string; mimeType?: string }> }> {
-  const lowLevelServer = (
-    server as unknown as { server: { _requestHandlers: Map<string, unknown> } }
-  ).server;
-  const handler = lowLevelServer._requestHandlers.get("resources/read") as (
-    req: { method: string; params: { uri: string } },
-    extra: unknown,
-  ) => Promise<{ contents: Array<{ uri: string; text?: string; mimeType?: string }> }>;
-
-  if (!handler) throw new Error("No resources/read handler found");
-
-  return handler(
-    { method: "resources/read", params: { uri } },
-    { signal: new AbortController().signal, sessionId: "test" },
-  );
+async function readResource(server: McpServer, uri: string) {
+  return (await inMemoryClientFor(server)).readResource(uri);
 }
 
 describe("MCP Resources", () => {
@@ -96,6 +81,10 @@ describe("MCP Resources", () => {
     server = new McpServer({ name: "test", version: "0.0.0" });
     engine = mockEngine();
     scopeGuard = new ScopeGuard(null);
+  });
+
+  afterEach(async () => {
+    await server.close();
   });
 
   describe("secrets resource", () => {
@@ -262,9 +251,9 @@ describe("MCP Resources", () => {
       const srv = new McpServer({ name: "test", version: "0.0.0" });
       registerAuditResource(srv, engine, listOnly);
 
-      await expect(readResource(srv, "secret://vault/audit/recent")).rejects.toThrow(
-        expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }),
-      );
+      await expect(
+        invokeHandler(srv, "resources/read", { uri: "secret://vault/audit/recent" }),
+      ).rejects.toThrow(expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }));
     });
   });
 });

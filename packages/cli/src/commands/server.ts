@@ -285,8 +285,7 @@ export function registerServerCommand(program: Command): void {
 
           if (opts.mcp) {
             const { createMcpServer } = await import("@harpoc/mcp-server");
-            const { StdioServerTransport } =
-              await import("@modelcontextprotocol/sdk/server/stdio.js");
+            const { StdioServerTransport } = await import("@modelcontextprotocol/server/stdio");
             // The launch token arrives through --token-file or the ambient
             // HARPOC_TOKEN (the file wins) — never argv (R9/A10). A profile-set
             // variable must not error out --rest-only starts, so the env var
