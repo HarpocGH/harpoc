@@ -203,7 +203,7 @@ describe("every JSON-body route refuses an unknown key (R10/A5)", () => {
       expect(res.status).toBe(400);
       const json = (await res.json()) as { error: string; message: string };
       expect(json.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
-      expect(json.message).toContain("Unrecognized key(s) in object: 'extra'");
+      expect(json.message).toContain('Unrecognized key: "extra"');
     },
   );
 

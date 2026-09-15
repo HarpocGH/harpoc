@@ -269,7 +269,8 @@ describe("createSecretInputSchema", () => {
       injection: { type: "bearer" },
     });
     expect(result.success).toBe(false);
-    if (!result.success) expect(result.error.issues[0]?.message).toContain("'injection'");
+    if (!result.success)
+      expect(result.error.issues[0]?.message).toContain('Unrecognized key: "injection"');
   });
 
   it("rejects missing name", () => {
@@ -344,6 +345,61 @@ describe("createSecretInputSchema", () => {
     expect(() =>
       createSecretInputSchema.parse({ name: "key", type: "api_key", expires_at: 0 }),
     ).toThrow();
+  });
+});
+
+describe("string formats after the zod 4 sweep", () => {
+  const SMTP_MIN = {
+    type: "smtp",
+    host: "smtp.example.com",
+    from: "bot@example.com",
+    to: ["ops@example.com"],
+    subject: "hi",
+    text: "body",
+  };
+  const HTTP_MIN = {
+    type: "http",
+    method: "GET",
+    url: "https://api.github.com/user",
+    injection: { type: "bearer" },
+  };
+  it("emailAddressSchema still refuses a bare local part and accepts an address", () => {
+    expect(smtpActionSchema.safeParse({ ...SMTP_MIN, from: "nobody" }).success).toBe(false);
+    expect(smtpActionSchema.safeParse({ ...SMTP_MIN, from: "a@b.example" }).success).toBe(true);
+  });
+  it("httpishUrlSchema still refuses ftp and accepts https", () => {
+    expect(httpActionSchema.safeParse({ ...HTTP_MIN, url: "ftp://x.example/" }).success).toBe(
+      false,
+    );
+    expect(httpActionSchema.safeParse({ ...HTTP_MIN, url: "https://x.example/" }).success).toBe(
+      true,
+    );
+  });
+  it("the base64 value field still refuses a non-base64 string", () => {
+    expect(
+      createSecretInputSchema.safeParse({ name: "k", type: "api_key", value: "***" }).success,
+    ).toBe(false);
+    expect(
+      createSecretInputSchema.safeParse({ name: "k", type: "api_key", value: "YWJj" }).success,
+    ).toBe(true);
+  });
+  it("httpishUrlSchema accepts a URL with surrounding whitespace and parses it trimmed (zod 4's z.url())", () => {
+    const parsed = httpActionSchema.safeParse({ ...HTTP_MIN, url: " https://x.example/ " });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.url).toBe("https://x.example/");
+  });
+  it("an integer field refuses a value beyond the safe-integer range (zod 4's int())", () => {
+    expect(
+      createSecretInputSchema.safeParse({ name: "k", type: "api_key", expires_at: 2 ** 53 })
+        .success,
+    ).toBe(false);
+    expect(
+      createSecretInputSchema.safeParse({
+        name: "k",
+        type: "api_key",
+        expires_at: 1_700_000_000_000,
+      }).success,
+    ).toBe(true);
   });
 });
 
@@ -674,7 +730,8 @@ describe("useSecretBodySchema (REST POST /secrets/:handle/use body)", () => {
       handle: "secret://k",
     });
     expect(result.success).toBe(false);
-    if (!result.success) expect(result.error.issues[0]?.message).toContain("'handle'");
+    if (!result.success)
+      expect(result.error.issues[0]?.message).toContain('Unrecognized key: "handle"');
   });
 
   it("refuses a missing action, naming it", () => {
@@ -884,7 +941,7 @@ describe("setInjectionPolicyRequestSchema", () => {
     });
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error.issues[0]?.message).toContain("'fs_isolaton'");
+      expect(result.error.issues[0]?.message).toContain('Unrecognized key: "fs_isolaton"');
     }
   });
 
@@ -2360,15 +2417,14 @@ describe("connectionConfigSchema", () => {
 // construction. The walker pins the rule once instead of one sample per object.
 // ---------------------------------------------------------------------------
 
-function collectObjects(
-  schema: z.ZodTypeAny,
-  path: string,
-  out: Array<[string, z.ZodObject<z.ZodRawShape>]>,
-): void {
+// zod 4: refinements live on the schema itself (no ZodEffects), a transform
+// makes a ZodPipe (none in this file's schemas, walked for completeness), and
+// an object's strictness is a `never` catchall.
+function collectObjects(schema: z.ZodType, path: string, out: Array<[string, z.ZodObject]>): void {
   if (schema instanceof z.ZodObject) {
-    out.push([path, schema as z.ZodObject<z.ZodRawShape>]);
-    for (const [key, child] of Object.entries(schema.shape as Record<string, z.ZodTypeAny>)) {
-      collectObjects(child, `${path}.${key}`, out);
+    out.push([path, schema]);
+    for (const [key, child] of Object.entries(schema.shape)) {
+      collectObjects(child as z.ZodType, `${path}.${key}`, out);
     }
     return;
   }
@@ -2377,25 +2433,29 @@ function collectObjects(
     schema instanceof z.ZodNullable ||
     schema instanceof z.ZodDefault
   ) {
-    collectObjects(schema._def.innerType as z.ZodTypeAny, path, out);
+    collectObjects(schema.def.innerType as z.ZodType, path, out);
     return;
   }
-  if (schema instanceof z.ZodEffects) {
-    collectObjects(schema._def.schema as z.ZodTypeAny, path, out);
+  if (schema instanceof z.ZodPipe) {
+    collectObjects(schema.def.in as z.ZodType, path, out);
     return;
   }
   if (schema instanceof z.ZodArray) {
-    collectObjects(schema.element as z.ZodTypeAny, `${path}[]`, out);
+    collectObjects(schema.element as z.ZodType, `${path}[]`, out);
     return;
   }
   if (schema instanceof z.ZodUnion || schema instanceof z.ZodDiscriminatedUnion) {
-    (schema.options as z.ZodTypeAny[]).forEach((option, i) =>
+    (schema.options as z.ZodType[]).forEach((option, i) =>
       collectObjects(option, `${path}|${i}`, out),
     );
   }
 }
 
-const REQUEST_BODY_SCHEMAS: Array<[string, z.ZodTypeAny]> = [
+function isStrict(object: z.ZodObject): boolean {
+  return object.def.catchall instanceof z.ZodNever;
+}
+
+const REQUEST_BODY_SCHEMAS: Array<[string, z.ZodType]> = [
   ["createSecretInputSchema", createSecretInputSchema],
   ["rotateSecretInputSchema", rotateSecretInputSchema],
   ["useSecretBodySchema", useSecretBodySchema],
@@ -2413,17 +2473,15 @@ const REQUEST_BODY_SCHEMAS: Array<[string, z.ZodTypeAny]> = [
 
 describe("request-body schemas refuse unknown keys at every level (R10/A5)", () => {
   it.each(REQUEST_BODY_SCHEMAS)("%s: every reachable object is strict", (_name, schema) => {
-    const objects: Array<[string, z.ZodObject<z.ZodRawShape>]> = [];
+    const objects: Array<[string, z.ZodObject]> = [];
     collectObjects(schema, "$", objects);
     expect(objects.length).toBeGreaterThan(0);
-    const lax = objects
-      .filter(([, object]) => object._def.unknownKeys !== "strict")
-      .map(([path]) => path);
+    const lax = objects.filter(([, object]) => !isStrict(object)).map(([path]) => path);
     expect(lax).toEqual([]);
   });
 
   it("the walker reaches useSecretActionSchema's nested unions (self-check)", () => {
-    const objects: Array<[string, z.ZodObject<z.ZodRawShape>]> = [];
+    const objects: Array<[string, z.ZodObject]> = [];
     collectObjects(useSecretBodySchema, "$", objects);
     const paths = objects.map(([path]) => path);
     expect(paths).toContain("$.action|0.injection|2"); // http → header injection
@@ -2438,7 +2496,8 @@ describe("request-body schemas refuse unknown keys at every level (R10/A5)", () 
       extra: 1,
     });
     expect(result.success).toBe(false);
-    if (!result.success) expect(result.error.issues[0]?.message).toContain("'extra'");
+    if (!result.success)
+      expect(result.error.issues[0]?.message).toContain('Unrecognized key: "extra"');
   });
 
   it("an unknown key inside a nested action object is refused (http injection)", () => {
@@ -2450,7 +2509,9 @@ describe("request-body schemas refuse unknown keys at every level (R10/A5)", () 
     });
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error.issues.map((i) => i.message).join(" ")).toContain("'header_name'");
+      expect(result.error.issues.map((i) => i.message).join(" ")).toContain(
+        'Unrecognized key: "header_name"',
+      );
     }
   });
 
@@ -2461,7 +2522,7 @@ describe("request-body schemas refuse unknown keys at every level (R10/A5)", () 
     expect(result.success).toBe(false);
     if (!result.success) {
       const issue = result.error.issues.find((i) => i.path[0] === "mail" && i.path[1] === "tls");
-      expect(issue?.message).toContain("'verify'");
+      expect(issue?.message).toContain('Unrecognized key: "verify"');
     }
   });
 

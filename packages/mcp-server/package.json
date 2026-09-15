@@ -30,7 +30,7 @@
     "@harpoc/oauth-proxy": "workspace:*",
     "@harpoc/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "zod": "^3.25.76"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@harpoc/test-utils": "workspace:*"

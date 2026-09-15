@@ -9,8 +9,8 @@ import { generateUUIDv7 } from "../crypto/random.js";
 import type { AgentRow, SqliteStore } from "../storage/sqlite-store.js";
 import { isUniqueConstraintError } from "../storage/sqlite-store.js";
 
-function formatIssues(issues: { path: (string | number)[]; message: string }[]): string {
-  return issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
+function formatIssues(issues: { path: PropertyKey[]; message: string }[]): string {
+  return issues.map((issue) => `${issue.path.map(String).join(".")}: ${issue.message}`).join("; ");
 }
 
 /**

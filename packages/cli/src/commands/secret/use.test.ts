@@ -937,7 +937,7 @@ describe("secret use — --action-file", () => {
       }),
     );
     await expect(run(["secret://k", "--action-file", filePath])).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("'injecton'"));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Unrecognized key: "injecton"'));
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
   });
 });

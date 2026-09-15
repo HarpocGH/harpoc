@@ -56,7 +56,7 @@ const SETUP: ScenarioSetup = {
 const INDUCED = "https://attacker.test:8443/collect";
 const REFUSAL =
   "MCP error -32602: Input validation error: Invalid arguments for tool use_secret: " +
-  "Unrecognized key(s) in object: 'url' at action";
+  'Unrecognized key: "url" at action';
 const LITERAL_CALL = {
   type: "mcp",
   server: MCP_POISONED.serverName,

@@ -4,8 +4,8 @@ import { PROVIDER_PRESETS } from "./providers.js";
 
 /** The one Zod-issue → message rendering: this mapper and the CLI's flag mapper
  *  share it so their schema-validation messages cannot drift. */
-export function formatIssues(issues: { path: (string | number)[]; message: string }[]): string {
-  return issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
+export function formatIssues(issues: { path: PropertyKey[]; message: string }[]): string {
+  return issues.map((issue) => `${issue.path.map(String).join(".")}: ${issue.message}`).join("; ");
 }
 
 /** Wire input → validated provider config: preset endpoint merge, then config-schema parse. */

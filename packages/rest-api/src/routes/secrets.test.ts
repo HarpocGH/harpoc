@@ -600,7 +600,7 @@ describe("secret routes", () => {
       expect(res.status).toBe(400);
       const body = (await res.json()) as { error: string; message: string };
       expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
-      expect(body.message).toContain("'handle'");
+      expect(body.message).toContain('Unrecognized key: "handle"');
       expect(engine.useSecret).not.toHaveBeenCalled();
     });
 
@@ -669,7 +669,14 @@ describe("secret routes", () => {
         expect(res.status).toBe(400);
         const body = (await res.json()) as { error: string; message: string };
         expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
-        expect(body.message).toContain(`${field}: Required`);
+        if (field === "response_mode") {
+          expect(body.message).toContain(
+            "response_mode: must be one of full, filtered, status_only",
+          );
+        } else {
+          expect(body.message).toContain(`${field}: Invalid input: expected `);
+          expect(body.message).toContain("received undefined");
+        }
         expect(engine.setInjectionPolicy).not.toHaveBeenCalled();
       },
     );
@@ -683,7 +690,7 @@ describe("secret routes", () => {
       expect(res.status).toBe(400);
       const body = (await res.json()) as { error: string; message: string };
       expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
-      expect(body.message).toContain("Unrecognized key(s) in object: 'fs_isolaton'");
+      expect(body.message).toContain('Unrecognized key: "fs_isolaton"');
       expect(engine.setInjectionPolicy).not.toHaveBeenCalled();
     });
 

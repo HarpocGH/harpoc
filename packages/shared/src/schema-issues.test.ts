@@ -2,12 +2,10 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { renderSchemaIssues } from "./schema-issues.js";
 
-const policy = z
-  .object({
-    response_mode: z.enum(["full", "filtered", "status_only"]),
-    limits: z.object({ port: z.number() }),
-  })
-  .strict();
+const policy = z.strictObject({
+  response_mode: z.enum(["full", "filtered", "status_only"]),
+  limits: z.object({ port: z.number() }),
+});
 
 function refusalOf(input: unknown): z.ZodError {
   const parsed = policy.safeParse(input);
@@ -18,20 +16,24 @@ function refusalOf(input: unknown): z.ZodError {
 describe("renderSchemaIssues", () => {
   it("joins a nested path with dots", () => {
     const error = refusalOf({ response_mode: "full", limits: { port: "80" } });
-    expect(renderSchemaIssues(error)).toBe("limits.port: Expected number, received string");
+    expect(renderSchemaIssues(error)).toBe(
+      "limits.port: Invalid input: expected number, received string",
+    );
   });
 
   it("renders a path-less issue under <root>", () => {
     const parsed = z.string().safeParse(5);
     if (parsed.success) throw new Error("fixture parsed");
-    expect(renderSchemaIssues(parsed.error)).toBe("<root>: Expected string, received number");
+    expect(renderSchemaIssues(parsed.error)).toBe(
+      "<root>: Invalid input: expected string, received number",
+    );
   });
 
   it("joins every issue with a semicolon", () => {
     const error = refusalOf({ response_mode: "1BAD", limits: { port: "80" } });
     expect(renderSchemaIssues(error)).toBe(
       "response_mode: must be one of full, filtered, status_only; " +
-        "limits.port: Expected number, received string",
+        "limits.port: Invalid input: expected number, received string",
     );
   });
 
@@ -53,8 +55,14 @@ describe("renderSchemaIssues", () => {
     expect(renderSchemaIssues(parsed.error)).toBe("<root>: must be one of a, b");
   });
 
+  it("renders a literal refusal as its single option (invalid_value covers literals too)", () => {
+    const parsed = z.literal(2048).safeParse(1024);
+    if (parsed.success) throw new Error("fixture parsed");
+    expect(renderSchemaIssues(parsed.error)).toBe("<root>: must be one of 2048");
+  });
+
   it("keeps zod's unrecognized-keys wording (pinned on both wires)", () => {
     const error = refusalOf({ response_mode: "full", limits: { port: 80 }, url: "http://x" });
-    expect(renderSchemaIssues(error)).toBe("<root>: Unrecognized key(s) in object: 'url'");
+    expect(renderSchemaIssues(error)).toBe('<root>: Unrecognized key: "url"');
   });
 });

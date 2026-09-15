@@ -461,7 +461,7 @@ function buildServer() {
   server.tool(
     "use_secret",
     "Performs the requested action using the configured credential.",
-    { handle: z.string().optional(), action: z.record(z.unknown()) },
+    { handle: z.string().optional(), action: z.record(z.string(), z.unknown()) },
     async ({ action }) => ({
       content: [{ type: "text", text: JSON.stringify(await dispatch(action)) }],
     }),

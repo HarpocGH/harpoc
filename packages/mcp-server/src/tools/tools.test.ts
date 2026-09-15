@@ -235,7 +235,7 @@ describe("MCP Tools", () => {
         },
       });
       expect(result.isError).toBe(true);
-      expect(result.content[0]?.text).toContain("'injecton'");
+      expect(result.content[0]?.text).toContain('Unrecognized key: "injecton"');
       expect(engine.useSecret).not.toHaveBeenCalled();
     });
 
@@ -400,25 +400,25 @@ describe("MCP Tools", () => {
     // JSON schema (via tools/list), not the Zod source, so a regression to a
     // hand-maintained MCP-side copy would fail them.
     describe("advertised action schema (v1.3 context widening pin)", () => {
-      interface AnyOfArm {
+      interface UnionArm {
         properties?: Record<string, { const?: string }>;
       }
 
-      async function actionArms(): Promise<AnyOfArm[]> {
+      async function actionArms(): Promise<UnionArm[]> {
         const tools = await listTools(server);
         const tool = tools.find((t) => t.name === "use_secret");
         expect(tool).toBeDefined();
         const actionSchema = (tool as McpToolDescriptor).inputSchema.properties?.action as
-          | { anyOf?: AnyOfArm[] }
+          | { oneOf?: UnionArm[] }
           | undefined;
-        expect(actionSchema?.anyOf).toBeDefined();
-        return actionSchema?.anyOf ?? [];
+        expect(actionSchema?.oneOf).toBeDefined();
+        return actionSchema?.oneOf ?? [];
       }
 
-      function armFor(arms: AnyOfArm[], type: string): AnyOfArm {
+      function armFor(arms: UnionArm[], type: string): UnionArm {
         const arm = arms.find((a) => a.properties?.type?.const === type);
         expect(arm).toBeDefined();
-        return arm as AnyOfArm;
+        return arm as UnionArm;
       }
 
       it("advertises 11 action arms — the shared 11-type union crossed the MCP boundary unmodified", async () => {
@@ -531,7 +531,8 @@ describe("MCP Tools", () => {
       });
       expect(result.isError).toBe(true);
       expect(getToolText(result)).toContain("-32602");
-      expect(getToolText(result)).toContain("Unrecognized key(s) in object: 'url' at action");
+      expect(getToolText(result)).toContain('Unrecognized key: "url"');
+      expect(getToolText(result)).toContain("action");
       expect(engine.useSecret).not.toHaveBeenCalled();
     });
 

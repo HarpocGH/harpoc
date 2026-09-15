@@ -3,9 +3,7 @@ import { z } from "zod";
 import { ErrorCode } from "@harpoc/shared";
 import { schemaValidationError } from "./schema-error.js";
 
-const schema = z
-  .object({ name: z.string(), nested: z.object({ n: z.number() }).strict() })
-  .strict();
+const schema = z.strictObject({ name: z.string(), nested: z.strictObject({ n: z.number() }) });
 
 const enumSchema = z.object({ response_mode: z.enum(["full", "filtered", "status_only"]) });
 
@@ -20,7 +18,7 @@ describe("schemaValidationError", () => {
     const err = schemaValidationError(parsed.error);
     expect(err.code).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
     expect(err.message).toBe(
-      "name: Required; nested.n: Expected number, received string; nested: Unrecognized key(s) in object: 'extra'; <root>: Unrecognized key(s) in object: 'stray'",
+      'name: Invalid input: expected string, received undefined; nested.n: Invalid input: expected number, received string; nested: Unrecognized key: "extra"; <root>: Unrecognized key: "stray"',
     );
   });
 
@@ -32,15 +30,11 @@ describe("schemaValidationError", () => {
     });
     if (parsed.success) throw new Error("expected a refusal");
     expect(schemaValidationError(parsed.error).message).toBe(
-      "<root>: Unrecognized key(s) in object: 'sk-live-not-a-key'",
+      '<root>: Unrecognized key: "sk-live-not-a-key"',
     );
   });
 
-  /**
-   * D5: an enum refusal names the options, never the value the caller sent.
-   * zod 3.25.76 renders `Invalid enum value. Expected 'full' | … ,
-   * received '1BAD'`, and a rejected value can be a fragment of a credential.
-   */
+  /** D5: an enum refusal names the options, never the value the caller sent. zod 4 renders `Invalid option: expected one of …` without the value, but the vault's own `must be one of` wording is what audit, CLI and REST pin, so the renderer never relies on zod's default. */
   it("an enum issue names the options and never the rejected value (D5)", () => {
     const parsed = enumSchema.safeParse({ response_mode: "1BAD" });
     if (parsed.success) throw new Error("expected a refusal");

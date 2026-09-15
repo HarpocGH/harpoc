@@ -167,7 +167,7 @@ describe("register", () => {
       () => registry.register({ name: "bot", extra: 1 } as never),
       ErrorCode.INVALID_INPUT,
     );
-    expect(err.message).toContain("'extra'");
+    expect(err.message).toContain('Unrecognized key: "extra"');
   });
 
   it("maps a duplicate name to AGENT_EXISTS, whatever the existing status", async () => {

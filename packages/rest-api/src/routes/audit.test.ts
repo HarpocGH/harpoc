@@ -74,7 +74,7 @@ describe("audit routes", () => {
   });
 
   it("passes query params to engine.queryAudit", async () => {
-    const uuid = "01234567-89ab-cdef-0123-456789abcdef";
+    const uuid = "01234567-89ab-4def-8123-456789abcdef";
     await app.request(
       `/api/v1/audit?secret_id=${uuid}&event_type=secret.read&since=1000&until=2000&limit=10`,
       { headers: AUTH },
@@ -155,7 +155,7 @@ describe("audit routes", () => {
     app.use("/api/v1/audit", authMiddleware);
     app.route("/api/v1/audit", createAuditRoutes());
 
-    await app.request("/api/v1/audit?secret_id=01234567-89ab-cdef-0123-456789abcdef", {
+    await app.request("/api/v1/audit?secret_id=01234567-89ab-4def-8123-456789abcdef", {
       headers: AUTH,
     });
 
