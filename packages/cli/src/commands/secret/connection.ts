@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import type { Command } from "commander";
 import type { ConnectionConfig, MailConnectionConfig } from "@harpoc/shared";
-import { connectionConfigSchema, VaultError } from "@harpoc/shared";
+import { connectionConfigSchema, renderSchemaIssues, VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
@@ -107,7 +107,7 @@ export function registerSecretConnectionCommand(secret: Command): void {
 
           const parsed = connectionConfigSchema.safeParse(config);
           if (!parsed.success) {
-            throw new Error(parsed.error.issues.map((i) => i.message).join(", "));
+            throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
           }
 
           await engine.setConnectionConfig(handle, parsed.data, resolved?.caller);

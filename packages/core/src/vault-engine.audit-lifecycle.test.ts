@@ -464,7 +464,8 @@ describe("an unknown-handle probe is audited on every resolving surface", () => 
       name: "setConnectionConfig",
       eventType: AuditEventType.POLICY_GRANT,
       detail: { handle: H, policy: "connection" },
-      call: () => engine.setConnectionConfig(H, {}, agent("bob")),
+      call: () =>
+        engine.setConnectionConfig(H, { database: { tls_mode: "require" } }, agent("bob")),
     },
     {
       name: "deleteConnectionConfig",

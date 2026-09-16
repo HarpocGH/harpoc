@@ -41,12 +41,11 @@ export class ScopeGuard {
 
   /**
    * Check whether the current token grants access for the given operation.
-   * Returns the principal ID (token subject) for audit logging.
    * Throws VaultError(ACCESS_DENIED) if access is not permitted.
    */
-  checkAccess(permission: Permission, project?: string, secretName?: string): string {
+  checkAccess(permission: Permission, project?: string, secretName?: string): void {
     // Null token = full access (no launch token provided)
-    if (!this.token) return "local";
+    if (!this.token) return;
 
     // 0. Token expiry recheck (long-running MCP server may outlive token TTL)
     if (this.token.exp <= Math.floor(Date.now() / 1000)) {
@@ -77,8 +76,6 @@ export class ScopeGuard {
     if (secretName !== undefined && !matchesSecretNameScope(secretName, this.token.secrets)) {
       throw VaultError.accessDenied("Token does not grant access to this secret");
     }
-
-    return this.token.sub;
   }
 
   /**
@@ -96,11 +93,6 @@ export class ScopeGuard {
       filtered = filtered.filter((s) => matchesSecretNameScope(s.name, this.token?.secrets));
     }
     return filtered;
-  }
-
-  /** Get the principal ID without performing access checks. */
-  get principal(): string {
-    return this.token?.sub ?? "local";
   }
 
   /**

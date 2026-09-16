@@ -128,4 +128,16 @@ describe("secret connection — token path", () => {
       undefined,
     );
   });
+
+  it("renders a schema refusal value-free through the shared renderer", async () => {
+    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    await expect(
+      run(["secret://conn", "--db-tls", "bogus", "--token", "jwt-value"]),
+    ).rejects.toThrow("process.exit");
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("database.tls_mode: must be one of require, disable"),
+    );
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("bogus"));
+    expect(mockEngine.setConnectionConfig).not.toHaveBeenCalled();
+  });
 });

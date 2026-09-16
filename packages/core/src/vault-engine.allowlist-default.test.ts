@@ -138,7 +138,7 @@ describe("target allowlists deny by default (R1, 2026-09-01)", () => {
 
   it("imap: an unconfigured secret refuses every host before any socket", async () => {
     const handle = await secret("dd-imap");
-    await engine.setConnectionConfig(handle, { mail: { tls: { ca: "" } } });
+    await engine.setConnectionConfig(handle, { mail: { tls: {} } });
     await expectVaultError(
       () =>
         engine.useSecret(handle, {

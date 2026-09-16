@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import type { InjectionPolicy, ResponseMode } from "@harpoc/shared";
-import { injectionPolicyInputSchema } from "@harpoc/shared";
+import { injectionPolicyInputSchema, renderSchemaIssues, VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
@@ -186,7 +186,7 @@ export function registerSecretAllowCommand(secret: Command): void {
           const current = await engine.getInjectionPolicy(handle, resolved?.caller);
           const parsed = injectionPolicyInputSchema.safeParse(mergePolicy(current, options));
           if (!parsed.success) {
-            throw new Error(parsed.error.issues.map((i) => i.message).join(", "));
+            throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
           }
 
           await engine.setInjectionPolicy(

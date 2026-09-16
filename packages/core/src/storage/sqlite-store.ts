@@ -12,7 +12,12 @@ import type {
   SecretType,
   TokenPrincipalType,
 } from "@harpoc/shared";
-import { SQLITE_PRAGMAS, VaultError } from "@harpoc/shared";
+import {
+  permissionListSchema,
+  secretIdListSchema,
+  SQLITE_PRAGMAS,
+  VaultError,
+} from "@harpoc/shared";
 import { baselineSchema } from "./migrations/baseline.js";
 import { LATEST_SCHEMA_VERSION } from "./schema.js";
 
@@ -203,6 +208,30 @@ export interface IssuedTokenRow {
 /** Filters for listing issued tokens. */
 export interface IssuedTokenFilter {
   agentId?: string;
+}
+
+/**
+ * A JSON column read against its schema: a row the store cannot read is
+ * VAULT_CORRUPTED naming the table, the column and the row — never the value.
+ */
+function parseJsonColumn<T>(
+  raw: unknown,
+  schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
+  table: string,
+  column: string,
+  id: string,
+): T {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw as string);
+  } catch {
+    throw VaultError.vaultCorrupted(`${table}.${column} for ${id} is not JSON`);
+  }
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    throw VaultError.vaultCorrupted(`${table}.${column} for ${id} is malformed`);
+  }
+  return parsed.data;
 }
 
 export class SqliteStore {
@@ -1369,7 +1398,13 @@ export class SqliteStore {
       secret_id: row.secret_id as string,
       principal_type: row.principal_type as PrincipalType,
       principal_id: row.principal_id as string,
-      permissions: JSON.parse(row.permissions as string) as AccessPolicy["permissions"],
+      permissions: parseJsonColumn(
+        row.permissions,
+        permissionListSchema,
+        "access_policies",
+        "permissions",
+        row.id as string,
+      ),
       created_at: row.created_at as number,
       expires_at: (row.expires_at as number) ?? null,
       created_by: row.created_by as string,
@@ -1395,9 +1430,24 @@ export class SqliteStore {
       subject: row.subject as string,
       principal_type: row.principal_type as TokenPrincipalType,
       agent_id: (row.agent_id as string) ?? null,
-      scope: JSON.parse(row.scope as string) as Permission[],
+      scope: parseJsonColumn(
+        row.scope,
+        permissionListSchema,
+        "issued_tokens",
+        "scope",
+        row.jti as string,
+      ),
       project: (row.project as string) ?? null,
-      secrets: row.secrets == null ? null : (JSON.parse(row.secrets as string) as string[]),
+      secrets:
+        row.secrets == null
+          ? null
+          : parseJsonColumn(
+              row.secrets,
+              secretIdListSchema,
+              "issued_tokens",
+              "secrets",
+              row.jti as string,
+            ),
       label: (row.label as string) ?? null,
       issued_at: row.issued_at as number,
       expires_at: row.expires_at as number,

@@ -20,22 +20,17 @@ describe("ScopeGuard", () => {
   describe("null token (full access)", () => {
     it("allows any permission", () => {
       const guard = new ScopeGuard(null);
-      expect(guard.checkAccess("use")).toBe("local");
-      expect(guard.checkAccess("create")).toBe("local");
-      expect(guard.checkAccess("admin")).toBe("local");
-    });
-
-    it("returns 'local' as principal", () => {
-      const guard = new ScopeGuard(null);
-      expect(guard.principal).toBe("local");
+      expect(() => guard.checkAccess("use")).not.toThrow();
+      expect(() => guard.checkAccess("create")).not.toThrow();
+      expect(() => guard.checkAccess("admin")).not.toThrow();
     });
   });
 
   describe("permission enforcement", () => {
     it("allows permitted actions", () => {
       const guard = new ScopeGuard(makeToken({ scope: ["use", "list"] }));
-      expect(guard.checkAccess("use")).toBe("test-agent");
-      expect(guard.checkAccess("list")).toBe("test-agent");
+      expect(() => guard.checkAccess("use")).not.toThrow();
+      expect(() => guard.checkAccess("list")).not.toThrow();
     });
 
     it("denies unpermitted actions", () => {
@@ -47,16 +42,16 @@ describe("ScopeGuard", () => {
 
     it("admin implies all permissions", () => {
       const guard = new ScopeGuard(makeToken({ scope: ["admin"] }));
-      expect(guard.checkAccess("use")).toBe("test-agent");
-      expect(guard.checkAccess("create")).toBe("test-agent");
-      expect(guard.checkAccess("revoke")).toBe("test-agent");
+      expect(() => guard.checkAccess("use")).not.toThrow();
+      expect(() => guard.checkAccess("create")).not.toThrow();
+      expect(() => guard.checkAccess("revoke")).not.toThrow();
     });
   });
 
   describe("project scoping", () => {
     it("allows access to matching project", () => {
       const guard = new ScopeGuard(makeToken({ project: "my-project" }));
-      expect(guard.checkAccess("use", "my-project")).toBe("test-agent");
+      expect(() => guard.checkAccess("use", "my-project")).not.toThrow();
     });
 
     it("denies access to different project", () => {
@@ -69,7 +64,7 @@ describe("ScopeGuard", () => {
     it("allows listing without project context", () => {
       const guard = new ScopeGuard(makeToken({ project: "my-project" }));
       // No project in the access check — allowed for listing (no secretName)
-      expect(guard.checkAccess("use")).toBe("test-agent");
+      expect(() => guard.checkAccess("use")).not.toThrow();
     });
 
     it("denies individual access to global (project-less) secrets", () => {
@@ -82,14 +77,14 @@ describe("ScopeGuard", () => {
 
     it("allows when token has no project scope", () => {
       const guard = new ScopeGuard(makeToken());
-      expect(guard.checkAccess("use", "any-project")).toBe("test-agent");
+      expect(() => guard.checkAccess("use", "any-project")).not.toThrow();
     });
   });
 
   describe("secret name scoping", () => {
     it("allows access to named secrets", () => {
       const guard = new ScopeGuard(makeToken({ secrets: ["api-key", "db-pass"] }));
-      expect(guard.checkAccess("use", undefined, "api-key")).toBe("test-agent");
+      expect(() => guard.checkAccess("use", undefined, "api-key")).not.toThrow();
     });
 
     it("denies access to unnamed secrets", () => {
@@ -101,18 +96,18 @@ describe("ScopeGuard", () => {
 
     it("allows when no secret name in context", () => {
       const guard = new ScopeGuard(makeToken({ secrets: ["api-key"] }));
-      expect(guard.checkAccess("list")).toBe("test-agent");
+      expect(() => guard.checkAccess("list")).not.toThrow();
     });
 
     it("allows when token has no secrets scope", () => {
       const guard = new ScopeGuard(makeToken());
-      expect(guard.checkAccess("use", undefined, "any-secret")).toBe("test-agent");
+      expect(() => guard.checkAccess("use", undefined, "any-secret")).not.toThrow();
     });
 
     it("matches secret-name patterns with * wildcards (thesis §4.7)", () => {
       const guard = new ScopeGuard(makeToken({ secrets: ["db-*"] }));
-      expect(guard.checkAccess("use", undefined, "db-prod")).toBe("test-agent");
-      expect(guard.checkAccess("use", undefined, "db-staging")).toBe("test-agent");
+      expect(() => guard.checkAccess("use", undefined, "db-prod")).not.toThrow();
+      expect(() => guard.checkAccess("use", undefined, "db-staging")).not.toThrow();
       expect(() => guard.checkAccess("use", undefined, "api-key")).toThrow(
         expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }),
       );
@@ -120,8 +115,8 @@ describe("ScopeGuard", () => {
 
     it("mixes literal names and patterns", () => {
       const guard = new ScopeGuard(makeToken({ secrets: ["api-key", "db-*"] }));
-      expect(guard.checkAccess("use", undefined, "api-key")).toBe("test-agent");
-      expect(guard.checkAccess("use", undefined, "db-prod")).toBe("test-agent");
+      expect(() => guard.checkAccess("use", undefined, "api-key")).not.toThrow();
+      expect(() => guard.checkAccess("use", undefined, "db-prod")).not.toThrow();
       expect(() => guard.checkAccess("use", undefined, "github-token")).toThrow(
         expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }),
       );
@@ -179,7 +174,7 @@ describe("ScopeGuard", () => {
       );
 
       // All match
-      expect(guard.checkAccess("use", "prod", "api-key")).toBe("test-agent");
+      expect(() => guard.checkAccess("use", "prod", "api-key")).not.toThrow();
 
       // Wrong permission
       expect(() => guard.checkAccess("create", "prod", "api-key")).toThrow();
@@ -189,13 +184,6 @@ describe("ScopeGuard", () => {
 
       // Wrong secret
       expect(() => guard.checkAccess("use", "prod", "other")).toThrow();
-    });
-  });
-
-  describe("principal", () => {
-    it("returns token subject", () => {
-      const guard = new ScopeGuard(makeToken({ sub: "my-agent" }));
-      expect(guard.principal).toBe("my-agent");
     });
   });
 });
@@ -245,7 +233,8 @@ describe("caller (engine-level policy enforcement)", () => {
   it("the interface tag never affects scope enforcement", () => {
     const stdio = new ScopeGuard(makeToken({ scope: ["use"] }), "mcp");
     const http = new ScopeGuard(makeToken({ scope: ["use"] }), "mcp-http");
-    expect(stdio.checkAccess("use")).toBe(http.checkAccess("use"));
+    expect(() => stdio.checkAccess("use")).not.toThrow();
+    expect(() => http.checkAccess("use")).not.toThrow();
     expect(() => stdio.checkAccess("create")).toThrow();
     expect(() => http.checkAccess("create")).toThrow();
   });
@@ -288,7 +277,7 @@ describe("ScopeGuard mid-session token rechecks", () => {
   it("consults the store on every call, not once", () => {
     let revoked = false;
     const guard = new ScopeGuard(makeToken(), "mcp", () => revoked);
-    expect(guard.checkAccess("use")).toBe("test-agent");
+    expect(() => guard.checkAccess("use")).not.toThrow();
     revoked = true;
     expect(() => guard.checkAccess("use")).toThrow(
       expect.objectContaining({ code: ErrorCode.TOKEN_REVOKED }),
@@ -297,11 +286,11 @@ describe("ScopeGuard mid-session token rechecks", () => {
 
   it("negative control: an unrevoked token passes", () => {
     const guard = new ScopeGuard(makeToken(), "mcp", (jti) => jti === "some-other-jti");
-    expect(guard.checkAccess("use")).toBe("test-agent");
+    expect(() => guard.checkAccess("use")).not.toThrow();
   });
 
   it("negative control: the tokenless local path is unaffected", () => {
     const guard = new ScopeGuard(null, "mcp", () => true);
-    expect(guard.checkAccess("admin")).toBe("local");
+    expect(() => guard.checkAccess("admin")).not.toThrow();
   });
 });

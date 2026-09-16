@@ -432,6 +432,22 @@ describe("DirectClient", () => {
     expect(deleted).toBe(true);
   });
 
+  it("setConnectionConfig refuses an unknown key through the shared schema before the engine sees it", async () => {
+    const engine = createMockEngine();
+    const client = new DirectClient(engine as never);
+
+    const error = await expectVaultError(
+      () =>
+        client.setConnectionConfig("secret://key", {
+          database: { tls_mode: "require" },
+          stray: 1,
+        } as never),
+      ErrorCode.SCHEMA_VALIDATION_ERROR,
+    );
+    expect(error.message).toBe('<root>: Unrecognized key: "stray"');
+    expect(engine.setConnectionConfig).not.toHaveBeenCalled();
+  });
+
   it("passes no caller on the config and policy operations (trusted local path)", async () => {
     const engine = createMockEngine();
     const client = new DirectClient(engine as never);
@@ -1194,6 +1210,53 @@ describe("DirectClient", () => {
       expect(status.subject).toBe("CN=web.example.com");
       expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://web");
       expect(engine.getCertificateStatus).toHaveBeenCalledWith("uuid-1");
+    });
+
+    it("importCertificate names the missing field the way the REST route does", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      await expect(
+        client.importCertificate("web", { certificate_pem: LEAF_PEM } as never),
+      ).rejects.toMatchObject({
+        code: ErrorCode.SCHEMA_VALIDATION_ERROR,
+        message: "private_key_pem: Invalid input: expected string, received undefined",
+      });
+    });
+
+    it("importCertificate names every missing field, path-prefixed and semicolon-joined", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      await expect(client.importCertificate("web", {} as never)).rejects.toMatchObject({
+        message:
+          "private_key_pem: Invalid input: expected string, received undefined; certificate_pem: Invalid input: expected string, received undefined",
+      });
+    });
+
+    it("generateCsr renders an enum refusal value-free with the shared wording", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      await expect(
+        client.generateCsr("web", { subject: "CN=web", algorithm: "dsa" } as never),
+      ).rejects.toMatchObject({
+        code: ErrorCode.SCHEMA_VALIDATION_ERROR,
+        message: "algorithm: must be one of rsa, ec",
+      });
+    });
+
+    it("generateCsr prefixes the pairing refusal with its path", async () => {
+      const engine = createMockEngine();
+      const certManager = createFakeCertManager();
+      const client = new DirectClient(engine as never, { certManager: certManager as never });
+
+      await expect(
+        client.generateCsr("web", { subject: "CN=web", algorithm: "ec", bits: 4096 } as never),
+      ).rejects.toMatchObject({ message: 'bits: bits applies only to algorithm "rsa"' });
     });
   });
 

@@ -39,6 +39,7 @@ import {
   VAULT_VERSION,
   VaultError,
   certificateImportSchema,
+  connectionConfigSchema,
   generateCsrRequestSchema,
   isEncryptedPrivateKeyPem,
   mcpServerConfigSchema,
@@ -162,7 +163,11 @@ export class DirectClient implements VaultClient {
   }
 
   async setConnectionConfig(handle: string, config: ConnectionConfig): Promise<void> {
-    return this.engine.setConnectionConfig(handle, config);
+    const parsed = connectionConfigSchema.safeParse(config);
+    if (!parsed.success) {
+      throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
+    }
+    return this.engine.setConnectionConfig(handle, parsed.data);
   }
 
   async getConnectionConfig(handle: string): Promise<ConnectionConfig | undefined> {
@@ -301,7 +306,7 @@ export class DirectClient implements VaultClient {
     // the wire contract.
     const parsed = certificateImportSchema.safeParse({ name, ...input });
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
     }
     if (isEncryptedPrivateKeyPem(input.private_key_pem)) {
       throw VaultError.encryptedKeyUnsupported(ENCRYPTED_KEY_IMPORT_REFUSAL);
@@ -331,7 +336,7 @@ export class DirectClient implements VaultClient {
     // matches what the REST route returns.
     const parsed = generateCsrRequestSchema.safeParse({ name, ...input });
     if (!parsed.success) {
-      throw VaultError.schemaValidation(parsed.error.issues.map((i) => i.message).join(", "));
+      throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
     }
     const manager = await this.loadCertManager();
     if (this.closed) throw VaultError.invalidInput("DirectClient is closed");

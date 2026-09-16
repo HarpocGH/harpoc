@@ -32,12 +32,14 @@ import {
   oauthGrantTypeSchema,
   oauthProviderConfigSchema,
   oauthProviderPresetSchema,
+  permissionListSchema,
   permissionSchema,
   principalTypeSchema,
   processActionSchema,
   registerAgentInputSchema,
   responseModeSchema,
   rotateSecretInputSchema,
+  secretIdListSchema,
   secretStatusSchema,
   secretTypeSchema,
   sessionFileSchema,
@@ -2565,5 +2567,24 @@ describe("request-body schemas refuse unknown keys at every level (R10/A5)", () 
         headers: { "x-anything": "v" },
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("stored JSON column schemas (P3-11)", () => {
+  it("permissionListSchema accepts a permission list and refuses an unknown value, value-free", () => {
+    expect(permissionListSchema.safeParse(["read", "use"]).success).toBe(true);
+    const refused = permissionListSchema.safeParse(["read", "fly"]);
+    expect(refused.success).toBe(false);
+    if (!refused.success) {
+      expect(renderSchemaIssues(refused.error)).toBe(
+        "1: must be one of list, read, use, create, rotate, revoke, admin",
+      );
+    }
+  });
+
+  it("secretIdListSchema refuses an empty id and a non-string", () => {
+    expect(secretIdListSchema.safeParse(["a", "b"]).success).toBe(true);
+    expect(secretIdListSchema.safeParse([""]).success).toBe(false);
+    expect(secretIdListSchema.safeParse([1]).success).toBe(false);
   });
 });

@@ -186,7 +186,7 @@ describe("secret mcp-server — token path", () => {
     );
   });
 
-  it("--protocol 2025-03-26 is refused with zod's enum wording, value-free", async () => {
+  it("--protocol 2025-03-26 is refused with the renderer's enum wording, value-free", async () => {
     mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
     await expect(
       run([
@@ -204,7 +204,7 @@ describe("secret mcp-server — token path", () => {
       ]),
     ).rejects.toThrow("process.exit");
     expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Invalid option: expected one of "2025-11-25"|"2026-07-28"'),
+      expect.stringContaining("protocol: must be one of 2025-11-25, 2026-07-28"),
     );
     expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("2025-03-26"));
     expect(mockEngine.setMcpServerConfig).not.toHaveBeenCalled();

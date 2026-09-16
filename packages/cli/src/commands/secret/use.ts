@@ -3,7 +3,12 @@ import type { Command } from "commander";
 import type { VaultEngine } from "@harpoc/core";
 import { InjectionGuard, sanitizeUseSecretResult } from "@harpoc/core";
 import type { CallerContext, UseSecretResponse } from "@harpoc/shared";
-import { isDecimalInteger, useSecretActionSchema, VaultError } from "@harpoc/shared";
+import {
+  isDecimalInteger,
+  renderSchemaIssues,
+  useSecretActionSchema,
+  VaultError,
+} from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
@@ -213,7 +218,7 @@ export function registerSecretUseCommand(secret: Command): void {
         }
         const parsed = useSecretActionSchema.safeParse(actionInput);
         if (!parsed.success) {
-          throw new Error(parsed.error.issues.map((i) => i.message).join(", "));
+          throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
         }
 
         const engine = await loadUnlockedEngine(vaultDir);

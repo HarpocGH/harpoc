@@ -142,7 +142,9 @@ describe("explicit grant (R1)", () => {
     await expectNotFound(engine.getConnectionConfig(handle, caller));
     await expectDenied(engine.setInjectionPolicy(handle, { url_allowlist: ["*"] }, {}, caller));
     await expectNotFound(engine.setMcpServerConfig(handle, MCP_CONFIG, caller));
-    await expectNotFound(engine.setConnectionConfig(handle, {}, caller));
+    await expectNotFound(
+      engine.setConnectionConfig(handle, { database: { tls_mode: "require" } }, caller),
+    );
   });
 
   it("a secret with rows for someone else restricts the config ops", async () => {
@@ -158,7 +160,9 @@ describe("explicit grant (R1)", () => {
     );
     await expectNotFound(engine.setMcpServerConfig("secret://gated", MCP_CONFIG, bob));
     await expectNotFound(engine.deleteMcpServerConfig("secret://gated", bob));
-    await expectNotFound(engine.setConnectionConfig("secret://gated", {}, bob));
+    await expectNotFound(
+      engine.setConnectionConfig("secret://gated", { database: { tls_mode: "require" } }, bob),
+    );
     await expectNotFound(engine.deleteConnectionConfig("secret://gated", bob));
     await expectNotFound(() => engine.listPolicies(id, bob));
   });
@@ -194,7 +198,13 @@ describe("permission granularity (D2: read→read, mutate→rotate)", () => {
       engine.setInjectionPolicy("secret://read-only", { url_allowlist: ["*"] }, {}, reader),
     );
     await expectDenied(engine.setMcpServerConfig("secret://read-only", MCP_CONFIG, reader));
-    await expectDenied(engine.setConnectionConfig("secret://read-only", {}, reader));
+    await expectDenied(
+      engine.setConnectionConfig(
+        "secret://read-only",
+        { database: { tls_mode: "require" } },
+        reader,
+      ),
+    );
     await expectDenied(engine.deleteMcpServerConfig("secret://read-only", reader));
     await expectDenied(engine.deleteConnectionConfig("secret://read-only", reader));
   });
@@ -272,7 +282,11 @@ describe("permission granularity (D2: read→read, mutate→rotate)", () => {
       ),
     ).resolves.toBeUndefined();
     await expectNotFound(
-      engine.setConnectionConfig("secret://project-scoped", {}, agent("any-agent", "other")),
+      engine.setConnectionConfig(
+        "secret://project-scoped",
+        { database: { tls_mode: "require" } },
+        agent("any-agent", "other"),
+      ),
     );
   });
 });
@@ -510,7 +524,7 @@ describe("audit attribution", () => {
 
   it("the trusted path leaves the principal columns NULL", async () => {
     const id = await makeSecret("local-row");
-    await engine.setConnectionConfig("secret://local-row", {});
+    await engine.setConnectionConfig("secret://local-row", { database: { tls_mode: "require" } });
 
     const rows = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT, secretId: id });
     const local = rows.filter((r) => r.detail?.policy === "connection");

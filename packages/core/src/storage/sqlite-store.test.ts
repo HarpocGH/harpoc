@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AccessPolicy, Secret } from "@harpoc/shared";
-import { AuditEventType, SecretStatus, SecretType } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, SecretStatus, SecretType } from "@harpoc/shared";
 import type {
   CertificateRow,
   ConnectionConfigRow,
@@ -1452,5 +1452,75 @@ describe("database file permissions (L11)", () => {
     // Best-effort by design: re-opening must never fail on a mode problem.
     store = new SqliteStore(dbPath);
     expect(store.db.open).toBe(true);
+  });
+});
+
+describe("JSON columns are read strictly (P3-11)", () => {
+  const TOKEN_ROW = {
+    jti: "jti-strict-1",
+    subject: "agent-1",
+    principal_type: "agent" as const,
+    agent_id: null,
+    scope: ["read" as const, "use" as const],
+    project: null,
+    secrets: ["secret-a"],
+    label: null,
+    issued_at: Date.now(),
+    expires_at: Date.now() + 60_000,
+    revoked_at: null,
+  };
+
+  it("a policy whose permissions column holds an unknown value is VAULT_CORRUPTED naming the column", () => {
+    const secret = makeSecret();
+    store.insertSecret(secret);
+    const policy = makePolicy(secret.id);
+    store.insertPolicy(policy);
+    store.db
+      .prepare("UPDATE access_policies SET permissions = ? WHERE id = ?")
+      .run('["read","fly"]', policy.id);
+    expect(() => store.getPolicy(policy.id)).toThrow(
+      expect.objectContaining({
+        code: ErrorCode.VAULT_CORRUPTED,
+        message: expect.stringContaining(
+          `access_policies.permissions for ${policy.id} is malformed`,
+        ),
+      }),
+    );
+  });
+
+  it("a policy whose permissions column is not JSON is VAULT_CORRUPTED, never a SyntaxError", () => {
+    const secret = makeSecret();
+    store.insertSecret(secret);
+    const policy = makePolicy(secret.id);
+    store.insertPolicy(policy);
+    store.db
+      .prepare("UPDATE access_policies SET permissions = ? WHERE id = ?")
+      .run("not json", policy.id);
+    expect(() => store.getPolicy(policy.id)).toThrow(
+      expect.objectContaining({
+        code: ErrorCode.VAULT_CORRUPTED,
+        message: expect.stringContaining("is not JSON"),
+      }),
+    );
+  });
+
+  it("an issued token whose scope or secrets column is malformed is VAULT_CORRUPTED naming the column", () => {
+    store.insertIssuedToken(TOKEN_ROW);
+    store.db
+      .prepare("UPDATE issued_tokens SET scope = ? WHERE jti = ?")
+      .run('["fly"]', TOKEN_ROW.jti);
+    expect(() => store.getIssuedToken(TOKEN_ROW.jti)).toThrow(
+      expect.objectContaining({
+        message: expect.stringContaining(`issued_tokens.scope for ${TOKEN_ROW.jti} is malformed`),
+      }),
+    );
+    store.db
+      .prepare("UPDATE issued_tokens SET scope = ?, secrets = ? WHERE jti = ?")
+      .run('["read"]', '[""]', TOKEN_ROW.jti);
+    expect(() => store.getIssuedToken(TOKEN_ROW.jti)).toThrow(
+      expect.objectContaining({
+        message: expect.stringContaining(`issued_tokens.secrets for ${TOKEN_ROW.jti} is malformed`),
+      }),
+    );
   });
 });

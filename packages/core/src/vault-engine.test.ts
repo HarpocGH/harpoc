@@ -13,7 +13,7 @@ import {
   VAULT_VERSION,
   VAULT_VERSION_FLOOR,
 } from "@harpoc/shared";
-import { AAD_INJECTION_POLICY, AAD_MCP_SERVER_CONFIG } from "@harpoc/shared";
+import { AAD_CONNECTION_CONFIG, AAD_INJECTION_POLICY, AAD_MCP_SERVER_CONFIG } from "@harpoc/shared";
 import type { InjectionPolicyInput } from "@harpoc/shared";
 import { expectVaultError, protectorTimer, recordSeriesLine } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
@@ -2191,6 +2191,23 @@ describe("MCP server config", () => {
     expect(err.message).toContain("is not JSON");
     expect(err.message).not.toContain("not json");
   });
+
+  it("refuses an MCP server config with an extra key before writing, naming the path (P3-11)", async () => {
+    await expect(
+      engine.setMcpServerConfig("secret://mcp", {
+        server_name: "srv",
+        transport: "http",
+        url: "https://mcp.example.com/mcp",
+        stray: 1,
+      } as never),
+    ).rejects.toMatchObject({
+      code: ErrorCode.SCHEMA_VALIDATION_ERROR,
+      message: expect.stringContaining(
+        'Invalid MCP server config: <root>: Unrecognized key: "stray"',
+      ),
+    });
+    expect(await engine.getMcpServerConfig("secret://mcp")).toBeUndefined();
+  });
 });
 
 describe("connection config", () => {
@@ -2275,6 +2292,74 @@ describe("connection config", () => {
       .filter((e) => e.detail?.policy === "connection");
     expect(grants[0]?.detail?.has_git).toBe(true);
     expect(grants[0]?.detail?.has_mail).toBe(false);
+  });
+
+  const rewriteStoredConnectionConfig = async (
+    handle: string,
+    transform: (plaintext: string) => string,
+  ): Promise<void> => {
+    const secretId = await engine.resolveSecretId(handle);
+    const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
+    const row = store.getConnectionConfig(secretId);
+    if (!row) throw new Error("no stored connection config");
+    const plaintext = Buffer.from(
+      decrypt(
+        kek,
+        row.config_encrypted,
+        row.config_iv,
+        row.config_tag,
+        AAD_CONNECTION_CONFIG(secretId),
+      ),
+    ).toString("utf8");
+    const enc = encrypt(
+      kek,
+      new Uint8Array(Buffer.from(transform(plaintext), "utf8")),
+      AAD_CONNECTION_CONFIG(secretId),
+    );
+    const now = Date.now();
+    store.upsertConnectionConfig({
+      secret_id: secretId,
+      config_encrypted: enc.ciphertext,
+      config_iv: enc.iv,
+      config_tag: enc.tag,
+      created_at: now,
+      updated_at: now,
+    });
+  };
+
+  it("refuses a connection config the schema refuses before writing, naming the path (P3-11)", async () => {
+    await expect(
+      engine.setConnectionConfig("secret://conn", {
+        database: { tls_mode: "require" },
+        stray: 1,
+      } as never),
+    ).rejects.toMatchObject({
+      code: ErrorCode.SCHEMA_VALIDATION_ERROR,
+      message: expect.stringContaining(
+        'Invalid connection config: <root>: Unrecognized key: "stray"',
+      ),
+    });
+    expect(await engine.getConnectionConfig("secret://conn")).toBeUndefined();
+  });
+
+  it("a stored connection config with an unknown key is VAULT_CORRUPTED naming the path, never the key", async () => {
+    await engine.setConnectionConfig("secret://conn", { database: { tls_mode: "require" } });
+    await rewriteStoredConnectionConfig("secret://conn", (plaintext) =>
+      JSON.stringify({ ...(JSON.parse(plaintext) as Record<string, unknown>), extra: 1 }),
+    );
+    const error = await engine.getConnectionConfig("secret://conn").catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: ErrorCode.VAULT_CORRUPTED });
+    expect((error as Error).message).toContain("is malformed (<root>)");
+    expect((error as Error).message).not.toContain("extra");
+  });
+
+  it("a stored connection config that is not JSON is VAULT_CORRUPTED, never a raw SyntaxError", async () => {
+    await engine.setConnectionConfig("secret://conn", { database: { tls_mode: "require" } });
+    await rewriteStoredConnectionConfig("secret://conn", () => "not json");
+    await expect(engine.getConnectionConfig("secret://conn")).rejects.toMatchObject({
+      code: ErrorCode.VAULT_CORRUPTED,
+      message: expect.stringContaining("is not JSON"),
+    });
   });
 });
 

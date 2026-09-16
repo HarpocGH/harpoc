@@ -58,6 +58,11 @@ export const secretStatusSchema = z.enum(secretStatusValues);
 const permissionValues = Object.values(Permission) as [Permission, ...Permission[]];
 export const permissionSchema = z.enum(permissionValues);
 
+/** A policy's or a token's permission list as the store keeps it — a JSON column, read strictly (P3-11). */
+export const permissionListSchema = z.array(permissionSchema);
+/** A token's per-secret allowlist column: secret ids, never an empty string. */
+export const secretIdListSchema = z.array(z.string().min(1));
+
 const auditEventTypeValues = Object.values(AuditEventType) as [AuditEventType, ...AuditEventType[]];
 export const auditEventTypeSchema = z.enum(auditEventTypeValues);
 

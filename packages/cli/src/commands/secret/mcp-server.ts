@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { mcpServerConfigSchema } from "@harpoc/shared";
+import { mcpServerConfigSchema, renderSchemaIssues, VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
@@ -83,7 +83,7 @@ export function registerSecretMcpServerCommand(secret: Command): void {
             protocol: options.protocol,
           });
           if (!parsed.success) {
-            throw new Error(parsed.error.issues.map((i) => i.message).join(", "));
+            throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
           }
 
           await engine.setMcpServerConfig(handle, parsed.data, resolved?.caller);

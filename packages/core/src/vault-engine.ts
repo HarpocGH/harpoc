@@ -17,6 +17,7 @@ import type {
   IssuedToken,
   IssuedTokenStatusFilter,
   McpServerConfig,
+  McpServerConfigInput,
   OAuthProviderConfig,
   OAuthTokenStatus,
   Permission,
@@ -52,6 +53,7 @@ import {
   AES_KEY_LENGTH,
   AgentStatus,
   AuditEventType,
+  connectionConfigSchema,
   DEFAULT_SESSION_TTL_MS,
   ErrorCode,
   formatHandle,
@@ -1975,9 +1977,16 @@ export class VaultEngine {
    */
   async setMcpServerConfig(
     handle: string,
-    config: McpServerConfig,
+    config: McpServerConfigInput,
     caller?: CallerContext,
   ): Promise<void> {
+    const validated = mcpServerConfigSchema.safeParse(config);
+    if (!validated.success) {
+      throw VaultError.schemaValidation(
+        `Invalid MCP server config: ${renderSchemaIssues(validated.error)}`,
+      );
+    }
+
     const s = this.assertUnlocked();
     // Before the terminate below: a denied caller must not be able to kill
     // another principal's live downstream child by calling this repeatedly.
@@ -1993,7 +2002,7 @@ export class VaultEngine {
       },
     );
 
-    const json = JSON.stringify(config);
+    const json = JSON.stringify(validated.data);
     const enc = encrypt(
       s.kek,
       new Uint8Array(Buffer.from(json, "utf8")),
@@ -2016,8 +2025,8 @@ export class VaultEngine {
         ...callerColumns(caller),
         detail: {
           policy: "mcp_server",
-          server_name: config.server_name,
-          transport: config.transport,
+          server_name: validated.data.server_name,
+          transport: validated.data.transport,
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
@@ -2103,7 +2112,22 @@ export class VaultEngine {
       row.config_tag,
       AAD_CONNECTION_CONFIG(secretId),
     );
-    return JSON.parse(Buffer.from(bytes).toString("utf8")) as ConnectionConfig;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(Buffer.from(bytes).toString("utf8"));
+    } catch {
+      throw VaultError.vaultCorrupted(`Connection config for secret ${secretId} is not JSON`);
+    }
+    const parsed = connectionConfigSchema.safeParse(raw);
+    if (!parsed.success) {
+      const paths = parsed.error.issues.map(
+        (issue) => issue.path.map(String).join(".") || "<root>",
+      );
+      throw VaultError.vaultCorrupted(
+        `Connection config for secret ${secretId} is malformed (${paths.join(", ")})`,
+      );
+    }
+    return parsed.data;
   }
 
   /**
@@ -2116,6 +2140,13 @@ export class VaultEngine {
     config: ConnectionConfig,
     caller?: CallerContext,
   ): Promise<void> {
+    const validated = connectionConfigSchema.safeParse(config);
+    if (!validated.success) {
+      throw VaultError.schemaValidation(
+        `Invalid connection config: ${renderSchemaIssues(validated.error)}`,
+      );
+    }
+
     const s = this.assertUnlocked();
     // Endpoint-authentication pins (DB TLS/CA, SSH host keys) bound the
     // allowlist decision — dropping them is a rotate-class change.
@@ -2131,7 +2162,7 @@ export class VaultEngine {
       },
     );
 
-    const json = JSON.stringify(config);
+    const json = JSON.stringify(validated.data);
     const enc = encrypt(
       s.kek,
       new Uint8Array(Buffer.from(json, "utf8")),
@@ -2154,21 +2185,21 @@ export class VaultEngine {
         ...callerColumns(caller),
         detail: {
           policy: "connection",
-          has_database: config.database !== undefined,
-          has_ssh: config.ssh !== undefined,
-          has_mail: config.mail !== undefined,
-          has_git: config.git !== undefined,
-          database_tls: config.database?.tls_mode,
+          has_database: validated.data.database !== undefined,
+          has_ssh: validated.data.ssh !== undefined,
+          has_mail: validated.data.mail !== undefined,
+          has_git: validated.data.git !== undefined,
+          database_tls: validated.data.database?.tls_mode,
           // The mail group carries the TLS decision as a value, not a mode —
           // projected onto the database group's require/disable vocabulary so
           // one audit reader covers both TLS opt-outs.
           mail_tls:
-            config.mail === undefined
+            validated.data.mail === undefined
               ? undefined
-              : config.mail.tls === false
+              : validated.data.mail.tls === false
                 ? "disable"
                 : "require",
-          known_hosts_count: config.ssh?.known_hosts.length ?? 0,
+          known_hosts_count: validated.data.ssh?.known_hosts.length ?? 0,
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,

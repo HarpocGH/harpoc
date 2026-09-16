@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { Command } from "commander";
 import type { InjectionPolicy } from "@harpoc/shared";
 
@@ -195,6 +195,7 @@ describe("mergePolicy", () => {
 
 describe("secret allow command — interpreter acknowledgement pass-through", () => {
   let errorSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: MockInstance;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -210,10 +211,14 @@ describe("secret allow command — interpreter acknowledgement pass-through", ()
       fs_isolation: false,
     });
     errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
   });
 
   afterEach(() => {
     errorSpy.mockRestore();
+    exitSpy.mockRestore();
     if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
     else process.env.HARPOC_TOKEN = savedEnvToken;
   });
@@ -246,6 +251,15 @@ describe("secret allow command — interpreter acknowledgement pass-through", ()
       { acknowledge_interpreters: false },
       undefined,
     );
+  });
+
+  it("renders a schema refusal value-free through the shared renderer", async () => {
+    await expect(run(["secret://k", "--response-mode", "bogus"])).rejects.toThrow("process.exit");
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("response_mode: must be one of full, filtered, status_only"),
+    );
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("bogus"));
+    expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
   });
 });
 
