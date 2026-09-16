@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/client";
 import { MAX_MCP_STDERR_BYTES } from "@harpoc/shared";
@@ -59,6 +60,39 @@ describe("StdioChildTransport — protocol round trip", () => {
     await client.connect(transport, { timeout: 5_000 });
     expect(transport.pid).toBeGreaterThan(0);
     await client.close();
+  });
+});
+
+describe("StdioChildTransport — pinned modern revision", () => {
+  it("probes in place on the one child it spawned", async () => {
+    const fixturePath = fileURLToPath(
+      new URL("./__fixtures__/modern-stdio-server.mjs", import.meta.url),
+    );
+    const transport = new StdioChildTransport({
+      resolvedCommand: NODE,
+      args: [fixturePath],
+      env: { PATH: process.env.PATH ?? "" },
+    });
+    const client = new Client(
+      { name: "test", version: "0.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    await client.connect(transport, { timeout: 10_000 });
+    try {
+      const pid = transport.pid;
+
+      const result = (await client.callTool(
+        { name: "reveal", arguments: {} },
+        { timeout: 10_000 },
+      )) as { content: Array<{ type: string; text: string }> };
+
+      expect(result.content[0]?.text).toBe("modern-stdio-ok");
+      expect(typeof pid).toBe("number");
+      expect(transport.pid).toBe(pid);
+      expect(client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
+    } finally {
+      await client.close();
+    }
   });
 });
 

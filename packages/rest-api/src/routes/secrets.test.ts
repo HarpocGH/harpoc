@@ -927,6 +927,39 @@ describe("secret routes", () => {
       expect((call[1] as { server_name: string }).server_name).toBe("github-mcp");
     });
 
+    it("PUT carries an explicit protocol through to the engine", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/mcp-server", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          server_name: "remote",
+          transport: "http",
+          url: "https://mcp.example.com/mcp",
+          protocol: "2026-07-28",
+        }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setMcpServerConfig.mock.calls[0] as unknown[];
+      expect(call[0]).toBe("secret://test-key");
+      expect(call[1]).toMatchObject({ protocol: "2026-07-28" });
+    });
+
+    it("PUT without protocol reaches the engine with the default revision", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/mcp-server", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          server_name: "remote",
+          transport: "http",
+          url: "https://mcp.example.com/mcp",
+        }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setMcpServerConfig.mock.calls[0] as unknown[];
+      expect(call[0]).toBe("secret://test-key");
+      expect(call[1]).toMatchObject({ protocol: "2025-11-25" });
+    });
+
     it("PUT rejects a stdio config without env_var", async () => {
       const res = await app.request("/api/v1/secrets/test-key/mcp-server", {
         method: "PUT",
@@ -1296,6 +1329,7 @@ describe("secret routes", () => {
         body: {
           server_name: "github-mcp",
           transport: "stdio",
+          protocol: "2025-11-25",
           command: "node",
           args: ["server.js"],
           env_var: "GITHUB_TOKEN",

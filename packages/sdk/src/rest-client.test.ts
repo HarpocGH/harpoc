@@ -327,6 +327,7 @@ describe("RestClient", () => {
       await client.setMcpServerConfig("secret://k", {
         server_name: "github-mcp",
         transport: "stdio",
+        protocol: "2025-11-25",
         command: "node",
         args: ["server.js"],
         env_var: "GITHUB_TOKEN",
@@ -337,6 +338,21 @@ describe("RestClient", () => {
       const body = JSON.parse(call[1].body as string);
       expect(body.server_name).toBe("github-mcp");
       expect(body.env_var).toBe("GITHUB_TOKEN");
+    });
+
+    it("setMcpServerConfig sends the pinned protocol revision as given", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setMcpServerConfig("secret://k", {
+        server_name: "remote",
+        transport: "http",
+        protocol: "2026-07-28",
+        url: "https://mcp.example.com/mcp",
+      });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toContain("/api/v1/secrets/k/mcp-server");
+      expect(call[1].method).toBe("PUT");
+      const body = JSON.parse(call[1].body as string);
+      expect(body.protocol).toBe("2026-07-28");
     });
 
     it("getMcpServerConfig sends GET and maps null to undefined", async () => {

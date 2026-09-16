@@ -50,6 +50,7 @@ rl.on("line", (line) => {
 const CONFIG: McpServerConfig = {
   server_name: "crash-mcp",
   transport: "stdio",
+  protocol: "2025-11-25",
   command: NODE,
   args: ["-e", CRASH_SERVER],
   env_var: "DOWNSTREAM_TOKEN",

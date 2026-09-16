@@ -285,7 +285,7 @@ export function registerServerCommand(program: Command): void {
 
           if (opts.mcp) {
             const { createMcpServer } = await import("@harpoc/mcp-server");
-            const { StdioServerTransport } = await import("@modelcontextprotocol/server/stdio");
+            const { serveStdio } = await import("@modelcontextprotocol/server/stdio");
             // The launch token arrives through --token-file or the ambient
             // HARPOC_TOKEN (the file wins) — never argv (R9/A10). A profile-set
             // variable must not error out --rest-only starts, so the env var
@@ -296,9 +296,11 @@ export function registerServerCommand(program: Command): void {
               allowTokenless: opts.allowTokenless,
               enableTtyPrompt: true,
             });
-            const transport = new StdioServerTransport();
-            await server.connect(transport);
-            mcpServer = server;
+            const handle = serveStdio(() => server, {
+              onerror: (error) =>
+                process.stderr.write(`[harpoc] MCP stdio error: ${error.message}\n`),
+            });
+            mcpServer = handle;
             // The SDK transport listens for data and error only: an MCP host
             // that hangs up (stdin EOF) closes nothing. That hang-up is the
             // stdio server's graceful stop (R4/D67) — alone, it ends the
@@ -309,7 +311,7 @@ export function registerServerCommand(program: Command): void {
               stdioClosed = true;
               auditStop("stdio", opts.allowTokenless === true, undefined, "transport_closed");
               const alone = !opts.rest && !opts.mcpHttp && !opts.oauthRefresh && !opts.certRenew;
-              const closed = server.close().catch(() => undefined);
+              const closed = handle.close().catch(() => undefined);
               if (alone) void closed.then(() => shutdown("transport_closed"));
             });
             console.error("[harpoc] MCP server running on stdio");

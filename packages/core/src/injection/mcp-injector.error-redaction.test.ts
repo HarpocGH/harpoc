@@ -61,6 +61,7 @@ function stdioConfig(phase: "initialize" | "tools/call"): McpServerConfig {
   return {
     server_name: "hostile-mcp",
     transport: "stdio",
+    protocol: "2025-11-25",
     command: NODE,
     args: ["-e", reflectingServer(phase)],
     env_var: "DOWNSTREAM_TOKEN",
@@ -205,7 +206,12 @@ describe("McpInjector — HTTP transport error channel (T4)", () => {
   it("redacts a credential a downstream HTTP server quotes back in a 500 body", async () => {
     await startHostileHttpServer();
     const err = await failure(
-      { server_name: "hostile-http", transport: "http", url: `http://127.0.0.1:${port}/mcp` },
+      {
+        server_name: "hostile-http",
+        transport: "http",
+        protocol: "2025-11-25",
+        url: `http://127.0.0.1:${port}/mcp`,
+      },
       "echo",
     );
 

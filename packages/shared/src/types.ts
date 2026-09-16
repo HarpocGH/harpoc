@@ -156,6 +156,13 @@ export const McpTransport = {
 } as const;
 export type McpTransport = (typeof McpTransport)[keyof typeof McpTransport];
 
+/** MCP protocol revision the vault speaks to a downstream server (phase 3, dual-era). */
+export const McpProtocolRevision = {
+  LEGACY: "2025-11-25",
+  MODERN: "2026-07-28",
+} as const;
+export type McpProtocolRevision = (typeof McpProtocolRevision)[keyof typeof McpProtocolRevision];
+
 /**
  * Backing store engine of a database action. The `engine` field keeps the
  * taxonomy open. `redis` and `mongodb` (v1.3) route through `command`

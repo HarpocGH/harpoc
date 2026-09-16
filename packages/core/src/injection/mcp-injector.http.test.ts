@@ -3,10 +3,16 @@ import { createServer } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { McpServer } from "@modelcontextprotocol/server";
-import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
-import type { InjectionPolicy, McpAction, McpServerConfig } from "@harpoc/shared";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
+import { NodeStreamableHTTPServerTransport, toNodeHandler } from "@modelcontextprotocol/node";
+import type {
+  InjectionPolicy,
+  McpAction,
+  McpProtocolRevision,
+  McpServerConfig,
+} from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
+import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
 
 // Partial mock: hostnames under *.pinned.test validate successfully and pin to
 // the loopback downstream server; everything else uses the real validator. The
@@ -28,6 +34,7 @@ vi.mock("./url-validator.js", async (importOriginal) => {
 
 import { McpInjector } from "./mcp-injector.js";
 import { McpConnectionRegistry } from "./mcp-registry.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 const SECRET = "sk-mcp-http-secret-0123456789";
 
@@ -45,12 +52,17 @@ const POLICY: InjectionPolicy = {
   strict_tree_exit: false,
 };
 
+function captureLogger(): { log: ReturnType<typeof vi.fn>; logger: AuditLogger } {
+  const log = vi.fn();
+  return { log, logger: { log } as unknown as AuditLogger };
+}
+
 function mcpAction(tool: string): McpAction {
   return { type: "mcp", server: "http-mcp", tool };
 }
 
-function httpConfig(url: string): McpServerConfig {
-  return { server_name: "http-mcp", transport: "http", url };
+function httpConfig(url: string, protocol: McpProtocolRevision = "2025-11-25"): McpServerConfig {
+  return { server_name: "http-mcp", transport: "http", protocol, url };
 }
 
 function policyFor(url: string): InjectionPolicy {
@@ -109,6 +121,35 @@ describe("MCP Streamable HTTP DNS-rebinding pinning", () => {
     expect(JSON.stringify(result.content)).toContain("pinned-ok");
     expect(seenHosts.length).toBeGreaterThan(0);
     expect(seenHosts.every((h) => h === `mcp.pinned.test:${port}`)).toBe(true);
+  });
+
+  it("names the pinned revision the legacy-only downstream does not offer", async () => {
+    const injector = new McpInjector(null, registry);
+    const err = await expectVaultError(
+      () => run(injector, httpConfig(`http://mcp.pinned.test:${port}/mcp`, "2026-07-28")),
+      ErrorCode.MCP_CONNECT_FAILED,
+    );
+
+    expect(err.message).toContain("protocol 2026-07-28 is not offered");
+  });
+
+  it("audits the refused pin as a failed secret.use row", async () => {
+    const { log, logger } = captureLogger();
+    const injector = new McpInjector(logger, registry);
+    await expectVaultError(
+      () => run(injector, httpConfig(`http://mcp.pinned.test:${port}/mcp`, "2026-07-28")),
+      ErrorCode.MCP_CONNECT_FAILED,
+    );
+
+    const logged = log.mock.calls.map((c) => c[0] as AuditLogOptions);
+    expect(logged).toHaveLength(1);
+    expect(logged[0]?.eventType).toBe("secret.use");
+    expect(logged[0]?.success).toBe(false);
+    expect(logged[0]?.detail).toMatchObject({
+      context: "mcp",
+      transport: "http",
+      error: ErrorCode.MCP_CONNECT_FAILED,
+    });
   });
 
   /**
@@ -177,5 +218,52 @@ describe("MCP Streamable HTTP redirect refusal", () => {
       run(injector, httpConfig(`http://127.0.0.1:${redirectPort}/mcp`)),
     ).rejects.toMatchObject({ code: ErrorCode.REDIRECT_POLICY_VIOLATION });
     expect(victimHits).toBe(0);
+  });
+});
+
+describe("MCP downstream protocol revision", () => {
+  let httpServer: Server;
+  let port: number;
+  let registry: McpConnectionRegistry;
+
+  beforeEach(async () => {
+    const handler = createMcpHandler(
+      () => {
+        const downstream = new McpServer({ name: "modern-downstream", version: "1.0.0" });
+        downstream.registerTool("echo", { description: "Echo" }, async () => ({
+          content: [{ type: "text" as const, text: "modern-ok" }],
+        }));
+        return downstream;
+      },
+      { legacy: "reject" },
+    );
+    const nodeHandler = toNodeHandler(handler);
+
+    httpServer = createServer((req, res) => {
+      nodeHandler(req, res).catch(() => res.destroy());
+    });
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+    port = (httpServer.address() as AddressInfo).port;
+    registry = new McpConnectionRegistry(null);
+  });
+
+  afterEach(async () => {
+    await registry.closeAll();
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+  });
+
+  it("pins the configured modern revision on the downstream client", async () => {
+    const injector = new McpInjector(null, registry);
+    const result = await run(injector, httpConfig(`http://127.0.0.1:${port}/mcp`, "2026-07-28"));
+
+    expect(JSON.stringify(result.content)).toContain("modern-ok");
+  });
+
+  it("never negotiates: a legacy pin is refused by the modern-only downstream", async () => {
+    const injector = new McpInjector(null, registry);
+    await expectVaultError(
+      () => run(injector, httpConfig(`http://127.0.0.1:${port}/mcp`, "2025-11-25")),
+      ErrorCode.MCP_CONNECT_FAILED,
+    );
   });
 });

@@ -1,10 +1,20 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { McpServer } from "@modelcontextprotocol/server";
-import { isInitializeRequest } from "@modelcontextprotocol/server";
-import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
+import {
+  createMcpHandler,
+  isInitializeRequest,
+  isJsonContentType,
+  isLegacyRequest,
+} from "@modelcontextprotocol/server";
+import {
+  NodeStreamableHTTPServerTransport,
+  toNodeHandler,
+  toWebRequest,
+} from "@modelcontextprotocol/node";
 import { CertManager } from "@harpoc/cert-manager";
 import type { VaultEngine } from "@harpoc/core";
 import {
@@ -34,6 +44,12 @@ const SESSION_SWEEP_INTERVAL_MS = 60 * 1000;
  * of legitimate clients is never churned.
  */
 const SESSION_EVICTION_GRACE_MS = 30 * 1000;
+
+/** What the modern leg's per-request factory reads: set by the pre-gate, never by the SDK. */
+interface ModernRequestContext {
+  token: string;
+  remoteAddress?: string;
+}
 
 /** Session-lifecycle limits. Defaults suit a normal deployment. */
 export interface McpHttpSessionLimits {
@@ -96,6 +112,11 @@ interface McpHttpSession {
  * listener's allowed-host set before anything else — the vault's own check
  * since 2026-09-04 (R11/D61), the SDK's deprecated transport options no longer
  * used.
+ *
+ * Since 2026-09-15 the listener also serves the 2026-07-28 revision: a request
+ * carrying the per-request envelope is answered by a handler that builds the
+ * vault's server per request from that request's token (no session, no
+ * Mcp-Session-Id); the 2025-11-25 session path above is unchanged (design R1).
  */
 export async function startMcpHttpServer(options: McpHttpServerOptions): Promise<McpHttpServer> {
   const { engine } = options;
@@ -109,6 +130,35 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
   const injectionGuard = new InjectionGuard();
   const oauthManager = createDefaultOAuthManager(engine);
   const certManager = new CertManager(engine);
+
+  // The modern (2026-07-28) leg: one handler for the listener's lifetime, a
+  // fresh vault server per request from the token that request carried — the
+  // pre-gate below verified it; the SDK verifies nothing itself. The legacy
+  // (2025-11-25) leg keeps the session table; isLegacyRequest routes between
+  // them (design § 6.1, R1).
+  const modernContext = new AsyncLocalStorage<ModernRequestContext>();
+  const modernHandler = createMcpHandler(
+    () => {
+      const ctx = modernContext.getStore();
+      if (!ctx) throw new Error("modern MCP request outside the listener's pre-gate");
+      return createMcpServer({
+        engine,
+        launchToken: ctx.token,
+        rateLimiter,
+        injectionGuard,
+        oauthManager,
+        certManager,
+        accessInterface: "mcp-http",
+        ...(ctx.remoteAddress !== undefined ? { remoteAddress: ctx.remoteAddress } : {}),
+      });
+    },
+    {
+      legacy: "reject",
+      onerror: (err) =>
+        process.stderr.write(`[harpoc] MCP modern-era request failed: ${err.message}\n`),
+    },
+  );
+  const modernNode = toNodeHandler(modernHandler);
 
   const maxSessions = options.sessionLimits?.max ?? MAX_SESSIONS;
   const idleTtlMs = options.sessionLimits?.idleTtlMs ?? SESSION_IDLE_TTL_MS;
@@ -231,6 +281,32 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
     const read = await readJsonBodyOrRespond(req, res);
     if (!read.ok) return;
     const body = read.body;
+
+    // Route by era: a request with no per-request envelope claim (an initialize)
+    // is the 2025 session path; everything else — its validation-ladder answers
+    // included — belongs to the modern handler.
+    if (!(await isLegacyRequest(await toWebRequest(req, body)))) {
+      if (!isJsonContentType(req.headers["content-type"])) {
+        sendJsonRpcError(res, 415, "Unsupported Media Type: Content-Type must be application/json");
+        return;
+      }
+      try {
+        engine.verifyToken(token);
+      } catch (err) {
+        sendAuthError(res, err);
+        return;
+      }
+      await modernContext.run(
+        {
+          token,
+          ...(req.socket.remoteAddress !== undefined
+            ? { remoteAddress: normalizeSocketPeer(req.socket.remoteAddress) }
+            : {}),
+        },
+        () => modernNode(req, res, body),
+      );
+      return;
+    }
 
     if (!isInitializeRequest(body)) {
       sendJsonRpcError(res, 400, "Bad Request: expected an initialize request (no session ID)");
@@ -355,6 +431,7 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
       // cancels in connect.ts — embedders of this server never exit the process).
       oauthManager.cancelPendingFlows();
       clearInterval(sweepTimer);
+      await modernHandler.close();
       for (const session of [...sessions.values()]) {
         try {
           await session.server.close();

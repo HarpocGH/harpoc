@@ -90,6 +90,7 @@ rl.on("line", (line) => {
 const STDIO_CONFIG: McpServerConfig = {
   server_name: "test-mcp",
   transport: "stdio",
+  protocol: "2025-11-25",
   command: NODE,
   args: ["-e", TEST_SERVER],
   env_var: "DOWNSTREAM_TOKEN",
@@ -212,7 +213,12 @@ describe("McpInjector — validation", () => {
   it("denies an http endpoint not on the URL allowlist", async () => {
     await expect(
       run(mcpAction("echo"), {
-        config: { server_name: "test-mcp", transport: "http", url: "https://evil.example.com/mcp" },
+        config: {
+          server_name: "test-mcp",
+          transport: "http",
+          protocol: "2025-11-25",
+          url: "https://evil.example.com/mcp",
+        },
         policy: { ...POLICY, url_allowlist: ["https://good.example.com/*"] },
       }),
     ).rejects.toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
@@ -221,7 +227,12 @@ describe("McpInjector — validation", () => {
   it("rejects a plaintext http endpoint on a non-loopback host", async () => {
     await expect(
       run(mcpAction("echo"), {
-        config: { server_name: "test-mcp", transport: "http", url: "http://api.example.com/mcp" },
+        config: {
+          server_name: "test-mcp",
+          transport: "http",
+          protocol: "2025-11-25",
+          url: "http://api.example.com/mcp",
+        },
         policy: { ...POLICY, url_allowlist: ["http://api.example.com/*"] },
       }),
     ).rejects.toMatchObject({ code: ErrorCode.URL_HTTPS_REQUIRED });
@@ -519,7 +530,12 @@ describe("McpInjector — isolation: refused on a host that cannot deliver (§4.
   it("does not gate an HTTP downstream on either flag (request-mediated, no child)", async () => {
     const terminateSpy = vi.spyOn(registry, "terminate");
     const err = await run(mcpAction("echo"), {
-      config: { server_name: "test-mcp", transport: "http", url: "http://127.0.0.1:9/mcp" },
+      config: {
+        server_name: "test-mcp",
+        transport: "http",
+        protocol: "2025-11-25",
+        url: "http://127.0.0.1:9/mcp",
+      },
       policy: {
         ...POLICY,
         network_isolation: true,

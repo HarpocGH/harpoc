@@ -237,6 +237,30 @@ services:
       timeout: 5s
       retries: 45
 
+  # Its `reveal` tool reflects the Authorization the vault injected, and
+  # /recorded lets the harness confirm out of band that the downstream really
+  # received the credential while the caller-visible result stayed clean. Plain
+  # loopback HTTP: a supported vault target (url-validator permits loopback
+  # http), and MCP-over-TLS trust would ride the same NODE_EXTRA_CA_CERTS lever
+  # the http context already proves.
+  mcp-downstream-2026:
+    build:
+      context: ./fixtures/mcp-downstream-2026
+    image: harpoc-e2e-mcp-downstream-2026
+    ports:
+      - "127.0.0.1:55092:8092"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('node:net').connect(8092,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+
   # git smart-HTTP over loopback with basic auth (D2: no TLS on the git path —
   # criterion 3's handshake is the database services' job; the git arms test
   # redirect refusal, submodule denial and askpass host-binding, none of which

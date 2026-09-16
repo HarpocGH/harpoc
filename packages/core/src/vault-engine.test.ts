@@ -13,11 +13,11 @@ import {
   VAULT_VERSION,
   VAULT_VERSION_FLOOR,
 } from "@harpoc/shared";
-import { AAD_INJECTION_POLICY } from "@harpoc/shared";
+import { AAD_INJECTION_POLICY, AAD_MCP_SERVER_CONFIG } from "@harpoc/shared";
 import type { InjectionPolicyInput } from "@harpoc/shared";
 import { expectVaultError, protectorTimer, recordSeriesLine } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
-import { encrypt } from "./crypto/aes-gcm.js";
+import { decrypt, encrypt } from "./crypto/aes-gcm.js";
 import { forceNetworkIsolationUnavailableForTests } from "./injection/network-isolation.js";
 import type { McpConnectionEntry, McpConnectionRegistry } from "./injection/mcp-registry.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
@@ -2056,6 +2056,7 @@ describe("MCP server config", () => {
     await engine.setMcpServerConfig("secret://mcp", {
       server_name: "github-mcp",
       transport: "stdio",
+      protocol: "2025-11-25",
       command: process.execPath,
       args: ["server.js"],
       env_var: "GITHUB_TOKEN",
@@ -2075,6 +2076,7 @@ describe("MCP server config", () => {
     await engine.setMcpServerConfig("secret://mcp", {
       server_name: "github-mcp",
       transport: "http",
+      protocol: "2025-11-25",
       url: "https://mcp.example.com/mcp",
     });
     const events = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT });
@@ -2087,6 +2089,7 @@ describe("MCP server config", () => {
     await engine.setMcpServerConfig("secret://mcp", {
       server_name: "github-mcp",
       transport: "http",
+      protocol: "2025-11-25",
       url: "https://mcp.example.com/mcp",
     });
     expect(await engine.deleteMcpServerConfig("secret://mcp")).toBe(true);
@@ -2097,6 +2100,96 @@ describe("MCP server config", () => {
 
   it("returns false when deleting a nonexistent config", async () => {
     expect(await engine.deleteMcpServerConfig("secret://mcp")).toBe(false);
+  });
+
+  const writeStoredMcpConfig = async (handle: string, plaintext: string): Promise<void> => {
+    const secretId = await engine.resolveSecretId(handle);
+    const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
+    const enc = encrypt(
+      kek,
+      new Uint8Array(Buffer.from(plaintext, "utf8")),
+      AAD_MCP_SERVER_CONFIG(secretId),
+    );
+    const now = Date.now();
+    store.upsertMcpServer({
+      secret_id: secretId,
+      config_encrypted: enc.ciphertext,
+      config_iv: enc.iv,
+      config_tag: enc.tag,
+      created_at: now,
+      updated_at: now,
+    });
+  };
+
+  const rewriteStoredMcpConfig = async (
+    handle: string,
+    transform: (config: Record<string, unknown>) => Record<string, unknown>,
+  ): Promise<void> => {
+    const secretId = await engine.resolveSecretId(handle);
+    const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
+    const row = store.getMcpServer(secretId);
+    if (!row) throw new Error("no stored MCP server config");
+    const plaintext = decrypt(
+      kek,
+      row.config_encrypted,
+      row.config_iv,
+      row.config_tag,
+      AAD_MCP_SERVER_CONFIG(secretId),
+    );
+    const rewritten = transform(
+      JSON.parse(Buffer.from(plaintext).toString("utf8")) as Record<string, unknown>,
+    );
+    await writeStoredMcpConfig(handle, JSON.stringify(rewritten));
+  };
+
+  it("a config stored before the protocol field reads back with the default (the one read-side default)", async () => {
+    await engine.setMcpServerConfig("secret://mcp", {
+      server_name: "s",
+      transport: "http",
+      url: "https://x.example/mcp",
+      protocol: "2025-11-25",
+    });
+    // Simulate the pre-field blob: rewrite the stored JSON without `protocol`.
+    await rewriteStoredMcpConfig("secret://mcp", (config) => {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { protocol: _dropped, ...rest } = config;
+      return rest;
+    });
+    const read = await engine.getMcpServerConfig("secret://mcp");
+    expect(read?.protocol).toBe("2025-11-25");
+  });
+
+  it("a malformed stored config is VAULT_CORRUPTED, never a silent default", async () => {
+    await engine.setMcpServerConfig("secret://mcp", {
+      server_name: "s",
+      transport: "http",
+      url: "https://x.example/mcp",
+      protocol: "2025-11-25",
+    });
+    await rewriteStoredMcpConfig("secret://mcp", (c) => ({ ...c, transport: "sse" }));
+    const err = await expectVaultError(
+      () => engine.getMcpServerConfig("secret://mcp"),
+      ErrorCode.VAULT_CORRUPTED,
+    );
+    expect(err.message).toContain("is malformed");
+    expect(err.message).toContain("transport");
+    expect(err.message).not.toContain("sse");
+  });
+
+  it("a stored config that is not JSON is VAULT_CORRUPTED, never a raw SyntaxError", async () => {
+    await engine.setMcpServerConfig("secret://mcp", {
+      server_name: "s",
+      transport: "http",
+      url: "https://x.example/mcp",
+      protocol: "2025-11-25",
+    });
+    await writeStoredMcpConfig("secret://mcp", "not json");
+    const err = await expectVaultError(
+      () => engine.getMcpServerConfig("secret://mcp"),
+      ErrorCode.VAULT_CORRUPTED,
+    );
+    expect(err.message).toContain("is not JSON");
+    expect(err.message).not.toContain("not json");
   });
 });
 
@@ -2216,6 +2309,7 @@ describe("useSecret (MCP proxy)", () => {
     await engine.setMcpServerConfig("secret://mcpuse", {
       server_name: "test-mcp",
       transport: "stdio",
+      protocol: "2025-11-25",
       command: process.execPath,
       args: ["-e", MCP_TEST_SERVER],
       env_var: "DOWNSTREAM_TOKEN",
@@ -2237,6 +2331,7 @@ describe("useSecret (MCP proxy)", () => {
     await engine.setMcpServerConfig("secret://mcpuse", {
       server_name: "test-mcp",
       transport: "stdio",
+      protocol: "2025-11-25",
       command: process.execPath,
       args: ["-e", MCP_TEST_SERVER],
       env_var: "DOWNSTREAM_TOKEN",
@@ -2261,6 +2356,7 @@ describe("useSecret (MCP proxy)", () => {
     await engine.setMcpServerConfig("secret://mcpuse", {
       server_name: "test-mcp",
       transport: "stdio",
+      protocol: "2025-11-25",
       command: process.execPath,
       args: ["-e", MCP_TEST_SERVER],
       env_var: "DOWNSTREAM_TOKEN",
@@ -2287,6 +2383,7 @@ describe("useSecret (MCP proxy)", () => {
     await engine.setMcpServerConfig("secret://mcpuse", {
       server_name: "test-mcp",
       transport: "stdio",
+      protocol: "2025-11-25",
       command: process.execPath,
       args: ["-e", MCP_TEST_SERVER],
       env_var: "DOWNSTREAM_TOKEN",

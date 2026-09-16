@@ -30,6 +30,8 @@ export function escapeLatex(value) {
     .replace(/\u0000/g, "\\textbackslash{}");
 }
 
+const TRANSPORT_ONLY_SURFACES = ["mcp-stdio", "mcp-http-2026", "mcp-stdio-2026"];
+
 /**
  * Whether a demonstration record's scenario/context/surface put it on the
  * matrix's shape — independent of whether it actually carries the
@@ -42,7 +44,7 @@ function isMatrixShaped(r) {
   return (
     r.scenario.startsWith("demo-") &&
     r.scenario === `demo-${r.context}` &&
-    r.surface !== "mcp-stdio"
+    !TRANSPORT_ONLY_SURFACES.includes(r.surface)
   );
 }
 

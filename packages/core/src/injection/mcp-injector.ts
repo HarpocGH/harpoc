@@ -6,6 +6,7 @@ import {
   ErrorCode,
   MAX_MCP_RESULT_BYTES,
   MCP_INIT_TIMEOUT_MS,
+  McpProtocolRevision,
   McpTransport,
   VAULT_VERSION,
   VaultError,
@@ -218,6 +219,14 @@ export class McpInjector {
         this.audit(action, secretId, config, { error: err.code }, false, attribution);
         throw err;
       }
+      if (err instanceof sdk.SdkError && err.code === sdk.SdkErrorCode.EraNegotiationFailed) {
+        const vaultErr = VaultError.mcpConnectFailed(
+          config.server_name,
+          `protocol ${config.protocol} is not offered by the downstream server`,
+        );
+        this.audit(action, secretId, config, { error: vaultErr.code }, false, attribution);
+        throw vaultErr;
+      }
       const detail =
         err instanceof Error ? redactSecretEncodings(err.message, valueStr) : undefined;
       const vaultErr = VaultError.mcpConnectFailed(config.server_name, detail);
@@ -265,7 +274,17 @@ export class McpInjector {
     fingerprints: { credentialFingerprint: string; configFingerprint: string },
     attribution?: AuditAttribution,
   ): Promise<McpConnectionEntry> {
-    const client = new sdk.Client({ name: "harpoc-vault", version: VAULT_VERSION });
+    const client = new sdk.Client(
+      { name: "harpoc-vault", version: VAULT_VERSION },
+      {
+        versionNegotiation: {
+          mode:
+            config.protocol === McpProtocolRevision.MODERN
+              ? { pin: McpProtocolRevision.MODERN }
+              : "legacy",
+        },
+      },
+    );
 
     let stdioTransport: StdioChildTransport | undefined;
     let dispose: (() => void) | undefined;

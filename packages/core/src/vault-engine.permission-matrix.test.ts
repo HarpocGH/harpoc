@@ -43,6 +43,7 @@ const GRANTABLE: Permission[] = ["list", "read", "use", "rotate", "revoke", "adm
 const MCP_CONFIG: McpServerConfig = {
   server_name: "docs",
   transport: "http",
+  protocol: "2025-11-25",
   url: "https://mcp.example.com/mcp",
 };
 

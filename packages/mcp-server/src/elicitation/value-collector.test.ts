@@ -1,10 +1,20 @@
 import { describe, it, expect, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/client";
-import { InMemoryTransport } from "@modelcontextprotocol/server";
-import type { McpServer } from "@modelcontextprotocol/server";
+import { CLIENT_CAPABILITIES_META_KEY, InMemoryTransport } from "@modelcontextprotocol/server";
+import type { McpServer, ServerContext } from "@modelcontextprotocol/server";
+import { connectModernInMemoryClient } from "@harpoc/test-utils";
+import type { InMemoryMcpClient } from "@harpoc/test-utils";
 import type { VaultEngine } from "@harpoc/core";
+import { VaultError } from "@harpoc/shared";
 import { createMcpServer } from "../server.js";
-import { startValueCollector, collectValueViaUrlElicitation } from "./value-collector.js";
+import { valueRequestState } from "./request-state.js";
+import * as ttyPrompt from "./tty-prompt.js";
+import * as valueCollector from "./value-collector.js";
+import {
+  collectValueViaUrlElicitation,
+  elicitValueViaInputRequired,
+  startValueCollector,
+} from "./value-collector.js";
 
 const FORM_HEADERS = { "content-type": "application/x-www-form-urlencoded" };
 
@@ -448,5 +458,511 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
     } finally {
       await close();
     }
+  });
+
+  describe("the modern (2026-07-28) leg", () => {
+    async function connectModern(
+      engine: VaultEngine,
+      enableTtyPrompt = false,
+    ): Promise<InMemoryMcpClient> {
+      return connectModernInMemoryClient(
+        () => createMcpServer({ engine, allowTokenless: true, enableTtyPrompt }),
+        { name: "e2e-client", version: "1.0.0" },
+        { capabilities: { elicitation: { url: {} } } },
+      );
+    }
+
+    async function connectModernWithToken(
+      engine: VaultEngine,
+      launchToken: string,
+    ): Promise<InMemoryMcpClient> {
+      return connectModernInMemoryClient(
+        () => createMcpServer({ engine, launchToken }),
+        { name: "e2e-client", version: "1.0.0" },
+        { capabilities: { elicitation: { url: {} } } },
+      );
+    }
+
+    function modernCtx(): ServerContext {
+      return {
+        mcpReq: {
+          envelope: { [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { url: {} } } },
+        },
+      } as unknown as ServerContext;
+    }
+
+    async function retryRaw(
+      modern: InMemoryMcpClient,
+      requestState: unknown,
+      action: "accept" | "decline",
+      args: Record<string, unknown> = { name: "api-key", type: "api_key" },
+    ): Promise<{ isError?: boolean; content: Array<{ text?: string }> }> {
+      return (await modern.client.request({
+        method: "tools/call",
+        params: {
+          name: "create_secret",
+          arguments: args,
+          requestState,
+          inputResponses: { value: { action } },
+        },
+      })) as unknown as { isError?: boolean; content: Array<{ text?: string }> };
+    }
+
+    it("create_secret round-trips the value through the one-time form", async () => {
+      const engine = mockEngine();
+      let captured = "";
+      vi.mocked(engine.setSecretValue).mockImplementation((_handle: string, value: Uint8Array) => {
+        captured = Buffer.from(value).toString("utf8");
+        return Promise.resolve();
+      });
+
+      const modern = await connectModern(engine);
+      modern.client.setRequestHandler("elicitation/create", async (request) => {
+        const params = request.params as { mode?: string; url?: string };
+        expect(params.mode).toBe("url");
+        await fetch(params.url as string);
+        await fetch(params.url as string, {
+          method: "POST",
+          headers: FORM_HEADERS,
+          body: postBody("browser-entered-value"),
+        });
+        return { action: "accept" };
+      });
+
+      try {
+        const result = await modern.callTool("create_secret", {
+          name: "api-key",
+          type: "api_key",
+        });
+        const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
+        expect(payload.status).toBe("created");
+        expect(engine.setSecretValue).toHaveBeenCalledWith(
+          "secret://api-key",
+          expect.anything(),
+          expect.objectContaining({ principal_id: "tokenless-stdio" }),
+        );
+        expect(captured).toBe("browser-entered-value");
+        expect(result.content[0]?.text).not.toContain("browser-entered-value");
+      } finally {
+        await modern.close();
+      }
+    });
+
+    it("create_secret stays pending when the client declines", async () => {
+      const engine = mockEngine();
+      const modern = await connectModern(engine);
+      modern.client.setRequestHandler("elicitation/create", () =>
+        Promise.resolve({ action: "decline" as const }),
+      );
+
+      try {
+        const result = await modern.callTool("create_secret", {
+          name: "api-key",
+          type: "api_key",
+        });
+        const payload = JSON.parse(result.content[0]?.text ?? "{}") as {
+          status: string;
+          message: string;
+        };
+        expect(payload.status).toBe("pending");
+        expect(payload.message).toContain("harpoc secret set");
+        expect(engine.setSecretValue).not.toHaveBeenCalled();
+      } finally {
+        await modern.close();
+      }
+    });
+
+    it("refuses a tampered requestState before the tool runs", async () => {
+      const engine = mockEngine();
+      const verify = vi.spyOn(valueRequestState, "verify").mockRejectedValue(new Error("mac"));
+      const modern = await connectModern(engine);
+      modern.client.setRequestHandler("elicitation/create", () =>
+        Promise.resolve({ action: "accept" as const }),
+      );
+
+      try {
+        let thrown: unknown;
+        try {
+          await modern.callTool("create_secret", { name: "api-key", type: "api_key" });
+        } catch (err) {
+          thrown = err;
+        }
+        expect((thrown as { code?: number }).code).toBe(-32602);
+        expect(String((thrown as { message?: string }).message)).toContain(
+          "Invalid or expired requestState",
+        );
+        expect(engine.createSecret).not.toHaveBeenCalled();
+
+        const genuine = verify.mock.calls[0]?.[0];
+        verify.mockRestore();
+        const drained = await retryRaw(modern, genuine, "decline");
+        expect(drained.isError).toBeUndefined();
+      } finally {
+        verify.mockRestore();
+        await modern.close();
+      }
+    });
+
+    it("refuses a genuine requestState with one character flipped", async () => {
+      const engine = mockEngine();
+      let captured = "";
+      vi.mocked(engine.setSecretValue).mockImplementation((_handle: string, value: Uint8Array) => {
+        captured = Buffer.from(value).toString("utf8");
+        return Promise.resolve();
+      });
+
+      const modern = await connectModern(engine);
+      try {
+        const round1 = (await modern.client.request(
+          {
+            method: "tools/call",
+            params: { name: "create_secret", arguments: { name: "api-key", type: "api_key" } },
+          },
+          { allowInputRequired: true },
+        )) as unknown as {
+          resultType?: string;
+          requestState?: string;
+          inputRequests?: { value?: { params?: { url?: string } } };
+        };
+        expect(round1.resultType).toBe("input_required");
+        const genuine = round1.requestState ?? "";
+        await fetch(round1.inputRequests?.value?.params?.url ?? "", {
+          method: "POST",
+          headers: FORM_HEADERS,
+          body: postBody("value-behind-the-mac"),
+        });
+
+        const middle = Math.floor(genuine.length / 2);
+        const at = genuine.slice(middle, middle + 1);
+        expect(at).toMatch(/[A-Za-z0-9_-]/);
+        const flipped =
+          genuine.slice(0, middle) + (at === "a" ? "b" : "a") + genuine.slice(middle + 1);
+        expect(flipped.length).toBe(genuine.length);
+        expect(flipped).not.toBe(genuine);
+
+        let thrown: unknown;
+        try {
+          await retryRaw(modern, flipped, "accept");
+        } catch (err) {
+          thrown = err;
+        }
+        expect((thrown as { code?: number }).code).toBe(-32602);
+        expect(String((thrown as { message?: string }).message)).toContain(
+          "Invalid or expired requestState",
+        );
+        expect(engine.createSecret).not.toHaveBeenCalled();
+
+        const genuineRetry = await retryRaw(modern, genuine, "accept");
+        expect(genuineRetry.isError).toBeUndefined();
+        expect(captured).toBe("value-behind-the-mac");
+      } finally {
+        await modern.close();
+      }
+    });
+
+    it("refuses a requestState whose collector has already closed", async () => {
+      const engine = mockEngine();
+      const pending = await elicitValueViaInputRequired(
+        {
+          subject: "api-key",
+          operation: "create",
+          principal: "tokenless-stdio",
+          target: "/api-key",
+          timeoutMs: 50,
+        },
+        modernCtx(),
+      );
+      const requestState = pending?.requestState;
+      expect(typeof requestState).toBe("string");
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const modern = await connectModern(engine);
+      try {
+        const result = await retryRaw(modern, requestState, "accept");
+        expect(result.isError).toBe(true);
+        expect(result.content[0]?.text).toContain(
+          "requestState names no live value collection for this caller",
+        );
+        expect(engine.createSecret).not.toHaveBeenCalled();
+      } finally {
+        await modern.close();
+      }
+    });
+
+    it("refuses a requestState minted by a token-bearing caller named local", async () => {
+      const engine = mockEngine({
+        verifyToken: vi.fn().mockReturnValue({
+          sub: "local",
+          vault_id: "v",
+          scope: ["admin"],
+          iat: Math.floor(Date.now() / 1000),
+          exp: Math.floor(Date.now() / 1000) + 3600,
+          jti: "01931b7e-0000-7000-8000-00000000cafe",
+          principal_type: "agent",
+        }),
+        isTokenRevoked: vi.fn().mockReturnValue(false),
+      });
+
+      const tokenBearing = await connectModernWithToken(engine, "local.jwt.token");
+      try {
+        const round1 = (await tokenBearing.client.request(
+          {
+            method: "tools/call",
+            params: { name: "create_secret", arguments: { name: "api-key", type: "api_key" } },
+          },
+          { allowInputRequired: true },
+        )) as unknown as {
+          resultType?: string;
+          requestState?: string;
+          inputRequests?: { value?: { params?: { url?: string } } };
+        };
+        expect(round1.resultType).toBe("input_required");
+        const url = round1.inputRequests?.value?.params?.url ?? "";
+        await fetch(url, {
+          method: "POST",
+          headers: FORM_HEADERS,
+          body: postBody("typed-into-the-local-token-form"),
+        });
+
+        const modern = await connectModern(engine);
+        try {
+          const result = await retryRaw(modern, round1.requestState, "accept");
+          expect(result.isError).toBe(true);
+          expect(result.content[0]?.text).toContain(
+            "requestState names no live value collection for this caller",
+          );
+          expect(engine.createSecret).not.toHaveBeenCalled();
+          expect(engine.setSecretValue).not.toHaveBeenCalled();
+        } finally {
+          await modern.close();
+        }
+      } finally {
+        await tokenBearing.close();
+      }
+    });
+
+    it("rotate_secret round-trips the new value through the one-time form", async () => {
+      const engine = mockEngine();
+      let captured = "";
+      vi.mocked(engine.rotateSecret).mockImplementation((_handle: string, value: Uint8Array) => {
+        captured = Buffer.from(value).toString("utf8");
+        return Promise.resolve();
+      });
+
+      const modern = await connectModern(engine);
+      modern.client.setRequestHandler("elicitation/create", async (request) => {
+        const params = request.params as { mode?: string; url?: string };
+        expect(params.mode).toBe("url");
+        await fetch(params.url as string, {
+          method: "POST",
+          headers: FORM_HEADERS,
+          body: postBody("rotated-value"),
+        });
+        return { action: "accept" };
+      });
+
+      try {
+        const result = await modern.callTool("rotate_secret", { handle: "secret://api-key" });
+        const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
+        expect(payload.status).toBe("rotated");
+        expect(captured).toBe("rotated-value");
+        expect(result.content[0]?.text).not.toContain("rotated-value");
+      } finally {
+        await modern.close();
+      }
+    });
+
+    it("rotate_secret stays pending_rotation when the client declines", async () => {
+      const engine = mockEngine();
+      const modern = await connectModern(engine);
+      modern.client.setRequestHandler("elicitation/create", () =>
+        Promise.resolve({ action: "decline" as const }),
+      );
+
+      try {
+        const result = await modern.callTool("rotate_secret", { handle: "secret://api-key" });
+        const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
+        expect(payload.status).toBe("pending_rotation");
+        expect(engine.rotateSecret).not.toHaveBeenCalled();
+      } finally {
+        await modern.close();
+      }
+    });
+
+    it("refuses a requestState replayed into another operation and subject", async () => {
+      const engine = mockEngine();
+      const pending = await elicitValueViaInputRequired(
+        {
+          subject: "db-password",
+          operation: "rotate",
+          principal: "tokenless-stdio",
+          target: "/db-password",
+        },
+        modernCtx(),
+      );
+      const requestState = pending?.requestState;
+      const url = (pending?.inputRequests?.value as { params?: { url?: string } } | undefined)
+        ?.params?.url;
+      expect(typeof requestState).toBe("string");
+      expect(typeof url).toBe("string");
+
+      const modern = await connectModern(engine);
+      try {
+        const replayed = await retryRaw(modern, requestState, "accept");
+        expect(replayed.isError).toBe(true);
+        expect(replayed.content[0]?.text).toContain(
+          "requestState names no live value collection for this caller",
+        );
+        expect(engine.createSecret).not.toHaveBeenCalled();
+
+        await expect(fetch(url as string)).rejects.toThrow();
+        const again = await retryRaw(modern, requestState, "accept");
+        expect(again.isError).toBe(true);
+      } finally {
+        await modern.close();
+      }
+    });
+
+    it("refuses a requestState replayed into another project", async () => {
+      const engine = mockEngine();
+      const modern = await connectModern(engine);
+      try {
+        const round1 = (await modern.client.request(
+          {
+            method: "tools/call",
+            params: {
+              name: "create_secret",
+              arguments: { name: "api-key", type: "api_key", project: "prod" },
+            },
+          },
+          { allowInputRequired: true },
+        )) as unknown as { resultType?: string; requestState?: string };
+        expect(round1.resultType).toBe("input_required");
+
+        const replayed = await retryRaw(modern, round1.requestState, "accept", {
+          name: "api-key",
+          type: "api_key",
+          project: "staging",
+        });
+        expect(replayed.isError).toBe(true);
+        expect(replayed.content[0]?.text).toContain(
+          "requestState names no live value collection for this caller",
+        );
+        expect(engine.createSecret).not.toHaveBeenCalled();
+      } finally {
+        await modern.close();
+      }
+    });
+
+    it("zeroes the collected value when the engine refuses the create on the retry", async () => {
+      const engine = mockEngine();
+      vi.mocked(engine.createSecret).mockRejectedValue(VaultError.duplicateSecret("api-key"));
+      const resumed = vi.spyOn(valueCollector, "resumeValueCollection");
+
+      const modern = await connectModern(engine);
+      modern.client.setRequestHandler("elicitation/create", async (request) => {
+        const params = request.params as { url?: string };
+        await fetch(params.url as string, {
+          method: "POST",
+          headers: FORM_HEADERS,
+          body: postBody("value-the-engine-refuses"),
+        });
+        return { action: "accept" };
+      });
+
+      try {
+        const result = await modern.callTool("create_secret", {
+          name: "api-key",
+          type: "api_key",
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0]?.text).toContain("Secret already exists");
+
+        const collected = (await resumed.mock.results[0]?.value) as Uint8Array;
+        expect(collected.length).toBe("value-the-engine-refuses".length);
+        expect(collected.every((byte) => byte === 0)).toBe(true);
+      } finally {
+        resumed.mockRestore();
+        await modern.close();
+      }
+    });
+
+    it("hands the client a URL-mode request and a value-free request state", async () => {
+      const pending = await elicitValueViaInputRequired(
+        {
+          subject: "api-key",
+          operation: "create",
+          principal: "tokenless-stdio",
+          target: "prod/api-key",
+          timeoutMs: 50,
+        },
+        modernCtx(),
+      );
+
+      const request = pending?.inputRequests?.value as
+        | { params?: { mode?: string; url?: string; message?: string } }
+        | undefined;
+      expect(request?.params?.mode).toBe("url");
+      const url = request?.params?.url ?? "";
+      expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/collect\/[A-Za-z0-9_-]{43}$/);
+      expect(request?.params?.message).toBe(
+        'Enter the value for secret "api-key" in the one-time local form. The value is posted directly to the vault and never enters the model context.',
+      );
+
+      const segments = (pending?.requestState ?? "").split(".");
+      expect(segments[0]).toBe("v1");
+      const envelope = JSON.parse(Buffer.from(segments[1] ?? "", "base64url").toString("utf8")) as {
+        p: Record<string, unknown>;
+      };
+      expect(Object.keys(envelope.p).sort()).toEqual([
+        "collector",
+        "operation",
+        "principal",
+        "target",
+      ]);
+      expect(envelope.p).toMatchObject({
+        principal: "tokenless-stdio",
+        operation: "create",
+        target: "prod/api-key",
+      });
+      expect(pending?.requestState).not.toContain(url.slice(url.lastIndexOf("/") + 1));
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+
+    it("falls to the terminal prompt when a modern retry declines", async () => {
+      const engine = mockEngine();
+      const tty = vi
+        .spyOn(ttyPrompt, "collectValueFromTty")
+        .mockResolvedValue(new Uint8Array(Buffer.from("typed-at-the-terminal", "utf8")));
+      let captured = "";
+      vi.mocked(engine.setSecretValue).mockImplementation((_handle: string, value: Uint8Array) => {
+        captured = Buffer.from(value).toString("utf8");
+        return Promise.resolve();
+      });
+
+      const modern = await connectModern(engine, true);
+      modern.client.setRequestHandler("elicitation/create", () =>
+        Promise.resolve({ action: "decline" as const }),
+      );
+
+      try {
+        const result = await modern.callTool("create_secret", {
+          name: "api-key",
+          type: "api_key",
+        });
+        const payload = JSON.parse(result.content[0]?.text ?? "{}") as {
+          status: string;
+          message: string;
+        };
+        expect(payload.status).toBe("created");
+        expect(payload.message).toContain("a terminal prompt");
+        expect(tty).toHaveBeenCalledWith({ subject: "api-key", operation: "create" });
+        expect(captured).toBe("typed-at-the-terminal");
+      } finally {
+        tty.mockRestore();
+        await modern.close();
+      }
+    });
   });
 });

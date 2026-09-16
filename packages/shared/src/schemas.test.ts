@@ -26,6 +26,7 @@ import {
   listAgentsQuerySchema,
   listTokensQuerySchema,
   mcpActionSchema,
+  mcpProtocolRevisionSchema,
   mcpServerConfigSchema,
   mcpTransportSchema,
   oauthGrantTypeSchema,
@@ -54,6 +55,7 @@ import {
   websocketActionSchema,
 } from "./schemas.js";
 import type { InjectionPolicy, SetInjectionPolicyRequest } from "./schemas.js";
+import { renderSchemaIssues } from "./schema-issues.js";
 
 // ---------------------------------------------------------------------------
 // Enum schemas
@@ -1002,6 +1004,17 @@ describe("mcpTransportSchema", () => {
   });
 });
 
+describe("mcpProtocolRevisionSchema", () => {
+  it("accepts the two revisions and refuses another value-free", () => {
+    expect(mcpProtocolRevisionSchema.parse("2025-11-25")).toBe("2025-11-25");
+    expect(mcpProtocolRevisionSchema.parse("2026-07-28")).toBe("2026-07-28");
+    const refused = mcpProtocolRevisionSchema.safeParse("2025-03-26");
+    expect(refused.success).toBe(false);
+    if (refused.success) return;
+    expect(renderSchemaIssues(refused.error)).toBe("<root>: must be one of 2025-11-25, 2026-07-28");
+  });
+});
+
 describe("mcpServerConfigSchema", () => {
   const validStdio = {
     server_name: "github-mcp",
@@ -1059,6 +1072,22 @@ describe("mcpServerConfigSchema", () => {
 
   it("rejects an invalid server_name format", () => {
     expect(() => mcpServerConfigSchema.parse({ ...validStdio, server_name: "bad name" })).toThrow();
+  });
+
+  it("defaults protocol to 2025-11-25 and keeps an explicit 2026-07-28", () => {
+    const legacy = mcpServerConfigSchema.parse({
+      server_name: "s",
+      transport: "http",
+      url: "https://x.example/mcp",
+    });
+    expect(legacy.protocol).toBe("2025-11-25");
+    const modern = mcpServerConfigSchema.parse({
+      server_name: "s",
+      transport: "http",
+      url: "https://x.example/mcp",
+      protocol: "2026-07-28",
+    });
+    expect(modern.protocol).toBe("2026-07-28");
   });
 });
 

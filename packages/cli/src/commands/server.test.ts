@@ -6,7 +6,7 @@ const {
   mockEngine,
   mockMcpServer,
   mockMcpHttpServer,
-  mockTransport,
+  mockHandle,
   mockRestServer,
   mockRestOAuthManager,
   mockScheduler,
@@ -30,7 +30,9 @@ const {
     endpoint: "/mcp",
     close: vi.fn().mockResolvedValue(undefined),
   },
-  mockTransport: {},
+  mockHandle: {
+    close: vi.fn().mockResolvedValue(undefined),
+  },
   mockRestServer: {
     close: vi.fn(),
   },
@@ -71,7 +73,7 @@ vi.mock("@harpoc/mcp-server", () => ({
 }));
 
 vi.mock("@modelcontextprotocol/server/stdio", () => ({
-  StdioServerTransport: vi.fn().mockReturnValue(mockTransport),
+  serveStdio: vi.fn().mockReturnValue(mockHandle),
 }));
 
 vi.mock("@harpoc/rest-api", () => ({
@@ -323,7 +325,7 @@ describe("server start", () => {
 
   it("starts MCP server with --mcp", async () => {
     const { createMcpServer } = await import("@harpoc/mcp-server");
-    const { StdioServerTransport } = await import("@modelcontextprotocol/server/stdio");
+    const { serveStdio } = await import("@modelcontextprotocol/server/stdio");
 
     await run(["--mcp"]);
 
@@ -333,8 +335,10 @@ describe("server start", () => {
       allowTokenless: undefined,
       enableTtyPrompt: true,
     });
-    expect(StdioServerTransport).toHaveBeenCalled();
-    expect(mockMcpServer.connect).toHaveBeenCalledWith(mockTransport);
+    expect(serveStdio).toHaveBeenCalledTimes(1);
+    const factory = vi.mocked(serveStdio).mock.calls[0]?.[0];
+    expect(factory?.({} as never)).toBe(mockMcpServer);
+    expect(typeof vi.mocked(serveStdio).mock.calls[0]?.[1]?.onerror).toBe("function");
   });
 
   it("passes allowTokenless with --mcp --allow-tokenless", async () => {
@@ -1158,7 +1162,7 @@ describe("server start", () => {
         trigger: "transport_closed",
       }),
     );
-    expect(mockMcpServer.close).toHaveBeenCalledTimes(1);
+    expect(mockHandle.close).toHaveBeenCalledTimes(1);
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
     onceSpy.mockRestore();
   });
@@ -1171,7 +1175,7 @@ describe("server start", () => {
     await run(["--mcp", "--allow-tokenless", "--rest"]);
     const endCall = onceSpy.mock.calls.find((call) => (call[0] as string) === "end");
     (endCall?.[1] as () => void)();
-    await vi.waitFor(() => expect(mockMcpServer.close).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(mockHandle.close).toHaveBeenCalledTimes(1));
 
     expect(mockEngine.auditServerStop).toHaveBeenCalledTimes(1);
     expect(mockEngine.auditServerStop).toHaveBeenCalledWith(
@@ -1190,7 +1194,7 @@ describe("server start", () => {
     expect(mockEngine.auditServerStop).toHaveBeenLastCalledWith(
       expect.objectContaining({ transport: "rest", trigger: "SIGINT" }),
     );
-    expect(mockMcpServer.close).toHaveBeenCalledTimes(1);
+    expect(mockHandle.close).toHaveBeenCalledTimes(1);
 
     onSpy.mockRestore();
     onceSpy.mockRestore();

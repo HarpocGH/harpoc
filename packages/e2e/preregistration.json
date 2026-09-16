@@ -114,6 +114,20 @@
   {
     "scenario": "demo-http",
     "context": "http",
+    "surface": "mcp-http-2026",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-http",
+    "context": "http",
+    "surface": "mcp-stdio-2026",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-http",
+    "context": "http",
     "surface": "rest",
     "arm": "harpoc",
     "expected": "SUCCEEDED"
@@ -149,6 +163,20 @@
   {
     "scenario": "demo-process",
     "context": "process",
+    "surface": "mcp-http-2026",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-process",
+    "context": "process",
+    "surface": "mcp-stdio-2026",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-process",
+    "context": "process",
     "surface": "rest",
     "arm": "harpoc",
     "expected": "SUCCEEDED"
@@ -184,6 +212,20 @@
   {
     "scenario": "demo-mcp",
     "context": "mcp",
+    "surface": "mcp-http-2026",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp",
+    "context": "mcp",
+    "surface": "mcp-stdio-2026",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp",
+    "context": "mcp",
     "surface": "rest",
     "arm": "harpoc",
     "expected": "SUCCEEDED"
@@ -219,6 +261,20 @@
   {
     "scenario": "demo-mcp-stdio-downstream",
     "context": "mcp",
+    "surface": "mcp-http-2026",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp-stdio-downstream",
+    "context": "mcp",
+    "surface": "mcp-stdio-2026",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp-stdio-downstream",
+    "context": "mcp",
     "surface": "rest",
     "arm": "harpoc",
     "expected": "SUCCEEDED"
@@ -238,6 +294,55 @@
     "expected": "SUCCEEDED"
   },
   {
+    "scenario": "demo-mcp-2026",
+    "context": "mcp",
+    "surface": "mcp-http",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp-2026",
+    "context": "mcp",
+    "surface": "mcp-stdio",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp-2026",
+    "context": "mcp",
+    "surface": "mcp-http-2026",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp-2026",
+    "context": "mcp",
+    "surface": "mcp-stdio-2026",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp-2026",
+    "context": "mcp",
+    "surface": "rest",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp-2026",
+    "context": "mcp",
+    "surface": "sdk",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-mcp-2026",
+    "context": "mcp",
+    "surface": "cli",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
     "scenario": "demo-database",
     "context": "database",
     "surface": "mcp-http",
@@ -248,6 +353,20 @@
     "scenario": "demo-database",
     "context": "database",
     "surface": "mcp-stdio",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-database",
+    "context": "database",
+    "surface": "mcp-http-2026",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-database",
+    "context": "database",
+    "surface": "mcp-stdio-2026",
     "arm": "harpoc",
     "expected": "SUCCEEDED"
   },
@@ -283,6 +402,20 @@
     "scenario": "demo-git",
     "context": "git",
     "surface": "mcp-stdio",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-git",
+    "context": "git",
+    "surface": "mcp-http-2026",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-git",
+    "context": "git",
+    "surface": "mcp-stdio-2026",
     "arm": "harpoc",
     "expected": "SUCCEEDED"
   },
@@ -318,6 +451,20 @@
     "scenario": "demo-ssh",
     "context": "ssh",
     "surface": "mcp-stdio",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-ssh",
+    "context": "ssh",
+    "surface": "mcp-http-2026",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "demo-ssh",
+    "context": "ssh",
+    "surface": "mcp-stdio-2026",
     "arm": "harpoc",
     "expected": "SUCCEEDED"
   },

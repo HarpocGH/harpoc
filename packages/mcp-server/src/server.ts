@@ -4,6 +4,7 @@ import type { VaultEngine } from "@harpoc/core";
 import { OAuthManager } from "@harpoc/oauth-proxy";
 import type { AccessInterface } from "@harpoc/shared";
 import { ErrorCode, HARPOC_VERSION, VaultError } from "@harpoc/shared";
+import { valueRequestState } from "./elicitation/request-state.js";
 import { InjectionGuard } from "./guards/injection-guard.js";
 import { RateLimiter } from "./guards/rate-limiter.js";
 import { ScopeGuard } from "./guards/scope-guard.js";
@@ -161,6 +162,7 @@ export function createMcpServer(options: CreateMcpServerOptions): McpServer {
         tools: { listChanged: false },
         resources: { subscribe: false, listChanged: false },
       },
+      requestState: { verify: (state, ctx) => valueRequestState.verify(state, ctx) },
     },
   );
 

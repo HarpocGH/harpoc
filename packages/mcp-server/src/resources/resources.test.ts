@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { McpServer } from "@modelcontextprotocol/server";
-import { inMemoryClientFor, invokeHandler } from "@harpoc/test-utils";
+import { connectModernInMemoryClient, inMemoryClientFor, invokeHandler } from "@harpoc/test-utils";
 import type { SecretInfo } from "@harpoc/core";
 import type { VaultEngine } from "@harpoc/core";
 import type { VaultApiToken } from "@harpoc/shared";
@@ -110,6 +110,18 @@ describe("MCP Resources", () => {
       const result = await readResource(server, "secret://vault/secrets/nonexistent");
       const data = JSON.parse(getResourceText(result));
       expect(data.error).toBe("Secret not found");
+    });
+
+    it("returns the same not-found error on the 2026-07-28 leg", async () => {
+      const modern = await connectModernInMemoryClient(() => server);
+      try {
+        expect(modern.client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
+        const result = await modern.readResource("secret://vault/secrets/nonexistent");
+        const data = JSON.parse(getResourceText(result));
+        expect(data.error).toBe("Secret not found");
+      } finally {
+        await modern.close();
+      }
     });
   });
 

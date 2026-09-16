@@ -416,6 +416,7 @@ describe("an unknown-handle probe is audited on every resolving surface", () => 
   const MCP_CONFIG = {
     server_name: "docs",
     transport: "http",
+    protocol: "2025-11-25",
     url: "https://mcp.example.com/mcp",
   } as const;
   const SITES: ConfigSite[] = [

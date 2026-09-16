@@ -4,12 +4,11 @@ import type { McpHttpServer } from "@harpoc/mcp-server";
 import type { Permission } from "@harpoc/shared";
 import type { HarnessVault } from "../vault.js";
 import { ensureAgent } from "../vault.js";
+import { textOf } from "./mcp-http.js";
 import type { CallOutcome, Surface } from "./surface.js";
 
-export type { CallOutcome } from "./surface.js";
-
-export interface McpHttpSurface extends Surface {
-  name: "mcp-http";
+export interface McpHttp2026Surface extends Surface {
+  name: "mcp-http-2026";
   /**
    * The connected client, exposed so the Phase 4 Harpoc arm can drive the
    * metadata surfaces (`list_secrets`, `get_secret_info`, resources) that
@@ -21,24 +20,17 @@ export interface McpHttpSurface extends Surface {
   client: Client;
 }
 
-export function textOf(result: { content?: unknown }): string {
-  const content = result.content as Array<{ type: string; text?: string }> | undefined;
-  return (content ?? []).map((c) => c.text ?? "").join("\n");
-}
-
 /**
- * The surface the thesis names for Tier-1 evidence: Harpoc's own MCP server
- * over the real Streamable HTTP wire, reached by a scripted client carrying a
- * scoped, vault-signed Bearer token (C-1, C-2). Never `--allow-tokenless`: a
- * tokenless run skips token expiry, the revocation recheck, per-secret policy,
- * configuration gating, enumeration filtering and audit scope filtering, and
- * would report passes that say nothing about the deployed posture.
+ * Never `--allow-tokenless`: a tokenless run skips token expiry, the revocation
+ * recheck, per-secret policy, configuration gating, enumeration filtering and
+ * audit scope filtering, and would report passes that say nothing about the
+ * deployed posture.
  */
-export async function startMcpHttpSurface(
+export async function startMcpHttp2026Surface(
   vault: HarnessVault,
   principal: string,
   scopes: Permission[],
-): Promise<McpHttpSurface> {
+): Promise<McpHttp2026Surface> {
   ensureAgent(vault, principal);
   const server: McpHttpServer = await startMcpHttpServer({ engine: vault.engine, port: 0 });
   const token = vault.engine.createToken(principal, scopes);
@@ -47,11 +39,14 @@ export async function startMcpHttpSurface(
     new URL(`http://127.0.0.1:${server.port}${server.endpoint}`),
     { requestInit: { headers: { Authorization: `Bearer ${token}` } } },
   );
-  const client = new Client({ name: "harpoc-e2e-client", version: "1.0.0" });
+  const client = new Client(
+    { name: "harpoc-e2e-client-2026", version: "1.0.0" },
+    { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+  );
   await client.connect(transport);
 
   return {
-    name: "mcp-http",
+    name: "mcp-http-2026",
     interfaceId: "mcp",
     auditInterface: "mcp-http",
     principal,

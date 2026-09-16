@@ -95,6 +95,7 @@ describe("MCP proxy context — stdio transport (thesis §4.5.4)", () => {
     await vault.engine.setMcpServerConfig(handle, {
       server_name: "integ-mcp",
       transport: "stdio",
+      protocol: "2025-11-25",
       command: NODE,
       args: ["-e", DOWNSTREAM_SERVER],
       env_var: "TOKEN",
@@ -318,6 +319,7 @@ describe("MCP proxy context — stdio transport (thesis §4.5.4)", () => {
     await vault.engine.setMcpServerConfig(created.handle, {
       server_name: "integ-mcp",
       transport: "stdio",
+      protocol: "2025-11-25",
       command: NODE,
       args: ["-e", DOWNSTREAM_SERVER],
       env_var: "TOKEN",
@@ -388,6 +390,7 @@ describe("MCP proxy context — Streamable HTTP transport (request-mediated)", (
     await vault.engine.setMcpServerConfig(handle, {
       server_name: "integ-mcp",
       transport: "http",
+      protocol: "2025-11-25",
       url: baseUrl,
     });
     await vault.engine.setInjectionPolicy(handle, {

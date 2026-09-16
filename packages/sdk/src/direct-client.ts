@@ -12,6 +12,7 @@ import type {
   InjectionPolicy,
   IssuedToken,
   McpServerConfig,
+  McpServerConfigInput,
   OAuthFlowResult,
   OAuthTokenStatus,
   RegisterAgentInput,
@@ -40,6 +41,8 @@ import {
   certificateImportSchema,
   generateCsrRequestSchema,
   isEncryptedPrivateKeyPem,
+  mcpServerConfigSchema,
+  renderSchemaIssues,
 } from "@harpoc/shared";
 import { importPeer } from "./import-peer.js";
 
@@ -146,8 +149,12 @@ export class DirectClient implements VaultClient {
     return this.engine.getInjectionPolicy(handle);
   }
 
-  async setMcpServerConfig(handle: string, config: McpServerConfig): Promise<void> {
-    return this.engine.setMcpServerConfig(handle, config);
+  async setMcpServerConfig(handle: string, config: McpServerConfigInput): Promise<void> {
+    const parsed = mcpServerConfigSchema.safeParse(config);
+    if (!parsed.success) {
+      throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
+    }
+    return this.engine.setMcpServerConfig(handle, parsed.data);
   }
 
   async getMcpServerConfig(handle: string): Promise<McpServerConfig | undefined> {

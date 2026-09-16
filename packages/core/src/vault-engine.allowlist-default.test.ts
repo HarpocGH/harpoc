@@ -91,6 +91,7 @@ describe("target allowlists deny by default (R1, 2026-09-01)", () => {
     await engine.setMcpServerConfig(handle, {
       server_name: "dd",
       transport: "http",
+      protocol: "2025-11-25",
       url: "http://127.0.0.1:1/mcp",
     });
     await expectVaultError(

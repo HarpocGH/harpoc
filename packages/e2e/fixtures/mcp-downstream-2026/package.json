@@ -1,0 +1,12 @@
+{
+  "name": "harpoc-e2e-mcp-downstream-2026",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Downstream MCP server fixture on the 2026-07-28 revision only: the SDK v2 handler in reject-legacy mode, records the Authorization values it receives",
+  "dependencies": {
+    "@modelcontextprotocol/node": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "hono": "4.12.5"
+  }
+}

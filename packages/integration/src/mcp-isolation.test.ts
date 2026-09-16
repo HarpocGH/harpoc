@@ -73,6 +73,7 @@ async function setupVault(policy: {
   await vault.engine.setMcpServerConfig(created.handle, {
     server_name: "integ-iso-mcp",
     transport: "stdio",
+    protocol: "2025-11-25",
     command: NODE,
     args: ["-e", DOWNSTREAM_SERVER],
     env_var: "TOKEN",

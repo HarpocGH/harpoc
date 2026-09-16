@@ -1,6 +1,9 @@
 import { Client } from "@modelcontextprotocol/client";
+import type { ClientOptions, Implementation } from "@modelcontextprotocol/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import type { McpServer } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { McpProtocolRevision } from "@harpoc/shared";
 
 export interface InMemoryToolResult {
   content: Array<{ type: string; text: string }>;
@@ -40,6 +43,17 @@ export async function connectInMemoryClient(
   await server.connect(serverTransport);
   const client = new Client(clientInfo, clientOptions);
   await client.connect(clientTransport);
+  return wrapClient(client, async () => {
+    clients.delete(server);
+    try {
+      await client.close();
+    } finally {
+      await server.close();
+    }
+  });
+}
+
+function wrapClient(client: Client, close: () => Promise<void>): InMemoryMcpClient {
   return {
     client,
     async callTool(name, args) {
@@ -53,15 +67,38 @@ export async function connectInMemoryClient(
         contents: Array<{ uri: string; mimeType?: string; text?: string }>;
       };
     },
-    async close() {
-      clients.delete(server);
-      try {
-        await client.close();
-      } finally {
-        await server.close();
-      }
-    },
+    close,
   };
+}
+
+/**
+ * A client pinned to the 2026-07-28 revision over an in-memory pair. The
+ * bare pair cannot serve the modern era (a plain McpServer answers
+ * server/discover with -32601); serveStdio owns the era decision for the
+ * connection and pins one instance from the factory, so the same factory
+ * that builds the vault's server serves a modern client here.
+ */
+export async function connectModernInMemoryClient(
+  factory: () => McpServer,
+  clientInfo: Implementation = { name: "harpoc-test-client", version: "1.0.0" },
+  clientOptions: ClientOptions = {},
+): Promise<InMemoryMcpClient> {
+  const [clientEnd, serverEnd] = InMemoryTransport.createLinkedPair();
+  const handle = serveStdio(factory, { transport: serverEnd });
+  const client = new Client(clientInfo, {
+    ...clientOptions,
+    versionNegotiation: { mode: { pin: McpProtocolRevision.MODERN } },
+  });
+  try {
+    await client.connect(clientEnd);
+  } catch (err) {
+    await handle.close().catch(() => undefined);
+    throw err;
+  }
+  return wrapClient(client, async () => {
+    await client.close().catch(() => undefined);
+    await handle.close().catch(() => undefined);
+  });
 }
 
 const clients = new WeakMap<McpServer, Promise<InMemoryMcpClient>>();

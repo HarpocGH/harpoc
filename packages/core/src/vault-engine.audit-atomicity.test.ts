@@ -310,6 +310,7 @@ describe("fail-closed audit: policy and config writes", () => {
       engine.setMcpServerConfig("secret://mcp-key", {
         server_name: "test-mcp",
         transport: "http",
+        protocol: "2025-11-25",
         url: "https://mcp.example.com/mcp",
       }),
     ).rejects.toThrow("audit unavailable");
@@ -323,6 +324,7 @@ describe("fail-closed audit: policy and config writes", () => {
     await engine.setMcpServerConfig("secret://mcp-del", {
       server_name: "test-mcp",
       transport: "http",
+      protocol: "2025-11-25",
       url: "https://mcp.example.com/mcp",
     });
     failNextAuditInsert();

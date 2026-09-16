@@ -16,7 +16,7 @@ export function detailString(row: AuditRow, key: string): string | undefined {
 /**
  * Which rows an assertion is about. Every field narrows: `context` picks the
  * execution context, `principal` the surface that issued the call (the
- * demonstration loop runs five surfaces against one vault, and `rest` and `sdk`
+ * demonstration loop runs seven surfaces against one vault, and `rest` and `sdk`
  * share an interface, so the principal is what tells their rows apart), and
  * `server` the downstream MCP server when one context has two variants.
  */

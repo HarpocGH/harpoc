@@ -1,7 +1,7 @@
 import { rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Permission } from "@harpoc/shared";
+import { AuditEventType, Permission } from "@harpoc/shared";
 import { createHarnessVault, grantOn, PREREGISTRATION_FILE } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
 import { loadExpectations } from "./evidence/preregistration.js";
@@ -13,6 +13,8 @@ import { expectAttributedSuccess } from "./harness/audit.js";
 import { recordArm } from "./harness/evidence.js";
 import { startMcpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import { startMcpStdioSurface } from "./harness/surfaces/mcp-stdio.js";
+import { startMcpHttp2026Surface } from "./harness/surfaces/mcp-http-2026.js";
+import { startMcpStdio2026Surface } from "./harness/surfaces/mcp-stdio-2026.js";
 import { startRestSurface } from "./harness/surfaces/rest.js";
 import { startSdkSurface } from "./harness/surfaces/sdk.js";
 import { startCliSurface } from "./harness/surfaces/cli.js";
@@ -29,14 +31,14 @@ import type { ContextFixture } from "./demonstration/contexts.js";
  *
  * Six contexts × four interfaces = 24 cells, each one successful,
  * opacity-checked `use_secret` call through a real surface carrying a scoped
- * token (C-2). MCP is one interface with two transports, so `mcp-http`
- * represents it in the matrix and `mcp-stdio` is reported beside it as
- * transport coverage; the `mcp` context additionally runs a stdio-DOWNSTREAM
- * variant (D10), likewise reported as coverage rather than as a matrix cell.
- * Seven context arms × five surfaces = 35 pre-registered, evidence-emitting
- * cells.
+ * token (C-2). MCP is one interface with two transports on two protocol eras,
+ * so `mcp-http` represents it in the matrix and the other three MCP drivers are
+ * reported beside it as transport coverage; the `mcp` context additionally runs
+ * a stdio-DOWNSTREAM variant (D10) and a 2026-07-28 downstream variant,
+ * likewise reported as coverage rather than as matrix cells. Eight context arms
+ * × seven surfaces = 56 pre-registered, evidence-emitting cells.
  *
- * One vault, one fleet check, five persistent surfaces: the surfaces are
+ * One vault, one fleet check, seven persistent surfaces: the surfaces are
  * distinguished in the audit trail by their per-surface principals, which is
  * what lets `rest` and `sdk` — which share the `rest` access interface, since
  * the SDK reaches the vault over that wire — be told apart at all.
@@ -51,7 +53,15 @@ interface Cell {
 /** The matrix Ch. 1 §1.4 commits to: six contexts × four access interfaces. */
 const MATRIX_CONTEXTS = ["http", "process", "mcp", "database", "git", "ssh"] as const;
 const MATRIX_INTERFACES = ["mcp", "rest", "sdk", "cli"] as const;
-const SURFACE_NAMES = ["mcp-http", "mcp-stdio", "rest", "sdk", "cli"] as const;
+const SURFACE_NAMES = [
+  "mcp-http",
+  "mcp-stdio",
+  "mcp-http-2026",
+  "mcp-stdio-2026",
+  "rest",
+  "sdk",
+  "cli",
+] as const;
 
 describe("demonstration matrix — six contexts × four interfaces", () => {
   let vault: HarnessVault;
@@ -85,6 +95,8 @@ describe("demonstration matrix — six contexts × four interfaces", () => {
     for (const principal of [
       "e2e-demo-mcp-http",
       "e2e-demo-mcp-stdio",
+      "e2e-demo-mcp-http-2026",
+      "e2e-demo-mcp-stdio-2026",
       "e2e-demo-rest",
       "e2e-demo-sdk",
       "e2e-demo-cli",
@@ -100,6 +112,8 @@ describe("demonstration matrix — six contexts × four interfaces", () => {
     surfaces.push(
       await startMcpHttpSurface(vault, "e2e-demo-mcp-http", [Permission.USE]),
       await startMcpStdioSurface(vault, "e2e-demo-mcp-stdio", [Permission.USE]),
+      await startMcpHttp2026Surface(vault, "e2e-demo-mcp-http-2026", [Permission.USE]),
+      await startMcpStdio2026Surface(vault, "e2e-demo-mcp-stdio-2026", [Permission.USE]),
       await startRestSurface(vault, "e2e-demo-rest", [Permission.USE]),
       await startSdkSurface(vault, "e2e-demo-sdk", [Permission.USE]),
       await startCliSurface(vault, "e2e-demo-cli", [Permission.USE]),
@@ -177,8 +191,8 @@ describe("demonstration matrix — six contexts × four interfaces", () => {
     emitted.push(record);
   }
 
-  // The loop: every context through every surface. Adding a seventh context
-  // costs one fixture, not five tests.
+  // The loop: every context through every surface. Adding an eighth context
+  // costs one fixture, not seven tests.
   for (const surfaceName of SURFACE_NAMES) {
     describe(surfaceName, () => {
       for (const arm of CONTEXT_ARMS) {
@@ -197,6 +211,14 @@ describe("demonstration matrix — six contexts × four interfaces", () => {
     });
   }
 
+  it("the mcp-stdio-2026 surface spawned the vault entry exactly once", () => {
+    const starts = vault.engine
+      .queryAudit({ eventType: AuditEventType.SERVER_START })
+      .filter((row) => row.detail?.["subject"] === "e2e-demo-mcp-stdio-2026");
+    expect(starts).toHaveLength(1);
+    expect(starts[0]?.detail).toMatchObject({ transport: "stdio", tokenless: false });
+  });
+
   /**
    * The Chapter 1 claim, asserted rather than assumed. Without this the matrix
    * is only as large as the loop happens to be: deleting a context arm or a
@@ -207,7 +229,7 @@ describe("demonstration matrix — six contexts × four interfaces", () => {
    * Asserted over the records this file emitted, not over the shared evidence
    * file, which other suites append to.
    */
-  it("covers the committed matrix: 24 (context × interface) cells, 35 cells in all", () => {
+  it("covers the committed matrix: 24 (context × interface) cells, 56 cells in all", () => {
     expect(emitted).toHaveLength(CONTEXT_ARMS.length * SURFACE_NAMES.length);
     expect(emitted.every((r) => r.match)).toBe(true);
 

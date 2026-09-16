@@ -143,4 +143,70 @@ describe("secret mcp-server — token path", () => {
       undefined,
     );
   });
+
+  it("--protocol 2026-07-28 reaches setMcpServerConfig with the modern revision", async () => {
+    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    await run([
+      "secret://k",
+      "--name",
+      "srv",
+      "--transport",
+      "http",
+      "--url",
+      "https://mcp.example.com/mcp",
+      "--protocol",
+      "2026-07-28",
+      "--token",
+      "jwt-value",
+    ]);
+    expect(mockEngine.setMcpServerConfig).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ protocol: "2026-07-28" }),
+      expect.objectContaining({ interface: "cli" }),
+    );
+  });
+
+  it("omitting --protocol defaults to 2025-11-25", async () => {
+    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    await run([
+      "secret://k",
+      "--name",
+      "srv",
+      "--transport",
+      "http",
+      "--url",
+      "https://mcp.example.com/mcp",
+      "--token",
+      "jwt-value",
+    ]);
+    expect(mockEngine.setMcpServerConfig).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ protocol: "2025-11-25" }),
+      expect.objectContaining({ interface: "cli" }),
+    );
+  });
+
+  it("--protocol 2025-03-26 is refused with zod's enum wording, value-free", async () => {
+    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    await expect(
+      run([
+        "secret://k",
+        "--name",
+        "srv",
+        "--transport",
+        "http",
+        "--url",
+        "https://mcp.example.com/mcp",
+        "--protocol",
+        "2025-03-26",
+        "--token",
+        "jwt-value",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid option: expected one of "2025-11-25"|"2026-07-28"'),
+    );
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("2025-03-26"));
+    expect(mockEngine.setMcpServerConfig).not.toHaveBeenCalled();
+  });
 });

@@ -11,6 +11,7 @@ import type {
   InjectionPolicy,
   IssuedToken,
   McpServerConfig,
+  McpServerConfigInput,
   OAuthFlowResult,
   OAuthTokenStatus,
   RegisterAgentInput,
@@ -133,7 +134,7 @@ export class RestClient implements VaultClient {
     );
   }
 
-  async setMcpServerConfig(handle: string, config: McpServerConfig): Promise<void> {
+  async setMcpServerConfig(handle: string, config: McpServerConfigInput): Promise<void> {
     await this.request<{ updated: boolean }>(
       "PUT",
       `/api/v1/secrets/${this.encodeHandle(handle)}/mcp-server`,

@@ -294,6 +294,7 @@ describe("secret mcp-server command flow", () => {
     await engine.setMcpServerConfig("secret://mcp-test", {
       server_name: "github-mcp",
       transport: "stdio",
+      protocol: "2025-11-25",
       command: "node",
       args: ["server.js"],
       env_var: "GITHUB_TOKEN",

@@ -68,6 +68,7 @@ import {
   matchesSecretNameScope,
   MAX_SESSION_TTL_MS,
   MAX_TOKEN_TTL_MS,
+  mcpServerConfigSchema,
   meetsVaultVersionFloor,
   MIN_PASSWORD_LENGTH,
   OAuthProviderPreset,
@@ -1948,7 +1949,22 @@ export class VaultEngine {
       row.config_tag,
       AAD_MCP_SERVER_CONFIG(secretId),
     );
-    return JSON.parse(Buffer.from(bytes).toString("utf8")) as McpServerConfig;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(Buffer.from(bytes).toString("utf8"));
+    } catch {
+      throw VaultError.vaultCorrupted(`MCP server config for secret ${secretId} is not JSON`);
+    }
+    const parsed = mcpServerConfigSchema.safeParse(raw);
+    if (!parsed.success) {
+      const paths = parsed.error.issues.map(
+        (issue) => issue.path.map(String).join(".") || "<root>",
+      );
+      throw VaultError.vaultCorrupted(
+        `MCP server config for secret ${secretId} is malformed (${paths.join(", ")})`,
+      );
+    }
+    return parsed.data;
   }
 
   /**

@@ -1,13 +1,20 @@
 /**
- * The access surfaces the demonstration matrix drives. Five drivers over four
- * access interfaces: MCP is one interface with two transports (design §3.5), so
- * `mcp-http` represents it in the 6 × 4 = 24-cell matrix and `mcp-stdio` is
- * reported beside it as transport coverage.
+ * The access surfaces the demonstration matrix drives. Seven drivers over four
+ * access interfaces: MCP is one interface with two transports on two protocol
+ * eras (design §3.5), so `mcp-http` represents it in the 6 × 4 = 24-cell matrix
+ * and the other three MCP drivers are reported beside it as transport coverage.
  *
  * `interfaceId` is what the matrix counts; `name` is what the evidence record
  * carries, so the two never have to be re-derived from each other downstream.
  */
-export type SurfaceName = "mcp-http" | "mcp-stdio" | "rest" | "sdk" | "cli";
+export type SurfaceName =
+  | "mcp-http"
+  | "mcp-stdio"
+  | "mcp-http-2026"
+  | "mcp-stdio-2026"
+  | "rest"
+  | "sdk"
+  | "cli";
 export type InterfaceId = "mcp" | "rest" | "sdk" | "cli";
 
 export interface CallOutcome {

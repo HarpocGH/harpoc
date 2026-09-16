@@ -11,6 +11,7 @@ import {
   GIT_HTTPS,
   ECHO_HTTPS,
   MCP_DOWNSTREAM,
+  MCP_DOWNSTREAM_2026,
   ATTACKER,
   DOCKER_REGISTRY,
   assertFleetUp,
@@ -145,6 +146,13 @@ describe("backend fleet", () => {
     expect(MCP_DOWNSTREAM.endpoint).toContain(String(MCP_DOWNSTREAM.port));
     assertFleetUp("mcp-downstream");
     expect(await canOpenTcp(MCP_DOWNSTREAM.host, MCP_DOWNSTREAM.port)).toBe(true);
+  });
+
+  it("reaches the mcp-downstream-2026 container on its own offset port", async () => {
+    expect(MCP_DOWNSTREAM_2026.port).toBe(55092);
+    expect(MCP_DOWNSTREAM_2026.endpoint).toContain(String(MCP_DOWNSTREAM_2026.port));
+    assertFleetUp("mcp-downstream-2026");
+    expect(await canOpenTcp(MCP_DOWNSTREAM_2026.host, MCP_DOWNSTREAM_2026.port)).toBe(true);
   });
 
   it("reaches the attacker sink on its own offset port", async () => {

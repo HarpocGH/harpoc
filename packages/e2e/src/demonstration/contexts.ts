@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { HarnessVault } from "../harness/vault.js";
 import { storeSecret } from "../harness/vault.js";
-import { ECHO_HTTPS, GIT_HTTP, MCP_DOWNSTREAM, PG, SSHD_PINNED } from "../harness/backends.js";
+import {
+  ECHO_HTTPS,
+  GIT_HTTP,
+  MCP_DOWNSTREAM,
+  MCP_DOWNSTREAM_2026,
+  PG,
+  SSHD_PINNED,
+} from "../harness/backends.js";
 import type { FleetService } from "../harness/backends.js";
 import { caPem } from "../harness/pki.js";
 import { clientKeyPem, knownHostPin } from "../harness/ssh.js";
@@ -14,7 +21,7 @@ import type { CallOutcome } from "../harness/surfaces/surface.js";
 /**
  * One demonstration cell's context half: what the vault must hold, what call to
  * issue, and what proves the backend was really reached. The surface half is
- * the other loop dimension — every context here runs unchanged through all five
+ * the other loop dimension — every context here runs unchanged through all seven
  * drivers, which is what makes the matrix a loop rather than 24 hand-written
  * tests.
  */
@@ -188,6 +195,7 @@ const MCP_HTTP_DOWNSTREAM_ARM: ContextArm = {
     await vault.engine.setMcpServerConfig(handle, {
       server_name: MCP_DOWNSTREAM.serverName,
       transport: "http",
+      protocol: "2025-11-25",
       url: MCP_DOWNSTREAM.endpoint,
     });
     return {
@@ -199,7 +207,7 @@ const MCP_HTTP_DOWNSTREAM_ARM: ContextArm = {
       benignMarker: MCP_DOWNSTREAM.benignMarker,
       action: async () => {
         // The recorder accumulates across the whole run and the fixture's
-        // credential is the same for all five surfaces, so without this reset
+        // credential is the same for all seven surfaces, so without this reset
         // the first cell's entry would satisfy every later cell's out-of-band
         // check — the one assertion whose whole purpose is to be independent
         // of the vault's own reporting.
@@ -250,6 +258,86 @@ const MCP_HTTP_DOWNSTREAM_ARM: ContextArm = {
   },
 };
 
+const MCP_HTTP_DOWNSTREAM_2026_ARM: ContextArm = {
+  scenario: "demo-mcp-2026",
+  context: "mcp",
+  services: ["mcp-downstream-2026"],
+  auditServer: MCP_DOWNSTREAM_2026.serverName,
+  async setup(vault) {
+    const secret = `demo-mcp-2026-token-${NONCE}`;
+    const handle = await storeSecret(vault, "demo-mcp-2026", secret);
+    await vault.engine.setInjectionPolicy(handle, {
+      url_allowlist: [`${MCP_DOWNSTREAM_2026.endpoint}*`],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: [],
+    });
+    await vault.engine.setMcpServerConfig(handle, {
+      server_name: MCP_DOWNSTREAM_2026.serverName,
+      transport: "http",
+      url: MCP_DOWNSTREAM_2026.endpoint,
+      protocol: "2026-07-28",
+    });
+    return {
+      handle,
+      opacitySubjects: [secret],
+      // The downstream returns it beside the credential, so a mutation that
+      // redacted the whole tool result would satisfy every opacity assertion
+      // and fail here — the `mcp` arms had no such control before.
+      benignMarker: MCP_DOWNSTREAM_2026.benignMarker,
+      action: async () => {
+        // The recorder accumulates across the whole run and the fixture's
+        // credential is the same for all seven surfaces, so without this reset
+        // the first cell's entry would satisfy every later cell's out-of-band
+        // check — the one assertion whose whole purpose is to be independent
+        // of the vault's own reporting.
+        const cleared = await fetch(MCP_DOWNSTREAM_2026.recordedUrl, { method: "DELETE" });
+        if (!cleared.ok) {
+          throw new Error(
+            `could not reset the downstream recorder: HTTP ${String(cleared.status)}`,
+          );
+        }
+        // Asserted, not assumed: this is what makes the per-cell property
+        // falsifiable. Drop the reset and every cell after the first starts
+        // from a non-empty recorder — the state in which the out-of-band check
+        // passes without this call having reached the downstream at all.
+        const after = (await (await fetch(MCP_DOWNSTREAM_2026.recordedUrl)).json()) as {
+          authorizations: string[];
+        };
+        if (after.authorizations.length !== 0) {
+          throw new Error(
+            `downstream recorder still holds ${String(after.authorizations.length)} entr(ies) ` +
+              "after the reset — this cell's out-of-band check would not be its own",
+          );
+        }
+        return {
+          type: "mcp",
+          server: MCP_DOWNSTREAM_2026.serverName,
+          tool: MCP_DOWNSTREAM_2026.tool,
+        };
+      },
+      async assertReached(outcome) {
+        const result = parseResult(outcome);
+        if (result["type"] !== "mcp") {
+          throw new Error(`expected an mcp result, got ${String(result["type"])}`);
+        }
+        expectRedacted(outcome, "mcp");
+        // The other half, read out of band so it cannot be an artifact of the
+        // vault's own reporting: the downstream really was handed the bearer.
+        // The recorder was emptied immediately before this call, so a match
+        // here is THIS cell's request, not a neighbour's.
+        const response = await fetch(MCP_DOWNSTREAM_2026.recordedUrl);
+        const body = (await response.json()) as { authorizations: string[] };
+        if (!body.authorizations.includes(`Bearer ${secret}`)) {
+          throw new Error(
+            "downstream never recorded the injected bearer — the credential did not reach it",
+          );
+        }
+      },
+    };
+  },
+};
+
 /** mcp (stdio downstream) — the D10 variant: real framing, interpreter gate. */
 const STDIO_DOWNSTREAM_SERVER = "e2e-stdio-downstream";
 /**
@@ -284,6 +372,7 @@ const MCP_STDIO_DOWNSTREAM_ARM: ContextArm = {
     await vault.engine.setMcpServerConfig(handle, {
       server_name: STDIO_DOWNSTREAM_SERVER,
       transport: "stdio",
+      protocol: "2025-11-25",
       command: process.execPath,
       args: [script],
       env_var: "DOWNSTREAM_TOKEN",
@@ -466,16 +555,17 @@ const SSH_ARM: ContextArm = {
 };
 
 /**
- * The seven context arms the demonstration loop runs against every surface.
- * Six are the matrix's contexts; the seventh is the D10 stdio-downstream
- * variant of `mcp`, reported as transport coverage rather than as a matrix
- * cell.
+ * The eight context arms the demonstration loop runs against every surface.
+ * Six are the matrix's contexts; the other two are the D10 stdio-downstream
+ * variant of `mcp` and its 2026-07-28 http variant, reported as transport
+ * coverage rather than as matrix cells.
  */
 export const CONTEXT_ARMS: ContextArm[] = [
   HTTP_ARM,
   PROCESS_ARM,
   MCP_HTTP_DOWNSTREAM_ARM,
   MCP_STDIO_DOWNSTREAM_ARM,
+  MCP_HTTP_DOWNSTREAM_2026_ARM,
   DATABASE_ARM,
   GIT_ARM,
   SSH_ARM,

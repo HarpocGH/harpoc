@@ -2,7 +2,15 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { McpServer } from "@modelcontextprotocol/server";
+import {
+  CLIENT_CAPABILITIES_META_KEY,
+  inputRequired,
+  inputResponse,
+} from "@modelcontextprotocol/server";
+import type { InputRequiredResult, McpServer, ServerContext } from "@modelcontextprotocol/server";
+import { VaultError } from "@harpoc/shared";
+import { valueRequestState } from "./request-state.js";
+import type { ValueRequestState } from "./request-state.js";
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_FORM_BODY_BYTES = 128 * 1024;
@@ -16,7 +24,7 @@ const TOKEN_BYTES = 32;
  */
 const MAX_CONCURRENT_COLLECTORS = 8;
 
-let liveCollectors = 0;
+const liveCollectors = new Map<string, ValueCollector>();
 
 export interface ValueCollectorOptions {
   /** Secret name shown on the form (display only, HTML-escaped). */
@@ -26,6 +34,7 @@ export interface ValueCollectorOptions {
 }
 
 export interface ValueCollector {
+  readonly id: string;
   /** One-time URL for the user's browser. */
   readonly url: string;
   /** Resolves with the submitted value; rejects on timeout or close(). */
@@ -41,9 +50,10 @@ export interface ValueCollector {
  * single-use token (timing-safe compared) and expires after `timeoutMs`.
  */
 export async function startValueCollector(options: ValueCollectorOptions): Promise<ValueCollector> {
-  if (liveCollectors >= MAX_CONCURRENT_COLLECTORS) {
+  if (liveCollectors.size >= MAX_CONCURRENT_COLLECTORS) {
     throw new Error("Too many concurrent value collectors");
   }
+  const id = randomUUID();
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const token = randomBytes(TOKEN_BYTES).toString("base64url");
   const tokenBuffer = Buffer.from(token, "utf8");
@@ -147,7 +157,6 @@ export async function startValueCollector(options: ValueCollectorOptions): Promi
       resolve();
     });
   });
-  liveCollectors++;
   let released = false;
 
   const port = (server.address() as AddressInfo).port;
@@ -164,7 +173,7 @@ export async function startValueCollector(options: ValueCollectorOptions): Promi
     settle(() => rejectValue(new Error("Value collector closed")));
     if (!released) {
       released = true;
-      liveCollectors--;
+      liveCollectors.delete(id);
     }
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
@@ -172,11 +181,14 @@ export async function startValueCollector(options: ValueCollectorOptions): Promi
     });
   }
 
-  return {
+  const collector: ValueCollector = {
+    id,
     url,
     waitForValue: () => valuePromise,
     close,
   };
+  liveCollectors.set(id, collector);
+  return collector;
 }
 
 /**
@@ -248,6 +260,97 @@ export async function collectValueViaUrlElicitation(
   } finally {
     await collector.close();
   }
+}
+
+/** A modern (2026-07-28) request: the per-request envelope is present. */
+export function isModernRequest(ctx: { mcpReq: { envelope?: unknown } }): boolean {
+  return ctx.mcpReq.envelope !== undefined;
+}
+
+/**
+ * The modern leg's first round: start the one-time form and hand the client a
+ * URL-mode request plus a sealed state naming the collector. The value still
+ * never traverses MCP — the browser posts it into this process.
+ */
+export async function elicitValueViaInputRequired(
+  options: ValueCollectorOptions & { principal: string; target: string },
+  ctx: ServerContext,
+): Promise<InputRequiredResult | null> {
+  if (!hasUrlElicitationCapability(ctx)) return null;
+
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  let collector: ValueCollector;
+  try {
+    collector = await startValueCollector({ ...options, timeoutMs });
+  } catch {
+    return null;
+  }
+
+  const verb = options.operation === "create" ? "the value" : "the new value";
+  let requestState: string;
+  try {
+    requestState = await valueRequestState.mint(
+      {
+        collector: collector.id,
+        principal: options.principal,
+        operation: options.operation,
+        target: options.target,
+      },
+      ctx,
+    );
+  } catch (err) {
+    await collector.close();
+    throw err;
+  }
+  return inputRequired({
+    inputRequests: {
+      value: inputRequired.elicitUrl({
+        message: `Enter ${verb} for secret "${options.subject}" in the one-time local form. The value is posted directly to the vault and never enters the model context.`,
+        url: collector.url,
+      }),
+    },
+    requestState,
+  });
+}
+
+/**
+ * The retry: the state named a live collector of this caller's, the client
+ * accepted, the form was (or is about to be) posted. Null on a decline.
+ */
+export async function resumeValueCollection(
+  state: ValueRequestState,
+  round: Omit<ValueRequestState, "collector">,
+  inputResponses: Record<string, unknown> | undefined,
+): Promise<Uint8Array | null> {
+  const collector = liveCollectors.get(state.collector);
+  if (
+    !collector ||
+    state.principal !== round.principal ||
+    state.operation !== round.operation ||
+    state.target !== round.target
+  ) {
+    if (collector) await collector.close();
+    throw VaultError.schemaValidation(
+      "requestState names no live value collection for this caller",
+    );
+  }
+  try {
+    const response = inputResponse(inputResponses, "value");
+    if (response.kind !== "elicit" || response.action !== "accept") return null;
+    return await collector.waitForValue();
+  } catch {
+    return null;
+  } finally {
+    await collector.close();
+  }
+}
+
+function hasUrlElicitationCapability(ctx: ServerContext): boolean {
+  const envelope = ctx.mcpReq.envelope as Record<string, unknown> | undefined;
+  const capabilities = envelope?.[CLIENT_CAPABILITIES_META_KEY] as
+    | { elicitation?: { url?: unknown } }
+    | undefined;
+  return capabilities?.elicitation?.url !== undefined;
 }
 
 function sendHtml(res: ServerResponse, status: number, statusText: string, body: string): void {

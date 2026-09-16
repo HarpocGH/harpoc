@@ -113,6 +113,7 @@ export const TOOL_POISONING_ARMS: ScenarioArm[] = [
       await vault.engine.setMcpServerConfig(handle, {
         server_name: MCP_POISONED.serverName,
         transport: "http",
+        protocol: "2025-11-25",
         url: MCP_POISONED.endpoint,
       });
       return { handle, credential, marker: MCP_POISONED.benignMarker };

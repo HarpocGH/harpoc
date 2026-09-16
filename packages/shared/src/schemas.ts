@@ -24,6 +24,7 @@ import {
   FollowRedirects,
   GitOperation,
   InjectionType,
+  McpProtocolRevision,
   McpTransport,
   OAuthGrantType,
   OAuthProviderPreset,
@@ -1043,6 +1044,12 @@ export type ConnectionConfig = z.infer<typeof connectionConfigSchema>;
 const mcpTransportValues = Object.values(McpTransport) as [McpTransport, ...McpTransport[]];
 export const mcpTransportSchema = z.enum(mcpTransportValues);
 
+const mcpProtocolRevisionValues = Object.values(McpProtocolRevision) as [
+  McpProtocolRevision,
+  ...McpProtocolRevision[],
+];
+export const mcpProtocolRevisionSchema = z.enum(mcpProtocolRevisionValues);
+
 /**
  * Per-secret downstream MCP server configuration (trusted admin path only).
  * stdio requires `command` + `env_var`; http requires `url`.
@@ -1054,6 +1061,7 @@ export const mcpServerConfigSchema = z
       .regex(/^[a-zA-Z0-9_-]+$/, "Invalid server name format")
       .max(MAX_NAME_LENGTH),
     transport: mcpTransportSchema,
+    protocol: mcpProtocolRevisionSchema.optional().default(McpProtocolRevision.LEGACY),
     command: z.string().min(1).max(4096).optional(),
     args: z.array(z.string().max(4096)).max(MAX_PROCESS_ARGS).optional(),
     env_var: z
@@ -1095,8 +1103,13 @@ export const mcpServerConfigSchema = z
  * stdio: `command` + `env_var` required; the launch command is validated
  * against the secret's command allowlist (fail-safe deny) at every use.
  * http: `url` required; validated against the URL allowlist and SSRF checks.
+ * `protocol` selects the MCP revision the vault speaks to it — `2025-11-25`
+ * (the default; the plain initialize handshake) or `2026-07-28` (pinned; the
+ * connect fails loudly if the server does not offer it). Never negotiated
+ * automatically (design R5).
  */
 export type McpServerConfig = z.infer<typeof mcpServerConfigSchema>;
+export type McpServerConfigInput = z.input<typeof mcpServerConfigSchema>;
 
 export const accessPolicyInputSchema = z
   .strictObject({

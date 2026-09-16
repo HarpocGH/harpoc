@@ -6,8 +6,9 @@ import {
   VaultError,
   VaultState,
 } from "@harpoc/shared";
-import type { OAuthTokenStatus } from "@harpoc/shared";
+import type { McpServerConfigInput, OAuthTokenStatus } from "@harpoc/shared";
 import { DirectClient } from "./direct-client.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 const FULL_POLICY = {
   url_allowlist: [] as string[],
@@ -387,11 +388,32 @@ describe("DirectClient", () => {
       env_var: "GITHUB_TOKEN",
     };
     await client.setMcpServerConfig("secret://key", config);
-    expect(engine.setMcpServerConfig).toHaveBeenCalledWith("secret://key", config);
+    expect(engine.setMcpServerConfig).toHaveBeenCalledWith("secret://key", {
+      ...config,
+      protocol: "2025-11-25",
+    });
 
     const got = await client.getMcpServerConfig("secret://key");
     expect(engine.getMcpServerConfig).toHaveBeenCalledWith("secret://key");
     expect(got).toBeUndefined();
+  });
+
+  it("setMcpServerConfig refuses an unsupported transport through the shared schema", async () => {
+    const engine = createMockEngine();
+    const client = new DirectClient(engine as never);
+
+    const error = await expectVaultError(
+      () =>
+        client.setMcpServerConfig("secret://key", {
+          server_name: "github-mcp",
+          transport: "sse",
+          command: "node",
+          env_var: "GITHUB_TOKEN",
+        } as unknown as McpServerConfigInput),
+      ErrorCode.SCHEMA_VALIDATION_ERROR,
+    );
+    expect(error.message).toContain("transport: must be one of stdio, http");
+    expect(engine.setMcpServerConfig).not.toHaveBeenCalled();
   });
 
   it("connection-config methods delegate to the engine", async () => {

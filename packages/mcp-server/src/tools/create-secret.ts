@@ -4,7 +4,13 @@ import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
 import { secretTypeSchema } from "@harpoc/shared";
 import { collectValueFromTty } from "../elicitation/tty-prompt.js";
-import { collectValueViaUrlElicitation } from "../elicitation/value-collector.js";
+import type { ValueRequestState } from "../elicitation/request-state.js";
+import {
+  collectValueViaUrlElicitation,
+  elicitValueViaInputRequired,
+  isModernRequest,
+  resumeValueCollection,
+} from "../elicitation/value-collector.js";
 import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
 
@@ -35,7 +41,7 @@ export function registerCreateSecret(
           .describe("Project namespace"),
       }),
     },
-    async (args) => {
+    async (args, ctx) => {
       scopeGuard.checkAccess(PERMISSION, args.project, args.name);
       // Bucketed by name, not just globally: this tool opens a URL-mode value
       // collector (a loopback listener plus a timer) per call, and the global
@@ -43,58 +49,103 @@ export function registerCreateSecret(
       // yet, so the requested name is the stable key.
       rateLimiter.checkLimit(`create:${args.project ?? ""}/${args.name}`);
 
-      // Create secret without a value — it starts in "pending" status. The
-      // value is then collected out-of-band, per the thesis's channel
-      // priority: URL-mode elicitation > controlling-terminal prompt >
-      // deferred (CLI: harpoc secret set).
-      const result = await engine.createSecret(
-        {
-          name: args.name,
-          type: args.type,
-          project: args.project,
-        },
-        scopeGuard.caller,
-      );
+      const modern = isModernRequest(ctx);
+      const finishCreate = async (
+        collect: () => Promise<{ value: Uint8Array | null; channel: string }>,
+      ) => {
+        // Create secret without a value — it starts in "pending" status. The
+        // value is then collected out-of-band, per the thesis's channel
+        // priority: URL-mode elicitation > controlling-terminal prompt >
+        // deferred (CLI: harpoc secret set).
+        const result = await engine.createSecret(
+          {
+            name: args.name,
+            type: args.type,
+            project: args.project,
+          },
+          scopeGuard.caller,
+        );
 
-      let status: string = result.status;
-      let message =
-        result.status === "pending"
-          ? `Secret created. Set the value with: harpoc secret set ${args.name}`
-          : result.message;
+        let status: string = result.status;
+        let message =
+          result.status === "pending"
+            ? `Secret created. Set the value with: harpoc secret set ${args.name}`
+            : result.message;
 
-      if (result.status === "pending") {
+        if (result.status === "pending") {
+          const collected = await collect();
+          if (collected.value) {
+            try {
+              // The caller is attribution only here: the row is written by the
+              // token that just created the secret (`create` is interface-scoped),
+              // and under R1 that token holds no grant on the fresh secret — the
+              // set is part of creation, not a later access (N17).
+              await engine.setSecretValue(result.handle, collected.value, scopeGuard.caller);
+            } finally {
+              collected.value.fill(0);
+            }
+            status = "created";
+            message = `Secret created. The value was collected via ${collected.channel}, out-of-band of the model context.`;
+          }
+        }
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ handle: result.handle, status, message }, null, 2),
+            },
+          ],
+        };
+      };
+
+      const collectOutOfBand = async (
+        collected: Uint8Array | null,
+      ): Promise<{ value: Uint8Array | null; channel: string }> => {
         let channel = "URL-mode elicitation";
-        let value = await collectValueViaUrlElicitation(server, {
-          subject: args.name,
-          operation: "create",
-        });
+        let value = collected;
+        if (value === null && !modern) {
+          value = await collectValueViaUrlElicitation(server, {
+            subject: args.name,
+            operation: "create",
+          });
+        }
         if (value === null && enableTtyPrompt) {
           channel = "a terminal prompt";
           value = await collectValueFromTty({ subject: args.name, operation: "create" });
         }
-        if (value) {
+        return { value, channel };
+      };
+
+      if (modern) {
+        const target = `${args.project ?? ""}/${args.name}`;
+        const state = ctx.mcpReq.requestState<ValueRequestState>();
+        if (state === undefined) {
+          const pending = await elicitValueViaInputRequired(
+            {
+              subject: args.name,
+              operation: "create",
+              principal: scopeGuard.principalBinding,
+              target,
+            },
+            ctx,
+          );
+          if (pending !== null) return pending;
+        } else {
+          const value = await resumeValueCollection(
+            state,
+            { principal: scopeGuard.principalBinding, operation: "create", target },
+            ctx.mcpReq.inputResponses,
+          );
           try {
-            // The caller is attribution only here: the row is written by the
-            // token that just created the secret (`create` is interface-scoped),
-            // and under R1 that token holds no grant on the fresh secret — the
-            // set is part of creation, not a later access (N17).
-            await engine.setSecretValue(result.handle, value, scopeGuard.caller);
+            return await finishCreate(() => collectOutOfBand(value));
           } finally {
-            value.fill(0);
+            value?.fill(0);
           }
-          status = "created";
-          message = `Secret created. The value was collected via ${channel}, out-of-band of the model context.`;
         }
       }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({ handle: result.handle, status, message }, null, 2),
-          },
-        ],
-      };
+      return finishCreate(() => collectOutOfBand(null));
     },
   );
 }

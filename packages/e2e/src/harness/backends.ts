@@ -129,6 +129,18 @@ export const MCP_DOWNSTREAM = {
   benignMarker: "mcp-downstream-benign-marker",
 } as const;
 
+/** The `mcp` context's modern counterparty: the SDK v2 handler, legacy rejected (phase 3). */
+export const MCP_DOWNSTREAM_2026 = {
+  host: "127.0.0.1",
+  port: 55092,
+  serverName: "e2e-downstream-2026",
+  endpoint: "http://127.0.0.1:55092/mcp",
+  recordedUrl: "http://127.0.0.1:55092/recorded",
+  tool: "reveal",
+  /** Kept byte-identical in `fixtures/mcp-downstream-2026/server.mjs`. */
+  benignMarker: "mcp-downstream-2026-benign-marker",
+} as const;
+
 /**
  * The exfiltration sink the two-arm scenarios try to move a credential to
  * (C-3). `recordedUrl` is the harness-only side channel reporting what actually
@@ -252,6 +264,7 @@ export type FleetService =
   | "git-https"
   | "echo-https"
   | "mcp-downstream"
+  | "mcp-downstream-2026"
   | "mcp-poisoned"
   | "attacker"
   | "mail"

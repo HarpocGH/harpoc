@@ -147,7 +147,7 @@ For clients that connect to a URL instead of spawning a process:
 npx harpoc server start --mcp-http --mcp-http-port 3001
 ```
 
-The endpoint is `http://127.0.0.1:3001/mcp`. Every request requires a vault-issued JWT (`Authorization: Bearer`) — there is no tokenless mode over HTTP.
+The endpoint is `http://127.0.0.1:3001/mcp`. Every request requires a vault-issued JWT (`Authorization: Bearer`) — there is no tokenless mode over HTTP. Since 2026-09-16 the same endpoint also serves the `2026-07-28` revision: a client that speaks it gets a per-request server with no session; a client that sends `initialize` gets the session path exactly as before.
 
 ### Launch Token Options
 

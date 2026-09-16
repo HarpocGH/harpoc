@@ -112,6 +112,7 @@ async function spawnDownstream(handle: string, serverName: string): Promise<void
   await engine.setMcpServerConfig(handle, {
     server_name: serverName,
     transport: "stdio",
+    protocol: "2025-11-25",
     command: process.execPath,
     args: ["-e", MCP_TEST_SERVER],
     env_var: "DOWNSTREAM_TOKEN",

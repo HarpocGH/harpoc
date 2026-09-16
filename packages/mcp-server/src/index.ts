@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { VaultEngine } from "@harpoc/core";
 import {
   assertBindAllowed,
@@ -218,9 +218,10 @@ async function main(): Promise<void> {
       allowTokenless: values["allow-tokenless"] as boolean | undefined,
       enableTtyPrompt: true,
     });
-    const stdio = new StdioServerTransport();
-    await server.connect(stdio);
-    close = () => server.close();
+    const stdio = serveStdio(() => server, {
+      onerror: (error) => process.stderr.write(`[harpoc] MCP stdio error: ${error.message}\n`),
+    });
+    close = () => stdio.close();
     transport = "stdio";
     // The SDK transport listens for data and error only: an MCP host that
     // hangs up (stdin EOF) closes nothing. That hang-up is this server's

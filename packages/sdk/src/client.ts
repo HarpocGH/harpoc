@@ -15,6 +15,7 @@ import type {
   IssuedToken,
   IssuedTokenStatusFilter,
   McpServerConfig,
+  McpServerConfigInput,
   OAuthFlowResult,
   OAuthTokenStatus,
   RegisterAgentInput,
@@ -83,7 +84,7 @@ export interface VaultClient {
     options?: SetInjectionPolicyOptions,
   ): Promise<void>;
   getInjectionPolicy(handle: string): Promise<InjectionPolicy>;
-  setMcpServerConfig(handle: string, config: McpServerConfig): Promise<void>;
+  setMcpServerConfig(handle: string, config: McpServerConfigInput): Promise<void>;
   getMcpServerConfig(handle: string): Promise<McpServerConfig | undefined>;
   setConnectionConfig(handle: string, config: ConnectionConfig): Promise<void>;
   getConnectionConfig(handle: string): Promise<ConnectionConfig | undefined>;

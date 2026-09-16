@@ -1,13 +1,15 @@
 import { request as httpRequest } from "node:http";
+import type { IncomingHttpHeaders } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import type { AddressInfo } from "node:net";
 import { readFileSync } from "node:fs";
 import { isConnectionRefused, isIpv6BindUnavailable } from "@harpoc/test-utils";
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import type { VaultEngine } from "@harpoc/core";
 import { OAuthManager } from "@harpoc/oauth-proxy";
 import { ErrorCode, VaultError } from "@harpoc/shared";
+import type { VaultApiToken } from "@harpoc/shared";
 import { startMcpHttpServer } from "./http.js";
 import type { McpHttpServer } from "./http.js";
 
@@ -33,6 +35,7 @@ function mockEngine(overrides: Record<string, unknown> = {}): VaultEngine {
     createSecret: vi
       .fn()
       .mockResolvedValue({ handle: "secret://x", status: "pending", message: "" }),
+    setSecretValue: vi.fn().mockResolvedValue(undefined),
     rotateSecret: vi.fn().mockResolvedValue(undefined),
     revokeSecret: vi.fn().mockResolvedValue(undefined),
     resolveSecretId: vi.fn().mockResolvedValue("uuid-123"),
@@ -64,8 +67,27 @@ function rpcHeaders(extra: Record<string, string> = {}): Record<string, string> 
   };
 }
 
+const MODERN_LIST_BODY = JSON.stringify({
+  method: "tools/list",
+  jsonrpc: "2.0",
+  id: 0,
+  params: {
+    _meta: {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": { name: "modern-raw-client", version: "1.0.0" },
+      "io.modelcontextprotocol/clientCapabilities": {},
+    },
+  },
+});
+
+const MODERN_HEADERS = {
+  "mcp-method": "tools/list",
+  "mcp-protocol-version": "2026-07-28",
+};
+
 interface RawResponse {
   status: number;
+  headers: IncomingHttpHeaders;
   body: string;
 }
 
@@ -80,7 +102,9 @@ function rawRequest(
     const req = httpRequest({ host: "127.0.0.1", port, path: "/mcp", method, headers }, (res) => {
       let data = "";
       res.on("data", (chunk: Buffer) => (data += chunk.toString("utf8")));
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, body: data }));
+      res.on("end", () =>
+        resolve({ status: res.statusCode ?? 0, headers: res.headers, body: data }),
+      );
     });
     req.on("error", reject);
     req.end(body);
@@ -355,6 +379,8 @@ describe("startMcpHttpServer", () => {
     expect(res.status).toBe(503);
   });
 
+  // The modern (2026-07-28) leg has no session, so the four session cases
+  // below have no modern twin: each request authorizes itself (design § 6.1).
   it("pins the session to the token presented at initialize", async () => {
     const { port } = await start(mockEngine());
 
@@ -845,4 +871,186 @@ describe("startMcpHttpServer — session reclamation (M6)", () => {
     expect((await ping(server.port, first.sessionId as string)).status).toBeLessThan(400);
     expect((await ping(server.port, second.sessionId as string)).status).toBeLessThan(400);
   }, 20_000);
+});
+
+describe("the 2026-07-28 leg (dual-era, design R1)", () => {
+  let server: McpHttpServer;
+  let engine: VaultEngine;
+
+  beforeEach(async () => {
+    engine = mockEngine();
+    server = await startMcpHttpServer({ engine, port: 0 });
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  async function connectModern(
+    port: number,
+    token: string,
+    clientOptions: ConstructorParameters<typeof Client>[1] = {},
+  ) {
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    });
+    const client = new Client(
+      { name: "modern-test-client", version: "1.0.0" },
+      { ...clientOptions, versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    await client.connect(transport);
+    return { client, transport };
+  }
+
+  it("serves a pinned modern client beside the session path, with no session id", async () => {
+    const { client, transport } = await connectModern(server.port, TOKEN);
+    try {
+      expect(transport.sessionId).toBeUndefined();
+      const tools = await client.listTools();
+      expect(tools.tools.map((t) => t.name)).toHaveLength(9);
+      const result = (await client.callTool({ name: "list_secrets", arguments: {} })) as {
+        isError?: boolean;
+      };
+      expect(result.isError).toBeUndefined();
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("carries the SDK's default cache hints on a modern tools/list result", async () => {
+    const { client } = await connectModern(server.port, TOKEN);
+    try {
+      const result = (await client.listTools()) as { ttlMs?: number; cacheScope?: string };
+      expect(result.ttlMs).toBe(0);
+      expect(result.cacheScope).toBe("private");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("verifies the bearer on every modern request: a revoked token is refused mid-conversation", async () => {
+    const { client } = await connectModern(server.port, TOKEN);
+    vi.mocked(engine.verifyToken).mockImplementation(() => {
+      throw VaultError.tokenRevoked();
+    });
+    await expect(client.callTool({ name: "list_secrets", arguments: {} })).rejects.toThrow(
+      "Token revoked",
+    );
+    await client.close().catch(() => undefined);
+  });
+
+  it("refuses a modern request without a bearer before any handler runs", async () => {
+    const res = await rawRequest(server.port, rpcHeaders(MODERN_HEADERS), MODERN_LIST_BODY);
+    expect(res.status).toBe(401);
+    expect(res.headers["www-authenticate"]).toContain('Bearer realm="harpoc"');
+  });
+
+  it("checks the host before the era: a rebinding Host on a modern request is 403", async () => {
+    const res = await rawRequest(
+      server.port,
+      rpcHeaders({ authorization: `Bearer ${TOKEN}`, host: "evil.example", ...MODERN_HEADERS }),
+      MODERN_LIST_BODY,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("builds the vault server per modern request from that request's token", async () => {
+    const otherToken = "second.jwt.token";
+    vi.mocked(engine.verifyToken).mockImplementation(
+      (token) =>
+        (token === otherToken ? tokenPayload(["use"]) : tokenPayload()) as unknown as VaultApiToken,
+    );
+    const { client } = await connectModern(server.port, TOKEN);
+    const { client: other } = await connectModern(server.port, otherToken);
+    try {
+      const before = vi.mocked(engine.verifyToken).mock.calls.length;
+      const first = (await client.callTool({ name: "list_secrets", arguments: {} })) as {
+        isError?: boolean;
+      };
+      const second = (await other.callTool({ name: "list_secrets", arguments: {} })) as {
+        isError?: boolean;
+      };
+      expect(first.isError).toBeUndefined();
+      expect(second.isError).toBe(true);
+      expect(vi.mocked(engine.verifyToken).mock.calls).toContainEqual([otherToken]);
+      expect(vi.mocked(engine.verifyToken).mock.calls.length - before).toBeGreaterThanOrEqual(4);
+    } finally {
+      await client.close();
+      await other.close();
+    }
+  });
+
+  it("round-trips a modern create_secret across two per-request servers", async () => {
+    vi.mocked(engine.verifyToken).mockReturnValue(
+      tokenPayload(["create"]) as unknown as VaultApiToken,
+    );
+    let captured = "";
+    vi.mocked(engine.setSecretValue).mockImplementation((_handle: string, value: Uint8Array) => {
+      captured = Buffer.from(value).toString("utf8");
+      return Promise.resolve();
+    });
+
+    const { client } = await connectModern(server.port, TOKEN, {
+      capabilities: { elicitation: { url: {} } },
+    });
+    client.setRequestHandler("elicitation/create", async (request) => {
+      const params = request.params as { mode?: string; url?: string };
+      expect(params.mode).toBe("url");
+      await fetch(params.url as string);
+      await fetch(params.url as string, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "value=posted-into-the-loopback-form",
+      });
+      return { action: "accept" };
+    });
+
+    try {
+      const before = vi.mocked(engine.verifyToken).mock.calls.length;
+      const result = (await client.callTool({
+        name: "create_secret",
+        arguments: { name: "api-key", type: "api_key" },
+      })) as { content: Array<{ text: string }> };
+      const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
+
+      expect(payload.status).toBe("created");
+      expect(captured).toBe("posted-into-the-loopback-form");
+      expect(result.content[0]?.text).not.toContain("posted-into-the-loopback-form");
+      expect(vi.mocked(engine.verifyToken).mock.calls.length - before).toBeGreaterThanOrEqual(4);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("the legacy session path is untouched: an initialize still mints a session", async () => {
+    const { client, transport } = await connectClient(server.port, TOKEN);
+    expect(transport.sessionId).toBeDefined();
+    await client.close();
+  });
+
+  it("the session id decides before the era: an unknown one on a modern body is 404", async () => {
+    const res = await rawRequest(
+      server.port,
+      rpcHeaders({
+        authorization: `Bearer ${TOKEN}`,
+        "mcp-session-id": "00000000-0000-0000-0000-000000000000",
+        ...MODERN_HEADERS,
+      }),
+      MODERN_LIST_BODY,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("refuses a modern request whose Content-Type is not application/json with 415", async () => {
+    const res = await rawRequest(
+      server.port,
+      rpcHeaders({
+        authorization: `Bearer ${TOKEN}`,
+        ...MODERN_HEADERS,
+        "content-type": "text/plain",
+      }),
+      MODERN_LIST_BODY,
+    );
+    expect(res.status).toBe(415);
+  });
 });

@@ -9,6 +9,7 @@ import {
   auditScopeFromToken,
   callerFromToken,
   matchesSecretNameScope,
+  TOKENLESS_STDIO_PRINCIPAL,
   tokenlessStdioCaller,
   VaultError,
 } from "@harpoc/shared";
@@ -100,6 +101,14 @@ export class ScopeGuard {
   /** Get the principal ID without performing access checks. */
   get principal(): string {
     return this.token?.sub ?? "local";
+  }
+
+  /**
+   * The identity a value-collection round is sealed to: the token's jti —
+   * never a name an operator can register — or the tokenless stdio caller.
+   */
+  get principalBinding(): string {
+    return this.token?.jti ?? TOKENLESS_STDIO_PRINCIPAL;
   }
 
   /**

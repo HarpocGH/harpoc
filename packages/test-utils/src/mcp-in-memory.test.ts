@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { connectInMemoryClient, inMemoryClientFor, invokeHandler } from "./mcp-in-memory.js";
+import {
+  connectInMemoryClient,
+  connectModernInMemoryClient,
+  inMemoryClientFor,
+  invokeHandler,
+} from "./mcp-in-memory.js";
 
 function serverWithEcho(): McpServer {
   const server = new McpServer({ name: "t", version: "0.0.0" });
@@ -99,5 +104,46 @@ describe("invokeHandler", () => {
       contents: Array<{ text?: string }>;
     };
     expect(read.contents[0]?.text).toBe("ok");
+  });
+});
+
+function eraServer(): McpServer {
+  const server = new McpServer({ name: "t", version: "1.0.0" });
+  server.registerTool("era", { description: "era" }, async (ctx) => ({
+    content: [
+      { type: "text" as const, text: ctx.mcpReq.envelope !== undefined ? "modern" : "legacy" },
+    ],
+  }));
+  return server;
+}
+
+describe("connectModernInMemoryClient", () => {
+  it("serves the modern era at the pinned revision", async () => {
+    const mcp = await connectModernInMemoryClient(eraServer);
+    try {
+      expect((await mcp.callTool("era", {})).content[0]?.text).toBe("modern");
+      expect(mcp.client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
+      expect(mcp.client.getProtocolEra()).toBe("modern");
+    } finally {
+      await mcp.close();
+    }
+  });
+
+  it("contrasts with the legacy helper over the bare pair", async () => {
+    const mcp = await connectInMemoryClient(eraServer());
+    try {
+      expect((await mcp.callTool("era", {})).content[0]?.text).toBe("legacy");
+      expect(mcp.client.getNegotiatedProtocolVersion()).toBe("2025-11-25");
+    } finally {
+      await mcp.close();
+    }
+  });
+
+  it("closes the client and the serveStdio handle, and a second close does not throw", async () => {
+    const mcp = await connectModernInMemoryClient(eraServer);
+    expect((await mcp.callTool("era", {})).content[0]?.text).toBe("modern");
+    await expect(mcp.close()).resolves.toBeUndefined();
+    await expect(mcp.callTool("era", {})).rejects.toThrow();
+    await expect(mcp.close()).resolves.toBeUndefined();
   });
 });

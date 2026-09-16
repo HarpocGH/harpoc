@@ -17,6 +17,7 @@ interface McpServerOptions {
   envVar?: string;
   cwd?: string;
   url?: string;
+  protocol?: string;
   show?: boolean;
   delete?: boolean;
   token?: string;
@@ -36,6 +37,10 @@ export function registerSecretMcpServerCommand(secret: Command): void {
     .option("--env-var <name>", "Env var to inject the secret into (stdio transport)")
     .option("--cwd <dir>", "Working directory (stdio transport)")
     .option("--url <url>", "Downstream Streamable HTTP endpoint (http transport)")
+    .option(
+      "--protocol <revision>",
+      "MCP protocol revision spoken to the downstream server: 2025-11-25 (default) | 2026-07-28",
+    )
     .option("--show", "Show the current config instead of setting it")
     .option("--delete", "Remove the config")
     .option("--token <jwt>", TOKEN_OPTION_DESCRIPTION)
@@ -75,6 +80,7 @@ export function registerSecretMcpServerCommand(secret: Command): void {
             env_var: options.envVar,
             working_directory: options.cwd,
             url: options.url,
+            protocol: options.protocol,
           });
           if (!parsed.success) {
             throw new Error(parsed.error.issues.map((i) => i.message).join(", "));
