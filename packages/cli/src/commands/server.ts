@@ -284,19 +284,19 @@ export function registerServerCommand(program: Command): void {
           }
 
           if (opts.mcp) {
-            const { createMcpServer } = await import("@harpoc/mcp-server");
+            const { createStdioServerFactory } = await import("@harpoc/mcp-server");
             const { serveStdio } = await import("@modelcontextprotocol/server/stdio");
             // The launch token arrives through --token-file or the ambient
             // HARPOC_TOKEN (the file wins) — never argv (R9/A10). A profile-set
             // variable must not error out --rest-only starts, so the env var
             // is never checked without --mcp.
-            const server = createMcpServer({
+            const factory = createStdioServerFactory({
               engine,
               launchToken: fileToken ?? process.env.HARPOC_TOKEN,
               allowTokenless: opts.allowTokenless,
               enableTtyPrompt: true,
             });
-            const handle = serveStdio(() => server, {
+            const handle = serveStdio(factory, {
               onerror: (error) =>
                 process.stderr.write(`[harpoc] MCP stdio error: ${error.message}\n`),
             });

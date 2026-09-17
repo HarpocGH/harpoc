@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AuditEventType,
+  callerFromToken,
   ErrorCode,
   VaultError,
   VaultState,
@@ -14,7 +15,12 @@ import {
   VAULT_VERSION_FLOOR,
 } from "@harpoc/shared";
 import { AAD_CONNECTION_CONFIG, AAD_INJECTION_POLICY, AAD_MCP_SERVER_CONFIG } from "@harpoc/shared";
-import type { InjectionPolicyInput } from "@harpoc/shared";
+import type {
+  CallerContext,
+  InjectionPolicyInput,
+  Permission,
+  TokenPrincipalType,
+} from "@harpoc/shared";
 import { expectVaultError, protectorTimer, recordSeriesLine } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { decrypt, encrypt } from "./crypto/aes-gcm.js";
@@ -101,6 +107,15 @@ function registerAgents(...names: string[]): void {
       if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
     }
   }
+}
+
+function callerFor(
+  subject: string,
+  scope: Permission[],
+  principalType: TokenPrincipalType,
+): CallerContext {
+  const jwt = engine.createToken(subject, scope, 60_000, { principalType });
+  return callerFromToken(engine.verifyToken(jwt), "rest");
 }
 
 afterEach(async () => {
@@ -2359,6 +2374,63 @@ describe("connection config", () => {
     await expect(engine.getConnectionConfig("secret://conn")).rejects.toMatchObject({
       code: ErrorCode.VAULT_CORRUPTED,
       message: expect.stringContaining("is not JSON"),
+    });
+  });
+});
+
+describe("the value tools' pre-flights (P3-35)", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "taken",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+  });
+
+  it("secretNameTaken is true for an active name, false for an unknown and for a revoked one", async () => {
+    expect(await engine.secretNameTaken("taken")).toBe(true);
+    expect(await engine.secretNameTaken("taken", "other-project")).toBe(false);
+    expect(await engine.secretNameTaken("unknown")).toBe(false);
+    await engine.revokeSecret("secret://taken");
+    expect(await engine.secretNameTaken("taken")).toBe(false);
+  });
+
+  it("secretNameTaken writes no audit row", async () => {
+    const before = engine.queryAudit({}).length;
+    await engine.secretNameTaken("taken");
+    await engine.secretNameTaken("unknown");
+    expect(engine.queryAudit({}).length).toBe(before);
+  });
+
+  it("assertRotateAllowed refuses an unknown handle as SECRET_NOT_FOUND with a denied secret.rotate row", async () => {
+    await expect(engine.assertRotateAllowed("secret://missing")).rejects.toMatchObject({
+      code: ErrorCode.SECRET_NOT_FOUND,
+    });
+    const denied = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_ROTATE })
+      .filter((row) => row.success === false);
+    expect(denied).toHaveLength(1);
+    expect(denied[0]?.detail).toMatchObject({ handle: "secret://missing" });
+  });
+
+  it("assertRotateAllowed passes a granted caller and refuses a grantless one as SECRET_NOT_FOUND (R5)", async () => {
+    registerAgents("rotator", "bystander");
+    const granted = callerFor("rotator", ["rotate"], "agent");
+    const secretId = await engine.resolveSecretId("secret://taken");
+    engine.grantPolicy(
+      { secretId, principalType: "agent", principalId: "rotator", permissions: ["rotate"] },
+      "admin",
+    );
+    const rotateRowsBefore = engine.queryAudit({ eventType: AuditEventType.SECRET_ROTATE }).length;
+    await expect(engine.assertRotateAllowed("secret://taken", granted)).resolves.toBeUndefined();
+    expect(engine.queryAudit({ eventType: AuditEventType.SECRET_ROTATE }).length).toBe(
+      rotateRowsBefore,
+    );
+
+    const grantless = callerFor("bystander", ["rotate"], "agent");
+    await expect(engine.assertRotateAllowed("secret://taken", grantless)).rejects.toMatchObject({
+      code: ErrorCode.SECRET_NOT_FOUND,
     });
   });
 });

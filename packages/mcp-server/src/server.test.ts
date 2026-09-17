@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { inMemoryClientFor } from "@harpoc/test-utils";
 import type { VaultEngine } from "@harpoc/core";
 import { ErrorCode, VaultError } from "@harpoc/shared";
-import { createMcpServer } from "./server.js";
+import { createMcpServer, createStdioServerFactory } from "./server.js";
 
 async function callTool(server: McpServer, name: string, args: Record<string, unknown>) {
   return (await inMemoryClientFor(server)).callTool(name, args);
@@ -37,6 +37,8 @@ function mockEngine(overrides: Record<string, unknown> = {}): VaultEngine {
       jti: "jti-1",
       principal_type: "agent",
     }),
+    secretNameTaken: vi.fn().mockResolvedValue(false),
+    assertRotateAllowed: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as unknown as VaultEngine;
 }
@@ -315,5 +317,33 @@ describe("createMcpServer — launch-token revocation wiring", () => {
       stderrSpy.mockRestore();
     }
     expect(isTokenRevoked).not.toHaveBeenCalled();
+  });
+});
+
+describe("createStdioServerFactory", () => {
+  it("createStdioServerFactory gates once and builds a fresh instance per call", () => {
+    const engine = mockEngine();
+    const factory = createStdioServerFactory({
+      engine,
+      launchToken: "valid.jwt.token",
+      enableTtyPrompt: true,
+    });
+    expect(engine.auditServerStart).toHaveBeenCalledTimes(1);
+    const first = factory();
+    const second = factory();
+    expect(first).not.toBe(second);
+    expect(engine.verifyToken).toHaveBeenCalledTimes(1);
+    expect(engine.auditServerStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("createStdioServerFactory refuses at creation, not at the first call, and writes the failed row once", () => {
+    const engine = mockEngine();
+    expect(() => createStdioServerFactory({ engine })).toThrow(
+      expect.objectContaining({ code: ErrorCode.TOKEN_REQUIRED }),
+    );
+    expect(engine.auditServerStart).toHaveBeenCalledTimes(1);
+    expect(engine.auditServerStart).toHaveBeenCalledWith(
+      expect.objectContaining({ success: false, error: ErrorCode.TOKEN_REQUIRED }),
+    );
   });
 });

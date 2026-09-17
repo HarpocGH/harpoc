@@ -87,6 +87,7 @@ export function registerStartOauthFlow(
       let secretBytes = await collectValueViaUrlElicitation(server, {
         subject,
         operation: "create",
+        principal: scopeGuard.principalBinding,
       });
       if (secretBytes === null && enableTtyPrompt) {
         secretBytes = await collectValueFromTty({ subject, operation: "create" });

@@ -2,14 +2,12 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
-import { secretTypeSchema } from "@harpoc/shared";
+import { VaultError, secretTypeSchema } from "@harpoc/shared";
 import { collectValueFromTty } from "../elicitation/tty-prompt.js";
-import type { ValueRequestState } from "../elicitation/request-state.js";
 import {
   collectValueViaUrlElicitation,
-  elicitValueViaInputRequired,
   isModernRequest,
-  resumeValueCollection,
+  runModernValueRound,
 } from "../elicitation/value-collector.js";
 import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
@@ -108,6 +106,7 @@ export function registerCreateSecret(
           value = await collectValueViaUrlElicitation(server, {
             subject: args.name,
             operation: "create",
+            principal: scopeGuard.principalBinding,
           });
         }
         if (value === null && enableTtyPrompt) {
@@ -118,31 +117,22 @@ export function registerCreateSecret(
       };
 
       if (modern) {
-        const target = `${args.project ?? ""}/${args.name}`;
-        const state = ctx.mcpReq.requestState<ValueRequestState>();
-        if (state === undefined) {
-          const pending = await elicitValueViaInputRequired(
-            {
-              subject: args.name,
-              operation: "create",
-              principal: scopeGuard.principalBinding,
-              target,
+        const round = await runModernValueRound(
+          ctx,
+          {
+            subject: args.name,
+            operation: "create",
+            principal: scopeGuard.principalBinding,
+            target: `${args.project ?? ""}/${args.name}`,
+            preflight: async () => {
+              if (await engine.secretNameTaken(args.name, args.project)) {
+                throw VaultError.duplicateSecret(args.name);
+              }
             },
-            ctx,
-          );
-          if (pending !== null) return pending;
-        } else {
-          const value = await resumeValueCollection(
-            state,
-            { principal: scopeGuard.principalBinding, operation: "create", target },
-            ctx.mcpReq.inputResponses,
-          );
-          try {
-            return await finishCreate(() => collectOutOfBand(value));
-          } finally {
-            value?.fill(0);
-          }
-        }
+          },
+          (value) => finishCreate(() => collectOutOfBand(value)),
+        );
+        if (round.kind !== "fallthrough") return round.result;
       }
 
       return finishCreate(() => collectOutOfBand(null));

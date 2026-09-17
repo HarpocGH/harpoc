@@ -179,7 +179,7 @@ describe("index.ts lifecycle ordering", () => {
   // start row written during the setup with its stop row.
   it("arms the latch after the transport is up and before writing the readiness banner", () => {
     const text = source();
-    const serve = text.indexOf("serveStdio(() => server");
+    const serve = text.indexOf("serveStdio(factory");
     const arm = text.indexOf("latch.arm(");
     const banner = text.indexOf("process.stderr.write(banner)");
     expect(serve).toBeGreaterThanOrEqual(0);

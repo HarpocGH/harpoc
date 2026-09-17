@@ -284,6 +284,11 @@ describe("start_oauth_flow", () => {
     expect(engine.createOAuthSecret).toHaveBeenCalledTimes(1);
     expect(oauthConfigOf(engine).client_secret).toBeUndefined();
 
+    expect(collectValueViaUrlElicitation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ principal: "jti-1" }),
+    );
+
     expect(startClientCredentials).toHaveBeenCalledWith(
       "gh-m2m",
       expect.objectContaining({

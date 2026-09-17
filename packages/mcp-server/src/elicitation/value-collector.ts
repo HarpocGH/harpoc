@@ -24,13 +24,26 @@ const TOKEN_BYTES = 32;
  */
 const MAX_CONCURRENT_COLLECTORS = 8;
 
+/**
+ * Live collectors one principal may hold at once, keyed by the guard's
+ * principal binding (the token's jti, or the tokenless stdio caller): one
+ * create and one rotate in flight. A modern round 1 returns with its collector
+ * alive for up to five minutes, so without this a single token could hold the
+ * whole process ceiling from any of its per-request servers.
+ */
+const MAX_COLLECTORS_PER_PRINCIPAL = 2;
+
 const liveCollectors = new Map<string, ValueCollector>();
+
+const liveCollectorsByPrincipal = new Map<string, number>();
 
 export interface ValueCollectorOptions {
   /** Secret name shown on the form (display only, HTML-escaped). */
   subject: string;
   operation: "create" | "rotate";
   timeoutMs?: number;
+  /** The caller's principal binding (ScopeGuard.principalBinding); bounds the caller, not just the process. */
+  principal?: string;
 }
 
 export interface ValueCollector {
@@ -53,142 +66,164 @@ export async function startValueCollector(options: ValueCollectorOptions): Promi
   if (liveCollectors.size >= MAX_CONCURRENT_COLLECTORS) {
     throw new Error("Too many concurrent value collectors");
   }
-  const id = randomUUID();
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const token = randomBytes(TOKEN_BYTES).toString("base64url");
-  const tokenBuffer = Buffer.from(token, "utf8");
-  const path = `/collect/${token}`;
-
-  let used = false;
-  let settled = false;
-  let resolveValue: (value: Uint8Array) => void = () => undefined;
-  let rejectValue: (err: Error) => void = () => undefined;
-  const valuePromise = new Promise<Uint8Array>((resolve, reject) => {
-    resolveValue = resolve;
-    rejectValue = reject;
-  });
-  // A collector closed without a waiter must not surface an unhandled rejection.
-  void valuePromise.catch(() => undefined);
-
-  function settle(fn: () => void): void {
-    if (!settled) {
-      settled = true;
-      fn();
-    }
+  const principal = options.principal;
+  if (
+    principal !== undefined &&
+    (liveCollectorsByPrincipal.get(principal) ?? 0) >= MAX_COLLECTORS_PER_PRINCIPAL
+  ) {
+    throw new Error("Too many concurrent value collectors for this caller");
   }
-
-  function matchesToken(requestPath: string): boolean {
-    const prefix = "/collect/";
-    if (!requestPath.startsWith(prefix)) return false;
-    const candidate = Buffer.from(requestPath.slice(prefix.length), "utf8");
-    return candidate.length === tokenBuffer.length && timingSafeEqual(candidate, tokenBuffer);
+  if (principal !== undefined) {
+    liveCollectorsByPrincipal.set(principal, (liveCollectorsByPrincipal.get(principal) ?? 0) + 1);
   }
+  function releasePrincipal(): void {
+    if (principal === undefined) return;
+    const left = (liveCollectorsByPrincipal.get(principal) ?? 1) - 1;
+    if (left <= 0) liveCollectorsByPrincipal.delete(principal);
+    else liveCollectorsByPrincipal.set(principal, left);
+  }
+  try {
+    const id = randomUUID();
+    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const token = randomBytes(TOKEN_BYTES).toString("base64url");
+    const tokenBuffer = Buffer.from(token, "utf8");
+    const path = `/collect/${token}`;
 
-  /**
-   * node:http calls this synchronously: a throw escaping it is an unhandled
-   * exception that takes the whole vault process down. Nothing below is
-   * expected to throw — the token length guard in matchesToken is what keeps
-   * timingSafeEqual from raising ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH on a
-   * short token — but that is one guard away from a remote crash, so the
-   * boundary is explicit.
-   */
-  function handleRequest(req: IncomingMessage, res: ServerResponse): void {
-    try {
-      route(req, res);
-    } catch {
-      try {
-        sendHtml(res, 500, "Internal Server Error", "<h1>Request failed</h1>");
-      } catch {
-        res.destroy();
+    let used = false;
+    let settled = false;
+    let resolveValue: (value: Uint8Array) => void = () => undefined;
+    let rejectValue: (err: Error) => void = () => undefined;
+    const valuePromise = new Promise<Uint8Array>((resolve, reject) => {
+      resolveValue = resolve;
+      rejectValue = reject;
+    });
+    // A collector closed without a waiter must not surface an unhandled rejection.
+    void valuePromise.catch(() => undefined);
+
+    function settle(fn: () => void): void {
+      if (!settled) {
+        settled = true;
+        fn();
       }
     }
-  }
 
-  function route(req: IncomingMessage, res: ServerResponse): void {
-    const requestPath = (req.url ?? "/").split("?")[0] ?? "/";
-
-    if (!matchesToken(requestPath)) {
-      sendHtml(res, 404, "Not Found", "<h1>Not found</h1>");
-      return;
+    function matchesToken(requestPath: string): boolean {
+      const prefix = "/collect/";
+      if (!requestPath.startsWith(prefix)) return false;
+      const candidate = Buffer.from(requestPath.slice(prefix.length), "utf8");
+      return candidate.length === tokenBuffer.length && timingSafeEqual(candidate, tokenBuffer);
     }
 
-    if (used) {
-      sendHtml(res, 410, "Gone", "<h1>This form was already used</h1><p>Close this window.</p>");
-      return;
-    }
-
-    if (req.method === "GET") {
-      sendHtml(res, 200, "OK", formPage(options, requestPath));
-      return;
-    }
-
-    if (req.method !== "POST") {
-      res.setHeader("Allow", "GET, POST");
-      sendHtml(res, 405, "Method Not Allowed", "<h1>Method not allowed</h1>");
-      return;
-    }
-
-    readBody(req)
-      .then((body) => {
-        const value = new URLSearchParams(body).get("value");
-        if (value === null || value.length === 0) {
-          sendHtml(res, 400, "Bad Request", "<h1>Empty value</h1><p>Go back and try again.</p>");
-          return;
+    /**
+     * node:http calls this synchronously: a throw escaping it is an unhandled
+     * exception that takes the whole vault process down. Nothing below is
+     * expected to throw — the token length guard in matchesToken is what keeps
+     * timingSafeEqual from raising ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH on a
+     * short token — but that is one guard away from a remote crash, so the
+     * boundary is explicit.
+     */
+    function handleRequest(req: IncomingMessage, res: ServerResponse): void {
+      try {
+        route(req, res);
+      } catch {
+        try {
+          sendHtml(res, 500, "Internal Server Error", "<h1>Request failed</h1>");
+        } catch {
+          res.destroy();
         }
-        used = true;
-        sendHtml(
-          res,
-          200,
-          "OK",
-          "<h1>Value saved to vault</h1><p>You can close this window and return to your agent.</p>",
-        );
-        settle(() => resolveValue(new Uint8Array(Buffer.from(value, "utf8"))));
-      })
-      .catch(() => {
-        sendHtml(res, 413, "Payload Too Large", "<h1>Value too large</h1>");
-      });
-  }
-
-  const server = createServer(handleRequest);
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      server.removeListener("error", reject);
-      resolve();
-    });
-  });
-  let released = false;
-
-  const port = (server.address() as AddressInfo).port;
-  const url = `http://127.0.0.1:${port}${path}`;
-
-  const timeoutId = setTimeout(() => {
-    settle(() => rejectValue(new Error("Value collection timed out")));
-    void close();
-  }, timeoutMs);
-  if (timeoutId.unref) timeoutId.unref();
-
-  async function close(): Promise<void> {
-    clearTimeout(timeoutId);
-    settle(() => rejectValue(new Error("Value collector closed")));
-    if (!released) {
-      released = true;
-      liveCollectors.delete(id);
+      }
     }
-    await new Promise<void>((resolve) => {
-      server.close(() => resolve());
-      server.closeIdleConnections();
-    });
-  }
 
-  const collector: ValueCollector = {
-    id,
-    url,
-    waitForValue: () => valuePromise,
-    close,
-  };
-  liveCollectors.set(id, collector);
-  return collector;
+    function route(req: IncomingMessage, res: ServerResponse): void {
+      const requestPath = (req.url ?? "/").split("?")[0] ?? "/";
+
+      if (!matchesToken(requestPath)) {
+        sendHtml(res, 404, "Not Found", "<h1>Not found</h1>");
+        return;
+      }
+
+      if (used) {
+        sendHtml(res, 410, "Gone", "<h1>This form was already used</h1><p>Close this window.</p>");
+        return;
+      }
+
+      if (req.method === "GET") {
+        sendHtml(res, 200, "OK", formPage(options, requestPath));
+        return;
+      }
+
+      if (req.method !== "POST") {
+        res.setHeader("Allow", "GET, POST");
+        sendHtml(res, 405, "Method Not Allowed", "<h1>Method not allowed</h1>");
+        return;
+      }
+
+      readBody(req)
+        .then((body) => {
+          const value = new URLSearchParams(body).get("value");
+          if (value === null || value.length === 0) {
+            sendHtml(res, 400, "Bad Request", "<h1>Empty value</h1><p>Go back and try again.</p>");
+            return;
+          }
+          used = true;
+          sendHtml(
+            res,
+            200,
+            "OK",
+            "<h1>Value saved to vault</h1><p>You can close this window and return to your agent.</p>",
+          );
+          settle(() => resolveValue(new Uint8Array(Buffer.from(value, "utf8"))));
+        })
+        .catch(() => {
+          sendHtml(res, 413, "Payload Too Large", "<h1>Value too large</h1>");
+        });
+    }
+
+    const server = createServer(handleRequest);
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.removeListener("error", reject);
+        resolve();
+      });
+    });
+    let released = false;
+
+    const port = (server.address() as AddressInfo).port;
+    const url = `http://127.0.0.1:${port}${path}`;
+
+    const timeoutId = setTimeout(() => {
+      settle(() => rejectValue(new Error("Value collection timed out")));
+      void close();
+    }, timeoutMs);
+    if (timeoutId.unref) timeoutId.unref();
+
+    async function close(): Promise<void> {
+      clearTimeout(timeoutId);
+      settle(() => rejectValue(new Error("Value collector closed")));
+      if (!released) {
+        released = true;
+        liveCollectors.delete(id);
+        releasePrincipal();
+      }
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeIdleConnections();
+      });
+    }
+
+    const collector: ValueCollector = {
+      id,
+      url,
+      waitForValue: () => valuePromise,
+      close,
+    };
+    liveCollectors.set(id, collector);
+    return collector;
+  } catch (err) {
+    releasePrincipal();
+    throw err;
+  }
 }
 
 /**
@@ -342,6 +377,60 @@ export async function resumeValueCollection(
     return null;
   } finally {
     await collector.close();
+  }
+}
+
+/** One modern value round, as the tool describes it. */
+export interface ModernValueRound {
+  subject: string;
+  operation: "create" | "rotate";
+  principal: string;
+  target: string;
+  /** Runs before round 1 opens the form, never on the retry; a throw refuses the call. */
+  preflight?: () => Promise<void>;
+}
+
+export type ModernValueRoundResult<T> =
+  | { kind: "pending"; result: InputRequiredResult }
+  | { kind: "done"; result: T }
+  | { kind: "fallthrough" };
+
+/**
+ * The modern leg's whole value round for a tool: round 1 runs the preflight,
+ * opens the one-time form and answers inputRequired; the retry resumes the
+ * collection the sealed state names, hands the value (null on a decline) to
+ * `finish` and zeroes it afterwards. "fallthrough" means no round ran — the
+ * client lacks the URL channel or a ceiling was reached — and the tool takes
+ * the terminal-or-deferred ladder.
+ */
+export async function runModernValueRound<T>(
+  ctx: ServerContext,
+  round: ModernValueRound,
+  finish: (value: Uint8Array | null) => Promise<T>,
+): Promise<ModernValueRoundResult<T>> {
+  const state = ctx.mcpReq.requestState<ValueRequestState>();
+  if (state === undefined) {
+    await round.preflight?.();
+    const pending = await elicitValueViaInputRequired(
+      {
+        subject: round.subject,
+        operation: round.operation,
+        principal: round.principal,
+        target: round.target,
+      },
+      ctx,
+    );
+    return pending === null ? { kind: "fallthrough" } : { kind: "pending", result: pending };
+  }
+  const value = await resumeValueCollection(
+    state,
+    { principal: round.principal, operation: round.operation, target: round.target },
+    ctx.mcpReq.inputResponses,
+  );
+  try {
+    return { kind: "done", result: await finish(value) };
+  } finally {
+    value?.fill(0);
   }
 }
 

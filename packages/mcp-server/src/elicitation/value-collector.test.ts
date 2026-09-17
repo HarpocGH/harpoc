@@ -5,7 +5,7 @@ import type { McpServer, ServerContext } from "@modelcontextprotocol/server";
 import { connectModernInMemoryClient } from "@harpoc/test-utils";
 import type { InMemoryMcpClient } from "@harpoc/test-utils";
 import type { VaultEngine } from "@harpoc/core";
-import { VaultError } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 import { createMcpServer } from "../server.js";
 import { valueRequestState } from "./request-state.js";
 import * as ttyPrompt from "./tty-prompt.js";
@@ -13,6 +13,7 @@ import * as valueCollector from "./value-collector.js";
 import {
   collectValueViaUrlElicitation,
   elicitValueViaInputRequired,
+  runModernValueRound,
   startValueCollector,
 } from "./value-collector.js";
 
@@ -225,6 +226,79 @@ describe("startValueCollector — concurrency ceiling (M10b)", () => {
       for (const collector of open) await collector.close();
     }
   }, 20_000);
+
+  it("holds one principal to two live collectors while another principal still opens one", async () => {
+    const open: Awaited<ReturnType<typeof startValueCollector>>[] = [];
+    try {
+      open.push(await startValueCollector({ subject: "a", operation: "create", principal: "p" }));
+      open.push(await startValueCollector({ subject: "b", operation: "rotate", principal: "p" }));
+
+      await expect(
+        startValueCollector({ subject: "c", operation: "create", principal: "p" }),
+      ).rejects.toThrow(/value collectors for this caller/);
+      open.push(await startValueCollector({ subject: "d", operation: "create", principal: "q" }));
+
+      // Closing one of p's frees exactly one slot for p.
+      await (open.shift() as Awaited<ReturnType<typeof startValueCollector>>).close();
+      open.push(await startValueCollector({ subject: "e", operation: "create", principal: "p" }));
+    } finally {
+      for (const collector of open) await collector.close();
+    }
+  }, 20_000);
+
+  it("a modern round 1 degrades to null at the per-principal ceiling, and the process ceiling still holds", async () => {
+    const open: Awaited<ReturnType<typeof startValueCollector>>[] = [];
+    try {
+      open.push(await startValueCollector({ subject: "a", operation: "create", principal: "p" }));
+      open.push(await startValueCollector({ subject: "b", operation: "create", principal: "p" }));
+      const ctx = {
+        mcpReq: {
+          envelope: { [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { url: {} } } },
+          requestState: () => undefined,
+        },
+      } as unknown as ServerContext;
+      await expect(
+        elicitValueViaInputRequired(
+          { subject: "c", operation: "create", principal: "p", target: "/c" },
+          ctx,
+        ),
+      ).resolves.toBeNull();
+
+      for (let i = 1; i <= 6; i++) {
+        const other = `q${String(i)}`;
+        open.push(
+          await startValueCollector({ subject: other, operation: "create", principal: other }),
+        );
+      }
+      let refused: unknown;
+      try {
+        await startValueCollector({ subject: "ninth", operation: "create", principal: "r" });
+      } catch (err) {
+        refused = err;
+      }
+      expect((refused as Error).message).toMatch(/concurrent value collectors/);
+      expect((refused as Error).message).not.toMatch(/for this caller/);
+    } finally {
+      for (const collector of open) await collector.close();
+    }
+  }, 20_000);
+
+  it("keeps a simultaneous burst for one principal at the ceiling of two", async () => {
+    const start = (subject: string) =>
+      startValueCollector({ subject, operation: "create", principal: "burst" });
+    const results = await Promise.allSettled([start("a"), start("b"), start("c")]);
+    const open = results.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+    try {
+      expect(open).toHaveLength(2);
+      const reasons = results.flatMap((r) =>
+        r.status === "rejected" ? [(r.reason as Error).message] : [],
+      );
+      expect(reasons).toHaveLength(1);
+      expect(reasons[0]).toMatch(/value collectors for this caller/);
+    } finally {
+      for (const collector of open) await collector.close();
+    }
+  }, 20_000);
 });
 
 describe("collectValueViaUrlElicitation", () => {
@@ -323,6 +397,8 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       listSecrets: vi.fn().mockReturnValue([]),
       resolveSecretId: vi.fn().mockResolvedValue("uuid-123"),
       auditServerStart: vi.fn(),
+      secretNameTaken: vi.fn().mockResolvedValue(false),
+      assertRotateAllowed: vi.fn().mockResolvedValue(undefined),
       ...overrides,
     } as unknown as VaultEngine;
   }
@@ -857,7 +933,16 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
     it("zeroes the collected value when the engine refuses the create on the retry", async () => {
       const engine = mockEngine();
       vi.mocked(engine.createSecret).mockRejectedValue(VaultError.duplicateSecret("api-key"));
-      const resumed = vi.spyOn(valueCollector, "resumeValueCollection");
+      const realRound = valueCollector.runModernValueRound;
+      const seen: Array<Uint8Array | null> = [];
+      const rounds = vi
+        .spyOn(valueCollector, "runModernValueRound")
+        .mockImplementation((ctx, round, finish) =>
+          realRound(ctx, round, (value) => {
+            seen.push(value);
+            return finish(value);
+          }),
+        );
 
       const modern = await connectModern(engine);
       modern.client.setRequestHandler("elicitation/create", async (request) => {
@@ -878,11 +963,11 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         expect(result.isError).toBe(true);
         expect(result.content[0]?.text).toContain("Secret already exists");
 
-        const collected = (await resumed.mock.results[0]?.value) as Uint8Array;
+        const collected = seen[0] as Uint8Array;
         expect(collected.length).toBe("value-the-engine-refuses".length);
         expect(collected.every((byte) => byte === 0)).toBe(true);
       } finally {
-        resumed.mockRestore();
+        rounds.mockRestore();
         await modern.close();
       }
     });
@@ -964,5 +1049,138 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         await modern.close();
       }
     });
+
+    it("runModernValueRound falls through when the client lacks the URL channel", async () => {
+      const ctx = {
+        mcpReq: { envelope: {}, requestState: () => undefined },
+      } as unknown as ServerContext;
+      const finish = vi.fn();
+      await expect(
+        runModernValueRound(
+          ctx,
+          { subject: "k", operation: "create", principal: "p", target: "/k" },
+          finish,
+        ),
+      ).resolves.toEqual({ kind: "fallthrough" });
+      expect(finish).not.toHaveBeenCalled();
+    });
+
+    it("runModernValueRound runs the preflight before round 1 and lets its refusal through", async () => {
+      const ctx = {
+        ...modernCtx(),
+        mcpReq: { ...modernCtx().mcpReq, requestState: () => undefined },
+      } as unknown as ServerContext;
+      const preflight = vi.fn().mockRejectedValue(VaultError.duplicateSecret("k"));
+      await expect(
+        runModernValueRound(
+          ctx,
+          { subject: "k", operation: "create", principal: "p", target: "/k", preflight },
+          vi.fn(),
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.DUPLICATE_SECRET });
+      expect(preflight).toHaveBeenCalledTimes(1);
+
+      const open: Awaited<ReturnType<typeof startValueCollector>>[] = [];
+      try {
+        open.push(
+          await startValueCollector({ subject: "probe-1", operation: "create", principal: "p" }),
+        );
+        open.push(
+          await startValueCollector({ subject: "probe-2", operation: "create", principal: "p" }),
+        );
+      } finally {
+        for (const collector of open) await collector.close();
+      }
+    }, 20_000);
+
+    it("runModernValueRound never runs the preflight on the retry", async () => {
+      const ctx = {
+        ...modernCtx(),
+        mcpReq: {
+          ...modernCtx().mcpReq,
+          requestState: () => ({ bogus: true }),
+          inputResponses: {},
+        },
+      } as unknown as ServerContext;
+      const preflight = vi.fn();
+      const finish = vi.fn();
+      await expect(
+        runModernValueRound(
+          ctx,
+          { subject: "k", operation: "create", principal: "p", target: "/k", preflight },
+          finish,
+        ),
+      ).rejects.toMatchObject({
+        code: ErrorCode.SCHEMA_VALIDATION_ERROR,
+        message: "requestState names no live value collection for this caller",
+      });
+      expect(preflight).not.toHaveBeenCalled();
+      expect(finish).not.toHaveBeenCalled();
+    });
+
+    it("create_secret refuses a taken name at round 1, before any form opens", async () => {
+      const engine = mockEngine();
+      vi.mocked(engine.secretNameTaken).mockResolvedValue(true);
+      const modern = await connectModern(engine);
+      const open: Awaited<ReturnType<typeof startValueCollector>>[] = [];
+      try {
+        const result = await modern.callTool("create_secret", { name: "api-key", type: "api_key" });
+        expect(result.isError).toBe(true);
+        expect(result.content[0]?.text).toContain("Secret already exists: api-key");
+        expect(engine.secretNameTaken).toHaveBeenCalledWith("api-key", undefined);
+        open.push(
+          await startValueCollector({
+            subject: "probe-1",
+            operation: "create",
+            principal: "tokenless-stdio",
+          }),
+        );
+        open.push(
+          await startValueCollector({
+            subject: "probe-2",
+            operation: "create",
+            principal: "tokenless-stdio",
+          }),
+        );
+        expect(engine.createSecret).not.toHaveBeenCalled();
+      } finally {
+        for (const collector of open) await collector.close();
+        await modern.close();
+      }
+    }, 20_000);
+
+    it("rotate_secret refuses a missing or ungranted handle at round 1, before any form opens", async () => {
+      const engine = mockEngine();
+      vi.mocked(engine.assertRotateAllowed).mockRejectedValue(
+        VaultError.secretNotFound("secret://gone"),
+      );
+      const modern = await connectModern(engine);
+      const open: Awaited<ReturnType<typeof startValueCollector>>[] = [];
+      try {
+        const result = await modern.callTool("rotate_secret", { handle: "secret://gone" });
+        expect(result.isError).toBe(true);
+        expect(engine.assertRotateAllowed).toHaveBeenCalledWith(
+          "secret://gone",
+          expect.objectContaining({ principal_id: "tokenless-stdio" }),
+        );
+        open.push(
+          await startValueCollector({
+            subject: "probe-1",
+            operation: "rotate",
+            principal: "tokenless-stdio",
+          }),
+        );
+        open.push(
+          await startValueCollector({
+            subject: "probe-2",
+            operation: "rotate",
+            principal: "tokenless-stdio",
+          }),
+        );
+      } finally {
+        for (const collector of open) await collector.close();
+        await modern.close();
+      }
+    }, 20_000);
   });
 });

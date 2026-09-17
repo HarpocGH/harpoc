@@ -449,6 +449,14 @@ export class SecretManager {
     return nonRevoked.length > 0 ? nonRevoked : matches;
   }
 
+  /** Whether a non-revoked secret of this name exists in the project — the create-time duplicate rule. */
+  async hasActiveSecret(name: string, project?: string): Promise<boolean> {
+    const nameHmac = await computeNameHmac(this.kek, name, project ?? null);
+    return this.store
+      .getSecretsByNameHmac(nameHmac)
+      .some((secret) => secret.status !== SecretStatus.REVOKED);
+  }
+
   // ---------------------------------------------------------------------------
   // Private
   // ---------------------------------------------------------------------------

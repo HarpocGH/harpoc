@@ -4,12 +4,10 @@ import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
 import { parseHandle } from "@harpoc/shared";
 import { collectValueFromTty } from "../elicitation/tty-prompt.js";
-import type { ValueRequestState } from "../elicitation/request-state.js";
 import {
   collectValueViaUrlElicitation,
-  elicitValueViaInputRequired,
   isModernRequest,
-  resumeValueCollection,
+  runModernValueRound,
 } from "../elicitation/value-collector.js";
 import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
@@ -95,6 +93,7 @@ export function registerRotateSecret(
           value = await collectValueViaUrlElicitation(server, {
             subject: parsed.name,
             operation: "rotate",
+            principal: scopeGuard.principalBinding,
           });
         }
         if (value === null && enableTtyPrompt) {
@@ -105,34 +104,27 @@ export function registerRotateSecret(
       };
 
       if (modern) {
-        const target = `${parsed.project ?? ""}/${parsed.name}`;
-        const state = ctx.mcpReq.requestState<ValueRequestState>();
-        if (state === undefined) {
-          const pending = await elicitValueViaInputRequired(
-            {
-              subject: parsed.name,
-              operation: "rotate",
-              principal: scopeGuard.principalBinding,
-              target,
-            },
-            ctx,
-          );
-          if (pending !== null) return pending;
-        } else {
-          const value = await resumeValueCollection(
-            state,
-            { principal: scopeGuard.principalBinding, operation: "rotate", target },
-            ctx.mcpReq.inputResponses,
-          );
-          try {
+        const round = await runModernValueRound(
+          ctx,
+          {
+            subject: parsed.name,
+            operation: "rotate",
+            principal: scopeGuard.principalBinding,
+            target: `${parsed.project ?? ""}/${parsed.name}`,
+            preflight: () => engine.assertRotateAllowed(args.handle, scopeGuard.caller),
+          },
+          async (value) => {
             const collected = await collectOutOfBand(value);
-            return await finishRotate(collected.value, collected.channel);
-          } finally {
-            value?.fill(0);
-          }
-        }
+            return finishRotate(collected.value, collected.channel);
+          },
+        );
+        if (round.kind !== "fallthrough") return round.result;
       }
 
+      // The rotate pre-flight (P3-35, both eras): a missing or ungranted secret
+      // refuses here, before any value is collected — audited and concealed
+      // exactly as rotateSecret itself would refuse it.
+      await engine.assertRotateAllowed(args.handle, scopeGuard.caller);
       const collected = await collectOutOfBand(null);
       return finishRotate(collected.value, collected.channel);
     },

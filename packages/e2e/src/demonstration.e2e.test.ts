@@ -73,6 +73,7 @@ describe("demonstration matrix — six contexts × four interfaces", () => {
   const emitted: EvidenceRecord[] = [];
 
   beforeAll(async () => {
+    const setupStartedAt = Date.now();
     for (const arm of CONTEXT_ARMS) {
       for (const service of arm.services) assertFleetUp(service);
     }
@@ -117,6 +118,13 @@ describe("demonstration matrix — six contexts × four interfaces", () => {
       await startRestSurface(vault, "e2e-demo-rest", [Permission.USE]),
       await startSdkSurface(vault, "e2e-demo-sdk", [Permission.USE]),
       await startCliSurface(vault, "e2e-demo-cli", [Permission.USE]),
+    );
+
+    // The setup's share of the 180 s hook budget, printed for the CI log and
+    // the record — a series line, never an assertion (a timing red under load
+    // widens the budget, not the product).
+    process.stdout.write(
+      `[demonstration setup] ${String(Date.now() - setupStartedAt)} ms of 180000\n`,
     );
   }, 180_000);
 

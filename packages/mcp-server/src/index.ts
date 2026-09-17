@@ -19,10 +19,10 @@ import {
   parseHttpPortOption,
   readLaunchTokenFile,
 } from "./cli-options.js";
-import { createMcpServer } from "./server.js";
+import { createStdioServerFactory } from "./server.js";
 import { installSignalLatch } from "./signal-latch.js";
 
-export { createMcpServer } from "./server.js";
+export { createMcpServer, createStdioServerFactory } from "./server.js";
 export type { CreateMcpServerOptions } from "./server.js";
 export { startMcpHttpServer, DEFAULT_MCP_HTTP_PORT } from "./http.js";
 export type { McpHttpServer, McpHttpServerOptions } from "./http.js";
@@ -212,13 +212,13 @@ async function main(): Promise<void> {
     // HARPOC_TOKEN (the file wins) — never argv (R9/A10). It is only read for
     // stdio — a profile-set variable must not affect --http, which
     // authenticates per request.
-    const server = createMcpServer({
+    const factory = createStdioServerFactory({
       engine,
       launchToken: fileToken ?? (process.env.HARPOC_TOKEN || undefined),
       allowTokenless: values["allow-tokenless"] as boolean | undefined,
       enableTtyPrompt: true,
     });
-    const stdio = serveStdio(() => server, {
+    const stdio = serveStdio(factory, {
       onerror: (error) => process.stderr.write(`[harpoc] MCP stdio error: ${error.message}\n`),
     });
     close = () => stdio.close();

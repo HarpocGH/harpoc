@@ -88,19 +88,22 @@ export function createDefaultOAuthManager(engine: VaultEngine): OAuthManager {
   });
 }
 
-/**
- * Create and configure the Harpoc MCP server with all tools and resources.
- * If a launch token is provided, it is verified and used for scope enforcement.
- * Without a token, construction is refused (TOKEN_REQUIRED) unless the caller
- * explicitly opts into the unrestricted local full-access mode via
- * `allowTokenless` — which is audited as `server.start`, fail-closed.
- */
-export function createMcpServer(options: CreateMcpServerOptions): McpServer {
-  const { engine, launchToken } = options;
+interface SharedServerParts {
+  rateLimiter: RateLimiter;
+  injectionGuard: InjectionGuard;
+  oauthManager: OAuthManager;
+  certManager: CertManager;
+}
 
+/**
+ * The launch gate: the token verified and the `server.start` row written, or
+ * the waiver, or the refusal — once per process for a stdio start, once per
+ * session or request for the HTTP leg (which writes no row here).
+ */
+function resolveScopeGuard(options: CreateMcpServerOptions): ScopeGuard {
+  const { engine, launchToken } = options;
   const accessInterface = options.accessInterface ?? "mcp";
 
-  let scopeGuard: ScopeGuard;
   if (launchToken) {
     const token = engine.verifyToken(launchToken);
     if (accessInterface === "mcp") {
@@ -118,13 +121,14 @@ export function createMcpServer(options: CreateMcpServerOptions): McpServer {
     // Revocation is re-consulted per call: this token is verified once, here,
     // and the server it launches can outlive the operator's decision to revoke
     // it (H7). The HTTP transport re-verifies per request and needs no hook.
-    scopeGuard = new ScopeGuard(
+    return new ScopeGuard(
       token,
       accessInterface,
       (jti) => engine.isTokenRevoked(jti),
       options.remoteAddress,
     );
-  } else if (options.allowTokenless) {
+  }
+  if (options.allowTokenless) {
     // The waiver goes into the tamper-evident trail before anything else
     // happens (W6): a failed write must leave neither a warning on stderr nor
     // a constructed server behind — no record, no unrestricted server.
@@ -136,24 +140,36 @@ export function createMcpServer(options: CreateMcpServerOptions): McpServer {
     process.stderr.write(
       "[harpoc] WARNING: --allow-tokenless — all tools and resources are unrestricted (no launch token)\n",
     );
-    scopeGuard = new ScopeGuard(null, accessInterface);
-  } else {
-    // The refusal is as much a start decision as the waiver: without a row the
-    // trail shows nothing at all for a launch that was attempted and denied.
-    engine.auditServerStart({
-      transport: "stdio",
-      tokenless: false,
-      ttyPrompt: options.enableTtyPrompt ?? false,
-      success: false,
-      error: ErrorCode.TOKEN_REQUIRED,
-    });
-    throw VaultError.tokenRequired();
+    return new ScopeGuard(null, accessInterface);
   }
+  // The refusal is as much a start decision as the waiver: without a row the
+  // trail shows nothing at all for a launch that was attempted and denied.
+  engine.auditServerStart({
+    transport: "stdio",
+    tokenless: false,
+    ttyPrompt: options.enableTtyPrompt ?? false,
+    success: false,
+    error: ErrorCode.TOKEN_REQUIRED,
+  });
+  throw VaultError.tokenRequired();
+}
 
-  const rateLimiter = options.rateLimiter ?? new RateLimiter();
-  const injectionGuard = options.injectionGuard ?? new InjectionGuard();
-  const oauthManager = options.oauthManager ?? createDefaultOAuthManager(engine);
-  const certManager = options.certManager ?? new CertManager(engine);
+function sharedParts(options: CreateMcpServerOptions): SharedServerParts {
+  return {
+    rateLimiter: options.rateLimiter ?? new RateLimiter(),
+    injectionGuard: options.injectionGuard ?? new InjectionGuard(),
+    oauthManager: options.oauthManager ?? createDefaultOAuthManager(options.engine),
+    certManager: options.certManager ?? new CertManager(options.engine),
+  };
+}
+
+function buildMcpServer(
+  options: CreateMcpServerOptions,
+  scopeGuard: ScopeGuard,
+  parts: SharedServerParts,
+): McpServer {
+  const { engine } = options;
+  const { rateLimiter, injectionGuard, oauthManager, certManager } = parts;
 
   const server = new McpServer(
     { name: "harpoc", version: HARPOC_VERSION },
@@ -186,4 +202,27 @@ export function createMcpServer(options: CreateMcpServerOptions): McpServer {
   registerProjectsResource(server, engine, scopeGuard);
 
   return server;
+}
+
+/**
+ * Create and configure the Harpoc MCP server with all tools and resources.
+ * If a launch token is provided, it is verified and used for scope enforcement.
+ * Without a token, construction is refused (TOKEN_REQUIRED) unless the caller
+ * explicitly opts into the unrestricted local full-access mode via
+ * `allowTokenless` — which is audited as `server.start`, fail-closed.
+ */
+export function createMcpServer(options: CreateMcpServerOptions): McpServer {
+  return buildMcpServer(options, resolveScopeGuard(options), sharedParts(options));
+}
+
+/**
+ * The stdio launchers' factory: the launch gate runs once, here, and every
+ * call builds a fresh instance over the same guard and shared parts — so the
+ * SDK's stdio entry can discard its discover-probe instance and pin a fresh
+ * one without closing and reconnecting a singleton (P3-24).
+ */
+export function createStdioServerFactory(options: CreateMcpServerOptions): () => McpServer {
+  const scopeGuard = resolveScopeGuard(options);
+  const parts = sharedParts(options);
+  return () => buildMcpServer(options, scopeGuard, parts);
 }

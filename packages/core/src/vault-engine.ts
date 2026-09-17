@@ -879,6 +879,38 @@ export class VaultEngine {
     }
   }
 
+  /**
+   * Whether an active secret of this name exists in the project — the
+   * duplicate check `createSecret` makes, without the create and without an
+   * audit row: the modern MCP leg asks before it opens a value form (P3-35).
+   */
+  async secretNameTaken(name: string, project?: string): Promise<boolean> {
+    const s = this.assertUnlocked();
+    return s.secretManager.hasActiveSecret(name, project);
+  }
+
+  /**
+   * The rotate pre-flight: resolves the handle and enforces the caller's
+   * `rotate` grant exactly as `rotateSecret` will — a failure is audited as a
+   * denied `secret.rotate` and concealed per R5 — so a refusal lands before
+   * any value is collected (P3-35, both eras). With no caller the trusted
+   * local path resolves the handle alone.
+   */
+  async assertRotateAllowed(handle: string, caller?: CallerContext): Promise<void> {
+    const s = this.assertUnlocked();
+    const resolved = await this.enforceCallerPolicy(
+      s,
+      handle,
+      caller,
+      "rotate",
+      AuditEventType.SECRET_ROTATE,
+      { handle },
+    );
+    if (resolved === undefined) {
+      await this.resolveSecretId(handle, caller, AuditEventType.SECRET_ROTATE);
+    }
+  }
+
   async revokeSecret(handle: string, caller?: CallerContext): Promise<void> {
     const s = this.assertUnlocked();
     const resolved = await this.enforceCallerPolicy(

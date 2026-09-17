@@ -5,6 +5,7 @@ import type { InMemoryToolDescriptor } from "@harpoc/test-utils";
 import type { SecretInfo } from "@harpoc/core";
 import type { VaultEngine } from "@harpoc/core";
 import type { ExpiringCertificateInfo, ExpiringOAuthTokenInfo } from "@harpoc/shared";
+import { VaultError } from "@harpoc/shared";
 import { InjectionGuard } from "../guards/injection-guard.js";
 import { RateLimiter } from "../guards/rate-limiter.js";
 import { ScopeGuard } from "../guards/scope-guard.js";
@@ -75,6 +76,8 @@ function mockEngine(): VaultEngine {
     queryAudit: vi.fn().mockReturnValue([]),
     getExpiringOAuthTokenStatuses: vi.fn().mockReturnValue([]),
     getExpiringCertificateStatuses: vi.fn().mockReturnValue([]),
+    secretNameTaken: vi.fn().mockResolvedValue(false),
+    assertRotateAllowed: vi.fn().mockResolvedValue(undefined),
   } as unknown as VaultEngine;
 }
 
@@ -640,6 +643,20 @@ describe("MCP Tools", () => {
 
     it("does not call engine.rotateSecret (deferred)", async () => {
       await callTool(server, "rotate_secret", { handle: "secret://my-key" });
+      expect(engine.rotateSecret).not.toHaveBeenCalled();
+    });
+
+    it("runs the rotate pre-flight before collecting on the legacy leg", async () => {
+      await callTool(server, "rotate_secret", { handle: "secret://my-key" });
+      expect(engine.assertRotateAllowed).toHaveBeenCalledWith("secret://my-key", expect.anything());
+    });
+
+    it("a refused pre-flight answers before any collection on the legacy leg", async () => {
+      vi.mocked(engine.assertRotateAllowed).mockRejectedValueOnce(
+        VaultError.secretNotFound("secret://my-key"),
+      );
+      const result = await callTool(server, "rotate_secret", { handle: "secret://my-key" });
+      expect(result.isError).toBe(true);
       expect(engine.rotateSecret).not.toHaveBeenCalled();
     });
   });
