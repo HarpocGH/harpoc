@@ -528,6 +528,68 @@ describe("renderProvenance", () => {
     });
     expect(tex).toContain("1 record(s) diverged");
   });
+
+  function singleArm(scenario: string, context: string, outcome = "SUCCEEDED"): EvidenceRecord {
+    return record({
+      scenario,
+      context,
+      variant: undefined,
+      arm: "harpoc",
+      expected: outcome,
+      observed: outcome,
+    });
+  }
+
+  it("names the excluded set by class: happy paths counted, the self-check, further demonstrations named", () => {
+    const tex = renderProvenance(
+      [
+        ...PAIR,
+        singleArm("git-http-happy-path", "git"),
+        singleArm("machinery-selfcheck", "process", "OPAQUE"),
+        singleArm("git-https-ca-pinned", "git"),
+      ],
+      PAIR_EXPECTATIONS,
+    );
+    expect(tex).toContain(
+      "3 single-arm records excluded from both tables (1 Phase 0--2 happy path, " +
+        "the harness self-check and 1 further single-arm demonstration: git-https-ca-pinned). ",
+    );
+  });
+
+  it("omits the demonstration clause when every excluded record is a happy path or the self-check", () => {
+    const tex = renderProvenance(
+      [
+        ...PAIR,
+        singleArm("ssh-happy-path", "ssh"),
+        singleArm("machinery-selfcheck", "process", "OPAQUE"),
+      ],
+      PAIR_EXPECTATIONS,
+    );
+    expect(tex).toContain(
+      "2 single-arm records excluded from both tables (1 Phase 0--2 happy path and the harness self-check). ",
+    );
+  });
+
+  it("keeps the parts summing to the count: a lone class, several self-check records, none", () => {
+    const lone = renderProvenance([...PAIR, singleArm("ssh-happy-path", "ssh")], PAIR_EXPECTATIONS);
+    expect(lone).toContain(
+      "1 single-arm records excluded from both tables (1 Phase 0--2 happy path). ",
+    );
+    const twice = renderProvenance(
+      [
+        ...PAIR,
+        singleArm("machinery-selfcheck", "process", "OPAQUE"),
+        { ...singleArm("machinery-selfcheck", "process", "OPAQUE"), surface: "engine" },
+      ],
+      PAIR_EXPECTATIONS,
+    );
+    expect(twice).toContain(
+      "2 single-arm records excluded from both tables (2 harness self-check records). ",
+    );
+    expect(renderProvenance(PAIR, PAIR_EXPECTATIONS)).toContain(
+      "0 single-arm records excluded from both tables (none). ",
+    );
+  });
 });
 
 describe("duplicate and multi-commit record sets (review 2026-08-14, F6)", () => {

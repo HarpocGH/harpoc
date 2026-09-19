@@ -262,3 +262,53 @@ describeWindows("Windows batch file exclusion", () => {
     );
   });
 });
+
+// On Windows only a PE file is spawnable: CreateProcess refuses everything else
+// (ERROR_BAD_EXE_FORMAT), and Docker Desktop 4.87 ships a POSIX shell shim named
+// `docker` beside `docker.exe`, which the bare-name probe found first (2026-09-17).
+describeWindows("Windows executable extensions", () => {
+  let dir: string;
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "harpoc-pe-"));
+    writeFileSync(join(dir, "docker"), '#!/usr/bin/env sh\nexec "$0.exe" "$@"\n');
+    writeFileSync(join(dir, "docker.exe"), "");
+    writeFileSync(join(dir, "shimonly"), "#!/usr/bin/env sh\nexit 0\n");
+    writeFileSync(join(dir, "UPPER.EXE"), "");
+    writeFileSync(join(dir, "tool2.com"), "");
+  });
+
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("skips an extensionless sibling and resolves the .exe for a bare name", () => {
+    expect(resolveExecutable("docker", [dir])).toBe(realpathSync(join(dir, "docker.exe")));
+  });
+
+  it("resolves nothing for a bare name whose only candidate is extensionless", () => {
+    expect(resolveExecutable("shimonly", [dir])).toBeNull();
+  });
+
+  it("refuses an absolute extensionless path at the resolver and at the allowlist choke point", async () => {
+    const shim = join(dir, "shimonly");
+    expect(resolveExecutable(shim, [])).toBeNull();
+    await expectVaultError(
+      () => resolveAndMatchCommand(shim, [shim], []),
+      ErrorCode.COMMAND_NOT_ALLOWED,
+    );
+  });
+
+  it("resolves an absolute extensionless path to its .exe sibling, never to the file itself", () => {
+    const shim = join(dir, "docker");
+    const exe = realpathSync(join(dir, "docker.exe"));
+    expect(resolveExecutable(shim, [])).toBe(exe);
+    expect(resolveAndMatchCommand(shim, [shim], [])).toBe(exe);
+  });
+
+  it("accepts .exe and .com, whatever the extension's case", () => {
+    const upper = join(dir, "UPPER.EXE");
+    expect(resolveExecutable(upper, [])).toBe(realpathSync(upper));
+    expect(resolveExecutable("tool2", [dir])).toBe(realpathSync(join(dir, "tool2.com")));
+  });
+});

@@ -1010,8 +1010,9 @@ export type MailConnectionConfig = z.infer<typeof mailConnectionConfigSchema>;
 /**
  * Git-HTTPS endpoint-authentication config: a private CA the vault pins for
  * the HTTPS transport through vault-authored `-c http.sslCAInfo` (both curl
- * backends — `http.schannelUseSSLCAInfo` covers Windows). Git-over-SSH uses
- * the `ssh` group's host keys instead.
+ * backends — `http.schannelUseSSLCAInfo` covers Windows, where the vault
+ * also names the schannel backend: `WIN32_PINNED_CA_CONFIG` in core's git
+ * injector). Git-over-SSH uses the `ssh` group's host keys instead.
  */
 export const gitConnectionConfigSchema = z.strictObject({
   ca_pem: z.string().min(1).max(65_536),

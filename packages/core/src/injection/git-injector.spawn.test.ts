@@ -308,17 +308,21 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
     );
 
     const [, args] = spawnMock.mock.calls[0] as SpawnCall;
-    expect(args.slice(0, 6)).toEqual([
+    const caConfig = [
       "-c",
       "http.followRedirects=false",
       "-c",
       `http.sslCAInfo=${caPathSeen}`,
       "-c",
       "http.schannelUseSSLCAInfo=true",
-    ]);
-    expect(args[6]).toBe("-c");
-    expect(args[7]).toMatch(/^core\.hooksPath=/);
-    expect(args.indexOf("clone")).toBe(8);
+      ...(process.platform === "win32"
+        ? ["-c", "http.sslBackend=schannel", "-c", "http.schannelCheckRevoke=best-effort"]
+        : []),
+    ];
+    expect(args.slice(0, caConfig.length)).toEqual(caConfig);
+    expect(args[caConfig.length]).toBe("-c");
+    expect(args[caConfig.length + 1]).toMatch(/^core\.hooksPath=/);
+    expect(args.indexOf("clone")).toBe(caConfig.length + 2);
     expect(caContent).toBe(CA_PEM);
     if (process.platform !== "win32") expect(caMode).toBe(0o600);
     expect(existsSync(caPathSeen as string)).toBe(false);
@@ -334,6 +338,18 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
     const [, args] = spawnMock.mock.calls[0] as SpawnCall;
     expect(args.join(" ")).not.toContain("sslCAInfo");
     expect(args.indexOf("clone")).toBe(4);
+  });
+
+  it("leaves the TLS backend to the host's git when no CA is pinned", async () => {
+    await injector.executeWithSecret(
+      { type: "git", operation: "clone", repository: REPO },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      httpsPolicy(),
+      undefined,
+    );
+    const [, args] = spawnMock.mock.calls[0] as SpawnCall;
+    expect(args.join(" ")).not.toContain("http.sslBackend=");
+    expect(args.join(" ")).not.toContain("http.schannelCheckRevoke=");
   });
 
   it("N11: forces core.hooksPath to an empty vault-authored directory that exists only for the run", async () => {

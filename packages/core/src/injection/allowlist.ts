@@ -138,23 +138,30 @@ function globMatch(pattern: string, value: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Executable extensions probed when resolving a bare command name. Windows
- * batch files (`.cmd`/`.bat`) are deliberately absent — see `isWindowsBatchFile`.
+ * Executable extensions probed when resolving a bare command name. The bare
+ * name is probed first so an absolute path that already carries its extension
+ * resolves as given; on Windows the resolved file must still pass
+ * `isWindowsExecutable`, so an extensionless sibling is skipped and a batch
+ * file is never resolved.
  */
 const EXECUTABLE_EXTENSIONS = process.platform === "win32" ? ["", ".exe", ".com"] : [""];
 
 /**
- * Windows batch files are never resolvable as commands. Spawning a `.cmd`/`.bat`
- * with `shell:false` is cmd.exe interpretation in disguise: Node versions
- * before the CVE-2024-27980 fix silently wrapped such spawns in cmd.exe — an
- * argument-injection surface that collapses the no-shell property the process
- * context is built on — and patched versions refuse them with EINVAL. The
- * vault enforces the exclusion itself rather than inheriting it from the
- * runtime's version. Checked against the final symlink-resolved path so a
- * symlink cannot smuggle a batch file in.
+ * On Windows only a `.exe` / `.com` file is resolvable as a command, checked
+ * against the final symlink-resolved path so a symlink cannot smuggle anything
+ * else in. Batch files: spawning a `.cmd`/`.bat` with `shell:false` is cmd.exe
+ * interpretation in disguise — Node versions before the CVE-2024-27980 fix
+ * silently wrapped such spawns in cmd.exe, an argument-injection surface that
+ * collapses the no-shell property the process context is built on — and
+ * patched versions refuse them with EINVAL; the vault enforces the exclusion
+ * itself rather than inheriting it from the runtime's version. Extensionless
+ * files: CreateProcess cannot run them (ERROR_BAD_EXE_FORMAT), and Docker
+ * Desktop 4.87 ships a POSIX shell shim named `docker` beside `docker.exe`,
+ * which a bare-name probe found first (2026-09-17). POSIX has no such rule:
+ * any file the probe finds is spawnable.
  */
-function isWindowsBatchFile(p: string): boolean {
-  return process.platform === "win32" && /\.(cmd|bat)$/i.test(p);
+function isWindowsExecutable(p: string): boolean {
+  return process.platform !== "win32" || /\.(exe|com)$/i.test(p);
 }
 
 /**
@@ -176,8 +183,9 @@ function normalizeForCompare(p: string): string {
  * absolute, symlink-resolved path. Returns null when it cannot be resolved.
  * Relative paths containing a separator are rejected (null) — callers must use
  * a bare name resolved against the controlled PATH or an absolute path. On
- * Windows, batch files are never resolved — neither probed for bare names nor
- * accepted as absolute paths.
+ * Windows only a `.exe` / `.com` file resolves: a batch file or an
+ * extensionless file is never resolved, neither for a bare name nor as an
+ * absolute path.
  */
 export function resolveExecutable(command: string, pathDirs: string[]): string | null {
   const candidates: string[] = [];
@@ -200,7 +208,7 @@ export function resolveExecutable(command: string, pathDirs: string[]): string |
           } catch {
             resolved = resolve(full);
           }
-          if (isWindowsBatchFile(resolved)) continue;
+          if (!isWindowsExecutable(resolved)) continue;
           return resolved;
         }
       } catch {

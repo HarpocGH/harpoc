@@ -177,8 +177,9 @@ export function classify(records) {
       continue;
     }
     // Single-arm records that are neither a paired row nor a demonstration
-    // cell: the Phase 0-2 happy paths and the machinery self-check. Reported in
-    // the provenance block so their exclusion from both tables is stated.
+    // cell: the Phase 0-2 happy paths, the machinery self-check and any further
+    // single-arm demonstration. Reported in the provenance block so their
+    // exclusion from both tables is stated.
     if (r.arm === "harpoc") other.push(r);
     else unclassified.push(r);
   }
@@ -495,6 +496,42 @@ export function renderMatrixTable(matrix, transport) {
 }
 
 /**
+ * The excluded set's composition, derived from the records so the parenthetical
+ * cannot drift from the count beside it (C3-14, 2026-09-17: the fixed string
+ * named six of eight once the two single-arm git-https records joined the set).
+ * Three classes: the Phase 0--2 happy paths (`happy-path` in the scenario name),
+ * the machinery self-check, and any further single-arm demonstration, named.
+ */
+function describeExcluded(other) {
+  const isHappy = (r) => r.scenario.includes("happy-path");
+  const isSelfCheck = (r) => r.scenario === "machinery-selfcheck";
+  const happy = other.filter(isHappy).length;
+  const selfChecks = other.filter(isSelfCheck).length;
+  const further = other
+    .filter((r) => !isHappy(r) && !isSelfCheck(r))
+    .map((r) => escapeLatex(r.scenario))
+    .sort();
+  const parts = [];
+  if (happy > 0) parts.push(`${String(happy)} Phase 0--2 happy path${happy === 1 ? "" : "s"}`);
+  if (selfChecks > 0) {
+    parts.push(
+      selfChecks === 1
+        ? "the harness self-check"
+        : `${String(selfChecks)} harness self-check records`,
+    );
+  }
+  if (further.length > 0) {
+    parts.push(
+      `${String(further.length)} further single-arm demonstration${further.length === 1 ? "" : "s"}: ` +
+        further.join(", "),
+    );
+  }
+  if (parts.length === 0) return "none";
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+/**
  * Where the numbers came from. Without this the tables are unattributable, and
  * a caveat accepted at generation time would not travel with the artifact.
  */
@@ -517,8 +554,7 @@ export function renderProvenance(records, expectations, options = {}) {
       "pre-registered expectations committed before the run. " +
       `${String(paired.length)} paired attack rows, ${String(matrix.length)} matrix cells, ` +
       `${String(transport.length)} transport-coverage cells, ${String(other.length)} ` +
-      "single-arm records excluded from both tables (the Phase 0--2 happy paths and the " +
-      "harness self-check). " +
+      `single-arm records excluded from both tables (${describeExcluded(other)}). ` +
       (records.every((r) => r.match === true)
         ? "Every record matched its pre-registration."
         : `${String(records.filter((r) => r.match !== true).length)} record(s) diverged from ` +

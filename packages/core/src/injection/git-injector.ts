@@ -101,7 +101,9 @@ process.stdout.write(out + "\\n");
  * host the vault never resolved, validated or allowlisted. A stored `git.ca_pem`
  * (D64) adds `http.sslCAInfo=<0600 temp file>` and
  * `http.schannelUseSSLCAInfo=true` — vault-authored, since `-c` is denied to
- * callers and both curl backends honor the pair.
+ * callers and both curl backends honor the pair — and, on win32,
+ * `WIN32_PINNED_CA_CONFIG`, so the pin does not ride on the host's
+ * `http.sslBackend`.
  *
  * Both transports additionally carry -c core.hooksPath=<empty temp dir>, prepended
  * by buildGitArgs, so no hook of the caller's tree — post-merge on pull, pre-push on
@@ -109,6 +111,25 @@ process.stdout.write(out + "\\n");
  * socket in its environment (N11).
  */
 const HTTPS_FORCED_CONFIG = ["-c", "http.followRedirects=false"];
+
+/**
+ * Beside a pinned CA on win32 the TLS backend is named explicitly, with
+ * best-effort revocation: git honours `http.schannel*` only while
+ * `http.sslBackend` is `schannel`, and a host whose git has no system config
+ * (`GIT_CONFIG_NOSYSTEM`, a portable git) leaves the backend unset — curl's
+ * schannel default then verifies the CA file with a strict revocation check that
+ * a private CA without CRL/OCSP fails (`CERT_TRUST_REVOCATION_STATUS_UNKNOWN`,
+ * exit 128; 2026-09-17). `best-effort` still checks revocation where the CA
+ * publishes it, which the OpenSSL backend never does. Unpinned HTTPS keeps the
+ * host's backend. The value is Git for Windows' (2.26.0 and later): an upstream
+ * build of git parses the key as a boolean and refuses `best-effort`.
+ */
+const WIN32_PINNED_CA_CONFIG = [
+  "-c",
+  "http.sslBackend=schannel",
+  "-c",
+  "http.schannelCheckRevoke=best-effort",
+];
 
 /**
  * Executes a Git operation, authenticating over HTTPS (request-mediated, via a
@@ -202,7 +223,15 @@ export class GitInjector {
           : writeTempSshFile("harpoc-git-ca-", "ca.pem", config.git.ca_pem);
       const args = [
         ...HTTPS_FORCED_CONFIG,
-        ...(ca ? ["-c", `http.sslCAInfo=${ca.file}`, "-c", "http.schannelUseSSLCAInfo=true"] : []),
+        ...(ca
+          ? [
+              "-c",
+              `http.sslCAInfo=${ca.file}`,
+              "-c",
+              "http.schannelUseSSLCAInfo=true",
+              ...(process.platform === "win32" ? WIN32_PINNED_CA_CONFIG : []),
+            ]
+          : []),
         ...built.args,
       ];
       const env = baseGitEnv(policy.env_allowlist);
