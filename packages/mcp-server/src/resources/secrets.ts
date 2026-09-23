@@ -17,7 +17,7 @@ export function registerSecretsResource(
       mimeType: "application/json",
     },
     async (uri) => {
-      scopeGuard.checkAccess("list");
+      scopeGuard.checkAccess("list", undefined, undefined, `resources/read ${uri.href}`);
       const secrets = scopeGuard.filterByScope(engine.listSecrets(undefined, scopeGuard.caller));
       const result = secrets.map((s) => ({
         handle: s.handle,
@@ -40,7 +40,12 @@ export function registerSecretsResource(
     "secret-by-name",
     new ResourceTemplate("secret://vault/secrets/{name}", {
       list: async () => {
-        scopeGuard.checkAccess("list");
+        scopeGuard.checkAccess(
+          "list",
+          undefined,
+          undefined,
+          "resources/list secret://vault/secrets/{name}",
+        );
         const secrets = scopeGuard.filterByScope(engine.listSecrets(undefined, scopeGuard.caller));
         return {
           resources: secrets.map((s) => ({
@@ -58,7 +63,7 @@ export function registerSecretsResource(
     },
     async (uri, variables) => {
       const name = variables.name as string;
-      scopeGuard.checkAccess("read", undefined, name);
+      scopeGuard.checkAccess("read", undefined, name, `resources/read ${uri.href}`);
 
       // The template variable is a bare name, which does not resolve to a
       // handle for project-scoped secrets — so the listing (unfiltered, no

@@ -41,6 +41,7 @@ const MOCK_POLICY: AccessPolicy = {
 function createMockEngine(token: VaultApiToken = ADMIN_TOKEN) {
   return {
     verifyToken: vi.fn().mockReturnValue(token),
+    auditScopeRefusal: vi.fn(),
     resolveSecretId: vi.fn().mockResolvedValue("secret-uuid-1"),
     listPolicies: vi.fn().mockReturnValue([MOCK_POLICY]),
     grantPolicy: vi.fn().mockReturnValue(MOCK_POLICY),

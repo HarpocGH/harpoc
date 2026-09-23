@@ -57,8 +57,9 @@ export function registerOAuthConnectCommand(oauth: Command): void {
       ) => {
         try {
           if (options.device && options.clientCredentials) {
-            console.error("Error: --device and --client-credentials are mutually exclusive.");
-            process.exit(1);
+            throw VaultError.invalidInput(
+              "--device and --client-credentials are mutually exclusive.",
+            );
           }
 
           const callbackPort = parseIntOption(options.callbackPort, "callback port", 0, MAX_PORT);
@@ -78,10 +79,9 @@ export function registerOAuthConnectCommand(oauth: Command): void {
           }
           if (clientSecret === "") clientSecret = undefined;
           if (grantType === OAuthGrantType.CLIENT_CREDENTIALS && clientSecret === undefined) {
-            console.error(
-              "Error: client_credentials requires a client secret. Set HARPOC_OAUTH_CLIENT_SECRET or enter it at the prompt.",
+            throw VaultError.invalidInput(
+              "client_credentials requires a client secret. Set HARPOC_OAUTH_CLIENT_SECRET or enter it at the prompt.",
             );
-            process.exit(1);
           }
 
           const { config, project } = buildOAuthProviderConfig(

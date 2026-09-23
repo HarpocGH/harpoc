@@ -121,12 +121,14 @@ function resolveScopeGuard(options: CreateMcpServerOptions): ScopeGuard {
     // Revocation is re-consulted per call: this token is verified once, here,
     // and the server it launches can outlive the operator's decision to revoke
     // it (H7). The HTTP transport re-verifies per request and needs no hook.
-    return new ScopeGuard(
+    const guard = new ScopeGuard(
       token,
       accessInterface,
       (jti) => engine.isTokenRevoked(jti),
       options.remoteAddress,
+      (operation, reason) => engine.auditScopeRefusal(guard.caller, operation, reason),
     );
+    return guard;
   }
   if (options.allowTokenless) {
     // The waiver goes into the tamper-evident trail before anything else

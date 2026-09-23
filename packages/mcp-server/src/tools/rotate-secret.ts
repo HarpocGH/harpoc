@@ -32,7 +32,7 @@ export function registerRotateSecret(
     },
     async (args, ctx) => {
       const parsed = parseHandle(args.handle);
-      scopeGuard.checkAccess(PERMISSION, parsed.project, parsed.name);
+      scopeGuard.checkAccess(PERMISSION, parsed.project, parsed.name, "rotate_secret");
       // Bucketed per secret: like create_secret this opens a URL-mode value
       // collector per call, which the global tier alone barely bounds.
       rateLimiter.checkLimit(`rotate:${parsed.project ?? ""}/${parsed.name}`);

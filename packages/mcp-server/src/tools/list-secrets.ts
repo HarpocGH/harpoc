@@ -30,7 +30,7 @@ export function registerListSecrets(
       }),
     },
     async (args) => {
-      scopeGuard.checkAccess(PERMISSION, args.project);
+      scopeGuard.checkAccess(PERMISSION, args.project, undefined, "list_secrets");
       rateLimiter.checkLimit();
 
       let secrets = engine.listSecrets(args.project, scopeGuard.caller);

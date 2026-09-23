@@ -10,7 +10,7 @@ import {
   updateAgentInputSchema,
 } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
-import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
+import { checkScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
 import { callerOf } from "../utils/caller.js";
 import { readJsonBody } from "../utils/read-json-body.js";
 import { schemaValidationError } from "../utils/schema-error.js";
@@ -38,8 +38,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
 
   router.get("/", (c) => {
-    const token = c.get("token");
-    checkTokenScope(token, "admin");
+    checkScope(c, "admin");
 
     const status = c.req.query("status");
     const parsed = listAgentsQuerySchema.safeParse({ status: status ?? undefined });
@@ -54,8 +53,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
   });
 
   router.post("/", async (c) => {
-    const token = c.get("token");
-    checkTokenScope(token, "admin");
+    checkScope(c, "admin");
 
     const body = await readJsonBody(c);
     const parsed = registerAgentInputSchema.safeParse(body);
@@ -70,8 +68,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
   });
 
   router.get("/:name", (c) => {
-    const token = c.get("token");
-    checkTokenScope(token, "admin");
+    checkScope(c, "admin");
     const name = parseAgentName(c.req.param("name"));
 
     const engine = c.get("engine");
@@ -80,8 +77,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
 
   // Replace semantics: an omitted field is cleared (the CLI merges instead).
   router.put("/:name", async (c) => {
-    const token = c.get("token");
-    checkTokenScope(token, "admin");
+    checkScope(c, "admin");
     const name = parseAgentName(c.req.param("name"));
 
     const body = await readJsonBody(c);
@@ -98,8 +94,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
 
   // Body-less, like /oauth/:handle/refresh.
   router.post("/:name/deactivate", (c) => {
-    const token = c.get("token");
-    checkTokenScope(token, "admin");
+    checkScope(c, "admin");
     const name = parseAgentName(c.req.param("name"));
 
     const engine = c.get("engine");
@@ -109,8 +104,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
   });
 
   router.post("/:name/activate", (c) => {
-    const token = c.get("token");
-    checkTokenScope(token, "admin");
+    checkScope(c, "admin");
     const name = parseAgentName(c.req.param("name"));
 
     const engine = c.get("engine");
@@ -120,8 +114,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
   });
 
   router.delete("/:name", (c) => {
-    const token = c.get("token");
-    checkTokenScope(token, "admin");
+    checkScope(c, "admin");
     const name = parseAgentName(c.req.param("name"));
 
     const engine = c.get("engine");
@@ -131,8 +124,7 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
   });
 
   router.get("/:name/policies", (c) => {
-    const token = c.get("token");
-    checkTokenScope(token, "admin");
+    checkScope(c, "admin");
     const name = parseAgentName(c.req.param("name"));
 
     const engine = c.get("engine");
@@ -144,12 +136,12 @@ export function createAgentRoutes(): Hono<HarpocEnv> {
   // The permission matrix cell: replace-semantics per (agent, secret).
   router.put("/:name/secrets/:handle/permissions", async (c) => {
     const token = c.get("token");
-    checkTokenScope(token, "admin");
+    checkScope(c, "admin");
     const name = parseAgentName(c.req.param("name"));
 
     const handleParam = c.req.param("handle");
     const { project, name: secretName } = parseHandleParam(handleParam);
-    checkTokenScope(token, "admin", project, secretName);
+    checkScope(c, "admin", project, secretName);
 
     const body = await readJsonBody(c);
     const parsed = setAgentPermissionsInputSchema.safeParse(body);

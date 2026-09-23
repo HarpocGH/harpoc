@@ -259,13 +259,21 @@ describe("MCP Resources", () => {
     });
 
     it("audit resource requires admin permission", async () => {
-      const listOnly = new ScopeGuard(makeScopedToken({ scope: ["list"] }));
+      const seen = vi.fn();
+      const listOnly = new ScopeGuard(
+        makeScopedToken({ scope: ["list"] }),
+        "mcp",
+        undefined,
+        undefined,
+        seen,
+      );
       const srv = new McpServer({ name: "test", version: "0.0.0" });
       registerAuditResource(srv, engine, listOnly);
 
       await expect(
         invokeHandler(srv, "resources/read", { uri: "secret://vault/audit/recent" }),
       ).rejects.toThrow(expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }));
+      expect(seen).toHaveBeenCalledWith("resources/read secret://vault/audit/recent", "permission");
     });
   });
 });

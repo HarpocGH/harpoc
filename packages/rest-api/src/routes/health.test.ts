@@ -30,6 +30,7 @@ function createTestApp(
   const engine = {
     getState: vi.fn().mockReturnValue(state),
     verifyToken: vi.fn().mockReturnValue(token),
+    auditScopeRefusal: vi.fn(),
     listSecrets: vi.fn().mockReturnValue(
       secrets.map((s, i) => ({
         handle: `secret://${s.name ?? `key${i}`}`,

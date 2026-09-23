@@ -11,7 +11,12 @@ import {
 } from "@harpoc/shared";
 import { InjectionGuard, sanitizeUseSecretResult } from "@harpoc/core";
 import type { HarpocEnv } from "../types.js";
-import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
+import {
+  checkScope,
+  buildHandle,
+  parseHandleParam,
+  recordScopeRefusal,
+} from "../middleware/scope.js";
 import { callerOf } from "../utils/caller.js";
 import { readJsonBody } from "../utils/read-json-body.js";
 import { schemaValidationError } from "../utils/schema-error.js";
@@ -23,7 +28,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
   // List secrets
   router.get("/", (c) => {
     const token = c.get("token");
-    checkTokenScope(token, "list");
+    checkScope(c, "list");
 
     const engine = c.get("engine");
     // `?project=` arrives as the empty string, which is falsy but NOT nullish:
@@ -34,6 +39,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
     // If token is project-scoped, enforce it
     if (token.project && project && project !== token.project) {
+      recordScopeRefusal(c, "project");
       throw VaultError.accessDenied(`Token is scoped to project: ${token.project}`);
     }
     const effectiveProject = project ?? token.project;
@@ -50,8 +56,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
   // Create secret
   router.post("/", async (c) => {
-    const token = c.get("token");
-    checkTokenScope(token, "create");
+    checkScope(c, "create");
 
     const engine = c.get("engine");
     const body = await readJsonBody(c);
@@ -61,7 +66,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
       throw schemaValidationError(parsed.error);
     }
 
-    checkTokenScope(token, "create", parsed.data.project, parsed.data.name);
+    checkScope(c, "create", parsed.data.project, parsed.data.name);
 
     const result = await engine.createSecret(
       {
@@ -81,9 +86,8 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
   // Get secret info
   router.get("/:handle", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "read", project, name);
+    checkScope(c, "read", project, name);
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
@@ -97,9 +101,8 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
   // Get secret value (base64-encoded)
   router.get("/:handle/value", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "read", project, name);
+    checkScope(c, "read", project, name);
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
@@ -111,9 +114,8 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
   // Revoke secret
   router.delete("/:handle", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "revoke", project, name);
+    checkScope(c, "revoke", project, name);
 
     const confirm = c.req.query("confirm");
     if (confirm !== "true") {
@@ -130,9 +132,8 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
   // Rotate secret
   router.post("/:handle/rotate", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "rotate", project, name);
+    checkScope(c, "rotate", project, name);
 
     const engine = c.get("engine");
     const body = await readJsonBody(c);
@@ -155,9 +156,8 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
   // Use secret (request- or process-mediated injection)
   router.post("/:handle/use", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "use", project, name);
+    checkScope(c, "use", project, name);
 
     const engine = c.get("engine");
     const body = await readJsonBody(c);
@@ -179,9 +179,8 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
   // Get injection policy (URL + command allowlists)
   router.get("/:handle/injection-policy", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "read", project, name);
+    checkScope(c, "read", project, name);
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
@@ -193,9 +192,8 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
   // it takes `admin` at the interface and per secret (R1); the endpoint pins
   // (mcp-server, connection-config) stay `rotate`.
   router.put("/:handle/injection-policy", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "admin", project, name);
+    checkScope(c, "admin", project, name);
 
     const engine = c.get("engine");
     const body = await readJsonBody(c);
@@ -212,9 +210,8 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
   // Get downstream MCP server config
   router.get("/:handle/mcp-server", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "read", project, name);
+    checkScope(c, "read", project, name);
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
@@ -224,9 +221,8 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
   // Set downstream MCP server config (trusted administrative operation)
   router.put("/:handle/mcp-server", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "rotate", project, name);
+    checkScope(c, "rotate", project, name);
 
     const engine = c.get("engine");
     const body = await readJsonBody(c);
@@ -242,9 +238,8 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
   // Delete downstream MCP server config
   router.delete("/:handle/mcp-server", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "rotate", project, name);
+    checkScope(c, "rotate", project, name);
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
@@ -252,11 +247,10 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     return c.json({ data: { deleted } });
   });
 
-  // Get endpoint-authentication config (database TLS / SSH host keys)
+  // Get endpoint-authentication config (database TLS, SSH host keys, mail TLS, the Git-HTTPS and HTTP CA pins)
   router.get("/:handle/connection-config", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "read", project, name);
+    checkScope(c, "read", project, name);
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
@@ -266,9 +260,8 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
   // Set endpoint-authentication config (trusted administrative operation)
   router.put("/:handle/connection-config", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "rotate", project, name);
+    checkScope(c, "rotate", project, name);
 
     const engine = c.get("engine");
     const body = await readJsonBody(c);
@@ -284,9 +277,8 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
 
   // Delete endpoint-authentication config
   router.delete("/:handle/connection-config", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "rotate", project, name);
+    checkScope(c, "rotate", project, name);
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));

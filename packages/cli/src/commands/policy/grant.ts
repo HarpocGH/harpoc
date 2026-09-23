@@ -1,9 +1,10 @@
 import type { Command } from "commander";
 import type { Permission } from "@harpoc/shared";
-import { AuditEventType, permissionSchema, principalTypeSchema } from "@harpoc/shared";
+import { AuditEventType, VaultError, permissionSchema, principalTypeSchema } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printSuccess, printJson, printRecord } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { parsePositiveInteger } from "../../utils/options.js";
 
 export function registerPolicyGrantCommand(policy: Command): void {
   policy
@@ -51,7 +52,7 @@ export function registerPolicyGrantCommand(policy: Command): void {
             for (const p of permStrings) {
               const result = permissionSchema.safeParse(p);
               if (!result.success) {
-                throw new Error(
+                throw VaultError.invalidInput(
                   `Invalid permission: "${p}". Valid: list, read, use, create, rotate, revoke, admin`,
                 );
               }
@@ -60,15 +61,18 @@ export function registerPolicyGrantCommand(policy: Command): void {
 
             const parsedType = principalTypeSchema.safeParse(options.principalType);
             if (!parsedType.success) {
-              throw new Error(
+              throw VaultError.invalidInput(
                 `Invalid principal type: "${options.principalType}". Valid: agent, tool, project, user`,
               );
             }
 
-            const expiresMinutes = options.expires ? parseInt(options.expires, 10) : undefined;
-            if (expiresMinutes !== undefined && (isNaN(expiresMinutes) || expiresMinutes <= 0)) {
-              throw new Error("--expires must be a positive number of minutes");
-            }
+            const expiresMinutes =
+              options.expires !== undefined
+                ? parsePositiveInteger(
+                    options.expires,
+                    "--expires must be a positive number of minutes",
+                  )
+                : undefined;
             const expiresAt =
               expiresMinutes !== undefined ? Date.now() + expiresMinutes * 60 * 1000 : undefined;
 

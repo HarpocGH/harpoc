@@ -24,6 +24,7 @@ const NON_ADMIN_TOKEN: VaultApiToken = {
 function createMockEngine(token: VaultApiToken = ADMIN_TOKEN) {
   return {
     verifyToken: vi.fn().mockReturnValue(token),
+    auditScopeRefusal: vi.fn(),
     queryAudit: vi.fn().mockReturnValue([
       {
         id: 1,

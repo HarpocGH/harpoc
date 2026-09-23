@@ -6,7 +6,7 @@ import type {
   HealthResponse,
 } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
-import { checkTokenScope } from "../middleware/scope.js";
+import { checkScope } from "../middleware/scope.js";
 import { callerOf } from "../utils/caller.js";
 
 const MAX_EXPIRING_WINDOW_DAYS = 365;
@@ -32,7 +32,7 @@ export function createExpiringSecretsRoute(): Hono<HarpocEnv> {
 
   router.get("/", (c) => {
     const token = c.get("token");
-    checkTokenScope(token, "list");
+    checkScope(c, "list");
 
     const engine = c.get("engine");
 

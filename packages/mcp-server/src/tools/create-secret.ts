@@ -40,7 +40,7 @@ export function registerCreateSecret(
       }),
     },
     async (args, ctx) => {
-      scopeGuard.checkAccess(PERMISSION, args.project, args.name);
+      scopeGuard.checkAccess(PERMISSION, args.project, args.name, "create_secret");
       // Bucketed by name, not just globally: this tool opens a URL-mode value
       // collector (a loopback listener plus a timer) per call, and the global
       // tier alone is far too generous a ceiling on that. No secret id exists

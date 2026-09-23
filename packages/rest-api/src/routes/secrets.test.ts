@@ -46,6 +46,7 @@ const MOCK_TOKEN: VaultApiToken = {
 function createMockEngine() {
   return {
     verifyToken: vi.fn().mockReturnValue(MOCK_TOKEN),
+    auditScopeRefusal: vi.fn(),
     listSecrets: vi.fn().mockReturnValue([
       {
         handle: "secret://test-key",
@@ -1229,6 +1230,12 @@ describe("secret routes", () => {
         engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: withoutScope(tc.missing) });
         const res = await tc.request();
         expect(res.status).toBe(403);
+        expect(engine.auditScopeRefusal).toHaveBeenCalledTimes(1);
+        expect(engine.auditScopeRefusal).toHaveBeenCalledWith(
+          expect.objectContaining({ principal_id: MOCK_TOKEN.sub, interface: "rest" }),
+          expect.stringMatching(/^(GET|POST|PUT|DELETE) \/api\/v1\/secrets/),
+          "permission",
+        );
         expect(engine[tc.engineFn]).not.toHaveBeenCalled();
       });
     }
@@ -1297,6 +1304,12 @@ describe("secret routes", () => {
         engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["db-*"] });
         const res = await tc.request();
         expect(res.status).toBe(403);
+        expect(engine.auditScopeRefusal).toHaveBeenCalledTimes(1);
+        expect(engine.auditScopeRefusal).toHaveBeenCalledWith(
+          expect.objectContaining({ principal_id: MOCK_TOKEN.sub, interface: "rest" }),
+          expect.stringMatching(/^(GET|POST|PUT|DELETE) \/api\/v1\/secrets/),
+          "secret",
+        );
         expect(engine[tc.engineFn]).not.toHaveBeenCalled();
       });
     }
@@ -1596,6 +1609,11 @@ describe("GET /secrets — project scope", () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.listSecrets).not.toHaveBeenCalled();
+    expect(engine.auditScopeRefusal).toHaveBeenCalledWith(
+      expect.objectContaining({ project: "myproj", interface: "rest" }),
+      "GET /api/v1/secrets",
+      "project",
+    );
   });
 
   it("honours the token's own project when it matches", async () => {
@@ -1603,6 +1621,21 @@ describe("GET /secrets — project scope", () => {
     const res = await app.request("/api/v1/secrets?project=myproj", { headers: AUTH });
     expect(res.status).toBe(200);
     expect(engine.listSecrets).toHaveBeenCalledWith("myproj", expect.anything());
+    expect(engine.auditScopeRefusal).not.toHaveBeenCalled();
+  });
+
+  it("a scope refusal on a sealed vault answers 503 VAULT_LOCKED (the writer re-enters assertUnlocked)", async () => {
+    engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: ["list"] });
+    engine.auditScopeRefusal.mockImplementation(() => {
+      throw VaultError.vaultLocked();
+    });
+    const res = await app.request("/api/v1/secrets", {
+      method: "POST",
+      headers: { ...AUTH, "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.VAULT_LOCKED);
   });
 
   it("negative control: an unscoped token may still request a project", async () => {

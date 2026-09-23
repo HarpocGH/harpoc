@@ -418,6 +418,79 @@ describe("harpoc agent group", () => {
       expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
     });
 
+    it("refuses a non-integer --expires as an INVALID_INPUT envelope under --json (P1bF-2)", async () => {
+      await expect(
+        run([
+          "permissions",
+          "bot",
+          "secret://k",
+          "--permissions",
+          "use",
+          "--expires",
+          "5abc",
+          "--json",
+        ]),
+      ).rejects.toThrow("process.exit");
+      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+        error: "INVALID_INPUT",
+        message: "--expires must be a positive number of minutes",
+      });
+      expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
+    });
+
+    it("refuses an empty --expires instead of writing a grant with no expiry (P1bF-2)", async () => {
+      await expect(
+        run(["permissions", "bot", "secret://k", "--permissions", "use", "--expires", ""]),
+      ).rejects.toThrow("process.exit");
+      expect(stderr()).toContain("--expires must be a positive number of minutes");
+      expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
+    });
+
+    it("--permissions with --clear is refused as an INVALID_INPUT envelope under --json (P1bF-2)", async () => {
+      await expect(
+        run(["permissions", "bot", "secret://k", "--permissions", "use", "--clear", "--json"]),
+      ).rejects.toThrow("process.exit");
+      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+        error: "INVALID_INPUT",
+        message: "--permissions and --clear are mutually exclusive",
+      });
+      expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
+    });
+
+    it("neither --permissions nor --clear is refused as an INVALID_INPUT envelope under --json (P1bF-2)", async () => {
+      await expect(run(["permissions", "bot", "secret://k", "--json"])).rejects.toThrow(
+        "process.exit",
+      );
+      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+        error: "INVALID_INPUT",
+        message: "one of --permissions or --clear is required (an empty cell is never written)",
+      });
+      expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
+    });
+
+    it("--expires with --clear is refused as an INVALID_INPUT envelope under --json (P1bF-2)", async () => {
+      await expect(
+        run(["permissions", "bot", "secret://k", "--clear", "--expires", "5", "--json"]),
+      ).rejects.toThrow("process.exit");
+      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+        error: "INVALID_INPUT",
+        message: "--expires cannot be combined with --clear",
+      });
+      expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
+    });
+
+    it("an unknown permission is refused as an INVALID_INPUT envelope under --json (P1bF-2)", async () => {
+      await expect(
+        run(["permissions", "bot", "secret://k", "--permissions", "bogus", "--json"]),
+      ).rejects.toThrow("process.exit");
+      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+        error: "INVALID_INPUT",
+        message:
+          'Invalid permission: "bogus". Valid: list, read, use, create, rotate, revoke, admin',
+      });
+      expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
+    });
+
     it("prints the note when the secret receives its first grant", async () => {
       mockEngine.setAgentPermissions.mockReturnValue(
         result({ gated_before: false, gated_after: true }),

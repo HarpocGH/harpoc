@@ -22,6 +22,7 @@ function createMockEngine() {
   return {
     getState: vi.fn().mockReturnValue(VaultState.UNLOCKED),
     verifyToken: vi.fn().mockReturnValue(MOCK_TOKEN),
+    auditScopeRefusal: vi.fn(),
     listSecrets: vi.fn().mockReturnValue([]),
     createSecret: vi.fn().mockResolvedValue({
       handle: "secret://k",

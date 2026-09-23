@@ -56,6 +56,7 @@ function mockEngine(overrides: Record<string, unknown> = {}): VaultEngine {
     getState: vi.fn().mockReturnValue("unlocked"),
     queryAudit: vi.fn().mockReturnValue([]),
     auditServerStart: vi.fn(),
+    auditScopeRefusal: vi.fn(),
     isTokenRevoked: vi.fn().mockReturnValue(false),
     verifyToken: vi.fn().mockReturnValue(token(["rotate"])),
     ...overrides,

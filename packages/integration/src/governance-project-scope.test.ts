@@ -96,6 +96,7 @@ describe("Governance refuses a project-claimed admin token (R11/N12)", () => {
     expect(row?.secret_id).toBeNull();
     expect(row?.detail).toMatchObject({
       error: ErrorCode.ACCESS_DENIED,
+      reason: "governance",
       interface: "rest",
     });
     // The listener is loopback, so D9's peer normaliser is what makes a

@@ -1004,13 +1004,15 @@ describe("MCP Tools", () => {
         jti: "j",
         principal_type: "agent" as const,
       };
-      const restrictedGuard = new ScopeGuard(token);
+      const seen = vi.fn();
+      const restrictedGuard = new ScopeGuard(token, "mcp", undefined, undefined, seen);
       const srv = new McpServer({ name: "test", version: "0.0.0" });
       registerCreateSecret(srv, engine, restrictedGuard, rateLimiter);
 
       const result = await callTool(srv, "create_secret", { name: "x", type: "api_key" });
       expect(result.isError).toBe(true);
       expect(getToolText(result)).toContain("Access denied");
+      expect(seen).toHaveBeenCalledWith("create_secret", "permission");
     });
 
     it("denies create_secret for a name outside the token's name patterns", async () => {

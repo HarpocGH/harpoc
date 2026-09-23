@@ -31,7 +31,7 @@ export function registerUseSecret(
     },
     async (args) => {
       const parsed = parseHandle(args.handle);
-      scopeGuard.checkAccess(PERMISSION, parsed.project, parsed.name);
+      scopeGuard.checkAccess(PERMISSION, parsed.project, parsed.name, "use_secret");
 
       // Keyed on the handle, not a resolved id: resolving before the audited
       // engine path let an unknown-handle probe leave no row (N3).

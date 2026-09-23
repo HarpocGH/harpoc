@@ -91,4 +91,66 @@ describe("policy grant --principal-type validation", () => {
       undefined,
     );
   });
+
+  it("refuses a non-integer --expires as an INVALID_INPUT envelope under --json (P1cF-2)", async () => {
+    await expect(
+      run([
+        "secret://k",
+        "--principal-type",
+        "agent",
+        "--principal-id",
+        "a",
+        "--permissions",
+        "use",
+        "--expires",
+        "1.5",
+        "--json",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: "--expires must be a positive number of minutes",
+    });
+    expect(mockEngine.grantPolicy).not.toHaveBeenCalled();
+  });
+
+  it("an invalid --principal-type is refused as an INVALID_INPUT envelope under --json (P1cF-2)", async () => {
+    await expect(
+      run([
+        "secret://k",
+        "--principal-type",
+        "bogus",
+        "--principal-id",
+        "a",
+        "--permissions",
+        "use",
+        "--json",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: 'Invalid principal type: "bogus". Valid: agent, tool, project, user',
+    });
+    expect(mockEngine.grantPolicy).not.toHaveBeenCalled();
+  });
+
+  it("an unknown permission is refused as an INVALID_INPUT envelope under --json (P1cF-2)", async () => {
+    await expect(
+      run([
+        "secret://k",
+        "--principal-type",
+        "agent",
+        "--principal-id",
+        "a",
+        "--permissions",
+        "bogus",
+        "--json",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: 'Invalid permission: "bogus". Valid: list, read, use, create, rotate, revoke, admin',
+    });
+    expect(mockEngine.grantPolicy).not.toHaveBeenCalled();
+  });
 });

@@ -9,6 +9,7 @@ import {
 } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord } from "../../utils/output.js";
+import { parsePositiveInteger } from "../../utils/options.js";
 
 export function registerAuthTokenCommand(auth: Command): void {
   auth
@@ -58,7 +59,7 @@ export function registerAuthTokenCommand(auth: Command): void {
             for (const s of scopeStrings) {
               const result = permissionSchema.safeParse(s);
               if (!result.success) {
-                throw new Error(
+                throw VaultError.invalidInput(
                   `Invalid permission: "${s}". Valid: list, read, use, create, rotate, revoke, admin`,
                 );
               }
@@ -71,18 +72,18 @@ export function registerAuthTokenCommand(auth: Command): void {
               options.principalType ?? "agent",
             );
             if (!parsedPrincipalType.success) {
-              throw new Error(
+              throw VaultError.invalidInput(
                 `Invalid principal type: "${options.principalType}". Valid: agent, tool, user`,
               );
             }
             const principalType = parsedPrincipalType.data;
             const maxTtlMinutes = Math.floor(MAX_TOKEN_TTL_MS / 60_000);
-            const ttlMinutes = parseInt(options.ttl ?? "60", 10);
-            if (isNaN(ttlMinutes) || ttlMinutes <= 0) {
-              throw new Error("TTL must be a positive number of minutes");
-            }
+            const ttlMinutes = parsePositiveInteger(
+              options.ttl ?? "60",
+              "TTL must be a positive number of minutes",
+            );
             if (ttlMinutes > maxTtlMinutes) {
-              throw new Error(
+              throw VaultError.invalidInput(
                 `TTL cannot exceed ${maxTtlMinutes} minutes (${maxTtlMinutes / 60}h)`,
               );
             }
@@ -159,7 +160,7 @@ export function registerAuthTokenCommand(auth: Command): void {
                 subject,
                 principal_type: principalType,
                 scope,
-                ttl_minutes: parseInt(options.ttl ?? "60", 10),
+                ttl_minutes: ttlMinutes,
                 project: options.project ?? null,
                 secrets: options.secrets ? options.secrets.split(",").map((s) => s.trim()) : null,
                 label: options.label ?? null,

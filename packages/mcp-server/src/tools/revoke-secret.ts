@@ -24,7 +24,7 @@ export function registerRevokeSecret(
     },
     async (args) => {
       const parsed = parseHandle(args.handle);
-      scopeGuard.checkAccess(PERMISSION, parsed.project, parsed.name);
+      scopeGuard.checkAccess(PERMISSION, parsed.project, parsed.name, "revoke_secret");
       rateLimiter.checkLimit();
 
       await engine.revokeSecret(args.handle, scopeGuard.caller);

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   callerFromToken,
   checkTokenScope,
@@ -191,5 +191,40 @@ describe("remote_address (E75i)", () => {
     expect("remote_address" in callerFromToken(baseToken(), "rest")).toBe(false);
     expect("remote_address" in callerFromToken(baseToken(), "rest", undefined)).toBe(false);
     expect("remote_address" in callerFromToken(baseToken(), "rest", "")).toBe(false);
+  });
+});
+
+describe("checkTokenScope — onRefusal (D2g)", () => {
+  const base = baseToken({ sub: "agent-1", scope: ["read", "list"] });
+
+  it("reports the permission branch once, then throws", () => {
+    const seen = vi.fn();
+    expect(() => checkTokenScope(base, "rotate", undefined, undefined, seen)).toThrow(
+      expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }),
+    );
+    expect(seen).toHaveBeenCalledTimes(1);
+    expect(seen).toHaveBeenCalledWith("permission");
+  });
+
+  it("reports a cross-project refusal and a global-secret refusal as project", () => {
+    const scoped = { ...base, project: "acme" };
+    const seen = vi.fn();
+    expect(() => checkTokenScope(scoped, "read", "other", "db", seen)).toThrow();
+    expect(() => checkTokenScope(scoped, "read", undefined, "db", seen)).toThrow();
+    expect(seen.mock.calls).toEqual([["project"], ["project"]]);
+  });
+
+  it("reports the secret-name branch as secret", () => {
+    const seen = vi.fn();
+    expect(() =>
+      checkTokenScope({ ...base, secrets: ["db-*"] }, "read", undefined, "mail", seen),
+    ).toThrow();
+    expect(seen).toHaveBeenCalledWith("secret");
+  });
+
+  it("an admitted call never invokes it", () => {
+    const seen = vi.fn();
+    checkTokenScope(base, "read", undefined, "db", seen);
+    expect(seen).not.toHaveBeenCalled();
   });
 });

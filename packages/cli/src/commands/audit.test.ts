@@ -75,6 +75,33 @@ describe("audit --since validation", () => {
       undefined,
     );
   });
+
+  it("refuses a non-decimal --limit as an INVALID_INPUT envelope under --json (P1cF-4)", async () => {
+    await expect(run(["--limit", "0x10", "--json"])).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: "--limit must be a positive number",
+    });
+    expect(mockEngine.queryAudit).not.toHaveBeenCalled();
+  });
+
+  it("an invalid --since is refused as an INVALID_INPUT envelope under --json (P1cF-4)", async () => {
+    await expect(run(["--since", "bogus", "--json"])).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: "--since must be a valid date (e.g. 2026-07-01 or 2026-07-01T12:00:00Z)",
+    });
+    expect(mockEngine.queryAudit).not.toHaveBeenCalled();
+  });
+
+  it("refuses an empty --since instead of treating it as no filter (P1c-32)", async () => {
+    await expect(run(["--since", "", "--json"])).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: "--since must be a valid date (e.g. 2026-07-01 or 2026-07-01T12:00:00Z)",
+    });
+    expect(mockEngine.queryAudit).not.toHaveBeenCalled();
+  });
 });
 
 describe("audit table Principal column (by whom, thesis §4.3.4)", () => {
@@ -361,6 +388,38 @@ describe("audit anchor / verify --anchor", () => {
     writeFileSync(file, JSON.stringify({ hello: "world" }), "utf8");
     await expect(run(["verify", "--anchor", file])).rejects.toThrow("process.exit");
     expect(stderrText()).toContain("Not a valid harpoc audit anchor");
+    expect(mockEngine.verifyAuditChain).not.toHaveBeenCalled();
+  });
+
+  it("a missing anchor file is refused as an INVALID_INPUT envelope under --json (P1cF-4)", async () => {
+    const file = join(tempDir, "nope.anchor");
+    await expect(run(["verify", "--anchor", file, "--json"])).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: `Cannot read anchor file: ${file}`,
+    });
+    expect(mockEngine.verifyAuditChain).not.toHaveBeenCalled();
+  });
+
+  it("a non-JSON anchor file is refused as an INVALID_INPUT envelope under --json (P1cF-4)", async () => {
+    const file = join(tempDir, "bad.anchor");
+    writeFileSync(file, "not json {", "utf8");
+    await expect(run(["verify", "--anchor", file, "--json"])).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: `Anchor file is not valid JSON: ${file}`,
+    });
+    expect(mockEngine.verifyAuditChain).not.toHaveBeenCalled();
+  });
+
+  it("JSON that is not a harpoc anchor is refused as an INVALID_INPUT envelope under --json (P1cF-4)", async () => {
+    const file = join(tempDir, "wrong.anchor");
+    writeFileSync(file, JSON.stringify({ hello: "world" }), "utf8");
+    await expect(run(["verify", "--anchor", file, "--json"])).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: `Not a valid harpoc audit anchor (expected format "harpoc-audit-anchor/1"): ${file}`,
+    });
     expect(mockEngine.verifyAuditChain).not.toHaveBeenCalled();
   });
 });

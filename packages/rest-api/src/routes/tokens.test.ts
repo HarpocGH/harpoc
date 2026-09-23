@@ -52,6 +52,7 @@ const ADMIN_CALLER = {
 function createMockEngine(token: VaultApiToken = ADMIN_TOKEN) {
   return {
     verifyToken: vi.fn().mockReturnValue(token),
+    auditScopeRefusal: vi.fn(),
     listIssuedTokens: vi.fn().mockReturnValue([MOCK_ISSUED_TOKEN]),
     revokeToken: vi.fn(),
   };

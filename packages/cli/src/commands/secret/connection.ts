@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import type { Command } from "commander";
 import type { ConnectionConfig, MailConnectionConfig } from "@harpoc/shared";
 import { connectionConfigSchema, renderSchemaIssues, VaultError } from "@harpoc/shared";
@@ -23,6 +23,8 @@ export interface ConnectionOptions {
   mailCa?: string;
   /** Path to a CA certificate PEM to pin for the Git-HTTPS transport. */
   gitCa?: string;
+  /** Path to a CA certificate PEM to pin for the HTTP context (D2h). */
+  httpCa?: string;
   clear?: boolean;
   show?: boolean;
   delete?: boolean;
@@ -34,7 +36,7 @@ export function registerSecretConnectionCommand(secret: Command): void {
   secret
     .command("connection <handle>")
     .description(
-      "Configure a secret's endpoint-authentication pins — database TLS policy, SSH host keys, mail TLS and the Git-HTTPS CA (trusted admin path); omitted flags keep their stored values",
+      "Configure a secret's endpoint-authentication pins — database TLS policy, SSH host keys, mail TLS, the Git-HTTPS CA and the HTTP CA (trusted admin path); omitted flags keep their stored values",
     )
     .option("--db-tls <mode>", "Database TLS mode: require | disable")
     .option("--db-ca-file <path>", "Path to a CA certificate PEM (database TLS)")
@@ -55,6 +57,10 @@ export function registerSecretConnectionCommand(secret: Command): void {
       "Path to a CA certificate PEM (mail TLS); also clears --mail-no-tls",
     )
     .option("--git-ca <path>", "Path to a CA certificate PEM to pin for the Git-HTTPS transport")
+    .option(
+      "--http-ca <path>",
+      "Path to a CA certificate PEM to pin for the HTTP context's TLS connections",
+    )
     .option("--clear", "Reset the whole config to empty before applying the other flags")
     .option("--show", "Show the current config instead of setting it")
     .option("--delete", "Remove the config")
@@ -63,6 +69,7 @@ export function registerSecretConnectionCommand(secret: Command): void {
     .action(async (handle: string, options: ConnectionOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        assertPathOptions(options);
         const engine = await loadUnlockedEngine(vaultDir);
         try {
           const tokenValue = options.token ?? process.env.HARPOC_TOKEN;
@@ -87,6 +94,7 @@ export function registerSecretConnectionCommand(secret: Command): void {
             options.mailNoTls === true ||
             options.mailCa !== undefined ||
             options.gitCa !== undefined ||
+            options.httpCa !== undefined ||
             options.clear === true;
           if (options.show || !hasInput) {
             const resolved = resolveTokenCallerForHandle(engine, "read", handle, tokenValue);
@@ -121,6 +129,33 @@ export function registerSecretConnectionCommand(secret: Command): void {
     });
 }
 
+const PATH_OPTIONS: ReadonlyArray<readonly [keyof ConnectionOptions, string]> = [
+  ["dbCaFile", "--db-ca-file"],
+  ["knownHostsFile", "--known-hosts-file"],
+  ["mailCa", "--mail-ca"],
+  ["gitCa", "--git-ca"],
+  ["httpCa", "--http-ca"],
+];
+
+/**
+ * An empty path passed `hasInput` but every merge treated it as absent, so the
+ * stored config was rewritten unchanged (and `--mail-ca ""` dropped a stored mail
+ * pin); refused before the vault opens, as `--domains` is (P1F-4, 2026-09-23).
+ * A path that does not exist is refused here too, so `--json` renders the envelope
+ * instead of the merge's `ENOENT` (P1c-31).
+ */
+function assertPathOptions(options: ConnectionOptions): void {
+  for (const [key, flag] of PATH_OPTIONS) {
+    const value = options[key];
+    if (typeof value === "string" && value.trim() === "") {
+      throw VaultError.invalidInput(`${flag} requires a file path.`);
+    }
+    if (typeof value === "string" && !existsSync(value)) {
+      throw VaultError.invalidInput(`${flag}: no such file: ${value}`);
+    }
+  }
+}
+
 /**
  * Merge the provided flags into the current config. Fields the caller omits
  * keep their stored values — per field within the database group, so e.g.
@@ -129,7 +164,8 @@ export function registerSecretConnectionCommand(secret: Command): void {
  * Provided `--known-host`/`--known-hosts-file` flags replace the stored SSH
  * list. `--clear` starts from an empty config instead of the stored one.
  * `--git-ca` pins a CA for the Git-HTTPS transport; omitted, a stored `git`
- * group rides through.
+ * group rides through; `--http-ca` pins one for the HTTP context; omitted, a
+ * stored `http` group rides through (D2h, 2026-09-23).
  */
 export function mergeConnectionConfig(
   current: ConnectionConfig | null | undefined,
@@ -172,6 +208,11 @@ export function mergeConnectionConfig(
   const gitCaPem = options.gitCa ? readFileSync(options.gitCa, "utf8") : base?.git?.ca_pem;
   if (gitCaPem !== undefined) {
     config.git = { ca_pem: gitCaPem };
+  }
+
+  const httpCaPem = options.httpCa ? readFileSync(options.httpCa, "utf8") : base?.http?.ca_pem;
+  if (httpCaPem !== undefined) {
+    config.http = { ca_pem: httpCaPem };
   }
 
   return config;

@@ -8,7 +8,7 @@ import {
   ENCRYPTED_KEY_IMPORT_REFUSAL,
 } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
-import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
+import { checkScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
 import { callerOf } from "../utils/caller.js";
 import { readJsonBody } from "../utils/read-json-body.js";
 import { schemaValidationError } from "../utils/schema-error.js";
@@ -17,14 +17,13 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
 
   router.post("/import", async (c) => {
-    const token = c.get("token");
-    checkTokenScope(token, "create");
+    checkScope(c, "create");
     const body = await readJsonBody(c);
     const parsed = certificateImportSchema.safeParse(body);
     if (!parsed.success) {
       throw schemaValidationError(parsed.error);
     }
-    checkTokenScope(token, "create", parsed.data.project, parsed.data.name);
+    checkScope(c, "create", parsed.data.project, parsed.data.name);
     if (isEncryptedPrivateKeyPem(parsed.data.private_key_pem)) {
       throw VaultError.encryptedKeyUnsupported(ENCRYPTED_KEY_IMPORT_REFUSAL);
     }
@@ -41,14 +40,13 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
   });
 
   router.post("/csr", async (c) => {
-    const token = c.get("token");
-    checkTokenScope(token, "create");
+    checkScope(c, "create");
     const body = await readJsonBody(c);
     const parsed = generateCsrRequestSchema.safeParse(body);
     if (!parsed.success) {
       throw schemaValidationError(parsed.error);
     }
-    checkTokenScope(token, "create", parsed.data.project, parsed.data.name);
+    checkScope(c, "create", parsed.data.project, parsed.data.name);
     const r = await c.get("certManager").generateCsr(parsed.data.name, {
       commonName: parsed.data.subject,
       sans: parsed.data.sans,
@@ -62,9 +60,8 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
   });
 
   router.post("/:handle/renew", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "rotate", project, name);
+    checkScope(c, "rotate", project, name);
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
     c.get("limiter").checkSecret(handle);
@@ -77,9 +74,8 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
   });
 
   router.get("/:handle/status", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "read", project, name);
+    checkScope(c, "read", project, name);
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
     c.get("limiter").checkSecret(handle);

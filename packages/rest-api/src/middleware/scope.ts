@@ -1,11 +1,33 @@
-import { parseHandle } from "@harpoc/shared";
+import type { Context } from "hono";
+import { checkTokenScope, parseHandle } from "@harpoc/shared";
+import type { Permission, ScopeRefusalReason } from "@harpoc/shared";
+import { callerOf } from "../utils/caller.js";
+import type { HarpocEnv } from "../types.js";
 
 /**
- * The 3-dimensional token scope predicate lives in shared (`checkTokenScope`)
- * so the CLI token path enforces identical semantics; re-exported here to keep
- * this middleware the import point for every route.
+ * Record a token-scope refusal on this request — one `access.denied` row naming
+ * `<METHOD> <path>` (Hono's normalised path, percent-encoding kept, no query;
+ * never `routePath`) under the requesting principal — before the route throws
+ * (D2g, 2026-09-23).
  */
-export { checkTokenScope } from "@harpoc/shared";
+export function recordScopeRefusal(c: Context<HarpocEnv>, reason: ScopeRefusalReason): void {
+  c.get("engine").auditScopeRefusal(callerOf(c), `${c.req.method} ${c.req.path}`, reason);
+}
+
+/**
+ * The route-level scope check: `checkTokenScope` over the request's token, every
+ * refusal recorded through `recordScopeRefusal` before it throws (D2g).
+ */
+export function checkScope(
+  c: Context<HarpocEnv>,
+  permission: Permission,
+  project?: string,
+  secretName?: string,
+): void {
+  checkTokenScope(c.get("token"), permission, project, secretName, (reason) =>
+    recordScopeRefusal(c, reason),
+  );
+}
 
 /**
  * Build a full secret handle URI from a route parameter.

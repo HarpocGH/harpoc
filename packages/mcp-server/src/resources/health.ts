@@ -14,7 +14,7 @@ export function registerHealthResource(
     "secret://vault/health",
     { description: "Vault state and secret health summary", mimeType: "application/json" },
     async (uri) => {
-      scopeGuard.checkAccess("list");
+      scopeGuard.checkAccess("list", undefined, undefined, `resources/read ${uri.href}`);
 
       const secrets = scopeGuard.filterByScope(engine.listSecrets(undefined, scopeGuard.caller));
       const byStatus: Record<string, number> = {};

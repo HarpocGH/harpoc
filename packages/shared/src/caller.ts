@@ -74,6 +74,9 @@ export function isAdminUserCaller(caller: CallerContext): boolean {
   return caller.principal_type === TokenPrincipalType.USER && caller.admin_scope === true;
 }
 
+/** The branch a token-scope check refused on — the `reason` every `access.denied` row carries (D2g, 2026-09-23). */
+export type ScopeRefusalReason = "permission" | "project" | "secret" | "governance";
+
 /**
  * Enforce 3-dimensional token scope (permission, project, secret-name
  * patterns — `*` wildcards, thesis §4.7). The single scope predicate shared by
@@ -82,30 +85,37 @@ export function isAdminUserCaller(caller: CallerContext): boolean {
  * rest-api so the CLI can enforce identical semantics without a Hono
  * dependency — the `applyTokenEndpointAuth` precedent). Mirrors
  * ScopeGuard.checkAccess() from mcp-server, which adds the per-call
- * revocation recheck the long-lived MCP transports need.
+ * revocation recheck the long-lived MCP transports need. `onRefusal` is
+ * invoked once, immediately before the throw, with the branch that refused, so
+ * an interface can record the refusal before it answers (D2g, 2026-09-23).
  */
 export function checkTokenScope(
   token: VaultApiToken,
   permission: Permission,
   project?: string,
   secretName?: string,
+  onRefusal?: (reason: ScopeRefusalReason) => void,
 ): void {
   // 1. Permission check
   if (!token.scope.includes(permission) && !token.scope.includes("admin")) {
+    onRefusal?.("permission");
     throw VaultError.accessDenied(`Token lacks permission: ${permission}`);
   }
 
   // 2. Project scope check
   if (token.project && project !== undefined && project !== token.project) {
+    onRefusal?.("project");
     throw VaultError.accessDenied(`Token is scoped to project: ${token.project}`);
   }
   // Deny individual access to global (project-less) secrets for project-scoped tokens
   if (token.project && secretName !== undefined && project === undefined) {
+    onRefusal?.("project");
     throw VaultError.accessDenied(`Token is scoped to project: ${token.project}`);
   }
 
   // 3. Secret name scope check (name patterns, thesis §4.7)
   if (secretName !== undefined && !matchesSecretNameScope(secretName, token.secrets)) {
+    onRefusal?.("secret");
     throw VaultError.accessDenied("Token does not grant access to this secret");
   }
 }

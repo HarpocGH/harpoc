@@ -27,7 +27,7 @@ export function registerRenewCertificate(
     },
     async (args) => {
       const parsed = parseHandle(args.handle);
-      scopeGuard.checkAccess(PERMISSION, parsed.project, parsed.name);
+      scopeGuard.checkAccess(PERMISSION, parsed.project, parsed.name, "renew_certificate");
       rateLimiter.checkLimit(args.handle);
       const secretId = await engine.resolveSecretId(
         args.handle,

@@ -199,6 +199,45 @@ describe("mergeConnectionConfig — git CA group (D64)", () => {
   });
 });
 
+describe("mergeConnectionConfig — http CA group (D2h)", () => {
+  it("--http-ca pins a CA for the HTTP context, other groups untouched", () => {
+    const caPath = join(tempDir, "http-ca.pem");
+    writeFileSync(caPath, CA_PEM);
+    const merged = mergeConnectionConfig(STORED, { httpCa: caPath });
+    expect(merged.http).toEqual({ ca_pem: CA_PEM });
+    expect(merged.database).toEqual(STORED.database);
+    expect(merged.ssh).toEqual(STORED.ssh);
+    expect(merged.mail).toEqual(STORED.mail);
+  });
+
+  it("a stored http group rides through a write that names another group (P1c-6)", () => {
+    const caPath = join(tempDir, "git-ca.pem");
+    writeFileSync(caPath, CA_PEM);
+    const merged = mergeConnectionConfig(
+      { ...STORED, http: { ca_pem: CA_PEM } },
+      { gitCa: caPath },
+    );
+    expect(merged.http).toEqual({ ca_pem: CA_PEM });
+    expect(merged.git).toEqual({ ca_pem: CA_PEM });
+  });
+
+  it("--clear drops a stored http group", () => {
+    const merged = mergeConnectionConfig(
+      { ...STORED, http: { ca_pem: CA_PEM } },
+      { clear: true, dbTls: "require" },
+    );
+    expect(merged.http).toBeUndefined();
+  });
+
+  it("builds an http group from --http-ca alone when nothing is stored", () => {
+    const caPath = join(tempDir, "http-ca2.pem");
+    writeFileSync(caPath, CA_PEM);
+    expect(mergeConnectionConfig(undefined, { httpCa: caPath })).toEqual({
+      http: { ca_pem: CA_PEM },
+    });
+  });
+});
+
 describe("mergeConnectionConfig against a real engine", () => {
   it("a tls-only update no longer drops a stored CA pin", async () => {
     const engine = new VaultEngine({

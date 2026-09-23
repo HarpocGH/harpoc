@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { auditQuerySchema, auditScopeFromToken } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
-import { checkTokenScope } from "../middleware/scope.js";
+import { checkScope } from "../middleware/scope.js";
 import { schemaValidationError } from "../utils/schema-error.js";
 
 export function createAuditRoutes(): Hono<HarpocEnv> {
@@ -9,7 +9,7 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
 
   router.get("/", (c) => {
     const token = c.get("token");
-    checkTokenScope(token, "admin");
+    checkScope(c, "admin");
 
     const engine = c.get("engine");
 
@@ -66,8 +66,7 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
   });
 
   router.post("/verify", (c) => {
-    const token = c.get("token");
-    checkTokenScope(token, "admin");
+    checkScope(c, "admin");
 
     const engine = c.get("engine");
     const report = engine.verifyAuditChain();

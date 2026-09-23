@@ -1,3 +1,6 @@
+import { rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { Command } from "commander";
 import type { VaultApiToken } from "@harpoc/shared";
@@ -17,6 +20,7 @@ vi.mock("../../utils/vault-loader.js", () => ({
   loadUnlockedEngine: vi.fn().mockResolvedValue(mockEngine),
 }));
 
+import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerSecretConnectionCommand } from "./connection.js";
 
 function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
@@ -139,5 +143,58 @@ describe("secret connection — token path", () => {
     );
     expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("bogus"));
     expect(mockEngine.setConnectionConfig).not.toHaveBeenCalled();
+  });
+
+  it.each([["--db-ca-file"], ["--known-hosts-file"], ["--mail-ca"], ["--git-ca"], ["--http-ca"]])(
+    "%s with an empty path is refused INVALID_INPUT before the vault opens (P1F-4)",
+    async (flag) => {
+      await expect(run(["secret://k", flag, "", "--json"])).rejects.toThrow("process.exit");
+      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+        error: "INVALID_INPUT",
+        message: `${flag} requires a file path.`,
+      });
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a whitespace-only path is refused INVALID_INPUT before the vault opens (P1F-4)", async () => {
+    await expect(run(["secret://k", "--git-ca", "  ", "--json"])).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: "--git-ca requires a file path.",
+    });
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+  });
+
+  it.each([["--db-ca-file"], ["--known-hosts-file"], ["--mail-ca"], ["--git-ca"], ["--http-ca"]])(
+    "%s with a nonexistent path is refused INVALID_INPUT before the vault opens (P1c-31)",
+    async (flag) => {
+      await expect(
+        run(["secret://k", flag, "C:/nonexistent/harpoc-1c.pem", "--json"]),
+      ).rejects.toThrow("process.exit");
+      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+        error: "INVALID_INPUT",
+        message: `${flag}: no such file: C:/nonexistent/harpoc-1c.pem`,
+      });
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    },
+  );
+
+  it("--http-ca <file> merges the http group over the stored config (D2h)", async () => {
+    const caPath = join(tmpdir(), `harpoc-http-ca-${process.pid}.pem`);
+    writeFileSync(caPath, "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n");
+    try {
+      await run(["secret://k", "--http-ca", caPath]);
+      expect(mockEngine.setConnectionConfig).toHaveBeenCalledWith(
+        "secret://k",
+        {
+          database: { tls_mode: "require" },
+          http: { ca_pem: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n" },
+        },
+        undefined,
+      );
+    } finally {
+      rmSync(caPath, { force: true });
+    }
   });
 });

@@ -1,5 +1,10 @@
 import type { Context } from "hono";
-import { VaultError } from "@harpoc/shared";
+import {
+  MAX_REQUEST_BODY_BYTES,
+  VaultError,
+  contentLengthExceeds,
+  readBodyCapped,
+} from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 
 /**
@@ -12,11 +17,22 @@ import type { HarpocEnv } from "../types.js";
  * a route dereferencing a field off the result (e.g. `body.action`) throws a
  * TypeError that the error handler can only turn into a generic 500 (Task 3,
  * polish tranche 2026-08-20).
+ * Since 2026-09-23 (P1F-7) the body is read under `MAX_REQUEST_BODY_BYTES`: a
+ * declared or streamed size over the cap — or a malformed `Content-Length`,
+ * fail-closed — is refused `INVALID_INPUT` before any byte is parsed, the MCP
+ * listener's bound.
  */
 export async function readJsonBody(c: Context<HarpocEnv>): Promise<Record<string, unknown>> {
+  if (contentLengthExceeds(c.req.raw.headers, MAX_REQUEST_BODY_BYTES)) {
+    throw VaultError.invalidInput("Request body too large");
+  }
+  const read = await readBodyCapped(c.req.raw.body, MAX_REQUEST_BODY_BYTES);
+  if (!read.ok) {
+    throw VaultError.invalidInput("Request body too large");
+  }
   let body: unknown;
   try {
-    body = await c.req.json();
+    body = JSON.parse(new TextDecoder().decode(read.bytes));
   } catch {
     throw VaultError.schemaValidation("Request body must be valid JSON");
   }

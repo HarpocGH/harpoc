@@ -891,8 +891,8 @@ export const injectionPolicySchema = z.strictObject({
   strict_tree_exit: z.boolean(),
 });
 
-/** Per-secret injection policy input (URL + host + command + env allowlists + HTTP response mode). */
-export const injectionPolicyInputSchema = z.object({
+/** Per-secret injection policy input (URL + host + command + env allowlists + HTTP response mode); every field defaults, an unknown key is refused (D2c, 2026-09-23). */
+export const injectionPolicyInputSchema = z.strictObject({
   url_allowlist: urlAllowlistSchema.optional().default([]),
   command_allowlist: commandAllowlistSchema.optional().default([]),
   env_allowlist: envAllowlistSchema.optional().default([]),
@@ -1026,13 +1026,21 @@ export const gitConnectionConfigSchema = z.strictObject({
 
 export type GitConnectionConfig = z.infer<typeof gitConnectionConfigSchema>;
 
+/** The HTTP context's private-CA pin: the per-call dispatcher trusts this CA for the request and its redirects (D2h, 2026-09-23). */
+export const httpConnectionConfigSchema = z.strictObject({
+  ca_pem: z.string().min(1).max(65_536),
+});
+
+export type HttpConnectionConfig = z.infer<typeof httpConnectionConfigSchema>;
+
 /**
  * Per-secret endpoint-authentication pins (KEK-encrypted at rest), the §4.7
  * "authenticated target connections" counterpart to the target allowlist. Set
  * only via the trusted admin path (CLI/REST) — never via an MCP tool. `ssh` is
  * shared by the SSH and Git-over-SSH contexts, `mail` by the SMTP and IMAP
- * contexts (v1.3). At least one of `database` / `ssh` / `mail` / `git` must be
- * present; `git` pins a private CA for the Git-HTTPS transport (D64).
+ * contexts (v1.3). At least one of `database` / `ssh` / `mail` / `git` / `http` must be
+ * present; `git` pins a private CA for the Git-HTTPS transport (D64), `http` one for the HTTP
+ * context (D2h, 2026-09-23).
  */
 export const connectionConfigSchema = z
   .strictObject({
@@ -1040,12 +1048,13 @@ export const connectionConfigSchema = z
     ssh: sshConnectionConfigSchema.optional(),
     mail: mailConnectionConfigSchema.optional(),
     git: gitConnectionConfigSchema.optional(),
+    http: httpConnectionConfigSchema.optional(),
   })
   .superRefine((data, ctx) => {
-    if (!data.database && !data.ssh && !data.mail && !data.git) {
+    if (!data.database && !data.ssh && !data.mail && !data.git && !data.http) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "connection config must set at least one of database, ssh, mail or git",
+        message: "connection config must set at least one of database, ssh, mail, git or http",
         path: [],
       });
     }

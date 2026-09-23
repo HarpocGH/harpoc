@@ -24,7 +24,7 @@ export function registerCheckHealth(
       }),
     },
     async (args) => {
-      scopeGuard.checkAccess(PERMISSION);
+      scopeGuard.checkAccess(PERMISSION, undefined, undefined, "check_secret_health");
       rateLimiter.checkLimit();
 
       const secrets = scopeGuard.filterByScope(engine.listSecrets(undefined, scopeGuard.caller));

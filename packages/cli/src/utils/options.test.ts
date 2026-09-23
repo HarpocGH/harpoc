@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
-import { parseIntOption } from "./options.js";
+import { parseIntOption, parsePositiveInteger } from "./options.js";
 
 function refusalOf(run: () => unknown): unknown {
   try {
@@ -71,5 +71,27 @@ describe("parseIntOption", () => {
   it("never exits the process itself — the command's error path renders the refusal (CM-6)", () => {
     expect(refusalOf(() => parseIntOption("abc", "timeout", 1, 86400))).toBeInstanceOf(VaultError);
     expect(exitSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("parsePositiveInteger (P1bF-2)", () => {
+  it.each(["5abc", "1.5", "1e3", "0", "", " 7", "-1", "0x10"])(
+    "refuses %j as INVALID_INPUT with the caller's message",
+    (value) => {
+      let caught: unknown;
+      try {
+        parsePositiveInteger(value, "--expires must be a positive number of minutes");
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(VaultError);
+      expect((caught as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
+      expect((caught as VaultError).message).toBe("--expires must be a positive number of minutes");
+    },
+  );
+
+  it("parses a decimal integer of at least 1", () => {
+    expect(parsePositiveInteger("7", "m")).toBe(7);
+    expect(parsePositiveInteger("1", "m")).toBe(1);
   });
 });

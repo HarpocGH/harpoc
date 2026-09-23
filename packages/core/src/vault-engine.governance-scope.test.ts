@@ -126,6 +126,7 @@ describe("N12: governance is vault-wide — a project-claimed caller is refused"
     expect(rows[0]?.detail).toEqual({
       operation: name,
       error: ErrorCode.ACCESS_DENIED,
+      reason: "governance",
       interface: "rest",
     });
   });
@@ -134,5 +135,28 @@ describe("N12: governance is vault-wide — a project-claimed caller is refused"
     engine.listAgents("all", UNSCOPED);
     engine.listAgents("all");
     expect(engine.queryAudit({ eventType: AuditEventType.ACCESS_DENIED })).toHaveLength(0);
+  });
+
+  it("auditScopeRefusal writes one access.denied row carrying the reason and no secret id (D2g)", () => {
+    const reader: CallerContext = {
+      principal_type: "agent",
+      principal_id: "reader-1",
+      interface: "rest",
+      remote_address: "127.0.0.1",
+    };
+    engine.auditScopeRefusal(reader, "POST /api/v1/secrets/acme%2Fdb/rotate", "permission");
+    const rows = engine.queryAudit({ eventType: AuditEventType.ACCESS_DENIED });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.success).toBe(false);
+    expect(rows[0]?.secret_id).toBeNull();
+    expect(rows[0]?.principal_type).toBe("agent");
+    expect(rows[0]?.principal_id).toBe("reader-1");
+    expect(rows[0]?.ip_address).toBe("127.0.0.1");
+    expect(rows[0]?.detail).toEqual({
+      operation: "POST /api/v1/secrets/acme%2Fdb/rotate",
+      error: ErrorCode.ACCESS_DENIED,
+      reason: "permission",
+      interface: "rest",
+    });
   });
 });

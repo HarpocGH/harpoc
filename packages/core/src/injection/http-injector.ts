@@ -140,6 +140,8 @@ export interface HttpInjectorRequest {
    * follow_redirects mode is active.
    */
   urlAllowlist?: string[];
+  /** A private CA (PEM) the per-call dispatcher trusts for this request and its redirects — `http.ca_pem` (D2h, 2026-09-23). */
+  caPem?: string;
 }
 
 /** Scrub the secret value and its encodings from an HTTP result (I2a); true when anything changed. */
@@ -203,7 +205,12 @@ export class HttpInjector {
       if (validated.resolvedAddresses) {
         pins.set(url.hostname.toLowerCase(), validated.resolvedAddresses);
       }
-      const dispatcher = new Agent({ connect: { lookup: createPinnedLookup(pins) } });
+      const dispatcher = new Agent({
+        connect: {
+          lookup: createPinnedLookup(pins),
+          ...(request.caPem === undefined ? {} : { ca: request.caPem }),
+        },
+      });
 
       const timeoutMs = request.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
 
@@ -248,6 +255,7 @@ export class HttpInjector {
               status: response.status,
               injection_type: injection.type,
               response_mode: request.responseMode ?? "filtered",
+              ...(request.caPem === undefined ? {} : { ca_pinned: true }),
               ...(sanitized ? { sanitized: true } : {}),
             },
           },
@@ -275,6 +283,7 @@ export class HttpInjector {
                 error: err.code,
                 injection_type: injection.type,
                 response_mode: request.responseMode ?? "filtered",
+                ...(request.caPem === undefined ? {} : { ca_pinned: true }),
               },
               success: false,
             },
@@ -304,6 +313,7 @@ export class HttpInjector {
               error: errorCode,
               injection_type: injection.type,
               response_mode: request.responseMode ?? "filtered",
+              ...(request.caPem === undefined ? {} : { ca_pinned: true }),
             },
             success: false,
           },

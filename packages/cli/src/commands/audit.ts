@@ -1,10 +1,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import type { Command } from "commander";
 import type { AuditChainAnchor, AuditEventType } from "@harpoc/shared";
-import { auditChainAnchorSchema, auditScopeFromToken } from "@harpoc/shared";
+import { VaultError, auditChainAnchorSchema, auditScopeFromToken } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError, printTable, printJson, formatTimestamp } from "../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../utils/token-caller.js";
+import { parsePositiveInteger } from "../utils/options.js";
 
 const OFF_HOST_GUIDANCE =
   "Store this anchor OFF-HOST (another machine, a sync target the attacker cannot write, or paper).\n" +
@@ -16,17 +17,17 @@ function readAnchorFile(path: string): AuditChainAnchor {
   try {
     raw = readFileSync(path, "utf8");
   } catch {
-    throw new Error(`Cannot read anchor file: ${path}`);
+    throw VaultError.invalidInput(`Cannot read anchor file: ${path}`);
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error(`Anchor file is not valid JSON: ${path}`);
+    throw VaultError.invalidInput(`Anchor file is not valid JSON: ${path}`);
   }
   const result = auditChainAnchorSchema.safeParse(parsed);
   if (!result.success) {
-    throw new Error(
+    throw VaultError.invalidInput(
       `Not a valid harpoc audit anchor (expected format "harpoc-audit-anchor/1"): ${path}`,
     );
   }
@@ -64,14 +65,15 @@ export function registerAuditCommand(program: Command): void {
         try {
           const engine = await loadUnlockedEngine(vaultDir);
           try {
-            const limit = options.limit ? parseInt(options.limit, 10) : 50;
-            if (isNaN(limit) || limit <= 0) {
-              throw new Error("--limit must be a positive number");
-            }
+            const limit = parsePositiveInteger(
+              options.limit ?? "50",
+              "--limit must be a positive number",
+            );
 
-            const since = options.since ? new Date(options.since).getTime() : undefined;
+            const since =
+              options.since !== undefined ? new Date(options.since).getTime() : undefined;
             if (since !== undefined && Number.isNaN(since)) {
-              throw new Error(
+              throw VaultError.invalidInput(
                 "--since must be a valid date (e.g. 2026-07-01 or 2026-07-01T12:00:00Z)",
               );
             }

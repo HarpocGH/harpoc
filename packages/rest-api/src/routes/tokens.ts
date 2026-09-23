@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { listTokensQuerySchema } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
-import { checkTokenScope } from "../middleware/scope.js";
+import { checkScope } from "../middleware/scope.js";
 import { callerOf } from "../utils/caller.js";
 import { schemaValidationError } from "../utils/schema-error.js";
 
@@ -14,8 +14,7 @@ export function createTokenRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
 
   router.get("/", (c) => {
-    const token = c.get("token");
-    checkTokenScope(token, "admin");
+    checkScope(c, "admin");
 
     const status = c.req.query("status");
     const agent = c.req.query("agent");
@@ -37,8 +36,7 @@ export function createTokenRoutes(): Hono<HarpocEnv> {
   });
 
   router.delete("/:jti", (c) => {
-    const token = c.get("token");
-    checkTokenScope(token, "admin");
+    checkScope(c, "admin");
 
     const engine = c.get("engine");
     // The issued-token registry supplies the expiry (R9/C33-A), and a jti it

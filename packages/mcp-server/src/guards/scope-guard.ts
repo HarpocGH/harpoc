@@ -3,6 +3,7 @@ import type {
   AuditVisibilityScope,
   CallerContext,
   Permission,
+  ScopeRefusalReason,
   VaultApiToken,
 } from "@harpoc/shared";
 import {
@@ -37,13 +38,25 @@ export class ScopeGuard {
     private readonly isRevoked?: (jti: string) => boolean,
     /** Socket peer of the session's connection — Streamable HTTP only (E75i). */
     private readonly remoteAddress?: string,
+    /**
+     * Invoked once, immediately before a scope refusal throws, with the operation
+     * the caller named and the branch that refused — the server factory binds it
+     * to the engine's `access.denied` writer (D2g, 2026-09-23). Expiry and
+     * revocation are not scope refusals and never reach it.
+     */
+    private readonly onRefusal?: (operation: string, reason: ScopeRefusalReason) => void,
   ) {}
 
   /**
    * Check whether the current token grants access for the given operation.
    * Throws VaultError(ACCESS_DENIED) if access is not permitted.
    */
-  checkAccess(permission: Permission, project?: string, secretName?: string): void {
+  checkAccess(
+    permission: Permission,
+    project?: string,
+    secretName?: string,
+    operation?: string,
+  ): void {
     // Null token = full access (no launch token provided)
     if (!this.token) return;
 
@@ -60,22 +73,31 @@ export class ScopeGuard {
 
     // 1. Permission check
     if (!this.token.scope.includes(permission) && !this.token.scope.includes("admin")) {
-      throw VaultError.accessDenied(`Token lacks permission: ${permission}`);
+      this.refuse(operation, "permission", `Token lacks permission: ${permission}`);
     }
 
     // 2. Project scope check
     if (this.token.project && project !== undefined && project !== this.token.project) {
-      throw VaultError.accessDenied(`Token is scoped to project: ${this.token.project}`);
+      this.refuse(operation, "project", `Token is scoped to project: ${this.token.project}`);
     }
     // Deny individual access to global (project-less) secrets for project-scoped tokens
     if (this.token.project && secretName !== undefined && project === undefined) {
-      throw VaultError.accessDenied(`Token is scoped to project: ${this.token.project}`);
+      this.refuse(operation, "project", `Token is scoped to project: ${this.token.project}`);
     }
 
     // 3. Secret name scope check (name patterns, thesis §4.7)
     if (secretName !== undefined && !matchesSecretNameScope(secretName, this.token.secrets)) {
-      throw VaultError.accessDenied("Token does not grant access to this secret");
+      this.refuse(operation, "secret", "Token does not grant access to this secret");
     }
+  }
+
+  private refuse(
+    operation: string | undefined,
+    reason: ScopeRefusalReason,
+    message: string,
+  ): never {
+    this.onRefusal?.(operation ?? "unnamed", reason);
+    throw VaultError.accessDenied(message);
   }
 
   /**

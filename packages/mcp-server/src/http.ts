@@ -22,6 +22,7 @@ import {
   buildAllowedHostSet,
   checkRequestHost,
   ErrorCode,
+  MAX_REQUEST_BODY_BYTES,
   normalizeSocketPeer,
   VaultError,
 } from "@harpoc/shared";
@@ -32,7 +33,6 @@ import { createDefaultOAuthManager, createMcpServer } from "./server.js";
 export const DEFAULT_MCP_HTTP_PORT = 3001;
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_ENDPOINT = "/mcp";
-const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_SESSIONS = 128;
 /** A session untouched for this long is abandoned — its client is gone. */
 const SESSION_IDLE_TTL_MS = 10 * 60 * 1000;
@@ -465,7 +465,7 @@ function fingerprint(token: string): Buffer {
 type BodyReadResult = { ok: true; body: unknown } | { ok: false };
 
 /**
- * Read and parse a request body with the MAX_BODY_BYTES cap, answering 413
+ * Read and parse a request body with the MAX_REQUEST_BODY_BYTES cap, answering 413
  * (too large) or 400 (malformed JSON) directly on failure. Every request path
  * that carries a body must go through this: the SDK transport's own body read
  * (`await req.json()`) is unbounded, so handing it an unread request reopens
@@ -501,7 +501,7 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
       if (settled) return;
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
       total += buf.length;
-      if (total > MAX_BODY_BYTES) {
+      if (total > MAX_REQUEST_BODY_BYTES) {
         settled = true;
         chunks.length = 0;
         reject(new VaultError(ErrorCode.INVALID_INPUT, "Request body too large"));

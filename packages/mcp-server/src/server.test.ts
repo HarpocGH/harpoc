@@ -27,6 +27,7 @@ function mockEngine(overrides: Record<string, unknown> = {}): VaultEngine {
     getState: vi.fn().mockReturnValue("unlocked"),
     queryAudit: vi.fn().mockReturnValue([]),
     auditServerStart: vi.fn(),
+    auditScopeRefusal: vi.fn(),
     isTokenRevoked: vi.fn().mockReturnValue(false),
     verifyToken: vi.fn().mockReturnValue({
       sub: "agent",
@@ -250,6 +251,12 @@ describe("createMcpServer", () => {
 
       const result = await callTool(server, "create_secret", { name: "x", type: "api_key" });
       expect(result.isError).toBe(true);
+      expect(engine.auditScopeRefusal).toHaveBeenCalledTimes(1);
+      expect(engine.auditScopeRefusal).toHaveBeenCalledWith(
+        expect.objectContaining({ principal_id: "agent", interface: "mcp" }),
+        "create_secret",
+        "permission",
+      );
       expect((result.content[0] as { text: string }).text).toContain("Access denied");
     });
 

@@ -26,7 +26,7 @@ export function registerGetSecretInfo(
     },
     async (args) => {
       const parsed = parseHandle(args.handle);
-      scopeGuard.checkAccess(PERMISSION, parsed.project, parsed.name);
+      scopeGuard.checkAccess(PERMISSION, parsed.project, parsed.name, "get_secret_info");
       rateLimiter.checkLimit();
 
       const info = await engine.getSecretInfo(args.handle, scopeGuard.caller);

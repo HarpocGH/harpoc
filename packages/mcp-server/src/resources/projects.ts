@@ -12,7 +12,7 @@ export function registerProjectsResource(
     "secret://vault/projects",
     { description: "Distinct projects with secret counts", mimeType: "application/json" },
     async (uri) => {
-      scopeGuard.checkAccess("list");
+      scopeGuard.checkAccess("list", undefined, undefined, `resources/read ${uri.href}`);
 
       const secrets = scopeGuard.filterByScope(engine.listSecrets(undefined, scopeGuard.caller));
       const counts = new Map<string, number>();

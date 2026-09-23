@@ -67,6 +67,7 @@ function encryptedEcPrivateKeyPem(): string {
 function createMockEngine() {
   return {
     verifyToken: vi.fn().mockReturnValue(MOCK_TOKEN),
+    auditScopeRefusal: vi.fn(),
     resolveSecretId: vi.fn().mockResolvedValue("secret-uuid-1"),
     getCertificateStatus: vi.fn().mockReturnValue(CERT_STATUS),
     // Only reached when `createApp` builds its own default `CertManager`: a

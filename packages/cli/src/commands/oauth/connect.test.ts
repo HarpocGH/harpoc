@@ -204,6 +204,47 @@ describe("oauth connect", () => {
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("mutually exclusive"));
   });
 
+  it("--device with --client-credentials under --json is refused as an INVALID_INPUT envelope (P1bF-2)", async () => {
+    await expect(
+      run([
+        "x-token",
+        "--provider",
+        "github",
+        "--client-id",
+        "c",
+        "--device",
+        "--client-credentials",
+        "--json",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: "--device and --client-credentials are mutually exclusive.",
+    });
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+  });
+
+  it("client_credentials without a client secret under --json is refused as an INVALID_INPUT envelope (P1cF-1)", async () => {
+    vi.mocked(promptHidden).mockResolvedValue("");
+
+    await expect(
+      run([
+        "cc-token",
+        "--provider",
+        "github",
+        "--client-id",
+        "client-1",
+        "--client-credentials",
+        "--json",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message:
+        "client_credentials requires a client secret. Set HARPOC_OAUTH_CLIENT_SECRET or enter it at the prompt.",
+    });
+  });
+
   it("--device prints the user code and resolves only after completion settles", async () => {
     let releaseCompletion: () => void = () => {};
     const completion = new Promise<void>((resolve) => {

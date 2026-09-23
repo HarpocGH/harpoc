@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import type { Permission } from "@harpoc/shared";
-import { AuditEventType, permissionSchema } from "@harpoc/shared";
+import { AuditEventType, VaultError, permissionSchema } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import {
   handleError,
@@ -10,6 +10,7 @@ import {
   formatTimestamp,
 } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { parsePositiveInteger } from "../../utils/options.js";
 
 interface PermissionsOptions {
   permissions?: string;
@@ -41,16 +42,16 @@ export function registerAgentPermissionsCommand(agent: Command): void {
           );
 
           if (options.permissions !== undefined && options.clear) {
-            throw new Error("--permissions and --clear are mutually exclusive");
+            throw VaultError.invalidInput("--permissions and --clear are mutually exclusive");
           }
           if (options.permissions === undefined && !options.clear) {
-            throw new Error(
+            throw VaultError.invalidInput(
               "one of --permissions or --clear is required (an empty cell is never written)",
             );
           }
           // A cleared cell holds no grant to expire: refused, not dropped.
           if (options.clear && options.expires !== undefined) {
-            throw new Error("--expires cannot be combined with --clear");
+            throw VaultError.invalidInput("--expires cannot be combined with --clear");
           }
 
           const permStrings =
@@ -60,17 +61,20 @@ export function registerAgentPermissionsCommand(agent: Command): void {
           for (const p of permStrings) {
             const parsed = permissionSchema.safeParse(p);
             if (!parsed.success) {
-              throw new Error(
+              throw VaultError.invalidInput(
                 `Invalid permission: "${p}". Valid: list, read, use, create, rotate, revoke, admin`,
               );
             }
           }
           const permissions = permStrings as Permission[];
 
-          const expiresMinutes = options.expires ? parseInt(options.expires, 10) : undefined;
-          if (expiresMinutes !== undefined && (isNaN(expiresMinutes) || expiresMinutes <= 0)) {
-            throw new Error("--expires must be a positive number of minutes");
-          }
+          const expiresMinutes =
+            options.expires !== undefined
+              ? parsePositiveInteger(
+                  options.expires,
+                  "--expires must be a positive number of minutes",
+                )
+              : undefined;
           const expiresAt =
             expiresMinutes !== undefined ? Date.now() + expiresMinutes * 60 * 1000 : undefined;
 

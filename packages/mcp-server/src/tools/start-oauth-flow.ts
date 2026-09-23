@@ -49,7 +49,7 @@ export function registerStartOauthFlow(
       }),
     },
     async (args) => {
-      scopeGuard.checkAccess(PERMISSION, args.project, args.name);
+      scopeGuard.checkAccess(PERMISSION, args.project, args.name, "start_oauth_flow");
       rateLimiter.checkLimit(`create:${args.project ?? ""}/${args.name}`);
       const input: StartOAuthFlowInput = { ...args };
 

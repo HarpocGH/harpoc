@@ -838,6 +838,14 @@ describe("injectionPolicyInputSchema", () => {
     ).toThrow();
     expect(() => injectionPolicyInputSchema.parse({ response_header_allowlist: [""] })).toThrow();
   });
+
+  it("refuses an unknown key, naming it (strict — D2c)", () => {
+    const parsed = injectionPolicyInputSchema.safeParse({ network_isolaton: true });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues[0]?.message).toBe('Unrecognized key: "network_isolaton"');
+    }
+  });
 });
 
 describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
@@ -2447,12 +2455,22 @@ describe("connectionConfigSchema", () => {
     expect(connectionConfigSchema.safeParse({ git: {} }).success).toBe(false);
   });
 
-  it("refuses an empty config, naming all four groups", () => {
+  it("accepts an http group carrying a CA PEM alone (D2h)", () => {
+    const parsed = connectionConfigSchema.safeParse({ http: { ca_pem: CA } });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.http).toEqual({ ca_pem: CA });
+  });
+
+  it("refuses an http group without ca_pem (D2h)", () => {
+    expect(connectionConfigSchema.safeParse({ http: {} }).success).toBe(false);
+  });
+
+  it("refuses an empty config, naming all five groups", () => {
     const parsed = connectionConfigSchema.safeParse({});
     expect(parsed.success).toBe(false);
     if (!parsed.success) {
       expect(parsed.error.issues[0]?.message).toBe(
-        "connection config must set at least one of database, ssh, mail or git",
+        "connection config must set at least one of database, ssh, mail, git or http",
       );
     }
   });

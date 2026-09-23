@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
+import { MAX_TOKEN_TTL_MS } from "@harpoc/shared";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -83,6 +84,45 @@ describe("auth token --principal-type", () => {
     const output = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(output).toContain('Invalid principal type: "project"');
     expect(output).toContain("Valid: agent, tool, user");
+  });
+
+  it("refuses a non-integer --ttl as an INVALID_INPUT envelope under --json (P1cF-3)", async () => {
+    await expect(run(["--ttl", "1e3", "--json"])).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: "TTL must be a positive number of minutes",
+    });
+    expect(mockEngine.createToken).not.toHaveBeenCalled();
+  });
+
+  it("a --ttl over the cap is refused as an INVALID_INPUT envelope under --json (P1cF-3)", async () => {
+    const maxTtlMinutes = Math.floor(MAX_TOKEN_TTL_MS / 60_000);
+    await expect(run(["--ttl", String(maxTtlMinutes + 1), "--json"])).rejects.toThrow(
+      "process.exit",
+    );
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: `TTL cannot exceed ${maxTtlMinutes} minutes (${maxTtlMinutes / 60}h)`,
+    });
+    expect(mockEngine.createToken).not.toHaveBeenCalled();
+  });
+
+  it("an unknown --scope permission is refused as an INVALID_INPUT envelope under --json (P1cF-3)", async () => {
+    await expect(run(["--scope", "bogus", "--json"])).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: 'Invalid permission: "bogus". Valid: list, read, use, create, rotate, revoke, admin',
+    });
+    expect(mockEngine.createToken).not.toHaveBeenCalled();
+  });
+
+  it("an invalid --principal-type is refused as an INVALID_INPUT envelope under --json (P1cF-3)", async () => {
+    await expect(run(["--principal-type", "project", "--json"])).rejects.toThrow("process.exit");
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: 'Invalid principal type: "project". Valid: agent, tool, user',
+    });
+    expect(mockEngine.createToken).not.toHaveBeenCalled();
   });
 });
 

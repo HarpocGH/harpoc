@@ -811,6 +811,201 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
     }
   });
 
+  it("two concurrent client-credentials starts for one name: the first never stores, the second does (P1bF-1)", async () => {
+    let exchangeParked = false;
+    let releaseExchange: () => void = () => undefined;
+    const held = createServer((_req, res) => {
+      releaseExchange = () => {
+        releaseExchange = () => undefined;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            access_token: "old-flow-token",
+            token_type: "bearer",
+            expires_in: 3600,
+          }),
+        );
+      };
+      exchangeParked = true;
+    });
+    await new Promise<void>((resolve) => held.listen(0, "127.0.0.1", () => resolve()));
+    const heldUrl = `http://127.0.0.1:${(held.address() as { port: number }).port}`;
+    try {
+      const fake = makeFakeEngine();
+      const manager = fakeEngineManager(fake, {});
+      const first = manager.startClientCredentials("gh", {
+        ...makeClientCredentialsConfig(),
+        token_endpoint: heldUrl,
+      });
+      first.catch(() => undefined);
+      await vi.waitFor(() => expect(exchangeParked).toBe(true));
+
+      const second = await manager.startClientCredentials("gh", makeClientCredentialsConfig());
+      expect(second.status).toBe("authorized");
+      releaseExchange();
+
+      await expect(first).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+      expect(fake.completeOAuthFlow).toHaveBeenCalledTimes(1);
+      expect(fake.completeOAuthFlow.mock.calls[0]?.[1]).not.toBe("old-flow-token");
+    } finally {
+      releaseExchange();
+      held.closeAllConnections();
+      await new Promise<void>((resolve) => held.close(() => resolve()));
+    }
+  });
+
+  it("a client-credentials restart over a parked authorization-code exchange supersedes it (P1bF-1)", async () => {
+    let exchangeParked = false;
+    let releaseExchange: () => void = () => undefined;
+    const held = createServer((_req, res) => {
+      releaseExchange = () => {
+        releaseExchange = () => undefined;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            access_token: "old-flow-token",
+            token_type: "bearer",
+            expires_in: 3600,
+          }),
+        );
+      };
+      exchangeParked = true;
+    });
+    await new Promise<void>((resolve) => held.listen(0, "127.0.0.1", () => resolve()));
+    const heldUrl = `http://127.0.0.1:${(held.address() as { port: number }).port}`;
+    try {
+      const fake = makeFakeEngine();
+      const errors: unknown[] = [];
+      const manager = fakeEngineManager(fake, {
+        callbackPort: 0,
+        onBackgroundFlowError: (_secretId, err) => {
+          errors.push(err);
+        },
+      });
+
+      const first = await manager.startAuthorizationCodeDeferred("gh", {
+        ...makeAuthCodeConfig(),
+        token_endpoint: heldUrl,
+      });
+      const firstRedirect = new URL(
+        new URL(first.authUrl).searchParams.get("redirect_uri") as string,
+      );
+      const state = new URL(first.authUrl).searchParams.get("state") as string;
+      firstRedirect.searchParams.set("code", "old-code");
+      firstRedirect.searchParams.set("state", state);
+      await fetch(firstRedirect);
+      await vi.waitFor(() => expect(exchangeParked).toBe(true));
+
+      const second = await manager.startClientCredentials("gh", makeClientCredentialsConfig());
+      expect(second.status).toBe("authorized");
+      releaseExchange();
+
+      await expect(first.completion).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+      expect(fake.completeOAuthFlow).toHaveBeenCalledTimes(1);
+      expect(errors).toHaveLength(0);
+    } finally {
+      releaseExchange();
+      held.closeAllConnections();
+      await new Promise<void>((resolve) => held.close(() => resolve()));
+    }
+  });
+
+  it("cancelFlow reaches a parked client-credentials exchange, which then never stores (P1bF-1)", async () => {
+    let exchangeParked = false;
+    let releaseExchange: () => void = () => undefined;
+    const held = createServer((_req, res) => {
+      releaseExchange = () => {
+        releaseExchange = () => undefined;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            access_token: "old-flow-token",
+            token_type: "bearer",
+            expires_in: 3600,
+          }),
+        );
+      };
+      exchangeParked = true;
+    });
+    await new Promise<void>((resolve) => held.listen(0, "127.0.0.1", () => resolve()));
+    const heldUrl = `http://127.0.0.1:${(held.address() as { port: number }).port}`;
+    try {
+      const fake = makeFakeEngine();
+      const manager = fakeEngineManager(fake, {});
+      const first = manager.startClientCredentials("gh", {
+        ...makeClientCredentialsConfig(),
+        token_endpoint: heldUrl,
+      });
+      first.catch(() => undefined);
+      await vi.waitFor(() => expect(exchangeParked).toBe(true));
+      expect(manager.cancelFlow("sid-1")).toBe(true);
+      releaseExchange();
+      await expect(first).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+      expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
+    } finally {
+      releaseExchange();
+      held.closeAllConnections();
+      await new Promise<void>((resolve) => held.close(() => resolve()));
+    }
+  });
+
+  it("a device-code restart supersedes a parked client-credentials exchange before it aborts it — the exchange never stores (P1bF-1)", async () => {
+    let exchangeParked = false;
+    let releaseExchange: () => void = () => undefined;
+    const held = createServer((_req, res) => {
+      releaseExchange = () => {
+        releaseExchange = () => undefined;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            access_token: "old-flow-token",
+            token_type: "bearer",
+            expires_in: 3600,
+          }),
+        );
+      };
+      exchangeParked = true;
+    });
+    await new Promise<void>((resolve) => held.listen(0, "127.0.0.1", () => resolve()));
+    const heldUrl = `http://127.0.0.1:${(held.address() as { port: number }).port}`;
+    let deviceParked = false;
+    let releaseDevice: () => void = () => undefined;
+    deviceHandler = (_req, res) => {
+      releaseDevice = () => {
+        releaseDevice = () => undefined;
+        res.writeHead(500);
+        res.end("Server error");
+      };
+      deviceParked = true;
+    };
+    try {
+      const fake = makeFakeEngine();
+      const manager = fakeEngineManager(fake, {});
+      const first = manager.startClientCredentials("gh", {
+        ...makeClientCredentialsConfig(),
+        token_endpoint: heldUrl,
+      });
+      first.catch(() => undefined);
+      await vi.waitFor(() => expect(exchangeParked).toBe(true));
+
+      const second = manager.startDeviceCode("gh", makeDeviceCodeConfig());
+      second.catch(() => undefined);
+      await vi.waitFor(() => expect(deviceParked).toBe(true));
+      releaseExchange();
+
+      await expect(first).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+      expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
+
+      releaseDevice();
+      await expect(second).rejects.toBeDefined();
+    } finally {
+      releaseExchange();
+      releaseDevice();
+      held.closeAllConnections();
+      await new Promise<void>((resolve) => held.close(() => resolve()));
+    }
+  });
+
   it("a predecessor whose exchange lands while the restart is still binding settles as superseded, silently", async () => {
     let exchangeParked = false;
     let releaseExchange: () => void = () => undefined;

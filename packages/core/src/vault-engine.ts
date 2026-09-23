@@ -22,6 +22,7 @@ import type {
   OAuthTokenStatus,
   Permission,
   RegisterAgentInput,
+  ScopeRefusalReason,
   Secret,
   ServerStopTrigger,
   ServerTransport,
@@ -1191,6 +1192,7 @@ export class VaultEngine {
           }
           const responseMode = action.response_mode ?? policyMode;
 
+          const config = this.loadConnectionConfig(s, secret.id);
           const response = await s.httpInjector.executeWithSecret(
             {
               method: action.method,
@@ -1201,6 +1203,7 @@ export class VaultEngine {
               responseMode,
               responseHeaderAllowlist: policy.response_header_allowlist,
               urlAllowlist: policy.url_allowlist,
+              caPem: config?.http?.ca_pem,
             },
             value,
             action.injection,
@@ -1814,6 +1817,7 @@ export class VaultEngine {
         `Invalid injection policy: ${renderSchemaIssues(validated.error)}`,
       );
     }
+    const input = validated.data;
 
     const s = this.assertUnlocked();
     // Configuration of a secret is itself gated (W1) and the injection policy
@@ -1836,9 +1840,7 @@ export class VaultEngine {
 
     const stored = new Set(this.loadInjectionPolicy(s, secret.id).command_allowlist);
     const pathDirs = controlledPathDirs();
-    const added = [
-      ...new Set((policy.command_allowlist ?? []).filter((entry) => !stored.has(entry))),
-    ];
+    const added = [...new Set(input.command_allowlist.filter((entry) => !stored.has(entry)))];
     // Two tiers, one flag (R6(ii)): the raw name first, then the entry
     // resolved on the controlled PATH (a symlink to `sh` is `sh`, E71i). An
     // entry is counted in exactly one tier.
@@ -1870,19 +1872,7 @@ export class VaultEngine {
       throw VaultError.interpreterNotAcknowledged(addedInterpreters, addedWrappers);
     }
 
-    const json = JSON.stringify({
-      url_allowlist: policy.url_allowlist ?? [],
-      command_allowlist: policy.command_allowlist ?? [],
-      env_allowlist: policy.env_allowlist ?? [],
-      host_allowlist: policy.host_allowlist ?? [],
-      response_mode: policy.response_mode ?? "filtered",
-      response_header_allowlist: policy.response_header_allowlist ?? [],
-      network_isolation: policy.network_isolation ?? false,
-      fs_isolation: policy.fs_isolation ?? false,
-      smtp_recipient_allowlist: policy.smtp_recipient_allowlist ?? [],
-      imap_read_only: policy.imap_read_only ?? false,
-      strict_tree_exit: policy.strict_tree_exit ?? false,
-    });
+    const json = JSON.stringify(input);
     const enc = encrypt(
       s.kek,
       new Uint8Array(Buffer.from(json, "utf8")),
@@ -1907,17 +1897,17 @@ export class VaultEngine {
         ...callerColumns(caller),
         detail: {
           policy: "injection",
-          url_count: policy.url_allowlist?.length ?? 0,
-          command_count: policy.command_allowlist?.length ?? 0,
-          env_count: policy.env_allowlist?.length ?? 0,
-          host_count: policy.host_allowlist?.length ?? 0,
-          response_mode: policy.response_mode ?? "filtered",
-          response_header_count: policy.response_header_allowlist?.length ?? 0,
-          network_isolation: policy.network_isolation ?? false,
-          fs_isolation: policy.fs_isolation ?? false,
-          recipient_count: policy.smtp_recipient_allowlist?.length ?? 0,
-          imap_read_only: policy.imap_read_only ?? false,
-          strict_tree_exit: policy.strict_tree_exit ?? false,
+          url_count: input.url_allowlist.length,
+          command_count: input.command_allowlist.length,
+          env_count: input.env_allowlist.length,
+          host_count: input.host_allowlist.length,
+          response_mode: input.response_mode,
+          response_header_count: input.response_header_allowlist.length,
+          network_isolation: input.network_isolation,
+          fs_isolation: input.fs_isolation,
+          recipient_count: input.smtp_recipient_allowlist.length,
+          imap_read_only: input.imap_read_only,
+          strict_tree_exit: input.strict_tree_exit,
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
@@ -1950,16 +1940,12 @@ export class VaultEngine {
     // tightened from a separate process, whose engine cannot reach this
     // registry. One terminate covers every demand; network, fs, strict is
     // the precedence.
-    if (
-      policy.network_isolation === true ||
-      policy.fs_isolation === true ||
-      policy.strict_tree_exit === true
-    ) {
+    if (input.network_isolation || input.fs_isolation || input.strict_tree_exit) {
       await s.mcpRegistry.terminate(
         secret.id,
-        policy.network_isolation === true
+        input.network_isolation
           ? "network_isolation_enabled"
-          : policy.fs_isolation === true
+          : input.fs_isolation
             ? "fs_isolation_enabled"
             : "strict_tree_exit_enabled",
         attributionFromCaller(caller, this.sessionId),
@@ -2144,7 +2130,7 @@ export class VaultEngine {
   }
 
   // ---------------------------------------------------------------------------
-  // Connection config (database TLS policy / SSH pinned host keys)
+  // Connection config (database TLS, SSH host keys, mail TLS, the Git-HTTPS and HTTP CA pins)
   // ---------------------------------------------------------------------------
 
   /** Load a secret's endpoint-authentication config, or undefined when unset. */
@@ -2177,9 +2163,10 @@ export class VaultEngine {
   }
 
   /**
-   * Set (or replace) a secret's endpoint-authentication config (database TLS
-   * policy / SSH pinned host keys). Trusted administrative operation (CLI/REST
-   * only — never an MCP tool); encrypted under the KEK.
+   * Set (or replace) a secret's endpoint-authentication config (database TLS,
+   * SSH host keys, mail TLS, the Git-HTTPS and HTTP CA pins). Trusted
+   * administrative operation (CLI/REST only — never an MCP tool); encrypted
+   * under the KEK.
    */
   async setConnectionConfig(
     handle: string,
@@ -2235,6 +2222,7 @@ export class VaultEngine {
           has_ssh: validated.data.ssh !== undefined,
           has_mail: validated.data.mail !== undefined,
           has_git: validated.data.git !== undefined,
+          has_http: validated.data.http !== undefined,
           database_tls: validated.data.database?.tls_mode,
           // The mail group carries the TLS decision as a value, not a mode —
           // projected onto the database group's require/disable vocabulary so
@@ -3552,9 +3540,26 @@ export class VaultEngine {
    * governance-scope middleware refuses before the engine assertion is ever
    * reached and writes the same row from there — so a project-scoped token
    * probing `/api/v1/agents/*` leaves exactly one row whichever layer refuses
-   * it; the engine's own row is the SDK/direct-mode row.
+   * it; the engine's own row is the SDK/direct-mode row. Since 2026-09-23 the
+   * governance case of `auditScopeRefusal` (`reason: "governance"`).
    */
   auditGovernanceRefusal(caller: CallerContext | undefined, operation: string): void {
+    this.auditScopeRefusal(caller, operation, "governance");
+  }
+
+  /**
+   * Write the `access.denied` row every interface scope refusal leaves — no
+   * secret id, the refusing principal's columns, the operation as the interface
+   * names it (`<METHOD> <path>` on REST, the tool or resource on MCP, the engine
+   * method for governance) and the branch that refused (D2g, 2026-09-23). The
+   * row commits standalone before the interface throws; a sealed engine throws
+   * `VAULT_LOCKED` from here instead.
+   */
+  auditScopeRefusal(
+    caller: CallerContext | undefined,
+    operation: string,
+    reason: ScopeRefusalReason,
+  ): void {
     const s = this.assertUnlocked();
     s.auditLogger.log({
       eventType: AuditEventType.ACCESS_DENIED,
@@ -3562,6 +3567,7 @@ export class VaultEngine {
       detail: {
         operation,
         error: ErrorCode.ACCESS_DENIED,
+        reason,
         ...callerInterfaceDetail(caller),
       },
       success: false,

@@ -9,6 +9,7 @@ import {
   AuditEventType,
   callerFromToken,
   ErrorCode,
+  injectionPolicyInputSchema,
   VaultError,
   VaultState,
   VAULT_VERSION,
@@ -860,6 +861,28 @@ describe("injection policy", () => {
     const p = await engine.getInjectionPolicy("secret://pol");
     expect(p.response_mode).toBe("filtered");
     expect(p.response_header_allowlist).toEqual([]);
+  });
+
+  it("refuses an unknown key as SCHEMA_VALIDATION naming it, and stores nothing (D2c)", async () => {
+    const err = await expectVaultError(
+      () =>
+        engine.setInjectionPolicy("secret://pol", {
+          network_isolaton: true,
+        } as unknown as InjectionPolicyInput),
+      ErrorCode.SCHEMA_VALIDATION_ERROR,
+    );
+    expect(err.message).toContain('Unrecognized key: "network_isolaton"');
+    const grants = engine
+      .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
+      .filter((e) => e.detail?.policy === "injection");
+    expect(grants).toHaveLength(0);
+  });
+
+  it("stores the schema's defaults for an empty input (D2c)", async () => {
+    await engine.setInjectionPolicy("secret://pol", {});
+    expect(await engine.getInjectionPolicy("secret://pol")).toEqual(
+      injectionPolicyInputSchema.parse({}),
+    );
   });
 
   it("audits a policy change as POLICY_GRANT", async () => {
@@ -2353,6 +2376,17 @@ describe("connection config", () => {
       .filter((e) => e.detail?.policy === "connection");
     expect(grants[0]?.detail?.has_git).toBe(true);
     expect(grants[0]?.detail?.has_mail).toBe(false);
+  });
+
+  it("audits the http group's presence as has_http (D2h)", async () => {
+    await engine.setConnectionConfig("secret://conn", {
+      http: { ca_pem: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n" },
+    });
+    const grants = engine
+      .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
+      .filter((e) => e.detail?.policy === "connection");
+    expect(grants[0]?.detail?.has_http).toBe(true);
+    expect(grants[0]?.detail?.has_git).toBe(false);
   });
 
   const rewriteStoredConnectionConfig = async (

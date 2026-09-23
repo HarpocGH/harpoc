@@ -41,6 +41,7 @@ const OAUTH_STATUS = {
 function createMockEngine() {
   return {
     verifyToken: vi.fn().mockReturnValue(MOCK_TOKEN),
+    auditScopeRefusal: vi.fn(),
     resolveSecretId: vi.fn().mockResolvedValue("secret-uuid-1"),
     getOAuthTokenStatus: vi.fn().mockReturnValue(OAUTH_STATUS),
     refreshOAuthToken: vi.fn().mockResolvedValue(1_700_000_003_600),

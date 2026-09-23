@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { VaultApiToken } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import { ScopeGuard } from "./scope-guard.js";
@@ -184,6 +184,73 @@ describe("ScopeGuard", () => {
 
       // Wrong secret
       expect(() => guard.checkAccess("use", "prod", "other")).toThrow();
+    });
+  });
+
+  describe("onRefusal (D2g)", () => {
+    const build = (overrides: Partial<VaultApiToken>, seen: ReturnType<typeof vi.fn>) =>
+      new ScopeGuard(makeToken(overrides), "mcp", undefined, undefined, seen);
+
+    it("reports the permission branch with the operation, once, then throws", () => {
+      const seen = vi.fn();
+      expect(() =>
+        build({ scope: ["list"] }, seen).checkAccess(
+          "create",
+          undefined,
+          undefined,
+          "create_secret",
+        ),
+      ).toThrow(expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }));
+      expect(seen).toHaveBeenCalledTimes(1);
+      expect(seen).toHaveBeenCalledWith("create_secret", "permission");
+    });
+
+    it("reports a cross-project and a global-secret refusal as project", () => {
+      const seen = vi.fn();
+      const guard = build({ project: "acme" }, seen);
+      expect(() => guard.checkAccess("use", "other", "db", "use_secret")).toThrow();
+      expect(() => guard.checkAccess("use", undefined, "db", "use_secret")).toThrow();
+      expect(seen.mock.calls).toEqual([
+        ["use_secret", "project"],
+        ["use_secret", "project"],
+      ]);
+    });
+
+    it("reports the secret-name branch as secret", () => {
+      const seen = vi.fn();
+      expect(() =>
+        build({ secrets: ["db-*"] }, seen).checkAccess("use", undefined, "mail", "use_secret"),
+      ).toThrow();
+      expect(seen).toHaveBeenCalledWith("use_secret", "secret");
+    });
+
+    it("an admitted call, an expired token, a revoked token and a null token report nothing", () => {
+      const seen = vi.fn();
+      build({}, seen).checkAccess("use", undefined, undefined, "use_secret");
+      expect(() =>
+        build({ exp: 1 }, seen).checkAccess("use", undefined, undefined, "use_secret"),
+      ).toThrow();
+      expect(() =>
+        new ScopeGuard(makeToken(), "mcp", () => true, undefined, seen).checkAccess(
+          "use",
+          undefined,
+          undefined,
+          "use_secret",
+        ),
+      ).toThrow();
+      new ScopeGuard(null, "mcp", undefined, undefined, seen).checkAccess(
+        "admin",
+        undefined,
+        undefined,
+        "audit",
+      );
+      expect(seen).not.toHaveBeenCalled();
+    });
+
+    it("a caller naming no operation reports 'unnamed'", () => {
+      const seen = vi.fn();
+      expect(() => build({ scope: ["list"] }, seen).checkAccess("create")).toThrow();
+      expect(seen).toHaveBeenCalledWith("unnamed", "permission");
     });
   });
 });

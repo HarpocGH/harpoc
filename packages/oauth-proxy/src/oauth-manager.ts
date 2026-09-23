@@ -171,8 +171,8 @@ export class OAuthManager {
   }
 
   /**
-   * Abort one pending background flow — a device-code poll, or an
-   * authorization-code flow from its reservation onward (bind window included).
+   * Abort one pending background flow — a device-code poll, a client-credentials exchange, or
+   * an authorization-code flow from its reservation onward (bind window included).
    */
   cancelFlow(secretId: string): boolean {
     const flow = this.pendingFlows.get(secretId);
@@ -182,7 +182,7 @@ export class OAuthManager {
   }
 
   /**
-   * Abort every pending background flow, device-code polls and
+   * Abort every pending background flow, device-code polls, client-credentials exchanges and
    * authorization-code flows alike (owner dispose path) — over the live set, so
    * a flow the per-secret map no longer names is cancelled too.
    */
@@ -398,6 +398,12 @@ export class OAuthManager {
     if (pending.superseded) throw VaultError.oauthFlowFailed("Authorization flow superseded");
   }
 
+  private assertNotCancelled(pending: PendingFlow): void {
+    if (pending.controller.signal.aborted) {
+      throw VaultError.oauthFlowFailed("Client-credentials flow cancelled");
+    }
+  }
+
   /**
    * Drop a settled flow: out of the live set always, out of the per-secret map
    * only while it still owns that entry — never a successor's (same-secretId
@@ -415,6 +421,7 @@ export class OAuthManager {
    * 1. Create OAuth secret in vault (PENDING)
    * 2. Exchange client_id + client_secret for access token
    * 3. Complete OAuth flow (secret → ACTIVE)
+   * The flow is registered like the other two, so a restart for the same name supersedes it and `cancelFlow` reaches it (P1bF-1, 2026-09-23).
    */
   async startClientCredentials(
     name: string,
@@ -430,10 +437,25 @@ export class OAuthManager {
       project,
       caller,
     );
+    // The same invariant as the authorization-code mark above (P1R-3, 2026-09-23).
+    const predecessor = this.pendingFlows.get(secretId);
+    if (predecessor) predecessor.superseded = true;
+    predecessor?.controller.abort();
+
+    const pending: PendingFlow = {
+      controller: new AbortController(),
+      holdsSocket: false,
+      settled: false,
+      superseded: false,
+    };
+    this.pendingFlows.set(secretId, pending);
+    this.liveFlows.add(pending);
 
     try {
       const flow = new ClientCredentialsFlow();
       const tokens = await flow.authenticate(resolved);
+      this.assertNotSuperseded(pending);
+      this.assertNotCancelled(pending);
 
       const expiresAt = tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined;
       await this.engine.completeOAuthFlow(secretId, tokens.access_token, undefined, expiresAt);
@@ -445,6 +467,9 @@ export class OAuthManager {
       };
     } catch (err) {
       throw toFlowError(err);
+    } finally {
+      pending.settled = true;
+      this.unregisterPendingFlow(secretId, pending);
     }
   }
 

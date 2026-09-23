@@ -18,3 +18,16 @@ export function parseIntOption(value: string, label: string, min: number, max: n
   }
   return parsed;
 }
+
+/**
+ * Parse a positive decimal integer option (`1*DIGIT`, at least 1), refusing
+ * through the command's error path with the caller's own message so `--json`
+ * renders the envelope (P1bF-2, 2026-09-23). The sites that took `parseInt`
+ * accepted `5abc`, `1.5` and `1e3` as 5, 1 and 1.
+ */
+export function parsePositiveInteger(value: string, message: string): number {
+  if (!isDecimalInteger(value) || Number(value) < 1) {
+    throw VaultError.invalidInput(message);
+  }
+  return Number(value);
+}

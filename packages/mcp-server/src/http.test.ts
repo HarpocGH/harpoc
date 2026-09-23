@@ -43,6 +43,7 @@ function mockEngine(overrides: Record<string, unknown> = {}): VaultEngine {
     queryAudit: vi.fn().mockReturnValue([]),
     verifyToken: vi.fn().mockReturnValue(tokenPayload()),
     auditServerStart: vi.fn(),
+    auditScopeRefusal: vi.fn(),
     isTokenRevoked: vi.fn().mockReturnValue(false),
     secretNameTaken: vi.fn().mockResolvedValue(false),
     assertRotateAllowed: vi.fn().mockResolvedValue(undefined),
@@ -329,6 +330,12 @@ describe("startMcpHttpServer", () => {
       arguments: { name: "x", type: "api_key" },
     })) as { content: Array<{ text: string }>; isError?: boolean };
     expect(result.isError).toBe(true);
+    expect(engine.auditScopeRefusal).toHaveBeenCalledTimes(1);
+    expect(engine.auditScopeRefusal).toHaveBeenCalledWith(
+      expect.objectContaining({ principal_id: "agent", interface: "mcp-http" }),
+      "create_secret",
+      "permission",
+    );
     expect((result.content[0] as { text: string }).text).toContain("Access denied");
   });
 

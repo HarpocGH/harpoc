@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { PrincipalType, Permission } from "@harpoc/shared";
 import { AuditEventType, accessPolicyInputSchema } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
-import { checkTokenScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
+import { checkScope, buildHandle, parseHandleParam } from "../middleware/scope.js";
 import { callerOf } from "../utils/caller.js";
 import { readJsonBody } from "../utils/read-json-body.js";
 import { schemaValidationError } from "../utils/schema-error.js";
@@ -12,9 +12,8 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
 
   // List policies for a secret
   router.get("/:handle/policies", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "read", project, name);
+    checkScope(c, "read", project, name);
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
@@ -28,7 +27,7 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
   router.post("/:handle/policies", async (c) => {
     const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "admin", project, name);
+    checkScope(c, "admin", project, name);
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
@@ -57,9 +56,8 @@ export function createPolicyRoutes(): Hono<HarpocEnv> {
 
   // Revoke a policy
   router.delete("/:handle/policies/:policyId", async (c) => {
-    const token = c.get("token");
     const { project, name } = parseHandleParam(c.req.param("handle"));
-    checkTokenScope(token, "admin", project, name);
+    checkScope(c, "admin", project, name);
 
     const engine = c.get("engine");
     const handle = buildHandle(c.req.param("handle"));
