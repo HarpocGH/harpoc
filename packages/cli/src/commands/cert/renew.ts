@@ -1,12 +1,11 @@
 import type { Command } from "commander";
 import { CertManager } from "@harpoc/cert-manager";
+import { AuditEventType } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord, formatTimestamp } from "../../utils/output.js";
 import { parseIntOption } from "../../utils/options.js";
+import { MAX_PORT, MIN_PORT } from "../../utils/option-bounds.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
-
-const MIN_PORT = 1;
-const MAX_PORT = 65535;
 
 interface CertRenewOptions {
   httpPort?: string;
@@ -40,7 +39,12 @@ export function registerCertRenewCommand(cert: Command): void {
             handle,
             options.token ?? process.env.HARPOC_TOKEN,
           );
-          const secretId = await resolveSecretId(engine, handle);
+          const secretId = await resolveSecretId(
+            engine,
+            handle,
+            resolved?.caller,
+            AuditEventType.CERT_RENEW,
+          );
 
           const manager = new CertManager(engine);
           // The caller threads into every engine read and the write, so

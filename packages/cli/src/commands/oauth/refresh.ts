@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+import { AuditEventType } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess, formatTimestamp } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
@@ -20,7 +21,12 @@ export function registerOAuthRefreshCommand(oauth: Command): void {
             handle,
             options.token ?? process.env.HARPOC_TOKEN,
           );
-          const secretId = await resolveSecretId(engine, handle);
+          const secretId = await resolveSecretId(
+            engine,
+            handle,
+            resolved?.caller,
+            AuditEventType.OAUTH_REFRESH,
+          );
           const newExpiresAt = await engine.refreshOAuthToken(secretId, resolved?.caller, handle);
           if (options.json) {
             printJson({ handle, new_expires_at: newExpiresAt });

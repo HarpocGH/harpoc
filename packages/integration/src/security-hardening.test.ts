@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -119,7 +119,6 @@ describe("Memory Wiping", () => {
   it("session file overwritten with random bytes before deletion on lock", async () => {
     // After lock, the session file should not exist
     await vault.engine.lock();
-    const { existsSync } = await import("node:fs");
     expect(existsSync(vault.sessionPath)).toBe(false);
   });
 
@@ -855,6 +854,25 @@ describe("No-Logging Static Audit", () => {
       "shared/src/caller.ts",
     ]);
     expect(new Set(writes).size).toBe(2);
+  });
+
+  it("the loopback host set is declared once, in @harpoc/shared (CM-2 tripwire)", () => {
+    const packagesDir = join(REPO_ROOT, "packages");
+    const declarationPattern = /new Set\(\[[^\]]*"localhost"/;
+    const declarations: string[] = [];
+    let scanned = 0;
+    for (const entry of readdirSync(packagesDir, { withFileTypes: true })) {
+      const srcDir = join(packagesDir, entry.name, "src");
+      if (!entry.isDirectory() || !existsSync(srcDir)) continue;
+      for (const filePath of collectTsFiles(srcDir)) {
+        scanned++;
+        if (declarationPattern.test(readFileSync(filePath, "utf8"))) {
+          declarations.push(`${entry.name}/src/${relative(srcDir, filePath).split(sep).join("/")}`);
+        }
+      }
+    }
+    expect(scanned).toBeGreaterThan(100);
+    expect(declarations).toEqual(["shared/src/host-allowlist.ts"]);
   });
 });
 

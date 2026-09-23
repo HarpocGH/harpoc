@@ -20,7 +20,7 @@ export function registerOAuthStatusCommand(oauth: Command): void {
             handle,
             options.token ?? process.env.HARPOC_TOKEN,
           );
-          const secretId = await resolveSecretId(engine, handle);
+          const secretId = await resolveSecretId(engine, handle, resolved?.caller);
           const status = engine.getOAuthTokenStatus(secretId, resolved?.caller, handle);
           if (options.json) {
             printJson(status);

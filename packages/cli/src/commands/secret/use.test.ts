@@ -615,6 +615,28 @@ describe("secret use — buildAction covers the five v1.3 contexts", () => {
     });
   });
 
+  it("imap: --uid refuses a non-decimal integer literal (W1-29)", async () => {
+    await expect(
+      run([
+        "secret://k",
+        "--action",
+        "imap",
+        "--host",
+        "imap.example.com",
+        "--mailbox",
+        "Archive",
+        "--operation",
+        "fetch",
+        "--uid",
+        "0x10",
+        "--parts",
+        "headers",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--uid must be an integer"));
+  });
+
   it("imap: --account maps the XOAUTH2 identity into the action", async () => {
     await run([
       "secret://k",

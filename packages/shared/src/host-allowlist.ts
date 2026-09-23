@@ -16,6 +16,14 @@ import { VaultError } from "./errors.js";
 /** Bind addresses whose listener never leaves the host (thesis §4.1). */
 export const LOOPBACK_BIND_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "::1", "localhost"]);
 
+/**
+ * The same three names as `URL.hostname` spells them — the IPv6 literal
+ * bracketed — for every "plain http(s)/ws for loopback only" URL refinement
+ * (the OAuth endpoint and WebSocket schemas, the ACME directory check, core's
+ * `isLoopback`): the one declaration since 2026-09-23 (CM-2).
+ */
+export const LOOPBACK_URL_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
 const HOST_CHARS = /^[a-z0-9.:-]+$/;
 const IPV6_CHARS = /^[0-9a-f:.]+$/;
 const PORT = /^\d{1,5}$/;

@@ -212,6 +212,17 @@ describe("createOAuthSecret", () => {
     expect(info.status).toBe("active");
   });
 
+  it("completeOAuthFlow stores and audits before its first yield — the supersede guard's invariant (P1R-3)", async () => {
+    const { secretId } = await engine.createOAuthSecret("sync-complete", defaultProviderConfig());
+    const completion = engine.completeOAuthFlow(secretId, "access-tok");
+    expect(
+      engine
+        .queryAudit({ eventType: AuditEventType.OAUTH_CALLBACK })
+        .filter((r) => r.secret_id === secretId),
+    ).toHaveLength(1);
+    await completion;
+  });
+
   it("an ACTIVE OAuth secret of the same name still collides (negative control)", async () => {
     const { secretId } = await engine.createOAuthSecret("active-col", defaultProviderConfig());
     await engine.completeOAuthFlow(secretId, "access-tok");

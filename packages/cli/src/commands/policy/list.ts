@@ -29,7 +29,7 @@ export function registerPolicyListCommand(policy: Command): void {
             let secretId: string | undefined;
             if (handle) {
               resolved = resolveTokenCallerForHandle(engine, "read", handle, tokenValue);
-              secretId = await resolveSecretId(engine, handle);
+              secretId = await resolveSecretId(engine, handle, resolved?.caller);
             } else {
               resolved = resolveTokenCaller(engine, { permission: "read" }, tokenValue);
             }

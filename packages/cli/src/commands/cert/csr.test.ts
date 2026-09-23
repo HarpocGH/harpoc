@@ -215,6 +215,35 @@ describe("cert csr", () => {
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
+  it("a trailing comma in --sans is refused before the vault opens", async () => {
+    await expect(
+      run(["csr", "web", "--subject", "example.com", "--sans", "a.example,"]),
+    ).rejects.toThrow("process.exit");
+
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--sans requires"));
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("an IPv6 zone id in --sans is refused before the vault opens", async () => {
+    await expect(
+      run(["csr", "web", "--subject", "example.com", "--sans", "fe80::1%eth0"]),
+    ).rejects.toThrow("process.exit");
+
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("zone id"));
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("the --sans refusal renders the INVALID_INPUT envelope under --json", async () => {
+    await expect(
+      run(["csr", "web", "--subject", "example.com", "--sans", "fe80::1%eth0", "--json"]),
+    ).rejects.toThrow("process.exit");
+
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"error":"INVALID_INPUT"'));
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+  });
+
   it("--bits under the default (ec) algorithm is refused rather than silently dropped", async () => {
     await expect(run(["csr", "web", "--subject", "example.com", "--bits", "4096"])).rejects.toThrow(
       "process.exit",

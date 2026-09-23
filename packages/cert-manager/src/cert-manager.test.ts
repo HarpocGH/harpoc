@@ -498,6 +498,13 @@ describe("CertManager", () => {
       ).rejects.toThrow(csrFailed);
       expect(engine.importCertificate).not.toHaveBeenCalled();
     });
+
+    it("refuses a SAN carrying an IPv6 zone id before any key is generated", async () => {
+      await expect(
+        manager.generateCsr("api", { commonName: "api.example.com", sans: ["fe80::1%eth0"] }),
+      ).rejects.toThrow(csrFailed);
+      expect(engine.importCertificate).not.toHaveBeenCalled();
+    });
   });
 
   describe("issueWithAcme", () => {

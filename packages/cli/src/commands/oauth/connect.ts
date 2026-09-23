@@ -6,6 +6,7 @@ import { handleError, printJson, printSuccess } from "../../utils/output.js";
 import { promptHidden } from "../../utils/prompt.js";
 import { buildOAuthProviderConfig } from "../../utils/oauth-config.js";
 import { parseIntOption } from "../../utils/options.js";
+import { MAX_PORT } from "../../utils/option-bounds.js";
 
 export function registerOAuthConnectCommand(oauth: Command): void {
   oauth
@@ -60,7 +61,7 @@ export function registerOAuthConnectCommand(oauth: Command): void {
             process.exit(1);
           }
 
-          const callbackPort = parseIntOption(options.callbackPort, "callback port", 0, 65535);
+          const callbackPort = parseIntOption(options.callbackPort, "callback port", 0, MAX_PORT);
           const timeoutSeconds = parseIntOption(options.timeout, "timeout", 1, 86400);
 
           const grantType: OAuthGrantType = options.device

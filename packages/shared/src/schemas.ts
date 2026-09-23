@@ -16,6 +16,7 @@ import {
 } from "./constants.js";
 import { isDecimalInteger } from "./decimal-integer.js";
 import { isValidHandle } from "./handle.js";
+import { LOOPBACK_URL_HOSTS } from "./host-allowlist.js";
 import { isValidRecipientPattern } from "./recipient-pattern.js";
 import {
   ActionType,
@@ -665,9 +666,6 @@ const websocketCollectSchema = z.strictObject({
     .default(DEFAULT_WS_COLLECT_WINDOW_MS),
 });
 
-/** Mirrors the loopback set the OAuth endpoint schema and core's `validateUrl` use. */
-const WS_LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
-
 /**
  * WebSocket URL: `wss://` anywhere, or `ws://` for loopback only — mirrors
  * core's `validateUrl` SSRF policy (same shape as `oauthEndpointUrlSchema`).
@@ -679,7 +677,9 @@ const websocketUrlSchema = z.url().refine((value) => {
   } catch {
     return false;
   }
-  return url.protocol === "wss:" || (url.protocol === "ws:" && WS_LOOPBACK_HOSTS.has(url.hostname));
+  return (
+    url.protocol === "wss:" || (url.protocol === "ws:" && LOOPBACK_URL_HOSTS.has(url.hostname))
+  );
 }, "WebSocket URL must use wss: (plain ws: is allowed for loopback only)");
 
 /**
@@ -1289,8 +1289,6 @@ const oauthProviderPresetValues = Object.values(OAuthProviderPreset) as [
 ];
 export const oauthProviderPresetSchema = z.enum(oauthProviderPresetValues);
 
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
-
 // Mirrors core's validateUrl SSRF policy: HTTPS anywhere, plain HTTP for loopback only.
 const oauthEndpointUrlSchema = z.url().refine((value) => {
   let url: URL;
@@ -1300,7 +1298,7 @@ const oauthEndpointUrlSchema = z.url().refine((value) => {
     return false;
   }
   return (
-    url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname))
+    url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_URL_HOSTS.has(url.hostname))
   );
 }, "URL must use HTTPS (plain HTTP is allowed for loopback only)");
 

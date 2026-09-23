@@ -105,6 +105,7 @@ function dnsNameBytes(name: string): Uint8Array {
 
 function ipToBytes(ip: string): Uint8Array {
   if (isIP(ip) === 4) return Uint8Array.from(ip.split(".").map((o) => Number.parseInt(o, 10)));
+  if (ip.includes("%")) throw VaultError.certCsrFailed("iPAddress SAN must not carry a zone id");
   const groups = expandIpv6(ip);
   if (groups.length !== IPV6_GROUPS || groups.some((g) => !Number.isInteger(g) || g > 0xffff)) {
     throw VaultError.certCsrFailed("iPAddress SAN is not a representable IPv6 address");

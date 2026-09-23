@@ -229,6 +229,11 @@ export class OAuthManager {
       project,
       caller,
     );
+    // The mark lands in the microtask drain `createOAuthSecret`'s return
+    // settles in: the engine's resume path yields to no I/O between its
+    // row-replacing transaction and its return (its comment states the
+    // invariant), so no predecessor completion can interleave here
+    // (P1R-3, 2026-09-23).
     const predecessor = this.pendingFlows.get(secretId);
     if (predecessor) predecessor.superseded = true;
 
@@ -464,6 +469,7 @@ export class OAuthManager {
       project,
       caller,
     );
+    // The same invariant as the authorization-code mark above (P1R-3, 2026-09-23).
     const predecessor = this.pendingFlows.get(secretId);
     if (predecessor) predecessor.superseded = true;
 

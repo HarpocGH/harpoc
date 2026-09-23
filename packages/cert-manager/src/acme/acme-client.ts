@@ -1,7 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { contentLengthExceeds, readBodyCapped, VaultError } from "@harpoc/shared";
 import { validateAcmeUrl } from "./directory.js";
-import { jwkThumbprint, publicJwk, signJws } from "./jws.js";
+import { jwkThumbprint, jwsAlgForCurve, publicJwk, signJws } from "./jws.js";
 
 export interface AcmeClientOptions {
   directoryUrl: string;
@@ -50,11 +50,6 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 1_048_576; // 1 MiB, matching the repo's other body caps
 const MAX_PROBLEM_TYPE_CHARS = 128;
 const UNSETTLED_STATES = new Set(["pending", "processing"]);
-const JWS_ALG_BY_CURVE = new Map<string, string>([
-  ["P-256", "ES256"],
-  ["P-384", "ES384"],
-  ["P-521", "ES512"],
-]);
 
 interface AcmeDirectory {
   newNonce: string;
@@ -329,7 +324,7 @@ export class AcmeClient {
 function algorithmFor(jwk: Record<string, string>): string {
   if (jwk["kty"] === "RSA") return "RS256";
   const curve = jwk["crv"] ?? "";
-  const alg = JWS_ALG_BY_CURVE.get(curve);
+  const alg = jwsAlgForCurve(curve);
   if (alg === undefined) {
     throw VaultError.certAcmeFailed(`unsupported account key curve: ${curve || "(absent)"}`);
   }

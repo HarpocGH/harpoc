@@ -103,6 +103,11 @@ function keyAlgorithm(key: KeyObject): JwsAlgorithm {
   return algorithm;
 }
 
+/** The JOSE `alg` of an EC curve, or undefined for one `signJws` cannot sign with — the one table (CM-3, 2026-09-23). */
+export function jwsAlgForCurve(curve: string): string | undefined {
+  return EC_ALGORITHMS.get(curve)?.alg;
+}
+
 function loadKey(privateKeyPem: string): KeyObject {
   let key: KeyObject;
   try {

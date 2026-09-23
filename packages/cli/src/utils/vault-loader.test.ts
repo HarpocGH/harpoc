@@ -2,7 +2,13 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ErrorCode, VAULT_DB_NAME, VAULT_DIR_NAME } from "@harpoc/shared";
+import {
+  AuditEventType,
+  type CallerContext,
+  ErrorCode,
+  VAULT_DB_NAME,
+  VAULT_DIR_NAME,
+} from "@harpoc/shared";
 import {
   resetJobWrapperProbeForTests,
   resolveJobWrapper,
@@ -128,5 +134,64 @@ describe("resolveSecretId", () => {
     const engine = new VaultEngine({ dbPath, sessionPath });
 
     await expect(resolveSecretId(engine, "secret://any")).rejects.toThrow();
+  });
+
+  it("a failed probe with a caller leaves an attributed secret.read row (D2b)", async () => {
+    const dbPath = join(tempDir, VAULT_DB_NAME);
+    const sessionPath = join(tempDir, "session.json");
+    const engine = new VaultEngine({ dbPath, sessionPath });
+    await engine.initVault("test-password");
+    const caller: CallerContext = {
+      principal_type: "agent",
+      principal_id: "bob",
+      interface: "cli",
+    };
+
+    await expectVaultError(
+      () => resolveSecretId(engine, "secret://nope", caller),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
+
+    const row = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_READ })
+      .find((r) => !r.success);
+    expect(row?.principal_id).toBe("bob");
+    expect(row?.secret_id).toBeNull();
+    expect(row?.detail).toEqual({
+      handle: "secret://nope",
+      error: ErrorCode.SECRET_NOT_FOUND,
+      interface: "cli",
+    });
+
+    await engine.destroy();
+  });
+
+  it("a failed probe lands under the event type the command passes (D2b)", async () => {
+    const dbPath = join(tempDir, VAULT_DB_NAME);
+    const sessionPath = join(tempDir, "session.json");
+    const engine = new VaultEngine({ dbPath, sessionPath });
+    await engine.initVault("test-password");
+    const caller: CallerContext = {
+      principal_type: "agent",
+      principal_id: "bob",
+      interface: "cli",
+    };
+
+    await expectVaultError(
+      () => resolveSecretId(engine, "secret://nope", caller, AuditEventType.CERT_RENEW),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
+
+    expect(engine.queryAudit({ eventType: AuditEventType.SECRET_READ })).toHaveLength(0);
+    const row = engine.queryAudit({ eventType: AuditEventType.CERT_RENEW }).find((r) => !r.success);
+    expect(row?.principal_id).toBe("bob");
+    expect(row?.secret_id).toBeNull();
+    expect(row?.detail).toEqual({
+      handle: "secret://nope",
+      error: ErrorCode.SECRET_NOT_FOUND,
+      interface: "cli",
+    });
+
+    await engine.destroy();
   });
 });

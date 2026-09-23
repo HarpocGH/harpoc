@@ -394,6 +394,9 @@ function assertSans(sans: string[]): void {
   if (sans.some((san) => san.trim() === "")) {
     throw VaultError.certCsrFailed("a subject alternative name must not be empty");
   }
+  if (sans.some((san) => san.includes("%"))) {
+    throw VaultError.certCsrFailed("a subject alternative name must not carry an IPv6 zone id");
+  }
 }
 
 function assertHttpPort(httpPort: number | undefined): void {

@@ -4,6 +4,12 @@ import { VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord, formatTimestamp } from "../../utils/output.js";
 import { parseIntOption } from "../../utils/options.js";
+import {
+  MAX_PORT,
+  MAX_RENEW_BEFORE_DAYS,
+  MIN_PORT,
+  MIN_RENEW_BEFORE_DAYS,
+} from "../../utils/option-bounds.js";
 import { promptHidden } from "../../utils/prompt.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
 import {
@@ -13,11 +19,6 @@ import {
   parseCurve,
   DEFAULT_KEY_ALGORITHM,
 } from "./key-algorithm-options.js";
-
-const MIN_RENEW_BEFORE_DAYS = 1;
-const MAX_RENEW_BEFORE_DAYS = 365;
-const MIN_PORT = 1;
-const MAX_PORT = 65535;
 
 interface CertIssueOptions {
   domains: string;
@@ -43,7 +44,9 @@ interface CertIssueOptions {
 function parseDomains(value: string): string[] {
   const domains = value.split(",").map((domain) => domain.trim());
   if (domains.some((domain) => domain === "")) {
-    throw new Error("--domains requires a comma-separated list of non-empty domain names.");
+    throw VaultError.invalidInput(
+      "--domains requires a comma-separated list of non-empty domain names.",
+    );
   }
   return domains;
 }
@@ -88,8 +91,11 @@ export function registerCertIssueCommand(cert: Command): void {
         // typo must not cost a key-pair generation, an ACME account or a
         // rate-limited order.
         const domains = parseDomains(options.domains);
-        if (options.email.trim() === "") {
-          throw new Error("--email requires a contact email address for the ACME account.");
+        const email = options.email.trim();
+        if (email === "") {
+          throw VaultError.invalidInput(
+            "--email requires a contact email address for the ACME account.",
+          );
         }
         // dns-01 never starts the http-01 responder, so a port supplied
         // alongside --dns would be dead configuration. Refused rather than
@@ -137,7 +143,7 @@ export function registerCertIssueCommand(cert: Command): void {
           const manager = new CertManager(engine);
           const issued = await manager.issueWithAcme(name, {
             domains,
-            email: options.email,
+            email,
             staging: options.staging ?? false,
             httpPort,
             dns01: options.dns === true ? publishDnsRecord : undefined,

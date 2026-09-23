@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import type { Permission } from "@harpoc/shared";
-import { permissionSchema } from "@harpoc/shared";
+import { AuditEventType, permissionSchema } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import {
   handleError,
@@ -74,7 +74,12 @@ export function registerAgentPermissionsCommand(agent: Command): void {
           const expiresAt =
             expiresMinutes !== undefined ? Date.now() + expiresMinutes * 60 * 1000 : undefined;
 
-          const secretId = await resolveSecretId(engine, handle);
+          const secretId = await resolveSecretId(
+            engine,
+            handle,
+            resolved?.caller,
+            AuditEventType.POLICY_GRANT,
+          );
           const result = engine.setAgentPermissions(
             name,
             secretId,

@@ -6,15 +6,8 @@ import { MAX_TOKEN_TTL_MS, Permission, assertBindAllowed, isDecimalInteger } fro
 import type { ServerStopTrigger, ServerTransport } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError } from "../utils/output.js";
-
-function parsePort(value: string, label: string): number {
-  const port = Number(value);
-  if (!isDecimalInteger(value) || port < 1 || port > 65535) {
-    console.error(`Error: Invalid ${label} "${value}". Must be 1-65535.`);
-    process.exit(1);
-  }
-  return port;
-}
+import { parseIntOption } from "../utils/options.js";
+import { MAX_PORT, MIN_PORT } from "../utils/option-bounds.js";
 
 function resolveUiDistDir(): string {
   const require = createRequire(import.meta.url);
@@ -125,9 +118,14 @@ export function registerServerCommand(program: Command): void {
             process.exit(1);
           }
 
-          const port = parsePort(opts.port, "port");
-          const mcpHttpPort = parsePort(opts.mcpHttpPort, "MCP HTTP port");
-          const certRenewPort = parsePort(opts.certRenewPort, "cert renewal port");
+          const port = parseIntOption(opts.port, "port", MIN_PORT, MAX_PORT);
+          const mcpHttpPort = parseIntOption(opts.mcpHttpPort, "MCP HTTP port", MIN_PORT, MAX_PORT);
+          const certRenewPort = parseIntOption(
+            opts.certRenewPort,
+            "cert renewal port",
+            MIN_PORT,
+            MAX_PORT,
+          );
 
           if (opts.token !== undefined) {
             console.error(

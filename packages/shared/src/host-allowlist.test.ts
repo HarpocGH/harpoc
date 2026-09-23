@@ -6,6 +6,7 @@ import {
   checkRequestHost,
   isLoopbackBindHost,
   LOOPBACK_BIND_HOSTS,
+  LOOPBACK_URL_HOSTS,
   normalizeAllowedHost,
   parseHostHeader,
   parseOriginHeader,
@@ -28,6 +29,12 @@ describe("isLoopbackBindHost", () => {
 
   it("names exactly the three loopback forms", () => {
     expect([...LOOPBACK_BIND_HOSTS].sort()).toEqual(["127.0.0.1", "::1", "localhost"]);
+  });
+
+  it("the URL-form loopback set is the bind-form set with the IPv6 literal bracketed (CM-2 drift pin)", () => {
+    expect(
+      [...LOOPBACK_URL_HOSTS].map((h) => (h.startsWith("[") ? h.slice(1, -1) : h)).sort(),
+    ).toEqual([...LOOPBACK_BIND_HOSTS].sort());
   });
 });
 

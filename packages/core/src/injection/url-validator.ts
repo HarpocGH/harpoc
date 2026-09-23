@@ -1,7 +1,5 @@
 import { promises as dns } from "node:dns";
-import { ErrorCode, VaultError } from "@harpoc/shared";
-
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+import { ErrorCode, LOOPBACK_BIND_HOSTS, LOOPBACK_URL_HOSTS, VaultError } from "@harpoc/shared";
 
 /** RFC 1918 and link-local IPv4 ranges. */
 const PRIVATE_IPV4_RANGES: [number, number, number][] = [
@@ -77,7 +75,8 @@ export function isPrivateIp(ip: string): boolean {
  * Check if a hostname is a loopback address.
  */
 export function isLoopback(hostname: string): boolean {
-  return LOOPBACK_HOSTS.has(hostname.toLowerCase());
+  const name = hostname.toLowerCase();
+  return LOOPBACK_URL_HOSTS.has(name) || LOOPBACK_BIND_HOSTS.has(name);
 }
 
 export interface ValidatedUrl {

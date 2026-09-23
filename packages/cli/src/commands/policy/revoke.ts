@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+import { AuditEventType } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printSuccess } from "../../utils/output.js";
 import type { ResolvedToken } from "../../utils/token-caller.js";
@@ -31,7 +32,12 @@ export function registerPolicyRevokeCommand(policy: Command): void {
             let secretId: string | undefined;
             if (options.secret) {
               resolved = resolveTokenCallerForHandle(engine, "admin", options.secret, tokenValue);
-              secretId = await resolveSecretId(engine, options.secret);
+              secretId = await resolveSecretId(
+                engine,
+                options.secret,
+                resolved?.caller,
+                AuditEventType.POLICY_REVOKE,
+              );
             }
             // The cross-secret IDOR guard is the engine's: a policy on another
             // secret refuses like an unknown id, with no caller-less read.

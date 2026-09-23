@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { VAULT_DB_NAME, VAULT_DIR_NAME, SESSION_FILE_NAME } from "@harpoc/shared";
+import type { AuditEventType, CallerContext } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
 
 /**
@@ -37,10 +38,18 @@ export function createEngine(vaultDir: string): VaultEngine {
 }
 
 /**
- * Resolve a secret handle to its internal UUID.
+ * Resolve a secret handle to its internal UUID. A token-bearing command passes
+ * the caller it resolved and, where its semantics are not a read, its own event
+ * type, so a failed probe is attributed and lands where an operator filtering
+ * that command's events will see it — the REST routes' shape (D2b, 2026-09-23).
  */
-export async function resolveSecretId(engine: VaultEngine, handle: string): Promise<string> {
-  return engine.resolveSecretId(handle);
+export async function resolveSecretId(
+  engine: VaultEngine,
+  handle: string,
+  caller?: CallerContext,
+  eventType?: AuditEventType,
+): Promise<string> {
+  return engine.resolveSecretId(handle, caller, eventType);
 }
 
 /**

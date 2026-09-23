@@ -5,11 +5,9 @@ import { CertManager } from "@harpoc/cert-manager";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord } from "../../utils/output.js";
 import { parseIntOption } from "../../utils/options.js";
+import { MAX_RENEW_BEFORE_DAYS, MIN_RENEW_BEFORE_DAYS } from "../../utils/option-bounds.js";
 import { MAX_SECRET_FILE_BYTES, resolveSecretValue } from "../../utils/secret-value.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
-
-const MIN_RENEW_BEFORE_DAYS = 1;
-const MAX_RENEW_BEFORE_DAYS = 365;
 
 interface CertImportOptions {
   key: string;

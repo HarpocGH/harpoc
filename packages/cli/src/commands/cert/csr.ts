@@ -1,5 +1,6 @@
 import type { Command } from "commander";
 import { CertManager } from "@harpoc/cert-manager";
+import { VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
@@ -22,9 +23,26 @@ interface CertCsrOptions {
   token?: string;
 }
 
+/**
+ * Parsed before the vault opens, as `parseDomains` is (the `secret set` F4
+ * lesson): an empty entry is an operator typo, and an IPv6 zone id has no place
+ * in a certificate — the builder refuses it too (CM-1/CM-7, 2026-09-23).
+ */
 function parseSans(value: string | undefined): string[] | undefined {
   if (value === undefined) return undefined;
-  return value.split(",").map((s) => s.trim());
+  const sans = value.split(",").map((s) => s.trim());
+  if (sans.some((san) => san === "")) {
+    throw VaultError.invalidInput(
+      "--sans requires a comma-separated list of non-empty subject alternative names.",
+    );
+  }
+  const zoned = sans.find((san) => san.includes("%"));
+  if (zoned !== undefined) {
+    throw VaultError.invalidInput(
+      `--sans entry "${zoned}" carries an IPv6 zone id, which has no place in a certificate.`,
+    );
+  }
+  return sans;
 }
 
 export function registerCertCsrCommand(cert: Command): void {

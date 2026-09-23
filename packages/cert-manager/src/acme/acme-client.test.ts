@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import { generateCertKeyPair } from "../key-pair.js";
@@ -506,6 +507,12 @@ describe("AcmeClient key authorization and account key algorithm", () => {
     expect(
       () => new AcmeClient({ directoryUrl: DIRECTORY_URL, accountKeyPem: "not a pem" }),
     ).toThrow(acmeFailed);
+  });
+
+  it("carries no curve table of its own — the alg comes from jws.ts (CM-3 tripwire)", () => {
+    const source = readFileSync(new URL("./acme-client.ts", import.meta.url), "utf8");
+    expect(source).not.toMatch(/"P-(256|384|521)"/);
+    expect(source).toContain("jwsAlgForCurve(");
   });
 });
 

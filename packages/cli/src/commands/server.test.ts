@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 
 // ── Hoisted mocks (available inside vi.mock factories) ─────────────
@@ -662,7 +663,15 @@ describe("server start", () => {
 
   it("--port refuses a hex form", async () => {
     await expect(run(["--rest", "--port", "0x1f90"])).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith('Error: Invalid port "0x1f90". Must be 1-65535.');
+    expect(errorSpy).toHaveBeenCalledWith(
+      'Error: [INVALID_INPUT] Invalid port "0x1f90". Must be 1-65535.',
+    );
+  });
+
+  it("the port options are parsed by parseIntOption, not an exit-in-place helper (P1F-3 tripwire)", () => {
+    const source = readFileSync(new URL("./server.ts", import.meta.url), "utf8");
+    expect(source).not.toContain("function parsePort");
+    expect(source).toContain("parseIntOption(");
   });
 
   it("--ui-token-ttl 1440 is accepted — the boundary equals the 24 h cap", async () => {
@@ -942,7 +951,7 @@ describe("server start", () => {
 
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(errorSpy).toHaveBeenCalledWith(
-      'Error: Invalid cert renewal port "abc". Must be 1-65535.',
+      'Error: [INVALID_INPUT] Invalid cert renewal port "abc". Must be 1-65535.',
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });

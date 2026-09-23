@@ -113,11 +113,13 @@ describe("buildCsr", () => {
     expect(body).toContain("871000000000000000000000ffffc0000201");
   });
 
-  it("refuses an IPv6 SAN whose groups are not representable", () => {
+  it("refuses an IPv6 SAN carrying a zone id instead of dropping the zone", () => {
     const { privateKeyPem } = generateCertKeyPair({ algorithm: "ec" });
-    expect(() =>
-      buildCsr({ privateKeyPem, commonName: "v6.example.com", sans: ["fe80::%eth0"] }),
-    ).toThrow(csrFailed);
+    for (const san of ["fe80::1%eth0", "::1%1", "fe80::%eth0"]) {
+      expect(() => buildCsr({ privateKeyPem, commonName: "v6.example.com", sans: [san] })).toThrow(
+        csrFailed,
+      );
+    }
   });
 
   it("omits the extensionRequest attribute entirely when no SANs are given", () => {

@@ -2,7 +2,7 @@ import { createHash, generateKeyPairSync, verify } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import { generateCertKeyPair } from "../key-pair.js";
-import { jwkThumbprint, publicJwk, signJws } from "./jws.js";
+import { jwkThumbprint, jwsAlgForCurve, publicJwk, signJws } from "./jws.js";
 
 /*
  * RFC 7638 §3.1 verbatim: the example JWK (alg and kid included, both of which
@@ -159,6 +159,13 @@ describe("signJws", () => {
     expect(() => signJws({ payload: "", protectedHeader: {}, privateKeyPem: privateKey })).toThrow(
       acmeFailed,
     );
+  });
+
+  it("names the JOSE alg of each supported curve and none for an unlisted one (CM-3)", () => {
+    expect(jwsAlgForCurve("P-256")).toBe("ES256");
+    expect(jwsAlgForCurve("P-384")).toBe("ES384");
+    expect(jwsAlgForCurve("P-521")).toBe("ES512");
+    expect(jwsAlgForCurve("secp256k1")).toBeUndefined();
   });
 
   it("refuses a header or payload that will not serialize", () => {

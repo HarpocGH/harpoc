@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import type { Permission } from "@harpoc/shared";
-import { permissionSchema, principalTypeSchema } from "@harpoc/shared";
+import { AuditEventType, permissionSchema, principalTypeSchema } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printSuccess, printJson, printRecord } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
@@ -40,7 +40,12 @@ export function registerPolicyGrantCommand(policy: Command): void {
             );
 
             // Resolve the handle to get the internal secret UUID
-            const secretId = await resolveSecretId(engine, handle);
+            const secretId = await resolveSecretId(
+              engine,
+              handle,
+              resolved?.caller,
+              AuditEventType.POLICY_GRANT,
+            );
 
             const permStrings = options.permissions.split(",").map((p) => p.trim());
             for (const p of permStrings) {

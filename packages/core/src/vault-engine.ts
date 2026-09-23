@@ -2454,7 +2454,10 @@ export class VaultEngine {
       }
 
       // Only the resume path has a secret that outlives a rollback, so it is
-      // the only one that can attribute a denial row to a secret id.
+      // the only one that can attribute a denial row to a secret id. Nothing
+      // below yields: the OAuth manager marks the predecessor superseded in
+      // the microtask drain this return settles in, and an `await` added here
+      // would reopen the window P10-7 named (P1R-3, 2026-09-23).
       const existingId = existing.id;
       onResolved(existingId);
       s.store.transaction(() => {
@@ -2467,6 +2470,10 @@ export class VaultEngine {
 
   /**
    * Complete an OAuth flow: encrypt and store tokens, transition secret to ACTIVE.
+   * Synchronous from entry through the transaction — no `await` precedes the
+   * store write — so the manager's supersede check immediately before this call
+   * cannot be split from the write; an `await` added above the transaction
+   * reopens P10-7 (P1R-3, 2026-09-23; pinned in vault-engine-oauth.test.ts).
    */
   async completeOAuthFlow(
     secretId: string,

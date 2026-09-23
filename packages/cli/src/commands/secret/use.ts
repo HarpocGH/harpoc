@@ -492,11 +492,10 @@ function buildInjectionConfig(options: UseOptions): Record<string, unknown> {
 
 function parseUidList(values: string[] | undefined, flag: string): number[] {
   return (values ?? []).map((value) => {
-    const parsed = Number(value);
-    if (!Number.isInteger(parsed)) {
+    if (!isDecimalInteger(value)) {
       throw new Error(`${flag} must be an integer (got "${value}")`);
     }
-    return parsed;
+    return Number(value);
   });
 }
 

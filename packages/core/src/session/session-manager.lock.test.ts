@@ -335,6 +335,22 @@ describe("session.json.lock (R8/D56)", () => {
     expect(readdirSync(tempDir).filter((f) => f.includes(".stale-"))).toEqual([]);
   });
 
+  it("the stale-<uuid> directories a reclaim left behind are swept on the next acquisition, whatever their age (P1R-2)", async () => {
+    const manager = new SessionManager(sessionPath);
+    const old = `${lockPath}.stale-00000000-0000-4000-8000-000000000001`;
+    const young = `${lockPath}.stale-00000000-0000-4000-8000-000000000002`;
+    const stale = new Date(Date.now() - 1_000);
+    mkdirSync(old);
+    utimesSync(old, stale, stale);
+    mkdirSync(young);
+
+    await manager.writeSession(sessionExpiringSoon());
+
+    expect(existsSync(old)).toBe(false);
+    expect(existsSync(young)).toBe(false);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
   it("a lock directory carrying another holder's nonce survives the holder's release", async () => {
     const foreignNonce = "00000000-0000-4000-8000-000000000000";
     const manager = new SessionManager(sessionPath);

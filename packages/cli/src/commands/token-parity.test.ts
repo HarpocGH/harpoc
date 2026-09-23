@@ -1,7 +1,12 @@
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { Command } from "commander";
-import type { CertificateStatus, Permission, VaultApiToken } from "@harpoc/shared";
+import {
+  AuditEventType,
+  type CertificateStatus,
+  type Permission,
+  type VaultApiToken,
+} from "@harpoc/shared";
 
 const { mockEngine, mockManager, mockCertManager, mockResolveSecretValue, mockPromptConfirm } =
   vi.hoisted(() => {
@@ -77,6 +82,7 @@ vi.mock("../utils/prompt.js", () => ({ promptConfirm: mockPromptConfirm }));
 // map pins is the scope gate in front of the work, not the work.
 vi.mock("@harpoc/cert-manager", () => ({ CertManager: mockCertManager }));
 
+import { resolveSecretId } from "../utils/vault-loader.js";
 import { registerSecretListCommand } from "./secret/list.js";
 import { registerSecretGetCommand } from "./secret/get.js";
 import { registerSecretSetCommand } from "./secret/set.js";
@@ -253,6 +259,7 @@ interface Row {
   argv: string[];
   permission: Permission;
   call: keyof typeof PROBES;
+  resolve?: AuditEventType | "default";
 }
 
 // No "secret use" row: use predates this tranche and is pinned in secret/use.test.ts.
@@ -317,7 +324,12 @@ const ROWS: Row[] = [
     permission: "rotate",
     call: "deleteConnectionConfig",
   },
-  { argv: ["policy", "list", "secret://k"], permission: "read", call: "listPolicies" },
+  {
+    argv: ["policy", "list", "secret://k"],
+    permission: "read",
+    call: "listPolicies",
+    resolve: "default",
+  },
   {
     argv: [
       "policy",
@@ -332,19 +344,41 @@ const ROWS: Row[] = [
     ],
     permission: "admin",
     call: "grantPolicy",
+    resolve: AuditEventType.POLICY_GRANT,
   },
   {
     argv: ["policy", "revoke", "pol-1", "--secret", "secret://k"],
     permission: "admin",
     call: "revokePolicy",
+    resolve: AuditEventType.POLICY_REVOKE,
   },
   { argv: ["audit"], permission: "admin", call: "queryAudit" },
   { argv: ["audit", "verify"], permission: "admin", call: "verifyAuditChain" },
   { argv: ["audit", "anchor"], permission: "admin", call: "getAuditChainTail" },
-  { argv: ["oauth", "status", "secret://k"], permission: "read", call: "getOAuthTokenStatus" },
-  { argv: ["oauth", "refresh", "secret://k"], permission: "rotate", call: "refreshOAuthToken" },
-  { argv: ["cert", "status", "secret://k"], permission: "read", call: "getCertificateStatus" },
-  { argv: ["cert", "renew", "secret://k"], permission: "rotate", call: "renewCertificate" },
+  {
+    argv: ["oauth", "status", "secret://k"],
+    permission: "read",
+    call: "getOAuthTokenStatus",
+    resolve: "default",
+  },
+  {
+    argv: ["oauth", "refresh", "secret://k"],
+    permission: "rotate",
+    call: "refreshOAuthToken",
+    resolve: AuditEventType.OAUTH_REFRESH,
+  },
+  {
+    argv: ["cert", "status", "secret://k"],
+    permission: "read",
+    call: "getCertificateStatus",
+    resolve: "default",
+  },
+  {
+    argv: ["cert", "renew", "secret://k"],
+    permission: "rotate",
+    call: "renewCertificate",
+    resolve: AuditEventType.CERT_RENEW,
+  },
   // The three creation-scoped cert commands take the same shape `secret set`
   // does — one row apiece, `create` as the permission — because `create` is not
   // grantable per secret: token scope alone governs it, so the row is the whole
@@ -387,6 +421,7 @@ const ROWS: Row[] = [
     argv: ["agent", "permissions", "bot", "secret://k", "--permissions", "use"],
     permission: "admin",
     call: "setAgentPermissions",
+    resolve: AuditEventType.POLICY_GRANT,
   },
   { argv: ["auth", "list"], permission: "admin", call: "listIssuedTokens" },
 ];
@@ -509,7 +544,7 @@ describe("token permission map (Task 9 pin)", () => {
     else process.env.HARPOC_TOKEN = savedEnvToken;
   });
 
-  describe.each(ROWS)("token permission map: $argv", ({ argv, permission, call }) => {
+  describe.each(ROWS)("token permission map: $argv", ({ argv, permission, call, resolve }) => {
     it(`refuses a token without '${permission}' before the engine call`, async () => {
       mockEngine.verifyToken.mockReturnValue(token({ scope: [] }));
       await expect(run([...argv, "--token", "jwt-value"])).rejects.toThrow("process.exit");
@@ -524,6 +559,23 @@ describe("token permission map (Task 9 pin)", () => {
       await run([...argv, "--token", "jwt-value"]);
       expect(PROBES[call]).toHaveBeenCalled();
     });
+
+    if (resolve !== undefined) {
+      it("resolves the handle with the token's caller and the command's event type (D2b)", async () => {
+        mockEngine.verifyToken.mockReturnValue(token({ scope: [permission] }));
+        await run([...argv, "--token", "jwt-value"]);
+        const caller = expect.objectContaining({
+          principal_type: "agent",
+          principal_id: "agent-1",
+          interface: "cli",
+        });
+        if (resolve === "default") {
+          expect(resolveSecretId).toHaveBeenCalledWith(mockEngine, "secret://k", caller);
+        } else {
+          expect(resolveSecretId).toHaveBeenCalledWith(mockEngine, "secret://k", caller, resolve);
+        }
+      });
+    }
   });
 
   // Exhaustiveness, bounded by what buildProgram registers: a token-bearing

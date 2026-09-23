@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { VaultError } from "@harpoc/shared";
+import { AuditEventType, VaultError } from "@harpoc/shared";
 import type { CertificateStatus, VaultApiToken } from "@harpoc/shared";
 import type { IssueOptions, RenewOptions } from "@harpoc/cert-manager";
 
@@ -539,6 +539,33 @@ describe("cert issue", () => {
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
+  it("a non-integer --http-port under --json is refused as an INVALID_INPUT envelope before the vault opens (CM-6)", async () => {
+    await expect(
+      run([
+        "issue",
+        "web",
+        "--domains",
+        "example.com",
+        "--email",
+        "ops@example.com",
+        "--http-port",
+        "80.5",
+        "--json",
+      ]),
+    ).rejects.toThrow("process.exit");
+
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"error":"INVALID_INPUT"'));
+    const envelope = JSON.parse(String(errorSpy.mock.calls[0]?.[0])) as { message: string };
+    expect(envelope.message).toBe('Invalid http-port "80.5". Must be 1-65535.');
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+  });
+
+  it("forwards the email trimmed (CM-4)", async () => {
+    await run(["issue", "web", "--domains", "example.com", "--email", " ops@example.com "]);
+
+    expect(issueOptions().email).toBe("ops@example.com");
+  });
+
   it("an out-of-range --renew-before-days is refused before the vault opens", async () => {
     await expect(
       run([
@@ -669,7 +696,12 @@ describe("cert renew", () => {
   it("resolves the handle to a secret id and prints the refreshed status", async () => {
     await run(["renew", "secret://web"]);
 
-    expect(resolveSecretId).toHaveBeenCalledWith(mockEngine, "secret://web");
+    expect(resolveSecretId).toHaveBeenCalledWith(
+      mockEngine,
+      "secret://web",
+      undefined,
+      AuditEventType.CERT_RENEW,
+    );
     expect(mockCertManager).toHaveBeenCalledWith(mockEngine);
     expect(mockRenewCertificate.mock.calls[0]?.[0]).toBe("secret-id-1");
 

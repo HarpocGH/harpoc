@@ -6,6 +6,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   rmdirSync,
@@ -15,7 +16,7 @@ import {
 } from "node:fs";
 import { readFile, chmod } from "node:fs/promises";
 import { userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { randomFillSync, randomUUID } from "node:crypto";
 import type { SessionFile, SessionKeyProtectionScheme } from "@harpoc/shared";
 import {
@@ -568,6 +569,7 @@ export class SessionManager {
         this.lastLockError = err instanceof Error ? err : new Error(String(err));
         return null;
       }
+      this.sweepStaleLocks();
       return nonce;
     }
     return null;
@@ -592,6 +594,35 @@ export class SessionManager {
       return Date.now() - statSync(this.lockPath).mtimeMs > this.lockStaleMs;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Best effort: remove every `<lock>.stale-<uuid>` directory beside the lock —
+   * a reclaim renames the stale lock there before removing it, and a crash
+   * between the two steps, or a removal an open handle refused (EBUSY/EPERM on
+   * win32), leaves it behind. Nothing reads a renamed directory again and both
+   * removals are forced and swallow their errors, so a sweep racing a reclaim's
+   * own removal is a no-op for whichever side comes second. Runs after every
+   * successful acquisition (P1R-2, 2026-09-23).
+   */
+  private sweepStaleLocks(): void {
+    const dir = dirname(this.lockPath);
+    const prefix = `${basename(this.lockPath)}.stale-`;
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.startsWith(prefix)) continue;
+      const path = join(dir, entry);
+      try {
+        rmSync(path, { recursive: true, force: true });
+      } catch {
+        /* best effort */
+      }
     }
   }
 
