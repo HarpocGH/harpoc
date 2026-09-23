@@ -24,6 +24,7 @@ import type { SftpExecution } from "./injection/sftp-injector.js";
 import type { MailTlsConfig, SmtpExecution, SmtpOAuth } from "./injection/smtp-injector.js";
 import type { WebsocketExecution } from "./injection/websocket-injector.js";
 import type { TreeKillMechanism } from "./injection/win32-job-wrapper.js";
+import type { SqliteStore } from "./storage/sqlite-store.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./crypto/argon2.js")>();
@@ -681,6 +682,34 @@ describe("useSecret (imap) — engine dispatch", () => {
       uid_count: 0,
       error: ErrorCode.INTERNAL_ERROR,
     });
+  });
+
+  it("an audit write that fails inside the choke point still leaves as a redacted INTERNAL_ERROR", async () => {
+    installSeams(engine, {
+      imap: () => {
+        throw new Error("boom");
+      },
+    });
+    const insert = vi
+      .spyOn((engine as unknown as { store: SqliteStore }).store, "insertAuditEvent")
+      .mockImplementation(() => {
+        throw new Error("audit unavailable");
+      });
+
+    let err: VaultError;
+    try {
+      err = (await engine
+        .useSecret("secret://inbox", IMAP_ACTION)
+        .catch((e: unknown) => e)) as VaultError;
+      expect(insert).toHaveBeenCalledTimes(2);
+    } finally {
+      insert.mockRestore();
+    }
+
+    expect(err).toBeInstanceOf(VaultError);
+    expect(err.code).toBe(ErrorCode.INTERNAL_ERROR);
+    expect(err.message).toBe("the audit write failed unexpectedly");
+    expect(err.message).not.toContain("boom");
   });
 
   it("threads the connection mail group's CA pin to the injector", async () => {

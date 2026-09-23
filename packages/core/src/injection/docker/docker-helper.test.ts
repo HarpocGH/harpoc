@@ -90,6 +90,20 @@ describe("docker credential helper (real subprocess)", () => {
     });
   });
 
+  it("get for the Docker Hub key serves the credential when docker asks with that exact address", async () => {
+    const { stdout, code } = await runHelper("get", {
+      stdin: "https://index.docker.io/v1/",
+      env: { HARPOC_DOCKER_REGISTRY: "https://index.docker.io/v1/" },
+    });
+
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      Username: USER,
+      Secret: SECRET,
+      ServerURL: "https://index.docker.io/v1/",
+    });
+  });
+
   it("get tolerates a trailing newline on the requested server URL", async () => {
     const { stdout, code } = await runHelper("get", { stdin: `${REGISTRY}\n` });
 

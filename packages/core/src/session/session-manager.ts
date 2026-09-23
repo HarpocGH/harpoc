@@ -5,7 +5,9 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readFileSync,
   renameSync,
+  rmSync,
   rmdirSync,
   statSync,
   unlinkSync,
@@ -14,7 +16,7 @@ import {
 import { readFile, chmod } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
-import { randomFillSync } from "node:crypto";
+import { randomFillSync, randomUUID } from "node:crypto";
 import type { SessionFile, SessionKeyProtectionScheme } from "@harpoc/shared";
 import {
   DEFAULT_SESSION_TTL_MS,
@@ -28,6 +30,8 @@ import { wipeBuffer } from "../crypto/random.js";
 import { system32Path } from "../win32-paths.js";
 import { createSessionKeyProtector } from "./session-key-protector.js";
 import type { SessionKeyProtector } from "./session-key-protector.js";
+
+const LOCK_OWNER_FILE = "owner";
 
 export interface SessionManagerOptions {
   /** Session-key protector (default: platform-selected — DPAPI on Windows, none elsewhere). */
@@ -471,6 +475,12 @@ export class SessionManager {
   /**
    * The cross-process session mutex (R8/D56): `session.json.lock` is a
    * directory, because `mkdir` fails atomically on EEXIST on every platform.
+   * The directory carries the holder's nonce in `owner`: release removes only
+   * its own lock (a reclaimed-and-recreated lock is left standing), ignores a
+   * missing lock alone (ENOENT, or ENOTDIR — no directory of ours is there)
+   * and reports any other errno through the seam; a stale lock is renamed
+   * away before it is removed, so of two waiters that judged it stale only
+   * the rename's winner reclaims (D1a-2, 2026-09-23).
    * `try` gives up at once and runs `onContention` (the slide is expendable);
    * `wait` polls until the lock is free or a holder older than `lockStaleMs`
    * is reclaimed, and past that bound proceeds without it — the fresh write
@@ -482,8 +492,8 @@ export class SessionManager {
    * runs on the module-captured real clock (R31).
    */
   private async withSessionLock<T>(lock: SessionLockMode<T>, body: () => Promise<T>): Promise<T> {
-    let held = this.tryAcquireLock();
-    if (!held) {
+    let nonce = this.tryAcquireLock();
+    if (nonce === null) {
       if (lock.mode === "try") {
         // Contention (EEXIST) is the slide's designed steady state and stays
         // silent; any other mkdir failure is the fault the wait path reports
@@ -498,16 +508,16 @@ export class SessionManager {
         return lock.onContention();
       }
       const deadline = realDateNow() + this.lockStaleMs + SESSION_LOCK_POLL_MS;
-      while (!held && realDateNow() < deadline) {
+      while (nonce === null && realDateNow() < deadline) {
         await sleep(SESSION_LOCK_POLL_MS);
-        held = this.tryAcquireLock();
+        nonce = this.tryAcquireLock();
       }
       // One attempt at or past the bound: a dead holder is reclaimed however
       // long the attempts themselves took.
-      if (!held) held = this.tryAcquireLock();
+      if (nonce === null) nonce = this.tryAcquireLock();
       // Read synchronously after the last attempt, before any await: the field
       // cannot have been rewritten by an interleaved caller.
-      if (!held && this.lastLockError) {
+      if (nonce === null && this.lastLockError) {
         this.onPermissionRepairFailure(
           new Error(
             `proceeding without the session lock at ${this.lockPath} (${this.lastLockError.message})`,
@@ -518,34 +528,49 @@ export class SessionManager {
     try {
       return await body();
     } finally {
-      if (held) this.releaseLock();
+      if (nonce !== null) this.releaseLock(nonce);
     }
   }
 
-  private tryAcquireLock(): boolean {
+  private tryAcquireLock(): string | null {
     this.lastLockError = null;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         mkdirSync(this.lockPath);
-        return true;
       } catch (err) {
         if ((err as NodeJS.ErrnoException | null)?.code !== "EEXIST") {
           this.lastLockError = err instanceof Error ? err : new Error(String(err));
-          return false;
+          return null;
         }
         // The holder released between our own mkdir and this check: the lock
         // is free, not held, so the one retry takes it instead of reporting
         // contention over a directory that is no longer there (R30).
         if (this.lockVanished()) continue;
-        if (!this.isLockStale()) return false;
+        if (!this.isLockStale()) return null;
         try {
-          rmdirSync(this.lockPath);
+          const stalePath = `${this.lockPath}.stale-${randomUUID()}`;
+          renameSync(this.lockPath, stalePath);
+          rmSync(stalePath, { recursive: true, force: true });
         } catch {
           // Another process reclaimed it first; the retry decides.
         }
+        continue;
       }
+      const nonce = randomUUID();
+      try {
+        writeFileSync(join(this.lockPath, LOCK_OWNER_FILE), nonce, { mode: 0o600 });
+      } catch (err) {
+        try {
+          rmSync(this.lockPath, { recursive: true, force: true });
+        } catch {
+          /* best effort */
+        }
+        this.lastLockError = err instanceof Error ? err : new Error(String(err));
+        return null;
+      }
+      return nonce;
     }
-    return false;
+    return null;
   }
 
   /**
@@ -570,12 +595,29 @@ export class SessionManager {
     }
   }
 
-  private releaseLock(): void {
+  private releaseLock(nonce: string): void {
+    const ownerPath = join(this.lockPath, LOCK_OWNER_FILE);
+    let owner: string;
     try {
-      rmdirSync(this.lockPath);
-    } catch {
-      // Already reclaimed as stale by another process.
+      owner = readFileSync(ownerPath, "utf8");
+    } catch (err) {
+      if (!isMissingFileError(err)) this.reportReleaseFailure(err);
+      return;
     }
+    if (owner !== nonce) return;
+    try {
+      unlinkSync(ownerPath);
+      rmdirSync(this.lockPath);
+    } catch (err) {
+      if (!isMissingFileError(err)) this.reportReleaseFailure(err);
+    }
+  }
+
+  private reportReleaseFailure(err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    this.onPermissionRepairFailure(
+      new Error(`the session lock at ${this.lockPath} could not be released (${message})`),
+    );
   }
 
   /**

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +7,9 @@ import { DEFAULT_MCP_HTTP_PORT } from "./http.js";
 import {
   MAX_LAUNCH_TOKEN_FILE_BYTES,
   parseAllowedHostsOption,
+  parseAllowTokenlessOption,
   parseHttpPortOption,
+  parseTokenFileOption,
   readLaunchTokenFile,
 } from "./cli-options.js";
 
@@ -102,6 +105,63 @@ describe("readLaunchTokenFile (R9/A10)", () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     expect(source).toContain("readLaunchTokenFile(");
     expect(source).not.toMatch(/launchToken:\s*\(?values\.token\b/);
+  });
+
+  // Source-text tripwire: the size cap and the bytes read must be the same
+  // file, which only a single descriptor (open, fstat, bounded read)
+  // guarantees — a path re-open (statSync + readFileSync) admits a swap
+  // between the two calls.
+  it("reads the file through one descriptor — fstat and a bounded read, never a path re-open", () => {
+    const source = readFileSync(new URL("./cli-options.ts", import.meta.url), "utf8");
+    expect(source).toContain("fstatSync(");
+    expect(source).toContain("readSync(");
+    expect(source).not.toMatch(/\breadFileSync\(|\bstatSync\(/);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "refuses a FIFO without blocking, naming it as not a regular file",
+    () => {
+      const path = join(dir, "fifo");
+      execFileSync("mkfifo", [path]);
+      expect(readLaunchTokenFile(path)).toEqual({
+        ok: false,
+        message: `Error: --token-file ${path} is not a regular file.\n`,
+      });
+    },
+  );
+});
+
+describe("parseTokenFileOption", () => {
+  it("returns undefined when --token-file is absent", () => {
+    expect(parseTokenFileOption(undefined)).toEqual({ ok: true, value: undefined });
+  });
+
+  it("accepts a path", () => {
+    expect(parseTokenFileOption("/tmp/token")).toEqual({ ok: true, value: "/tmp/token" });
+  });
+
+  it.each([true, "", 42])("refuses a value-less or non-path %j", (raw) => {
+    expect(parseTokenFileOption(raw)).toEqual({
+      ok: false,
+      message: "Error: --token-file requires a path.\n",
+    });
+  });
+});
+
+describe("parseAllowTokenlessOption", () => {
+  it.each([undefined, false])("is false when --allow-tokenless is absent (%j)", (raw) => {
+    expect(parseAllowTokenlessOption(raw)).toEqual({ ok: true, value: false });
+  });
+
+  it("accepts the bare flag", () => {
+    expect(parseAllowTokenlessOption(true)).toEqual({ ok: true, value: true });
+  });
+
+  it.each(["no", "true", 1])("refuses a valued --allow-tokenless %j", (raw) => {
+    expect(parseAllowTokenlessOption(raw)).toEqual({
+      ok: false,
+      message: "Error: --allow-tokenless takes no value.\n",
+    });
   });
 });
 

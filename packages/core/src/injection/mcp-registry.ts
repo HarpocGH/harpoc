@@ -315,6 +315,11 @@ export class McpConnectionRegistry {
     });
   }
 
+  /**
+   * The row is written before the entry is forgotten and the teardown runs in a
+   * finally, so a throwing write still tears the child down and surfaces (D2a,
+   * 2026-09-23).
+   */
   private async terminateEntry(
     entry: McpConnectionEntry,
     reason: string,
@@ -323,34 +328,35 @@ export class McpConnectionRegistry {
     if (entry.state === "closing") return;
     entry.state = "closing";
 
-    if (this.live.get(entry.secretId) === entry) {
-      this.live.delete(entry.secretId);
-    }
-    this.stopSweepIfIdle();
-
-    this.auditLogger?.log(
-      withAttribution(
-        {
-          eventType: AuditEventType.MCP_TERMINATE,
-          secretId: entry.secretId,
-          detail: {
-            server: entry.serverName,
-            transport: entry.transportKind,
-            reason,
-            uptime_ms: Date.now() - entry.spawnedAt,
-          },
-          success: true,
-        },
-        attribution,
-      ),
-    );
-
     try {
-      await entry.client.close();
-    } catch {
-      entry.stdioTransport?.killSync();
+      this.auditLogger?.log(
+        withAttribution(
+          {
+            eventType: AuditEventType.MCP_TERMINATE,
+            secretId: entry.secretId,
+            detail: {
+              server: entry.serverName,
+              transport: entry.transportKind,
+              reason,
+              uptime_ms: Date.now() - entry.spawnedAt,
+            },
+            success: true,
+          },
+          attribution,
+        ),
+      );
     } finally {
-      entry.dispose?.();
+      if (this.live.get(entry.secretId) === entry) {
+        this.live.delete(entry.secretId);
+      }
+      this.stopSweepIfIdle();
+      try {
+        await entry.client.close();
+      } catch {
+        entry.stdioTransport?.killSync();
+      } finally {
+        entry.dispose?.();
+      }
     }
   }
 

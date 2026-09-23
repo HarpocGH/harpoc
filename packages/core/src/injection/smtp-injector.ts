@@ -225,7 +225,7 @@ export class SmtpInjector {
     } catch (err) {
       if (err instanceof VaultError) throw err;
       throw VaultError.invalidInput(
-        "message assembly failed: a reserved header field was supplied",
+        "message assembly failed: a reserved or malformed header field was supplied",
       );
     }
 

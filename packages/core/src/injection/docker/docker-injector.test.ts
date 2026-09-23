@@ -8,6 +8,7 @@ import { spawnCaptured } from "../spawn-captured.js";
 import type { SpawnCapturedResult } from "../spawn-captured.js";
 import {
   buildDockerAuditDetails,
+  DOCKER_HUB_AUTH_KEY,
   executeDockerRegistryAction,
   parseImageReference,
 } from "./docker-injector.js";
@@ -263,6 +264,7 @@ describe("parseImageReference", () => {
     expect(parseImageReference("registry.example.com/team/app:1.0")).toEqual({
       registry: "registry.example.com",
       repository: "team/app:1.0",
+      credentialKey: "registry.example.com",
     });
   });
 
@@ -270,6 +272,7 @@ describe("parseImageReference", () => {
     expect(parseImageReference("localhost:5000/app:dev")).toEqual({
       registry: "localhost:5000",
       repository: "app:dev",
+      credentialKey: "localhost:5000",
     });
   });
 
@@ -277,6 +280,7 @@ describe("parseImageReference", () => {
     expect(parseImageReference("nginx:latest")).toEqual({
       registry: "registry-1.docker.io",
       repository: "nginx:latest",
+      credentialKey: DOCKER_HUB_AUTH_KEY,
     });
   });
 
@@ -284,6 +288,33 @@ describe("parseImageReference", () => {
     expect(parseImageReference("myuser/myapp:1.0")).toEqual({
       registry: "registry-1.docker.io",
       repository: "myuser/myapp:1.0",
+      credentialKey: DOCKER_HUB_AUTH_KEY,
+    });
+  });
+
+  it("treats docker.io/… and index.docker.io/… as Docker Hub, with the repository behind the domain", () => {
+    expect(parseImageReference("docker.io/library/nginx:latest")).toEqual({
+      registry: "registry-1.docker.io",
+      repository: "library/nginx:latest",
+      credentialKey: DOCKER_HUB_AUTH_KEY,
+    });
+    expect(parseImageReference("index.docker.io/user/app")).toEqual({
+      registry: "registry-1.docker.io",
+      repository: "user/app",
+      credentialKey: DOCKER_HUB_AUTH_KEY,
+    });
+  });
+
+  it("treats a first segment carrying an uppercase letter as a registry host, as docker does", () => {
+    expect(parseImageReference("MyHost/app")).toEqual({
+      registry: "MyHost",
+      repository: "app",
+      credentialKey: "MyHost",
+    });
+    expect(parseImageReference("Docker.io/app")).toEqual({
+      registry: "Docker.io",
+      repository: "app",
+      credentialKey: "Docker.io",
     });
   });
 
@@ -291,6 +322,7 @@ describe("parseImageReference", () => {
     expect(parseImageReference("localhost/app")).toEqual({
       registry: "localhost",
       repository: "app",
+      credentialKey: "localhost",
     });
   });
 });

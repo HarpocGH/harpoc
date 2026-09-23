@@ -4,6 +4,7 @@ import { ErrorCode, VaultError } from "@harpoc/shared";
 import { AuthorizationCodeFlow, buildAuthorizationUrl } from "./flows/authorization-code.js";
 import { ClientCredentialsFlow } from "./flows/client-credentials.js";
 import { DeviceCodeFlow } from "./flows/device-code.js";
+import type { DeviceCodeStartResult } from "./flows/device-code.js";
 import { CallbackServer } from "./callback-server.js";
 import type { CallbackResult } from "./callback-server.js";
 import { generateCodeChallenge } from "./pkce.js";
@@ -41,6 +42,9 @@ interface PendingFlow {
   holdsSocket: boolean;
   /** Set by the completer before it unregisters: this flow can no longer run. */
   settled: boolean;
+  /** Set at a restart's re-insert: the row now carries the successor's config, so this flow's
+   * tokens must never be stored (D1a-8, 2026-09-23). */
+  superseded: boolean;
 }
 
 /**
@@ -142,10 +146,12 @@ export class OAuthManager {
   private readonly pendingFlows = new Map<string, PendingFlow>();
   /**
    * Every flow that can still run. The per-secret map holds only the newest
-   * flow for each secret, so a chained supersede whose middle bind fails leaves
-   * its predecessor live but unreachable from the map — its callback listener
-   * would then stand for the whole callback timeout, past the dispose that was
-   * supposed to have cancelled it, and the cap would under-count it (D6).
+   * flow for each secret; a superseded predecessor is aborted on every exit of
+   * the restart (D1a-8, 2026-09-23), but between the re-insert and that abort
+   * it is marked, unnamed by the map and still live — only this set lets the
+   * dispose reach it (D6) — and an authorization-code predecessor aborted
+   * mid-exchange pins its listener until its completion settles, so the cap
+   * counts it from here.
    */
   private readonly liveFlows = new Set<PendingFlow>();
 
@@ -223,6 +229,8 @@ export class OAuthManager {
       project,
       caller,
     );
+    const predecessor = this.pendingFlows.get(secretId);
+    if (predecessor) predecessor.superseded = true;
 
     // Cap the concurrently pinned loopback listeners (D3). Checked here — the
     // secretId is known, so a supersede (same secret, its predecessor already
@@ -230,11 +238,11 @@ export class OAuthManager {
     // CallbackServer exists, so a refusal binds no socket and arms no timer.
     // The PENDING secret row above stays and is resumable: that row is what
     // `create` scope already buys.
-    const predecessor = this.pendingFlows.get(secretId);
     if (
       predecessor?.holdsSocket !== true &&
       this.countSocketFlows() >= this.maxPendingAuthorizations
     ) {
+      predecessor?.controller.abort();
       throw new VaultError(ErrorCode.RATE_LIMIT_EXCEEDED, "Too many pending authorization flows");
     }
 
@@ -242,11 +250,16 @@ export class OAuthManager {
     // cap from here, and cancelFlow during the bind window aborts this very
     // controller. A supersede overwrites the predecessor's entry but aborts it
     // only once the successor is bound, so two starts never race one port.
-    // A failed bind rolls back only its own entry, onto a live predecessor only
-    // — and rolls back nothing once the reservation itself has been aborted,
-    // which cancels the predecessor it displaced along with it.
+    // A failed bind never restores the predecessor: the re-insert already
+    // replaced the row's config, so its tokens could no longer be stored
+    // correctly (D1a-8).
     const controller = new AbortController();
-    const pending: PendingFlow = { controller, holdsSocket: true, settled: false };
+    const pending: PendingFlow = {
+      controller,
+      holdsSocket: true,
+      settled: false,
+      superseded: false,
+    };
     this.pendingFlows.set(secretId, pending);
     this.liveFlows.add(pending);
 
@@ -286,15 +299,9 @@ export class OAuthManager {
       return { handle, secretId, authUrl, completion };
     } catch (err) {
       this.liveFlows.delete(pending);
+      predecessor?.controller.abort();
       if (this.pendingFlows.get(secretId)?.controller === controller) {
-        if (controller.signal.aborted) {
-          predecessor?.controller.abort();
-          this.pendingFlows.delete(secretId);
-        } else if (predecessor && !predecessor.controller.signal.aborted && !predecessor.settled) {
-          this.pendingFlows.set(secretId, predecessor);
-        } else {
-          this.pendingFlows.delete(secretId);
-        }
+        this.pendingFlows.delete(secretId);
       }
       await callbackServer.stop();
       throw toFlowError(err);
@@ -344,6 +351,7 @@ export class OAuthManager {
       try {
         const { code } = await waitForCallbackOrAbort(callbackServer, pending.controller.signal);
         const tokens = await flow.handleCallback(code, resolved, redirectUri, codeVerifier);
+        this.assertNotSuperseded(pending);
         const expiresAt = tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined;
         await this.engine.completeOAuthFlow(
           secretId,
@@ -365,7 +373,7 @@ export class OAuthManager {
         // An abort is an expected cancellation; anything else (callback
         // timeout, token exchange failure, completeOAuthFlow on a sealed
         // engine) is surfaced — the secret stays PENDING either way.
-        if (!pending.controller.signal.aborted) {
+        if (!pending.controller.signal.aborted && !pending.superseded) {
           try {
             this.onBackgroundFlowError?.(secretId, err);
           } catch {
@@ -381,25 +389,8 @@ export class OAuthManager {
     return completion;
   }
 
-  /**
-   * Register a socket-less background flow (device code) under its secretId,
-   * superseding any flow already running for that secret — the
-   * authorization-code path reserves its own entry before the bind instead
-   * (D9). `createOAuthSecret` resumes a PENDING secret and returns the SAME
-   * secretId, so a second start for the same name would otherwise leave the
-   * first flow live but uncancellable — still able to exchange a redirect and
-   * drive the secret ACTIVE behind the caller's back.
-   */
-  private registerPendingFlow(secretId: string): PendingFlow {
-    this.pendingFlows.get(secretId)?.controller.abort();
-    const pending: PendingFlow = {
-      controller: new AbortController(),
-      holdsSocket: false,
-      settled: false,
-    };
-    this.pendingFlows.set(secretId, pending);
-    this.liveFlows.add(pending);
-    return pending;
+  private assertNotSuperseded(pending: PendingFlow): void {
+    if (pending.superseded) throw VaultError.oauthFlowFailed("Authorization flow superseded");
   }
 
   /**
@@ -473,9 +464,30 @@ export class OAuthManager {
       project,
       caller,
     );
+    const predecessor = this.pendingFlows.get(secretId);
+    if (predecessor) predecessor.superseded = true;
+
+    // A device-code poll holds no listener: registered for cancellation, but
+    // outside the authorization cap.
+    const pending: PendingFlow = {
+      controller: new AbortController(),
+      holdsSocket: false,
+      settled: false,
+      superseded: false,
+    };
+    this.pendingFlows.set(secretId, pending);
+    this.liveFlows.add(pending);
 
     const flow = new DeviceCodeFlow();
-    const deviceResult = await flow.startFlow(resolved);
+    let deviceResult: DeviceCodeStartResult;
+    try {
+      deviceResult = await flow.startFlow(resolved);
+    } catch (err) {
+      this.unregisterPendingFlow(secretId, pending);
+      predecessor?.controller.abort();
+      throw err;
+    }
+    predecessor?.controller.abort();
 
     // Start polling in the background (non-blocking)
     const completion = this.pollDeviceCodeInBackground(
@@ -485,6 +497,7 @@ export class OAuthManager {
       resolved,
       deviceResult.expires_in,
       secretId,
+      pending,
     );
 
     return {
@@ -504,13 +517,12 @@ export class OAuthManager {
     config: OAuthProviderConfig,
     expiresIn: number,
     secretId: string,
+    pending: PendingFlow,
   ): Promise<void> {
-    // A device-code poll holds no listener: registered for cancellation, but
-    // outside the authorization cap.
-    const pending = this.registerPendingFlow(secretId);
     const completion = flow
       .pollForToken(deviceCode, interval, config, expiresIn, pending.controller.signal)
       .then(async (tokens) => {
+        this.assertNotSuperseded(pending);
         const expiresAt = tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined;
         await this.engine.completeOAuthFlow(
           secretId,
@@ -527,7 +539,7 @@ export class OAuthManager {
         // An abort is an expected cancellation; anything else (poll failure,
         // timeout, completeOAuthFlow on a sealed engine) is surfaced — the
         // secret stays PENDING either way.
-        if (!pending.controller.signal.aborted) {
+        if (!pending.controller.signal.aborted && !pending.superseded) {
           try {
             this.onBackgroundFlowError?.(secretId, err);
           } catch {

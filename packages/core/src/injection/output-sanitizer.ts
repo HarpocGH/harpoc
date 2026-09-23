@@ -83,10 +83,11 @@ export function mapStringLeavesTracked(
     for (const [key, val] of Object.entries(value)) {
       let mappedKey = fn(key);
       if (mappedKey !== key) changed = true;
-      if (mappedKey !== key && Object.prototype.hasOwnProperty.call(result, mappedKey)) {
+      if (Object.prototype.hasOwnProperty.call(result, mappedKey)) {
         let suffix = 2;
         while (Object.prototype.hasOwnProperty.call(result, `${mappedKey}_${suffix}`)) suffix++;
         mappedKey = `${mappedKey}_${suffix}`;
+        changed = true;
       }
       const r = mapStringLeavesTracked(val, fn, budget);
       if (r.changed) changed = true;

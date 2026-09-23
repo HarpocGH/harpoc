@@ -366,7 +366,7 @@ describe("completeOAuthFlow", () => {
     const info = await engine.getSecretInfo("secret://flow-test");
     expect(info.status).toBe("active");
 
-    const token = await engine.getOAuthAccessToken(secretId);
+    const token = await engine["getOAuthAccessToken"](secretId);
     expect(token).toBe("access-tok-123");
 
     const status = engine.getOAuthTokenStatus(secretId);
@@ -379,7 +379,7 @@ describe("completeOAuthFlow", () => {
   it("works without refresh token", async () => {
     await engine.completeOAuthFlow(secretId, "access-only");
 
-    const token = await engine.getOAuthAccessToken(secretId);
+    const token = await engine["getOAuthAccessToken"](secretId);
     expect(token).toBe("access-only");
 
     const status = engine.getOAuthTokenStatus(secretId);
@@ -435,7 +435,7 @@ describe("refreshOAuthToken", () => {
     const newExpiry = await engine.refreshOAuthToken(secretId);
     expect(newExpiry).toBeGreaterThan(Date.now());
 
-    const token = await engine.getOAuthAccessToken(secretId);
+    const token = await engine["getOAuthAccessToken"](secretId);
     expect(token).toBe("refreshed-access-token");
   });
 
@@ -560,7 +560,7 @@ describe("refreshOAuthToken", () => {
     };
 
     const explicitRefresh = engine.refreshOAuthToken(secretId);
-    const onUseRead = engine.getOAuthAccessToken(secretId);
+    const onUseRead = engine["getOAuthAccessToken"](secretId);
     release();
     const [, token] = await Promise.all([explicitRefresh, onUseRead]);
 
@@ -657,7 +657,7 @@ describe("refreshOAuthToken token-endpoint auth methods", () => {
     expect(request.body.has("client_id")).toBe(false);
     expect(request.body.has("client_secret")).toBe(false);
 
-    expect(await engine.getOAuthAccessToken(secretId)).toBe("refreshed-access-token");
+    expect(await engine["getOAuthAccessToken"](secretId)).toBe("refreshed-access-token");
   });
 
   it("form-urlencodes credential halves through the full encrypt-store-refresh stack", async () => {
@@ -881,14 +881,67 @@ describe("getOAuthAccessToken", () => {
   it("returns decrypted access token", async () => {
     await engine.completeOAuthFlow(secretId, "my-secret-token", "refresh", Date.now() + 3600_000);
 
-    const token = await engine.getOAuthAccessToken(secretId);
+    const token = await engine["getOAuthAccessToken"](secretId);
     expect(token).toBe("my-secret-token");
   });
 
   it("auto-refreshes when token is expired", async () => {
     await engine.completeOAuthFlow(secretId, "expired-token", "refresh-tok", Date.now() - 5000);
 
-    const token = await engine.getOAuthAccessToken(secretId);
+    const token = await engine["getOAuthAccessToken"](secretId);
+    expect(token).toBe("refreshed-access-token");
+  });
+
+  it("an auto-refresh attributes its oauth.refresh row to the caller whose use triggered it", async () => {
+    await engine.completeOAuthFlow(secretId, "expired-token", "refresh-tok", Date.now() - 5000);
+
+    const token = await engine["getOAuthAccessToken"](secretId, undefined, {
+      principal_type: PrincipalType.AGENT,
+      principal_id: "reader-1",
+      interface: "mcp",
+    });
+    expect(token).toBe("refreshed-access-token");
+
+    const rows = engine
+      .queryAudit({ secretId, eventType: AuditEventType.OAUTH_REFRESH })
+      .filter((row) => row.success);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.principal_type).toBe("agent");
+    expect(rows[0]?.principal_id).toBe("reader-1");
+    expect(rows[0]?.detail).toMatchObject({ interface: "mcp" });
+  });
+
+  it("a failed auto-refresh attributes its oauth.refresh denial row to the caller whose use triggered it", async () => {
+    tokenEndpointHandler = (_req, res) => {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "server_error" }));
+    };
+    await engine.completeOAuthFlow(secretId, "expired-token", "refresh-tok", Date.now() - 5000);
+
+    await expect(
+      engine["getOAuthAccessToken"](secretId, undefined, {
+        principal_type: PrincipalType.AGENT,
+        principal_id: "reader-1",
+        interface: "mcp",
+      }),
+    ).rejects.toBeInstanceOf(VaultError);
+
+    const denied = engine
+      .queryAudit({ secretId, eventType: AuditEventType.OAUTH_REFRESH })
+      .filter((row) => row.success === false);
+    expect(denied).toHaveLength(1);
+    expect(denied[0]?.principal_type).toBe("agent");
+    expect(denied[0]?.principal_id).toBe("reader-1");
+  });
+
+  it("control: a caller without rotate still auto-refreshes through the private read", async () => {
+    await engine.completeOAuthFlow(secretId, "expired-token", "refresh-tok", Date.now() - 5000);
+
+    const token = await engine["getOAuthAccessToken"](secretId, undefined, {
+      principal_type: PrincipalType.AGENT,
+      principal_id: "unregistered-reader",
+      interface: "mcp",
+    });
     expect(token).toBe("refreshed-access-token");
   });
 
@@ -900,21 +953,21 @@ describe("getOAuthAccessToken", () => {
       Date.now() + 30_000, // 30s — within 60s buffer
     );
 
-    const token = await engine.getOAuthAccessToken(secretId);
+    const token = await engine["getOAuthAccessToken"](secretId);
     expect(token).toBe("refreshed-access-token");
   });
 
   it("throws when token is expired and no refresh token", async () => {
     await engine.completeOAuthFlow(secretId, "expired-tok", undefined, Date.now() - 5000);
 
-    await expect(engine.getOAuthAccessToken(secretId)).rejects.toMatchObject({
+    await expect(engine["getOAuthAccessToken"](secretId)).rejects.toMatchObject({
       code: ErrorCode.OAUTH_REFRESH_FAILED,
     });
   });
 
   it("throws when OAuth flow not completed (PENDING)", async () => {
     // Secret is still PENDING — no completeOAuthFlow called
-    await expect(engine.getOAuthAccessToken(secretId)).rejects.toMatchObject({
+    await expect(engine["getOAuthAccessToken"](secretId)).rejects.toMatchObject({
       code: ErrorCode.OAUTH_NOT_CONFIGURED,
     });
   });
@@ -927,7 +980,7 @@ describe("getOAuthAccessToken", () => {
     });
     const apiKeyId = await engine.resolveSecretId("secret://regular-key");
 
-    await expect(engine.getOAuthAccessToken(apiKeyId)).rejects.toMatchObject({
+    await expect(engine["getOAuthAccessToken"](apiKeyId)).rejects.toMatchObject({
       code: ErrorCode.OAUTH_NOT_CONFIGURED,
     });
   });
@@ -942,7 +995,7 @@ describe("getOAuthAccessToken", () => {
     const terminate = vi.spyOn(registryOf(engine), "terminate");
 
     const err = await expectVaultError(
-      () => engine.getOAuthAccessToken(secretId),
+      () => engine["getOAuthAccessToken"](secretId),
       ErrorCode.SECRET_EXPIRED,
     );
     expect(err.message).toBe("Secret expired: secret://access-test");
@@ -962,7 +1015,7 @@ describe("getOAuthAccessToken", () => {
     expireSecret(secretId);
 
     const err = await expectVaultError(
-      () => engine.getOAuthAccessToken(secretId, "secret://passed-in"),
+      () => engine["getOAuthAccessToken"](secretId, "secret://passed-in"),
       ErrorCode.SECRET_EXPIRED,
     );
     expect(err.message).toBe("Secret expired: secret://passed-in");
@@ -976,7 +1029,7 @@ describe("getOAuthAccessToken", () => {
     await engine.revokeSecret("secret://access-test");
 
     const err = await expectVaultError(
-      () => engine.getOAuthAccessToken(secretId),
+      () => engine["getOAuthAccessToken"](secretId),
       ErrorCode.SECRET_REVOKED,
     );
     expect(err.message).toBe("Secret revoked: secret://access-test");
@@ -1055,7 +1108,7 @@ describe("useSecret with OAuth", () => {
     expect(body.authorization).toBe("Bearer [REDACTED]");
 
     // Verify the refresh actually happened by checking the stored token
-    const token = await engine.getOAuthAccessToken(secretId);
+    const token = await engine["getOAuthAccessToken"](secretId);
     expect(token).toBe("refreshed-access-token");
   });
 });

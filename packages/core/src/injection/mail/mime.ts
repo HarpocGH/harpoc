@@ -126,8 +126,15 @@ function buildHeader(name: string, rawValue: string): string {
   return `${name}: ${encodeWords(rawValue)}\r\n`;
 }
 
-function sanitizeHeaderName(name: string): string {
-  return name.replace(/[\r\n:]+/g, "");
+/** RFC 5322 § 3.6.8 `ftext`: printable US-ASCII except ':' — the module's own guard, independent of the schema upstream. */
+const HEADER_FIELD_NAME = /^[!-9;-~]+$/;
+
+function assertHeaderName(name: string): void {
+  if (!HEADER_FIELD_NAME.test(name)) {
+    throw new Error(
+      "extraHeaders may not set a malformed header name (whitespace, ':' or a control character)",
+    );
+  }
 }
 
 function sanitizeFilenameForHeader(filename: string): string {
@@ -228,13 +235,13 @@ export function assembleMessage(input: MimeInput): { message: string; messageId:
   headerLines.push(`MIME-Version: 1.0\r\n`);
   if (input.extraHeaders) {
     for (const [key, value] of Object.entries(input.extraHeaders)) {
-      const sanitizedKey = sanitizeHeaderName(key);
-      if (RESERVED_HEADER_NAMES.has(sanitizedKey.toLowerCase())) {
+      assertHeaderName(key);
+      if (RESERVED_HEADER_NAMES.has(key.toLowerCase())) {
         throw new Error(
-          `extraHeaders may not set reserved header "${sanitizedKey}" — use the dedicated MimeInput field, or the SMTP envelope for bcc`,
+          `extraHeaders may not set reserved header "${key}" — use the dedicated MimeInput field, or the SMTP envelope for bcc`,
         );
       }
-      headerLines.push(buildHeader(sanitizedKey, value));
+      headerLines.push(buildHeader(key, value));
     }
   }
 

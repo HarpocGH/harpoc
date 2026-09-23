@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   compareVaultVersions,
   isVaultVersionSupported,
+  isWellFormedVaultVersion,
   meetsVaultVersionFloor,
 } from "./version.js";
 
@@ -87,5 +88,15 @@ describe("meetsVaultVersionFloor", () => {
     expect(meetsVaultVersionFloor("0.9.0", "1.5.0")).toBe(false);
     expect(meetsVaultVersionFloor("banana", "1.5.0")).toBe(false);
     expect(meetsVaultVersionFloor("1.5.0", "banana")).toBe(false);
+  });
+});
+
+describe("isWellFormedVaultVersion", () => {
+  it("isWellFormedVaultVersion accepts dotted decimals and refuses garbage", () => {
+    expect(isWellFormedVaultVersion("1.5.0")).toBe(true);
+    expect(isWellFormedVaultVersion("1.5")).toBe(true);
+    expect(isWellFormedVaultVersion("banana")).toBe(false);
+    expect(isWellFormedVaultVersion("")).toBe(false);
+    expect(isWellFormedVaultVersion("1.x.0")).toBe(false);
   });
 });

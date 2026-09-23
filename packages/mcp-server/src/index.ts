@@ -16,7 +16,9 @@ import type { ServerStopTrigger, ServerTransport } from "@harpoc/shared";
 import { DEFAULT_MCP_HTTP_PORT, startMcpHttpServer } from "./http.js";
 import {
   parseAllowedHostsOption,
+  parseAllowTokenlessOption,
   parseHttpPortOption,
+  parseTokenFileOption,
   readLaunchTokenFile,
 } from "./cli-options.js";
 import { createStdioServerFactory } from "./server.js";
@@ -70,7 +72,19 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const tokenFile = values["token-file"] as string | undefined;
+  const tokenFileOption = parseTokenFileOption(values["token-file"]);
+  if (!tokenFileOption.ok) {
+    process.stderr.write(tokenFileOption.message);
+    process.exit(1);
+  }
+  const tokenFile = tokenFileOption.value;
+
+  const allowTokenlessOption = parseAllowTokenlessOption(values["allow-tokenless"]);
+  if (!allowTokenlessOption.ok) {
+    process.stderr.write(allowTokenlessOption.message);
+    process.exit(1);
+  }
+  const allowTokenless = allowTokenlessOption.value;
 
   if (values.http && tokenFile !== undefined) {
     process.stderr.write(
@@ -79,14 +93,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  if (values.http && values["allow-tokenless"]) {
+  if (values.http && allowTokenless) {
     process.stderr.write(
       "Error: --allow-tokenless is not supported with --http. The Streamable HTTP transport has no tokenless mode.\n",
     );
     process.exit(1);
   }
 
-  if (values["allow-tokenless"] && (tokenFile !== undefined || process.env.HARPOC_TOKEN)) {
+  if (allowTokenless && (tokenFile !== undefined || process.env.HARPOC_TOKEN)) {
     process.stderr.write(
       "Error: --allow-tokenless conflicts with a launch token (--token-file / HARPOC_TOKEN). Provide one or the other.\n",
     );
@@ -165,7 +179,7 @@ async function main(): Promise<void> {
   }
 
   const startedAt = Date.now();
-  const tokenless = values["allow-tokenless"] === true;
+  const tokenless = allowTokenless;
   let close: () => Promise<void>;
   // `harpoc-mcp` serves two of the three transports; `rest` is the CLI's.
   // The narrowing is deliberate (R21/D1) — the union is shared, the subset
@@ -215,7 +229,7 @@ async function main(): Promise<void> {
     const factory = createStdioServerFactory({
       engine,
       launchToken: fileToken ?? (process.env.HARPOC_TOKEN || undefined),
-      allowTokenless: values["allow-tokenless"] as boolean | undefined,
+      allowTokenless,
       enableTtyPrompt: true,
     });
     const stdio = serveStdio(factory, {

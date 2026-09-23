@@ -1085,6 +1085,33 @@ describe("certificate accessors", () => {
     ).toHaveLength(0);
   });
 
+  it("a token-bearing ACME import attributes the cert.issue row and still writes no policy.grant row", async () => {
+    const { secretId: acmeId } = await engine.importCertificate(
+      "acme-web",
+      fx("ec-key.pem"),
+      {
+        certificatePem: fx("ec-cert.pem"),
+        acmeIssued: true,
+        acmeAccountJson: JSON.stringify({ privateKeyPem: "k", accountUrl: "u" }),
+      },
+      undefined,
+      { principal_type: PrincipalType.AGENT, principal_id: "acme-bot", interface: "cli" },
+    );
+
+    const issue = engine
+      .queryAudit({ eventType: AuditEventType.CERT_ISSUE })
+      .filter((e) => e.secret_id === acmeId);
+    expect(issue).toHaveLength(1);
+    expect(issue[0]?.principal_type).toBe(PrincipalType.AGENT);
+    expect(issue[0]?.principal_id).toBe("acme-bot");
+    expect(issue[0]?.detail).toMatchObject({ acme: true, acme_account: true, interface: "cli" });
+    expect(
+      engine
+        .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
+        .filter((e) => e.secret_id === acmeId),
+    ).toHaveLength(0);
+  });
+
   it("rolls the ACME account back with the certificate when the cert.issue write fails", async () => {
     // Pass 1 = the secret.create row the manager's own transaction writes, so
     // the break lands on the cert.issue row of the certificate transaction.

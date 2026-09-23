@@ -163,7 +163,7 @@ describe("executeDockerRegistryAction spawn shape", () => {
     expect(parsed).toEqual({ credHelpers: { "registry.example.com": "harpoc" } });
   });
 
-  it("keys credHelpers by the default registry for a bare image", async () => {
+  it("keys credHelpers by the address docker consults for Docker Hub — https://index.docker.io/v1/ — for a bare image", async () => {
     let raw = "";
     vi.mocked(spawnCaptured).mockImplementation((_cmd, _args, opts) => {
       raw = readFileSync(join(opts.env.DOCKER_CONFIG as string, "config.json"), "utf8");
@@ -176,8 +176,30 @@ describe("executeDockerRegistryAction spawn shape", () => {
       allowed({ host_allowlist: ["registry-1.docker.io"] }),
     );
 
-    expect(raw).toBe('{"credHelpers":{"registry-1.docker.io":"harpoc"}}');
+    expect(raw).toBe('{"credHelpers":{"https://index.docker.io/v1/":"harpoc"}}');
     expect(raw).not.toContain("auths");
+    expect(
+      (vi.mocked(spawnCaptured).mock.calls[0] as SpawnCall)[2].env.HARPOC_DOCKER_REGISTRY,
+    ).toBe("https://index.docker.io/v1/");
+  });
+
+  it("keys credHelpers by the literal host for an explicit registry-1.docker.io reference, as docker reads it", async () => {
+    let raw = "";
+    vi.mocked(spawnCaptured).mockImplementation((_cmd, _args, opts) => {
+      raw = readFileSync(join(opts.env.DOCKER_CONFIG as string, "config.json"), "utf8");
+      return Promise.resolve(OK_RESULT);
+    });
+
+    await executeDockerRegistryAction(
+      { ...PULL_ACTION, image: "registry-1.docker.io/user/app:1.0" },
+      SECRET,
+      allowed({ host_allowlist: ["registry-1.docker.io"] }),
+    );
+
+    expect(raw).toBe('{"credHelpers":{"registry-1.docker.io":"harpoc"}}');
+    expect(
+      (vi.mocked(spawnCaptured).mock.calls[0] as SpawnCall)[2].env.HARPOC_DOCKER_REGISTRY,
+    ).toBe("registry-1.docker.io");
   });
 
   it("does NOT wire network/fs isolation into the docker spawn (refused at the engine, not here)", async () => {

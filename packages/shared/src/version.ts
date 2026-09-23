@@ -50,6 +50,14 @@ export function meetsVaultVersionFloor(stored: string, floor: string): boolean {
   return order !== null && order >= 0;
 }
 
+/**
+ * Whether `version` parses as a dotted decimal at all — the corruption case
+ * the ceiling check would otherwise report as "newer" (2026-09-23).
+ */
+export function isWellFormedVaultVersion(version: string): boolean {
+  return parseVersion(version) !== null;
+}
+
 function parseVersion(version: string): number[] | null {
   if (version.length === 0) {
     return null;

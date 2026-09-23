@@ -4,10 +4,13 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   rmdirSync,
   statSync,
+  unlinkSync,
   utimesSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,7 +20,14 @@ import { SessionManager } from "./session-manager.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, mkdirSync: vi.fn(actual.mkdirSync), statSync: vi.fn(actual.statSync) };
+  return {
+    ...actual,
+    mkdirSync: vi.fn(actual.mkdirSync),
+    statSync: vi.fn(actual.statSync),
+    rmdirSync: vi.fn(actual.rmdirSync),
+    renameSync: vi.fn(actual.renameSync),
+    unlinkSync: vi.fn(actual.unlinkSync),
+  };
 });
 
 // Captured before any vi.useFakeTimers(): the real-clock case below must be
@@ -76,6 +86,9 @@ beforeEach(() => {
 afterEach(() => {
   vi.mocked(mkdirSync).mockReset();
   vi.mocked(statSync).mockReset();
+  vi.mocked(rmdirSync).mockReset();
+  vi.mocked(renameSync).mockReset();
+  vi.mocked(unlinkSync).mockReset();
   rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -255,5 +268,88 @@ describe("session.json.lock (R8/D56)", () => {
     expect(result).toBeNull();
     expect(existsSync(sessionPath)).toBe(false);
     expect(existsSync(lockPath)).toBe(true);
+  });
+
+  it("the lock directory carries the holder's nonce while held, and nothing after release", async () => {
+    const manager = new SessionManager(sessionPath);
+    let ownerWhileHeld: string | undefined;
+    await manager.writeSession(sessionExpiringSoon());
+    await (
+      manager as unknown as {
+        withSessionLock: (lock: { mode: "wait" }, body: () => Promise<void>) => Promise<void>;
+      }
+    ).withSessionLock({ mode: "wait" }, async () => {
+      ownerWhileHeld = readFileSync(join(lockPath, "owner"), "utf8");
+    });
+
+    expect(ownerWhileHeld).toMatch(/^[0-9a-f-]{36}$/);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it("a lock directory that does not carry the holder's nonce survives the holder's release", async () => {
+    const manager = new SessionManager(sessionPath);
+    await manager.writeSession(sessionExpiringSoon());
+    await (
+      manager as unknown as {
+        withSessionLock: (lock: { mode: "wait" }, body: () => Promise<void>) => Promise<void>;
+      }
+    ).withSessionLock({ mode: "wait" }, async () => {
+      // Another process reclaimed this lock as stale and now holds a fresh one.
+      rmSync(lockPath, { recursive: true, force: true });
+      mkdirSync(lockPath);
+    });
+
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
+  it("a non-ENOENT errno on release reaches the seam and is never thrown", async () => {
+    const reported: Error[] = [];
+    const manager = new SessionManager(sessionPath, {
+      onPermissionRepairFailure: (error) => {
+        reported.push(error);
+      },
+    });
+    vi.mocked(rmdirSync).mockImplementationOnce(() => {
+      throw ioError("EACCES");
+    });
+
+    await manager.writeSession(sessionExpiringSoon());
+
+    expect(reported.map((e) => e.message)).toEqual([
+      expect.stringContaining(`the session lock at ${lockPath} could not be released (EACCES`),
+    ]);
+    expect(existsSync(sessionPath)).toBe(true);
+  });
+
+  it("reclaiming a stale lock renames it away before removing it", async () => {
+    const manager = new SessionManager(sessionPath, { lockStaleMs: 200 });
+    await manager.writeSession(sessionExpiringSoon());
+    mkdirSync(lockPath);
+    const stale = new Date(Date.now() - 1_000);
+    utimesSync(lockPath, stale, stale);
+
+    await manager.extendSession(60_000, true);
+
+    expect(vi.mocked(renameSync)).toHaveBeenCalledWith(lockPath, expect.stringMatching(/\.stale-/));
+    expect(existsSync(lockPath)).toBe(false);
+    expect(readdirSync(tempDir).filter((f) => f.includes(".stale-"))).toEqual([]);
+  });
+
+  it("a lock directory carrying another holder's nonce survives the holder's release", async () => {
+    const foreignNonce = "00000000-0000-4000-8000-000000000000";
+    const manager = new SessionManager(sessionPath);
+    await manager.writeSession(sessionExpiringSoon());
+    await (
+      manager as unknown as {
+        withSessionLock: (lock: { mode: "wait" }, body: () => Promise<void>) => Promise<void>;
+      }
+    ).withSessionLock({ mode: "wait" }, async () => {
+      rmSync(lockPath, { recursive: true, force: true });
+      mkdirSync(lockPath);
+      writeFileSync(join(lockPath, "owner"), foreignNonce);
+    });
+
+    expect(existsSync(lockPath)).toBe(true);
+    expect(readFileSync(join(lockPath, "owner"), "utf8")).toBe(foreignNonce);
   });
 });

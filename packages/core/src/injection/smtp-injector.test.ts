@@ -426,6 +426,20 @@ describe("SmtpInjector — error redaction and translation", () => {
       ),
     ).rejects.toBeInstanceOf(VaultError);
   });
+
+  it("translates a malformed-header plain Error from assembleMessage into INVALID_INPUT", async () => {
+    const { fn } = makeFakeSend();
+    const injector = new SmtpInjector({ sendSmtp: fn });
+    await expect(
+      injector.run(
+        baseAction({ headers: { "To ": "smuggled@evil.example" } }),
+        SECRET,
+        basePolicy({}),
+        undefined,
+        undefined,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.INVALID_INPUT });
+  });
 });
 
 describe("buildSmtpAuditDetails", () => {

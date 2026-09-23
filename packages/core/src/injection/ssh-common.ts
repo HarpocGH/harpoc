@@ -22,7 +22,12 @@ export interface TempSshFile {
 export function writeTempSshFile(prefix: string, name: string, content: string): TempSshFile {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   const file = join(dir, name);
-  writeFileSync(file, content, { mode: 0o600 });
+  try {
+    writeFileSync(file, content, { mode: 0o600 });
+  } catch (err) {
+    rmSync(dir, { recursive: true, force: true });
+    throw err;
+  }
   return {
     file,
     dispose: () => {

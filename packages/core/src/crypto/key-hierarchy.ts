@@ -7,7 +7,9 @@ import {
   AAD_WRAPPED_AUDIT_KEY,
   AAD_WRAPPED_JWT_KEY,
   AES_KEY_LENGTH,
+  ErrorCode,
   HKDF_INFO_NAME_INDEX,
+  VaultError,
 } from "@harpoc/shared";
 import { decrypt, encrypt } from "./aes-gcm.js";
 import { deriveKey, generateSalt } from "./argon2.js";
@@ -121,6 +123,9 @@ export async function createVaultKeys(password: string): Promise<VaultKeys> {
  * random JWT/audit keys from the KEK — the key hierarchy is instantiated
  * exactly as specified, with no derivation fallback. A vault missing the
  * wrapped keys fails closed at the engine (VAULT_CORRUPTED) before this runs.
+ * A failed KEK unwrap is a wrong password; a failed sub-key unwrap under a KEK
+ * that did unwrap is corruption and is reported as such, never counted
+ * against the lockout (2026-09-23).
  */
 export async function unlockVault(
   password: string,
@@ -161,7 +166,9 @@ export async function unlockVault(
       if (jwtKey) {
         wipeBuffer(jwtKey);
       }
-      throw err;
+      throw err instanceof VaultError && err.code === ErrorCode.ENCRYPTION_ERROR
+        ? VaultError.vaultCorrupted("wrapped key hierarchy does not unwrap under the vault key")
+        : err;
     }
   } finally {
     wipeBuffer(masterKey);

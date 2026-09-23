@@ -40,6 +40,13 @@ describe("harpoc-mcp --token-file and the removed --token (spawned binary)", () 
     expect(result.stderr).not.toContain("Vault is locked");
   }, 30_000);
 
+  it("refuses a value-less --token-file before touching any vault", async () => {
+    const result = await runMcp(["--token-file"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--token-file requires a path");
+    expect(result.stderr).not.toContain("Vault is locked");
+  }, 30_000);
+
   it("refuses the removed --token flag, never echoing its value", async () => {
     const result = await runMcp(["--token", "not.a.jwt"]);
     expect(result.code).toBe(1);
@@ -69,5 +76,15 @@ describe("harpoc-mcp --http --allowed-host (spawned binary)", () => {
     const result = await runMcp(["--allowed-host", "vault.example"]);
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("--allowed-host requires --http");
+  }, 30_000);
+});
+
+describe("harpoc-mcp --allow-tokenless (spawned binary)", () => {
+  it("refuses a valued --allow-tokenless before touching any vault", async () => {
+    const result = await runMcp(["--allow-tokenless=no"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--allow-tokenless takes no value");
+    expect(result.stderr).not.toContain("WARNING: --allow-tokenless");
+    expect(result.stderr).not.toContain("Vault is locked");
   }, 30_000);
 });

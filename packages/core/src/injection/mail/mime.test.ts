@@ -223,6 +223,26 @@ describe("assembleMessage", () => {
     expect(message).not.toContain("x@evil.com");
   });
 
+  it("(j2) extraHeaders rejects a header name outside ftext (a trailing space) without leaking the value or emitting a To : line", () => {
+    let caught: unknown;
+    try {
+      assembleMessage({
+        from: "alice@example.com",
+        to: ["bob@example.com"],
+        subject: "Reserved header test",
+        text: "body",
+        extraHeaders: { "To ": "x@evil.com" },
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    const message = (caught as Error).message;
+    expect(message).toMatch(/malformed/);
+    expect(message).not.toContain("x@evil.com");
+  });
+
   it("(k) an extraHeaders value with a CRLF injection arrives encoded, never as a raw header line", () => {
     const malicious = "a\r\nBcc: evil";
     const { message } = assembleMessage({

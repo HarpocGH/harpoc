@@ -62,6 +62,7 @@ import {
   isAdminUserCaller,
   isValidSecretNamePattern,
   isVaultVersionSupported,
+  isWellFormedVaultVersion,
   IssuedTokenStatus,
   execWrapperName,
   knownInterpreterName,
@@ -451,6 +452,8 @@ export class VaultEngine {
     let message: string | null = null;
     if (!vaultVersion) {
       message = "vault_version row is missing";
+    } else if (!isWellFormedVaultVersion(vaultVersion)) {
+      message = `Vault version ${vaultVersion} is not a valid version stamp`;
     } else if (!isVaultVersionSupported(vaultVersion, VAULT_VERSION)) {
       message = `Vault version ${vaultVersion} is newer than supported ${VAULT_VERSION}`;
     } else if (!meetsVaultVersionFloor(vaultVersion, VAULT_VERSION_FLOOR)) {
@@ -1093,7 +1096,7 @@ export class VaultEngine {
     let value: Uint8Array;
     try {
       if (secret.type === SecretType.OAUTH_TOKEN) {
-        const accessToken = await this.getOAuthAccessToken(secret.id, handle);
+        const accessToken = await this.getOAuthAccessToken(secret.id, handle, caller);
         value = new Uint8Array(Buffer.from(accessToken, "utf8"));
       } else {
         value = await s.secretManager.getSecretValue(handle);
@@ -1482,15 +1485,26 @@ export class VaultEngine {
       // The choke point (E69): every thrown error leaves this method as a
       // VaultError with the credential stripped from message and details. The
       // injector-authored arms audit the VaultErrors they throw; a raw throw
-      // provably had no row, so it gets the engine's (N16).
+      // provably had no row, so it gets the engine's (N16). An audit write that
+      // fails here is itself routed through the same throw — the failure to
+      // record replaces the original error, redacted (D1a-3).
       if (!(err instanceof VaultError)) {
-        this.auditUse(
-          s,
-          secret.id,
-          { handle, context: action.type, error: ErrorCode.INTERNAL_ERROR },
-          false,
-          attribution,
-        );
+        try {
+          this.auditUse(
+            s,
+            secret.id,
+            { handle, context: action.type, error: ErrorCode.INTERNAL_ERROR },
+            false,
+            attribution,
+          );
+        } catch (auditErr) {
+          throw redactErrorMessage(
+            auditErr instanceof VaultError
+              ? auditErr
+              : VaultError.internalError("the audit write failed unexpectedly"),
+            Buffer.from(value).toString("utf8"),
+          );
+        }
       }
       throw redactErrorMessage(toVaultError(err), Buffer.from(value).toString("utf8"));
     } finally {
@@ -2556,6 +2570,18 @@ export class VaultEngine {
       { action: "refresh" },
       handle,
     );
+    return this.joinOrStartRefresh(secretId, caller);
+  }
+
+  /**
+   * The in-flight join behind refreshOAuthToken, without its policy check —
+   * the auto-refresh inside a use joins here so its row names the using
+   * principal while a use-scoped caller still refreshes (D1a-3).
+   */
+  private async joinOrStartRefresh(
+    secretId: string,
+    caller?: CallerContext,
+  ): Promise<number | null> {
     const existing = this.oauthRefreshInFlight.get(secretId);
     if (existing) return existing;
 
@@ -2779,14 +2805,20 @@ export class VaultEngine {
   }
 
   /**
-   * Get the decrypted OAuth access token. Auto-refreshes if expired or within
-   * 60s of expiry. NEVER return this to the LLM — only use within the injection
-   * pipeline. `handle` is the one the caller already resolved (`useSecret`
-   * holds it); without it the handle is rebuilt from the secret's own name, so
-   * a lazy expiry here writes the same `secret.expire { handle }` row and
-   * queues the same downstream terminate as every other lazy-expiry path (D5).
+   * Get the decrypted OAuth access token for injection (private since
+   * 2026-09-23 — the comment-enforced "only caller is useSecret" is now the
+   * type's). Auto-refreshes if expired or within 60s of expiry. NEVER return
+   * this to the LLM — only use within the injection pipeline. `handle` is the
+   * one the caller already resolved (`useSecret` holds it); without it the
+   * handle is rebuilt from the secret's own name, so a lazy expiry here writes
+   * the same `secret.expire { handle }` row and queues the same downstream
+   * terminate as every other lazy-expiry path (D5).
    */
-  async getOAuthAccessToken(secretId: string, handle?: string): Promise<string> {
+  private async getOAuthAccessToken(
+    secretId: string,
+    handle?: string,
+    caller?: CallerContext,
+  ): Promise<string> {
     const s = this.assertUnlocked();
 
     // No denial row here: the only caller is `useSecret`, whose own catch
@@ -2822,7 +2854,7 @@ export class VaultEngine {
     ) {
       if (oauthRow.refresh_token_encrypted) {
         try {
-          await this.refreshOAuthToken(secretId);
+          await this.joinOrStartRefresh(secretId, caller);
           const refreshed = s.store.getOAuthToken(secretId);
           if (
             refreshed?.access_token_encrypted &&

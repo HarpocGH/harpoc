@@ -166,6 +166,22 @@ describe("vault version guard", () => {
     await expectUnlockCorrupted();
   });
 
+  it("names a malformed stored version as malformed, not as newer", async () => {
+    await engine.initVault("password");
+    await engine.lock();
+    setVaultVersion("banana");
+
+    const engine2 = new VaultEngine({ dbPath, sessionPath });
+    try {
+      await expect(engine2.unlock("password")).rejects.toMatchObject({
+        code: ErrorCode.VAULT_CORRUPTED,
+        message: expect.stringContaining("Vault version banana is not a valid version stamp"),
+      });
+    } finally {
+      await engine2.destroy();
+    }
+  });
+
   it.each(["0.9.0", "1.0.0", "1.4.1"])(
     "refuses a vault stamped %s — below the v1.5 floor — naming harpoc init (R2)",
     async (stamp) => {
@@ -206,6 +222,36 @@ describe("vault version guard", () => {
     db.prepare("DELETE FROM vault_meta WHERE key = 'vault_version'").run();
     db.close();
     await expectUnlockCorrupted();
+  });
+});
+
+describe("the wrapped key hierarchy", () => {
+  it("a corrupted wrapped_jwt_key with the correct password refuses VAULT_CORRUPTED and counts no failed attempt", async () => {
+    await engine.initVault("password");
+    await engine.lock();
+    const db = new Database(dbPath);
+    const row = db.prepare("SELECT value FROM vault_meta WHERE key = 'wrapped_jwt_key'").get() as {
+      value: string;
+    };
+    const corrupted = (row.value.startsWith("A") ? "B" : "A") + row.value.slice(1);
+    db.prepare("UPDATE vault_meta SET value = ? WHERE key = 'wrapped_jwt_key'").run(corrupted);
+    db.close();
+
+    const engine2 = new VaultEngine({ dbPath, sessionPath });
+    try {
+      await expect(engine2.unlock("password")).rejects.toMatchObject({
+        code: ErrorCode.VAULT_CORRUPTED,
+      });
+    } finally {
+      await engine2.destroy();
+    }
+
+    const check = new Database(dbPath);
+    const attempts = check
+      .prepare("SELECT value FROM vault_meta WHERE key = 'failed_attempts'")
+      .get() as { value: string } | undefined;
+    check.close();
+    expect(attempts?.value ?? "0").toBe("0");
   });
 });
 

@@ -121,28 +121,56 @@ export function buildDockerAuditDetails(action: DockerRegistryAction): DockerAud
 const DEFAULT_REGISTRY = "registry-1.docker.io";
 
 /**
+ * The key docker consults in `credHelpers` — and hands the helper on stdin —
+ * for every Docker Hub reference (docker/cli `configfile.getAuthConfigKey`),
+ * never the registry host itself (2026-09-23).
+ */
+export const DOCKER_HUB_AUTH_KEY = "https://index.docker.io/v1/";
+const DOCKER_HUB_DOMAINS = new Set(["docker.io", "index.docker.io"]);
+
+/**
  * Split an image reference `[registry-host[:port]/]repo[:tag][@digest]` into its
  * registry authority and repository. The registry component is the allowlist
- * subject and the `credHelpers` key. When the reference carries no registry
- * host — a bare `nginx:latest` or a Docker Hub `user/repo` — the registry
- * defaults to {@link DEFAULT_REGISTRY}; that default host must still be present
- * in `host_allowlist` (fail-safe deny — a bare image is not implicitly trusted).
+ * subject; `credentialKey` is what docker consults in `credHelpers` — the Hub
+ * address for a reference written without a host or as `docker.io`/`index.docker.io`,
+ * the host itself otherwise. When the reference carries no registry host — a
+ * bare `nginx:latest` or a Docker Hub `user/repo` — the registry defaults to
+ * {@link DEFAULT_REGISTRY}; that default host must still be present in
+ * `host_allowlist` (fail-safe deny — a bare image is not implicitly trusted).
  *
  * The first path segment is a registry host only when it looks like one: it
  * contains a `.` (domain) or `:` (port), or is exactly `localhost`. Otherwise
  * it is a Docker Hub namespace, and the whole reference is the repository — the
- * same rule the docker CLI applies.
+ * same rule the docker CLI applies. Mirrors docker's own domain rule
+ * (distribution/reference splitDockerDomain): docker.io and index.docker.io
+ * are Hub, and a first segment carrying an uppercase letter is a domain.
  */
-export function parseImageReference(image: string): { registry: string; repository: string } {
+export function parseImageReference(image: string): {
+  registry: string;
+  repository: string;
+  credentialKey: string;
+} {
   const firstSlash = image.indexOf("/");
   if (firstSlash === -1) {
-    return { registry: DEFAULT_REGISTRY, repository: image };
+    return { registry: DEFAULT_REGISTRY, repository: image, credentialKey: DOCKER_HUB_AUTH_KEY };
   }
   const first = image.slice(0, firstSlash);
-  if (first.includes(".") || first.includes(":") || first === "localhost") {
-    return { registry: first, repository: image.slice(firstSlash + 1) };
+  if (DOCKER_HUB_DOMAINS.has(first)) {
+    return {
+      registry: DEFAULT_REGISTRY,
+      repository: image.slice(firstSlash + 1),
+      credentialKey: DOCKER_HUB_AUTH_KEY,
+    };
   }
-  return { registry: DEFAULT_REGISTRY, repository: image };
+  if (
+    first.includes(".") ||
+    first.includes(":") ||
+    first === "localhost" ||
+    first !== first.toLowerCase()
+  ) {
+    return { registry: first, repository: image.slice(firstSlash + 1), credentialKey: first };
+  }
+  return { registry: DEFAULT_REGISTRY, repository: image, credentialKey: DOCKER_HUB_AUTH_KEY };
 }
 
 /** Parse the `username:password` registry credential from the secret value. */
@@ -299,7 +327,7 @@ async function runDocker(
     throw VaultError.invalidInput("docker image reference must not start with '-'");
   }
 
-  const { registry } = parseImageReference(action.image);
+  const { registry, credentialKey } = parseImageReference(action.image);
 
   // Registry host allowlist — deny-by-default (an empty list refuses). The
   // default Docker Hub host is not exempt.
@@ -314,7 +342,7 @@ async function runDocker(
     controlledPathDirs(),
   );
 
-  const config = writeDockerConfig(registry);
+  const config = writeDockerConfig(credentialKey);
   // The helper is created INSIDE the try so `config.dispose()` still runs if
   // `writeCredentialHelper()` throws (mkdtemp/writeFile failure) — otherwise the
   // credential-free config tmpdir would leak on that pre-try throw path.
@@ -325,7 +353,7 @@ async function runDocker(
     env.DOCKER_CONFIG = config.dir;
     // Prepend the helper dir so docker resolves docker-credential-harpoc there.
     env.PATH = helper.dir + delimiter + (env.PATH ?? "");
-    env.HARPOC_DOCKER_REGISTRY = registry;
+    env.HARPOC_DOCKER_REGISTRY = credentialKey;
     env.HARPOC_DOCKER_USER = user;
     env.HARPOC_DOCKER_SECRET = secret;
 

@@ -1,3 +1,5 @@
+import { isDecimalInteger } from "./decimal-integer.js";
+
 /**
  * Byte-bounded reads of WHATWG response bodies, shared by the HTTP injector
  * and the ACME client (E80 / E86a). Pure over the web-streams API: the
@@ -5,15 +7,20 @@
  */
 export type CappedBodyRead = { ok: true; bytes: Uint8Array } | { ok: false; reason: "too_large" };
 
-/** True when a declared Content-Length exceeds `maxBytes`; absent or unparseable ⇒ false. */
+/**
+ * True when a declared Content-Length exceeds `maxBytes`. Absent ⇒ false; a value
+ * that is not `1*DIGIT` (RFC 9110 § 8.6 — hex, exponent, sign, decimal point, a
+ * joined duplicate) ⇒ true, fail-closed (2026-09-23); the streaming cap is the
+ * second guard.
+ */
 export function contentLengthExceeds(
   headers: { get(name: string): string | null },
   maxBytes: number,
 ): boolean {
   const declared = headers.get("content-length");
   if (declared === null) return false;
-  const length = Number(declared);
-  return Number.isFinite(length) && length > maxBytes;
+  if (!isDecimalInteger(declared)) return true;
+  return Number(declared) > maxBytes;
 }
 
 /**

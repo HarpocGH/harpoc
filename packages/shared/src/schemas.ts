@@ -478,6 +478,9 @@ const SMTP_ENVELOPE_HEADER_NAMES = new Set([
   "message-id",
 ]);
 
+/** RFC 5322 § 3.6.8 `ftext`: printable US-ASCII except ':' — no whitespace, no CR/LF, no colon. */
+const HEADER_FIELD_NAME = /^[!-9;-~]+$/;
+
 /**
  * Caller-supplied SMTP headers: deny-listed against the envelope and
  * structural headers the vault assembles itself, so the audited envelope
@@ -485,7 +488,10 @@ const SMTP_ENVELOPE_HEADER_NAMES = new Set([
  * case-insensitively — header names are case-insensitive per RFC 5322.
  */
 const smtpHeadersSchema = z
-  .record(z.string().min(1).max(256), z.string().max(8192))
+  .record(
+    z.string().min(1).max(256).regex(HEADER_FIELD_NAME, "Invalid header field name"),
+    z.string().max(8192),
+  )
   .refine(
     (headers) =>
       Object.keys(headers).every((k) => !SMTP_ENVELOPE_HEADER_NAMES.has(k.toLowerCase())),

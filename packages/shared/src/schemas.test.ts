@@ -2055,6 +2055,32 @@ describe("v1.3 action schemas", () => {
       ).toThrow();
     }
   });
+  it("refuses a header name that is not RFC 5322 ftext — whitespace, a colon or a control character", () => {
+    for (const k of ["To ", " Bcc", "X\tFoo", "X-Foo:", "X-Foo\r\nBcc", "X Foo"]) {
+      expect(() =>
+        smtpActionSchema.parse({
+          type: "smtp",
+          host: "h",
+          from: "a@b.com",
+          to: ["d@e.com"],
+          subject: "s",
+          text: "x",
+          headers: { [k]: "v" },
+        }),
+      ).toThrow();
+    }
+    expect(() =>
+      smtpActionSchema.parse({
+        type: "smtp",
+        host: "h",
+        from: "a@b.com",
+        to: ["d@e.com"],
+        subject: "s",
+        text: "x",
+        headers: { "X-Foo": "v" },
+      }),
+    ).not.toThrow();
+  });
   it("refuses relative and control-char attachment paths", () => {
     const base = { type: "smtp", host: "h", from: "a@b.c", to: ["d@e.f"], subject: "s", text: "x" };
     expect(() =>

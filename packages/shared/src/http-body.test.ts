@@ -11,14 +11,20 @@ function streamOf(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
 }
 
 describe("contentLengthExceeds", () => {
-  it("is false when the header is absent or unparseable", () => {
+  it("is false only for an absent header", () => {
     expect(contentLengthExceeds(new Headers(), 10)).toBe(false);
-    expect(contentLengthExceeds(new Headers({ "content-length": "abc" }), 10)).toBe(false);
   });
 
-  it("is true only strictly past the cap", () => {
+  it("is true only strictly past the cap for a well-formed value", () => {
     expect(contentLengthExceeds(new Headers({ "content-length": "10" }), 10)).toBe(false);
     expect(contentLengthExceeds(new Headers({ "content-length": "11" }), 10)).toBe(true);
+    expect(contentLengthExceeds(new Headers({ "content-length": "0" }), 10)).toBe(false);
+  });
+
+  it("treats any value that is not 1*DIGIT as exceeding (fail-closed, RFC 9110 § 8.6)", () => {
+    for (const v of ["abc", "-5", "10.5", "1e6", "0x10", "+20", "12, 12", "Infinity"]) {
+      expect(contentLengthExceeds(new Headers({ "content-length": v }), 100)).toBe(true);
+    }
   });
 });
 

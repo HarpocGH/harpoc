@@ -385,7 +385,7 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
     // Positive control for the seeded-access-token needle, taken here because
     // the refresh below overwrites it: the value the sweep looks for is the
     // value the vault held.
-    expect(await vault.engine.getOAuthAccessToken(seeded.secretId)).toBe(AC_ACCESS_TOKEN);
+    expect(await vault.engine["getOAuthAccessToken"](seeded.secretId)).toBe(AC_ACCESS_TOKEN);
 
     mock.setNextTokens({
       access_token: ROTATED_ACCESS_TOKEN,
@@ -590,9 +590,9 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
     // controlled in test 2, at the only moment it is the stored value; the
     // refresh replaced it with the rotated one read back here.
     const ccSecretId = await vault.engine.resolveSecretId(`secret://${CC_NAME}`);
-    expect(await vault.engine.getOAuthAccessToken(ccSecretId)).toBe(CC_ACCESS_TOKEN);
+    expect(await vault.engine["getOAuthAccessToken"](ccSecretId)).toBe(CC_ACCESS_TOKEN);
     const acSecretId = await vault.engine.resolveSecretId(`secret://${AC_NAME}`);
-    expect(await vault.engine.getOAuthAccessToken(acSecretId)).toBe(ROTATED_ACCESS_TOKEN);
+    expect(await vault.engine["getOAuthAccessToken"](acSecretId)).toBe(ROTATED_ACCESS_TOKEN);
 
     const storedKey = await vault.engine.getCertificatePrivateKey(importedSecretId);
     for (const needle of keyNeedles("control", KEY_PEM)) {

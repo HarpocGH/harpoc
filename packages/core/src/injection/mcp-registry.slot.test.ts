@@ -170,6 +170,31 @@ describe("McpConnectionRegistry — a connect publishes only while its slot is i
     expect(rows[0]?.detail).toMatchObject({ server: "slot-mcp", reason: "secret_revoked" });
   });
 
+  it("a terminate whose audit write throws still closes the child, frees the slot and surfaces the error", async () => {
+    let seenAtWrite: McpConnectionEntry | undefined;
+    const logger = {
+      log: vi.fn(() => {
+        seenAtWrite = registry.get("s1");
+        throw new Error("audit unavailable");
+      }),
+    } as unknown as AuditLogger;
+    const registry = new McpConnectionRegistry(logger);
+    const close = vi.fn().mockResolvedValue(undefined);
+    const entry = await registry.acquire("s1", () => Promise.resolve(fakeEntry("s1", close)));
+
+    await expect(registry.terminate("s1", "secret_revoked")).rejects.toThrow("audit unavailable");
+
+    expect(logger.log).toHaveBeenCalledTimes(1);
+    expect(seenAtWrite).toBe(entry);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(entry.state).toBe("closing");
+    expect(registry.get("s1")).toBeUndefined();
+    const again = await registry.acquire("s1", () =>
+      Promise.resolve(fakeEntry("s1", vi.fn().mockResolvedValue(undefined))),
+    );
+    expect(again).not.toBe(entry);
+  });
+
   it("a connect that resolves after a seal cleared the map and a post-seal acquire seated a successor leaves the successor alone (the catch's second beneficiary)", async () => {
     const registry = new McpConnectionRegistry(null);
     let resolveFirst: (entry: McpConnectionEntry) => void = () => undefined;

@@ -138,6 +138,24 @@ describe("mapStringLeaves — key positions", () => {
     expect(JSON.stringify(out)).not.toContain(SECRET);
   });
 
+  it("keeps both entries when an unchanged key collides with a renamed one, in either order", () => {
+    const out1 = mapStringLeaves({ [SECRET]: "first", "[REDACTED]": "second" }, redact) as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(out1)).toHaveLength(2);
+    expect(Object.values(out1)).toEqual(expect.arrayContaining(["first", "second"]));
+    expect(JSON.stringify(out1)).not.toContain(SECRET);
+
+    const out2 = mapStringLeaves({ "[REDACTED]": "second", [SECRET]: "first" }, redact) as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(out2)).toHaveLength(2);
+    expect(Object.values(out2)).toEqual(expect.arrayContaining(["first", "second"]));
+    expect(JSON.stringify(out2)).not.toContain(SECRET);
+  });
+
   it("leaves unrelated keys and the structure untouched", () => {
     const out = mapStringLeaves({ note: "hello", n: 1, list: [1, "two", null] }, redact);
     expect(out).toEqual({ note: "hello", n: 1, list: [1, "two", null] });
@@ -317,9 +335,9 @@ describe("mapStringLeaves — JSON descent budget", () => {
   });
 
   it("maps keys at depth, with the collision rule (H3)", () => {
-    // `SHOUTED` FIRST on purpose: the suffix rule only guards a key the mapper
-    // actually changed, so with the other order the unchanged `SHOUTED` would
-    // overwrite the mapped one. That is pre-existing behaviour, pinned as it is.
+    // `SHOUTED` first here; the other order is pinned by the input-order case
+    // above: since 2026-09-23 an unchanged key that lands on a name a renamed
+    // key took is suffixed too, so neither order loses a value.
     const leaf = JSON.stringify({ SHOUTED: 2, secret: 1 });
     const out = mapStringLeaves({ payload: leaf }, shout, { descendJson: 1 }) as {
       payload: string;

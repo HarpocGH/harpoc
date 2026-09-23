@@ -214,7 +214,13 @@ export class GitInjector {
     }
     const cwd = built.cwd;
     const timeoutMs = action.timeout_ms ?? DEFAULT_GIT_TIMEOUT_MS;
-    const askpass = writeAskpass();
+    let askpass: { launcher: string; dispose: () => void };
+    try {
+      askpass = writeAskpass();
+    } catch (err) {
+      hooks.dispose();
+      throw err;
+    }
     let ca: TempSshFile | null = null;
     try {
       ca =
@@ -350,7 +356,13 @@ export class GitInjector {
       throw err;
     }
     const timeoutMs = action.timeout_ms ?? DEFAULT_GIT_TIMEOUT_MS;
-    const kh = writeKnownHosts(knownHosts);
+    let kh: TempSshFile;
+    try {
+      kh = writeKnownHosts(knownHosts);
+    } catch (err) {
+      hooks.dispose();
+      throw err;
+    }
 
     let agent: EphemeralSshAgent;
     try {
@@ -609,15 +621,20 @@ function createEmptyHooksDir(): { dir: string; dispose: () => void } {
 function writeAskpass(): { launcher: string; dispose: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "harpoc-git-"));
   const helper = join(dir, "askpass.mjs");
-  writeFileSync(helper, ASKPASS_HELPER_SRC, { mode: 0o700 });
   const node = process.execPath;
   let launcher: string;
-  if (process.platform === "win32") {
-    launcher = join(dir, "askpass.cmd");
-    writeFileSync(launcher, `@"${node}" "${helper}" %*\r\n`, { mode: 0o700 });
-  } else {
-    launcher = join(dir, "askpass.sh");
-    writeFileSync(launcher, `#!/bin/sh\nexec "${node}" "${helper}" "$@"\n`, { mode: 0o700 });
+  try {
+    writeFileSync(helper, ASKPASS_HELPER_SRC, { mode: 0o700 });
+    if (process.platform === "win32") {
+      launcher = join(dir, "askpass.cmd");
+      writeFileSync(launcher, `@"${node}" "${helper}" %*\r\n`, { mode: 0o700 });
+    } else {
+      launcher = join(dir, "askpass.sh");
+      writeFileSync(launcher, `#!/bin/sh\nexec "${node}" "${helper}" "$@"\n`, { mode: 0o700 });
+    }
+  } catch (err) {
+    rmSync(dir, { recursive: true, force: true });
+    throw err;
   }
   return {
     launcher,

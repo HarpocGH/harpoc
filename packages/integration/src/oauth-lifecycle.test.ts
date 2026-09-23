@@ -124,7 +124,7 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
     // at-cc-1, read back over the trusted local path. Without it the opacity
     // assertion below would pass just as well against a provider that never
     // honoured `setNextTokens` and handed out its default token instead.
-    expect(await vault.engine.getOAuthAccessToken(ccSecretId)).toBe(CC_ACCESS_TOKEN);
+    expect(await vault.engine["getOAuthAccessToken"](ccSecretId)).toBe(CC_ACCESS_TOKEN);
 
     expect(raw).not.toContain(CC_CLIENT_SECRET);
     expect(raw).not.toContain(CC_ACCESS_TOKEN);

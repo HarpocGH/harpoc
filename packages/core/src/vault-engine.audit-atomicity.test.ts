@@ -228,12 +228,12 @@ describe("fail-closed audit: lazy expiry", () => {
     liveStore().updateSecret(secretId, { expires_at: Date.now() - 1000 });
     failNextAuditInsert();
 
-    await expect(engine.getOAuthAccessToken(secretId)).rejects.toThrow("audit unavailable");
+    await expect(engine["getOAuthAccessToken"](secretId)).rejects.toThrow("audit unavailable");
 
     expect(rawStatus(secretId)).toBe(SecretStatus.PENDING);
     expect(auditCount(AuditEventType.SECRET_EXPIRE)).toBe(0);
 
-    await expect(engine.getOAuthAccessToken(secretId)).rejects.toMatchObject({
+    await expect(engine["getOAuthAccessToken"](secretId)).rejects.toMatchObject({
       code: ErrorCode.SECRET_EXPIRED,
     });
     expect(rawStatus(secretId)).toBe(SecretStatus.EXPIRED);
