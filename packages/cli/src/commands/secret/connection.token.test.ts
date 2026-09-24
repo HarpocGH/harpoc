@@ -1,4 +1,4 @@
-import { rmSync, writeFileSync } from "node:fs";
+import { chmodSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
@@ -177,6 +177,52 @@ describe("secret connection — token path", () => {
         message: `${flag}: no such file: C:/nonexistent/harpoc-1c.pem`,
       });
       expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([["--db-ca-file"], ["--known-hosts-file"], ["--mail-ca"], ["--git-ca"], ["--http-ca"]])(
+    "%s with a directory is refused INVALID_INPUT before the vault opens (D1d-4)",
+    async (flag) => {
+      await expect(run(["secret://k", flag, tmpdir(), "--json"])).rejects.toThrow("process.exit");
+      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+        error: "INVALID_INPUT",
+        message: `${flag}: not a readable file: ${tmpdir()}`,
+      });
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    },
+  );
+
+  it('--git-ca with a path too long for the filesystem is refused INVALID_INPUT "no such file" before the vault opens (P1d-10)', async () => {
+    const longPath = join(tmpdir(), "a".repeat(40_000));
+    await expect(run(["secret://k", "--git-ca", longPath, "--json"])).rejects.toThrow(
+      "process.exit",
+    );
+    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "INVALID_INPUT",
+      message: `--git-ca: no such file: ${longPath}`,
+    });
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "--git-ca with an unreadable file is refused INVALID_INPUT before the vault opens (D1d-4)",
+    async () => {
+      const caPath = join(tmpdir(), `harpoc-unreadable-ca-${process.pid}.pem`);
+      writeFileSync(caPath, "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n");
+      try {
+        chmodSync(caPath, 0o000);
+        await expect(run(["secret://k", "--git-ca", caPath, "--json"])).rejects.toThrow(
+          "process.exit",
+        );
+        expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+          error: "INVALID_INPUT",
+          message: `--git-ca: not a readable file: ${caPath}`,
+        });
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      } finally {
+        chmodSync(caPath, 0o600);
+        rmSync(caPath, { force: true });
+      }
     },
   );
 

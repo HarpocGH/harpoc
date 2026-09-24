@@ -1026,7 +1026,7 @@ export const gitConnectionConfigSchema = z.strictObject({
 
 export type GitConnectionConfig = z.infer<typeof gitConnectionConfigSchema>;
 
-/** The HTTP context's private-CA pin: the per-call dispatcher trusts this CA for the request and its redirects (D2h, 2026-09-23). */
+/** The HTTP context's private-CA pin: the per-call dispatcher trusts this CA, and only this CA, for the request and its redirects — the default trust store is replaced for that dispatcher (D2h, 2026-09-23; D1d-2, 2026-09-24). */
 export const httpConnectionConfigSchema = z.strictObject({
   ca_pem: z.string().min(1).max(65_536),
 });

@@ -51,6 +51,18 @@ export function registerAuthTokenCommand(auth: Command): void {
       ) => {
         const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
         try {
+          const maxTtlMinutes = Math.floor(MAX_TOKEN_TTL_MS / 60_000);
+          const ttlMinutes = parsePositiveInteger(
+            options.ttl ?? "60",
+            "TTL must be a positive number of minutes",
+          );
+          if (ttlMinutes > maxTtlMinutes) {
+            throw VaultError.invalidInput(
+              `TTL cannot exceed ${maxTtlMinutes} minutes (${maxTtlMinutes / 60}h)`,
+            );
+          }
+          const ttlMs = ttlMinutes * 60 * 1000;
+
           const engine = await loadUnlockedEngine(vaultDir);
           try {
             const scopeStrings = options.scope
@@ -77,18 +89,6 @@ export function registerAuthTokenCommand(auth: Command): void {
               );
             }
             const principalType = parsedPrincipalType.data;
-            const maxTtlMinutes = Math.floor(MAX_TOKEN_TTL_MS / 60_000);
-            const ttlMinutes = parsePositiveInteger(
-              options.ttl ?? "60",
-              "TTL must be a positive number of minutes",
-            );
-            if (ttlMinutes > maxTtlMinutes) {
-              throw VaultError.invalidInput(
-                `TTL cannot exceed ${maxTtlMinutes} minutes (${maxTtlMinutes / 60}h)`,
-              );
-            }
-            const ttlMs = ttlMinutes * 60 * 1000;
-
             // Checked before the mint: a refused write must not leave a row in
             // the issued-token registry for a token nobody ever received. No
             // --force — the flag writes a credential, and silently replacing

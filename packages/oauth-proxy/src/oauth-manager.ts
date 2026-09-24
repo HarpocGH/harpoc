@@ -395,7 +395,7 @@ export class OAuthManager {
   }
 
   private assertNotSuperseded(pending: PendingFlow): void {
-    if (pending.superseded) throw VaultError.oauthFlowFailed("Authorization flow superseded");
+    if (pending.superseded) throw VaultError.oauthFlowFailed("OAuth flow superseded");
   }
 
   private assertNotCancelled(pending: PendingFlow): void {

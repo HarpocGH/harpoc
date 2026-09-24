@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
-import { MAX_TOKEN_TTL_MS } from "@harpoc/shared";
+import { ErrorCode, MAX_TOKEN_TTL_MS, VaultError } from "@harpoc/shared";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -25,6 +25,7 @@ vi.mock("../../utils/vault-loader.js", () => ({
 }));
 
 import { Command } from "commander";
+import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerAuthTokenCommand } from "./token.js";
 import { readLaunchTokenFile } from "@harpoc/mcp-server";
 
@@ -93,6 +94,23 @@ describe("auth token --principal-type", () => {
       message: "TTL must be a positive number of minutes",
     });
     expect(mockEngine.createToken).not.toHaveBeenCalled();
+  });
+
+  it("--ttl is parsed before the vault opens: a typo on a locked vault reports INVALID_INPUT (D1d-5)", async () => {
+    vi.mocked(loadUnlockedEngine).mockRejectedValueOnce(
+      new VaultError(ErrorCode.VAULT_LOCKED, "Vault is locked"),
+    );
+    try {
+      await expect(run(["--ttl", "5abc", "--json"])).rejects.toThrow("process.exit");
+      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+        error: "INVALID_INPUT",
+        message: "TTL must be a positive number of minutes",
+      });
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(loadUnlockedEngine).mockReset();
+      vi.mocked(loadUnlockedEngine).mockResolvedValue(mockEngine as never);
+    }
   });
 
   it("a --ttl over the cap is refused as an INVALID_INPUT envelope under --json (P1cF-3)", async () => {

@@ -100,7 +100,7 @@ interface SharedServerParts {
  * the waiver, or the refusal — once per process for a stdio start, once per
  * session or request for the HTTP leg (which writes no row here).
  */
-function resolveScopeGuard(options: CreateMcpServerOptions): ScopeGuard {
+function resolveScopeGuard(options: CreateMcpServerOptions, rateLimiter: RateLimiter): ScopeGuard {
   const { engine, launchToken } = options;
   const accessInterface = options.accessInterface ?? "mcp";
 
@@ -126,7 +126,10 @@ function resolveScopeGuard(options: CreateMcpServerOptions): ScopeGuard {
       accessInterface,
       (jti) => engine.isTokenRevoked(jti),
       options.remoteAddress,
-      (operation, reason) => engine.auditScopeRefusal(guard.caller, operation, reason),
+      (operation, reason) => {
+        rateLimiter.checkLimit();
+        engine.auditScopeRefusal(guard.caller, operation, reason);
+      },
     );
     return guard;
   }
@@ -156,9 +159,9 @@ function resolveScopeGuard(options: CreateMcpServerOptions): ScopeGuard {
   throw VaultError.tokenRequired();
 }
 
-function sharedParts(options: CreateMcpServerOptions): SharedServerParts {
+function sharedParts(options: CreateMcpServerOptions, rateLimiter: RateLimiter): SharedServerParts {
   return {
-    rateLimiter: options.rateLimiter ?? new RateLimiter(),
+    rateLimiter,
     injectionGuard: options.injectionGuard ?? new InjectionGuard(),
     oauthManager: options.oauthManager ?? createDefaultOAuthManager(options.engine),
     certManager: options.certManager ?? new CertManager(options.engine),
@@ -214,7 +217,12 @@ function buildMcpServer(
  * `allowTokenless` — which is audited as `server.start`, fail-closed.
  */
 export function createMcpServer(options: CreateMcpServerOptions): McpServer {
-  return buildMcpServer(options, resolveScopeGuard(options), sharedParts(options));
+  const rateLimiter = options.rateLimiter ?? new RateLimiter();
+  return buildMcpServer(
+    options,
+    resolveScopeGuard(options, rateLimiter),
+    sharedParts(options, rateLimiter),
+  );
 }
 
 /**
@@ -224,7 +232,8 @@ export function createMcpServer(options: CreateMcpServerOptions): McpServer {
  * one without closing and reconnecting a singleton (P3-24).
  */
 export function createStdioServerFactory(options: CreateMcpServerOptions): () => McpServer {
-  const scopeGuard = resolveScopeGuard(options);
-  const parts = sharedParts(options);
+  const rateLimiter = options.rateLimiter ?? new RateLimiter();
+  const scopeGuard = resolveScopeGuard(options, rateLimiter);
+  const parts = sharedParts(options, rateLimiter);
   return () => buildMcpServer(options, scopeGuard, parts);
 }

@@ -20,6 +20,8 @@ vi.mock("../../utils/vault-loader.js", () => ({
 }));
 
 import { Command } from "commander";
+import { ErrorCode, VaultError } from "@harpoc/shared";
+import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerPolicyGrantCommand } from "./grant.js";
 
 async function run(args: string[]): Promise<void> {
@@ -112,6 +114,36 @@ describe("policy grant --principal-type validation", () => {
       message: "--expires must be a positive number of minutes",
     });
     expect(mockEngine.grantPolicy).not.toHaveBeenCalled();
+  });
+
+  it("--expires is parsed before the vault opens: a typo on a locked vault reports INVALID_INPUT (D1d-5)", async () => {
+    vi.mocked(loadUnlockedEngine).mockRejectedValueOnce(
+      new VaultError(ErrorCode.VAULT_LOCKED, "Vault is locked"),
+    );
+    try {
+      await expect(
+        run([
+          "secret://k",
+          "--principal-type",
+          "agent",
+          "--principal-id",
+          "a",
+          "--permissions",
+          "use",
+          "--expires",
+          "5abc",
+          "--json",
+        ]),
+      ).rejects.toThrow("process.exit");
+      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+        error: "INVALID_INPUT",
+        message: "--expires must be a positive number of minutes",
+      });
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(loadUnlockedEngine).mockReset();
+      vi.mocked(loadUnlockedEngine).mockResolvedValue(mockEngine as never);
+    }
   });
 
   it("an invalid --principal-type is refused as an INVALID_INPUT envelope under --json (P1cF-2)", async () => {

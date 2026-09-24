@@ -32,6 +32,16 @@ export function registerAgentPermissionsCommand(agent: Command): void {
     .action(async (name: string, handle: string, options: PermissionsOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        const expiresMinutes =
+          options.expires !== undefined
+            ? parsePositiveInteger(
+                options.expires,
+                "--expires must be a positive number of minutes",
+              )
+            : undefined;
+        const expiresAt =
+          expiresMinutes !== undefined ? Date.now() + expiresMinutes * 60 * 1000 : undefined;
+
         const engine = await loadUnlockedEngine(vaultDir);
         try {
           const resolved = resolveTokenCallerForHandle(
@@ -67,16 +77,6 @@ export function registerAgentPermissionsCommand(agent: Command): void {
             }
           }
           const permissions = permStrings as Permission[];
-
-          const expiresMinutes =
-            options.expires !== undefined
-              ? parsePositiveInteger(
-                  options.expires,
-                  "--expires must be a positive number of minutes",
-                )
-              : undefined;
-          const expiresAt =
-            expiresMinutes !== undefined ? Date.now() + expiresMinutes * 60 * 1000 : undefined;
 
           const secretId = await resolveSecretId(
             engine,

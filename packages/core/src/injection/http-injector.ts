@@ -140,7 +140,7 @@ export interface HttpInjectorRequest {
    * follow_redirects mode is active.
    */
   urlAllowlist?: string[];
-  /** A private CA (PEM) the per-call dispatcher trusts for this request and its redirects — `http.ca_pem` (D2h, 2026-09-23). */
+  /** A private CA (PEM) the per-call dispatcher trusts — and the only one it trusts — for this request and its redirects; the default store is replaced for that dispatcher — `http.ca_pem` (D2h, 2026-09-23; D1d-2, 2026-09-24). */
   caPem?: string;
 }
 

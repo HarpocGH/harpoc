@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, openSync, readFileSync, statSync, type Stats } from "node:fs";
 import type { Command } from "commander";
 import type { ConnectionConfig, MailConnectionConfig } from "@harpoc/shared";
 import { connectionConfigSchema, renderSchemaIssues, VaultError } from "@harpoc/shared";
@@ -59,7 +59,7 @@ export function registerSecretConnectionCommand(secret: Command): void {
     .option("--git-ca <path>", "Path to a CA certificate PEM to pin for the Git-HTTPS transport")
     .option(
       "--http-ca <path>",
-      "Path to a CA certificate PEM to pin for the HTTP context's TLS connections",
+      "Path to a CA certificate PEM to pin for the HTTP context's TLS connections (that CA only — the default trust store is replaced for the request and its redirects)",
     )
     .option("--clear", "Reset the whole config to empty before applying the other flags")
     .option("--show", "Show the current config instead of setting it")
@@ -142,16 +142,26 @@ const PATH_OPTIONS: ReadonlyArray<readonly [keyof ConnectionOptions, string]> = 
  * stored config was rewritten unchanged (and `--mail-ca ""` dropped a stored mail
  * pin); refused before the vault opens, as `--domains` is (P1F-4, 2026-09-23).
  * A path that does not exist is refused here too, so `--json` renders the envelope
- * instead of the merge's `ENOENT` (P1c-31).
+ * instead of the merge's `ENOENT` (P1c-31). A directory or an unreadable file is
+ * refused with the same envelope (D1d-4, 2026-09-24).
  */
 function assertPathOptions(options: ConnectionOptions): void {
   for (const [key, flag] of PATH_OPTIONS) {
     const value = options[key];
-    if (typeof value === "string" && value.trim() === "") {
-      throw VaultError.invalidInput(`${flag} requires a file path.`);
+    if (typeof value !== "string") continue;
+    if (value.trim() === "") throw VaultError.invalidInput(`${flag} requires a file path.`);
+    let stat: Stats | undefined;
+    try {
+      stat = statSync(value, { throwIfNoEntry: false });
+    } catch {
+      stat = undefined;
     }
-    if (typeof value === "string" && !existsSync(value)) {
-      throw VaultError.invalidInput(`${flag}: no such file: ${value}`);
+    if (stat === undefined) throw VaultError.invalidInput(`${flag}: no such file: ${value}`);
+    if (stat.isDirectory()) throw VaultError.invalidInput(`${flag}: not a readable file: ${value}`);
+    try {
+      closeSync(openSync(value, "r"));
+    } catch {
+      throw VaultError.invalidInput(`${flag}: not a readable file: ${value}`);
     }
   }
 }

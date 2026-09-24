@@ -63,21 +63,20 @@ export function registerAuditCommand(program: Command): void {
       ) => {
         const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
         try {
+          const limit = parsePositiveInteger(
+            options.limit ?? "50",
+            "--limit must be a positive number",
+          );
+
+          const since = options.since !== undefined ? new Date(options.since).getTime() : undefined;
+          if (since !== undefined && Number.isNaN(since)) {
+            throw VaultError.invalidInput(
+              "--since must be a valid date (e.g. 2026-07-01 or 2026-07-01T12:00:00Z)",
+            );
+          }
+
           const engine = await loadUnlockedEngine(vaultDir);
           try {
-            const limit = parsePositiveInteger(
-              options.limit ?? "50",
-              "--limit must be a positive number",
-            );
-
-            const since =
-              options.since !== undefined ? new Date(options.since).getTime() : undefined;
-            if (since !== undefined && Number.isNaN(since)) {
-              throw VaultError.invalidInput(
-                "--since must be a valid date (e.g. 2026-07-01 or 2026-07-01T12:00:00Z)",
-              );
-            }
-
             const tokenValue =
               options.token ??
               (cmd.optsWithGlobals() as { token?: string }).token ??

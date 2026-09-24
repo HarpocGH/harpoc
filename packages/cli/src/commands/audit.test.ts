@@ -18,6 +18,8 @@ vi.mock("../utils/vault-loader.js", () => ({
 }));
 
 import { Command } from "commander";
+import { ErrorCode, VaultError } from "@harpoc/shared";
+import { loadUnlockedEngine } from "../utils/vault-loader.js";
 import { registerAuditCommand } from "./audit.js";
 
 async function run(args: string[]): Promise<void> {
@@ -83,6 +85,23 @@ describe("audit --since validation", () => {
       message: "--limit must be a positive number",
     });
     expect(mockEngine.queryAudit).not.toHaveBeenCalled();
+  });
+
+  it("--limit is parsed before the vault opens: a typo on a locked vault reports INVALID_INPUT (D1d-5)", async () => {
+    vi.mocked(loadUnlockedEngine).mockRejectedValueOnce(
+      new VaultError(ErrorCode.VAULT_LOCKED, "Vault is locked"),
+    );
+    try {
+      await expect(run(["--limit", "5abc", "--json"])).rejects.toThrow("process.exit");
+      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+        error: "INVALID_INPUT",
+        message: "--limit must be a positive number",
+      });
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(loadUnlockedEngine).mockReset();
+      vi.mocked(loadUnlockedEngine).mockResolvedValue(mockEngine as never);
+    }
   });
 
   it("an invalid --since is refused as an INVALID_INPUT envelope under --json (P1cF-4)", async () => {

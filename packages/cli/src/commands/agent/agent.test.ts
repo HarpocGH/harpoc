@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 import type { Agent, SetAgentPermissionsResult } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 
 const { mockEngine, mockPromptConfirm } = vi.hoisted(() => ({
   mockEngine: {
@@ -25,6 +26,7 @@ vi.mock("../../utils/vault-loader.js", () => ({
 vi.mock("../../utils/prompt.js", () => ({ promptConfirm: mockPromptConfirm }));
 
 import { Command } from "commander";
+import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerAgentRegisterCommand } from "./register.js";
 import { registerAgentListCommand } from "./list.js";
 import { registerAgentShowCommand } from "./show.js";
@@ -436,6 +438,34 @@ describe("harpoc agent group", () => {
         message: "--expires must be a positive number of minutes",
       });
       expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
+    });
+
+    it("--expires is parsed before the vault opens: a typo on a locked vault reports INVALID_INPUT (D1d-5)", async () => {
+      vi.mocked(loadUnlockedEngine).mockRejectedValueOnce(
+        new VaultError(ErrorCode.VAULT_LOCKED, "Vault is locked"),
+      );
+      try {
+        await expect(
+          run([
+            "permissions",
+            "bot",
+            "secret://k",
+            "--permissions",
+            "read",
+            "--expires",
+            "5abc",
+            "--json",
+          ]),
+        ).rejects.toThrow("process.exit");
+        expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+          error: "INVALID_INPUT",
+          message: "--expires must be a positive number of minutes",
+        });
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      } finally {
+        vi.mocked(loadUnlockedEngine).mockReset();
+        vi.mocked(loadUnlockedEngine).mockResolvedValue(mockEngine as never);
+      }
     });
 
     it("refuses an empty --expires instead of writing a grant with no expiry (P1bF-2)", async () => {

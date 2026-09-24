@@ -42,7 +42,10 @@ export class ScopeGuard {
      * Invoked once, immediately before a scope refusal throws, with the operation
      * the caller named and the branch that refused — the server factory binds it
      * to the engine's `access.denied` writer (D2g, 2026-09-23). Expiry and
-     * revocation are not scope refusals and never reach it.
+     * revocation are not scope refusals and never reach it. A callback that
+     * throws replaces the refusal — the server factory's limiter check answers
+     * RATE_LIMIT_EXCEEDED past the global budget and no row is written (D1d-1,
+     * 2026-09-24).
      */
     private readonly onRefusal?: (operation: string, reason: ScopeRefusalReason) => void,
   ) {}

@@ -31,6 +31,16 @@ export function registerPolicyGrantCommand(policy: Command): void {
       ) => {
         const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
         try {
+          const expiresMinutes =
+            options.expires !== undefined
+              ? parsePositiveInteger(
+                  options.expires,
+                  "--expires must be a positive number of minutes",
+                )
+              : undefined;
+          const expiresAt =
+            expiresMinutes !== undefined ? Date.now() + expiresMinutes * 60 * 1000 : undefined;
+
           const engine = await loadUnlockedEngine(vaultDir);
           try {
             const resolved = resolveTokenCallerForHandle(
@@ -65,16 +75,6 @@ export function registerPolicyGrantCommand(policy: Command): void {
                 `Invalid principal type: "${options.principalType}". Valid: agent, tool, project, user`,
               );
             }
-
-            const expiresMinutes =
-              options.expires !== undefined
-                ? parsePositiveInteger(
-                    options.expires,
-                    "--expires must be a positive number of minutes",
-                  )
-                : undefined;
-            const expiresAt =
-              expiresMinutes !== undefined ? Date.now() + expiresMinutes * 60 * 1000 : undefined;
 
             const policyResult = engine.grantPolicy(
               {

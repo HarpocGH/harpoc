@@ -993,7 +993,10 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
       await vi.waitFor(() => expect(deviceParked).toBe(true));
       releaseExchange();
 
-      await expect(first).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+      await expect(first).rejects.toMatchObject({
+        code: ErrorCode.OAUTH_FLOW_FAILED,
+        message: "OAuth flow failed: OAuth flow superseded",
+      });
       expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
 
       releaseDevice();
@@ -1054,7 +1057,7 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
 
       await expect(first.completion).rejects.toMatchObject({
         code: ErrorCode.OAUTH_FLOW_FAILED,
-        message: "OAuth flow failed: Authorization flow superseded",
+        message: "OAuth flow failed: OAuth flow superseded",
       });
       expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
       expect(errors).toHaveLength(0);
@@ -1178,7 +1181,7 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
 
       await expect(first.completion).rejects.toMatchObject({
         code: ErrorCode.OAUTH_FLOW_FAILED,
-        message: "OAuth flow failed: Authorization flow superseded",
+        message: "OAuth flow failed: OAuth flow superseded",
       });
       expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
       expect(errors).toHaveLength(0);
