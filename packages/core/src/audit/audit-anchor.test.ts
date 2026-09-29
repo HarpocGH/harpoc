@@ -31,7 +31,7 @@ function logRows(count: number): number[] {
   return ids;
 }
 
-function insertLegacyRow(): number {
+function insertUnlinkedRow(): number {
   dropAuditRowHmacConstraint(store.db);
   const result = store.db
     .prepare(
@@ -64,13 +64,13 @@ describe("chainTail", () => {
   });
 
   it("returns null when the only row carries no link", () => {
-    insertLegacyRow();
+    insertUnlinkedRow();
     expect(query.chainTail()).toBeNull();
   });
 
   it("returns null when the last row carries no link — nothing is anchorable", () => {
     logRows(2);
-    insertLegacyRow();
+    insertUnlinkedRow();
     expect(query.chainTail()).toBeNull();
   });
 });
@@ -151,17 +151,17 @@ describe("anchored chain verification (tail truncation)", () => {
     expect(result.anchor?.status).toBe("ok");
   });
 
-  it("treats a legacy row at the anchored id as a mismatch", () => {
-    const legacyId = insertLegacyRow();
+  it("treats an unlinked row at the anchored id as a mismatch", () => {
+    const unlinkedId = insertUnlinkedRow();
     logRows(2);
     const anchor: AuditChainAnchorInput = {
-      lastId: legacyId,
+      lastId: unlinkedId,
       rowHmac: generateRandomBytes(32),
     };
     const result = query.verifyChain(anchor);
     expect(result.valid).toBe(false);
-    expect(result.anchor).toEqual({ lastId: legacyId, status: "hmac_mismatch" });
-    expect(result.firstBrokenId).toBe(legacyId);
+    expect(result.anchor).toEqual({ lastId: unlinkedId, status: "hmac_mismatch" });
+    expect(result.firstBrokenId).toBe(unlinkedId);
   });
 
   it("fails on an anchor whose id never existed", () => {

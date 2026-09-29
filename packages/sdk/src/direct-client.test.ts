@@ -973,7 +973,10 @@ describe("DirectClient", () => {
       pending.catch(() => {});
       client.close();
 
-      await expect(pending).rejects.toMatchObject({ code: ErrorCode.INVALID_INPUT });
+      await expect(pending).rejects.toMatchObject({
+        code: ErrorCode.INVALID_INPUT,
+        message: "DirectClient is closed",
+      });
       expect(oauthManager.startAuthorizationCodeDeferred).not.toHaveBeenCalled();
       expect(oauthManager.startDeviceCode).not.toHaveBeenCalled();
       expect(oauthManager.startClientCredentials).not.toHaveBeenCalled();
@@ -992,6 +995,7 @@ describe("DirectClient", () => {
 
       await expect(internals.loadOAuthManager()).rejects.toMatchObject({
         code: ErrorCode.INVALID_INPUT,
+        message: "DirectClient is closed",
       });
     });
 
@@ -1005,6 +1009,7 @@ describe("DirectClient", () => {
 
       await expect(internals.loadCertManager()).rejects.toMatchObject({
         code: ErrorCode.INVALID_INPUT,
+        message: "DirectClient is closed",
       });
     });
   });
@@ -1430,7 +1435,10 @@ describe("DirectClient", () => {
       client.close();
       release(manager);
 
-      await expect(pending).rejects.toMatchObject({ code: ErrorCode.INVALID_INPUT });
+      await expect(pending).rejects.toMatchObject({
+        code: ErrorCode.INVALID_INPUT,
+        message: "DirectClient is closed",
+      });
       expect(manager.cancelPendingFlows).toHaveBeenCalledTimes(1);
     });
 
@@ -1446,6 +1454,7 @@ describe("DirectClient", () => {
 
       await expect(internals.loadOAuthManager()).rejects.toMatchObject({
         code: ErrorCode.INVALID_INPUT,
+        message: "DirectClient is closed",
       });
       expect(build).not.toHaveBeenCalled();
     });
@@ -1474,7 +1483,10 @@ describe("DirectClient", () => {
       client.close();
       release(manager);
 
-      await expect(pending).rejects.toMatchObject({ code: ErrorCode.INVALID_INPUT });
+      await expect(pending).rejects.toMatchObject({
+        code: ErrorCode.INVALID_INPUT,
+        message: "DirectClient is closed",
+      });
     });
 
     it("a CertManager load started after close() refuses before building", async () => {
@@ -1489,6 +1501,7 @@ describe("DirectClient", () => {
 
       await expect(internals.loadCertManager()).rejects.toMatchObject({
         code: ErrorCode.INVALID_INPUT,
+        message: "DirectClient is closed",
       });
       expect(build).not.toHaveBeenCalled();
     });

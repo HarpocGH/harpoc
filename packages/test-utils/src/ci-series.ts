@@ -21,12 +21,17 @@ export const SERIES_TRIGGER_MS = 60_000;
 export interface SeriesLineOptions {
   /** The sample the rule is judged on, in ms — the warm listing; the slowest DPAPI call. */
   judgedMs: number;
-  /** The step-summary file; defaults to `process.env.GITHUB_STEP_SUMMARY`, absent off a runner. */
+  /**
+   * The step-summary file; defaults to `process.env.GITHUB_STEP_SUMMARY`, absent
+   * off a runner. An explicit `""` is not a fallthrough: it suppresses the env
+   * default and the write alike.
+   */
   summaryPath?: string;
   /**
    * The series file the Windows legs upload as an artifact (D5, 2026-09-09);
    * defaults to `process.env.HARPOC_SERIES_FILE`, set by `ci.yml`'s Windows
    * test step and named in `turbo.json`'s `test.env`; absent elsewhere.
+   * An explicit `""` suppresses the env default and the write alike.
    */
   seriesPath?: string;
   /** Where the line goes; defaults to `console.error` — the log the harvest greps. */

@@ -104,7 +104,7 @@ describe("session file permissions (owner-only from creation)", () => {
   // L9: the ACL step used execSync with a cmd.exe string carrying the vault
   // path — against the project's own "never a shell; args are data" doctrine —
   // and swallowed every failure, on the very path whose stated protection is
-  // file permissions (the DPAPI write-failure fallback).
+  // file permissions (the `HARPOC_SESSION_KEYSTORE=off` opt-out).
   describe("Windows ACL step (L9)", () => {
     it("invokes the pinned System32 icacls with the path as an argument, no shell", async () => {
       await withPlatform("win32", async () => {

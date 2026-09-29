@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import ssh2 from "ssh2";
 import type { ParsedKey, Server as SshServer } from "ssh2";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { resolveExecutable } from "./allowlist.js";
+import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
 import { buildSshEnv, sshHardeningArgs, writeIdentityFile, writeKnownHosts } from "./ssh-common.js";
 
@@ -36,8 +37,8 @@ const SSH =
     ? (resolveExecutable(
         join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "ssh.exe"),
         [],
-      ) ?? resolveExecutable("ssh", controlledPathDirs()))
-    : resolveExecutable("ssh", controlledPathDirs());
+      ) ?? resolveNativeSshClient("ssh"))
+    : resolveNativeSshClient("ssh");
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "__fixtures__", "ssh");
 const USER_KEY_PEM = readFileSync(join(FIXTURES, "ed25519_openssh"), "utf8");

@@ -329,6 +329,28 @@ describe("unknown-handle probes and ambiguity over the REST wire", () => {
     expect(revoked?.principal_type).toBe("agent");
     expect(revoked?.principal_id).toBe("revoker");
   });
+
+  it("a cross-secret policy revoke over REST is refused POLICY_NOT_FOUND before the caller check — no row names the prober", async () => {
+    await vault.engine.createSecret({ name: "own", type: SecretType.API_KEY, value: VALUE });
+    await vault.engine.createSecret({ name: "other", type: SecretType.API_KEY, value: VALUE });
+    const target = await grantOn(vault.engine, "secret://other", "grantee", ["read"]);
+    await grantOn(vault.engine, "secret://own", "prober", ["admin"]);
+    const token = vault.engine.createToken("prober", ["admin"]);
+
+    const res = await app.request(`/api/v1/secrets/own/policies/${target.id}`, {
+      method: "DELETE",
+      headers: auth(token),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe(ErrorCode.POLICY_NOT_FOUND);
+
+    const probed = vault.engine
+      .queryAudit({ eventType: AuditEventType.POLICY_REVOKE })
+      .filter((r) => r.principal_id === "prober");
+    expect(probed).toHaveLength(0);
+    expect(vault.engine.listPolicies(target.secret_id).some((p) => p.id === target.id)).toBe(true);
+  });
 });
 
 const MCP_ENTRY = join(

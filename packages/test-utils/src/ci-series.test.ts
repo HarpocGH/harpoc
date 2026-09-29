@@ -1,7 +1,7 @@
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SERIES_TRIGGER_MS, recordSeriesLine } from "./ci-series.js";
 
 const LINE = "[t dpapi] protect=1234ms (ok), unprotect=980ms (ok)";
@@ -162,5 +162,18 @@ describe("recordSeriesLine (D4, 2026-09-08)", () => {
     expect(printed[0]).toBe(LINE);
     expect(printed[1]).toMatch(/^\[series\] summary write failed: /);
     expect(printed).toHaveLength(2);
+  });
+
+  it("prints on console.error when no print channel is passed (the stream the harvest greps)", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      recordSeriesLine(LINE, { judgedMs: SERIES_TRIGGER_MS + 1 });
+      expect(errorSpy.mock.calls).toEqual([
+        [LINE],
+        [`[series] TRIGGER (judged 60001 ms > 60000 ms): ${LINE}`],
+      ]);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

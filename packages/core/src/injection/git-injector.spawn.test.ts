@@ -17,6 +17,7 @@ import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/share
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
@@ -39,7 +40,7 @@ if (process.platform === "win32") {
 }
 
 const GIT = resolveExecutable("git", controlledPathDirs());
-const SSH = resolveExecutable("ssh", controlledPathDirs());
+const SSH = resolveNativeSshClient("ssh");
 const describeGit = GIT ? describe : describe.skip;
 const describeGitSsh = GIT && SSH ? describe : describe.skip;
 

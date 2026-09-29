@@ -258,4 +258,19 @@ describe("ip_address from the caller's socket peer (E75i)", () => {
       .find((r) => !r.success);
     expect(denial?.ip_address).toBe("10.0.0.9");
   });
+
+  it("an injector-written secret.use row carries the peer; the same caller without one leaves NULL", async () => {
+    await makeProcessSecret("peer-use");
+    await grantTo("peer-use", "alice", ["use"]);
+    await engine.useSecret("secret://peer-use", PROCESS_ACTION, PEER_CALLER);
+    await engine.useSecret("secret://peer-use", PROCESS_ACTION, REST_CALLER);
+
+    const uses = engine
+      .queryAudit({ eventType: AuditEventType.SECRET_USE })
+      .filter((r) => r.success);
+    expect(uses).toHaveLength(2);
+    expect(uses.every((r) => r.detail?.context === "process")).toBe(true);
+    expect(uses.map((r) => r.ip_address).sort()).toEqual([null, "10.0.0.7"].sort());
+    expect(engine.verifyAuditChain().valid).toBe(true);
+  });
 });

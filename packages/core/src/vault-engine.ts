@@ -130,7 +130,7 @@ import {
 } from "./injection/docker/docker-injector.js";
 import { GitInjector } from "./injection/git-injector.js";
 import { HttpInjector } from "./injection/http-injector.js";
-import type { ImapOAuth } from "./injection/imap-injector.js";
+import type { ImapExecution, ImapOAuth } from "./injection/imap-injector.js";
 import { buildImapAuditDetails, ImapInjector } from "./injection/imap-injector.js";
 import { McpInjector } from "./injection/mcp-injector.js";
 import { McpConnectionRegistry } from "./injection/mcp-registry.js";
@@ -139,10 +139,15 @@ import { ProcessInjector } from "./injection/process-injector.js";
 import { isResponseModeAllowed } from "./injection/response-mode.js";
 import type { SftpExecution } from "./injection/sftp-injector.js";
 import { buildSftpAuditDetails, executeSftpAction } from "./injection/sftp-injector.js";
-import type { SmtpOAuth, SmtpResolvedAttachment } from "./injection/smtp-injector.js";
+import type {
+  SmtpExecution,
+  SmtpOAuth,
+  SmtpResolvedAttachment,
+} from "./injection/smtp-injector.js";
 import { buildSmtpAuditDetails, SmtpInjector } from "./injection/smtp-injector.js";
 import { SshInjector } from "./injection/ssh-injector.js";
 import { validateUrl } from "./injection/url-validator.js";
+import type { WebsocketExecution } from "./injection/websocket-injector.js";
 import { buildWsAuditDetails, executeWebsocketAction } from "./injection/websocket-injector.js";
 import { setJobWrapperUnavailableHandler } from "./injection/win32-job-wrapper.js";
 import type { SecretInfo } from "./secrets/secret-manager.js";
@@ -270,7 +275,8 @@ function computeOAuthRefreshStatus(row: OAuthTokenRow): OAuthTokenStatus["refres
  * (read) attachment list on success only, and a refusal may have happened
  * before the first `stat`. Naming the attempted paths keeps the
  * exfiltration-relevant fact — which local files the caller tried to send — in
- * the trail; `attachment_total_bytes` stays 0 because nothing was read.
+ * the trail; `attachment_total_bytes` is 0 meaning "not accounted": the
+ * failure may have come before the first read or after some were read.
  */
 function attemptedAttachments(action: SmtpAction): SmtpResolvedAttachment[] {
   return (action.attachments ?? []).map((spec) => ({ path: spec.path, bytes: 0 }));
@@ -1269,7 +1275,7 @@ export class VaultEngine {
                 { accessToken: secretValue, username: action.from }
               : undefined;
 
-          let execution;
+          let execution: SmtpExecution;
           try {
             execution = await s.smtpInjector.run(action, secretValue, policy, mail, oauth);
           } catch (err) {
@@ -1326,7 +1332,7 @@ export class VaultEngine {
                 { accessToken: imapSecretValue, username: action.account as string }
               : undefined;
 
-          let execution;
+          let execution: ImapExecution;
           try {
             execution = await s.imapInjector.run(action, imapSecretValue, policy, mail, imapOAuth);
           } catch (err) {
@@ -1364,7 +1370,7 @@ export class VaultEngine {
             ...buildWsAuditDetails(action, { messages: [], close_code: null }),
           };
 
-          let execution;
+          let execution: WebsocketExecution;
           try {
             execution = await s.websocketExecutor(action, value, policy);
           } catch (err) {
@@ -2360,10 +2366,13 @@ export class VaultEngine {
     project?: string,
     caller?: CallerContext,
   ): Promise<{ handle: string; secretId: string }> {
-    // Base row, OAuth row and the `oauth.authorize` row commit together (NM3,
-    // N10) — a crash cannot leave a PENDING secret without its provider row.
-    // Runs inside the caller's transaction: `createSecret`'s own on the fresh
-    // path, the replace transaction on the resume path.
+    // On the fresh path the base row, OAuth row and the `oauth.authorize`
+    // row commit together (NM3, N10) — a crash cannot leave a PENDING secret
+    // without its provider row; on the resume path the base row already
+    // exists, and the old OAuth row's delete, its replacement and the
+    // `oauth.authorize` row commit together. Runs inside the caller's
+    // transaction: `createSecret`'s own on the fresh path, the replace
+    // transaction on the resume path.
     const commitOAuthRow = (secretId: string, handle: string, resumed: boolean): void => {
       const clientIdBytes = new Uint8Array(Buffer.from(providerConfig.client_id, "utf8"));
       const clientIdEnc = encrypt(s.kek, clientIdBytes, AAD_OAUTH_CLIENT_ID(secretId));
@@ -4991,9 +5000,10 @@ export class VaultEngine {
   }
 
   /**
-   * Synchronous seal on lazily-detected TTL expiry (from assertUnlocked). The
-   * async monitor tick does a graceful downstream close; here wipeKeys()'s
-   * killAllSync suffices — the operation that tripped this is about to throw.
+   * Synchronous seal on lazily-detected TTL expiry (from assertUnlocked), and
+   * the body of sealAfterFailedSessionWrite. The async monitor tick does a
+   * graceful downstream close; here wipeKeys()'s killAllSync suffices — the
+   * operation that tripped this is about to throw.
    */
   private sealExpired(): void {
     this.wipeKeys();

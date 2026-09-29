@@ -365,7 +365,11 @@ describe("existence oracle (R5)", () => {
   it("a caller holding list but not read is told which permission it lacks", async () => {
     const id = await makeSecret("list-only");
     grant(id, "agent", "alice", ["list"]);
-    await expectDenied(engine.getSecretValue("secret://list-only", agent("alice")));
+    const err = await expectVaultError(
+      () => engine.getSecretValue("secret://list-only", agent("alice")),
+      ErrorCode.ACCESS_DENIED,
+    );
+    expect(err.message).toBe("Access denied: Principal lacks 'read' permission on this secret");
   });
 
   it("an admin check on a zero-row secret stays ACCESS_DENIED — the matrix remedy survives", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode, MAX_HTTP_RESPONSE_BYTES, VaultError } from "@harpoc/shared";
 import { mapStringLeaves, redactErrorMessage, redactSecretEncodings } from "./output-sanitizer.js";
 
 const SECRET = "sk-topsecretvalue-123456";
@@ -479,6 +479,21 @@ describe("redactSecretEncodings — nested JSON documents", () => {
     const body = JSON.stringify({ pad: padding, data: inner });
     // Over the guard: the flat passes still run, the descent does not.
     expect(redactSecretEncodings(body, secret)).toContain("en-big");
+  });
+
+  it("descends into a body of exactly MAX_HTTP_RESPONSE_BYTES and skips one character past it (the guard equals the HTTP body cap)", () => {
+    const secret = 'tok"en-cap';
+    const inner = t1(secret);
+    const bodyOf = (length: number): string => {
+      const skeleton = JSON.stringify({ pad: "", data: inner });
+      return JSON.stringify({ pad: "x".repeat(length - skeleton.length), data: inner });
+    };
+    const atCap = bodyOf(MAX_HTTP_RESPONSE_BYTES);
+    const pastCap = bodyOf(MAX_HTTP_RESPONSE_BYTES + 1);
+    expect(atCap.length).toBe(MAX_HTTP_RESPONSE_BYTES);
+    expect(pastCap.length).toBe(MAX_HTTP_RESPONSE_BYTES + 1);
+    expect(redactSecretEncodings(atCap, secret)).not.toContain("en-cap");
+    expect(redactSecretEncodings(pastCap, secret)).toContain("en-cap");
   });
 });
 

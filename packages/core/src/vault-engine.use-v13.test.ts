@@ -357,6 +357,18 @@ describe("useSecret (smtp) — engine dispatch", () => {
     expect(res).toEqual({ type: "smtp", accepted: 1, message_id: "<vault@harpoc>" });
   });
 
+  it("hands the stored injection policy to the SMTP injector", async () => {
+    await engine.setInjectionPolicy("secret://mail", {
+      smtp_recipient_allowlist: ["dev@example.com"],
+    });
+    const calls = installSeams(engine, {});
+
+    await engine.useSecret("secret://mail", SMTP_ACTION);
+
+    expect(calls.smtp).toHaveLength(1);
+    expect(calls.smtp[0]?.policy.smtp_recipient_allowlist).toEqual(["dev@example.com"]);
+  });
+
   it("writes a successful secret.use row carrying the spec §7.2 smtp details", async () => {
     installSeams(engine, {
       smtp: {
@@ -446,15 +458,15 @@ describe("useSecret (smtp) — engine dispatch", () => {
       },
     });
 
-    const err = (await engine
-      .useSecret("secret://mail", {
-        ...SMTP_ACTION,
-        attachments: [{ path: "/home/agent/.ssh/id_ed25519" }],
-      })
-      .catch((e: unknown) => e)) as VaultError;
+    const err = await expectVaultError(
+      () =>
+        engine.useSecret("secret://mail", {
+          ...SMTP_ACTION,
+          attachments: [{ path: "/home/agent/.ssh/id_ed25519" }],
+        }),
+      ErrorCode.FILE_IO_ERROR,
+    );
 
-    expect(err).toBeInstanceOf(VaultError);
-    expect(err.code).toBe(ErrorCode.FILE_IO_ERROR);
     expect(err.message).not.toContain("id_ed25519");
     expect(useRows(false)[0]?.detail?.error).toBe(ErrorCode.FILE_IO_ERROR);
   });
@@ -526,9 +538,10 @@ describe("useSecret (smtp) — STARTTLS cannot honor the mail TLS opt-out (N4)",
   it("names the conflict and both fixes in the message", async () => {
     installSeams(engine, {});
 
-    const err = (await engine
-      .useSecret("secret://mail", STARTTLS_ACTION)
-      .catch((e: unknown) => e)) as VaultError;
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://mail", STARTTLS_ACTION),
+      ErrorCode.INVALID_INPUT,
+    );
 
     expect(err.message).toContain("STARTTLS");
     expect(err.message).toContain("security: tls");
@@ -561,6 +574,16 @@ describe("useSecret (imap) — engine dispatch", () => {
 
     expect(calls.imap).toHaveLength(1);
     expect(res).toEqual({ type: "imap", operation: "search", uids: [3, 9] });
+  });
+
+  it("hands the stored injection policy to the IMAP injector", async () => {
+    await engine.setInjectionPolicy("secret://inbox", { imap_read_only: true });
+    const calls = installSeams(engine, {});
+
+    await engine.useSecret("secret://inbox", IMAP_ACTION);
+
+    expect(calls.imap).toHaveLength(1);
+    expect(calls.imap[0]?.policy.imap_read_only).toBe(true);
   });
 
   it("returns fetched messages under the imap envelope", async () => {
@@ -665,13 +688,12 @@ describe("useSecret (imap) — engine dispatch", () => {
       },
     });
 
-    const err = (await engine
-      .useSecret("secret://inbox", IMAP_ACTION)
-      .catch((e: unknown) => e)) as VaultError;
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://inbox", IMAP_ACTION),
+      ErrorCode.INTERNAL_ERROR,
+    );
 
     // (b) no raw non-VaultError escapes to the caller.
-    expect(err).toBeInstanceOf(VaultError);
-    expect(err.code).toBe(ErrorCode.INTERNAL_ERROR);
     expect(err.message).not.toContain("boom");
     // (a) the denial is still audited, with the mapped code.
     expect(useRows(false)[0]?.detail).toEqual({
@@ -698,16 +720,15 @@ describe("useSecret (imap) — engine dispatch", () => {
 
     let err: VaultError;
     try {
-      err = (await engine
-        .useSecret("secret://inbox", IMAP_ACTION)
-        .catch((e: unknown) => e)) as VaultError;
+      err = await expectVaultError(
+        () => engine.useSecret("secret://inbox", IMAP_ACTION),
+        ErrorCode.INTERNAL_ERROR,
+      );
       expect(insert).toHaveBeenCalledTimes(2);
     } finally {
       insert.mockRestore();
     }
 
-    expect(err).toBeInstanceOf(VaultError);
-    expect(err.code).toBe(ErrorCode.INTERNAL_ERROR);
     expect(err.message).toBe("the audit write failed unexpectedly");
     expect(err.message).not.toContain("boom");
   });
@@ -741,11 +762,13 @@ describe("useSecret (imap) — mail TLS opt-out is refused (implicit-TLS only)",
   it("names the conflict and the admin fix in the message", async () => {
     installSeams(engine, {});
 
-    const err = await engine.useSecret("secret://inbox", IMAP_ACTION).catch((e: unknown) => e);
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://inbox", IMAP_ACTION),
+      ErrorCode.INVALID_INPUT,
+    );
 
-    const message = (err as VaultError).message;
-    expect(message).toContain("implicit-TLS");
-    expect(message).toContain("two secrets");
+    expect(err.message).toContain("implicit-TLS");
+    expect(err.message).toContain("two secrets");
   });
 
   it("audits the refusal as a failed secret.use row", async () => {
@@ -790,12 +813,12 @@ describe("useSecret (imap) — an OAuth-type secret is refused (no XOAUTH2 accou
   it("refuses before the injector, so the access token never reaches the wire", async () => {
     const calls = installSeams(engine, {});
 
-    const err = (await engine
-      .useSecret(oauthHandle, IMAP_ACTION)
-      .catch((e: unknown) => e)) as VaultError;
+    const err = await expectVaultError(
+      () => engine.useSecret(oauthHandle, IMAP_ACTION),
+      ErrorCode.INVALID_INPUT,
+    );
 
     expect(calls.imap).toHaveLength(0);
-    expect(err.code).toBe(ErrorCode.INVALID_INPUT);
     expect(err.message).toContain("XOAUTH2");
     expect(err.message).not.toContain("ya29.");
   });
@@ -850,12 +873,12 @@ describe("useSecret (imap) — OAuth arm (XOAUTH2 via the action's account field
   it("still refuses without the account field, naming it in the message", async () => {
     const calls = installSeams(engine, {});
 
-    const err = (await engine
-      .useSecret(oauthHandle, IMAP_ACTION)
-      .catch((e: unknown) => e)) as VaultError;
+    const err = await expectVaultError(
+      () => engine.useSecret(oauthHandle, IMAP_ACTION),
+      ErrorCode.INVALID_INPUT,
+    );
 
     expect(calls.imap).toHaveLength(0);
-    expect(err.code).toBe(ErrorCode.INVALID_INPUT);
     expect(err.message).toContain("'account'");
   });
 });
@@ -868,12 +891,12 @@ describe("useSecret (imap) — the account field is refused for the username:pas
   it("refuses before the injector is reached", async () => {
     const calls = installSeams(engine, {});
 
-    const err = (await engine
-      .useSecret("secret://inbox", { ...IMAP_ACTION, account: "agent@example.com" })
-      .catch((e: unknown) => e)) as VaultError;
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://inbox", { ...IMAP_ACTION, account: "agent@example.com" }),
+      ErrorCode.INVALID_INPUT,
+    );
 
     expect(calls.imap).toHaveLength(0);
-    expect(err.code).toBe(ErrorCode.INVALID_INPUT);
     expect(err.message).toContain("'account'");
   });
 
@@ -988,6 +1011,18 @@ describe("useSecret (websocket) — engine dispatch", () => {
     expect(res).toEqual({ type: "websocket", messages: ["a", "b"], close_code: 1000 });
   });
 
+  it("hands the stored injection policy to the WebSocket executor", async () => {
+    await engine.setInjectionPolicy("secret://ws", {
+      url_allowlist: ["wss://stream.example.com/*"],
+    });
+    const calls = installSeams(engine, {});
+
+    await engine.useSecret("secret://ws", WS_ACTION);
+
+    expect(calls.websocket).toHaveLength(1);
+    expect(calls.websocket[0]?.policy.url_allowlist).toEqual(["wss://stream.example.com/*"]);
+  });
+
   it("writes a successful secret.use row carrying the spec §7.2 websocket details", async () => {
     installSeams(engine, {
       websocket: { type: "websocket", messages: ["a", "b"], close_code: 1000 },
@@ -1030,12 +1065,11 @@ describe("useSecret (websocket) — engine dispatch", () => {
       },
     });
 
-    const err = (await engine
-      .useSecret("secret://ws", WS_ACTION)
-      .catch((e: unknown) => e)) as VaultError;
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://ws", WS_ACTION),
+      ErrorCode.INTERNAL_ERROR,
+    );
 
-    expect(err).toBeInstanceOf(VaultError);
-    expect(err.code).toBe(ErrorCode.INTERNAL_ERROR);
     expect(err.message).not.toContain("boom");
     expect(useRows(false)[0]?.detail).toEqual({
       context: "websocket",
@@ -1192,12 +1226,11 @@ describe("useSecret (sftp) — engine dispatch", () => {
       },
     });
 
-    const err = (await engine
-      .useSecret("secret://deploy", SFTP_ACTION)
-      .catch((e: unknown) => e)) as VaultError;
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://deploy", SFTP_ACTION),
+      ErrorCode.INTERNAL_ERROR,
+    );
 
-    expect(err).toBeInstanceOf(VaultError);
-    expect(err.code).toBe(ErrorCode.INTERNAL_ERROR);
     expect(err.message).not.toContain("boom");
     expect(useRows(false)[0]?.detail).toEqual({
       context: "sftp",
@@ -1261,13 +1294,13 @@ describe("docker_registry × isolation — refused before the dispatch arm", () 
   it("refuses under network_isolation with NETWORK_ISOLATION_UNAVAILABLE", async () => {
     await engine.setInjectionPolicy("secret://reg", { network_isolation: true });
 
-    const err = (await engine
-      .useSecret("secret://reg", DOCKER_ACTION)
-      .catch((e: unknown) => e)) as VaultError;
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://reg", DOCKER_ACTION),
+      ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+    );
 
     // The T14 stub arm must never be reached: it throws INTERNAL_ERROR.
     expect(err.code).not.toBe(ErrorCode.INTERNAL_ERROR);
-    expect(err.code).toBe(ErrorCode.NETWORK_ISOLATION_UNAVAILABLE);
     expect(err.message).toContain("Docker daemon boundary");
     expect(err.message).toContain("--no-network-isolation");
   });
@@ -1275,12 +1308,12 @@ describe("docker_registry × isolation — refused before the dispatch arm", () 
   it("refuses under fs_isolation with FS_ISOLATION_UNAVAILABLE", async () => {
     await engine.setInjectionPolicy("secret://reg", { fs_isolation: true });
 
-    const err = (await engine
-      .useSecret("secret://reg", DOCKER_ACTION)
-      .catch((e: unknown) => e)) as VaultError;
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://reg", DOCKER_ACTION),
+      ErrorCode.FS_ISOLATION_UNAVAILABLE,
+    );
 
     expect(err.code).not.toBe(ErrorCode.INTERNAL_ERROR);
-    expect(err.code).toBe(ErrorCode.FS_ISOLATION_UNAVAILABLE);
     expect(err.message).toContain("Docker daemon boundary");
   });
 
@@ -1290,11 +1323,10 @@ describe("docker_registry × isolation — refused before the dispatch arm", () 
       fs_isolation: true,
     });
 
-    const err = (await engine
-      .useSecret("secret://reg", DOCKER_ACTION)
-      .catch((e: unknown) => e)) as VaultError;
-
-    expect(err.code).toBe(ErrorCode.NETWORK_ISOLATION_UNAVAILABLE);
+    await expectVaultError(
+      () => engine.useSecret("secret://reg", DOCKER_ACTION),
+      ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+    );
   });
 
   it("audits the refusal as a failed secret.use row", async () => {
@@ -1359,6 +1391,16 @@ describe("useSecret (docker_registry) — engine dispatch", () => {
       stdout: "Pulled\n",
       stderr: "",
     });
+  });
+
+  it("hands the stored injection policy to the docker injector", async () => {
+    await engine.setInjectionPolicy("secret://reg", { strict_tree_exit: true });
+    const calls = installSeams(engine, {});
+
+    await engine.useSecret("secret://reg", DOCKER_ACTION);
+
+    expect(calls.docker).toHaveLength(1);
+    expect(calls.docker[0]?.policy.strict_tree_exit).toBe(true);
   });
 
   it("writes a successful secret.use row carrying the spec §7.2 docker details", async () => {
@@ -1474,12 +1516,11 @@ describe("useSecret (docker_registry) — engine dispatch", () => {
       },
     });
 
-    const err = (await engine
-      .useSecret("secret://reg", DOCKER_ACTION)
-      .catch((e: unknown) => e)) as VaultError;
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://reg", DOCKER_ACTION),
+      ErrorCode.INTERNAL_ERROR,
+    );
 
-    expect(err).toBeInstanceOf(VaultError);
-    expect(err.code).toBe(ErrorCode.INTERNAL_ERROR);
     expect(err.message).not.toContain("boom");
     expect(useRows(false)[0]?.detail).toEqual({
       context: "docker_registry",
@@ -1601,12 +1642,11 @@ describe("useSecret — thrown-error choke point (E69 + N16)", () => {
       await initWithSecret("k", VALUE);
       installSeams(engine, outcomes);
 
-      const err = (await engine
-        .useSecret("secret://k", action)
-        .catch((e: unknown) => e)) as VaultError;
+      const err = await expectVaultError(
+        () => engine.useSecret("secret://k", action),
+        ErrorCode.GIT_OPERATION_FAILED,
+      );
 
-      expect(err).toBeInstanceOf(VaultError);
-      expect(err.code).toBe(ErrorCode.GIT_OPERATION_FAILED);
       expect(err.message).toContain("[REDACTED]");
       expect(err.message).not.toContain(VALUE);
       expect(JSON.stringify(err.details ?? {})).not.toContain(VALUE);
@@ -1622,15 +1662,16 @@ describe("useSecret — thrown-error choke point (E69 + N16)", () => {
       },
     });
 
-    const err = (await engine
-      .useSecret("secret://k", {
-        type: "git",
-        operation: "clone",
-        repository: "https://8.8.8.8/o/r.git",
-      })
-      .catch((e: unknown) => e)) as VaultError;
+    const err = await expectVaultError(
+      () =>
+        engine.useSecret("secret://k", {
+          type: "git",
+          operation: "clone",
+          repository: "https://8.8.8.8/o/r.git",
+        }),
+      ErrorCode.INTERNAL_ERROR,
+    );
 
-    expect(err.code).toBe(ErrorCode.INTERNAL_ERROR);
     expect(err.message).not.toContain(VALUE);
 
     const failed = useRows(false);
@@ -1658,7 +1699,9 @@ describe("useSecret — status precedes the pre-decrypt guards (Wave 2, B21)", (
 
     expect(calls.imap).toHaveLength(0);
     expect(engine.queryAudit({ eventType: AuditEventType.SECRET_EXPIRE })).toHaveLength(1);
-    expect(useRows(false)[0]?.detail).toMatchObject({
+    const failed = useRows(false);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.detail).toMatchObject({
       context: "imap",
       error: ErrorCode.SECRET_EXPIRED,
     });
@@ -1710,6 +1753,15 @@ describe("useSecret — status precedes the pre-decrypt guards (Wave 2, B21)", (
     await expectVaultError(
       () => engine.useSecret("secret://reg", DOCKER_ACTION),
       ErrorCode.SECRET_EXPIRED,
+    );
+    const failed = useRows(false);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.detail).toMatchObject({
+      context: "docker_registry",
+      error: ErrorCode.SECRET_EXPIRED,
+    });
+    expect(failed.some((r) => r.detail?.error === ErrorCode.NETWORK_ISOLATION_UNAVAILABLE)).toBe(
+      false,
     );
   });
 

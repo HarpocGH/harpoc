@@ -1594,7 +1594,7 @@ describe("OAuthManager pending-flow cap (D3)", () => {
     }
   });
 
-  it("a cancelFlow during the bind window takes effect (the reservation is the controller)", async () => {
+  it("a cancelFlow during the bind window takes effect and releases the bound port (the reservation is the controller)", async () => {
     const fake = makePerNameFakeEngine();
     const manager = fakeEngineManager(fake, { callbackPort: 0 });
     const { startSpy, releaseBind } = gateCallbackServerStart();
@@ -1606,6 +1606,12 @@ describe("OAuthManager pending-flow cap (D3)", () => {
       releaseBind();
       const a = await pending;
       await expect(a.completion).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
+      const redirectUri = new URL(new URL(a.authUrl).searchParams.get("redirect_uri") as string);
+      await vi.waitFor(async () => {
+        await expect(
+          fetch(`http://127.0.0.1:${redirectUri.port}/not-the-callback`),
+        ).rejects.toThrow();
+      });
     } finally {
       startSpy.mockRestore();
     }

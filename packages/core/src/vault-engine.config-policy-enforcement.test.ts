@@ -185,7 +185,7 @@ describe("explicit grant (R1)", () => {
   });
 });
 
-describe("permission granularity (D2: read→read, mutate→rotate)", () => {
+describe("permission granularity (D2: read→read, endpoint mutations→rotate, injection policy→admin)", () => {
   it("a read grant opens the config reads but not the mutations", async () => {
     const id = await makeSecret("read-only");
     grant(id, "agent", "reader", ["read"]);

@@ -246,6 +246,40 @@ describe("ImapInjector — fetched content sanitization", () => {
     expect(JSON.stringify(out)).not.toContain("s3cr3tpass");
   });
 
+  it("redacts a credential planted in the envelope subject and from/to addresses", async () => {
+    const messages: ImapMessage[] = [
+      {
+        uid: 1,
+        flags: [],
+        envelope: {
+          date: null,
+          subject: "your password is s3cr3tpass",
+          from: ["s3cr3tpass <attacker@example.com>"],
+          to: ["ops+s3cr3tpass@example.com"],
+        },
+      },
+    ];
+    const client = makeFakeClient({ fetch: () => Promise.resolve(messages) });
+    const { fn } = connectReturning(client);
+    const injector = new ImapInjector({ connectImap: fn });
+
+    const execution = await injector.run(
+      baseAction({ operation: { kind: "fetch", uids: [1], parts: "envelope" } }),
+      "imapuser:s3cr3tpass",
+      basePolicy({}),
+      undefined,
+      undefined,
+    );
+
+    const out = (execution.result as { messages: ImapMessage[] }).messages;
+    expect(out[0]?.envelope?.subject).toBe("your password is [REDACTED]");
+    expect(out[0]?.envelope?.from).toEqual(["[REDACTED] <attacker@example.com>"]);
+    expect(out[0]?.envelope?.to).toEqual(["ops+[REDACTED]@example.com"]);
+    expect(out[0]?.envelope?.date).toBeNull();
+    expect(JSON.stringify(out)).not.toContain("s3cr3tpass");
+    expect(execution.sanitized).toBe(true);
+  });
+
   // E70: the redaction is invisible in the wire result, so the execution
   // reports it and the engine stamps its success row from that.
   it("reports sanitized when a fetched message carried the credential", async () => {

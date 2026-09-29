@@ -253,7 +253,7 @@ describe("filter/gate agreement (shared principal set)", () => {
     expect(listedNames(alice)).toContain("by-admin");
   });
 
-  it("a hidden row is also denied by the point check when no permission is granted", async () => {
+  it("a hidden row is also concealed by the point check (SECRET_NOT_FOUND) when no permission is granted", async () => {
     const id = await makeSecret("hidden");
     grant(id, "agent", "alice", ["use"]);
 

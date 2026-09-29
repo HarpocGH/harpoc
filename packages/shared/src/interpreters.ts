@@ -33,8 +33,12 @@
  * Basename matching alone is evaded
  * by a rename, but not by a symlink: the policy-write gate resolves each newly
  * added entry on the vault's controlled PATH and matches the target too (a
- * symlink to `sh` is `sh`), the same parity the use-time gate has, so the
- * residual is only what the resolver cannot resolve. The gate targets
+ * symlink to `sh` is `sh`), the same parity the use-time gate has. The match
+ * is taken once, at the write, and only on newly added entries, so three
+ * residuals stay: an entry the resolver cannot resolve at the write; an entry
+ * already on the stored allowlist, which is never re-gated (writing it again
+ * is not an addition); and a symlink or binary put at the entry's path after
+ * the write, which nothing re-matches at use time. The gate targets
  * deliberate policy decisions by a trusted administrator, not adversarial
  * evasion, which for on-disk binaries is L4/L5 territory.
  */

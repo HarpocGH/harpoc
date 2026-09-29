@@ -31,6 +31,28 @@ describe("spawnCaptured — the redacted flag (E70)", () => {
     expect(clean.redacted).toBe(false);
   });
 
+  it("is true when only stderr carried the credential", async () => {
+    const r = await spawnCaptured(
+      process.execPath,
+      ["-e", `process.stderr.write(${JSON.stringify("token=s3cret-value")})`],
+      { env: ENV, timeoutMs: 10_000, redact: ["s3cret-value"] },
+    );
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toBe("token=[REDACTED]");
+    expect(r.redacted).toBe(true);
+  });
+
+  it("is true when an encoded form of the credential was redacted", async () => {
+    const b64 = Buffer.from("s3cret-value", "utf8").toString("base64");
+    const r = await spawnCaptured(process.execPath, nodeWriting(`token=${b64}`), {
+      env: ENV,
+      timeoutMs: 10_000,
+      redact: ["s3cret-value"],
+    });
+    expect(r.stdout).toBe("token=[REDACTED]");
+    expect(r.redacted).toBe(true);
+  });
+
   it("is false on a spawn failure", async () => {
     const failed = await spawnCaptured("/nonexistent/harpoc-no-such-binary", [], {
       env: ENV,

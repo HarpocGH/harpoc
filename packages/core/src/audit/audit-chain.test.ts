@@ -5,7 +5,7 @@ import { generateRandomBytes } from "../crypto/random.js";
 import { SqliteStore } from "../storage/sqlite-store.js";
 import { AuditLogger } from "./audit-logger.js";
 import { AuditQuery } from "./audit-query.js";
-import { dropAuditRowHmacConstraint } from "@harpoc/test-utils";
+import { dropAuditRowHmacConstraint, sqliteErrorCode } from "@harpoc/test-utils";
 
 let store: SqliteStore;
 let auditKey: Uint8Array;
@@ -124,7 +124,7 @@ describe("audit HMAC chain verification", () => {
 
   it("a NULL link ahead of the first chained row is a break, not history", () => {
     dropAuditRowHmacConstraint(store.db);
-    const legacyId = Number(
+    const unlinkedId = Number(
       store.db
         .prepare(
           `INSERT INTO audit_log (timestamp, event_type, secret_id, principal_type, principal_id,
@@ -138,7 +138,7 @@ describe("audit HMAC chain verification", () => {
 
     const result = query.verifyChain();
     expect(result.valid).toBe(false);
-    expect(result.firstBrokenId).toBe(legacyId);
+    expect(result.firstBrokenId).toBe(unlinkedId);
     expect(result.checked).toBe(2);
     expect("legacy" in result).toBe(false);
   });
@@ -243,20 +243,10 @@ describe("audit chain: NULL links are not a free pass", () => {
 });
 
 describe("audit chain: the v1.5 table refuses an erased link (R2)", () => {
-  function sqliteCode(run: () => void): string | undefined {
-    let caught: unknown;
-    try {
-      run();
-    } catch (err) {
-      caught = err;
-    }
-    return (caught as { code?: string } | undefined)?.code;
-  }
-
   it("UPDATE … SET row_hmac = NULL fails on the constraint and the chain stays valid", () => {
     const id = logger.log({ eventType: AuditEventType.SECRET_READ, detail: { a: 1 } });
     expect(
-      sqliteCode(() =>
+      sqliteErrorCode(() =>
         store.db.prepare("UPDATE audit_log SET row_hmac = NULL WHERE id = ?").run(id),
       ),
     ).toBe("SQLITE_CONSTRAINT_NOTNULL");
@@ -265,7 +255,7 @@ describe("audit chain: the v1.5 table refuses an erased link (R2)", () => {
 
   it("a link-less INSERT fails on the constraint", () => {
     expect(
-      sqliteCode(() =>
+      sqliteErrorCode(() =>
         store.db
           .prepare(
             `INSERT INTO audit_log (timestamp, event_type, secret_id, principal_type, principal_id,

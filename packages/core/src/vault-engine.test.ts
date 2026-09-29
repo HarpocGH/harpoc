@@ -3532,6 +3532,7 @@ describe("lockout mechanism", () => {
     const eng = new VaultEngine({ dbPath, sessionPath });
     await eng.unlock("correct1");
     await eng.lock();
+    await eng.destroy();
 
     // 4 more failed attempts should NOT trigger lockout (counter was reset)
     for (let i = 0; i < 4; i++) {

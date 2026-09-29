@@ -59,6 +59,8 @@ export interface SmtpScript {
   authMechanisms: string[];
   /** Present TLS from the first byte (for `security: "tls"`). */
   implicitTls?: boolean;
+  /** Advertise `authMechanisms` on the plaintext leg too (a relay honoring the `tls: false` opt-out). */
+  plaintextAuth?: boolean;
   /** Answer AUTH with 535 instead of 235. */
   auth?: "ok" | "fail";
   /** Answer RCPT TO with 550 instead of 250. */
@@ -207,7 +209,10 @@ class Connection {
     if (this.script.starttls && !this.secure) {
       lines.push("STARTTLS");
     }
-    if (this.secure && this.script.authMechanisms.length > 0) {
+    if (
+      (this.secure || this.script.plaintextAuth === true) &&
+      this.script.authMechanisms.length > 0
+    ) {
       lines.push(`AUTH ${this.script.authMechanisms.join(" ")}`);
     }
     const out = lines

@@ -560,6 +560,35 @@ describe("audit_log", () => {
     expect(scoped[0]?.secret_id).toBeNull();
   });
 
+  it("a visibility list past the SQL variable ceiling is filtered in JS — before the limit, in timestamp order", () => {
+    const row = (timestamp: number, secretId: string | null) => ({
+      timestamp,
+      event_type: AuditEventType.SECRET_READ,
+      secret_id: secretId,
+      principal_type: null,
+      principal_id: null,
+      detail_encrypted: null,
+      detail_iv: null,
+      detail_tag: null,
+      ip_address: null,
+      session_id: null,
+      success: true,
+    });
+    store.insertAuditEvent(row(1000, "id-a"), LINK);
+    store.insertAuditEvent(row(3000, "id-b"), LINK);
+    store.insertAuditEvent(row(2000, "id-a"), LINK);
+    store.insertAuditEvent(row(500, null), LINK);
+    const visible = ["id-a", ...Array.from({ length: 40_000 }, (_, i) => `unseen-${i}`)];
+
+    expect(store.queryAuditLog({ visibleSecretIds: visible }).map((e) => e.timestamp)).toEqual([
+      2000, 1000, 500,
+    ]);
+    const limited = store.queryAuditLog({ visibleSecretIds: visible, limit: 1 });
+    expect(limited).toHaveLength(1);
+    expect(limited[0]?.secret_id).toBe("id-a");
+    expect(limited[0]?.timestamp).toBe(2000);
+  });
+
   it("stores encrypted detail blobs", () => {
     const detail = new Uint8Array([42, 43, 44]);
     const iv = new Uint8Array(12).fill(1);

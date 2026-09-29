@@ -4,10 +4,13 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InjectionPolicy } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import { system32Path } from "../win32-paths.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 vi.mock("./spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
 vi.mock("node:fs", async (importOriginal) => {
@@ -24,7 +27,7 @@ if (process.platform === "win32") {
 }
 
 const GIT = resolveExecutable("git", controlledPathDirs());
-const SSH = resolveExecutable("ssh", controlledPathDirs());
+const SSH = resolveNativeSshClient("ssh");
 const describeGit = GIT ? describe : describe.skip;
 const describeGitSsh = GIT && SSH ? describe : describe.skip;
 
@@ -127,6 +130,60 @@ describeGitSsh("the known_hosts write fails (SSH)", () => {
         { ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] } },
       ),
     ).rejects.toThrow("EACCES");
+    expect(readdirSync(tempRoot)).toEqual([]);
+    expect(spawnCaptured).not.toHaveBeenCalled();
+  });
+});
+
+describeGit("the argument build refuses (HTTPS)", () => {
+  it("leaves no vault-authored directory behind and propagates the refusal", async () => {
+    const injector = new GitInjector(null);
+    await expectVaultError(
+      () =>
+        injector.executeWithSecret(
+          { type: "git", operation: "pull", repository: "https://8.8.8.8/org/repo.git" },
+          new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+          httpsPolicy(),
+          undefined,
+        ),
+      ErrorCode.INVALID_GIT_CONFIG,
+    );
+    expect(readdirSync(tempRoot)).toEqual([]);
+    expect(spawnCaptured).not.toHaveBeenCalled();
+  });
+});
+
+describeGitSsh("the argument build refuses (SSH)", () => {
+  it("leaves no vault-authored directory behind and propagates the refusal", async () => {
+    const injector = new GitInjector(null);
+    await expectVaultError(
+      () =>
+        injector.executeWithSecret(
+          { type: "git", operation: "pull", repository: "git@github.com:org/repo.git" },
+          new Uint8Array(Buffer.from("unused")),
+          policy({ command_allowlist: [GIT as string], host_allowlist: ["github.com"] }),
+          { ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] } },
+        ),
+      ErrorCode.INVALID_GIT_CONFIG,
+    );
+    expect(readdirSync(tempRoot)).toEqual([]);
+    expect(spawnCaptured).not.toHaveBeenCalled();
+  });
+});
+
+describeGitSsh("the agent fails to start (SSH)", () => {
+  it("leaves no vault-authored directory behind and propagates the refusal", async () => {
+    const injector = new GitInjector(null);
+    await expectVaultError(
+      () =>
+        injector.executeWithSecret(
+          { type: "git", operation: "clone", repository: "git@github.com:org/repo.git" },
+          new Uint8Array(Buffer.from("not-a-valid-key")),
+          policy({ command_allowlist: [GIT as string], host_allowlist: ["github.com"] }),
+          { ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] } },
+        ),
+      ErrorCode.SSH_AGENT_FAILED,
+    );
     expect(readdirSync(tempRoot)).toEqual([]);
     expect(spawnCaptured).not.toHaveBeenCalled();
   });

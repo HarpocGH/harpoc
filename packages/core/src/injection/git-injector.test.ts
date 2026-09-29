@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { GitInjector } from "./git-injector.js";
 import { system32Path } from "../win32-paths.js";
 
@@ -21,6 +22,7 @@ if (process.platform === "win32") {
 }
 
 const GIT = resolveExecutable("git", controlledPathDirs());
+const SSH = resolveNativeSshClient("ssh");
 const describeGit = GIT ? describe : describe.skip;
 
 const SECRET = new Uint8Array(Buffer.from("ghp_testtoken"));
@@ -290,20 +292,37 @@ describeGit("GitInjector target enforcement (git resolvable)", () => {
     ).rejects.toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
   });
 
-  it("accepts an allowlisted SSH remote config shape (reaches agent start)", async () => {
-    // github.com allowlisted + a (bogus) pinned key: the injector proceeds past
-    // target validation. We only assert it does NOT reject on policy grounds.
+  it("refuses an SSH remote when the host_allowlist is empty (deny-by-default)", async () => {
     const config: ConnectionConfig = {
       ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAABOGUS"] },
     };
-    const badKey = new Uint8Array(Buffer.from("not-a-valid-key"));
     await expect(
       injector.executeWithSecret(
         gitAction({ operation: "clone", repository: "git@github.com:org/repo.git" }),
-        badKey,
-        allowGit({ host_allowlist: ["github.com"] }),
+        SECRET,
+        allowGit(),
         config,
       ),
-    ).rejects.toMatchObject({ code: ErrorCode.SSH_AGENT_FAILED });
+    ).rejects.toMatchObject({ code: ErrorCode.HOST_NOT_ALLOWED });
   });
+
+  it.skipIf(SSH === null)(
+    "accepts an allowlisted SSH remote config shape (reaches agent start)",
+    async () => {
+      // github.com allowlisted + a (bogus) pinned key: the injector proceeds past
+      // target validation. We only assert it does NOT reject on policy grounds.
+      const config: ConnectionConfig = {
+        ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAABOGUS"] },
+      };
+      const badKey = new Uint8Array(Buffer.from("not-a-valid-key"));
+      await expect(
+        injector.executeWithSecret(
+          gitAction({ operation: "clone", repository: "git@github.com:org/repo.git" }),
+          badKey,
+          allowGit({ host_allowlist: ["github.com"] }),
+          config,
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.SSH_AGENT_FAILED });
+    },
+  );
 });

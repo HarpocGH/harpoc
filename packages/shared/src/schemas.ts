@@ -943,7 +943,7 @@ export const injectionPolicyInputSchema = z.strictObject({
  * escapes, as on the timeout path). Request-mediated actions spawn no child
  * and are unaffected. The shape the vault stores, loads and
  * returns: every field present, no defaults — defaults apply at
- * `InjectionPolicyInput` (the input schema), never on the stored blob.
+ * `injectionPolicyInputSchema`, never on the stored blob.
  */
 export type InjectionPolicy = z.output<typeof injectionPolicySchema>;
 

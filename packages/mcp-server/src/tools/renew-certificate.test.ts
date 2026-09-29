@@ -210,10 +210,10 @@ describe("renew_certificate", () => {
       handle: "secret://other-cert",
     });
     expect(otherSecret.isError ?? false).toBe(false);
-    expect(certManager.renewCertificate).toHaveBeenLastCalledWith(
-      "uuid-456",
-      expect.objectContaining({}),
-    );
+    expect(certManager.renewCertificate).toHaveBeenLastCalledWith("uuid-456", {
+      caller: EXPECTED_CALLER,
+      handle: "secret://other-cert",
+    });
   });
 
   it("a certManager throw surfaces as an error result, not a crash", async () => {

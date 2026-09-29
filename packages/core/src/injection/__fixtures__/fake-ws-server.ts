@@ -32,6 +32,8 @@ export interface FakeWsScript {
    * server that never completes the RFC 6455 closing handshake. Used to pin
    * the injector's `waitWithTimeout` bound on the post-close wait. */
   neverAckClose?: boolean;
+  /** Send `messages` as binary frames (opcode 0x2) carrying their UTF-8 bytes. */
+  binary?: boolean;
 }
 
 /** One request the fake server received — the upgrade request's headers and
@@ -191,7 +193,7 @@ export async function startFakeWsServer(script: FakeWsScript): Promise<FakeWsSer
       }
       const text = messages[i] as string;
       i += 1;
-      socket.write(buildServerFrame(0x1, Buffer.from(text, "utf8")));
+      socket.write(buildServerFrame(script.binary === true ? 0x2 : 0x1, Buffer.from(text, "utf8")));
       setTimeout(sendNext, script.messageDelayMs ?? 0);
     };
     // Deferred, not written back-to-back with the 101 response: a caller's

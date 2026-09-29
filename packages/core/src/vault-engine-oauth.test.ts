@@ -7,7 +7,11 @@ import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, PrincipalType, VaultError } from "@harpoc/shared";
 import type { CallerContext, OAuthProviderConfig, Permission } from "@harpoc/shared";
-import { dropOAuthAuthMethodConstraint, expectVaultError } from "@harpoc/test-utils";
+import {
+  dropOAuthAuthMethodConstraint,
+  expectVaultError,
+  sqliteErrorCode,
+} from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { McpConnectionRegistry } from "./injection/mcp-registry.js";
 
@@ -750,26 +754,18 @@ describe("refreshOAuthToken token-endpoint auth methods", () => {
   it("the v1.5 table refuses a NULL and an unknown auth method outright (R2)", async () => {
     const secretId = await createActiveOAuthSecret("checked-column");
     const db = new Database(dbPath);
-    const codeOf = (sql: string, ...params: unknown[]): string | undefined => {
-      let caught: unknown;
-      try {
-        db.prepare(sql).run(...params);
-      } catch (err) {
-        caught = err;
-      }
-      return (caught as { code?: string } | undefined)?.code;
-    };
     expect(
-      codeOf(
-        "UPDATE oauth_tokens SET token_endpoint_auth_method = NULL WHERE secret_id = ?",
-        secretId,
+      sqliteErrorCode(() =>
+        db
+          .prepare("UPDATE oauth_tokens SET token_endpoint_auth_method = NULL WHERE secret_id = ?")
+          .run(secretId),
       ),
     ).toBe("SQLITE_CONSTRAINT_NOTNULL");
     expect(
-      codeOf(
-        "UPDATE oauth_tokens SET token_endpoint_auth_method = ? WHERE secret_id = ?",
-        "private_key_jwt",
-        secretId,
+      sqliteErrorCode(() =>
+        db
+          .prepare("UPDATE oauth_tokens SET token_endpoint_auth_method = ? WHERE secret_id = ?")
+          .run("private_key_jwt", secretId),
       ),
     ).toBe("SQLITE_CONSTRAINT_CHECK");
     db.close();

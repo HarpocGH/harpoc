@@ -12,6 +12,7 @@ import {
 import type { SmtpSendOptions } from "./mail/smtp-client.js";
 import type { MailTlsConfig, SmtpInjectorDeps, SmtpOAuth } from "./smtp-injector.js";
 import { SmtpInjector, buildSmtpAuditDetails, executeSmtpAction } from "./smtp-injector.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 const SECRET = "smtpuser:smtppass";
 
@@ -390,9 +391,10 @@ describe("SmtpInjector — error redaction and translation", () => {
         Promise.reject(new VaultError(ErrorCode.SMTP_DELIVERY_FAILED, "relay rejected user abc")),
     });
 
-    const err = (await injector
-      .run(baseAction(), "abc:s3cr3tpass", basePolicy({}), undefined, undefined)
-      .catch((e: unknown) => e)) as VaultError;
+    const err = await expectVaultError(
+      () => injector.run(baseAction(), "abc:s3cr3tpass", basePolicy({}), undefined, undefined),
+      ErrorCode.SMTP_DELIVERY_FAILED,
+    );
 
     expect(err.message).not.toContain("abc");
     expect(err.message).toContain("[REDACTED]");
@@ -404,9 +406,10 @@ describe("SmtpInjector — error redaction and translation", () => {
         Promise.reject(new VaultError(ErrorCode.SMTP_DELIVERY_FAILED, "relay rejected user ab")),
     });
 
-    const err = (await injector
-      .run(baseAction(), "ab:s3cr3tpass", basePolicy({}), undefined, undefined)
-      .catch((e: unknown) => e)) as VaultError;
+    const err = await expectVaultError(
+      () => injector.run(baseAction(), "ab:s3cr3tpass", basePolicy({}), undefined, undefined),
+      ErrorCode.SMTP_DELIVERY_FAILED,
+    );
 
     expect(err.message).toBe("relay rejected user ab");
   });

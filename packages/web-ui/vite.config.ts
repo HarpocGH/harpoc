@@ -12,8 +12,10 @@ export default defineConfig({
     name: "web-ui",
     environment: "jsdom",
     coverage: {
+      provider: "v8",
       include: ["src/**"],
       exclude: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+      reporter: ["text-summary"],
     },
   },
 });

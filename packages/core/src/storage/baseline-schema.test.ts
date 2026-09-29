@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuditEventType } from "@harpoc/shared";
 import { SqliteStore } from "./sqlite-store.js";
 import { LATEST_SCHEMA_VERSION } from "./schema.js";
+import { sqliteErrorCode } from "@harpoc/test-utils";
 
 let store: SqliteStore;
 
@@ -29,16 +30,6 @@ function tableInfo(table: string): { name: string; notnull: number; dflt_value: 
     notnull: number;
     dflt_value: string | null;
   }[];
-}
-
-function sqliteCode(run: () => void): string | undefined {
-  let caught: unknown;
-  try {
-    run();
-  } catch (err) {
-    caught = err;
-  }
-  return (caught as { code?: string } | undefined)?.code;
 }
 
 function insertBareSecret(id: string, nameHmac: string | null): void {
@@ -116,7 +107,9 @@ describe("v1.5 baseline DDL (R2)", () => {
     const columns = tableInfo("secrets");
     expect(columns.map((c) => c.name)).not.toContain("sync_version");
     expect(columns.find((c) => c.name === "name_hmac")?.notnull).toBe(1);
-    expect(sqliteCode(() => insertBareSecret("s-null", null))).toBe("SQLITE_CONSTRAINT_NOTNULL");
+    expect(sqliteErrorCode(() => insertBareSecret("s-null", null))).toBe(
+      "SQLITE_CONSTRAINT_NOTNULL",
+    );
     insertBareSecret("s-ok", "hmac-ok");
     expect(store.db.prepare("SELECT COUNT(*) AS c FROM secrets").get()).toEqual({ c: 1 });
   });
@@ -124,7 +117,7 @@ describe("v1.5 baseline DDL (R2)", () => {
   it("audit_log.row_hmac is NOT NULL — a link-less INSERT and a nulled link are refused", () => {
     expect(tableInfo("audit_log").find((c) => c.name === "row_hmac")?.notnull).toBe(1);
     expect(
-      sqliteCode(() =>
+      sqliteErrorCode(() =>
         store.db
           .prepare("INSERT INTO audit_log (timestamp, event_type, success) VALUES (1, 'x', 1)")
           .run(),
@@ -148,7 +141,7 @@ describe("v1.5 baseline DDL (R2)", () => {
       new Uint8Array(32).fill(7),
     );
     expect(
-      sqliteCode(() =>
+      sqliteErrorCode(() =>
         store.db.prepare("UPDATE audit_log SET row_hmac = NULL WHERE id = ?").run(id),
       ),
     ).toBe("SQLITE_CONSTRAINT_NOTNULL");
@@ -164,14 +157,14 @@ describe("v1.5 baseline DDL (R2)", () => {
 
     insertBareOAuthRow("s-oauth-a", "");
     expect(store.getOAuthToken("s-oauth-a")?.token_endpoint_auth_method).toBe("client_secret_post");
-    expect(sqliteCode(() => insertBareOAuthRow("s-oauth-b", "NULL"))).toBe(
+    expect(sqliteErrorCode(() => insertBareOAuthRow("s-oauth-b", "NULL"))).toBe(
       "SQLITE_CONSTRAINT_NOTNULL",
     );
-    expect(sqliteCode(() => insertBareOAuthRow("s-oauth-c", "'private_key_jwt'"))).toBe(
+    expect(sqliteErrorCode(() => insertBareOAuthRow("s-oauth-c", "'private_key_jwt'"))).toBe(
       "SQLITE_CONSTRAINT_CHECK",
     );
     expect(
-      sqliteCode(() =>
+      sqliteErrorCode(() =>
         store.db
           .prepare("UPDATE oauth_tokens SET token_endpoint_auth_method = NULL WHERE secret_id = ?")
           .run("s-oauth-a"),

@@ -136,6 +136,23 @@ describe("executeWebsocketAction — bounded collect", () => {
   });
 });
 
+describe("executeWebsocketAction — binary frames", () => {
+  it("decodes a binary frame's bytes as UTF-8 text", async () => {
+    const fake = await start({ messages: ["h\u00e9llo \u2713"], binary: true });
+    const action = baseAction({ url: `ws://127.0.0.1:${fake.port}/` });
+    const { result } = await executeWebsocketAction(action, secretBytes(), basePolicy());
+    expect(result.messages).toEqual(["h\u00e9llo \u2713"]);
+  });
+
+  it("redacts the credential from a binary frame and reports sanitized", async () => {
+    const fake = await start({ messages: [`echo: ${SECRET}`], binary: true });
+    const action = baseAction({ url: `ws://127.0.0.1:${fake.port}/` });
+    const execution = await executeWebsocketAction(action, secretBytes(), basePolicy());
+    expect(execution.result.messages).toEqual(["echo: [REDACTED]"]);
+    expect(execution.sanitized).toBe(true);
+  });
+});
+
 describe("executeWebsocketAction — bounded close wait", () => {
   it("still resolves within timeout_ms when the server never completes the closing handshake", async () => {
     // Regression for the `waitWithTimeout` guard: a server that accepts the

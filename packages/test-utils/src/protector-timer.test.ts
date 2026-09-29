@@ -18,6 +18,8 @@ describe("protectorTimer (D3, 2026-09-08)", () => {
     expect(Array.from(blob)).toEqual([3, 2, 1]);
     expect(Array.from(await timed.unprotect(blob))).toEqual([1, 2, 3]);
     expect(timer.report()).toMatch(/^\[t\] protect=\d+ms \(ok\), unprotect=\d+ms \(ok\)$/);
+    const scheme: "dpapi" = timer.wrap({ ...reversing("x"), scheme: "dpapi" as const }).scheme;
+    expect(scheme).toBe("dpapi");
   });
 
   it("records a failed call with its message and rethrows it", async () => {

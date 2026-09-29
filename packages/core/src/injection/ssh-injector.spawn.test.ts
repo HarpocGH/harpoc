@@ -13,7 +13,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, InjectionPolicy, SshAction } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { controlledPathDirs } from "./allowlist.js";
+import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { SshInjector } from "./ssh-injector.js";
@@ -35,7 +36,7 @@ if (process.platform === "win32") {
   ].join(delimiter);
 }
 
-const SSH = resolveExecutable("ssh", controlledPathDirs());
+const SSH = resolveNativeSshClient("ssh");
 const describeSsh = SSH ? describe : describe.skip;
 
 const OK_RESULT: SpawnCapturedResult = {

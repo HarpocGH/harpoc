@@ -383,6 +383,7 @@ describe("RenewalScheduler onRenewError", () => {
     await drive(scheduler.tick());
 
     expect(engine.auditCertRenewFailure).toHaveBeenCalledWith("broken", renewError);
+    expect(engine.auditCertRenewFailure).toHaveBeenCalledTimes(1);
     expect(order).toEqual(["audit", "report"]);
   });
 
@@ -397,6 +398,11 @@ describe("RenewalScheduler onRenewError", () => {
     await drive(scheduler.tick());
 
     expect(renewer.renewCertificate).toHaveBeenCalledTimes(6);
+    expect(engine.auditCertRenewFailure).toHaveBeenCalledTimes(2);
+    expect(engine.auditCertRenewFailure).toHaveBeenLastCalledWith(
+      "b",
+      expect.objectContaining({ message: "acme unreachable" }),
+    );
   });
 
   it("forwards a swallowed audit-write failure to onRenewError, ahead of the renewal error, each with its phase", async () => {

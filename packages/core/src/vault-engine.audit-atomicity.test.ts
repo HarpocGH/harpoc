@@ -443,6 +443,7 @@ describe("fail-closed audit: tokens, OAuth flow, password change", () => {
     expect(denied).toHaveLength(1);
     expect(denied[0]?.success).toBe(false);
     expect(denied[0]?.detail?.error).toBe(ErrorCode.INTERNAL_ERROR);
+    expect(denied[0]?.secret_id).toBeNull();
     await expect(engine.resolveSecretId("secret://oauth-atomic")).rejects.toMatchObject({
       code: ErrorCode.SECRET_NOT_FOUND,
     });

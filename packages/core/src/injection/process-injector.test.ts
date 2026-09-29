@@ -1,7 +1,7 @@
-import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import type { ProcessAction, ProcessResult } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
@@ -89,6 +89,38 @@ describe("ProcessInjector — no shell (L2/L3 separation)", () => {
       }),
     );
     expect(result.stdout).toBe("$(echo pwned)");
+  });
+
+  it("delivers every metacharacter-laden argument verbatim as exactly one argv entry and executes none of them", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harpoc-argv-canary-"));
+    const keep = join(dir, "keep");
+    writeFileSync(keep, "k");
+    const canary = join(dir, "canary");
+    const META = [
+      `; rm -rf ${keep}`,
+      "$(id)",
+      "`id`",
+      `$(echo pwned > ${canary})`,
+      `\`echo pwned > ${canary}\``,
+      `&& echo pwned > ${canary}`,
+      `| echo pwned > ${canary}`,
+      `& echo pwned > ${canary}`,
+      "%PATH% ^& echo x",
+      `"; echo pwned > ${canary}; "`,
+      'a\\"b',
+      "trailing\\",
+      "",
+      "two words",
+    ];
+    try {
+      const script = "process.stdout.write(JSON.stringify(process.argv.slice(1)))";
+      const result = await run(nodeAction(script, { args: ["-e", script, ...META] }));
+      expect(existsSync(canary)).toBe(false);
+      expect(existsSync(keep)).toBe(true);
+      expect(JSON.parse(result.stdout)).toEqual(META);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -221,6 +253,10 @@ describe("ProcessInjector — filesystem isolation (§4.5.3 layer 4)", () => {
     rmSync(join(fsTmpRoot, "marker"), { recursive: true, force: true });
   });
 
+  afterAll(() => {
+    rmSync(fsTmpRoot, { recursive: true, force: true });
+  });
+
   it("refuses fail-closed before any spawn and audits when the platform cannot deliver isolation", async () => {
     forceFsIsolationUnavailableForTests("forced by test");
     const marker = join(fsTmpRoot, "marker");
@@ -274,6 +310,10 @@ describe("ProcessInjector — dedicated-context binaries (C1)", () => {
 
   afterEach(() => {
     rmSync(join(tmpRoot, "marker"), { recursive: true, force: true });
+  });
+
+  afterAll(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
   });
 
   it("refuses git in the process context and audits the denial", async () => {

@@ -609,6 +609,20 @@ describe("revokePolicy's membership check is inside the engine (E75a fallout)", 
     expect(engine.listPolicies(idA).some((p) => p.id === policyId)).toBe(true);
   });
 
+  it("a caller admin on its own secret probing another secret's policy id is refused before the caller check — no row names the probe", async () => {
+    const { secretId: idA, policyId } = await policyOn("policy-scope-probed");
+    const idB = await makeSecret("policy-scope-own");
+    grant(idB, "mallory", ["admin"]);
+
+    const err = await expectVaultError(
+      () => Promise.resolve().then(() => engine.revokePolicy(policyId, agent("mallory"), idB)),
+      ErrorCode.POLICY_NOT_FOUND,
+    );
+    expect(err.message).toBe(`Policy not found: ${policyId}`);
+    expect(engine.queryAudit({ eventType: AuditEventType.POLICY_REVOKE })).toHaveLength(0);
+    expect(engine.listPolicies(idA).some((p) => p.id === policyId)).toBe(true);
+  });
+
   it("the matching expected id revokes", async () => {
     const { secretId: idA, policyId } = await policyOn("policy-scope-match");
 

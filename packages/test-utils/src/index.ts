@@ -17,6 +17,7 @@ export {
   dropSecretsNameHmacConstraint,
 } from "./constraint-drops.js";
 export type { SqlExecHandle } from "./constraint-drops.js";
+export { sqliteErrorCode } from "./sqlite-error-code.js";
 export {
   connectInMemoryClient,
   connectModernInMemoryClient,

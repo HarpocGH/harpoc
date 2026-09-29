@@ -13,7 +13,8 @@ import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, InjectionPolicy, SftpAction } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { controlledPathDirs } from "./allowlist.js";
+import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { executeSftpAction } from "./sftp-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
@@ -35,8 +36,23 @@ if (process.platform === "win32") {
   ].join(delimiter);
 }
 
-const SFTP = resolveExecutable("sftp", controlledPathDirs());
+const SFTP = resolveNativeSshClient("sftp");
 const describeSftp = SFTP ? describe : describe.skip;
+
+function tierRequired(tier: string): boolean {
+  return (process.env["HARPOC_REQUIRE_PLATFORM_TESTS"] ?? "")
+    .split(",")
+    .map((t) => t.trim())
+    .includes(tier);
+}
+
+it("ssh-live tier: required legs fail instead of skipping when sftp is unresolvable", () => {
+  if (SFTP === null && tierRequired("ssh-live")) {
+    throw new Error(
+      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no sftp client resolves',
+    );
+  }
+});
 
 const OK_RESULT: SpawnCapturedResult = {
   exit_code: 0,
@@ -155,7 +171,23 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     // "-oBatchMode=yes -b <batchFile> user@host" is the exact argv tail — no
     // `-l`, no `--`: sftp has no separate user flag, and paths never reach
     // argv at all (they live inside the batch file).
-    expect(args.slice(-4)).toEqual([
+    expect(args).toEqual([
+      "-F",
+      "none",
+      "-o",
+      "StrictHostKeyChecking=yes",
+      "-o",
+      expect.stringMatching(/^UserKnownHostsFile="[^"]*harpoc-ssh-[^\\/"]+[\\/]known_hosts"$/),
+      "-o",
+      "IdentitiesOnly=yes",
+      "-i",
+      expect.stringMatching(/harpoc-ssh-id-[^\\/]+[\\/]identity\.pub$/),
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "PasswordAuthentication=no",
+      "-o",
+      "ConnectTimeout=30",
       "-oBatchMode=yes",
       "-b",
       batchFile,
@@ -175,8 +207,23 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
       SFTP_CONFIG,
     );
     const [, args] = spawnMock.mock.calls[0] as [string, string[], { env: Record<string, string> }];
-    const tail = args.slice(-6);
-    expect(tail).toEqual([
+    expect(args).toEqual([
+      "-F",
+      "none",
+      "-o",
+      "StrictHostKeyChecking=yes",
+      "-o",
+      expect.stringMatching(/^UserKnownHostsFile="[^"]*harpoc-ssh-[^\\/"]+[\\/]known_hosts"$/),
+      "-o",
+      "IdentitiesOnly=yes",
+      "-i",
+      expect.stringMatching(/harpoc-ssh-id-[^\\/]+[\\/]identity\.pub$/),
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "PasswordAuthentication=no",
+      "-o",
+      "ConnectTimeout=30",
       "-P",
       "2222",
       "-oBatchMode=yes",
@@ -504,6 +551,19 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
       exit_code: 255,
       stderr: "ssh: connect to host 127.0.0.2 port 22: Connection refused",
     });
+
+    await expect(
+      executeSftpAction(
+        LIST_ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        allowedPolicy(),
+        SFTP_CONFIG,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.SSH_CONNECT_FAILED });
+  });
+
+  it("maps a spawn failure (spawn_failed) to SSH_CONNECT_FAILED", async () => {
+    spawnMock.mockResolvedValue({ ...OK_RESULT, exit_code: null, spawn_failed: true });
 
     await expect(
       executeSftpAction(

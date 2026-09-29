@@ -15,10 +15,8 @@ export interface TimedProtectorTarget {
 }
 
 /** A wrapped protector: the inner one's scheme, every call timed into the timer's line. */
-export interface TimedProtector<S extends string> {
+export interface TimedProtector<S extends string> extends TimedProtectorTarget {
   readonly scheme: S;
-  protect(key: Uint8Array): Promise<Uint8Array>;
-  unprotect(blob: Uint8Array): Promise<Uint8Array>;
 }
 
 export interface ProtectorTimer {
@@ -33,8 +31,8 @@ export interface ProtectorTimer {
 export function protectorTimer(label: string): ProtectorTimer {
   const samples: string[] = [];
   let slowest = 0;
-  const timed = async <S extends string>(
-    inner: TimedProtectorTarget & { readonly scheme: S },
+  const timed = async (
+    inner: TimedProtectorTarget,
     method: "protect" | "unprotect",
     input: Uint8Array,
   ): Promise<Uint8Array> => {

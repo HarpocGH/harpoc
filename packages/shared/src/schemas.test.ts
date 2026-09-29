@@ -1792,6 +1792,36 @@ describe("generateCsrRequestSchema", () => {
       }).success,
     ).toBe(false);
   });
+  it("accepts curve with algorithm ec", () => {
+    expect(
+      generateCsrRequestSchema.safeParse({
+        name: "web-cert",
+        subject: "example.com",
+        algorithm: "ec",
+        curve: "P-384",
+      }).success,
+    ).toBe(true);
+  });
+  it("refuses bits outside 2048/4096 (1024)", () => {
+    const r = generateCsrRequestSchema.safeParse({
+      name: "web-cert",
+      subject: "example.com",
+      algorithm: "rsa",
+      bits: 1024,
+    });
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.issues.map((i) => i.path)).toEqual([["bits"]]);
+  });
+  it("refuses a curve outside P-256/P-384 (P-521)", () => {
+    const r = generateCsrRequestSchema.safeParse({
+      name: "web-cert",
+      subject: "example.com",
+      algorithm: "ec",
+      curve: "P-521",
+    });
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.issues.map((i) => i.path)).toEqual([["curve"]]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2492,6 +2522,8 @@ describe("connectionConfigSchema", () => {
 // construction. The walker pins the rule once instead of one sample per object.
 // ---------------------------------------------------------------------------
 
+const LEAF_KINDS = new Set(["string", "number", "boolean", "enum", "literal", "unknown"]);
+
 // zod 4: refinements live on the schema itself (no ZodEffects), a transform
 // makes a ZodPipe (none in this file's schemas, walked for completeness), and
 // an object's strictness is a `never` catchall.
@@ -2523,7 +2555,16 @@ function collectObjects(schema: z.ZodType, path: string, out: Array<[string, z.Z
     (schema.options as z.ZodType[]).forEach((option, i) =>
       collectObjects(option, `${path}|${i}`, out),
     );
+    return;
   }
+  if (
+    schema instanceof z.ZodRecord &&
+    LEAF_KINDS.has((schema.def.valueType as z.ZodType).def.type)
+  ) {
+    return;
+  }
+  if (LEAF_KINDS.has(schema.def.type)) return;
+  throw new Error(`collectObjects: unhandled ${schema.def.type} at ${path}`);
 }
 
 function isStrict(object: z.ZodObject): boolean {
@@ -2562,6 +2603,16 @@ describe("request-body schemas refuse unknown keys at every level (R10/A5)", () 
     expect(paths).toContain("$.action|0.injection|2"); // http → header injection
     expect(paths).toContain("$.action|7.operation|1"); // imap → fetch operation
     expect(paths.length).toBeGreaterThanOrEqual(24);
+  });
+
+  it("the walker refuses a kind it does not handle (self-check)", () => {
+    const objects: Array<[string, z.ZodObject]> = [];
+    expect(() =>
+      collectObjects(z.record(z.string(), z.object({ a: z.string() })), "$", objects),
+    ).toThrow("collectObjects: unhandled record at $");
+    expect(() => collectObjects(z.tuple([z.string()]), "$", objects)).toThrow(
+      "collectObjects: unhandled tuple at $",
+    );
   });
 
   it("a top-level unknown key is refused (create)", () => {

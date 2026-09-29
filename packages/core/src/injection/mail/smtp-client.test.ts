@@ -70,6 +70,27 @@ describe("sendSmtp — credential never crosses the plaintext leg", () => {
     expect(plain).not.toMatch(/AUTH|hunter2/i);
     expect(srv.wire().postTls.length).toBe(0);
   });
+
+  it("security tls + tls:false (the audited opt-out): AUTH PLAIN goes over the plaintext leg, nothing is upgraded", async () => {
+    const srv = await fake({ starttls: false, authMechanisms: ["PLAIN"], plaintextAuth: true });
+    const result = await sendSmtp(optsFor(srv, { security: "tls", tls: false }));
+    expect(result).toEqual({ accepted: 1, messageId: null });
+    expect(srv.wire().plaintext.toString("latin1")).toContain(`AUTH PLAIN ${PLAIN_CRED}`);
+    expect(srv.wire().postTls.length).toBe(0);
+  });
+
+  it("security starttls + tls:false still upgrades and writes no credential on the plaintext leg", async () => {
+    const srv = await fake({ starttls: true, authMechanisms: ["PLAIN"], plaintextAuth: true });
+    await expect(
+      sendSmtp(optsFor(srv, { security: "starttls", tls: false })),
+    ).rejects.toMatchObject({
+      code: "SMTP_DELIVERY_FAILED",
+    });
+    const plain = srv.wire().plaintext.toString("latin1");
+    expect(plain).toContain("STARTTLS");
+    expect(plain).not.toMatch(/AUTH/i);
+    expect(plain).not.toContain(PLAIN_CRED);
+  });
 });
 
 describe("sendSmtp — delivery over TLS", () => {
