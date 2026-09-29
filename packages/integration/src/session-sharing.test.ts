@@ -20,7 +20,7 @@ import type { SessionKeyProtector } from "@harpoc/core";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { InjectionType, PrincipalType, SecretType, VaultState } from "@harpoc/shared";
-import { protectorTimer, recordSeriesLine } from "@harpoc/test-utils";
+import { protectorTimer, recordSeriesLine, silenceAuditLines } from "@harpoc/test-utils";
 import type { McpServer } from "@modelcontextprotocol/server";
 import {
   createTestVault,
@@ -31,6 +31,8 @@ import {
 import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 import { assertTierAvailable } from "./helpers/platform-tiers.js";
+
+silenceAuditLines();
 
 const PASSWORD = "session-sharing-pw";
 const SECRET_NAME = "shared-key";

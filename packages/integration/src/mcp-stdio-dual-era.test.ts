@@ -119,7 +119,11 @@ describe("both protocol eras on one stdio pipe", () => {
     });
     await init.initVault(PASSWORD);
     await init.destroy();
-    const unlock = await runCli(["unlock"], { vaultDir, stdin: `${PASSWORD}\n` });
+    const unlock = await runCli(["unlock"], {
+      vaultDir,
+      stdin: `${PASSWORD}\n`,
+      timeoutMs: 110_000,
+    });
     expect(unlock.code).toBe(0);
     engine = new VaultEngine({
       dbPath: join(vaultDir, VAULT_DB_NAME),

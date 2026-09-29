@@ -12,6 +12,9 @@ import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
 import { startMockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import type { MockOAuthProvider } from "./helpers/mock-oauth-provider.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
+
+silenceAuditLines();
 
 /**
  * REST background authorization-code flow (Phase 10, D2): `POST /oauth/authorize`

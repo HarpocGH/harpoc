@@ -29,6 +29,9 @@ import {
   startCliServer,
   startCliServerOnFreePort,
 } from "./helpers/spawn-cli.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
+
+silenceAuditLines();
 
 const PASSWORD = "audit-lifecycle-pw";
 const VALUE = new Uint8Array(Buffer.from("lifecycle-value"));
@@ -62,6 +65,7 @@ describe("server lifecycle rows through the spawned CLI", () => {
     const unlock = await runCli(["unlock"], {
       vaultDir,
       stdin: `${PASSWORD}\n`,
+      timeoutMs: 110_000,
     });
     expect(unlock.code).toBe(0);
     engine = new VaultEngine({
@@ -411,7 +415,11 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
     await init.destroy();
     // `harpoc-mcp` opens an existing session and refuses a locked vault, so the
     // twin unlocks through the CLI exactly as the one above does.
-    const unlock = await runCli(["unlock"], { vaultDir, stdin: `${PASSWORD}\n` });
+    const unlock = await runCli(["unlock"], {
+      vaultDir,
+      stdin: `${PASSWORD}\n`,
+      timeoutMs: 110_000,
+    });
     expect(unlock.code).toBe(0);
     engine = new VaultEngine({
       dbPath: join(vaultDir, VAULT_DB_NAME),

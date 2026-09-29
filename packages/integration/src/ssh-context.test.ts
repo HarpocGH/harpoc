@@ -4,6 +4,7 @@ import { ErrorCode } from "@harpoc/shared";
 import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 /**
  * SSH context (thesis §4.5.7, §6.2 host-redirection). Deterministic enforcement:
@@ -100,13 +101,12 @@ describe("SSH context (process-mediated, §4.5.7)", () => {
   });
 
   it("I1: the private key never appears in a rejection", async () => {
-    let thrown: unknown;
-    try {
-      await client.useSecret(handle, sshAction("deploy.example.com"));
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown).toBeDefined();
-    expect(JSON.stringify(thrown)).not.toContain("PRIVATE KEY");
+    const err = await expectVaultError(
+      () => client.useSecret(handle, sshAction("deploy.example.com")),
+      ErrorCode.HOST_NOT_ALLOWED,
+    );
+    expect(err.message).not.toContain("PRIVATE KEY");
+    expect(String(err.stack)).not.toContain("PRIVATE KEY");
+    expect(JSON.stringify(err)).not.toContain("PRIVATE KEY");
   });
 });

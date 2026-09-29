@@ -10,17 +10,17 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
-    "@harpoc/shared": "workspace:*",
+    "@harpoc/cli": "workspace:*",
     "@harpoc/core": "workspace:*",
     "@harpoc/mcp-server": "workspace:*",
     "@harpoc/rest-api": "workspace:*",
     "@harpoc/sdk": "workspace:*",
-    "@harpoc/cli": "workspace:*",
+    "@harpoc/shared": "workspace:*",
     "@hono/node-server": "^1.14.0",
-    "hono": "^4.12.5",
     "@modelcontextprotocol/client": "^2.0.0",
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
+    "hono": "^4.12.5",
     "pg": "^8.22.0",
     "zod": "^4.6.5"
   },

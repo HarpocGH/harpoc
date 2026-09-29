@@ -19,6 +19,9 @@ import { callTool, listTools } from "./helpers/mcp-helpers.js";
 import { startMockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import type { MockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import { KEY_PEM, CERT_PEM, EXPIRED_KEY_PEM, EXPIRED_CERT_PEM } from "./helpers/cert-fixtures.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
+
+silenceAuditLines();
 
 /**
  * Security posture of the OAuth and certificate surfaces (Phase 10): the two

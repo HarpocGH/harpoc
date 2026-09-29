@@ -18,6 +18,9 @@ import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
+
+silenceAuditLines();
 
 const PASSWORD = "integration-test-pw";
 const SECRET_NAME = "my-api-key";

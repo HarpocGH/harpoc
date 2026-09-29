@@ -168,6 +168,10 @@ describe("pre-registration OS keying", () => {
     arm: "harpoc",
   } as const;
 
+  afterEach(() => {
+    for (const osDir of osTestDirs.splice(0)) rmSync(osDir, { recursive: true, force: true });
+  });
+
   it("prefers the row keyed to the running OS", () => {
     expect(expectationFor(OS_KEYED, KEY, "win32")).toBe("REFUSED_UNAVAILABLE");
   });
@@ -187,8 +191,12 @@ describe("pre-registration OS keying", () => {
   });
 });
 
+const osTestDirs: string[] = [];
+
 function dirForOsTest(): string {
-  return mkdtempSync(join(tmpdir(), "harpoc-prereg-os-"));
+  const osDir = mkdtempSync(join(tmpdir(), "harpoc-prereg-os-"));
+  osTestDirs.push(osDir);
+  return osDir;
 }
 
 /**

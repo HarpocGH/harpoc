@@ -787,3 +787,60 @@ describe("compiled binary smoke: the explicit grant and the empty allowlist (D8)
     expect(verify.code).toBe(0);
   }, 60_000);
 });
+
+describe("compiled binary smoke: a grantless admin-scoped token's secret allow is concealed (R-FW-13)", () => {
+  let proberToken: string;
+
+  beforeAll(async () => {
+    const set = await runCli(["secret", "set", "allow-probed"], { stdin: "allow-probed-value\n" });
+    expect(set.code).toBe(0);
+    await registerAgents("allow-prober");
+    const minted = await runCli([
+      "auth",
+      "token",
+      "--scope",
+      "admin",
+      "--secrets",
+      "allow-probed",
+      "--agent",
+      "allow-prober",
+      "--json",
+    ]);
+    expect(minted.code).toBe(0);
+    proberToken = (JSON.parse(minted.stdout) as { token: string }).token;
+  }, 60_000);
+
+  it("the merge read refuses SECRET_NOT_FOUND, audits the read denial and leaves the policy untouched", async () => {
+    const denied = await runCli([
+      "secret",
+      "allow",
+      "secret://allow-probed",
+      "--url",
+      "https://api.example.com/*",
+      "--token",
+      proberToken,
+      "--json",
+    ]);
+    expect(denied.code).toBe(1);
+    expect(denied.stderr).toContain("SECRET_NOT_FOUND");
+    expect(denied.stderr).not.toContain("ACCESS_DENIED");
+
+    const audit = await runCli(["audit", "--json", "--event", "secret.read", "--limit", "50"]);
+    expect(audit.code).toBe(0);
+    const rows = JSON.parse(audit.stdout) as {
+      success?: boolean | number;
+      principal_id: string | null;
+      detail?: Record<string, unknown> | null;
+    }[];
+    const refused = rows.find(
+      (r) => r.principal_id === "allow-prober" && r.detail?.handle === "secret://allow-probed",
+    );
+    expect(Boolean(refused?.success)).toBe(false);
+    expect(refused?.detail?.config).toBe("injection");
+    expect(refused?.detail?.required_permission).toBe("read");
+
+    const shown = await runCli(["secret", "allow", "secret://allow-probed", "--show"]);
+    expect(shown.code).toBe(0);
+    expect((JSON.parse(shown.stdout) as { url_allowlist: string[] }).url_allowlist).toEqual([]);
+  }, 60_000);
+});

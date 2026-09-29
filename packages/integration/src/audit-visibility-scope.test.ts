@@ -3,6 +3,9 @@ import { createApp } from "@harpoc/rest-api";
 import { SecretType } from "@harpoc/shared";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
+
+silenceAuditLines();
 
 const PASSWORD = "audit-visibility-pw";
 

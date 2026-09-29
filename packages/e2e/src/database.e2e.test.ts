@@ -157,7 +157,8 @@ describe("database context — a plaintext target is refused by default", () => 
     });
     await grantOn(vault, handle, "e2e-db-plain-agent", [Permission.USE]);
 
-    // No connection config at all: the DEFAULT posture is what is on trial.
+    // No setConnectionConfig above, unlike the two describes before: the DEFAULT
+    // posture is on trial.
     surface = await startMcpHttpSurface(vault, "e2e-db-plain-agent", [Permission.USE]);
   });
 

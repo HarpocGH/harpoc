@@ -1133,6 +1133,7 @@ describe("server start", () => {
     expect(httpRow).toBeLessThan(httpClose);
     expect(restRow).toBeLessThan(restClose);
     expect(restClose).toBeLessThan(destroy);
+    expect(httpClose).toBeLessThan(destroy);
 
     onSpy.mockRestore();
   });
@@ -1150,6 +1151,11 @@ describe("server start", () => {
 
     await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+    expect(mockEngine.auditServerStop.mock.results[0]?.type).toBe("throw");
+    expect(mockRestServer.close).toHaveBeenCalledTimes(1);
+    expect(mockEngine.auditServerStop.mock.invocationCallOrder[0]).toBeLessThan(
+      mockRestServer.close.mock.invocationCallOrder[0] as number,
+    );
     onSpy.mockRestore();
   });
 
@@ -1173,6 +1179,26 @@ describe("server start", () => {
     );
     expect(mockHandle.close).toHaveBeenCalledTimes(1);
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+    onceSpy.mockRestore();
+  });
+
+  it("stdin EOF under a launch token: the stdio stop row says tokenless false", async () => {
+    const onceSpy = vi.spyOn(process.stdin, "once");
+    exitSpy.mockImplementation(() => undefined as never);
+
+    await run(["--mcp", "--token-file", "/tmp/launch-token"]);
+    const endCall = onceSpy.mock.calls.find((call) => (call[0] as string) === "end");
+    (endCall?.[1] as () => void)();
+
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    expect(mockEngine.auditServerStop).toHaveBeenCalledTimes(1);
+    expect(mockEngine.auditServerStop).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transport: "stdio",
+        tokenless: false,
+        trigger: "transport_closed",
+      }),
+    );
     onceSpy.mockRestore();
   });
 

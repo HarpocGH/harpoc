@@ -18,6 +18,7 @@ export {
 } from "./constraint-drops.js";
 export type { SqlExecHandle } from "./constraint-drops.js";
 export { sqliteErrorCode } from "./sqlite-error-code.js";
+export { silenceAuditLines } from "./silence-audit-lines.js";
 export {
   connectInMemoryClient,
   connectModernInMemoryClient,

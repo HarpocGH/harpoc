@@ -1,8 +1,8 @@
-import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { runNode } from "./helpers/spawn-cli.js";
 
 const MCP_ENTRY = join(
   dirname(createRequire(import.meta.url).resolve("@harpoc/mcp-server/package.json")),
@@ -11,15 +11,7 @@ const MCP_ENTRY = join(
 );
 
 function runMcp(args: string[]): Promise<{ code: number | null; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [MCP_ENTRY, ...args], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stderr = "";
-    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ code, stderr }));
-  });
+  return runNode([MCP_ENTRY, ...args]);
 }
 
 describe("harpoc-mcp --http --port (spawned binary)", () => {

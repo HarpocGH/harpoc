@@ -9,6 +9,7 @@ import { describe, it, expect, beforeAll, afterAll, vi, beforeEach, afterEach } 
 import { VaultEngine, wipeBuffer, encrypt, SqliteStore } from "@harpoc/core";
 import {
   AES_KEY_LENGTH,
+  AuditEventType,
   ErrorCode,
   InjectionType,
   SecretType,
@@ -17,9 +18,10 @@ import {
   LOCKOUT_MAX_ATTEMPTS,
   LOCKOUT_DURATIONS_MS,
 } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectVaultError, silenceAuditLines } from "@harpoc/test-utils";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { startTestServer, type TestServer } from "./helpers/rest-helpers.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = join(__filename, "..");
@@ -713,7 +715,7 @@ describe("Lockout Progression", () => {
 // ---------------------------------------------------------------------------
 describe("No-Logging Static Audit", () => {
   /**
-   * Recursively collect all non-test .ts files in a directory.
+   * Recursively collect all non-test .ts and .tsx files in a directory.
    */
   function collectTsFiles(dir: string): string[] {
     const results: string[] = [];
@@ -723,9 +725,8 @@ describe("No-Logging Static Audit", () => {
         results.push(...collectTsFiles(fullPath));
       } else if (
         entry.isFile() &&
-        entry.name.endsWith(".ts") &&
-        !entry.name.endsWith(".test.ts") &&
-        !entry.name.endsWith(".spec.ts") &&
+        /\.tsx?$/.test(entry.name) &&
+        !/\.(test|spec)\.tsx?$/.test(entry.name) &&
         !entry.name.endsWith(".d.ts")
       ) {
         results.push(fullPath);
@@ -733,6 +734,15 @@ describe("No-Logging Static Audit", () => {
     }
     return results;
   }
+
+  it("the walker takes web-ui's .tsx sources and leaves its .test.tsx files out (D3 a)", () => {
+    const webUiSrc = join(REPO_ROOT, "packages", "web-ui", "src");
+    const files = collectTsFiles(webUiSrc).map((f) => relative(webUiSrc, f).split(sep).join("/"));
+    expect(files).toContain("main.tsx");
+    expect(files).toContain("pages/secrets.tsx");
+    expect(files.filter((f) => f.endsWith(".tsx")).length).toBeGreaterThanOrEqual(18);
+    expect(files.filter((f) => /\.(test|spec)\.tsx?$/.test(f))).toEqual([]);
+  });
 
   it("core/src/ has zero console.log/warn/error calls", () => {
     const coreDir = join(REPO_ROOT, "packages/core/src");
@@ -778,8 +788,10 @@ describe("No-Logging Static Audit", () => {
    * green. All three are console-free today, so they carry the strict rule
    * (any diagnostic they need goes through an injected callback, as core does
    * with `onSessionFilePermissionRepairFailure`).
+   * `web-ui` joined them with the `.tsx` widening (D3 a, 2026-09): the SPA is
+   * console-free too.
    */
-  it.each(["oauth-proxy", "sdk", "shared"])("%s/src/ has zero console calls", (pkg) => {
+  it.each(["oauth-proxy", "sdk", "shared", "web-ui"])("%s/src/ has zero console calls", (pkg) => {
     const files = collectTsFiles(join(REPO_ROOT, "packages", pkg, "src"));
     expect(files.length).toBeGreaterThan(0);
 
@@ -978,21 +990,60 @@ describe("SSRF E2E via useSecret", () => {
     expect(response.status).toBe(200);
   });
 
-  it("useSecret to http://[::1] loopback is allowed", async () => {
-    // ::1 is loopback — HTTP should be allowed (though connection may fail if
-    // no server is listening on IPv6; we test the URL validation passes)
-    try {
-      await vault.engine.useSecret(handle, {
-        type: "http",
-        method: "GET",
-        url: "http://[::1]:1/test",
-        injection: { type: InjectionType.BEARER },
+  it("useSecret to http://[::1] loopback passes the SSRF floor and the allowlist (the request itself fails)", async () => {
+    const response = await vault.engine.useSecret(handle, {
+      type: "http",
+      method: "GET",
+      url: "http://[::1]:1/test",
+      injection: { type: InjectionType.BEARER },
+    });
+    expect(response.type).toBe("http");
+    if (response.type !== "http") throw new Error("expected http result");
+    expect(response.status).toBeNull();
+    expect(response.error).toBeDefined();
+  });
+});
+
+describe("Concurrent REST create (security review 2026-03-05 follow-up)", () => {
+  silenceAuditLines();
+
+  let vault: TestVault;
+  let server: TestServer;
+  let token: string;
+
+  beforeAll(async () => {
+    vault = createTestVault();
+    await vault.engine.initVault(PASSWORD);
+    registerAgents(vault.engine, "race-agent");
+    token = vault.engine.createToken("race-agent", ["create"]);
+    server = startTestServer(vault.engine);
+  });
+
+  afterAll(async () => {
+    await server.close();
+    await destroyTestVault(vault);
+  });
+
+  it("two concurrent POST /api/v1/secrets with one name: one 201, one DUPLICATE_SECRET 409, one row", async () => {
+    const post = (): Promise<Response> =>
+      fetch(`${server.baseUrl}/api/v1/secrets`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "race-key",
+          type: SecretType.API_KEY,
+          value: Buffer.from("race-value").toString("base64"),
+        }),
       });
-      // Connection may fail but should NOT be SSRF_BLOCKED
-    } catch (e) {
-      const err = e as VaultError;
-      // Acceptable: CONNECTION_REFUSED, TIMEOUT, etc. — but NOT SSRF_BLOCKED
-      expect(err.code).not.toBe(ErrorCode.SSRF_BLOCKED);
-    }
+    const responses = await Promise.all([post(), post()]);
+    const bodies = await Promise.all(responses.map((r) => r.json() as Promise<{ error?: string }>));
+    expect(responses.map((r) => r.status).sort()).toEqual([201, 409]);
+    expect(bodies[responses.findIndex((r) => r.status === 409)]?.error).toBe(
+      ErrorCode.DUPLICATE_SECRET,
+    );
+    expect(vault.engine.listSecrets().filter((s) => s.name === "race-key")).toHaveLength(1);
+    expect(
+      vault.engine.queryAudit({ eventType: AuditEventType.SECRET_CREATE }).filter((r) => r.success),
+    ).toHaveLength(1);
   });
 });

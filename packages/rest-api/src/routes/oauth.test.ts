@@ -8,6 +8,7 @@ import { RateLimiter } from "../middleware/rate-limit.js";
 import { createApp } from "../app.js";
 import { createOAuthRoutes } from "./oauth.js";
 import type { HarpocEnv } from "../types.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
 
 const MOCK_TOKEN: VaultApiToken = {
   sub: "test-agent",
@@ -346,6 +347,9 @@ describe("GET /api/v1/oauth/:handle/status", () => {
     const checkSecret = vi.spyOn(limiter, "checkSecret");
     await app.request("/api/v1/oauth/gh-app/status", { headers: AUTH });
     expect(checkSecret).toHaveBeenCalledWith("secret://gh-app");
+    expect(checkSecret.mock.invocationCallOrder[0]).toBeLessThan(
+      engine.resolveSecretId.mock.invocationCallOrder[0] as number,
+    );
   });
 
   it("requires the read scope (403, engine untouched)", async () => {
@@ -399,6 +403,9 @@ describe("POST /api/v1/oauth/:handle/refresh", () => {
     const checkSecret = vi.spyOn(limiter, "checkSecret");
     await app.request("/api/v1/oauth/gh-app/refresh", { method: "POST", headers: AUTH });
     expect(checkSecret).toHaveBeenCalledWith("secret://gh-app");
+    expect(checkSecret.mock.invocationCallOrder[0]).toBeLessThan(
+      engine.resolveSecretId.mock.invocationCallOrder[0] as number,
+    );
   });
 
   it("requires the rotate scope (403, engine untouched)", async () => {
@@ -434,6 +441,8 @@ describe("POST /api/v1/oauth/:handle/refresh", () => {
 });
 
 describe("createApp OAuth wiring", () => {
+  silenceAuditLines();
+
   const WIRED_JSON_HEADERS = { ...JSON_HEADERS, host: "localhost" };
 
   it("mounts the routes and serves the injected manager from context", async () => {

@@ -21,8 +21,8 @@
     }
   },
   "dependencies": {
-    "@harpoc/shared": "workspace:*",
     "@harpoc/core": "workspace:*",
+    "@harpoc/shared": "workspace:*",
     "open": "^10.1.0"
   },
   "devDependencies": {

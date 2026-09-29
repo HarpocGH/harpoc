@@ -83,9 +83,9 @@ describe("backend fleet", () => {
     expect(PG.host).toBe("localhost");
   });
 
-  it("addresses the two sshd servers at distinct loopback aliases on port 22", () => {
-    // An ssh host forbids ":", so the pinned and rogue servers must live at
-    // different addresses rather than different ports on one address.
+  it("addresses the two sshd servers at distinct loopback aliases on port 22, the pinned one also on port 55022", () => {
+    // The pinned and rogue servers live at distinct loopback aliases — retained,
+    // not forced, since an SshAction carries a `port` (D59).
     expect(SSHD_PINNED.host).toBe("127.0.0.2");
     expect(SSHD_ROGUE.host).toBe("127.0.0.3");
     expect(SSHD_PINNED.port).toBe(22);

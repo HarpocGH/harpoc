@@ -3,6 +3,9 @@ import { ErrorCode, VaultError, VaultState, HARPOC_VERSION } from "@harpoc/share
 import type { VaultApiToken } from "@harpoc/shared";
 import { OAuthManager, defaultOpenBrowser } from "@harpoc/oauth-proxy";
 import { createApp, createDefaultOAuthManager } from "./app.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
+
+silenceAuditLines();
 
 const MOCK_TOKEN: VaultApiToken = {
   sub: "test-agent",

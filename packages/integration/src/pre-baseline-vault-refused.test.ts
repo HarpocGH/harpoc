@@ -11,7 +11,6 @@ const PASSWORD = "pre-baseline-vault-pw";
 
 interface SqliteHandle {
   exec(sql: string): void;
-  prepare(sql: string): { get(...params: unknown[]): unknown };
 }
 
 /** The engine's own connection: one handle on the file, better-sqlite3 stays out of this package. */

@@ -27,8 +27,9 @@ export const MYSQL = {
 
 /**
  * The sshd containers are published on loopback ALIASES at port 22, not the
- * 55xxx offset the database services use: an `ssh` host forbids ":", so two
- * servers cannot share one address. `127.0.0.2` and `127.0.0.3` are distinct
+ * 55xxx offset the database services use. The aliases predate the SshAction
+ * `port` field (D59) and are retained, not forced: with a port the two
+ * servers could share one address. `127.0.0.2` and `127.0.0.3` are distinct
  * loopback addresses — all of 127/8 is loopback on Linux and Windows (verified
  * reachable through a Docker alias bind on this host), but stock macOS
  * configures only 127.0.0.1 on lo0: `fleet:up` runs a preflight

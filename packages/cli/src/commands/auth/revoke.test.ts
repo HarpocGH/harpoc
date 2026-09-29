@@ -71,7 +71,10 @@ describe("auth revoke (registry-authoritative, R9/C33-A)", () => {
   });
 
   it("--token is an unknown option", async () => {
-    await expect(run(["some-jti", "--token", "header.payload.signature"])).rejects.toThrow();
+    await expect(run(["some-jti", "--token", "header.payload.signature"])).rejects.toThrow(
+      "process.exit",
+    );
+    expect(exitSpy).toHaveBeenCalledWith(1);
     expect(mockEngine.revokeToken).not.toHaveBeenCalled();
   });
 

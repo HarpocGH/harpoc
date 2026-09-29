@@ -89,10 +89,10 @@ services:
       retries: 45
 
   # sshd-pinned serves both the `ssh` context and git-over-ssh. Published on the
-  # loopback ALIAS 127.0.0.2:22 because the host still forbids ":" in an
-  # SshAction host, so the two sshd containers cannot share one address — each
-  # takes a distinct 127.x. Since D59 the pinned server is also published on
-  # 127.0.0.1:55022 for the non-22 `port` arm.
+  # loopback ALIAS 127.0.0.2:22, sshd-rogue on 127.0.0.3:22: the distinct
+  # aliases predate the SshAction `port` field and are retained, not forced —
+  # with a port the two servers could share one address. Since D59 the pinned
+  # server is also published on 127.0.0.1:55022 for the non-22 `port` arm.
   # Stock macOS configures only 127.0.0.1 on lo0: fleet:up's preflight
   # (scripts/fleet-preflight.mjs) fails loudly with the `sudo ifconfig lo0
   # alias` recovery before this bind can take the whole bring-up down.

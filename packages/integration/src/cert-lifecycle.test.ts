@@ -17,6 +17,9 @@ import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
 import { callTool } from "./helpers/mcp-helpers.js";
 import { KEY_PEM, CERT_PEM } from "./helpers/cert-fixtures.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
+
+silenceAuditLines();
 
 /**
  * Certificate lifecycle across the wired surfaces (Phase 10): REST import →

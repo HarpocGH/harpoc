@@ -14,6 +14,7 @@ import { RateLimiter } from "../middleware/rate-limit.js";
 import { createApp } from "../app.js";
 import { createCertificateRoutes } from "./certificates.js";
 import type { HarpocEnv } from "../types.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
 
 const MOCK_TOKEN: VaultApiToken = {
   sub: "test-agent",
@@ -193,6 +194,26 @@ describe("POST /api/v1/certificates/import", () => {
     expect(res.status).toBe(403);
     expect(certManager.importCertificate).not.toHaveBeenCalled();
   });
+
+  it("rejects a name outside the token's secret-name patterns (403, audited, manager untouched)", async () => {
+    engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["db-*"] });
+    const res = await post("/api/v1/certificates/import", IMPORT_BODY);
+    expect(res.status).toBe(403);
+    expect(engine.auditScopeRefusal).toHaveBeenCalledWith(
+      expect.objectContaining({ principal_id: "test-agent", interface: "rest" }),
+      "POST /api/v1/certificates/import",
+      "secret",
+    );
+    expect(certManager.importCertificate).not.toHaveBeenCalled();
+  });
+
+  it("defaults auto_renew to false and renew_before_days to 30 when omitted", async () => {
+    await post("/api/v1/certificates/import", IMPORT_BODY);
+    expect(certManager.importCertificate).toHaveBeenCalledWith(
+      "my-cert",
+      expect.objectContaining({ autoRenew: false, renewBeforeDays: 30 }),
+    );
+  });
 });
 
 // The wire `subject` is the bare common name: the manager prefixes `CN=`
@@ -277,6 +298,18 @@ describe("POST /api/v1/certificates/csr", () => {
     expect(res.status).toBe(403);
     expect(certManager.generateCsr).not.toHaveBeenCalled();
   });
+
+  it("rejects a name outside the token's secret-name patterns (403, audited, manager untouched)", async () => {
+    engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["db-*"] });
+    const res = await post("/api/v1/certificates/csr", CSR_BODY);
+    expect(res.status).toBe(403);
+    expect(engine.auditScopeRefusal).toHaveBeenCalledWith(
+      expect.objectContaining({ principal_id: "test-agent", interface: "rest" }),
+      "POST /api/v1/certificates/csr",
+      "secret",
+    );
+    expect(certManager.generateCsr).not.toHaveBeenCalled();
+  });
 });
 
 describe("POST /api/v1/certificates/:handle/renew", () => {
@@ -304,6 +337,9 @@ describe("POST /api/v1/certificates/:handle/renew", () => {
     const checkSecret = vi.spyOn(limiter, "checkSecret");
     await post("/api/v1/certificates/my-cert/renew", {});
     expect(checkSecret).toHaveBeenCalledWith("secret://my-cert");
+    expect(checkSecret.mock.invocationCallOrder[0]).toBeLessThan(
+      engine.resolveSecretId.mock.invocationCallOrder[0] as number,
+    );
   });
 
   it("requires the rotate scope (403, manager untouched)", async () => {
@@ -355,6 +391,9 @@ describe("GET /api/v1/certificates/:handle/status", () => {
     const checkSecret = vi.spyOn(limiter, "checkSecret");
     await app.request("/api/v1/certificates/my-cert/status", { headers: AUTH });
     expect(checkSecret).toHaveBeenCalledWith("secret://my-cert");
+    expect(checkSecret.mock.invocationCallOrder[0]).toBeLessThan(
+      engine.resolveSecretId.mock.invocationCallOrder[0] as number,
+    );
   });
 
   it("requires the read scope (403, engine untouched)", async () => {
@@ -371,6 +410,8 @@ describe("GET /api/v1/certificates/:handle/status", () => {
 });
 
 describe("createApp certificate wiring", () => {
+  silenceAuditLines();
+
   const WIRED_JSON_HEADERS = { ...JSON_HEADERS, host: "localhost" };
 
   it("mounts the routes and serves the injected manager from context", async () => {

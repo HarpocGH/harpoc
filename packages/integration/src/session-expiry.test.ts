@@ -10,6 +10,9 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool } from "./helpers/mcp-helpers.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
+
+silenceAuditLines();
 
 const PASSWORD = "session-expiry-pw";
 

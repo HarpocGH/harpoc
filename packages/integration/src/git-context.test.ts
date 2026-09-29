@@ -4,6 +4,7 @@ import { controlledPathDirs, resolveExecutable } from "@harpoc/core";
 import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 /**
  * Git context (thesis §4.5.6, §6.2 remote-redirection). Deterministic
@@ -90,17 +91,17 @@ describeGit("Git context (both mechanisms, §4.5.6)", () => {
   });
 
   it("I1: the token never appears in a rejection", async () => {
-    let thrown: unknown;
-    try {
-      await client.useSecret(handle, {
-        type: "git",
-        operation: "clone",
-        repository: "https://8.8.8.8/attacker/repo.git",
-      });
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown).toBeDefined();
-    expect(JSON.stringify(thrown)).not.toContain("ghp_git-secret");
+    const err = await expectVaultError(
+      () =>
+        client.useSecret(handle, {
+          type: "git",
+          operation: "clone",
+          repository: "https://8.8.8.8/attacker/repo.git",
+        }),
+      ErrorCode.URL_NOT_ALLOWED,
+    );
+    expect(err.message).not.toContain("ghp_git-secret");
+    expect(String(err.stack)).not.toContain("ghp_git-secret");
+    expect(JSON.stringify(err)).not.toContain("ghp_git-secret");
   });
 });

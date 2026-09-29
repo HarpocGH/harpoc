@@ -50,7 +50,7 @@ const secret = (over: Partial<SecretInfo> = {}): SecretInfo => ({
   ...over,
 });
 
-/** Held by `ci-bot`, so the loaded policies mark it agent-gated. */
+/** Held by `ci-bot`, so the loaded policies mark it granted. */
 const GATED = secret();
 /** No agent holds a row on it — granting here is the flip the editor predicts. */
 const UNGATED = secret({ handle: "secret://open-key", name: "open-key", project: null });
@@ -295,7 +295,7 @@ describe("PermissionsPage", () => {
     await waitFor(() => expect(screen.getByText("ACCESS_DENIED")).toBeTruthy());
   });
 
-  it("names the grant command when a policy-gated cell write is refused", async () => {
+  it("names the grant command when a cell write is refused ACCESS_DENIED", async () => {
     window.sessionStorage.setItem(
       "harpoc.ui.token",
       jwt({ sub: "web-ui", principal_type: "user", jti: "j-1" }),
@@ -550,7 +550,7 @@ describe("PermissionsPage", () => {
     expect(cell("ci-bot", UNGATED.handle).textContent).toBe("—");
     fireEvent.click(cell("ci-bot", UNGATED.handle));
     fireEvent.click(screen.getByText("Clear"));
-    // No live grant gates the column, so there is no ungating to confirm —
+    // No live grant is on the column, so there is no last grant to confirm —
     // but the expired row is stored, so the clear is written.
     expect(screen.queryByText("Confirm")).toBeNull();
     await waitFor(() =>
@@ -691,8 +691,8 @@ describe("PermissionsPage", () => {
     await waitFor(() => expect(cell("other-bot", GATED.handle)).toBeTruthy());
     fireEvent.click(cell("ci-bot", GATED.handle));
     fireEvent.click(screen.getByText("Clear"));
-    // The secret stays gated through the other agent's row, so there is no
-    // ungating to confirm.
+    // The secret keeps a grant through the other agent's row, so there is no
+    // last grant to confirm.
     expect(screen.queryByText("Confirm")).toBeNull();
     await waitFor(() =>
       expect(setAgentPermissions).toHaveBeenCalledWith("ci-bot", GATED.handle, {
@@ -702,7 +702,7 @@ describe("PermissionsPage", () => {
     );
   });
 
-  it("states that nothing changed when a confirmed ungating did not happen", async () => {
+  it("states that nothing changed when a confirmed last grant did not happen", async () => {
     const setAgentPermissions = vi
       .fn()
       .mockResolvedValue({ policy: null, gated_before: true, gated_after: true });
@@ -740,7 +740,7 @@ describe("PermissionsPage", () => {
     await waitFor(() => expect(screen.getByText("ACCESS_DENIED")).toBeTruthy());
   });
 
-  it("never describes a secret as governed by token scope alone", async () => {
+  it("never describes a secret as ungated or policy-gated", async () => {
     render(<PermissionsPage api={api()} />);
     await waitFor(() => expect(cell("ci-bot", GATED.handle)).toBeTruthy());
     expect(document.body.textContent).not.toContain("ungated");

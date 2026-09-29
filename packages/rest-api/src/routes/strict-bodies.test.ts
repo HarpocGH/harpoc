@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
 import { createApp } from "../app.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
+
+silenceAuditLines();
 
 const MOCK_TOKEN: VaultApiToken = {
   sub: "test-agent",

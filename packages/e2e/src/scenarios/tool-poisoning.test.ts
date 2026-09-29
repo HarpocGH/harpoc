@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Arm, CallOutcome } from "../arms/arm.js";
+import { resetSink } from "../harness/attacker.js";
 import { MCP_POISONED } from "../harness/backends.js";
+import { resetPoisonedRecorder } from "../harness/mcp-poisoned.js";
 import { Outcome } from "./scenario.js";
 import type { ScenarioSetup } from "./scenario.js";
 import { TOOL_POISONING_ARMS } from "./tool-poisoning.js";
@@ -110,6 +112,7 @@ const observe = ARM.observe;
 
 describe("tool-poisoning / downstream-target-fixed — the two-call contract", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     fleet.sink = [];
     fleet.authorizations = [];
   });
@@ -181,5 +184,18 @@ describe("tool-poisoning / downstream-target-fixed — the two-call contract", (
     const arm = fakeArm("harpoc", [refused(), reflected(`Bearer ${CREDENTIAL}`)]);
 
     await expect(observe(arm, SETUP)).resolves.toBe(Outcome.LEAKED);
+  });
+
+  it("resets the attacker sink and the poisoned recorder once each, before call 1", async () => {
+    fleet.authorizations = [`Bearer ${CREDENTIAL}`];
+    const arm = fakeArm("harpoc", [refused(), reflected("[REDACTED]")]);
+    const invoke = vi.spyOn(arm, "invoke");
+
+    await expect(observe(arm, SETUP)).resolves.toBe(Outcome.BLOCKED);
+    expect(vi.mocked(resetSink)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(resetPoisonedRecorder)).toHaveBeenCalledTimes(1);
+    const firstInvoke = invoke.mock.invocationCallOrder[0] ?? 0;
+    expect(vi.mocked(resetSink).mock.invocationCallOrder[0]).toBeLessThan(firstInvoke);
+    expect(vi.mocked(resetPoisonedRecorder).mock.invocationCallOrder[0]).toBeLessThan(firstInvoke);
   });
 });

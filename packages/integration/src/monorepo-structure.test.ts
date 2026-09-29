@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { describeBuildOutput, getPkgRoot } from "@harpoc/test-utils";
@@ -8,6 +8,39 @@ const monorepoRoot = resolve(pkgRoot, "..", "..");
 const sharedDistDir = resolve(monorepoRoot, "packages", "shared", "dist");
 
 const PACKAGES = ["shared", "core", "mcp-server", "rest-api", "sdk", "cli"] as const;
+
+function ciTestEnvNames(yaml: string): string[] {
+  const lines = yaml.split(/\r?\n/);
+  const names = new Set<string>();
+  let step: string[] = [];
+  const flush = (): void => {
+    if (step.some((l) => /^\s+run:\s.*\bpnpm test\b/.test(l))) {
+      let envIndent = -1;
+      for (const l of step) {
+        const env = /^(\s*)env:\s*$/.exec(l);
+        if (env) {
+          envIndent = (env[1] ?? "").length;
+          continue;
+        }
+        if (envIndent < 0 || /^\s*#/.test(l)) continue;
+        const key = /^(\s*)([A-Z][A-Z0-9_]*):/.exec(l);
+        if (key && (key[1] ?? "").length > envIndent) names.add(key[2] as string);
+        else envIndent = -1;
+      }
+    }
+    step = [];
+  };
+  for (const l of lines) {
+    if (/^\s+- (name|run|uses):/.test(l)) flush();
+    step.push(l);
+  }
+  flush();
+  for (const l of lines) {
+    const exported = /echo "([A-Z][A-Z0-9_]*)=.*>>\s*"\$GITHUB_ENV"/.exec(l);
+    if (exported) names.add(exported[1] as string);
+  }
+  return [...names].sort();
+}
 
 describe("shared", () => {
   describeBuildOutput(sharedDistDir);
@@ -72,6 +105,39 @@ describe("bin entries", () => {
   });
 });
 
+const DEPENDENCY_BLOCKS = [
+  "dependencies",
+  "devDependencies",
+  "peerDependencies",
+  "peerDependenciesMeta",
+  "optionalDependencies",
+] as const;
+
+describe("manifest dependency blocks are sorted (TU-2, 2026-09-29)", () => {
+  const manifests = [
+    "package.json",
+    ...readdirSync(resolve(monorepoRoot, "packages"), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => `packages/${entry.name}/package.json`)
+      .filter((path) => existsSync(resolve(monorepoRoot, path))),
+  ];
+
+  it("finds the root manifest and every package's", () => {
+    expect(manifests.length).toBeGreaterThanOrEqual(14);
+  });
+
+  it.each(manifests)("%s lists every dependency block in code-unit order", (path) => {
+    const manifest = JSON.parse(readFileSync(resolve(monorepoRoot, path), "utf-8")) as Record<
+      string,
+      Record<string, unknown> | undefined
+    >;
+    for (const block of DEPENDENCY_BLOCKS) {
+      const names = Object.keys(manifest[block] ?? {});
+      expect(names, `${path} ${block}`).toEqual([...names].sort());
+    }
+  });
+});
+
 // RED before turbo.json named them: turbo 2 runs tasks in strict env mode, so
 // the variables ci.yml sets for the test step — the required-tier gate (review
 // T3, 2026-07-16) and the provisioned macOS keychain, two at the 2026-09-08 RED
@@ -89,5 +155,15 @@ describe("turbo env pass-through (D5, 2026-09-08; the series file 2026-09-09)", 
       "HARPOC_TEST_KEYCHAIN",
       "HARPOC_SERIES_FILE",
     ]);
+  });
+
+  it("the test task's env list is exactly what ci.yml exports to its test steps", () => {
+    const turbo = JSON.parse(readFileSync(resolve(monorepoRoot, "turbo.json"), "utf-8")) as {
+      tasks: Record<string, { env?: string[] }>;
+    };
+    const ci = readFileSync(resolve(monorepoRoot, ".github", "workflows", "ci.yml"), "utf-8");
+    const exported = ciTestEnvNames(ci);
+    expect(exported.length).toBeGreaterThanOrEqual(3);
+    expect([...(turbo.tasks["test"]?.env ?? [])].sort()).toEqual(exported);
   });
 });

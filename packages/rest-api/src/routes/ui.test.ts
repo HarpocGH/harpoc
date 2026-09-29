@@ -1,7 +1,7 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Hono } from "hono";
 import type { VaultEngine } from "@harpoc/core";
 import { createUiRoutes } from "./ui.js";
@@ -22,6 +22,11 @@ beforeAll(() => {
   writeFileSync(join(uiDir, "..", outsideName), '{"leaked":true}');
   app = new Hono();
   app.route("/ui", createUiRoutes(uiDir));
+});
+
+afterAll(() => {
+  rmSync(uiDir, { recursive: true, force: true });
+  rmSync(join(uiDir, "..", outsideName), { force: true });
 });
 
 describe("createUiRoutes", () => {

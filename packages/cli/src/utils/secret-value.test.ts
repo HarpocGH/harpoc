@@ -143,7 +143,7 @@ describe("resolveSecretValue — acquisition", () => {
     expect(analyzeKeyMaterial).not.toHaveBeenCalled();
   });
 
-  it("still analyzes armored input (the encrypted-OpenSSH refusal is reached)", async () => {
+  it("still analyzes armored input", async () => {
     vi.mocked(analyzeKeyMaterial).mockClear();
     const path = writeTemp(
       "armored.pem",

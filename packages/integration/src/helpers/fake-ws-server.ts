@@ -10,7 +10,10 @@ import type { AddressInfo, Socket } from "node:net";
  * It handles the RFC 6455 upgrade by hand on a raw `node:http` server: the
  * handshake (`Sec-WebSocket-Accept` from the client's key), unmasked
  * server→client text frames, and a masked-frame decoder for client→server
- * frames. Plain `ws://` on loopback, so no certificate is involved.
+ * frames. Plain `ws://` on loopback, so no certificate is involved. A trimmed
+ * copy: the original carries script options this one does not
+ * (`respondStatus`, `neverAckClose`, `binary`), and its `clientFrames()`
+ * returns data frames only where this one returns every frame.
  */
 
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";

@@ -25,19 +25,19 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@harpoc/shared": "workspace:*",
-    "@harpoc/core": "workspace:*",
     "@harpoc/cert-manager": "workspace:*",
+    "@harpoc/core": "workspace:*",
     "@harpoc/mcp-server": "workspace:*",
     "@harpoc/oauth-proxy": "workspace:*",
     "@harpoc/rest-api": "workspace:*",
+    "@harpoc/shared": "workspace:*",
     "@harpoc/web-ui": "workspace:*",
     "@modelcontextprotocol/server": "^2.0.0",
     "commander": "^13.1.0"
   },
   "devDependencies": {
-    "@types/node": "^22.15.0",
-    "@harpoc/test-utils": "workspace:*"
+    "@harpoc/test-utils": "workspace:*",
+    "@types/node": "^22.15.0"
   },
   "scripts": {
     "build": "tsc",

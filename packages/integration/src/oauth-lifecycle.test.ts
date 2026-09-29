@@ -18,6 +18,9 @@ import type { TestServer } from "./helpers/rest-helpers.js";
 import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 import { startMockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import type { MockOAuthProvider } from "./helpers/mock-oauth-provider.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
+
+silenceAuditLines();
 
 /**
  * OAuth lifecycle across the wired surfaces (Phase 10): REST authorize →
@@ -209,6 +212,8 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
     });
     expect(raw).not.toContain("rt-1");
     expect(raw).not.toContain("at-2");
+    expect(raw).not.toContain(AC_CLIENT_SECRET);
+    expect(raw).not.toContain("at-1");
 
     const status = vault.engine.getOAuthTokenStatus(acSecretId);
     expect(status.access_token_expires_at).toBe(refreshedExpiresAt);

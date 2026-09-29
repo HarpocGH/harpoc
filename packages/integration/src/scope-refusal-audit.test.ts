@@ -4,6 +4,9 @@ import { createTestVault, destroyTestVault, registerAgents } from "./helpers/eng
 import type { TestVault } from "./helpers/engine-factory.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
+
+silenceAuditLines();
 
 const PASSWORD = "scope-refusal-audit-pw";
 

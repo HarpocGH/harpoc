@@ -5,6 +5,9 @@ import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool } from "./helpers/mcp-helpers.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
+
+silenceAuditLines();
 
 const PASSWORD = "probe-audit-pw-1";
 
@@ -75,7 +78,14 @@ describe("unknown-handle probes write an attributed denial row (N3)", () => {
       body: JSON.stringify({ action: USE_ACTION }),
     });
     expect(res.status).toBe(404);
-    expect(deniedRows(AuditEventType.SECRET_USE)).toHaveLength(before + 1);
+    const useRows = deniedRows(AuditEventType.SECRET_USE);
+    expect(useRows).toHaveLength(before + 1);
+    expect(useRows.filter((r) => r.detail?.interface === "rest")).toHaveLength(1);
+    expect(useRows.find((r) => r.detail?.interface === "rest")?.detail).toMatchObject({
+      error: ErrorCode.SECRET_NOT_FOUND,
+      context: "http",
+      interface: "rest",
+    });
   });
 
   it("MCP use_secret on an unknown name: tool error and one secret.use denial", async () => {
@@ -86,6 +96,14 @@ describe("unknown-handle probes write an attributed denial row (N3)", () => {
       action: USE_ACTION,
     });
     expect(result.isError).toBe(true);
-    expect(deniedRows(AuditEventType.SECRET_USE)).toHaveLength(before + 1);
+    const useRows = deniedRows(AuditEventType.SECRET_USE);
+    expect(useRows).toHaveLength(before + 1);
+    expect(useRows.filter((r) => r.detail?.interface === "mcp")).toHaveLength(1);
+    expect(useRows.find((r) => r.detail?.interface === "mcp")?.detail).toMatchObject({
+      error: ErrorCode.SECRET_NOT_FOUND,
+      context: "http",
+      interface: "mcp",
+      handle: "secret://nope",
+    });
   });
 });

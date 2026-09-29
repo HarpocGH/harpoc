@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveBash } from "./fixtures.js";
-import { KEYS_DIR, clientKeyPem, keysReady, knownHostPin } from "./ssh.js";
+import { KEYS_DIR, clientKeyPem, keysReady, knownHostPin, knownHostPinOnPort } from "./ssh.js";
 
 // resolveBash, not bare "bash": on a Windows dev host PATH bash may be the
 // System32 WSL launcher, which cannot open the absolute Windows script path.
@@ -70,6 +70,15 @@ describe("fixture ssh keys", () => {
     // The bracketed non-22 form OpenSSH uses for git-over-ssh on a custom port.
     expect(knownHostPin("[127.0.0.1]:2222", "pinned")).toMatch(
       /^\[127\.0\.0\.1\]:2222 ssh-ed25519 /,
+    );
+  });
+
+  it("brackets a non-22 pin as `[host]:port` over the same key the bare pin carries", () => {
+    const onPort = knownHostPinOnPort("127.0.0.1", 55022);
+    expect(onPort).toMatch(/^\[127\.0\.0\.1\]:55022 ssh-ed25519 [A-Za-z0-9+/]+=*$/);
+    expect(onPort.split(" ").slice(1)).toEqual(knownHostPin("127.0.0.1").split(" ").slice(1));
+    expect(knownHostPinOnPort("127.0.0.3", 55022, "rogue").split(" ").slice(1)).toEqual(
+      knownHostPin("127.0.0.3", "rogue").split(" ").slice(1),
     );
   });
 

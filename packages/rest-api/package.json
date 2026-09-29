@@ -21,12 +21,12 @@
     }
   },
   "dependencies": {
-    "@harpoc/shared": "workspace:*",
+    "@harpoc/cert-manager": "workspace:*",
     "@harpoc/core": "workspace:*",
     "@harpoc/oauth-proxy": "workspace:*",
-    "@harpoc/cert-manager": "workspace:*",
-    "hono": "^4.7.0",
+    "@harpoc/shared": "workspace:*",
     "@hono/node-server": "^1.14.0",
+    "hono": "^4.7.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {

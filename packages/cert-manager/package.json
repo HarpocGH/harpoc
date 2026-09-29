@@ -21,12 +21,12 @@
     }
   },
   "dependencies": {
-    "@harpoc/shared": "workspace:*",
-    "@harpoc/core": "workspace:*"
+    "@harpoc/core": "workspace:*",
+    "@harpoc/shared": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^22.15.0",
-    "@harpoc/test-utils": "workspace:*"
+    "@harpoc/test-utils": "workspace:*",
+    "@types/node": "^22.15.0"
   },
   "scripts": {
     "build": "tsc",

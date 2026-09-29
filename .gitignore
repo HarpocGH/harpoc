@@ -7,3 +7,4 @@ session.json
 .turbo
 coverage/
 *.tsbuildinfo
+.r7-bwrap-marker-*/

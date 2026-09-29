@@ -3,6 +3,7 @@ import { ErrorCode } from "@harpoc/shared";
 import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 /**
  * Database context (thesis §4.5.5, §6.2 URL-manipulation analogue). Deterministic
@@ -72,14 +73,13 @@ describe("Database context (request-mediated, §4.5.5)", () => {
   });
 
   it("I1: the credential never appears in a rejection", async () => {
-    let thrown: unknown;
-    try {
-      await client.useSecret(handle, dbAction("attacker.example.com:5432"));
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown).toBeDefined();
-    expect(JSON.stringify(thrown)).not.toContain("sk-db-secret");
+    const err = await expectVaultError(
+      () => client.useSecret(handle, dbAction("attacker.example.com:5432")),
+      ErrorCode.HOST_NOT_ALLOWED,
+    );
+    expect(err.message).not.toContain("sk-db-secret");
+    expect(String(err.stack)).not.toContain("sk-db-secret");
+    expect(JSON.stringify(err)).not.toContain("sk-db-secret");
   });
 
   it("records the denied use in the audit trail with context=database", async () => {

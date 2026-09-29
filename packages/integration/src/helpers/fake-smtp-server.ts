@@ -10,10 +10,12 @@ import { LOOPBACK_CERT_PEM, LOOPBACK_KEY_PEM } from "./loopback-cert.js";
  * `rootDir: "src"` cross-package tripwire the typecheck gate enforces; core's
  * cert PEMs are reached only by a runtime `readFileSync`, never a module
  * import), and core does not export the fake, so the brief permits a local
- * copy. The one change from the original is the presented certificate: this
- * copy serves the loopback pair (CN `harpoc-loopback`, SAN
- * `DNS:localhost, IP:127.0.0.1`) so the real `VaultEngine` can dial it through
- * the SSRF floor with TLS identity intact.
+ * copy. It is a trimmed copy, not a mirror: it serves the loopback pair (CN
+ * `harpoc-loopback`, SAN `DNS:localhost, IP:127.0.0.1`) so the real
+ * `VaultEngine` can dial it through the SSRF floor with TLS identity intact,
+ * and it carries only the script options the integration suites use — the
+ * original has more (`banner`, `plaintextAuth`), and a protocol fix made there
+ * is ported here by hand.
  */
 
 const SECURE_CONTEXT = createSecureContext({ key: LOOPBACK_KEY_PEM, cert: LOOPBACK_CERT_PEM });

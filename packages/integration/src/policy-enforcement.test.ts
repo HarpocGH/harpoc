@@ -6,6 +6,9 @@ import type { McpHttpServer } from "@harpoc/mcp-server";
 import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
+
+silenceAuditLines();
 
 const PASSWORD = "policy-enforcement-pw";
 
@@ -32,7 +35,6 @@ describe("per-secret access policy enforcement end-to-end", () => {
       "cfg-admin",
       "charlie",
       "other-agent",
-      "someone-else",
       "w2-lister",
     );
     await vault.engine.createSecret({

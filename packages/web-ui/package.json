@@ -18,17 +18,17 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@harpoc/shared": "workspace:*",
     "@fontsource/ibm-plex-mono": "^5.2.5",
+    "@harpoc/shared": "workspace:*",
     "preact": "^10.26.9"
   },
   "devDependencies": {
+    "@harpoc/test-utils": "workspace:*",
     "@preact/preset-vite": "^2.10.1",
     "@testing-library/preact": "^3.2.4",
     "@types/node": "^22.15.0",
     "jsdom": "^26.1.0",
-    "vite": "^7.0.0",
-    "@harpoc/test-utils": "workspace:*"
+    "vite": "^7.0.0"
   },
   "scripts": {
     "build": "vite build",

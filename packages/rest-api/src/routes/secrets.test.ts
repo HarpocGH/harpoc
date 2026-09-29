@@ -1377,6 +1377,35 @@ describe("secret routes", () => {
         );
       });
     }
+
+    it('DELETE /:handle/connection-config succeeds on scope ["rotate"] and the engine deleter is called', async () => {
+      engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: ["rotate"] });
+
+      const res = await app.request("/api/v1/secrets/test-key/connection-config", {
+        method: "DELETE",
+        headers: AUTH,
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ data: { deleted: true } });
+      expect(engine.deleteConnectionConfig).toHaveBeenCalledWith(
+        "secret://test-key",
+        ROTATE_CALLER,
+      );
+    });
+
+    it('DELETE /:handle/mcp-server succeeds on scope ["rotate"] and the engine deleter is called', async () => {
+      engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: ["rotate"] });
+
+      const res = await app.request("/api/v1/secrets/test-key/mcp-server", {
+        method: "DELETE",
+        headers: AUTH,
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ data: { deleted: true } });
+      expect(engine.deleteMcpServerConfig).toHaveBeenCalledWith("secret://test-key", ROTATE_CALLER);
+    });
   });
 });
 

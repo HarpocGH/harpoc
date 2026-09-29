@@ -18,24 +18,73 @@ const withVaultDir = (args: string[], vaultDir: string): string[] => [
   ...args,
 ];
 
-export function runCli(
-  args: string[],
-  opts: { vaultDir: string; stdin?: string },
+export const CHILD_TIMEOUT_MS = 25_000;
+export const KILL_GRACE_MS = 2_000;
+export const STOP_GRACE_MS = 5_000;
+export const RAW_GET_TIMEOUT_MS = 10_000;
+
+export function runNode(
+  argv: string[],
+  opts: { stdin?: string; timeoutMs?: number } = {},
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const timeoutMs = opts.timeoutMs ?? CHILD_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, withVaultDir(args, opts.vaultDir), {
+    const child = spawn(process.execPath, argv, {
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    const timers: NodeJS.Timeout[] = [];
+    const clearTimers = (): void => {
+      for (const timer of timers) clearTimeout(timer);
+    };
+    timers.push(
+      setTimeout(() => {
+        timedOut = true;
+        child.kill();
+        timers.push(
+          setTimeout(() => {
+            child.kill("SIGKILL");
+            timers.push(
+              setTimeout(() => {
+                reject(new Error(`child pid ${String(child.pid)} did not close after SIGKILL`));
+              }, KILL_GRACE_MS),
+            );
+          }, KILL_GRACE_MS),
+        );
+      }, timeoutMs),
+    );
     child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
     child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-    child.on("error", reject);
+    child.on("error", (err: Error) => {
+      clearTimers();
+      reject(err);
+    });
     child.on("close", (code) => {
+      clearTimers();
+      if (timedOut) {
+        reject(
+          new Error(
+            `child pid ${String(child.pid)} timed out after ${String(timeoutMs)} ms and was killed (${String(child.signalCode)}); stdout so far:\n${stdout}\nstderr so far:\n${stderr}`,
+          ),
+        );
+        return;
+      }
       resolve({ code, stdout, stderr });
     });
     if (opts.stdin !== undefined) child.stdin.write(opts.stdin);
     child.stdin.end();
+  });
+}
+
+export function runCli(
+  args: string[],
+  opts: { vaultDir: string; stdin?: string; timeoutMs?: number },
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return runNode(withVaultDir(args, opts.vaultDir), {
+    stdin: opts.stdin,
+    timeoutMs: opts.timeoutMs,
   });
 }
 
@@ -45,11 +94,15 @@ export interface CliServer {
   stdoutSoFar(): string;
   stderrSoFar(): string;
   waitForStderr(pattern: RegExp, timeoutMs?: number): Promise<RegExpMatchArray>;
-  stop(): Promise<void>;
+  stop(graceMs?: number): Promise<void>;
 }
 
 export function startCliServer(args: string[], opts: { vaultDir: string }): CliServer {
-  const child = spawn(process.execPath, withVaultDir(args, opts.vaultDir), {
+  return startNode(withVaultDir(args, opts.vaultDir));
+}
+
+export function startNode(argv: string[]): CliServer {
+  const child = spawn(process.execPath, argv, {
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
@@ -102,8 +155,8 @@ export function startCliServer(args: string[], opts: { vaultDir: string }): CliS
         }, 50);
       });
     },
-    stop(): Promise<void> {
-      return new Promise((resolve) => {
+    stop(graceMs = STOP_GRACE_MS): Promise<void> {
+      return new Promise((resolve, reject) => {
         if (child.exitCode !== null || child.signalCode !== null) {
           resolve();
           return;
@@ -114,10 +167,26 @@ export function startCliServer(args: string[], opts: { vaultDir: string }): CliS
           resolve();
           return;
         }
+        const timers: NodeJS.Timeout[] = [];
         child.once("close", () => {
+          for (const timer of timers) clearTimeout(timer);
           resolve();
         });
         child.kill();
+        timers.push(
+          setTimeout(() => {
+            child.kill("SIGKILL");
+            timers.push(
+              setTimeout(() => {
+                reject(
+                  new Error(
+                    `CLI child pid ${String(child.pid)} did not close within ${String(2 * graceMs)} ms of kill() and SIGKILL`,
+                  ),
+                );
+              }, graceMs),
+            );
+          }, graceMs),
+        );
       });
     },
   };

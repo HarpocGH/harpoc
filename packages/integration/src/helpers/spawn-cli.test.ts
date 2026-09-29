@@ -8,8 +8,10 @@ import { SESSION_FILE_NAME, VAULT_DB_NAME } from "@harpoc/shared";
 import {
   freePort,
   runCli,
+  runNode,
   startCliServer,
   startCliServerOnFreePort,
+  startNode,
   type CliServer,
 } from "./spawn-cli.js";
 
@@ -25,7 +27,7 @@ beforeAll(async () => {
   });
   await engine.initVault(PASSWORD);
   await engine.destroy();
-  const unlock = await runCli(["unlock"], { vaultDir, stdin: `${PASSWORD}\n` });
+  const unlock = await runCli(["unlock"], { vaultDir, stdin: `${PASSWORD}\n`, timeoutMs: 110_000 });
   expect(unlock.code).toBe(0);
 }, 120_000);
 
@@ -82,4 +84,63 @@ describe("startCliServerOnFreePort", () => {
     ).rejects.toThrow(/exited before \/api\/v1\/health/);
     expect(pickPort).toHaveBeenCalledTimes(1);
   });
+});
+
+describe("child deadlines (SG-33, W1-11, DM26-11)", () => {
+  it("runNode kills a hanging child at its deadline and rejects naming it", async () => {
+    const started = Date.now();
+    const err = await runNode(["-e", "setInterval(() => {}, 1e6)"], { timeoutMs: 200 }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/timed out after 200 ms and was killed \(SIGTERM\)/);
+    const pid = Number(/pid (\d+)/.exec((err as Error).message)?.[1]);
+    expect(() => process.kill(pid, 0)).toThrow();
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 10_000);
+
+  it("runCli threads its deadline to the CLI child", async () => {
+    const port = await freePort();
+    await expect(
+      runCli(["server", "start", "--rest", "--port", String(port)], { vaultDir, timeoutMs: 500 }),
+    ).rejects.toThrow(/timed out after 500 ms/);
+  }, 10_000);
+
+  it.runIf(process.platform !== "win32")(
+    "stop() escalates to SIGKILL when the child ignores SIGTERM",
+    async () => {
+      const s = startNode([
+        "-e",
+        "process.on('SIGTERM', () => { process.stderr.write('term\\n'); }); process.stderr.write('ready\\n'); setInterval(() => {}, 1e6)",
+      ]);
+      try {
+        await s.waitForStderr(/ready/, 5_000);
+        await s.stop(200);
+        expect(s.child.signalCode).toBe("SIGKILL");
+        expect(s.stderrSoFar()).toMatch(/term/);
+      } finally {
+        await s.stop(200);
+      }
+    },
+    10_000,
+  );
+
+  it.runIf(process.platform === "win32")(
+    "stop() on win32: kill() alone ends a SIGTERM-ignoring child",
+    async () => {
+      const s = startNode([
+        "-e",
+        "process.on('SIGTERM', () => {}); process.stderr.write('ready\\n'); setInterval(() => {}, 1e6)",
+      ]);
+      try {
+        await s.waitForStderr(/ready/, 5_000);
+        await s.stop(200);
+        expect(s.child.signalCode).toBe("SIGTERM");
+      } finally {
+        await s.stop(200);
+      }
+    },
+    10_000,
+  );
 });

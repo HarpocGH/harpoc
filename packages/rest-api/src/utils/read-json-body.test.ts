@@ -1,4 +1,7 @@
+import { request } from "node:http";
+import type { AddressInfo } from "node:net";
 import { Hono } from "hono";
+import { serve } from "@hono/node-server";
 import { describe, expect, it } from "vitest";
 import { ErrorCode, MAX_REQUEST_BODY_BYTES } from "@harpoc/shared";
 import type { Context } from "hono";
@@ -79,5 +82,78 @@ describe("readJsonBody — the request-body cap (P1F-7)", () => {
     const res = await app().request("/echo", { method: "POST", body: "\uFEFF" + '{"a":1}' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ keys: ["a"] });
+  });
+});
+
+function listen(): Promise<{ port: number; close: () => Promise<void> }> {
+  let server: ReturnType<typeof serve> | undefined;
+  return new Promise((resolve) => {
+    server = serve({ fetch: app().fetch, port: 0, hostname: "127.0.0.1" }, (info: AddressInfo) =>
+      resolve({
+        port: info.port,
+        close: () => new Promise<void>((done) => server?.close(() => done())),
+      }),
+    );
+  });
+}
+
+function postChunked(
+  port: number,
+  total: number,
+  pauseMs: number,
+): Promise<{ status: number | undefined; body: unknown; writtenAtResponse: number }> {
+  return new Promise((resolve, reject) => {
+    let written = 0;
+    let answered = false;
+    const chunk = Buffer.alloc(65_536, 0x78);
+    const req = request({ host: "127.0.0.1", port, path: "/echo", method: "POST" }, (res) => {
+      answered = true;
+      const writtenAtResponse = written;
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (d: string) => (text += d));
+      res.on("end", () =>
+        resolve({ status: res.statusCode, body: JSON.parse(text), writtenAtResponse }),
+      );
+    });
+    req.on("error", (err) => {
+      if (!answered) reject(err);
+    });
+    void (async () => {
+      while (written < total && !answered) {
+        const n = Math.min(chunk.length, total - written);
+        const ok = req.write(n === chunk.length ? chunk : chunk.subarray(0, n));
+        written += n;
+        if (!ok) await new Promise((r) => req.once("drain", r));
+        if (pauseMs > 0) await new Promise((r) => setTimeout(r, pauseMs));
+      }
+      if (!answered) req.end();
+    })().catch(reject);
+  });
+}
+
+describe("readJsonBody — the cap over a real socket (P1c-30)", () => {
+  it("refuses a chunked body one byte over the cap", async () => {
+    const listener = await listen();
+    try {
+      const res = await postChunked(listener.port, MAX_REQUEST_BODY_BYTES + 1, 0);
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual(TOO_LARGE);
+    } finally {
+      await listener.close();
+    }
+  });
+
+  it("refuses a trickled body before the client has sent it all", { timeout: 15_000 }, async () => {
+    const total = 6 * 1024 * 1024;
+    const listener = await listen();
+    try {
+      const res = await postChunked(listener.port, total, 5);
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual(TOO_LARGE);
+      expect(res.writtenAtResponse).toBeLessThan(total);
+    } finally {
+      await listener.close();
+    }
   });
 });

@@ -526,7 +526,9 @@ describe("harpoc agent group", () => {
         result({ gated_before: false, gated_after: true }),
       );
       await run(["permissions", "bot", "secret://k", "--permissions", "use"]);
-      expect(stderr()).toContain("received its first grant");
+      expect(stderr()).toContain(
+        "Note: secret://k received its first grant — until now no agent or tool token could reach it.",
+      );
     });
 
     it("prints the note when the secret loses its last grant", async () => {
@@ -534,7 +536,9 @@ describe("harpoc agent group", () => {
         result({ policy: null, gated_before: true, gated_after: false }),
       );
       await run(["permissions", "bot", "secret://k", "--clear"]);
-      expect(stderr()).toContain("has no grants left");
+      expect(stderr()).toContain(
+        "Note: secret://k has no grants left — no agent or tool token can reach it until one is written.",
+      );
     });
 
     it("prints no gating note when the gate did not flip", async () => {

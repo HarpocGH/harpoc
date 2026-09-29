@@ -31,6 +31,7 @@ describe("web-ui launch flow (spawned CLI)", () => {
     const unlock = await runCli(["unlock"], {
       vaultDir,
       stdin: `${PASSWORD}\n`,
+      timeoutMs: 110_000,
     });
     expect(unlock.code).toBe(0);
   }, 120_000);

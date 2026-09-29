@@ -8,6 +8,9 @@ import {
   registerAgents,
 } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { silenceAuditLines } from "@harpoc/test-utils";
+
+silenceAuditLines();
 
 const PASSWORD = "rest-scope-denial-pw";
 
