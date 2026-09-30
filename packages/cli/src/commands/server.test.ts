@@ -83,27 +83,29 @@ vi.mock("@harpoc/rest-api", () => ({
 }));
 
 vi.mock("@harpoc/oauth-proxy", () => ({
-  TokenRefreshScheduler: vi.fn().mockImplementation((engine: unknown, options: unknown) => {
+  TokenRefreshScheduler: vi.fn().mockImplementation(function (engine: unknown, options: unknown) {
     schedulerCtorCalls.push({ engine, options: options as Record<string, unknown> });
     return mockScheduler;
   }),
 }));
 
 vi.mock("@harpoc/cert-manager", () => ({
-  CertManager: vi.fn().mockImplementation((engine: unknown) => {
+  CertManager: vi.fn().mockImplementation(function (engine: unknown) {
     certManagerCtorCalls.push({ engine });
     return mockCertManager;
   }),
-  RenewalScheduler: vi
-    .fn()
-    .mockImplementation((engine: unknown, renewer: unknown, options: unknown) => {
-      renewalSchedulerCtorCalls.push({
-        engine,
-        renewer,
-        options: options as Record<string, unknown>,
-      });
-      return mockRenewalScheduler;
-    }),
+  RenewalScheduler: vi.fn().mockImplementation(function (
+    engine: unknown,
+    renewer: unknown,
+    options: unknown,
+  ) {
+    renewalSchedulerCtorCalls.push({
+      engine,
+      renewer,
+      options: options as Record<string, unknown>,
+    });
+    return mockRenewalScheduler;
+  }),
 }));
 
 // ── Helpers ────────────────────────────────────────────────────────

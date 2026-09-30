@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
-import type { VaultApiToken } from "@harpoc/shared";
+import { describe, it, expect, vi, type Mock } from "vitest";
+import type { ScopeRefusalReason, VaultApiToken } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import { ScopeGuard } from "./scope-guard.js";
 
@@ -188,8 +188,10 @@ describe("ScopeGuard", () => {
   });
 
   describe("onRefusal (D2g)", () => {
-    const build = (overrides: Partial<VaultApiToken>, seen: ReturnType<typeof vi.fn>) =>
-      new ScopeGuard(makeToken(overrides), "mcp", undefined, undefined, seen);
+    const build = (
+      overrides: Partial<VaultApiToken>,
+      seen: Mock<(operation: string, reason: ScopeRefusalReason) => void>,
+    ) => new ScopeGuard(makeToken(overrides), "mcp", undefined, undefined, seen);
 
     it("reports the permission branch with the operation, once, then throws", () => {
       const seen = vi.fn();

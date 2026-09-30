@@ -94,8 +94,8 @@ async function run(args: string[]): Promise<void> {
 
 describe("harpoc agent group", () => {
   let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: MockInstance;
+  let logSpy: MockInstance;
   const savedEnvToken = process.env.HARPOC_TOKEN;
 
   const stdout = (): string => logSpy.mock.calls.map((c) => String(c[0])).join("\n");

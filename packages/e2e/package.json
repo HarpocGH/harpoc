@@ -16,16 +16,17 @@
     "@harpoc/rest-api": "workspace:*",
     "@harpoc/sdk": "workspace:*",
     "@harpoc/shared": "workspace:*",
-    "@hono/node-server": "^1.14.0",
+    "@hono/node-server": "^1.19.15",
     "@modelcontextprotocol/client": "^2.0.0",
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
-    "hono": "^4.12.5",
+    "hono": "^4.13.5",
     "pg": "^8.22.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@harpoc/test-utils": "workspace:*"
+    "@harpoc/test-utils": "workspace:*",
+    "@types/node": "^22.15.0"
   },
   "scripts": {
     "pki": "node scripts/generate-fixtures.mjs pki",

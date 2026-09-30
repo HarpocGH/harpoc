@@ -14,7 +14,7 @@ const distDir = resolve(pkgRoot, "dist");
 
 describe("core", () => {
   describeBuildOutput(distDir);
-  describeCrossPackageImports(["@harpoc/shared"]);
+  describeCrossPackageImports({ "@harpoc/shared": () => import("@harpoc/shared") });
   describeWorkspaceDeps(pkgRoot, ["@harpoc/shared"]);
 
   it("builds the win32 job wrapper after tsc (D3, 2026-09-10)", () => {

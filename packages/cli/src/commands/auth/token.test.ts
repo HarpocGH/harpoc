@@ -41,7 +41,7 @@ async function run(args: string[]): Promise<void> {
 
 describe("auth token --principal-type", () => {
   let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: MockInstance;
   let logSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -147,7 +147,7 @@ describe("auth token --principal-type", () => {
 describe("auth token --label", () => {
   let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: MockInstance;
 
   const stdout = (): string => logSpy.mock.calls.map((c) => String(c[0])).join("\n");
 
@@ -214,8 +214,8 @@ describe("auth token --label", () => {
  */
 describe("auth token --out", () => {
   let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: MockInstance;
+  let logSpy: MockInstance;
   let dir: string;
 
   const stdout = (): string => logSpy.mock.calls.map((c) => c.map(String).join(" ")).join("\n");

@@ -47,15 +47,15 @@ export function describeBuildOutput(distDir: string, options?: { shebang?: boole
   });
 }
 
-/** Assert that each specifier can be dynamically imported (cross-package wiring). */
-export function describeCrossPackageImports(specifiers: string[]): void {
+/** Assert that each import resolves from the calling package (cross-package wiring). */
+export function describeCrossPackageImports(imports: Record<string, () => Promise<unknown>>): void {
   describe("cross-package imports", () => {
-    for (const specifier of specifiers) {
+    for (const [specifier, load] of Object.entries(imports)) {
       // The first import of @harpoc/core loads native addons (better-sqlite3,
       // argon2) and large dependency graphs; under a fully parallel suite run
       // that regularly exceeds the 5 s default timeout.
       it(`can import ${specifier}`, { timeout: 30_000 }, async () => {
-        const mod = await import(specifier);
+        const mod = await load();
         expect(mod).toBeDefined();
       });
     }

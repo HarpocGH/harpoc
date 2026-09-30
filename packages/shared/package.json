@@ -23,6 +23,9 @@
   "dependencies": {
     "zod": "^4.6.5"
   },
+  "devDependencies": {
+    "@types/node": "^22.15.0"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",

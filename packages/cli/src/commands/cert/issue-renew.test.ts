@@ -14,7 +14,9 @@ const { mockEngine, mockCertManager, mockIssueWithAcme, mockRenewCertificate, mo
       },
       mockIssueWithAcme: issueWithAcme,
       mockRenewCertificate: renewCertificate,
-      mockCertManager: vi.fn(() => ({ issueWithAcme, renewCertificate })),
+      mockCertManager: vi.fn(function () {
+        return { issueWithAcme, renewCertificate };
+      }),
       mockPromptHidden: vi.fn(),
     };
   });

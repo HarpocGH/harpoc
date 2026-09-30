@@ -29,7 +29,7 @@ async function run(args: string[]): Promise<void> {
 describe("auth revoke (registry-authoritative, R9/C33-A)", () => {
   const savedEnv = process.env.HARPOC_TOKEN;
   let logSpy: ReturnType<typeof vi.spyOn>;
-  let errSpy: ReturnType<typeof vi.spyOn>;
+  let errSpy: MockInstance;
   let exitSpy: MockInstance;
 
   beforeEach(() => {

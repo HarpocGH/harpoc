@@ -126,7 +126,7 @@ describe("audit --since validation", () => {
 describe("audit table Principal column (by whom, thesis §4.3.4)", () => {
   let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: MockInstance;
   const savedEnvToken = process.env.HARPOC_TOKEN;
 
   beforeEach(() => {
@@ -193,7 +193,7 @@ describe("audit table Principal column (by whom, thesis §4.3.4)", () => {
 describe("audit table IP column (from where, E75i)", () => {
   let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: MockInstance;
   const savedEnvToken = process.env.HARPOC_TOKEN;
 
   beforeEach(() => {
@@ -277,8 +277,8 @@ const validAnchor = {
 describe("audit anchor / verify --anchor", () => {
   let tempDir: string;
   let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: MockInstance;
+  let logSpy: MockInstance;
   const savedEnvToken = process.env.HARPOC_TOKEN;
 
   beforeEach(() => {

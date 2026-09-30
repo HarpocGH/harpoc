@@ -54,7 +54,9 @@ const { mockEngine, mockManager, mockCertManager, mockResolveSecretValue, mockPr
         destroy: vi.fn().mockResolvedValue(undefined),
       },
       mockManager: manager,
-      mockCertManager: vi.fn(() => manager),
+      mockCertManager: vi.fn(function () {
+        return manager;
+      }),
       mockResolveSecretValue: vi.fn(),
       mockPromptConfirm: vi.fn(),
     };

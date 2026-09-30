@@ -31,7 +31,7 @@ vi.mock("@harpoc/oauth-proxy", async (importOriginal) => {
   const original = await importOriginal<typeof import("@harpoc/oauth-proxy")>();
   return {
     ...original,
-    OAuthManager: vi.fn().mockImplementation((engine: unknown, options: unknown) => {
+    OAuthManager: vi.fn().mockImplementation(function (engine: unknown, options: unknown) {
       managerCtorCalls.push({ engine, options: options as Record<string, unknown> });
       return mockManager;
     }),

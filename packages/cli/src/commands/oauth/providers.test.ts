@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
@@ -20,7 +20,7 @@ async function run(args: string[]): Promise<void> {
 }
 
 describe("oauth providers", () => {
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: MockInstance;
 
   beforeEach(() => {
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {});

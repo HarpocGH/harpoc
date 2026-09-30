@@ -6,6 +6,6 @@ const pkgRoot = getPkgRoot(import.meta.url);
 describe("web-ui", () => {
   // No describeBuildOutput: the build artifact is a Vite site (index.html +
   // hashed assets), not a tsc dist/index.js.
-  describeCrossPackageImports(["@harpoc/shared"]);
+  describeCrossPackageImports({ "@harpoc/shared": () => import("@harpoc/shared") });
   describeWorkspaceDeps(pkgRoot, ["@harpoc/shared"]);
 });

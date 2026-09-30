@@ -12,14 +12,14 @@ const distDir = resolve(pkgRoot, "dist");
 
 describe("cli", () => {
   describeBuildOutput(distDir, { shebang: true });
-  describeCrossPackageImports([
-    "@harpoc/shared",
-    "@harpoc/core",
-    "@harpoc/cert-manager",
-    "@harpoc/mcp-server",
-    "@harpoc/oauth-proxy",
-    "@harpoc/rest-api",
-  ]);
+  describeCrossPackageImports({
+    "@harpoc/shared": () => import("@harpoc/shared"),
+    "@harpoc/core": () => import("@harpoc/core"),
+    "@harpoc/cert-manager": () => import("@harpoc/cert-manager"),
+    "@harpoc/mcp-server": () => import("@harpoc/mcp-server"),
+    "@harpoc/oauth-proxy": () => import("@harpoc/oauth-proxy"),
+    "@harpoc/rest-api": () => import("@harpoc/rest-api"),
+  });
   describeWorkspaceDeps(pkgRoot, [
     "@harpoc/shared",
     "@harpoc/core",

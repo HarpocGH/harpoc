@@ -94,7 +94,7 @@ async function run(args: string[]): Promise<void> {
 
 describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provider)", () => {
   let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: MockInstance;
   let logSpy: ReturnType<typeof vi.spyOn>;
   const savedEnv = process.env.HARPOC_OAUTH_CLIENT_SECRET;
 

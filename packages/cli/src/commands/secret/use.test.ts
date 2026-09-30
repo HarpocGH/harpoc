@@ -1024,7 +1024,7 @@ describe("secret use — --action is a closed set", () => {
 describe("secret use — output shape and boundary sanitization", () => {
   let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: MockInstance;
 
   beforeEach(() => {
     vi.clearAllMocks();
