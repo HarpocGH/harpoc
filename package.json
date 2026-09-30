@@ -30,7 +30,7 @@
     "dev": "turbo run dev"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.5",
+    "@eslint/js": "^10.0.1",
     "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^10.11.0",
     "prettier": "^3.9.9",

@@ -335,7 +335,7 @@ function healthOf(service: FleetService): string | undefined {
  * failure mode HARPOC_REQUIRE_PLATFORM_TESTS exists to prevent elsewhere.
  */
 export function assertFleetUp(service: FleetService): void {
-  let running = "";
+  let running: string;
   try {
     running = execFileSync(DOCKER, ["compose", "ps", "--services", "--filter", "status=running"], {
       cwd: COMPOSE_DIR,
