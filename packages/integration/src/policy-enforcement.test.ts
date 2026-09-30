@@ -100,8 +100,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
 
   function textOf(result: unknown): string {
     const content = (result as { content?: unknown }).content as
-      | { type: string; text?: string }[]
-      | undefined;
+      { type: string; text?: string }[] | undefined;
     return (content ?? []).map((c) => c.text ?? "").join("\n");
   }
 

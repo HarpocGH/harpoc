@@ -77,8 +77,7 @@ describe("MCP Streamable HTTP transport (real engine, real tokens)", () => {
 
   function textOf(result: unknown): string {
     const content = (result as { content?: unknown }).content as
-      | { type: string; text?: string }[]
-      | undefined;
+      { type: string; text?: string }[] | undefined;
     return (content ?? []).map((c) => c.text ?? "").join("\n");
   }
 

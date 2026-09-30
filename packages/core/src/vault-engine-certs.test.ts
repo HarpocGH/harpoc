@@ -93,8 +93,7 @@ function storedCert(secretId: string): StoredCertRow | undefined {
   const db = new Database(dbPath, { readonly: true });
   try {
     return db.prepare("SELECT * FROM certificates WHERE secret_id = ?").get(secretId) as
-      | StoredCertRow
-      | undefined;
+      StoredCertRow | undefined;
   } finally {
     db.close();
   }

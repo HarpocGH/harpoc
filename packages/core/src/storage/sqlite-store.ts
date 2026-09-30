@@ -334,8 +334,7 @@ export class SqliteStore {
 
   getMeta(key: string): string | undefined {
     const row = this.db.prepare("SELECT value FROM vault_meta WHERE key = ?").get(key) as
-      | { value: string }
-      | undefined;
+      { value: string } | undefined;
     return row?.value;
   }
 
@@ -403,8 +402,7 @@ export class SqliteStore {
 
   getSecret(id: string): Secret | undefined {
     const row = this.db.prepare("SELECT * FROM secrets WHERE id = ?").get(id) as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     return row ? this.rowToSecret(row) : undefined;
   }
 
@@ -506,8 +504,7 @@ export class SqliteStore {
 
   getPolicy(id: string): AccessPolicy | undefined {
     const row = this.db.prepare("SELECT * FROM access_policies WHERE id = ?").get(id) as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     return row ? this.rowToPolicy(row) : undefined;
   }
 
@@ -742,8 +739,7 @@ export class SqliteStore {
 
   isTokenRevoked(jti: string): boolean {
     const row = this.db.prepare("SELECT jti FROM revoked_tokens WHERE jti = ?").get(jti) as
-      | { jti: string }
-      | undefined;
+      { jti: string } | undefined;
     return row !== undefined;
   }
 
@@ -780,15 +776,13 @@ export class SqliteStore {
 
   getAgentByName(name: string): AgentRow | undefined {
     const row = this.db.prepare("SELECT * FROM agents WHERE name = ?").get(name) as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     return row ? this.rowToAgent(row) : undefined;
   }
 
   getAgentById(id: string): AgentRow | undefined {
     const row = this.db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     return row ? this.rowToAgent(row) : undefined;
   }
 
@@ -876,8 +870,7 @@ export class SqliteStore {
   /** One issued-token row by jti, or null — the registry is authoritative for revocation (R9/C33-A). */
   getIssuedToken(jti: string): IssuedTokenRow | null {
     const row = this.db.prepare("SELECT * FROM issued_tokens WHERE jti = ?").get(jti) as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     return row ? this.rowToIssuedToken(row) : null;
   }
 
@@ -990,8 +983,7 @@ export class SqliteStore {
 
   getOAuthToken(secretId: string): OAuthTokenRow | undefined {
     const row = this.db.prepare("SELECT * FROM oauth_tokens WHERE secret_id = ?").get(secretId) as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     return row ? this.rowToOAuthToken(row) : undefined;
   }
 
@@ -1114,8 +1106,7 @@ export class SqliteStore {
 
   getCertificate(secretId: string): CertificateRow | undefined {
     const row = this.db.prepare("SELECT * FROM certificates WHERE secret_id = ?").get(secretId) as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     return row ? this.rowToCertificate(row) : undefined;
   }
 
@@ -1268,8 +1259,7 @@ export class SqliteStore {
 
   getMcpServer(secretId: string): McpServerRow | undefined {
     const row = this.db.prepare("SELECT * FROM mcp_servers WHERE secret_id = ?").get(secretId) as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     return row ? this.rowToMcpServer(row) : undefined;
   }
 

@@ -30,8 +30,7 @@ import { validateHostPort } from "./url-validator.js";
 
 /** The adapter an action dispatches through, tagged so each arm narrows without a cast. */
 type ResolvedAdapter =
-  | { kind: "command"; adapter: DbCommandAdapter }
-  | { kind: "sql"; adapter: DbEngineAdapter };
+  { kind: "command"; adapter: DbCommandAdapter } | { kind: "sql"; adapter: DbEngineAdapter };
 
 /**
  * Executes a SQL query with an injected credential (request-mediated injection,

@@ -23,7 +23,7 @@
   "dependencies": {
     "@harpoc/shared": "workspace:*",
     "@modelcontextprotocol/client": "^2.0.0",
-    "argon2": "^0.43.0",
+    "argon2": "^0.45.1",
     "better-sqlite3": "^12.6.2",
     "mongodb": "^7.5.0",
     "mysql2": "^3.23.1",

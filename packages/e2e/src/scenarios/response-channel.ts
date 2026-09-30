@@ -226,21 +226,19 @@ export const RESPONSE_CHANNEL_ARMS: ScenarioArm[] = [
             .join(""),
       ],
     ] as const
-  ).map(
-    ([variant, fragmentOf]): ScenarioArm => ({
-      scenario: "response-channel-echo",
-      context: "http",
-      variant,
-      services: ["echo-https"],
-      setup: (v) => setupEcho(v, variant, `p4-rc-${variant}-${NONCE}`),
-      async observe(arm, setup) {
-        // Measured as FRAGMENT survival, not full-credential survival: the
-        // endpoint never emits the whole value, so a whole-credential sweep
-        // would find nothing and report BLOCKED for both arms — a false
-        // negative that would hide the residual entirely.
-        const outcome = await arm.invoke(setup.handle, fetchAction("/echo/partial"));
-        return verdict(arm, fragmentSurvived(outcome, fragmentOf(setup.credential)));
-      },
-    }),
-  ),
+  ).map(([variant, fragmentOf]): ScenarioArm => ({
+    scenario: "response-channel-echo",
+    context: "http",
+    variant,
+    services: ["echo-https"],
+    setup: (v) => setupEcho(v, variant, `p4-rc-${variant}-${NONCE}`),
+    async observe(arm, setup) {
+      // Measured as FRAGMENT survival, not full-credential survival: the
+      // endpoint never emits the whole value, so a whole-credential sweep
+      // would find nothing and report BLOCKED for both arms — a false
+      // negative that would hide the residual entirely.
+      const outcome = await arm.invoke(setup.handle, fetchAction("/echo/partial"));
+      return verdict(arm, fragmentSurvived(outcome, fragmentOf(setup.credential)));
+    },
+  })),
 ];

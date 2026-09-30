@@ -137,8 +137,7 @@ export function buildAllowedHostSet(
 }
 
 export type HostCheck =
-  | { ok: true }
-  | { ok: false; header: "Host" | "Origin"; hostname: string | null };
+  { ok: true } | { ok: false; header: "Host" | "Origin"; hostname: string | null };
 
 /**
  * The allow decision for one request. `Host` must parse and be listed;

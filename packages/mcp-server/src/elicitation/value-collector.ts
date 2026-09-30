@@ -237,8 +237,7 @@ export async function collectValueViaUrlElicitation(
   options: ValueCollectorOptions,
 ): Promise<Uint8Array | null> {
   const elicitation = mcp.server.getClientCapabilities()?.elicitation as
-    | { url?: unknown }
-    | undefined;
+    { url?: unknown } | undefined;
   if (!elicitation?.url) return null;
 
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -437,8 +436,7 @@ export async function runModernValueRound<T>(
 function hasUrlElicitationCapability(ctx: ServerContext): boolean {
   const envelope = ctx.mcpReq.envelope as Record<string, unknown> | undefined;
   const capabilities = envelope?.[CLIENT_CAPABILITIES_META_KEY] as
-    | { elicitation?: { url?: unknown } }
-    | undefined;
+    { elicitation?: { url?: unknown } } | undefined;
   return capabilities?.elicitation?.url !== undefined;
 }
 

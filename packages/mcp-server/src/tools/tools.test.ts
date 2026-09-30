@@ -385,8 +385,7 @@ describe("MCP Tools", () => {
         const tool = tools.find((t) => t.name === "use_secret");
         expect(tool).toBeDefined();
         const actionSchema = (tool as InMemoryToolDescriptor).inputSchema.properties?.action as
-          | { oneOf?: UnionArm[] }
-          | undefined;
+          { oneOf?: UnionArm[] } | undefined;
         expect(actionSchema?.oneOf).toBeDefined();
         return actionSchema?.oneOf ?? [];
       }
@@ -1085,11 +1084,7 @@ describe("token-derived caller wiring (engine-level policy enforcement)", () => 
     sub: "agent-7",
     vault_id: "vault-1",
     scope: ["use", "read", "rotate", "revoke", "create"] as (
-      | "use"
-      | "read"
-      | "rotate"
-      | "revoke"
-      | "create"
+      "use" | "read" | "rotate" | "revoke" | "create"
     )[],
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 3600,

@@ -57,7 +57,7 @@ export function createUiRoutes(uiDir: string): Hono {
     const contentType = CONTENT_TYPES[isAsset ? ext : ".html"];
     if (contentType === undefined) return c.notFound();
 
-    let body: Uint8Array;
+    let body: Uint8Array<ArrayBuffer>;
     try {
       body = new Uint8Array(await readFile(filePath));
     } catch {

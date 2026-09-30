@@ -446,11 +446,9 @@ export async function resolveJobWrapper(
   if (!cachedResolution) {
     if (now() < unavailableUntil) return { unavailable: lastUnavailable };
     const attempt: Promise<JobWrapperResolution> = resolve(seams)
-      .catch(
-        (err: unknown): JobWrapperResolution => ({
-          unavailable: `resolution failed: ${err instanceof Error ? err.message : String(err)}`,
-        }),
-      )
+      .catch((err: unknown): JobWrapperResolution => ({
+        unavailable: `resolution failed: ${err instanceof Error ? err.message : String(err)}`,
+      }))
       .then((result) => {
         if ("unavailable" in result && cachedResolution === attempt) {
           cachedResolution = null;

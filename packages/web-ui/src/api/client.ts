@@ -207,8 +207,7 @@ export function createApiClient(
     if (init?.body !== undefined) headers["Content-Type"] = "application/json";
     const res = await fetchFn(path, { ...init, headers });
     const body = (await res.json().catch(() => null)) as
-      | ({ data?: T; error?: string; message?: string } & Record<string, unknown>)
-      | null;
+      ({ data?: T; error?: string; message?: string } & Record<string, unknown>) | null;
     if (!res.ok) {
       // Keyed on the error code, not the 423: the status is shared with other
       // refusals, the code is not.

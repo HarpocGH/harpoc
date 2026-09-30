@@ -8,13 +8,7 @@
  * carries, so the two never have to be re-derived from each other downstream.
  */
 export type SurfaceName =
-  | "mcp-http"
-  | "mcp-stdio"
-  | "mcp-http-2026"
-  | "mcp-stdio-2026"
-  | "rest"
-  | "sdk"
-  | "cli";
+  "mcp-http" | "mcp-stdio" | "mcp-http-2026" | "mcp-stdio-2026" | "rest" | "sdk" | "cli";
 export type InterfaceId = "mcp" | "rest" | "sdk" | "cli";
 
 export interface CallOutcome {

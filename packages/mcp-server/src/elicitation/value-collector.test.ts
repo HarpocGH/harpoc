@@ -985,8 +985,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       );
 
       const request = pending?.inputRequests?.value as
-        | { params?: { mode?: string; url?: string; message?: string } }
-        | undefined;
+        { params?: { mode?: string; url?: string; message?: string } } | undefined;
       expect(request?.params?.mode).toBe("url");
       const url = request?.params?.url ?? "";
       expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/collect\/[A-Za-z0-9_-]{43}$/);

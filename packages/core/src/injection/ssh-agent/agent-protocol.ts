@@ -66,7 +66,7 @@ function handleMessage(message: Buffer, key: LoadedKey): Buffer {
  * completes). A frame claiming an implausible length fails closed and resets.
  */
 export function createAgentResponder(key: LoadedKey): (chunk: Buffer) => Buffer {
-  let buffer = Buffer.alloc(0);
+  let buffer: Buffer = Buffer.alloc(0);
   return (chunk: Buffer): Buffer => {
     buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
     const out: Buffer[] = [];
