@@ -26,7 +26,7 @@
     "@harpoc/test-utils": "workspace:*",
     "@preact/preset-vite": "^2.10.1",
     "@testing-library/preact": "^3.2.4",
-    "@types/node": "^22.15.0",
+    "@types/node": "^26.6.3",
     "jsdom": "^30.1.1",
     "vite": "^7.3.5"
   },
