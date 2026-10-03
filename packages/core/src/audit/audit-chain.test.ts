@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AuditEventType } from "@harpoc/shared";
+import { AuditEventType, PrincipalType } from "@harpoc/shared";
 import { encrypt } from "../crypto/aes-gcm.js";
 import { generateRandomBytes } from "../crypto/random.js";
 import { SqliteStore } from "../storage/sqlite-store.js";
+import { computeAuditRowHmac } from "./audit-chain.js";
 import { AuditLogger } from "./audit-logger.js";
 import { AuditQuery } from "./audit-query.js";
 import { dropAuditRowHmacConstraint, sqliteErrorCode } from "@harpoc/test-utils";
@@ -153,6 +154,85 @@ describe("audit HMAC chain verification", () => {
     const result = query.verifyChain();
     expect(result.valid).toBe(true);
     expect(result.checked).toBe(3);
+  });
+});
+
+describe("audit HMAC chain: every bound column is pinned", () => {
+  const SECRET_ID = "3f1c2a4e-9b7d-4c1e-8a2f-5d6e7f8a9b0c";
+
+  function logFullRow(): number {
+    logger.log({ eventType: AuditEventType.SECRET_READ, detail: { i: 0 } });
+    const id = logger.log({
+      eventType: AuditEventType.SECRET_USE,
+      secretId: SECRET_ID,
+      principalType: PrincipalType.AGENT,
+      principalId: "agent-alpha",
+      detail: { i: 1 },
+      ipAddress: "203.0.113.7",
+      sessionId: "session-alpha",
+    });
+    logger.log({ eventType: AuditEventType.SECRET_READ, detail: { i: 2 } });
+    return id;
+  }
+
+  function flipFirstByte(stored: unknown): Buffer {
+    const copy = Buffer.from(stored as Buffer);
+    copy.writeUInt8(copy.readUInt8(0) ^ 0xff, 0);
+    return copy;
+  }
+
+  it.each<[string, string, (stored: unknown) => unknown]>([
+    ["timestamp", "timestamp", (stored) => (stored as number) + 1],
+    ["event_type", "event_type", () => AuditEventType.SECRET_ROTATE],
+    ["secret_id", "secret_id", () => "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d"],
+    ["principal_type", "principal_type", () => PrincipalType.TOOL],
+    ["principal_id", "principal_id", () => "agent-beta"],
+    ["detail_encrypted", "detail_encrypted", flipFirstByte],
+    ["detail_iv", "detail_iv", flipFirstByte],
+    ["detail_tag", "detail_tag", flipFirstByte],
+    ["ip_address", "ip_address", () => "203.0.113.8"],
+    ["session_id", "session_id", () => "session-beta"],
+    ["detail_iv nulled beside a present ciphertext", "detail_iv", () => null],
+    ["detail_tag nulled beside a present ciphertext", "detail_tag", () => null],
+  ])("detects a tampered %s", (_label, column, rewrite) => {
+    const id = logFullRow();
+    const { stored } = store.db
+      .prepare(`SELECT ${column} AS stored FROM audit_log WHERE id = ?`)
+      .get(id) as { stored: unknown };
+    const tampered = rewrite(stored);
+    expect(tampered).not.toEqual(stored);
+    store.db.prepare(`UPDATE audit_log SET ${column} = ? WHERE id = ?`).run(tampered, id);
+
+    const result = query.verifyChain();
+    expect(result.valid).toBe(false);
+    expect(result.firstBrokenId).toBe(id);
+  });
+
+  it("known answer: computeAuditRowHmac over a fixed row, key and link", () => {
+    const chainKey = Uint8Array.from({ length: 32 }, (_, i) => i);
+    const prev = new Uint8Array(32).fill(0xa5);
+
+    const digest = computeAuditRowHmac(
+      chainKey,
+      {
+        timestamp: 1_767_225_600_000,
+        event_type: AuditEventType.SECRET_USE,
+        secret_id: SECRET_ID,
+        principal_type: PrincipalType.AGENT,
+        principal_id: "agent-alpha",
+        detail_encrypted: new Uint8Array(16).fill(0x11),
+        detail_iv: new Uint8Array(12).fill(0x22),
+        detail_tag: new Uint8Array(16).fill(0x33),
+        ip_address: "203.0.113.7",
+        session_id: "session-alpha",
+        success: true,
+      },
+      prev,
+    );
+
+    expect(Buffer.from(digest).toString("hex")).toBe(
+      "df25b177d8ae94d7a604418fd523d5a8e3db3e5b57aac5c78c5f3e683522c177",
+    );
   });
 });
 

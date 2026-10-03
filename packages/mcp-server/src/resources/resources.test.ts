@@ -1,9 +1,14 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { McpServer } from "@modelcontextprotocol/server";
-import { connectModernInMemoryClient, inMemoryClientFor, invokeHandler } from "@harpoc/test-utils";
+import {
+  connectModernInMemoryClient,
+  expectVaultError,
+  inMemoryClientFor,
+  invokeHandler,
+} from "@harpoc/test-utils";
 import type { SecretInfo } from "@harpoc/core";
 import type { VaultEngine } from "@harpoc/core";
-import type { VaultApiToken } from "@harpoc/shared";
+import type { Permission, VaultApiToken } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import { ScopeGuard } from "../guards/scope-guard.js";
 import { registerSecretsResource } from "./secrets.js";
@@ -274,6 +279,87 @@ describe("MCP Resources", () => {
         invokeHandler(srv, "resources/read", { uri: "secret://vault/audit/recent" }),
       ).rejects.toThrow(expect.objectContaining({ code: ErrorCode.ACCESS_DENIED }));
       expect(seen).toHaveBeenCalledWith("resources/read secret://vault/audit/recent", "permission");
+    });
+
+    describe("scope refusals", () => {
+      interface ResourceRefusal {
+        label: string;
+        operation: string;
+        register: typeof registerSecretsResource;
+        method: "resources/read" | "resources/list";
+        params: Record<string, unknown>;
+        scope: Permission[];
+        missing: Permission;
+      }
+
+      const REFUSALS: ResourceRefusal[] = [
+        {
+          label: "secret://vault/secrets",
+          operation: "resources/read secret://vault/secrets",
+          register: registerSecretsResource,
+          method: "resources/read",
+          params: { uri: "secret://vault/secrets" },
+          scope: ["use"],
+          missing: "list",
+        },
+        {
+          label: "the by-name template's list",
+          operation: "resources/list secret://vault/secrets/{name}",
+          register: registerSecretsResource,
+          method: "resources/list",
+          params: {},
+          scope: ["use"],
+          missing: "list",
+        },
+        {
+          label: "secret://vault/secrets/my-key",
+          operation: "resources/read secret://vault/secrets/my-key",
+          register: registerSecretsResource,
+          method: "resources/read",
+          params: { uri: "secret://vault/secrets/my-key" },
+          scope: ["use", "list"],
+          missing: "read",
+        },
+        {
+          label: "secret://vault/health",
+          operation: "resources/read secret://vault/health",
+          register: registerHealthResource,
+          method: "resources/read",
+          params: { uri: "secret://vault/health" },
+          scope: ["use"],
+          missing: "list",
+        },
+        {
+          label: "secret://vault/projects",
+          operation: "resources/read secret://vault/projects",
+          register: registerProjectsResource,
+          method: "resources/read",
+          params: { uri: "secret://vault/projects" },
+          scope: ["use"],
+          missing: "list",
+        },
+      ];
+
+      it.each(REFUSALS)(
+        "$label refuses a token without $missing",
+        async ({ operation, register, method, params, scope }) => {
+          const seen = vi.fn();
+          const guard = new ScopeGuard(
+            makeScopedToken({ scope }),
+            "mcp",
+            undefined,
+            undefined,
+            seen,
+          );
+          const srv = new McpServer({ name: "test", version: "0.0.0" });
+          register(srv, engine, guard);
+
+          await expectVaultError(() => invokeHandler(srv, method, params), ErrorCode.ACCESS_DENIED);
+          expect(seen).toHaveBeenCalledExactlyOnceWith(operation, "permission");
+          expect(engine.listSecrets).not.toHaveBeenCalled();
+          expect(engine.getSecretInfo).not.toHaveBeenCalled();
+        },
+      );
     });
   });
 });

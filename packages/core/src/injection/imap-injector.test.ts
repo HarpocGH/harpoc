@@ -9,6 +9,7 @@ import type {
   ImapOperationFields,
 } from "./imap-injector.js";
 import { ImapInjector, buildImapAuditDetails, executeImapAction } from "./imap-injector.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 const SECRET = "imapuser:imappass";
 
@@ -213,6 +214,24 @@ describe("ImapInjector — host allowlist", () => {
       undefined,
     );
     expect(client.selectCalls.length).toBe(1);
+  });
+
+  it("an allowlisted private target is refused SSRF_BLOCKED before any socket", async () => {
+    const { fn, calls } = connectMustNotBeCalled();
+    const injector = new ImapInjector({ connectImap: fn });
+
+    await expectVaultError(
+      () =>
+        injector.run(
+          baseAction({ host: "10.0.0.1" }),
+          SECRET,
+          basePolicy({ host_allowlist: ["10.0.0.1"] }),
+          undefined,
+          undefined,
+        ),
+      ErrorCode.SSRF_BLOCKED,
+    );
+    expect(calls).toEqual([]);
   });
 });
 

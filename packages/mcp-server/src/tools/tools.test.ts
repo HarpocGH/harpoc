@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import type { Mock } from "vitest";
 import { McpServer } from "@modelcontextprotocol/server";
 import { connectModernInMemoryClient, inMemoryClientFor } from "@harpoc/test-utils";
 import type { InMemoryToolDescriptor } from "@harpoc/test-utils";
@@ -92,6 +93,37 @@ async function callTool(server: McpServer, name: string, args: Record<string, un
 /** Advertised `tools/list` output — used by the v1.3 schema-widening pins below. */
 async function listTools(server: McpServer) {
   return (await inMemoryClientFor(server)).listTools();
+}
+
+const SENTINEL = "ZZ-sentinel-9f3";
+
+function isBufferJson(value: unknown): value is { type: "Buffer"; data: number[] } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { type?: unknown }).type === "Buffer" &&
+    Array.isArray((value as { data?: unknown }).data)
+  );
+}
+
+function decodeBytes(_key: string, value: unknown): unknown {
+  if (value instanceof Uint8Array) return new TextDecoder().decode(value);
+  if (isBufferJson(value)) return new TextDecoder().decode(Uint8Array.from(value.data));
+  return value;
+}
+
+/** Serialized at call time, so a forward that zeroes its bytes afterwards still shows. */
+function recordEngineArgs(engine: VaultEngine): string[] {
+  const seen: string[] = [];
+  for (const fn of Object.values(engine)) {
+    const mock = fn as Mock<(...args: unknown[]) => unknown>;
+    const passThrough = mock.getMockImplementation();
+    mock.mockImplementation((...args: unknown[]) => {
+      seen.push(JSON.stringify(args, decodeBytes));
+      return passThrough?.(...args);
+    });
+  }
+  return seen;
 }
 
 describe("MCP Tools", () => {
@@ -602,6 +634,26 @@ describe("MCP Tools", () => {
       expect(call).not.toHaveProperty("value");
     });
 
+    it("advertises exactly name, project and type — no value input", async () => {
+      const tool = (await listTools(server)).find((t) => t.name === "create_secret");
+      expect(tool).toBeDefined();
+      expect(
+        Object.keys((tool as InMemoryToolDescriptor).inputSchema.properties ?? {}).sort(),
+      ).toEqual(["name", "project", "type"]);
+    });
+
+    it("a value argument reaches no engine call", async () => {
+      const sent = recordEngineArgs(engine);
+      await callTool(server, "create_secret", {
+        name: "new-key",
+        type: "api_key",
+        value: SENTINEL,
+      });
+
+      expect(sent.join("\n")).not.toContain(SENTINEL);
+      expect(engine.createSecret).toHaveBeenCalledTimes(1);
+    });
+
     // M10b: every call opens a URL-mode value collector (a loopback listener
     // plus a timer). Only the very generous global tier applied, so the
     // per-secret tier is now bucketed by the requested name.
@@ -657,6 +709,22 @@ describe("MCP Tools", () => {
       const result = await callTool(server, "rotate_secret", { handle: "secret://my-key" });
       expect(result.isError).toBe(true);
       expect(engine.rotateSecret).not.toHaveBeenCalled();
+    });
+
+    it("advertises exactly one input property: handle — no value input", async () => {
+      const tool = (await listTools(server)).find((t) => t.name === "rotate_secret");
+      expect(tool).toBeDefined();
+      expect(Object.keys((tool as InMemoryToolDescriptor).inputSchema.properties ?? {})).toEqual([
+        "handle",
+      ]);
+    });
+
+    it("a value argument reaches no engine call", async () => {
+      const sent = recordEngineArgs(engine);
+      await callTool(server, "rotate_secret", { handle: "secret://my-key", value: SENTINEL });
+
+      expect(sent.join("\n")).not.toContain(SENTINEL);
+      expect(engine.assertRotateAllowed).toHaveBeenCalledTimes(1);
     });
   });
 

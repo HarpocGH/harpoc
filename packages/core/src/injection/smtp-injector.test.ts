@@ -145,6 +145,24 @@ describe("SmtpInjector — refusal ordering (security guardrails)", () => {
 
     expect(probed).toEqual([]);
   });
+
+  it("an allowlisted private target is refused SSRF_BLOCKED before any send", async () => {
+    const { fn, calls } = makeFakeSend();
+    const injector = new SmtpInjector({ sendSmtp: fn });
+
+    await expectVaultError(
+      () =>
+        injector.run(
+          baseAction({ host: "10.0.0.1" }),
+          SECRET,
+          basePolicy({ host_allowlist: ["10.0.0.1"] }),
+          undefined,
+          undefined,
+        ),
+      ErrorCode.SSRF_BLOCKED,
+    );
+    expect(calls).toEqual([]);
+  });
 });
 
 describe("SmtpInjector — attachment caps (vault-authored reasons only)", () => {

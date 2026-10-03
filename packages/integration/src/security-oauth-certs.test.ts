@@ -320,6 +320,7 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
     // not an input any tool offers.
     for (const tool of tools) {
       expect(Object.keys(tool.inputSchema.properties ?? {})).not.toContain("client_secret");
+      expect(Object.keys(tool.inputSchema.properties ?? {})).not.toContain("value");
     }
 
     // The asymmetry is deliberate, so it is pinned rather than left to the

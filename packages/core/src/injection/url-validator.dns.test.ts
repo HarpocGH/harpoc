@@ -8,7 +8,8 @@ vi.mock("node:dns", () => ({
   lookup: vi.fn(),
 }));
 
-import { validateUrl } from "./url-validator.js";
+import { validateHostPort, validateUrl } from "./url-validator.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 // The pre-flight A/AAAA resolution branch of validateUrl — reached only for
 // public hostnames, so node:dns is mocked (test-env convention: no real DNS).
@@ -64,6 +65,42 @@ describe("validateUrl DNS resolution", () => {
 
     await expect(validateUrl("https://missing.example.com/")).rejects.toMatchObject({
       code: ErrorCode.DNS_RESOLUTION_FAILED,
+    });
+  });
+});
+
+describe("validateHostPort DNS resolution", () => {
+  beforeEach(() => {
+    lookupMock.mockReset();
+  });
+
+  it("refuses a hostname that resolves to a private address", async () => {
+    lookupMock.mockResolvedValue({ address: "10.0.0.1", family: 4 });
+
+    await expectVaultError(() => validateHostPort("db.example.test", 5432), ErrorCode.SSRF_BLOCKED);
+    expect(lookupMock).toHaveBeenCalledExactlyOnceWith("db.example.test");
+  });
+
+  it("fails with DNS_RESOLUTION_FAILED when the resolver errors", async () => {
+    lookupMock.mockRejectedValue(new Error("getaddrinfo ENOTFOUND db.example.test"));
+
+    await expectVaultError(
+      () => validateHostPort("db.example.test", 5432),
+      ErrorCode.DNS_RESOLUTION_FAILED,
+    );
+    expect(lookupMock).toHaveBeenCalledExactlyOnceWith("db.example.test");
+  });
+
+  it("returns the resolved public address for pinning and the hostname unchanged", async () => {
+    lookupMock.mockResolvedValue({ address: "93.184.216.34", family: 4 });
+
+    const result = await validateHostPort("db.example.test", 5432);
+
+    expect(lookupMock).toHaveBeenCalledExactlyOnceWith("db.example.test");
+    expect(result).toEqual({
+      host: "db.example.test",
+      port: 5432,
+      resolvedAddress: "93.184.216.34",
     });
   });
 });

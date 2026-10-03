@@ -18,10 +18,15 @@ import type {
 import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
+import type { ImapRunner, SmtpRunner } from "./vault-engine.js";
 import type { DockerExecution } from "./injection/docker/docker-injector.js";
 import type { ImapExecution, ImapOAuth } from "./injection/imap-injector.js";
+import { ImapInjector } from "./injection/imap-injector.js";
+import type { ImapConnectOptions } from "./injection/mail/imap-client.js";
+import type { SmtpSendOptions } from "./injection/mail/smtp-client.js";
 import type { SftpExecution } from "./injection/sftp-injector.js";
 import type { MailTlsConfig, SmtpExecution, SmtpOAuth } from "./injection/smtp-injector.js";
+import { SmtpInjector } from "./injection/smtp-injector.js";
 import type { WebsocketExecution } from "./injection/websocket-injector.js";
 import type { TreeKillMechanism } from "./injection/win32-job-wrapper.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
@@ -470,6 +475,38 @@ describe("useSecret (smtp) — engine dispatch", () => {
     expect(err.message).not.toContain("id_ed25519");
     expect(useRows(false)[0]?.detail?.error).toBe(ErrorCode.FILE_IO_ERROR);
   });
+
+  it("refuses an allowlisted private target SSRF_BLOCKED in the real injector, unsent, and audits it", async () => {
+    await engine.setInjectionPolicy("secret://mail", { host_allowlist: ["10.0.0.1"] });
+    const sends: SmtpSendOptions[] = [];
+    (engine as unknown as { smtpInjector: SmtpRunner }).smtpInjector = new SmtpInjector({
+      sendSmtp: (opts) => {
+        sends.push(opts);
+        return Promise.resolve({ accepted: 1, messageId: null });
+      },
+    });
+
+    await expectVaultError(
+      () => engine.useSecret("secret://mail", { ...SMTP_ACTION, host: "10.0.0.1" }),
+      ErrorCode.SSRF_BLOCKED,
+    );
+
+    expect(sends).toEqual([]);
+    expect(useRows(false)).toEqual([
+      {
+        success: false,
+        detail: {
+          context: "smtp",
+          host: "10.0.0.1",
+          from: "ops@example.com",
+          recipients: ["dev@example.com"],
+          attachment_paths: [],
+          attachment_total_bytes: 0,
+          error: ErrorCode.SSRF_BLOCKED,
+        },
+      },
+    ]);
+  });
 });
 
 describe("useSecret (smtp) — OAuth arm", () => {
@@ -740,6 +777,37 @@ describe("useSecret (imap) — engine dispatch", () => {
     await engine.useSecret("secret://inbox", IMAP_ACTION);
 
     expect(calls.imap[0]?.connection).toEqual({ tls: { ca: "-----CA-----" } });
+  });
+
+  it("refuses an allowlisted private target SSRF_BLOCKED in the real injector, unconnected, and audits it", async () => {
+    await engine.setInjectionPolicy("secret://inbox", { host_allowlist: ["10.0.0.1"] });
+    const connects: ImapConnectOptions[] = [];
+    (engine as unknown as { imapInjector: ImapRunner }).imapInjector = new ImapInjector({
+      connectImap: (opts) => {
+        connects.push(opts);
+        return Promise.reject(new Error("connectImap must not be called"));
+      },
+    });
+
+    await expectVaultError(
+      () => engine.useSecret("secret://inbox", { ...IMAP_ACTION, host: "10.0.0.1" }),
+      ErrorCode.SSRF_BLOCKED,
+    );
+
+    expect(connects).toEqual([]);
+    expect(useRows(false)).toEqual([
+      {
+        success: false,
+        detail: {
+          context: "imap",
+          host: "10.0.0.1",
+          mailbox: "INBOX",
+          operation: "search",
+          uid_count: 0,
+          error: ErrorCode.SSRF_BLOCKED,
+        },
+      },
+    ]);
   });
 });
 
