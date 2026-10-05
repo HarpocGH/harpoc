@@ -568,12 +568,28 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       } as unknown as ServerContext;
     }
 
-    /** Awaits the collector's own `waitForValue()` rejection (its timeout) through the resume path. */
+    /**
+     * Awaits the collector's end through the resume path. Either the resume reaches the collector first and
+     * awaits its own `waitForValue()` rejection (its timeout) — `null` — or the collector's timer has already
+     * closed it and the resume refuses the state as naming no live collection; both prove the collector is gone.
+     */
     async function collectorTimedOut(requestState: string | undefined): Promise<void> {
       const state = await valueRequestState.verify(requestState as string, modernCtx());
-      await expect(
-        resumeValueCollection(state, state, { value: { action: "accept" } }),
-      ).resolves.toBeNull();
+      const outcome = await resumeValueCollection(state, state, {
+        value: { action: "accept" },
+      }).then(
+        (value) => ({ value }),
+        (thrown: unknown) => ({ thrown }),
+      );
+      if ("thrown" in outcome) {
+        expect(outcome.thrown).toBeInstanceOf(VaultError);
+        expect(outcome.thrown).toMatchObject({ code: ErrorCode.SCHEMA_VALIDATION_ERROR });
+        expect((outcome.thrown as VaultError).message).toContain(
+          "requestState names no live value collection for this caller",
+        );
+      } else {
+        expect(outcome.value).toBeNull();
+      }
     }
 
     async function retryRaw(
