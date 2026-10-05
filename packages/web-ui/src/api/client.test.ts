@@ -37,6 +37,17 @@ describe("api client", () => {
     expect(headersOf(callOf(fetchFn).init)["Authorization"]).toBeUndefined();
   });
 
+  it("reads the bearer on every call, not once at construction", async () => {
+    const fetchFn = stubFetch(200, { data: [] });
+    let token = "a";
+    const api = createApiClient(() => token, fetchFn);
+    await api.listSecrets();
+    token = "b";
+    await api.listSecrets();
+    expect(headersOf(callOf(fetchFn, 0).init)["Authorization"]).toBe("Bearer a");
+    expect(headersOf(callOf(fetchFn, 1).init)["Authorization"]).toBe("Bearer b");
+  });
+
   it("maps error envelopes to ApiError with status and code", async () => {
     const api = createApiClient(
       () => "jwt-1",

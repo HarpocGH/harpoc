@@ -32,6 +32,7 @@ function mockEngine(): VaultEngine {
         updatedAt: 2000,
         expiresAt: null,
         rotatedAt: null,
+        ...OPACITY_EXTRA,
       },
       {
         handle: "secret://prod/db-pass",
@@ -44,6 +45,7 @@ function mockEngine(): VaultEngine {
         updatedAt: 3000,
         expiresAt: null,
         rotatedAt: 2000,
+        ...OPACITY_EXTRA,
       },
     ] satisfies SecretInfo[]),
     getSecretInfo: vi.fn().mockResolvedValue({
@@ -57,6 +59,7 @@ function mockEngine(): VaultEngine {
       updatedAt: 2000,
       expiresAt: null,
       rotatedAt: null,
+      ...OPACITY_EXTRA,
     } satisfies SecretInfo),
     useSecret: vi.fn().mockResolvedValue({
       type: "http",
@@ -96,6 +99,9 @@ async function listTools(server: McpServer) {
 }
 
 const SENTINEL = "ZZ-sentinel-9f3";
+
+/** Row fields no projection may forward — a snake_case marker and a camelCase one. */
+const OPACITY_EXTRA = { zz_sentinel: SENTINEL, encryptedValue: SENTINEL };
 
 function isBufferJson(value: unknown): value is { type: "Buffer"; data: number[] } {
   return (
@@ -158,11 +164,25 @@ describe("MCP Tools", () => {
       expect(data[0].name).toBe("my-key");
     });
 
-    it("never includes secret values", async () => {
+    it("never includes secret values — each row is exactly the nine metadata keys", async () => {
       const result = await callTool(server, "list_secrets", {});
       const text = getToolText(result);
-      expect(text).not.toContain("value");
-      expect(text).not.toContain("ciphertext");
+      const data = JSON.parse(text) as Record<string, unknown>[];
+      expect(data).toHaveLength(2);
+      for (const row of data) {
+        expect(Object.keys(row).sort()).toEqual([
+          "created_at",
+          "expires_at",
+          "handle",
+          "name",
+          "project",
+          "status",
+          "type",
+          "updated_at",
+          "version",
+        ]);
+      }
+      expect(text).not.toContain(SENTINEL);
     });
 
     it("filters by project", async () => {
@@ -203,11 +223,22 @@ describe("MCP Tools", () => {
       expect(data.type).toBe("api_key");
     });
 
-    it("never includes secret value", async () => {
+    it("never includes secret value — exactly the ten metadata keys", async () => {
       const result = await callTool(server, "get_secret_info", { handle: "secret://my-key" });
       const text = getToolText(result);
-      expect(text).not.toContain("value");
-      expect(text).not.toContain("ciphertext");
+      expect(Object.keys(JSON.parse(text) as Record<string, unknown>).sort()).toEqual([
+        "created_at",
+        "expires_at",
+        "handle",
+        "name",
+        "project",
+        "rotated_at",
+        "status",
+        "type",
+        "updated_at",
+        "version",
+      ]);
+      expect(text).not.toContain(SENTINEL);
     });
   });
 

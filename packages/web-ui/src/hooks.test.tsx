@@ -103,6 +103,27 @@ describe("useAsync", () => {
     await waitFor(() => expect(text("data")).toBe("v2"));
   });
 
+  it("keeps a newer response when the superseded first load settles last", async () => {
+    let settleFirst: (v: string) => void = () => undefined;
+    let settleSecond: (v: string) => void = () => undefined;
+    const load = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<string>((r) => (settleFirst = r)))
+      .mockImplementationOnce(() => new Promise<string>((r) => (settleSecond = r)));
+    const { rerender } = render(<Probe load={load} dep={1} />);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+
+    rerender(<Probe load={load} dep={2} />);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    settleSecond("v2");
+    await waitFor(() => expect(text("data")).toBe("v2"));
+
+    settleFirst("v1");
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(text("data")).toBe("v2");
+    expect(text("error")).toBe("-");
+  });
+
   it("drops a response that lands after unmount", async () => {
     let settle: (v: string) => void = () => undefined;
     const { unmount } = render(<Probe load={() => new Promise<string>((r) => (settle = r))} />);

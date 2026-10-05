@@ -6,7 +6,8 @@ import { VaultEngine } from "@harpoc/core";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { DirectClient, RestClient } from "@harpoc/sdk";
-import { AuditEventType, SecretType, VaultState } from "@harpoc/shared";
+import type { VaultClient } from "@harpoc/sdk";
+import { AuditEventType, ErrorCode, HARPOC_VERSION, SecretType, VaultState } from "@harpoc/shared";
 import type { McpServer } from "@modelcontextprotocol/server";
 import {
   createTestVault,
@@ -18,7 +19,7 @@ import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
-import { silenceAuditLines } from "@harpoc/test-utils";
+import { expectVaultError, silenceAuditLines } from "@harpoc/test-utils";
 
 silenceAuditLines();
 
@@ -26,6 +27,50 @@ const PASSWORD = "integration-test-pw";
 const SECRET_NAME = "my-api-key";
 const SECRET_VALUE = "sk-test-abcdef1234567890ab";
 const SECRET_VALUE_V2 = "sk-test-rotated-9876543210";
+
+type ParityRead = (client: VaultClient, handle: string) => Promise<unknown>;
+type ParityOracle = (engine: VaultEngine, handle: string) => unknown;
+
+/** A read's result as the wire carries it: JSON, `undefined` kept as itself. */
+function asJson(value: unknown): unknown {
+  return value === undefined ? undefined : (JSON.parse(JSON.stringify(value)) as unknown);
+}
+
+const PARITY_READS: [string, ParityRead, ParityOracle][] = [
+  ["listSecrets", (c) => c.listSecrets(), (e) => e.listSecrets()],
+  ["getSecretInfo", (c, h) => c.getSecretInfo(h), (e, h) => e.getSecretInfo(h)],
+  ["getInjectionPolicy", (c, h) => c.getInjectionPolicy(h), (e, h) => e.getInjectionPolicy(h)],
+  ["getMcpServerConfig", (c, h) => c.getMcpServerConfig(h), (e, h) => e.getMcpServerConfig(h)],
+  ["getConnectionConfig", (c, h) => c.getConnectionConfig(h), (e, h) => e.getConnectionConfig(h)],
+  [
+    "listPolicies",
+    (c, h) => c.listPolicies(h),
+    async (e, h) => e.listPolicies(await e.resolveSecretId(h)),
+  ],
+  [
+    "queryAudit",
+    (c) => c.queryAudit({ eventType: AuditEventType.SECRET_CREATE }),
+    (e) => e.queryAudit({ eventType: AuditEventType.SECRET_CREATE }),
+  ],
+  ["listAgents", (c) => c.listAgents("all"), (e) => e.listAgents("all")],
+  ["getAgent", (c) => c.getAgent("test-agent"), (e) => e.getAgent("test-agent")],
+  [
+    "listAgentPolicies",
+    (c) => c.listAgentPolicies("test-agent"),
+    (e) => e.listAgentPolicies("test-agent"),
+  ],
+  [
+    "listTokens",
+    (c) => c.listTokens({ status: "all" }),
+    (e) => e.listIssuedTokens({ status: "all" }),
+  ],
+  ["getHealth", (c) => c.getHealth(), (e) => ({ state: e.getState(), version: HARPOC_VERSION })],
+];
+
+const PARITY_REFUSALS: [string, ErrorCode, ParityRead][] = [
+  ["getOAuthStatus", ErrorCode.OAUTH_NOT_CONFIGURED, (c, h) => c.getOAuthStatus(h)],
+  ["getCertificateStatus", ErrorCode.CERT_NOT_CONFIGURED, (c, h) => c.getCertificateStatus(h)],
+];
 
 describe("Full Lifecycle", () => {
   let vault: TestVault;
@@ -187,6 +232,36 @@ describe("Full Lifecycle", () => {
     expect(info.name).toBe(SECRET_NAME);
     expect(info.type).toBe(SecretType.API_KEY);
     expect(info.version).toBe(1);
+  });
+
+  // ---- Read-only parity: DirectClient and RestClient over the same input ---
+  describe.each([
+    ["DirectClient", (): VaultClient => new DirectClient(vault.engine)],
+    ["RestClient", (): VaultClient => new RestClient({ baseUrl: restServer.baseUrl, token })],
+  ])("%s read-only parity", (_label, makeClient) => {
+    beforeAll(async () => {
+      await vault.engine.setConnectionConfig(handle, { database: { tls_mode: "require" } });
+      await vault.engine.setMcpServerConfig(handle, {
+        server_name: "github-mcp",
+        transport: "stdio",
+        protocol: "2025-11-25",
+        command: "node",
+        args: ["server.js"],
+        env_var: "GITHUB_TOKEN",
+      });
+    });
+
+    it.each(PARITY_READS)("%s answers what the engine answers", async (_member, read, oracle) => {
+      const got = asJson(await read(makeClient(), handle));
+      expect(got).toEqual(asJson(await oracle(vault.engine, handle)));
+    });
+
+    it.each(PARITY_REFUSALS)(
+      "%s refuses the api_key secret with %s",
+      async (_member, code, read) => {
+        await expectVaultError(() => read(makeClient(), handle), code);
+      },
+    );
   });
 
   // ---- Test 10: rotateSecret ----------------------------------------------

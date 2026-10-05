@@ -946,6 +946,41 @@ describe("secret use — --action-file", () => {
     expect(mockEngine.useSecret).toHaveBeenCalled();
   });
 
+  it("--action-file with --token and --json is not a conflict: the cli caller, the JSON envelope", async () => {
+    mockEngine.verifyToken.mockReturnValueOnce(token());
+    const filePath = join(tempDir, "action.json");
+    const action = {
+      type: "imap",
+      host: "imap.example.com",
+      port: 993,
+      mailbox: "INBOX",
+      operation: { kind: "expunge" },
+    };
+    writeFileSync(filePath, JSON.stringify(action));
+    const outcome = await run([
+      "secret://k",
+      "--action-file",
+      filePath,
+      "--token",
+      "jwt-value",
+      "--json",
+    ]).then(
+      () => "resolved",
+      (err: unknown) => err,
+    );
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(outcome).toBe("resolved");
+    expect(mockEngine.verifyToken).toHaveBeenCalledWith("jwt-value");
+    expect(mockEngine.useSecret).toHaveBeenCalledTimes(1);
+    expect(mockEngine.useSecret).toHaveBeenCalledWith("secret://k", action, {
+      principal_type: "agent",
+      principal_id: "agent-1",
+      interface: "cli",
+    });
+    const out = logSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("\n");
+    expect(JSON.parse(out)).toEqual({ type: "imap", operation: "expunge", affected: 0 });
+  });
+
   it("--action-file: an unknown key inside the action is refused, naming it (R10/A5)", async () => {
     const filePath = join(tempDir, "action.json");
     writeFileSync(

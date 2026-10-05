@@ -187,10 +187,8 @@ describe("auth token --label", () => {
   });
 
   it("prints the label in the human output", async () => {
-    await run(["--agent", "bot-1", "--label", "ci"]);
-    const out = stdout();
-    expect(out).toContain("Label");
-    expect(out).toContain("ci");
+    await run(["--agent", "bot-1", "--label", "ci-launch-7f3a"]);
+    expect(stdout()).toMatch(/^Label\s+ci-launch-7f3a$/m);
   });
 
   it("prints the label under --json", async () => {
@@ -245,6 +243,7 @@ describe("auth token --out", () => {
     expect(readFileSync(out, "utf8")).toBe("jwt-token\n");
     expect(stdout()).not.toContain("jwt-token");
     expect(stderr()).toContain(`Token written to ${out}`);
+    expect(stderr()).not.toContain("jwt-token");
     expect(stdout()).toContain("Subject");
   });
 
@@ -256,6 +255,7 @@ describe("auth token --out", () => {
     expect(payload.token_file).toBe(out);
     expect(payload.token).toBeUndefined();
     expect(stdout()).not.toContain("jwt-token");
+    expect(stderr()).not.toContain("jwt-token");
   });
 
   it("refuses an existing --out path before the token is minted", async () => {
@@ -290,6 +290,7 @@ describe("auth token --out", () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(existsSync(out)).toBe(false);
     expect(stdout()).not.toContain("jwt-token");
+    expect(stderr()).not.toContain("jwt-token");
     // The happy unlink path is silent: the warning is for an unlink that failed.
     expect(stderr()).not.toContain("could not remove the empty");
   });

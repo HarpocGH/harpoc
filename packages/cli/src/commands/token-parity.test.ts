@@ -262,6 +262,7 @@ interface Row {
   permission: Permission;
   call: keyof typeof PROBES;
   resolve?: AuditEventType | "default";
+  callerArg?: Partial<Record<keyof typeof mockEngine, number>>;
 }
 
 // No "secret use" row: use predates this tranche and is pinned in secret/use.test.ts.
@@ -404,28 +405,61 @@ const ROWS: Row[] = [
   // interface is the whole gate — the same permission the REST routes check.
   // The matrix cell names a secret on top of that, and its row is the `admin`
   // one for the same reason `policy grant`'s is.
-  { argv: ["agent", "register", "bot"], permission: "admin", call: "registerAgent" },
-  { argv: ["agent", "list"], permission: "admin", call: "listAgents" },
-  { argv: ["agent", "show", "bot"], permission: "admin", call: "getAgent" },
+  {
+    argv: ["agent", "register", "bot"],
+    permission: "admin",
+    call: "registerAgent",
+    callerArg: { registerAgent: 1 },
+  },
+  {
+    argv: ["agent", "list"],
+    permission: "admin",
+    call: "listAgents",
+    callerArg: { listAgents: 1 },
+  },
+  {
+    argv: ["agent", "show", "bot"],
+    permission: "admin",
+    call: "getAgent",
+    callerArg: { getAgent: 1 },
+  },
   {
     argv: ["agent", "update", "bot", "--owner", "ops"],
     permission: "admin",
     call: "updateAgent",
+    callerArg: { getAgent: 1, updateAgent: 2 },
   },
-  { argv: ["agent", "deactivate", "bot"], permission: "admin", call: "deactivateAgent" },
-  { argv: ["agent", "activate", "bot"], permission: "admin", call: "activateAgent" },
+  {
+    argv: ["agent", "deactivate", "bot"],
+    permission: "admin",
+    call: "deactivateAgent",
+    callerArg: { deactivateAgent: 1 },
+  },
+  {
+    argv: ["agent", "activate", "bot"],
+    permission: "admin",
+    call: "activateAgent",
+    callerArg: { activateAgent: 1 },
+  },
   {
     argv: ["agent", "delete", "bot", "--confirm"],
     permission: "admin",
     call: "deleteAgent",
+    callerArg: { getAgent: 1, deleteAgent: 1 },
   },
   {
     argv: ["agent", "permissions", "bot", "secret://k", "--permissions", "use"],
     permission: "admin",
     call: "setAgentPermissions",
     resolve: AuditEventType.POLICY_GRANT,
+    callerArg: { setAgentPermissions: 5 },
   },
-  { argv: ["auth", "list"], permission: "admin", call: "listIssuedTokens" },
+  {
+    argv: ["auth", "list"],
+    permission: "admin",
+    call: "listIssuedTokens",
+    callerArg: { listIssuedTokens: 1 },
+  },
 ];
 
 describe("token permission map (Task 9 pin)", () => {
@@ -579,6 +613,28 @@ describe("token permission map (Task 9 pin)", () => {
       });
     }
   });
+
+  describe.each(ROWS.filter((row) => row.callerArg !== undefined))(
+    "token caller threading: $argv",
+    ({ argv, permission, callerArg }) => {
+      it("passes the token's caller to every engine call the command makes (I26)", async () => {
+        mockEngine.verifyToken.mockReturnValue(token({ scope: [permission] }));
+        await run([...argv, "--token", "jwt-value"]);
+        const entries = Object.entries(callerArg ?? {}) as [keyof typeof mockEngine, number][];
+        for (const [method, index] of entries) {
+          const calls = mockEngine[method].mock.calls;
+          expect(calls, method).toHaveLength(1);
+          expect(calls[0]?.[index], method).toEqual(
+            expect.objectContaining({
+              principal_type: "agent",
+              principal_id: "agent-1",
+              interface: "cli",
+            }),
+          );
+        }
+      });
+    },
+  );
 
   // Exhaustiveness, bounded by what buildProgram registers: a token-bearing
   // command added to the tree above without a row fails here instead of ageing

@@ -20,6 +20,292 @@ const FULL_POLICY = {
   strict_tree_exit: false,
 };
 
+const HANDLE = "secret://proj/k";
+const ENCODED = "proj%2Fk";
+const MCP_CONFIG = {
+  server_name: "github-mcp",
+  transport: "stdio" as const,
+  protocol: "2025-11-25" as const,
+  command: "node",
+  args: ["server.js"],
+  env_var: "GITHUB_TOKEN",
+};
+const CONNECTION_CONFIG = { database: { tls_mode: "require" as const } };
+const HTTP_ACTION = {
+  type: "http" as const,
+  method: "GET" as const,
+  url: "https://api.example.com",
+  timeout_ms: 5000,
+  injection: { type: "bearer" as const },
+  follow_redirects: "none" as const,
+};
+const CERT_STATUS = {
+  secret_id: "uuid-1",
+  subject: "CN=web.example.com",
+  issuer: "CN=Test CA",
+  not_before: 1000,
+  not_after: 2000,
+  auto_renew: true,
+  renewal_status: "ok",
+};
+
+type Args<K extends keyof RestClient> = RestClient[K] extends (...args: infer A) => unknown
+  ? A
+  : never;
+
+interface MemberRow {
+  method: keyof RestClient;
+  invoke: (c: RestClient) => Promise<unknown>;
+  verb: "GET" | "POST" | "PUT" | "DELETE";
+  path: string;
+  body: unknown;
+  data: unknown;
+  returns: unknown;
+}
+
+/** One `RestClient` member: its call, the request it must send, and what it unwraps. */
+function member<K extends keyof RestClient>(
+  method: K,
+  args: Args<K>,
+  verb: MemberRow["verb"],
+  path: string,
+  wire: { body?: unknown; data: unknown; returns?: unknown },
+): MemberRow {
+  return {
+    method,
+    invoke: (c) => (c[method] as (...a: Args<K>) => Promise<unknown>).apply(c, args),
+    verb,
+    path,
+    body: wire.body,
+    data: wire.data,
+    returns: wire.returns,
+  };
+}
+
+const MEMBERS: MemberRow[] = [
+  member("listSecrets", ["proj"], "GET", "/api/v1/secrets?project=proj", {
+    data: [],
+    returns: [],
+  }),
+  member("getSecretInfo", [HANDLE], "GET", `/api/v1/secrets/${ENCODED}`, {
+    data: { handle: HANDLE, name: "k" },
+    returns: { handle: HANDLE, name: "k" },
+  }),
+  member("getSecretValue", [HANDLE], "GET", `/api/v1/secrets/${ENCODED}/value`, {
+    data: { value: Buffer.from([7, 8, 9]).toString("base64") },
+    returns: new Uint8Array([7, 8, 9]),
+  }),
+  member(
+    "createSecret",
+    [{ name: "k", type: "api_key", value: new Uint8Array([1, 2, 3]) }],
+    "POST",
+    "/api/v1/secrets",
+    {
+      body: { name: "k", type: "api_key", value: Buffer.from([1, 2, 3]).toString("base64") },
+      data: { handle: "secret://k", status: "created", message: "OK" },
+      returns: { handle: "secret://k", status: "created", message: "OK" },
+    },
+  ),
+  member(
+    "rotateSecret",
+    [HANDLE, new Uint8Array([4, 5, 6])],
+    "POST",
+    `/api/v1/secrets/${ENCODED}/rotate`,
+    { body: { value: Buffer.from([4, 5, 6]).toString("base64") }, data: { rotated: true } },
+  ),
+  member("revokeSecret", [HANDLE], "DELETE", `/api/v1/secrets/${ENCODED}?confirm=true`, {
+    data: { revoked: true },
+  }),
+  member("useSecret", [HANDLE, HTTP_ACTION], "POST", `/api/v1/secrets/${ENCODED}/use`, {
+    body: { action: HTTP_ACTION },
+    data: { type: "http", status: 200, body: "ok" },
+    returns: { type: "http", status: 200, body: "ok" },
+  }),
+  member(
+    "setInjectionPolicy",
+    [HANDLE, FULL_POLICY],
+    "PUT",
+    `/api/v1/secrets/${ENCODED}/injection-policy`,
+    { body: { ...FULL_POLICY, acknowledge_interpreters: false }, data: { updated: true } },
+  ),
+  member("getInjectionPolicy", [HANDLE], "GET", `/api/v1/secrets/${ENCODED}/injection-policy`, {
+    data: FULL_POLICY,
+    returns: FULL_POLICY,
+  }),
+  member(
+    "setMcpServerConfig",
+    [HANDLE, MCP_CONFIG],
+    "PUT",
+    `/api/v1/secrets/${ENCODED}/mcp-server`,
+    { body: MCP_CONFIG, data: { updated: true } },
+  ),
+  member("getMcpServerConfig", [HANDLE], "GET", `/api/v1/secrets/${ENCODED}/mcp-server`, {
+    data: MCP_CONFIG,
+    returns: MCP_CONFIG,
+  }),
+  member(
+    "setConnectionConfig",
+    [HANDLE, CONNECTION_CONFIG],
+    "PUT",
+    `/api/v1/secrets/${ENCODED}/connection-config`,
+    { body: CONNECTION_CONFIG, data: { updated: true } },
+  ),
+  member("getConnectionConfig", [HANDLE], "GET", `/api/v1/secrets/${ENCODED}/connection-config`, {
+    data: CONNECTION_CONFIG,
+    returns: CONNECTION_CONFIG,
+  }),
+  member(
+    "deleteConnectionConfig",
+    [HANDLE],
+    "DELETE",
+    `/api/v1/secrets/${ENCODED}/connection-config`,
+    { data: { deleted: true }, returns: true },
+  ),
+  member(
+    "grantPolicy",
+    [HANDLE, { principal_type: "agent", principal_id: "a1", permissions: ["read"] }],
+    "POST",
+    `/api/v1/secrets/${ENCODED}/policies`,
+    {
+      body: { principal_type: "agent", principal_id: "a1", permissions: ["read"] },
+      data: { id: "p1" },
+      returns: { id: "p1" },
+    },
+  ),
+  member("revokePolicy", [HANDLE, "p1"], "DELETE", `/api/v1/secrets/${ENCODED}/policies/p1`, {
+    data: { revoked: true },
+  }),
+  member("listPolicies", [HANDLE], "GET", `/api/v1/secrets/${ENCODED}/policies`, {
+    data: [],
+    returns: [],
+  }),
+  member(
+    "queryAudit",
+    [
+      {
+        secretId: "uuid-1",
+        eventType: "secret.read",
+        limit: 10,
+        success: false,
+        principalType: "agent",
+        principalId: "a1",
+      },
+    ],
+    "GET",
+    "/api/v1/audit?secret_id=uuid-1&event_type=secret.read&limit=10&success=false&principal_type=agent&principal_id=a1",
+    { data: [], returns: [] },
+  ),
+  member("registerAgent", [{ name: "deploy-bot", description: "d" }], "POST", "/api/v1/agents", {
+    body: { name: "deploy-bot", description: "d" },
+    data: { id: "agent-1", name: "deploy-bot" },
+    returns: { id: "agent-1", name: "deploy-bot" },
+  }),
+  member("listAgents", ["all"], "GET", "/api/v1/agents?status=all", { data: [], returns: [] }),
+  member("getAgent", ["deploy-bot"], "GET", "/api/v1/agents/deploy-bot", {
+    data: { id: "agent-1", name: "deploy-bot" },
+    returns: { id: "agent-1", name: "deploy-bot" },
+  }),
+  member(
+    "updateAgent",
+    ["deploy-bot", { description: "updated" }],
+    "PUT",
+    "/api/v1/agents/deploy-bot",
+    {
+      body: { description: "updated" },
+      data: { id: "agent-1", name: "deploy-bot", description: "updated" },
+      returns: { id: "agent-1", name: "deploy-bot", description: "updated" },
+    },
+  ),
+  member("deactivateAgent", ["deploy-bot"], "POST", "/api/v1/agents/deploy-bot/deactivate", {
+    data: { revoked_tokens: 2 },
+    returns: { revoked_tokens: 2 },
+  }),
+  member("activateAgent", ["deploy-bot"], "POST", "/api/v1/agents/deploy-bot/activate", {
+    data: { id: "agent-1", name: "deploy-bot" },
+    returns: { id: "agent-1", name: "deploy-bot" },
+  }),
+  member("deleteAgent", ["deploy-bot"], "DELETE", "/api/v1/agents/deploy-bot", {
+    data: { revoked_tokens: 1, removed_grants: 3 },
+    returns: { revoked_tokens: 1, removed_grants: 3 },
+  }),
+  member("listAgentPolicies", ["deploy-bot"], "GET", "/api/v1/agents/deploy-bot/policies", {
+    data: [],
+    returns: [],
+  }),
+  member(
+    "setAgentPermissions",
+    ["deploy-bot", HANDLE, { permissions: ["read"] }],
+    "PUT",
+    `/api/v1/agents/deploy-bot/secrets/${ENCODED}/permissions`,
+    {
+      body: { permissions: ["read"] },
+      data: { policy: null, gated_before: false, gated_after: false },
+      returns: { policy: null, gated_before: false, gated_after: false },
+    },
+  ),
+  member(
+    "listTokens",
+    [{ status: "all", agent: "deploy-bot" }],
+    "GET",
+    "/api/v1/tokens?status=all&agent=deploy-bot",
+    { data: [], returns: [] },
+  ),
+  member("revokeToken", ["jti-1"], "DELETE", "/api/v1/tokens/jti-1", { data: { revoked: true } }),
+  member("getHealth", [], "GET", "/api/v1/health", {
+    data: { state: "unlocked", version: "1.0.0" },
+    returns: { state: "unlocked", version: "1.0.0" },
+  }),
+  member(
+    "startOAuthFlow",
+    [{ name: "gh", provider: "github", grant_type: "device_code", client_id: "cid" }],
+    "POST",
+    "/api/v1/oauth/authorize",
+    {
+      body: { name: "gh", provider: "github", grant_type: "device_code", client_id: "cid" },
+      data: { handle: "secret://gh", status: "pending_authorization", user_code: "ABCD-1234" },
+      returns: { handle: "secret://gh", status: "pending_authorization", user_code: "ABCD-1234" },
+    },
+  ),
+  member("getOAuthStatus", [HANDLE], "GET", `/api/v1/oauth/${ENCODED}/status`, {
+    data: { secret_id: "uuid-1", provider: "github", refresh_status: "ok" },
+    returns: { secret_id: "uuid-1", provider: "github", refresh_status: "ok" },
+  }),
+  member("refreshOAuthToken", [HANDLE], "POST", `/api/v1/oauth/${ENCODED}/refresh`, {
+    data: { refreshed: true, expires_at: 1234 },
+    returns: 1234,
+  }),
+  member(
+    "importCertificate",
+    ["web", { private_key_pem: "key-pem", certificate_pem: "cert-pem" }],
+    "POST",
+    "/api/v1/certificates/import",
+    {
+      body: { name: "web", private_key_pem: "key-pem", certificate_pem: "cert-pem" },
+      data: { handle: "secret://web", secret_id: "uuid-1" },
+      returns: { handle: "secret://web", secretId: "uuid-1" },
+    },
+  ),
+  member(
+    "generateCsr",
+    ["web", { subject: "web.example.com" }],
+    "POST",
+    "/api/v1/certificates/csr",
+    {
+      body: { name: "web", subject: "web.example.com" },
+      data: { handle: "secret://web", csr_pem: "csr-pem" },
+      returns: { handle: "secret://web", csrPem: "csr-pem" },
+    },
+  ),
+  member("renewCertificate", [HANDLE], "POST", `/api/v1/certificates/${ENCODED}/renew`, {
+    data: CERT_STATUS,
+    returns: CERT_STATUS,
+  }),
+  member("getCertificateStatus", [HANDLE], "GET", `/api/v1/certificates/${ENCODED}/status`, {
+    data: CERT_STATUS,
+    returns: CERT_STATUS,
+  }),
+];
+
 let client: RestClient;
 let fetchSpy: ReturnType<typeof vi.fn>;
 
@@ -66,15 +352,6 @@ describe("RestClient", () => {
   });
 
   describe("getSecretInfo", () => {
-    it("sends GET /api/v1/secrets/:handle", async () => {
-      const info = { handle: "secret://key", name: "key" };
-      mockFetchResponse(info);
-      const result = await client.getSecretInfo("secret://key");
-
-      expect(result).toEqual(info);
-      expect(fetchSpy).toHaveBeenCalledWith(`${BASE_URL}/api/v1/secrets/key`, expect.anything());
-    });
-
     it("encodes project/name handles", async () => {
       mockFetchResponse({});
       await client.getSecretInfo("secret://proj/key");
@@ -126,18 +403,6 @@ describe("RestClient", () => {
     });
   });
 
-  describe("rotateSecret", () => {
-    it("sends POST with base64 value", async () => {
-      mockFetchResponse({ rotated: true });
-      await client.rotateSecret("secret://k", new Uint8Array([4, 5, 6]));
-
-      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
-      expect(call[0]).toContain("/api/v1/secrets/k/rotate");
-      const body = JSON.parse(call[1].body as string);
-      expect(body.value).toBe(Buffer.from([4, 5, 6]).toString("base64"));
-    });
-  });
-
   describe("revokeSecret", () => {
     it("sends DELETE with confirm=true", async () => {
       mockFetchResponse({ revoked: true });
@@ -150,25 +415,6 @@ describe("RestClient", () => {
   });
 
   describe("useSecret", () => {
-    it("posts the action to the /use endpoint", async () => {
-      mockFetchResponse({ type: "http", status: 200, body: "ok" });
-      await client.useSecret("secret://k", {
-        type: "http",
-        method: "GET",
-        url: "https://api.example.com",
-        timeout_ms: 5000,
-        injection: { type: "bearer" },
-        follow_redirects: "none",
-      });
-
-      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
-      expect(call[0]).toContain("/api/v1/secrets/k/use");
-      const body = JSON.parse(call[1].body as string);
-      expect(body.action.type).toBe("http");
-      expect(body.action.timeout_ms).toBe(5000);
-      expect(body.action.follow_redirects).toBe("none");
-    });
-
     it("posts a process action", async () => {
       mockFetchResponse({ type: "process", exit_code: 0, stdout: "", stderr: "" });
       await client.useSecret("secret://k", {
@@ -314,14 +560,6 @@ describe("RestClient", () => {
       expect(body.acknowledge_interpreters).toBe(true);
     });
 
-    it("getInjectionPolicy sends GET", async () => {
-      mockFetchResponse({ url_allowlist: [], command_allowlist: ["gh"], env_allowlist: [] });
-      const policy = await client.getInjectionPolicy("secret://k");
-      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
-      expect(call[0]).toContain("/api/v1/secrets/k/injection-policy");
-      expect(policy.command_allowlist).toEqual(["gh"]);
-    });
-
     it("setMcpServerConfig sends PUT with the config", async () => {
       mockFetchResponse({ updated: true });
       await client.setMcpServerConfig("secret://k", {
@@ -362,23 +600,17 @@ describe("RestClient", () => {
       expect(call[0]).toContain("/api/v1/secrets/k/mcp-server");
       expect(config).toBeUndefined();
     });
+
+    it("getConnectionConfig sends GET and maps null to undefined", async () => {
+      mockFetchResponse(null);
+      const config = await client.getConnectionConfig("secret://k");
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toContain("/api/v1/secrets/k/connection-config");
+      expect(config).toBeUndefined();
+    });
   });
 
   describe("policies", () => {
-    it("grantPolicy sends POST", async () => {
-      mockFetchResponse({ id: "p1" });
-      await client.grantPolicy("secret://k", {
-        principal_type: "agent",
-        principal_id: "a1",
-        permissions: ["read"],
-      });
-
-      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
-      expect(call[0]).toContain("/api/v1/secrets/k/policies");
-      const body = JSON.parse(call[1].body as string);
-      expect(body.principal_type).toBe("agent");
-    });
-
     it("revokePolicy sends DELETE", async () => {
       mockFetchResponse({ revoked: true });
       await client.revokePolicy("secret://k", "p1");
@@ -603,16 +835,6 @@ describe("RestClient", () => {
 
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];
       expect(call[0]).toBe(`${BASE_URL}/api/v1/tokens/${encodeURIComponent("a/b")}`);
-    });
-  });
-
-  describe("getHealth", () => {
-    it("sends GET /api/v1/health", async () => {
-      mockFetchResponse({ state: "unlocked", version: "1.0.0" });
-      const result = await client.getHealth();
-
-      expect(result.state).toBe("unlocked");
-      expect(result.version).toBe("1.0.0");
     });
   });
 
@@ -879,6 +1101,35 @@ describe("RestClient", () => {
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];
       const headers = call[1].headers as Record<string, string>;
       expect(headers.authorization).toBe(`Bearer ${TOKEN}`);
+    });
+  });
+
+  describe("every member — verb, path, headers, body and unwrapped data (I28, I29)", () => {
+    it.each(MEMBERS)(
+      "$method sends $verb $path",
+      async ({ invoke, verb, path, body, data, returns }) => {
+        mockFetchResponse(data);
+        const result = await invoke(client);
+
+        expect(result).toEqual(returns);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+        expect(url).toBe(`${BASE_URL}${path}`);
+        expect(init.method).toBe(verb);
+        expect(init.headers).toEqual(
+          body === undefined
+            ? { authorization: `Bearer ${TOKEN}` }
+            : { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+        );
+        expect(init.body === undefined ? undefined : JSON.parse(init.body as string)).toEqual(body);
+      },
+    );
+
+    it("the table holds one row for every RestClient member", () => {
+      const members = Object.getOwnPropertyNames(RestClient.prototype).filter(
+        (name) => !["constructor", "encodeHandle", "request"].includes(name),
+      );
+      expect(MEMBERS.map((row) => row.method).sort()).toEqual(members.sort());
     });
   });
 });

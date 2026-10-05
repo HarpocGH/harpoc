@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   AuditEventType,
   ErrorCode,
@@ -15,21 +15,6 @@ import { VaultEngine } from "@harpoc/core";
 import type { SecretInfo, DecryptedAuditEvent } from "@harpoc/core";
 import { expectVaultError } from "@harpoc/test-utils";
 import { resolveSecretId } from "../utils/vault-loader.js";
-
-// Mock argon2 for speed (the connect.e2e / core / oauth-proxy stand-in): nothing
-// here depends on the KDF's cost, and the real RFC 9106 profile made the
-// lockout test six 2 GiB derivations — 31–42 s on a loaded windows-latest
-// runner against the 30 s ceiling (18b58b9). core keeps the real-Argon2id suites.
-vi.mock("argon2", () => ({
-  hash: async (password: Buffer | string, opts: { salt: Buffer | Uint8Array }) => {
-    const { createHash } = await import("node:crypto");
-    const salt = opts.salt instanceof Uint8Array ? Buffer.from(opts.salt) : opts.salt;
-    return createHash("sha256")
-      .update(typeof password === "string" ? password : Buffer.from(password))
-      .update(salt)
-      .digest();
-  },
-}));
 
 /**
  * These tests exercise VaultEngine directly — the same operations the CLI commands perform.
@@ -73,7 +58,7 @@ afterEach(async () => {
   }
 });
 
-describe("init command flow", () => {
+describe("VaultEngine.initVault", () => {
   it("creates a new vault", async () => {
     const { vaultId } = await engine.initVault(TEST_PASSWORD);
     expect(vaultId).toBeTruthy();
@@ -81,7 +66,7 @@ describe("init command flow", () => {
   });
 });
 
-describe("unlock/lock command flow", () => {
+describe("VaultEngine.unlock and lock, the lockout included", () => {
   it("unlocks and locks a vault", async () => {
     await engine.initVault(TEST_PASSWORD);
     await engine.lock();
@@ -124,7 +109,7 @@ describe("unlock/lock command flow", () => {
   });
 });
 
-describe("session loading flow", () => {
+describe("VaultEngine.loadSession", () => {
   it("loads session after init", async () => {
     await engine.initVault(TEST_PASSWORD);
     await engine.destroy();
@@ -147,7 +132,7 @@ describe("session loading flow", () => {
   });
 });
 
-describe("secret set/get/list command flow", () => {
+describe("VaultEngine.createSecret, getSecretInfo, getSecretValue and listSecrets", () => {
   beforeEach(async () => {
     await engine.initVault(TEST_PASSWORD);
   });
@@ -239,7 +224,7 @@ describe("secret set/get/list command flow", () => {
   });
 });
 
-describe("secret rotate command flow", () => {
+describe("VaultEngine.rotateSecret", () => {
   beforeEach(async () => {
     await engine.initVault(TEST_PASSWORD);
   });
@@ -261,7 +246,7 @@ describe("secret rotate command flow", () => {
   });
 });
 
-describe("secret delete command flow", () => {
+describe("VaultEngine.revokeSecret", () => {
   beforeEach(async () => {
     await engine.initVault(TEST_PASSWORD);
   });
@@ -280,7 +265,7 @@ describe("secret delete command flow", () => {
   });
 });
 
-describe("secret mcp-server command flow", () => {
+describe("VaultEngine MCP server config and an unconfigured mcp use", () => {
   beforeEach(async () => {
     await engine.initVault(TEST_PASSWORD);
     await engine.createSecret({
@@ -315,7 +300,7 @@ describe("secret mcp-server command flow", () => {
   });
 });
 
-describe("audit command flow", () => {
+describe("VaultEngine.queryAudit", () => {
   beforeEach(async () => {
     await engine.initVault(TEST_PASSWORD);
   });
@@ -348,7 +333,7 @@ describe("audit command flow", () => {
   });
 });
 
-describe("auth token command flow", () => {
+describe("VaultEngine.createToken, verifyToken and revokeToken", () => {
   beforeEach(async () => {
     await engine.initVault(TEST_PASSWORD);
     registerAgents("test-agent", "my-bot", "revoke-test");
@@ -383,7 +368,7 @@ describe("auth token command flow", () => {
   });
 });
 
-describe("policy command flow", () => {
+describe("VaultEngine.grantPolicy, listPolicies and revokePolicy", () => {
   beforeEach(async () => {
     await engine.initVault(TEST_PASSWORD);
     registerAgents("claude-agent");
@@ -420,7 +405,7 @@ describe("policy command flow", () => {
   });
 });
 
-describe("full lifecycle integration", () => {
+describe("VaultEngine full lifecycle", () => {
   it("init → unlock → set → list → get → rotate → audit → lock", async () => {
     // 1. Init
     const { vaultId } = await engine.initVault(TEST_PASSWORD);

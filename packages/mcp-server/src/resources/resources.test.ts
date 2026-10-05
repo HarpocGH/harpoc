@@ -16,6 +16,11 @@ import { registerHealthResource } from "./health.js";
 import { registerAuditResource } from "./audit.js";
 import { registerProjectsResource } from "./projects.js";
 
+const SENTINEL = "ZZ-sentinel-9f3";
+
+/** Row fields no projection may forward — a snake_case marker and a camelCase one. */
+const OPACITY_EXTRA = { zz_sentinel: SENTINEL, encryptedValue: SENTINEL };
+
 const LISTED_SECRETS: SecretInfo[] = [
   {
     handle: "secret://my-key",
@@ -28,6 +33,7 @@ const LISTED_SECRETS: SecretInfo[] = [
     updatedAt: 2000,
     expiresAt: null,
     rotatedAt: null,
+    ...OPACITY_EXTRA,
   },
   {
     handle: "secret://prod/db-pass",
@@ -40,6 +46,7 @@ const LISTED_SECRETS: SecretInfo[] = [
     updatedAt: 3000,
     expiresAt: null,
     rotatedAt: 2000,
+    ...OPACITY_EXTRA,
   },
 ];
 
@@ -111,6 +118,40 @@ describe("MCP Resources", () => {
       expect(data.name).toBe("my-key");
     });
 
+    it("the list answers exactly six metadata keys per row, never the row", async () => {
+      const text = getResourceText(await readResource(server, "secret://vault/secrets"));
+      const data = JSON.parse(text) as Record<string, unknown>[];
+      expect(data).toHaveLength(2);
+      for (const row of data) {
+        expect(Object.keys(row).sort()).toEqual([
+          "handle",
+          "name",
+          "project",
+          "status",
+          "type",
+          "version",
+        ]);
+      }
+      expect(text).not.toContain(SENTINEL);
+    });
+
+    it("the by-name read answers exactly the ten metadata keys, never the row", async () => {
+      const text = getResourceText(await readResource(server, "secret://vault/secrets/my-key"));
+      expect(Object.keys(JSON.parse(text) as Record<string, unknown>).sort()).toEqual([
+        "created_at",
+        "expires_at",
+        "handle",
+        "name",
+        "project",
+        "rotated_at",
+        "status",
+        "type",
+        "updated_at",
+        "version",
+      ]);
+      expect(text).not.toContain(SENTINEL);
+    });
+
     it("returns error for non-existent secret", async () => {
       const result = await readResource(server, "secret://vault/secrets/nonexistent");
       const data = JSON.parse(getResourceText(result));
@@ -141,6 +182,30 @@ describe("MCP Resources", () => {
       expect(data.vault_state).toBe("unlocked");
       expect(data.total_secrets).toBe(2);
       expect(data.by_status.active).toBe(2);
+    });
+
+    it("answers exactly the four aggregate keys and two-key expiring entries, never the row", async () => {
+      const soon = Date.now() + 24 * 60 * 60 * 1000;
+      vi.mocked(engine.listSecrets).mockReturnValue([
+        ...LISTED_SECRETS,
+        {
+          ...(LISTED_SECRETS[0] as SecretInfo),
+          handle: "secret://expiring",
+          name: "expiring",
+          expiresAt: soon,
+        },
+      ]);
+      const text = getResourceText(await readResource(server, "secret://vault/health"));
+      const data = JSON.parse(text) as Record<string, unknown>;
+      expect(Object.keys(data).sort()).toEqual([
+        "by_status",
+        "expiring_soon",
+        "total_secrets",
+        "vault_state",
+      ]);
+      expect(data.by_status).toEqual({ active: 3 });
+      expect(data.expiring_soon).toEqual([{ handle: "secret://expiring", expires_at: soon }]);
+      expect(text).not.toContain(SENTINEL);
     });
   });
 
@@ -173,6 +238,15 @@ describe("MCP Resources", () => {
       const prod = data.find((d) => d.project === "prod");
       expect(none?.secret_count).toBe(1);
       expect(prod?.secret_count).toBe(1);
+    });
+
+    it("answers exactly project and secret_count per entry, never the row", async () => {
+      const text = getResourceText(await readResource(server, "secret://vault/projects"));
+      expect(JSON.parse(text)).toEqual([
+        { project: "(none)", secret_count: 1 },
+        { project: "prod", secret_count: 1 },
+      ]);
+      expect(text).not.toContain(SENTINEL);
     });
   });
 

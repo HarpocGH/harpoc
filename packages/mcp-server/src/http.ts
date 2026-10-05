@@ -82,6 +82,8 @@ export interface McpHttpServer {
   /** Actual bound port (differs from the requested one when 0 was passed). */
   readonly port: number;
   readonly endpoint: string;
+  /** Run the session-reclamation sweep now; the interval keeps its own cadence. */
+  sweepSessions(): void;
   close(): Promise<void>;
 }
 
@@ -425,6 +427,7 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
   return {
     port: boundPort,
     endpoint,
+    sweepSessions,
     close: async (): Promise<void> => {
       // The shared manager owns the in-flight device-code polls; without this
       // an orphaned poll completes against a destroyed engine (the CLI path

@@ -1,9 +1,21 @@
 import { PassThrough } from "node:stream";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 import { promptConfirm, promptHidden } from "./prompt.js";
 
 function sink(): PassThrough {
   return new PassThrough();
+}
+
+type RawModeInput = PassThrough & {
+  isRaw?: boolean;
+  setRawMode: Mock<(mode: boolean) => unknown>;
+};
+
+function rawModeInput(isRaw?: boolean): RawModeInput {
+  const input = new PassThrough() as RawModeInput;
+  if (isRaw !== undefined) input.isRaw = isRaw;
+  input.setRawMode = vi.fn<(mode: boolean) => unknown>(() => input);
+  return input;
 }
 
 describe("promptHidden", () => {
@@ -123,6 +135,54 @@ describe("promptHidden", () => {
     expect(seen).not.toContain("hunter2");
     expect(seen.replace("Password: ", "").replace(/\r?\n/g, "")).toBe("");
   });
+
+  it.each<{
+    path: string;
+    isRaw: boolean | undefined;
+    settle: (input: RawModeInput, pending: Promise<string>) => Promise<void>;
+  }>([
+    {
+      path: "Enter",
+      isRaw: undefined,
+      settle: async (input, pending) => {
+        input.write("hunter2\r");
+        await expect(pending).resolves.toBe("hunter2");
+      },
+    },
+    {
+      path: "Ctrl+C",
+      isRaw: undefined,
+      settle: async (input, pending) => {
+        input.write("hun\x03");
+        await expect(pending).rejects.toThrow("User cancelled");
+      },
+    },
+    {
+      path: "EOF",
+      isRaw: undefined,
+      settle: async (input, pending) => {
+        input.end("hunter2");
+        await expect(pending).resolves.toBe("hunter2");
+      },
+    },
+    {
+      path: "Enter, the input already raw",
+      isRaw: true,
+      settle: async (input, pending) => {
+        input.write("hunter2\r");
+        await expect(pending).resolves.toBe("hunter2");
+      },
+    },
+  ])(
+    "engages raw mode before the first keystroke and restores it on $path",
+    async ({ isRaw, settle }) => {
+      const input = rawModeInput(isRaw);
+      const pending = promptHidden("Password: ", input, sink());
+      expect(input.setRawMode.mock.calls).toEqual([[true]]);
+      await settle(input, pending);
+      expect(input.setRawMode.mock.calls).toEqual([[true], [isRaw ?? false]]);
+    },
+  );
 });
 
 describe("promptConfirm", () => {

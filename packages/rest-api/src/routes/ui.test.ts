@@ -12,6 +12,9 @@ let uiDir: string;
 let outsideName: string;
 let app: Hono;
 
+const UI_CSP =
+  "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+
 beforeAll(() => {
   uiDir = mkdtempSync(join(tmpdir(), "harpoc-ui-"));
   writeFileSync(join(uiDir, "index.html"), '<!doctype html><div id="root"></div>');
@@ -34,7 +37,7 @@ describe("createUiRoutes", () => {
     const res = await app.request("/ui");
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
-    expect(res.headers.get("content-security-policy")).toContain("default-src 'self'");
+    expect(res.headers.get("content-security-policy")).toBe(UI_CSP);
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await res.text()).toContain("root");
   });
@@ -43,8 +46,21 @@ describe("createUiRoutes", () => {
     const res = await app.request("/ui/assets/app-abc123.js");
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/javascript");
-    expect(res.headers.get("cache-control")).toContain("immutable");
+    expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(res.headers.get("content-security-policy")).toBe(UI_CSP);
   });
+
+  it.each(["/ui", "/ui/", "/ui/secrets", "/ui/index.html"])(
+    "%s answers the whole CSP, nosniff and no-cache",
+    async (path) => {
+      const res = await app.request(path);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+      expect(res.headers.get("content-security-policy")).toBe(UI_CSP);
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(res.headers.get("cache-control")).toBe("no-cache");
+    },
+  );
 
   it("SPA-falls-back extension-less routes to index.html", async () => {
     const res = await app.request("/ui/secrets");

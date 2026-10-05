@@ -12,6 +12,8 @@ import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
 import { startMcpHttpServer } from "./http.js";
 import type { McpHttpServer } from "./http.js";
+import { startValueCollector } from "./elicitation/value-collector.js";
+import type { ValueCollector } from "./elicitation/value-collector.js";
 
 const TOKEN = "valid.jwt.token";
 
@@ -727,6 +729,16 @@ describe("startMcpHttpServer — session reclamation (M6)", () => {
 
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+  /** Runs `fn` with `Date.now()` pinned to `ms`, then restores the real clock. */
+  async function atClock<T>(ms: number, fn: () => T | Promise<T>): Promise<T> {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(ms);
+    try {
+      return await fn();
+    } finally {
+      clock.mockRestore();
+    }
+  }
+
   function raw(
     port: number,
     method: string,
@@ -762,40 +774,40 @@ describe("startMcpHttpServer — session reclamation (M6)", () => {
       JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" }),
     );
 
-  it("reclaims a session abandoned without a DELETE", async () => {
-    server = await startMcpHttpServer({
+  it("reclaims a session abandoned without a DELETE — one sweepSessions() call, no sleep", async () => {
+    const live = await startMcpHttpServer({
       engine: mockEngine(),
       port: 0,
-      sessionLimits: { idleTtlMs: 150, sweepIntervalMs: 40 },
+      sessionLimits: { idleTtlMs: 150, sweepIntervalMs: 600_000 },
     });
+    server = live;
 
-    const created = await initialize(server.port);
+    const created = await initialize(live.port);
     expect(created.status).toBe(200);
 
-    await sleep(400);
+    await atClock(Date.now() + 1_000, () => live.sweepSessions());
 
     // The client is gone; the slot must be gone with it.
-    const after = await ping(server.port, created.sessionId as string);
+    const after = await ping(live.port, created.sessionId as string);
     expect(after.status).toBe(404);
   }, 20_000);
 
   it("keeps a session that is still being used", async () => {
-    server = await startMcpHttpServer({
+    const live = await startMcpHttpServer({
       engine: mockEngine(),
       port: 0,
-      sessionLimits: { idleTtlMs: 1_000, sweepIntervalMs: 40 },
+      sessionLimits: { idleTtlMs: 1_000, sweepIntervalMs: 600_000 },
     });
+    server = live;
 
-    const created = await initialize(server.port);
+    const created = await initialize(live.port);
     const sessionId = created.sessionId as string;
 
-    // Well past the idle TTL in total, but never idle for it. The gap must
-    // stay far under the TTL: with 250/100 the 150 ms margin was breached by
-    // loaded-runner scheduling jitter (windows leg, run 31591341443).
-    for (let i = 0; i < 10; i++) {
-      await sleep(200);
-      expect((await ping(server.port, sessionId)).status).toBeLessThan(400);
-    }
+    const pingedAt = Date.now() + 5_000;
+    expect((await atClock(pingedAt, () => ping(live.port, sessionId))).status).toBeLessThan(400);
+    await atClock(pingedAt + 900, () => live.sweepSessions());
+
+    expect((await ping(live.port, sessionId)).status).toBeLessThan(400);
   }, 20_000);
 
   it("reclaims a session whose pinned token has expired", async () => {
@@ -808,13 +820,13 @@ describe("startMcpHttpServer — session reclamation (M6)", () => {
     server = await startMcpHttpServer({
       engine,
       port: 0,
-      sessionLimits: { idleTtlMs: 600_000, sweepIntervalMs: 40 },
+      sessionLimits: { idleTtlMs: 600_000, sweepIntervalMs: 600_000 },
     });
 
     const created = await initialize(server.port);
     expect(created.status).toBe(200);
 
-    await sleep(200);
+    server.sweepSessions();
     expect((await ping(server.port, created.sessionId as string)).status).toBe(404);
   }, 20_000);
 
@@ -824,14 +836,14 @@ describe("startMcpHttpServer — session reclamation (M6)", () => {
     server = await startMcpHttpServer({
       engine,
       port: 0,
-      sessionLimits: { idleTtlMs: 600_000, sweepIntervalMs: 40 },
+      sessionLimits: { idleTtlMs: 600_000, sweepIntervalMs: 600_000 },
     });
 
     const created = await initialize(server.port);
     expect(created.status).toBe(200);
 
     isTokenRevoked.mockReturnValue(true);
-    await sleep(200);
+    server.sweepSessions();
     expect((await ping(server.port, created.sessionId as string)).status).toBe(404);
   }, 20_000);
 
@@ -1027,6 +1039,66 @@ describe("the 2026-07-28 leg (dual-era, design R1)", () => {
       expect(result.content[0]?.text).not.toContain("posted-into-the-loopback-form");
       expect(vi.mocked(engine.verifyToken).mock.calls.length - before).toBeGreaterThanOrEqual(4);
     } finally {
+      await client.close();
+    }
+  });
+
+  it("answers a modern client_credentials start_oauth_flow as pending and leaves no collector live", async () => {
+    vi.mocked(engine.verifyToken).mockReturnValue(
+      tokenPayload(["create"]) as unknown as VaultApiToken,
+    );
+    const createOAuthSecret = vi
+      .fn()
+      .mockResolvedValue({ handle: "secret://m2m", secretId: "uuid-m2m" });
+    Object.assign(engine, { createOAuthSecret });
+    const exchange = vi
+      .spyOn(OAuthManager.prototype, "startClientCredentials")
+      .mockRejectedValue(new Error("no token exchange on this leg"));
+    const elicited = vi.fn(async () => ({ action: "cancel" as const }));
+
+    const { client } = await connectModern(server.port, TOKEN, {
+      capabilities: { elicitation: { url: {} } },
+    });
+    client.setRequestHandler("elicitation/create", elicited);
+
+    try {
+      const result = (await client.callTool({
+        name: "start_oauth_flow",
+        arguments: {
+          name: "m2m",
+          provider: "custom",
+          grant_type: "client_credentials",
+          client_id: "client-123",
+          token_endpoint: "https://idp.example.com/oauth/token",
+        },
+      })) as { isError?: boolean; content: Array<{ text: string }> };
+
+      expect(result.isError).toBeUndefined();
+      expect(JSON.parse(result.content[0]?.text ?? "{}")).toEqual({
+        handle: "secret://m2m",
+        status: "pending",
+        message:
+          "No out-of-band channel was available to collect the client secret. Complete with: " +
+          "harpoc oauth connect m2m --client-credentials --provider custom --client-id client-123",
+      });
+      expect(createOAuthSecret).toHaveBeenCalledTimes(1);
+      expect(exchange).not.toHaveBeenCalled();
+      expect(elicited).not.toHaveBeenCalled();
+
+      const slots: ValueCollector[] = [];
+      try {
+        slots.push(
+          await startValueCollector({ subject: "a", operation: "create", principal: "jti-1" }),
+        );
+        slots.push(
+          await startValueCollector({ subject: "b", operation: "create", principal: "jti-1" }),
+        );
+      } finally {
+        for (const collector of slots) await collector.close();
+      }
+      expect(slots).toHaveLength(2);
+    } finally {
+      exchange.mockRestore();
       await client.close();
     }
   });

@@ -13,6 +13,7 @@ import * as valueCollector from "./value-collector.js";
 import {
   collectValueViaUrlElicitation,
   elicitValueViaInputRequired,
+  resumeValueCollection,
   runModernValueRound,
   startValueCollector,
 } from "./value-collector.js";
@@ -567,6 +568,14 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       } as unknown as ServerContext;
     }
 
+    /** Awaits the collector's own `waitForValue()` rejection (its timeout) through the resume path. */
+    async function collectorTimedOut(requestState: string | undefined): Promise<void> {
+      const state = await valueRequestState.verify(requestState as string, modernCtx());
+      await expect(
+        resumeValueCollection(state, state, { value: { action: "accept" } }),
+      ).resolves.toBeNull();
+    }
+
     async function retryRaw(
       modern: InMemoryMcpClient,
       requestState: unknown,
@@ -750,7 +759,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       );
       const requestState = pending?.requestState;
       expect(typeof requestState).toBe("string");
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await collectorTimedOut(requestState);
 
       const modern = await connectModern(engine);
       try {
@@ -1011,7 +1020,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       });
       expect(pending?.requestState).not.toContain(url.slice(url.lastIndexOf("/") + 1));
 
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await collectorTimedOut(pending?.requestState);
     });
 
     it("falls to the terminal prompt when a modern retry declines", async () => {

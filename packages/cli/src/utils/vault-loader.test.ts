@@ -1,7 +1,8 @@
 import { mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { Command } from "commander";
 import {
   AuditEventType,
   type CallerContext,
@@ -19,9 +20,17 @@ import { expectVaultError } from "@harpoc/test-utils";
 import {
   createEngine,
   loadUnlockedEngine,
+  refuseEmptyVaultDir,
   resolveSecretId,
   resolveVaultDir,
 } from "./vault-loader.js";
+import { registerLockCommand } from "../commands/lock.js";
+import { registerSecretListCommand } from "../commands/secret/list.js";
+
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return { ...actual, homedir: vi.fn(actual.homedir) };
+});
 
 let tempDir: string;
 
@@ -31,6 +40,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.mocked(homedir).mockReset();
   try {
     rmSync(tempDir, { recursive: true, force: true });
   } catch {
@@ -38,15 +48,96 @@ afterEach(() => {
   }
 });
 
+/** Run `fn` with `dir` as the working directory, restored afterwards. */
+function inCwd<T>(dir: string, fn: () => T): T {
+  const saved = process.cwd();
+  process.chdir(dir);
+  try {
+    return fn();
+  } finally {
+    process.chdir(saved);
+  }
+}
+
 describe("resolveVaultDir", () => {
   it("returns explicit path when provided", () => {
     const explicit = join(tempDir, "custom-vault");
     expect(resolveVaultDir(explicit)).toBe(explicit);
   });
 
-  it("falls back to home directory vault when cwd has no .harpoc", () => {
-    const result = resolveVaultDir();
-    expect(result).toContain(VAULT_DIR_NAME);
+  it.each(["", "  "])("refuses an empty --vault-dir (%j) as INVALID_INPUT", async (value) => {
+    const err = await expectVaultError(() => resolveVaultDir(value), ErrorCode.INVALID_INPUT);
+    expect(err.message).toBe("--vault-dir: empty path");
+  });
+
+  it("falls back to the home vault with no flag and no .harpoc in the working directory", () => {
+    const cwd = join(tempDir, "cwd");
+    mkdirSync(cwd);
+    vi.mocked(homedir).mockReturnValue(join(tempDir, "home"));
+    expect(inCwd(cwd, () => resolveVaultDir())).toBe(join(homedir(), VAULT_DIR_NAME));
+  });
+
+  it("prefers a .harpoc directory in the working directory over the home vault", () => {
+    const cwd = join(tempDir, "cwd");
+    mkdirSync(join(cwd, VAULT_DIR_NAME), { recursive: true });
+    mkdirSync(join(tempDir, "home", VAULT_DIR_NAME), { recursive: true });
+    vi.mocked(homedir).mockReturnValue(join(tempDir, "home"));
+    const [resolved, expected] = inCwd(cwd, () => [
+      resolveVaultDir(),
+      join(process.cwd(), VAULT_DIR_NAME),
+    ]);
+    expect(resolved).toBe(expected);
+    expect(resolved).not.toBe(join(homedir(), VAULT_DIR_NAME));
+  });
+});
+
+describe("refuseEmptyVaultDir (the root preAction hook)", () => {
+  let errSpy: MockInstance;
+  let logSpy: MockInstance;
+  let exitSpy: MockInstance;
+
+  async function run(args: string[]): Promise<void> {
+    const program = new Command();
+    program
+      .option("--vault-dir <path>", "Path to vault directory")
+      .hook("preAction", refuseEmptyVaultDir);
+    registerLockCommand(program);
+    registerSecretListCommand(program.command("secret"));
+    program.exitOverride();
+    program.configureOutput({ writeErr: () => {} });
+    await program.parseAsync(["node", "harpoc", ...args]);
+  }
+
+  beforeEach(() => {
+    vi.mocked(homedir).mockReturnValue(join(tempDir, "home"));
+    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
+  });
+
+  afterEach(() => {
+    errSpy.mockRestore();
+    logSpy.mockRestore();
+    exitSpy.mockRestore();
+  });
+
+  it('refuses `lock --vault-dir ""` with the INVALID_INPUT line and exit 1', async () => {
+    await expect(run(["--vault-dir", "", "lock"])).rejects.toThrow("process.exit");
+    expect(exitSpy.mock.calls).toEqual([[1]]);
+    expect(errSpy.mock.calls).toEqual([["Error: [INVALID_INPUT] --vault-dir: empty path"]]);
+  });
+
+  it('refuses `secret list --vault-dir "  " --json` through the JSON envelope', async () => {
+    await expect(run(["secret", "list", "--vault-dir", "  ", "--json"])).rejects.toThrow(
+      "process.exit",
+    );
+    expect(exitSpy.mock.calls).toEqual([[1]]);
+    expect(errSpy.mock.calls).toEqual([
+      [JSON.stringify({ error: "INVALID_INPUT", message: "--vault-dir: empty path" })],
+    ]);
+    expect(logSpy).not.toHaveBeenCalled();
   });
 });
 

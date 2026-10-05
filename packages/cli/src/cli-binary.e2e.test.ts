@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -27,40 +27,146 @@ interface CliResult {
   stderr: string;
 }
 
-function runCli(args: string[], options?: { stdin?: string }): Promise<CliResult> {
+const CHILD_TIMEOUT_MS = 25_000;
+const KILL_GRACE_MS = 2_000;
+
+interface SpawnOptions {
+  stdin?: string;
+  timeoutMs?: number;
+}
+
+/** The subcommand words before the first flag: a rejection never prints a flag's value. */
+function commandName(args: string[]): string {
+  const firstFlag = args.findIndex((arg) => arg.startsWith("-"));
+  return (firstFlag === -1 ? args : args.slice(0, firstFlag)).join(" ");
+}
+
+function spawnNode(
+  argv: string[],
+  name: string,
+  env: NodeJS.ProcessEnv,
+  options: SpawnOptions = {},
+): Promise<CliResult> {
+  const timeoutMs = options.timeoutMs ?? CHILD_TIMEOUT_MS;
   return new Promise((resolvePromise, rejectPromise) => {
-    // This helper drives `secret set`/`secret rotate` (which now read
-    // HARPOC_TOKEN as a fallback) with no --token, expecting the trusted
-    // local path — so an operator's ambient HARPOC_TOKEN must not leak into
-    // the spawned child (it would be verified against a foreign JWT and
-    // refused). Tests that need an ambient token (D8) set it explicitly on
-    // their own separate spawn call, not through this helper.
-    const childEnv: NodeJS.ProcessEnv = {
-      ...process.env,
-      HARPOC_OAUTH_CLIENT_SECRET: CLIENT_SECRET,
-    };
-    delete childEnv.HARPOC_TOKEN;
-    const child = spawn(process.execPath, [CLI_PATH, "--vault-dir", vaultDir, ...args], {
-      env: childEnv,
-      windowsHide: true,
-    });
+    const child = spawn(process.execPath, argv, { env, windowsHide: true });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    const timers: NodeJS.Timeout[] = [];
+    const clearTimers = (): void => {
+      for (const timer of timers) clearTimeout(timer);
+    };
+    timers.push(
+      setTimeout(() => {
+        timedOut = true;
+        child.kill();
+        timers.push(
+          setTimeout(() => {
+            child.kill("SIGKILL");
+            timers.push(
+              setTimeout(() => {
+                rejectPromise(
+                  new Error(`${name} (pid ${String(child.pid)}) did not close after SIGKILL`),
+                );
+              }, KILL_GRACE_MS),
+            );
+          }, KILL_GRACE_MS),
+        );
+      }, timeoutMs),
+    );
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
     });
-    child.on("error", rejectPromise);
+    child.on("error", (err: Error) => {
+      clearTimers();
+      rejectPromise(err);
+    });
     child.on("close", (code) => {
-      capturedOutputs.push(stdout, stderr);
+      clearTimers();
+      if (timedOut) {
+        rejectPromise(
+          new Error(
+            `${name} (pid ${String(child.pid)}) timed out after ${String(timeoutMs)} ms and was killed (${String(child.signalCode)}); stderr so far:\n${stderr}`,
+          ),
+        );
+        return;
+      }
       resolvePromise({ code, stdout, stderr });
     });
-    if (options?.stdin !== undefined) {
+    if (options.stdin !== undefined) {
       child.stdin.write(options.stdin);
     }
     child.stdin.end();
+  });
+}
+
+function spawnCli(
+  dir: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  options?: SpawnOptions,
+): Promise<CliResult> {
+  return spawnNode(
+    [CLI_PATH, "--vault-dir", dir, ...args],
+    `harpoc ${commandName(args)}`,
+    env,
+    options,
+  );
+}
+
+async function runCli(args: string[], options?: SpawnOptions): Promise<CliResult> {
+  // This helper drives `secret set`/`secret rotate` (which now read
+  // HARPOC_TOKEN as a fallback) with no --token, expecting the trusted
+  // local path — so an operator's ambient HARPOC_TOKEN must not leak into
+  // the spawned child (it would be verified against a foreign JWT and
+  // refused). Tests that need an ambient token (D8) set it explicitly on
+  // their own separate spawn call, not through this helper.
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    HARPOC_OAUTH_CLIENT_SECRET: CLIENT_SECRET,
+  };
+  delete childEnv.HARPOC_TOKEN;
+  const result = await spawnCli(vaultDir, args, childEnv, options);
+  capturedOutputs.push(result.stdout, result.stderr);
+  return result;
+}
+
+/** kill(), SIGKILL after the grace, settled on `close`: no later case meets a live child. */
+function stopChild(child: ChildProcess): Promise<void> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolvePromise();
+      return;
+    }
+    if (child.pid === undefined) {
+      child.kill();
+      resolvePromise();
+      return;
+    }
+    const timers: NodeJS.Timeout[] = [];
+    child.once("close", () => {
+      for (const timer of timers) clearTimeout(timer);
+      resolvePromise();
+    });
+    child.kill();
+    timers.push(
+      setTimeout(() => {
+        child.kill("SIGKILL");
+        timers.push(
+          setTimeout(() => {
+            rejectPromise(
+              new Error(
+                `child pid ${String(child.pid)} did not close within ${String(2 * KILL_GRACE_MS)} ms of kill() and SIGKILL`,
+              ),
+            );
+          }, KILL_GRACE_MS),
+        );
+      }, KILL_GRACE_MS),
+    );
   });
 }
 
@@ -97,7 +203,10 @@ beforeAll(async () => {
   mkdirSync(vaultDir, { recursive: true });
 
   // Real binary, real argon2, piped-stdin password prompts (init asks twice).
-  const init = await runCli(["init"], { stdin: `${MASTER_PASSWORD}\n${MASTER_PASSWORD}\n` });
+  const init = await runCli(["init"], {
+    stdin: `${MASTER_PASSWORD}\n${MASTER_PASSWORD}\n`,
+    timeoutMs: 55_000,
+  });
   if (init.code !== 0) {
     throw new Error(`harpoc init failed (exit ${String(init.code)}): ${init.stderr}`);
   }
@@ -304,7 +413,7 @@ describe("compiled binary smoke: stdio MCP token gate (V3)", () => {
       expect(stderr).toContain("WARNING");
       expect(stderr).toContain("unrestricted");
     } finally {
-      child.kill();
+      await stopChild(child);
     }
   }, 30_000);
 
@@ -407,18 +516,9 @@ describe("compiled binary smoke: vault directory and database modes (L11)", () =
         `harpoc-modes-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       );
 
-      const init = await new Promise<CliResult>((resolvePromise, rejectPromise) => {
-        const child = spawn(process.execPath, [CLI_PATH, "--vault-dir", freshDir, "init"], {
-          windowsHide: true,
-        });
-        let stdout = "";
-        let stderr = "";
-        child.stdout.on("data", (c: Buffer) => (stdout += c.toString("utf8")));
-        child.stderr.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
-        child.on("error", rejectPromise);
-        child.on("close", (code) => resolvePromise({ code, stdout, stderr }));
-        child.stdin.write(`${MASTER_PASSWORD}\n${MASTER_PASSWORD}\n`);
-        child.stdin.end();
+      const init = await spawnCli(freshDir, ["init"], process.env, {
+        stdin: `${MASTER_PASSWORD}\n${MASTER_PASSWORD}\n`,
+        timeoutMs: 55_000,
       });
 
       try {
@@ -431,6 +531,15 @@ describe("compiled binary smoke: vault directory and database modes (L11)", () =
     },
     60_000,
   );
+});
+
+describe("compiled binary smoke: an empty --vault-dir (I27)", () => {
+  it("refuses INVALID_INPUT through the root preAction hook before any vault opens", async () => {
+    const result = await runCli(["--vault-dir", "  ", "lock"]);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("Error: [INVALID_INPUT] --vault-dir: empty path\n");
+  });
 });
 
 // Phase 3 D1: `secret use` accepts a scoped token, so the CLI is no longer
@@ -561,18 +670,9 @@ describe("compiled binary smoke: token-scoped secret use (D1)", () => {
   }, 60_000);
 
   it("the ambient HARPOC_TOKEN is honored when no flag is given (D8)", async () => {
-    const child = await new Promise<CliResult>((resolvePromise, rejectPromise) => {
-      const proc = spawn(process.execPath, [CLI_PATH, "--vault-dir", vaultDir, ...useArgs()], {
-        env: { ...process.env, HARPOC_TOKEN: foreignToken },
-        windowsHide: true,
-      });
-      let stdout = "";
-      let stderr = "";
-      proc.stdout.on("data", (c: Buffer) => (stdout += c.toString("utf8")));
-      proc.stderr.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
-      proc.on("error", rejectPromise);
-      proc.on("close", (code) => resolvePromise({ code, stdout, stderr }));
-      proc.stdin.end();
+    const child = await spawnCli(vaultDir, useArgs(), {
+      ...process.env,
+      HARPOC_TOKEN: foreignToken,
     });
     capturedOutputs.push(child.stdout, child.stderr);
     expect(child.code).toBe(1);
@@ -843,4 +943,26 @@ describe("compiled binary smoke: a grantless admin-scoped token's secret allow i
     expect(shown.code).toBe(0);
     expect((JSON.parse(shown.stdout) as { url_allowlist: string[] }).url_allowlist).toEqual([]);
   }, 60_000);
+});
+
+describe("the spawn helpers' deadline (I20)", () => {
+  it("kills a hanging child at its deadline and rejects naming it, after its close", async () => {
+    const started = Date.now();
+    const err = await spawnNode(
+      ["-e", "setInterval(() => {}, 1000)"],
+      "node -e setInterval",
+      process.env,
+      { timeoutMs: 200 },
+    ).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(
+      /^node -e setInterval \(pid \d+\) timed out after 200 ms and was killed \(SIGTERM\)/,
+    );
+    const pid = Number(/pid (\d+)/.exec((err as Error).message)?.[1]);
+    expect(() => process.kill(pid, 0)).toThrow();
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 10_000);
 });

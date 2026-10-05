@@ -70,6 +70,11 @@ const jsonResponse = (status: number, body: unknown): Response =>
 
 const HEALTHY = { data: { state: "unlocked", version: "1.0.0" } };
 
+interface SeenRequest {
+  url: string;
+  authorization: string | undefined;
+}
+
 /**
  * Wraps a per-test `/api/v1/health` stub. DashboardPage renders as soon as the
  * shell reaches "unlocked" and immediately calls `listSecrets()`/
@@ -80,11 +85,14 @@ const HEALTHY = { data: { state: "unlocked", version: "1.0.0" } };
  * `/health/expiring`. A path-agnostic stub that only knows about health
  * responses hands at least one of them the wrong shape and throws mid-render
  * (unhandled rejection). Routing them away from `healthHandler` also keeps the
- * call-counting handlers below counting health calls only.
+ * call-counting handlers below counting health calls only. `seen`, when given,
+ * records every request's URL and `Authorization` header.
  */
-function routeFetch(healthHandler: () => Response): typeof fetch {
-  return vi.fn((input: RequestInfo | URL) => {
+function routeFetch(healthHandler: () => Response, seen: SeenRequest[] = []): typeof fetch {
+  return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    seen.push({ url, authorization: headers["Authorization"] });
     if (url.includes("/api/v1/health/expiring")) {
       return Promise.resolve(
         jsonResponse(200, {
@@ -259,6 +267,7 @@ describe("App session signals", () => {
   it("accepts the re-pasted token on the FIRST submit after a 401", async () => {
     setToken("stale");
     let calls = 0;
+    const seen: SeenRequest[] = [];
     vi.stubGlobal(
       "fetch",
       routeFetch(() => {
@@ -266,7 +275,7 @@ describe("App session signals", () => {
         return calls === 1
           ? jsonResponse(401, { error: "UNAUTHORIZED", message: "no" })
           : jsonResponse(200, HEALTHY);
-      }),
+      }, seen),
     );
     const { container } = render(<App />);
     await waitFor(() => expect(screen.getByText("Sign in")).toBeTruthy());
@@ -274,6 +283,7 @@ describe("App session signals", () => {
     fireEvent.input(screen.getByLabelText("API token"), { target: { value: "fresh.jwt" } });
     const form = container.querySelector("form");
     if (form === null) throw new Error("sign-in form missing");
+    const before = seen.length;
     fireEvent.submit(form);
 
     // One submit, one transition: a stale render-time error must not bounce the
@@ -281,6 +291,9 @@ describe("App session signals", () => {
     await waitFor(() => expect(screen.getByText("UNLOCKED")).toBeTruthy());
     expect(getToken()).toBe("fresh.jwt");
     expect(screen.queryByText("Sign in")).toBeNull();
+    const sentAfterPaste = (): string[] => seen.slice(before).flatMap((r) => r.authorization ?? []);
+    await waitFor(() => expect(sentAfterPaste().length).toBeGreaterThan(0));
+    expect([...new Set(sentAfterPaste())]).toEqual(["Bearer fresh.jwt"]);
   });
 
   it("shows the sealed takeover when a call answers VAULT_LOCKED", async () => {

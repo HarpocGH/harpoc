@@ -7,6 +7,7 @@ export {
 } from "./utils/vault-loader.js";
 import { Command } from "commander";
 import { HARPOC_VERSION } from "@harpoc/shared";
+import { refuseEmptyVaultDir } from "./utils/vault-loader.js";
 import { registerInitCommand } from "./commands/init.js";
 import { registerUnlockCommand } from "./commands/unlock.js";
 import { registerLockCommand } from "./commands/lock.js";
@@ -51,7 +52,8 @@ program
   .name("harpoc")
   .description("Secret vault for AI agents")
   .version(HARPOC_VERSION)
-  .option("--vault-dir <path>", "Path to vault directory");
+  .option("--vault-dir <path>", "Path to vault directory")
+  .hook("preAction", refuseEmptyVaultDir);
 
 // Top-level commands
 registerInitCommand(program);

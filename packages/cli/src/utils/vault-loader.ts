@@ -1,20 +1,38 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { VAULT_DB_NAME, VAULT_DIR_NAME, SESSION_FILE_NAME } from "@harpoc/shared";
+import type { Command } from "commander";
+import { VAULT_DB_NAME, VAULT_DIR_NAME, SESSION_FILE_NAME, VaultError } from "@harpoc/shared";
 import type { AuditEventType, CallerContext } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
+import { handleError } from "./output.js";
 
 /**
- * Resolve the vault directory. Checks --vault-dir option, then cwd, then home.
+ * Resolve the vault directory. Checks --vault-dir option, then cwd, then home;
+ * an empty or whitespace-only --vault-dir refuses INVALID_INPUT.
  */
 export function resolveVaultDir(vaultDirOption?: string): string {
-  if (vaultDirOption) return vaultDirOption;
+  if (vaultDirOption !== undefined) {
+    if (vaultDirOption.trim() === "") throw VaultError.invalidInput("--vault-dir: empty path");
+    return vaultDirOption;
+  }
 
   const cwdVault = join(process.cwd(), VAULT_DIR_NAME);
   if (existsSync(cwdVault)) return cwdVault;
 
   return join(homedir(), VAULT_DIR_NAME);
+}
+
+/**
+ * The root program's preAction hook: an empty --vault-dir refuses before any
+ * command's action runs, through the --json envelope where the command has one.
+ */
+export function refuseEmptyVaultDir(program: Command, actionCommand: Command): void {
+  try {
+    resolveVaultDir(program.opts<{ vaultDir?: string }>().vaultDir);
+  } catch (err) {
+    handleError(err, actionCommand.optsWithGlobals<{ json?: boolean }>().json === true);
+  }
 }
 
 /**

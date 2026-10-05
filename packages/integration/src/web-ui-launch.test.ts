@@ -8,6 +8,8 @@ import { runCli, startCliServerOnFreePort } from "./helpers/spawn-cli.js";
 
 const PASSWORD = "launch-flow-pw-1";
 const LAUNCH_LINE = /\[harpoc\] Web UI: (http:\/\/[^#\s?]+)#token=(\S+)/;
+const UI_CSP =
+  "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 function jwtPayload(token: string): Record<string, unknown> {
   const segment = token.split(".")[1] as string;
@@ -69,7 +71,7 @@ describe("web-ui launch flow (spawned CLI)", () => {
       // /ui: index, CSP + nosniff, SPA fallback, traversal + unknown-extension 404.
       const index = await fetch(`${origin}/ui`);
       expect(index.status).toBe(200);
-      expect(index.headers.get("content-security-policy")).toContain("default-src 'self'");
+      expect(index.headers.get("content-security-policy")).toBe(UI_CSP);
       expect(index.headers.get("x-content-type-options")).toBe("nosniff");
       const html = await index.text();
 

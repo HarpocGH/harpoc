@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getToken } from "./auth/token-store";
 
 afterEach(() => {
   sessionStorage.clear();
@@ -28,5 +29,19 @@ describe("main boot", () => {
     });
     const { render } = await import("preact");
     render(null, document.getElementById("root") as HTMLElement);
+  });
+
+  it("adopts the launch token from the fragment and scrubs it during module boot", async () => {
+    document.body.innerHTML = '<div id="root"></div>';
+    window.location.hash = "#token=a.b.c";
+    vi.resetModules();
+    await import("./main");
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => setTimeout(resolve, 0));
+    });
+    const { render } = await import("preact");
+    render(null, document.getElementById("root") as HTMLElement);
+    expect(getToken()).toBe("a.b.c");
+    expect(window.location.hash).toBe("");
   });
 });
