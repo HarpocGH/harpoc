@@ -1473,15 +1473,6 @@ describe("database file permissions (L11)", () => {
       }
     }
   });
-
-  it("opens a pre-existing database whose mode cannot be changed", () => {
-    const dbPath = join(dir, "readonly-mode.vault.db");
-    store = new SqliteStore(dbPath);
-    store.close();
-    // Best-effort by design: re-opening must never fail on a mode problem.
-    store = new SqliteStore(dbPath);
-    expect(store.db.open).toBe(true);
-  });
 });
 
 describe("JSON columns are read strictly (P3-11)", () => {

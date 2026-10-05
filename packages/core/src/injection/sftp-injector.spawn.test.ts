@@ -199,6 +199,38 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     expect(opts.redact).toContain(keyPem);
   });
 
+  it("spawns sftp with a built environment, not the vault's own", async () => {
+    process.env.HARPOC_T14_SFTP_AMBIENT = "ambient-value";
+    process.env.HARPOC_T14_SFTP_ALLOWED = "allowed-value";
+    try {
+      await executeSftpAction(
+        LIST_ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        allowedPolicy({ env_allowlist: ["HARPOC_T14_SFTP_ALLOWED"] }),
+        SFTP_CONFIG,
+      );
+
+      const [, , opts] = spawnMock.mock.calls[0] as [
+        string,
+        string[],
+        { env: Record<string, string> },
+      ];
+      expect(opts.env.HARPOC_T14_SFTP_AMBIENT).toBeUndefined();
+      expect(opts.env.HARPOC_T14_SFTP_ALLOWED).toBe("allowed-value");
+
+      const expected = new Set([
+        "PATH",
+        ...(process.platform === "win32" ? ["SystemRoot", "ProgramData"] : []),
+        "SSH_AUTH_SOCK",
+        "HARPOC_T14_SFTP_ALLOWED",
+      ]);
+      expect(Object.keys(opts.env).filter((k) => !expected.has(k))).toEqual([]);
+    } finally {
+      delete process.env.HARPOC_T14_SFTP_AMBIENT;
+      delete process.env.HARPOC_T14_SFTP_ALLOWED;
+    }
+  });
+
   it("passes a non-22 port as -P ahead of the batch-mode flags", async () => {
     await executeSftpAction(
       { ...LIST_ACTION, port: 2222 },

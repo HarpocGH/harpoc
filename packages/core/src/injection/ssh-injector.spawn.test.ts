@@ -566,6 +566,67 @@ describeSsh("SshInjector output sanitization on the row (Wave 2, E70)", () => {
     });
   });
 
+  const OUTCOMES: {
+    outcome: string;
+    spawned: Partial<SpawnCapturedResult>;
+    error: ErrorCode | undefined;
+  }[] = [
+    {
+      outcome: "exit 255 without host-key text",
+      spawned: {
+        exit_code: 255,
+        stderr: "ssh: connect to host deploy.example.com port 22: Connection refused",
+      },
+      error: ErrorCode.SSH_CONNECT_FAILED,
+    },
+    {
+      outcome: "a timed-out run",
+      spawned: { exit_code: null, timed_out: true, signal: "SIGKILL" },
+      error: ErrorCode.PROCESS_TIMEOUT,
+    },
+    {
+      outcome: "a spawn failure",
+      spawned: { exit_code: null, spawn_failed: true },
+      error: ErrorCode.SSH_CONNECT_FAILED,
+    },
+    {
+      outcome: "a non-zero remote exit (1)",
+      spawned: { exit_code: 1 },
+      error: undefined,
+    },
+    { outcome: "a clean exit (0)", spawned: { exit_code: 0 }, error: undefined },
+  ];
+
+  it.each(OUTCOMES)(
+    "classifies $outcome by result.error and the row's success",
+    async ({ spawned, error }) => {
+      const log = vi.fn();
+      const audited = new SshInjector({ log } as unknown as AuditLogger);
+      const settled = { ...OK_RESULT, ...spawned };
+      spawnMock.mockResolvedValue(settled);
+      const result = await audited.executeWithSecret(
+        ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        policy({ host_allowlist: ["deploy.example.com"], command_allowlist: [SSH as string] }),
+        SSH_CONFIG,
+        "secret-1",
+      );
+
+      expect(result.error).toBe(error);
+      expect(result.timed_out).toBe(settled.timed_out ? true : undefined);
+      const row = log.mock.calls.at(-1)?.[0] as {
+        success: boolean;
+        detail: Record<string, unknown>;
+      };
+      expect(row.success).toBe(error === undefined);
+      expect(row.detail).toMatchObject({
+        context: "ssh",
+        exit_code: settled.exit_code,
+        timed_out: settled.timed_out,
+      });
+    },
+  );
+
   it("carries the spawn tier onto the row as tree_kill (2026-09-10)", async () => {
     const log = vi.fn();
     const audited = new SshInjector({ log } as unknown as AuditLogger);

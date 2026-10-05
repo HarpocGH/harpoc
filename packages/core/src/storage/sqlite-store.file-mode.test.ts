@@ -41,6 +41,24 @@ describe("database file mode at creation (D55)", () => {
     },
   );
 
+  it.runIf(process.platform !== "win32")(
+    "opens a pre-existing database whose mode cannot be changed (chmod refused EPERM)",
+    () => {
+      const dbPath = join(dir, "foreign-mode.vault.db");
+      new SqliteStore(dbPath).close();
+      vi.mocked(chmodSync).mockClear();
+      vi.mocked(chmodSync).mockImplementation(() => {
+        throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+      });
+
+      store = new SqliteStore(dbPath);
+      store.setMeta("probe", "ok");
+
+      expect(store.getMeta("probe")).toBe("ok");
+      expect(chmodSync).toHaveBeenCalledWith(dbPath, 0o600);
+    },
+  );
+
   it("does not create a file for an in-memory store", () => {
     store = new SqliteStore(":memory:");
     expect(existsSync(":memory:")).toBe(false);

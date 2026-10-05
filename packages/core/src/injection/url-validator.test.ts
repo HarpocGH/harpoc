@@ -241,22 +241,6 @@ describe("validateUrl", () => {
     await expectVaultError(() => validateUrl(""), ErrorCode.URL_INVALID);
   });
 
-  it("rejects URL with no host (https:///path)", async () => {
-    // URL constructor may parse this or throw — either SSRF_BLOCKED or URL_INVALID is acceptable
-    let thrown: unknown;
-    try {
-      await validateUrl("https:///path");
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBeInstanceOf(VaultError);
-    expect([
-      ErrorCode.URL_INVALID,
-      ErrorCode.SSRF_BLOCKED,
-      ErrorCode.DNS_RESOLUTION_FAILED,
-    ]).toContain((thrown as VaultError).code);
-  });
-
   it("rejects javascript: scheme", async () => {
     let thrown: unknown;
     try {

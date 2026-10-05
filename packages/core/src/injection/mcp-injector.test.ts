@@ -32,7 +32,7 @@ const SECRET = "sk-mcp-supersecret-abcdef123456";
 /**
  * Inline downstream MCP server (newline-delimited JSON-RPC over stdio) with
  * tools exercising the lifecycle and leakage surfaces: echo, leak-env,
- * leak-structured, error-tool, crash (exits mid-call), slow.
+ * leak-structured, env-keys, error-tool, crash (exits mid-call), slow.
  */
 const TEST_SERVER = `
 const readline = require("node:readline");
@@ -71,6 +71,10 @@ rl.on("line", (line) => {
       send({ jsonrpc: "2.0", id: m.id, result: {
         content: [],
         structuredContent: { nested: { secret: process.env.DOWNSTREAM_TOKEN || "unset" } },
+      }});
+    } else if (name === "env-keys") {
+      send({ jsonrpc: "2.0", id: m.id, result: {
+        content: [{ type: "text", text: JSON.stringify(Object.keys(process.env).sort()) }],
       }});
     } else if (name === "error-tool") {
       send({ jsonrpc: "2.0", id: m.id, result: {
@@ -332,6 +336,64 @@ describe("McpInjector — output sanitization (I2b)", () => {
     const result = await run(mcpAction("big"));
     expect(result.truncated).toBe(true);
     expect(JSON.stringify(result).length).toBeLessThan(1_100_000);
+  });
+});
+
+/** The names libuv copies from the parent into a win32 child environment that lacks them. */
+const WIN32_LIBUV_REQUIRED_ENV = [
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "LOGONSERVER",
+  "SYSTEMDRIVE",
+  "SYSTEMROOT",
+  "TEMP",
+  "USERDOMAIN",
+  "USERNAME",
+  "USERPROFILE",
+  "WINDIR",
+];
+
+describe("McpInjector — the stdio child's environment (§4.5.3 layer 3)", () => {
+  const AMBIENT = "HARPOC_MCP_AMBIENT";
+  const ALLOWED = "HARPOC_MCP_ALLOWED";
+
+  afterEach(() => {
+    Reflect.deleteProperty(process.env, AMBIENT);
+    Reflect.deleteProperty(process.env, ALLOWED);
+  });
+
+  function childEnvKeys(result: { content?: unknown }): string[] {
+    const [first] = result.content as { type: string; text: string }[];
+    return JSON.parse((first as { text: string }).text) as string[];
+  }
+
+  function toleratedKeys(...allowlisted: string[]): Set<string> {
+    return new Set([
+      "DOWNSTREAM_TOKEN",
+      "PATH",
+      ...allowlisted,
+      ...(process.platform === "win32" ? WIN32_LIBUV_REQUIRED_ENV : []),
+      ...(process.platform === "darwin" ? ["__CF_USER_TEXT_ENCODING"] : []),
+    ]);
+  }
+
+  it("hands the downstream child a built environment, not the vault's own", async () => {
+    process.env[AMBIENT] = "ambient-value";
+    const keys = childEnvKeys(await run(mcpAction("env-keys")));
+    expect(keys).not.toContain(AMBIENT);
+    expect(keys).toEqual(expect.arrayContaining(["DOWNSTREAM_TOKEN", "PATH"]));
+    const tolerated = toleratedKeys();
+    expect(keys.filter((k) => !tolerated.has(k))).toEqual([]);
+  });
+
+  it("passes an env_allowlist entry through to the downstream child", async () => {
+    process.env[ALLOWED] = "allowed-value";
+    const keys = childEnvKeys(
+      await run(mcpAction("env-keys"), { policy: { ...POLICY, env_allowlist: [ALLOWED] } }),
+    );
+    expect(keys).toEqual(expect.arrayContaining(["DOWNSTREAM_TOKEN", "PATH", ALLOWED]));
+    const tolerated = toleratedKeys(ALLOWED);
+    expect(keys.filter((k) => !tolerated.has(k))).toEqual([]);
   });
 });
 

@@ -1121,6 +1121,116 @@ describe("useSecret with OAuth", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The SSRF floor on the refresh POST (test review I1)
+// ---------------------------------------------------------------------------
+
+describe("refreshOAuthToken — the SSRF floor on the token endpoint", () => {
+  const PRIVATE_ENDPOINTS = ["https://10.0.0.1/token", "https://169.254.169.254/token"];
+
+  /** A global `fetch` that would complete the refresh: a call to it is the failure under test. */
+  function stubTokenFetch() {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            access_token: "private-endpoint-access-token",
+            refresh_token: "private-endpoint-refresh-token",
+            expires_in: 3600,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    return fetchSpy;
+  }
+
+  async function activePrivateSecret(endpoint: string, expiresAt: number): Promise<string> {
+    const { secretId } = await engine.createOAuthSecret(
+      "private-endpoint",
+      defaultProviderConfig({ token_endpoint: endpoint }),
+    );
+    await engine.setInjectionPolicy("secret://private-endpoint", {
+      url_allowlist: [`${targetServerUrl}/*`],
+    });
+    await engine.completeOAuthFlow(secretId, "current-access", "refresh-tok", expiresAt);
+    return secretId;
+  }
+
+  function useOnTarget() {
+    return engine.useSecret("secret://private-endpoint", {
+      type: "http",
+      method: "GET",
+      url: `${targetServerUrl}/api/data`,
+      injection: { type: "bearer" },
+    });
+  }
+
+  function expectOneRefusedRefresh(secretId: string): void {
+    const rows = engine.queryAudit({ secretId, eventType: AuditEventType.OAUTH_REFRESH });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      success: false,
+      detail: { action: "refresh", error: ErrorCode.SSRF_BLOCKED },
+    });
+  }
+
+  beforeEach(async () => {
+    await engine.initVault("password");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each(PRIVATE_ENDPOINTS)(
+    "refuses an explicit refresh against %s before any POST",
+    async (endpoint) => {
+      const fetchSpy = stubTokenFetch();
+      const secretId = await activePrivateSecret(endpoint, Date.now() - 1000);
+
+      await expectVaultError(() => engine.refreshOAuthToken(secretId), ErrorCode.SSRF_BLOCKED);
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expectOneRefusedRefresh(secretId);
+    },
+  );
+
+  it.each(PRIVATE_ENDPOINTS)(
+    "refuses the on-use auto-refresh of an expired token against %s: the use fails SSRF_BLOCKED",
+    async (endpoint) => {
+      const fetchSpy = stubTokenFetch();
+      const secretId = await activePrivateSecret(endpoint, Date.now() - 5000);
+
+      await expectVaultError(useOnTarget, ErrorCode.SSRF_BLOCKED);
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expectOneRefusedRefresh(secretId);
+      const useRows = engine.queryAudit({ secretId, eventType: AuditEventType.SECRET_USE });
+      expect(useRows).toHaveLength(1);
+      expect(useRows[0]).toMatchObject({
+        success: false,
+        detail: { context: "http", error: ErrorCode.SSRF_BLOCKED },
+      });
+    },
+  );
+
+  it.each(PRIVATE_ENDPOINTS)(
+    "a refused in-window auto-refresh against %s falls back to the unexpired token",
+    async (endpoint) => {
+      const fetchSpy = stubTokenFetch();
+      const secretId = await activePrivateSecret(endpoint, Date.now() + 30_000);
+
+      const response = await useOnTarget();
+
+      if (response.type !== "http") throw new Error("expected http result");
+      expect(response.status).toBe(200);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expectOneRefusedRefresh(secretId);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Caller policy enforcement on the OAuth entry points
 // ---------------------------------------------------------------------------
 

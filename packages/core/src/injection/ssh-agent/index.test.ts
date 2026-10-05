@@ -146,12 +146,17 @@ describe("EphemeralSshAgent", () => {
     });
   });
 
-  it("removes the socket directory on dispose (POSIX)", async () => {
+  it("stops serving the moment it is disposed", async () => {
     const agent = await EphemeralSshAgent.start(readFixture("ed25519_openssh"));
     const sock = agent.authSock;
-    agent.dispose();
-    if (process.platform !== "win32") {
-      expect(existsSync(sock)).toBe(false);
+    try {
+      await expect(listIdentities(sock)).resolves.toBeInstanceOf(Buffer);
+    } finally {
+      agent.dispose();
     }
+    await expect(
+      agentRequest(sock, writeByte(SSH_AGENTC_REQUEST_IDENTITIES)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(existsSync(sock)).toBe(false);
   });
 });

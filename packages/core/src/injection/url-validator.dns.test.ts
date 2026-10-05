@@ -67,6 +67,13 @@ describe("validateUrl DNS resolution", () => {
       code: ErrorCode.DNS_RESOLUTION_FAILED,
     });
   });
+
+  it("resolves the hostname the parser takes from https:///path and fails on one code", async () => {
+    lookupMock.mockRejectedValue(new Error("getaddrinfo ENOTFOUND path"));
+
+    await expectVaultError(() => validateUrl("https:///path"), ErrorCode.DNS_RESOLUTION_FAILED);
+    expect(lookupMock).toHaveBeenCalledExactlyOnceWith("path", { all: true });
+  });
 });
 
 describe("validateHostPort DNS resolution", () => {

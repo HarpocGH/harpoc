@@ -94,6 +94,19 @@ function helperDirFrom(env: Record<string, string>): string {
   return (env.PATH ?? "").split(delimiter)[0] as string;
 }
 
+/** The keys every docker spawn carries: baseDockerEnv's, the allowlisted, the call site's four. */
+function dockerEnvKeys(...allowlisted: string[]): string[] {
+  return [
+    "PATH",
+    ...(process.platform === "win32" && process.env.SystemRoot ? ["SystemRoot"] : []),
+    ...allowlisted,
+    "DOCKER_CONFIG",
+    "HARPOC_DOCKER_REGISTRY",
+    "HARPOC_DOCKER_USER",
+    "HARPOC_DOCKER_SECRET",
+  ].sort();
+}
+
 describe("executeDockerRegistryAction spawn shape", () => {
   it("spawns the pinned docker binary with argv [docker, operation, image] and no shell", async () => {
     await executeDockerRegistryAction(PULL_ACTION, SECRET, allowed());
@@ -122,6 +135,36 @@ describe("executeDockerRegistryAction spawn shape", () => {
     // The credential travels via env only — never on argv.
     expect(args.join(" ")).not.toContain("s3cr3t-registry-pass-value");
     expect(args.join(" ")).not.toContain("robot");
+  });
+
+  it("spawns docker with a built environment, not the vault's own", async () => {
+    process.env.HARPOC_DOCKER_AMBIENT = "ambient-value";
+    try {
+      await executeDockerRegistryAction(PULL_ACTION, SECRET, allowed());
+
+      const [, , opts] = vi.mocked(spawnCaptured).mock.calls[0] as SpawnCall;
+      expect(opts.env.HARPOC_DOCKER_AMBIENT).toBeUndefined();
+      expect(Object.keys(opts.env).sort()).toEqual(dockerEnvKeys());
+    } finally {
+      delete process.env.HARPOC_DOCKER_AMBIENT;
+    }
+  });
+
+  it("passes an env_allowlist entry through to docker", async () => {
+    process.env.HARPOC_DOCKER_ALLOWED = "allowed-value";
+    try {
+      await executeDockerRegistryAction(
+        PULL_ACTION,
+        SECRET,
+        allowed({ env_allowlist: ["HARPOC_DOCKER_ALLOWED"] }),
+      );
+
+      const [, , opts] = vi.mocked(spawnCaptured).mock.calls[0] as SpawnCall;
+      expect(opts.env.HARPOC_DOCKER_ALLOWED).toBe("allowed-value");
+      expect(Object.keys(opts.env).sort()).toEqual(dockerEnvKeys("HARPOC_DOCKER_ALLOWED"));
+    } finally {
+      delete process.env.HARPOC_DOCKER_ALLOWED;
+    }
   });
 
   it("prepends the credential-helper dir to PATH", async () => {

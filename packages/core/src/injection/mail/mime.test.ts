@@ -203,6 +203,26 @@ describe("assembleMessage", () => {
     expect(/(?<!\r)\n/.test(message)).toBe(false);
   });
 
+  it.each(['a"\r\nX-Injected: evil', 'a"\nX-Injected: evil'])(
+    "(i2) a line-break-injecting attachment filename %j arrives neutralized in both part headers",
+    (filename) => {
+      const { message } = assembleMessage({
+        from: "alice@example.com",
+        to: ["bob@example.com"],
+        subject: "Attachment filename injection",
+        text: "body",
+        attachments: [{ filename, contentType: "text/plain", data: Buffer.from("data", "utf8") }],
+      });
+
+      expect(/^X-Injected:/m.test(message)).toBe(false);
+      expect(/(?<!\r)\n/.test(message)).toBe(false);
+      expect(message).toContain('Content-Type: text/plain; name="a\\" X-Injected: evil"\r\n');
+      expect(message).toContain(
+        'Content-Disposition: attachment; filename="a\\" X-Injected: evil"\r\n',
+      );
+    },
+  );
+
   it("(j) extraHeaders rejects a reserved header name (e.g. Bcc) without leaking the value", () => {
     let caught: unknown;
     try {

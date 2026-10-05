@@ -61,6 +61,13 @@ beforeAll(async () => {
       return;
     }
 
+    if (url.pathname === "/echo-header") {
+      const auth = String(req.headers["authorization"] ?? "").replace(/^Bearer\s+/i, "");
+      res.writeHead(200, { "Content-Type": "application/json", "X-Echo": auth });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
     if (url.pathname === "/status") {
       const code = parseInt(url.searchParams.get("code") ?? "200", 10);
       if (code === 204) {
@@ -123,7 +130,7 @@ beforeAll(async () => {
     // reporting the origin alone does not remove it — only redaction does.
     if (url.pathname === "/redirect-echo-credential-host") {
       const auth = String(req.headers["authorization"] ?? "").replace(/^Bearer\s+/i, "");
-      res.writeHead(302, { Location: `https://${auth.toLowerCase()}.invalid/` });
+      res.writeHead(302, { Location: `http://${auth.toLowerCase()}.invalid/` });
       res.end();
       return;
     }
@@ -750,17 +757,6 @@ describe("HttpInjector", () => {
   });
 
   describe("error classification", () => {
-    it("returns DNS_RESOLUTION_FAILED for unknown hosts", async () => {
-      const response = await injector.executeWithSecret(
-        { method: "GET", url: "https://this-host-does-not-exist-xyz123.invalid/api" },
-        new Uint8Array(Buffer.from("val")),
-        { type: "bearer" },
-      );
-
-      expect(response.status).toBeNull();
-      expect(response.error).toBe("DNS_RESOLUTION_FAILED");
-    });
-
     it("returns CONNECTION_REFUSED for refused connections", async () => {
       // Port 2 is almost certainly not listening
       const response = await injector.executeWithSecret(
@@ -1042,6 +1038,35 @@ describe("HttpInjector", () => {
         "secret-1",
       );
       expect(response.body).toContain("echo-me-token-value");
+      const last = rows.at(-1) as { detail: Record<string, unknown> };
+      expect("sanitized" in last.detail).toBe(false);
+    });
+
+    it("filtered mode redacts a credential echoed in a response header and marks the row sanitized", async () => {
+      const recorded = new HttpInjector(logger);
+      const response = await recorded.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/echo-header`, responseMode: "filtered" },
+        new Uint8Array(Buffer.from("header-echo-token-value")),
+        { type: "bearer" },
+        "any",
+        "secret-1",
+      );
+      expect(response.body).toBe('{"ok":true}');
+      expect(response.headers?.["x-echo"]).toBe("[REDACTED]");
+      const last = rows.at(-1) as { detail: Record<string, unknown> };
+      expect(last.detail).toMatchObject({ context: "http", status: 200, sanitized: true });
+    });
+
+    it("full mode returns a credential echoed in a response header raw and unmarked", async () => {
+      const recorded = new HttpInjector(logger);
+      const response = await recorded.executeWithSecret(
+        { method: "GET", url: `${baseUrl}/echo-header`, responseMode: "full" },
+        new Uint8Array(Buffer.from("header-echo-token-value")),
+        { type: "bearer" },
+        "any",
+        "secret-1",
+      );
+      expect(response.headers?.["x-echo"]).toBe("header-echo-token-value");
       const last = rows.at(-1) as { detail: Record<string, unknown> };
       expect("sanitized" in last.detail).toBe(false);
     });

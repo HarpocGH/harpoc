@@ -26,6 +26,7 @@ import { expectVaultError, protectorTimer, recordSeriesLine } from "@harpoc/test
 import { VaultEngine } from "./vault-engine.js";
 import { decrypt, encrypt } from "./crypto/aes-gcm.js";
 import { forceNetworkIsolationUnavailableForTests } from "./injection/network-isolation.js";
+import { validateUrl } from "./injection/url-validator.js";
 import type { McpConnectionEntry, McpConnectionRegistry } from "./injection/mcp-registry.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
 import { DpapiSessionKeyProtector } from "./session/session-key-protector.js";
@@ -39,6 +40,28 @@ vi.mock("./crypto/argon2.js", async (importOriginal) => {
       const { createHash } = await import("node:crypto");
       return new Uint8Array(createHash("sha256").update(password).update(salt).digest());
     },
+  };
+});
+
+const UNRESOLVED = vi.hoisted(() => ({
+  host: "unresolved.pinned.test",
+  url: "https://unresolved.pinned.test/api",
+}));
+
+vi.mock("./injection/url-validator.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./injection/url-validator.js")>();
+  const shared = await import("@harpoc/shared");
+  return {
+    ...actual,
+    validateUrl: vi.fn(async (...args: Parameters<typeof actual.validateUrl>) => {
+      if (args[0] === UNRESOLVED.url) {
+        throw new shared.VaultError(
+          shared.ErrorCode.DNS_RESOLUTION_FAILED,
+          `DNS resolution failed for ${UNRESOLVED.host}: getaddrinfo ENOTFOUND ${UNRESOLVED.host}`,
+        );
+      }
+      return actual.validateUrl(...args);
+    }),
   };
 });
 
@@ -275,12 +298,7 @@ describe("session TTL enforcement for long-lived engines", () => {
 
     vi.setSystemTime(Date.now() + 500);
 
-    expect(() => eng.listSecrets()).toThrow(VaultError);
-    try {
-      eng.listSecrets();
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.VAULT_LOCKED);
-    }
+    await expectVaultError(() => eng.listSecrets(), ErrorCode.VAULT_LOCKED);
     expect(eng.getState()).toBe(VaultState.SEALED);
     await eng.destroy();
   });
@@ -445,24 +463,12 @@ describe("lifecycle", () => {
     await engine.lock();
 
     const engine2 = new VaultEngine({ dbPath, sessionPath });
-    await expect(engine2.unlock("wrong123")).rejects.toThrow(VaultError);
-
-    try {
-      await engine2.unlock("wrong123");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.INVALID_PASSWORD);
-    }
+    await expectVaultError(() => engine2.unlock("wrong123"), ErrorCode.INVALID_PASSWORD);
     await engine2.destroy();
   });
 
   it("rejects operations when sealed", async () => {
-    expect(() => engine.listSecrets()).toThrow(VaultError);
-
-    try {
-      engine.listSecrets();
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.VAULT_LOCKED);
-    }
+    await expectVaultError(() => engine.listSecrets(), ErrorCode.VAULT_LOCKED);
   });
 
   it("loadSession closes store on vault_id mismatch (no handle leak)", async () => {
@@ -2987,6 +2993,8 @@ describe("audit trail", () => {
 });
 
 describe("audit trail for failed useSecret", () => {
+  let secretId: string;
+
   beforeEach(async () => {
     await engine.initVault("password");
     await engine.createSecret({
@@ -2995,26 +3003,28 @@ describe("audit trail for failed useSecret", () => {
       value: new Uint8Array(Buffer.from("val")),
     });
     await engine.setInjectionPolicy("secret://audit-use", {
-      url_allowlist: [
-        "https://this-host-does-not-exist-xyz123.invalid/*",
-        `${baseUrl}/*`,
-        "http://127.0.0.1:2/*",
-      ],
+      url_allowlist: [`https://${UNRESOLVED.host}/*`, `${baseUrl}/*`, "http://127.0.0.1:2/*"],
     });
+    secretId = await engine.resolveSecretId("secret://audit-use");
   });
 
   it("logs DNS failure with success=false", async () => {
-    await engine.useSecret("secret://audit-use", {
+    const response = await engine.useSecret("secret://audit-use", {
       type: "http",
       method: "GET",
-      url: "https://this-host-does-not-exist-xyz123.invalid/api",
+      url: UNRESOLVED.url,
       injection: { type: "bearer" },
     });
 
-    const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
-    expect(events.length).toBeGreaterThanOrEqual(1);
-    const last = events[0];
-    expect(last?.detail?.error).toBe("DNS_RESOLUTION_FAILED");
+    expect(validateUrl).toHaveBeenCalledWith(UNRESOLVED.url);
+    expect(response).toMatchObject({ status: null, error: ErrorCode.DNS_RESOLUTION_FAILED });
+    const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE, secretId });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      success: false,
+      secret_id: secretId,
+      detail: { context: "http", error: ErrorCode.DNS_RESOLUTION_FAILED },
+    });
   });
 
   it("logs successful request with success=true", async () => {
@@ -3025,15 +3035,17 @@ describe("audit trail for failed useSecret", () => {
       injection: { type: "bearer" },
     });
 
-    const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
-    expect(events.length).toBeGreaterThanOrEqual(1);
-    const last = events[0];
-    expect(last?.detail?.method).toBe("GET");
-    expect(last?.detail?.status).toBe(200);
+    const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE, secretId });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      success: true,
+      secret_id: secretId,
+      detail: { context: "http", method: "GET", status: 200 },
+    });
   });
 
   it("logs connection refused with success=false", async () => {
-    await engine.useSecret("secret://audit-use", {
+    const response = await engine.useSecret("secret://audit-use", {
       type: "http",
       method: "GET",
       url: "http://127.0.0.1:2/api",
@@ -3041,10 +3053,14 @@ describe("audit trail for failed useSecret", () => {
       injection: { type: "bearer" },
     });
 
-    const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
-    expect(events.length).toBeGreaterThanOrEqual(1);
-    const last = events[0];
-    expect(last?.detail?.error).toBeDefined();
+    expect(response).toMatchObject({ status: null, error: ErrorCode.CONNECTION_REFUSED });
+    const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE, secretId });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      success: false,
+      secret_id: secretId,
+      detail: { context: "http", error: ErrorCode.CONNECTION_REFUSED },
+    });
   });
 });
 

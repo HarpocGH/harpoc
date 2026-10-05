@@ -21,6 +21,7 @@ import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
+import { sshHardeningArgs } from "./ssh-common.js";
 import { system32Path } from "../win32-paths.js";
 
 vi.mock("./spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
@@ -706,6 +707,45 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
     expect(opts.redact).toContain(keyPem);
   });
 
+  it("hands git a built environment over SSH, not the vault's own", async () => {
+    process.env.HARPOC_T14_GIT_SSH_AMBIENT = "ambient-value";
+    process.env.HARPOC_T14_GIT_SSH_ALLOWED = "allowed-value";
+    try {
+      const { privateKey: keyPem } = generateKeyPairSync("rsa", {
+        modulusLength: 2048,
+        privateKeyEncoding: { type: "pkcs1", format: "pem" },
+        publicKeyEncoding: { type: "spki", format: "pem" },
+      });
+      await injector.executeWithSecret(
+        { type: "git", operation: "clone", repository: "git@github.com:org/repo.git" },
+        new Uint8Array(Buffer.from(keyPem)),
+        policy({
+          command_allowlist: [GIT as string],
+          host_allowlist: ["github.com"],
+          env_allowlist: ["HARPOC_T14_GIT_SSH_ALLOWED"],
+        }),
+        { ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] } },
+      );
+
+      const [, , opts] = spawnMock.mock.calls[0] as SpawnCall;
+      expect(opts.env.HARPOC_T14_GIT_SSH_AMBIENT).toBeUndefined();
+      expect(opts.env.HARPOC_T14_GIT_SSH_ALLOWED).toBe("allowed-value");
+
+      const expected = new Set([
+        "PATH",
+        ...(process.platform === "win32" ? ["SystemRoot", "ProgramData"] : []),
+        "SSH_AUTH_SOCK",
+        "GIT_SSH_COMMAND",
+        "GIT_TERMINAL_PROMPT",
+        "HARPOC_T14_GIT_SSH_ALLOWED",
+      ]);
+      expect(Object.keys(opts.env).filter((k) => !expected.has(k))).toEqual([]);
+    } finally {
+      delete process.env.HARPOC_T14_GIT_SSH_AMBIENT;
+      delete process.env.HARPOC_T14_GIT_SSH_ALLOWED;
+    }
+  });
+
   it("N11: the SSH transport forces core.hooksPath as well, and removes the directory after the run", async () => {
     const { privateKey: keyPem } = generateKeyPairSync("rsa", {
       modulusLength: 2048,
@@ -863,6 +903,10 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
         expect(words[iIdx + 1]).toContain(spacedFwd);
         // sh performed no $-expansion: the literal $probe survives.
         expect(words[iIdx + 1]).toContain("$probe");
+        const khPath = /^UserKnownHostsFile="([^"]+)"$/.exec(khWord as string)?.[1] as string;
+        const hardening = sshHardeningArgs(khPath, words[iIdx + 1] as string, 120);
+        expect(words.slice(1, 1 + hardening.length)).toEqual(hardening);
+        expect(words).toHaveLength(1 + hardening.length);
       } finally {
         restoreTempEnv(saved);
         rmSync(spaced, { recursive: true, force: true });
