@@ -41,11 +41,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.mocked(homedir).mockReset();
-  try {
-    rmSync(tempDir, { recursive: true, force: true });
-  } catch {
-    // Ignore
-  }
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 /** Run `fn` with `dir` as the working directory, restored afterwards. */

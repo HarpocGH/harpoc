@@ -182,6 +182,55 @@ describe("checkRequestHost", () => {
       hostname: null,
     });
   });
+
+  const bypassShapes: Array<[string, string, string | null, string, string | null]> = [
+    [
+      "a trailing dot",
+      "vault.example.",
+      "vault.example.",
+      "https://vault.example.",
+      "vault.example.",
+    ],
+    ["an IPv6 zone id", "[fe80::1%25eth0]", null, "https://[fe80::1%25eth0]", null],
+    [
+      "a unicode homograph",
+      "v\u0430ult.example",
+      null,
+      "https://v\u0430ult.example",
+      "xn--vult-53d.example",
+    ],
+    [
+      "a name the listed one prefixes",
+      "vault.example.evil.net",
+      "vault.example.evil.net",
+      "https://vault.example.evil.net",
+      "vault.example.evil.net",
+    ],
+    [
+      "a name the listed one suffixes",
+      "evil-vault.example",
+      "evil-vault.example",
+      "https://evil-vault.example",
+      "evil-vault.example",
+    ],
+    ["an unbracketed IPv6 literal", "::1", null, "https://::1", null],
+  ];
+
+  it.each(bypassShapes)(
+    "refuses %s on Host and on Origin",
+    (_shape, host, hostHostname, origin, originHostname) => {
+      expect(checkRequestHost({ host }, allowed)).toEqual({
+        ok: false,
+        header: "Host",
+        hostname: hostHostname,
+      });
+      expect(checkRequestHost({ host: "vault.example", origin }, allowed)).toEqual({
+        ok: false,
+        header: "Origin",
+        hostname: originHostname,
+      });
+    },
+  );
 });
 
 describe("assertBindAllowed", () => {

@@ -65,11 +65,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  try {
-    rmSync(dir, { recursive: true, force: true });
-  } catch {
-    // Ignore
-  }
+  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe("SessionManager transient read failures (L6)", () => {

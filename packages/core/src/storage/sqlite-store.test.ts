@@ -1408,11 +1408,7 @@ describe("concurrent file-based WAL access", () => {
   afterEach(() => {
     fileStore1.close();
     fileStore2.close();
-    try {
-      rmSync(fileDir, { recursive: true, force: true });
-    } catch {
-      // Ignore
-    }
+    rmSync(fileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("two stores share data via same file", () => {
@@ -1451,11 +1447,7 @@ describe("database file permissions (L11)", () => {
 
   afterEach(() => {
     store.close();
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // Ignore
-    }
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it.runIf(process.platform !== "win32")("creates the database owner-only", () => {

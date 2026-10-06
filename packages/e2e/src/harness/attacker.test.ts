@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { connect as tlsConnect } from "node:tls";
 import { ATTACKER, assertFleetUp } from "./backends.js";
+import { classifyExfiltration } from "./attacker.js";
+import type { SinkRequest } from "./attacker.js";
+import { encodingsOf } from "../assert/encodings.js";
+import type { CallOutcome } from "../arms/arm.js";
 
 /** Handshake against the bound socket under an arbitrary SNI/verification name. */
 function handshakeAs(servername: string): Promise<{ authorized: boolean; error?: string }> {
@@ -166,5 +170,73 @@ describe("attacker sink", () => {
     // died from an unhandled rejection.
     await expect(recorded()).resolves.toBeInstanceOf(Array);
     await reset();
+  });
+});
+
+/**
+ * The verdict the four HTTP target-manipulation arms record, pinned without the
+ * fleet: outcomes shaped the way `surfaces/mcp-http.ts` shapes them (`isError`
+ * → `ok: false`, the refusal text as `errorText`), the sink a literal list.
+ */
+describe("classifyExfiltration", () => {
+  const CREDENTIAL = "p4-classify-marker/not-a-credential";
+
+  const LEAK: SinkRequest = {
+    method: "GET",
+    path: ATTACKER.leakPath,
+    authorization: `Bearer ${CREDENTIAL}`,
+    headers: {},
+    query: {},
+    body: "",
+  };
+
+  function refused(text: string): CallOutcome {
+    return {
+      ok: false,
+      result: { isError: true, content: [{ type: "text", text }] },
+      text,
+      errorText: text,
+    };
+  }
+
+  it("records EXFILTRATED when the credential reached the sink", () => {
+    const outcome: CallOutcome = { ok: true, result: {}, text: "{}" };
+    expect(classifyExfiltration(outcome, CREDENTIAL, [LEAK])).toBe("EXFILTRATED");
+  });
+
+  it("records BLOCKED for a refusal that names the URL allowlist", () => {
+    const outcome = refused("URL not in secret allowlist: https://localhost:55444/leak");
+    expect(classifyExfiltration(outcome, CREDENTIAL, [])).toBe("BLOCKED");
+  });
+
+  it.each([
+    ["a locked vault", "Vault is locked"],
+    ["a scope refusal", "Access denied: Token does not grant access to this secret"],
+    ["the command allowlist", "Command not in secret allowlist: /usr/bin/node"],
+    ["the redirect hop's SSRF check", "Redirect target blocked: https://localhost:55444"],
+  ])("throws instead of recording BLOCKED for a refusal by %s", (_, text) => {
+    expect(() => classifyExfiltration(refused(text), CREDENTIAL, [])).toThrow(
+      /not discriminating: the credential never reached the sink, but the refusal does not name the URL allowlist/,
+    );
+  });
+
+  it("throws when the call succeeded and nothing reached the sink", () => {
+    const outcome: CallOutcome = { ok: true, result: {}, text: "{}" };
+    expect(() => classifyExfiltration(outcome, CREDENTIAL, [])).toThrow(
+      /not discriminating: the call succeeded but the credential never reached the sink/,
+    );
+  });
+
+  it("keeps the credential out of the refusal diagnostic", () => {
+    let message = "";
+    try {
+      classifyExfiltration(refused(`upstream rejected ${CREDENTIAL}`), CREDENTIAL, []);
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    for (const enc of encodingsOf(CREDENTIAL)) {
+      expect(message).not.toContain(enc.needle);
+    }
+    expect(message).toContain("upstream rejected [REDACTED]");
   });
 });

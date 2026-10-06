@@ -1,5 +1,5 @@
 import { ATTACKER } from "./backends.js";
-import { sightings } from "../assert/opacity.js";
+import { redactForDiagnostics, sightings } from "../assert/opacity.js";
 import type { CallOutcome } from "../arms/arm.js";
 
 export interface SinkRequest {
@@ -46,14 +46,23 @@ export function sinkSawCredential(credential: string, arrived: SinkRequest[]): b
 }
 
 /**
+ * The vault's URL-allowlist refusal, by its message (`VaultError.urlNotAllowed`):
+ * the agent-facing surfaces carry the refusal's `.message`, never its `.code`.
+ */
+const URL_REFUSAL = "URL not in secret allowlist";
+
+/**
  * The verdict for a target-manipulation arm, as one rule applied to both arms —
  * that is what keeps the paired row a comparison of credential-handling layers
  * rather than of two differently-written checks.
  *
- * The final branch is the anti-vacuity guard: a call that SUCCEEDED while
- * nothing reached the sink means the arm did not exercise what it claims (a
- * misdirected URL, a backend that never ran), and recording BLOCKED there would
- * manufacture a passing cell out of a broken one.
+ * The two throw branches are the anti-vacuity guard. A call that SUCCEEDED
+ * while nothing reached the sink means the arm did not exercise what it claims
+ * (a misdirected URL, a backend that never ran), and recording BLOCKED there
+ * would manufacture a passing cell out of a broken one. A call that FAILED for
+ * any reason other than the URL allowlist is the same defect from the other
+ * side: a scope refusal, a locked vault or an unreachable host is not the
+ * control this arm certifies (the `targetedVerdict` rule).
  */
 export function classifyExfiltration(
   outcome: CallOutcome,
@@ -61,7 +70,14 @@ export function classifyExfiltration(
   arrived: SinkRequest[],
 ): "EXFILTRATED" | "BLOCKED" {
   if (sinkSawCredential(credential, arrived)) return "EXFILTRATED";
-  if (!outcome.ok) return "BLOCKED";
+  if (!outcome.ok && (outcome.errorText ?? "").includes(URL_REFUSAL)) return "BLOCKED";
+  if (!outcome.ok) {
+    throw new Error(
+      "arm is not discriminating: the credential never reached the sink, but the refusal does " +
+        "not name the URL allowlist — error=" +
+        redactForDiagnostics(outcome.errorText ?? "(none)", credential),
+    );
+  }
   throw new Error(
     "arm is not discriminating: the call succeeded but the credential never reached the sink — " +
       "the attack path is broken, so neither BLOCKED nor EXFILTRATED would mean anything",

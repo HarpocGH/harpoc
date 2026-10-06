@@ -2045,6 +2045,19 @@ describe("auditChainAnchorSchema", () => {
 // v1.3 extended-context action schemas
 // ---------------------------------------------------------------------------
 
+interface SchemaIssue {
+  path: PropertyKey[];
+  message: string;
+}
+
+/** The issues `schema` reports for `input` as `{ path, message }` pairs; empty when it parses. */
+function issuesOf(schema: z.ZodType, input: unknown): SchemaIssue[] {
+  const result = schema.safeParse(input);
+  return result.success
+    ? []
+    : result.error.issues.map((issue) => ({ path: issue.path, message: issue.message }));
+}
+
 describe("v1.3 action schemas", () => {
   it("accepts a minimal smtp action and applies defaults", () => {
     const a = smtpActionSchema.parse({
@@ -2057,18 +2070,22 @@ describe("v1.3 action schemas", () => {
     });
     expect(a.security).toBe("tls");
   });
-  it("refuses an smtp action with neither text nor html", () => {
-    expect(() =>
-      smtpActionSchema.parse({
-        type: "smtp",
-        host: "h",
-        from: "a@b.c",
-        to: ["d@e.f"],
-        subject: "s",
-      }),
-    ).toThrow();
+  it.each([
+    ["smtpActionSchema", smtpActionSchema],
+    ["useSecretActionSchema", useSecretActionSchema],
+  ] as const)("%s refuses an smtp action with neither text nor html", (_name, schema) => {
+    const base = { type: "smtp", host: "h", from: "a@b.com", to: ["d@e.com"], subject: "s" };
+    expect(issuesOf(schema, { ...base, text: "x" })).toEqual([]);
+    expect(issuesOf(schema, { ...base, html: "<p>x</p>" })).toEqual([]);
+    expect(issuesOf(schema, base)).toEqual([
+      { path: ["text"], message: "at least one of text or html is required" },
+    ]);
   });
   it("refuses envelope-shadowing extra headers", () => {
+    const base = { type: "smtp", host: "h", from: "a@b.com", to: ["d@e.com"], subject: "s" };
+    expect(issuesOf(smtpActionSchema, { ...base, text: "x", headers: { "X-Foo": "v" } })).toEqual(
+      [],
+    );
     for (const k of [
       "From",
       "to",
@@ -2080,17 +2097,9 @@ describe("v1.3 action schemas", () => {
       "Cc",
       "bcc",
     ]) {
-      expect(() =>
-        smtpActionSchema.parse({
-          type: "smtp",
-          host: "h",
-          from: "a@b.c",
-          to: ["d@e.f"],
-          subject: "s",
-          text: "x",
-          headers: { [k]: "v" },
-        }),
-      ).toThrow();
+      expect(issuesOf(smtpActionSchema, { ...base, text: "x", headers: { [k]: "v" } })).toEqual([
+        { path: ["headers"], message: "Header shadows an envelope or structural field" },
+      ]);
     }
   });
   it("refuses a header name that is not RFC 5322 ftext — whitespace, a colon or a control character", () => {
@@ -2120,13 +2129,26 @@ describe("v1.3 action schemas", () => {
     ).not.toThrow();
   });
   it("refuses relative and control-char attachment paths", () => {
-    const base = { type: "smtp", host: "h", from: "a@b.c", to: ["d@e.f"], subject: "s", text: "x" };
-    expect(() =>
-      smtpActionSchema.parse({ ...base, attachments: [{ path: "rel/file.txt" }] }),
-    ).toThrow();
-    expect(() =>
-      smtpActionSchema.parse({ ...base, attachments: [{ path: "C:/x\n.txt" }] }),
-    ).toThrow();
+    const base = {
+      type: "smtp",
+      host: "h",
+      from: "a@b.com",
+      to: ["d@e.com"],
+      subject: "s",
+      text: "x",
+    };
+    expect(
+      issuesOf(smtpActionSchema, {
+        ...base,
+        attachments: [{ path: "/srv/file.txt" }, { path: "C:\\srv\\file.txt" }],
+      }),
+    ).toEqual([]);
+    expect(
+      issuesOf(smtpActionSchema, { ...base, attachments: [{ path: "rel/file.txt" }] }),
+    ).toEqual([{ path: ["attachments", 0, "path"], message: "Attachment path must be absolute" }]);
+    expect(issuesOf(smtpActionSchema, { ...base, attachments: [{ path: "C:/x\n.txt" }] })).toEqual([
+      { path: ["attachments", 0, "path"], message: "Path must not contain control characters" },
+    ]);
   });
   it("imap: structured search only, closed flag enum, uid caps", () => {
     expect(
@@ -2261,49 +2283,70 @@ describe("v1.3 action schemas", () => {
       }),
     ).toThrow();
   });
-  it("database per-engine refinement matrix", () => {
-    const sql = {
-      type: "database",
-      engine: "postgresql",
-      host: "db",
-      database: "d",
-      query: "select 1",
-    };
-    databaseActionSchema.parse(sql);
-    expect(() => databaseActionSchema.parse({ ...sql, command: ["PING"] })).toThrow();
-    databaseActionSchema.parse({
-      type: "database",
-      engine: "redis",
-      host: "r",
-      database: "0",
-      command: ["GET", "k"],
+  const sql = { type: "database", engine: "postgresql", host: "db", database: "d" };
+  const redis = { type: "database", engine: "redis", host: "r", database: "0" };
+  const mongodb = { type: "database", engine: "mongodb", host: "m", database: "app" };
+  const databaseMatrix: Array<[string, Record<string, unknown>, SchemaIssue[]]> = [
+    ["accepts postgresql with a query", { ...sql, query: "select 1" }, []],
+    [
+      "refuses postgresql without a query",
+      sql,
+      [{ path: ["query"], message: "query is required for this engine" }],
+    ],
+    [
+      "refuses postgresql with a command",
+      { ...sql, query: "select 1", command: ["PING"] },
+      [{ path: ["command"], message: "command is not allowed for this engine" }],
+    ],
+    ["accepts redis with a string-array command", { ...redis, command: ["GET", "k"] }, []],
+    [
+      "refuses redis without a command",
+      redis,
+      [{ path: ["command"], message: "command must be a string array for redis" }],
+    ],
+    [
+      "refuses redis with a document command",
+      { ...redis, command: { get: "k" } },
+      [{ path: ["command"], message: "command must be a string array for redis" }],
+    ],
+    [
+      "refuses redis with a query",
+      { ...redis, command: ["GET", "k"], query: "GET k" },
+      [{ path: ["query"], message: "query is not allowed for this engine" }],
+    ],
+    [
+      "refuses redis with params",
+      { ...redis, command: ["GET", "k"], params: ["v"] },
+      [{ path: ["params"], message: "params is not allowed for this engine" }],
+    ],
+    [
+      "accepts mongodb with a document command",
+      { ...mongodb, command: { find: "users", limit: 1 } },
+      [],
+    ],
+    [
+      "refuses mongodb without a command",
+      mongodb,
+      [{ path: ["command"], message: "command must be a document for mongodb" }],
+    ],
+    [
+      "refuses mongodb with an array command",
+      { ...mongodb, command: ["find", "users"] },
+      [{ path: ["command"], message: "command must be a document for mongodb" }],
+    ],
+    [
+      "refuses mongodb with params",
+      { ...mongodb, command: { find: "users" }, params: [1] },
+      [{ path: ["params"], message: "params is not allowed for this engine" }],
+    ],
+  ];
+  describe.each([
+    ["databaseActionSchema", databaseActionSchema],
+    ["useSecretActionSchema", useSecretActionSchema],
+  ] as const)("database per-engine refinement matrix through %s", (_name, schema) => {
+    it.each(databaseMatrix)("%s", (_title, action, issues) => {
+      expect(issuesOf(schema, action)).toEqual(issues);
     });
-    expect(() =>
-      databaseActionSchema.parse({
-        type: "database",
-        engine: "redis",
-        host: "r",
-        database: "0",
-        query: "GET k",
-      }),
-    ).toThrow();
-    databaseActionSchema.parse({
-      type: "database",
-      engine: "mongodb",
-      host: "m",
-      database: "app",
-      command: { find: "users", limit: 1 },
-    });
-    expect(() =>
-      databaseActionSchema.parse({
-        type: "database",
-        engine: "mongodb",
-        host: "m",
-        database: "app",
-        command: { find: "users" },
-        params: [1],
-      }),
-    ).toThrow();
   });
   it("redis requires a non-negative integer database index", () => {
     for (const database of ["app", "-1"]) {

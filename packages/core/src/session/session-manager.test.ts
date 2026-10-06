@@ -55,11 +55,7 @@ beforeEach(() => {
 
 afterEach(() => {
   // Clean up
-  try {
-    rmSync(sessionDir, { recursive: true, force: true });
-  } catch {
-    // Ignore
-  }
+  rmSync(sessionDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe("writeSession / readSession roundtrip", () => {

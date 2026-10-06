@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { storeSecret } from "../harness/vault.js";
-import { sightings } from "../assert/opacity.js";
+import { redactForDiagnostics, sightings } from "../assert/opacity.js";
 import { resolvePrintenv, resolveGit, resolveSsh } from "../harness/fixtures.js";
 import { ATTACKER } from "../harness/backends.js";
 import { resetSink, sinkRequests, sinkSawCredential } from "../harness/attacker.js";
@@ -14,6 +14,9 @@ import type { HarnessVault } from "../harness/vault.js";
 const NONCE = "p4s6";
 const ENV_VAR = "OC_TOKEN";
 const NODE = process.execPath;
+const REDACTION = "[REDACTED]";
+const DEDICATED_CONTEXT_REFUSAL = "has a dedicated injection context";
+const COMMAND_REFUSAL = "Command not in secret allowlist";
 
 /**
  * The credential carries `:` and `/` on purpose: for an alphanumeric value
@@ -64,8 +67,21 @@ async function setupProcess(
  * A baseline that does NOT leak throws rather than reporting a tidy outcome: it
  * means the attack path is broken, and the paired row would be comparing
  * nothing.
+ *
+ * A Harpoc arm that did not leak throws unless its `proof` holds: the echo
+ * arms' call completed with the sanitizer's `[REDACTED]` in the child's
+ * stdout, the transform arms' call completed, and a refusal arm's call was
+ * refused by its guard by name. Without it a call refused or failed for an
+ * unrelated reason — a scope refusal, a locked vault, a missing binary — reads
+ * as a defence that held (the `targetedVerdict` rule).
  */
-function verdict(arm: Arm, leaked: boolean): OutcomeValue {
+function verdict(
+  arm: Arm,
+  leaked: boolean,
+  outcome: CallOutcome,
+  credential: string,
+  proof: BlockProof,
+): OutcomeValue {
   if (arm.name === "baseline") {
     if (!leaked) {
       throw new Error(
@@ -74,7 +90,28 @@ function verdict(arm: Arm, leaked: boolean): OutcomeValue {
     }
     return Outcome.LEAKED;
   }
-  return leaked ? Outcome.BYPASSED : Outcome.BLOCKED;
+  if (leaked) return Outcome.BYPASSED;
+  const missing = unproven(outcome, proof);
+  if (missing === undefined) return Outcome.BLOCKED;
+  throw new Error(
+    `arm is not discriminating: nothing leaked, but ${missing} — ok=${String(outcome.ok)}, ` +
+      `error=${redactForDiagnostics(outcome.errorText ?? "(none)", credential)}`,
+  );
+}
+
+/** What a Harpoc BLOCKED must show besides "nothing leaked" (see `verdict`). */
+type BlockProof = "redacted" | "completed" | { refusal: string };
+
+function unproven(outcome: CallOutcome, proof: BlockProof): string | undefined {
+  if (typeof proof === "object") {
+    if (!outcome.ok && (outcome.errorText ?? "").includes(proof.refusal)) return undefined;
+    return `the call was not refused by name ("${proof.refusal}")`;
+  }
+  if (!outcome.ok) return "the call did not complete";
+  if (proof === "redacted" && !processStdout(outcome).includes(REDACTION)) {
+    return "the child's stdout carries no [REDACTED]";
+  }
+  return undefined;
 }
 
 /**
@@ -160,7 +197,13 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
         args: [ENV_VAR],
         env_var: ENV_VAR,
       });
-      return verdict(arm, leakedToCaller(outcome, setup.credential));
+      return verdict(
+        arm,
+        leakedToCaller(outcome, setup.credential),
+        outcome,
+        setup.credential,
+        "redacted",
+      );
     },
   },
   {
@@ -177,9 +220,16 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
       );
       if (arm.name === "harpoc") {
         // Refused by the allowlist, before any transform can run.
-        return outcome.ok ? Outcome.BYPASSED : Outcome.BLOCKED;
+        if (outcome.ok) return Outcome.BYPASSED;
+        return verdict(arm, false, outcome, setup.credential, { refusal: COMMAND_REFUSAL });
       }
-      return verdict(arm, leakedToCaller(outcome, setup.credential));
+      return verdict(
+        arm,
+        leakedToCaller(outcome, setup.credential),
+        outcome,
+        setup.credential,
+        "completed",
+      );
     },
   },
   {
@@ -194,7 +244,13 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
           "process.stdout.write(Buffer.from(process.env.OC_TOKEN||'','utf8').toString('base64'))",
         ),
       );
-      return verdict(arm, leakedToCaller(outcome, setup.credential));
+      return verdict(
+        arm,
+        leakedToCaller(outcome, setup.credential),
+        outcome,
+        setup.credential,
+        "redacted",
+      );
     },
   },
   {
@@ -209,7 +265,13 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
           "process.stdout.write(Buffer.from(process.env.OC_TOKEN||'','utf8').toString('hex'))",
         ),
       );
-      return verdict(arm, leakedToCaller(outcome, setup.credential));
+      return verdict(
+        arm,
+        leakedToCaller(outcome, setup.credential),
+        outcome,
+        setup.credential,
+        "redacted",
+      );
     },
   },
   {
@@ -222,7 +284,13 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
         setup.handle,
         nodeAction("process.stdout.write(encodeURIComponent(process.env.OC_TOKEN||''))"),
       );
-      return verdict(arm, leakedToCaller(outcome, setup.credential));
+      return verdict(
+        arm,
+        leakedToCaller(outcome, setup.credential),
+        outcome,
+        setup.credential,
+        "redacted",
+      );
     },
   },
   {
@@ -241,7 +309,7 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
       const reassembled = processStdout(outcome).replace(/\n/g, "");
       const leaked =
         reassembled.includes(setup.credential) || leakedToCaller(outcome, setup.credential);
-      return verdict(arm, leaked);
+      return verdict(arm, leaked, outcome, setup.credential, "completed");
     },
   },
   {
@@ -267,14 +335,20 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
       // otherwise still be on disk when the Harpoc arm looks, and the second
       // arm would be reading the first arm's artifact.
       clearMarker(setup.marker);
-      await arm.invoke(
+      const outcome = await arm.invoke(
         setup.handle,
         nodeAction("require('fs').writeFileSync(process.argv[1], process.env.OC_TOKEN||'')", [
           setup.marker,
         ]),
       );
       const onDisk = existsSync(setup.marker) ? readFileSync(setup.marker, "utf8") : "";
-      return verdict(arm, onDisk.includes(setup.credential));
+      return verdict(
+        arm,
+        onDisk.includes(setup.credential),
+        outcome,
+        setup.credential,
+        "completed",
+      );
     },
   },
   {
@@ -296,7 +370,13 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
         ),
       );
       const rejoined = processStdout(outcome).replace(/\|/g, "");
-      return verdict(arm, rejoined.includes(setup.credential));
+      return verdict(
+        arm,
+        rejoined.includes(setup.credential),
+        outcome,
+        setup.credential,
+        "completed",
+      );
     },
   },
   {
@@ -328,13 +408,15 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
       // runs before Harpoc and really does spawn git, so a shared marker would
       // make the Harpoc arm report the baseline's execution as its own.
       clearMarker(setup.marker);
-      await arm.invoke(setup.handle, {
+      const outcome = await arm.invoke(setup.handle, {
         type: "process",
         command: resolveGit(),
         args: ["init", setup.marker],
         env_var: ENV_VAR,
       });
-      return verdict(arm, existsSync(setup.marker));
+      return verdict(arm, existsSync(setup.marker), outcome, setup.credential, {
+        refusal: DEDICATED_CONTEXT_REFUSAL,
+      });
     },
   },
   {
@@ -373,7 +455,7 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
       // spawn ssh, so a shared marker would make the Harpoc arm report the
       // baseline's execution as its own.
       clearMarker(setup.marker);
-      await arm.invoke(setup.handle, {
+      const outcome = await arm.invoke(setup.handle, {
         type: "process",
         command: resolveSsh(),
         args: [
@@ -390,7 +472,9 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
         ],
         env_var: ENV_VAR,
       });
-      return verdict(arm, existsSync(setup.marker));
+      return verdict(arm, existsSync(setup.marker), outcome, setup.credential, {
+        refusal: DEDICATED_CONTEXT_REFUSAL,
+      });
     },
   },
   {
@@ -419,6 +503,12 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
       const text = `${outcome.text} ${outcome.errorText ?? ""}`;
       if (text.includes("NETWORK_ISOLATION_UNAVAILABLE") || /isolation/i.test(text)) {
         return Outcome.REFUSED_UNAVAILABLE;
+      }
+      if (!outcome.ok) {
+        throw new Error(
+          "arm is not discriminating: the sink stayed empty, but the call did not complete — " +
+            `error=${redactForDiagnostics(outcome.errorText ?? "(none)", setup.credential)}`,
+        );
       }
       return Outcome.BLOCKED;
     },

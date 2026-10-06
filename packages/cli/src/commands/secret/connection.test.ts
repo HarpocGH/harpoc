@@ -31,11 +31,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  try {
-    rmSync(tempDir, { recursive: true, force: true });
-  } catch {
-    // Ignore
-  }
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
   else process.env.HARPOC_TOKEN = savedEnvToken;
 });

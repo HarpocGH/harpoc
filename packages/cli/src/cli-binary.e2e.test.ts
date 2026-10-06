@@ -218,11 +218,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   tokenServer.close();
-  try {
-    rmSync(vaultDir, { recursive: true, force: true });
-  } catch {
-    // ignore
-  }
+  rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe("compiled binary smoke: oauth connect (client_credentials)", () => {

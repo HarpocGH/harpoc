@@ -94,16 +94,31 @@ export interface CliServer {
   stdoutSoFar(): string;
   stderrSoFar(): string;
   waitForStderr(pattern: RegExp, timeoutMs?: number): Promise<RegExpMatchArray>;
+  closed(timeoutMs?: number): Promise<ChildClose>;
   stop(graceMs?: number): Promise<void>;
 }
 
-export function startCliServer(args: string[], opts: { vaultDir: string }): CliServer {
-  return startNode(withVaultDir(args, opts.vaultDir));
+export interface ChildClose {
+  code: number | null;
+  signal: NodeJS.Signals | null;
 }
 
-export function startNode(argv: string[]): CliServer {
+export interface StartNodeOptions {
+  stdin?: "ignore" | "pipe";
+  env?: NodeJS.ProcessEnv;
+}
+
+export function startCliServer(
+  args: string[],
+  opts: { vaultDir: string } & StartNodeOptions,
+): CliServer {
+  return startNode(withVaultDir(args, opts.vaultDir), { stdin: opts.stdin, env: opts.env });
+}
+
+export function startNode(argv: string[], opts: StartNodeOptions = {}): CliServer {
   const child = spawn(process.execPath, argv, {
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: [opts.stdin ?? "ignore", "pipe", "pipe"],
+    env: opts.env,
   });
   let stdout = "";
   let stderr = "";
@@ -115,9 +130,9 @@ export function startNode(argv: string[]): CliServer {
   child.once("close", () => {
     exited = true;
   });
-  child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
-  child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-  return {
+  child.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+  child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+  const server: CliServer = {
     child,
     exited: () => exited,
     stdoutSoFar: () => stdout,
@@ -155,6 +170,52 @@ export function startNode(argv: string[]): CliServer {
         }, 50);
       });
     },
+    closed(timeoutMs = CHILD_TIMEOUT_MS): Promise<ChildClose> {
+      return new Promise((resolve, reject) => {
+        if (exited) {
+          resolve({ code: child.exitCode, signal: child.signalCode });
+          return;
+        }
+        let timedOut = false;
+        let exitedFirst = false;
+        let pipeGrace: NodeJS.Timeout | undefined;
+        const deadline = setTimeout(() => {
+          timedOut = true;
+          exitedFirst = child.exitCode !== null || child.signalCode !== null;
+          server.stop(KILL_GRACE_MS).then(() => {
+            if (exited) return;
+            pipeGrace = setTimeout(() => {
+              reject(
+                new Error(
+                  `CLI child pid ${String(child.pid)} exited but its pipes did not close within ${String(KILL_GRACE_MS)} ms of the ${String(timeoutMs)} ms deadline; stderr so far:\n${stderr}`,
+                ),
+              );
+            }, KILL_GRACE_MS);
+          }, reject);
+        }, timeoutMs);
+        child.once("close", (code: number | null, signal: NodeJS.Signals | null) => {
+          clearTimeout(deadline);
+          clearTimeout(pipeGrace);
+          if (timedOut && exitedFirst) {
+            reject(
+              new Error(
+                `CLI child pid ${String(child.pid)} exited with code ${String(code)} but its pipes closed only after the ${String(timeoutMs)} ms deadline; stderr so far:\n${stderr}`,
+              ),
+            );
+            return;
+          }
+          if (timedOut) {
+            reject(
+              new Error(
+                `CLI child pid ${String(child.pid)} did not close within ${String(timeoutMs)} ms and was killed (${String(signal)}); stderr so far:\n${stderr}`,
+              ),
+            );
+            return;
+          }
+          resolve({ code, signal });
+        });
+      });
+    },
     stop(graceMs = STOP_GRACE_MS): Promise<void> {
       return new Promise((resolve, reject) => {
         if (child.exitCode !== null || child.signalCode !== null) {
@@ -190,6 +251,7 @@ export function startNode(argv: string[]): CliServer {
       });
     },
   };
+  return server;
 }
 
 export function freePort(): Promise<number> {

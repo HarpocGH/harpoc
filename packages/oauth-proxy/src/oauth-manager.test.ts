@@ -83,11 +83,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await engine.destroy();
-  try {
-    rmSync(tempDir, { recursive: true, force: true });
-  } catch {
-    // ignore
-  }
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 function makeClientCredentialsConfig(): OAuthProviderConfig {

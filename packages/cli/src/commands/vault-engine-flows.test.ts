@@ -51,11 +51,7 @@ function registerAgents(...names: string[]): void {
 
 afterEach(async () => {
   await engine.destroy();
-  try {
-    rmSync(tempDir, { recursive: true, force: true });
-  } catch {
-    // Ignore
-  }
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe("VaultEngine.initVault", () => {

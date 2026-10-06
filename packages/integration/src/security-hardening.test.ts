@@ -527,7 +527,7 @@ describe("Lockout Progression", () => {
     await engine.destroy();
   });
 
-  it("5 failed attempts triggers LOCKOUT_ACTIVE with ~30s retry_after", async () => {
+  it("5 failed attempts triggers LOCKOUT_ACTIVE with a 30 s retry_after", async () => {
     vi.useFakeTimers();
     try {
       for (let i = 0; i < LOCKOUT_MAX_ATTEMPTS; i++) {
@@ -544,8 +544,7 @@ describe("Lockout Progression", () => {
       const engine = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
       try {
         const err = await expectVaultError(() => engine.unlock(PASSWORD), ErrorCode.LOCKOUT_ACTIVE);
-        expect(err.details?.retry_after_ms).toBeDefined();
-        expect(Number(err.details?.retry_after_ms)).toBeLessThanOrEqual(LOCKOUT_DURATIONS_MS[0]);
+        expect(err.details?.retry_after_ms).toBe(LOCKOUT_DURATIONS_MS[0]);
       } finally {
         await engine.destroy();
       }
@@ -640,74 +639,43 @@ describe("Lockout Progression", () => {
     }
   });
 
-  it("escalation: 10 failures → 5 min, 15 failures → 30 min", async () => {
+  it("escalation: counted failures 5–9 lock for 30 s, 10–14 for 5 min, the 15th for 30 min", async () => {
     vi.useFakeTimers();
     try {
-      // First 5 failures → 30s lockout
-      for (let i = 0; i < LOCKOUT_MAX_ATTEMPTS; i++) {
-        const engine = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
+      const lockouts: number[] = [];
+      for (let failure = 1; failure <= 3 * LOCKOUT_MAX_ATTEMPTS; failure++) {
+        const wrong = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
         try {
-          await engine.unlock("wrong");
-        } catch {
-          /* expected */
+          await expectVaultError(() => wrong.unlock("wrong"), ErrorCode.INVALID_PASSWORD);
+        } finally {
+          await wrong.destroy();
         }
-        await engine.destroy();
-      }
+        if (failure < LOCKOUT_MAX_ATTEMPTS) continue;
 
-      // Fast-forward past 30s lockout
-      await vi.advanceTimersByTimeAsync(LOCKOUT_DURATIONS_MS[0] + 1000);
-
-      // 5 more failures (total 10) → 5 min lockout
-      for (let i = 0; i < LOCKOUT_MAX_ATTEMPTS; i++) {
-        const engine = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
+        const locked = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
+        let retryAfter: number;
         try {
-          await engine.unlock("wrong");
-        } catch {
-          /* expected */
+          const err = await expectVaultError(
+            () => locked.unlock(PASSWORD),
+            ErrorCode.LOCKOUT_ACTIVE,
+          );
+          retryAfter = Number(err.details?.retry_after_ms);
+        } finally {
+          await locked.destroy();
         }
-        await engine.destroy();
+        lockouts.push(retryAfter);
+        await vi.advanceTimersByTimeAsync(retryAfter + 1000);
       }
 
-      // Check lockout at 5 min tier
-      const engine1 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
-      try {
-        const err = await expectVaultError(
-          () => engine1.unlock(PASSWORD),
-          ErrorCode.LOCKOUT_ACTIVE,
-        );
-        expect(Number(err.details?.retry_after_ms)).toBeLessThanOrEqual(LOCKOUT_DURATIONS_MS[1]);
-      } finally {
-        await engine1.destroy();
-      }
-
-      // Fast-forward past 5 min lockout
-      await vi.advanceTimersByTimeAsync(LOCKOUT_DURATIONS_MS[1] + 1000);
-
-      // 5 more failures (total 15) → 30 min lockout
-      for (let i = 0; i < LOCKOUT_MAX_ATTEMPTS; i++) {
-        const engine = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
-        try {
-          await engine.unlock("wrong");
-        } catch {
-          /* expected */
-        }
-        await engine.destroy();
-      }
-
-      const engine2 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
-      try {
-        const err = await expectVaultError(
-          () => engine2.unlock(PASSWORD),
-          ErrorCode.LOCKOUT_ACTIVE,
-        );
-        expect(Number(err.details?.retry_after_ms)).toBeLessThanOrEqual(LOCKOUT_DURATIONS_MS[2]);
-      } finally {
-        await engine2.destroy();
-      }
+      expect(lockouts).toEqual([
+        ...Array<number>(LOCKOUT_MAX_ATTEMPTS).fill(LOCKOUT_DURATIONS_MS[0]),
+        ...Array<number>(LOCKOUT_MAX_ATTEMPTS).fill(LOCKOUT_DURATIONS_MS[1]),
+        LOCKOUT_DURATIONS_MS[2],
+      ]);
     } finally {
       vi.useRealTimers();
     }
-  });
+  }, 120_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -791,20 +759,132 @@ describe("No-Logging Static Audit", () => {
    * `web-ui` joined them with the `.tsx` widening (D3 a, 2026-09): the SPA is
    * console-free too.
    */
-  it.each(["oauth-proxy", "sdk", "shared", "web-ui"])("%s/src/ has zero console calls", (pkg) => {
-    const files = collectTsFiles(join(REPO_ROOT, "packages", pkg, "src"));
-    expect(files.length).toBeGreaterThan(0);
+  it.each(["cert-manager", "oauth-proxy", "sdk", "shared", "web-ui"])(
+    "%s/src/ has zero console calls",
+    (pkg) => {
+      const files = collectTsFiles(join(REPO_ROOT, "packages", pkg, "src"));
+      expect(files.length).toBeGreaterThan(0);
 
-    const consolePattern = /\bconsole\.(log|warn|error|info|debug)\s*\(/;
-    for (const filePath of files) {
-      const lines = readFileSync(filePath, "utf8").split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i] as string;
-        if (consolePattern.test(line)) {
-          expect.fail(`Found console call in ${filePath}:${i + 1}: ${line.trim()}`);
+      const consolePattern = /\bconsole\.(log|warn|error|info|debug)\s*\(/;
+      for (const filePath of files) {
+        const lines = readFileSync(filePath, "utf8").split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i] as string;
+          if (consolePattern.test(line)) {
+            expect.fail(`Found console call in ${filePath}:${i + 1}: ${line.trim()}`);
+          }
         }
       }
+    },
+  );
+
+  /** The index just past the string or template literal that opens at `start`. */
+  function skipLiteral(source: string, start: number): number {
+    const quote = source[start];
+    let i = start + 1;
+    while (i < source.length) {
+      const ch = source[i];
+      if (ch === "\\") {
+        i += 2;
+      } else if (ch === quote) {
+        return i + 1;
+      } else if (quote === "`" && ch === "$" && source[i + 1] === "{") {
+        i = skipBalanced(source, i + 2, "{", "}");
+      } else {
+        i++;
+      }
     }
+    return i;
+  }
+
+  /** The index just past the `close` balancing an `open` consumed before `start`. */
+  function skipBalanced(source: string, start: number, open: string, close: string): number {
+    let depth = 1;
+    let i = start;
+    while (i < source.length) {
+      const ch = source[i];
+      if (ch === '"' || ch === "'" || ch === "`") {
+        i = skipLiteral(source, i);
+      } else if (ch === "/" && source[i + 1] === "/") {
+        const end = source.indexOf("\n", i);
+        i = end === -1 ? source.length : end;
+      } else if (ch === "/" && source[i + 1] === "*") {
+        const end = source.indexOf("*/", i + 2);
+        i = end === -1 ? source.length : end + 2;
+      } else if (ch === "/" && !/[\w$)\]]/.test(source.slice(0, i).trimEnd().slice(-1))) {
+        let j = i + 1;
+        let inClass = false;
+        while (j < source.length && source[j] !== "\n" && (inClass || source[j] !== "/")) {
+          if (source[j] === "\\" && source[j + 1] !== "\n") j++;
+          else if (source[j] === "[") inClass = true;
+          else if (source[j] === "]") inClass = false;
+          j++;
+        }
+        i = source[j] === "/" ? j + 1 : i + 1;
+      } else {
+        if (ch === open) depth++;
+        if (ch === close && --depth === 0) return i + 1;
+        i++;
+      }
+    }
+    return i;
+  }
+
+  /** Every `console.<fn>(…)` call in `source`, read to its balancing parenthesis. */
+  function consoleCalls(source: string): Array<{ line: number; text: string }> {
+    return [...source.matchAll(/\bconsole\.(log|warn|error|info|debug)\s*\(/g)].map((m) => ({
+      line: source.slice(0, m.index).split("\n").length,
+      text: source.slice(m.index, skipBalanced(source, m.index + m[0].length, "(", ")")),
+    }));
+  }
+
+  it("consoleCalls reads a wrapped call to its balancing parenthesis past literal ones", () => {
+    const source = [
+      "console.error(",
+      '  "[x] ) %s",',
+      "  `(${fn(a)} ) ${'}'}`,",
+      "  // don't )",
+      "  secret.value,",
+      ");",
+      "console.log('done');",
+      "console.warn(",
+      '  "bad header %s",',
+      '  header.replace(/\\)[\'"]/g, ""),',
+      "  secret.value,",
+      ");",
+      "console.info(f(total / 2), 1 / 3);",
+      "console.debug(f((a + b) / 2), 3 / 4);",
+      "console.warn(",
+      '  "class %s",',
+      '  x.replace(/[/)]/g, ""),',
+      "  secret.value,",
+      ");",
+      "console.warn(",
+      '  "escape %s",',
+      '  x.replace(/\\/\\)/g, ""),',
+      "  secret.value,",
+      ");",
+      "console.info(",
+      '  "ratio %d %d",',
+      "  count++ / 2,",
+      "  scale(width / height),",
+      ");",
+    ].join("\n");
+    const callFrom = (head: string): string => {
+      const at = source.indexOf(head);
+      return source.slice(at, source.indexOf(");", at) + 1);
+    };
+    const warnAt = source.indexOf("console.warn(");
+    expect(consoleCalls(source)).toEqual([
+      { line: 1, text: source.slice(0, source.indexOf(");") + 1) },
+      { line: 7, text: "console.log('done')" },
+      { line: 8, text: source.slice(warnAt, source.indexOf(");", warnAt) + 1) },
+      { line: 13, text: "console.info(f(total / 2), 1 / 3)" },
+      { line: 14, text: "console.debug(f((a + b) / 2), 3 / 4)" },
+      { line: 15, text: callFrom('console.warn(\n  "class %s"') },
+      { line: 20, text: callFrom('console.warn(\n  "escape %s"') },
+      { line: 25, text: callFrom('console.info(\n  "ratio %d %d"') },
+    ]);
   });
 
   it("rest-api/ console calls do not reference secret, value, password, or key", () => {
@@ -812,20 +892,18 @@ describe("No-Logging Static Audit", () => {
     const files = collectTsFiles(restDir);
     expect(files.length).toBeGreaterThan(0);
 
-    const consolePattern = /\bconsole\.(log|warn|error|info|debug)\s*\(/;
     const sensitivePattern = /\b(secret|value|password|key)\b/i;
-    for (const filePath of files) {
-      const content = readFileSync(filePath, "utf8");
-      const lines = content.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i] as string;
-        if (consolePattern.test(line) && sensitivePattern.test(line)) {
-          expect.fail(
-            `Console call references sensitive term in ${filePath}:${i + 1}: ${line.trim()}`,
-          );
-        }
-      }
-    }
+    const calls = files.flatMap((filePath) =>
+      consoleCalls(readFileSync(filePath, "utf8")).map((call) => ({
+        at: `${relative(restDir, filePath).split(sep).join("/")}:${String(call.line)}`,
+        text: call.text,
+      })),
+    );
+    expect(calls.map((call) => call.at)).toHaveLength(3);
+    const offenders = calls
+      .filter((call) => sensitivePattern.test(call.text))
+      .map((call) => `${call.at}: ${(call.text.split("\n")[0] as string).trim()}`);
+    expect(offenders).toEqual([]);
   });
 
   // E77 tripwire: `admin_scope` is a plain optional field any in-process

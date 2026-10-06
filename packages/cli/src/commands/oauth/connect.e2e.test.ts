@@ -75,11 +75,7 @@ beforeAll(async () => {
 afterAll(() => {
   tokenServer.close();
   deviceServer.close();
-  try {
-    rmSync(tempDir, { recursive: true, force: true });
-  } catch {
-    // ignore
-  }
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 async function run(args: string[]): Promise<void> {

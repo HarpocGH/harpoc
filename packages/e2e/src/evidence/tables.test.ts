@@ -152,9 +152,9 @@ describe("classify", () => {
     expect([paired, matrix].map((b) => b.length)).toEqual([0, 0]);
   });
 
-  it("reports a lone baseline record as unclassified rather than rendering half a row", () => {
-    // The generator must not present a baseline leak with no comparison beside
-    // it: that is the shape C-3 exists to prevent.
+  it("classifies a lone baseline record as a paired row with no Harpoc side, not as unclassified", () => {
+    // C-3's half row is rendered, its Harpoc cells `--`: what refuses a
+    // pre-registered Harpoc row that never ran is `checkGates`, not `classify`.
     const { unclassified, paired } = classify([
       record({ scenario: "orphan", variant: undefined, arm: "baseline" }),
     ]);

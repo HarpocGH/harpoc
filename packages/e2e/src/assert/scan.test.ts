@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 import { encodingsOf } from "./encodings.js";
 import { scan } from "./scan.js";
 
@@ -150,5 +151,52 @@ describe("scan — escape tolerance and serialized depth (review 2026-08-14, F1/
     });
     expect(hits).toHaveLength(1);
     expect(hits[0]).toMatchObject({ path: "$.quoted" });
+  });
+});
+
+describe("scan — Error objects nested in a result (review 2026-10-01, I46)", () => {
+  const raw = (path: string) => ({ encoding: "raw", path, position: "value" });
+
+  it("finds the credential in an Error's message and stack", () => {
+    expect(scan(SECRET, { resource: new Error(SECRET) })).toEqual([
+      raw("$.resource.message"),
+      raw("$.resource.stack"),
+    ]);
+  });
+
+  it("finds it in the probe's failing slot", () => {
+    expect(scan(SECRET, { failing: new Error(`use_secret failed: ${SECRET}`) })).toEqual([
+      raw("$.failing.message"),
+      raw("$.failing.stack"),
+    ]);
+  });
+
+  it("finds it in an Error nested below the top level", () => {
+    expect(scan(SECRET, { result: { list: new Error(SECRET) } })).toEqual([
+      raw("$.result.list.message"),
+      raw("$.result.list.stack"),
+    ]);
+  });
+
+  it("finds it in a VaultError's message", () => {
+    const err = new VaultError(ErrorCode.ACCESS_DENIED, `Access denied: ${SECRET}`);
+    expect(scan(SECRET, { info: err })).toEqual([raw("$.info.message"), raw("$.info.stack")]);
+  });
+
+  it("finds it in a VaultError's details", () => {
+    const err = new VaultError(ErrorCode.ACCESS_DENIED, "Access denied", { echoed: SECRET });
+    expect(scan(SECRET, { info: err })).toEqual([raw("$.info.details.echoed")]);
+  });
+
+  it("returns nothing for an Error that does not carry it (negative control)", () => {
+    expect(
+      scan(SECRET, { failing: new Error("Secret not found: secret://does-not-exist") }),
+    ).toEqual([]);
+  });
+
+  it("walks an Error that references itself once", () => {
+    const err = new Error(SECRET) as Error & { self?: unknown };
+    err.self = err;
+    expect(scan(SECRET, { info: err })).toEqual([raw("$.info.message"), raw("$.info.stack")]);
   });
 });

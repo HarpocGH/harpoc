@@ -43,11 +43,7 @@ describe("at-rest opacity (thesis: encrypted at rest)", () => {
   });
 
   afterEach(() => {
-    try {
-      rmSync(tempDir, { recursive: true, force: true });
-    } catch {
-      // ignore
-    }
+    rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("neither the secret name nor its value reaches the vault files in any common encoding", async () => {

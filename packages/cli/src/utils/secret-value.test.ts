@@ -27,11 +27,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  try {
-    rmSync(tempDir, { recursive: true, force: true });
-  } catch {
-    // Ignore
-  }
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 function writeTemp(name: string, content: string | Buffer): string {

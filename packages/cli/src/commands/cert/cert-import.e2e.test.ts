@@ -57,11 +57,7 @@ afterEach(() => {
   exitSpy.mockRestore();
   errorSpy.mockRestore();
   logSpy.mockRestore();
-  try {
-    rmSync(vaultDir, { recursive: true, force: true });
-  } catch {
-    // Ignore
-  }
+  rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
   else process.env.HARPOC_TOKEN = savedEnvToken;
 });

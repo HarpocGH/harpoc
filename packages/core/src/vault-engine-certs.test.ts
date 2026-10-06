@@ -207,11 +207,7 @@ beforeEach(() => {
 afterEach(async () => {
   vi.restoreAllMocks();
   await engine.destroy();
-  try {
-    rmSync(tempDir, { recursive: true, force: true });
-  } catch {
-    // Ignore
-  }
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 // Loopback target for the http action: the request counter makes "refused

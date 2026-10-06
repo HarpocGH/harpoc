@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { Mock } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { CallerContext, CertificateStatus } from "@harpoc/shared";
@@ -11,6 +11,7 @@ import type { CertificateEngine } from "./cert-manager.js";
 import { generateCertKeyPair } from "./key-pair.js";
 import type { KeyPairOptions } from "./key-pair.js";
 import { RenewalScheduler } from "./renewal-scheduler.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 interface ScriptedChallenge {
   type: string;
@@ -54,6 +55,7 @@ const scenario = vi.hoisted(() => ({
   chainPem: "",
   solverStarts: [] as SolverStart[],
   solverStops: 0,
+  sequence: [] as string[],
 }));
 
 vi.mock("./acme/acme-client.js", () => {
@@ -84,6 +86,7 @@ vi.mock("./acme/acme-client.js", () => {
         return authorization;
       });
       this.respondChallenge = vi.fn(async () => {
+        scenario.sequence.push("respond");
         if (scenario.respondChallengeError !== null) throw scenario.respondChallengeError;
       });
       this.finalize = vi.fn(async () => undefined);
@@ -101,10 +104,12 @@ vi.mock("./acme/challenge-solver.js", async (importOriginal) => {
   class Http01Solver {
     async start(token: string, keyAuthorization: string, port: number): Promise<number> {
       scenario.solverStarts.push({ token, keyAuthorization, port });
+      scenario.sequence.push("start");
       return port;
     }
     async stop(): Promise<void> {
       scenario.solverStops += 1;
+      scenario.sequence.push("stop");
     }
   }
   return { ...actual, Http01Solver };
@@ -156,6 +161,18 @@ const CALLER: CallerContext = {
 const acmeFailed = expect.objectContaining({ code: ErrorCode.CERT_ACME_FAILED });
 const csrFailed = expect.objectContaining({ code: ErrorCode.CERT_CSR_FAILED });
 const certInvalid = expect.objectContaining({ code: ErrorCode.CERT_INVALID });
+
+const KEY_MARKER = "MARKER-6b1f0e9a3c5d2874";
+const MARKED_KEY_PEM = `-----BEGIN PRIVATE KEY-----\n${KEY_MARKER}\n-----END PRIVATE KEY-----\n`;
+
+/** The refusal's message, its string form and its details all omit the marked key. */
+function expectNoKeyMarker(err: unknown): void {
+  expect(err).toBeInstanceOf(VaultError);
+  const error = err as VaultError;
+  expect(error.message).not.toContain(KEY_MARKER);
+  expect(String(error)).not.toContain(KEY_MARKER);
+  expect(JSON.stringify(error.details ?? {})).not.toContain(KEY_MARKER);
+}
 
 function httpAuthorization(domain: string, status = "pending"): ScriptedAuthorization {
   return {
@@ -291,6 +308,7 @@ describe("CertManager", () => {
     scenario.chainPem = BUNDLE;
     scenario.solverStarts.length = 0;
     scenario.solverStops = 0;
+    scenario.sequence.length = 0;
     engine = makeEngine();
     manager = managerFor(engine);
   });
@@ -648,6 +666,7 @@ describe("CertManager", () => {
         },
       ]);
       expect(scenario.solverStops).toBe(1);
+      expect(scenario.sequence).toEqual(["start", "respond", "stop"]);
     });
 
     it("defaults the challenge port to 80", async () => {
@@ -664,6 +683,7 @@ describe("CertManager", () => {
       ).rejects.toThrow(acmeFailed);
       expect(scenario.solverStarts).toHaveLength(1);
       expect(scenario.solverStops).toBe(1);
+      expect(scenario.sequence).toEqual(["start", "respond", "stop"]);
       expect(engine.importCertificate).not.toHaveBeenCalled();
     });
 
@@ -693,7 +713,9 @@ describe("CertManager", () => {
     });
 
     it("uses the dns-01 callback with the RFC 8555 TXT value and starts no HTTP solver", async () => {
-      const dns01 = vi.fn(async () => undefined);
+      const dns01 = vi.fn(async () => {
+        scenario.sequence.push("dns01");
+      });
 
       await manager.issueWithAcme("web", { ...issueOptions, dns01, algorithm: "ec" });
 
@@ -705,6 +727,7 @@ describe("CertManager", () => {
       expect(issued().respondChallenge).toHaveBeenCalledWith(
         "https://acme-v02.api.letsencrypt.org/c/fixture.example.com/dns",
       );
+      expect(scenario.sequence).toEqual(["dns01", "respond"]);
     });
 
     it("refuses when the authorization offers no matching challenge", async () => {
@@ -919,6 +942,7 @@ describe("CertManager", () => {
 
       expect(scenario.solverStarts[0]?.port).toBe(8080);
       expect(scenario.solverStops).toBe(1);
+      expect(scenario.sequence).toEqual(["start", "respond", "stop"]);
     });
 
     it("stops the solver when the renewal challenge fails", async () => {
@@ -927,6 +951,7 @@ describe("CertManager", () => {
 
       await expect(manager.renewCertificate(SECRET_ID)).rejects.toThrow(acmeFailed);
       expect(scenario.solverStops).toBe(1);
+      expect(scenario.sequence).toEqual(["start", "respond", "stop"]);
       expect(engine.updateCertificate).not.toHaveBeenCalled();
     });
 
@@ -960,6 +985,25 @@ describe("CertManager", () => {
       engine.getAcmeAccount.mockReturnValue("{}");
 
       await expect(manager.renewCertificate(SECRET_ID)).rejects.toThrow(acmeFailed);
+      expect(scenario.instances).toHaveLength(0);
+    });
+
+    it.each([
+      [
+        "not valid JSON",
+        JSON.stringify({ privateKeyPem: MARKED_KEY_PEM, accountUrl: ACCOUNT_URL }).slice(0, -1),
+      ],
+      ["not a JSON object", JSON.stringify([MARKED_KEY_PEM, ACCOUNT_URL])],
+      ["incomplete", JSON.stringify({ privateKeyPem: MARKED_KEY_PEM })],
+    ])("keeps the stored account key out of the %s refusal", async (reason, stored) => {
+      engine.getAcmeAccount.mockReturnValue(stored);
+
+      const err = await expectVaultError(
+        () => manager.renewCertificate(SECRET_ID),
+        ErrorCode.CERT_ACME_FAILED,
+      );
+      expect(err.message).toContain(`the stored ACME account is ${reason}`);
+      expectNoKeyMarker(err);
       expect(scenario.instances).toHaveLength(0);
     });
 
@@ -1168,6 +1212,40 @@ describe("CertManager", () => {
         manager,
       );
       expect(scheduler.isRunning).toBe(false);
+    });
+
+    it("forwards a scheduled renewal's refusal to the audit hook and onRenewError without the stored account key", async () => {
+      vi.useFakeTimers();
+      onTestFinished(() => {
+        vi.useRealTimers();
+      });
+      engine.getAcmeAccount.mockReturnValue(
+        JSON.stringify({ privateKeyPem: MARKED_KEY_PEM, accountUrl: ACCOUNT_URL }).slice(0, -1),
+      );
+      const schedulerEngine = {
+        getExpiringCertificates: vi.fn(() => [
+          { secret_id: SECRET_ID, auto_renew: true, not_after: Date.now(), renew_before_days: 30 },
+        ]),
+        auditCertRenewFailure: vi.fn<(secretId: string, error: unknown) => void>(),
+      };
+      const reported: unknown[] = [];
+      const scheduler = new RenewalScheduler(schedulerEngine as never, manager, {
+        onRenewError: (_secretId, err) => {
+          reported.push(err);
+        },
+      });
+
+      const tick = scheduler.tick();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await tick;
+
+      expect(engine.getAcmeAccount).toHaveBeenCalledTimes(3);
+      expect(schedulerEngine.auditCertRenewFailure).toHaveBeenCalledTimes(1);
+      const audited = schedulerEngine.auditCertRenewFailure.mock.calls[0]?.[1];
+      expect(audited).toMatchObject({ code: ErrorCode.CERT_ACME_FAILED });
+      expect(reported).toHaveLength(1);
+      expect(reported[0]).toBe(audited);
+      expectNoKeyMarker(audited);
     });
   });
 });

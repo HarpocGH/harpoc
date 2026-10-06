@@ -32,11 +32,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await engine.destroy();
-  try {
-    rmSync(tempDir, { recursive: true, force: true });
-  } catch {
-    // Ignore
-  }
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe("target allowlists deny by default (R1, 2026-09-01)", () => {

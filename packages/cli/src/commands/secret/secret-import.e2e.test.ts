@@ -42,11 +42,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await engine.destroy();
-  try {
-    rmSync(tempDir, { recursive: true, force: true });
-  } catch {
-    // Ignore
-  }
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
   else process.env.HARPOC_TOKEN = savedEnvToken;
 });
@@ -220,11 +216,7 @@ describe("secret rotate --from-file — end to end (review T5)", () => {
     } finally {
       exitSpy.mockRestore();
       errorSpy.mockRestore();
-      try {
-        rmSync(vaultDir, { recursive: true, force: true });
-      } catch {
-        // Ignore
-      }
+      rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   }, 30_000);
 });

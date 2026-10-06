@@ -74,11 +74,7 @@ afterEach(() => {
   errSpy.mockRestore();
   logSpy.mockRestore();
   exitSpy.mockRestore();
-  try {
-    rmSync(tempDir, { recursive: true, force: true });
-  } catch {
-    // Ignore
-  }
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe("harpoc init", () => {

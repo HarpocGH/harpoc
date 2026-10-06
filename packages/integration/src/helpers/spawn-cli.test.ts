@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import { VaultEngine } from "@harpoc/core";
 import { SESSION_FILE_NAME, VAULT_DB_NAME } from "@harpoc/shared";
 import {
@@ -106,6 +106,111 @@ describe("child deadlines (SG-33, W1-11, DM26-11)", () => {
       runCli(["server", "start", "--rest", "--port", String(port)], { vaultDir, timeoutMs: 500 }),
     ).rejects.toThrow(/timed out after 500 ms/);
   }, 10_000);
+
+  it("closed() kills a child that ignores stdin EOF at its deadline and rejects naming it", async () => {
+    const started = Date.now();
+    const s = startNode(["-e", "process.stdin.resume(); setInterval(() => {}, 1e6)"], {
+      stdin: "pipe",
+    });
+    s.child.stdin?.end();
+    const err = await s.closed(200).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(
+      /did not close within 200 ms and was killed \(SIGTERM\)/,
+    );
+    const pid = Number(/pid (\d+)/.exec((err as Error).message)?.[1]);
+    expect(pid).toBe(s.child.pid);
+    expect(() => process.kill(pid, 0)).toThrow();
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 10_000);
+
+  it("closed() resolves the exit of a child that reads its piped stdin to EOF", async () => {
+    const s = startNode(
+      [
+        "-e",
+        "process.stdin.on('data', (d) => process.stderr.write(d)); process.stdin.on('end', () => process.exit(3))",
+      ],
+      { stdin: "pipe" },
+    );
+    s.child.stdin?.end("ping\n");
+    await expect(s.closed(5_000)).resolves.toEqual({ code: 3, signal: null });
+    expect(s.stderrSoFar()).toBe("ping\n");
+    await expect(s.closed(5_000)).resolves.toEqual({ code: 3, signal: null });
+  }, 10_000);
+
+  it("closed() rejects naming a child that exited while a descendant holds its pipes", async () => {
+    const started = Date.now();
+    const s = startNode([
+      "-e",
+      "const g = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true, windowsHide: true }); g.unref(); process.stderr.write('grandchild ' + g.pid + '\\n');",
+    ]);
+    const grand: { pid?: number } = {};
+    onTestFinished(async () => {
+      if (grand.pid !== undefined) {
+        try {
+          process.kill(grand.pid);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
+        }
+      }
+      await s.stop();
+    });
+    const match = await s.waitForStderr(/grandchild (\d+)/, 5_000);
+    const grandPid = Number(match[1]);
+    grand.pid = grandPid;
+    await vi.waitFor(() => expect(s.child.exitCode).toBe(0), { timeout: 3_000 });
+    const err = await s.closed(200).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(
+      /exited but its pipes did not close within 2000 ms of the 200 ms deadline/,
+    );
+    expect(Number(/pid (\d+)/.exec((err as Error).message)?.[1])).toBe(s.child.pid);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    process.kill(grandPid);
+    await expect(s.closed(5_000)).resolves.toEqual({ code: 0, signal: null });
+    await vi.waitFor(() => expect(() => process.kill(grandPid, 0)).toThrow(), { timeout: 3_000 });
+  }, 10_000);
+
+  it("closed() forwards stop()'s rejection when a killed child's descendant holds its pipes", async () => {
+    const s = startNode([
+      "-e",
+      "const g = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true, windowsHide: true }); g.unref(); process.stderr.write('grandchild ' + g.pid + '\\n'); setInterval(() => {}, 1e6);",
+    ]);
+    const grand: { pid?: number } = {};
+    onTestFinished(async () => {
+      if (grand.pid !== undefined) {
+        try {
+          process.kill(grand.pid);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
+        }
+      }
+      await s.stop();
+    });
+    const match = await s.waitForStderr(/grandchild (\d+)/, 5_000);
+    const grandPid = Number(match[1]);
+    grand.pid = grandPid;
+    const called = Date.now();
+    const err = await s.closed(200).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    const elapsed = Date.now() - called;
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/did not close within 4000 ms of kill\(\) and SIGKILL/);
+    expect(Number(/pid (\d+)/.exec((err as Error).message)?.[1])).toBe(s.child.pid);
+    expect(elapsed).toBeGreaterThanOrEqual(4_000);
+    expect(elapsed).toBeLessThan(9_000);
+    process.kill(grandPid);
+    await expect(s.closed(5_000)).resolves.toBeDefined();
+    await vi.waitFor(() => expect(() => process.kill(grandPid, 0)).toThrow(), { timeout: 3_000 });
+  }, 15_000);
 
   it.runIf(process.platform !== "win32")(
     "stop() escalates to SIGKILL when the child ignores SIGTERM",

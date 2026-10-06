@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import { generateCertKeyPair } from "../key-pair.js";
 import { jwkThumbprint, jwsAlgForCurve, publicJwk, signJws } from "./jws.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 /*
  * RFC 7638 §3.1 verbatim: the example JWK (alg and kid included, both of which
@@ -97,6 +98,20 @@ describe("signJws", () => {
     expect(() =>
       signJws({ payload: "", protectedHeader: { alg: "EdDSA" }, privateKeyPem: privateKey }),
     ).toThrow(acmeFailed);
+  });
+
+  it("keeps an unparseable private key out of the refusal", async () => {
+    const marker = "MARKER-2d7c4a9e1f0b8635";
+    const privateKeyPem = `-----BEGIN PRIVATE KEY-----\n${marker}\n-----END PRIVATE KEY-----\n`;
+
+    const err = await expectVaultError(
+      () => signJws({ payload: "", protectedHeader: { alg: "ES256" }, privateKeyPem }),
+      ErrorCode.CERT_ACME_FAILED,
+    );
+    expect(err.message).toContain("private key PEM is not parseable");
+    expect(err.message).not.toContain(marker);
+    expect(String(err)).not.toContain(marker);
+    expect(JSON.stringify(err.details ?? {})).not.toContain(marker);
   });
 
   it("refuses a protected header whose alg disagrees with the signing key", () => {

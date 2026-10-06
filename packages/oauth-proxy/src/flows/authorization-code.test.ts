@@ -5,6 +5,7 @@ import type { OAuthProviderConfig } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import { AuthorizationCodeFlow } from "./authorization-code.js";
 import { generateCodeChallenge } from "../pkce.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 let tokenServer: Server;
 let tokenServerUrl: string;
@@ -95,8 +96,11 @@ describe("AuthorizationCodeFlow.startFlow", () => {
     expect(url.searchParams.get("scope")).toBeNull();
   });
 
-  it("throws when auth_endpoint is missing", () => {
-    expect(() => flow.startFlow(makeConfig({ auth_endpoint: undefined }), redirectUri)).toThrow();
+  it("throws when auth_endpoint is missing", async () => {
+    await expectVaultError(
+      () => flow.startFlow(makeConfig({ auth_endpoint: undefined }), redirectUri),
+      ErrorCode.OAUTH_FLOW_FAILED,
+    );
   });
 });
 

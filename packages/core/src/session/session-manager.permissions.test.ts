@@ -66,11 +66,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  try {
-    rmSync(sessionDir, { recursive: true, force: true });
-  } catch {
-    // Ignore
-  }
+  rmSync(sessionDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe("session file permissions (owner-only from creation)", () => {

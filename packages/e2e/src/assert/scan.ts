@@ -1,5 +1,6 @@
 import { encodingsOf } from "./encodings.js";
 import { findEscapeTolerant } from "./json-escape.js";
+import { serializeError } from "./serialize-error.js";
 
 export interface Sighting {
   encoding: string;
@@ -21,7 +22,10 @@ const MAX_PARSE_DEPTH = 6;
  * Walk an arbitrary structure and report every position at which the secret
  * appears in any encoding. Object KEYS are tested as well as values — review
  * findings H3 and L1 leaked through keys and SQL column aliases while the
- * identical string in value position was correctly redacted.
+ * identical string in value position was correctly redacted. An `Error` at any
+ * depth is walked as `serializeError` flattens it: its `message` and `stack`
+ * are non-enumerable, so a caught rejection parked in a result slot would
+ * otherwise read as clean (review 2026-10-01, I46).
  */
 export function scan(secret: string, root: unknown): Sighting[] {
   const encodings = encodingsOf(secret);
@@ -75,6 +79,10 @@ export function scan(secret: string, root: unknown): Sighting[] {
     if (visited.has(node)) return;
     visited.add(node);
 
+    if (node instanceof Error) {
+      walk(serializeError(node), path, depth);
+      return;
+    }
     if (Array.isArray(node)) {
       node.forEach((item, i) => walk(item, `${path}[${i}]`, depth));
       return;
