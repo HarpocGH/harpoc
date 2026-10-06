@@ -33,7 +33,7 @@
     "@harpoc/shared": "workspace:*",
     "@harpoc/web-ui": "workspace:*",
     "@modelcontextprotocol/server": "^2.0.0",
-    "commander": "^13.1.0"
+    "commander": "^15.0.0"
   },
   "devDependencies": {
     "@harpoc/test-utils": "workspace:*",
