@@ -24,7 +24,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@types/node": "^22.15.0"
+    "@types/node": "^26.6.4"
   },
   "scripts": {
     "build": "tsc",
