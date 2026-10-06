@@ -29,7 +29,7 @@
     "mysql2": "^3.23.1",
     "pg": "^8.22.0",
     "redis": "^6.2.1",
-    "undici": "^7.29.1"
+    "undici": "^8.11.2"
   },
   "devDependencies": {
     "@harpoc/test-utils": "workspace:*",
