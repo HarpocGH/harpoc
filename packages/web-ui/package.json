@@ -20,7 +20,7 @@
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.5",
     "@harpoc/shared": "workspace:*",
-    "preact": "^10.26.9"
+    "preact": "^11.0.0"
   },
   "devDependencies": {
     "@harpoc/test-utils": "workspace:*",
