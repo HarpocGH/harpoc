@@ -4,6 +4,7 @@ import { ErrorCode, MAX_HTTP_RESPONSE_BYTES } from "@harpoc/shared";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { HttpInjector } from "./http-injector.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 let server: Server;
 let baseUrl: string;
@@ -728,31 +729,38 @@ describe("HttpInjector", () => {
         );
 
         expect(response.status).toBe(200);
-        expect(response.body).toBeDefined();
-        expect(response.headers).toBeDefined();
+        const body = JSON.parse(response.body ?? "{}") as Record<string, string>;
+        expect(body.method).toBe("GET");
+        expect(response.headers?.["content-type"]).toBe("application/json");
       },
     );
   });
 
   describe("URL validation", () => {
     it("rejects HTTP for non-loopback", async () => {
-      await expect(
-        injector.executeWithSecret(
-          { method: "GET", url: "http://example.com/api" },
-          new Uint8Array(Buffer.from("val")),
-          { type: "bearer" },
-        ),
-      ).rejects.toThrow("loopback");
+      const err = await expectVaultError(
+        () =>
+          injector.executeWithSecret(
+            { method: "GET", url: "http://example.com/api" },
+            new Uint8Array(Buffer.from("val")),
+            { type: "bearer" },
+          ),
+        ErrorCode.URL_HTTPS_REQUIRED,
+      );
+      expect(err.message).toContain("loopback");
     });
 
     it("rejects SSRF targets", async () => {
-      await expect(
-        injector.executeWithSecret(
-          { method: "GET", url: "https://10.0.0.1/api" },
-          new Uint8Array(Buffer.from("val")),
-          { type: "bearer" },
-        ),
-      ).rejects.toThrow("SSRF");
+      const err = await expectVaultError(
+        () =>
+          injector.executeWithSecret(
+            { method: "GET", url: "https://10.0.0.1/api" },
+            new Uint8Array(Buffer.from("val")),
+            { type: "bearer" },
+          ),
+        ErrorCode.SSRF_BLOCKED,
+      );
+      expect(err.message).toContain("SSRF");
     });
   });
 
@@ -766,7 +774,7 @@ describe("HttpInjector", () => {
       );
 
       expect(response.status).toBeNull();
-      expect(["CONNECTION_REFUSED", "TIMEOUT"]).toContain(response.error);
+      expect(response.error).toBe("CONNECTION_REFUSED");
     });
   });
 
@@ -882,7 +890,7 @@ describe("HttpInjector", () => {
       );
 
       expect(response.status).toBe(204);
-      expect(response.body === "" || response.body === undefined).toBe(true);
+      expect(response.body).toBe("");
     });
   });
 

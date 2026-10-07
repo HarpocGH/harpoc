@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import { ImapClient } from "./imap-client.js";
 import type { ImapConnectOptions } from "./imap-client.js";
 import { getFixtureCaPem, FIXTURE_HOST, startFakeImap } from "./__fixtures__/fake-imap-server.js";
 import type { FakeImap, ImapScript } from "./__fixtures__/fake-imap-server.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 const servers: FakeImap[] = [];
 const clients: ImapClient[] = [];
@@ -198,7 +199,7 @@ describe("ImapClient — fetch (UID FETCH, always .PEEK)", () => {
   it("rejects an empty UID list before sending anything", async () => {
     const srv = await fake({});
     const client = await connect(srv);
-    await expect(client.fetch([], "envelope")).rejects.toBeInstanceOf(VaultError);
+    await expectVaultError(() => client.fetch([], "envelope"), ErrorCode.INVALID_INPUT);
     expect(srv.commands().map((c) => c.name)).not.toContain("UID FETCH");
   });
 });
@@ -228,15 +229,15 @@ describe("ImapClient — store (UID STORE)", () => {
   it("rejects a malformed flag (embedded space) as a VaultError before sending anything", async () => {
     const srv = await fake({});
     const client = await connect(srv);
-    await expect(client.store([1], ["not a flag"], [])).rejects.toBeInstanceOf(VaultError);
+    await expectVaultError(() => client.store([1], ["not a flag"], []), ErrorCode.INVALID_INPUT);
     expect(srv.commands().map((c) => c.name)).not.toContain("UID STORE");
   });
 
   it("rejects a malformed flag (embedded backslash / empty) as a VaultError before sending anything", async () => {
     const srv = await fake({});
     const client = await connect(srv);
-    await expect(client.store([1], [], ["\\Se\\en"])).rejects.toBeInstanceOf(VaultError);
-    await expect(client.store([1], [], [""])).rejects.toBeInstanceOf(VaultError);
+    await expectVaultError(() => client.store([1], [], ["\\Se\\en"]), ErrorCode.INVALID_INPUT);
+    await expectVaultError(() => client.store([1], [], [""]), ErrorCode.INVALID_INPUT);
     expect(srv.commands().map((c) => c.name)).not.toContain("UID STORE");
   });
 });
@@ -399,8 +400,8 @@ describe("ImapClient — UID validation (fail closed before sending)", () => {
   it("rejects an invalid UID (non-integer / non-positive) before sending anything", async () => {
     const srv = await fake({});
     const client = await connect(srv);
-    await expect(client.copy([0], "Archive")).rejects.toBeInstanceOf(VaultError);
-    await expect(client.store([-1], ["\\Seen"], [])).rejects.toBeInstanceOf(VaultError);
+    await expectVaultError(() => client.copy([0], "Archive"), ErrorCode.INVALID_INPUT);
+    await expectVaultError(() => client.store([-1], ["\\Seen"], []), ErrorCode.INVALID_INPUT);
     expect(srv.commands().map((c) => c.name)).not.toContain("UID COPY");
     expect(srv.commands().map((c) => c.name)).not.toContain("UID STORE");
   });

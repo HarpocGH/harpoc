@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { InjectionPolicy, InjectionPolicyInput, SmtpAction } from "@harpoc/shared";
-import { ActionType, ErrorCode, VaultError, injectionPolicyInputSchema } from "@harpoc/shared";
+import { ActionType, ErrorCode, injectionPolicyInputSchema } from "@harpoc/shared";
 import type { SmtpSendOptions } from "./mail/smtp-client.js";
 import type { SmtpInjectorDeps } from "./smtp-injector.js";
 import { SmtpInjector } from "./smtp-injector.js";
@@ -125,20 +125,6 @@ describe("SmtpInjector — recipient allowlist coupling (design §5.2)", () => {
     ).rejects.toMatchObject({ code: ErrorCode.RECIPIENT_NOT_ALLOWED });
   });
 
-  it("attachments + EMPTY allowlist → ATTACHMENT_POLICY_REQUIRED", async () => {
-    const { fn } = makeFakeSend();
-    const injector = new SmtpInjector({ sendSmtp: fn, ...smallFs() });
-    await expect(
-      injector.run(
-        baseAction({ attachments: [{ path: "/doc.pdf" }] }),
-        SECRET,
-        basePolicy({ smtp_recipient_allowlist: [] }),
-        undefined,
-        undefined,
-      ),
-    ).rejects.toMatchObject({ code: ErrorCode.ATTACHMENT_POLICY_REQUIRED });
-  });
-
   it("attachments + a configured matching allowlist is allowed", async () => {
     const { fn, calls } = makeFakeSend();
     const injector = new SmtpInjector({ sendSmtp: fn, ...smallFs() });
@@ -150,7 +136,6 @@ describe("SmtpInjector — recipient allowlist coupling (design §5.2)", () => {
       undefined,
     );
     expect(calls).toHaveLength(1);
-    expect(VaultError.attachmentPolicyRequired).toBeTypeOf("function");
   });
 
   it("domain comparison is case-insensitive; local part is case-sensitive", async () => {

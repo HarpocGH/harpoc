@@ -8,7 +8,7 @@ import {
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { describe, expect, it } from "vitest";
 import { analyzeKeyMaterial, decryptKeyForImport } from "./key-import.js";
@@ -206,7 +206,10 @@ describe("decryptKeyForImport — rejection", () => {
     expect(err.message).not.toContain("BEGIN");
   });
 
-  it("throws KEY_PASSPHRASE_INVALID on material that is not a decryptable key", () => {
-    expect(() => decryptKeyForImport("not a key at all", PASSPHRASE)).toThrow(VaultError);
+  it("throws KEY_PASSPHRASE_INVALID on material that is not a decryptable key", async () => {
+    await expectVaultError(
+      () => decryptKeyForImport("not a key at all", PASSPHRASE),
+      ErrorCode.KEY_PASSPHRASE_INVALID,
+    );
   });
 });

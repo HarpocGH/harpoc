@@ -1,17 +1,19 @@
 import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ProcessAction, ProcessResult } from "@harpoc/shared";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode, MAX_PROCESS_OUTPUT_BYTES } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { forceFsIsolationUnavailableForTests } from "./fs-isolation.js";
 import { forceNetworkIsolationUnavailableForTests } from "./network-isolation.js";
 import { ProcessInjector } from "./process-injector.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 const NODE = process.execPath;
 const SECRET = "sk-supersecret-abcdef123456";
+const GIT_PATH = resolveExecutable("git", controlledPathDirs());
 
 const injector = new ProcessInjector(null);
 
@@ -119,7 +121,7 @@ describe("ProcessInjector — no shell (L2/L3 separation)", () => {
       expect(existsSync(keep)).toBe(true);
       expect(JSON.parse(result.stdout)).toEqual(META);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 });
@@ -164,12 +166,14 @@ describe("ProcessInjector — command allowlist", () => {
   });
 
   it("denies a command not in the allowlist", async () => {
-    await expect(
-      run(nodeAction(`process.stdout.write("x")`), {
-        command_allowlist: ["some-other-binary"],
-        env_allowlist: [],
-      }),
-    ).rejects.toBeInstanceOf(VaultError);
+    await expectVaultError(
+      () =>
+        run(nodeAction(`process.stdout.write("x")`), {
+          command_allowlist: ["some-other-binary"],
+          env_allowlist: [],
+        }),
+      ErrorCode.COMMAND_NOT_ALLOWED,
+    );
   });
 });
 
@@ -186,6 +190,15 @@ describe("ProcessInjector — resource bounds", () => {
       nodeAction(`process.stdout.write(Buffer.alloc(1200000, 65).toString())`),
     );
     expect(result.truncated).toBe(true);
+    expect(Buffer.byteLength(result.stdout)).toBe(MAX_PROCESS_OUTPUT_BYTES);
+  });
+
+  it("truncates stderr that exceeds the cap at exactly the cap", async () => {
+    const result = await run(
+      nodeAction(`process.stderr.write(Buffer.alloc(1200000, 66).toString())`),
+    );
+    expect(result.truncated).toBe(true);
+    expect(Buffer.byteLength(result.stderr)).toBe(MAX_PROCESS_OUTPUT_BYTES);
   });
 });
 
@@ -246,15 +259,24 @@ describe("ProcessInjector — network isolation (§4.5.3 layer 4)", () => {
 describe("ProcessInjector — filesystem isolation (§4.5.3 layer 4)", () => {
   // The refusal must land BEFORE any process exists — the child here would
   // create the marker directory, so its absence is the pre-spawn proof.
-  const fsTmpRoot = mkdtempSync(join(tmpdir(), "harpoc-fs-iso-"));
+  let fsTmpRoot: string;
+
+  beforeAll(() => {
+    fsTmpRoot = mkdtempSync(join(tmpdir(), "harpoc-fs-iso-"));
+  });
 
   afterEach(() => {
     forceFsIsolationUnavailableForTests(null);
-    rmSync(join(fsTmpRoot, "marker"), { recursive: true, force: true });
+    rmSync(join(fsTmpRoot, "marker"), {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   });
 
   afterAll(() => {
-    rmSync(fsTmpRoot, { recursive: true, force: true });
+    rmSync(fsTmpRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("refuses fail-closed before any spawn and audits when the platform cannot deliver isolation", async () => {
@@ -306,14 +328,23 @@ describe("ProcessInjector — dedicated-context binaries (C1)", () => {
   // The Git and SSH contexts must allowlist their binary, and command_allowlist
   // is context-agnostic — so the process context, which inspects no argument,
   // could re-spawn git/ssh and bypass the vault's own hardening for them.
-  const tmpRoot = mkdtempSync(join(tmpdir(), "harpoc-dedicated-"));
+  let tmpRoot: string;
+
+  beforeAll(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "harpoc-dedicated-"));
+  });
 
   afterEach(() => {
-    rmSync(join(tmpRoot, "marker"), { recursive: true, force: true });
+    rmSync(join(tmpRoot, "marker"), {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   });
 
   afterAll(() => {
-    rmSync(tmpRoot, { recursive: true, force: true });
+    rmSync(tmpRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("refuses git in the process context and audits the denial", async () => {
@@ -340,12 +371,15 @@ describe("ProcessInjector — dedicated-context binaries (C1)", () => {
   });
 
   it("names the context the caller must use instead", async () => {
-    await expect(
-      run(
-        { type: "process", command: "git", args: [], env_var: "SECRET" },
-        { command_allowlist: ["git"], env_allowlist: [] },
-      ),
-    ).rejects.toThrow(/action\.type 'git'/);
+    const err = await expectVaultError(
+      () =>
+        run(
+          { type: "process", command: "git", args: [], env_var: "SECRET" },
+          { command_allowlist: ["git"], env_allowlist: [] },
+        ),
+      ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+    );
+    expect(err.message).toMatch(/action\.type 'git'/);
   });
 
   // Permanent pin of the C1 exploit shape: `git -c alias.x=!<command>` executes
@@ -367,24 +401,26 @@ describe("ProcessInjector — dedicated-context binaries (C1)", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  it("refuses a symlink that resolves to git (resolved path is what is classified)", async () => {
-    if (process.platform === "win32") return; // symlink creation needs privileges
-    const gitPath = resolveExecutable("git", controlledPathDirs());
-    if (!gitPath) return; // no git on this host — nothing to alias
-    const link = join(tmpRoot, "not-git");
-    rmSync(link, { force: true });
-    symlinkSync(gitPath, link);
-    try {
-      await expect(
-        run(
-          { type: "process", command: link, args: ["--version"], env_var: "SECRET" },
-          { command_allowlist: [link], env_allowlist: [] },
-        ),
-      ).rejects.toMatchObject({ code: ErrorCode.DEDICATED_CONTEXT_REQUIRED });
-    } finally {
+  // Skips on win32 (creating a symlink needs Developer Mode or elevation) and on a host with no
+  // git to alias; the Linux and macOS legs run it — git is tier-required there (CORE-G-6).
+  it.skipIf(process.platform === "win32" || GIT_PATH === null)(
+    "refuses a symlink that resolves to git (resolved path is what is classified)",
+    async () => {
+      const link = join(tmpRoot, "not-git");
       rmSync(link, { force: true });
-    }
-  });
+      symlinkSync(GIT_PATH as string, link);
+      try {
+        await expect(
+          run(
+            { type: "process", command: link, args: ["--version"], env_var: "SECRET" },
+            { command_allowlist: [link], env_allowlist: [] },
+          ),
+        ).rejects.toMatchObject({ code: ErrorCode.DEDICATED_CONTEXT_REQUIRED });
+      } finally {
+        rmSync(link, { force: true });
+      }
+    },
+  );
 
   it("negative control: an ordinary allowlisted binary still runs", async () => {
     const result = await run(nodeAction(`process.stdout.write("ran")`));

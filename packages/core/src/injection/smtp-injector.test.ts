@@ -174,23 +174,20 @@ describe("SmtpInjector — attachment caps (vault-authored reasons only)", () =>
       path: `/f${i}`,
     }));
 
-    let caught: unknown;
-    try {
-      await injector.run(
-        baseAction({ attachments }),
-        SECRET,
-        basePolicy({ smtp_recipient_allowlist: ["*@example.com"] }),
-        undefined,
-        undefined,
-      );
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(VaultError);
-    expect((caught as VaultError).code).toBe(ErrorCode.ATTACHMENT_REJECTED);
+    const err = await expectVaultError(
+      () =>
+        injector.run(
+          baseAction({ attachments }),
+          SECRET,
+          basePolicy({ smtp_recipient_allowlist: ["*@example.com"] }),
+          undefined,
+          undefined,
+        ),
+      ErrorCode.ATTACHMENT_REJECTED,
+    );
     // Count guard fires before any stat, and the reason names no path.
     expect(probed).toEqual([]);
-    expect((caught as VaultError).message).not.toContain("/f0");
+    expect(err.message).not.toContain("/f0");
   });
 
   it("refuses a single file over the per-file byte cap (reason is a policy string)", async () => {
@@ -201,20 +198,18 @@ describe("SmtpInjector — attachment caps (vault-authored reasons only)", () =>
       readFile: () => Promise.reject(new Error("must not read an over-cap file")),
     });
 
-    let caught: unknown;
-    try {
-      await injector.run(
-        baseAction({ attachments: [{ path: "/big.bin" }] }),
-        SECRET,
-        basePolicy({ smtp_recipient_allowlist: ["*@example.com"] }),
-        undefined,
-        undefined,
-      );
-    } catch (e) {
-      caught = e;
-    }
-    expect((caught as VaultError).code).toBe(ErrorCode.ATTACHMENT_REJECTED);
-    expect((caught as VaultError).message).not.toContain("/big.bin");
+    const err = await expectVaultError(
+      () =>
+        injector.run(
+          baseAction({ attachments: [{ path: "/big.bin" }] }),
+          SECRET,
+          basePolicy({ smtp_recipient_allowlist: ["*@example.com"] }),
+          undefined,
+          undefined,
+        ),
+      ErrorCode.ATTACHMENT_REJECTED,
+    );
+    expect(err.message).not.toContain("/big.bin");
   });
 
   it("refuses when the total across files exceeds the message cap", async () => {
@@ -226,19 +221,17 @@ describe("SmtpInjector — attachment caps (vault-authored reasons only)", () =>
       readFile: () => Promise.reject(new Error("must not read once total exceeded")),
     });
 
-    let caught: unknown;
-    try {
-      await injector.run(
-        baseAction({ attachments: [{ path: "/a" }, { path: "/b" }, { path: "/c" }] }),
-        SECRET,
-        basePolicy({ smtp_recipient_allowlist: ["*@example.com"] }),
-        undefined,
-        undefined,
-      );
-    } catch (e) {
-      caught = e;
-    }
-    expect((caught as VaultError).code).toBe(ErrorCode.ATTACHMENT_REJECTED);
+    await expectVaultError(
+      () =>
+        injector.run(
+          baseAction({ attachments: [{ path: "/a" }, { path: "/b" }, { path: "/c" }] }),
+          SECRET,
+          basePolicy({ smtp_recipient_allowlist: ["*@example.com"] }),
+          undefined,
+          undefined,
+        ),
+      ErrorCode.ATTACHMENT_REJECTED,
+    );
     expect(per * 3).toBeGreaterThan(MAX_ATTACHMENT_TOTAL_BYTES);
   });
 });
@@ -321,9 +314,10 @@ describe("SmtpInjector — auth arms", () => {
   it("refuses a secret value without a colon separator", async () => {
     const { fn } = makeFakeSend();
     const injector = new SmtpInjector({ sendSmtp: fn });
-    await expect(
-      injector.run(baseAction(), "no-colon-here", basePolicy({}), undefined, undefined),
-    ).rejects.toBeInstanceOf(VaultError);
+    await expectVaultError(
+      () => injector.run(baseAction(), "no-colon-here", basePolicy({}), undefined, undefined),
+      ErrorCode.INVALID_INPUT,
+    );
   });
 });
 
@@ -392,15 +386,11 @@ describe("SmtpInjector — error redaction and translation", () => {
         ),
     });
 
-    let caught: unknown;
-    try {
-      await injector.run(baseAction(), "smtpuser:s3cr3tpass", basePolicy({}), undefined, undefined);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(VaultError);
-    expect((caught as VaultError).code).toBe(ErrorCode.SMTP_DELIVERY_FAILED);
-    expect((caught as VaultError).message).not.toContain("s3cr3tpass");
+    const err = await expectVaultError(
+      () => injector.run(baseAction(), "smtpuser:s3cr3tpass", basePolicy({}), undefined, undefined),
+      ErrorCode.SMTP_DELIVERY_FAILED,
+    );
+    expect(err.message).not.toContain("s3cr3tpass");
   });
 
   it("redacts a username at the shared floor (MIN_REDACTABLE_FRAGMENT)", async () => {
@@ -437,15 +427,17 @@ describe("SmtpInjector — error redaction and translation", () => {
     const injector = new SmtpInjector({ sendSmtp: fn });
     // headers set a reserved field — mime.ts throws a plain Error; the injector
     // must not let a raw Error escape.
-    await expect(
-      injector.run(
-        baseAction({ headers: { Bcc: "smuggled@evil.example" } }),
-        SECRET,
-        basePolicy({}),
-        undefined,
-        undefined,
-      ),
-    ).rejects.toBeInstanceOf(VaultError);
+    await expectVaultError(
+      () =>
+        injector.run(
+          baseAction({ headers: { Bcc: "smuggled@evil.example" } }),
+          SECRET,
+          basePolicy({}),
+          undefined,
+          undefined,
+        ),
+      ErrorCode.INVALID_INPUT,
+    );
   });
 
   it("translates a malformed-header plain Error from assembleMessage into INVALID_INPUT", async () => {

@@ -15,6 +15,7 @@ import type { ConnectionConfig, InjectionPolicy, SftpAction } from "@harpoc/shar
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { controlledPathDirs } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
+import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { executeSftpAction } from "./sftp-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
@@ -37,14 +38,8 @@ if (process.platform === "win32") {
 }
 
 const SFTP = resolveNativeSshClient("sftp");
-const describeSftp = SFTP ? describe : describe.skip;
-
-function tierRequired(tier: string): boolean {
-  return (process.env["HARPOC_REQUIRE_PLATFORM_TESTS"] ?? "")
-    .split(",")
-    .map((t) => t.trim())
-    .includes(tier);
-}
+// Skipped where no native sftp client resolves (an MSYS/Cygwin build reads as absent).
+const describeSftp = describe.skipIf(SFTP === null);
 
 it("ssh-live tier: required legs fail instead of skipping when sftp is unresolvable", () => {
   if (SFTP === null && tierRequired("ssh-live")) {
@@ -302,24 +297,28 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     expect(existsSync(batchPath)).toBe(false);
   });
 
-  it("writes the batch file with mode 0600, captured at spawn time (Unix only)", async () => {
-    if (process.platform === "win32") return;
-    let modeAtSpawn = 0;
-    spawnMock.mockImplementation((_cmd, args) => {
-      const batchPath = args[args.indexOf("-b") + 1] as string;
-      modeAtSpawn = statSync(batchPath).mode & 0o777;
-      return Promise.resolve(OK_RESULT);
-    });
+  // POSIX file modes only: win32 has no 0600 (the per-user temp directory's ACL is the
+  // control there), so the Windows legs skip and the Linux and macOS legs prove it.
+  it.skipIf(process.platform === "win32")(
+    "writes the batch file with mode 0600, captured at spawn time (Unix only)",
+    async () => {
+      let modeAtSpawn = 0;
+      spawnMock.mockImplementation((_cmd, args) => {
+        const batchPath = args[args.indexOf("-b") + 1] as string;
+        modeAtSpawn = statSync(batchPath).mode & 0o777;
+        return Promise.resolve(OK_RESULT);
+      });
 
-    await executeSftpAction(
-      LIST_ACTION,
-      new Uint8Array(Buffer.from(makeKeyPem())),
-      allowedPolicy(),
-      SFTP_CONFIG,
-    );
+      await executeSftpAction(
+        LIST_ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        allowedPolicy(),
+        SFTP_CONFIG,
+      );
 
-    expect(modeAtSpawn).toBe(0o600);
-  });
+      expect(modeAtSpawn).toBe(0o600);
+    },
+  );
 
   describe("golden batch file content per operation", () => {
     it("upload: put <local> <remote>, both double-quoted", async () => {
@@ -727,7 +726,7 @@ describe.runIf(process.platform === "win32")(
 
     afterEach(() => {
       process.env.PATH = savedPath;
-      rmSync(fixtureDir, { recursive: true, force: true });
+      rmSync(fixtureDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     });
 
     it("refuses before any spawn", async () => {

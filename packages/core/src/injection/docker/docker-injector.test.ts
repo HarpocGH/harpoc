@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DockerRegistryAction, InjectionPolicy } from "@harpoc/shared";
-import { ErrorCode, VaultError, dockerRegistryActionSchema, sshActionSchema } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import { spawnCaptured } from "../spawn-captured.js";
 import type { SpawnCapturedResult } from "../spawn-captured.js";
 import {
@@ -71,7 +71,7 @@ beforeEach(() => {
 afterEach(() => {
   if (savedPath === undefined) delete process.env.PATH;
   else process.env.PATH = savedPath;
-  rmSync(binDir, { recursive: true, force: true });
+  rmSync(binDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 function allowed(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
@@ -220,20 +220,6 @@ describe("executeDockerRegistryAction result mapping", () => {
     });
   });
 
-  it("redacts the credential from any thrown VaultError message (defense in depth)", async () => {
-    // A driver/daemon message could quote the injected secret; every throw out
-    // of the injector passes redactErrorMessage.
-    vi.mocked(spawnCaptured).mockRejectedValue(
-      new VaultError(ErrorCode.DOCKER_OPERATION_FAILED, "boom s3cr3t-registry-pass-value boom"),
-    );
-
-    const err = (await executeDockerRegistryAction(PULL_ACTION, SECRET, allowed()).catch(
-      (e: unknown) => e,
-    )) as VaultError;
-
-    expect(err.message).not.toContain("s3cr3t-registry-pass-value");
-  });
-
   it("redacts a username at the shared floor (MIN_REDACTABLE_FRAGMENT)", async () => {
     await executeDockerRegistryAction(
       PULL_ACTION,
@@ -344,28 +330,5 @@ describe("buildDockerAuditDetails", () => {
       image: "nginx:latest",
       operation: "push",
     });
-  });
-});
-
-describe("timeout_ms cap cross-check", () => {
-  it("accepts timeout_ms up to 1_800_000 for a docker_registry action", () => {
-    const parsed = dockerRegistryActionSchema.safeParse({
-      type: "docker_registry",
-      operation: "pull",
-      image: "registry.example.com/app:1.0",
-      timeout_ms: 1_800_000,
-    });
-    expect(parsed.success).toBe(true);
-  });
-
-  it("rejects timeout_ms at 300_001 for an ssh action (the 5-minute norm)", () => {
-    const parsed = sshActionSchema.safeParse({
-      type: "ssh",
-      host: "host.example.com",
-      user: "deploy",
-      command: "uptime",
-      timeout_ms: 300_001,
-    });
-    expect(parsed.success).toBe(false);
   });
 });

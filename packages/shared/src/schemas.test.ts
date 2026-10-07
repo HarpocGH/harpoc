@@ -1858,6 +1858,17 @@ describe("sshActionSchema argv hardening", () => {
       expect(() => sshActionSchema.parse({ ...validSsh, port })).toThrow();
     }
   });
+
+  it("rejects timeout_ms at 300_001 for an ssh action (the 5-minute norm)", () => {
+    const parsed = sshActionSchema.safeParse({
+      type: "ssh",
+      host: "host.example.com",
+      user: "deploy",
+      command: "uptime",
+      timeout_ms: 300_001,
+    });
+    expect(parsed.success).toBe(false);
+  });
 });
 
 describe("databaseActionSchema host:port range", () => {
@@ -2224,6 +2235,15 @@ describe("v1.3 action schemas", () => {
       }),
     ).toThrow();
   });
+  it("accepts a non-loopback wss:// URL at the schema boundary", () => {
+    expect(
+      websocketActionSchema.parse({
+        type: "websocket",
+        url: "wss://example.com/",
+        injection: { type: "bearer" },
+      }).url,
+    ).toBe("wss://example.com/");
+  });
   it("sftp: local_path required for upload/download, refused for list; control chars refused", () => {
     expect(() =>
       sftpActionSchema.parse({
@@ -2282,6 +2302,15 @@ describe("v1.3 action schemas", () => {
         timeout_ms: 1_800_001,
       }),
     ).toThrow();
+  });
+  it("accepts timeout_ms up to 1_800_000 for a docker_registry action", () => {
+    const parsed = dockerRegistryActionSchema.safeParse({
+      type: "docker_registry",
+      operation: "pull",
+      image: "registry.example.com/app:1.0",
+      timeout_ms: 1_800_000,
+    });
+    expect(parsed.success).toBe(true);
   });
   const sql = { type: "database", engine: "postgresql", host: "db", database: "d" };
   const redis = { type: "database", engine: "redis", host: "r", database: "0" };

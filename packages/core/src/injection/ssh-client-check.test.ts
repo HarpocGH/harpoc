@@ -2,8 +2,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import { assertNativeWin32SshClient } from "./ssh-common.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 let dir: string;
 let ssh: string;
@@ -15,18 +16,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
-
-function refusal(): VaultError {
-  try {
-    assertNativeWin32SshClient(ssh);
-  } catch (err) {
-    if (err instanceof VaultError) return err;
-    throw err;
-  }
-  throw new Error("expected SSH_CLIENT_UNSUPPORTED");
-}
 
 describe.runIf(process.platform === "win32")("assertNativeWin32SshClient (win32)", () => {
   it("passes a client with neither runtime DLL beside it", () => {
@@ -35,10 +26,12 @@ describe.runIf(process.platform === "win32")("assertNativeWin32SshClient (win32)
 
   it.each(["msys-2.0.dll", "cygwin1.dll"])(
     "refuses a client with %s beside it, naming the directory only",
-    (dll) => {
+    async (dll) => {
       writeFileSync(join(dir, dll), "");
-      const err = refusal();
-      expect(err.code).toBe(ErrorCode.SSH_CLIENT_UNSUPPORTED);
+      const err = await expectVaultError(
+        () => assertNativeWin32SshClient(ssh),
+        ErrorCode.SSH_CLIENT_UNSUPPORTED,
+      );
       expect(err.statusCode).toBe(501);
       expect(err.message).toContain(dir);
       expect(err.message).not.toContain(ssh);

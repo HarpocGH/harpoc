@@ -514,22 +514,20 @@ describe("ImapInjector — auth arms", () => {
     const injector = new ImapInjector({ connectImap: fn });
     const oauth: ImapOAuth = { accessToken: "tok-abc123", username: "oauth-user@example.com" };
 
-    let caught: unknown;
-    try {
-      await injector.run(baseAction(), "ignored:ignored", basePolicy({}), undefined, oauth);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(VaultError);
-    expect((caught as VaultError).message).not.toContain("tok-abc123");
+    const err = await expectVaultError(
+      () => injector.run(baseAction(), "ignored:ignored", basePolicy({}), undefined, oauth),
+      ErrorCode.IMAP_OPERATION_FAILED,
+    );
+    expect(err.message).not.toContain("tok-abc123");
   });
 
   it("refuses a secret value without a colon separator", async () => {
     const { fn, calls } = connectMustNotBeCalled();
     const injector = new ImapInjector({ connectImap: fn });
-    await expect(
-      injector.run(baseAction(), "no-colon-here", basePolicy({}), undefined, undefined),
-    ).rejects.toBeInstanceOf(VaultError);
+    await expectVaultError(
+      () => injector.run(baseAction(), "no-colon-here", basePolicy({}), undefined, undefined),
+      ErrorCode.INVALID_INPUT,
+    );
     expect(calls).toEqual([]);
   });
 });
@@ -620,9 +618,10 @@ describe("ImapInjector — logout", () => {
     const { fn } = connectReturning(client);
     const injector = new ImapInjector({ connectImap: fn });
 
-    await expect(
-      injector.run(baseAction(), SECRET, basePolicy({}), undefined, undefined),
-    ).rejects.toBeInstanceOf(VaultError);
+    await expectVaultError(
+      () => injector.run(baseAction(), SECRET, basePolicy({}), undefined, undefined),
+      ErrorCode.IMAP_OPERATION_FAILED,
+    );
     expect(loggedOut).toBe(true);
   });
 

@@ -326,7 +326,7 @@ describe("McpInjector — post-spawn failure (M8)", () => {
           { ...CONFIG, args: ["-e", pidReportingServer(pidFile)] },
           "secret-orphan",
         ),
-      ).rejects.toThrow();
+      ).rejects.toThrow(/^audit write failed$/);
 
       expect(registry.get("secret-orphan")).toBeUndefined();
 
@@ -338,7 +338,7 @@ describe("McpInjector — post-spawn failure (M8)", () => {
       await waitFor(() => !isAlive(pid));
       expect(isAlive(pid)).toBe(false);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   }, 20_000);
 
@@ -360,7 +360,7 @@ describe("McpInjector — post-spawn failure (M8)", () => {
       expect(registry.get("secret-ok")).toBeDefined();
       expect(isAlive(Number(readFileSync(pidFile, "utf8")))).toBe(true);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   }, 20_000);
 });

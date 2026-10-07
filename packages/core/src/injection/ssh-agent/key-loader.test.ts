@@ -129,13 +129,15 @@ describe("loadPrivateKey — rejections (no secret material in messages)", () =>
     expect(err.message).not.toContain("some-passphrase");
   });
 
-  it("rejects garbage input", () => {
-    expect(() => loadPrivateKey("not a key")).toThrow();
+  it("rejects garbage input", async () => {
+    await expectVaultError(() => loadPrivateKey("not a key"), ErrorCode.SSH_AGENT_FAILED);
   });
 
   it("rejects a truncated OpenSSH container", () => {
     const truncated = `-----BEGIN OPENSSH PRIVATE KEY-----\n${Buffer.from("openssh-key-v1\0").toString("base64")}\n-----END OPENSSH PRIVATE KEY-----`;
-    expect(() => loadPrivateKey(truncated)).toThrow();
+    // The container reads sit outside the loader's VaultError wrap: the wire reader's plain
+    // Error surfaces here, and EphemeralSshAgent.start maps it to SSH_AGENT_FAILED.
+    expect(() => loadPrivateKey(truncated)).toThrow(/^ssh-wire: truncated/);
   });
 });
 

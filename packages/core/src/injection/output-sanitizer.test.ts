@@ -36,13 +36,11 @@ describe("redactSecretEncodings", () => {
   });
 
   it("redacts the percent-encoded form", () => {
-    const enc = encodeURIComponent(SECRET);
     // pick a secret that actually changes under encoding
     const s = "a b/c?d";
     const encoded = encodeURIComponent(s);
     const out = redactSecretEncodings(`q=${encoded}`, s);
     expect(out).not.toContain(encoded);
-    void enc;
   });
 
   /**
@@ -438,9 +436,11 @@ describe("redactSecretEncodings — nested JSON documents", () => {
 
   it("falls back to the flat result when the document does not parse", () => {
     const secret = 'tok"en-m';
-    const truncated = wrap(t1(secret)).slice(0, -3);
+    const truncated = `{"raw":${JSON.stringify(secret)},` + wrap(t1(secret)).slice(1, -3);
     // No throw, and never weaker than the flat pass alone.
-    expect(() => redactSecretEncodings(truncated, secret)).not.toThrow();
+    expect(redactSecretEncodings(truncated, secret)).toBe(
+      '{"raw":"[REDACTED]","data":"{\\"echo\\":\\"tok\\\\\\"en-m\\"',
+    );
   });
 
   it("does not let re-serialization introduce the credential where it wasn't (monotonicity)", () => {

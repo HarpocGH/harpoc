@@ -28,8 +28,9 @@ if (process.platform === "win32") {
 
 const GIT = resolveExecutable("git", controlledPathDirs());
 const SSH = resolveNativeSshClient("ssh");
-const describeGit = GIT ? describe : describe.skip;
-const describeGitSsh = GIT && SSH ? describe : describe.skip;
+// Skipped where git (and, for the SSH transport, the native ssh client) does not resolve.
+const describeGit = describe.skipIf(GIT === null);
+const describeGitSsh = describe.skipIf(GIT === null || SSH === null);
 
 function overrideTempEnv(dir: string): { TMPDIR?: string; TMP?: string; TEMP?: string } {
   const saved = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
@@ -87,7 +88,7 @@ beforeEach(() => {
 afterEach(() => {
   restoreTempEnv(saved);
   vi.mocked(writeFileSync).mockReset();
-  rmSync(tempRoot, { recursive: true, force: true });
+  rmSync(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describeGit("the askpass write fails (HTTPS)", () => {

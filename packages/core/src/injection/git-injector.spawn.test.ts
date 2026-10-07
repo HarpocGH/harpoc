@@ -18,6 +18,7 @@ import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
+import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
@@ -42,8 +43,20 @@ if (process.platform === "win32") {
 
 const GIT = resolveExecutable("git", controlledPathDirs());
 const SSH = resolveNativeSshClient("ssh");
-const describeGit = GIT ? describe : describe.skip;
-const describeGitSsh = GIT && SSH ? describe : describe.skip;
+// Skipped where git (and, for the SSH transport, the native ssh client) does not resolve.
+const describeGit = describe.skipIf(GIT === null);
+const describeGitSsh = describe.skipIf(GIT === null || SSH === null);
+
+// A leg that exports the ssh-live tier ships git as well (TM-11): where git does not resolve
+// on such a leg, this guard fails the file instead of letting the HTTPS, H6 and isolation
+// suites below skip silently.
+it("ssh-live tier: required legs fail instead of skipping when git is unresolvable", () => {
+  if (GIT === null && tierRequired("ssh-live")) {
+    throw new Error(
+      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no git resolves',
+    );
+  }
+});
 
 /** Redirect the temp dir os.tmpdir() reads (TEMP/TMP on win32, TMPDIR on POSIX). */
 function overrideTempEnv(dir: string): { TMPDIR?: string; TMP?: string; TEMP?: string } {
@@ -399,7 +412,7 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
       expect(at).toBeLessThan(args.indexOf("pull"));
       expect(opts.cwd).toBe(wd);
     } finally {
-      rmSync(wd, { recursive: true, force: true });
+      rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 
@@ -855,14 +868,14 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
       expect(outsideQuotes).not.toContain("$");
     } finally {
       restoreTempEnv(saved);
-      rmSync(spaced, { recursive: true, force: true });
+      rmSync(spaced, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 
   // Real-sh round trip: the composed string must split back into exactly the
   // intended argv under the same shell git uses. POSIX always has /bin/sh; on
   // Windows the Git-for-Windows sh is probed (attempt-and-skip when absent).
-  (findRoundtripSh() ? it : it.skip)(
+  it.skipIf(findRoundtripSh() === null)(
     "composes a GIT_SSH_COMMAND real sh splits back into the intended argv",
     async () => {
       const sh = findRoundtripSh() as string;
@@ -909,7 +922,7 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
         expect(words).toHaveLength(1 + hardening.length);
       } finally {
         restoreTempEnv(saved);
-        rmSync(spaced, { recursive: true, force: true });
+        rmSync(spaced, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
     },
   );
@@ -1512,7 +1525,10 @@ describeGitSsh("GitInjector SSH-transport filesystem isolation (§4.5.3 layer 4)
   });
 });
 
-const describeGitSshWin32 = GIT && SSH && process.platform === "win32" ? describe : describe.skip;
+// win32 only: the MSYS/Cygwin client refusal is a win32 product path (a no-op elsewhere).
+const describeGitSshWin32 = describe.skipIf(
+  GIT === null || SSH === null || process.platform !== "win32",
+);
 
 describeGitSshWin32("GitInjector refuses an MSYS/Cygwin ssh client (D58)", () => {
   const spawnMock = vi.mocked(spawnCaptured);
@@ -1550,7 +1566,7 @@ describeGitSshWin32("GitInjector refuses an MSYS/Cygwin ssh client (D58)", () =>
 
   afterEach(() => {
     process.env.PATH = savedPath;
-    rmSync(fixtureDir, { recursive: true, force: true });
+    rmSync(fixtureDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("refuses before any spawn, with a failed secret.use row naming the code", async () => {

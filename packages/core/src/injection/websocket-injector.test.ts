@@ -1,15 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { InjectionPolicy, InjectionPolicyInput, WebsocketAction } from "@harpoc/shared";
-import {
-  ActionType,
-  ErrorCode,
-  VaultError,
-  injectionPolicyInputSchema,
-  websocketActionSchema,
-} from "@harpoc/shared";
+import { ActionType, ErrorCode, injectionPolicyInputSchema } from "@harpoc/shared";
 import type { FakeWsServer, FakeWsScript } from "./__fixtures__/fake-ws-server.js";
 import { startFakeWsServer } from "./__fixtures__/fake-ws-server.js";
 import { buildWsAuditDetails, executeWebsocketAction } from "./websocket-injector.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 const SECRET = "ws-secret-value";
 
@@ -317,34 +312,11 @@ describe("executeWebsocketAction — non-101 / connection failure", () => {
       injection: { type: "query", query_param: "token" },
     });
 
-    let thrown: unknown;
-    try {
-      await executeWebsocketAction(action, secretBytes(), basePolicy());
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown).toBeInstanceOf(VaultError);
-    expect((thrown as VaultError).message).not.toContain(SECRET);
-  });
-});
-
-describe("executeWebsocketAction — schema-level scope (Task 1)", () => {
-  it("refuses a non-loopback ws:// URL at the schema boundary", () => {
-    const result = websocketActionSchema.safeParse({
-      type: ActionType.WEBSOCKET,
-      url: "ws://example.com/",
-      injection: { type: "bearer" },
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("accepts a non-loopback wss:// URL at the schema boundary", () => {
-    const result = websocketActionSchema.safeParse({
-      type: ActionType.WEBSOCKET,
-      url: "wss://example.com/",
-      injection: { type: "bearer" },
-    });
-    expect(result.success).toBe(true);
+    const err = await expectVaultError(
+      () => executeWebsocketAction(action, secretBytes(), basePolicy()),
+      ErrorCode.WEBSOCKET_CONNECT_FAILED,
+    );
+    expect(err.message).not.toContain(SECRET);
   });
 });
 

@@ -4,6 +4,7 @@ import { ErrorCode, VaultError } from "@harpoc/shared";
 import { KeychainWrappingKeyStore } from "./keychain-store.js";
 import { runKeystoreHelper } from "./keystore-helper.js";
 import { KeystoreWrappedSessionKeyProtector } from "./wrapping-key-store.js";
+import { tierRequired } from "../injection/__fixtures__/platform-tier.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
 describe("KeychainWrappingKeyStore construction", () => {
@@ -31,13 +32,6 @@ describe("KeychainWrappingKeyStore construction", () => {
 // that tier's name: the probe failing is then a FAILURE, not a skip — a
 // regressed provisioning step must not silently drop real-path coverage to
 // zero while the leg stays green (review T3). Local dev (var unset) skips.
-function tierRequired(tier: string): boolean {
-  return (process.env["HARPOC_REQUIRE_PLATFORM_TESTS"] ?? "")
-    .split(",")
-    .map((t) => t.trim())
-    .includes(tier);
-}
-
 // Thesis §4.6 real platform path. Runs on macOS only, and only where a usable
 // keychain answers (CI provisions a disposable unlocked keychain and exports
 // HARPOC_TEST_KEYCHAIN; a locked/headless keychain skips — unless the tier is

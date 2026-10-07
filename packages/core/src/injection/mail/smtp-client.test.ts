@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { VaultError } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import { sendSmtp } from "./smtp-client.js";
 import type { SmtpSendOptions } from "./smtp-client.js";
 import { getFixtureCaPem, FIXTURE_HOST, startFakeSmtp } from "./__fixtures__/fake-smtp-server.js";
 import type { FakeSmtp, SmtpScript } from "./__fixtures__/fake-smtp-server.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 const MESSAGE =
   [
@@ -170,15 +171,10 @@ describe("sendSmtp — failures fold to SMTP_DELIVERY_FAILED", () => {
       implicitTls: true,
       rcpt: "fail",
     });
-    let caught: unknown;
-    try {
-      await sendSmtp(optsFor(srv, { security: "tls" }));
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(VaultError);
-    const err = caught as VaultError;
-    expect(err.code).toBe("SMTP_DELIVERY_FAILED");
+    const err = await expectVaultError(
+      () => sendSmtp(optsFor(srv, { security: "tls" })),
+      ErrorCode.SMTP_DELIVERY_FAILED,
+    );
     expect(err.message).toContain(FIXTURE_HOST);
     expect(err.message).not.toContain("hunter2secret");
   });
@@ -197,15 +193,17 @@ describe("sendSmtp — failures fold to SMTP_DELIVERY_FAILED", () => {
 
   it("a ballooning banner line is refused at the read cap", async () => {
     const srv = await fake({ starttls: false, authMechanisms: ["PLAIN"], banner: "flood" });
-    await expect(sendSmtp(optsFor(srv, { security: "starttls" }))).rejects.toBeInstanceOf(
-      VaultError,
+    await expectVaultError(
+      () => sendSmtp(optsFor(srv, { security: "starttls" })),
+      ErrorCode.SMTP_DELIVERY_FAILED,
     );
   });
 
   it("honors timeoutMs when the server never greets", async () => {
     const srv = await fake({ starttls: false, authMechanisms: ["PLAIN"], banner: "silent" });
-    await expect(
-      sendSmtp(optsFor(srv, { security: "starttls", timeoutMs: 300 })),
-    ).rejects.toBeInstanceOf(VaultError);
+    await expectVaultError(
+      () => sendSmtp(optsFor(srv, { security: "starttls", timeoutMs: 300 })),
+      ErrorCode.SMTP_DELIVERY_FAILED,
+    );
   });
 });

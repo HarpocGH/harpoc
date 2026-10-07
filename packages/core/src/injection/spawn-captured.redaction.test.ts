@@ -59,7 +59,7 @@ describe("spawnCaptured — the redacted flag (E70)", () => {
       timeoutMs: 10_000,
       redact: ["s3cret-value"],
     });
-    expect(failed.spawn_failed || failed.exit_code !== 0).toBe(true);
+    expect(failed.spawn_failed).toBe(true);
     expect(failed.redacted).toBe(false);
   });
 });

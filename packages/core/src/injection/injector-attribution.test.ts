@@ -85,7 +85,7 @@ describe("ProcessInjector attribution", () => {
     );
     const [row] = rows(log);
     expect(row?.eventType).toBe("secret.use");
-    expect(row?.success).not.toBe(false);
+    expect(row?.success).toBe(true);
     expectAttributed(row as AuditLogOptions);
   });
 
@@ -255,26 +255,30 @@ describe("HttpInjector attribution", () => {
   });
 
   it("stamps context on the classified-fetch-error failure row", async () => {
+    // Held for the whole call and dropping every connection: no port reuse is possible.
     const server = createServer();
+    server.on("connection", (socket) => socket.destroy());
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as AddressInfo).port;
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-
-    const { log, logger } = captureLogger();
-    const injector = new HttpInjector(logger);
-    const result = await injector.executeWithSecret(
-      { method: "GET", url: `http://127.0.0.1:${port}/` },
-      SECRET,
-      { type: "bearer" },
-      "same-origin",
-      "secret-1",
-      ATTRIBUTION,
-    );
-    expect(result.status).toBeNull();
-    expect(result.error).toBeDefined();
-    const [row] = rows(log);
-    expect(row?.success).toBe(false);
-    expect(row?.detail?.context).toBe("http");
+    try {
+      const { log, logger } = captureLogger();
+      const injector = new HttpInjector(logger);
+      const result = await injector.executeWithSecret(
+        { method: "GET", url: `http://127.0.0.1:${port}/` },
+        SECRET,
+        { type: "bearer" },
+        "same-origin",
+        "secret-1",
+        ATTRIBUTION,
+      );
+      expect(result.status).toBeNull();
+      expect(result.error).toBe(ErrorCode.INTERNAL_ERROR);
+      const [row] = rows(log);
+      expect(row?.success).toBe(false);
+      expect(row?.detail?.context).toBe("http");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 

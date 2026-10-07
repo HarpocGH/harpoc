@@ -37,7 +37,8 @@ if (process.platform === "win32") {
 }
 
 const SSH = resolveNativeSshClient("ssh");
-const describeSsh = SSH ? describe : describe.skip;
+// Skipped where no native ssh client resolves (an MSYS/Cygwin build reads as absent).
+const describeSsh = describe.skipIf(SSH === null);
 
 const OK_RESULT: SpawnCapturedResult = {
   exit_code: 0,
@@ -730,7 +731,7 @@ describe.runIf(process.platform === "win32")(
 
     afterEach(() => {
       process.env.PATH = savedPath;
-      rmSync(fixtureDir, { recursive: true, force: true });
+      rmSync(fixtureDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     });
 
     it("refuses before any spawn, with a failed secret.use row naming the code", async () => {

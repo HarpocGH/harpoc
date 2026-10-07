@@ -229,7 +229,7 @@ describe.runIf(process.platform !== "win32")(
             // Gone.
           }
         }
-        rmSync(dir, { recursive: true, force: true });
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
       expect(alive).toBe(false);
     }, 60_000);
@@ -358,7 +358,7 @@ describe("StdioChildTransport — teardown", () => {
       args: [],
       env: {},
     });
-    await expect(transport.start()).rejects.toThrow();
+    await expect(transport.start()).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
 
@@ -381,7 +381,8 @@ describe("StdioChildTransport — dead stdin pipe", () => {
       // Let the destroy's 'error' event fire — unhandled, it would crash here.
       await new Promise((r) => setTimeout(r, 20));
 
-      await expect(transport.send({ jsonrpc: "2.0", id: 1, method: "ping" })).rejects.toThrow();
+      const sent = transport.send({ jsonrpc: "2.0", id: 1, method: "ping" });
+      await expect(sent).rejects.toMatchObject({ code: "ERR_STREAM_DESTROYED" });
     } finally {
       transport.killSync();
       await transport.close();
@@ -605,7 +606,7 @@ describe.runIf(process.platform === "win32")(
             // Gone.
           }
         }
-        rmSync(dir, { recursive: true, force: true });
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
       expect(alive).toBe(false);
     }, 60_000);

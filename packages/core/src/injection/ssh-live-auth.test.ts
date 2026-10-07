@@ -7,6 +7,7 @@ import type { ParsedKey, Server as SshServer } from "ssh2";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveExecutable } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
+import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
 import { buildSshEnv, sshHardeningArgs, writeIdentityFile, writeKnownHosts } from "./ssh-common.js";
 
@@ -21,8 +22,10 @@ import { buildSshEnv, sshHardeningArgs, writeIdentityFile, writeKnownHosts } fro
  *
  * The server side is the `ssh2` package — a test-only counterparty simulating
  * the remote host; no third-party crypto enters the vault's runtime dependency
- * set. The `-p <port>` flag is harness-only: SshAction has no port field, and
- * an unprivileged test cannot bind 22.
+ * set. The server listens on an ephemeral port (an unprivileged test cannot bind
+ * 22), so the harness passes `-p <port>` itself — the flag `SshInjector` emits for
+ * `SshAction.port` (`ssh-injector.spawn.test.ts`, "passes a non-22 port as -p ahead
+ * of -l").
  */
 
 const { Server, utils } = ssh2;
@@ -46,13 +49,6 @@ const USER_KEY_PEM = readFileSync(join(FIXTURES, "ed25519_openssh"), "utf8");
 // A CI leg that provisions an ssh client exports HARPOC_REQUIRE_PLATFORM_TESTS
 // including "ssh-live": the client going missing is then a FAILURE, not a skip
 // (review T3 pattern). Local dev without ssh on PATH skips.
-function tierRequired(tier: string): boolean {
-  return (process.env["HARPOC_REQUIRE_PLATFORM_TESTS"] ?? "")
-    .split(",")
-    .map((t) => t.trim())
-    .includes(tier);
-}
-
 it("ssh-live tier: required legs fail instead of skipping when ssh is unresolvable", () => {
   if (SSH === null && tierRequired("ssh-live")) {
     throw new Error(
@@ -61,7 +57,7 @@ it("ssh-live tier: required legs fail instead of skipping when ssh is unresolvab
   }
 });
 
-const describeSsh = SSH ? describe : describe.skip;
+const describeSsh = describe.skipIf(SSH === null);
 
 interface AuthEvent {
   method: string;
@@ -163,8 +159,9 @@ describeSsh("live SSH authentication through the ephemeral agent", () => {
       });
       child.on("error", reject);
       child.on("close", (code) => {
-        // Let the server's auth events land before the test inspects them.
-        setTimeout(() => resolve({ exit: code, stdout, stderr }), 250);
+        // The server records each auth event before it replies, so every event has landed
+        // by the child's close; the negative case waits for the flushed tick, not a sleep.
+        setImmediate(() => resolve({ exit: code, stdout, stderr }));
       });
     });
   }

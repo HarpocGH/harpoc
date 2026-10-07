@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import {
   WS_SCHEMES,
@@ -242,28 +242,13 @@ describe("validateUrl", () => {
   });
 
   it("rejects javascript: scheme", async () => {
-    let thrown: unknown;
-    try {
-      await validateUrl("javascript:alert(1)");
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBeInstanceOf(VaultError);
-    expect([ErrorCode.URL_INVALID, ErrorCode.URL_HTTPS_REQUIRED]).toContain(
-      (thrown as VaultError).code,
-    );
+    await expectVaultError(() => validateUrl("javascript:alert(1)"), ErrorCode.URL_HTTPS_REQUIRED);
   });
 
   it("rejects data: scheme", async () => {
-    let thrown: unknown;
-    try {
-      await validateUrl("data:text/html,<h1>test</h1>");
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBeInstanceOf(VaultError);
-    expect([ErrorCode.URL_INVALID, ErrorCode.URL_HTTPS_REQUIRED]).toContain(
-      (thrown as VaultError).code,
+    await expectVaultError(
+      () => validateUrl("data:text/html,<h1>test</h1>"),
+      ErrorCode.URL_HTTPS_REQUIRED,
     );
   });
 
@@ -273,7 +258,7 @@ describe("validateUrl", () => {
     expect(result.url.port).toBe("8443");
   });
 
-  it("blocks HTTP loopback with IPv6 [::1] as SSRF or allows as loopback", async () => {
+  it("allows plain HTTP to the IPv6 loopback [::1] (loopback is exempt from the HTTPS rule)", async () => {
     // [::1] is loopback — HTTP should be allowed
     const result = await validateUrl("http://[::1]:3000/api");
     expect(result.url.protocol).toBe("http:");

@@ -8,6 +8,7 @@ import {
   findLinuxKeystoreBinary,
 } from "./linux-keystores.js";
 import { KeystoreWrappedSessionKeyProtector } from "./wrapping-key-store.js";
+import { tierRequired } from "../injection/__fixtures__/platform-tier.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
 describe("findLinuxKeystoreBinary", () => {
@@ -51,13 +52,6 @@ describe("Linux store construction", () => {
 // regressed provisioning step (missing keyutils/libsecret-tools, lost keyring
 // possession, dead D-Bus) must not silently drop real-path coverage to zero
 // while the leg stays green (review T3). Local dev (var unset) skips.
-function tierRequired(tier: string): boolean {
-  return (process.env["HARPOC_REQUIRE_PLATFORM_TESTS"] ?? "")
-    .split(",")
-    .map((t) => t.trim())
-    .includes(tier);
-}
-
 function assertTierAvailable(tier: string, available: boolean, probeError: unknown): void {
   if (!available && tierRequired(tier)) {
     throw new Error(

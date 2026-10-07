@@ -70,6 +70,7 @@ afterEach(() => {
 });
 
 describe("spawnCaptured → descendant sweep wiring", () => {
+  // The sweep is the win32 product path (descendant-sweep.ts); POSIX signals the group.
   it.runIf(process.platform === "win32")(
     "a timed-out child is swept once, by its pid and spawn/exit window, and settlement waits for the sweep",
     async () => {
@@ -127,6 +128,7 @@ describe("spawnCaptured → descendant sweep wiring", () => {
     20_000,
   );
 
+  // The sweep is the win32 product path (descendant-sweep.ts); POSIX signals the group.
   it.runIf(process.platform === "win32")(
     "a sweep that rejects still lets the spawn settle with its capture",
     async () => {
@@ -142,6 +144,7 @@ describe("spawnCaptured → descendant sweep wiring", () => {
     15_000,
   );
 
+  // The sweep is the win32 product path (descendant-sweep.ts); POSIX signals the group.
   it.runIf(process.platform === "win32")(
     "a sweep that fails open reports its partial count and the flag",
     async () => {
@@ -187,6 +190,7 @@ describe("spawnCaptured → descendant sweep wiring", () => {
     20_000,
   );
 
+  // The sweep is the win32 product path (descendant-sweep.ts); POSIX signals the group.
   it.runIf(process.platform === "win32")(
     "an exit that lands during the backstop sweep confirms the kill",
     async () => {

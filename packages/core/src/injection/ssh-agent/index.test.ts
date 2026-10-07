@@ -8,6 +8,7 @@ import { ErrorCode } from "@harpoc/shared";
 import { describe, expect, it } from "vitest";
 import { EphemeralSshAgent } from "./index.js";
 import { SshReader, writeByte, writeString, writeUint32 } from "./ssh-wire.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "..", "__fixtures__", "ssh");
 const readFixture = (name: string): string => readFileSync(join(FIXTURES, name), "utf8");
@@ -138,6 +139,15 @@ describe("EphemeralSshAgent", () => {
     await expect(EphemeralSshAgent.start("not a private key")).rejects.toMatchObject({
       code: ErrorCode.SSH_AGENT_FAILED,
     });
+  });
+
+  it("maps a truncated OpenSSH container's wire error to SSH_AGENT_FAILED", async () => {
+    const truncated = `-----BEGIN OPENSSH PRIVATE KEY-----\n${Buffer.from("openssh-key-v1\0").toString("base64")}\n-----END OPENSSH PRIVATE KEY-----`;
+    const err = await expectVaultError(
+      () => EphemeralSshAgent.start(truncated),
+      ErrorCode.SSH_AGENT_FAILED,
+    );
+    expect(err.message).toBe("Ephemeral ssh-agent failed: invalid private key");
   });
 
   it("rejects an encrypted private key", async () => {

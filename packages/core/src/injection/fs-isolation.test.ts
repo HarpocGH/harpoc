@@ -11,6 +11,7 @@ import {
   requireFsIsolation,
   resetFsIsolationProbeForTests,
 } from "./fs-isolation.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 /**
  * The mechanism is pure argv composition over injectable seams — the real
@@ -305,7 +306,10 @@ describe("requireFsIsolation", () => {
     // demanding spawn until the vault restarted.
     const runProbe = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
     const seams = { platform: "linux" as const, probeBinary: noBwrap, runProbe };
-    await expect(requireFsIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(VaultError);
+    await expectVaultError(
+      () => requireFsIsolation("/usr/bin/tool", [], seams),
+      ErrorCode.FS_ISOLATION_UNAVAILABLE,
+    );
     const wrap = await requireFsIsolation("/usr/bin/tool", [], seams);
     expect(wrap.mechanism).toBe("landlock");
     expect(runProbe).toHaveBeenCalledTimes(2);
@@ -314,8 +318,14 @@ describe("requireFsIsolation", () => {
   it("a persistently failing probe still refuses every call (fail closed, re-probed)", async () => {
     const runProbe = vi.fn().mockResolvedValue(false);
     const seams = { platform: "linux" as const, probeBinary: noBwrap, runProbe };
-    await expect(requireFsIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(VaultError);
-    await expect(requireFsIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(VaultError);
+    await expectVaultError(
+      () => requireFsIsolation("/usr/bin/tool", [], seams),
+      ErrorCode.FS_ISOLATION_UNAVAILABLE,
+    );
+    await expectVaultError(
+      () => requireFsIsolation("/usr/bin/tool", [], seams),
+      ErrorCode.FS_ISOLATION_UNAVAILABLE,
+    );
     expect(runProbe).toHaveBeenCalledTimes(2);
   });
 
@@ -533,8 +543,9 @@ describe("requireCombinedIsolation", () => {
   it("does NOT cache a failed probe — a transient failure self-heals", async () => {
     const runProbe = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
     const seams = { platform: "darwin" as const, probeBinary: () => true, runProbe };
-    await expect(requireCombinedIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(
-      VaultError,
+    await expectVaultError(
+      () => requireCombinedIsolation("/usr/bin/tool", [], seams),
+      ErrorCode.FS_ISOLATION_UNAVAILABLE,
     );
     const wrap = await requireCombinedIsolation("/usr/bin/tool", [], seams);
     expect(wrap.mechanism).toBe("sandbox-exec");
@@ -544,11 +555,13 @@ describe("requireCombinedIsolation", () => {
   it("a persistently failing probe still refuses every call (fail closed, re-probed)", async () => {
     const runProbe = vi.fn().mockResolvedValue(false);
     const seams = { platform: "darwin" as const, probeBinary: () => true, runProbe };
-    await expect(requireCombinedIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(
-      VaultError,
+    await expectVaultError(
+      () => requireCombinedIsolation("/usr/bin/tool", [], seams),
+      ErrorCode.FS_ISOLATION_UNAVAILABLE,
     );
-    await expect(requireCombinedIsolation("/usr/bin/tool", [], seams)).rejects.toBeInstanceOf(
-      VaultError,
+    await expectVaultError(
+      () => requireCombinedIsolation("/usr/bin/tool", [], seams),
+      ErrorCode.FS_ISOLATION_UNAVAILABLE,
     );
     expect(runProbe).toHaveBeenCalledTimes(2);
   });

@@ -203,7 +203,7 @@ describe("resolveAndMatchCommand", () => {
 
 // Batch files are excluded by the vault itself, not by relying on patched
 // Node's EINVAL for shell-less .cmd/.bat spawns (CVE-2024-27980).
-const describeWindows = process.platform === "win32" ? describe : describe.skip;
+const describeWindows = describe.skipIf(process.platform !== "win32");
 
 describeWindows("Windows batch file exclusion", () => {
   let dir: string;
@@ -227,7 +227,7 @@ describeWindows("Windows batch file exclusion", () => {
   });
 
   afterAll(() => {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("does not probe .cmd/.bat when resolving a bare name", () => {
@@ -279,7 +279,7 @@ describeWindows("Windows executable extensions", () => {
   });
 
   afterAll(() => {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("skips an extensionless sibling and resolves the .exe for a bare name", () => {

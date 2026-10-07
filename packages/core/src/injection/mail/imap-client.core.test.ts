@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { VaultError } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import { ImapClient } from "./imap-client.js";
 import type { ImapConnectOptions } from "./imap-client.js";
 import { getFixtureCaPem, FIXTURE_HOST, startFakeImap } from "./__fixtures__/fake-imap-server.js";
 import type { FakeImap, ImapScript } from "./__fixtures__/fake-imap-server.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 const servers: FakeImap[] = [];
 const clients: ImapClient[] = [];
@@ -148,15 +149,10 @@ describe("ImapClient — capped-output discipline and failures", () => {
   it("refuses an oversized announced literal before buffering it", async () => {
     const srv = await fake({ fetchOversizedLiteral: 104_857_600 });
     const client = await connect(srv);
-    let caught: unknown;
-    try {
-      await client.command("FETCH", [{ kind: "atom", value: "1" }]);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(VaultError);
-    const err = caught as VaultError;
-    expect(err.code).toBe("IMAP_OPERATION_FAILED");
+    const err = await expectVaultError(
+      () => client.command("FETCH", [{ kind: "atom", value: "1" }]),
+      ErrorCode.IMAP_OPERATION_FAILED,
+    );
     expect(err.message).toContain(FIXTURE_HOST);
     expect(err.message).not.toContain("hunter2secret");
   });
@@ -164,23 +160,19 @@ describe("ImapClient — capped-output discipline and failures", () => {
   it("refuses a response stream that blows past the session cap", async () => {
     const srv = await fake({ flood: true });
     const client = await connect(srv);
-    await expect(client.command("FETCH", [{ kind: "atom", value: "1" }])).rejects.toBeInstanceOf(
-      VaultError,
+    await expectVaultError(
+      () => client.command("FETCH", [{ kind: "atom", value: "1" }]),
+      ErrorCode.IMAP_OPERATION_FAILED,
     );
   });
 
   it("a tagged NO folds to imapOperationFailed naming the origin only", async () => {
     const srv = await fake({ selectStatus: "no" });
     const client = await connect(srv);
-    let caught: unknown;
-    try {
-      await client.select("INBOX", false);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(VaultError);
-    const err = caught as VaultError;
-    expect(err.code).toBe("IMAP_OPERATION_FAILED");
+    const err = await expectVaultError(
+      () => client.select("INBOX", false),
+      ErrorCode.IMAP_OPERATION_FAILED,
+    );
     expect(err.message).toContain(FIXTURE_HOST);
     expect(err.message).not.toContain("hunter2secret");
   });
@@ -194,8 +186,9 @@ describe("ImapClient — capped-output discipline and failures", () => {
 
   it("honors timeoutMs when the server never greets", async () => {
     const srv = await fake({ greeting: "silent" });
-    await expect(ImapClient.connect(optsFor(srv, { timeoutMs: 300 }))).rejects.toBeInstanceOf(
-      VaultError,
+    await expectVaultError(
+      () => ImapClient.connect(optsFor(srv, { timeoutMs: 300 })),
+      ErrorCode.IMAP_OPERATION_FAILED,
     );
   });
 });

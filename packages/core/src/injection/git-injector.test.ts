@@ -6,6 +6,7 @@ import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { GitInjector } from "./git-injector.js";
 import { system32Path } from "../win32-paths.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 // On Windows the ephemeral agent listens on a named pipe, which only the native
 // Win32-OpenSSH client consumes through SSH_AUTH_SOCK; an MSYS build (the
@@ -23,7 +24,8 @@ if (process.platform === "win32") {
 
 const GIT = resolveExecutable("git", controlledPathDirs());
 const SSH = resolveNativeSshClient("ssh");
-const describeGit = GIT ? describe : describe.skip;
+// Skipped where git does not resolve; the SSH case below also needs the native ssh client.
+const describeGit = describe.skipIf(GIT === null);
 
 const SECRET = new Uint8Array(Buffer.from("ghp_testtoken"));
 
@@ -182,15 +184,11 @@ describe("GitInjector enforcement (no git binary required)", () => {
       "--templ=/tmp/evil",
       "-",
     ])("rejects the dangerous-prefix working_directory %s", async (working_directory) => {
-      const err = await injector
-        .executeWithSecret(gitAction({ working_directory }), SECRET, policy(), undefined)
-        .then(
-          () => undefined,
-          (e: unknown) => e as Error,
-        );
-      if (err === undefined) throw new Error("expected the call to reject");
-
-      expect(err).toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
+      const err = await expectVaultError(
+        () =>
+          injector.executeWithSecret(gitAction({ working_directory }), SECRET, policy(), undefined),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
       expect(err.message).toContain("must not start with '-'");
     });
 
