@@ -132,8 +132,8 @@ async function run(args: string[]): Promise<void> {
 describe("server start", () => {
   let exitSpy: MockInstance;
   let errorSpy: ReturnType<typeof vi.spyOn>;
-  let priorSigintListeners: NodeJS.SignalsListener[];
-  let priorSigtermListeners: NodeJS.SignalsListener[];
+  let priorSigintListeners: ((signal: "SIGINT") => void)[];
+  let priorSigtermListeners: ((signal: "SIGTERM") => void)[];
   let priorStdinEndListeners: ((...args: unknown[]) => void)[];
 
   beforeEach(() => {

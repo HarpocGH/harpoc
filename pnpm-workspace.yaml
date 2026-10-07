@@ -6,15 +6,19 @@ strictPeerDependencies: true
 # pnpm 10.x (the pinned packageManager) reads onlyBuiltDependencies; pnpm 11 removed
 # that key for allowBuilds and turns an undecided build script into a failed install
 # (ERR_PNPM_IGNORED_BUILDS), so every package with an install script needs a verdict.
-# The three false entries have had their scripts skipped since v1.0 with CI green:
+# esbuild, cpu-features and ssh2 have had their scripts skipped since v1.0 with CI green:
 # esbuild gets its binary from the platform package, cpu-features and ssh2 (a core
 # test-only dependency) are optional native accelerators with pure-JS fallbacks.
+# better-sqlite3 13 (2026-10-07) ships its prebuilt binaries inside the tarball
+# (prebuilds/<platform>-<arch>.node, loaded when build/Release is absent) and declares
+# `gypfile: false`; pnpm's lifecycle runner does not read that flag and would inject
+# `node-gyp rebuild` for its binding.gyp — a from-source build that needs Visual Studio
+# on Windows — so its verdict is false too.
 onlyBuiltDependencies:
   - argon2
-  - better-sqlite3
 allowBuilds:
   argon2: true
-  better-sqlite3: true
+  better-sqlite3: false
   cpu-features: false
   esbuild: false
   ssh2: false
