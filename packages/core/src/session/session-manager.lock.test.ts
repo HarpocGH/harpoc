@@ -75,8 +75,6 @@ const sessionExpiringSoon = (): SessionFile =>
     5_000, // live, but far enough from a 60 s slide to exceed the 1 s write threshold
   );
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), "harpoc-lock-"));
   sessionPath = join(tempDir, "session.json");
@@ -89,7 +87,7 @@ afterEach(() => {
   vi.mocked(rmdirSync).mockReset();
   vi.mocked(renameSync).mockReset();
   vi.mocked(unlinkSync).mockReset();
-  rmSync(tempDir, { recursive: true, force: true });
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe("session.json.lock (R8/D56)", () => {
@@ -136,9 +134,23 @@ describe("session.json.lock (R8/D56)", () => {
   it("the fresh write waits too: the file lands once the lock is released", async () => {
     const manager = new SessionManager(sessionPath, { lockStaleMs: 5_000 });
     mkdirSync(lockPath);
+    vi.mocked(mkdirSync).mockClear();
 
-    const write = manager.writeSession(sessionExpiringSoon());
-    await sleep(100);
+    const settled = { done: false };
+    const write = manager.writeSession(sessionExpiringSoon()).then(() => {
+      settled.done = true;
+    });
+    // The product's own retries are the event: the first attempt and two
+    // polls refused by the held lock, then the write must still be waiting.
+    await vi.waitFor(
+      () => {
+        expect(
+          vi.mocked(mkdirSync).mock.calls.filter(([p]) => p === lockPath).length,
+        ).toBeGreaterThanOrEqual(3);
+      },
+      { interval: 5 },
+    );
+    expect(settled.done).toBe(false);
     expect(existsSync(sessionPath)).toBe(false);
 
     rmdirSync(lockPath);

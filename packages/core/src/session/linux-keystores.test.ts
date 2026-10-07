@@ -8,6 +8,7 @@ import {
   findLinuxKeystoreBinary,
 } from "./linux-keystores.js";
 import { KeystoreWrappedSessionKeyProtector } from "./wrapping-key-store.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 describe("findLinuxKeystoreBinary", () => {
   it("resolves from /usr/bin first, then /bin", () => {
@@ -40,13 +41,7 @@ describe("Linux store construction", () => {
       new SecretServiceWrappingKeyStore({ executablePath: "/nonexistent/harpoc-test/secret-tool" }),
       new KeyringWrappingKeyStore({ executablePath: "/nonexistent/harpoc-test/keyctl" }),
     ]) {
-      try {
-        await store.loadWrappingKey();
-        expect.unreachable("loadWrappingKey should have rejected");
-      } catch (err) {
-        expect(err).toBeInstanceOf(VaultError);
-        expect((err as VaultError).code).toBe(ErrorCode.SESSION_FILE_ERROR);
-      }
+      await expectVaultError(() => store.loadWrappingKey(), ErrorCode.SESSION_FILE_ERROR);
     }
   });
 });

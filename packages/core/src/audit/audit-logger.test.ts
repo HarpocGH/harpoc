@@ -30,16 +30,17 @@ describe("AuditLogger", () => {
     expect(id).toBeGreaterThan(0);
   });
 
-  it("encrypts detail when auditKey is provided", () => {
-    logger.log({
-      eventType: AuditEventType.SECRET_USE,
-      detail: { url: "https://api.example.com", method: "GET" },
-    });
+  it("stores detail as ciphertext + iv + tag, never the plaintext JSON", () => {
+    const detail = { url: "https://api.example.com", method: "GET" };
+    logger.log({ eventType: AuditEventType.SECRET_USE, detail });
 
     const events = store.queryAuditLog();
-    expect(events[0]?.detail_encrypted).not.toBeNull();
     expect(events[0]?.detail_iv).not.toBeNull();
     expect(events[0]?.detail_tag).not.toBeNull();
+    const stored = Buffer.from(events[0]?.detail_encrypted ?? new Uint8Array());
+    expect(stored.length).toBeGreaterThan(0);
+    expect(stored.includes(Buffer.from(JSON.stringify(detail), "utf8"))).toBe(false);
+    expect(stored.includes(Buffer.from("api.example.com", "utf8"))).toBe(false);
   });
 
   it("stores null detail when no detail provided", () => {

@@ -3,9 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext, McpServerConfig, Permission, PrincipalType } from "@harpoc/shared";
-import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
+import { registerAgents } from "./__fixtures__/engine-seams.js";
 
 /**
  * W1: secret-scoped *configuration* under the per-secret policy layer.
@@ -18,16 +19,9 @@ import { VaultEngine } from "./vault-engine.js";
  * 2026-09-01), all explicit-grant exactly like V1.
  */
 
-vi.mock("./crypto/argon2.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./crypto/argon2.js")>();
-  return {
-    ...original,
-    deriveKey: async (password: string, salt: Uint8Array) => {
-      const { createHash } = await import("node:crypto");
-      return new Uint8Array(createHash("sha256").update(password).update(salt).digest());
-    },
-  };
-});
+vi.mock("./crypto/argon2.js", async (importOriginal) =>
+  (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
+);
 
 let tempDir: string;
 let engine: VaultEngine;
@@ -48,20 +42,6 @@ beforeEach(async () => {
   });
   await engine.initVault("password");
 });
-
-/**
- * Register the agent identities this suite mints tokens or grants for — the
- * v1.4 registration gate refuses an unregistered agent-typed principal.
- */
-function registerAgents(...names: string[]): void {
-  for (const name of names) {
-    try {
-      engine.registerAgent({ name });
-    } catch (err) {
-      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
-    }
-  }
-}
 
 afterEach(async () => {
   await engine.destroy();
@@ -90,7 +70,7 @@ function grant(
   permissions: Permission[],
   expiresAt?: number,
 ): void {
-  if (principalType === "agent") registerAgents(principalId);
+  if (principalType === "agent") registerAgents(engine, principalId);
   engine.grantPolicy({ secretId, principalType, principalId, permissions, expiresAt }, "admin");
 }
 
@@ -291,7 +271,7 @@ describe("policy administration (D3: grant/revoke require admin)", () => {
   it("every grant requires an admin grant — the first one included (R1)", async () => {
     const id = await makeSecret("bootstrap");
     const bob = agent("bob");
-    registerAgents("alice", "bob");
+    registerAgents(engine, "alice", "bob");
 
     // No rows yet — and no exemption for that: bob is a token caller holding nothing.
     await expectDenied(() =>
@@ -317,13 +297,13 @@ describe("policy administration (D3: grant/revoke require admin)", () => {
     );
 
     // A row now exists and bob holds no admin grant.
-    expect(() =>
+    await expectDenied(() =>
       engine.grantPolicy(
         { secretId: id, principalType: "agent", principalId: "bob", permissions: ["admin"] },
         "bob",
         bob,
       ),
-    ).toThrow(VaultError);
+    );
   });
 
   it("self-escalation is refused: a use-only principal cannot grant itself admin", async () => {

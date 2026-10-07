@@ -9,16 +9,9 @@ import type { DecryptedAuditEvent } from "./audit/audit-query.js";
 import type { IssuedTokenRow, SqliteStore } from "./storage/sqlite-store.js";
 import { VaultEngine } from "./vault-engine.js";
 
-vi.mock("./crypto/argon2.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./crypto/argon2.js")>();
-  return {
-    ...original,
-    deriveKey: async (password: string, salt: Uint8Array) => {
-      const { createHash } = await import("node:crypto");
-      return new Uint8Array(createHash("sha256").update(password).update(salt).digest());
-    },
-  };
-});
+vi.mock("./crypto/argon2.js", async (importOriginal) =>
+  (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
+);
 
 let tempDir: string;
 let engine: VaultEngine;
@@ -147,7 +140,7 @@ describe("registerAgent", () => {
 
   it("rolls the insert back when the audit write fails", () => {
     failNextAuditInsert();
-    expect(() => engine.registerAgent({ name: "alpha" })).toThrow();
+    expect(() => engine.registerAgent({ name: "alpha" })).toThrow("audit unavailable");
     expect(liveStore().getAgentByName("alpha")).toBeUndefined();
   });
 });
@@ -218,7 +211,7 @@ describe("updateAgent", () => {
   it("rolls the update back when the audit write fails", () => {
     engine.registerAgent({ name: "alpha", description: "old" });
     failNextAuditInsert();
-    expect(() => engine.updateAgent("alpha", { description: "new" })).toThrow();
+    expect(() => engine.updateAgent("alpha", { description: "new" })).toThrow("audit unavailable");
     expect(liveStore().getAgentByName("alpha")?.description).toBe("old");
   });
 });
@@ -314,21 +307,21 @@ describe("deactivateAgent", () => {
     seedToken("alpha", "jti-1");
 
     failNextAuditInsert();
-    expect(() => engine.deactivateAgent("alpha")).toThrow();
+    expect(() => engine.deactivateAgent("alpha")).toThrow("audit unavailable");
 
     expect(liveStore().getAgentByName("alpha")?.status).toBe("active");
     expect(engine.isTokenRevoked("jti-1")).toBe(false);
     expect(liveStore().listIssuedTokens()[0]?.revoked_at).toBeNull();
   });
 
-  it("a deactivated agent's token is refused by verifyToken, whose prune runs first (R9/C33-A: the entry carries the token's own registry expiry, in ms)", () => {
+  it("a deactivated agent's token is refused by verifyToken, whose prune runs first (R9/C33-A: the entry carries the token's own registry expiry, in ms)", async () => {
     engine.registerAgent({ name: "alpha" });
     const token = engine.createToken("alpha", ["read"]);
     const { exp } = engine.verifyToken(token);
 
     engine.deactivateAgent("alpha");
 
-    expect(() => engine.verifyToken(token)).toThrow("revoked");
+    await expectVaultError(() => engine.verifyToken(token), ErrorCode.TOKEN_REVOKED);
 
     const denylist = liveStore().db.prepare("SELECT expires_at FROM revoked_tokens").all() as {
       expires_at: number;
@@ -381,7 +374,7 @@ describe("activateAgent", () => {
     engine.deactivateAgent("alpha");
 
     failNextAuditInsert();
-    expect(() => engine.activateAgent("alpha")).toThrow();
+    expect(() => engine.activateAgent("alpha")).toThrow("audit unavailable");
     expect(liveStore().getAgentByName("alpha")?.status).toBe("inactive");
   });
 });
@@ -468,7 +461,7 @@ describe("deleteAgent", () => {
     seedToken("alpha", "jti-1");
 
     failNextAuditInsert();
-    expect(() => engine.deleteAgent("alpha")).toThrow();
+    expect(() => engine.deleteAgent("alpha")).toThrow("audit unavailable");
 
     expect(liveStore().getAgentByName("alpha")).toBeDefined();
     expect(engine.isTokenRevoked("jti-1")).toBe(false);
@@ -600,7 +593,7 @@ describe("createToken registration gate", () => {
     engine.registerAgent({ name: "ghost" });
 
     failNextAuditInsert();
-    expect(() => engine.createToken("ghost", ["use"])).toThrow();
+    expect(() => engine.createToken("ghost", ["use"])).toThrow("audit unavailable");
 
     expect(liveStore().listIssuedTokens()).toHaveLength(0);
   });

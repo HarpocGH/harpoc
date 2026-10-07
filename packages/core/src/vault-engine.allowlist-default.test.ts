@@ -6,16 +6,9 @@ import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
-vi.mock("./crypto/argon2.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./crypto/argon2.js")>();
-  return {
-    ...original,
-    deriveKey: async (password: string, salt: Uint8Array) => {
-      const { createHash } = await import("node:crypto");
-      return new Uint8Array(createHash("sha256").update(password).update(salt).digest());
-    },
-  };
-});
+vi.mock("./crypto/argon2.js", async (importOriginal) =>
+  (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
+);
 
 let tempDir: string;
 let engine: VaultEngine;
@@ -94,6 +87,7 @@ describe("target allowlists deny by default (R1, 2026-09-01)", () => {
       () => engine.useSecret(handle, { type: "mcp", server: "dd", tool: "echo" }),
       ErrorCode.URL_NOT_ALLOWED,
     );
+    deniedRow("URL_NOT_ALLOWED", "mcp");
   });
 
   it("database: an unconfigured secret refuses every host:port before connecting", async () => {

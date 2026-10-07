@@ -7,17 +7,11 @@ import type { CallerContext, Permission, PrincipalType } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
+import { registerAgents } from "./__fixtures__/engine-seams.js";
 
-vi.mock("./crypto/argon2.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./crypto/argon2.js")>();
-  return {
-    ...original,
-    deriveKey: async (password: string, salt: Uint8Array) => {
-      const { createHash } = await import("node:crypto");
-      return new Uint8Array(createHash("sha256").update(password).update(salt).digest());
-    },
-  };
-});
+vi.mock("./crypto/argon2.js", async (importOriginal) =>
+  (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
+);
 
 let tempDir: string;
 let engine: VaultEngine;
@@ -33,20 +27,6 @@ beforeEach(async () => {
   });
   await engine.initVault("password");
 });
-
-/**
- * Register the agent identities this suite mints tokens or grants for — the
- * v1.4 registration gate refuses an unregistered agent-typed principal.
- */
-function registerAgents(...names: string[]): void {
-  for (const name of names) {
-    try {
-      engine.registerAgent({ name });
-    } catch (err) {
-      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
-    }
-  }
-}
 
 afterEach(async () => {
   await engine.destroy();
@@ -75,7 +55,7 @@ function grant(
   permissions: Permission[],
   expiresAt?: number,
 ): void {
-  if (principalType === "agent") registerAgents(principalId);
+  if (principalType === "agent") registerAgents(engine, principalId);
   engine.grantPolicy(
     { secretId, principalType, principalId, permissions, expiresAt },
     "test-admin",
@@ -311,7 +291,7 @@ describe("createToken principal_type claim", () => {
   });
 
   it("no option → the claim is minted as agent, audited as agent", async () => {
-    registerAgents("legacy");
+    registerAgents(engine, "legacy");
     const token = engine.createToken("legacy", ["use"], 60_000);
     const payload = engine.verifyToken(token);
     expect(payload.principal_type).toBe("agent");
@@ -370,7 +350,7 @@ describe("existence oracle (R5)", () => {
 
   it("an admin check on a zero-row secret stays ACCESS_DENIED — the matrix remedy survives", async () => {
     const id = await makeSecret("fresh");
-    registerAgents("mallory", "target");
+    registerAgents(engine, "mallory", "target");
     const err = await expectVaultError(
       () =>
         Promise.resolve().then(() =>

@@ -13,6 +13,7 @@ import {
   wrapDek,
 } from "./key-hierarchy.js";
 import { generateRandomBytes } from "./random.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 let cachedKeys: Awaited<ReturnType<typeof createVaultKeys>>;
 beforeAll(async () => {
@@ -100,32 +101,19 @@ describe("unlockVault", () => {
   it("fails with wrong password", async () => {
     const created = await createVaultKeys("correct-password");
 
-    await expect(
-      unlockVault(
-        "wrong-password",
-        created.salt,
-        created.wrappedKek,
-        created.wrappedKekIv,
-        created.wrappedKekTag,
-        created.wrappedJwtKey,
-        created.wrappedAuditKey,
-      ),
-    ).rejects.toThrow(VaultError);
-
-    try {
-      await unlockVault(
-        "wrong-password",
-        created.salt,
-        created.wrappedKek,
-        created.wrappedKekIv,
-        created.wrappedKekTag,
-        created.wrappedJwtKey,
-        created.wrappedAuditKey,
-      );
-    } catch (e) {
-      expect(e).toBeInstanceOf(VaultError);
-      expect((e as VaultError).code).toBe(ErrorCode.ENCRYPTION_ERROR);
-    }
+    await expectVaultError(
+      () =>
+        unlockVault(
+          "wrong-password",
+          created.salt,
+          created.wrappedKek,
+          created.wrappedKekIv,
+          created.wrappedKekTag,
+          created.wrappedJwtKey,
+          created.wrappedAuditKey,
+        ),
+      ErrorCode.ENCRYPTION_ERROR,
+    );
   });
 });
 

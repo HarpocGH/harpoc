@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -12,7 +12,6 @@ import type {
   OAuthTokenRow,
 } from "./sqlite-store.js";
 import { SqliteStore } from "./sqlite-store.js";
-import { LATEST_SCHEMA_VERSION } from "./schema.js";
 
 let store: SqliteStore;
 const LINK = new Uint8Array(32).fill(7);
@@ -67,68 +66,6 @@ beforeEach(() => {
 
 afterEach(() => {
   store.close();
-});
-
-describe("schema creation", () => {
-  it("creates all four tables", () => {
-    const tables = store.db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-      .all() as { name: string }[];
-    const names = tables.map((t) => t.name);
-
-    expect(names).toContain("vault_meta");
-    expect(names).toContain("secrets");
-    expect(names).toContain("access_policies");
-    expect(names).toContain("audit_log");
-  });
-
-  it("creates oauth_tokens table", () => {
-    const row = store.db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='oauth_tokens'")
-      .get() as { name: string } | undefined;
-    expect(row?.name).toBe("oauth_tokens");
-  });
-
-  it("creates certificates table", () => {
-    const row = store.db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='certificates'")
-      .get() as { name: string } | undefined;
-    expect(row?.name).toBe("certificates");
-  });
-
-  it("creates injection_policies table", () => {
-    const row = store.db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='injection_policies'")
-      .get() as { name: string } | undefined;
-    expect(row?.name).toBe("injection_policies");
-  });
-
-  it("creates mcp_servers table", () => {
-    const row = store.db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='mcp_servers'")
-      .get() as { name: string } | undefined;
-    expect(row?.name).toBe("mcp_servers");
-  });
-
-  it("creates connection_configs table", () => {
-    const row = store.db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='connection_configs'")
-      .get() as { name: string } | undefined;
-    expect(row?.name).toBe("connection_configs");
-  });
-
-  it("sets schema_version to 12", () => {
-    expect(store.getMeta("schema_version")).toBe(String(LATEST_SCHEMA_VERSION));
-  });
-
-  it("creates the live-name unique index", () => {
-    const row = store.db
-      .prepare(
-        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_secrets_name_hmac_live'",
-      )
-      .get() as { name: string } | undefined;
-    expect(row?.name).toBe("idx_secrets_name_hmac_live");
-  });
 });
 
 describe("PRAGMAs", () => {
@@ -1428,42 +1365,6 @@ describe("concurrent file-based WAL access", () => {
     const retrieved = fileStore2.getSecret(secret.id);
     expect(retrieved).toBeDefined();
     expect(retrieved?.id).toBe(secret.id);
-  });
-});
-
-// L11: the database file is created 0600 before SQLite opens it (D55), so on
-// POSIX its permissions no longer depend on the umask — matching the session
-// file beside it. A pre-existing file is chmod-repaired best-effort. Contents
-// are KEK-encrypted, so this is hardening consistency, not a confidentiality
-// fix.
-describe("database file permissions (L11)", () => {
-  let dir: string;
-  let store: SqliteStore;
-
-  beforeEach(() => {
-    dir = join(tmpdir(), `harpoc-dbmode-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    mkdirSync(dir, { recursive: true });
-  });
-
-  afterEach(() => {
-    store.close();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  });
-
-  it.runIf(process.platform !== "win32")("creates the database owner-only", () => {
-    const dbPath = join(dir, "modes.vault.db");
-    store = new SqliteStore(dbPath);
-    store.setMeta("k", "v"); // force the WAL sidecars into existence
-
-    expect(statSync(dbPath).mode & 0o777).toBe(0o600);
-    for (const sidecar of [`${dbPath}-wal`, `${dbPath}-shm`]) {
-      if (existsSync(sidecar)) {
-        // SQLite's unix VFS copies the main file's mode onto -wal/-shm, so the
-        // pre-created 0600 carries over; the finding is about the database
-        // file itself, which the assertion above pins.
-        expect(statSync(sidecar).isFile()).toBe(true);
-      }
-    }
   });
 });
 

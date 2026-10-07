@@ -22,7 +22,7 @@ afterEach(() => {
   store?.close();
   store = undefined;
   vi.mocked(chmodSync).mockReset();
-  rmSync(dir, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe("database file mode at creation (D55)", () => {

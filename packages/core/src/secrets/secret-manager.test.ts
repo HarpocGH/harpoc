@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import { dropSecretsNameHmacConstraint, expectVaultError } from "@harpoc/test-utils";
 import { createVaultKeys } from "../crypto/key-hierarchy.js";
 import { SqliteStore } from "../storage/sqlite-store.js";
@@ -65,13 +65,15 @@ describe("createSecret", () => {
       value: new Uint8Array(Buffer.from("v1")),
     });
 
-    await expect(
-      manager.createSecret({
-        name: "dup",
-        type: "api_key",
-        value: new Uint8Array(Buffer.from("v2")),
-      }),
-    ).rejects.toThrow(VaultError);
+    await expectVaultError(
+      () =>
+        manager.createSecret({
+          name: "dup",
+          type: "api_key",
+          value: new Uint8Array(Buffer.from("v2")),
+        }),
+      ErrorCode.DUPLICATE_SECRET,
+    );
   });
 
   it("allows same name in different projects", async () => {
@@ -150,9 +152,11 @@ describe("setSecretValue", () => {
       value: new Uint8Array(Buffer.from("v")),
     });
 
-    await expect(
-      manager.setSecretValue("secret://active-key", new Uint8Array(Buffer.from("new"))),
-    ).rejects.toThrow("not pending");
+    const err = await expectVaultError(
+      () => manager.setSecretValue("secret://active-key", new Uint8Array(Buffer.from("new"))),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toContain("not pending");
   });
 });
 
@@ -194,13 +198,20 @@ describe("getSecretValue", () => {
     });
     await manager.revokeSecret("secret://revoked");
 
-    await expect(manager.getSecretValue("secret://revoked")).rejects.toThrow(VaultError);
+    await expectVaultError(
+      () => manager.getSecretValue("secret://revoked"),
+      ErrorCode.SECRET_REVOKED,
+    );
   });
 
   it("throws for pending secret", async () => {
     await manager.createSecret({ name: "pend", type: "api_key" });
 
-    await expect(manager.getSecretValue("secret://pend")).rejects.toThrow("no value set");
+    const err = await expectVaultError(
+      () => manager.getSecretValue("secret://pend"),
+      ErrorCode.SECRET_VALUE_REQUIRED,
+    );
+    expect(err.message).toContain("no value set");
   });
 });
 
@@ -288,9 +299,10 @@ describe("rotateSecret", () => {
     });
     await manager.revokeSecret("secret://rev");
 
-    await expect(
-      manager.rotateSecret("secret://rev", new Uint8Array(Buffer.from("new"))),
-    ).rejects.toThrow(VaultError);
+    await expectVaultError(
+      () => manager.rotateSecret("secret://rev", new Uint8Array(Buffer.from("new"))),
+      ErrorCode.SECRET_REVOKED,
+    );
   });
 });
 
@@ -517,12 +529,10 @@ describe("expiresAt handling", () => {
     });
 
     // Accessing the value should trigger expiry transition and throw
-    await expect(manager.getSecretValue("secret://lazy-expire")).rejects.toThrow(VaultError);
-    try {
-      await manager.getSecretValue("secret://lazy-expire");
-    } catch (e) {
-      expect((e as VaultError).code).toBe(ErrorCode.SECRET_EXPIRED);
-    }
+    await expectVaultError(
+      () => manager.getSecretValue("secret://lazy-expire"),
+      ErrorCode.SECRET_EXPIRED,
+    );
 
     // Status should now be EXPIRED in the DB
     const info = await manager.getSecretInfo("secret://lazy-expire");

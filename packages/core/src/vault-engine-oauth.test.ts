@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuditEventType, ErrorCode, PrincipalType, VaultError } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, PrincipalType } from "@harpoc/shared";
 import type { CallerContext, OAuthProviderConfig, Permission } from "@harpoc/shared";
 import {
   dropOAuthAuthMethodConstraint,
@@ -13,18 +13,11 @@ import {
   sqliteErrorCode,
 } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
-import type { McpConnectionRegistry } from "./injection/mcp-registry.js";
+import { registerAgents, registryOf } from "./__fixtures__/engine-seams.js";
 
-vi.mock("./crypto/argon2.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./crypto/argon2.js")>();
-  return {
-    ...original,
-    deriveKey: async (password: string, salt: Uint8Array) => {
-      const { createHash } = await import("node:crypto");
-      return new Uint8Array(createHash("sha256").update(password).update(salt).digest());
-    },
-  };
-});
+vi.mock("./crypto/argon2.js", async (importOriginal) =>
+  (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
+);
 
 let tempDir: string;
 let dbPath: string;
@@ -39,25 +32,6 @@ let tokenEndpointHandler: (req: IncomingMessage, res: ServerResponse) => void;
 // Target HTTP server for useSecret
 let targetServer: Server;
 let targetServerUrl: string;
-
-/**
- * Register the agent identities this suite mints tokens or grants for — the
- * v1.4 registration gate refuses an unregistered agent-typed principal.
- */
-function registerAgents(...names: string[]): void {
-  for (const name of names) {
-    try {
-      engine.registerAgent({ name });
-    } catch (err) {
-      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
-    }
-  }
-}
-
-/** The engine's live MCP connection registry (test seam — private field). */
-function registryOf(e: VaultEngine): McpConnectionRegistry {
-  return (e as unknown as { mcpRegistry: McpConnectionRegistry }).mcpRegistry;
-}
 
 /** Expire a secret out of band — the lazy transition is what is under test. */
 function expireSecret(secretId: string): void {
@@ -169,6 +143,18 @@ describe("createOAuthSecret", () => {
 
     const status = engine.getOAuthTokenStatus(secretId);
     expect(status.provider).toBe("github");
+    const db = new Database(dbPath, { readonly: true });
+    const row = db
+      .prepare(
+        "SELECT client_secret_encrypted, client_secret_iv, client_secret_tag FROM oauth_tokens WHERE secret_id = ?",
+      )
+      .get(secretId);
+    db.close();
+    expect(row).toEqual({
+      client_secret_encrypted: null,
+      client_secret_iv: null,
+      client_secret_tag: null,
+    });
   });
 
   it("logs OAUTH_AUTHORIZE audit event", async () => {
@@ -921,13 +907,15 @@ describe("getOAuthAccessToken", () => {
     };
     await engine.completeOAuthFlow(secretId, "expired-token", "refresh-tok", Date.now() - 5000);
 
-    await expect(
-      engine["getOAuthAccessToken"](secretId, undefined, {
-        principal_type: PrincipalType.AGENT,
-        principal_id: "reader-1",
-        interface: "mcp",
-      }),
-    ).rejects.toBeInstanceOf(VaultError);
+    await expectVaultError(
+      () =>
+        engine["getOAuthAccessToken"](secretId, undefined, {
+          principal_type: PrincipalType.AGENT,
+          principal_id: "reader-1",
+          interface: "mcp",
+        }),
+      ErrorCode.OAUTH_REFRESH_FAILED,
+    );
 
     const denied = engine
       .queryAudit({ secretId, eventType: AuditEventType.OAUTH_REFRESH })
@@ -1002,7 +990,6 @@ describe("getOAuthAccessToken", () => {
       ErrorCode.SECRET_EXPIRED,
     );
     expect(err.message).toBe("Secret expired: secret://access-test");
-    await new Promise((resolve) => setTimeout(resolve, 50));
 
     const rows = engine.queryAudit({ eventType: AuditEventType.SECRET_EXPIRE });
     expect(rows).toHaveLength(1);
@@ -1239,7 +1226,7 @@ describe("OAuth entry points — caller policy enforcement (token-cli-parity)", 
     secretId = result.secretId;
     await engine.completeOAuthFlow(secretId, "old-access", "old-refresh", Date.now() - 1000);
     // Presence-gates the secret: any caller now needs a matching grant.
-    registerAgents("deploy-bot", "auditor");
+    registerAgents(engine, "deploy-bot", "auditor");
     engine.grantPolicy(
       {
         secretId,

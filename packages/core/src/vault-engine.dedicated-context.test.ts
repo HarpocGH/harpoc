@@ -5,16 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
 
-vi.mock("./crypto/argon2.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./crypto/argon2.js")>();
-  return {
-    ...original,
-    deriveKey: async (password: string, salt: Uint8Array) => {
-      const { createHash } = await import("node:crypto");
-      return new Uint8Array(createHash("sha256").update(password).update(salt).digest());
-    },
-  };
-});
+vi.mock("./crypto/argon2.js", async (importOriginal) =>
+  (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
+);
 
 let tempDir: string;
 let engine: VaultEngine;

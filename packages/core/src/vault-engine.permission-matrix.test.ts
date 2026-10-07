@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext, McpServerConfig, Permission } from "@harpoc/shared";
 import { ErrorCode, SecretType, VaultError } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
+import { registerAgents } from "./__fixtures__/engine-seams.js";
 
 /**
  * T7: which permission each caller-gated method demands was pinned only
@@ -22,16 +23,9 @@ import { VaultEngine } from "./vault-engine.js";
  * case below.
  */
 
-vi.mock("./crypto/argon2.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./crypto/argon2.js")>();
-  return {
-    ...original,
-    deriveKey: async (password: string, salt: Uint8Array) => {
-      const { createHash } = await import("node:crypto");
-      return new Uint8Array(createHash("sha256").update(password).update(salt).digest());
-    },
-  };
-});
+vi.mock("./crypto/argon2.js", async (importOriginal) =>
+  (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
+);
 
 let tempDir: string;
 let engine: VaultEngine;
@@ -55,22 +49,8 @@ beforeEach(async () => {
     sessionPath: join(tempDir, "session.json"),
   });
   await engine.initVault("password");
-  registerAgents(PRINCIPAL, "someone-else", "victim");
+  registerAgents(engine, PRINCIPAL, "someone-else", "victim");
 });
-
-/**
- * Register the agent identities this suite mints tokens or grants for — the
- * v1.4 registration gate refuses an unregistered agent-typed principal.
- */
-function registerAgents(...names: string[]): void {
-  for (const name of names) {
-    try {
-      engine.registerAgent({ name });
-    } catch (err) {
-      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
-    }
-  }
-}
 
 afterEach(async () => {
   await engine.destroy();

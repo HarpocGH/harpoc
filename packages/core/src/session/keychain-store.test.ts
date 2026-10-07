@@ -4,6 +4,7 @@ import { ErrorCode, VaultError } from "@harpoc/shared";
 import { KeychainWrappingKeyStore } from "./keychain-store.js";
 import { runKeystoreHelper } from "./keystore-helper.js";
 import { KeystoreWrappedSessionKeyProtector } from "./wrapping-key-store.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 describe("KeychainWrappingKeyStore construction", () => {
   it("has scheme keychain", () => {
@@ -22,13 +23,7 @@ describe("KeychainWrappingKeyStore construction", () => {
     const store = new KeychainWrappingKeyStore({
       executablePath: "/nonexistent/harpoc-test/security",
     });
-    try {
-      await store.loadWrappingKey();
-      expect.unreachable("loadWrappingKey should have rejected");
-    } catch (err) {
-      expect(err).toBeInstanceOf(VaultError);
-      expect((err as VaultError).code).toBe(ErrorCode.SESSION_FILE_ERROR);
-    }
+    await expectVaultError(() => store.loadWrappingKey(), ErrorCode.SESSION_FILE_ERROR);
   });
 });
 

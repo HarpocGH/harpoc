@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SessionFile, SessionKeyProtectionScheme } from "@harpoc/shared";
-import { DEFAULT_SESSION_TTL_MS, ErrorCode, MAX_SESSION_TTL_MS, VaultError } from "@harpoc/shared";
+import { DEFAULT_SESSION_TTL_MS, ErrorCode, MAX_SESSION_TTL_MS } from "@harpoc/shared";
 import { SessionManager } from "./session-manager.js";
 import type { WrappingKeyStore } from "./wrapping-key-store.js";
 import { KeystoreWrappedSessionKeyProtector, WRAPPING_KEY_LENGTH } from "./wrapping-key-store.js";
@@ -32,13 +32,7 @@ class InMemoryWrappingKeyStore implements WrappingKeyStore {
 }
 
 async function expectSessionFileError(promise: Promise<unknown>): Promise<void> {
-  try {
-    await promise;
-    expect.unreachable("expected rejection");
-  } catch (err) {
-    expect(err).toBeInstanceOf(VaultError);
-    expect((err as VaultError).code).toBe(ErrorCode.SESSION_FILE_ERROR);
-  }
+  await expectVaultError(() => promise, ErrorCode.SESSION_FILE_ERROR);
 }
 
 describe("KeystoreWrappedSessionKeyProtector", () => {
@@ -217,7 +211,7 @@ describe("KeystoreWrappedSessionKeyProtector through SessionManager", () => {
   });
 
   afterEach(() => {
-    rmSync(sessionDir, { recursive: true, force: true });
+    rmSync(sessionDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("writes a keychain-tagged file whose session_key is not the raw key, and reads it back", async () => {

@@ -4,21 +4,16 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuditEventType, ErrorCode, SecretStatus, VaultError } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, SecretStatus } from "@harpoc/shared";
 import type { OAuthProviderConfig } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
+import { registerAgents } from "./__fixtures__/engine-seams.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
-vi.mock("./crypto/argon2.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./crypto/argon2.js")>();
-  return {
-    ...original,
-    deriveKey: async (password: string, salt: Uint8Array) => {
-      const { createHash } = await import("node:crypto");
-      return new Uint8Array(createHash("sha256").update(password).update(salt).digest());
-    },
-  };
-});
+vi.mock("./crypto/argon2.js", async (importOriginal) =>
+  (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
+);
 
 // NM3 fail-closed audit: every durable-state mutation commits in the same
 // SQLite transaction as its audit row. These tests force the audit INSERT to
@@ -92,22 +87,8 @@ beforeEach(async () => {
     sessionPath: join(tempDir, "session.json"),
   });
   await engine.initVault("password");
-  registerAgents("agent-1", "user-1");
+  registerAgents(engine, "agent-1", "user-1");
 });
-
-/**
- * Register the agent identities this suite mints tokens or grants for — the
- * v1.4 registration gate refuses an unregistered agent-typed principal.
- */
-function registerAgents(...names: string[]): void {
-  for (const name of names) {
-    try {
-      engine.registerAgent({ name });
-    } catch (err) {
-      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
-    }
-  }
-}
 
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -251,7 +232,10 @@ describe("chain integrity across transactional audit writes", () => {
     );
     await engine.rotateSecret("secret://life-key", new Uint8Array(Buffer.from("v2")));
     // A denied read (single-insert path) interleaved with transactional rows.
-    await expect(engine.getSecretValue("secret://missing")).rejects.toThrow();
+    await expectVaultError(
+      () => engine.getSecretValue("secret://missing"),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
     await engine.revokeSecret("secret://life-key");
     await engine.changePassword("password", "newpassword1");
 
@@ -418,7 +402,7 @@ describe("fail-closed audit: tokens, OAuth flow, password change", () => {
     expect(auditCount(AuditEventType.TOKEN_REVOKE)).toBe(0);
 
     engine.revokeToken(jti);
-    expect(() => engine.verifyToken(token)).toThrow();
+    await expectVaultError(() => engine.verifyToken(token), ErrorCode.TOKEN_REVOKED);
     expect(auditCount(AuditEventType.TOKEN_REVOKE)).toBe(1);
   });
 

@@ -6,6 +6,7 @@ import {
   NoneSessionKeyProtector,
   createSessionKeyProtector,
 } from "./session-key-protector.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 describe("NoneSessionKeyProtector", () => {
   it("has scheme none and passes data through unchanged", async () => {
@@ -149,13 +150,10 @@ describe.runIf(process.platform === "win32")("DpapiSessionKeyProtector (Windows)
     const protector = new DpapiSessionKeyProtector({
       executablePath: "C:\\nonexistent\\powershell.exe",
     });
-    try {
-      await protector.protect(new Uint8Array(randomBytes(32)));
-      expect.unreachable("protect should have rejected");
-    } catch (err) {
-      expect(err).toBeInstanceOf(VaultError);
-      expect((err as VaultError).code).toBe(ErrorCode.SESSION_FILE_ERROR);
-    }
+    await expectVaultError(
+      () => protector.protect(new Uint8Array(randomBytes(32))),
+      ErrorCode.SESSION_FILE_ERROR,
+    );
   });
 
   it("enforces the timeout", async () => {

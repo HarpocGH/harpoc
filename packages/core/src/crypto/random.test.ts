@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./random.js";
 
 describe("generateRandomBytes", () => {
@@ -37,14 +37,21 @@ describe("generateUUIDv7", () => {
     expect(["8", "9", "a", "b"]).toContain(variantChar);
   });
 
-  it("produces time-ordered UUIDs across different milliseconds", async () => {
-    const uuids: string[] = [];
-    for (let i = 0; i < 5; i++) {
-      uuids.push(generateUUIDv7());
-      await new Promise((r) => setTimeout(r, 2));
+  it("produces time-ordered UUIDs across different milliseconds", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const base = Date.now();
+      const uuids: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        vi.setSystemTime(base + i);
+        uuids.push(generateUUIDv7());
+      }
+      const sorted = [...uuids].sort();
+      expect(uuids).toEqual(sorted);
+      expect(new Set(uuids).size).toBe(5);
+    } finally {
+      vi.useRealTimers();
     }
-    const sorted = [...uuids].sort();
-    expect(uuids).toEqual(sorted);
   });
 
   it("generates unique UUIDs", () => {

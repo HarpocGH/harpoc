@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import type {
   CallerContext,
   ExpiringCertificateInfo,
@@ -15,6 +15,7 @@ import type {
   PrincipalType,
 } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
+import { registerAgents } from "./__fixtures__/engine-seams.js";
 
 /**
  * D5 — the expiring-status projections hand out metadata only: no encrypted
@@ -22,16 +23,9 @@ import { VaultEngine } from "./vault-engine.js";
  * `listSecrets` (W2), silently.
  */
 
-vi.mock("./crypto/argon2.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./crypto/argon2.js")>();
-  return {
-    ...original,
-    deriveKey: async (password: string, salt: Uint8Array) => {
-      const { createHash } = await import("node:crypto");
-      return new Uint8Array(createHash("sha256").update(password).update(salt).digest());
-    },
-  };
-});
+vi.mock("./crypto/argon2.js", async (importOriginal) =>
+  (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
+);
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "__fixtures__", "certs");
 const fx = (name: string): string => readFileSync(join(FIXTURES, name), "utf8");
@@ -51,20 +45,6 @@ beforeEach(async () => {
   engine = new VaultEngine({ dbPath, sessionPath: join(tempDir, "session.json") });
   await engine.initVault("password");
 });
-
-/**
- * Register the agent identities this suite mints tokens or grants for — the
- * v1.4 registration gate refuses an unregistered agent-typed principal.
- */
-function registerAgents(...names: string[]): void {
-  for (const name of names) {
-    try {
-      engine.registerAgent({ name });
-    } catch (err) {
-      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
-    }
-  }
-}
 
 afterEach(async () => {
   await engine.destroy();
@@ -96,7 +76,7 @@ function grant(
   principalId: string,
   permissions: Permission[],
 ): void {
-  if (principalType === "agent") registerAgents(principalId);
+  if (principalType === "agent") registerAgents(engine, principalId);
   engine.grantPolicy({ secretId, principalType, principalId, permissions }, "test-admin");
 }
 

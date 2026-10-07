@@ -10,18 +10,12 @@ import { AuditEventType, ErrorCode, PrincipalType, SecretType, VaultError } from
 import type { Permission } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
+import { registerAgents } from "./__fixtures__/engine-seams.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
 
-vi.mock("./crypto/argon2.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./crypto/argon2.js")>();
-  return {
-    ...original,
-    deriveKey: async (password: string, salt: Uint8Array) => {
-      const { createHash } = await import("node:crypto");
-      return new Uint8Array(createHash("sha256").update(password).update(salt).digest());
-    },
-  };
-});
+vi.mock("./crypto/argon2.js", async (importOriginal) =>
+  (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
+);
 
 /*
  * The __fixtures__/certs material was generated once with OpenSSL 3.5.3:
@@ -69,20 +63,6 @@ let tempDir: string;
 let dbPath: string;
 let sessionPath: string;
 let engine: VaultEngine;
-
-/**
- * Register the agent identities this suite mints tokens or grants for — the
- * v1.4 registration gate refuses an unregistered agent-typed principal.
- */
-function registerAgents(...names: string[]): void {
-  for (const name of names) {
-    try {
-      engine.registerAgent({ name });
-    } catch (err) {
-      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
-    }
-  }
-}
 
 /**
  * Some row-level assertions read the committed row straight from SQLite — for
@@ -524,17 +504,6 @@ describe("importCertificate", () => {
     expect(JSON.stringify(issue?.detail)).not.toContain("PRIVATE KEY");
   });
 
-  it("rejects a duplicate certificate name", async () => {
-    await engine.importCertificate("dup-cert", fx("rsa-key.pem"), {
-      certificatePem: fx("rsa-cert.pem"),
-    });
-    await expect(
-      engine.importCertificate("dup-cert", fx("rsa-key.pem"), {
-        certificatePem: fx("rsa-cert.pem"),
-      }),
-    ).rejects.toMatchObject({ code: ErrorCode.DUPLICATE_SECRET });
-  });
-
   it("refuses to import while the vault is locked", async () => {
     await engine.lock();
     await expect(
@@ -913,7 +882,11 @@ describe("certificate accessors", () => {
     }));
   });
 
-  it("getCertificateStatus reports metadata without decrypting", () => {
+  it("getCertificateStatus reports metadata without decrypting", async () => {
+    // Every decrypt under a zeroed KEK fails, so a status read that decrypted
+    // anything would throw; the private-key read below is the control.
+    (engine as unknown as { kek: Uint8Array }).kek.fill(0);
+
     const st = engine.getCertificateStatus(secretId);
     expect(st.secret_id).toBe(secretId);
     expect(st.subject).toContain("fixture.example.com");
@@ -922,6 +895,10 @@ describe("certificate accessors", () => {
     expect(st.not_after).toBeGreaterThan(Date.now());
     expect(st.auto_renew).toBe(false);
     expect(st.renewal_status).toBe("ok");
+    await expectVaultError(
+      () => engine.getCertificatePrivateKey(secretId),
+      ErrorCode.ENCRYPTION_ERROR,
+    );
   });
 
   it("reports auto_renew from the stored row", async () => {
@@ -1660,7 +1637,7 @@ describe("updateCertificate", () => {
 
   it("refuses an ungranted caller before the private key is read", async () => {
     const secretId = await pending("gated-renewal");
-    registerAgents("renewer");
+    registerAgents(engine, "renewer");
     engine.grantPolicy(
       {
         secretId,
@@ -1692,7 +1669,7 @@ describe("updateCertificate", () => {
 
   it("lets a rotate-granted caller complete the renewal and attributes the row", async () => {
     const secretId = await pending("granted-renewal");
-    registerAgents("renewer");
+    registerAgents(engine, "renewer");
     engine.grantPolicy(
       {
         secretId,
@@ -1748,7 +1725,7 @@ describe("certificate accessors — caller policy enforcement", () => {
       certificatePem: fx("rsa-cert.pem"),
     }));
     // Presence-gates the secret: any caller now needs a matching grant.
-    registerAgents("reader");
+    registerAgents(engine, "reader");
     engine.grantPolicy(
       {
         secretId,

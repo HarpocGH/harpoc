@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { vi } from "vitest";
 import type { CallerContext, Permission, PrincipalType } from "@harpoc/shared";
-import { AuditEventType, ErrorCode, SecretType, VaultError } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
+import { registerAgents } from "./__fixtures__/engine-seams.js";
 
 /**
  * W2 — `list` as live policy vocabulary: enumeration is filtered by the
@@ -15,16 +16,9 @@ import { VaultEngine } from "./vault-engine.js";
  * checks (R1, 2026-09-01), evaluated in batch.
  */
 
-vi.mock("./crypto/argon2.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./crypto/argon2.js")>();
-  return {
-    ...original,
-    deriveKey: async (password: string, salt: Uint8Array) => {
-      const { createHash } = await import("node:crypto");
-      return new Uint8Array(createHash("sha256").update(password).update(salt).digest());
-    },
-  };
-});
+vi.mock("./crypto/argon2.js", async (importOriginal) =>
+  (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
+);
 
 let tempDir: string;
 let engine: VaultEngine;
@@ -40,20 +34,6 @@ beforeEach(async () => {
   });
   await engine.initVault("password");
 });
-
-/**
- * Register the agent identities this suite mints tokens or grants for — the
- * v1.4 registration gate refuses an unregistered agent-typed principal.
- */
-function registerAgents(...names: string[]): void {
-  for (const name of names) {
-    try {
-      engine.registerAgent({ name });
-    } catch (err) {
-      if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
-    }
-  }
-}
 
 afterEach(async () => {
   await engine.destroy();
@@ -83,7 +63,7 @@ function grant(
   permissions: Permission[],
   expiresAt?: number,
 ): void {
-  if (principalType === "agent") registerAgents(principalId);
+  if (principalType === "agent") registerAgents(engine, principalId);
   engine.grantPolicy(
     { secretId, principalType, principalId, permissions, expiresAt },
     "test-admin",
@@ -124,7 +104,7 @@ describe("explicit grant (R1)", () => {
 
   it("revoking the last row closes enumeration", async () => {
     const id = await makeSecret("reopen");
-    registerAgents("alice");
+    registerAgents(engine, "alice");
     const policy = engine.grantPolicy(
       { secretId: id, principalType: "agent", principalId: "alice", permissions: ["list"] },
       "test-admin",
@@ -286,12 +266,14 @@ describe("grantPolicy refuses `create`", () => {
   it("rejects a permissions array containing create", async () => {
     const id = await makeSecret("no-create");
 
-    expect(() =>
-      engine.grantPolicy(
-        { secretId: id, principalType: "agent", principalId: "alice", permissions: ["create"] },
-        "test-admin",
-      ),
-    ).toThrow(VaultError);
+    await expectVaultError(
+      () =>
+        engine.grantPolicy(
+          { secretId: id, principalType: "agent", principalId: "alice", permissions: ["create"] },
+          "test-admin",
+        ),
+      ErrorCode.INVALID_INPUT,
+    );
 
     await expectVaultError(
       () =>
@@ -325,12 +307,14 @@ describe("grantPolicy refuses `create`", () => {
     const id = await makeSecret("refused-grant");
     const before = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT }).length;
 
-    expect(() =>
-      engine.grantPolicy(
-        { secretId: id, principalType: "agent", principalId: "alice", permissions: ["create"] },
-        "test-admin",
-      ),
-    ).toThrow();
+    await expectVaultError(
+      () =>
+        engine.grantPolicy(
+          { secretId: id, principalType: "agent", principalId: "alice", permissions: ["create"] },
+          "test-admin",
+        ),
+      ErrorCode.INVALID_INPUT,
+    );
 
     expect(engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT }).length).toBe(before);
   });

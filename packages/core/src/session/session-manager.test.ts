@@ -206,24 +206,30 @@ describe("createSessionData", () => {
   });
 });
 
+// Platform-gated by construction, not by provisioning: POSIX has file modes,
+// Windows has the icacls ACL (its real-path pin is session-manager.permissions.test.ts).
 describe("file permissions", () => {
-  it("session file has mode 0o600 after write (Unix only)", async () => {
-    if (process.platform === "win32") return; // Skip on Windows
-    const session = makeValidSession();
-    await manager.writeSession(session);
+  it.skipIf(process.platform === "win32")(
+    "session file has mode 0o600 after write (Unix only)",
+    async () => {
+      const session = makeValidSession();
+      await manager.writeSession(session);
 
-    const stats = statSync(sessionPath);
-    // 0o600 = owner read/write only
-    expect(stats.mode & 0o777).toBe(0o600);
-  });
+      const stats = statSync(sessionPath);
+      // 0o600 = owner read/write only
+      expect(stats.mode & 0o777).toBe(0o600);
+    },
+  );
 
-  it("session file permissions set via icacls on Windows (Windows only)", async () => {
-    if (process.platform !== "win32") return; // Skip on non-Windows
-    const session = makeValidSession();
-    // writeSession internally calls icacls on Windows — should not throw
-    await manager.writeSession(session);
-    expect(existsSync(sessionPath)).toBe(true);
-  });
+  it.skipIf(process.platform !== "win32")(
+    "writes the session file through the icacls step on Windows (Windows only)",
+    async () => {
+      const session = makeValidSession();
+      // writeSession internally calls icacls on Windows — should not throw
+      await manager.writeSession(session);
+      expect(existsSync(sessionPath)).toBe(true);
+    },
+  );
 });
 
 describe("secure erase", () => {
