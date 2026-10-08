@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import { CallbackServer } from "./callback-server.js";
 
@@ -169,8 +169,7 @@ describe("CallbackServer terminal-branch cleanup (code review Low O2)", () => {
     await expect(srv.waitForCallback()).resolves.toMatchObject({ code: "x" });
 
     // The server closes itself once the response is flushed...
-    await new Promise((r) => setTimeout(r, 50));
-    expect(srv.isRunning).toBe(false);
+    await vi.waitFor(() => expect(srv.isRunning).toBe(false));
     // ...and the 5-minute timer is gone, not merely orphaned.
     expect((srv as unknown as { timeoutId: unknown }).timeoutId).toBeNull();
     await expect(
@@ -189,8 +188,7 @@ describe("CallbackServer terminal-branch cleanup (code review Low O2)", () => {
     await fetch(`http://127.0.0.1:${port}/oauth/callback?code=x&state=st-evil`);
     await expect(pending).rejects.toMatchObject({ code: ErrorCode.OAUTH_INVALID_STATE });
 
-    await new Promise((r) => setTimeout(r, 50));
-    expect(srv.isRunning).toBe(false);
+    await vi.waitFor(() => expect(srv.isRunning).toBe(false));
     expect((srv as unknown as { timeoutId: unknown }).timeoutId).toBeNull();
   });
 

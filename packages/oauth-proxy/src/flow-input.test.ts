@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { ErrorCode, OAuthGrantType, VaultError } from "@harpoc/shared";
+import { ErrorCode, OAuthGrantType } from "@harpoc/shared";
 import type { StartOAuthFlowInput } from "@harpoc/shared";
 import { providerConfigFromFlowInput } from "./flow-input.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 function baseInput(overrides: Partial<StartOAuthFlowInput> = {}): StartOAuthFlowInput {
   return {
@@ -11,16 +12,6 @@ function baseInput(overrides: Partial<StartOAuthFlowInput> = {}): StartOAuthFlow
     client_id: "client-1",
     ...overrides,
   };
-}
-
-function captureVaultError(fn: () => unknown): VaultError {
-  try {
-    fn();
-  } catch (err) {
-    if (err instanceof VaultError) return err;
-    throw err;
-  }
-  throw new Error("expected providerConfigFromFlowInput to throw a VaultError");
 }
 
 describe("providerConfigFromFlowInput", () => {
@@ -69,26 +60,28 @@ describe("providerConfigFromFlowInput", () => {
     expect(config.device_authorization_endpoint).toBe("https://ghe.example.com/login/device/code");
   });
 
-  it("rejects a custom provider without a token endpoint", () => {
-    const err = captureVaultError(() =>
-      providerConfigFromFlowInput(
-        baseInput({ provider: "custom", grant_type: OAuthGrantType.CLIENT_CREDENTIALS }),
-      ),
+  it("rejects a custom provider without a token endpoint", async () => {
+    const err = await expectVaultError(
+      () =>
+        providerConfigFromFlowInput(
+          baseInput({ provider: "custom", grant_type: OAuthGrantType.CLIENT_CREDENTIALS }),
+        ),
+      ErrorCode.SCHEMA_VALIDATION_ERROR,
     );
-    expect(err.code).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
     expect(err.message).toBe('token_endpoint is required for provider "custom"');
   });
 
-  it("rejects an authorization_code custom config without an auth endpoint", () => {
-    const err = captureVaultError(() =>
-      providerConfigFromFlowInput(
-        baseInput({
-          provider: "custom",
-          token_endpoint: "https://auth.example.com/token",
-        }),
-      ),
+  it("rejects an authorization_code custom config without an auth endpoint", async () => {
+    const err = await expectVaultError(
+      () =>
+        providerConfigFromFlowInput(
+          baseInput({
+            provider: "custom",
+            token_endpoint: "https://auth.example.com/token",
+          }),
+        ),
+      ErrorCode.SCHEMA_VALIDATION_ERROR,
     );
-    expect(err.code).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
     expect(err.message).toBe(
       "auth_endpoint: auth_endpoint is required for authorization_code grant type",
     );

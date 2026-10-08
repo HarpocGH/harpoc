@@ -2,6 +2,7 @@ import type { Agent } from "@harpoc/shared";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../api/client";
+import { makeAgent } from "../__fixtures__/builders";
 import { AgentsPage } from "./agents";
 
 afterEach(cleanup);
@@ -9,20 +10,8 @@ beforeEach(() => {
   window.location.hash = "";
 });
 
-const agent = (over: Partial<Agent> = {}): Agent => ({
-  id: "id-1",
-  name: "ci-bot",
-  description: "CI runner",
-  owner: "platform",
-  status: "active",
-  created_at: 0,
-  updated_at: 0,
-  deactivated_at: null,
-  last_active_at: 1700000000000,
-  active_tokens: 2,
-  grants: 3,
-  ...over,
-});
+const agent = (over: Partial<Agent> = {}): Agent =>
+  makeAgent({ last_active_at: 1700000000000, grants: 3, ...over });
 
 const api = (over: Partial<ApiClient> = {}): ApiClient =>
   ({

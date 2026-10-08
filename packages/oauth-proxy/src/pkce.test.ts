@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { generateCodeChallenge, generateCodeVerifier } from "./pkce.js";
 
@@ -40,11 +39,10 @@ describe("generateCodeChallenge", () => {
     expect(c1).not.toBe(c2);
   });
 
-  it("matches manual SHA-256 + base64url computation", () => {
-    const verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-    const expected = createHash("sha256").update(verifier).digest("base64url");
-    const challenge = generateCodeChallenge(verifier);
-    expect(challenge).toBe(expected);
+  it("matches RFC 7636 Appendix B's S256 example", () => {
+    expect(generateCodeChallenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")).toBe(
+      "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+    );
   });
 
   it("does not contain padding characters", () => {

@@ -5,9 +5,17 @@ import { generateCertKeyPair } from "./key-pair.js";
 describe("generateCertKeyPair", () => {
   it("generates RSA 2048 PEM pairs", () => {
     const { privateKeyPem, publicKeyPem } = generateCertKeyPair({ algorithm: "rsa" });
+    expect(privateKeyPem).toMatch(/^-----BEGIN PRIVATE KEY-----\n/);
+    expect(publicKeyPem).toMatch(/^-----BEGIN PUBLIC KEY-----\n/);
     const key = createPrivateKey(privateKeyPem);
     expect(key.asymmetricKeyType).toBe("rsa");
-    expect(createPublicKey(publicKeyPem).asymmetricKeyType).toBe("rsa");
+    expect(key.asymmetricKeyDetails?.modulusLength).toBe(2048);
+    expect(createPublicKey(publicKeyPem).asymmetricKeyDetails?.modulusLength).toBe(2048);
+  });
+
+  it("generates RSA 4096 on request", () => {
+    const { privateKeyPem } = generateCertKeyPair({ algorithm: "rsa", modulusLength: 4096 });
+    expect(createPrivateKey(privateKeyPem).asymmetricKeyDetails?.modulusLength).toBe(4096);
   });
   it("generates EC P-256 by default and P-384 on request", () => {
     expect(

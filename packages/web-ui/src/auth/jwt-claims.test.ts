@@ -1,11 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { b64url, unsignedJwt } from "../__fixtures__/builders";
 import { decodeJwtClaims } from "./jwt-claims";
 
-const b64url = (text: string): string =>
-  btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-
-const jwt = (payload: unknown): string =>
-  `${b64url('{"alg":"HS256","typ":"JWT"}')}.${b64url(JSON.stringify(payload))}.signature`;
+const jwt = unsignedJwt;
 
 describe("decodeJwtClaims", () => {
   it("reads jti, sub, exp and principal_type off a three-segment token", () => {

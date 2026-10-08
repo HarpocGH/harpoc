@@ -2,6 +2,7 @@ import type { IssuedToken } from "@harpoc/shared";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../api/client";
+import { makeToken, unsignedJwt } from "../__fixtures__/builders";
 import { setToken } from "../auth/token-store";
 import { TokensPage } from "./tokens";
 
@@ -16,21 +17,14 @@ beforeEach(() => {
 
 const HOUR = 3_600_000;
 
-const token = (over: Partial<IssuedToken> = {}): IssuedToken => ({
-  jti: "jti-1",
-  subject: "ci-bot",
-  principal_type: "agent",
-  agent: "ci-bot",
-  scope: ["read", "use"],
-  project: "myproj",
-  secrets: ["db-*"],
-  label: "deploy",
-  issued_at: 1700000000000,
-  expires_at: Date.now() + 3 * HOUR,
-  revoked_at: null,
-  status: "active",
-  ...over,
-});
+const token = (over: Partial<IssuedToken> = {}): IssuedToken =>
+  makeToken({
+    project: "myproj",
+    secrets: ["db-*"],
+    issued_at: 1700000000000,
+    expires_at: Date.now() + 3 * HOUR,
+    ...over,
+  });
 
 const api = (over: Partial<ApiClient> = {}): ApiClient =>
   ({
@@ -39,12 +33,8 @@ const api = (over: Partial<ApiClient> = {}): ApiClient =>
     ...over,
   }) as ApiClient;
 
-const b64url = (text: string): string =>
-  btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-
 /** A session JWT carrying `jti` — payload only; nothing here verifies it. */
-const sessionJwt = (jti: string): string =>
-  `${b64url('{"alg":"HS256"}')}.${b64url(JSON.stringify({ jti, sub: "web-ui" }))}.sig`;
+const sessionJwt = (jti: string): string => unsignedJwt({ jti, sub: "web-ui" });
 
 const href = (selector: string): string | undefined =>
   document.querySelector<HTMLAnchorElement>(selector)?.getAttribute("href") ?? undefined;

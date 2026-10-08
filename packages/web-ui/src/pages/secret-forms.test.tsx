@@ -7,6 +7,22 @@ import { CreateSecretForm, DeleteForm, PolicyEditor, RotateForm } from "./secret
 
 afterEach(cleanup);
 
+/** The text is in neither the DOM (attributes included) nor web storage. */
+function expectNotExposed(...texts: string[]): void {
+  const stored = [window.sessionStorage, window.localStorage]
+    .flatMap((store) =>
+      Array.from({ length: store.length }, (_, i) => {
+        const key = store.key(i);
+        return key === null ? "" : `${key}=${store.getItem(key) ?? ""}`;
+      }),
+    )
+    .join("\n");
+  for (const text of texts) {
+    expect(document.body.innerHTML).not.toContain(text);
+    expect(stored).not.toContain(text);
+  }
+}
+
 /** What the create route answers (201) — not a SecretInfo. */
 const created = { handle: "secret://n1", status: "created", message: "Secret created" };
 
@@ -29,8 +45,7 @@ describe("CreateSecretForm", () => {
     // The wire takes base64, and the plaintext must not reach the request at all.
     expect(body["value"]).toBe("czNjcmV0LWJ5dGVz");
     await waitFor(() => expect(valueInput().value).toBe(""));
-    expect(document.body.textContent).not.toContain("s3cret-bytes");
-    expect(document.body.textContent).not.toContain("czNjcmV0LWJ5dGVz");
+    expectNotExposed("s3cret-bytes", "czNjcmV0LWJ5dGVz");
     expect(onDone).toHaveBeenCalled();
   });
 
@@ -97,7 +112,7 @@ describe("CreateSecretForm", () => {
     // aside rather than displaying (and mangling) it.
     expect(valueInput().value).toBe("");
     expect(valueInput().disabled).toBe(true);
-    expect(document.body.textContent).not.toContain("BEGIN KEY");
+    expectNotExposed("BEGIN KEY");
 
     fireEvent.input(screen.getByLabelText(/Name/), { target: { value: "n1" } });
     fireEvent.submit(screen.getByRole("button", { name: "Create secret" }));
@@ -141,7 +156,7 @@ describe("CreateSecretForm", () => {
     await waitFor(() => expect(screen.getByText("Invalid name")).toBeTruthy());
     expect(document.querySelector(".error-text")?.textContent).toBe("Invalid name");
     expect(onDone).not.toHaveBeenCalled();
-    expect(document.body.textContent).not.toContain("s3cret-bytes");
+    expectNotExposed("s3cret-bytes");
   });
 });
 
@@ -163,7 +178,7 @@ describe("RotateForm", () => {
     // base64-validated schema the create route uses.
     await waitFor(() => expect(rotate).toHaveBeenCalledWith("k1", "djItYnl0ZXM="));
     await waitFor(() => expect(newValue().value).toBe(""));
-    expect(document.body.textContent).not.toContain("v2-bytes");
+    expectNotExposed("v2-bytes");
     expect(newValue().type).toBe("password");
     expect(newValue().getAttribute("autocomplete")).toBe("off");
   });
@@ -258,7 +273,7 @@ describe("DeleteForm", () => {
   });
 
   it("renders the refusal", async () => {
-    const del = vi.fn().mockRejectedValue(new ApiError(409, "SECRET_REVOKED", "already revoked"));
+    const del = vi.fn().mockRejectedValue(new ApiError(410, "SECRET_REVOKED", "already revoked"));
     render(
       <DeleteForm
         api={{ deleteSecret: del } as unknown as ApiClient}
@@ -481,7 +496,7 @@ describe("PolicyEditor", () => {
     const put = vi
       .fn()
       .mockRejectedValue(
-        new ApiError(403, "INTERPRETER_NOT_ACKNOWLEDGED", "sh is a known interpreter"),
+        new ApiError(400, "INTERPRETER_NOT_ACKNOWLEDGED", "sh is a known interpreter"),
       );
     render(
       <PolicyEditor

@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { ErrorCode, OAuthGrantType, VaultError } from "@harpoc/shared";
+import type { Mock } from "vitest";
+import { ErrorCode, OAuthGrantType } from "@harpoc/shared";
 import type { CallerContext, StartOAuthFlowInput } from "@harpoc/shared";
 import type { OAuthManager } from "./oauth-manager.js";
 import { PENDING_AUTHORIZATION_MESSAGE, startOAuthFlowResult } from "./start-flow-result.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 function baseInput(overrides: Partial<StartOAuthFlowInput> = {}): StartOAuthFlowInput {
   return {
@@ -20,7 +22,7 @@ function stubManager(): {
   manager: OAuthManager;
   fns: Record<
     "startAuthorizationCodeDeferred" | "startDeviceCode" | "startClientCredentials",
-    ReturnType<typeof vi.fn>
+    Mock
   >;
 } {
   const fns = {
@@ -42,6 +44,7 @@ function stubManager(): {
       handle: "secret://gh-token",
       status: "authorized",
       message: "Token acquired and stored",
+      secretId: "sid-1",
     }),
   };
   return { manager: fns as unknown as OAuthManager, fns };
@@ -109,12 +112,11 @@ describe("startOAuthFlowResult", () => {
 
   it("client_credentials without a client_secret is refused before the manager is called", async () => {
     const { manager, fns } = stubManager();
-    await expect(
-      startOAuthFlowResult(manager, baseInput({ grant_type: OAuthGrantType.CLIENT_CREDENTIALS })),
-    ).rejects.toMatchObject({ code: ErrorCode.SCHEMA_VALIDATION_ERROR });
-    await expect(
-      startOAuthFlowResult(manager, baseInput({ grant_type: OAuthGrantType.CLIENT_CREDENTIALS })),
-    ).rejects.toBeInstanceOf(VaultError);
+    await expectVaultError(
+      () =>
+        startOAuthFlowResult(manager, baseInput({ grant_type: OAuthGrantType.CLIENT_CREDENTIALS })),
+      ErrorCode.SCHEMA_VALIDATION_ERROR,
+    );
     expect(fns.startClientCredentials).not.toHaveBeenCalled();
   });
 

@@ -209,7 +209,7 @@ export function createApiClient(
     const body = (await res.json().catch(() => null)) as
       ({ data?: T; error?: string; message?: string } & Record<string, unknown>) | null;
     if (!res.ok) {
-      // Keyed on the error code, not the 423: the status is shared with other
+      // Keyed on the error code, not the 503: the status is shared with other
       // refusals, the code is not.
       if (res.status === 401) onUnauthorized?.();
       if (body?.error === "VAULT_LOCKED") onSealed?.();

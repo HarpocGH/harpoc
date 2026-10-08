@@ -163,7 +163,7 @@ describe("App shell", () => {
     render(
       <App
         api={fakeApi({
-          health: vi.fn().mockRejectedValue(new ApiError(401, "UNAUTHORIZED", "nope")),
+          health: vi.fn().mockRejectedValue(new ApiError(401, "INVALID_TOKEN", "nope")),
         })}
       />,
     );
@@ -176,7 +176,9 @@ describe("App shell", () => {
     setToken("t");
     render(
       <App
-        api={fakeApi({ health: vi.fn().mockRejectedValue(new ApiError(500, "INTERNAL", "boom")) })}
+        api={fakeApi({
+          health: vi.fn().mockRejectedValue(new ApiError(500, "INTERNAL_ERROR", "boom")),
+        })}
       />,
     );
     await waitFor(() => expect(screen.getByRole("heading", { name: "Dashboard" })).toBeTruthy());
@@ -257,7 +259,7 @@ describe("App session signals", () => {
     setToken("stale");
     vi.stubGlobal(
       "fetch",
-      vi.fn(() => Promise.resolve(jsonResponse(401, { error: "UNAUTHORIZED", message: "no" }))),
+      vi.fn(() => Promise.resolve(jsonResponse(401, { error: "INVALID_TOKEN", message: "no" }))),
     );
     render(<App />);
     await waitFor(() => expect(screen.getByText("Sign in")).toBeTruthy());
@@ -273,7 +275,7 @@ describe("App session signals", () => {
       routeFetch(() => {
         calls += 1;
         return calls === 1
-          ? jsonResponse(401, { error: "UNAUTHORIZED", message: "no" })
+          ? jsonResponse(401, { error: "INVALID_TOKEN", message: "no" })
           : jsonResponse(200, HEALTHY);
       }, seen),
     );
@@ -301,7 +303,7 @@ describe("App session signals", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(() =>
-        Promise.resolve(jsonResponse(423, { error: "VAULT_LOCKED", message: "Vault is locked" })),
+        Promise.resolve(jsonResponse(503, { error: "VAULT_LOCKED", message: "Vault is locked" })),
       ),
     );
     render(<App />);
@@ -315,7 +317,7 @@ describe("App session signals", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(() =>
-        Promise.resolve(jsonResponse(423, { error: "VAULT_LOCKED", message: "Vault is locked" })),
+        Promise.resolve(jsonResponse(503, { error: "VAULT_LOCKED", message: "Vault is locked" })),
       ),
     );
     render(<App />);
@@ -325,18 +327,18 @@ describe("App session signals", () => {
     expect(getToken()).toBe("keep-me");
   });
 
-  it("leaves the sealed takeover when a new token is adopted and the vault answers", async () => {
+  it("a fresh shell signs in after the vault was unlocked", async () => {
     let locked = true;
     vi.stubGlobal(
       "fetch",
       routeFetch(() =>
         locked
-          ? jsonResponse(423, { error: "VAULT_LOCKED", message: "Vault is locked" })
+          ? jsonResponse(503, { error: "VAULT_LOCKED", message: "Vault is locked" })
           : jsonResponse(200, HEALTHY),
       ),
     );
     setToken("t");
-    const { container } = render(<App />);
+    render(<App />);
     await waitFor(() => expect(screen.getByText(/harpoc unlock/)).toBeTruthy());
 
     locked = false;
@@ -344,7 +346,7 @@ describe("App session signals", () => {
     cleanup();
     const second = render(<App />);
     fireEvent.input(second.getByLabelText("API token"), { target: { value: "after.unlock" } });
-    const form = second.container.querySelector("form") ?? container.querySelector("form");
+    const form = second.container.querySelector("form");
     if (form === null) throw new Error("sign-in form missing");
     fireEvent.submit(form);
     await waitFor(() => expect(screen.getByText("UNLOCKED")).toBeTruthy());

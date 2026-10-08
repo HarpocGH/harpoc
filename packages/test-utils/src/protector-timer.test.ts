@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { protectorTimer } from "./protector-timer.js";
 
 /** A protector whose protect reverses the bytes and whose unprotect reverses them back. */
@@ -57,21 +57,35 @@ describe("protectorTimer (D3, 2026-09-08)", () => {
   });
 
   it("slowestMs is the slowest call so far, a failed call included", async () => {
-    const timer = protectorTimer("t");
-    const slow = timer.wrap({
-      ...reversing("fake"),
-      protect: () =>
-        new Promise<Uint8Array>((resolve) => setTimeout(() => resolve(Uint8Array.from([1])), 30)),
-      unprotect: () =>
-        new Promise<Uint8Array>((_, reject) =>
-          setTimeout(() => reject(new Error("slow fail")), 60),
-        ),
-    });
-    await slow.protect(Uint8Array.from([1]));
-    const afterProtect = timer.slowestMs();
-    expect(afterProtect).toBeGreaterThanOrEqual(25);
-    await expect(slow.unprotect(Uint8Array.from([1]))).rejects.toThrow("slow fail");
-    expect(timer.slowestMs()).toBeGreaterThanOrEqual(55);
-    expect(timer.slowestMs()).toBeGreaterThanOrEqual(afterProtect);
+    vi.useFakeTimers();
+    try {
+      const timer = protectorTimer("t");
+      const slow = timer.wrap({
+        ...reversing("fake"),
+        protect: () =>
+          new Promise<Uint8Array>((resolve) => setTimeout(() => resolve(Uint8Array.from([1])), 30)),
+        unprotect: () =>
+          new Promise<Uint8Array>((_, reject) =>
+            setTimeout(() => reject(new Error("slow fail")), 60),
+          ),
+      });
+      const first = slow.protect(Uint8Array.from([1]));
+      await vi.advanceTimersByTimeAsync(30);
+      await first;
+      expect(timer.slowestMs()).toBe(30);
+      const second = expect(slow.unprotect(Uint8Array.from([1]))).rejects.toThrow("slow fail");
+      await vi.advanceTimersByTimeAsync(60);
+      await second;
+      expect(timer.slowestMs()).toBe(60);
+      const third = slow.protect(Uint8Array.from([1]));
+      await vi.advanceTimersByTimeAsync(30);
+      await third;
+      expect(timer.slowestMs()).toBe(60);
+      expect(timer.report()).toBe(
+        "[t] protect=30ms (ok), unprotect=60ms (slow fail), protect=30ms (ok)",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

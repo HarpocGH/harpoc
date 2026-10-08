@@ -1,16 +1,21 @@
-import { createServer } from "node:http";
-import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MockInstance } from "vitest";
-import { ErrorCode, VaultError } from "@harpoc/shared";
-import type { CallerContext, OAuthProviderConfig } from "@harpoc/shared";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ErrorCode } from "@harpoc/shared";
+import type { CallerContext } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
-import { CallbackServer } from "./callback-server.js";
-import { DEFAULT_MAX_PENDING_AUTHORIZATIONS, OAuthManager } from "./oauth-manager.js";
-import type { OAuthManagerOptions } from "./oauth-manager.js";
+import { OAuthManager } from "./oauth-manager.js";
+import {
+  authCodeConfig,
+  clientCredentialsConfig,
+  defaultTokenHandler,
+  deviceCodeConfig,
+  fakeEngineManager,
+  makeFakeEngine,
+  useLoopbackEndpoints,
+} from "./__fixtures__/oauth-manager-fixtures.js";
+import type { Handler } from "./__fixtures__/oauth-manager-fixtures.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
 // Mock argon2 for speed (same approach as core tests)
@@ -27,98 +32,43 @@ vi.mock("argon2", () => ({
 
 let tempDir: string;
 let engine: VaultEngine;
-let tokenServer: Server;
-let tokenServerUrl: string;
-let tokenHandler: (req: IncomingMessage, res: ServerResponse) => void;
-let deviceServer: Server;
-let deviceServerUrl: string;
-let deviceHandler: (req: IncomingMessage, res: ServerResponse) => void;
+let tokenHandler: Handler;
+let deviceHandler: Handler;
+const endpoints = useLoopbackEndpoints(
+  () => tokenHandler,
+  () => deviceHandler,
+);
+const makeClientCredentialsConfig = () => clientCredentialsConfig(endpoints.tokenUrl());
+const makeAuthCodeConfig = () => authCodeConfig(endpoints.tokenUrl());
+const makeDeviceCodeConfig = () => deviceCodeConfig(endpoints.tokenUrl(), endpoints.deviceUrl());
 
-beforeAll(async () => {
-  tokenServer = createServer((req, res) => {
-    tokenHandler(req, res);
-  });
-  await new Promise<void>((resolve) => {
-    tokenServer.listen(0, "127.0.0.1", () => resolve());
-  });
-  const tokenAddr = tokenServer.address() as { port: number };
-  tokenServerUrl = `http://127.0.0.1:${tokenAddr.port}`;
-
-  deviceServer = createServer((req, res) => {
-    deviceHandler(req, res);
-  });
-  await new Promise<void>((resolve) => {
-    deviceServer.listen(0, "127.0.0.1", () => resolve());
-  });
-  const deviceAddr = deviceServer.address() as { port: number };
-  deviceServerUrl = `http://127.0.0.1:${deviceAddr.port}`;
+beforeEach(() => {
+  tokenHandler = defaultTokenHandler;
 });
 
-afterAll(() => {
-  tokenServer.close();
-  deviceServer.close();
-});
-
-beforeEach(async () => {
-  tempDir = join(tmpdir(), `harpoc-oauth-mgr-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(tempDir, { recursive: true });
-  engine = new VaultEngine({
-    dbPath: join(tempDir, "test.vault.db"),
-    sessionPath: join(tempDir, "session.json"),
-  });
-  await engine.initVault("password");
-
-  // Default token handler
-  tokenHandler = (_req, res) => {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        access_token: "mgr-access-token",
-        refresh_token: "mgr-refresh-token",
-        expires_in: 3600,
-      }),
+function useRealEngine(): void {
+  beforeEach(async () => {
+    tempDir = join(
+      tmpdir(),
+      `harpoc-oauth-mgr-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     );
-  };
-});
+    mkdirSync(tempDir, { recursive: true });
+    engine = new VaultEngine({
+      dbPath: join(tempDir, "test.vault.db"),
+      sessionPath: join(tempDir, "session.json"),
+    });
+    await engine.initVault("password");
+  });
 
-afterEach(async () => {
-  await engine.destroy();
-  rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-});
-
-function makeClientCredentialsConfig(): OAuthProviderConfig {
-  return {
-    provider: "custom",
-    grant_type: "client_credentials",
-    token_endpoint: tokenServerUrl,
-    client_id: "cc-client",
-    client_secret: "cc-secret",
-    scopes: ["api.read"],
-  };
-}
-
-function makeAuthCodeConfig(): OAuthProviderConfig {
-  return {
-    provider: "custom",
-    grant_type: "authorization_code",
-    token_endpoint: tokenServerUrl,
-    auth_endpoint: "https://example.com/auth",
-    client_id: "auth-code-client",
-    client_secret: "auth-code-secret",
-  };
-}
-
-function makeDeviceCodeConfig(): OAuthProviderConfig {
-  return {
-    provider: "custom",
-    grant_type: "device_code",
-    token_endpoint: tokenServerUrl,
-    device_authorization_endpoint: deviceServerUrl,
-    client_id: "device-client",
-  };
+  afterEach(async () => {
+    await engine.destroy();
+    rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
 }
 
 describe("B26: client_secret_basic with no client secret is refused at flow start", () => {
+  useRealEngine();
+
   const MESSAGE =
     "client_secret_basic requires a client secret: the method sends the client credentials in an Authorization header, which a public client cannot form — supply the secret, or choose client_secret_post (the default) for a public client";
 
@@ -205,6 +155,8 @@ describe("B26: client_secret_basic with no client secret is refused at flow star
 });
 
 describe("OAuthManager.startClientCredentials", () => {
+  useRealEngine();
+
   it("completes client_credentials flow end-to-end", async () => {
     const manager = new OAuthManager(engine);
     const result = await manager.startClientCredentials("cc-secret", makeClientCredentialsConfig());
@@ -228,6 +180,7 @@ describe("OAuthManager.startClientCredentials", () => {
     await expect(
       manager.startClientCredentials("fail-cc", makeClientCredentialsConfig()),
     ).rejects.toMatchObject({ code: ErrorCode.OAUTH_TOKEN_EXCHANGE_FAILED });
+    expect((await engine.getSecretInfo("secret://fail-cc")).status).toBe("pending");
   });
 
   it("creates secret in project", async () => {
@@ -243,6 +196,8 @@ describe("OAuthManager.startClientCredentials", () => {
 });
 
 describe("OAuthManager.startAuthorizationCode", () => {
+  useRealEngine();
+
   it("creates secret and opens browser (mocked)", async () => {
     let openedUrl = "";
     const manager = new OAuthManager(engine, {
@@ -255,8 +210,6 @@ describe("OAuthManager.startAuthorizationCode", () => {
         const state = authUrl.searchParams.get("state");
         const redirectUri = authUrl.searchParams.get("redirect_uri");
         if (state && redirectUri) {
-          // Give the callback server time to start listening
-          await new Promise((r) => setTimeout(r, 50));
           await fetch(`${redirectUri}?code=auth-code-123&state=${state}`);
         }
       },
@@ -286,7 +239,6 @@ describe("OAuthManager.startAuthorizationCode", () => {
         const state = authUrl.searchParams.get("state");
         const redirectUri = authUrl.searchParams.get("redirect_uri");
         if (state && redirectUri) {
-          await new Promise((r) => setTimeout(r, 50));
           await fetch(`${redirectUri}?code=bad-code&state=${state}`);
         }
       },
@@ -295,6 +247,7 @@ describe("OAuthManager.startAuthorizationCode", () => {
     await expect(
       manager.startAuthorizationCode("fail-auth", makeAuthCodeConfig()),
     ).rejects.toMatchObject({ code: ErrorCode.OAUTH_TOKEN_EXCHANGE_FAILED });
+    expect((await engine.getSecretInfo("secret://fail-auth")).status).toBe("pending");
   });
 
   it("handles callback timeout", async () => {
@@ -309,10 +262,13 @@ describe("OAuthManager.startAuthorizationCode", () => {
     await expect(
       manager.startAuthorizationCode("timeout-auth", makeAuthCodeConfig()),
     ).rejects.toMatchObject({ code: ErrorCode.OAUTH_CALLBACK_TIMEOUT });
+    expect((await engine.getSecretInfo("secret://timeout-auth")).status).toBe("pending");
   });
 });
 
 describe("OAuthManager.startDeviceCode", () => {
+  useRealEngine();
+
   it("returns pending_authorization with user code", async () => {
     deviceHandler = (_req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -352,6 +308,8 @@ describe("OAuthManager.startDeviceCode", () => {
 });
 
 describe("OAuthManager device-code background poll lifecycle (code review Low O3)", () => {
+  useRealEngine();
+
   function pendingDeviceHandlers(): { tokenHits: () => number; release: () => void } {
     let hits = 0;
     let released = false;
@@ -510,22 +468,6 @@ describe("OAuthManager device-code background poll lifecycle (code review Low O3
 // ---------------------------------------------------------------------------
 // Deferred authorization-code start (D9) + caller threading
 // ---------------------------------------------------------------------------
-
-interface FakeEngine {
-  createOAuthSecret: ReturnType<typeof vi.fn>;
-  completeOAuthFlow: ReturnType<typeof vi.fn>;
-}
-
-function makeFakeEngine(): FakeEngine {
-  return {
-    createOAuthSecret: vi.fn(async () => ({ handle: "secret://gh", secretId: "sid-1" })),
-    completeOAuthFlow: vi.fn(async () => undefined),
-  };
-}
-
-function fakeEngineManager(fake: FakeEngine, options?: OAuthManagerOptions): OAuthManager {
-  return new OAuthManager(fake as unknown as VaultEngine, options);
-}
 
 describe("OAuthManager.startAuthorizationCodeDeferred", () => {
   it("resolves before any callback, with the auth URL bound to the live callback port", async () => {
@@ -703,1070 +645,6 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
       expect(unhandled).not.toHaveBeenCalled();
     } finally {
       process.off("unhandledRejection", unhandled);
-    }
-  });
-
-  it("a restart for the same secret supersedes the first flow and keeps the second cancellable", async () => {
-    const fake = makeFakeEngine();
-    const errors: unknown[] = [];
-    const manager = fakeEngineManager(fake, {
-      callbackPort: 0,
-      onBackgroundFlowError: (_secretId, err) => {
-        errors.push(err);
-      },
-    });
-
-    // Same name: createOAuthSecret resumes the PENDING secret and returns the
-    // SAME secretId, so both starts land on one pendingFlows key.
-    const first = await manager.startAuthorizationCodeDeferred("gh", makeAuthCodeConfig());
-    const firstPort = new URL(new URL(first.authUrl).searchParams.get("redirect_uri") as string)
-      .port;
-    const second = await manager.startAuthorizationCodeDeferred("gh", makeAuthCodeConfig());
-    const secondPort = new URL(new URL(second.authUrl).searchParams.get("redirect_uri") as string)
-      .port;
-    expect(second.secretId).toBe(first.secretId);
-    expect(secondPort).not.toBe(firstPort);
-
-    // The superseded flow is aborted, not reported as a background failure...
-    await expect(first.completion).rejects.toBeDefined();
-    expect(errors).toHaveLength(0);
-    // ...and its callback server is gone, so its redirect can no longer be
-    // exchanged behind the caller's back.
-    await vi.waitFor(async () => {
-      await expect(fetch(`http://127.0.0.1:${firstPort}/not-the-callback`)).rejects.toThrow();
-    });
-
-    // The survivor is still live and still cancellable (the superseded flow's
-    // cleanup must not delete the successor's registration).
-    const probe = await fetch(`http://127.0.0.1:${secondPort}/not-the-callback`);
-    expect(probe.status).toBe(404);
-    expect(manager.cancelFlow(second.secretId)).toBe(true);
-    await expect(second.completion).rejects.toBeDefined();
-
-    expect(errors).toHaveLength(0);
-    expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
-  });
-
-  it("a predecessor whose token exchange is in flight when a restart re-inserts the row never stores its tokens", async () => {
-    // A token endpoint the test holds: the first flow's exchange parks here
-    // while the second start re-inserts the row and binds.
-    let exchangeParked = false;
-    let releaseExchange: () => void = () => undefined;
-    const held = createServer((_req, res) => {
-      releaseExchange = () => {
-        releaseExchange = () => undefined;
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            access_token: "old-flow-token",
-            token_type: "bearer",
-            expires_in: 3600,
-          }),
-        );
-      };
-      exchangeParked = true;
-    });
-    await new Promise<void>((resolve) => held.listen(0, "127.0.0.1", () => resolve()));
-    const heldUrl = `http://127.0.0.1:${(held.address() as { port: number }).port}`;
-    try {
-      const fake = makeFakeEngine();
-      const errors: unknown[] = [];
-      const manager = fakeEngineManager(fake, {
-        callbackPort: 0,
-        onBackgroundFlowError: (_secretId, err) => {
-          errors.push(err);
-        },
-      });
-
-      const first = await manager.startAuthorizationCodeDeferred("gh", {
-        ...makeAuthCodeConfig(),
-        token_endpoint: heldUrl,
-      });
-      const firstRedirect = new URL(
-        new URL(first.authUrl).searchParams.get("redirect_uri") as string,
-      );
-      const state = new URL(first.authUrl).searchParams.get("state") as string;
-      firstRedirect.searchParams.set("code", "old-code");
-      firstRedirect.searchParams.set("state", state);
-      await fetch(firstRedirect);
-      await vi.waitFor(() => expect(exchangeParked).toBe(true));
-
-      const second = await manager.startAuthorizationCodeDeferred("gh", makeAuthCodeConfig());
-      expect(second.secretId).toBe(first.secretId);
-      releaseExchange();
-
-      await expect(first.completion).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-      expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
-      expect(errors).toHaveLength(0);
-      expect(manager.cancelFlow(second.secretId)).toBe(true);
-      await expect(second.completion).rejects.toBeDefined();
-    } finally {
-      releaseExchange();
-      held.closeAllConnections();
-      await new Promise<void>((resolve) => held.close(() => resolve()));
-    }
-  });
-
-  it("two concurrent client-credentials starts for one name: the first never stores, the second does (P1bF-1)", async () => {
-    let exchangeParked = false;
-    let releaseExchange: () => void = () => undefined;
-    const held = createServer((_req, res) => {
-      releaseExchange = () => {
-        releaseExchange = () => undefined;
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            access_token: "old-flow-token",
-            token_type: "bearer",
-            expires_in: 3600,
-          }),
-        );
-      };
-      exchangeParked = true;
-    });
-    await new Promise<void>((resolve) => held.listen(0, "127.0.0.1", () => resolve()));
-    const heldUrl = `http://127.0.0.1:${(held.address() as { port: number }).port}`;
-    try {
-      const fake = makeFakeEngine();
-      const manager = fakeEngineManager(fake, {});
-      const first = manager.startClientCredentials("gh", {
-        ...makeClientCredentialsConfig(),
-        token_endpoint: heldUrl,
-      });
-      first.catch(() => undefined);
-      await vi.waitFor(() => expect(exchangeParked).toBe(true));
-
-      const second = await manager.startClientCredentials("gh", makeClientCredentialsConfig());
-      expect(second.status).toBe("authorized");
-      releaseExchange();
-
-      await expect(first).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-      expect(fake.completeOAuthFlow).toHaveBeenCalledTimes(1);
-      expect(fake.completeOAuthFlow.mock.calls[0]?.[1]).not.toBe("old-flow-token");
-    } finally {
-      releaseExchange();
-      held.closeAllConnections();
-      await new Promise<void>((resolve) => held.close(() => resolve()));
-    }
-  });
-
-  it("a client-credentials restart over a parked authorization-code exchange supersedes it (P1bF-1)", async () => {
-    let exchangeParked = false;
-    let releaseExchange: () => void = () => undefined;
-    const held = createServer((_req, res) => {
-      releaseExchange = () => {
-        releaseExchange = () => undefined;
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            access_token: "old-flow-token",
-            token_type: "bearer",
-            expires_in: 3600,
-          }),
-        );
-      };
-      exchangeParked = true;
-    });
-    await new Promise<void>((resolve) => held.listen(0, "127.0.0.1", () => resolve()));
-    const heldUrl = `http://127.0.0.1:${(held.address() as { port: number }).port}`;
-    try {
-      const fake = makeFakeEngine();
-      const errors: unknown[] = [];
-      const manager = fakeEngineManager(fake, {
-        callbackPort: 0,
-        onBackgroundFlowError: (_secretId, err) => {
-          errors.push(err);
-        },
-      });
-
-      const first = await manager.startAuthorizationCodeDeferred("gh", {
-        ...makeAuthCodeConfig(),
-        token_endpoint: heldUrl,
-      });
-      const firstRedirect = new URL(
-        new URL(first.authUrl).searchParams.get("redirect_uri") as string,
-      );
-      const state = new URL(first.authUrl).searchParams.get("state") as string;
-      firstRedirect.searchParams.set("code", "old-code");
-      firstRedirect.searchParams.set("state", state);
-      await fetch(firstRedirect);
-      await vi.waitFor(() => expect(exchangeParked).toBe(true));
-
-      const second = await manager.startClientCredentials("gh", makeClientCredentialsConfig());
-      expect(second.status).toBe("authorized");
-      releaseExchange();
-
-      await expect(first.completion).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-      expect(fake.completeOAuthFlow).toHaveBeenCalledTimes(1);
-      expect(errors).toHaveLength(0);
-    } finally {
-      releaseExchange();
-      held.closeAllConnections();
-      await new Promise<void>((resolve) => held.close(() => resolve()));
-    }
-  });
-
-  it("cancelFlow reaches a parked client-credentials exchange, which then never stores (P1bF-1)", async () => {
-    let exchangeParked = false;
-    let releaseExchange: () => void = () => undefined;
-    const held = createServer((_req, res) => {
-      releaseExchange = () => {
-        releaseExchange = () => undefined;
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            access_token: "old-flow-token",
-            token_type: "bearer",
-            expires_in: 3600,
-          }),
-        );
-      };
-      exchangeParked = true;
-    });
-    await new Promise<void>((resolve) => held.listen(0, "127.0.0.1", () => resolve()));
-    const heldUrl = `http://127.0.0.1:${(held.address() as { port: number }).port}`;
-    try {
-      const fake = makeFakeEngine();
-      const manager = fakeEngineManager(fake, {});
-      const first = manager.startClientCredentials("gh", {
-        ...makeClientCredentialsConfig(),
-        token_endpoint: heldUrl,
-      });
-      first.catch(() => undefined);
-      await vi.waitFor(() => expect(exchangeParked).toBe(true));
-      expect(manager.cancelFlow("sid-1")).toBe(true);
-      releaseExchange();
-      await expect(first).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-      expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
-    } finally {
-      releaseExchange();
-      held.closeAllConnections();
-      await new Promise<void>((resolve) => held.close(() => resolve()));
-    }
-  });
-
-  it("a device-code restart supersedes a parked client-credentials exchange before it aborts it — the exchange never stores (P1bF-1)", async () => {
-    let exchangeParked = false;
-    let releaseExchange: () => void = () => undefined;
-    const held = createServer((_req, res) => {
-      releaseExchange = () => {
-        releaseExchange = () => undefined;
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            access_token: "old-flow-token",
-            token_type: "bearer",
-            expires_in: 3600,
-          }),
-        );
-      };
-      exchangeParked = true;
-    });
-    await new Promise<void>((resolve) => held.listen(0, "127.0.0.1", () => resolve()));
-    const heldUrl = `http://127.0.0.1:${(held.address() as { port: number }).port}`;
-    let deviceParked = false;
-    let releaseDevice: () => void = () => undefined;
-    deviceHandler = (_req, res) => {
-      releaseDevice = () => {
-        releaseDevice = () => undefined;
-        res.writeHead(500);
-        res.end("Server error");
-      };
-      deviceParked = true;
-    };
-    try {
-      const fake = makeFakeEngine();
-      const manager = fakeEngineManager(fake, {});
-      const first = manager.startClientCredentials("gh", {
-        ...makeClientCredentialsConfig(),
-        token_endpoint: heldUrl,
-      });
-      first.catch(() => undefined);
-      await vi.waitFor(() => expect(exchangeParked).toBe(true));
-
-      const second = manager.startDeviceCode("gh", makeDeviceCodeConfig());
-      second.catch(() => undefined);
-      await vi.waitFor(() => expect(deviceParked).toBe(true));
-      releaseExchange();
-
-      await expect(first).rejects.toMatchObject({
-        code: ErrorCode.OAUTH_FLOW_FAILED,
-        message: "OAuth flow failed: OAuth flow superseded",
-      });
-      expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
-
-      releaseDevice();
-      await expect(second).rejects.toBeDefined();
-    } finally {
-      releaseExchange();
-      releaseDevice();
-      held.closeAllConnections();
-      await new Promise<void>((resolve) => held.close(() => resolve()));
-    }
-  });
-
-  it("a predecessor whose exchange lands while the restart is still binding settles as superseded, silently", async () => {
-    let exchangeParked = false;
-    let releaseExchange: () => void = () => undefined;
-    const held = createServer((_req, res) => {
-      releaseExchange = () => {
-        releaseExchange = () => undefined;
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ access_token: "old-flow-token", expires_in: 3600 }));
-      };
-      exchangeParked = true;
-    });
-    await new Promise<void>((resolve) => held.listen(0, "127.0.0.1", () => resolve()));
-    const heldUrl = `http://127.0.0.1:${(held.address() as { port: number }).port}`;
-    const fake = makeFakeEngine();
-    const errors: unknown[] = [];
-    const manager = fakeEngineManager(fake, {
-      callbackPort: 0,
-      onBackgroundFlowError: (_secretId, err) => {
-        errors.push(err);
-      },
-    });
-    let startSpy: MockInstance<CallbackServer["start"]> | undefined;
-    let releaseBind: () => void = () => undefined;
-    try {
-      const first = await manager.startAuthorizationCodeDeferred("gh", {
-        ...makeAuthCodeConfig(),
-        token_endpoint: heldUrl,
-      });
-      ({ startSpy, releaseBind } = gateCallbackServerStart());
-      const firstRedirect = new URL(
-        new URL(first.authUrl).searchParams.get("redirect_uri") as string,
-      );
-      firstRedirect.searchParams.set("code", "old-code");
-      firstRedirect.searchParams.set(
-        "state",
-        new URL(first.authUrl).searchParams.get("state") as string,
-      );
-      await fetch(firstRedirect);
-      await vi.waitFor(() => expect(exchangeParked).toBe(true));
-
-      // The re-insert has happened, the successor's bind has not: the
-      // predecessor is superseded but not yet aborted.
-      const second = manager.startAuthorizationCodeDeferred("gh", makeAuthCodeConfig());
-      await vi.waitFor(() => expect(startSpy).toHaveBeenCalledTimes(1));
-      releaseExchange();
-
-      await expect(first.completion).rejects.toMatchObject({
-        code: ErrorCode.OAUTH_FLOW_FAILED,
-        message: "OAuth flow failed: OAuth flow superseded",
-      });
-      expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
-      expect(errors).toHaveLength(0);
-
-      releaseBind();
-      const started = await second;
-      expect(manager.cancelFlow(started.secretId)).toBe(true);
-      await expect(started.completion).rejects.toBeDefined();
-    } finally {
-      startSpy?.mockRestore();
-      releaseBind();
-      releaseExchange();
-      held.closeAllConnections();
-      await new Promise<void>((resolve) => held.close(() => resolve()));
-    }
-  });
-
-  it("a device-code predecessor whose token poll is in flight when a restart re-inserts the row never stores its tokens", async () => {
-    let deviceStarts = 0;
-    deviceHandler = (_req, res) => {
-      deviceStarts += 1;
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({
-          device_code: `dc-${deviceStarts}`,
-          user_code: "USER-1",
-          verification_uri: "https://example.com/device",
-          // The first flow polls at once and parks; the second sleeps.
-          interval: deviceStarts === 1 ? 0 : 60,
-          expires_in: 600,
-        }),
-      );
-    };
-    let pollParked = false;
-    let releasePoll: () => void = () => undefined;
-    tokenHandler = (_req, res) => {
-      releasePoll = () => {
-        releasePoll = () => undefined;
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ access_token: "old-flow-token", expires_in: 3600 }));
-      };
-      pollParked = true;
-    };
-    try {
-      const fake = makeFakeEngine();
-      const errors: unknown[] = [];
-      const manager = fakeEngineManager(fake, {
-        onBackgroundFlowError: (_secretId, err) => {
-          errors.push(err);
-        },
-      });
-
-      const first = await manager.startDeviceCode("gh", makeDeviceCodeConfig());
-      await vi.waitFor(() => expect(pollParked).toBe(true));
-
-      await manager.startDeviceCode("gh", makeDeviceCodeConfig());
-      releasePoll();
-
-      await expect(first.completion).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-      expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
-      expect(errors).toHaveLength(0);
-      expect(manager.cancelFlow("sid-1")).toBe(true);
-    } finally {
-      releasePoll();
-    }
-  });
-
-  it("a device-code predecessor whose poll lands while the restart is still starting settles as superseded, silently", async () => {
-    let deviceStarts = 0;
-    let releaseDeviceStart: () => void = () => undefined;
-    deviceHandler = (_req, res) => {
-      deviceStarts += 1;
-      const answer = (interval: number): void => {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            device_code: `dc-${deviceStarts}`,
-            user_code: "USER-1",
-            verification_uri: "https://example.com/device",
-            interval,
-            expires_in: 600,
-          }),
-        );
-      };
-      if (deviceStarts === 1) {
-        answer(0);
-        return;
-      }
-      releaseDeviceStart = () => {
-        releaseDeviceStart = () => undefined;
-        answer(60);
-      };
-    };
-    let pollParked = false;
-    let releasePoll: () => void = () => undefined;
-    tokenHandler = (_req, res) => {
-      releasePoll = () => {
-        releasePoll = () => undefined;
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ access_token: "old-flow-token", expires_in: 3600 }));
-      };
-      pollParked = true;
-    };
-    try {
-      const fake = makeFakeEngine();
-      const errors: unknown[] = [];
-      const manager = fakeEngineManager(fake, {
-        onBackgroundFlowError: (_secretId, err) => {
-          errors.push(err);
-        },
-      });
-
-      const first = await manager.startDeviceCode("gh", makeDeviceCodeConfig());
-      await vi.waitFor(() => expect(pollParked).toBe(true));
-
-      // The re-insert has happened, the successor's device request is still
-      // out: the predecessor is superseded but not yet aborted.
-      const second = manager.startDeviceCode("gh", makeDeviceCodeConfig());
-      await vi.waitFor(() => expect(deviceStarts).toBe(2));
-      releasePoll();
-
-      await expect(first.completion).rejects.toMatchObject({
-        code: ErrorCode.OAUTH_FLOW_FAILED,
-        message: "OAuth flow failed: OAuth flow superseded",
-      });
-      expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
-      expect(errors).toHaveLength(0);
-
-      releaseDeviceStart();
-      await second;
-      expect(manager.cancelFlow("sid-1")).toBe(true);
-    } finally {
-      releaseDeviceStart();
-      releasePoll();
-    }
-  });
-
-  it("a device-code restart whose start fails after the re-insert aborts the predecessor", async () => {
-    let deviceStarts = 0;
-    deviceHandler = (_req, res) => {
-      deviceStarts += 1;
-      if (deviceStarts > 1) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "server_error" }));
-        return;
-      }
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({
-          device_code: "dc-1",
-          user_code: "USER-1",
-          verification_uri: "https://example.com/device",
-          interval: 60,
-          expires_in: 600,
-        }),
-      );
-    };
-    const fake = makeFakeEngine();
-    const errors: unknown[] = [];
-    const manager = fakeEngineManager(fake, {
-      onBackgroundFlowError: (_secretId, err) => {
-        errors.push(err);
-      },
-    });
-
-    const first = await manager.startDeviceCode("gh", makeDeviceCodeConfig());
-    await expect(manager.startDeviceCode("gh", makeDeviceCodeConfig())).rejects.toMatchObject({
-      code: ErrorCode.OAUTH_FLOW_FAILED,
-    });
-
-    const settled: unknown = await Promise.race([
-      first.completion.then(
-        () => "resolved" as const,
-        (err: unknown) => err,
-      ),
-      new Promise<"pending">((resolve) => {
-        setTimeout(() => {
-          resolve("pending");
-        }, 500);
-      }),
-    ]);
-    expect(settled).not.toBe("pending");
-    expect(settled).toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-    expect(errors).toHaveLength(0);
-    await vi.waitFor(() => {
-      expect(manager.cancelFlow("sid-1")).toBe(false);
-    });
-    expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
-  });
-
-  it("a device-code start whose own device request is out when a later restart re-inserts the row never stores its tokens", async () => {
-    let deviceStarts = 0;
-    let releaseSecondStart: () => void = () => undefined;
-    deviceHandler = (_req, res) => {
-      deviceStarts += 1;
-      const answer = (interval: number): void => {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            device_code: `dc-${deviceStarts}`,
-            user_code: "USER-1",
-            verification_uri: "https://example.com/device",
-            interval,
-            expires_in: 600,
-          }),
-        );
-      };
-      if (deviceStarts === 2) {
-        releaseSecondStart = () => {
-          releaseSecondStart = () => undefined;
-          answer(0);
-        };
-        return;
-      }
-      answer(60);
-    };
-    try {
-      const fake = makeFakeEngine();
-      const errors: unknown[] = [];
-      const manager = fakeEngineManager(fake, {
-        onBackgroundFlowError: (_secretId, err) => {
-          errors.push(err);
-        },
-      });
-
-      await manager.startDeviceCode("gh", makeDeviceCodeConfig());
-      const pendingSecond = manager.startDeviceCode("gh", makeDeviceCodeConfig());
-      await vi.waitFor(() => expect(deviceStarts).toBe(2));
-      await manager.startDeviceCode("gh", makeDeviceCodeConfig());
-
-      releaseSecondStart();
-      const second = await pendingSecond;
-      await expect(second.completion).rejects.toMatchObject({
-        code: ErrorCode.OAUTH_FLOW_FAILED,
-      });
-      expect(fake.completeOAuthFlow).not.toHaveBeenCalled();
-      expect(errors).toHaveLength(0);
-      expect(manager.cancelFlow("sid-1")).toBe(true);
-    } finally {
-      releaseSecondStart();
-    }
-  });
-
-  it("a start refused by the cap after the re-insert aborts the predecessor", async () => {
-    pendingDeviceCodeHandler();
-    const fake = makePerNameFakeEngine();
-    const manager = fakeEngineManager(fake, { callbackPort: 0, maxPendingAuthorizations: 1 });
-
-    const holder = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-    const device = await manager.startDeviceCode("b", makeDeviceCodeConfig());
-    await expect(
-      manager.startAuthorizationCodeDeferred("b", makeAuthCodeConfig()),
-    ).rejects.toMatchObject({ code: ErrorCode.RATE_LIMIT_EXCEEDED });
-
-    const settled: unknown = await Promise.race([
-      device.completion.then(
-        () => "resolved" as const,
-        (err: unknown) => err,
-      ),
-      new Promise<"pending">((resolve) => {
-        setTimeout(() => {
-          resolve("pending");
-        }, 500);
-      }),
-    ]);
-    expect(settled).not.toBe("pending");
-    expect(settled).toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-
-    expect(manager.cancelFlow(holder.secretId)).toBe(true);
-    await expect(holder.completion).rejects.toBeDefined();
-  });
-
-  it("a failed bind aborts its predecessor even after a later start took the slot", async () => {
-    const fake = makePerNameFakeEngine();
-    const manager = fakeEngineManager(fake, { callbackPort: 0 });
-
-    let releaseBind: () => void = () => {};
-    const gate = new Promise<void>((resolve) => {
-      releaseBind = resolve;
-    });
-    const realStart = CallbackServer.prototype.start;
-    let binds = 0;
-    const startSpy = vi.spyOn(CallbackServer.prototype, "start").mockImplementation(async function (
-      this: CallbackServer,
-      state: string,
-      timeoutMs?: number,
-    ) {
-      binds += 1;
-      if (binds === 2) {
-        await gate;
-        throw new Error("EADDRINUSE");
-      }
-      return realStart.call(this, state, timeoutMs);
-    });
-
-    try {
-      const first = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-      const second = manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-      await vi.waitFor(() => expect(startSpy).toHaveBeenCalledTimes(2));
-      const third = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-
-      releaseBind();
-      await expect(second).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-
-      const settled: unknown = await Promise.race([
-        first.completion.then(
-          () => "resolved" as const,
-          (err: unknown) => err,
-        ),
-        new Promise<"pending">((resolve) => {
-          setTimeout(() => {
-            resolve("pending");
-          }, 500);
-        }),
-      ]);
-      expect(settled).not.toBe("pending");
-      expect(settled).toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-
-      expect(manager.cancelFlow("sid-a")).toBe(true);
-      await expect(third.completion).rejects.toBeDefined();
-    } finally {
-      startSpy.mockRestore();
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Pending-flow cap (D3): concurrent socket-holding authorization-code flows
-// ---------------------------------------------------------------------------
-
-/** Distinct secretId per name — the cap is about *concurrent* flows. */
-function makePerNameFakeEngine(): FakeEngine {
-  return {
-    createOAuthSecret: vi.fn(async (name: string) => ({
-      handle: `secret://${name}`,
-      secretId: `sid-${name}`,
-    })),
-    completeOAuthFlow: vi.fn(async () => undefined),
-  };
-}
-
-function pendingDeviceCodeHandler(): void {
-  deviceHandler = (_req, res) => {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        device_code: "dc-cap",
-        user_code: "USER-CAP",
-        verification_uri: "https://example.com/device",
-        // Long interval: the background poll sleeps for the whole test rather
-        // than hammering the token endpoint.
-        interval: 60,
-        expires_in: 600,
-      }),
-    );
-  };
-}
-
-/**
- * Hold every `CallbackServer.start` inside the bind: the spy waits for
- * `releaseBind()` and then delegates to the real implementation, so a test can
- * observe a flow that has been started but has not yet bound its port.
- */
-function gateCallbackServerStart(): {
-  startSpy: MockInstance<CallbackServer["start"]>;
-  releaseBind: () => void;
-} {
-  let releaseBind: () => void = () => {};
-  const gate = new Promise<void>((resolve) => {
-    releaseBind = resolve;
-  });
-  const realStart = CallbackServer.prototype.start;
-  const startSpy = vi.spyOn(CallbackServer.prototype, "start").mockImplementation(async function (
-    this: CallbackServer,
-    state: string,
-    timeoutMs?: number,
-  ) {
-    await gate;
-    return realStart.call(this, state, timeoutMs);
-  });
-  return { startSpy, releaseBind };
-}
-
-describe("OAuthManager pending-flow cap (D3)", () => {
-  it("refuses an authorization-code start once the cap of socket-holding flows is reached", async () => {
-    const fake = makePerNameFakeEngine();
-    const manager = fakeEngineManager(fake, { callbackPort: 0, maxPendingAuthorizations: 2 });
-
-    const a = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-    const b = await manager.startAuthorizationCodeDeferred("b", makeAuthCodeConfig());
-
-    const refusal: unknown = await manager
-      .startAuthorizationCodeDeferred("c", makeAuthCodeConfig())
-      .catch((err: unknown) => err);
-
-    expect(refusal).toBeInstanceOf(VaultError);
-    const err = refusal as VaultError;
-    expect(err.code).toBe(ErrorCode.RATE_LIMIT_EXCEEDED);
-    expect(err.message).toContain("Too many pending authorization flows");
-    expect(err.statusCode).toBe(429);
-
-    manager.cancelPendingFlows();
-    await expect(a.completion).rejects.toBeDefined();
-    await expect(b.completion).rejects.toBeDefined();
-  });
-
-  it("floors a non-finite cap to the default rather than disabling it", async () => {
-    const fake = makePerNameFakeEngine();
-    const manager = fakeEngineManager(fake, {
-      callbackPort: 0,
-      maxPendingAuthorizations: Number.NaN,
-    });
-
-    // Every `count >= NaN` is false, so a NaN cap enforces nothing at all —
-    // the one fail-open direction on this control.
-    expect(
-      (manager as unknown as { maxPendingAuthorizations: number }).maxPendingAuthorizations,
-    ).toBe(DEFAULT_MAX_PENDING_AUTHORIZATIONS);
-
-    // The fallback is a live cap, not a refuse-everything one.
-    const a = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-    expect(a.handle).toBe("secret://a");
-
-    manager.cancelPendingFlows();
-    await expect(a.completion).rejects.toBeDefined();
-  });
-
-  it("a supersede for the same secret never trips the cap", async () => {
-    const fake = makePerNameFakeEngine();
-    const manager = fakeEngineManager(fake, { callbackPort: 0, maxPendingAuthorizations: 1 });
-
-    const first = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-    // Same name → same secretId → the predecessor's listener is replaced, not
-    // added to: one socket before, one socket after.
-    const second = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-    expect(second.secretId).toBe(first.secretId);
-
-    await expect(first.completion).rejects.toBeDefined();
-    expect(manager.cancelFlow(second.secretId)).toBe(true);
-    await expect(second.completion).rejects.toBeDefined();
-  });
-
-  it("a cancelled flow frees its slot", async () => {
-    const fake = makePerNameFakeEngine();
-    const manager = fakeEngineManager(fake, { callbackPort: 0, maxPendingAuthorizations: 1 });
-
-    const a = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-    expect(manager.cancelFlow(a.secretId)).toBe(true);
-    await expect(a.completion).rejects.toBeDefined();
-    await vi.waitFor(() => {
-      expect(manager.cancelFlow(a.secretId)).toBe(false);
-    });
-
-    const b = await manager.startAuthorizationCodeDeferred("b", makeAuthCodeConfig());
-    expect(b.handle).toBe("secret://b");
-
-    manager.cancelFlow(b.secretId);
-    await expect(b.completion).rejects.toBeDefined();
-  });
-
-  it("device-code flows neither trip the cap nor count toward it", async () => {
-    pendingDeviceCodeHandler();
-    const fake = makePerNameFakeEngine();
-    const manager = fakeEngineManager(fake, { callbackPort: 0, maxPendingAuthorizations: 1 });
-
-    // A device flow registers in the same map but holds no socket, so the one
-    // authorization-code slot is still free...
-    const device = await manager.startDeviceCode("d", makeDeviceCodeConfig());
-    expect(device.status).toBe("pending_authorization");
-
-    const a = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-    expect(a.handle).toBe("secret://a");
-
-    // ...and with that slot taken, a further device flow is still not refused.
-    const second = await manager.startDeviceCode("d2", makeDeviceCodeConfig());
-    expect(second.status).toBe("pending_authorization");
-
-    manager.cancelPendingFlows();
-    await expect(a.completion).rejects.toBeDefined();
-    await expect(device.completion).rejects.toBeDefined();
-    await expect(second.completion).rejects.toBeDefined();
-  });
-
-  it("a refused start binds no callback socket (the PENDING secret stays resumable)", async () => {
-    const fake = makePerNameFakeEngine();
-    const manager = fakeEngineManager(fake, { callbackPort: 0, maxPendingAuthorizations: 1 });
-    const startSpy = vi.spyOn(CallbackServer.prototype, "start");
-
-    try {
-      const a = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-      expect(startSpy).toHaveBeenCalledTimes(1);
-
-      await expect(
-        manager.startAuthorizationCodeDeferred("b", makeAuthCodeConfig()),
-      ).rejects.toBeDefined();
-
-      // Refusal lands before any CallbackServer is constructed or started: no
-      // second listener, no second timeout timer.
-      expect(startSpy).toHaveBeenCalledTimes(1);
-      // The vault row was created first, so the refused start leaves a
-      // resumable PENDING secret (D3 — that is what `create` scope buys).
-      expect(fake.createOAuthSecret).toHaveBeenCalledTimes(2);
-
-      manager.cancelFlow(a.secretId);
-      await expect(a.completion).rejects.toBeDefined();
-    } finally {
-      startSpy.mockRestore();
-    }
-  });
-
-  it("counts a flow from before its bind, so a simultaneous burst cannot overshoot the cap", async () => {
-    const fake = makePerNameFakeEngine();
-    const manager = fakeEngineManager(fake, { callbackPort: 0, maxPendingAuthorizations: 1 });
-    const { startSpy, releaseBind } = gateCallbackServerStart();
-
-    try {
-      const first = manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-      // Let the first start reach its (gated) bind before the second is attempted.
-      await vi.waitFor(() => expect(startSpy).toHaveBeenCalledTimes(1));
-
-      const second: unknown = await manager
-        .startAuthorizationCodeDeferred("b", makeAuthCodeConfig())
-        .catch((err: unknown) => err);
-      expect(second).toBeInstanceOf(VaultError);
-      expect((second as VaultError).code).toBe(ErrorCode.RATE_LIMIT_EXCEEDED);
-      expect(startSpy).toHaveBeenCalledTimes(1);
-
-      releaseBind();
-      const a = await first;
-      manager.cancelFlow(a.secretId);
-      await expect(a.completion).rejects.toBeDefined();
-    } finally {
-      startSpy.mockRestore();
-    }
-  });
-
-  it("a cancelFlow during the bind window takes effect and releases the bound port (the reservation is the controller)", async () => {
-    const fake = makePerNameFakeEngine();
-    const manager = fakeEngineManager(fake, { callbackPort: 0 });
-    const { startSpy, releaseBind } = gateCallbackServerStart();
-
-    try {
-      const pending = manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-      await vi.waitFor(() => expect(startSpy).toHaveBeenCalledTimes(1));
-      expect(manager.cancelFlow("sid-a")).toBe(true);
-      releaseBind();
-      const a = await pending;
-      await expect(a.completion).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-      const redirectUri = new URL(new URL(a.authUrl).searchParams.get("redirect_uri") as string);
-      await vi.waitFor(async () => {
-        await expect(
-          fetch(`http://127.0.0.1:${redirectUri.port}/not-the-callback`),
-        ).rejects.toThrow();
-      });
-    } finally {
-      startSpy.mockRestore();
-    }
-  });
-
-  it("a failed bind never resurrects a predecessor that settled inside the bind window", async () => {
-    const fake = makePerNameFakeEngine();
-    const manager = fakeEngineManager(fake, {
-      callbackPort: 0,
-      callbackTimeoutMs: 500,
-      maxPendingAuthorizations: 1,
-    });
-
-    const first = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-
-    let releaseBind: () => void = () => {};
-    const gate = new Promise<void>((resolve) => {
-      releaseBind = resolve;
-    });
-    const startSpy = vi.spyOn(CallbackServer.prototype, "start").mockImplementation(async () => {
-      await gate;
-      throw new Error("EADDRINUSE");
-    });
-
-    try {
-      // Same name → same secretId, so the successor's reservation replaces the
-      // predecessor's entry: the predecessor's own callback timeout then
-      // settles it without removing anything (the unregister is identity-guarded).
-      const second = manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-      await vi.waitFor(() => expect(startSpy).toHaveBeenCalledTimes(1));
-      await expect(first.completion).rejects.toMatchObject({
-        code: ErrorCode.OAUTH_CALLBACK_TIMEOUT,
-      });
-
-      releaseBind();
-      await expect(second).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-
-      // The failed bind leaves nothing dead behind: no entry to cancel...
-      expect(manager.cancelFlow("sid-a")).toBe(false);
-    } finally {
-      startSpy.mockRestore();
-    }
-
-    // ...and the cap's single slot is free for the next flow.
-    const b = await manager.startAuthorizationCodeDeferred("b", makeAuthCodeConfig());
-    expect(b.handle).toBe("secret://b");
-    manager.cancelFlow(b.secretId);
-    await expect(b.completion).rejects.toBeDefined();
-  });
-
-  it("a failed bind after its own reservation was cancelled aborts the predecessor too", async () => {
-    const fake = makePerNameFakeEngine();
-    const manager = fakeEngineManager(fake, { callbackPort: 0 });
-
-    const first = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-
-    let releaseBind: () => void = () => {};
-    const gate = new Promise<void>((resolve) => {
-      releaseBind = resolve;
-    });
-    const startSpy = vi.spyOn(CallbackServer.prototype, "start").mockImplementation(async () => {
-      await gate;
-      throw new Error("EADDRINUSE");
-    });
-
-    try {
-      // Same name → same secretId: the successor's reservation replaces the
-      // predecessor's entry, so the predecessor is no longer in the map.
-      const second = manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-      await vi.waitFor(() => expect(startSpy).toHaveBeenCalledTimes(1));
-
-      // The owner dispose path (DirectClient.close) lands inside the bind
-      // window and aborts the only entry there — the reservation.
-      manager.cancelPendingFlows();
-
-      releaseBind();
-      await expect(second).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-
-      // The cancellation must cover the predecessor the reservation displaced:
-      // restoring it would leave its callback server up past the dispose.
-      const settled: unknown = await Promise.race([
-        first.completion.then(
-          () => "resolved" as const,
-          (err: unknown) => err,
-        ),
-        new Promise<"pending">((resolve) => {
-          setTimeout(() => {
-            resolve("pending");
-          }, 500);
-        }),
-      ]);
-      expect(settled).not.toBe("pending");
-      expect(settled).toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-
-      expect(manager.cancelFlow("sid-a")).toBe(false);
-    } finally {
-      startSpy.mockRestore();
-    }
-  });
-
-  it("a chained supersede whose middle bind fails still cancels the first flow", async () => {
-    const fake = makePerNameFakeEngine();
-    const manager = fakeEngineManager(fake, { callbackPort: 0, callbackTimeoutMs: 3_000 });
-
-    let releaseBind: () => void = () => {};
-    const gate = new Promise<void>((resolve) => {
-      releaseBind = resolve;
-    });
-    const realStart = CallbackServer.prototype.start;
-    let binds = 0;
-    const startSpy = vi.spyOn(CallbackServer.prototype, "start").mockImplementation(async function (
-      this: CallbackServer,
-      state: string,
-      timeoutMs?: number,
-    ) {
-      binds += 1;
-      if (binds === 2) {
-        await gate;
-        throw new Error("EADDRINUSE");
-      }
-      return realStart.call(this, state, timeoutMs);
-    });
-
-    try {
-      // One name → one secretId → each start displaces the entry before it, so
-      // the per-secret map only ever names the newest of the three.
-      const first = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-      const second = manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-      await vi.waitFor(() => expect(startSpy).toHaveBeenCalledTimes(2));
-      const third = await manager.startAuthorizationCodeDeferred("a", makeAuthCodeConfig());
-
-      // The dispose lands while the second's bind is still held: the third's
-      // bind aborted only the second, and the second's own exit — which would
-      // abort the first — has not run, so the first is marked but live and
-      // named by no map entry. Only the live set reaches it.
-      manager.cancelPendingFlows();
-
-      const settled: unknown = await Promise.race([
-        first.completion.then(
-          () => "resolved" as const,
-          (err: unknown) => err,
-        ),
-        new Promise<"pending">((resolve) => {
-          setTimeout(() => {
-            resolve("pending");
-          }, 500);
-        }),
-      ]);
-      expect(settled).not.toBe("pending");
-      expect(settled).toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-
-      releaseBind();
-      await expect(second).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
-
-      await expect(third.completion).rejects.toMatchObject({
-        code: ErrorCode.OAUTH_FLOW_FAILED,
-      });
-    } finally {
-      startSpy.mockRestore();
     }
   });
 });

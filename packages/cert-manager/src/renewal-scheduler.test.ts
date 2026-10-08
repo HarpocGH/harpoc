@@ -252,53 +252,66 @@ describe("RenewalScheduler stop() drain", () => {
   });
 
   it("stop() resolves only after the in-flight tick stored the issued certificate", async () => {
-    let release: () => void = () => {};
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let stored = false;
-    const renewer = {
-      renewCertificate: vi.fn().mockImplementation(async () => {
-        await gate;
-        stored = true;
-      }),
-    };
-    scheduler = new RenewalScheduler(engineWith([row("s1")]) as never, renewer, {
-      checkIntervalMs: 10,
-    });
-    scheduler.start();
-    await vi.waitFor(() => {
+    vi.useFakeTimers();
+    try {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let stored = false;
+      const renewer = {
+        renewCertificate: vi.fn().mockImplementation(async () => {
+          await gate;
+          stored = true;
+        }),
+      };
+      scheduler = new RenewalScheduler(engineWith([row("s1")]) as never, renewer, {
+        checkIntervalMs: 10,
+      });
+      scheduler.start();
+      await vi.advanceTimersByTimeAsync(10);
       expect(renewer.renewCertificate).toHaveBeenCalled();
-    });
 
-    const stopPromise = scheduler.stop();
-    let stopResolved = false;
-    void stopPromise.then(() => {
-      stopResolved = true;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(stopResolved).toBe(false);
-    expect(stored).toBe(false);
+      const stopPromise = scheduler.stop();
+      let stopResolved = false;
+      void stopPromise.then(() => {
+        stopResolved = true;
+      });
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(stopResolved).toBe(false);
+      expect(stored).toBe(false);
 
-    release();
-    await stopPromise;
-    expect(stored).toBe(true);
+      release();
+      await stopPromise;
+      expect(stored).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("the drain is bounded — a hung CA cannot block shutdown", async () => {
-    const renewer = { renewCertificate: vi.fn().mockImplementation(() => new Promise(() => {})) };
-    scheduler = new RenewalScheduler(engineWith([row("s1")]) as never, renewer, {
-      checkIntervalMs: 10,
-    });
-    scheduler.start();
-    await vi.waitFor(() => {
+    vi.useFakeTimers();
+    try {
+      const renewer = { renewCertificate: vi.fn().mockImplementation(() => new Promise(() => {})) };
+      scheduler = new RenewalScheduler(engineWith([row("s1")]) as never, renewer, {
+        checkIntervalMs: 10,
+      });
+      scheduler.start();
+      await vi.advanceTimersByTimeAsync(10);
       expect(renewer.renewCertificate).toHaveBeenCalled();
-    });
 
-    const start = Date.now();
-    await scheduler.stop(200);
-    expect(Date.now() - start).toBeLessThan(5_000);
-    expect(scheduler.isRunning).toBe(false);
+      let done = false;
+      const stopping = scheduler.stop(200).then(() => {
+        done = true;
+      });
+      await vi.advanceTimersByTimeAsync(199);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await stopping;
+      expect(scheduler.isRunning).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stop() with no tick in flight resolves immediately", async () => {

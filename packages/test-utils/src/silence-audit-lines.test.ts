@@ -1,9 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import type { MockInstance } from "vitest";
 import { silenceAuditLines } from "./silence-audit-lines.js";
 
 describe("silenceAuditLines", () => {
   const seen: unknown[][] = [];
-  let outer: ReturnType<typeof vi.spyOn>;
+  let outer: MockInstance<typeof console.error>;
 
   beforeAll(() => {
     outer = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
@@ -43,11 +44,12 @@ describe("silenceAuditLines", () => {
     expect(seen[0]).toEqual(["[harpoc] OAuth background flow failed (secret-1): provider offline"]);
   });
 
-  it("restores the function it replaced after each test", () => {
+  it("installs the filter for the body of a test and passes every argument through", () => {
     expect(console.error).not.toBe(outer);
     seen.length = 0;
     console.error("still the outer spy");
-    expect(seen).toEqual([["still the outer spy"]]);
+    console.error("[harpoc] %s", "x");
+    expect(seen).toEqual([["still the outer spy"], ["[harpoc] %s", "x"]]);
   });
 
   it("keeps the filter when a test restores a spy of its own", () => {

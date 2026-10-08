@@ -6,6 +6,10 @@ import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { Mock } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { CallerContext, CertificateStatus } from "@harpoc/shared";
+import {
+  LETS_ENCRYPT_PRODUCTION as PRODUCTION,
+  LETS_ENCRYPT_STAGING as STAGING,
+} from "./acme/directory.js";
 import { CertManager } from "./cert-manager.js";
 import type { CertificateEngine } from "./cert-manager.js";
 import { generateCertKeyPair } from "./key-pair.js";
@@ -131,8 +135,6 @@ const RENEWED_BUNDLE = `${RENEWED_LEAF}\n${INTERMEDIATE}\n`;
 const KEY = fx("rsa-key.pem");
 const CSR_PEM = fx("csr-fixture.pem");
 
-const PRODUCTION = "https://acme-v02.api.letsencrypt.org/directory";
-const STAGING = "https://acme-staging-v02.api.letsencrypt.org/directory";
 const ACCOUNT_URL = "https://acme-v02.api.letsencrypt.org/acme/acct/1";
 const STAGING_ACCOUNT_URL = "https://acme-staging-v02.api.letsencrypt.org/acme/acct/1";
 const ORDER_URL = "https://acme-v02.api.letsencrypt.org/acme/order/1";

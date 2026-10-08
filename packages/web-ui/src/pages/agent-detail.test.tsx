@@ -1,7 +1,7 @@
-import type { Agent, AgentPolicy, IssuedToken } from "@harpoc/shared";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, AuditEventWire } from "../api/client";
+import { makeAgent, makeAgentPolicy, makeEvent, makeToken } from "../__fixtures__/builders";
 import { AgentDetailPage } from "./agent-detail";
 
 afterEach(() => {
@@ -12,60 +12,14 @@ beforeEach(() => {
   window.location.hash = "";
 });
 
-const agent = (over: Partial<Agent> = {}): Agent => ({
-  id: "id-1",
-  name: "ci-bot",
-  description: "CI runner",
-  owner: "platform",
-  status: "active",
-  created_at: 0,
-  updated_at: 0,
-  deactivated_at: null,
-  last_active_at: null,
-  active_tokens: 2,
-  grants: 1,
-  ...over,
-});
+const agent = makeAgent;
 
-const policy = (over: Partial<AgentPolicy> = {}): AgentPolicy => ({
-  policy_id: "p-1",
-  secret_id: "s-1",
-  handle: "secret://myproj/test-key",
-  permissions: ["read", "use"],
-  expires_at: null,
-  created_at: 0,
-  ...over,
-});
+const policy = makeAgentPolicy;
 
-const token = (over: Partial<IssuedToken> = {}): IssuedToken => ({
-  jti: "jti-1",
-  subject: "ci-bot",
-  principal_type: "agent",
-  agent: "ci-bot",
-  scope: ["read", "use"],
-  project: null,
-  secrets: null,
-  label: "deploy",
-  issued_at: 0,
-  expires_at: 1700000000000,
-  revoked_at: null,
-  status: "active",
-  ...over,
-});
+const token = makeToken;
 
-const event = (over: Partial<AuditEventWire> = {}): AuditEventWire => ({
-  id: 1,
-  timestamp: 1700000000000,
-  event_type: "secret.use",
-  secret_id: "s-1",
-  principal_type: "agent",
-  principal_id: "ci-bot",
-  detail: null,
-  ip_address: null,
-  session_id: null,
-  success: true,
-  ...over,
-});
+const event = (over: Partial<AuditEventWire> = {}): AuditEventWire =>
+  makeEvent({ secret_id: "s-1", principal_type: "agent", principal_id: "ci-bot", ...over });
 
 const api = (over: Partial<ApiClient> = {}): ApiClient =>
   ({
@@ -214,9 +168,9 @@ describe("AgentDetailPage", () => {
     const prompt = String(confirmSpy.mock.calls[0]?.[0] ?? "");
     // The counts are the whole point of the confirmation: deleting an agent
     // revokes its live tokens and drops its grants, and both are irreversible.
-    expect(prompt).toContain("2");
-    expect(prompt).toContain("1");
-    expect(prompt).toContain("ci-bot");
+    expect(prompt).toBe(
+      'Delete agent "ci-bot"? This revokes its 2 active token(s) and removes its 1 grant(s). There is no undo.',
+    );
     await waitFor(() => expect(deleteAgent).toHaveBeenCalledWith("ci-bot"));
     await waitFor(() => expect(window.location.hash).toBe("#/agents"));
   });

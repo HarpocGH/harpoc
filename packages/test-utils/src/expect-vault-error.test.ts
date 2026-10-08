@@ -40,7 +40,7 @@ describe("expectVaultError", () => {
         () => Promise.reject(VaultError.invalidInput("x")),
         ErrorCode.SECRET_NOT_FOUND,
       ),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/INVALID_INPUT[\s\S]*SECRET_NOT_FOUND/);
   });
 
   it("invokes the function exactly once", async () => {

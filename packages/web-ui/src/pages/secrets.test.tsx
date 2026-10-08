@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ApiClient, SecretInfo } from "../api/client";
+import type { ApiClient } from "../api/client";
+import { makeSecret } from "../__fixtures__/builders";
 import { SecretsPage } from "./secrets";
 
 afterEach(cleanup);
@@ -8,19 +9,7 @@ beforeEach(() => {
   window.location.hash = "";
 });
 
-const secret = (over: Partial<SecretInfo> = {}): SecretInfo => ({
-  handle: "secret://k1",
-  name: "k1",
-  type: "api_key",
-  project: null,
-  status: "active",
-  version: 1,
-  createdAt: 0,
-  updatedAt: 0,
-  expiresAt: null,
-  rotatedAt: null,
-  ...over,
-});
+const secret = makeSecret;
 
 const api = (over: Partial<ApiClient> = {}): ApiClient =>
   ({

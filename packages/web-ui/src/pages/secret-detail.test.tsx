@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AccessPolicy } from "@harpoc/shared";
-import type { ApiClient, SecretInfo } from "../api/client";
+import type { ApiClient } from "../api/client";
+import { makeAccessPolicy, makeSecret } from "../__fixtures__/builders";
 import { SecretDetailPage } from "./secret-detail";
 
 afterEach(() => {
@@ -9,31 +10,16 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const secret = (over: Partial<SecretInfo> = {}): SecretInfo => ({
-  handle: "secret://k1",
-  name: "k1",
-  type: "api_key",
-  project: null,
-  status: "active",
-  version: 1,
-  createdAt: 0,
-  updatedAt: 0,
-  expiresAt: null,
-  rotatedAt: null,
-  ...over,
-});
+const secret = makeSecret;
 
-const grant = (over: Partial<AccessPolicy> = {}): AccessPolicy => ({
-  id: "pol-1",
-  secret_id: "sec-1",
-  principal_type: "agent",
-  principal_id: "agent-7",
-  permissions: ["read"],
-  created_at: 0,
-  expires_at: null,
-  created_by: "cli",
-  ...over,
-});
+const grant = (over: Partial<AccessPolicy> = {}): AccessPolicy =>
+  makeAccessPolicy({
+    id: "pol-1",
+    secret_id: "sec-1",
+    principal_id: "agent-7",
+    permissions: ["read"],
+    ...over,
+  });
 
 function api(over: Partial<ApiClient> = {}): ApiClient {
   return {

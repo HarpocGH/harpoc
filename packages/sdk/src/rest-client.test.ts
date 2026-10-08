@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { Mock } from "vitest";
 import { ErrorCode, injectionPolicyInputSchema } from "@harpoc/shared";
 import type { OAuthTokenStatus, SetAgentPermissionsInput } from "@harpoc/shared";
 import { RestClient } from "./rest-client.js";
@@ -307,7 +308,7 @@ const MEMBERS: MemberRow[] = [
 ];
 
 let client: RestClient;
-let fetchSpy: ReturnType<typeof vi.fn>;
+let fetchSpy: Mock;
 
 function mockFetchResponse(data: unknown, status = 200) {
   fetchSpy.mockResolvedValueOnce({

@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Mock } from "vitest";
 import { ApiError, createApiClient } from "./client";
 
-type FetchMock = ReturnType<typeof vi.fn>;
+type FetchMock = Mock;
 
 function stubFetch(status: number, body: unknown) {
   return vi.fn(
@@ -272,7 +273,7 @@ describe("api client session signals", () => {
     const onUnauthorized = vi.fn();
     const api = createApiClient(
       () => "stale",
-      stubFetch(401, { error: "UNAUTHORIZED", message: "bad token" }),
+      stubFetch(401, { error: "INVALID_TOKEN", message: "bad token" }),
       onUnauthorized,
     );
     await expect(api.listSecrets()).rejects.toBeInstanceOf(ApiError);
@@ -283,7 +284,7 @@ describe("api client session signals", () => {
     const onUnauthorized = vi.fn();
     const api = createApiClient(
       () => "t",
-      stubFetch(500, { error: "INTERNAL", message: "boom" }),
+      stubFetch(500, { error: "INTERNAL_ERROR", message: "boom" }),
       onUnauthorized,
     );
     await expect(api.listSecrets()).rejects.toBeInstanceOf(ApiError);
@@ -294,7 +295,7 @@ describe("api client session signals", () => {
     const onSealed = vi.fn();
     const api = createApiClient(
       () => "t",
-      stubFetch(423, { error: "VAULT_LOCKED", message: "Vault is locked" }),
+      stubFetch(503, { error: "VAULT_LOCKED", message: "Vault is locked" }),
       undefined,
       onSealed,
     );
@@ -306,7 +307,7 @@ describe("api client session signals", () => {
     const onSealed = vi.fn();
     const api = createApiClient(
       () => "t",
-      stubFetch(423, { error: "RATE_LIMIT_EXCEEDED", message: "slow down" }),
+      stubFetch(503, { error: "INTERNAL_ERROR", message: "upstream unavailable" }),
       undefined,
       onSealed,
     );
@@ -324,7 +325,10 @@ describe("api client session signals", () => {
   });
 
   it("stays callable when neither signal is supplied", async () => {
-    const api = createApiClient(() => "t", stubFetch(401, { error: "UNAUTHORIZED", message: "x" }));
+    const api = createApiClient(
+      () => "t",
+      stubFetch(401, { error: "INVALID_TOKEN", message: "x" }),
+    );
     await expect(api.listSecrets()).rejects.toBeInstanceOf(ApiError);
   });
 });

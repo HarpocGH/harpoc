@@ -20,7 +20,7 @@ afterEach(() => {
   else process.env["GITHUB_STEP_SUMMARY"] = savedSummary;
   if (savedSeries === undefined) delete process.env["HARPOC_SERIES_FILE"];
   else process.env["HARPOC_SERIES_FILE"] = savedSeries;
-  rmSync(dir, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe("recordSeriesLine (D4, 2026-09-08)", () => {
@@ -129,6 +129,20 @@ describe("recordSeriesLine (D4, 2026-09-08)", () => {
     recordSeriesLine(LINE, { judgedMs: 5, print: (l) => printed.push(l) });
     expect(readFileSync(series, "utf8")).toBe(`- \`${LINE}\`\n`);
     expect(readdirSync(dir)).toEqual(["env-series.md"]);
+    expect(printed).toEqual([LINE]);
+  });
+
+  it("an explicit empty path suppresses the env default for both sinks", () => {
+    process.env["GITHUB_STEP_SUMMARY"] = join(dir, "env-summary.md");
+    process.env["HARPOC_SERIES_FILE"] = join(dir, "env-series.md");
+    const printed: string[] = [];
+    recordSeriesLine(LINE, {
+      judgedMs: 5,
+      summaryPath: "",
+      seriesPath: "",
+      print: (l) => printed.push(l),
+    });
+    expect(readdirSync(dir)).toEqual([]);
     expect(printed).toEqual([LINE]);
   });
 

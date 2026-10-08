@@ -1,7 +1,6 @@
-import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { describeWorkspaceDeps } from "@harpoc/test-utils";
+import { describeBuildOutput, describeWorkspaceDeps } from "@harpoc/test-utils";
 
 const PKG_ROOT = join(import.meta.dirname, "..");
 const DIST_ROOT = join(PKG_ROOT, "dist");
@@ -23,18 +22,7 @@ describe("package scaffold", () => {
     expect(exports.types).toBe("./dist/index.d.ts");
     expect(exports.import).toBe("./dist/index.js");
   });
-
-  it("dist directory exists after build", () => {
-    expect(existsSync(DIST_ROOT)).toBe(true);
-  });
-
-  it("dist/index.js exists after build", () => {
-    expect(existsSync(join(DIST_ROOT, "index.js"))).toBe(true);
-  });
-
-  it("dist/index.d.ts exists after build", () => {
-    expect(existsSync(join(DIST_ROOT, "index.d.ts"))).toBe(true);
-  });
 });
 
+describeBuildOutput(DIST_ROOT);
 describeWorkspaceDeps(PKG_ROOT, ["@harpoc/shared", "@harpoc/core"]);

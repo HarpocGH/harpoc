@@ -1,7 +1,8 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/preact";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AuditEventWire, SecretInfo } from "../api/client";
+import type { AuditEventWire } from "../api/client";
 import type { ApiClient } from "../api/client";
+import { makeEvent, makeSecret } from "../__fixtures__/builders";
 import { DashboardPage } from "./dashboard";
 
 afterEach(cleanup);
@@ -9,33 +10,18 @@ beforeEach(() => {
   window.location.hash = "";
 });
 
-const secret = (over: Partial<SecretInfo>): SecretInfo => ({
-  handle: "secret://k1",
-  name: "k1",
-  type: "api_key",
-  project: null,
-  status: "active",
-  version: 1,
-  createdAt: 0,
-  updatedAt: 0,
-  expiresAt: null,
-  rotatedAt: null,
-  ...over,
-});
+const secret = makeSecret;
 
-const failedEvent = (over: Partial<AuditEventWire> = {}): AuditEventWire => ({
-  id: 41,
-  timestamp: 1_700_000_000_000,
-  event_type: "access.denied",
-  secret_id: "id-1",
-  principal_type: "agent",
-  principal_id: "agent-7",
-  detail: null,
-  ip_address: null,
-  session_id: null,
-  success: false,
-  ...over,
-});
+const failedEvent = (over: Partial<AuditEventWire> = {}): AuditEventWire =>
+  makeEvent({
+    id: 41,
+    event_type: "access.denied",
+    secret_id: "id-1",
+    principal_type: "agent",
+    principal_id: "agent-7",
+    success: false,
+    ...over,
+  });
 
 function api(over: Partial<ApiClient>): ApiClient {
   return {
@@ -119,7 +105,6 @@ describe("DashboardPage", () => {
   });
 
   it("navigates to secret detail when an expiring-secret row is clicked", async () => {
-    const { fireEvent } = await import("@testing-library/preact");
     render(<DashboardPage api={api({})} />);
     await waitFor(() => expect(screen.getByText("soon")).toBeTruthy());
     const before = window.location.hash;
@@ -133,7 +118,6 @@ describe("DashboardPage", () => {
     // project-less `rotate-me` are different secrets, and the route segment the
     // detail page is addressed by is the scheme-less handle — the same form the
     // secrets list navigates with.
-    const { fireEvent } = await import("@testing-library/preact");
     render(
       <DashboardPage
         api={api({

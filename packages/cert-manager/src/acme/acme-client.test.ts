@@ -1,11 +1,20 @@
 import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import { generateCertKeyPair } from "../key-pair.js";
 import { jwkThumbprint, publicJwk } from "./jws.js";
 import { AcmeClient } from "./acme-client.js";
 import type { AcmeClientOptions } from "./acme-client.js";
+import { expectVaultError } from "@harpoc/test-utils";
+
+const delays = vi.hoisted(() => [] as number[]);
+vi.mock("node:timers/promises", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:timers/promises")>()),
+  setTimeout: async (ms?: number) => {
+    delays.push(ms ?? 0);
+  },
+}));
 
 const DIRECTORY_URL = "https://acme.example.com/directory";
 const NEW_NONCE_URL = "https://acme.example.com/acme/new-nonce";
@@ -149,14 +158,8 @@ const at = (calls: Call[], index: number): Call => {
   return call;
 };
 
-const messageOf = async (run: () => Promise<unknown>): Promise<string> => {
-  try {
-    await run();
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
-  return "(did not throw)";
-};
+const messageOf = async (run: () => Promise<unknown>): Promise<string> =>
+  (await expectVaultError(run, ErrorCode.CERT_ACME_FAILED)).message;
 
 const makeClient = (ca: FakeCa, overrides: Partial<AcmeClientOptions> = {}): AcmeClient =>
   new AcmeClient({
@@ -956,10 +959,10 @@ describe("AcmeClient finalize and download", () => {
 });
 
 describe("AcmeClient Retry-After", () => {
-  const elapsedFor = async (
+  const delaysFor = async (
     retryAfter: string | null,
     maxRetryAfterMs: number,
-  ): Promise<number> => {
+  ): Promise<number[]> => {
     const headers: Record<string, string> = { "replay-nonce": "n2" };
     if (retryAfter !== null) headers["retry-after"] = retryAfter;
     const ca = caWith(
@@ -967,28 +970,26 @@ describe("AcmeClient Retry-After", () => {
       json({ status: "processing" }, { headers }),
       json({ status: "valid", certificate: CERTIFICATE_URL }),
     );
-    const started = Date.now();
+    delays.length = 0;
     await registeredClient(ca, { maxRetryAfterMs }).pollOrder(ORDER_URL);
-    return Date.now() - started;
+    return [...delays];
   };
 
   it("honours delta-seconds and clamps the wait to maxRetryAfterMs", async () => {
-    const elapsed = await elapsedFor("120", 40);
-    expect(elapsed).toBeGreaterThanOrEqual(25);
-    expect(elapsed).toBeLessThan(2_000);
+    expect(await delaysFor("120", 40)).toEqual([40]);
   });
 
   it("skips the wait entirely when the server asks for zero seconds", async () => {
-    expect(await elapsedFor("0", 5_000)).toBeLessThan(500);
+    expect(await delaysFor("0", 5_000)).toEqual([]);
   });
 
   it("parses an HTTP-date Retry-After that has already passed", async () => {
     const past = new Date(Date.now() - 60_000).toUTCString();
-    expect(await elapsedFor(past, 5_000)).toBeLessThan(500);
+    expect(await delaysFor(past, 5_000)).toEqual([]);
   });
 
   it("falls back to a one-second poll interval when the header is absent or unusable", async () => {
-    expect(await elapsedFor(null, 5_000)).toBeGreaterThanOrEqual(900);
-    expect(await elapsedFor("soon", 0)).toBeLessThan(500);
+    expect(await delaysFor(null, 5_000)).toEqual([1000]);
+    expect(await delaysFor("soon", 0)).toEqual([]);
   });
 });

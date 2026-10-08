@@ -36,7 +36,7 @@ import type {
 } from "./client.js";
 import {
   ENCRYPTED_KEY_IMPORT_REFUSAL,
-  VAULT_VERSION,
+  HARPOC_VERSION,
   VaultError,
   certificateImportSchema,
   connectionConfigSchema,
@@ -267,7 +267,7 @@ export class DirectClient implements VaultClient {
   async getHealth(): Promise<HealthResponse> {
     return {
       state: this.engine.getState(),
-      version: VAULT_VERSION,
+      version: HARPOC_VERSION,
     };
   }
 

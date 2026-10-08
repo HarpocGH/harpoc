@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { DirectClient } from "./direct-client.js";
 import { importPeer } from "./import-peer.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 /**
  * Every lazy peer load must go through `importPeer`, so an absent
@@ -28,20 +29,10 @@ const OAUTH_INPUT = {
   client_id: "cid",
 } as const;
 
-async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
-  try {
-    await promise;
-  } catch (err) {
-    return err;
-  }
-  throw new Error("expected the call to reject");
-}
-
-function expectMissing(err: unknown, specifier: string): void {
-  expect(err).toBeInstanceOf(VaultError);
-  expect((err as VaultError).code).toBe(ErrorCode.MISSING_DEPENDENCY);
-  expect((err as VaultError).statusCode).toBe(501);
-  expect((err as VaultError).message).toContain(specifier);
+async function expectMissing(run: () => Promise<unknown>, specifier: string): Promise<void> {
+  const err = await expectVaultError(run, ErrorCode.MISSING_DEPENDENCY);
+  expect(err.statusCode).toBe(501);
+  expect(err.message).toContain(specifier);
 }
 
 describe("DirectClient with the optional peers absent", () => {
@@ -54,20 +45,20 @@ describe("DirectClient with the optional peers absent", () => {
 
   it("startOAuthFlow reports MISSING_DEPENDENCY (501) from the manager build site", async () => {
     const client = new DirectClient(engine);
-    expectMissing(await rejectionOf(client.startOAuthFlow(OAUTH_INPUT)), "@harpoc/oauth-proxy");
+    await expectMissing(() => client.startOAuthFlow(OAUTH_INPUT), "@harpoc/oauth-proxy");
     expect(importPeerMock).toHaveBeenCalledWith("@harpoc/oauth-proxy", expect.any(Function));
   });
 
   it("startOAuthFlow reports MISSING_DEPENDENCY from the startOAuthFlowResult site", async () => {
     const client = new DirectClient(engine, { oauthManager: {} as never });
-    expectMissing(await rejectionOf(client.startOAuthFlow(OAUTH_INPUT)), "@harpoc/oauth-proxy");
+    await expectMissing(() => client.startOAuthFlow(OAUTH_INPUT), "@harpoc/oauth-proxy");
     expect(importPeerMock).toHaveBeenCalledWith("@harpoc/oauth-proxy", expect.any(Function));
   });
 
   it("generateCsr reports MISSING_DEPENDENCY (501)", async () => {
     const client = new DirectClient(engine);
-    expectMissing(
-      await rejectionOf(client.generateCsr("web", { subject: "example.com" })),
+    await expectMissing(
+      () => client.generateCsr("web", { subject: "example.com" }),
       "@harpoc/cert-manager",
     );
     expect(importPeerMock).toHaveBeenCalledWith("@harpoc/cert-manager", expect.any(Function));
@@ -76,8 +67,7 @@ describe("DirectClient with the optional peers absent", () => {
   it("a closed client refuses startOAuthFlow before paying the peer import", async () => {
     const client = new DirectClient(engine);
     client.close();
-    const err = await rejectionOf(client.startOAuthFlow(OAUTH_INPUT));
-    expect((err as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
+    await expectVaultError(() => client.startOAuthFlow(OAUTH_INPUT), ErrorCode.INVALID_INPUT);
     expect(importPeerMock).not.toHaveBeenCalled();
   });
 

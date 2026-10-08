@@ -1,3 +1,5 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   ENCRYPTED_KEY_IMPORT_REFUSAL,
@@ -6,237 +8,22 @@ import {
   VaultError,
   VaultState,
 } from "@harpoc/shared";
-import type { McpServerConfigInput, OAuthTokenStatus } from "@harpoc/shared";
+import type { McpServerConfigInput } from "@harpoc/shared";
 import { DirectClient } from "./direct-client.js";
+import {
+  ENCRYPTED_KEY_PEM,
+  FULL_POLICY,
+  LEAF_PEM,
+  PLAIN_KEY_PEM,
+  createFakeCertManager,
+  createFakeOAuthManager,
+  createMockEngine,
+} from "./__fixtures__/direct-client-fixtures.js";
 import { expectVaultError } from "@harpoc/test-utils";
-
-const FULL_POLICY = {
-  url_allowlist: [] as string[],
-  command_allowlist: ["gh"],
-  env_allowlist: [] as string[],
-  host_allowlist: [] as string[],
-  response_mode: "filtered" as const,
-  response_header_allowlist: [] as string[],
-  network_isolation: false,
-  fs_isolation: false,
-  smtp_recipient_allowlist: [] as string[],
-  imap_read_only: false,
-  strict_tree_exit: false,
-};
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
-
-function createMockEngine() {
-  return {
-    getState: vi.fn().mockReturnValue(VaultState.UNLOCKED),
-    listSecrets: vi.fn().mockReturnValue([
-      {
-        handle: "secret://key",
-        name: "key",
-        type: "api_key",
-        project: null,
-        status: "active",
-        version: 1,
-        createdAt: 1000,
-        updatedAt: 1000,
-        expiresAt: null,
-        rotatedAt: null,
-      },
-    ]),
-    createSecret: vi.fn().mockResolvedValue({
-      handle: "secret://k",
-      status: "created",
-      message: "Secret created",
-    }),
-    getSecretInfo: vi.fn().mockResolvedValue({
-      handle: "secret://key",
-      name: "key",
-      type: "api_key",
-      project: null,
-      status: "active",
-      version: 1,
-      createdAt: 1000,
-      updatedAt: 1000,
-      expiresAt: null,
-      rotatedAt: null,
-    }),
-    getSecretValue: vi.fn().mockResolvedValue(new Uint8Array([72, 101, 108, 108, 111])),
-    rotateSecret: vi.fn().mockResolvedValue(undefined),
-    revokeSecret: vi.fn().mockResolvedValue(undefined),
-    useSecret: vi.fn().mockResolvedValue({ type: "http", status: 200, body: "ok" }),
-    setInjectionPolicy: vi.fn().mockResolvedValue(undefined),
-    getInjectionPolicy: vi.fn().mockResolvedValue({
-      url_allowlist: [],
-      command_allowlist: [],
-      env_allowlist: [],
-      host_allowlist: [],
-    }),
-    setMcpServerConfig: vi.fn().mockResolvedValue(undefined),
-    getMcpServerConfig: vi.fn().mockResolvedValue(undefined),
-    setConnectionConfig: vi.fn().mockResolvedValue(undefined),
-    getConnectionConfig: vi.fn().mockResolvedValue(undefined),
-    deleteConnectionConfig: vi.fn().mockResolvedValue(true),
-    resolveSecretId: vi.fn().mockResolvedValue("uuid-1"),
-    grantPolicy: vi.fn().mockReturnValue({
-      id: "p1",
-      secret_id: "uuid-1",
-      principal_type: "agent",
-      principal_id: "a1",
-      permissions: ["read"],
-      created_at: Date.now(),
-      expires_at: null,
-      created_by: "sdk-direct",
-    }),
-    revokePolicy: vi.fn(),
-    listPolicies: vi.fn().mockReturnValue([]),
-    queryAudit: vi.fn().mockReturnValue([]),
-    registerAgent: vi.fn().mockReturnValue({
-      id: "agent-1",
-      name: "deploy-bot",
-      description: null,
-      owner: null,
-      status: "active",
-      created_at: 1000,
-      updated_at: 1000,
-      deactivated_at: null,
-      last_active_at: null,
-      active_tokens: 0,
-      grants: 0,
-    }),
-    listAgents: vi.fn().mockReturnValue([]),
-    getAgent: vi.fn().mockReturnValue({
-      id: "agent-1",
-      name: "deploy-bot",
-      description: null,
-      owner: null,
-      status: "active",
-      created_at: 1000,
-      updated_at: 1000,
-      deactivated_at: null,
-      last_active_at: null,
-      active_tokens: 0,
-      grants: 0,
-    }),
-    updateAgent: vi.fn().mockReturnValue({
-      id: "agent-1",
-      name: "deploy-bot",
-      description: "updated",
-      owner: null,
-      status: "active",
-      created_at: 1000,
-      updated_at: 2000,
-      deactivated_at: null,
-      last_active_at: null,
-      active_tokens: 0,
-      grants: 0,
-    }),
-    deactivateAgent: vi.fn().mockReturnValue({ revoked_tokens: 2 }),
-    activateAgent: vi.fn().mockReturnValue({
-      id: "agent-1",
-      name: "deploy-bot",
-      description: null,
-      owner: null,
-      status: "active",
-      created_at: 1000,
-      updated_at: 3000,
-      deactivated_at: null,
-      last_active_at: null,
-      active_tokens: 0,
-      grants: 0,
-    }),
-    deleteAgent: vi.fn().mockReturnValue({ revoked_tokens: 1, removed_grants: 3 }),
-    listAgentPolicies: vi.fn().mockReturnValue([]),
-    setAgentPermissions: vi.fn().mockReturnValue({
-      policy: {
-        id: "p1",
-        secret_id: "uuid-1",
-        principal_type: "agent",
-        principal_id: "deploy-bot",
-        permissions: ["read"],
-        created_at: Date.now(),
-        expires_at: null,
-        created_by: "sdk-direct",
-      },
-      gated_before: false,
-      gated_after: true,
-    }),
-    listIssuedTokens: vi.fn().mockReturnValue([]),
-    revokeToken: vi.fn(),
-    getOAuthTokenStatus: vi.fn().mockReturnValue({
-      secret_id: "uuid-1",
-      provider: "github",
-      has_access_token: true,
-      access_token_expires_at: 4000,
-      has_refresh_token: true,
-      last_refreshed_at: 3000,
-      refresh_status: "ok",
-      token_endpoint_auth_method: "client_secret_post",
-    } satisfies OAuthTokenStatus),
-    refreshOAuthToken: vi.fn().mockResolvedValue(9999),
-    importCertificate: vi.fn().mockResolvedValue({ handle: "secret://web", secretId: "uuid-web" }),
-    getCertificateStatus: vi.fn().mockReturnValue({
-      secret_id: "uuid-1",
-      subject: "CN=web.example.com",
-      issuer: "CN=Test CA",
-      not_before: 1000,
-      not_after: 2000,
-      auto_renew: false,
-      renewal_status: "ok",
-    }),
-  };
-}
-
-function createFakeOAuthManager() {
-  return {
-    cancelPendingFlows: vi.fn(),
-    startClientCredentials: vi.fn().mockResolvedValue({
-      handle: "secret://cc",
-      status: "authorized",
-      message: "Client credentials flow completed for github",
-    }),
-    startDeviceCode: vi.fn().mockResolvedValue({
-      handle: "secret://dev",
-      status: "pending_authorization",
-      auth_url: "https://github.com/login/device",
-      user_code: "ABCD-1234",
-      message: "Please visit https://github.com/login/device and enter code: ABCD-1234",
-      completion: Promise.resolve(),
-    }),
-    startAuthorizationCodeDeferred: vi.fn().mockResolvedValue({
-      handle: "secret://ac",
-      secretId: "uuid-ac",
-      authUrl: "https://github.com/login/oauth/authorize?client_id=cid",
-      completion: Promise.resolve(),
-    }),
-  };
-}
-
-function createFakeCertManager() {
-  return {
-    importCertificate: vi.fn().mockResolvedValue({ handle: "secret://web", secretId: "uuid-web" }),
-    generateCsr: vi.fn().mockResolvedValue({
-      handle: "secret://web",
-      secretId: "uuid-web",
-      csrPem: "-----BEGIN CERTIFICATE REQUEST-----\nr\n-----END CERTIFICATE REQUEST-----",
-    }),
-    renewCertificate: vi.fn().mockResolvedValue({
-      secret_id: "uuid-web",
-      subject: "CN=web.example.com",
-      issuer: "CN=Test CA",
-      not_before: 1000,
-      not_after: 5000,
-      auto_renew: true,
-      renewal_status: "ok",
-    }),
-  };
-}
-
-const PLAIN_KEY_PEM = "-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----";
-const ENCRYPTED_KEY_PEM =
-  "-----BEGIN ENCRYPTED PRIVATE KEY-----\nk\n-----END ENCRYPTED PRIVATE KEY-----";
-const LEAF_PEM = "-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----";
 
 describe("DirectClient", () => {
   it("listSecrets delegates to engine", async () => {
@@ -276,22 +63,15 @@ describe("DirectClient", () => {
 
     const value = await client.getSecretValue("secret://key");
     expect(Buffer.from(value).toString()).toBe("Hello");
-  });
-
-  it("createSecret delegates to engine", async () => {
-    const engine = createMockEngine();
-    const client = new DirectClient(engine as never);
-
-    const result = await client.createSecret({ name: "k", type: "api_key" });
-    expect(result.handle).toBe("secret://k");
-    expect(engine.createSecret).toHaveBeenCalled();
+    expect(engine.getSecretValue).toHaveBeenCalledWith("secret://key");
   });
 
   it("createSecret maps the wire shape to the engine input", async () => {
     const engine = createMockEngine();
     const client = new DirectClient(engine as never);
 
-    await client.createSecret({ name: "k", type: "api_key", expires_at: 123 });
+    const result = await client.createSecret({ name: "k", type: "api_key", expires_at: 123 });
+    expect(result.handle).toBe("secret://k");
     expect(engine.createSecret).toHaveBeenCalledWith({
       name: "k",
       type: "api_key",
@@ -928,13 +708,22 @@ describe("DirectClient", () => {
       const client = new DirectClient(engine as never, {
         onBackgroundFlowError: (secretId: string, err: unknown) => events.push({ secretId, err }),
       });
+      let hits = 0;
+      const stub = createServer((_req, res) => {
+        hits += 1;
+        res.writeHead(500).end();
+      });
+      await new Promise<void>((resolve) => stub.listen(0, "127.0.0.1", resolve));
+      const { port } = stub.address() as AddressInfo;
 
       try {
         const result = await client.startOAuthFlow({
           name: "gh",
-          provider: "github",
+          provider: "custom",
           grant_type: "authorization_code",
           client_id: "cid",
+          auth_endpoint: "https://auth.example.test/authorize",
+          token_endpoint: `http://127.0.0.1:${port}/token`,
         });
         expect(result.status).toBe("pending_authorization");
 
@@ -945,8 +734,11 @@ describe("DirectClient", () => {
         await vi.waitFor(() => expect(events).toHaveLength(1));
         expect(events[0]?.secretId).toBe("uuid-gh");
         expect(events[0]?.err).toBeInstanceOf(VaultError);
+        expect(events[0]?.err).toMatchObject({ code: ErrorCode.OAUTH_INVALID_STATE });
+        expect(hits).toBe(0);
       } finally {
         client.close();
+        stub.close();
       }
     });
 
@@ -1262,416 +1054,6 @@ describe("DirectClient", () => {
       await expect(
         client.generateCsr("web", { subject: "CN=web", algorithm: "ec", bits: 4096 } as never),
       ).rejects.toMatchObject({ message: 'bits: bits applies only to algorithm "rsa"' });
-    });
-  });
-
-  /**
-   * D4 says the OAuth and certificate peers are loaded by `import()` only when
-   * one of their methods is actually called, and that each client builds its
-   * manager once. Every other test here injects a fake, so the real dynamic
-   * import ran only on the OAuth side (the background-failure test above) and
-   * neither side pinned the cache — a lost `if (!this.xInstance)` would have
-   * rebuilt a manager per call, silently.
-   */
-  describe("lazy optional peers (no injected manager)", () => {
-    it("lazily builds the real CertManager when none is injected", async () => {
-      const engine = createMockEngine();
-      const client = new DirectClient(engine as never);
-
-      try {
-        const ref = await client.importCertificate("web", {
-          private_key_pem: PLAIN_KEY_PEM,
-          certificate_pem: LEAF_PEM,
-        });
-
-        expect(ref).toEqual({ handle: "secret://web", secretId: "uuid-web" });
-        // The real manager's own mapping: a bundle split into leaf + chain, then
-        // the engine's positional signature. A fake could not produce this.
-        expect(engine.importCertificate).toHaveBeenCalledWith(
-          "web",
-          PLAIN_KEY_PEM,
-          {
-            certificatePem: LEAF_PEM,
-            chainPem: undefined,
-            autoRenew: false,
-            renewBeforeDays: 30,
-          },
-          undefined,
-          undefined,
-        );
-      } finally {
-        client.close();
-      }
-    });
-
-    it("caches the lazily built managers (one instance per client)", async () => {
-      const engine = createMockEngine();
-      const client = new DirectClient(engine as never);
-      // The cache is the property under test, so reference equality through the
-      // private loaders is the honest pin — no public method exposes it.
-      const load = client as never as {
-        loadOAuthManager(): Promise<unknown>;
-        loadCertManager(): Promise<unknown>;
-      };
-
-      try {
-        expect(await load.loadOAuthManager()).toBe(await load.loadOAuthManager());
-        expect(await load.loadCertManager()).toBe(await load.loadCertManager());
-      } finally {
-        client.close();
-      }
-    });
-
-    // RED before the promise memoization: each un-awaited first call passed the
-    // `if (!instance)` check, so two managers were built and the field kept the
-    // second — close() then cancelled a manager the first caller never had.
-    it("two concurrent first calls share one manager", async () => {
-      const engine = createMockEngine();
-      const client = new DirectClient(engine as never);
-      const load = client as never as {
-        loadOAuthManager(): Promise<{ cancelPendingFlows: () => void }>;
-      };
-
-      try {
-        const [first, second] = await Promise.all([
-          load.loadOAuthManager(),
-          load.loadOAuthManager(),
-        ]);
-        expect(first).toBe(second);
-      } finally {
-        client.close();
-      }
-    });
-
-    // RED before the promise memoization independently of the identity check:
-    // the second manager is reachable by nobody, so close() leaves it uncancelled.
-    it("close() cancels every OAuth manager the client built", async () => {
-      const engine = createMockEngine();
-      const client = new DirectClient(engine as never);
-      const internals = client as never as {
-        buildOAuthManager(): Promise<{ cancelPendingFlows: () => void }>;
-        loadOAuthManager(): Promise<{ cancelPendingFlows: () => void }>;
-      };
-      const built: Array<{ cancelPendingFlows: () => void }> = [];
-      const original = internals.buildOAuthManager;
-      vi.spyOn(internals, "buildOAuthManager").mockImplementation(async () => {
-        const manager = await original.call(client);
-        vi.spyOn(manager, "cancelPendingFlows");
-        built.push(manager);
-        return manager;
-      });
-
-      try {
-        const [a, b] = await Promise.all([
-          internals.loadOAuthManager(),
-          internals.loadOAuthManager(),
-        ]);
-        client.close();
-        expect(built).toHaveLength(1);
-        for (const manager of built) expect(manager.cancelPendingFlows).toHaveBeenCalledTimes(1);
-        expect(a).toBe(b);
-      } finally {
-        client.close();
-      }
-    });
-
-    it("two concurrent first calls share one CertManager", async () => {
-      const engine = createMockEngine();
-      const client = new DirectClient(engine as never);
-      const load = client as never as { loadCertManager(): Promise<unknown> };
-
-      try {
-        const [first, second] = await Promise.all([load.loadCertManager(), load.loadCertManager()]);
-        expect(first).toBe(second);
-      } finally {
-        client.close();
-      }
-    });
-
-    it("a failed load does not stick — the next call retries", async () => {
-      const engine = createMockEngine();
-      const client = new DirectClient(engine as never);
-      const build = vi
-        .spyOn(
-          client as never as { buildOAuthManager: () => Promise<unknown> },
-          "buildOAuthManager",
-        )
-        .mockRejectedValueOnce(new Error("optional peer not installed"));
-      const load = client as never as { loadOAuthManager(): Promise<unknown> };
-
-      try {
-        await expect(load.loadOAuthManager()).rejects.toThrow("optional peer not installed");
-      } finally {
-        build.mockRestore();
-      }
-      try {
-        await expect(load.loadOAuthManager()).resolves.toBeDefined();
-      } finally {
-        client.close();
-      }
-    });
-
-    // RED today: close() reads only oauthManagerInstance, which the build sets on
-    // resolve — a close() during the load cancels nothing, and the flow started
-    // afterwards pins the event loop for the whole callback timeout.
-    it("close() during an in-flight peer load leaves no uncancelled manager", async () => {
-      const engine = createMockEngine();
-      const client = new DirectClient(engine as never);
-      const internals = client as never as {
-        buildOAuthManager(): Promise<unknown>;
-        loadOAuthManager(): Promise<unknown>;
-      };
-      const manager = { cancelPendingFlows: vi.fn() };
-      let release: (m: unknown) => void = () => {};
-      vi.spyOn(internals, "buildOAuthManager").mockImplementation(
-        () =>
-          new Promise((resolve) => {
-            release = resolve as (m: unknown) => void;
-          }),
-      );
-
-      const pending = internals.loadOAuthManager();
-      pending.catch(() => {});
-      client.close();
-      release(manager);
-
-      await expect(pending).rejects.toMatchObject({
-        code: ErrorCode.INVALID_INPUT,
-        message: "DirectClient is closed",
-      });
-      expect(manager.cancelPendingFlows).toHaveBeenCalledTimes(1);
-    });
-
-    it("a load started after close() refuses before building", async () => {
-      const engine = createMockEngine();
-      const client = new DirectClient(engine as never);
-      const internals = client as never as {
-        buildOAuthManager(): Promise<unknown>;
-        loadOAuthManager(): Promise<unknown>;
-      };
-      const build = vi.spyOn(internals, "buildOAuthManager");
-      client.close();
-
-      await expect(internals.loadOAuthManager()).rejects.toMatchObject({
-        code: ErrorCode.INVALID_INPUT,
-        message: "DirectClient is closed",
-      });
-      expect(build).not.toHaveBeenCalled();
-    });
-
-    // RED without loadCertManager's post-await check: the build resolves after
-    // close() and hands the caller a manager on a client the embedder has
-    // already shut down. No cancel to assert — CertManager holds no socket.
-    it("close() during an in-flight CertManager load refuses the resolved manager", async () => {
-      const engine = createMockEngine();
-      const client = new DirectClient(engine as never);
-      const internals = client as never as {
-        buildCertManager(): Promise<unknown>;
-        loadCertManager(): Promise<unknown>;
-      };
-      const manager = {};
-      let release: (m: unknown) => void = () => {};
-      vi.spyOn(internals, "buildCertManager").mockImplementation(
-        () =>
-          new Promise((resolve) => {
-            release = resolve as (m: unknown) => void;
-          }),
-      );
-
-      const pending = internals.loadCertManager();
-      pending.catch(() => {});
-      client.close();
-      release(manager);
-
-      await expect(pending).rejects.toMatchObject({
-        code: ErrorCode.INVALID_INPUT,
-        message: "DirectClient is closed",
-      });
-    });
-
-    it("a CertManager load started after close() refuses before building", async () => {
-      const engine = createMockEngine();
-      const client = new DirectClient(engine as never);
-      const internals = client as never as {
-        buildCertManager(): Promise<unknown>;
-        loadCertManager(): Promise<unknown>;
-      };
-      const build = vi.spyOn(internals, "buildCertManager");
-      client.close();
-
-      await expect(internals.loadCertManager()).rejects.toMatchObject({
-        code: ErrorCode.INVALID_INPUT,
-        message: "DirectClient is closed",
-      });
-      expect(build).not.toHaveBeenCalled();
-    });
-
-    // RED without the post-load re-check: the loader's own checks run before it
-    // hands the manager back, so a close() landing after them — modelled here by
-    // closing from inside the loader — must be seen by the method itself.
-    describe("the three cert-manager calls re-check closed after the load", () => {
-      it.each([
-        [
-          "importCertificate",
-          (c: DirectClient) =>
-            c.importCertificate("web", {
-              private_key_pem: PLAIN_KEY_PEM,
-              certificate_pem: LEAF_PEM,
-            }),
-        ],
-        ["generateCsr", (c: DirectClient) => c.generateCsr("web", { subject: "web.example.com" })],
-        ["renewCertificate", (c: DirectClient) => c.renewCertificate("secret://web")],
-      ] as const)("%s refuses when the client closed during the load", async (name, call) => {
-        const engine = createMockEngine();
-        const client = new DirectClient(engine as never);
-        const manager = createFakeCertManager();
-        const internals = client as never as {
-          loadCertManager(): Promise<unknown>;
-        };
-        vi.spyOn(internals, "loadCertManager").mockImplementation(async () => {
-          client.close();
-          return manager;
-        });
-
-        await expect(call(client)).rejects.toMatchObject({
-          code: ErrorCode.INVALID_INPUT,
-          message: "DirectClient is closed",
-        });
-        expect(manager[name]).not.toHaveBeenCalled();
-      });
-    });
-
-    // Mock-free twin of the OAuth warm-client pin: an injected manager makes
-    // the loader resolve without yielding, so a close() landing right after
-    // the call is seen only by the method's own re-check (RED for import and
-    // csr without it). renewCertificate awaits resolveSecretId first, so the
-    // loader's own check refuses it there and this row pins the refusal only.
-    describe("the three cert-manager calls racing close() on a warm client", () => {
-      it.each([
-        [
-          "importCertificate",
-          (c: DirectClient) =>
-            c.importCertificate("web", {
-              private_key_pem: PLAIN_KEY_PEM,
-              certificate_pem: LEAF_PEM,
-            }),
-        ],
-        ["generateCsr", (c: DirectClient) => c.generateCsr("web", { subject: "web.example.com" })],
-        ["renewCertificate", (c: DirectClient) => c.renewCertificate("secret://web")],
-      ] as const)("%s starts nothing on the injected manager", async (name, call) => {
-        const engine = createMockEngine();
-        const certManager = createFakeCertManager();
-        const client = new DirectClient(engine as never, { certManager: certManager as never });
-
-        const pending = call(client);
-        pending.catch(() => {});
-        client.close();
-
-        await expect(pending).rejects.toMatchObject({
-          code: ErrorCode.INVALID_INPUT,
-          message: "DirectClient is closed",
-        });
-        expect(certManager[name]).not.toHaveBeenCalled();
-      });
-    });
-
-    // RED without the `=== attempt` identity guard: the stale catch clears the
-    // NEWER attempt, and the next caller builds a third manager close() never
-    // reaches.
-    it("a stale rejection does not clear a newer in-flight load", async () => {
-      const engine = createMockEngine();
-      const client = new DirectClient(engine as never);
-      const internals = client as never as {
-        buildOAuthManager(): Promise<unknown>;
-        loadOAuthManager(): Promise<unknown>;
-        oauthManagerLoad?: Promise<unknown>;
-      };
-      const secondManager = { cancelPendingFlows: vi.fn() };
-      let release: (m: unknown) => void = () => {};
-      const build = vi
-        .spyOn(internals, "buildOAuthManager")
-        .mockRejectedValueOnce(new Error("optional peer not installed"))
-        .mockImplementationOnce(
-          () =>
-            new Promise((resolve) => {
-              release = resolve as (m: unknown) => void;
-            }),
-        );
-
-      try {
-        const first = internals.loadOAuthManager();
-        first.catch(() => {});
-        const attempt = internals.oauthManagerLoad as Promise<unknown>;
-
-        let newer: Promise<unknown> | undefined;
-        attempt.catch(() => {
-          newer = internals.loadOAuthManager();
-          newer.catch(() => {});
-        });
-
-        const second = internals.loadOAuthManager();
-        second.catch(() => {});
-
-        await expect(first).rejects.toThrow("optional peer not installed");
-        await expect(second).rejects.toThrow("optional peer not installed");
-
-        const third = internals.loadOAuthManager();
-        release(secondManager);
-
-        expect(await third).toBe(secondManager);
-        expect(await (newer as Promise<unknown>)).toBe(secondManager);
-        expect(build).toHaveBeenCalledTimes(2);
-      } finally {
-        client.close();
-      }
-    });
-
-    it("a stale CertManager rejection does not clear a newer in-flight load", async () => {
-      const engine = createMockEngine();
-      const client = new DirectClient(engine as never);
-      const internals = client as never as {
-        buildCertManager(): Promise<unknown>;
-        loadCertManager(): Promise<unknown>;
-        certManagerLoad?: Promise<unknown>;
-      };
-      const secondManager = {};
-      let release: (m: unknown) => void = () => {};
-      const build = vi
-        .spyOn(internals, "buildCertManager")
-        .mockRejectedValueOnce(new Error("optional peer not installed"))
-        .mockImplementationOnce(
-          () =>
-            new Promise((resolve) => {
-              release = resolve as (m: unknown) => void;
-            }),
-        );
-
-      try {
-        const first = internals.loadCertManager();
-        first.catch(() => {});
-        const attempt = internals.certManagerLoad as Promise<unknown>;
-
-        let newer: Promise<unknown> | undefined;
-        attempt.catch(() => {
-          newer = internals.loadCertManager();
-          newer.catch(() => {});
-        });
-
-        const second = internals.loadCertManager();
-        second.catch(() => {});
-
-        await expect(first).rejects.toThrow("optional peer not installed");
-        await expect(second).rejects.toThrow("optional peer not installed");
-
-        const third = internals.loadCertManager();
-        release(secondManager);
-
-        expect(await third).toBe(secondManager);
-        expect(await (newer as Promise<unknown>)).toBe(secondManager);
-        expect(build).toHaveBeenCalledTimes(2);
-      } finally {
-        client.close();
-      }
     });
   });
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { OAuthProviderConfig } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import { PROVIDER_PRESETS, getScopesSeparator, resolveProvider } from "./providers.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 function baseConfig(overrides: Partial<OAuthProviderConfig> = {}): OAuthProviderConfig {
   return {
@@ -41,6 +42,18 @@ describe("PROVIDER_PRESETS", () => {
     const slack = PROVIDER_PRESETS["slack"];
     expect(slack).toBeDefined();
     expect(slack?.scopes_separator).toBe(",");
+  });
+
+  it("pins every preset endpoint to https", () => {
+    const endpoints = Object.entries(PROVIDER_PRESETS).flatMap(([name, preset]) =>
+      [preset.auth_endpoint, preset.token_endpoint, preset.device_authorization_endpoint]
+        .filter((endpoint): endpoint is string => endpoint !== undefined)
+        .map((endpoint) => [name, endpoint] as const),
+    );
+    expect(endpoints).toHaveLength(11);
+    for (const [name, endpoint] of endpoints) {
+      expect(new URL(endpoint).protocol, `${name}: ${endpoint}`).toBe("https:");
+    }
   });
 });
 
@@ -89,14 +102,11 @@ describe("resolveProvider", () => {
     expect(resolved).toEqual(config);
   });
 
-  it("throws OAUTH_PROVIDER_NOT_FOUND for unknown preset", () => {
-    const config = baseConfig({ provider: "unknown" as never });
-    expect(() => resolveProvider(config)).toThrow();
-    try {
-      resolveProvider(config);
-    } catch (err) {
-      expect((err as { code: string }).code).toBe(ErrorCode.OAUTH_PROVIDER_NOT_FOUND);
-    }
+  it("throws OAUTH_PROVIDER_NOT_FOUND for unknown preset", async () => {
+    await expectVaultError(
+      () => resolveProvider(baseConfig({ provider: "unknown" as never })),
+      ErrorCode.OAUTH_PROVIDER_NOT_FOUND,
+    );
   });
 });
 

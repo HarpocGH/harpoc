@@ -54,7 +54,7 @@ describe("web-ui posture", () => {
   it("references no external origin (CSP 'self' must hold)", () => {
     for (const file of sources) {
       const text = readFileSync(file, "utf-8");
-      expect(/https?:\/\/(?!github\.com|127\.0\.0\.1|localhost)/.test(text), file).toBe(false);
+      expect(/https?:\/\/(?!(?:127\.0\.0\.1|localhost)(?![\w.-]))/i.test(text), file).toBe(false);
     }
   });
 });

@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ApiClient, AuditEventWire } from "../api/client";
+import type { ApiClient } from "../api/client";
+import { makeEvent } from "../__fixtures__/builders";
 import { AuditPage } from "./audit";
 
 afterEach(cleanup);
@@ -8,19 +9,7 @@ beforeEach(() => {
   window.location.hash = "";
 });
 
-const event = (over: Partial<AuditEventWire>): AuditEventWire => ({
-  id: 1,
-  timestamp: 1700000000000,
-  event_type: "secret.use",
-  secret_id: null,
-  principal_type: null,
-  principal_id: null,
-  detail: null,
-  ip_address: null,
-  session_id: null,
-  success: true,
-  ...over,
-});
+const event = makeEvent;
 
 function api(over: Partial<ApiClient> = {}): ApiClient {
   return {

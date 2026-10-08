@@ -63,13 +63,11 @@ describe("TokenRefreshScheduler", () => {
   });
 
   it("tick continues after individual token refresh failure", async () => {
-    let callCount = 0;
     const engine = {
       getExpiringOAuthTokens: vi
         .fn()
         .mockReturnValue([{ secret_id: "fail-token" }, { secret_id: "ok-token" }]),
       refreshOAuthToken: vi.fn().mockImplementation(async (id: string) => {
-        callCount++;
         if (id === "fail-token") throw new Error("Refresh failed");
         return Date.now() + 3600_000;
       }),
@@ -78,8 +76,12 @@ describe("TokenRefreshScheduler", () => {
     scheduler = new TokenRefreshScheduler(engine as never, { initialRetryDelayMs: 0 });
     await scheduler.tick();
 
-    // Both tokens attempted (first fails with retries, second succeeds)
-    expect(callCount).toBeGreaterThanOrEqual(2);
+    expect(engine.refreshOAuthToken.mock.calls.map(([id]) => id)).toEqual([
+      "fail-token",
+      "fail-token",
+      "fail-token",
+      "ok-token",
+    ]);
   });
 
   it("refreshNow delegates to engine with retry", async () => {
@@ -95,21 +97,33 @@ describe("TokenRefreshScheduler", () => {
   });
 
   it("retries with exponential backoff on failure then succeeds", async () => {
-    let callCount = 0;
-    const engine = {
-      getExpiringOAuthTokens: vi.fn().mockReturnValue([]),
-      refreshOAuthToken: vi.fn().mockImplementation(async () => {
-        callCount++;
-        if (callCount < 3) throw new Error("Transient failure");
-        return Date.now() + 3600_000;
-      }),
-    };
-
-    scheduler = new TokenRefreshScheduler(engine as never, { initialRetryDelayMs: 0 });
-    const result = await scheduler.refreshNow("retry-test");
-
-    expect(callCount).toBe(3);
-    expect(result).toBeGreaterThan(Date.now());
+    vi.useFakeTimers();
+    try {
+      let callCount = 0;
+      const engine = {
+        getExpiringOAuthTokens: vi.fn().mockReturnValue([]),
+        refreshOAuthToken: vi.fn().mockImplementation(async () => {
+          callCount++;
+          if (callCount < 3) throw new Error("Transient failure");
+          return Date.now() + 3600_000;
+        }),
+      };
+      scheduler = new TokenRefreshScheduler(engine as never, { initialRetryDelayMs: 1000 });
+      const result = scheduler.refreshNow("retry-test");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(callCount).toBe(1);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(callCount).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(callCount).toBe(2);
+      await vi.advanceTimersByTimeAsync(3999);
+      expect(callCount).toBe(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(callCount).toBe(3);
+      await expect(result).resolves.toBeGreaterThan(Date.now());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("throws after max retries exhausted", async () => {

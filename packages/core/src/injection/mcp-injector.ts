@@ -8,7 +8,7 @@ import {
   MCP_INIT_TIMEOUT_MS,
   McpProtocolRevision,
   McpTransport,
-  VAULT_VERSION,
+  HARPOC_VERSION,
   VaultError,
 } from "@harpoc/shared";
 import { Agent, fetch as undiciFetch } from "undici";
@@ -275,7 +275,7 @@ export class McpInjector {
     attribution?: AuditAttribution,
   ): Promise<McpConnectionEntry> {
     const client = new sdk.Client(
-      { name: "harpoc-vault", version: VAULT_VERSION },
+      { name: "harpoc-vault", version: HARPOC_VERSION },
       {
         versionNegotiation: {
           mode:

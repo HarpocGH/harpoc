@@ -1,8 +1,16 @@
 import type { AccessPolicy, Agent, AgentPolicy } from "@harpoc/shared";
+import { Permission } from "@harpoc/shared";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, SecretInfo } from "../api/client";
 import { ApiError } from "../api/client";
+import {
+  makeAccessPolicy,
+  makeAgent,
+  makeAgentPolicy,
+  makeSecret,
+  unsignedJwt,
+} from "../__fixtures__/builders";
 import { PermissionsPage } from "./permissions";
 
 afterEach(() => {
@@ -14,70 +22,28 @@ beforeEach(() => {
   window.sessionStorage.clear();
 });
 
-/** A three-segment token whose payload decodes — nothing here verifies one. */
-const jwt = (payload: Record<string, unknown>): string =>
-  `h.${btoa(JSON.stringify(payload)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}.s`;
+const jwt = unsignedJwt;
 
-const agent = (over: Partial<Agent> = {}): Agent => ({
-  id: "a-1",
-  name: "ci-bot",
-  description: null,
-  owner: null,
-  status: "active",
-  created_at: 0,
-  updated_at: 0,
-  deactivated_at: null,
-  last_active_at: null,
-  active_tokens: 0,
-  grants: 0,
-  ...over,
-});
+const agent = (over: Partial<Agent> = {}): Agent =>
+  makeAgent({ id: "a-1", description: null, owner: null, active_tokens: 0, grants: 0, ...over });
 
 const ACTIVE = agent();
 const INACTIVE = agent({ id: "a-2", name: "old-bot", status: "inactive" });
 
-const secret = (over: Partial<SecretInfo> = {}): SecretInfo => ({
-  handle: "secret://myproj/test-key",
-  name: "test-key",
-  type: "api_key",
-  project: "myproj",
-  status: "active",
-  version: 1,
-  createdAt: 0,
-  updatedAt: 0,
-  expiresAt: null,
-  rotatedAt: null,
-  ...over,
-});
+const secret = (over: Partial<SecretInfo> = {}): SecretInfo =>
+  makeSecret({ handle: "secret://myproj/test-key", name: "test-key", project: "myproj", ...over });
 
 /** Held by `ci-bot`, so the loaded policies mark it granted. */
 const GATED = secret();
 /** No agent holds a row on it — granting here is the flip the editor predicts. */
 const UNGATED = secret({ handle: "secret://open-key", name: "open-key", project: null });
 
-const policy = (over: Partial<AgentPolicy> = {}): AgentPolicy => ({
-  policy_id: "p-1",
-  secret_id: "s-1",
-  handle: GATED.handle,
-  permissions: ["read", "use"],
-  expires_at: null,
-  created_at: 0,
-  ...over,
-});
+const policy = (over: Partial<AgentPolicy> = {}): AgentPolicy =>
+  makeAgentPolicy({ handle: GATED.handle, ...over });
 
 const POLICIES: Record<string, AgentPolicy[]> = { "ci-bot": [policy()], "old-bot": [] };
 
-const access = (over: Partial<AccessPolicy> = {}): AccessPolicy => ({
-  id: "ap-1",
-  secret_id: "s-1",
-  principal_type: "agent",
-  principal_id: "ci-bot",
-  permissions: ["read", "use"],
-  created_at: 0,
-  expires_at: null,
-  created_by: "cli",
-  ...over,
-});
+const access = makeAccessPolicy;
 
 /**
  * What `GET /secrets/:handle/policies` answers per column — agent rows
@@ -159,10 +125,10 @@ describe("PermissionsPage", () => {
     render(<PermissionsPage api={api()} />);
     await waitFor(() => expect(cell("ci-bot", UNGATED.handle)).toBeTruthy());
     fireEvent.click(cell("ci-bot", UNGATED.handle));
-    for (const permission of ["list", "read", "use", "rotate", "revoke", "admin"]) {
+    for (const permission of Object.values(Permission).filter((p) => p !== Permission.CREATE)) {
       expect(screen.getByLabelText(permission)).toBeTruthy();
     }
-    expect(screen.queryByLabelText("create")).toBeNull();
+    expect(screen.queryByLabelText(Permission.CREATE)).toBeNull();
   });
 
   it("predicts the first-grant flip before the PUT and writes only after Confirm", async () => {
