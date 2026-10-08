@@ -50,8 +50,18 @@ export interface ScenarioSetup {
   credential: string;
   /**
    * A benign string travelling the same path as the credential. Blanket
-   * redaction would satisfy every opacity check, so an arm that reports OPAQUE
-   * must also show this survived.
+   * redaction would satisfy every opacity check, so the arms that credit the
+   * vault with a clean completed result, and whose result can carry a
+   * caller-chosen string, also show this survived: output-channel's four echo
+   * arms (`OC_MARKER`, printed beside the token), response-channel's five echo
+   * arms (the `x-harpoc-marker` header the echo fixture reflects) and
+   * context-opacity's Redis `ECHO`. No other arm checks it: the five other
+   * context-opacity results (an SMTP acceptance, IMAP UIDs, a MongoDB ping, an
+   * SFTP listing, a docker pull) cannot carry it without a fixture change, the
+   * remaining arms' verdicts stand on other evidence (a refusal by name, an
+   * execution or sink observation, a fragment's survival, a status-only
+   * completion, the handle in a captured log), and the shell-out arms reuse the
+   * field as a scratch file path.
    */
   marker: string;
   cleanup?: () => void | Promise<void>;

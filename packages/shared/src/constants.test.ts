@@ -227,10 +227,6 @@ describe("session timing constants", () => {
     expect(MAX_SESSION_TTL_MS).toBe(24 * 60 * 60 * 1_000);
   });
 
-  it("MAX_HTTP_RESPONSE_BYTES is 4 MiB", () => {
-    expect(MAX_HTTP_RESPONSE_BYTES).toBe(4 * 1024 * 1024);
-  });
-
   it("SESSION_SLIDE_INTERVAL_MS is 30 seconds", () => {
     expect(SESSION_SLIDE_INTERVAL_MS).toBe(30_000);
   });
@@ -330,6 +326,10 @@ describe("vault defaults", () => {
 
   it("DEFAULT_HTTP_TIMEOUT_MS is 30 seconds", () => {
     expect(DEFAULT_HTTP_TIMEOUT_MS).toBe(30_000);
+  });
+
+  it("MAX_HTTP_RESPONSE_BYTES is 4 MiB", () => {
+    expect(MAX_HTTP_RESPONSE_BYTES).toBe(4 * 1024 * 1024);
   });
 
   it("MAX_NAME_LENGTH is 255", () => {

@@ -34,7 +34,7 @@ describe("Session Expiry", () => {
   });
 
   afterAll(async () => {
-    destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   // ---- Test 1: Session monitor detects expired session --------------------
@@ -54,13 +54,14 @@ describe("Session Expiry", () => {
       dbPath: vault.dbPath,
       sessionPath: vault.sessionPath,
     });
+    let mcpServer: McpServer | undefined;
     try {
       const loaded = await engine2.loadSession();
       expect(loaded).toBe(true);
       expect(engine2.getState()).toBe(VaultState.UNLOCKED);
 
       // Set up MCP, REST, SDK before expiry
-      const mcpServer: McpServer = createMcpServer({ engine: engine2, allowTokenless: true });
+      mcpServer = createMcpServer({ engine: engine2, allowTokenless: true });
       const app = createApp(engine2);
       const client = new DirectClient(engine2);
 
@@ -88,6 +89,7 @@ describe("Session Expiry", () => {
 
       await engine2.destroy();
     } finally {
+      await mcpServer?.close();
       vi.useRealTimers();
     }
   });

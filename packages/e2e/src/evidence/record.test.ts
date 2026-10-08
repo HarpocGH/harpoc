@@ -39,11 +39,13 @@ describe("evidence records", () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "harpoc-evidence-"));
   });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+  afterEach(async () => {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await restoreRealExecFileSync();
+    resetDirtyCacheForTests();
   });
 
-  it("stamps commit and timestamp and computes the match flag", () => {
+  it("stamps commit and timestamp and computes the match flag", async () => {
     const rec = emit(join(dir, "run.jsonl"), {
       scenario: "url-manipulation",
       context: "database",
@@ -54,7 +56,16 @@ describe("evidence records", () => {
       observed: "HOST_NOT_ALLOWED",
     });
     expect(rec.match).toBe(true);
-    expect(rec.commit).toMatch(/^[0-9a-f]{40}$|^unknown$/);
+    const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    let head: string;
+    try {
+      head = actual.execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    } catch {
+      head = "unknown";
+    }
+    expect(rec.commit).toBe(head);
+    // Every place the collection runs is a git checkout (CI's actions/checkout, the dev host).
+    expect(rec.commit).toMatch(/^[0-9a-f]{40}$/);
     expect(() => new Date(rec.at).toISOString()).not.toThrow();
   });
 
@@ -156,16 +167,24 @@ describe("evidence records", () => {
 
   it("re-probes after a transient git failure instead of caching it (F15)", async () => {
     resetDirtyCacheForTests();
-    execFileSyncMock.mockImplementationOnce(() => {
-      throw new Error("index.lock exists");
-    });
-    execFileSyncMock.mockImplementation(() => "" as never);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      execFileSyncMock.mockImplementationOnce(() => {
+        throw new Error("index.lock exists");
+      });
+      execFileSyncMock.mockImplementation(() => "" as never);
 
-    expect(treeDirty()).toBe(true); // honest answer when it cannot be determined
-    expect(treeDirty()).toBe(false); // the next call re-probes and succeeds
-
-    await restoreRealExecFileSync();
-    resetDirtyCacheForTests();
+      expect(treeDirty()).toBe(true); // honest answer when it cannot be determined
+      expect(treeDirty()).toBe(false); // the next call re-probes and succeeds
+      expect(stderrSpy).toHaveBeenCalledTimes(1);
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "evidence: git status failed, records stamp dirty until it succeeds: Error: index.lock exists",
+        ),
+      );
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 
   it("caches a successful probe (negative control)", async () => {
@@ -175,9 +194,6 @@ describe("evidence records", () => {
     treeDirty();
     treeDirty();
     expect(execFileSyncMock).toHaveBeenCalledTimes(1);
-
-    await restoreRealExecFileSync();
-    resetDirtyCacheForTests();
   });
 
   // Without this the ten output-channel arms land in the artifact

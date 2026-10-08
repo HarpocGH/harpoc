@@ -7,7 +7,14 @@ import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { DirectClient, RestClient } from "@harpoc/sdk";
 import type { VaultClient } from "@harpoc/sdk";
-import { AuditEventType, ErrorCode, HARPOC_VERSION, SecretType, VaultState } from "@harpoc/shared";
+import {
+  AuditEventType,
+  ErrorCode,
+  HARPOC_VERSION,
+  SecretStatus,
+  SecretType,
+  VaultState,
+} from "@harpoc/shared";
 import type { McpServer } from "@modelcontextprotocol/server";
 import {
   createTestVault,
@@ -123,17 +130,18 @@ describe("Full Lifecycle", () => {
   });
 
   afterAll(async () => {
+    await mcpServer?.close();
     await restServer?.close();
-    await vault?.engine.destroy();
     await new Promise<void>((resolve, reject) => {
       echoServer?.close((err) => (err ? reject(err) : resolve()));
     });
-    destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   // ---- Test 1: initVault + createSecret -----------------------------------
-  it("creates a secret with handle and active status", () => {
+  it("creates a secret with handle and active status", async () => {
     expect(handle).toBe(`secret://${SECRET_NAME}`);
+    expect((await vault.engine.getSecretInfo(handle)).status).toBe(SecretStatus.ACTIVE);
   });
 
   // ---- Test 2: MCP list_secrets -------------------------------------------
@@ -306,6 +314,7 @@ describe("Full Lifecycle", () => {
     // MCP tool should error
     const mcpResult = await callTool(mcpServer, "list_secrets", {});
     expect(mcpResult.isError).toBe(true);
+    expect(mcpResult.content[0]?.text ?? "").toContain("Vault is locked");
 
     // REST should return 503
     const app = createApp(vault.engine);

@@ -38,7 +38,7 @@ describe("every REST scope refusal writes an access.denied row (D2g)", () => {
 
   afterAll(async () => {
     await server?.close();
-    await destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   const denied = () => vault.engine.queryAudit({ eventType: AuditEventType.ACCESS_DENIED });

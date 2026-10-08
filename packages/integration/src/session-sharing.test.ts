@@ -90,12 +90,12 @@ describe("Session Sharing", () => {
   });
 
   afterAll(async () => {
+    await mcpServer?.close();
     await engine2?.destroy();
-    await vault1?.engine.destroy();
     await new Promise<void>((resolve, reject) => {
       echoServer?.close((err) => (err ? reject(err) : resolve()));
     });
-    destroyTestVault(vault1).catch(() => {});
+    await destroyTestVault(vault1);
   });
 
   // ---- Test 1: loadSession succeeds on Engine2 ----------------------------
@@ -202,9 +202,9 @@ describe("Session Sharing", () => {
     expect(policies.some((p) => p.principal_id === "mcp-agent")).toBe(true);
   });
 
-  // ---- Test 10: Both engines remain functional concurrently ---------------
-  it("both engines remain functional concurrently (no SQLite lock contention)", async () => {
-    // Parallel reads from both engines
+  // ---- Test 10: Both engines read the same rows ---------------------------
+  it("both engines read the same rows through the shared session", async () => {
+    // Reads from both engines
     const [secrets1, secrets2, info1, info2] = await Promise.all([
       Promise.resolve(vault1.engine.listSecrets()),
       Promise.resolve(engine2.listSecrets()),
@@ -293,7 +293,7 @@ async function expectSharedWrappedSession(
     }
   } finally {
     await engineA.destroy();
-    rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 

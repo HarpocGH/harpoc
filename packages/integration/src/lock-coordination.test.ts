@@ -4,7 +4,7 @@ import { VaultEngine } from "@harpoc/core";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { DirectClient } from "@harpoc/sdk";
-import { SESSION_CLEANUP_INTERVAL_MS, VaultState } from "@harpoc/shared";
+import { ErrorCode, SESSION_CLEANUP_INTERVAL_MS, SecretType, VaultState } from "@harpoc/shared";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
@@ -67,7 +67,7 @@ describe("Lock Coordination", () => {
   });
 
   afterAll(async () => {
-    destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   // ---- Test 1: Engine2 detects Engine1's lock via monitor -----------------
@@ -135,9 +135,10 @@ describe("Lock Coordination", () => {
       dbPath: vault.dbPath,
       sessionPath: vault.sessionPath,
     });
+    let mcpServer: McpServer | undefined;
     try {
       await engine2.loadSession();
-      const mcpServer: McpServer = createMcpServer({ engine: engine2, allowTokenless: true });
+      mcpServer = createMcpServer({ engine: engine2, allowTokenless: true });
 
       await awaitSessionLockRelease(vault.sessionPath);
       await engine1.lock();
@@ -145,7 +146,9 @@ describe("Lock Coordination", () => {
 
       const result = await callTool(mcpServer, "list_secrets", {});
       expect(result.isError).toBe(true);
+      expect(result.content[0]?.text ?? "").toContain("Vault is locked");
     } finally {
+      await mcpServer?.close();
       vi.useRealTimers();
       await engine1.destroy();
       await engine2.destroy();
@@ -169,7 +172,7 @@ describe("Lock Coordination", () => {
       await engine1.lock();
       await advanceMonitorAndAwaitSeal(engine2);
 
-      await expect(client.listSecrets()).rejects.toThrow("Vault is locked");
+      await expect(client.listSecrets()).rejects.toMatchObject({ code: ErrorCode.VAULT_LOCKED });
     } finally {
       vi.useRealTimers();
       await engine1.destroy();
@@ -217,8 +220,13 @@ describe("Lock Coordination", () => {
     await engine3.unlock(PASSWORD);
     expect(engine3.getState()).toBe(VaultState.UNLOCKED);
 
-    const secrets = engine3.listSecrets();
-    expect(secrets).toBeDefined();
+    const { handle } = await engine3.createSecret({
+      name: "after-relock",
+      type: SecretType.API_KEY,
+      value: new Uint8Array(Buffer.from("relock-value")),
+    });
+    expect(Buffer.from(await engine3.getSecretValue(handle)).toString("utf8")).toBe("relock-value");
+    expect(engine3.listSecrets().map((s) => s.name)).toEqual(["after-relock"]);
     await engine3.destroy();
     await engine1.destroy();
   });

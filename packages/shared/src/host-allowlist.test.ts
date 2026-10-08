@@ -235,27 +235,31 @@ describe("checkRequestHost", () => {
 
 describe("assertBindAllowed", () => {
   it("refuses a non-loopback bind with no allowed host", () => {
-    expect(() => assertBindAllowed("0.0.0.0", [])).toThrow(VaultError);
+    let thrown: unknown;
     try {
       assertBindAllowed("0.0.0.0", []);
     } catch (err) {
-      expect((err as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
-      expect((err as VaultError).message).toBe(
-        "A non-loopback bind (0.0.0.0) requires --allowed-host <name> naming every host name clients use to reach this listener (repeatable); loopback binds allow 127.0.0.1, ::1 and localhost automatically",
-      );
+      thrown = err;
     }
+    expect(thrown).toBeInstanceOf(VaultError);
+    expect((thrown as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
+    expect((thrown as VaultError).message).toBe(
+      "A non-loopback bind (0.0.0.0) requires --allowed-host <name> naming every host name clients use to reach this listener (repeatable); loopback binds allow 127.0.0.1, ::1 and localhost automatically",
+    );
   });
 
   it("refuses an invalid entry on any bind", () => {
+    let thrown: unknown;
     try {
       assertBindAllowed("127.0.0.1", ["vault.example:3000"]);
-      expect.unreachable("must throw");
     } catch (err) {
-      expect((err as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
-      expect((err as VaultError).message).toBe(
-        'Invalid allowed host "vault.example:3000": a host name or IP address, without scheme, path or port',
-      );
+      thrown = err;
     }
+    expect(thrown).toBeInstanceOf(VaultError);
+    expect((thrown as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
+    expect((thrown as VaultError).message).toBe(
+      'Invalid allowed host "vault.example:3000": a host name or IP address, without scheme, path or port',
+    );
   });
 
   it("accepts a non-loopback bind with an entry, and a loopback bind with none", () => {

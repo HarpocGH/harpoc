@@ -19,6 +19,8 @@ import { callTool, listTools } from "./helpers/mcp-helpers.js";
 import { startMockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import type { MockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import { KEY_PEM, CERT_PEM, EXPIRED_KEY_PEM, EXPIRED_CERT_PEM } from "./helpers/cert-fixtures.js";
+import { canon, keyNeedles } from "./helpers/key-needles.js";
+import type { Needle } from "./helpers/key-needles.js";
 import { silenceAuditLines } from "@harpoc/test-utils";
 
 silenceAuditLines();
@@ -140,36 +142,6 @@ function windowDaysCovering(certPem: string): number {
  * down this file does need.
  */
 const EXPIRING_WINDOW_DAYS = windowDaysCovering(EXPIRED_CERT_PEM);
-
-interface Needle {
-  label: string;
-  value: string;
-}
-
-/**
- * A private key leaks either verbatim (armored, wrapped at 64 chars) or
- * re-encoded, so both the first base64 line and the unwrapped body are needles.
- */
-function keyNeedles(label: string, pem: string): Needle[] {
-  const lines = pem
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0 && !l.startsWith("-----"));
-  return [
-    { label: `${label} (first base64 line)`, value: lines[0] as string },
-    { label: `${label} (unwrapped base64 body)`, value: lines.join("") },
-  ];
-}
-
-/**
- * Line breaks are not part of a needle's identity: an armored key reaches a raw
- * response body wrapped at real newlines and a stringified one wrapped at `\n`
- * escapes, while the unwrapped-body needle carries neither. Stripping both from
- * both sides is what lets that needle fire at all.
- */
-function canon(text: string): string {
-  return text.replaceAll("\\n", "").replaceAll("\n", "");
-}
 
 const NEEDLES: Needle[] = [
   { label: "client_credentials client secret", value: CC_CLIENT_SECRET },
@@ -303,8 +275,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await mcp?.close();
   await rest.close();
-  await destroyTestVault(vault).catch(() => {});
+  await destroyTestVault(vault);
   await mock.close();
 });
 

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AuditEventType } from "@harpoc/shared";
+import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 const PASSWORD = "integration-password";
 
@@ -35,7 +36,10 @@ describe("transactional audit writes across a real lifecycle", () => {
       { acknowledge_interpreters: true },
     );
     await vault.engine.rotateSecret("secret://life-key", new Uint8Array(Buffer.from("v2")));
-    await expect(vault.engine.getSecretValue("secret://missing")).rejects.toThrow();
+    await expectVaultError(
+      () => vault.engine.getSecretValue("secret://missing"),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
     const token = vault.engine.createToken("agent-1", ["read"]);
     vault.engine.revokeToken(vault.engine.verifyToken(token).jti);
     await vault.engine.revokeSecret("secret://life-key");
@@ -51,9 +55,15 @@ describe("transactional audit writes across a real lifecycle", () => {
     ).toBe(true);
 
     // The multi-row transaction (grant + interpreter ack) landed both rows.
-    expect(
-      vault.engine.queryAudit({ eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED }),
-    ).toHaveLength(1);
+    const grants = vault.engine
+      .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
+      .filter((e) => e.detail?.policy === "injection");
+    const acks = vault.engine.queryAudit({
+      eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED,
+    });
+    expect(grants).toHaveLength(1);
+    expect(acks).toHaveLength(1);
+    expect(acks[0]?.secret_id).toBe(grants[0]?.secret_id);
 
     // Every detail blob still decrypts under its row-bound AAD.
     expect(vault.engine.queryAudit().filter((e) => e.detail_unreadable)).toHaveLength(0);

@@ -4,6 +4,7 @@ import { controlledPathDirs, resolveExecutable } from "@harpoc/core";
 import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { tierRequired } from "./helpers/platform-tiers.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
 /**
@@ -19,7 +20,17 @@ const PASSWORD = "integration-test-pw";
 const GIT_SECRET = "x-access-token:ghp_git-secret-abcd";
 const GIT = resolveExecutable("git", controlledPathDirs());
 
-const describeGit = GIT ? describe : describe.skip;
+const describeGit = describe.skipIf(GIT === null);
+
+// A leg that exports the ssh-live tier ships git as well (TM-11): where git does not resolve
+// on such a leg, this guard fails the file instead of letting the suite below skip silently.
+it("ssh-live tier: required legs fail instead of skipping when git is unresolvable", () => {
+  if (GIT === null && tierRequired("ssh-live")) {
+    throw new Error(
+      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no git resolves',
+    );
+  }
+});
 
 describeGit("Git context (both mechanisms, §4.5.6)", () => {
   let vault: TestVault;

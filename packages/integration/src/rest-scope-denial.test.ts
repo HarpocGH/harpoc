@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createApp } from "@harpoc/rest-api";
-import { SecretType } from "@harpoc/shared";
+import { ErrorCode, SecretType } from "@harpoc/shared";
 import {
   createTestVault,
   destroyTestVault,
@@ -41,7 +41,7 @@ describe("REST scope enforcement end-to-end", () => {
   });
 
   afterAll(async () => {
-    await destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   it("read/list-scoped token without a grant is told not-found; its use and policy writes stay scope-refused", async () => {
@@ -51,6 +51,7 @@ describe("REST scope enforcement end-to-end", () => {
 
     const info = await app.request("/api/v1/secrets/db-prod", { headers: auth });
     expect(info.status).toBe(404);
+    expect(((await info.json()) as { error: string }).error).toBe(ErrorCode.SECRET_NOT_FOUND);
 
     const use = await app.request("/api/v1/secrets/db-prod/use", {
       method: "POST",
@@ -65,6 +66,7 @@ describe("REST scope enforcement end-to-end", () => {
       }),
     });
     expect(use.status).toBe(403);
+    expect(((await use.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
 
     const put = await app.request("/api/v1/secrets/db-prod/injection-policy", {
       method: "PUT",
@@ -72,11 +74,13 @@ describe("REST scope enforcement end-to-end", () => {
       body: JSON.stringify({ url_allowlist: ["https://attacker.example/*"] }),
     });
     expect(put.status).toBe(403);
+    expect(((await put.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
 
     const policyRes = await app.request("/api/v1/secrets/db-prod/injection-policy", {
       headers: auth,
     });
     expect(policyRes.status).toBe(404);
+    expect(((await policyRes.json()) as { error: string }).error).toBe(ErrorCode.SECRET_NOT_FOUND);
   });
 
   it("name-pattern token is denied on out-of-pattern secrets", async () => {
@@ -90,6 +94,7 @@ describe("REST scope enforcement end-to-end", () => {
 
     const denied = await app.request("/api/v1/secrets/db-prod", { headers: auth });
     expect(denied.status).toBe(403);
+    expect(((await denied.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
 
     const listRes = await app.request("/api/v1/secrets", { headers: auth });
     expect(listRes.status).toBe(200);
@@ -103,6 +108,7 @@ describe("REST scope enforcement end-to-end", () => {
       headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.TOKEN_EXPIRED);
   });
 
   it("revoked token is rejected with 401", async () => {
@@ -112,6 +118,7 @@ describe("REST scope enforcement end-to-end", () => {
       headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.TOKEN_REVOKED);
   });
 
   // D6/R14: both config PUTs are deliberately `rotate`, not `admin` (the

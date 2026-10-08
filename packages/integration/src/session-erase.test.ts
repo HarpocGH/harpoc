@@ -17,7 +17,7 @@ const PASSWORD = "session-erase-test-pw";
 let vault: TestVault | undefined;
 
 afterEach(async () => {
-  if (vault) await destroyTestVault(vault).catch(() => undefined);
+  if (vault) await destroyTestVault(vault);
   vault = undefined;
 });
 

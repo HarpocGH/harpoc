@@ -22,7 +22,9 @@
  *    and the tier is delivered by `bwrap --ro-bind / /` (Wave 3 step 9,
  *    2026-09-05). The list only decides whether a failed probe is fatal; the
  *    live probe gates the enforcement describe.
- *  - `ssh-live` — every leg.
+ *  - `ssh-live` — every leg; it covers git as well (TM-11, 2026-10): every
+ *    leg that exports it ships git, so the two integration git suites fail
+ *    instead of skipping where git does not resolve.
  */
 export function tierRequired(tier: string): boolean {
   return (process.env["HARPOC_REQUIRE_PLATFORM_TESTS"] ?? "")

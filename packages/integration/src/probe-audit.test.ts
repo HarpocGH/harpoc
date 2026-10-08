@@ -90,20 +90,24 @@ describe("unknown-handle probes write an attributed denial row (N3)", () => {
 
   it("MCP use_secret on an unknown name: tool error and one secret.use denial", async () => {
     const mcp = createMcpServer({ engine: vault.engine, launchToken: token });
-    const before = deniedRows(AuditEventType.SECRET_USE).length;
-    const result = await callTool(mcp, "use_secret", {
-      handle: "secret://nope",
-      action: USE_ACTION,
-    });
-    expect(result.isError).toBe(true);
-    const useRows = deniedRows(AuditEventType.SECRET_USE);
-    expect(useRows).toHaveLength(before + 1);
-    expect(useRows.filter((r) => r.detail?.interface === "mcp")).toHaveLength(1);
-    expect(useRows.find((r) => r.detail?.interface === "mcp")?.detail).toMatchObject({
-      error: ErrorCode.SECRET_NOT_FOUND,
-      context: "http",
-      interface: "mcp",
-      handle: "secret://nope",
-    });
+    try {
+      const before = deniedRows(AuditEventType.SECRET_USE).length;
+      const result = await callTool(mcp, "use_secret", {
+        handle: "secret://nope",
+        action: USE_ACTION,
+      });
+      expect(result.isError).toBe(true);
+      const useRows = deniedRows(AuditEventType.SECRET_USE);
+      expect(useRows).toHaveLength(before + 1);
+      expect(useRows.filter((r) => r.detail?.interface === "mcp")).toHaveLength(1);
+      expect(useRows.find((r) => r.detail?.interface === "mcp")?.detail).toMatchObject({
+        error: ErrorCode.SECRET_NOT_FOUND,
+        context: "http",
+        interface: "mcp",
+        handle: "secret://nope",
+      });
+    } finally {
+      await mcp.close();
+    }
   });
 });

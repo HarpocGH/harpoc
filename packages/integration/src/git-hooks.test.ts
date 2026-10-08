@@ -19,6 +19,7 @@ import { controlledPathDirs, resolveExecutable } from "@harpoc/core";
 import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { tierRequired } from "./helpers/platform-tiers.js";
 
 /**
  * N11 (R11, 2026-09-04): a `git pull` into a caller-supplied working tree
@@ -35,9 +36,19 @@ import type { TestVault } from "./helpers/engine-factory.js";
  */
 
 const GIT = resolveExecutable("git", controlledPathDirs());
-const describeGit = GIT ? describe : describe.skip;
+const describeGit = describe.skipIf(GIT === null);
 const PASSWORD = "integration-test-pw";
 const GIT_TIMEOUT_MS = 30_000;
+
+// A leg that exports the ssh-live tier ships git as well (TM-11): where git does not resolve
+// on such a leg, this guard fails the file instead of letting the suite below skip silently.
+it("ssh-live tier: required legs fail instead of skipping when git is unresolvable", () => {
+  if (GIT === null && tierRequired("ssh-live")) {
+    throw new Error(
+      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no git resolves',
+    );
+  }
+});
 
 describeGit("Git context — hooks of the caller's tree never run (N11)", () => {
   let root: string;
@@ -155,13 +166,14 @@ describeGit("Git context — hooks of the caller's tree never run (N11)", () => 
   afterAll(async () => {
     try {
       if (server !== undefined) await new Promise<void>((done) => server.close(() => done()));
-      await destroyTestVault(vault).catch(() => {});
+      await destroyTestVault(vault);
     } finally {
       for (const [key, value] of Object.entries(savedEnv)) {
         if (value === undefined) Reflect.deleteProperty(process.env, key);
         else process.env[key] = value;
       }
-      if (root !== undefined) rmSync(root, { recursive: true, force: true });
+      if (root !== undefined)
+        rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 

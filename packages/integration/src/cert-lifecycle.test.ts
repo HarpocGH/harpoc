@@ -104,7 +104,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await rest.close();
-  await destroyTestVault(vault).catch(() => {});
+  await destroyTestVault(vault);
 });
 
 describe("certificate lifecycle across REST, SDK and MCP", () => {
@@ -189,32 +189,35 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
       engine: vault.engine,
       allowTokenless: true,
     });
+    try {
+      const result = await callTool(mcpServer, "renew_certificate", {
+        handle: `secret://${IMPORTED_NAME}`,
+      });
 
-    const result = await callTool(mcpServer, "renew_certificate", {
-      handle: `secret://${IMPORTED_NAME}`,
-    });
+      expect(result.isError).toBe(true);
+      const text = result.content[0]?.text ?? "";
+      expect(text).toContain("ACME operation failed");
+      expect(text).toContain("no ACME account for this certificate");
 
-    expect(result.isError).toBe(true);
-    const text = result.content[0]?.text ?? "";
-    expect(text).toContain("ACME operation failed");
-    expect(text).toContain("no ACME account for this certificate");
+      // The tool result carries the message only, so the code is pinned where it
+      // is observable: CERT_ACME_FAILED (not CERT_NOT_CONFIGURED) is what
+      // CertManager.renewCertificate throws on the no-account path.
+      await expect(
+        new DirectClient(vault.engine).renewCertificate(`secret://${IMPORTED_NAME}`),
+      ).rejects.toMatchObject({ code: ErrorCode.CERT_ACME_FAILED });
 
-    // The tool result carries the message only, so the code is pinned where it
-    // is observable: CERT_ACME_FAILED (not CERT_NOT_CONFIGURED) is what
-    // CertManager.renewCertificate throws on the no-account path.
-    await expect(
-      new DirectClient(vault.engine).renewCertificate(`secret://${IMPORTED_NAME}`),
-    ).rejects.toMatchObject({ code: ErrorCode.CERT_ACME_FAILED });
+      const renewOverRest = await post(`/${IMPORTED_NAME}/renew`, {});
+      expect(renewOverRest.status).toBe(502);
+      const failure = (await renewOverRest.json()) as { error: string };
+      expect(failure.error).toBe(ErrorCode.CERT_ACME_FAILED);
 
-    const renewOverRest = await post(`/${IMPORTED_NAME}/renew`, {});
-    expect(renewOverRest.status).toBe(502);
-    const failure = (await renewOverRest.json()) as { error: string };
-    expect(failure.error).toBe(ErrorCode.CERT_ACME_FAILED);
-
-    // A refused renewal changes nothing about the certificate it was asked to
-    // replace.
-    const status = await getStatus(IMPORTED_NAME);
-    expect(status).toEqual(importedStatus);
+      // A refused renewal changes nothing about the certificate it was asked to
+      // replace.
+      const status = await getStatus(IMPORTED_NAME);
+      expect(status).toEqual(importedStatus);
+    } finally {
+      await mcpServer.close();
+    }
   });
 
   it("5. a passphrase-protected key is refused on both write paths, and nothing is created", async () => {

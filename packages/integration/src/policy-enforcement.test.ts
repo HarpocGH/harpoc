@@ -74,7 +74,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
 
   afterAll(async () => {
     await mcpServer.close();
-    await destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   afterEach(async () => {
@@ -141,6 +141,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
       headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.SECRET_NOT_FOUND);
   });
 
   it("REST: a project grant matches through the token's project claim, not the subject", async () => {
@@ -159,6 +160,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
       headers: { authorization: `Bearer ${bare}`, host: "localhost" },
     });
     expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.SECRET_NOT_FOUND);
   });
 
   it("MCP wire: use_secret is denied for an ungranted principal and passes the gate for the granted one", async () => {
@@ -218,6 +220,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
       headers: { authorization: `Bearer ${token}`, host: "localhost" },
     });
     expect(closed.status).toBe(404);
+    expect(((await closed.json()) as { error: string }).error).toBe(ErrorCode.SECRET_NOT_FOUND);
   });
 
   /**
@@ -286,6 +289,9 @@ describe("per-secret access policy enforcement end-to-end", () => {
           headers: { authorization: `Bearer ${other}`, host: "localhost" },
         });
         expect(denied.status, `denied ${path}`).toBe(404);
+        expect(((await denied.json()) as { error: string }).error, `denied ${path}`).toBe(
+          ErrorCode.SECRET_NOT_FOUND,
+        );
       }
     });
 
@@ -322,6 +328,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
         headers: { authorization: `Bearer ${outsider}`, host: "localhost" },
       });
       expect(denied.status).toBe(404);
+      expect(((await denied.json()) as { error: string }).error).toBe(ErrorCode.SECRET_NOT_FOUND);
       expect(await vault.engine.getConnectionConfig("secret://cfg-gated")).toBeDefined();
     });
 
@@ -341,6 +348,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
         }),
       });
       expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
       expect(
         vault.engine.listPolicies(dbProdId).some((p) => p.principal_id === "other-agent"),
       ).toBe(false);
@@ -407,6 +415,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
         headers: { authorization: `Bearer ${other}`, host: "localhost" },
       });
       expect(info.status).toBe(404);
+      expect(((await info.json()) as { error: string }).error).toBe(ErrorCode.SECRET_NOT_FOUND);
 
       const names = await restList(other);
       expect(names).not.toContain("db-prod");

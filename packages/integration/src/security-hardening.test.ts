@@ -50,12 +50,7 @@ describe("Memory Wiping", () => {
   });
 
   afterEach(async () => {
-    try {
-      await vault.engine.destroy();
-    } catch {
-      /* already destroyed */
-    }
-    destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   it("wipeBuffer() zeroes every byte (thesis §4.6 memory hygiene)", () => {
@@ -68,11 +63,10 @@ describe("Memory Wiping", () => {
   it("lock() makes vault inoperable (consequence of wipeKeys)", async () => {
     await vault.engine.lock();
     expect(vault.engine.getState()).toBe(VaultState.SEALED);
-    // Any operation should throw VAULT_LOCKED
-    expect(() => vault.engine.listSecrets()).toThrow();
+    await expectVaultError(() => vault.engine.listSecrets(), ErrorCode.VAULT_LOCKED);
   });
 
-  it("useSecret() completes HTTP injection then wipes value", async () => {
+  it("useSecret() completes an HTTP bearer injection against a loopback echo server", async () => {
     // Create echo server
     const echoServer = createServer((req, res) => {
       const body = JSON.stringify({ headers: req.headers });
@@ -93,7 +87,7 @@ describe("Memory Wiping", () => {
     });
     await vault.engine.setInjectionPolicy(result.handle, { url_allowlist: [`${echoUrl}/*`] });
 
-    // useSecret should complete without error (value decrypted, injected, then wiped)
+    // useSecret should complete without error
     const response = await vault.engine.useSecret(result.handle, {
       type: "http",
       method: "GET",
@@ -109,19 +103,11 @@ describe("Memory Wiping", () => {
     });
   });
 
-  it("session key wiped after session file write", async () => {
-    // If session key were NOT wiped, a second initVault would be affected.
-    // Instead, we verify the vault can lock and re-unlock (session key was wiped,
-    // new one is generated each time).
+  it("lock() then unlock() returns the vault to UNLOCKED", async () => {
+    // The wipe itself is observed in session-erase.test.ts.
     await vault.engine.lock();
     await vault.engine.unlock(PASSWORD);
     expect(vault.engine.getState()).toBe(VaultState.UNLOCKED);
-  });
-
-  it("session file overwritten with random bytes before deletion on lock", async () => {
-    // After lock, the session file should not exist
-    await vault.engine.lock();
-    expect(existsSync(vault.sessionPath)).toBe(false);
   });
 
   it("computeNameHmac returns consistent results (key derived then wiped internally)", async () => {
@@ -134,7 +120,7 @@ describe("Memory Wiping", () => {
     expect(hmac1).toHaveLength(64); // hex-encoded SHA-256
   });
 
-  it("multiple secrets can be created sequentially (DEK wiped after each)", async () => {
+  it("five secrets created in sequence each return their handle and are all listed", async () => {
     for (let i = 0; i < 5; i++) {
       const result = await vault.engine.createSecret({
         name: `sequential-secret-${i}`,
@@ -165,8 +151,7 @@ describe("Error Message Sanitization", () => {
   });
 
   afterAll(async () => {
-    await vault.engine.destroy();
-    destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   it("SECRET_NOT_FOUND contains handle, not secret value", async () => {
@@ -333,60 +318,65 @@ describe("IV Uniqueness", () => {
 
   it("creating multiple secrets via VaultEngine produces unique IVs in DB", async () => {
     const vault = createTestVault();
-    await vault.engine.initVault(PASSWORD);
+    let store: SqliteStore | undefined;
+    try {
+      await vault.engine.initVault(PASSWORD);
 
-    for (let i = 0; i < 5; i++) {
-      await vault.engine.createSecret({
-        name: `iv-test-${i}`,
-        type: SecretType.API_KEY,
-        value: new Uint8Array(Buffer.from("same-value")),
-      });
+      for (let i = 0; i < 5; i++) {
+        await vault.engine.createSecret({
+          name: `iv-test-${i}`,
+          type: SecretType.API_KEY,
+          value: new Uint8Array(Buffer.from("same-value")),
+        });
+      }
+
+      // Read IVs from the database directly
+      store = new SqliteStore(vault.dbPath);
+      const secrets = store.listSecrets();
+      const ctIvs = secrets.map((s) => Buffer.from(s.ct_iv).toString("hex"));
+      const dekIvs = secrets.map((s) => Buffer.from(s.dek_iv).toString("hex"));
+
+      expect(new Set(ctIvs).size).toBe(5);
+      expect(new Set(dekIvs).size).toBe(5);
+    } finally {
+      store?.close();
+      await destroyTestVault(vault);
     }
-
-    // Read IVs from the database directly
-    const store = new SqliteStore(vault.dbPath);
-    const secrets = store.listSecrets();
-    const ctIvs = secrets.map((s) => Buffer.from(s.ct_iv).toString("hex"));
-    const dekIvs = secrets.map((s) => Buffer.from(s.dek_iv).toString("hex"));
-
-    expect(new Set(ctIvs).size).toBe(5);
-    expect(new Set(dekIvs).size).toBe(5);
-
-    store.close();
-    await vault.engine.destroy();
-    destroyTestVault(vault).catch(() => {});
   });
 
   it("secret rotation produces new IV distinct from original", async () => {
     const vault = createTestVault();
-    await vault.engine.initVault(PASSWORD);
+    let store: SqliteStore | undefined;
+    let store2: SqliteStore | undefined;
+    try {
+      await vault.engine.initVault(PASSWORD);
 
-    const result = await vault.engine.createSecret({
-      name: "rotation-iv-test",
-      type: SecretType.API_KEY,
-      value: new Uint8Array(Buffer.from("original-value")),
-    });
+      const result = await vault.engine.createSecret({
+        name: "rotation-iv-test",
+        type: SecretType.API_KEY,
+        value: new Uint8Array(Buffer.from("original-value")),
+      });
 
-    // Get original IV from DB
-    const store = new SqliteStore(vault.dbPath);
-    const beforeRow = store.listSecrets()[0];
-    if (!beforeRow) throw new Error("expected a stored secret row");
-    const originalIv = Buffer.from(beforeRow.ct_iv).toString("hex");
+      // Get original IV from DB
+      store = new SqliteStore(vault.dbPath);
+      const beforeRow = store.listSecrets()[0];
+      if (!beforeRow) throw new Error("expected a stored secret row");
+      const originalIv = Buffer.from(beforeRow.ct_iv).toString("hex");
 
-    await vault.engine.rotateSecret(result.handle, new Uint8Array(Buffer.from("new-value")));
+      await vault.engine.rotateSecret(result.handle, new Uint8Array(Buffer.from("new-value")));
 
-    // Get new IV from DB (re-open to see updated data)
-    const store2 = new SqliteStore(vault.dbPath);
-    const afterRow = store2.listSecrets()[0];
-    if (!afterRow) throw new Error("expected a stored secret row");
-    const newIv = Buffer.from(afterRow.ct_iv).toString("hex");
+      // Get new IV from DB (re-open to see updated data)
+      store2 = new SqliteStore(vault.dbPath);
+      const afterRow = store2.listSecrets()[0];
+      if (!afterRow) throw new Error("expected a stored secret row");
+      const newIv = Buffer.from(afterRow.ct_iv).toString("hex");
 
-    expect(newIv).not.toBe(originalIv);
-
-    store.close();
-    store2.close();
-    await vault.engine.destroy();
-    destroyTestVault(vault).catch(() => {});
+      expect(newIv).not.toBe(originalIv);
+    } finally {
+      store?.close();
+      store2?.close();
+      await destroyTestVault(vault);
+    }
   });
 });
 
@@ -400,95 +390,102 @@ describe("Timing Attack Protection", () => {
     // rejected exactly like any other invalid signature — same error, no
     // detail distinguishing how close the guess was.
     const vault = createTestVault();
-    await vault.engine.initVault(PASSWORD);
-    registerAgents(vault.engine, "test-agent");
-
-    const token = vault.engine.createToken("test-agent", ["admin"]);
-    const parts = token.split(".");
-    const sigLength = Buffer.from(parts[2] as string, "base64url").length;
-    const zeroSig = Buffer.alloc(sigLength).toString("base64url");
-
-    let equalLengthError: Error | undefined;
     try {
-      vault.engine.verifyToken(`${parts[0]}.${parts[1]}.${zeroSig}`);
-    } catch (e) {
-      equalLengthError = e as Error;
-    }
-    let shortError: Error | undefined;
-    try {
-      vault.engine.verifyToken(`${parts[0]}.${parts[1]}.${"AA"}`);
-    } catch (e) {
-      shortError = e as Error;
-    }
+      await vault.engine.initVault(PASSWORD);
+      registerAgents(vault.engine, "test-agent");
 
-    expect(equalLengthError).toBeDefined();
-    expect(shortError).toBeDefined();
-    expect(equalLengthError?.message).toBe(shortError?.message);
+      const token = vault.engine.createToken("test-agent", ["admin"]);
+      const parts = token.split(".");
+      const sigLength = Buffer.from(parts[2] as string, "base64url").length;
+      const zeroSig = Buffer.alloc(sigLength).toString("base64url");
 
-    await vault.engine.destroy();
-    destroyTestVault(vault).catch(() => {});
+      let equalLengthError: Error | undefined;
+      try {
+        vault.engine.verifyToken(`${parts[0]}.${parts[1]}.${zeroSig}`);
+      } catch (e) {
+        equalLengthError = e as Error;
+      }
+      let shortError: Error | undefined;
+      try {
+        vault.engine.verifyToken(`${parts[0]}.${parts[1]}.${"AA"}`);
+      } catch (e) {
+        shortError = e as Error;
+      }
+
+      expect(equalLengthError).toBeDefined();
+      expect(shortError).toBeDefined();
+      expect(equalLengthError?.message).toBe(shortError?.message);
+    } finally {
+      await destroyTestVault(vault);
+    }
   });
 
   it("JWT with single-bit signature flip is rejected", async () => {
     const vault = createTestVault();
-    await vault.engine.initVault(PASSWORD);
-    registerAgents(vault.engine, "test-agent");
+    try {
+      await vault.engine.initVault(PASSWORD);
+      registerAgents(vault.engine, "test-agent");
 
-    const token = vault.engine.createToken("test-agent", ["admin"]);
-    const parts = token.split(".");
-    // Flip one bit in the signature
-    const sigBytes = Buffer.from(parts[2] as string, "base64url");
-    sigBytes[0] = (sigBytes[0] as number) ^ 0x01;
-    const tamperedToken = `${parts[0]}.${parts[1]}.${sigBytes.toString("base64url")}`;
+      const token = vault.engine.createToken("test-agent", ["admin"]);
+      const parts = token.split(".");
+      // Flip one bit in the signature
+      const sigBytes = Buffer.from(parts[2] as string, "base64url");
+      sigBytes[0] = (sigBytes[0] as number) ^ 0x01;
+      const tamperedToken = `${parts[0]}.${parts[1]}.${sigBytes.toString("base64url")}`;
 
-    expect(() => vault.engine.verifyToken(tamperedToken)).toThrow();
-
-    await vault.engine.destroy();
-    destroyTestVault(vault).catch(() => {});
+      await expectVaultError(
+        () => vault.engine.verifyToken(tamperedToken),
+        ErrorCode.INVALID_TOKEN,
+      );
+    } finally {
+      await destroyTestVault(vault);
+    }
   });
 
   it("JWT with entirely different signature is rejected", async () => {
     const vault = createTestVault();
-    await vault.engine.initVault(PASSWORD);
-    registerAgents(vault.engine, "test-agent");
+    try {
+      await vault.engine.initVault(PASSWORD);
+      registerAgents(vault.engine, "test-agent");
 
-    const token = vault.engine.createToken("test-agent", ["admin"]);
-    const parts = token.split(".");
-    // Replace signature with random data
-    const fakeSig = randomBytes(32).toString("base64url");
-    const fakeToken = `${parts[0]}.${parts[1]}.${fakeSig}`;
+      const token = vault.engine.createToken("test-agent", ["admin"]);
+      const parts = token.split(".");
+      // Replace signature with random data
+      const fakeSig = randomBytes(32).toString("base64url");
+      const fakeToken = `${parts[0]}.${parts[1]}.${fakeSig}`;
 
-    expect(() => vault.engine.verifyToken(fakeToken)).toThrow();
-
-    await vault.engine.destroy();
-    destroyTestVault(vault).catch(() => {});
+      await expectVaultError(() => vault.engine.verifyToken(fakeToken), ErrorCode.INVALID_TOKEN);
+    } finally {
+      await destroyTestVault(vault);
+    }
   });
 
   it("HMAC name lookup goes through an index (query plan, not wall clock)", async () => {
     const vault = createTestVault();
-    await vault.engine.initVault(PASSWORD);
+    try {
+      await vault.engine.initVault(PASSWORD);
 
-    await vault.engine.createSecret({
-      name: "timing-a",
-      type: SecretType.API_KEY,
-      value: new Uint8Array(Buffer.from("val-a")),
-    });
+      await vault.engine.createSecret({
+        name: "timing-a",
+        type: SecretType.API_KEY,
+        value: new Uint8Array(Buffer.from("val-a")),
+      });
 
-    const infoA = await vault.engine.getSecretInfo("secret://timing-a");
-    expect(infoA.name).toBe("timing-a");
+      const infoA = await vault.engine.getSecretInfo("secret://timing-a");
+      expect(infoA.name).toBe("timing-a");
 
-    // Deterministic replacement for the old flaky `< 1000 ms` assertion:
-    // ask SQLite how it would execute the name_hmac lookup.
-    const db = (vault.engine as unknown as { store: { db: RawDb } }).store.db;
-    const plan = db
-      .prepare("EXPLAIN QUERY PLAN SELECT id FROM secrets WHERE name_hmac = ?")
-      .all("probe") as { detail: string }[];
-    expect(
-      plan.some((row) => /USING (COVERING )?INDEX idx_secrets_name_hmac/i.test(row.detail)),
-    ).toBe(true);
-
-    await vault.engine.destroy();
-    destroyTestVault(vault).catch(() => {});
+      // Deterministic replacement for the old flaky `< 1000 ms` assertion:
+      // ask SQLite how it would execute the name_hmac lookup.
+      const db = (vault.engine as unknown as { store: { db: RawDb } }).store.db;
+      const plan = db
+        .prepare("EXPLAIN QUERY PLAN SELECT id FROM secrets WHERE name_hmac = ?")
+        .all("probe") as { detail: string }[];
+      expect(
+        plan.some((row) => /USING (COVERING )?INDEX idx_secrets_name_hmac/i.test(row.detail)),
+      ).toBe(true);
+    } finally {
+      await destroyTestVault(vault);
+    }
   });
 });
 
@@ -505,7 +502,7 @@ describe("Lockout Progression", () => {
   });
 
   afterEach(async () => {
-    destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   it("4 failed attempts: no lockout", async () => {
@@ -783,6 +780,41 @@ describe("No-Logging Static Audit", () => {
     },
   );
 
+  /**
+   * The console audit cannot see a write to the process streams. The library
+   * packages carry none outside these: core's five sit inside helper-script
+   * template literals written to disk and run as a child (docker's credential
+   * helper, git's askpass); sdk's is DirectClient's default
+   * onBackgroundFlowError, which an embedder's own callback replaces.
+   * mcp-server stays out: stderr is a stdio server's only diagnostic channel.
+   */
+  const STD_WRITE_SITES: Record<string, number> = {
+    "core/src/injection/docker/docker-injector.ts": 3,
+    "core/src/injection/git-injector.ts": 2,
+    "sdk/src/direct-client.ts": 1,
+  };
+
+  it.each(["core", "cert-manager", "oauth-proxy", "sdk", "shared", "web-ui"])(
+    "%s/src/ writes to process.stdout / process.stderr only at its recorded sites",
+    (pkg) => {
+      const packagesDir = join(REPO_ROOT, "packages");
+      const files = collectTsFiles(join(packagesDir, pkg, "src"));
+      expect(files.length).toBeGreaterThan(0);
+      const found: Record<string, number> = {};
+      for (const filePath of files) {
+        const n =
+          readFileSync(filePath, "utf8").match(/\bprocess\.(stdout|stderr)\.write\s*\(/g)?.length ??
+          0;
+        if (n > 0) found[relative(packagesDir, filePath).split(sep).join("/")] = n;
+      }
+      expect(found).toEqual(
+        Object.fromEntries(
+          Object.entries(STD_WRITE_SITES).filter(([p]) => p.startsWith(`${pkg}/`)),
+        ),
+      );
+    },
+  );
+
   /** The index just past the string or template literal that opens at `start`. */
   function skipLiteral(source: string, start: number): number {
     const quote = source[start];
@@ -1018,8 +1050,7 @@ describe("SSRF E2E via useSecret", () => {
     await new Promise<void>((resolve, reject) => {
       echoServer?.close((err) => (err ? reject(err) : resolve()));
     });
-    await vault.engine.destroy();
-    destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   it("useSecret to https://10.0.0.1/api → SSRF_BLOCKED", async () => {

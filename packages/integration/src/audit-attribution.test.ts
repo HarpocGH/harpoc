@@ -63,7 +63,7 @@ describe("credential-access audit attribution end-to-end", () => {
 
   afterAll(async () => {
     await mcpServer.close();
-    await destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   afterEach(async () => {

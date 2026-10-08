@@ -1,5 +1,5 @@
 import { storeSecret } from "../harness/vault.js";
-import { sightings, redactForDiagnostics } from "../assert/opacity.js";
+import { assertPresent, sightings, redactForDiagnostics } from "../assert/opacity.js";
 import { caPem } from "../harness/pki.js";
 import { clientKeyPem, knownHostPin } from "../harness/ssh.js";
 import { resolveDocker, resolveSftp } from "../harness/fixtures.js";
@@ -37,11 +37,18 @@ const NONCE = "p4v13";
  * The Harpoc arm additionally fails loudly if the vault did not COMPLETE the
  * operation: a refusal or an unhealthy fleet leaves the credential absent from
  * the error too, so certifying OPAQUE over a failed call would be vacuous. The
+ * Redis arm, whose `ECHO` returns a caller-chosen string, also fails unless
+ * that benign marker survived: blanket redaction would read as OPAQUE too. The
  * §6.4 success-path opacity these arms measure is proven in-process by the
  * integration suite (`v13-posture.test.ts`); these arms drive it end to end,
  * through a real MCP client over Streamable HTTP against the live fleet.
  */
-function opacityVerdict(arm: Arm, outcome: CallOutcome, credential: string): OutcomeValue {
+function opacityVerdict(
+  arm: Arm,
+  outcome: CallOutcome,
+  credential: string,
+  control?: string,
+): OutcomeValue {
   const leaked =
     sightings(credential, {
       result: outcome.result,
@@ -69,7 +76,9 @@ function opacityVerdict(arm: Arm, outcome: CallOutcome, credential: string): Out
         `${redactForDiagnostics(outcome.text.slice(0, 300), credential)})`,
     );
   }
-  return leaked ? Outcome.LEAKED : Outcome.OPAQUE;
+  if (leaked) return Outcome.LEAKED;
+  if (control !== undefined) assertPresent(control, { result: outcome.result });
+  return Outcome.OPAQUE;
 }
 
 /** Store the credential and return the setup shell; per-context policy is layered on by the caller. */
@@ -175,7 +184,7 @@ export const CONTEXT_OPACITY_ARMS: ScenarioArm[] = [
         // negative control that blanket redaction would flatten.
         command: ["ECHO", setup.marker],
       });
-      return opacityVerdict(arm, outcome, setup.credential);
+      return opacityVerdict(arm, outcome, setup.credential, setup.marker);
     },
   },
   {

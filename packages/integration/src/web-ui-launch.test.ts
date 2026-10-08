@@ -39,7 +39,7 @@ describe("web-ui launch flow (spawned CLI)", () => {
   }, 120_000);
 
   afterAll(() => {
-    rmSync(vaultDir, { recursive: true, force: true });
+    rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("serves the UI and a working fragment launch token", async () => {

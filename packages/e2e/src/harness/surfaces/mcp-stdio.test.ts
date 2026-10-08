@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { spawn } from "node:child_process";
 import { Permission } from "@harpoc/shared";
 import { createHarnessVault, grantOn, storeSecret } from "../vault.js";
 import type { HarnessVault } from "../vault.js";
@@ -8,6 +7,7 @@ import type { McpStdioSurface } from "./mcp-stdio.js";
 import { assertOpaque } from "../../assert/opacity.js";
 import { expectAttributedSuccess } from "../audit.js";
 import { resolveMcpServerEntry, resolvePrintenv } from "../fixtures.js";
+import { runNodeChild } from "../child.js";
 
 const PASSWORD = "e2e-stdio-pw";
 const SECRET = 'sk-stdio/ab+cd 123"x';
@@ -124,17 +124,10 @@ describe("mcp-stdio surface", () => {
   it("refuses to start tokenless (V3) — the surface never waives the gate", async () => {
     vault = await createHarnessVault(PASSWORD);
     const harness = vault;
-    const result = await new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
-      const child = spawn(
-        process.execPath,
-        [resolveMcpServerEntry(), "--vault-dir", harness.tmpDir],
-        { env: { ...process.env, HARPOC_TOKEN: "" }, windowsHide: true },
-      );
-      let stderr = "";
-      child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
-      child.on("error", reject);
-      child.on("close", (code) => resolve({ code, stderr }));
-      child.stdin.end();
+    const result = await runNodeChild([resolveMcpServerEntry(), "--vault-dir", harness.tmpDir], {
+      env: { ...process.env, HARPOC_TOKEN: "" },
+      timeoutMs: 25_000,
+      label: "harpoc-mcp (tokenless)",
     });
 
     expect(result.code).toBe(1);

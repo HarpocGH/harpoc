@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { Permission, useSecretActionSchema } from "@harpoc/shared";
+import { ErrorCode, Permission, useSecretActionSchema } from "@harpoc/shared";
 import { createHarnessVault, grantOn, storeSecret } from "../vault.js";
 import type { HarnessVault } from "../vault.js";
 import { actionToFlags, startCliSurface } from "./cli.js";
@@ -10,6 +10,12 @@ import { resolvePrintenv } from "../fixtures.js";
 
 const PASSWORD = "e2e-cli-pw";
 const SECRET = 'sk-cli/ab+cd 123"x';
+
+/** The `error` code of the CLI's `--json` error line — the last line of its stderr. */
+function cliErrorCode(errorText: string | undefined): unknown {
+  const last = (errorText ?? "").trim().split("\n").at(-1) ?? "";
+  return (JSON.parse(last) as { error?: unknown }).error;
+}
 
 describe("cli surface", () => {
   let vault: HarnessVault | undefined;
@@ -78,7 +84,7 @@ describe("cli surface", () => {
     });
 
     expect(outcome.ok).toBe(false);
-    expect(outcome.errorText ?? "").toMatch(/not in secret allowlist/i);
+    expect(cliErrorCode(outcome.errorText)).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
     assertOpaque(SECRET, {
       error: outcome.errorText,
       stdout: outcome.stdout,
@@ -100,7 +106,7 @@ describe("cli surface", () => {
     });
 
     expect(outcome.ok).toBe(false);
-    expect(outcome.errorText ?? "").toMatch(/permission|denied/i);
+    expect(cliErrorCode(outcome.errorText)).toBe(ErrorCode.ACCESS_DENIED);
   }, 60_000);
 });
 

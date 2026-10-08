@@ -35,9 +35,9 @@ type BlockProof = "redacted" | "completed";
 /**
  * Same two-vocabulary rule as §6.2.6: one measurement, two column names — and
  * the same proof before a Harpoc BLOCKED: the call completed and, for the echo
- * arms (`redacted`), the sanitizer's `[REDACTED]` is in the result. A refused
- * or failed call reaches the caller with nothing to leak, and would otherwise
- * read as a filter that held.
+ * arms (`redacted`), the sanitizer's `[REDACTED]` and the benign marker the
+ * echo fixture reflects are in the result. A refused or failed call reaches the
+ * caller with nothing to leak, and would otherwise read as a filter that held.
  */
 function verdict(
   arm: Arm,
@@ -45,6 +45,7 @@ function verdict(
   outcome: CallOutcome,
   credential: string,
   proof: BlockProof,
+  marker?: string,
 ): OutcomeValue {
   if (arm.name === "baseline") {
     if (!leaked) {
@@ -55,13 +56,29 @@ function verdict(
     return Outcome.LEAKED;
   }
   if (leaked) return Outcome.BYPASSED;
-  requireCompleted(outcome, credential, proof);
+  requireCompleted(outcome, credential, proof, marker);
   return Outcome.BLOCKED;
 }
 
-/** Throws unless the call completed and, for `redacted`, its result carries `[REDACTED]`. */
-function requireCompleted(outcome: CallOutcome, credential: string, proof: BlockProof): void {
-  if (outcome.ok && (proof === "completed" || outcome.text.includes(REDACTION))) return;
+/**
+ * Throws unless the call completed and, for `redacted`, its result carries
+ * `[REDACTED]` and, when one is given, the benign marker.
+ */
+function requireCompleted(
+  outcome: CallOutcome,
+  credential: string,
+  proof: BlockProof,
+  marker?: string,
+): void {
+  if (outcome.ok && (proof === "completed" || outcome.text.includes(REDACTION))) {
+    if (proof === "redacted" && marker !== undefined && !outcome.text.includes(marker)) {
+      throw new Error(
+        "arm is not discriminating: nothing leaked, but the benign marker did not survive — " +
+          "redaction is blanket, not targeted",
+      );
+    }
+    return;
+  }
   throw new Error(
     "arm is not discriminating: nothing leaked, but " +
       (outcome.ok ? "the result carries no [REDACTED]" : "the call did not complete") +
@@ -70,11 +87,12 @@ function requireCompleted(outcome: CallOutcome, credential: string, proof: Block
   );
 }
 
-const fetchAction = (path: string): Record<string, unknown> => ({
+const fetchAction = (path: string, marker?: string): Record<string, unknown> => ({
   type: "http",
   method: "GET",
   url: `${ORIGIN}${path}`,
   injection: { type: "bearer" },
+  ...(marker === undefined ? {} : { headers: { [ECHO_HTTPS.markerHeader]: marker } }),
 });
 
 /**
@@ -132,13 +150,14 @@ export const RESPONSE_CHANNEL_ARMS: ScenarioArm[] = [
     async observe(arm, setup) {
       // The backend reflects base64, base64url, hex (both cases) and
       // percent-encoded forms — exactly the set the vault redacts.
-      const outcome = await arm.invoke(setup.handle, fetchAction("/echo"));
+      const outcome = await arm.invoke(setup.handle, fetchAction("/echo", setup.marker));
       return verdict(
         arm,
         leakedToCaller(outcome, setup.credential),
         outcome,
         setup.credential,
         "redacted",
+        setup.marker,
       );
     },
   },
@@ -157,13 +176,14 @@ export const RESPONSE_CHANNEL_ARMS: ScenarioArm[] = [
       // on the wire. No special endpoint is needed: the channel appears in ANY
       // JSON response body, which is what makes it worth closing rather than
       // characterizing.
-      const outcome = await arm.invoke(setup.handle, fetchAction("/echo"));
+      const outcome = await arm.invoke(setup.handle, fetchAction("/echo", setup.marker));
       return verdict(
         arm,
         leakedToCaller(outcome, setup.credential),
         outcome,
         setup.credential,
         "redacted",
+        setup.marker,
       );
     },
   },
@@ -177,13 +197,17 @@ export const RESPONSE_CHANNEL_ARMS: ScenarioArm[] = [
     // JSON.stringify, which is V8's convention only (review 2026-08-14, F1).
     setup: (v) => setupEcho(v, "jsonescalt", `p4-rc-alt:tok/en"ü-${NONCE}`),
     async observe(arm, setup) {
-      const outcome = await arm.invoke(setup.handle, fetchAction("/echo/jsonesc-alt"));
+      const outcome = await arm.invoke(
+        setup.handle,
+        fetchAction("/echo/jsonesc-alt", setup.marker),
+      );
       return verdict(
         arm,
         leakedToCaller(outcome, setup.credential),
         outcome,
         setup.credential,
         "redacted",
+        setup.marker,
       );
     },
   },
@@ -200,13 +224,14 @@ export const RESPONSE_CHANNEL_ARMS: ScenarioArm[] = [
     async observe(arm, setup) {
       // The reflecting document is a string field of the response body, so the
       // credential is two escape layers down — past a matcher that decodes one.
-      const outcome = await arm.invoke(setup.handle, fetchAction("/echo/nested"));
+      const outcome = await arm.invoke(setup.handle, fetchAction("/echo/nested", setup.marker));
       return verdict(
         arm,
         leakedToCaller(outcome, setup.credential),
         outcome,
         setup.credential,
         "redacted",
+        setup.marker,
       );
     },
   },
@@ -220,13 +245,14 @@ export const RESPONSE_CHANNEL_ARMS: ScenarioArm[] = [
       // `filtered` returns every response header, so `x-echo-credential` is a
       // genuine structural position in the caller-visible result — not a
       // channel the vault happens never to populate.
-      const outcome = await arm.invoke(setup.handle, fetchAction("/echo"));
+      const outcome = await arm.invoke(setup.handle, fetchAction("/echo", setup.marker));
       return verdict(
         arm,
         leakedToCaller(outcome, setup.credential),
         outcome,
         setup.credential,
         "redacted",
+        setup.marker,
       );
     },
   },

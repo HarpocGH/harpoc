@@ -172,19 +172,10 @@ describe("HTTP status mapping", () => {
     expect(missing).toEqual([]);
   });
 
-  it("covers all ErrorCode members", () => {
-    const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(110);
-  });
-
   it("STATUS_MAP has a row for every ErrorCode member", () => {
     for (const code of Object.values(ErrorCode)) {
       expect(new VaultError(code, "x").statusCode, code).toBeTypeOf("number");
     }
-  });
-
-  it("maps MISSING_DEPENDENCY to 501", () => {
-    expect(new VaultError(ErrorCode.MISSING_DEPENDENCY, "x").statusCode).toBe(501);
   });
 
   it("maps RESPONSE_TOO_LARGE to 502 and names the origin only", () => {
@@ -696,6 +687,7 @@ describe("factory methods", () => {
     expect(err.code).toBe(ErrorCode.MCP_CONNECT_FAILED);
     expect(err.statusCode).toBe(502);
     expect(err.details).toEqual({ server: "github-mcp" });
+    expect(err.message).toBe("Failed to connect to MCP server 'github-mcp': spawn ENOENT");
   });
 
   it("mcpServerCrashed() carries exit forensics", () => {
@@ -856,7 +848,7 @@ describe("factory methods", () => {
     );
   });
 
-  it("v1.3 context factory messages never contain the word 'password' (credential-leak tripwire)", () => {
+  it("v1.3 context factory messages never contain the word 'password'", () => {
     const messages = [
       VaultError.recipientNotAllowed("someone@example.com").message,
       VaultError.attachmentPolicyRequired().message,

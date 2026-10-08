@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SqliteStore } from "@harpoc/core";
 import type { AuditChainAnchor } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
-import { dropAuditRowHmacConstraint } from "@harpoc/test-utils";
+import { dropAuditRowHmacConstraint, expectVaultError, sqliteErrorCode } from "@harpoc/test-utils";
 
 const PASSWORD = "integration-password";
 
@@ -172,7 +173,7 @@ describe("audit-chain anchor across the real database file", () => {
       expect(detected.valid).toBe(false);
       expect(detected.anchor?.status).toBe("row_missing");
     } finally {
-      rmSync(snapshotDir, { recursive: true, force: true });
+      rmSync(snapshotDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 
@@ -183,9 +184,11 @@ describe("audit-chain anchor across the real database file", () => {
     const foreignVault = createTestVault();
     try {
       await foreignVault.engine.initVault(PASSWORD);
-      expect(() => foreignVault.engine.verifyAuditChain({ anchor })).toThrowError(
-        /different vault/,
+      const err = await expectVaultError(
+        () => foreignVault.engine.verifyAuditChain({ anchor }),
+        ErrorCode.INVALID_INPUT,
       );
+      expect(err.message).toContain("different vault");
     } finally {
       await destroyTestVault(foreignVault);
     }
@@ -194,15 +197,13 @@ describe("audit-chain anchor across the real database file", () => {
   it("the v1.5 table refuses an erased link outright (R2)", async () => {
     await createSecrets(["alpha"]);
     const store = new SqliteStore(vault.dbPath);
-    let caught: unknown;
     try {
-      store.db.prepare("UPDATE audit_log SET row_hmac = NULL").run();
-    } catch (err) {
-      caught = err;
+      expect(
+        sqliteErrorCode(() => store.db.prepare("UPDATE audit_log SET row_hmac = NULL").run()),
+      ).toBe("SQLITE_CONSTRAINT_NOTNULL");
     } finally {
       store.close();
     }
-    expect((caught as { code?: string } | undefined)?.code).toBe("SQLITE_CONSTRAINT_NOTNULL");
     expect(vault.engine.verifyAuditChain().valid).toBe(true);
   });
 });

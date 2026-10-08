@@ -60,8 +60,9 @@ describe("a pre-baseline vault file is refused, not upgraded (R2)", () => {
   });
 
   afterAll(async () => {
-    await destroyTestVault(refused).catch(() => {});
-    if (vaultDir !== "") rmSync(vaultDir, { recursive: true, force: true });
+    await destroyTestVault(refused);
+    if (vaultDir !== "")
+      rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("refuses unlock as VAULT_CORRUPTED naming the schema, the baseline and harpoc init", async () => {

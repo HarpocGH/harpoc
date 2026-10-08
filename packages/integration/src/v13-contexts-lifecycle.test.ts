@@ -40,7 +40,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await destroyTestVault(vault).catch(() => undefined);
+  await destroyTestVault(vault);
 });
 
 afterEach(async () => {
@@ -131,7 +131,11 @@ describe("v1.3 contexts — lifecycle through the real engine", () => {
     cleanups.push(fake.close);
 
     const dir = mkdtempSync(join(tmpdir(), "v13-smtp-att-"));
-    cleanups.push(() => Promise.resolve(rmSync(dir, { recursive: true, force: true })));
+    cleanups.push(() =>
+      Promise.resolve(
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
+      ),
+    );
     const attachmentPath = join(dir, "report.txt");
     const attachmentBytes = Buffer.from("quarterly report body", "utf8");
     writeFileSync(attachmentPath, attachmentBytes);

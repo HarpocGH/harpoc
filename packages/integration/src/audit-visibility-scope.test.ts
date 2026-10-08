@@ -66,7 +66,7 @@ describe("audit visibility scope end-to-end (L10)", () => {
   });
 
   afterAll(async () => {
-    await destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   async function readAudit(token: string, query = ""): Promise<AuditRow[]> {

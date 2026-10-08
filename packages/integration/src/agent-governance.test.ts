@@ -96,7 +96,7 @@ describe("agent governance end to end", () => {
 
   afterAll(async () => {
     await server?.close();
-    await destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   // -------------------------------------------------------------------------
@@ -106,6 +106,10 @@ describe("agent governance end to end", () => {
     let firstToken: string;
     let secondToken: string;
     let mcp: McpServer;
+
+    afterAll(async () => {
+      await mcp?.close();
+    });
 
     it("registers over REST, mints a token and serves both surfaces", async () => {
       const registered = await api("/agents", {
@@ -159,14 +163,20 @@ describe("agent governance end to end", () => {
       const stillDenied = await api("/secrets", { headers: authHeaders(firstToken) });
       expect(stillDenied.status).toBe(401);
       expect((await bodyOf<ErrorBody>(stillDenied)).error).toBe(ErrorCode.TOKEN_REVOKED);
-      expect((await callTool(mcp, "list_secrets", {})).isError).toBe(true);
+      const stale = await callTool(mcp, "list_secrets", {});
+      expect(stale.isError).toBe(true);
+      expect(stale.content[0]?.text ?? "").toContain("Token revoked");
 
       secondToken = vault.engine.createToken("ci-bot", ["use", "list", "read"]);
       const allowed = await api("/secrets", { headers: authHeaders(secondToken) });
       expect(allowed.status).toBe(200);
 
       const freshMcp = createMcpServer({ engine: vault.engine, launchToken: secondToken });
-      expect((await callTool(freshMcp, "list_secrets", {})).isError ?? false).toBe(false);
+      try {
+        expect((await callTool(freshMcp, "list_secrets", {})).isError ?? false).toBe(false);
+      } finally {
+        await freshMcp.close();
+      }
     });
 
     it("leaves the lifecycle in the issued-token registry and the audit trail", () => {

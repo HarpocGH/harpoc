@@ -134,7 +134,7 @@ describe("both protocol eras on one stdio pipe", () => {
 
   afterAll(async () => {
     await engine.destroy();
-    rmSync(vaultDir, { recursive: true, force: true });
+    rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("a 2025-era client over harpoc-mcp negotiates 2025-11-25 and lists the nine tools", async () => {

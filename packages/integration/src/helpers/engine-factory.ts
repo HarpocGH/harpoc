@@ -29,7 +29,7 @@ export function createTestVault(sharedDir?: string): TestVault {
  */
 export async function destroyTestVault(vault: TestVault): Promise<void> {
   await vault.engine.destroy();
-  rmSync(vault.tmpDir, { recursive: true, force: true });
+  rmSync(vault.tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
 /**

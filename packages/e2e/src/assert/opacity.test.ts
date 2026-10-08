@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { sightings } from "./opacity.js";
+import { assertOpaque, assertPresent, sightings } from "./opacity.js";
+import { serializeError } from "./serialize-error.js";
 
 /**
  * A scenario has to CLASSIFY an outcome (LEAKED vs OPAQUE) rather than assert
@@ -29,8 +30,6 @@ describe("sightings (non-throwing opacity sweep)", () => {
     expect(hits.map((h) => /^[a-zA-Z]+/.exec(h.path)?.[0]).sort()).toEqual(["audit", "result"]);
   });
 });
-import { assertOpaque, assertPresent } from "./opacity.js";
-import { serializeError } from "./serialize-error.js";
 
 const SECRET = "sk-live-abc123!";
 

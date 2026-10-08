@@ -7,14 +7,28 @@ const pkgRoot = getPkgRoot(import.meta.url);
 const monorepoRoot = resolve(pkgRoot, "..", "..");
 const sharedDistDir = resolve(monorepoRoot, "packages", "shared", "dist");
 
-const PACKAGES = ["shared", "core", "mcp-server", "rest-api", "sdk", "cli"] as const;
+const WORKSPACE = readdirSync(resolve(monorepoRoot, "packages"), { withFileTypes: true })
+  .filter(
+    (e) => e.isDirectory() && existsSync(resolve(monorepoRoot, "packages", e.name, "package.json")),
+  )
+  .map((e) => e.name)
+  .sort();
+/** Workspace packages that do not ship a built `dist` library entry, and why. */
+const NOT_A_DIST_LIBRARY: Record<string, string> = {
+  benchmarks: "the benchmark scripts, no entry",
+  e2e: "the thesis harness, run by test:e2e",
+  integration: "tests only",
+  "test-utils": "source-only — exports ./src/index.ts",
+  "web-ui": "a vite SPA served by rest-api — exports only ./package.json",
+};
+const PACKAGES = WORKSPACE.filter((p) => !Object.hasOwn(NOT_A_DIST_LIBRARY, p));
 
 function ciTestEnvNames(yaml: string): string[] {
   const lines = yaml.split(/\r?\n/);
   const names = new Set<string>();
   let step: string[] = [];
   const flush = (): void => {
-    if (step.some((l) => /^\s+run:\s.*\bpnpm test\b/.test(l))) {
+    if (step.some((l) => !/^\s*#/.test(l) && /\bpnpm test\b/.test(l))) {
       let envIndent = -1;
       for (const l of step) {
         const env = /^(\s*)env:\s*$/.exec(l);
@@ -36,7 +50,7 @@ function ciTestEnvNames(yaml: string): string[] {
   }
   flush();
   for (const l of lines) {
-    const exported = /echo "([A-Z][A-Z0-9_]*)=.*>>\s*"\$GITHUB_ENV"/.exec(l);
+    const exported = /echo\s+"?([A-Z][A-Z0-9_]*)=.*>>\s*"?\$\{?GITHUB_ENV\}?"?/.exec(l);
     if (exported) names.add(exported[1] as string);
   }
   return [...names].sort();
@@ -82,6 +96,15 @@ describe("monorepo structure", () => {
       });
     });
   }
+
+  it("every exemption names a workspace package", () => {
+    expect(Object.keys(NOT_A_DIST_LIBRARY).filter((p) => !WORKSPACE.includes(p))).toEqual([]);
+  });
+
+  it.each(Object.keys(NOT_A_DIST_LIBRARY))('%s has "type": "module"', (pkg) => {
+    const raw = readFileSync(resolve(monorepoRoot, "packages", pkg, "package.json"), "utf-8");
+    expect((JSON.parse(raw) as Record<string, unknown>).type).toBe("module");
+  });
 });
 
 describe("bin entries", () => {
@@ -165,5 +188,50 @@ describe("turbo env pass-through (D5, 2026-09-08; the series file 2026-09-09)", 
     const exported = ciTestEnvNames(ci);
     expect(exported.length).toBeGreaterThanOrEqual(3);
     expect([...(turbo.tasks["test"]?.env ?? [])].sort()).toEqual(exported);
+  });
+});
+
+describe("ciTestEnvNames reads a test step's own env and every $GITHUB_ENV export form", () => {
+  it.each([
+    [
+      "a `run: |` test step's env",
+      [
+        "      - name: Test",
+        "        env:",
+        "          HARPOC_A: x",
+        "        run: |",
+        "          pnpm test",
+      ],
+      ["HARPOC_A"],
+    ],
+    [
+      "an unquoted `>> $GITHUB_ENV` export",
+      ['          echo "HARPOC_B=1" >> $GITHUB_ENV'],
+      ["HARPOC_B"],
+    ],
+    ["an unquoted assignment", ['          echo HARPOC_C=1 >> "$GITHUB_ENV"'], ["HARPOC_C"]],
+    [
+      "control: a non-test step's env is not collected",
+      ["      - name: Build", "        env:", "          HARPOC_D: x", "        run: pnpm build"],
+      [],
+    ],
+    [
+      "a braced ${GITHUB_ENV} export",
+      ['          echo "HARPOC_E=1" >> "${GITHUB_ENV}"'],
+      ["HARPOC_E"],
+    ],
+    [
+      "control: a commented-out pnpm test does not make a test step",
+      [
+        "      - name: Build",
+        "        env:",
+        "          HARPOC_F: x",
+        "        # pnpm test",
+        "        run: pnpm build",
+      ],
+      [],
+    ],
+  ])("%s", (_label, lines, expected) => {
+    expect(ciTestEnvNames(lines.join("\n"))).toEqual(expected);
   });
 });

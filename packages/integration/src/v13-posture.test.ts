@@ -248,7 +248,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await destroyTestVault(vault).catch(() => undefined);
+  await destroyTestVault(vault);
 });
 
 describe("v1.3 contexts — credential opacity across every observable channel", () => {

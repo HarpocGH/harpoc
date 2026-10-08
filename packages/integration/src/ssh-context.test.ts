@@ -4,6 +4,7 @@ import { ErrorCode } from "@harpoc/shared";
 import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { canon, keyNeedles } from "./helpers/key-needles.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
 /**
@@ -33,14 +34,16 @@ describe("SSH context (process-mediated, §4.5.7)", () => {
   let vault: TestVault;
   let handle: string;
   let client: DirectClient;
+  let keyPem: string;
 
   beforeEach(async () => {
     vault = createTestVault();
     await vault.engine.initVault(PASSWORD);
+    keyPem = makeKeyPem();
     const created = await vault.engine.createSecret({
       name: "ssh-key",
       type: "api_key",
-      value: new Uint8Array(Buffer.from(makeKeyPem(), "utf8")),
+      value: new Uint8Array(Buffer.from(keyPem, "utf8")),
     });
     handle = created.handle;
     client = new DirectClient(vault.engine);
@@ -105,8 +108,14 @@ describe("SSH context (process-mediated, §4.5.7)", () => {
       () => client.useSecret(handle, sshAction("deploy.example.com")),
       ErrorCode.HOST_NOT_ALLOWED,
     );
-    expect(err.message).not.toContain("PRIVATE KEY");
-    expect(String(err.stack)).not.toContain("PRIVATE KEY");
-    expect(JSON.stringify(err)).not.toContain("PRIVATE KEY");
+    const needles = [
+      { label: "PEM armor", value: "PRIVATE KEY" },
+      ...keyNeedles("ssh private key", keyPem),
+    ];
+    for (const needle of needles) expect(canon(keyPem)).toContain(canon(needle.value));
+    for (const surface of [err.message, String(err.stack), JSON.stringify(err)]) {
+      for (const needle of needles)
+        expect(canon(surface), needle.label).not.toContain(canon(needle.value));
+    }
   });
 });

@@ -1,5 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
@@ -39,19 +42,23 @@ describe("harpoc server start --rest and the listener host allowlist (R11/D61)",
   });
 
   afterAll(async () => {
-    await destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   it("refuses a non-loopback bind without --allowed-host before the vault opens", async () => {
-    const result = await runCli(
-      ["server", "start", "--rest", "--host", "0.0.0.0", "--port", "3999"],
-      {
-        vaultDir: vault.tmpDir,
-      },
-    );
-    expect(result.code).toBe(1);
-    expect(result.stderr).toContain("requires --allowed-host");
-    expect(result.stderr).not.toContain("listening");
+    const empty = mkdtempSync(join(tmpdir(), "harpoc-bind-refusal-"));
+    try {
+      const result = await runCli(
+        ["server", "start", "--rest", "--host", "0.0.0.0", "--port", "3999"],
+        { vaultDir: empty },
+      );
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("requires --allowed-host");
+      expect(result.stderr).not.toContain("Vault is locked");
+      expect(result.stderr).not.toContain("listening");
+    } finally {
+      rmSync(empty, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
   }, 30_000);
 
   it("an allowed host admits its name, the loopback names stay admitted, and the rest answer 421", async () => {

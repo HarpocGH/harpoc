@@ -13,6 +13,7 @@ import type { HarnessVault } from "../harness/vault.js";
 
 const NONCE = "p4s6";
 const ENV_VAR = "OC_TOKEN";
+const MARKER_ENV = "OC_MARKER";
 const NODE = process.execPath;
 const REDACTION = "[REDACTED]";
 const DEDICATED_CONTEXT_REFUSAL = "has a dedicated injection context";
@@ -33,9 +34,11 @@ async function setupProcess(
     acknowledge?: boolean;
     networkIsolation?: boolean;
     env?: string[];
+    marker?: boolean;
   },
 ): Promise<ScenarioSetup> {
   const credential = credentialFor(name);
+  const marker = `p4-oc-marker-${NONCE}`;
   const handle = await storeSecret(vault, `p4-oc-${name}-${NONCE}`, credential);
   await vault.engine.setInjectionPolicy(
     handle,
@@ -46,13 +49,29 @@ async function setupProcess(
       // through keeps network isolation the ONLY difference between the arms —
       // otherwise the isolated child would fail on trust and report BLOCKED for
       // a reason that has nothing to do with the defence under test.
-      env_allowlist: ["NODE_EXTRA_CA_CERTS", ...(opts.env ?? [])],
+      env_allowlist: [
+        "NODE_EXTRA_CA_CERTS",
+        ...(opts.marker === true ? [MARKER_ENV] : []),
+        ...(opts.env ?? []),
+      ],
       host_allowlist: [],
       network_isolation: opts.networkIsolation ?? false,
     },
     opts.acknowledge === true ? { acknowledge_interpreters: true } : undefined,
   );
-  return { handle, credential, marker: `p4-oc-marker-${NONCE}` };
+  if (opts.marker !== true) return { handle, credential, marker };
+  // The echo arms print it beside the token: one value for the four of them,
+  // forwarded through the env allowlist (the demonstration process cell's
+  // HARPOC_E2E_DEMO_MARKER precedent).
+  process.env[MARKER_ENV] = marker;
+  return {
+    handle,
+    credential,
+    marker,
+    cleanup: () => {
+      delete process.env["OC_MARKER"];
+    },
+  };
 }
 
 /**
@@ -69,11 +88,11 @@ async function setupProcess(
  * nothing.
  *
  * A Harpoc arm that did not leak throws unless its `proof` holds: the echo
- * arms' call completed with the sanitizer's `[REDACTED]` in the child's
- * stdout, the transform arms' call completed, and a refusal arm's call was
- * refused by its guard by name. Without it a call refused or failed for an
- * unrelated reason — a scope refusal, a locked vault, a missing binary — reads
- * as a defence that held (the `targetedVerdict` rule).
+ * arms' call completed with the sanitizer's `[REDACTED]` and the benign marker
+ * in the child's stdout, the transform arms' call completed, and a refusal
+ * arm's call was refused by its guard by name. Without it a call refused or
+ * failed for an unrelated reason — a scope refusal, a locked vault, a missing
+ * binary — reads as a defence that held (the `targetedVerdict` rule).
  */
 function verdict(
   arm: Arm,
@@ -81,6 +100,7 @@ function verdict(
   outcome: CallOutcome,
   credential: string,
   proof: BlockProof,
+  marker?: string,
 ): OutcomeValue {
   if (arm.name === "baseline") {
     if (!leaked) {
@@ -91,7 +111,7 @@ function verdict(
     return Outcome.LEAKED;
   }
   if (leaked) return Outcome.BYPASSED;
-  const missing = unproven(outcome, proof);
+  const missing = unproven(outcome, proof, marker);
   if (missing === undefined) return Outcome.BLOCKED;
   throw new Error(
     `arm is not discriminating: nothing leaked, but ${missing} — ok=${String(outcome.ok)}, ` +
@@ -102,7 +122,7 @@ function verdict(
 /** What a Harpoc BLOCKED must show besides "nothing leaked" (see `verdict`). */
 type BlockProof = "redacted" | "completed" | { refusal: string };
 
-function unproven(outcome: CallOutcome, proof: BlockProof): string | undefined {
+function unproven(outcome: CallOutcome, proof: BlockProof, marker?: string): string | undefined {
   if (typeof proof === "object") {
     if (!outcome.ok && (outcome.errorText ?? "").includes(proof.refusal)) return undefined;
     return `the call was not refused by name ("${proof.refusal}")`;
@@ -110,6 +130,9 @@ function unproven(outcome: CallOutcome, proof: BlockProof): string | undefined {
   if (!outcome.ok) return "the call did not complete";
   if (proof === "redacted" && !processStdout(outcome).includes(REDACTION)) {
     return "the child's stdout carries no [REDACTED]";
+  }
+  if (proof === "redacted" && marker !== undefined && !processStdout(outcome).includes(marker)) {
+    return "the benign marker did not survive — redaction is blanket, not targeted";
   }
   return undefined;
 }
@@ -189,12 +212,12 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
     scenario: "output-channel-leakage",
     context: "process",
     variant: "naive-echo",
-    setup: (v) => setupProcess(v, "naive", { commands: [resolvePrintenv()] }),
+    setup: (v) => setupProcess(v, "naive", { commands: [resolvePrintenv()], marker: true }),
     async observe(arm, setup) {
       const outcome = await arm.invoke(setup.handle, {
         type: "process",
         command: resolvePrintenv(),
-        args: [ENV_VAR],
+        args: [ENV_VAR, MARKER_ENV],
         env_var: ENV_VAR,
       });
       return verdict(
@@ -203,6 +226,7 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
         outcome,
         setup.credential,
         "redacted",
+        setup.marker,
       );
     },
   },
@@ -236,12 +260,12 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
     scenario: "output-channel-leakage",
     context: "process",
     variant: "encoding-base64",
-    setup: (v) => setupProcess(v, "b64", { commands: [NODE], acknowledge: true }),
+    setup: (v) => setupProcess(v, "b64", { commands: [NODE], acknowledge: true, marker: true }),
     async observe(arm, setup) {
       const outcome = await arm.invoke(
         setup.handle,
         nodeAction(
-          "process.stdout.write(Buffer.from(process.env.OC_TOKEN||'','utf8').toString('base64'))",
+          "process.stdout.write(Buffer.from(process.env.OC_TOKEN||'','utf8').toString('base64')+'\\n'+(process.env.OC_MARKER||''))",
         ),
       );
       return verdict(
@@ -250,6 +274,7 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
         outcome,
         setup.credential,
         "redacted",
+        setup.marker,
       );
     },
   },
@@ -257,12 +282,12 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
     scenario: "output-channel-leakage",
     context: "process",
     variant: "encoding-hex",
-    setup: (v) => setupProcess(v, "hex", { commands: [NODE], acknowledge: true }),
+    setup: (v) => setupProcess(v, "hex", { commands: [NODE], acknowledge: true, marker: true }),
     async observe(arm, setup) {
       const outcome = await arm.invoke(
         setup.handle,
         nodeAction(
-          "process.stdout.write(Buffer.from(process.env.OC_TOKEN||'','utf8').toString('hex'))",
+          "process.stdout.write(Buffer.from(process.env.OC_TOKEN||'','utf8').toString('hex')+'\\n'+(process.env.OC_MARKER||''))",
         ),
       );
       return verdict(
@@ -271,6 +296,7 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
         outcome,
         setup.credential,
         "redacted",
+        setup.marker,
       );
     },
   },
@@ -278,11 +304,13 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
     scenario: "output-channel-leakage",
     context: "process",
     variant: "encoding-percent",
-    setup: (v) => setupProcess(v, "pct", { commands: [NODE], acknowledge: true }),
+    setup: (v) => setupProcess(v, "pct", { commands: [NODE], acknowledge: true, marker: true }),
     async observe(arm, setup) {
       const outcome = await arm.invoke(
         setup.handle,
-        nodeAction("process.stdout.write(encodeURIComponent(process.env.OC_TOKEN||''))"),
+        nodeAction(
+          "process.stdout.write(encodeURIComponent(process.env.OC_TOKEN||'')+'\\n'+(process.env.OC_MARKER||''))",
+        ),
       );
       return verdict(
         arm,
@@ -290,6 +318,7 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
         outcome,
         setup.credential,
         "redacted",
+        setup.marker,
       );
     },
   },
@@ -322,7 +351,8 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
       return {
         ...base,
         marker: join(dir, "dropped.txt"),
-        cleanup: () => rmSync(dir, { recursive: true, force: true }),
+        cleanup: () =>
+          rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
       };
     },
     async observe(arm, setup) {
@@ -389,7 +419,8 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
       return {
         ...base,
         marker: join(dir, "spawned"),
-        cleanup: () => rmSync(dir, { recursive: true, force: true }),
+        cleanup: () =>
+          rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
       };
     },
     async observe(arm, setup) {
@@ -438,7 +469,8 @@ export const OUTPUT_CHANNEL_ARMS: ScenarioArm[] = [
       return {
         ...base,
         marker: join(dir, "ssh.log"),
-        cleanup: () => rmSync(dir, { recursive: true, force: true }),
+        cleanup: () =>
+          rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
       };
     },
     async observe(arm, setup) {

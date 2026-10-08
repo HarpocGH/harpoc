@@ -32,7 +32,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(() => {
-  rmSync(vaultDir, { recursive: true, force: true });
+  rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe("startCliServer", () => {

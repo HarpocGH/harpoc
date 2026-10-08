@@ -5,6 +5,7 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import type { Arm, CallOutcome } from "./arm.js";
 import { textOf } from "../harness/surfaces/mcp-http.js";
 import { resolveGit, resolveSsh } from "../harness/fixtures.js";
+import { stopChild } from "../harness/child.js";
 
 const SERVER = fileURLToPath(new URL("../../fixtures/baseline-mcp/server.mjs", import.meta.url));
 const STARTUP_TIMEOUT_MS = 30_000;
@@ -121,7 +122,7 @@ export async function startBaselineServer(opts: {
     stderr: () => stderr,
     async stop() {
       await client.close();
-      child.kill();
+      await stopChild(child, "baseline-mcp");
     },
   };
 }

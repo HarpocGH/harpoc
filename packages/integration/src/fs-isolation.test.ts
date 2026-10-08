@@ -136,7 +136,7 @@ describe.skipIf(!posixWithIsolation)("filesystem isolation — real kernel (Linu
       expect(existsSync(marker)).toBe(false);
     } finally {
       await destroyTestVault(vault);
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 

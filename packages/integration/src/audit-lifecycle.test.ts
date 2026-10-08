@@ -64,7 +64,7 @@ describe("server lifecycle rows through the spawned CLI", () => {
 
   afterAll(async () => {
     await engine.destroy();
-    rmSync(vaultDir, { recursive: true, force: true });
+    rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("stdin EOF is a graceful stop: a server.stop row with trigger transport_closed, exit 0", async () => {
@@ -199,7 +199,7 @@ describe("unknown-handle probes and ambiguity over the REST wire", () => {
   });
 
   afterAll(async () => {
-    await destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   it("an unknown handle on the oauth status route writes an attributed failed secret.read row", async () => {
@@ -395,7 +395,7 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
 
   afterAll(async () => {
     await engine.destroy();
-    rmSync(vaultDir, { recursive: true, force: true });
+    rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("stdin EOF is a graceful stop: exit 0 and one transport_closed row", async () => {

@@ -83,7 +83,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await rest.close();
-  await destroyTestVault(vault).catch(() => {});
+  await destroyTestVault(vault);
   await new Promise<void>((resolve, reject) =>
     sink.close((err) => (err ? reject(err) : resolve())),
   );
@@ -316,28 +316,31 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
       engine: vault.engine,
       allowTokenless: true,
     });
+    try {
+      const result = await callTool(mcpServer, "start_oauth_flow", {
+        name: "gh2",
+        provider: "github",
+        grant_type: "authorization_code",
+        client_id: "cid",
+      });
 
-    const result = await callTool(mcpServer, "start_oauth_flow", {
-      name: "gh2",
-      provider: "github",
-      grant_type: "authorization_code",
-      client_id: "cid",
-    });
+      expect(result.isError ?? false).toBe(false);
+      const payload = parseToolResult(result, "start_oauth_flow") as {
+        handle: string;
+        status: string;
+        message: string;
+      };
+      expect(payload.handle).toBe("secret://gh2");
+      expect(payload.status).toBe("pending_authorization");
+      expect(payload.message).toContain("harpoc oauth connect");
 
-    expect(result.isError ?? false).toBe(false);
-    const payload = parseToolResult(result, "start_oauth_flow") as {
-      handle: string;
-      status: string;
-      message: string;
-    };
-    expect(payload.handle).toBe("secret://gh2");
-    expect(payload.status).toBe("pending_authorization");
-    expect(payload.message).toContain("harpoc oauth connect");
-
-    const gh2Id = await vault.engine.resolveSecretId("secret://gh2");
-    const status = vault.engine.getOAuthTokenStatus(gh2Id);
-    expect(status.provider).toBe("github");
-    expect(status.has_access_token).toBe(false);
-    expect(status.has_refresh_token).toBe(false);
+      const gh2Id = await vault.engine.resolveSecretId("secret://gh2");
+      const status = vault.engine.getOAuthTokenStatus(gh2Id);
+      expect(status.provider).toBe("github");
+      expect(status.has_access_token).toBe(false);
+      expect(status.has_refresh_token).toBe(false);
+    } finally {
+      await mcpServer.close();
+    }
   });
 });

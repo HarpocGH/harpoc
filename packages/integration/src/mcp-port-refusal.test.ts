@@ -1,7 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runNode } from "./helpers/spawn-cli.js";
 
 const MCP_ENTRY = join(
@@ -10,8 +11,18 @@ const MCP_ENTRY = join(
   "index.js",
 );
 
+let vaultDir: string;
+
+beforeAll(() => {
+  vaultDir = mkdtempSync(join(tmpdir(), "harpoc-mcp-refusal-"));
+});
+
+afterAll(() => {
+  rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+});
+
 function runMcp(args: string[]): Promise<{ code: number | null; stderr: string }> {
-  return runNode([MCP_ENTRY, ...args]);
+  return runNode([MCP_ENTRY, "--vault-dir", vaultDir, ...args]);
 }
 
 describe("harpoc-mcp --http --port (spawned binary)", () => {

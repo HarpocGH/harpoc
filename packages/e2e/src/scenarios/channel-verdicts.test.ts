@@ -3,16 +3,18 @@ import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import type { Arm, CallOutcome } from "../arms/arm.js";
 import { encodingsOf } from "../assert/encodings.js";
+import { CONTEXT_OPACITY_ARMS } from "./context-opacity.js";
 import { OUTPUT_CHANNEL_ARMS } from "./output-channel.js";
 import { RESPONSE_CHANNEL_ARMS } from "./response-channel.js";
 import { Outcome } from "./scenario.js";
 import type { ScenarioArm, ScenarioSetup } from "./scenario.js";
 
 /**
- * The Harpoc verdicts of §6.2.6 and §6.2.7, driven without the fleet: each arm's
- * real `observe` against an arm that answers with a fixed outcome, shaped the
- * way `surfaces/mcp-http.ts` shapes it. A green fleet run never takes the
- * not-discriminating branch, so this is where it is falsifiable.
+ * The Harpoc verdicts of §6.2.6, §6.2.7 and the context-opacity Redis row,
+ * driven without the fleet: each arm's real `observe` against an arm that
+ * answers with a fixed outcome, shaped the way `surfaces/mcp-http.ts` shapes
+ * it. A green fleet run never takes the not-discriminating branch, so this is
+ * where it is falsifiable.
  */
 vi.mock("../harness/vault.js", () => ({ storeSecret: vi.fn() }));
 vi.mock("../harness/fixtures.js", async (importOriginal) => ({
@@ -31,6 +33,8 @@ const SETUP: ScenarioSetup = {
   credential: CREDENTIAL,
   marker: join(tmpdir(), "e2e-i44-marker-never-created"),
 };
+/** For the arms that carry the benign marker (E2E-6): a string, not a path. */
+const ECHO_SETUP: ScenarioSetup = { ...SETUP, marker: "p4-verdict-benign-marker" };
 
 function armOf(arms: ScenarioArm[], variant: string): ScenarioArm {
   return arms.find((a) => a.variant === variant) as ScenarioArm;
@@ -66,8 +70,25 @@ describe("output-channel Harpoc verdicts", () => {
   const gitContext = armOf(OUTPUT_CHANNEL_ARMS, "dedicated-context-git");
 
   it("records BLOCKED for an echo the sanitizer redacted", async () => {
-    const outcome = completed({ type: "process", exit_code: 0, stdout: "[REDACTED]", stderr: "" });
-    await expect(echo.observe(harpocAnswering(outcome), SETUP)).resolves.toBe(Outcome.BLOCKED);
+    const outcome = completed({
+      type: "process",
+      exit_code: 0,
+      stdout: `[REDACTED]\n${ECHO_SETUP.marker}`,
+      stderr: "",
+    });
+    await expect(echo.observe(harpocAnswering(outcome), ECHO_SETUP)).resolves.toBe(Outcome.BLOCKED);
+  });
+
+  it("throws when the benign marker did not survive", async () => {
+    const outcome = completed({
+      type: "process",
+      exit_code: 0,
+      stdout: "[REDACTED]\n[REDACTED]",
+      stderr: "",
+    });
+    await expect(echo.observe(harpocAnswering(outcome), ECHO_SETUP)).rejects.toThrow(
+      /redaction is blanket, not targeted/,
+    );
   });
 
   it.each([
@@ -138,8 +159,25 @@ describe("response-channel Harpoc verdicts", () => {
   const reason = armOf(RESPONSE_CHANNEL_ARMS, "status-reason-phrase");
 
   it("records BLOCKED for an echo the sanitizer redacted", async () => {
-    const outcome = completed({ type: "http", status: 200, body: '{"credential":"[REDACTED]"}' });
-    await expect(encoded.observe(harpocAnswering(outcome), SETUP)).resolves.toBe(Outcome.BLOCKED);
+    const outcome = completed({
+      type: "http",
+      status: 200,
+      body: `{"credential":"[REDACTED]","marker":"${ECHO_SETUP.marker}"}`,
+    });
+    await expect(encoded.observe(harpocAnswering(outcome), ECHO_SETUP)).resolves.toBe(
+      Outcome.BLOCKED,
+    );
+  });
+
+  it("throws when the benign marker did not survive", async () => {
+    const outcome = completed({
+      type: "http",
+      status: 200,
+      body: '{"credential":"[REDACTED]","marker":"[REDACTED]"}',
+    });
+    await expect(encoded.observe(harpocAnswering(outcome), ECHO_SETUP)).rejects.toThrow(
+      /redaction is blanket, not targeted/,
+    );
   });
 
   it("records CHANNEL_ABSENT for a completed call with no status-text field", async () => {
@@ -158,6 +196,31 @@ describe("response-channel Harpoc verdicts", () => {
     const arm = armOf(RESPONSE_CHANNEL_ARMS, variant);
     await expect(arm.observe(harpocAnswering(outcome), SETUP)).rejects.toThrow(
       /not discriminating/,
+    );
+  });
+});
+
+describe("context-opacity Harpoc verdicts", () => {
+  const redis = armOf(CONTEXT_OPACITY_ARMS, "redis");
+
+  function echoed(reply: string): CallOutcome {
+    return completed({
+      type: "database",
+      row_count: 1,
+      rows: [reply],
+      fields: [{ name: "reply" }],
+    });
+  }
+
+  it("records OPAQUE for a redis ECHO whose marker survived", async () => {
+    const outcome = echoed(ECHO_SETUP.marker);
+    await expect(redis.observe(harpocAnswering(outcome), ECHO_SETUP)).resolves.toBe(Outcome.OPAQUE);
+  });
+
+  it("throws when the redis ECHO marker did not survive", async () => {
+    const outcome = echoed("[REDACTED]");
+    await expect(redis.observe(harpocAnswering(outcome), ECHO_SETUP)).rejects.toThrow(
+      /redaction is blanket, not targeted/,
     );
   });
 });

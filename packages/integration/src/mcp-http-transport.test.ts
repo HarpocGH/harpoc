@@ -1,4 +1,6 @@
 import { request as httpRequest } from "node:http";
+import { createServer as createNetServer } from "node:net";
+import type { AddressInfo } from "node:net";
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { VaultEngine } from "@harpoc/core";
@@ -12,6 +14,7 @@ import {
   registerAgents,
 } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { RAW_GET_TIMEOUT_MS } from "./helpers/spawn-cli.js";
 
 const PASSWORD = "mcp-http-transport-pw";
 
@@ -166,6 +169,7 @@ function rawRpc(
   port: number,
   headers: Record<string, string>,
   body?: string,
+  timeoutMs = RAW_GET_TIMEOUT_MS,
 ): Promise<{ status: number; sessionId?: string }> {
   const initBody = JSON.stringify({
     jsonrpc: "2.0",
@@ -201,6 +205,26 @@ function rawRpc(
       },
     );
     req.on("error", reject);
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(
+        new Error(`rawRpc /mcp on port ${String(port)} timed out after ${String(timeoutMs)} ms`),
+      );
+    });
     req.end(body ?? initBody);
   });
 }
+
+describe("rawRpc", () => {
+  it("rejects and frees the socket when the server never answers", async () => {
+    const silent = createNetServer((socket) => {
+      socket.resume();
+    });
+    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = silent.address() as AddressInfo;
+      await expect(rawRpc(port, {}, undefined, 200)).rejects.toThrow(/timed out after 200 ms/);
+    } finally {
+      await new Promise<void>((resolve) => silent.close(() => resolve()));
+    }
+  }, 10_000);
+});

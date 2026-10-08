@@ -111,7 +111,7 @@ beforeAll(async () => {
 afterAll(async () => {
   manager.cancelPendingFlows();
   await rest.close();
-  await destroyTestVault(vault).catch(() => {});
+  await destroyTestVault(vault);
   await mock.close();
 });
 

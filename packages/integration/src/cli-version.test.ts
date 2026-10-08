@@ -15,7 +15,7 @@ describe("harpoc --version (spawned CLI)", () => {
   });
 
   afterAll(() => {
-    rmSync(vaultDir, { recursive: true, force: true });
+    rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("prints the product version and exits 0", async () => {

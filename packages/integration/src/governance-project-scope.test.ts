@@ -37,7 +37,7 @@ describe("Governance refuses a project-claimed admin token (R11/N12)", () => {
 
   afterAll(async () => {
     await server?.close();
-    await destroyTestVault(vault).catch(() => {});
+    await destroyTestVault(vault);
   });
 
   async function get(path: string, token: string): Promise<Response> {
@@ -58,12 +58,13 @@ describe("Governance refuses a project-claimed admin token (R11/N12)", () => {
     expect((await get("/api/v1/agents", unscoped)).status).toBe(200);
   });
 
-  it("REST: a project-claimed token cannot revoke a token it can see in the audit trail", async () => {
+  it("REST: a project-claimed token cannot revoke an issued token — 403 ACCESS_DENIED and the token stays live", async () => {
     const res = await fetch(`${server.baseUrl}/api/v1/tokens/${scopedJti}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${scoped}` },
     });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(vault.engine.isTokenRevoked(scopedJti)).toBe(false);
   });
 

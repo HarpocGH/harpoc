@@ -43,6 +43,19 @@ describe("scan", () => {
     expect(hits[0]?.encoding).toBe("base64");
   });
 
+  it.each([
+    ["at alignment 0 behind a 3-byte prefix", 1, "abc", ""],
+    ["at alignment 1", 0, "a", ""],
+    ["at alignment 2 (base64 of 'x:' + value)", 0, "x:", ""],
+    ["at alignment 0 followed by more bytes (the needle's '=' padding)", 0, "", ":z"],
+  ])(
+    "base64 of the value inside a longer run %s — %i hit(s) (stated limit, encodings.ts)",
+    (_, n, prefix, suffix) => {
+      const run = Buffer.from(`${prefix}${SECRET}${suffix}`, "utf8").toString("base64");
+      expect(scan(SECRET, { body: run }).filter((h) => h.encoding === "base64")).toHaveLength(n);
+    },
+  );
+
   it("finds an uppercase hex leak", () => {
     const hex = Buffer.from(SECRET, "utf8").toString("hex").toUpperCase();
     const hits = scan(SECRET, { body: hex });

@@ -13,6 +13,7 @@ import {
   ResponseMode,
   SecretStatus,
   SecretType,
+  TokenPrincipalType,
   VaultState,
 } from "./types.js";
 import { ErrorCode } from "./errors.js";
@@ -78,6 +79,11 @@ describe("enum member counts", () => {
     // Filter out reverse mappings (numeric keys) from TypeScript enum
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
     expect(members).toHaveLength(110);
+  });
+
+  it("TokenPrincipalType has 3 members and excludes project", () => {
+    expect(Object.values(TokenPrincipalType)).toHaveLength(3);
+    expect(Object.values(TokenPrincipalType)).not.toContain("project");
   });
 });
 

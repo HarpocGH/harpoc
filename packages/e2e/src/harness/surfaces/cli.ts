@@ -1,5 +1,6 @@
-import { spawn } from "node:child_process";
 import type { Permission } from "@harpoc/shared";
+import { runNodeChild } from "../child.js";
+import type { ChildRun } from "../child.js";
 import type { HarnessVault } from "../vault.js";
 import { ensureAgent } from "../vault.js";
 import { resolveCliEntry } from "../fixtures.js";
@@ -7,12 +8,6 @@ import type { CallOutcome, Surface } from "./surface.js";
 
 export interface CliSurface extends Surface {
   name: "cli";
-}
-
-interface CliRun {
-  code: number | null;
-  stdout: string;
-  stderr: string;
 }
 
 /**
@@ -115,21 +110,10 @@ export async function startCliSurface(
   const entry = resolveCliEntry();
   const token = vault.engine.createToken(principal, scopes);
 
-  function run(args: string[]): Promise<CliRun> {
-    return new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [entry, "--vault-dir", vault.tmpDir, ...args], {
-        env: { ...process.env, HARPOC_TOKEN: token },
-        windowsHide: true,
-      });
-      let stdout = "";
-      let stderr = "";
-      child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
-      child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
-      child.on("error", reject);
-      child.on("close", (code) => resolve({ code, stdout, stderr }));
-      // Always close stdin: the hidden-prompt reader resolves on end, and an
-      // open stdin hangs the child until the suite times out.
-      child.stdin.end();
+  function run(args: string[]): Promise<ChildRun> {
+    return runNodeChild([entry, "--vault-dir", vault.tmpDir, ...args], {
+      env: { ...process.env, HARPOC_TOKEN: token },
+      label: "harpoc secret use",
     });
   }
 

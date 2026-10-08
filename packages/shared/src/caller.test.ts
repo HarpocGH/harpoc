@@ -50,11 +50,6 @@ describe("callerFromToken", () => {
     expect("project" in caller).toBe(false);
   });
 
-  it("TokenPrincipalType has 3 members and excludes project", () => {
-    expect(Object.values(TokenPrincipalType)).toHaveLength(3);
-    expect(Object.values(TokenPrincipalType)).not.toContain("project");
-  });
-
   it("carries the access interface through when provided", () => {
     for (const iface of ["rest", "mcp", "mcp-http", "cli"] as const) {
       const caller = callerFromToken(baseToken(), iface);
@@ -94,6 +89,23 @@ describe("checkTokenScope", () => {
     for (const perm of ["use", "read", "rotate", "list", "revoke", "create"] as const) {
       expect(() => checkTokenScope(baseToken({ scope: ["admin"] }), perm)).not.toThrow();
     }
+  });
+
+  it("admin stays bound to its project", () => {
+    denied(() =>
+      checkTokenScope(baseToken({ scope: ["admin"], project: "api" }), "use", "web", "db-main"),
+    );
+  });
+
+  it("admin stays bound to its secret-name patterns", () => {
+    denied(() =>
+      checkTokenScope(
+        baseToken({ scope: ["admin"], secrets: ["db-*"] }),
+        "use",
+        undefined,
+        "api-key",
+      ),
+    );
   });
 
   it("project-scoped token passes on its own project", () => {

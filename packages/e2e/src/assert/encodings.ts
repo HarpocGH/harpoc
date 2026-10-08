@@ -8,6 +8,12 @@ export interface Encoding {
  * only the raw string is defeated by any of the others. Encodings that
  * collapse onto an earlier one for a given secret are dropped, so a hit is
  * always attributed to the first encoding that produces it.
+ *
+ * A base64 / base64url needle is the encoding of the value as a whole unit:
+ * the value base64-encoded inside a longer run is found only when it starts
+ * on a 3-byte boundary and, unless its byte length is a multiple of 3, ends
+ * the run (the product's `needlesFor` shares this limit, so `drift.test.ts`
+ * cannot see it) — pinned in `scan.test.ts`.
  */
 export function encodingsOf(secret: string): Encoding[] {
   const buf = Buffer.from(secret, "utf8");
