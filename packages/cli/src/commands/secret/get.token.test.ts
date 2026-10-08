@@ -1,6 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { Command } from "commander";
-import type { VaultApiToken } from "@harpoc/shared";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -17,19 +15,7 @@ vi.mock("../../utils/vault-loader.js", () => ({
 }));
 
 import { registerSecretGetCommand } from "./get.js";
-
-function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
-  return {
-    sub: "agent-1",
-    vault_id: "vault-1",
-    scope: ["read"],
-    iat: 0,
-    exp: 2_000_000_000,
-    jti: "jti-1",
-    principal_type: "agent",
-    ...overrides,
-  };
-}
+import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 const INFO = {
   handle: "secret://api-key",
@@ -45,50 +31,27 @@ const INFO = {
 };
 
 describe("secret get — token path", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let spies: CliSpies;
   let stdoutWriteSpy: MockInstance;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.getSecretInfo.mockResolvedValue(INFO);
     mockEngine.getSecretValue.mockResolvedValue(new TextEncoder().encode("v"));
-    mockEngine.verifyToken.mockReturnValue(token());
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    mockEngine.verifyToken.mockReturnValue(tokenFixture());
+    spies = spyCli();
     stdoutWriteSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
   });
 
   afterEach(() => {
-    // A blanket vi.restoreAllMocks() here also tears down the vi.mock'd
-    // loadUnlockedEngine (a bare vi.fn(), not a spy on a real function) —
-    // mockRestore() on it resets it to a no-op, so every test after the
-    // first in this file saw `engine` come back undefined. Restoring only
-    // the spies actually created here, as use.test.ts already does, avoids
-    // that collateral damage.
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
+    spies.restore();
     stdoutWriteSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
   });
 
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>");
-    const secret = program.command("secret");
-    registerSecretGetCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "get", ...args]);
-  }
+  const run = buildCli(
+    (program) => registerSecretGetCommand(program.command("secret")),
+    ["secret", "get"],
+  );
 
   it("tokenless path is unchanged: no verify, no caller", async () => {
     await run(["secret://api-key"]);
@@ -115,11 +78,12 @@ describe("secret get — token path", () => {
   });
 
   it("a use-scoped token is refused before any engine read", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["use"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["use"] }));
     await expect(run(["secret://api-key", "--value", "--token", "jwt-value"])).rejects.toThrow(
       "process.exit",
     );
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("[ACCESS_DENIED]"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
     expect(mockEngine.getSecretValue).not.toHaveBeenCalled();
     expect(mockEngine.getSecretInfo).not.toHaveBeenCalled();
   });

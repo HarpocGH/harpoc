@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -12,45 +12,25 @@ vi.mock("../../utils/vault-loader.js", () => ({
   loadUnlockedEngine: vi.fn().mockResolvedValue(mockEngine),
 }));
 
-import { Command } from "commander";
 import { VaultError } from "@harpoc/shared";
 import { registerAuthRevokeCommand } from "./revoke.js";
+import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
-async function run(args: string[]): Promise<void> {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-  const auth = program.command("auth");
-  registerAuthRevokeCommand(auth);
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  await program.parseAsync(["node", "harpoc", "auth", "revoke", ...args]);
-}
+const run = buildCli(
+  (program) => registerAuthRevokeCommand(program.command("auth")),
+  ["auth", "revoke"],
+);
 
 describe("auth revoke (registry-authoritative, R9/C33-A)", () => {
-  const savedEnv = process.env.HARPOC_TOKEN;
-  let logSpy: ReturnType<typeof vi.spyOn>;
-  let errSpy: MockInstance;
-  let exitSpy: MockInstance;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
+    spies = spyCli();
   });
 
   afterEach(() => {
-    if (savedEnv === undefined) {
-      delete process.env.HARPOC_TOKEN;
-    } else {
-      process.env.HARPOC_TOKEN = savedEnv;
-    }
-    logSpy.mockRestore();
-    errSpy.mockRestore();
-    exitSpy.mockRestore();
+    spies.restore();
   });
 
   it("revokes by jti alone — no expiry, no token", async () => {
@@ -64,17 +44,17 @@ describe("auth revoke (registry-authoritative, R9/C33-A)", () => {
     process.env.HARPOC_TOKEN = "header.payload.signature";
     await run(["some-jti"]);
     expect(mockEngine.revokeToken).toHaveBeenCalledWith("some-jti");
-    const warned = errSpy.mock.calls.some(
+    const warned = spies.errorSpy.mock.calls.some(
       (call) => typeof call[0] === "string" && call[0].startsWith("Warning:"),
     );
     expect(warned).toBe(false);
   });
 
   it("--token is an unknown option", async () => {
-    await expect(run(["some-jti", "--token", "header.payload.signature"])).rejects.toThrow(
-      "process.exit",
-    );
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    await expect(run(["some-jti", "--token", "header.payload.signature"])).rejects.toMatchObject({
+      code: "commander.unknownOption",
+      exitCode: 1,
+    });
     expect(mockEngine.revokeToken).not.toHaveBeenCalled();
   });
 
@@ -83,8 +63,8 @@ describe("auth revoke (registry-authoritative, R9/C33-A)", () => {
       throw VaultError.invalidInput("Unknown token jti: nope");
     });
     await expect(run(["nope"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Unknown token jti: nope"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Unknown token jti: nope"));
     expect(mockEngine.destroy).toHaveBeenCalled();
   });
 });

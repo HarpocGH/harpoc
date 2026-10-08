@@ -97,6 +97,7 @@ describe("policy routes", () => {
 
       const res = await app.request("/api/v1/secrets/test-key/policies", { headers: AUTH });
       expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     });
   });
 
@@ -154,6 +155,7 @@ describe("policy routes", () => {
         }),
       });
       expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     });
 
     it("rejects with missing required fields", async () => {
@@ -217,7 +219,7 @@ describe("policy routes", () => {
       expect(res.status).toBe(404);
     });
 
-    it("returns 404 for policy belonging to a different secret (IDOR prevention)", async () => {
+    it("hands the resolved secret id to revokePolicy and renders its POLICY_NOT_FOUND as 404 (the IDOR guard is the engine's)", async () => {
       // The membership check now lives in the engine: the route hands it the
       // secret id it resolved, and a foreign policy refuses POLICY_NOT_FOUND.
       const res = await app.request("/api/v1/secrets/test-key/policies/other-policy-id", {
@@ -251,6 +253,7 @@ describe("policy routes", () => {
         headers: AUTH,
       });
       expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
       expect(engine.revokePolicy).not.toHaveBeenCalled();
     });
   });

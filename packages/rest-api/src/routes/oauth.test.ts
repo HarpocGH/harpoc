@@ -66,6 +66,7 @@ function createMockOAuthManager() {
       handle: "secret://gh-app",
       status: "authorized",
       message: "Client credentials flow completed for github",
+      secretId: "secret-uuid-cc",
     }),
     startDeviceCode: vi.fn().mockResolvedValue({
       handle: "secret://gh-dev",
@@ -145,10 +146,8 @@ describe("POST /api/v1/oauth/authorize — client_credentials", () => {
     const body = await res.json();
     expect(body.data.status).toBe("authorized");
     expect(body.data.handle).toBe("secret://gh-app");
-    // This is the one branch that passes the manager's result through
-    // unshaped (`c.json({ data: result }, 201)`) rather than building the
-    // response field by field, so nothing stops a stray manager field (e.g.
-    // an internal secretId) from leaking onto the wire except this pin.
+    // oauth-proxy's startOAuthFlowResult shapes this result field by field; the
+    // manager's internal secretId (in the mock above) must not reach the wire.
     expect(Object.keys(body.data).sort()).toEqual(["handle", "message", "status"]);
   });
 
@@ -291,6 +290,7 @@ describe("POST /api/v1/oauth/authorize — validation and scope", () => {
     engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, project: "other" });
     const res = await authorize({ ...CLIENT_CREDENTIALS_BODY, project: "myproj" });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(oauthManager.startClientCredentials).not.toHaveBeenCalled();
   });
 
@@ -298,6 +298,7 @@ describe("POST /api/v1/oauth/authorize — validation and scope", () => {
     engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["db-*"] });
     const res = await authorize(CLIENT_CREDENTIALS_BODY);
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(oauthManager.startClientCredentials).not.toHaveBeenCalled();
   });
 
@@ -356,6 +357,7 @@ describe("GET /api/v1/oauth/:handle/status", () => {
     engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: ["create"] });
     const res = await app.request("/api/v1/oauth/gh-app/status", { headers: AUTH });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.getOAuthTokenStatus).not.toHaveBeenCalled();
   });
 
@@ -415,6 +417,7 @@ describe("POST /api/v1/oauth/:handle/refresh", () => {
       headers: AUTH,
     });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.refreshOAuthToken).not.toHaveBeenCalled();
   });
 
@@ -425,6 +428,7 @@ describe("POST /api/v1/oauth/:handle/refresh", () => {
       headers: AUTH,
     });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.refreshOAuthToken).not.toHaveBeenCalled();
   });
 
@@ -474,6 +478,7 @@ describe("createApp OAuth wiring", () => {
       headers: { host: "localhost" },
     });
     expect(status.status).toBe(401);
+    expect(((await status.json()) as { error: string }).error).toBe(ErrorCode.INVALID_TOKEN);
 
     // The `/*` middleware pattern must cover the single-segment authorize path
     // too — an unguarded route would read an unset `token` from context.
@@ -483,6 +488,7 @@ describe("createApp OAuth wiring", () => {
       body: JSON.stringify(CLIENT_CREDENTIALS_BODY),
     });
     expect(authorized.status).toBe(401);
+    expect(((await authorized.json()) as { error: string }).error).toBe(ErrorCode.INVALID_TOKEN);
     expect(injected.startClientCredentials).not.toHaveBeenCalled();
   });
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Hoisted mocks (available inside vi.mock factories) ─────────────
 
@@ -41,26 +41,16 @@ vi.mock("@harpoc/oauth-proxy", async (importOriginal) => {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-import { Command } from "commander";
 import { promptHidden } from "../../utils/prompt.js";
 import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { defaultOpenBrowser } from "@harpoc/oauth-proxy";
 import { registerOAuthConnectCommand } from "./connect.js";
+import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
-function buildProgram(): Command {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-  const oauth = program.command("oauth").description("OAuth");
-  registerOAuthConnectCommand(oauth);
-  return program;
-}
-
-async function run(args: string[]): Promise<void> {
-  const program = buildProgram();
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  await program.parseAsync(["node", "harpoc", "oauth", "connect", ...args]);
-}
+const run = buildCli(
+  (program) => registerOAuthConnectCommand(program.command("oauth").description("OAuth")),
+  ["oauth", "connect"],
+);
 
 const AUTH_RESULT = {
   handle: "secret://gh-token",
@@ -71,9 +61,7 @@ const AUTH_RESULT = {
 // ── Tests ──────────────────────────────────────────────────────────
 
 describe("oauth connect", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let spies: CliSpies;
   const savedEnv = process.env.HARPOC_OAUTH_CLIENT_SECRET;
 
   beforeEach(() => {
@@ -86,11 +74,7 @@ describe("oauth connect", () => {
       ...AUTH_RESULT,
       message: "Client credentials flow completed for github",
     });
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
@@ -99,9 +83,7 @@ describe("oauth connect", () => {
     } else {
       process.env.HARPOC_OAUTH_CLIENT_SECRET = savedEnv;
     }
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
+    spies.restore();
   });
 
   it("runs authorization_code by default with preset-merged endpoints", async () => {
@@ -117,7 +99,9 @@ describe("oauth connect", () => {
     expect(config.token_endpoint).toBe("https://github.com/login/oauth/access_token");
     expect(config.client_secret).toBeUndefined();
     expect(project).toBeUndefined();
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("OK: OAuth secret connected"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("OK: OAuth secret connected"),
+    );
     expect(mockEngine.destroy).toHaveBeenCalled();
   });
 
@@ -179,8 +163,8 @@ describe("oauth connect", () => {
       run(["cc-token", "--provider", "github", "--client-id", "client-1", "--client-credentials"]),
     ).rejects.toThrow("process.exit");
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("client_credentials requires a client secret"),
     );
     expect(mockManager.startClientCredentials).not.toHaveBeenCalled();
@@ -200,8 +184,8 @@ describe("oauth connect", () => {
       ]),
     ).rejects.toThrow("process.exit");
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("mutually exclusive"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("mutually exclusive"));
   });
 
   it("--device with --client-credentials under --json is refused as an INVALID_INPUT envelope (P1bF-2)", async () => {
@@ -217,7 +201,7 @@ describe("oauth connect", () => {
         "--json",
       ]),
     ).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: "--device and --client-credentials are mutually exclusive.",
     });
@@ -238,7 +222,7 @@ describe("oauth connect", () => {
         "--json",
       ]),
     ).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message:
         "client_credentials requires a client secret. Set HARPOC_OAUTH_CLIENT_SECRET or enter it at the prompt.",
@@ -272,14 +256,16 @@ describe("oauth connect", () => {
     });
 
     await vi.waitFor(() => {
-      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("ABCD-1234"));
+      expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("ABCD-1234"));
     });
     expect(finished).toBe(false);
 
     releaseCompletion();
     await runPromise;
     expect(finished).toBe(true);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("OK: OAuth secret connected"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("OK: OAuth secret connected"),
+    );
   });
 
   it("the default openBrowser prints the URL and does not launch a browser", async () => {
@@ -290,7 +276,7 @@ describe("oauth connect", () => {
     };
     await options.openBrowser("https://github.com/login/oauth/authorize?x=1");
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("https://github.com/login/oauth/authorize?x=1"),
     );
     expect(defaultOpenBrowser).not.toHaveBeenCalled();
@@ -304,7 +290,9 @@ describe("oauth connect", () => {
     };
     await options.openBrowser("https://example.com/auth");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("https://example.com/auth"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("https://example.com/auth"),
+    );
     expect(defaultOpenBrowser).toHaveBeenCalledWith("https://example.com/auth");
   });
 
@@ -331,12 +319,12 @@ describe("oauth connect", () => {
     await expect(
       run(["gh-token", "--provider", "github", "--client-id", "c", "--callback-port", "70000"]),
     ).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid callback port"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid callback port"));
   });
 
   it("SIGINT cancels pending flows and destroys the engine", async () => {
     const onceSpy = vi.spyOn(process, "once");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
 
     await run(["gh-token", "--provider", "github", "--client-id", "client-1"]);
 
@@ -346,7 +334,7 @@ describe("oauth connect", () => {
 
     expect(mockManager.cancelPendingFlows).toHaveBeenCalled();
     await vi.waitFor(() => {
-      expect(exitSpy).toHaveBeenCalledWith(130);
+      expect(spies.exitSpy).toHaveBeenCalledWith(130);
     });
     expect(mockEngine.destroy).toHaveBeenCalled();
     onceSpy.mockRestore();
@@ -355,8 +343,11 @@ describe("oauth connect", () => {
   it("--json prints a single JSON document to stdout", async () => {
     await run(["gh-token", "--provider", "github", "--client-id", "client-1", "--json"]);
 
-    expect(logSpy).toHaveBeenCalledTimes(1);
-    const printed = JSON.parse(logSpy.mock.calls[0]?.[0] as string) as Record<string, unknown>;
+    expect(spies.logSpy).toHaveBeenCalledTimes(1);
+    const printed = JSON.parse(spies.logSpy.mock.calls[0]?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(printed).toEqual({
       handle: "secret://gh-token",
       status: "authorized",

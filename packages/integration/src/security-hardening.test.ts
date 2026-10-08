@@ -683,13 +683,18 @@ describe("Lockout Progression", () => {
 // ---------------------------------------------------------------------------
 describe("No-Logging Static Audit", () => {
   /**
-   * Recursively collect all non-test .ts and .tsx files in a directory.
+   * Recursively collect all non-test .ts and .tsx files in a directory (test-fixture modules under __fixtures__/ are test code and skipped).
    */
   function collectTsFiles(dir: string): string[] {
     const results: string[] = [];
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const fullPath = join(dir, entry.name);
-      if (entry.isDirectory() && entry.name !== "node_modules" && entry.name !== "dist") {
+      if (
+        entry.isDirectory() &&
+        entry.name !== "node_modules" &&
+        entry.name !== "dist" &&
+        entry.name !== "__fixtures__"
+      ) {
         results.push(...collectTsFiles(fullPath));
       } else if (
         entry.isFile() &&

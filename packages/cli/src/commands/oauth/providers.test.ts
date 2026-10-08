@@ -1,39 +1,29 @@
-import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { Command } from "commander";
 import { registerOAuthProvidersCommand } from "./providers.js";
+import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
-function buildProgram(): Command {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-  const oauth = program.command("oauth").description("OAuth");
-  registerOAuthProvidersCommand(oauth);
-  return program;
-}
-
-async function run(args: string[]): Promise<void> {
-  const program = buildProgram();
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  await program.parseAsync(["node", "harpoc", "oauth", ...args]);
-}
+const run = buildCli(
+  (program) => registerOAuthProvidersCommand(program.command("oauth").description("OAuth")),
+  ["oauth"],
+);
 
 describe("oauth providers", () => {
-  let logSpy: MockInstance;
+  let spies: CliSpies;
 
   beforeEach(() => {
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    logSpy.mockRestore();
+    spies.restore();
   });
 
   it("default output lists all four presets and github's auth endpoint", async () => {
     await run(["providers"]);
 
-    const output = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
+    const output = spies.logSpy.mock.calls.map((call) => String(call[0])).join("\n");
     expect(output).toContain("github");
     expect(output).toContain("google");
     expect(output).toContain("microsoft");
@@ -44,7 +34,7 @@ describe("oauth providers", () => {
   it("human output closes with the custom-provider reminder", async () => {
     await run(["providers"]);
 
-    const lastLogged = String(logSpy.mock.calls.at(-1)?.[0]);
+    const lastLogged = String(spies.logSpy.mock.calls.at(-1)?.[0]);
     expect(lastLogged).toContain('Provider "custom" is also accepted');
     expect(lastLogged).toContain("--auth-endpoint");
   });
@@ -52,7 +42,7 @@ describe("oauth providers", () => {
   it("--json prints { providers: [...] } with the full field set for all four presets", async () => {
     await run(["providers", "--json"]);
 
-    const printed = JSON.parse(logSpy.mock.calls[0]?.[0] as string) as {
+    const printed = JSON.parse(spies.logSpy.mock.calls[0]?.[0] as string) as {
       providers: Record<string, unknown>[];
     };
 

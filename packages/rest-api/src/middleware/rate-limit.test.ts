@@ -1,41 +1,51 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { ErrorCode } from "@harpoc/shared";
 import { RateLimiter } from "./rate-limit.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 describe("RateLimiter", () => {
-  it("allows requests within the global limit", () => {
+  it("allows requests within the global limit", async () => {
     const limiter = new RateLimiter(10, 5, 5);
     for (let i = 0; i < 10; i++) {
       limiter.checkGlobal();
     }
     // 11th should throw
-    expect(() => limiter.checkGlobal()).toThrow("Global rate limit exceeded");
+    const err = await expectVaultError(() => limiter.checkGlobal(), ErrorCode.RATE_LIMIT_EXCEEDED);
+    expect(err.message).toBe("Global rate limit exceeded");
   });
 
-  it("allows requests within the per-secret limit", () => {
+  it("allows requests within the per-secret limit", async () => {
     const limiter = new RateLimiter(1000, 3, 3);
     for (let i = 0; i < 3; i++) {
       limiter.checkSecret("secret-1");
     }
-    expect(() => limiter.checkSecret("secret-1")).toThrow("Per-secret rate limit exceeded");
+    const err = await expectVaultError(
+      () => limiter.checkSecret("secret-1"),
+      ErrorCode.RATE_LIMIT_EXCEEDED,
+    );
+    expect(err.message).toBe("Per-secret rate limit exceeded");
   });
 
-  it("tracks per-secret limits independently", () => {
+  it("tracks per-secret limits independently", async () => {
     const limiter = new RateLimiter(1000, 2, 2);
     limiter.checkSecret("secret-1");
     limiter.checkSecret("secret-1");
-    expect(() => limiter.checkSecret("secret-1")).toThrow();
+    await expectVaultError(() => limiter.checkSecret("secret-1"), ErrorCode.RATE_LIMIT_EXCEEDED);
 
     // Different secret should still work
     limiter.checkSecret("secret-2");
     limiter.checkSecret("secret-2");
-    expect(() => limiter.checkSecret("secret-2")).toThrow();
+    await expectVaultError(() => limiter.checkSecret("secret-2"), ErrorCode.RATE_LIMIT_EXCEEDED);
   });
 
-  it("uses useSecretLimit when isUseSecret is true", () => {
+  it("uses useSecretLimit when isUseSecret is true", async () => {
     const limiter = new RateLimiter(1000, 10, 2);
     limiter.checkSecret("secret-1", true);
     limiter.checkSecret("secret-1", true);
-    expect(() => limiter.checkSecret("secret-1", true)).toThrow();
+    await expectVaultError(
+      () => limiter.checkSecret("secret-1", true),
+      ErrorCode.RATE_LIMIT_EXCEEDED,
+    );
 
     // Regular access still has higher limit
     limiter.checkSecret("secret-2", false);

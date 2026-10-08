@@ -84,6 +84,18 @@ async function readResource(server: McpServer, uri: string) {
   return (await inMemoryClientFor(server)).readResource(uri);
 }
 
+const servers: McpServer[] = [];
+
+/** A per-test server, closed (with its in-memory client) after the test. */
+function track(server: McpServer): McpServer {
+  servers.push(server);
+  return server;
+}
+
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map((server) => server.close()));
+});
+
 describe("MCP Resources", () => {
   let server: McpServer;
   let engine: VaultEngine;
@@ -266,7 +278,7 @@ describe("MCP Resources", () => {
 
     it("secrets resource filters by project scope", async () => {
       const scoped = new ScopeGuard(makeScopedToken({ project: "prod" }));
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerSecretsResource(srv, engine, scoped);
 
       const result = await readResource(srv, "secret://vault/secrets");
@@ -278,7 +290,7 @@ describe("MCP Resources", () => {
 
     it("secrets resource filters by secret name scope", async () => {
       const scoped = new ScopeGuard(makeScopedToken({ secrets: ["my-key"] }));
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerSecretsResource(srv, engine, scoped);
 
       const result = await readResource(srv, "secret://vault/secrets");
@@ -289,7 +301,7 @@ describe("MCP Resources", () => {
 
     it("health resource respects scope filtering", async () => {
       const scoped = new ScopeGuard(makeScopedToken({ project: "prod" }));
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerHealthResource(srv, engine, scoped);
 
       const result = await readResource(srv, "secret://vault/health");
@@ -299,7 +311,7 @@ describe("MCP Resources", () => {
 
     it("projects resource respects scope filtering", async () => {
       const scoped = new ScopeGuard(makeScopedToken({ project: "prod" }));
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerProjectsResource(srv, engine, scoped);
 
       const result = await readResource(srv, "secret://vault/projects");
@@ -316,7 +328,7 @@ describe("MCP Resources", () => {
     // project- or name-scoped admin token read every secret's audit detail.
     it("audit resource passes the token's project/name scope to the engine", async () => {
       const scoped = new ScopeGuard(makeScopedToken({ project: "prod", secrets: ["db-*"] }));
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerAuditResource(srv, engine, scoped);
 
       await readResource(srv, "secret://vault/audit/recent");
@@ -329,7 +341,7 @@ describe("MCP Resources", () => {
 
     it("audit resource passes no scope for an unrestricted admin token", async () => {
       const unrestricted = new ScopeGuard(makeScopedToken());
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerAuditResource(srv, engine, unrestricted);
 
       await readResource(srv, "secret://vault/audit/recent");
@@ -346,7 +358,7 @@ describe("MCP Resources", () => {
         undefined,
         seen,
       );
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerAuditResource(srv, engine, listOnly);
 
       await expect(
@@ -425,7 +437,7 @@ describe("MCP Resources", () => {
             undefined,
             seen,
           );
-          const srv = new McpServer({ name: "test", version: "0.0.0" });
+          const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
           register(srv, engine, guard);
 
           await expectVaultError(() => invokeHandler(srv, method, params), ErrorCode.ACCESS_DENIED);

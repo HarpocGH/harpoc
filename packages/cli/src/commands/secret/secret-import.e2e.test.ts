@@ -3,13 +3,13 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SecretType } from "@harpoc/shared";
 import { EphemeralSshAgent, VaultEngine } from "@harpoc/core";
-import { Command } from "commander";
 import { createEngine, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { resolveSecretValue } from "../../utils/secret-value.js";
 import { registerSecretRotateCommand } from "./rotate.js";
+import { buildCli, spyCli } from "../../__fixtures__/cli-harness.js";
 
 /**
  * Full decrypt-at-import chain (thesis §4.5.7): encrypted key file →
@@ -25,13 +25,8 @@ let tempDir: string;
 let dbPath: string;
 let sessionPath: string;
 let engine: VaultEngine;
-const savedEnvToken = process.env.HARPOC_TOKEN;
 
 beforeEach(async () => {
-  // rotate.ts now reads process.env.HARPOC_TOKEN as a fallback; this file
-  // drives rotate against a real engine with no --token, so an operator's
-  // ambient HARPOC_TOKEN would be verified against a foreign JWT and refused.
-  delete process.env.HARPOC_TOKEN;
   tempDir = join(tmpdir(), `harpoc-imp-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
   dbPath = join(tempDir, "test.vault.db");
@@ -43,8 +38,6 @@ beforeEach(async () => {
 afterEach(async () => {
   await engine.destroy();
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-  else process.env.HARPOC_TOKEN = savedEnvToken;
 });
 
 describe("encrypted SSH key import — end to end", () => {
@@ -168,8 +161,11 @@ describe("secret rotate --from-file — end to end (review T5)", () => {
       `harpoc-rot-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     );
     mkdirSync(vaultDir, { recursive: true });
-    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // rotate.ts reads HARPOC_TOKEN as a fallback; spyCli() removes an ambient one,
+    // which a real engine would verify as a foreign JWT and refuse. The exit stub
+    // returns, so a refusal shows as the exitSpy call below.
+    const spies = spyCli();
+    spies.exitSpy.mockImplementation(() => undefined as never);
     try {
       const setup = createEngine(vaultDir);
       await setup.initVault(TEST_PASSWORD);
@@ -187,24 +183,12 @@ describe("secret rotate --from-file — end to end (review T5)", () => {
       const keyFile = join(vaultDir, "new_key.pem");
       writeFileSync(keyFile, plainKey);
 
-      const program = new Command();
-      program.option("--vault-dir <path>", "Path to vault directory");
-      const secret = program.command("secret");
-      registerSecretRotateCommand(secret);
-      program.exitOverride();
-      program.configureOutput({ writeErr: () => {} });
-      await program.parseAsync([
-        "node",
-        "harpoc",
-        "--vault-dir",
-        vaultDir,
-        "secret",
-        "rotate",
-        created.handle,
-        "--from-file",
-        keyFile,
-      ]);
-      expect(exitSpy).not.toHaveBeenCalled();
+      const run = buildCli(
+        (program) => registerSecretRotateCommand(program.command("secret")),
+        ["--vault-dir", vaultDir, "secret", "rotate"],
+      );
+      await run([created.handle, "--from-file", keyFile]);
+      expect(spies.exitSpy).not.toHaveBeenCalled();
 
       const verify = await loadUnlockedEngine(vaultDir);
       try {
@@ -214,8 +198,7 @@ describe("secret rotate --from-file — end to end (review T5)", () => {
         await verify.destroy();
       }
     } finally {
-      exitSpy.mockRestore();
-      errorSpy.mockRestore();
+      spies.restore();
       rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   }, 30_000);

@@ -1,5 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { Command } from "commander";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 
 const { mockEngine, mockResolveSecretValue } = vi.hoisted(() => ({
@@ -23,44 +22,37 @@ vi.mock("../../utils/secret-value.js", () => ({
 import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerSecretSetCommand } from "./set.js";
 import { registerSecretRotateCommand } from "./rotate.js";
+import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 const loadEngineMock = vi.mocked(loadUnlockedEngine);
 
-let errorSpy: ReturnType<typeof vi.spyOn>;
-let exitSpy: MockInstance;
-const savedEnvToken = process.env.HARPOC_TOKEN;
+let spies: CliSpies;
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // set.ts/rotate.ts now read process.env.HARPOC_TOKEN as a fallback; this
-  // suite's mockEngine has no verifyToken, and none of these tests pass
-  // --token, so an operator's ambient HARPOC_TOKEN must not leak in here.
-  delete process.env.HARPOC_TOKEN;
   loadEngineMock.mockResolvedValue(mockEngine as never);
   mockEngine.createSecret.mockResolvedValue({ handle: "secret://k", name: "k" });
   mockEngine.rotateSecret.mockResolvedValue(undefined);
   mockResolveSecretValue.mockResolvedValue(Buffer.from("resolved-value", "utf8"));
-  errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-  exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+  // set.ts/rotate.ts read process.env.HARPOC_TOKEN as a fallback; this suite's
+  // mockEngine has no verifyToken, and spyCli() removes an ambient one. The exit
+  // stub returns: these cases assert what happened before the refusal's exit.
+  spies = spyCli();
+  spies.exitSpy.mockImplementation(() => undefined as never);
 });
 
 afterEach(() => {
-  errorSpy.mockRestore();
-  exitSpy.mockRestore();
-  if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-  else process.env.HARPOC_TOKEN = savedEnvToken;
+  spies.restore();
 });
 
-async function run(args: string[]): Promise<void> {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-  const secret = program.command("secret");
-  registerSecretSetCommand(secret);
-  registerSecretRotateCommand(secret);
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  await program.parseAsync(["node", "harpoc", "secret", ...args]);
-}
+const run = buildCli(
+  (program) => {
+    const secret = program.command("secret");
+    registerSecretSetCommand(secret);
+    registerSecretRotateCommand(secret);
+  },
+  ["secret"],
+);
 
 describe("secret set/rotate — sealed vault fails before the value is resolved (review fix F4)", () => {
   beforeEach(() => {
@@ -69,7 +61,7 @@ describe("secret set/rotate — sealed vault fails before the value is resolved 
 
   it("set: a sealed vault never consults the value/passphrase prompt", async () => {
     await run(["set", "k", "--from-file", "/nonexistent/key.pem"]);
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
     // Pre-fix, resolveSecretValue ran (and could prompt for a passphrase,
     // leaving decrypted key material unwiped) before the engine load threw.
     expect(mockResolveSecretValue).not.toHaveBeenCalled();
@@ -77,7 +69,7 @@ describe("secret set/rotate — sealed vault fails before the value is resolved 
 
   it("rotate: a sealed vault never consults the value/passphrase prompt", async () => {
     await run(["rotate", "secret://k", "--from-file", "/nonexistent/key.pem"]);
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
     expect(mockResolveSecretValue).not.toHaveBeenCalled();
   });
 
@@ -89,7 +81,7 @@ describe("secret set/rotate — sealed vault fails before the value is resolved 
       expect.objectContaining({ name: "k", value: expect.any(Buffer) }),
       undefined,
     );
-    expect(exitSpy).not.toHaveBeenCalled();
+    expect(spies.exitSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -103,7 +95,7 @@ describe("secret set/rotate — value wiped even when the engine call throws (re
 
     await run(["set", "k"]);
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
     expect([...value].every((b) => b === 0)).toBe(true);
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
   });
@@ -117,7 +109,7 @@ describe("secret set/rotate — value wiped even when the engine call throws (re
 
     await run(["rotate", "secret://k"]);
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
     expect([...value].every((b) => b === 0)).toBe(true);
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
   });
@@ -130,14 +122,14 @@ describe("secret set/rotate — value wiped even when the engine call throws (re
 
     expect(mockEngine.createSecret).toHaveBeenCalledTimes(1);
     expect([...value].every((b) => b === 0)).toBe(true);
-    expect(exitSpy).not.toHaveBeenCalled();
+    expect(spies.exitSpy).not.toHaveBeenCalled();
   });
 });
 
 describe("secret set — type validation precedes any prompt (review fix F4)", () => {
   it("an invalid --type fails before the value is resolved", async () => {
     await run(["set", "k", "--type", "not-a-type"]);
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
     expect(mockResolveSecretValue).not.toHaveBeenCalled();
     expect(loadEngineMock).not.toHaveBeenCalled();
   });

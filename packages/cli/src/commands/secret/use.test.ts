@@ -1,10 +1,9 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { ErrorCode, VaultError } from "@harpoc/shared";
-import type { VaultApiToken } from "@harpoc/shared";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -20,57 +19,28 @@ vi.mock("../../utils/vault-loader.js", () => ({
 }));
 
 import { registerSecretUseCommand, summarizeResult } from "./use.js";
+import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 const HTTP_ARGS = ["--action", "http", "--url", "https://api.example.com/v1"];
 
-function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
-  return {
-    sub: "agent-1",
-    vault_id: "vault-1",
-    scope: ["use"],
-    iat: 0,
-    exp: 2_000_000_000,
-    jti: "jti-1",
-    principal_type: "agent",
-    ...overrides,
-  };
-}
+const run = buildCli(
+  (program) => registerSecretUseCommand(program.command("secret")),
+  ["secret", "use"],
+);
 
 describe("secret use — token-scoped path (D1)", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.useSecret.mockResolvedValue({ type: "http", status: 200, body: "ok" });
-    mockEngine.verifyToken.mockReturnValue(token());
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["use"] }));
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
-
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>", "Path to vault directory");
-    const secret = program.command("secret");
-    registerSecretUseCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "use", ...args]);
-  }
 
   it("passes no caller when no token is supplied — the trusted local path is unchanged", async () => {
     await run(["secret://api-key", ...HTTP_ARGS]);
@@ -94,7 +64,7 @@ describe("secret use — token-scoped path (D1)", () => {
 
   it("carries the token's principal type and project into the caller", async () => {
     mockEngine.verifyToken.mockReturnValue(
-      token({ sub: "tool-7", principal_type: "tool", project: "api" }),
+      tokenFixture({ scope: ["use"], sub: "tool-7", principal_type: "tool", project: "api" }),
     );
     await run(["secret://api/api-key", ...HTTP_ARGS, "--token", "jwt-value"]);
     expect(mockEngine.useSecret).toHaveBeenCalledWith("secret://api/api-key", expect.anything(), {
@@ -123,8 +93,8 @@ describe("secret use — token-scoped path (D1)", () => {
     await expect(run(["secret://api-key", ...HTTP_ARGS, "--token", ""])).rejects.toThrow(
       "process.exit",
     );
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("supplied but empty"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("supplied but empty"));
     expect(mockEngine.verifyToken).not.toHaveBeenCalled();
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
   });
@@ -132,8 +102,8 @@ describe("secret use — token-scoped path (D1)", () => {
   it("refuses an empty ambient HARPOC_TOKEN the same way", async () => {
     process.env.HARPOC_TOKEN = "";
     await expect(run(["secret://api-key", ...HTTP_ARGS])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("HARPOC_TOKEN"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("HARPOC_TOKEN"));
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
   });
 
@@ -159,48 +129,29 @@ describe("secret use — token-scoped path (D1)", () => {
 });
 
 describe("secret use — token denials refuse before the injection runs", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.useSecret.mockResolvedValue({ type: "http", status: 200 });
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
+    spies.restore();
   });
-
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>", "Path to vault directory");
-    const secret = program.command("secret");
-    registerSecretUseCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "use", ...args]);
-  }
 
   async function expectDenied(args: string[], code: ErrorCode): Promise<void> {
     await expect(run(args)).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining(code));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining(code));
     // The load-bearing half: the credential was never injected.
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
     expect(mockEngine.destroy).toHaveBeenCalled();
   }
 
   it("refuses a token without the use permission", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
     await expectDenied(
       ["secret://api-key", ...HTTP_ARGS, "--token", "jwt", "--json"],
       ErrorCode.ACCESS_DENIED,
@@ -208,7 +159,7 @@ describe("secret use — token denials refuse before the injection runs", () => 
   });
 
   it("refuses a project-scoped token on another project's secret", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ project: "api" }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["use"], project: "api" }));
     await expectDenied(
       ["secret://web/api-key", ...HTTP_ARGS, "--token", "jwt", "--json"],
       ErrorCode.ACCESS_DENIED,
@@ -216,7 +167,7 @@ describe("secret use — token denials refuse before the injection runs", () => 
   });
 
   it("refuses a name-pattern-scoped token on a non-matching secret", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ secrets: ["db-*"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["use"], secrets: ["db-*"] }));
     await expectDenied(
       ["secret://api-key", ...HTTP_ARGS, "--token", "jwt", "--json"],
       ErrorCode.ACCESS_DENIED,
@@ -244,7 +195,7 @@ describe("secret use — token denials refuse before the injection runs", () => 
   });
 
   it("allows the matching name pattern — the denials above are the scope, not a blanket refusal", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ secrets: ["db-*"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["use"], secrets: ["db-*"] }));
     await run(["secret://db-main", ...HTTP_ARGS, "--token", "jwt"]);
     expect(mockEngine.useSecret).toHaveBeenCalledWith(
       "secret://db-main",
@@ -258,36 +209,17 @@ describe("secret use — token denials refuse before the injection runs", () => 
 // mapped every one of the six contexts untested, and the only invocation of
 // `secret use` anywhere in the repo was a platform-gated negative control.
 describe("secret use — buildAction covers all six contexts", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.useSecret.mockResolvedValue({ type: "http", status: 200 });
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
+    spies.restore();
   });
-
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>", "Path to vault directory");
-    const secret = program.command("secret");
-    registerSecretUseCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "use", ...args]);
-  }
 
   function actionOf(): Record<string, unknown> {
     const call = mockEngine.useSecret.mock.calls[0] as unknown[] | undefined;
@@ -372,7 +304,7 @@ describe("secret use — buildAction covers all six contexts", () => {
     await expect(
       run(["secret://k", "--action", "mcp", "--server", "s", "--tool", "t", "--arguments", "{"]),
     ).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--arguments"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("--arguments"));
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
   });
 
@@ -489,7 +421,7 @@ describe("secret use — buildAction covers all six contexts", () => {
     await expect(run(["secret://k", ...HTTP_ARGS, "--timeout-ms", "soon"])).rejects.toThrow(
       "process.exit",
     );
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--timeout-ms"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("--timeout-ms"));
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
   });
 });
@@ -499,36 +431,17 @@ describe("secret use — buildAction covers all six contexts", () => {
 // six-context describe block above: one happy case (flags in → exact
 // action object out) and one schema refusal per context.
 describe("secret use — buildAction covers the five v1.3 contexts", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.useSecret.mockResolvedValue({ type: "http", status: 200 });
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
+    spies.restore();
   });
-
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>", "Path to vault directory");
-    const secret = program.command("secret");
-    registerSecretUseCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "use", ...args]);
-  }
 
   function actionOf(): Record<string, unknown> {
     const call = mockEngine.useSecret.mock.calls[0] as unknown[] | undefined;
@@ -586,7 +499,9 @@ describe("secret use — buildAction covers the five v1.3 contexts", () => {
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
     // The refusal must come from the schema (recipient count), not from
     // --action itself being unrecognized — pins the real failure reason.
-    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("--action must be one of"));
+    expect(spies.errorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("--action must be one of"),
+    );
   });
 
   it("imap: host, mailbox, and a fetch operation with repeated uids and parts", async () => {
@@ -634,7 +549,9 @@ describe("secret use — buildAction covers the five v1.3 contexts", () => {
       ]),
     ).rejects.toThrow("process.exit");
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--uid must be an integer"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--uid must be an integer"),
+    );
   });
 
   it("imap: --account maps the XOAUTH2 identity into the action", async () => {
@@ -673,7 +590,9 @@ describe("secret use — buildAction covers the five v1.3 contexts", () => {
       ]),
     ).rejects.toThrow("process.exit");
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
-    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("--action must be one of"));
+    expect(spies.errorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("--action must be one of"),
+    );
   });
 
   it("websocket: url, injection, message, collect window and subprotocols", async () => {
@@ -711,7 +630,9 @@ describe("secret use — buildAction covers the five v1.3 contexts", () => {
       run(["secret://k", "--action", "websocket", "--url", "ws://ws.example.com/socket"]),
     ).rejects.toThrow("process.exit");
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
-    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("--action must be one of"));
+    expect(spies.errorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("--action must be one of"),
+    );
   });
 
   it("sftp: host, user, operation, remote and local paths", async () => {
@@ -778,7 +699,9 @@ describe("secret use — buildAction covers the five v1.3 contexts", () => {
       ]),
     ).rejects.toThrow("process.exit");
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--port must be an integer"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--port must be an integer"),
+    );
   });
 
   it("sftp: --local paired with a list operation is refused by the schema", async () => {
@@ -800,7 +723,9 @@ describe("secret use — buildAction covers the five v1.3 contexts", () => {
       ]),
     ).rejects.toThrow("process.exit");
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
-    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("--action must be one of"));
+    expect(spies.errorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("--action must be one of"),
+    );
   });
 
   it("docker_registry: operation and image", async () => {
@@ -833,48 +758,31 @@ describe("secret use — buildAction covers the five v1.3 contexts", () => {
       ]),
     ).rejects.toThrow("process.exit");
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
-    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("--action must be one of"));
+    expect(spies.errorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("--action must be one of"),
+    );
   });
 });
 
 describe("secret use — --action-file", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let spies: CliSpies;
   let tempDir: string;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.useSecret.mockResolvedValue({ type: "imap", operation: "expunge", affected: 0 });
     tempDir = join(
       tmpdir(),
       `harpoc-use-action-file-${String(Date.now())}-${Math.random().toString(36).slice(2)}`,
     );
     mkdirSync(tempDir, { recursive: true });
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    rmSync(tempDir, { recursive: true, force: true });
+    spies.restore();
+    rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
-
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>", "Path to vault directory");
-    const secret = program.command("secret");
-    registerSecretUseCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "use", ...args]);
-  }
 
   function actionOf(): Record<string, unknown> {
     const call = mockEngine.useSecret.mock.calls[0] as unknown[] | undefined;
@@ -910,9 +818,9 @@ describe("secret use — --action-file", () => {
     await expect(
       run(["secret://k", "--action-file", filePath, "--url", "https://api.example.com"]),
     ).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("INVALID_INPUT"));
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--action-file"));
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--url"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("INVALID_INPUT"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("--action-file"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("--url"));
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
   });
 
@@ -920,7 +828,7 @@ describe("secret use — --action-file", () => {
     await expect(
       run(["secret://k", "--action-file", join(tempDir, "missing.json")]),
     ).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("INVALID_INPUT"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("INVALID_INPUT"));
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
   });
 
@@ -928,7 +836,7 @@ describe("secret use — --action-file", () => {
     const filePath = join(tempDir, "bad.json");
     writeFileSync(filePath, "{not json");
     await expect(run(["secret://k", "--action-file", filePath])).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("INVALID_INPUT"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("INVALID_INPUT"));
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
   });
 
@@ -947,7 +855,7 @@ describe("secret use — --action-file", () => {
   });
 
   it("--action-file with --token and --json is not a conflict: the cli caller, the JSON envelope", async () => {
-    mockEngine.verifyToken.mockReturnValueOnce(token());
+    mockEngine.verifyToken.mockReturnValueOnce(tokenFixture({ scope: ["use"] }));
     const filePath = join(tempDir, "action.json");
     const action = {
       type: "imap",
@@ -968,7 +876,7 @@ describe("secret use — --action-file", () => {
       () => "resolved",
       (err: unknown) => err,
     );
-    expect(errorSpy).not.toHaveBeenCalled();
+    expect(spies.errorSpy).not.toHaveBeenCalled();
     expect(outcome).toBe("resolved");
     expect(mockEngine.verifyToken).toHaveBeenCalledWith("jwt-value");
     expect(mockEngine.useSecret).toHaveBeenCalledTimes(1);
@@ -977,7 +885,7 @@ describe("secret use — --action-file", () => {
       principal_id: "agent-1",
       interface: "cli",
     });
-    const out = logSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("\n");
+    const out = spies.logSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("\n");
     expect(JSON.parse(out)).toEqual({ type: "imap", operation: "expunge", affected: 0 });
   });
 
@@ -994,7 +902,7 @@ describe("secret use — --action-file", () => {
       }),
     );
     await expect(run(["secret://k", "--action-file", filePath])).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining('<root>: Unrecognized key: "injecton"'),
     );
     expect(mockEngine.useSecret).not.toHaveBeenCalled();
@@ -1002,36 +910,17 @@ describe("secret use — --action-file", () => {
 });
 
 describe("secret use — --action is a closed set", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.useSecret.mockResolvedValue({ type: "http", status: 200 });
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
+    spies.restore();
   });
-
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>", "Path to vault directory");
-    const secret = program.command("secret");
-    registerSecretUseCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "use", ...args]);
-  }
 
   // An unknown --action used to build an HTTP action silently, so the user saw
   // a complaint about a missing URL rather than about the flag they mistyped.
@@ -1041,7 +930,9 @@ describe("secret use — --action is a closed set", () => {
       await expect(
         run(["secret://k", "--action", value, "--command", "/bin/true", "--env-var", "T"]),
       ).rejects.toThrow("process.exit");
-      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--action must be one of"));
+      expect(spies.errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("--action must be one of"),
+      );
       expect(mockEngine.useSecret).not.toHaveBeenCalled();
     },
   );
@@ -1057,42 +948,27 @@ describe("secret use — --action is a closed set", () => {
 });
 
 describe("secret use — output shape and boundary sanitization", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: MockInstance;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
+    spies.restore();
   });
 
-  async function run(args: string[]): Promise<string> {
-    const program = new Command();
-    program.option("--vault-dir <path>", "Path to vault directory");
-    const secret = program.command("secret");
-    registerSecretUseCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "use", ...args]);
-    return logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+  async function output(args: string[]): Promise<string> {
+    await run(args);
+    return spies.stdout();
   }
 
   it("--json prints the exact machine shape", async () => {
     mockEngine.useSecret.mockImplementation(() =>
       Promise.resolve({ type: "process", exit_code: 0, stdout: "hello\n", stderr: "" }),
     );
-    const out = await run([
+    const out = await output([
       "secret://k",
       "--action",
       "process",
@@ -1114,7 +990,7 @@ describe("secret use — output shape and boundary sanitization", () => {
     mockEngine.useSecret.mockImplementation(() =>
       Promise.resolve({ type: "process", exit_code: 0, stdout: "hello\n", stderr: "" }),
     );
-    const out = await run([
+    const out = await output([
       "secret://k",
       "--action",
       "process",
@@ -1138,7 +1014,7 @@ describe("secret use — output shape and boundary sanitization", () => {
         headers: { "x-echo": leaked },
       }),
     );
-    const out = await run(["secret://k", ...HTTP_ARGS, "--json"]);
+    const out = await output(["secret://k", ...HTTP_ARGS, "--json"]);
     expect(out).not.toContain(leaked);
     expect(out).toContain("[REDACTED]");
   });
@@ -1147,7 +1023,7 @@ describe("secret use — output shape and boundary sanitization", () => {
     mockEngine.useSecret.mockImplementation(() =>
       Promise.resolve({ type: "http", status: 200, body: '{"ok":true,"items":3}' }),
     );
-    const out = await run(["secret://k", ...HTTP_ARGS, "--json"]);
+    const out = await output(["secret://k", ...HTTP_ARGS, "--json"]);
     expect(out).toContain('{\\"ok\\":true,\\"items\\":3}');
     expect(out).not.toContain("[REDACTED]");
   });
@@ -1199,5 +1075,54 @@ describe("summarizeResult renders every context", () => {
       type: "sftp",
       exit_code: 1,
     });
+  });
+
+  it("process surfaces the exit code and previews stdout", () => {
+    expect(
+      summarizeResult({ type: "process", exit_code: 3, stdout: "hello", stderr: "" }),
+    ).toMatchObject({ type: "process", exit_code: 3, stdout: "hello" });
+  });
+
+  it("smtp reports the accepted count and the message id", () => {
+    expect(
+      summarizeResult({ type: "smtp", accepted: 2, message_id: "<m-1@example.test>" }),
+    ).toMatchObject({
+      type: "smtp",
+      accepted: 2,
+      message_id: "<m-1@example.test>",
+    });
+  });
+
+  it("imap reports the operation, the uids and the message count", () => {
+    expect(summarizeResult({ type: "imap", operation: "search", uids: [3, 7] })).toMatchObject({
+      type: "imap",
+      operation: "search",
+      uids: "3, 7",
+    });
+    expect(
+      summarizeResult({ type: "imap", operation: "fetch", messages: [{ uid: 1 }, { uid: 2 }] }),
+    ).toMatchObject({ type: "imap", operation: "fetch", message_count: 2 });
+  });
+
+  it("websocket reports the close code and the message count", () => {
+    expect(
+      summarizeResult({ type: "websocket", messages: ["a", "b"], close_code: 1000 }),
+    ).toMatchObject({
+      type: "websocket",
+      close_code: 1000,
+      message_count: 2,
+    });
+  });
+
+  it("docker_registry surfaces the operation and the exit code", () => {
+    expect(
+      summarizeResult({
+        type: "docker_registry",
+        operation: "pull",
+        exit_code: 1,
+        stdout: "",
+        stderr: "",
+      }),
+    ).toMatchObject({ type: "docker_registry", operation: "pull", exit_code: 1 });
   });
 });

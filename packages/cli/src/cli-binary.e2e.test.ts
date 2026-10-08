@@ -18,7 +18,7 @@ let vaultDir: string;
 let tokenServer: Server;
 let tokenServerUrl: string;
 let tokenHandler: (req: IncomingMessage, res: ServerResponse) => void;
-/** Every byte the binary ever wrote, for the secrets-never-logged sweep. */
+/** Every runCli child's output. The client-secret sweep reads it after the oauth connect cases — oauth/connect.ts is the one reader of HARPOC_OAUTH_CLIENT_SECRET — so later spawns are not swept. */
 const capturedOutputs: string[] = [];
 
 interface CliResult {
@@ -356,11 +356,16 @@ describe("compiled binary smoke: audit table attribution (V2)", () => {
   it("the audit table carries a Principal column; trusted-local rows render '-'", async () => {
     const audit = await runCli(["audit", "--limit", "5"]);
     expect(audit.code).toBe(0);
-    const [header, , ...rows] = audit.stdout.split("\n");
-    expect(header).toContain("Principal");
+    const [header = "", , ...rows] = audit.stdout.split("\n");
+    const start = header.indexOf("Principal");
+    const end = header.indexOf("IP");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const dataRows = rows.filter((row) => row.trim() !== "");
+    expect(dataRows.length).toBeGreaterThan(0);
     // Every row of this CLI-only lifecycle is the trusted local path (D4):
     // NULL principal columns render "-", never a fabricated "local".
-    expect(rows.length).toBeGreaterThan(0);
+    for (const row of dataRows) expect(row.slice(start, end).trim()).toBe("-");
     expect(audit.stdout).not.toContain("local");
   }, 30_000);
 });
@@ -522,7 +527,7 @@ describe("compiled binary smoke: vault directory and database modes (L11)", () =
         expect(statSync(freshDir).mode & 0o777).toBe(0o700);
         expect(statSync(join(freshDir, VAULT_DB_NAME)).mode & 0o777).toBe(0o600);
       } finally {
-        rmSync(freshDir, { recursive: true, force: true });
+        rmSync(freshDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
     },
     60_000,
@@ -670,7 +675,6 @@ describe("compiled binary smoke: token-scoped secret use (D1)", () => {
       ...process.env,
       HARPOC_TOKEN: foreignToken,
     });
-    capturedOutputs.push(child.stdout, child.stderr);
     expect(child.code).toBe(1);
     expect(child.stderr).toContain("ACCESS_DENIED");
   }, 60_000);

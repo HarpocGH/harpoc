@@ -1,8 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { Command } from "commander";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SESSION_FILE_NAME, VAULT_DB_NAME } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
 
@@ -13,25 +12,24 @@ vi.mock("../utils/prompt.js", () => ({ promptPassword: mockPromptPassword }));
 import { registerInitCommand } from "./init.js";
 import { registerUnlockCommand } from "./unlock.js";
 import { registerLockCommand } from "./lock.js";
+import { buildCli, spyCli, type CliSpies } from "../__fixtures__/cli-harness.js";
 
 const PASSWORD = "vault-commands-pw-1";
 const UUID_V7 = /[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/;
 
 let tempDir: string;
 let vaultDir: string;
-let errSpy: MockInstance;
-let logSpy: MockInstance;
-let exitSpy: MockInstance;
+let spies: CliSpies;
 
-async function run(args: string[]): Promise<void> {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-  registerInitCommand(program);
-  registerUnlockCommand(program);
-  registerLockCommand(program);
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  await program.parseAsync(["node", "harpoc", "--vault-dir", vaultDir, ...args]);
+function run(args: string[]): Promise<void> {
+  return buildCli(
+    (program) => {
+      registerInitCommand(program);
+      registerUnlockCommand(program);
+      registerLockCommand(program);
+    },
+    ["--vault-dir", vaultDir],
+  )(args);
 }
 
 function answer(...values: string[]): void {
@@ -63,17 +61,11 @@ beforeEach(() => {
   tempDir = join(tmpdir(), `harpoc-vc-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
   vaultDir = join(tempDir, "vault");
-  errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-  logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-  exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-    throw new Error("process.exit");
-  });
+  spies = spyCli();
 });
 
 afterEach(() => {
-  errSpy.mockRestore();
-  logSpy.mockRestore();
-  exitSpy.mockRestore();
+  spies.restore();
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
@@ -81,8 +73,8 @@ describe("harpoc init", () => {
   it("creates the vault and its session, prompting twice", async () => {
     answer(PASSWORD, PASSWORD);
     await run(["init"]);
-    expect(exitSpy).not.toHaveBeenCalled();
-    expect(errSpy.mock.calls).toEqual([
+    expect(spies.exitSpy).not.toHaveBeenCalled();
+    expect(spies.errorSpy.mock.calls).toEqual([
       [expect.stringMatching(new RegExp(`^OK: Vault created \\(${UUID_V7.source}\\)$`))],
     ]);
     expect(mockPromptPassword.mock.calls).toEqual([
@@ -97,8 +89,8 @@ describe("harpoc init", () => {
     await sealedVault();
     const before = readFileSync(dbPath());
     await expect(run(["init"])).rejects.toThrow("process.exit");
-    expect(exitSpy.mock.calls[0]).toEqual([1]);
-    expect(errSpy).toHaveBeenNthCalledWith(
+    expect(spies.exitSpy.mock.calls[0]).toEqual([1]);
+    expect(spies.errorSpy).toHaveBeenNthCalledWith(
       1,
       `Error: a vault already exists at ${dbPath()}.\n` +
         `Use 'harpoc unlock' to open it. To start over, delete the vault directory manually.`,
@@ -110,16 +102,16 @@ describe("harpoc init", () => {
   it("refuses a mismatched confirmation and creates no database", async () => {
     answer(PASSWORD, "another-password");
     await expect(run(["init"])).rejects.toThrow("process.exit");
-    expect(exitSpy.mock.calls[0]).toEqual([1]);
-    expect(errSpy).toHaveBeenNthCalledWith(1, "Error: Passwords do not match.");
+    expect(spies.exitSpy.mock.calls[0]).toEqual([1]);
+    expect(spies.errorSpy).toHaveBeenNthCalledWith(1, "Error: Passwords do not match.");
     expect(existsSync(dbPath())).toBe(false);
   });
 
   it("refuses an empty password before the confirmation and creates no database", async () => {
     answer("");
     await expect(run(["init"])).rejects.toThrow("process.exit");
-    expect(exitSpy.mock.calls[0]).toEqual([1]);
-    expect(errSpy).toHaveBeenNthCalledWith(1, "Error: Password cannot be empty.");
+    expect(spies.exitSpy.mock.calls[0]).toEqual([1]);
+    expect(spies.errorSpy).toHaveBeenNthCalledWith(1, "Error: Password cannot be empty.");
     expect(mockPromptPassword).toHaveBeenCalledTimes(1);
     expect(existsSync(dbPath())).toBe(false);
   });
@@ -131,8 +123,8 @@ describe("harpoc unlock", () => {
     expect(existsSync(sessionPath())).toBe(false);
     answer(PASSWORD);
     await run(["unlock"]);
-    expect(exitSpy).not.toHaveBeenCalled();
-    expect(errSpy.mock.calls).toEqual([["OK: Vault unlocked."]]);
+    expect(spies.exitSpy).not.toHaveBeenCalled();
+    expect(spies.errorSpy.mock.calls).toEqual([["OK: Vault unlocked."]]);
     expect(mockPromptPassword.mock.calls).toEqual([[]]);
     expect(existsSync(sessionPath())).toBe(true);
   });
@@ -141,8 +133,8 @@ describe("harpoc unlock", () => {
     await sealedVault();
     answer("wrong-password");
     await expect(run(["unlock"])).rejects.toThrow("process.exit");
-    expect(exitSpy.mock.calls).toEqual([[1]]);
-    expect(errSpy.mock.calls).toEqual([["Error: Invalid password."]]);
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(spies.errorSpy.mock.calls).toEqual([["Error: Invalid password."]]);
     expect(existsSync(sessionPath())).toBe(false);
   });
 
@@ -159,8 +151,8 @@ describe("harpoc unlock", () => {
     } finally {
       vi.useRealTimers();
     }
-    expect(exitSpy.mock.calls).toEqual(Array.from({ length: 6 }, () => [1]));
-    expect(errSpy.mock.calls).toEqual([
+    expect(spies.exitSpy.mock.calls).toEqual(Array.from({ length: 6 }, () => [1]));
+    expect(spies.errorSpy.mock.calls).toEqual([
       ...Array.from({ length: 5 }, () => ["Error: Invalid password."]),
       ["Error: Account locked. Try again in 30s."],
     ]);
@@ -173,16 +165,18 @@ describe("harpoc lock", () => {
     await unlockedVault();
     expect(existsSync(sessionPath())).toBe(true);
     await run(["lock"]);
-    expect(exitSpy).not.toHaveBeenCalled();
-    expect(errSpy.mock.calls).toEqual([["OK: Vault locked."]]);
+    expect(spies.exitSpy).not.toHaveBeenCalled();
+    expect(spies.errorSpy.mock.calls).toEqual([["OK: Vault locked."]]);
     expect(existsSync(sessionPath())).toBe(false);
   });
 
   it("refuses a sealed vault", async () => {
     await sealedVault();
     await expect(run(["lock"])).rejects.toThrow("process.exit");
-    expect(exitSpy.mock.calls).toEqual([[1]]);
-    expect(errSpy.mock.calls).toEqual([["Error: Vault is locked. Run 'harpoc unlock' first."]]);
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(spies.errorSpy.mock.calls).toEqual([
+      ["Error: Vault is locked. Run 'harpoc unlock' first."],
+    ]);
     expect(existsSync(dbPath())).toBe(true);
   });
 });

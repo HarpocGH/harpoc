@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { VaultError } from "@harpoc/shared";
 
 const { mockEngine } = vi.hoisted(() => ({
@@ -15,36 +15,25 @@ vi.mock("../../utils/vault-loader.js", () => ({
   resolveSecretId: vi.fn().mockResolvedValue("secret-id-1"),
 }));
 
-import { Command } from "commander";
 import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerOAuthStatusCommand } from "./status.js";
 import { registerOAuthRefreshCommand } from "./refresh.js";
+import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
-function buildProgram(): Command {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-  const oauth = program.command("oauth").description("OAuth");
-  registerOAuthStatusCommand(oauth);
-  registerOAuthRefreshCommand(oauth);
-  return program;
-}
-
-async function run(args: string[]): Promise<void> {
-  const program = buildProgram();
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  await program.parseAsync(["node", "harpoc", "oauth", ...args]);
-}
+const run = buildCli(
+  (program) => {
+    const oauth = program.command("oauth").description("OAuth");
+    registerOAuthStatusCommand(oauth);
+    registerOAuthRefreshCommand(oauth);
+  },
+  ["oauth"],
+);
 
 describe("oauth status / oauth refresh", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.getOAuthTokenStatus.mockReturnValue({
       secret_id: "secret-id-1",
       provider: "github",
@@ -56,19 +45,11 @@ describe("oauth status / oauth refresh", () => {
       token_endpoint_auth_method: "client_secret_basic",
     });
     mockEngine.refreshOAuthToken.mockResolvedValue(1_800_000_000_000);
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
 
   it("status prints token health for the resolved secret", async () => {
@@ -79,15 +60,18 @@ describe("oauth status / oauth refresh", () => {
       undefined,
       "secret://gh-token",
     );
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("github"));
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("ok"));
+    expect(spies.logSpy).toHaveBeenCalledWith(expect.stringContaining("github"));
+    expect(spies.logSpy).toHaveBeenCalledWith(expect.stringContaining("ok"));
     expect(mockEngine.destroy).toHaveBeenCalled();
   });
 
   it("status --json prints the raw status object", async () => {
     await run(["status", "secret://gh-token", "--json"]);
 
-    const printed = JSON.parse(logSpy.mock.calls[0]?.[0] as string) as Record<string, unknown>;
+    const printed = JSON.parse(spies.logSpy.mock.calls[0]?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(printed.refresh_status).toBe("ok");
     expect(printed.provider).toBe("github");
     expect(printed.token_endpoint_auth_method).toBe("client_secret_basic");
@@ -96,7 +80,7 @@ describe("oauth status / oauth refresh", () => {
   it("status prints the configured token-endpoint auth method", async () => {
     await run(["status", "secret://gh-token"]);
 
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("client_secret_basic"));
+    expect(spies.logSpy).toHaveBeenCalledWith(expect.stringContaining("client_secret_basic"));
   });
 
   it("refresh calls engine.refreshOAuthToken and prints the new expiry", async () => {
@@ -107,7 +91,7 @@ describe("oauth status / oauth refresh", () => {
       undefined,
       "secret://gh-token",
     );
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("OK: Token refreshed"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("OK: Token refreshed"));
     expect(mockEngine.destroy).toHaveBeenCalled();
   });
 
@@ -116,7 +100,7 @@ describe("oauth status / oauth refresh", () => {
 
     await run(["refresh", "secret://gh-token"]);
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("no expiry"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("no expiry"));
   });
 
   it("a sealed vault renders the unlock guidance and exits 1", async () => {
@@ -124,8 +108,8 @@ describe("oauth status / oauth refresh", () => {
 
     await expect(run(["status", "secret://gh-token"])).rejects.toThrow("process.exit");
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Vault is locked"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Vault is locked"));
   });
 
   it("refresh surfaces an engine refresh failure via handleError", async () => {
@@ -135,8 +119,8 @@ describe("oauth status / oauth refresh", () => {
 
     await expect(run(["refresh", "secret://gh-token"])).rejects.toThrow("process.exit");
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("OAUTH_REFRESH_FAILED"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("OAUTH_REFRESH_FAILED"));
     expect(mockEngine.destroy).toHaveBeenCalled();
   });
 });

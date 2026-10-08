@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
+import { describe, it, expect, expectTypeOf, vi, beforeEach, afterEach } from "vitest";
 import type { IssuedToken } from "@harpoc/shared";
 
 const { mockEngine } = vi.hoisted(() => ({
@@ -14,8 +14,8 @@ vi.mock("../../utils/vault-loader.js", () => ({
   loadUnlockedEngine: vi.fn().mockResolvedValue(mockEngine),
 }));
 
-import { Command } from "commander";
 import { registerAuthListCommand } from "./list.js";
+import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 const TOKEN: IssuedToken = {
   jti: "01960000-0000-7000-8000-0000000000aa",
@@ -32,42 +32,23 @@ const TOKEN: IssuedToken = {
   status: "active",
 };
 
-async function run(args: string[]): Promise<void> {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-  const auth = program.command("auth");
-  registerAuthListCommand(auth);
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  await program.parseAsync(["node", "harpoc", "auth", "list", ...args]);
-}
+const run = buildCli(
+  (program) => registerAuthListCommand(program.command("auth")),
+  ["auth", "list"],
+);
 
 describe("harpoc auth list", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: MockInstance;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
-
-  const stdout = (): string => logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.listIssuedTokens.mockReturnValue([TOKEN]);
 
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
 
   it("lists active tokens by default", async () => {
@@ -96,7 +77,7 @@ describe("harpoc auth list", () => {
 
   it("prints the documented table columns", async () => {
     await run([]);
-    const out = stdout();
+    const out = spies.stdout();
     for (const column of [
       "JTI",
       "Subject",
@@ -115,11 +96,10 @@ describe("harpoc auth list", () => {
 
   it("prints the engine return verbatim under --json", async () => {
     await run(["--json"]);
-    expect(logSpy).toHaveBeenCalledWith(JSON.stringify([TOKEN], null, 2));
+    expect(spies.logSpy).toHaveBeenCalledWith(JSON.stringify([TOKEN], null, 2));
   });
 
-  it("never prints a JWT — the registry holds claims metadata only", async () => {
-    await run(["--json"]);
-    expect(stdout()).not.toContain("eyJ");
+  it("the registry row a listing prints carries no token field (claims metadata only)", () => {
+    expectTypeOf<IssuedToken>().not.toHaveProperty("token");
   });
 });

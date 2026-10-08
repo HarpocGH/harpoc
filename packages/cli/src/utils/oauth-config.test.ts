@@ -1,15 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { ErrorCode, OAuthGrantType, VaultError } from "@harpoc/shared";
+import { ErrorCode, OAuthGrantType } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { buildOAuthProviderConfig } from "./oauth-config.js";
-
-function captureError(fn: () => unknown): unknown {
-  try {
-    fn();
-  } catch (err) {
-    return err;
-  }
-  throw new Error("expected buildOAuthProviderConfig to throw");
-}
 
 describe("buildOAuthProviderConfig", () => {
   it("merges github preset token and auth endpoints", () => {
@@ -76,20 +68,17 @@ describe("buildOAuthProviderConfig", () => {
     ).toThrow(/token_endpoint is required for provider "custom"/);
   });
 
-  it("surfaces the shared mapper's schema-validation error code", () => {
-    let caught: unknown;
-    try {
-      buildOAuthProviderConfig(
-        "custom-token",
-        OAuthGrantType.CLIENT_CREDENTIALS,
-        { provider: "custom", clientId: "client-1" },
-        "secret",
-      );
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(VaultError);
-    expect((caught as VaultError).code).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+  it("surfaces the shared mapper's schema-validation error code", async () => {
+    await expectVaultError(
+      () =>
+        buildOAuthProviderConfig(
+          "custom-token",
+          OAuthGrantType.CLIENT_CREDENTIALS,
+          { provider: "custom", clientId: "client-1" },
+          "secret",
+        ),
+      ErrorCode.SCHEMA_VALIDATION_ERROR,
+    );
   });
 
   it("requires an auth endpoint for authorization_code with a custom provider", () => {
@@ -157,59 +146,51 @@ describe("buildOAuthProviderConfig", () => {
     expect(config.token_endpoint_auth_method).toBe("client_secret_basic");
   });
 
-  it("rejects an unknown provider", () => {
-    expect(() =>
-      buildOAuthProviderConfig(
-        "x-token",
-        OAuthGrantType.AUTHORIZATION_CODE,
-        { provider: "gitlab", clientId: "client-1" },
-        undefined,
-      ),
-    ).toThrow(/provider/);
+  it("rejects an unknown provider", async () => {
+    const err = await expectVaultError(
+      () =>
+        buildOAuthProviderConfig(
+          "x-token",
+          OAuthGrantType.AUTHORIZATION_CODE,
+          { provider: "gitlab", clientId: "client-1" },
+          undefined,
+        ),
+      ErrorCode.SCHEMA_VALIDATION_ERROR,
+    );
+    expect(err.message).toMatch(/^provider: /);
   });
 
-  it("requires --provider and --client-id, refusing both as INVALID_INPUT VaultErrors", () => {
-    expect(() =>
-      buildOAuthProviderConfig("x", OAuthGrantType.AUTHORIZATION_CODE, {}, undefined),
-    ).toThrow(/--provider is required/);
-    expect(() =>
-      buildOAuthProviderConfig(
-        "x",
-        OAuthGrantType.AUTHORIZATION_CODE,
-        { provider: "github" },
-        undefined,
-      ),
-    ).toThrow(/--client-id is required/);
-
-    const missingProvider = captureError(() =>
-      buildOAuthProviderConfig("x", OAuthGrantType.AUTHORIZATION_CODE, {}, undefined),
+  it("requires --provider and --client-id, refusing both as INVALID_INPUT VaultErrors", async () => {
+    const missingProvider = await expectVaultError(
+      () => buildOAuthProviderConfig("x", OAuthGrantType.AUTHORIZATION_CODE, {}, undefined),
+      ErrorCode.INVALID_INPUT,
     );
-    expect(missingProvider).toBeInstanceOf(VaultError);
-    expect((missingProvider as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
+    expect(missingProvider.message).toMatch(/--provider is required/);
 
-    const missingClientId = captureError(() =>
-      buildOAuthProviderConfig(
-        "x",
-        OAuthGrantType.AUTHORIZATION_CODE,
-        { provider: "github" },
-        undefined,
-      ),
+    const missingClientId = await expectVaultError(
+      () =>
+        buildOAuthProviderConfig(
+          "x",
+          OAuthGrantType.AUTHORIZATION_CODE,
+          { provider: "github" },
+          undefined,
+        ),
+      ErrorCode.INVALID_INPUT,
     );
-    expect(missingClientId).toBeInstanceOf(VaultError);
-    expect((missingClientId as VaultError).code).toBe(ErrorCode.INVALID_INPUT);
+    expect(missingClientId.message).toMatch(/--client-id is required/);
   });
 
-  it("throws the input-schema refusal as a SCHEMA_VALIDATION_ERROR VaultError", () => {
-    const caught = captureError(() =>
-      buildOAuthProviderConfig(
-        "has space",
-        OAuthGrantType.AUTHORIZATION_CODE,
-        { provider: "github", clientId: "client-1" },
-        undefined,
-      ),
+  it("throws the input-schema refusal as a SCHEMA_VALIDATION_ERROR VaultError", async () => {
+    await expectVaultError(
+      () =>
+        buildOAuthProviderConfig(
+          "has space",
+          OAuthGrantType.AUTHORIZATION_CODE,
+          { provider: "github", clientId: "client-1" },
+          undefined,
+        ),
+      ErrorCode.SCHEMA_VALIDATION_ERROR,
     );
-    expect(caught).toBeInstanceOf(VaultError);
-    expect((caught as VaultError).code).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
   });
 
   it("passes project through and includes the client secret in the config", () => {
@@ -223,14 +204,17 @@ describe("buildOAuthProviderConfig", () => {
     expect(config.client_secret).toBe("s3cret");
   });
 
-  it("rejects an invalid secret name", () => {
-    expect(() =>
-      buildOAuthProviderConfig(
-        "has space",
-        OAuthGrantType.AUTHORIZATION_CODE,
-        { provider: "github", clientId: "client-1" },
-        undefined,
-      ),
-    ).toThrow(/name/);
+  it("rejects an invalid secret name", async () => {
+    const err = await expectVaultError(
+      () =>
+        buildOAuthProviderConfig(
+          "has space",
+          OAuthGrantType.AUTHORIZATION_CODE,
+          { provider: "github", clientId: "client-1" },
+          undefined,
+        ),
+      ErrorCode.SCHEMA_VALIDATION_ERROR,
+    );
+    expect(err.message).toMatch(/^name: /);
   });
 });

@@ -71,6 +71,7 @@ describe("authMiddleware", () => {
     });
 
     expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.INVALID_TOKEN);
   });
 
   it("returns 401 for expired token", async () => {

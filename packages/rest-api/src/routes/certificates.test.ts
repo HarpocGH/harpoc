@@ -185,6 +185,7 @@ describe("POST /api/v1/certificates/import", () => {
     engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: ["read", "rotate"] });
     const res = await post("/api/v1/certificates/import", IMPORT_BODY);
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(certManager.importCertificate).not.toHaveBeenCalled();
   });
 
@@ -192,6 +193,7 @@ describe("POST /api/v1/certificates/import", () => {
     engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, project: "other" });
     const res = await post("/api/v1/certificates/import", { ...IMPORT_BODY, project: "myproj" });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(certManager.importCertificate).not.toHaveBeenCalled();
   });
 
@@ -199,6 +201,7 @@ describe("POST /api/v1/certificates/import", () => {
     engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["db-*"] });
     const res = await post("/api/v1/certificates/import", IMPORT_BODY);
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.auditScopeRefusal).toHaveBeenCalledWith(
       expect.objectContaining({ principal_id: "test-agent", interface: "rest" }),
       "POST /api/v1/certificates/import",
@@ -296,6 +299,7 @@ describe("POST /api/v1/certificates/csr", () => {
     engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: ["read", "rotate"] });
     const res = await post("/api/v1/certificates/csr", CSR_BODY);
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(certManager.generateCsr).not.toHaveBeenCalled();
   });
 
@@ -303,6 +307,7 @@ describe("POST /api/v1/certificates/csr", () => {
     engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["db-*"] });
     const res = await post("/api/v1/certificates/csr", CSR_BODY);
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.auditScopeRefusal).toHaveBeenCalledWith(
       expect.objectContaining({ principal_id: "test-agent", interface: "rest" }),
       "POST /api/v1/certificates/csr",
@@ -346,6 +351,7 @@ describe("POST /api/v1/certificates/:handle/renew", () => {
     engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: ["read", "create"] });
     const res = await post("/api/v1/certificates/my-cert/renew", {});
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(certManager.renewCertificate).not.toHaveBeenCalled();
   });
 
@@ -400,6 +406,7 @@ describe("GET /api/v1/certificates/:handle/status", () => {
     engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: ["create"] });
     const res = await app.request("/api/v1/certificates/my-cert/status", { headers: AUTH });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.getCertificateStatus).not.toHaveBeenCalled();
   });
 
@@ -443,6 +450,7 @@ describe("createApp certificate wiring", () => {
       headers: { host: "localhost" },
     });
     expect(status.status).toBe(401);
+    expect(((await status.json()) as { error: string }).error).toBe(ErrorCode.INVALID_TOKEN);
 
     // The `/*` middleware pattern must cover the single-segment import/csr
     // paths too — an unguarded route would read an unset `token` from context.
@@ -452,6 +460,7 @@ describe("createApp certificate wiring", () => {
       body: JSON.stringify(IMPORT_BODY),
     });
     expect(imported.status).toBe(401);
+    expect(((await imported.json()) as { error: string }).error).toBe(ErrorCode.INVALID_TOKEN);
     expect(injected.importCertificate).not.toHaveBeenCalled();
   });
 

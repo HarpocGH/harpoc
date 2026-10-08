@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Agent, SetAgentPermissionsResult } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 
@@ -25,7 +25,6 @@ vi.mock("../../utils/vault-loader.js", () => ({
 }));
 vi.mock("../../utils/prompt.js", () => ({ promptConfirm: mockPromptConfirm }));
 
-import { Command } from "commander";
 import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerAgentRegisterCommand } from "./register.js";
 import { registerAgentListCommand } from "./list.js";
@@ -35,6 +34,7 @@ import { registerAgentDeactivateCommand } from "./deactivate.js";
 import { registerAgentActivateCommand } from "./activate.js";
 import { registerAgentDeleteCommand } from "./delete.js";
 import { registerAgentPermissionsCommand } from "./permissions.js";
+import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 const AGENT: Agent = {
   id: "01960000-0000-7000-8000-000000000001",
@@ -70,40 +70,26 @@ function result(overrides: Partial<SetAgentPermissionsResult> = {}): SetAgentPer
   };
 }
 
-function buildProgram(): Command {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-  const agent = program.command("agent");
-  registerAgentRegisterCommand(agent);
-  registerAgentListCommand(agent);
-  registerAgentShowCommand(agent);
-  registerAgentUpdateCommand(agent);
-  registerAgentDeactivateCommand(agent);
-  registerAgentActivateCommand(agent);
-  registerAgentDeleteCommand(agent);
-  registerAgentPermissionsCommand(agent);
-  return program;
-}
-
-async function run(args: string[]): Promise<void> {
-  const program = buildProgram();
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  await program.parseAsync(["node", "harpoc", "agent", ...args]);
-}
+const run = buildCli(
+  (program) => {
+    const agent = program.command("agent");
+    registerAgentRegisterCommand(agent);
+    registerAgentListCommand(agent);
+    registerAgentShowCommand(agent);
+    registerAgentUpdateCommand(agent);
+    registerAgentDeactivateCommand(agent);
+    registerAgentActivateCommand(agent);
+    registerAgentDeleteCommand(agent);
+    registerAgentPermissionsCommand(agent);
+  },
+  ["agent"],
+);
 
 describe("harpoc agent group", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: MockInstance;
-  let logSpy: MockInstance;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
-
-  const stdout = (): string => logSpy.mock.calls.map((c) => String(c[0])).join("\n");
-  const stderr = (): string => errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
 
     mockEngine.registerAgent.mockReturnValue(AGENT);
     mockEngine.getAgent.mockReturnValue(AGENT);
@@ -115,19 +101,11 @@ describe("harpoc agent group", () => {
     mockEngine.setAgentPermissions.mockReturnValue(result());
     mockPromptConfirm.mockResolvedValue(true);
 
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
 
   describe("agent register", () => {
@@ -149,14 +127,14 @@ describe("harpoc agent group", () => {
 
     it("prints the record and a success line by default", async () => {
       await run(["register", "bot"]);
-      expect(stdout()).toContain("bot");
-      expect(stdout()).toContain("active");
-      expect(stderr()).toContain("OK: Agent registered.");
+      expect(spies.stdout()).toContain("bot");
+      expect(spies.stdout()).toContain("active");
+      expect(spies.stderr()).toContain("OK: Agent registered.");
     });
 
     it("prints the engine return verbatim under --json", async () => {
       await run(["register", "bot", "--json"]);
-      expect(logSpy).toHaveBeenCalledWith(JSON.stringify(AGENT, null, 2));
+      expect(spies.logSpy).toHaveBeenCalledWith(JSON.stringify(AGENT, null, 2));
     });
   });
 
@@ -173,7 +151,7 @@ describe("harpoc agent group", () => {
 
     it("prints the documented table columns", async () => {
       await run(["list"]);
-      const out = stdout();
+      const out = spies.stdout();
       for (const column of ["Name", "Status", "Owner", "Last active", "Tokens", "Grants"]) {
         expect(out).toContain(column);
       }
@@ -181,7 +159,7 @@ describe("harpoc agent group", () => {
 
     it("prints the engine return verbatim under --json", async () => {
       await run(["list", "--json"]);
-      expect(logSpy).toHaveBeenCalledWith(JSON.stringify([AGENT], null, 2));
+      expect(spies.logSpy).toHaveBeenCalledWith(JSON.stringify([AGENT], null, 2));
     });
   });
 
@@ -193,7 +171,7 @@ describe("harpoc agent group", () => {
 
     it("prints every Agent field", async () => {
       await run(["show", "bot"]);
-      const out = stdout();
+      const out = spies.stdout();
       expect(out).toContain(AGENT.id);
       expect(out).toContain("Active tokens");
       expect(out).toContain("Grants");
@@ -205,7 +183,7 @@ describe("harpoc agent group", () => {
 
     it("prints the engine return verbatim under --json", async () => {
       await run(["show", "bot", "--json"]);
-      expect(logSpy).toHaveBeenCalledWith(JSON.stringify(AGENT, null, 2));
+      expect(spies.logSpy).toHaveBeenCalledWith(JSON.stringify(AGENT, null, 2));
     });
   });
 
@@ -250,7 +228,7 @@ describe("harpoc agent group", () => {
 
     it("refuses with no flag at all, before reading the agent", async () => {
       await expect(run(["update", "bot"])).rejects.toThrow("process.exit");
-      expect(stderr()).toContain("Nothing to update");
+      expect(spies.stderr()).toContain("Nothing to update");
       expect(mockEngine.getAgent).not.toHaveBeenCalled();
       expect(mockEngine.updateAgent).not.toHaveBeenCalled();
     });
@@ -259,7 +237,9 @@ describe("harpoc agent group", () => {
       await expect(
         run(["update", "bot", "--description", "a bot", "--clear-description"]),
       ).rejects.toThrow("process.exit");
-      expect(stderr()).toContain("--description and --clear-description are mutually exclusive");
+      expect(spies.stderr()).toContain(
+        "--description and --clear-description are mutually exclusive",
+      );
       expect(mockEngine.getAgent).not.toHaveBeenCalled();
       expect(mockEngine.updateAgent).not.toHaveBeenCalled();
     });
@@ -268,14 +248,14 @@ describe("harpoc agent group", () => {
       await expect(run(["update", "bot", "--owner", "ops", "--clear-owner"])).rejects.toThrow(
         "process.exit",
       );
-      expect(stderr()).toContain("--owner and --clear-owner are mutually exclusive");
+      expect(spies.stderr()).toContain("--owner and --clear-owner are mutually exclusive");
       expect(mockEngine.getAgent).not.toHaveBeenCalled();
       expect(mockEngine.updateAgent).not.toHaveBeenCalled();
     });
 
     it("prints the engine return verbatim under --json", async () => {
       await run(["update", "bot", "--owner", "ops", "--json"]);
-      expect(logSpy).toHaveBeenCalledWith(JSON.stringify(AGENT, null, 2));
+      expect(spies.logSpy).toHaveBeenCalledWith(JSON.stringify(AGENT, null, 2));
     });
   });
 
@@ -283,12 +263,12 @@ describe("harpoc agent group", () => {
     it("deactivates and reports the revoked-token count", async () => {
       await run(["deactivate", "bot"]);
       expect(mockEngine.deactivateAgent).toHaveBeenCalledWith("bot", undefined);
-      expect(stderr()).toContain("OK: Agent deactivated (bot); 3 token(s) revoked");
+      expect(spies.stderr()).toContain("OK: Agent deactivated (bot); 3 token(s) revoked");
     });
 
     it("prints the engine return verbatim under --json", async () => {
       await run(["deactivate", "bot", "--json"]);
-      expect(logSpy).toHaveBeenCalledWith(JSON.stringify({ revoked_tokens: 3 }, null, 2));
+      expect(spies.logSpy).toHaveBeenCalledWith(JSON.stringify({ revoked_tokens: 3 }, null, 2));
     });
   });
 
@@ -296,12 +276,12 @@ describe("harpoc agent group", () => {
     it("activates the agent", async () => {
       await run(["activate", "bot"]);
       expect(mockEngine.activateAgent).toHaveBeenCalledWith("bot", undefined);
-      expect(stderr()).toContain("OK: Agent activated (bot)");
+      expect(spies.stderr()).toContain("OK: Agent activated (bot)");
     });
 
     it("prints the engine return verbatim under --json", async () => {
       await run(["activate", "bot", "--json"]);
-      expect(logSpy).toHaveBeenCalledWith(JSON.stringify(AGENT, null, 2));
+      expect(spies.logSpy).toHaveBeenCalledWith(JSON.stringify(AGENT, null, 2));
     });
   });
 
@@ -318,7 +298,7 @@ describe("harpoc agent group", () => {
     it("aborts on a declined confirmation without calling the engine", async () => {
       mockPromptConfirm.mockResolvedValue(false);
       await run(["delete", "bot"]);
-      expect(stderr()).toContain("Aborted.");
+      expect(spies.stderr()).toContain("Aborted.");
       expect(mockEngine.deleteAgent).not.toHaveBeenCalled();
     });
 
@@ -326,22 +306,24 @@ describe("harpoc agent group", () => {
       await run(["delete", "bot", "--confirm"]);
       expect(mockPromptConfirm).not.toHaveBeenCalled();
       expect(mockEngine.deleteAgent).toHaveBeenCalledWith("bot", undefined);
-      expect(stderr()).toContain("OK: Agent deleted (bot); 2 token(s) revoked, 3 grant(s) removed");
+      expect(spies.stderr()).toContain(
+        "OK: Agent deleted (bot); 2 token(s) revoked, 3 grant(s) removed",
+      );
     });
 
     it("surfaces an engine refusal before the prompt", async () => {
-      const { VaultError } = await import("@harpoc/shared");
       mockEngine.getAgent.mockImplementation(() => {
         throw VaultError.agentNotFound("bot");
       });
       await expect(run(["delete", "bot"])).rejects.toThrow("process.exit");
+      expect(spies.stderr()).toContain("[AGENT_NOT_FOUND]");
       expect(mockPromptConfirm).not.toHaveBeenCalled();
       expect(mockEngine.deleteAgent).not.toHaveBeenCalled();
     });
 
     it("prints the engine return verbatim under --json", async () => {
       await run(["delete", "bot", "--confirm", "--json"]);
-      expect(logSpy).toHaveBeenCalledWith(
+      expect(spies.logSpy).toHaveBeenCalledWith(
         JSON.stringify({ revoked_tokens: 2, removed_grants: 3 }, null, 2),
       );
     });
@@ -376,13 +358,13 @@ describe("harpoc agent group", () => {
       await expect(
         run(["permissions", "bot", "secret://k", "--permissions", "use", "--clear"]),
       ).rejects.toThrow("process.exit");
-      expect(stderr()).toContain("--permissions and --clear are mutually exclusive");
+      expect(spies.stderr()).toContain("--permissions and --clear are mutually exclusive");
       expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
     });
 
     it("refuses neither flag", async () => {
       await expect(run(["permissions", "bot", "secret://k"])).rejects.toThrow("process.exit");
-      expect(stderr()).toContain("one of --permissions or --clear is required");
+      expect(spies.stderr()).toContain("one of --permissions or --clear is required");
       expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
     });
 
@@ -390,7 +372,7 @@ describe("harpoc agent group", () => {
       await expect(
         run(["permissions", "bot", "secret://k", "--clear", "--expires", "60"]),
       ).rejects.toThrow("process.exit");
-      expect(stderr()).toContain("--expires cannot be combined with --clear");
+      expect(spies.stderr()).toContain("--expires cannot be combined with --clear");
       expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
     });
 
@@ -398,7 +380,7 @@ describe("harpoc agent group", () => {
       await expect(
         run(["permissions", "bot", "secret://k", "--permissions", "sudo"]),
       ).rejects.toThrow("process.exit");
-      expect(stderr()).toContain('Invalid permission: "sudo"');
+      expect(spies.stderr()).toContain('Invalid permission: "sudo"');
       expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
     });
 
@@ -416,7 +398,7 @@ describe("harpoc agent group", () => {
       await expect(
         run(["permissions", "bot", "secret://k", "--permissions", "use", "--expires", "0"]),
       ).rejects.toThrow("process.exit");
-      expect(stderr()).toContain("--expires must be a positive number of minutes");
+      expect(spies.stderr()).toContain("--expires must be a positive number of minutes");
       expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
     });
 
@@ -433,7 +415,7 @@ describe("harpoc agent group", () => {
           "--json",
         ]),
       ).rejects.toThrow("process.exit");
-      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
         error: "INVALID_INPUT",
         message: "--expires must be a positive number of minutes",
       });
@@ -457,7 +439,7 @@ describe("harpoc agent group", () => {
             "--json",
           ]),
         ).rejects.toThrow("process.exit");
-        expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+        expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
           error: "INVALID_INPUT",
           message: "--expires must be a positive number of minutes",
         });
@@ -472,7 +454,7 @@ describe("harpoc agent group", () => {
       await expect(
         run(["permissions", "bot", "secret://k", "--permissions", "use", "--expires", ""]),
       ).rejects.toThrow("process.exit");
-      expect(stderr()).toContain("--expires must be a positive number of minutes");
+      expect(spies.stderr()).toContain("--expires must be a positive number of minutes");
       expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
     });
 
@@ -480,7 +462,7 @@ describe("harpoc agent group", () => {
       await expect(
         run(["permissions", "bot", "secret://k", "--permissions", "use", "--clear", "--json"]),
       ).rejects.toThrow("process.exit");
-      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
         error: "INVALID_INPUT",
         message: "--permissions and --clear are mutually exclusive",
       });
@@ -491,7 +473,7 @@ describe("harpoc agent group", () => {
       await expect(run(["permissions", "bot", "secret://k", "--json"])).rejects.toThrow(
         "process.exit",
       );
-      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
         error: "INVALID_INPUT",
         message: "one of --permissions or --clear is required (an empty cell is never written)",
       });
@@ -502,7 +484,7 @@ describe("harpoc agent group", () => {
       await expect(
         run(["permissions", "bot", "secret://k", "--clear", "--expires", "5", "--json"]),
       ).rejects.toThrow("process.exit");
-      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
         error: "INVALID_INPUT",
         message: "--expires cannot be combined with --clear",
       });
@@ -513,7 +495,7 @@ describe("harpoc agent group", () => {
       await expect(
         run(["permissions", "bot", "secret://k", "--permissions", "bogus", "--json"]),
       ).rejects.toThrow("process.exit");
-      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
         error: "INVALID_INPUT",
         message:
           'Invalid permission: "bogus". Valid: list, read, use, create, rotate, revoke, admin',
@@ -526,7 +508,7 @@ describe("harpoc agent group", () => {
         result({ gated_before: false, gated_after: true }),
       );
       await run(["permissions", "bot", "secret://k", "--permissions", "use"]);
-      expect(stderr()).toContain(
+      expect(spies.stderr()).toContain(
         "Note: secret://k received its first grant — until now no agent or tool token could reach it.",
       );
     });
@@ -536,19 +518,19 @@ describe("harpoc agent group", () => {
         result({ policy: null, gated_before: true, gated_after: false }),
       );
       await run(["permissions", "bot", "secret://k", "--clear"]);
-      expect(stderr()).toContain(
+      expect(spies.stderr()).toContain(
         "Note: secret://k has no grants left — no agent or tool token can reach it until one is written.",
       );
     });
 
     it("prints no gating note when the gate did not flip", async () => {
       await run(["permissions", "bot", "secret://k", "--permissions", "use"]);
-      expect(stderr()).not.toContain("Note:");
+      expect(spies.stderr()).not.toContain("Note:");
     });
 
     it("names the cell in the human output", async () => {
       await run(["permissions", "bot", "secret://k", "--permissions", "read,use"]);
-      const out = stdout();
+      const out = spies.stdout();
       expect(out).toContain("bot");
       expect(out).toContain("secret://k");
       expect(out).toContain("read, use");
@@ -556,7 +538,7 @@ describe("harpoc agent group", () => {
 
     it("prints the engine return verbatim under --json", async () => {
       await run(["permissions", "bot", "secret://k", "--permissions", "use", "--json"]);
-      expect(logSpy).toHaveBeenCalledWith(JSON.stringify(result(), null, 2));
+      expect(spies.logSpy).toHaveBeenCalledWith(JSON.stringify(result(), null, 2));
     });
   });
 });

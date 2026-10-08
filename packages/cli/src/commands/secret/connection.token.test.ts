@@ -1,9 +1,7 @@
 import { chmodSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { Command } from "commander";
-import type { VaultApiToken } from "@harpoc/shared";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -22,62 +20,33 @@ vi.mock("../../utils/vault-loader.js", () => ({
 
 import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerSecretConnectionCommand } from "./connection.js";
-
-function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
-  return {
-    sub: "agent-1",
-    vault_id: "vault-1",
-    scope: ["read"],
-    iat: 0,
-    exp: 2_000_000_000,
-    jti: "jti-1",
-    principal_type: "agent",
-    ...overrides,
-  };
-}
+import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 describe("secret connection — token path", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.getConnectionConfig.mockResolvedValue({
       database: { tls_mode: "require" },
     });
     mockEngine.setConnectionConfig.mockResolvedValue(undefined);
     mockEngine.deleteConnectionConfig.mockResolvedValue(true);
-    mockEngine.verifyToken.mockReturnValue(token());
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    mockEngine.verifyToken.mockReturnValue(tokenFixture());
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
 
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>");
-    const secret = program.command("secret");
-    registerSecretConnectionCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "connection", ...args]);
-  }
+  const run = buildCli(
+    (program) => registerSecretConnectionCommand(program.command("secret")),
+    ["secret", "connection"],
+  );
 
   it("--delete requires rotate and passes the caller", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
     await run(["secret://k", "--delete", "--token", "jwt-value"]);
     expect(mockEngine.deleteConnectionConfig).toHaveBeenCalledWith(
       "secret://k",
@@ -86,7 +55,7 @@ describe("secret connection — token path", () => {
   });
 
   it("show requires read and passes the caller", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
     await run(["secret://k", "--show", "--token", "jwt-value"]);
     expect(mockEngine.getConnectionConfig).toHaveBeenCalledWith(
       "secret://k",
@@ -95,15 +64,16 @@ describe("secret connection — token path", () => {
   });
 
   it("set requires rotate — a read-scoped token is refused before any engine call", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
     await expect(
       run(["secret://k", "--db-tls", "require", "--token", "jwt-value"]),
     ).rejects.toThrow("process.exit");
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("[ACCESS_DENIED]"));
     expect(mockEngine.setConnectionConfig).not.toHaveBeenCalled();
   });
 
   it("set mode's merge read rides the write's permission and names the caller", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
     await run(["secret://k", "--db-tls", "require", "--token", "jwt-value"]);
     expect(mockEngine.getConnectionConfig).toHaveBeenCalledWith(
       "secret://k",
@@ -118,7 +88,7 @@ describe("secret connection — token path", () => {
   });
 
   it("set passes the caller; tokenless set passes none", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
     await run(["secret://k", "--db-tls", "require", "--token", "jwt-value"]);
     expect(mockEngine.setConnectionConfig).toHaveBeenCalledWith(
       "secret://k",
@@ -134,14 +104,14 @@ describe("secret connection — token path", () => {
   });
 
   it("renders a schema refusal value-free through the shared renderer", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
     await expect(
       run(["secret://conn", "--db-tls", "bogus", "--token", "jwt-value"]),
     ).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("database.tls_mode: must be one of require, disable"),
     );
-    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("bogus"));
+    expect(spies.errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("bogus"));
     expect(mockEngine.setConnectionConfig).not.toHaveBeenCalled();
   });
 
@@ -149,7 +119,7 @@ describe("secret connection — token path", () => {
     "%s with an empty path is refused INVALID_INPUT before the vault opens (P1F-4)",
     async (flag) => {
       await expect(run(["secret://k", flag, "", "--json"])).rejects.toThrow("process.exit");
-      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
         error: "INVALID_INPUT",
         message: `${flag} requires a file path.`,
       });
@@ -159,7 +129,7 @@ describe("secret connection — token path", () => {
 
   it("a whitespace-only path is refused INVALID_INPUT before the vault opens (P1F-4)", async () => {
     await expect(run(["secret://k", "--git-ca", "  ", "--json"])).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: "--git-ca requires a file path.",
     });
@@ -172,7 +142,7 @@ describe("secret connection — token path", () => {
       await expect(
         run(["secret://k", flag, "C:/nonexistent/harpoc-1c.pem", "--json"]),
       ).rejects.toThrow("process.exit");
-      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
         error: "INVALID_INPUT",
         message: `${flag}: no such file: C:/nonexistent/harpoc-1c.pem`,
       });
@@ -184,7 +154,7 @@ describe("secret connection — token path", () => {
     "%s with a directory is refused INVALID_INPUT before the vault opens (D1d-4)",
     async (flag) => {
       await expect(run(["secret://k", flag, tmpdir(), "--json"])).rejects.toThrow("process.exit");
-      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
         error: "INVALID_INPUT",
         message: `${flag}: not a readable file: ${tmpdir()}`,
       });
@@ -197,13 +167,16 @@ describe("secret connection — token path", () => {
     await expect(run(["secret://k", "--git-ca", longPath, "--json"])).rejects.toThrow(
       "process.exit",
     );
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: `--git-ca: no such file: ${longPath}`,
     });
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
+  // chmod 0o000 does not deny reads on Windows (NTFS ignores the POSIX mode
+  // bits), so the unreadable-file branch cannot be produced there; the ubuntu
+  // and macos legs run it (non-root runners — root would read it anyway).
   it.skipIf(process.platform === "win32")(
     "--git-ca with an unreadable file is refused INVALID_INPUT before the vault opens (D1d-4)",
     async () => {
@@ -214,7 +187,7 @@ describe("secret connection — token path", () => {
         await expect(run(["secret://k", "--git-ca", caPath, "--json"])).rejects.toThrow(
           "process.exit",
         );
-        expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+        expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
           error: "INVALID_INPUT",
           message: `--git-ca: not a readable file: ${caPath}`,
         });

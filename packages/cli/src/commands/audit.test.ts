@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -17,48 +17,31 @@ vi.mock("../utils/vault-loader.js", () => ({
   loadUnlockedEngine: vi.fn().mockResolvedValue(mockEngine),
 }));
 
-import { Command } from "commander";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { loadUnlockedEngine } from "../utils/vault-loader.js";
 import { registerAuditCommand } from "./audit.js";
+import { buildCli, spyCli, type CliSpies } from "../__fixtures__/cli-harness.js";
 
-async function run(args: string[]): Promise<void> {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-  registerAuditCommand(program);
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  await program.parseAsync(["node", "harpoc", "audit", ...args]);
-}
+const run = buildCli(registerAuditCommand, ["audit"]);
 
 describe("audit --since validation", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
 
   it("rejects an unparseable --since instead of silently returning the full list", async () => {
     await expect(run(["--since", "banana", "--json"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--since must be a valid date"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--since must be a valid date"),
+    );
     expect(mockEngine.queryAudit).not.toHaveBeenCalled();
   });
 
@@ -80,7 +63,7 @@ describe("audit --since validation", () => {
 
   it("refuses a non-decimal --limit as an INVALID_INPUT envelope under --json (P1cF-4)", async () => {
     await expect(run(["--limit", "0x10", "--json"])).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: "--limit must be a positive number",
     });
@@ -93,7 +76,7 @@ describe("audit --since validation", () => {
     );
     try {
       await expect(run(["--limit", "5abc", "--json"])).rejects.toThrow("process.exit");
-      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
         error: "INVALID_INPUT",
         message: "--limit must be a positive number",
       });
@@ -106,7 +89,7 @@ describe("audit --since validation", () => {
 
   it("an invalid --since is refused as an INVALID_INPUT envelope under --json (P1cF-4)", async () => {
     await expect(run(["--since", "bogus", "--json"])).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: "--since must be a valid date (e.g. 2026-07-01 or 2026-07-01T12:00:00Z)",
     });
@@ -115,7 +98,7 @@ describe("audit --since validation", () => {
 
   it("refuses an empty --since instead of treating it as no filter (P1c-32)", async () => {
     await expect(run(["--since", "", "--json"])).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: "--since must be a valid date (e.g. 2026-07-01 or 2026-07-01T12:00:00Z)",
     });
@@ -124,32 +107,16 @@ describe("audit --since validation", () => {
 });
 
 describe("audit table Principal column (by whom, thesis §4.3.4)", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: MockInstance;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
-
-  function tableText(): string {
-    return logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-  }
 
   it("renders type:id for attributed rows and '-' for NULL principal columns (never 'local')", async () => {
     mockEngine.queryAudit.mockReturnValue([
@@ -178,10 +145,13 @@ describe("audit table Principal column (by whom, thesis §4.3.4)", () => {
     ]);
 
     await run([]);
-    const text = tableText();
-    expect(text).toContain("Principal");
-    expect(text).toContain("agent:alice");
-    expect(text).not.toContain("local");
+    const lines = spies.stdout().split("\n");
+    const start = lines[0]?.indexOf("Principal") ?? -1;
+    const end = lines[0]?.indexOf("IP") ?? -1;
+    expect(start).toBeGreaterThan(-1);
+    expect(lines[2]?.slice(start, end).trim()).toBe("agent:alice");
+    expect(lines[3]?.slice(start, end).trim()).toBe("-");
+    expect(spies.stdout()).not.toContain("local");
   });
 });
 
@@ -191,27 +161,15 @@ describe("audit table Principal column (by whom, thesis §4.3.4)", () => {
  * columns. The Web UI table gains the same column in the same position.
  */
 describe("audit table IP column (from where, E75i)", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: MockInstance;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
 
   // printTable pads every cell, so two or more spaces separate columns and
@@ -247,7 +205,7 @@ describe("audit table IP column (from where, E75i)", () => {
     ]);
 
     await run([]);
-    const lines = logSpy.mock.calls
+    const lines = spies.logSpy.mock.calls
       .map((c) => c.join(" "))
       .join("\n")
       .split("\n");
@@ -276,47 +234,27 @@ const validAnchor = {
 
 describe("audit anchor / verify --anchor", () => {
   let tempDir: string;
-  let exitSpy: MockInstance;
-  let errorSpy: MockInstance;
-  let logSpy: MockInstance;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     tempDir = mkdtempSync(join(tmpdir(), "harpoc-anchor-test-"));
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
     process.exitCode = undefined;
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
+    spies.restore();
     process.exitCode = undefined;
-    rmSync(tempDir, { recursive: true, force: true });
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
-
-  function stderrText(): string {
-    return errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-  }
-
-  function stdoutText(): string {
-    return logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-  }
 
   it("prints the anchor JSON to stdout and the off-host guidance to stderr", async () => {
     mockEngine.getAuditChainTail.mockReturnValue(validAnchor);
     await run(["anchor"]);
-    expect(JSON.parse(stdoutText())).toEqual(validAnchor);
-    expect(stderrText()).toContain("OFF-HOST");
-    expect(stdoutText()).not.toContain("OFF-HOST");
+    expect(JSON.parse(spies.stdout())).toEqual(validAnchor);
+    expect(spies.stderr()).toContain("OFF-HOST");
+    expect(spies.stdout()).not.toContain("OFF-HOST");
   });
 
   it("writes the anchor to --out and keeps stdout clean", async () => {
@@ -324,16 +262,16 @@ describe("audit anchor / verify --anchor", () => {
     const out = join(tempDir, "vault.anchor");
     await run(["anchor", "--out", out]);
     expect(JSON.parse(readFileSync(out, "utf8"))).toEqual(validAnchor);
-    expect(logSpy).not.toHaveBeenCalled();
-    expect(stderrText()).toContain("Anchor written to");
-    expect(stderrText()).toContain("OFF-HOST");
+    expect(spies.logSpy).not.toHaveBeenCalled();
+    expect(spies.stderr()).toContain("Anchor written to");
+    expect(spies.stderr()).toContain("OFF-HOST");
   });
 
   it("exits non-zero when there are no chained rows to anchor", async () => {
     mockEngine.getAuditChainTail.mockReturnValue(null);
     await expect(run(["anchor"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(stderrText()).toContain("No anchorable audit chain tail");
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.stderr()).toContain("No anchorable audit chain tail");
   });
 
   it("verify always prints the current tail link, without and with --json", async () => {
@@ -344,13 +282,13 @@ describe("audit anchor / verify --anchor", () => {
       tail: validAnchor,
     });
     await run(["verify"]);
-    expect(stdoutText()).toContain(`Tail link: row ${validAnchor.last_id}`);
-    expect(stdoutText()).toContain(validAnchor.row_hmac);
-    expect(stdoutText()).toContain("Audit chain OK — 3 row(s) verified.");
+    expect(spies.stdout()).toContain(`Tail link: row ${validAnchor.last_id}`);
+    expect(spies.stdout()).toContain(validAnchor.row_hmac);
+    expect(spies.stdout()).toContain("Audit chain OK — 3 row(s) verified.");
 
-    logSpy.mockClear();
+    spies.logSpy.mockClear();
     await run(["verify", "--json"]);
-    const json = JSON.parse(stdoutText()) as { tail?: { last_id: number } };
+    const json = JSON.parse(spies.stdout()) as { tail?: { last_id: number } };
     expect(json.tail?.last_id).toBe(validAnchor.last_id);
   });
 
@@ -366,7 +304,7 @@ describe("audit anchor / verify --anchor", () => {
     writeFileSync(file, JSON.stringify(validAnchor), "utf8");
     await run(["verify", "--anchor", file]);
     expect(mockEngine.verifyAuditChain).toHaveBeenCalledWith({ anchor: validAnchor });
-    expect(stdoutText()).toContain(`Anchor OK — row ${validAnchor.last_id} intact`);
+    expect(spies.stdout()).toContain(`Anchor OK — row ${validAnchor.last_id} intact`);
     expect(process.exitCode).toBeUndefined();
   });
 
@@ -381,8 +319,8 @@ describe("audit anchor / verify --anchor", () => {
     const file = join(tempDir, "a.anchor");
     writeFileSync(file, JSON.stringify(validAnchor), "utf8");
     await run(["verify", "--anchor", file]);
-    expect(stderrText()).toContain("FAILS the anchor check");
-    expect(stderrText()).toContain("deleted or the database was rolled back");
+    expect(spies.stderr()).toContain("FAILS the anchor check");
+    expect(spies.stderr()).toContain("deleted or the database was rolled back");
     expect(process.exitCode).toBe(1);
   });
 
@@ -390,7 +328,7 @@ describe("audit anchor / verify --anchor", () => {
     await expect(run(["verify", "--anchor", join(tempDir, "nope.anchor")])).rejects.toThrow(
       "process.exit",
     );
-    expect(stderrText()).toContain("Cannot read anchor file");
+    expect(spies.stderr()).toContain("Cannot read anchor file");
     expect(mockEngine.verifyAuditChain).not.toHaveBeenCalled();
   });
 
@@ -398,7 +336,7 @@ describe("audit anchor / verify --anchor", () => {
     const file = join(tempDir, "bad.anchor");
     writeFileSync(file, "not json {", "utf8");
     await expect(run(["verify", "--anchor", file])).rejects.toThrow("process.exit");
-    expect(stderrText()).toContain("not valid JSON");
+    expect(spies.stderr()).toContain("not valid JSON");
     expect(mockEngine.verifyAuditChain).not.toHaveBeenCalled();
   });
 
@@ -406,14 +344,14 @@ describe("audit anchor / verify --anchor", () => {
     const file = join(tempDir, "wrong.anchor");
     writeFileSync(file, JSON.stringify({ hello: "world" }), "utf8");
     await expect(run(["verify", "--anchor", file])).rejects.toThrow("process.exit");
-    expect(stderrText()).toContain("Not a valid harpoc audit anchor");
+    expect(spies.stderr()).toContain("Not a valid harpoc audit anchor");
     expect(mockEngine.verifyAuditChain).not.toHaveBeenCalled();
   });
 
   it("a missing anchor file is refused as an INVALID_INPUT envelope under --json (P1cF-4)", async () => {
     const file = join(tempDir, "nope.anchor");
     await expect(run(["verify", "--anchor", file, "--json"])).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: `Cannot read anchor file: ${file}`,
     });
@@ -424,7 +362,7 @@ describe("audit anchor / verify --anchor", () => {
     const file = join(tempDir, "bad.anchor");
     writeFileSync(file, "not json {", "utf8");
     await expect(run(["verify", "--anchor", file, "--json"])).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: `Anchor file is not valid JSON: ${file}`,
     });
@@ -435,7 +373,7 @@ describe("audit anchor / verify --anchor", () => {
     const file = join(tempDir, "wrong.anchor");
     writeFileSync(file, JSON.stringify({ hello: "world" }), "utf8");
     await expect(run(["verify", "--anchor", file, "--json"])).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: `Not a valid harpoc audit anchor (expected format "harpoc-audit-anchor/1"): ${file}`,
     });

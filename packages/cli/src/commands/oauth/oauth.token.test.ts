@@ -1,5 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
-import type { VaultApiToken } from "@harpoc/shared";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -25,48 +24,25 @@ vi.mock("../../utils/vault-loader.js", () => ({
   resolveSecretId: vi.fn().mockResolvedValue("sid-1"),
 }));
 
-import { Command } from "commander";
 import { registerOAuthStatusCommand } from "./status.js";
 import { registerOAuthRefreshCommand } from "./refresh.js";
+import { resolveSecretId } from "../../utils/vault-loader.js";
+import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
-function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
-  return {
-    sub: "agent-1",
-    vault_id: "vault-1",
-    scope: ["read"],
-    iat: 0,
-    exp: 2_000_000_000,
-    jti: "jti-1",
-    principal_type: "agent",
-    ...overrides,
-  };
-}
-
-function buildProgram(): Command {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-  const oauth = program.command("oauth").description("OAuth");
-  registerOAuthStatusCommand(oauth);
-  registerOAuthRefreshCommand(oauth);
-  return program;
-}
-
-async function run(args: string[]): Promise<void> {
-  const program = buildProgram();
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  await program.parseAsync(["node", "harpoc", "oauth", ...args]);
-}
+const run = buildCli(
+  (program) => {
+    const oauth = program.command("oauth").description("OAuth");
+    registerOAuthStatusCommand(oauth);
+    registerOAuthRefreshCommand(oauth);
+  },
+  ["oauth"],
+);
 
 describe("oauth status / refresh — token path", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.getOAuthTokenStatus.mockReturnValue({
       secret_id: "sid-1",
       provider: "github",
@@ -78,23 +54,15 @@ describe("oauth status / refresh — token path", () => {
       token_endpoint_auth_method: "client_secret_post",
     });
     mockEngine.refreshOAuthToken.mockResolvedValue(2_000_000_000_000);
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
 
   it("status requires read and passes the caller", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
     await run(["status", "secret://gh", "--token", "jwt-value"]);
     expect(mockEngine.getOAuthTokenStatus).toHaveBeenCalledWith(
       "sid-1",
@@ -104,7 +72,7 @@ describe("oauth status / refresh — token path", () => {
   });
 
   it("refresh requires rotate and passes the caller", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
     await run(["refresh", "secret://gh", "--token", "jwt-value"]);
     expect(mockEngine.refreshOAuthToken).toHaveBeenCalledWith(
       "sid-1",
@@ -114,11 +82,12 @@ describe("oauth status / refresh — token path", () => {
   });
 
   it("scope refusals precede handle resolution; tokenless paths pass no caller", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
     await expect(run(["refresh", "secret://gh", "--token", "jwt-value"])).rejects.toThrow(
       "process.exit",
     );
     expect(mockEngine.refreshOAuthToken).not.toHaveBeenCalled();
+    expect(resolveSecretId).not.toHaveBeenCalled();
 
     await run(["status", "secret://gh"]);
     expect(mockEngine.getOAuthTokenStatus).toHaveBeenLastCalledWith(

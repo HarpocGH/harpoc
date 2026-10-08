@@ -1,7 +1,6 @@
 import { createPrivateKey } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { VaultError } from "@harpoc/shared";
-import type { VaultApiToken } from "@harpoc/shared";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -16,41 +15,20 @@ vi.mock("../../utils/vault-loader.js", () => ({
   loadUnlockedEngine: vi.fn().mockResolvedValue(mockEngine),
 }));
 
-import { Command } from "commander";
 import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerCertCsrCommand } from "./csr.js";
+import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
-function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
-  return {
-    sub: "agent-1",
-    vault_id: "vault-1",
-    scope: ["read"],
-    iat: 0,
-    exp: 2_000_000_000,
-    jti: "jti-1",
-    principal_type: "agent",
-    ...overrides,
-  };
-}
-
-let exitSpy: MockInstance;
-let errorSpy: ReturnType<typeof vi.spyOn>;
-let logSpy: ReturnType<typeof vi.spyOn>;
+let spies: CliSpies;
 let stdoutSpy: MockInstance;
-const savedEnvToken = process.env.HARPOC_TOKEN;
 
-async function run(args: string[]): Promise<void> {
-  const program = new Command();
-  // exitOverride must precede .command(): commander copies the exit callback
-  // into a child by value at creation time, so setting it afterwards would
-  // leave the subcommand's own parse errors exiting the test process for real.
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  program.option("--vault-dir <path>", "Path to vault directory");
-  const cert = program.command("cert").description("Manage certificate secrets");
-  registerCertCsrCommand(cert);
-  await program.parseAsync(["node", "harpoc", "cert", ...args]);
-}
+const run = buildCli(
+  (program) => {
+    const cert = program.command("cert").description("Manage certificate secrets");
+    registerCertCsrCommand(cert);
+  },
+  ["cert"],
+);
 
 /** Everything process.stdout.write received, concatenated in call order. */
 function stdoutText(): string {
@@ -59,30 +37,21 @@ function stdoutText(): string {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  delete process.env.HARPOC_TOKEN;
 
   vi.mocked(loadUnlockedEngine).mockResolvedValue(mockEngine as never);
   mockEngine.importCertificate.mockResolvedValue({
     handle: "secret://web",
     secretId: "secret-id-1",
   });
-  mockEngine.verifyToken.mockReturnValue(token());
+  mockEngine.verifyToken.mockReturnValue(tokenFixture());
 
-  exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-    throw new Error("process.exit");
-  });
-  errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-  logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  spies = spyCli();
   stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 });
 
 afterEach(() => {
-  exitSpy.mockRestore();
-  errorSpy.mockRestore();
-  logSpy.mockRestore();
+  spies.restore();
   stdoutSpy.mockRestore();
-  if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-  else process.env.HARPOC_TOKEN = savedEnvToken;
 });
 
 describe("cert csr", () => {
@@ -104,7 +73,7 @@ describe("cert csr", () => {
       undefined,
     );
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
-    expect(exitSpy).not.toHaveBeenCalled();
+    expect(spies.exitSpy).not.toHaveBeenCalled();
   });
 
   it("never writes guidance to stdout — only the CSR PEM", async () => {
@@ -112,7 +81,7 @@ describe("cert csr", () => {
 
     const pem = stdoutText();
     expect(pem.trim().split("\n")[0]).toBe("-----BEGIN CERTIFICATE REQUEST-----");
-    expect(logSpy).not.toHaveBeenCalled();
+    expect(spies.logSpy).not.toHaveBeenCalled();
   });
 
   it("defaults to an EC key pair", async () => {
@@ -180,7 +149,10 @@ describe("cert csr", () => {
     await run(["csr", "web", "--subject", "example.com", "--json"]);
 
     expect(stdoutSpy).not.toHaveBeenCalled();
-    const printed = JSON.parse(logSpy.mock.calls[0]?.[0] as string) as Record<string, unknown>;
+    const printed = JSON.parse(spies.logSpy.mock.calls[0]?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(printed).toEqual({
       handle: "secret://web",
       csrPem: expect.stringContaining("BEGIN CERTIFICATE REQUEST") as string,
@@ -192,7 +164,7 @@ describe("cert csr", () => {
       run(["csr", "web", "--subject", "example.com", "--algorithm", "dsa"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid algorithm"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid algorithm"));
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
     expect(stdoutSpy).not.toHaveBeenCalled();
   });
@@ -202,7 +174,7 @@ describe("cert csr", () => {
       "process.exit",
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid bits"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid bits"));
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
@@ -211,7 +183,7 @@ describe("cert csr", () => {
       run(["csr", "web", "--subject", "example.com", "--curve", "P-512"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid curve"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid curve"));
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
@@ -220,7 +192,7 @@ describe("cert csr", () => {
       run(["csr", "web", "--subject", "example.com", "--sans", "a.example,"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--sans requires"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("--sans requires"));
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
     expect(stdoutSpy).not.toHaveBeenCalled();
   });
@@ -230,7 +202,7 @@ describe("cert csr", () => {
       run(["csr", "web", "--subject", "example.com", "--sans", "fe80::1%eth0"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("zone id"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("zone id"));
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
     expect(stdoutSpy).not.toHaveBeenCalled();
   });
@@ -240,7 +212,7 @@ describe("cert csr", () => {
       run(["csr", "web", "--subject", "example.com", "--sans", "fe80::1%eth0", "--json"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"error":"INVALID_INPUT"'));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining('"error":"INVALID_INPUT"'));
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
@@ -249,7 +221,7 @@ describe("cert csr", () => {
       "process.exit",
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("--bits only applies with --algorithm rsa."),
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
@@ -261,7 +233,7 @@ describe("cert csr", () => {
       run(["csr", "web", "--subject", "example.com", "--algorithm", "ec", "--bits", "2048"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("--bits only applies with --algorithm rsa."),
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
@@ -272,7 +244,7 @@ describe("cert csr", () => {
       run(["csr", "web", "--subject", "example.com", "--algorithm", "rsa", "--curve", "P-384"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("--curve only applies with --algorithm ec."),
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
@@ -289,19 +261,19 @@ describe("cert csr", () => {
 
     await expect(run(["csr", "web", "--subject", "example.com"])).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Vault is locked"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Vault is locked"));
     expect(mockEngine.importCertificate).not.toHaveBeenCalled();
     expect(stdoutSpy).not.toHaveBeenCalled();
   });
 
   it("a token without 'create' is refused before any key material is generated", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
 
     await expect(
       run(["csr", "web", "--subject", "example.com", "--token", "jwt-value"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("Token lacks permission: create"),
     );
     expect(mockEngine.importCertificate).not.toHaveBeenCalled();
@@ -310,7 +282,7 @@ describe("cert csr", () => {
   });
 
   it("a token with 'create' generates the CSR and attributes the audit rows to its principal", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["create"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["create"] }));
 
     await run(["csr", "web", "--subject", "example.com", "--token", "jwt-value"]);
 
@@ -330,7 +302,7 @@ describe("cert csr", () => {
 
   it("an ambient HARPOC_TOKEN is honoured when --token is absent", async () => {
     process.env.HARPOC_TOKEN = "ambient-jwt";
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["create"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["create"] }));
 
     await run(["csr", "web", "--subject", "example.com"]);
 

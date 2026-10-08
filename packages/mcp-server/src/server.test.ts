@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import type { McpServer } from "@modelcontextprotocol/server";
-import { inMemoryClientFor } from "@harpoc/test-utils";
+import { expectVaultError, inMemoryClientFor } from "@harpoc/test-utils";
 import type { VaultEngine } from "@harpoc/core";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { createMcpServer, createStdioServerFactory } from "./server.js";
@@ -52,19 +52,14 @@ describe("createMcpServer", () => {
     );
   });
 
-  it("TOKEN_REQUIRED message names both recovery paths", () => {
+  it("TOKEN_REQUIRED message names both recovery paths", async () => {
     const engine = mockEngine();
-    try {
-      createMcpServer({ engine });
-      expect.unreachable("should have thrown");
-    } catch (err) {
-      const message = (err as Error).message;
-      expect(message).toContain("harpoc auth token");
-      expect(message).toContain("HARPOC_TOKEN");
-      expect(message).toContain("--allow-tokenless");
-      expect(message).toContain("--token-file <path>");
-      expect(message).not.toContain("(or --token)");
-    }
+    const err = await expectVaultError(() => createMcpServer({ engine }), ErrorCode.TOKEN_REQUIRED);
+    expect(err.message).toContain("harpoc auth token");
+    expect(err.message).toContain("HARPOC_TOKEN");
+    expect(err.message).toContain("--allow-tokenless");
+    expect(err.message).toContain("--token-file <path>");
+    expect(err.message).not.toContain("(or --token)");
   });
 
   it("creates server without token when allowTokenless is set, warning on stderr", () => {
@@ -284,14 +279,12 @@ describe("createMcpServer", () => {
 // H7: the launch token is verified once here, so the running server must
 // re-consult revocation — otherwise `harpoc auth revoke` cannot restrain it.
 describe("createMcpServer — launch-token revocation wiring", () => {
-  it("wires the engine's revocation check into the scope guard", () => {
+  it("verifies the launch token once at construction; the revocation lookup waits for the first call", () => {
     const isTokenRevoked = vi.fn().mockReturnValue(false);
     const engine = mockEngine({ isTokenRevoked });
     createMcpServer({ engine, launchToken: "jwt" });
-    // The guard holds the hook; it is exercised on the first checkAccess, which
-    // the tool-level suites drive. Presence is what this pins.
-    expect(typeof isTokenRevoked).toBe("function");
-    expect(engine.verifyToken).toHaveBeenCalledWith("jwt");
+    expect(engine.verifyToken).toHaveBeenCalledExactlyOnceWith("jwt");
+    expect(isTokenRevoked).not.toHaveBeenCalled();
   });
 
   it("a revoked launch token cannot call a tool on the running server", async () => {

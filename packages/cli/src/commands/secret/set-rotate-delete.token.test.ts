@@ -1,6 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { Command } from "commander";
-import type { VaultApiToken } from "@harpoc/shared";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockEngine, mockResolveSecretValue, mockPromptConfirm } = vi.hoisted(() => ({
   mockEngine: {
@@ -24,68 +22,38 @@ vi.mock("../../utils/prompt.js", () => ({ promptConfirm: mockPromptConfirm }));
 import { registerSecretSetCommand } from "./set.js";
 import { registerSecretRotateCommand } from "./rotate.js";
 import { registerSecretDeleteCommand } from "./delete.js";
-
-function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
-  return {
-    sub: "agent-1",
-    vault_id: "vault-1",
-    scope: ["read"],
-    iat: 0,
-    exp: 2_000_000_000,
-    jti: "jti-1",
-    principal_type: "agent",
-    ...overrides,
-  };
-}
+import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 describe("secret set/rotate/delete — token path", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockResolveSecretValue.mockResolvedValue(new TextEncoder().encode("v"));
     mockPromptConfirm.mockResolvedValue(true);
     mockEngine.createSecret.mockResolvedValue({ handle: "secret://k" });
     mockEngine.rotateSecret.mockResolvedValue(undefined);
     mockEngine.revokeSecret.mockResolvedValue(undefined);
-    mockEngine.verifyToken.mockReturnValue(token());
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    mockEngine.verifyToken.mockReturnValue(tokenFixture());
+    spies = spyCli();
   });
 
   afterEach(() => {
-    // Same rationale as get.token.test.ts / list.token.test.ts: a blanket
-    // vi.restoreAllMocks() here also tears down the vi.mock'd
-    // loadUnlockedEngine (a bare vi.fn(), not a spy on a real function), so
-    // restore only the spies actually created here.
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
 
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>");
-    const secret = program.command("secret");
-    registerSecretSetCommand(secret);
-    registerSecretRotateCommand(secret);
-    registerSecretDeleteCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", ...args]);
-  }
+  const run = buildCli(
+    (program) => {
+      const secret = program.command("secret");
+      registerSecretSetCommand(secret);
+      registerSecretRotateCommand(secret);
+      registerSecretDeleteCommand(secret);
+    },
+    ["secret"],
+  );
 
   it("set: create-scoped token passes the caller with project+name dims", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["create"], project: "api" }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["create"], project: "api" }));
     await run(["set", "db-key", "--project", "api", "--token", "jwt-value"]);
     expect(mockEngine.createSecret).toHaveBeenCalledWith(
       expect.objectContaining({ name: "db-key", project: "api" }),
@@ -94,14 +62,15 @@ describe("secret set/rotate/delete — token path", () => {
   });
 
   it("set: scope refusal happens before the value is collected", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["use"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["use"] }));
     await expect(run(["set", "db-key", "--token", "jwt-value"])).rejects.toThrow("process.exit");
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("[ACCESS_DENIED]"));
     expect(mockResolveSecretValue).not.toHaveBeenCalled();
     expect(mockEngine.createSecret).not.toHaveBeenCalled();
   });
 
   it("rotate: rotate-scoped token passes the caller; refusal precedes value collection", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
     await run(["rotate", "secret://db-key", "--token", "jwt-value"]);
     expect(mockEngine.rotateSecret).toHaveBeenCalledWith(
       "secret://db-key",
@@ -109,26 +78,28 @@ describe("secret set/rotate/delete — token path", () => {
       expect.objectContaining({ interface: "cli" }),
     );
 
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
     mockResolveSecretValue.mockClear();
     await expect(run(["rotate", "secret://db-key", "--token", "jwt-value"])).rejects.toThrow(
       "process.exit",
     );
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("[ACCESS_DENIED]"));
     expect(mockResolveSecretValue).not.toHaveBeenCalled();
   });
 
   it("delete: revoke-scoped token passes the caller; refusal precedes the prompt", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["revoke"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["revoke"] }));
     await run(["delete", "secret://db-key", "--confirm", "--token", "jwt-value"]);
     expect(mockEngine.revokeSecret).toHaveBeenCalledWith(
       "secret://db-key",
       expect.objectContaining({ interface: "cli" }),
     );
 
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
     await expect(run(["delete", "secret://db-key", "--token", "jwt-value"])).rejects.toThrow(
       "process.exit",
     );
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("[ACCESS_DENIED]"));
     expect(mockPromptConfirm).not.toHaveBeenCalled();
   });
 

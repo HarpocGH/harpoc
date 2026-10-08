@@ -1,6 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { Command } from "commander";
-import type { VaultApiToken } from "@harpoc/shared";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -16,19 +14,7 @@ vi.mock("../../utils/vault-loader.js", () => ({
 }));
 
 import { registerSecretListCommand } from "./list.js";
-
-function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
-  return {
-    sub: "agent-1",
-    vault_id: "vault-1",
-    scope: ["read"],
-    iat: 0,
-    exp: 2_000_000_000,
-    jti: "jti-1",
-    principal_type: "agent",
-    ...overrides,
-  };
-}
+import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 const INFO = {
   handle: "secret://api-key",
@@ -44,45 +30,26 @@ const INFO = {
 };
 
 describe("secret list — token path", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.listSecrets.mockReturnValue([
       { ...INFO, name: "db-key" },
       { ...INFO, name: "mail-key", handle: "secret://mail-key" },
     ]);
-    mockEngine.verifyToken.mockReturnValue(token());
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    mockEngine.verifyToken.mockReturnValue(tokenFixture());
+    spies = spyCli();
   });
 
   afterEach(() => {
-    // See the matching note in get.token.test.ts — a blanket
-    // vi.restoreAllMocks() here also clobbers the vi.mock'd loadUnlockedEngine.
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
 
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>");
-    const secret = program.command("secret");
-    registerSecretListCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "list", ...args]);
-  }
+  const run = buildCli(
+    (program) => registerSecretListCommand(program.command("secret")),
+    ["secret", "list"],
+  );
 
   it("tokenless path is unchanged", async () => {
     await run([]);
@@ -90,7 +57,7 @@ describe("secret list — token path", () => {
   });
 
   it("passes the caller and defaults the project filter to the token's project", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["list"], project: "api" }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["list"], project: "api" }));
     await run(["--token", "jwt-value"]);
     expect(mockEngine.listSecrets).toHaveBeenCalledWith("api", {
       principal_type: "agent",
@@ -101,15 +68,16 @@ describe("secret list — token path", () => {
   });
 
   it("refuses a cross-project --project against a project-scoped token", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["list"], project: "api" }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["list"], project: "api" }));
     await expect(run(["--project", "other", "--token", "jwt-value"])).rejects.toThrow(
       "process.exit",
     );
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("[ACCESS_DENIED]"));
     expect(mockEngine.listSecrets).not.toHaveBeenCalled();
   });
 
   it("treats --project '' as absent (H4) — the token's project still applies", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["list"], project: "api" }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["list"], project: "api" }));
     await run(["--project", "", "--token", "jwt-value"]);
     expect(mockEngine.listSecrets).toHaveBeenCalledWith("api", expect.anything());
   });
@@ -122,7 +90,7 @@ describe("secret list — token path", () => {
   });
 
   it("filters results by the token's secret-name patterns", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["list"], secrets: ["db-*"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["list"], secrets: ["db-*"] }));
     await run(["--json", "--token", "jwt-value"]);
     const printed = JSON.parse(
       (console.log as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0])).join("\n"),

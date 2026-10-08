@@ -3,9 +3,8 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VaultError } from "@harpoc/shared";
-import type { VaultApiToken } from "@harpoc/shared";
 
 const { mockEngine, mockPromptHidden } = vi.hoisted(() => ({
   mockEngine: {
@@ -34,11 +33,11 @@ vi.mock("../../utils/secret-value.js", async (importOriginal) => {
   return { ...actual, resolveSecretValue: vi.fn(actual.resolveSecretValue) };
 });
 
-import { Command } from "commander";
 import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { resolveSecretValue } from "../../utils/secret-value.js";
 import { registerCertImportCommand } from "./import.js";
 import { registerCertStatusCommand } from "./status.js";
+import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 const FIXTURES = fileURLToPath(new URL("../../__fixtures__/certs/", import.meta.url));
 const KEY_PATH = join(FIXTURES, "rsa-key.pem");
@@ -60,40 +59,17 @@ const STATUS = {
   renewal_status: "ok" as const,
 };
 
-function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
-  return {
-    sub: "agent-1",
-    vault_id: "vault-1",
-    scope: ["read"],
-    iat: 0,
-    exp: 2_000_000_000,
-    jti: "jti-1",
-    principal_type: "agent",
-    ...overrides,
-  };
-}
-
 let tempDir: string;
-let exitSpy: MockInstance;
-let errorSpy: ReturnType<typeof vi.spyOn>;
-let logSpy: ReturnType<typeof vi.spyOn>;
-const savedEnvToken = process.env.HARPOC_TOKEN;
+let spies: CliSpies;
 
-async function run(args: string[]): Promise<void> {
-  const program = new Command();
-  // exitOverride must precede .command(): commander copies the exit callback
-  // into a child by value at creation time, so setting it afterwards would
-  // leave the subcommands' own parse errors exiting the test process for real.
-  // (configureOutput is order-independent — the child shares the config object
-  // by reference and configureOutput mutates it in place.)
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  program.option("--vault-dir <path>", "Path to vault directory");
-  const cert = program.command("cert").description("Manage certificate secrets");
-  registerCertImportCommand(cert);
-  registerCertStatusCommand(cert);
-  await program.parseAsync(["node", "harpoc", "cert", ...args]);
-}
+const run = buildCli(
+  (program) => {
+    const cert = program.command("cert").description("Manage certificate secrets");
+    registerCertImportCommand(cert);
+    registerCertStatusCommand(cert);
+  },
+  ["cert"],
+);
 
 /** The buffer resolveSecretValue handed the command, for wipe assertions. */
 async function resolvedKeyBuffer(): Promise<Buffer> {
@@ -110,7 +86,6 @@ function writeTemp(name: string, contents: string): string {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  delete process.env.HARPOC_TOKEN;
   tempDir = join(tmpdir(), `harpoc-cert-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
 
@@ -120,23 +95,15 @@ beforeEach(() => {
     secretId: "secret-id-1",
   });
   mockEngine.getCertificateStatus.mockReturnValue(STATUS);
-  mockEngine.verifyToken.mockReturnValue(token());
+  mockEngine.verifyToken.mockReturnValue(tokenFixture());
   mockPromptHidden.mockResolvedValue(KEY_PASSPHRASE);
 
-  exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-    throw new Error("process.exit");
-  });
-  errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-  logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  spies = spyCli();
 });
 
 afterEach(() => {
-  exitSpy.mockRestore();
-  errorSpy.mockRestore();
-  logSpy.mockRestore();
+  spies.restore();
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-  else process.env.HARPOC_TOKEN = savedEnvToken;
 });
 
 describe("cert import", () => {
@@ -155,16 +122,19 @@ describe("cert import", () => {
       undefined,
       undefined,
     );
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("secret://web"));
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("imported"));
+    expect(spies.logSpy).toHaveBeenCalledWith(expect.stringContaining("secret://web"));
+    expect(spies.logSpy).toHaveBeenCalledWith(expect.stringContaining("imported"));
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
-    expect(exitSpy).not.toHaveBeenCalled();
+    expect(spies.exitSpy).not.toHaveBeenCalled();
   });
 
   it("--json prints exactly the handle record", async () => {
     await run(["import", "web", "--key", KEY_PATH, "--cert", CERT_PATH, "--json"]);
 
-    const printed = JSON.parse(logSpy.mock.calls[0]?.[0] as string) as Record<string, unknown>;
+    const printed = JSON.parse(spies.logSpy.mock.calls[0]?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(printed).toEqual({ handle: "secret://web" });
   });
 
@@ -264,7 +234,7 @@ describe("cert import", () => {
       run(["import", "web", "--key", encryptedPath, "--cert", CERT_PATH]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("KEY_PASSPHRASE_INVALID"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("KEY_PASSPHRASE_INVALID"));
     expect(mockEngine.importCertificate).not.toHaveBeenCalled();
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
   });
@@ -300,7 +270,7 @@ describe("cert import", () => {
 
     await run(["import", "web", "--key", KEY_PATH, "--cert", CERT_PATH]);
 
-    const written = [...logSpy.mock.calls, ...errorSpy.mock.calls].flat().join("\n");
+    const written = [...spies.logSpy.mock.calls, ...spies.errorSpy.mock.calls].flat().join("\n");
     expect(written).not.toContain(keyBody);
     expect(written).not.toContain("PRIVATE KEY");
   });
@@ -324,7 +294,7 @@ describe("cert import", () => {
       run(["import", "web", "--key", KEY_PATH, "--cert", CERT_PATH, "--renew-before-days", "4000"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining('Invalid renew-before-days "4000"'),
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
@@ -335,7 +305,7 @@ describe("cert import", () => {
       run(["import", "web", "--key", KEY_PATH, "--cert", CERT_PATH, "--renew-before-days", "366"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining('Invalid renew-before-days "366"'),
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
@@ -348,7 +318,7 @@ describe("cert import", () => {
       "process.exit",
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--key requires a path"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("--key requires a path"));
     expect(mockPromptHidden).not.toHaveBeenCalled();
     expect(resolveSecretValue).not.toHaveBeenCalled();
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
@@ -359,7 +329,7 @@ describe("cert import", () => {
       "process.exit",
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--cert requires a path"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("--cert requires a path"));
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
@@ -368,7 +338,7 @@ describe("cert import", () => {
       run(["import", "web", "--key", KEY_PATH, "--cert", CERT_PATH, "--chain", ""]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--chain requires a path"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("--chain requires a path"));
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
@@ -377,7 +347,9 @@ describe("cert import", () => {
       "process.exit",
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Cannot read certificate file"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Cannot read certificate file"),
+    );
     expect(resolveSecretValue).not.toHaveBeenCalled();
   });
 
@@ -388,7 +360,7 @@ describe("cert import", () => {
       "process.exit",
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("certificate file exceeds the 1 MiB limit"),
     );
     expect(resolveSecretValue).not.toHaveBeenCalled();
@@ -401,7 +373,9 @@ describe("cert import", () => {
       "process.exit",
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("certificate file is empty"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("certificate file is empty"),
+    );
     expect(resolveSecretValue).not.toHaveBeenCalled();
   });
 
@@ -410,7 +384,9 @@ describe("cert import", () => {
       run(["import", "web", "--key", KEY_PATH, "--cert", join(tempDir, "missing.pem")]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Cannot read certificate file"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Cannot read certificate file"),
+    );
     expect(resolveSecretValue).not.toHaveBeenCalled();
     expect(mockPromptHidden).not.toHaveBeenCalled();
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
@@ -423,7 +399,7 @@ describe("cert import", () => {
       "process.exit",
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("CERT_INVALID"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("CERT_INVALID"));
     expect(mockEngine.importCertificate).not.toHaveBeenCalled();
   });
 
@@ -434,28 +410,28 @@ describe("cert import", () => {
       "process.exit",
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Vault is locked"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Vault is locked"));
     expect(resolveSecretValue).not.toHaveBeenCalled();
   });
 
   it("a token without 'create' is refused before any file is read", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
 
     await expect(
       run(["import", "web", "--key", KEY_PATH, "--cert", CERT_PATH, "--token", "jwt-value"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("Token lacks permission: create"),
     );
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("ACCESS_DENIED"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("ACCESS_DENIED"));
     expect(resolveSecretValue).not.toHaveBeenCalled();
     expect(mockEngine.importCertificate).not.toHaveBeenCalled();
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
   });
 
   it("a token with 'create' imports and attributes the audit rows to its principal", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["create"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["create"] }));
 
     await run(["import", "web", "--key", KEY_PATH, "--cert", CERT_PATH, "--token", "jwt-value"]);
 
@@ -479,7 +455,7 @@ describe("cert import", () => {
 
   it("an ambient HARPOC_TOKEN is honoured when --token is absent", async () => {
     process.env.HARPOC_TOKEN = "ambient-jwt";
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["create"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["create"] }));
 
     await run(["import", "web", "--key", KEY_PATH, "--cert", CERT_PATH]);
 
@@ -496,7 +472,7 @@ describe("cert status", () => {
       undefined,
       "secret://web",
     );
-    const printed = logSpy.mock.calls.flat().join("\n");
+    const printed = spies.logSpy.mock.calls.flat().join("\n");
     expect(printed).toContain("Subject");
     expect(printed).toContain("CN=fixture.example.com");
     expect(printed).toContain("Issuer");
@@ -511,7 +487,7 @@ describe("cert status", () => {
   it("renders the validity window as formatted timestamps, not epoch millis", async () => {
     await run(["status", "secret://web"]);
 
-    const printed = logSpy.mock.calls.flat().join("\n");
+    const printed = spies.logSpy.mock.calls.flat().join("\n");
     expect(printed).toContain(new Date(STATUS.not_after).toISOString().slice(0, 10));
     expect(printed).not.toContain(String(STATUS.not_after));
   });
@@ -528,7 +504,7 @@ describe("cert status", () => {
 
     await run(["status", "secret://web"]);
 
-    const printed = logSpy.mock.calls.flat().join("\n");
+    const printed = spies.logSpy.mock.calls.flat().join("\n");
     expect(printed).toContain("no_certificate");
     expect(printed).toMatch(/Not after\s+-/);
   });
@@ -536,12 +512,15 @@ describe("cert status", () => {
   it("--json prints the exact CertificateStatus", async () => {
     await run(["status", "secret://web", "--json"]);
 
-    const printed = JSON.parse(logSpy.mock.calls[0]?.[0] as string) as Record<string, unknown>;
+    const printed = JSON.parse(spies.logSpy.mock.calls[0]?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(printed).toEqual(STATUS);
   });
 
   it("a token with 'read' scope succeeds and attributes the call", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
 
     await run(["status", "secret://web", "--token", "jwt-value"]);
 
@@ -557,14 +536,16 @@ describe("cert status", () => {
   });
 
   it("a rotate-only token is denied with ACCESS_DENIED before the engine read", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
 
     await expect(run(["status", "secret://web", "--token", "jwt-value"])).rejects.toThrow(
       "process.exit",
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("ACCESS_DENIED"));
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Token lacks permission: read"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("ACCESS_DENIED"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Token lacks permission: read"),
+    );
     expect(mockEngine.getCertificateStatus).not.toHaveBeenCalled();
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
   });
@@ -574,8 +555,8 @@ describe("cert status", () => {
 
     await expect(run(["status", "secret://web"])).rejects.toThrow("process.exit");
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Vault is locked"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Vault is locked"));
   });
 
   it("--json renders an engine refusal as a JSON error envelope", async () => {
@@ -585,7 +566,10 @@ describe("cert status", () => {
 
     await expect(run(["status", "secret://web", "--json"])).rejects.toThrow("process.exit");
 
-    const envelope = JSON.parse(errorSpy.mock.calls[0]?.[0] as string) as Record<string, unknown>;
+    const envelope = JSON.parse(spies.errorSpy.mock.calls[0]?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(envelope.error).toBe("CERT_INVALID");
   });
 });

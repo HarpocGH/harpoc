@@ -1,3 +1,4 @@
+import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
@@ -176,6 +177,25 @@ const BODY_ROUTES: Array<[string, string, string, Record<string, unknown>]> = [
   ],
 ];
 
+// The route file each row's handler lives in (a path does not name it:
+// `/api/v1/secrets/k/policies` is policies.ts).
+const BODY_ROUTE_FILE: Record<string, string> = {
+  create: "secrets.ts",
+  rotate: "secrets.ts",
+  use: "secrets.ts",
+  "injection-policy": "secrets.ts",
+  "mcp-server": "secrets.ts",
+  "connection-config": "secrets.ts",
+  policies: "policies.ts",
+  agents: "agents.ts",
+  "agents/:name": "agents.ts",
+  permissions: "agents.ts",
+  "certificates/import": "certificates.ts",
+  "certificates/csr": "certificates.ts",
+  "oauth/authorize": "oauth.ts",
+};
+const ROUTES_DIR = new URL(".", import.meta.url);
+
 function build() {
   const engine = createMockEngine();
   const app = createApp(engine as never, {
@@ -218,4 +238,38 @@ describe("every JSON-body route refuses an unknown key (R10/A5)", () => {
       expect(res.status).toBeLessThan(400);
     },
   );
+});
+
+describe("the body-route inventory is complete", () => {
+  it("holds one row per readJsonBody call site in every route file", () => {
+    const files = readdirSync(ROUTES_DIR).filter(
+      (f) => f.endsWith(".ts") && !f.endsWith(".test.ts"),
+    );
+    const callSites = Object.fromEntries(
+      files.map((f) => [
+        f,
+        (readFileSync(new URL(f, ROUTES_DIR), "utf8").match(/\breadJsonBody\(/g) ?? []).length,
+      ]),
+    );
+    const rows = Object.fromEntries(
+      files.map((f) => [
+        f,
+        BODY_ROUTES.filter(([, , label]) => BODY_ROUTE_FILE[label] === f).length,
+      ]),
+    );
+    expect(rows).toEqual(callSites);
+    expect(Object.values(rows).reduce((a, b) => a + b, 0)).toBe(BODY_ROUTES.length);
+  });
+
+  it("sends each row to a route the app registers under its method", () => {
+    const { app } = build();
+    const registered = app.routes.filter((r) => r.method !== "ALL");
+    for (const [method, path] of BODY_ROUTES) {
+      const hit = registered.some(
+        (r) =>
+          r.method === method && new RegExp(`^${r.path.replace(/:[^/]+/g, "[^/]+")}$`).test(path),
+      );
+      expect(hit, `${method} ${path}`).toBe(true);
+    }
+  });
 });

@@ -61,69 +61,54 @@ describe("printRecord", () => {
 
 describe("handleError", () => {
   it("formats VAULT_LOCKED error with hint", () => {
-    vi.spyOn(process, "exit").mockImplementation(() => {
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit");
     });
 
-    try {
-      handleError(VaultError.vaultLocked());
-    } catch {
-      // Expected
-    }
+    expect(() => handleError(VaultError.vaultLocked())).toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
     expect(consoleErrorOutput[0]).toContain("Run 'harpoc unlock' first");
   });
 
   it("formats VAULT_NOT_FOUND error with hint", () => {
-    vi.spyOn(process, "exit").mockImplementation(() => {
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit");
     });
 
-    try {
-      handleError(VaultError.vaultNotFound());
-    } catch {
-      // Expected
-    }
+    expect(() => handleError(VaultError.vaultNotFound())).toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
     expect(consoleErrorOutput[0]).toContain("Run 'harpoc init'");
   });
 
   it("formats LOCKOUT_ACTIVE with retry time", () => {
-    vi.spyOn(process, "exit").mockImplementation(() => {
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit");
     });
 
-    try {
-      handleError(VaultError.lockoutActive(30000));
-    } catch {
-      // Expected
-    }
+    expect(() => handleError(VaultError.lockoutActive(30000))).toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
     expect(consoleErrorOutput[0]).toContain("30s");
   });
 
   it("outputs JSON error when json flag is set", () => {
-    vi.spyOn(process, "exit").mockImplementation(() => {
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit");
     });
 
-    try {
-      handleError(VaultError.vaultLocked(), true);
-    } catch {
-      // Expected
-    }
+    expect(() => handleError(VaultError.vaultLocked(), true)).toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
     const errorStr = consoleErrorOutput[0] ?? "{}";
     const parsed = JSON.parse(errorStr) as { error: string; message: string };
     expect(parsed.error).toBe(ErrorCode.VAULT_LOCKED);
   });
 
   it("handles generic Error", () => {
-    vi.spyOn(process, "exit").mockImplementation(() => {
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit");
     });
 
-    try {
-      handleError(new Error("something failed"));
-    } catch {
-      // Expected
-    }
+    expect(() => handleError(new Error("something failed"))).toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
     expect(consoleErrorOutput[0]).toContain("something failed");
   });
 });

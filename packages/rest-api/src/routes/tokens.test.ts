@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 import type { IssuedToken, VaultApiToken } from "@harpoc/shared";
-import { VaultError } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 import { authMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { createTokenRoutes } from "./tokens.js";
@@ -129,12 +129,14 @@ describe("GET /api/v1/tokens", () => {
     app = buildApp(engine);
     const res = await app.request("/api/v1/tokens", { headers: AUTH });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.listIssuedTokens).not.toHaveBeenCalled();
   });
 
   it("requires auth", async () => {
     const res = await app.request("/api/v1/tokens");
     expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.INVALID_TOKEN);
   });
 });
 
@@ -181,11 +183,13 @@ describe("DELETE /api/v1/tokens/:jti", () => {
     app = buildApp(engine);
     const res = await app.request("/api/v1/tokens/jti-1", { method: "DELETE", headers: AUTH });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.revokeToken).not.toHaveBeenCalled();
   });
 
   it("requires auth", async () => {
     const res = await app.request("/api/v1/tokens/jti-1", { method: "DELETE" });
     expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.INVALID_TOKEN);
   });
 });

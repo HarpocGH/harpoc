@@ -443,6 +443,7 @@ A script author should also read the _Behavioral_ notes under _Changed_ — the 
 
 ### Internal
 
+- **The CLI's command tree built by one exported `buildProgram()` (2026-10-08).** `packages/cli/src/program.ts` holds every command registration and the root `preAction` hook; `index.ts` runs `buildProgram().parse()`, and the token-parity suite walks the shipped tree instead of a hand-maintained copy — a new `--token` command without a parity row now reds (behaviour unchanged).
 - **The MCP HTTP listener's reclamation sweep on demand (2026-10-05).** `McpHttpServer.sweepSessions()` runs the session-reclamation sweep on demand (the test seam for the reclamation suite; the interval cadence is unchanged).
 - **The CLI's port and renewal-lead bounds are one module (2026-09-23).** `MIN_PORT`, `MAX_PORT`, `MIN_RENEW_BEFORE_DAYS` and `MAX_RENEW_BEFORE_DAYS` in `utils/option-bounds.ts`, imported by the cert commands, `server start` and `oauth connect`, with a tripwire against a command-local redeclaration.
 - **The JWS curve table has one source (2026-09-23).** `acme-client` derived the protected-header `alg` from its own copy of the P-256/P-384/P-521 table; `jws.ts` exports `jwsAlgForCurve` and the client reads it, with a source tripwire against a second table.

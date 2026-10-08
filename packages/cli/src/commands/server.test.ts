@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Hoisted mocks (available inside vi.mock factories) ─────────────
 
@@ -110,33 +110,22 @@ vi.mock("@harpoc/cert-manager", () => ({
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-import { Command } from "commander";
 import { registerServerCommand } from "./server.js";
+import { buildCli, spyCli, type CliSpies } from "../__fixtures__/cli-harness.js";
 
-function buildProgram(): Command {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-  registerServerCommand(program);
-  return program;
-}
-
-async function run(args: string[]): Promise<void> {
-  const program = buildProgram();
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  await program.parseAsync(["node", "harpoc", "server", "start", ...args]);
-}
+const run = buildCli(registerServerCommand, ["server", "start"]);
 
 // ── Tests ──────────────────────────────────────────────────────────
 
 describe("server start", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let spies: CliSpies;
+  let originalLog: typeof console.log;
   let priorSigintListeners: ((signal: "SIGINT") => void)[];
   let priorSigtermListeners: ((signal: "SIGTERM") => void)[];
   let priorStdinEndListeners: ((...args: unknown[]) => void)[];
 
   beforeEach(() => {
+    originalLog = console.log;
     vi.clearAllMocks();
     schedulerCtorCalls.length = 0;
     certManagerCtorCalls.length = 0;
@@ -144,10 +133,7 @@ describe("server start", () => {
     priorSigintListeners = process.listeners("SIGINT");
     priorSigtermListeners = process.listeners("SIGTERM");
     priorStdinEndListeners = process.stdin.listeners("end") as ((...args: unknown[]) => void)[];
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
@@ -162,59 +148,63 @@ describe("server start", () => {
     for (const listener of process.stdin.listeners("end") as ((...args: unknown[]) => void)[]) {
       if (!priorStdinEndListeners.includes(listener)) process.stdin.removeListener("end", listener);
     }
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
+    spies.restore();
+    console.log = originalLog;
   });
 
   // ── Validation errors ───────────────────────────────────────────
 
   it("exits with error when no server flag is provided", async () => {
     await expect(run([])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       "Error: At least one of --mcp, --mcp-http, --rest, --oauth-refresh or --cert-renew is required.",
     );
   });
 
   it("exits with error for non-numeric port", async () => {
     await expect(run(["--rest", "--port", "abc"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid port"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid port"));
   });
 
   it("exits with error for port out of range", async () => {
     await expect(run(["--rest", "--port", "99999"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid port"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid port"));
   });
 
   it("exits with error for port 0", async () => {
     await expect(run(["--rest", "--port", "0"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid port"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid port"));
   });
 
   it("exits with error when --token-file is used without --mcp", async () => {
     await expect(run(["--rest", "--token-file", "/tmp/launch-token"])).rejects.toThrow(
       "process.exit",
     );
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--token-file requires --mcp"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--token-file requires --mcp"),
+    );
   });
 
   it("exits with error when --token-file is used with --mcp-http only", async () => {
     await expect(run(["--mcp-http", "--token-file", "/tmp/launch-token"])).rejects.toThrow(
       "process.exit",
     );
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--token-file requires --mcp"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--token-file requires --mcp"),
+    );
   });
 
   it("D61: refuses a non-loopback --host without --allowed-host before the vault opens", async () => {
     const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
     await expect(run(["--rest", "--host", "0.0.0.0"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("requires --allowed-host"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("requires --allowed-host"));
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
@@ -250,14 +240,14 @@ describe("server start", () => {
 
   it("D61: --allowed-host requires --rest, and an entry with a port is refused", async () => {
     await expect(run(["--mcp", "--allowed-host", "vault.example"])).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("--allowed-host requires --rest"),
     );
-    errorSpy.mockClear();
+    spies.errorSpy.mockClear();
     await expect(run(["--rest", "--allowed-host", "vault.example:3000"])).rejects.toThrow(
       "process.exit",
     );
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining('Invalid allowed host "vault.example:3000"'),
     );
   });
@@ -266,16 +256,16 @@ describe("server start", () => {
     const { createStdioServerFactory } = await import("@harpoc/mcp-server");
 
     await expect(run(["--mcp", "--token", "jwt"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--token was removed"));
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--token-file <path>"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("--token was removed"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("--token-file <path>"));
     expect(createStdioServerFactory).not.toHaveBeenCalled();
   });
 
   it("exits with error when --allow-tokenless is used without --mcp", async () => {
     await expect(run(["--rest", "--allow-tokenless"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("--allow-tokenless requires --mcp"),
     );
   });
@@ -286,8 +276,8 @@ describe("server start", () => {
     await expect(
       run(["--mcp", "--allow-tokenless", "--token-file", "/tmp/launch-token"]),
     ).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("--allow-tokenless conflicts with a launch token"),
     );
     expect(readLaunchTokenFile).not.toHaveBeenCalled();
@@ -296,32 +286,36 @@ describe("server start", () => {
 
   it("exits with error for an invalid --mcp-http-port", async () => {
     await expect(run(["--mcp-http", "--mcp-http-port", "abc"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid MCP HTTP port"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid MCP HTTP port"));
   });
 
   it("exits with error when REST and MCP HTTP ports collide", async () => {
     await expect(
       run(["--rest", "--mcp-http", "--port", "4000", "--mcp-http-port", "4000"]),
     ).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("must differ"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("must differ"));
   });
 
   it("exits with error when the REST port and the cert-renewal port collide", async () => {
     await expect(
       run(["--rest", "--port", "3000", "--cert-renew", "--cert-renew-port", "3000"]),
     ).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--cert-renew-port must differ"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--cert-renew-port must differ"),
+    );
   });
 
   it("exits with error when the MCP HTTP port and the cert-renewal port collide", async () => {
     await expect(
       run(["--mcp-http", "--mcp-http-port", "3001", "--cert-renew", "--cert-renew-port", "3001"]),
     ).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--cert-renew-port must differ"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--cert-renew-port must differ"),
+    );
   });
 
   // ── MCP mode ────────────────────────────────────────────────────
@@ -365,8 +359,8 @@ describe("server start", () => {
     });
 
     await expect(run(["--mcp"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--allow-tokenless"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("--allow-tokenless"));
     expect(mockEngine.destroy).toHaveBeenCalled();
   });
 
@@ -394,8 +388,8 @@ describe("server start", () => {
     await expect(run(["--mcp", "--token-file", "/tmp/launch-token"])).rejects.toThrow(
       "process.exit",
     );
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       "Error: Cannot read --token-file /tmp/launch-token: ENOENT",
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
@@ -405,20 +399,6 @@ describe("server start", () => {
   // ── HARPOC_TOKEN environment variable ───────────────────────────
 
   describe("HARPOC_TOKEN environment variable", () => {
-    const savedEnv = process.env.HARPOC_TOKEN;
-
-    beforeEach(() => {
-      delete process.env.HARPOC_TOKEN;
-    });
-
-    afterEach(() => {
-      if (savedEnv === undefined) {
-        delete process.env.HARPOC_TOKEN;
-      } else {
-        process.env.HARPOC_TOKEN = savedEnv;
-      }
-    });
-
     it("resolves the launch token from HARPOC_TOKEN with --mcp", async () => {
       const { createStdioServerFactory } = await import("@harpoc/mcp-server");
       process.env.HARPOC_TOKEN = "env.jwt.token";
@@ -450,8 +430,8 @@ describe("server start", () => {
       process.env.HARPOC_TOKEN = "env.jwt.token";
 
       await expect(run(["--mcp", "--allow-tokenless"])).rejects.toThrow("process.exit");
-      expect(exitSpy).toHaveBeenCalledWith(1);
-      expect(errorSpy).toHaveBeenCalledWith(
+      expect(spies.exitSpy).toHaveBeenCalledWith(1);
+      expect(spies.errorSpy).toHaveBeenCalledWith(
         expect.stringContaining("--allow-tokenless conflicts with a launch token"),
       );
       expect(createStdioServerFactory).not.toHaveBeenCalled();
@@ -466,7 +446,7 @@ describe("server start", () => {
 
       expect(startServer).toHaveBeenCalled();
       expect(createStdioServerFactory).not.toHaveBeenCalled();
-      expect(exitSpy).not.toHaveBeenCalled();
+      expect(spies.exitSpy).not.toHaveBeenCalled();
     });
   });
 
@@ -490,14 +470,11 @@ describe("server start", () => {
 
   it("starts stdio and Streamable HTTP MCP servers together", async () => {
     const { createStdioServerFactory, startMcpHttpServer } = await import("@harpoc/mcp-server");
-    const originalLog = console.log;
 
     await run(["--mcp", "--mcp-http"]);
 
     expect(createStdioServerFactory).toHaveBeenCalled();
     expect(startMcpHttpServer).toHaveBeenCalled();
-
-    console.log = originalLog;
   });
 
   // ── REST mode ───────────────────────────────────────────────────
@@ -551,7 +528,7 @@ describe("server start", () => {
 
   it("SIGINT shutdown cancels pending OAuth flows before destroying the engine", async () => {
     const onSpy = vi.spyOn(process, "on");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
 
     await run(["--rest"]);
 
@@ -560,7 +537,7 @@ describe("server start", () => {
     (sigintCall?.[1] as () => void)();
 
     await vi.waitFor(() => {
-      expect(exitSpy).toHaveBeenCalledWith(0);
+      expect(spies.exitSpy).toHaveBeenCalledWith(0);
     });
     // A pending authorization-code flow pins a loopback listener and a 5-minute
     // timer, and completes against the store — abort it before the store closes.
@@ -575,13 +552,13 @@ describe("server start", () => {
 
   it("shutdown without --rest cancels nothing (negative control)", async () => {
     const onSpy = vi.spyOn(process, "on");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
 
     await run(["--mcp"]);
     const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
     (sigintCall?.[1] as () => void)();
 
-    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
     expect(mockRestOAuthManager.cancelPendingFlows).not.toHaveBeenCalled();
 
     onSpy.mockRestore();
@@ -591,8 +568,8 @@ describe("server start", () => {
 
   it("--ui requires --rest", async () => {
     await expect(run(["--ui"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith("Error: --ui requires --rest.");
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith("Error: --ui requires --rest.");
   });
 
   it("--rest --ui passes uiDir to startServer, mints the launch token, prints the URL", async () => {
@@ -606,7 +583,7 @@ describe("server start", () => {
       principalType: "user",
       label: "web-ui launch",
     });
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       "[harpoc] Web UI: http://127.0.0.1:3000/ui#token=mock-launch-jwt",
     );
   });
@@ -623,20 +600,20 @@ describe("server start", () => {
 
   it("--ui-token-ttl requires --ui", async () => {
     await expect(run(["--rest", "--ui-token-ttl", "10"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith("Error: --ui-token-ttl requires --ui.");
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith("Error: --ui-token-ttl requires --ui.");
   });
 
   it("--ui-token-ttl refuses a non-integer value", async () => {
     await expect(run(["--rest", "--ui", "--ui-token-ttl", "ten"])).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       "Error: --ui-token-ttl must be a whole number of minutes (>= 1).",
     );
   });
 
   it("--ui-token-ttl refuses a value over the 24 h cap — never clamps", async () => {
     await expect(run(["--rest", "--ui", "--ui-token-ttl", "1441"])).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       "Error: --ui-token-ttl exceeds the 24 h token cap (1440).",
     );
     expect(mockEngine.createToken).not.toHaveBeenCalled();
@@ -656,7 +633,7 @@ describe("server start", () => {
       await expect(run(["--rest", "--ui", "--ui-token-ttl", value])).rejects.toThrow(
         "process.exit",
       );
-      expect(errorSpy).toHaveBeenCalledWith(
+      expect(spies.errorSpy).toHaveBeenCalledWith(
         "Error: --ui-token-ttl must be a whole number of minutes (>= 1).",
       );
       expect(mockEngine.createToken).not.toHaveBeenCalled();
@@ -665,7 +642,7 @@ describe("server start", () => {
 
   it("--port refuses a hex form", async () => {
     await expect(run(["--rest", "--port", "0x1f90"])).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       'Error: [INVALID_INPUT] Invalid port "0x1f90". Must be 1-65535.',
     );
   });
@@ -694,7 +671,7 @@ describe("server start", () => {
 
   it("--ui-token-ttl 0 is refused", async () => {
     await expect(run(["--rest", "--ui", "--ui-token-ttl", "0"])).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       "Error: --ui-token-ttl must be a whole number of minutes (>= 1).",
     );
     expect(mockEngine.createToken).not.toHaveBeenCalled();
@@ -702,14 +679,14 @@ describe("server start", () => {
 
   it("the launch warning names the 24 h cap when the flag is absent", async () => {
     await run(["--rest", "--ui"]);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       "[harpoc] The link grants admin access until the token expires (24 h cap). Do not share it.",
     );
   });
 
   it("the launch warning names the actual validity under --ui-token-ttl", async () => {
     await run(["--rest", "--ui", "--ui-token-ttl", "30"]);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       "[harpoc] The link grants admin access until the token expires (30 min). Do not share it.",
     );
   });
@@ -727,14 +704,10 @@ describe("server start", () => {
   });
 
   it("redirects console.log to stderr in dual mode", async () => {
-    const originalLog = console.log;
     await run(["--mcp", "--rest"]);
 
     // After dual-mode init, console.log should be console.error
     expect(console.log).toBe(console.error);
-
-    // Restore for other tests
-    console.log = originalLog;
   });
 
   // ── OAuth refresh scheduler ─────────────────────────────────────
@@ -747,10 +720,10 @@ describe("server start", () => {
     expect(TokenRefreshScheduler).toHaveBeenCalledTimes(1);
     expect(schedulerCtorCalls[0]?.engine).toBe(mockEngine);
     expect(mockScheduler.start).toHaveBeenCalledTimes(1);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("OAuth token refresh scheduler running"),
     );
-    expect(exitSpy).not.toHaveBeenCalled();
+    expect(spies.exitSpy).not.toHaveBeenCalled();
   });
 
   it("--rest --oauth-refresh starts both", async () => {
@@ -781,8 +754,8 @@ describe("server start", () => {
     );
 
     await expect(run(["--rest"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       "Error: listen EADDRINUSE: address already in use 127.0.0.1:3000",
     );
     expect(mockEngine.destroy).toHaveBeenCalled();
@@ -796,14 +769,14 @@ describe("server start", () => {
     };
     options.onRefreshError("secret-1", new Error("provider offline"));
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       "Warning: OAuth token refresh failed (secret-1): provider offline",
     );
   });
 
   it("onRefreshError is suppressed once shutdown began (review T6)", async () => {
     const onSpy = vi.spyOn(process, "on");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
 
     await run(["--oauth-refresh"]);
     const options = schedulerCtorCalls[0]?.options as {
@@ -812,20 +785,20 @@ describe("server start", () => {
 
     const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
     (sigintCall?.[1] as () => void)();
-    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
 
-    errorSpy.mockClear();
+    spies.errorSpy.mockClear();
     // A drain-window failure (e.g. vaultLocked racing the teardown) must not
     // print a spurious warning while the process is already exiting.
     options.onRefreshError("secret-1", new Error("vault locked"));
-    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Warning:"));
+    expect(spies.errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Warning:"));
 
     onSpy.mockRestore();
   });
 
   it("SIGINT shutdown stops the scheduler before destroying the engine", async () => {
     const onSpy = vi.spyOn(process, "on");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
 
     await run(["--oauth-refresh"]);
 
@@ -834,7 +807,7 @@ describe("server start", () => {
     (sigintCall?.[1] as () => void)();
 
     await vi.waitFor(() => {
-      expect(exitSpy).toHaveBeenCalledWith(0);
+      expect(spies.exitSpy).toHaveBeenCalledWith(0);
     });
     expect(mockScheduler.stop).toHaveBeenCalledTimes(1);
     const stopOrder = mockScheduler.stop.mock.invocationCallOrder[0] as number;
@@ -846,7 +819,7 @@ describe("server start", () => {
 
   it("shutdown awaits the scheduler drain before destroying the engine (review fix F2)", async () => {
     const onSpy = vi.spyOn(process, "on");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
     let releaseDrain: () => void = () => {};
     mockScheduler.stop.mockReturnValueOnce(
       new Promise<void>((resolve) => {
@@ -859,13 +832,13 @@ describe("server start", () => {
     (sigintCall?.[1] as () => void)();
 
     await vi.waitFor(() => expect(mockScheduler.stop).toHaveBeenCalled());
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setImmediate(resolve));
     // The store must stay open while a rotated token may still arrive —
     // pre-fix, shutdown fired stop() without awaiting the drain.
     expect(mockEngine.destroy).not.toHaveBeenCalled();
 
     releaseDrain();
-    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
 
     onSpy.mockRestore();
@@ -873,7 +846,7 @@ describe("server start", () => {
 
   it("combined --oauth-refresh --rest: refresh drain precedes restServer.close", async () => {
     const onSpy = vi.spyOn(process, "on");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
 
     await run(["--oauth-refresh", "--rest"]);
 
@@ -882,7 +855,7 @@ describe("server start", () => {
     (sigintCall?.[1] as () => void)();
 
     await vi.waitFor(() => {
-      expect(exitSpy).toHaveBeenCalledWith(0);
+      expect(spies.exitSpy).toHaveBeenCalledWith(0);
     });
     expect(mockScheduler.stop).toHaveBeenCalledTimes(1);
     expect(mockRestServer.close).toHaveBeenCalledTimes(1);
@@ -902,18 +875,18 @@ describe("server start", () => {
 
     await run(["--cert-renew"]);
 
-    expect(exitSpy).not.toHaveBeenCalled();
+    expect(spies.exitSpy).not.toHaveBeenCalled();
     expect(CertManager).toHaveBeenCalledTimes(1);
     expect(certManagerCtorCalls[0]?.engine).toBe(mockEngine);
     expect(RenewalScheduler).toHaveBeenCalledTimes(1);
     expect(renewalSchedulerCtorCalls[0]?.engine).toBe(mockEngine);
     expect(mockRenewalScheduler.start).toHaveBeenCalledTimes(1);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("certificate renewal scheduler running"),
     );
     // The first check fires one interval after start, not at start — the
     // startup line has to say so, or an operator reads silence as failure.
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("first check in ~1 h"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("first check in ~1 h"));
   });
 
   it("threads the default httpPort 80 into renewCertificate", async () => {
@@ -940,8 +913,8 @@ describe("server start", () => {
 
   it("exits with error when --cert-renew-port is given without --cert-renew", async () => {
     await expect(run(["--rest", "--cert-renew-port", "8080"])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("--cert-renew-port requires --cert-renew"),
     );
   });
@@ -951,8 +924,8 @@ describe("server start", () => {
 
     await expect(run(["--cert-renew", "--cert-renew-port", "abc"])).rejects.toThrow("process.exit");
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       'Error: [INVALID_INPUT] Invalid cert renewal port "abc". Must be 1-65535.',
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
@@ -975,7 +948,7 @@ describe("server start", () => {
     };
     options.onRenewError("secret-1", new Error("CA unreachable"), "renewal");
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       "Warning: certificate renewal failed (secret-1): CA unreachable",
     );
   });
@@ -988,17 +961,17 @@ describe("server start", () => {
     };
     options.onRenewError("secret-1", new Error("Vault is locked"), "audit");
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       "Warning: the failed-renewal audit row could not be written (secret-1): Vault is locked",
     );
-    expect(errorSpy).not.toHaveBeenCalledWith(
+    expect(spies.errorSpy).not.toHaveBeenCalledWith(
       expect.stringContaining("certificate renewal failed"),
     );
   });
 
   it("onRenewError is suppressed once shutdown began", async () => {
     const onSpy = vi.spyOn(process, "on");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
 
     await run(["--cert-renew"]);
     const options = renewalSchedulerCtorCalls[0]?.options as {
@@ -1007,18 +980,18 @@ describe("server start", () => {
 
     const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
     (sigintCall?.[1] as () => void)();
-    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
 
-    errorSpy.mockClear();
+    spies.errorSpy.mockClear();
     options.onRenewError("secret-1", new Error("vault locked"), "renewal");
-    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Warning:"));
+    expect(spies.errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Warning:"));
 
     onSpy.mockRestore();
   });
 
   it("SIGINT shutdown stops the renewal scheduler before destroying the engine", async () => {
     const onSpy = vi.spyOn(process, "on");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
 
     await run(["--cert-renew"]);
 
@@ -1027,7 +1000,7 @@ describe("server start", () => {
     (sigintCall?.[1] as () => void)();
 
     await vi.waitFor(() => {
-      expect(exitSpy).toHaveBeenCalledWith(0);
+      expect(spies.exitSpy).toHaveBeenCalledWith(0);
     });
     expect(mockRenewalScheduler.stop).toHaveBeenCalledTimes(1);
     const stopOrder = mockRenewalScheduler.stop.mock.invocationCallOrder[0] as number;
@@ -1039,7 +1012,7 @@ describe("server start", () => {
 
   it("shutdown awaits the renewal scheduler drain before destroying the engine", async () => {
     const onSpy = vi.spyOn(process, "on");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
     let releaseDrain: () => void = () => {};
     mockRenewalScheduler.stop.mockReturnValueOnce(
       new Promise<void>((resolve) => {
@@ -1052,13 +1025,13 @@ describe("server start", () => {
     (sigintCall?.[1] as () => void)();
 
     await vi.waitFor(() => expect(mockRenewalScheduler.stop).toHaveBeenCalled());
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setImmediate(resolve));
     // An order abandoned between issuance and storage is lost for good —
     // the store must stay open while a renewal may still be settling.
     expect(mockEngine.destroy).not.toHaveBeenCalled();
 
     releaseDrain();
-    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
 
     onSpy.mockRestore();
@@ -1066,7 +1039,7 @@ describe("server start", () => {
 
   it("combined --cert-renew --rest: renewal drain precedes restServer.close", async () => {
     const onSpy = vi.spyOn(process, "on");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
 
     await run(["--cert-renew", "--rest"]);
 
@@ -1075,7 +1048,7 @@ describe("server start", () => {
     (sigintCall?.[1] as () => void)();
 
     await vi.waitFor(() => {
-      expect(exitSpy).toHaveBeenCalledWith(0);
+      expect(spies.exitSpy).toHaveBeenCalledWith(0);
     });
     expect(mockRenewalScheduler.stop).toHaveBeenCalledTimes(1);
     expect(mockRestServer.close).toHaveBeenCalledTimes(1);
@@ -1104,12 +1077,12 @@ describe("server start", () => {
 
   it("SIGINT shutdown writes one server.stop per started listener, each before its close, all before destroy (R4/D67)", async () => {
     const onSpy = vi.spyOn(process, "on");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
 
     await run(["--rest", "--mcp-http", "--port", "3000", "--mcp-http-port", "3001"]);
     const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
     (sigintCall?.[1] as () => void)();
-    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
 
     expect(mockEngine.auditServerStop).toHaveBeenCalledTimes(2);
     expect(mockEngine.auditServerStop).toHaveBeenCalledWith(
@@ -1142,7 +1115,7 @@ describe("server start", () => {
 
   it("a stop row that cannot be written does not block the shutdown", async () => {
     const onSpy = vi.spyOn(process, "on");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
     mockEngine.auditServerStop.mockImplementationOnce(() => {
       throw new Error("vault locked");
     });
@@ -1151,7 +1124,7 @@ describe("server start", () => {
     const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
     (sigintCall?.[1] as () => void)();
 
-    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
     expect(mockEngine.auditServerStop.mock.results[0]?.type).toBe("throw");
     expect(mockRestServer.close).toHaveBeenCalledTimes(1);
@@ -1163,14 +1136,14 @@ describe("server start", () => {
 
   it("stdin EOF alone: the stdio stop row with trigger transport_closed, then the full shutdown", async () => {
     const onceSpy = vi.spyOn(process.stdin, "once");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
 
     await run(["--mcp", "--allow-tokenless"]);
     const endCall = onceSpy.mock.calls.find((call) => (call[0] as string) === "end");
     expect(endCall).toBeDefined();
     (endCall?.[1] as () => void)();
 
-    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
     expect(mockEngine.auditServerStop).toHaveBeenCalledTimes(1);
     expect(mockEngine.auditServerStop).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1186,13 +1159,13 @@ describe("server start", () => {
 
   it("stdin EOF under a launch token: the stdio stop row says tokenless false", async () => {
     const onceSpy = vi.spyOn(process.stdin, "once");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
 
     await run(["--mcp", "--token-file", "/tmp/launch-token"]);
     const endCall = onceSpy.mock.calls.find((call) => (call[0] as string) === "end");
     (endCall?.[1] as () => void)();
 
-    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
     expect(mockEngine.auditServerStop).toHaveBeenCalledTimes(1);
     expect(mockEngine.auditServerStop).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1207,7 +1180,7 @@ describe("server start", () => {
   it("stdin EOF beside --rest: only the stdio server stops, the REST listener keeps serving", async () => {
     const onSpy = vi.spyOn(process, "on");
     const onceSpy = vi.spyOn(process.stdin, "once");
-    exitSpy.mockImplementation(() => undefined as never);
+    spies.exitSpy.mockImplementation(() => undefined as never);
 
     await run(["--mcp", "--allow-tokenless", "--rest"]);
     const endCall = onceSpy.mock.calls.find((call) => (call[0] as string) === "end");
@@ -1222,11 +1195,11 @@ describe("server start", () => {
       }),
     );
     expect(mockRestServer.close).not.toHaveBeenCalled();
-    expect(exitSpy).not.toHaveBeenCalled();
+    expect(spies.exitSpy).not.toHaveBeenCalled();
 
     const sigintCall = onSpy.mock.calls.find((call) => call[0] === "SIGINT");
     (sigintCall?.[1] as () => void)();
-    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+    await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
     expect(mockEngine.auditServerStop).toHaveBeenCalledTimes(2);
     expect(mockEngine.auditServerStop).toHaveBeenLastCalledWith(
       expect.objectContaining({ transport: "rest", trigger: "SIGINT" }),

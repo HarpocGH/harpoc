@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ErrorCode, MAX_TOKEN_TTL_MS, VaultError } from "@harpoc/shared";
 
 const { mockEngine } = vi.hoisted(() => ({
@@ -24,39 +24,26 @@ vi.mock("../../utils/vault-loader.js", () => ({
   loadUnlockedEngine: vi.fn().mockResolvedValue(mockEngine),
 }));
 
-import { Command } from "commander";
 import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerAuthTokenCommand } from "./token.js";
 import { readLaunchTokenFile } from "@harpoc/mcp-server";
+import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
-async function run(args: string[]): Promise<void> {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-  const auth = program.command("auth");
-  registerAuthTokenCommand(auth);
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  await program.parseAsync(["node", "harpoc", "auth", "token", ...args]);
-}
+const run = buildCli(
+  (program) => registerAuthTokenCommand(program.command("auth")),
+  ["auth", "token"],
+);
 
 describe("auth token --principal-type", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: MockInstance;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
+    spies.restore();
   });
 
   it("defaults the principal type to agent", async () => {
@@ -82,14 +69,14 @@ describe("auth token --principal-type", () => {
   it("rejects an invalid principal type with a clean message before reaching the engine", async () => {
     await expect(run(["--principal-type", "project"])).rejects.toThrow("process.exit");
     expect(mockEngine.createToken).not.toHaveBeenCalled();
-    const output = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    const output = spies.errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(output).toContain('Invalid principal type: "project"');
     expect(output).toContain("Valid: agent, tool, user");
   });
 
   it("refuses a non-integer --ttl as an INVALID_INPUT envelope under --json (P1cF-3)", async () => {
     await expect(run(["--ttl", "1e3", "--json"])).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: "TTL must be a positive number of minutes",
     });
@@ -102,7 +89,7 @@ describe("auth token --principal-type", () => {
     );
     try {
       await expect(run(["--ttl", "5abc", "--json"])).rejects.toThrow("process.exit");
-      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
         error: "INVALID_INPUT",
         message: "TTL must be a positive number of minutes",
       });
@@ -118,7 +105,7 @@ describe("auth token --principal-type", () => {
     await expect(run(["--ttl", String(maxTtlMinutes + 1), "--json"])).rejects.toThrow(
       "process.exit",
     );
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: `TTL cannot exceed ${maxTtlMinutes} minutes (${maxTtlMinutes / 60}h)`,
     });
@@ -127,7 +114,7 @@ describe("auth token --principal-type", () => {
 
   it("an unknown --scope permission is refused as an INVALID_INPUT envelope under --json (P1cF-3)", async () => {
     await expect(run(["--scope", "bogus", "--json"])).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: 'Invalid permission: "bogus". Valid: list, read, use, create, rotate, revoke, admin',
     });
@@ -136,7 +123,7 @@ describe("auth token --principal-type", () => {
 
   it("an invalid --principal-type is refused as an INVALID_INPUT envelope under --json (P1cF-3)", async () => {
     await expect(run(["--principal-type", "project", "--json"])).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: 'Invalid principal type: "project". Valid: agent, tool, user',
     });
@@ -145,25 +132,15 @@ describe("auth token --principal-type", () => {
 });
 
 describe("auth token --label", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: MockInstance;
-
-  const stdout = (): string => logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
+    spies.restore();
   });
 
   it("passes the label through to createToken", async () => {
@@ -188,18 +165,18 @@ describe("auth token --label", () => {
 
   it("prints the label in the human output", async () => {
     await run(["--agent", "bot-1", "--label", "ci-launch-7f3a"]);
-    expect(stdout()).toMatch(/^Label\s+ci-launch-7f3a$/m);
+    expect(spies.stdout()).toMatch(/^Label\s+ci-launch-7f3a$/m);
   });
 
   it("prints the label under --json", async () => {
     await run(["--agent", "bot-1", "--label", "ci", "--json"]);
-    const payload = JSON.parse(stdout()) as { label: string | null };
+    const payload = JSON.parse(spies.stdout()) as { label: string | null };
     expect(payload.label).toBe("ci");
   });
 
   it("prints a null label under --json when the flag is absent", async () => {
     await run(["--agent", "bot-1", "--json"]);
-    const payload = JSON.parse(stdout()) as { label: string | null };
+    const payload = JSON.parse(spies.stdout()) as { label: string | null };
     expect(payload.label).toBeNull();
   });
 });
@@ -211,29 +188,18 @@ describe("auth token --label", () => {
  * through stdout, where a log pipe or a shell history would keep it.
  */
 describe("auth token --out", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: MockInstance;
-  let logSpy: MockInstance;
+  let spies: CliSpies;
   let dir: string;
-
-  const stdout = (): string => logSpy.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
-  const stderr = (): string => errorSpy.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
 
   beforeEach(() => {
     vi.clearAllMocks();
     dir = mkdtempSync(join(tmpdir(), "harpoc-auth-out-"));
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    rmSync(dir, { recursive: true, force: true });
+    spies.restore();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("writes the token to --out and prints no token", async () => {
@@ -241,21 +207,21 @@ describe("auth token --out", () => {
     await run(["--agent", "bot-1", "--out", out]);
 
     expect(readFileSync(out, "utf8")).toBe("jwt-token\n");
-    expect(stdout()).not.toContain("jwt-token");
-    expect(stderr()).toContain(`Token written to ${out}`);
-    expect(stderr()).not.toContain("jwt-token");
-    expect(stdout()).toContain("Subject");
+    expect(spies.stdout()).not.toContain("jwt-token");
+    expect(spies.stderr()).toContain(`Token written to ${out}`);
+    expect(spies.stderr()).not.toContain("jwt-token");
+    expect(spies.stdout()).toContain("Subject");
   });
 
   it("puts token_file in place of token under --json", async () => {
     const out = join(dir, "launch-token.json-mode");
     await run(["--agent", "bot-1", "--out", out, "--json"]);
 
-    const payload = JSON.parse(stdout()) as { token?: string; token_file?: string };
+    const payload = JSON.parse(spies.stdout()) as { token?: string; token_file?: string };
     expect(payload.token_file).toBe(out);
     expect(payload.token).toBeUndefined();
-    expect(stdout()).not.toContain("jwt-token");
-    expect(stderr()).not.toContain("jwt-token");
+    expect(spies.stdout()).not.toContain("jwt-token");
+    expect(spies.stderr()).not.toContain("jwt-token");
   });
 
   it("refuses an existing --out path before the token is minted", async () => {
@@ -263,9 +229,9 @@ describe("auth token --out", () => {
     writeFileSync(out, "keep-me\n", "utf8");
 
     await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(stderr()).toContain("INVALID_INPUT");
-    expect(stderr()).toContain(out);
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.stderr()).toContain("INVALID_INPUT");
+    expect(spies.stderr()).toContain(out);
     expect(mockEngine.createToken).not.toHaveBeenCalled();
     expect(readFileSync(out, "utf8")).toBe("keep-me\n");
   });
@@ -274,10 +240,10 @@ describe("auth token --out", () => {
     const out = join(dir, "no-such-dir", "launch-token");
 
     await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(stderr()).toContain("ENOENT");
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.stderr()).toContain("ENOENT");
     expect(mockEngine.createToken).not.toHaveBeenCalled();
-    expect(stdout()).not.toContain("jwt-token");
+    expect(spies.stdout()).not.toContain("jwt-token");
   });
 
   it("removes the opened file when the mint itself is refused", async () => {
@@ -287,12 +253,12 @@ describe("auth token --out", () => {
     });
 
     await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
     expect(existsSync(out)).toBe(false);
-    expect(stdout()).not.toContain("jwt-token");
-    expect(stderr()).not.toContain("jwt-token");
+    expect(spies.stdout()).not.toContain("jwt-token");
+    expect(spies.stderr()).not.toContain("jwt-token");
     // The happy unlink path is silent: the warning is for an unlink that failed.
-    expect(stderr()).not.toContain("could not remove the empty");
+    expect(spies.stderr()).not.toContain("could not remove the empty");
   });
 
   it.runIf(process.platform !== "win32")("writes it 0600 on POSIX", async () => {
@@ -309,11 +275,11 @@ describe("auth token --out", () => {
       symlinkSync(target, out);
 
       await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
-      expect(exitSpy).toHaveBeenCalledWith(1);
-      expect(stderr()).toContain("EEXIST");
+      expect(spies.exitSpy).toHaveBeenCalledWith(1);
+      expect(spies.stderr()).toContain("EEXIST");
       expect(existsSync(target)).toBe(false);
       expect(mockEngine.createToken).not.toHaveBeenCalled();
-      expect(stdout()).not.toContain("jwt-token");
+      expect(spies.stdout()).not.toContain("jwt-token");
     },
   );
 

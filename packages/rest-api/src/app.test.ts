@@ -100,6 +100,7 @@ describe("createApp integration", () => {
 
     const res = await app.request("/api/v1/secrets", { headers: HOST });
     expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.INVALID_TOKEN);
   });
 
   // The governance prefixes are their own `app.use(...)` registrations: without
@@ -111,7 +112,9 @@ describe("createApp integration", () => {
       const engine = createMockEngine();
       const app = createApp(engine as never);
 
-      expect((await app.request(path, { headers: HOST })).status).toBe(401);
+      const res = await app.request(path, { headers: HOST });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.INVALID_TOKEN);
       expect(
         (await app.request(path, { headers: { ...HOST, authorization: "Bearer valid-jwt" } }))
           .status,

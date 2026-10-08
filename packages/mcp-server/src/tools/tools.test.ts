@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import type { Mock } from "vitest";
 import { McpServer } from "@modelcontextprotocol/server";
-import { connectModernInMemoryClient, inMemoryClientFor } from "@harpoc/test-utils";
+import {
+  connectInMemoryClient,
+  connectModernInMemoryClient,
+  inMemoryClientFor,
+} from "@harpoc/test-utils";
 import type { InMemoryToolDescriptor } from "@harpoc/test-utils";
 import type { SecretInfo } from "@harpoc/core";
 import type { VaultEngine } from "@harpoc/core";
@@ -131,6 +135,18 @@ function recordEngineArgs(engine: VaultEngine): string[] {
   }
   return seen;
 }
+
+const servers: McpServer[] = [];
+
+/** A per-test server, closed (with its in-memory client) after the test. */
+function track(server: McpServer): McpServer {
+  servers.push(server);
+  return server;
+}
+
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map((server) => server.close()));
+});
 
 describe("MCP Tools", () => {
   let server: McpServer;
@@ -697,7 +713,7 @@ describe("MCP Tools", () => {
 
     it("refuses once the per-secret tier is exhausted", async () => {
       const limiter = new RateLimiter(10_000, 3);
-      const limited = new McpServer({ name: "t", version: "0.0.0" });
+      const limited = track(new McpServer({ name: "t", version: "0.0.0" }));
       registerCreateSecret(limited, engine, scopeGuard, limiter);
 
       for (let i = 0; i < 3; i++) {
@@ -858,7 +874,7 @@ describe("MCP Tools", () => {
         jti: "j",
         principal_type: "agent" as const,
       };
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
 
       const result = await callTool(srv, "check_secret_health", {});
@@ -881,7 +897,7 @@ describe("MCP Tools", () => {
         jti: "j",
         principal_type: "agent" as const,
       };
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
 
       const result = await callTool(srv, "check_secret_health", {});
@@ -962,7 +978,7 @@ describe("MCP Tools", () => {
         principal_type: "agent" as const,
       };
       const guard = new ScopeGuard(token);
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerCheckHealth(srv, engine, guard, rateLimiter);
 
       await callTool(srv, "check_secret_health", {});
@@ -994,7 +1010,7 @@ describe("MCP Tools", () => {
         jti: "j",
         principal_type: "agent" as const,
       };
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
 
       const result = await callTool(srv, "check_secret_health", {});
@@ -1026,7 +1042,7 @@ describe("MCP Tools", () => {
         jti: "j",
         principal_type: "agent" as const,
       };
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
 
       const result = await callTool(srv, "check_secret_health", {});
@@ -1058,7 +1074,7 @@ describe("MCP Tools", () => {
         jti: "j",
         principal_type: "agent" as const,
       };
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerCheckHealth(srv, engine, new ScopeGuard(token), rateLimiter);
 
       const result = await callTool(srv, "check_secret_health", {});
@@ -1104,7 +1120,7 @@ describe("MCP Tools", () => {
       };
       const seen = vi.fn();
       const restrictedGuard = new ScopeGuard(token, "mcp", undefined, undefined, seen);
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerCreateSecret(srv, engine, restrictedGuard, rateLimiter);
 
       const result = await callTool(srv, "create_secret", { name: "x", type: "api_key" });
@@ -1124,7 +1140,7 @@ describe("MCP Tools", () => {
         jti: "j",
         principal_type: "agent" as const,
       };
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerCreateSecret(srv, engine, new ScopeGuard(token), rateLimiter);
 
       const denied = await callTool(srv, "create_secret", {
@@ -1156,7 +1172,7 @@ describe("MCP Tools", () => {
         jti: "j",
         principal_type: "agent" as const,
       };
-      const srv = new McpServer({ name: "test", version: "0.0.0" });
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
       registerCreateSecret(srv, engine, new ScopeGuard(token), rateLimiter);
 
       const denied = await callTool(srv, "create_secret", { name: "x", type: "api_key" });
@@ -1256,28 +1272,28 @@ describe("token-derived caller wiring (engine-level policy enforcement)", () => 
   });
 
   it("create_secret passes the caller to the out-of-band value set", async () => {
-    // Drive the real URL-elicitation channel: declare the capability, then
-    // answer the elicitation by posting into the one-time form the tool opened.
-    const inner = (server as unknown as { server: Record<string, unknown> }).server;
-    inner.getClientCapabilities = (): unknown => ({ elicitation: { url: {} } });
-    inner.createElicitationCompletionNotifier = (): (() => Promise<void>) => () =>
-      Promise.resolve();
-    inner.elicitInput = async (params: { url: string }): Promise<{ action: string }> => {
-      await fetch(params.url, {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: "value=browser-entered",
-      });
-      return { action: "accept" };
-    };
     (engine.createSecret as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       handle: "secret://api/api-new",
       status: "pending",
       message: "",
     });
     registerCreateSecret(server, engine, new ScopeGuard(TOKEN), new RateLimiter());
+    // Drive the real URL-elicitation channel: a client that declares the
+    // capability answers the elicitation by posting into the one-time form.
+    const wire = await connectInMemoryClient(server, undefined, {
+      capabilities: { elicitation: { url: {} } },
+    });
+    wire.client.setRequestHandler("elicitation/create", async (request) => {
+      const { url } = request.params as { url: string };
+      await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "value=browser-entered",
+      });
+      return { action: "accept" };
+    });
 
-    await callTool(server, "create_secret", { name: "api-new", type: "api_key", project: "api" });
+    await wire.callTool("create_secret", { name: "api-new", type: "api_key", project: "api" });
 
     expect(engine.setSecretValue).toHaveBeenCalledWith(
       "secret://api/api-new",

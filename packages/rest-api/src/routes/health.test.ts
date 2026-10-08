@@ -88,6 +88,7 @@ describe("health routes", () => {
 
     const res = await app.request("/api/v1/health/expiring");
     expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.INVALID_TOKEN);
   });
 
   it("GET /api/v1/health/expiring on a sealed vault is 503 VAULT_LOCKED — the auth middleware refuses before the route (B19)", async () => {
@@ -159,6 +160,7 @@ describe("health routes", () => {
 
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
   });
 
   it("GET /api/v1/health/expiring filters by token secret-name scope", async () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { McpServer } from "@modelcontextprotocol/server";
 import { inMemoryClientFor } from "@harpoc/test-utils";
 import type { CertManager } from "@harpoc/cert-manager";
@@ -85,6 +85,18 @@ let injectionGuard: InjectionGuard;
 let oauthManager: OAuthManager;
 let certManager: CertManager;
 
+const servers: McpServer[] = [];
+
+/** A per-test server, closed (with its in-memory client) after the test. */
+function track(server: McpServer): McpServer {
+  servers.push(server);
+  return server;
+}
+
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map((server) => server.close()));
+});
+
 beforeEach(() => {
   engine = mockEngine();
   scopeGuard = new ScopeGuard(null);
@@ -163,7 +175,7 @@ describe("every MCP tool consults the rate limiter (T8)", () => {
   it.each(CASES)(
     "$tool refuses once the global tier is exhausted",
     async ({ tool, args, register }) => {
-      const server = new McpServer({ name: "t", version: "0.0.0" });
+      const server = track(new McpServer({ name: "t", version: "0.0.0" }));
       // Global tier of one: the first call spends it, the second must be refused
       // before the engine is reached.
       const limiter = new RateLimiter(1, 10_000, 10_000);
@@ -181,7 +193,7 @@ describe("every MCP tool consults the rate limiter (T8)", () => {
   it.each(CASES)(
     "control: $tool answers twice under a default limiter",
     async ({ tool, args, register }) => {
-      const server = new McpServer({ name: "t", version: "0.0.0" });
+      const server = track(new McpServer({ name: "t", version: "0.0.0" }));
       register(server, engine, new RateLimiter());
 
       await callTool(server, tool, args);
@@ -196,7 +208,7 @@ describe("every MCP tool consults the rate limiter (T8)", () => {
    * global-exhaustion case above cannot distinguish.
    */
   it("use_secret is bounded by the use tier, keyed by the requested handle", async () => {
-    const server = new McpServer({ name: "t", version: "0.0.0" });
+    const server = track(new McpServer({ name: "t", version: "0.0.0" }));
     const limiter = new RateLimiter(10_000, 10_000, 2);
     registerUseSecret(server, engine, scopeGuard, limiter, injectionGuard);
 
@@ -211,7 +223,7 @@ describe("every MCP tool consults the rate limiter (T8)", () => {
   });
 
   it("rotate_secret buckets per requested name, not vault-wide", async () => {
-    const server = new McpServer({ name: "t", version: "0.0.0" });
+    const server = track(new McpServer({ name: "t", version: "0.0.0" }));
     const limiter = new RateLimiter(10_000, 1);
     registerRotateSecret(server, engine, scopeGuard, limiter);
 

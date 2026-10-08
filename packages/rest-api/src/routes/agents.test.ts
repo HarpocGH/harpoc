@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 import type { Agent, AgentPolicy, SetAgentPermissionsResult, VaultApiToken } from "@harpoc/shared";
-import { AuditEventType, VaultError } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
 import { authMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { createAgentRoutes } from "./agents.js";
@@ -136,12 +136,14 @@ describe("GET /api/v1/agents", () => {
     app = buildApp(engine);
     const res = await app.request("/api/v1/agents", { headers: AUTH });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.listAgents).not.toHaveBeenCalled();
   });
 
   it("requires auth", async () => {
     const res = await app.request("/api/v1/agents");
     expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.INVALID_TOKEN);
   });
 });
 
@@ -216,6 +218,7 @@ describe("POST /api/v1/agents", () => {
       body: JSON.stringify({ name: "deploy-bot" }),
     });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.registerAgent).not.toHaveBeenCalled();
   });
 });
@@ -252,6 +255,7 @@ describe("GET /api/v1/agents/:name", () => {
     app = buildApp(engine);
     const res = await app.request("/api/v1/agents/deploy-bot", { headers: AUTH });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.getAgent).not.toHaveBeenCalled();
   });
 });
@@ -315,6 +319,7 @@ describe("PUT /api/v1/agents/:name", () => {
       body: JSON.stringify({ description: "new" }),
     });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.updateAgent).not.toHaveBeenCalled();
   });
 });
@@ -367,6 +372,7 @@ describe("POST /api/v1/agents/:name/deactivate", () => {
       headers: AUTH,
     });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.deactivateAgent).not.toHaveBeenCalled();
   });
 });
@@ -400,6 +406,7 @@ describe("POST /api/v1/agents/:name/activate", () => {
       headers: AUTH,
     });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.activateAgent).not.toHaveBeenCalled();
   });
 });
@@ -441,6 +448,7 @@ describe("DELETE /api/v1/agents/:name", () => {
       headers: AUTH,
     });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.deleteAgent).not.toHaveBeenCalled();
   });
 });
@@ -466,6 +474,7 @@ describe("GET /api/v1/agents/:name/policies", () => {
     app = buildApp(engine);
     const res = await app.request("/api/v1/agents/deploy-bot/policies", { headers: AUTH });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.listAgentPolicies).not.toHaveBeenCalled();
   });
 });
@@ -537,6 +546,7 @@ describe("PUT /api/v1/agents/:name/secrets/:handle/permissions", () => {
       body: JSON.stringify({ permissions: ["read"] }),
     });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.setAgentPermissions).not.toHaveBeenCalled();
     expect(engine.resolveSecretId).not.toHaveBeenCalled();
   });
@@ -586,6 +596,7 @@ describe("PUT /api/v1/agents/:name/secrets/:handle/permissions", () => {
       body: JSON.stringify({ permissions: ["read"] }),
     });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
     expect(engine.setAgentPermissions).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { Command } from "commander";
-import type { VaultApiToken } from "@harpoc/shared";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -18,29 +16,13 @@ vi.mock("../../utils/vault-loader.js", () => ({
 }));
 
 import { registerSecretMcpServerCommand } from "./mcp-server.js";
-
-function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
-  return {
-    sub: "agent-1",
-    vault_id: "vault-1",
-    scope: ["read"],
-    iat: 0,
-    exp: 2_000_000_000,
-    jti: "jti-1",
-    principal_type: "agent",
-    ...overrides,
-  };
-}
+import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 describe("secret mcp-server — token path", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.getMcpServerConfig.mockResolvedValue({
       server_name: "srv",
       transport: "http",
@@ -48,34 +30,21 @@ describe("secret mcp-server — token path", () => {
     });
     mockEngine.setMcpServerConfig.mockResolvedValue(undefined);
     mockEngine.deleteMcpServerConfig.mockResolvedValue(true);
-    mockEngine.verifyToken.mockReturnValue(token());
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    mockEngine.verifyToken.mockReturnValue(tokenFixture());
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
 
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>");
-    const secret = program.command("secret");
-    registerSecretMcpServerCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "mcp-server", ...args]);
-  }
+  const run = buildCli(
+    (program) => registerSecretMcpServerCommand(program.command("secret")),
+    ["secret", "mcp-server"],
+  );
 
   it("--delete requires rotate and passes the caller", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
     await run(["secret://k", "--delete", "--token", "jwt-value"]);
     expect(mockEngine.deleteMcpServerConfig).toHaveBeenCalledWith(
       "secret://k",
@@ -84,7 +53,7 @@ describe("secret mcp-server — token path", () => {
   });
 
   it("show requires read and passes the caller", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
     await run(["secret://k", "--show", "--token", "jwt-value"]);
     expect(mockEngine.getMcpServerConfig).toHaveBeenCalledWith(
       "secret://k",
@@ -93,7 +62,7 @@ describe("secret mcp-server — token path", () => {
   });
 
   it("set requires rotate — a read-scoped token is refused before any engine call", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
     await expect(
       run([
         "secret://k",
@@ -107,11 +76,12 @@ describe("secret mcp-server — token path", () => {
         "jwt-value",
       ]),
     ).rejects.toThrow("process.exit");
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("[ACCESS_DENIED]"));
     expect(mockEngine.setMcpServerConfig).not.toHaveBeenCalled();
   });
 
   it("set passes the caller; tokenless set passes none", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
     await run([
       "secret://k",
       "--name",
@@ -145,7 +115,7 @@ describe("secret mcp-server — token path", () => {
   });
 
   it("--protocol 2026-07-28 reaches setMcpServerConfig with the modern revision", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
     await run([
       "secret://k",
       "--name",
@@ -167,7 +137,7 @@ describe("secret mcp-server — token path", () => {
   });
 
   it("omitting --protocol defaults to 2025-11-25", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
     await run([
       "secret://k",
       "--name",
@@ -187,7 +157,7 @@ describe("secret mcp-server — token path", () => {
   });
 
   it("--protocol 2025-03-26 is refused with the renderer's enum wording, value-free", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
     await expect(
       run([
         "secret://k",
@@ -203,10 +173,10 @@ describe("secret mcp-server — token path", () => {
         "jwt-value",
       ]),
     ).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("protocol: must be one of 2025-11-25, 2026-07-28"),
     );
-    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("2025-03-26"));
+    expect(spies.errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("2025-03-26"));
     expect(mockEngine.setMcpServerConfig).not.toHaveBeenCalled();
   });
 });

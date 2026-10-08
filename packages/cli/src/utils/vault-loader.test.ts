@@ -1,8 +1,7 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { Command } from "commander";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AuditEventType,
   type CallerContext,
@@ -26,6 +25,7 @@ import {
 } from "./vault-loader.js";
 import { registerLockCommand } from "../commands/lock.js";
 import { registerSecretListCommand } from "../commands/secret/list.js";
+import { buildCli, spyCli, type CliSpies } from "../__fixtures__/cli-harness.js";
 
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
@@ -88,52 +88,38 @@ describe("resolveVaultDir", () => {
 });
 
 describe("refuseEmptyVaultDir (the root preAction hook)", () => {
-  let errSpy: MockInstance;
-  let logSpy: MockInstance;
-  let exitSpy: MockInstance;
+  let spies: CliSpies;
 
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program
-      .option("--vault-dir <path>", "Path to vault directory")
-      .hook("preAction", refuseEmptyVaultDir);
+  const run = buildCli((program) => {
+    program.hook("preAction", refuseEmptyVaultDir);
     registerLockCommand(program);
     registerSecretListCommand(program.command("secret"));
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", ...args]);
-  }
+  });
 
   beforeEach(() => {
     vi.mocked(homedir).mockReturnValue(join(tempDir, "home"));
-    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
+    spies = spyCli();
   });
 
   afterEach(() => {
-    errSpy.mockRestore();
-    logSpy.mockRestore();
-    exitSpy.mockRestore();
+    spies.restore();
   });
 
   it('refuses `lock --vault-dir ""` with the INVALID_INPUT line and exit 1', async () => {
     await expect(run(["--vault-dir", "", "lock"])).rejects.toThrow("process.exit");
-    expect(exitSpy.mock.calls).toEqual([[1]]);
-    expect(errSpy.mock.calls).toEqual([["Error: [INVALID_INPUT] --vault-dir: empty path"]]);
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(spies.errorSpy.mock.calls).toEqual([["Error: [INVALID_INPUT] --vault-dir: empty path"]]);
   });
 
   it('refuses `secret list --vault-dir "  " --json` through the JSON envelope', async () => {
     await expect(run(["secret", "list", "--vault-dir", "  ", "--json"])).rejects.toThrow(
       "process.exit",
     );
-    expect(exitSpy.mock.calls).toEqual([[1]]);
-    expect(errSpy.mock.calls).toEqual([
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(spies.errorSpy.mock.calls).toEqual([
       [JSON.stringify({ error: "INVALID_INPUT", message: "--vault-dir: empty path" })],
     ]);
-    expect(logSpy).not.toHaveBeenCalled();
+    expect(spies.logSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -220,7 +206,7 @@ describe("resolveSecretId", () => {
     const sessionPath = join(tempDir, "session.json");
     const engine = new VaultEngine({ dbPath, sessionPath });
 
-    await expect(resolveSecretId(engine, "secret://any")).rejects.toThrow();
+    await expectVaultError(() => resolveSecretId(engine, "secret://any"), ErrorCode.VAULT_LOCKED);
   });
 
   it("a failed probe with a caller leaves an attributed secret.read row (D2b)", async () => {

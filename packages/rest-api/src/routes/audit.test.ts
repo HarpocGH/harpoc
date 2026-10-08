@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 import type { VaultApiToken } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import { authMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { createAuditRoutes } from "./audit.js";
@@ -107,6 +108,7 @@ describe("audit routes", () => {
 
     const res = await app.request("/api/v1/audit", { headers: AUTH });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
   });
 
   it("handles omitted query params", async () => {
@@ -244,10 +246,12 @@ describe("POST /api/v1/audit/verify", () => {
 
     const res = await app.request("/api/v1/audit/verify", { method: "POST", headers: AUTH });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
   });
 
   it("requires auth", async () => {
     const res = await app.request("/api/v1/audit/verify", { method: "POST" });
     expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.INVALID_TOKEN);
   });
 });

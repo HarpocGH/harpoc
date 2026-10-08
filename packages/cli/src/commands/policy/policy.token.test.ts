@@ -1,6 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { Command } from "commander";
-import type { VaultApiToken } from "@harpoc/shared";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 
 const { mockEngine } = vi.hoisted(() => ({
@@ -44,19 +42,8 @@ vi.mock("../../utils/vault-loader.js", () => ({
 import { registerPolicyGrantCommand } from "./grant.js";
 import { registerPolicyRevokeCommand } from "./revoke.js";
 import { registerPolicyListCommand } from "./list.js";
-
-function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
-  return {
-    sub: "agent-1",
-    vault_id: "vault-1",
-    scope: ["read"],
-    iat: 0,
-    exp: 2_000_000_000,
-    jti: "jti-1",
-    principal_type: "agent",
-    ...overrides,
-  };
-}
+import { resolveSecretId } from "../../utils/vault-loader.js";
+import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 const GRANT_ARGS = [
   "grant",
@@ -70,43 +57,29 @@ const GRANT_ARGS = [
 ];
 
 describe("policy commands — token path", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
 
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>");
-    const policy = program.command("policy");
-    registerPolicyGrantCommand(policy);
-    registerPolicyRevokeCommand(policy);
-    registerPolicyListCommand(policy);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "policy", ...args]);
-  }
+  const run = buildCli(
+    (program) => {
+      const policy = program.command("policy");
+      registerPolicyGrantCommand(policy);
+      registerPolicyRevokeCommand(policy);
+      registerPolicyListCommand(policy);
+    },
+    ["policy"],
+  );
 
   it("grant: admin-scoped token passes the caller and stamps createdBy = token sub", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["admin"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["admin"] }));
     await run([...GRANT_ARGS, "--token", "jwt-value"]);
     expect(mockEngine.grantPolicy).toHaveBeenCalledWith(
       expect.objectContaining({ secretId: "sid-1", principalId: "bot" }),
@@ -121,30 +94,35 @@ describe("policy commands — token path", () => {
   });
 
   it("grant: a use-scoped token is refused before handle resolution", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["use"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["use"] }));
     await expect(run([...GRANT_ARGS, "--token", "jwt-value"])).rejects.toThrow("process.exit");
     expect(mockEngine.grantPolicy).not.toHaveBeenCalled();
+    expect(resolveSecretId).not.toHaveBeenCalled();
   });
 
   it("revoke: a token without --secret is refused with guidance", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["admin"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["admin"] }));
     await expect(run(["revoke", "pol-1", "--token", "jwt-value"])).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--secret <handle> is required"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--secret <handle> is required"),
+    );
     expect(mockEngine.revokePolicy).not.toHaveBeenCalled();
   });
 
   it('revoke: --secret "" with a token is refused, never the trusted path', async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["admin"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["admin"] }));
     await expect(run(["revoke", "pol-1", "--secret", "", "--token", "jwt-value"])).rejects.toThrow(
       "process.exit",
     );
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--secret <handle> is required"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--secret <handle> is required"),
+    );
     expect(mockEngine.revokePolicy).not.toHaveBeenCalled();
     expect(mockEngine.listPolicies).not.toHaveBeenCalled();
   });
 
   it("revoke: with --secret it scope-checks and hands the engine the caller and the secret id", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["admin"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["admin"] }));
     await run(["revoke", "pol-1", "--secret", "secret://k", "--token", "jwt-value"]);
     expect(mockEngine.listPolicies).not.toHaveBeenCalled();
     expect(mockEngine.revokePolicy).toHaveBeenCalledWith(
@@ -154,8 +132,8 @@ describe("policy commands — token path", () => {
     );
   });
 
-  it("revoke: a policy id not belonging to --secret is refused by the engine", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["admin"] }));
+  it("revoke: forwards --secret's id to revokePolicy and renders its refusal", async () => {
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["admin"] }));
     await expect(
       run(["revoke", "pol-other", "--secret", "secret://k", "--token", "jwt-value"]),
     ).rejects.toThrow("process.exit");
@@ -173,7 +151,7 @@ describe("policy commands — token path", () => {
   });
 
   it("list: with a handle, read scope is checked and the caller passed", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
     await run(["list", "secret://k", "--token", "jwt-value"]);
     expect(mockEngine.listPolicies).toHaveBeenCalledWith(
       "sid-1",
@@ -182,8 +160,8 @@ describe("policy commands — token path", () => {
     );
   });
 
-  it("list: handle-less with a token still passes the caller — the engine refuses (fail-closed)", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+  it("list: handle-less with a token passes the caller and no secret id (the refusal is the engine's)", async () => {
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
     await run(["list", "--token", "jwt-value"]);
     expect(mockEngine.listPolicies).toHaveBeenCalledWith(
       undefined,

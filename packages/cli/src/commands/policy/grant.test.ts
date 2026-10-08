@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -19,46 +19,29 @@ vi.mock("../../utils/vault-loader.js", () => ({
   resolveSecretId: vi.fn().mockResolvedValue("secret-id-1"),
 }));
 
-import { Command } from "commander";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerPolicyGrantCommand } from "./grant.js";
+import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
-async function run(args: string[]): Promise<void> {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-  const policy = program.command("policy");
-  registerPolicyGrantCommand(policy);
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  await program.parseAsync(["node", "harpoc", "policy", "grant", ...args]);
-}
+const run = buildCli(
+  (program) => registerPolicyGrantCommand(program.command("policy")),
+  ["policy", "grant"],
+);
 
 describe("policy grant --principal-type validation", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
 
-  it("rejects an invalid principal type with a clean message before reaching the engine", async () => {
+  it("rejects an invalid principal type with a clean message and grants nothing", async () => {
     await expect(
       run([
         "secret://x",
@@ -71,8 +54,8 @@ describe("policy grant --principal-type validation", () => {
         "--json",
       ]),
     ).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid principal type"));
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid principal type"));
     expect(mockEngine.grantPolicy).not.toHaveBeenCalled();
   });
 
@@ -109,7 +92,7 @@ describe("policy grant --principal-type validation", () => {
         "--json",
       ]),
     ).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: "--expires must be a positive number of minutes",
     });
@@ -135,7 +118,7 @@ describe("policy grant --principal-type validation", () => {
           "--json",
         ]),
       ).rejects.toThrow("process.exit");
-      expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+      expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
         error: "INVALID_INPUT",
         message: "--expires must be a positive number of minutes",
       });
@@ -159,7 +142,7 @@ describe("policy grant --principal-type validation", () => {
         "--json",
       ]),
     ).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: 'Invalid principal type: "bogus". Valid: agent, tool, project, user',
     });
@@ -179,7 +162,7 @@ describe("policy grant --principal-type validation", () => {
         "--json",
       ]),
     ).rejects.toThrow("process.exit");
-    expect(JSON.parse(String(errorSpy.mock.calls[0]?.[0]))).toEqual({
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
       error: "INVALID_INPUT",
       message: 'Invalid permission: "bogus". Valid: list, read, use, create, rotate, revoke, admin',
     });

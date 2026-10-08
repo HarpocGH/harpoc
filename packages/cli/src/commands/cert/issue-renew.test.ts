@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, VaultError } from "@harpoc/shared";
-import type { CertificateStatus, VaultApiToken } from "@harpoc/shared";
+import type { CertificateStatus } from "@harpoc/shared";
 import type { IssueOptions, RenewOptions } from "@harpoc/cert-manager";
 
 const { mockEngine, mockCertManager, mockIssueWithAcme, mockRenewCertificate, mockPromptHidden } =
@@ -36,10 +36,10 @@ vi.mock("@harpoc/cert-manager", () => ({ CertManager: mockCertManager }));
 
 vi.mock("../../utils/prompt.js", () => ({ promptHidden: mockPromptHidden }));
 
-import { Command } from "commander";
 import { loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { registerCertIssueCommand } from "./issue.js";
 import { registerCertRenewCommand } from "./renew.js";
+import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 const STATUS: CertificateStatus = {
   secret_id: "secret-id-1",
@@ -53,37 +53,16 @@ const STATUS: CertificateStatus = {
 
 const ISSUED = { handle: "secret://web", secretId: "secret-id-1", status: STATUS };
 
-function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
-  return {
-    sub: "agent-1",
-    vault_id: "vault-1",
-    scope: ["read"],
-    iat: 0,
-    exp: 2_000_000_000,
-    jti: "jti-1",
-    principal_type: "agent",
-    ...overrides,
-  };
-}
+let spies: CliSpies;
 
-let exitSpy: MockInstance;
-let errorSpy: ReturnType<typeof vi.spyOn>;
-let logSpy: ReturnType<typeof vi.spyOn>;
-const savedEnvToken = process.env.HARPOC_TOKEN;
-
-async function run(args: string[]): Promise<void> {
-  const program = new Command();
-  // exitOverride must precede .command(): commander copies the exit callback
-  // into a child by value at creation time, so setting it afterwards would
-  // leave the subcommands' own parse errors exiting the test process for real.
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  program.option("--vault-dir <path>", "Path to vault directory");
-  const cert = program.command("cert").description("Manage certificate secrets");
-  registerCertIssueCommand(cert);
-  registerCertRenewCommand(cert);
-  await program.parseAsync(["node", "harpoc", "cert", ...args]);
-}
+const run = buildCli(
+  (program) => {
+    const cert = program.command("cert").description("Manage certificate secrets");
+    registerCertIssueCommand(cert);
+    registerCertRenewCommand(cert);
+  },
+  ["cert"],
+);
 
 /** vitest's stdin is not a TTY; every --dns case decides explicitly (R11/E86e). */
 function stubStdinTty(value: boolean | undefined): () => void {
@@ -113,30 +92,21 @@ function renewOptions(): RenewOptions {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  delete process.env.HARPOC_TOKEN;
 
   vi.mocked(loadUnlockedEngine).mockResolvedValue(mockEngine as never);
   vi.mocked(resolveSecretId).mockResolvedValue("secret-id-1");
   mockIssueWithAcme.mockResolvedValue(ISSUED);
   mockRenewCertificate.mockResolvedValue(STATUS);
-  mockEngine.verifyToken.mockReturnValue(token());
+  mockEngine.verifyToken.mockReturnValue(tokenFixture());
   mockPromptHidden.mockResolvedValue("");
 
-  exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-    throw new Error("process.exit");
-  });
-  errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-  logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  spies = spyCli();
   restoreTty = stubStdinTty(true);
 });
 
 afterEach(() => {
   restoreTty();
-  exitSpy.mockRestore();
-  errorSpy.mockRestore();
-  logSpy.mockRestore();
-  if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-  else process.env.HARPOC_TOKEN = savedEnvToken;
+  spies.restore();
 });
 
 describe("cert issue", () => {
@@ -147,12 +117,12 @@ describe("cert issue", () => {
     expect(mockIssueWithAcme).toHaveBeenCalledTimes(1);
     expect(mockIssueWithAcme.mock.calls[0]?.[0]).toBe("web");
 
-    const printed = logSpy.mock.calls.flat().join("\n");
+    const printed = spies.logSpy.mock.calls.flat().join("\n");
     expect(printed).toContain("secret://web");
     expect(printed).toContain("CN=example.com");
     expect(printed).toContain("ok");
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
-    expect(exitSpy).not.toHaveBeenCalled();
+    expect(spies.exitSpy).not.toHaveBeenCalled();
   });
 
   it("forwards the domain list, email and the issuance defaults", async () => {
@@ -248,7 +218,7 @@ describe("cert issue", () => {
         "4096",
       ]),
     ).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("--bits only applies with --algorithm rsa."),
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
@@ -286,7 +256,9 @@ describe("cert issue", () => {
       ]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Invalid algorithm "nonsense"'));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid algorithm "nonsense"'),
+    );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
     expect(mockIssueWithAcme).not.toHaveBeenCalled();
   });
@@ -305,7 +277,7 @@ describe("cert issue", () => {
       ]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Invalid bits "1024"'));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining('Invalid bits "1024"'));
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
     expect(mockIssueWithAcme).not.toHaveBeenCalled();
   });
@@ -326,7 +298,7 @@ describe("cert issue", () => {
       ]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Invalid curve "P-521"'));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining('Invalid curve "P-521"'));
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
     expect(mockIssueWithAcme).not.toHaveBeenCalled();
   });
@@ -360,7 +332,7 @@ describe("cert issue", () => {
   it("renders the validity window as a formatted timestamp, not epoch millis", async () => {
     await run(["issue", "web", "--domains", "example.com", "--email", "ops@example.com"]);
 
-    const printed = logSpy.mock.calls.flat().join("\n");
+    const printed = spies.logSpy.mock.calls.flat().join("\n");
     expect(printed).toContain(new Date(STATUS.not_after as number).toISOString().slice(0, 10));
     expect(printed).not.toContain(String(STATUS.not_after));
   });
@@ -368,7 +340,10 @@ describe("cert issue", () => {
   it("--json prints the exact issuance result", async () => {
     await run(["issue", "web", "--domains", "example.com", "--email", "ops@example.com", "--json"]);
 
-    const printed = JSON.parse(logSpy.mock.calls[0]?.[0] as string) as Record<string, unknown>;
+    const printed = JSON.parse(spies.logSpy.mock.calls[0]?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(printed).toEqual(ISSUED);
   });
 
@@ -378,10 +353,10 @@ describe("cert issue", () => {
     const dns01 = issueOptions().dns01;
     expect(typeof dns01).toBe("function");
 
-    errorSpy.mockClear();
+    spies.errorSpy.mockClear();
     await dns01?.("example.com", "txt-value");
 
-    const written = errorSpy.mock.calls.flat().join("\n");
+    const written = spies.errorSpy.mock.calls.flat().join("\n");
     expect(written).toContain("_acme-challenge.example.com TXT txt-value");
     // The stdin wait is what makes dns-01 interactive: without it the command
     // would tell the CA to validate a record nobody has published yet.
@@ -400,10 +375,10 @@ describe("cert issue", () => {
       "--json",
     ]);
 
-    logSpy.mockClear();
+    spies.logSpy.mockClear();
     await issueOptions().dns01?.("example.com", "txt-value");
 
-    expect(logSpy).not.toHaveBeenCalled();
+    expect(spies.logSpy).not.toHaveBeenCalled();
   });
 
   it("--dns paired with --http-port is refused rather than silently dropping the port", async () => {
@@ -423,7 +398,7 @@ describe("cert issue", () => {
       ]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("--http-port only applies to the http-01 challenge"),
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
@@ -437,7 +412,7 @@ describe("cert issue", () => {
       run(["issue", "web", "--domains", "example.com", "--email", "ops@example.com", "--dns"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("--dns needs an interactive terminal"),
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
@@ -459,9 +434,9 @@ describe("cert issue", () => {
         "--json",
       ]),
     ).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"error":"INVALID_INPUT"'));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining('"error":"INVALID_INPUT"'));
 
-    errorSpy.mockClear();
+    spies.errorSpy.mockClear();
     restoreTty();
     restoreTty = stubStdinTty(true);
     await expect(
@@ -478,7 +453,7 @@ describe("cert issue", () => {
         "--json",
       ]),
     ).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"error":"INVALID_INPUT"'));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining('"error":"INVALID_INPUT"'));
   });
 
   it("a missing --domains is refused by commander before the vault opens", async () => {
@@ -501,7 +476,7 @@ describe("cert issue", () => {
       run(["issue", "web", "--domains", "", "--email", "ops@example.com"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--domains requires"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("--domains requires"));
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
@@ -510,7 +485,7 @@ describe("cert issue", () => {
       run(["issue", "web", "--domains", "example.com,", "--email", "ops@example.com"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--domains requires"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("--domains requires"));
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
@@ -519,7 +494,7 @@ describe("cert issue", () => {
       run(["issue", "web", "--domains", "example.com", "--email", "  "]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("--email requires"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("--email requires"));
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
@@ -537,7 +512,9 @@ describe("cert issue", () => {
       ]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Invalid http-port "80.5"'));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid http-port "80.5"'),
+    );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
@@ -556,8 +533,8 @@ describe("cert issue", () => {
       ]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('"error":"INVALID_INPUT"'));
-    const envelope = JSON.parse(String(errorSpy.mock.calls[0]?.[0])) as { message: string };
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining('"error":"INVALID_INPUT"'));
+    const envelope = JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0])) as { message: string };
     expect(envelope.message).toBe('Invalid http-port "80.5". Must be 1-65535.');
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
@@ -582,7 +559,7 @@ describe("cert issue", () => {
       ]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining('Invalid renew-before-days "4000"'),
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
@@ -602,7 +579,7 @@ describe("cert issue", () => {
       ]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining('Invalid renew-before-days "366"'),
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
@@ -615,12 +592,12 @@ describe("cert issue", () => {
       run(["issue", "web", "--domains", "example.com", "--email", "ops@example.com"]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Vault is locked"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Vault is locked"));
     expect(mockIssueWithAcme).not.toHaveBeenCalled();
   });
 
   it("a token without 'create' is refused before any ACME traffic", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
 
     await expect(
       run([
@@ -635,7 +612,7 @@ describe("cert issue", () => {
       ]),
     ).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("Token lacks permission: create"),
     );
     expect(mockIssueWithAcme).not.toHaveBeenCalled();
@@ -643,7 +620,7 @@ describe("cert issue", () => {
   });
 
   it("a token with 'create' issues and attributes the audit rows to its principal", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["create"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["create"] }));
 
     await run([
       "issue",
@@ -672,7 +649,7 @@ describe("cert issue", () => {
 
   it("an ambient HARPOC_TOKEN is honoured when --token is absent", async () => {
     process.env.HARPOC_TOKEN = "ambient-jwt";
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["create"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["create"] }));
 
     await run(["issue", "web", "--domains", "example.com", "--email", "ops@example.com"]);
 
@@ -688,7 +665,10 @@ describe("cert issue", () => {
       run(["issue", "web", "--domains", "example.com", "--email", "ops@example.com", "--json"]),
     ).rejects.toThrow("process.exit");
 
-    const envelope = JSON.parse(errorSpy.mock.calls[0]?.[0] as string) as Record<string, unknown>;
+    const envelope = JSON.parse(spies.errorSpy.mock.calls[0]?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(envelope.error).toBe("CERT_ACME_FAILED");
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
   });
@@ -707,18 +687,18 @@ describe("cert renew", () => {
     expect(mockCertManager).toHaveBeenCalledWith(mockEngine);
     expect(mockRenewCertificate.mock.calls[0]?.[0]).toBe("secret-id-1");
 
-    const printed = logSpy.mock.calls.flat().join("\n");
+    const printed = spies.logSpy.mock.calls.flat().join("\n");
     expect(printed).toContain("secret://web");
     expect(printed).toContain("CN=example.com");
     expect(printed).toContain("ok");
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
-    expect(exitSpy).not.toHaveBeenCalled();
+    expect(spies.exitSpy).not.toHaveBeenCalled();
   });
 
   it("renders the validity window as a formatted timestamp, not epoch millis", async () => {
     await run(["renew", "secret://web"]);
 
-    const printed = logSpy.mock.calls.flat().join("\n");
+    const printed = spies.logSpy.mock.calls.flat().join("\n");
     expect(printed).toContain(new Date(STATUS.not_after as number).toISOString().slice(0, 10));
     expect(printed).not.toContain(String(STATUS.not_after));
   });
@@ -726,7 +706,10 @@ describe("cert renew", () => {
   it("--json prints the exact refreshed CertificateStatus", async () => {
     await run(["renew", "secret://web", "--json"]);
 
-    const printed = JSON.parse(logSpy.mock.calls[0]?.[0] as string) as Record<string, unknown>;
+    const printed = JSON.parse(spies.logSpy.mock.calls[0]?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(printed).toEqual(STATUS);
   });
 
@@ -741,13 +724,15 @@ describe("cert renew", () => {
       "process.exit",
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Invalid http-port "eighty"'));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid http-port "eighty"'),
+    );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
     expect(mockRenewCertificate).not.toHaveBeenCalled();
   });
 
   it("a token with 'rotate' renews and threads the caller into the manager", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
 
     await run(["renew", "secret://web", "--token", "jwt-value"]);
 
@@ -763,14 +748,14 @@ describe("cert renew", () => {
   });
 
   it("a read-only token is denied with ACCESS_DENIED before the renewal runs", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
 
     await expect(run(["renew", "secret://web", "--token", "jwt-value"])).rejects.toThrow(
       "process.exit",
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("ACCESS_DENIED"));
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("ACCESS_DENIED"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("Token lacks permission: rotate"),
     );
     expect(mockRenewCertificate).not.toHaveBeenCalled();
@@ -787,7 +772,7 @@ describe("cert renew", () => {
 
   it("an ambient HARPOC_TOKEN is honoured when --token is absent", async () => {
     process.env.HARPOC_TOKEN = "ambient-jwt";
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
 
     await run(["renew", "secret://web"]);
 
@@ -799,7 +784,7 @@ describe("cert renew", () => {
 
     await expect(run(["renew", "secret://web"])).rejects.toThrow("process.exit");
 
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Vault is locked"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Vault is locked"));
     expect(mockRenewCertificate).not.toHaveBeenCalled();
   });
 
@@ -810,7 +795,10 @@ describe("cert renew", () => {
 
     await expect(run(["renew", "secret://web", "--json"])).rejects.toThrow("process.exit");
 
-    const envelope = JSON.parse(errorSpy.mock.calls[0]?.[0] as string) as Record<string, unknown>;
+    const envelope = JSON.parse(spies.errorSpy.mock.calls[0]?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(envelope.error).toBe("CERT_ACME_FAILED");
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
   });

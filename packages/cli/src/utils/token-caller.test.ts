@@ -57,11 +57,13 @@ describe("resolveTokenCaller", () => {
     expect(resolved?.payload.sub).toBe("agent-1");
   });
 
-  it("enforces the permission dimension via the real shared predicate", () => {
+  it("enforces the permission dimension via the real shared predicate", async () => {
     const engine = engineWith(payload({ scope: ["use"] }));
-    expect(() =>
-      resolveTokenCaller(engine, { permission: "read", name: "db-key" }, "jwt-value"),
-    ).toThrow("Token lacks permission: read");
+    const err = await expectVaultError(
+      () => resolveTokenCaller(engine, { permission: "read", name: "db-key" }, "jwt-value"),
+      ErrorCode.ACCESS_DENIED,
+    );
+    expect(err.message).toBe("Access denied: Token lacks permission: read");
   });
 
   it("enforces the project dimension", async () => {
@@ -132,9 +134,12 @@ describe("resolveTokenCallerForHandle", () => {
     expect(viaHandle).toEqual(viaTarget);
   });
 
-  it("throws on a malformed handle with a present token, without ever verifying", () => {
+  it("throws on a malformed handle with a present token, without ever verifying", async () => {
     const engine = engineWith(payload());
-    expect(() => resolveTokenCallerForHandle(engine, "use", "not-a-handle", "jwt-value")).toThrow();
+    await expectVaultError(
+      () => resolveTokenCallerForHandle(engine, "use", "not-a-handle", "jwt-value"),
+      ErrorCode.INVALID_HANDLE,
+    );
     expect(engine.verifyToken).not.toHaveBeenCalled();
   });
 });

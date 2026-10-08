@@ -1,12 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { Command } from "commander";
-import {
-  AuditEventType,
-  type CertificateStatus,
-  type Permission,
-  type VaultApiToken,
-} from "@harpoc/shared";
+import { AuditEventType, type CertificateStatus, type Permission } from "@harpoc/shared";
 
 const { mockEngine, mockManager, mockCertManager, mockResolveSecretValue, mockPromptConfirm } =
   vi.hoisted(() => {
@@ -66,6 +61,7 @@ vi.mock("../utils/vault-loader.js", () => ({
   resolveVaultDir: vi.fn().mockReturnValue("/mock/.harpoc"),
   loadUnlockedEngine: vi.fn().mockResolvedValue(mockEngine),
   resolveSecretId: vi.fn().mockResolvedValue("sid-1"),
+  refuseEmptyVaultDir: vi.fn(),
 }));
 // Partial: `cert import` also reads MAX_SECRET_FILE_BYTES from this module, and
 // a factory that returns only the faked function makes that import a load-time
@@ -85,51 +81,12 @@ vi.mock("../utils/prompt.js", () => ({ promptConfirm: mockPromptConfirm }));
 vi.mock("@harpoc/cert-manager", () => ({ CertManager: mockCertManager }));
 
 import { resolveSecretId } from "../utils/vault-loader.js";
-import { registerSecretListCommand } from "./secret/list.js";
-import { registerSecretGetCommand } from "./secret/get.js";
-import { registerSecretSetCommand } from "./secret/set.js";
-import { registerSecretRotateCommand } from "./secret/rotate.js";
-import { registerSecretDeleteCommand } from "./secret/delete.js";
-import { registerSecretAllowCommand } from "./secret/allow.js";
-import { registerSecretMcpServerCommand } from "./secret/mcp-server.js";
-import { registerSecretConnectionCommand } from "./secret/connection.js";
-import { registerPolicyGrantCommand } from "./policy/grant.js";
-import { registerPolicyRevokeCommand } from "./policy/revoke.js";
-import { registerPolicyListCommand } from "./policy/list.js";
-import { registerAuditCommand } from "./audit.js";
-import { registerOAuthStatusCommand } from "./oauth/status.js";
-import { registerOAuthRefreshCommand } from "./oauth/refresh.js";
-import { registerCertImportCommand } from "./cert/import.js";
-import { registerCertStatusCommand } from "./cert/status.js";
-import { registerCertCsrCommand } from "./cert/csr.js";
-import { registerCertIssueCommand } from "./cert/issue.js";
-import { registerCertRenewCommand } from "./cert/renew.js";
-import { registerAgentRegisterCommand } from "./agent/register.js";
-import { registerAgentListCommand } from "./agent/list.js";
-import { registerAgentShowCommand } from "./agent/show.js";
-import { registerAgentUpdateCommand } from "./agent/update.js";
-import { registerAgentDeactivateCommand } from "./agent/deactivate.js";
-import { registerAgentActivateCommand } from "./agent/activate.js";
-import { registerAgentDeleteCommand } from "./agent/delete.js";
-import { registerAgentPermissionsCommand } from "./agent/permissions.js";
-import { registerAuthListCommand } from "./auth/list.js";
+import { buildProgram } from "../program.js";
+import { spyCli, tokenFixture, type CliSpies } from "../__fixtures__/cli-harness.js";
 
 const FIXTURES = new URL("../__fixtures__/certs/", import.meta.url);
 const KEY_PATH = fileURLToPath(new URL("rsa-key.pem", FIXTURES));
 const CERT_PATH = fileURLToPath(new URL("rsa-cert.pem", FIXTURES));
-
-function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
-  return {
-    sub: "agent-1",
-    vault_id: "vault-1",
-    scope: ["read"],
-    iat: 0,
-    exp: 2_000_000_000,
-    jti: "jti-1",
-    principal_type: "agent",
-    ...overrides,
-  };
-}
 
 const INFO = {
   handle: "secret://k",
@@ -177,58 +134,6 @@ const POLICY = {
   created_at: 0,
   expires_at: null,
 };
-
-function buildProgram(): Command {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-
-  registerAuditCommand(program);
-
-  const secret = program.command("secret");
-  registerSecretListCommand(secret);
-  registerSecretGetCommand(secret);
-  registerSecretSetCommand(secret);
-  registerSecretRotateCommand(secret);
-  registerSecretDeleteCommand(secret);
-  registerSecretAllowCommand(secret);
-  registerSecretMcpServerCommand(secret);
-  registerSecretConnectionCommand(secret);
-
-  const policy = program.command("policy");
-  registerPolicyGrantCommand(policy);
-  registerPolicyRevokeCommand(policy);
-  registerPolicyListCommand(policy);
-
-  const oauth = program.command("oauth");
-  registerOAuthStatusCommand(oauth);
-  registerOAuthRefreshCommand(oauth);
-
-  const cert = program.command("cert");
-  registerCertImportCommand(cert);
-  registerCertStatusCommand(cert);
-  registerCertCsrCommand(cert);
-  registerCertIssueCommand(cert);
-  registerCertRenewCommand(cert);
-
-  const agent = program.command("agent");
-  registerAgentRegisterCommand(agent);
-  registerAgentListCommand(agent);
-  registerAgentShowCommand(agent);
-  registerAgentUpdateCommand(agent);
-  registerAgentDeactivateCommand(agent);
-  registerAgentActivateCommand(agent);
-  registerAgentDeleteCommand(agent);
-  registerAgentPermissionsCommand(agent);
-
-  // Only `auth list` from the auth group (R4): `auth token` declares no
-  // --token flag at all, and since R9 (2026-09-04) neither does `auth
-  // revoke` — the registry supplies the expiry — so the pin below never
-  // sees either.
-  const auth = program.command("auth");
-  registerAuthListCommand(auth);
-
-  return program;
-}
 
 function tokenCommandPaths(parent: Command, prefix: string[] = []): string[][] {
   const paths: string[][] = [];
@@ -463,15 +368,11 @@ const ROWS: Row[] = [
 ];
 
 describe("token permission map (Task 9 pin)", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let spies: CliSpies;
   let stdoutWriteSpy: MockInstance;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
 
     mockEngine.listSecrets.mockReturnValue([]);
     mockEngine.getSecretInfo.mockResolvedValue(INFO);
@@ -541,7 +442,7 @@ describe("token permission map (Task 9 pin)", () => {
       gated_after: true,
     });
     mockEngine.listIssuedTokens.mockReturnValue([]);
-    mockEngine.verifyToken.mockReturnValue(token());
+    mockEngine.verifyToken.mockReturnValue(tokenFixture());
 
     mockManager.importCertificate.mockResolvedValue({ handle: "secret://k", secretId: "sid-1" });
     mockManager.generateCsr.mockResolvedValue({
@@ -559,46 +460,34 @@ describe("token permission map (Task 9 pin)", () => {
     mockResolveSecretValue.mockResolvedValue(new TextEncoder().encode("v"));
     mockPromptConfirm.mockResolvedValue(true);
 
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
     stdoutWriteSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
   });
 
   afterEach(() => {
-    // Same rationale as get.token.test.ts / list.token.test.ts et al.: a
-    // blanket vi.restoreAllMocks() also tears down the vi.mock'd
-    // loadUnlockedEngine (a bare vi.fn(), not a spy on a real function), so
-    // restore only the spies actually created here.
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
+    spies.restore();
     stdoutWriteSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
   });
 
   describe.each(ROWS)("token permission map: $argv", ({ argv, permission, call, resolve }) => {
     it(`refuses a token without '${permission}' before the engine call`, async () => {
-      mockEngine.verifyToken.mockReturnValue(token({ scope: [] }));
+      mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: [] }));
       await expect(run([...argv, "--token", "jwt-value"])).rejects.toThrow("process.exit");
-      expect(errorSpy).toHaveBeenCalledWith(
+      expect(spies.errorSpy).toHaveBeenCalledWith(
         expect.stringContaining(`Token lacks permission: ${permission}`),
       );
       expect(PROBES[call]).not.toHaveBeenCalled();
     });
 
     it(`executes with '${permission}' scope`, async () => {
-      mockEngine.verifyToken.mockReturnValue(token({ scope: [permission] }));
+      mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: [permission] }));
       await run([...argv, "--token", "jwt-value"]);
       expect(PROBES[call]).toHaveBeenCalled();
     });
 
     if (resolve !== undefined) {
       it("resolves the handle with the token's caller and the command's event type (D2b)", async () => {
-        mockEngine.verifyToken.mockReturnValue(token({ scope: [permission] }));
+        mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: [permission] }));
         await run([...argv, "--token", "jwt-value"]);
         const caller = expect.objectContaining({
           principal_type: "agent",
@@ -618,7 +507,7 @@ describe("token permission map (Task 9 pin)", () => {
     "token caller threading: $argv",
     ({ argv, permission, callerArg }) => {
       it("passes the token's caller to every engine call the command makes (I26)", async () => {
-        mockEngine.verifyToken.mockReturnValue(token({ scope: [permission] }));
+        mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: [permission] }));
         await run([...argv, "--token", "jwt-value"]);
         const entries = Object.entries(callerArg ?? {}) as [keyof typeof mockEngine, number][];
         for (const [method, index] of entries) {
@@ -636,15 +525,22 @@ describe("token permission map (Task 9 pin)", () => {
     },
   );
 
-  // Exhaustiveness, bounded by what buildProgram registers: a token-bearing
-  // command added to the tree above without a row fails here instead of ageing
-  // silently into an unpinned scope. It cannot see a command that is never
-  // registered here at all — keeping buildProgram in step with index.ts stays a
-  // reading exercise.
+  // Outside the parity rows by design: `server start`'s hidden --token is the
+  // stdio launch-token channel, not a scope-gated caller; `secret use` is
+  // pinned in secret/use.test.ts. A new token-bearing command reds here.
+  const OUTSIDE_PARITY = [
+    ["server", "start"],
+    ["secret", "use"],
+  ];
+
+  // Exhaustiveness over the shipped tree: buildProgram is program.ts's, the one
+  // index.ts parses, so a token-bearing command registered without a row fails
+  // here instead of ageing silently into an unpinned scope.
   it("pins every --token-bearing command the program registers", () => {
     const unpinned = tokenCommandPaths(buildProgram()).filter(
       (path) => !ROWS.some((row) => path.every((segment, i) => row.argv[i] === segment)),
     );
-    expect(unpinned).toEqual([]);
+    const key = (path: string[]) => path.join(" ");
+    expect(unpinned.map(key).sort()).toEqual(OUTSIDE_PARITY.map(key).sort());
   });
 });

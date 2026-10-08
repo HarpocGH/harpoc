@@ -3,33 +3,11 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-  type MockInstance,
-} from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType } from "@harpoc/shared";
-import { Command } from "commander";
 import { createEngine, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerOAuthConnectCommand } from "./connect.js";
-
-// Mock argon2 for speed (same approach as core/oauth-proxy tests)
-vi.mock("argon2", () => ({
-  hash: async (password: Buffer | string, opts: { salt: Buffer | Uint8Array }) => {
-    const { createHash } = await import("node:crypto");
-    const salt = opts.salt instanceof Uint8Array ? Buffer.from(opts.salt) : opts.salt;
-    return createHash("sha256")
-      .update(typeof password === "string" ? password : Buffer.from(password))
-      .update(salt)
-      .digest();
-  },
-}));
+import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 // Only defaultOpenBrowser is replaced (F9 tests); everything else stays real.
 const openBrowserMock = vi.hoisted(() => vi.fn());
@@ -78,20 +56,15 @@ afterAll(() => {
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
-async function run(args: string[]): Promise<void> {
-  const program = new Command();
-  program.option("--vault-dir <path>", "Path to vault directory");
-  const oauth = program.command("oauth").description("OAuth");
-  registerOAuthConnectCommand(oauth);
-  program.exitOverride();
-  program.configureOutput({ writeErr: () => {} });
-  await program.parseAsync(["node", "harpoc", "--vault-dir", tempDir, "oauth", "connect", ...args]);
+function run(args: string[]): Promise<void> {
+  return buildCli(
+    (program) => registerOAuthConnectCommand(program.command("oauth").description("OAuth")),
+    ["--vault-dir", tempDir, "oauth", "connect"],
+  )(args);
 }
 
 describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provider)", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: MockInstance;
-  let logSpy: ReturnType<typeof vi.spyOn>;
+  let spies: CliSpies;
   const savedEnv = process.env.HARPOC_OAUTH_CLIENT_SECRET;
 
   beforeEach(() => {
@@ -107,13 +80,10 @@ describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provi
         }),
       );
     };
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    spies = spyCli();
     // The "browser": watch stderr for the printed authorization URL and hit
     // the loopback callback with the code + state, exactly like a user would.
-    errorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    spies.errorSpy.mockImplementation((...args: unknown[]) => {
       const text = args.map(String).join(" ");
       const match = /https:\/\/example\.com\/auth\?[^\s]+/.exec(text);
       if (match) {
@@ -135,9 +105,7 @@ describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provi
     } else {
       process.env.HARPOC_OAUTH_CLIENT_SECRET = savedEnv;
     }
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
+    spies.restore();
   });
 
   it("authorization_code end-to-end: the printed URL drives the callback and the secret goes ACTIVE", async () => {
@@ -156,7 +124,10 @@ describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provi
       "--json",
     ]);
 
-    const printed = JSON.parse(logSpy.mock.calls[0]?.[0] as string) as Record<string, unknown>;
+    const printed = JSON.parse(spies.logSpy.mock.calls[0]?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(printed.status).toBe("authorized");
     expect(printed.handle).toBe("secret://e2e-auth");
 
@@ -201,7 +172,9 @@ describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provi
       "--device",
     ]);
 
-    const stderrText = errorSpy.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+    const stderrText = spies.errorSpy.mock.calls
+      .map((call) => call.map(String).join(" "))
+      .join("\n");
     expect(stderrText).toContain("E2E-1234");
     expect(stderrText).toContain("OK: OAuth secret connected");
 
@@ -227,7 +200,10 @@ describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provi
       "--json",
     ]);
 
-    const printed = JSON.parse(logSpy.mock.calls[0]?.[0] as string) as Record<string, unknown>;
+    const printed = JSON.parse(spies.logSpy.mock.calls[0]?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(printed.status).toBe("authorized");
 
     const verify = await loadUnlockedEngine(tempDir);
@@ -258,8 +234,10 @@ describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provi
       ]),
     ).rejects.toThrow("process.exit");
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    const stderrText = errorSpy.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    const stderrText = spies.errorSpy.mock.calls
+      .map((call) => call.map(String).join(" "))
+      .join("\n");
     expect(stderrText).toContain("OAUTH_TOKEN_EXCHANGE_FAILED");
 
     const verify = await loadUnlockedEngine(tempDir);
@@ -290,8 +268,10 @@ describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provi
       ]),
     ).rejects.toThrow("process.exit");
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    const stderrText = errorSpy.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    const stderrText = spies.errorSpy.mock.calls
+      .map((call) => call.map(String).join(" "))
+      .join("\n");
     expect(stderrText).toContain("OAUTH_CALLBACK_TIMEOUT");
   });
 
@@ -330,7 +310,10 @@ describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provi
       "--json",
     ]);
 
-    const printed = JSON.parse(logSpy.mock.calls.at(-1)?.[0] as string) as Record<string, unknown>;
+    const printed = JSON.parse(spies.logSpy.mock.calls.at(-1)?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(printed.status).toBe("authorized");
     expect(printed.handle).toBe("secret://e2e-resume");
 
@@ -382,8 +365,10 @@ describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provi
       ]),
     ).rejects.toThrow("process.exit");
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    const stderrText = errorSpy.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    const stderrText = spies.errorSpy.mock.calls
+      .map((call) => call.map(String).join(" "))
+      .join("\n");
     expect(stderrText).toContain("OAUTH_CALLBACK_TIMEOUT");
 
     // The background poll was cancelled: the endpoint hit count settles.
@@ -427,10 +412,15 @@ describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provi
     ]);
 
     expect(openBrowserMock).toHaveBeenCalledOnce();
-    const stderrText = errorSpy.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+    const stderrText = spies.errorSpy.mock.calls
+      .map((call) => call.map(String).join(" "))
+      .join("\n");
     expect(stderrText).toContain("could not open a browser automatically");
 
-    const printed = JSON.parse(logSpy.mock.calls.at(-1)?.[0] as string) as Record<string, unknown>;
+    const printed = JSON.parse(spies.logSpy.mock.calls.at(-1)?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(printed.status).toBe("authorized");
   });
 
@@ -454,10 +444,15 @@ describe("oauth connect e2e (real engine, real OAuthManager, loopback fake provi
     ]);
 
     expect(openBrowserMock).toHaveBeenCalledOnce();
-    const stderrText = errorSpy.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+    const stderrText = spies.errorSpy.mock.calls
+      .map((call) => call.map(String).join(" "))
+      .join("\n");
     expect(stderrText).not.toContain("could not open a browser");
 
-    const printed = JSON.parse(logSpy.mock.calls.at(-1)?.[0] as string) as Record<string, unknown>;
+    const printed = JSON.parse(spies.logSpy.mock.calls.at(-1)?.[0] as string) as Record<
+      string,
+      unknown
+    >;
     expect(printed.status).toBe("authorized");
   });
 });

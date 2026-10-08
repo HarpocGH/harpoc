@@ -1,6 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { Command } from "commander";
-import type { VaultApiToken } from "@harpoc/shared";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -17,29 +15,13 @@ vi.mock("../../utils/vault-loader.js", () => ({
 }));
 
 import { registerSecretAllowCommand } from "./allow.js";
-
-function token(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
-  return {
-    sub: "agent-1",
-    vault_id: "vault-1",
-    scope: ["read"],
-    iat: 0,
-    exp: 2_000_000_000,
-    jti: "jti-1",
-    principal_type: "agent",
-    ...overrides,
-  };
-}
+import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 describe("secret allow — token path", () => {
-  let exitSpy: MockInstance;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let logSpy: ReturnType<typeof vi.spyOn>;
-  const savedEnvToken = process.env.HARPOC_TOKEN;
+  let spies: CliSpies;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.getInjectionPolicy.mockResolvedValue({
       url_allowlist: [],
       command_allowlist: [],
@@ -50,34 +32,21 @@ describe("secret allow — token path", () => {
       network_isolation: false,
       fs_isolation: false,
     });
-    mockEngine.verifyToken.mockReturnValue(token());
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    mockEngine.verifyToken.mockReturnValue(tokenFixture());
+    spies = spyCli();
   });
 
   afterEach(() => {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
+    spies.restore();
   });
 
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>");
-    const secret = program.command("secret");
-    registerSecretAllowCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "allow", ...args]);
-  }
+  const run = buildCli(
+    (program) => registerSecretAllowCommand(program.command("secret")),
+    ["secret", "allow"],
+  );
 
   it("show mode checks read scope and passes the caller", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
     await run(["secret://k", "--show", "--token", "jwt-value"]);
     expect(mockEngine.getInjectionPolicy).toHaveBeenCalledWith(
       "secret://k",
@@ -86,7 +55,7 @@ describe("secret allow — token path", () => {
   });
 
   it("set mode checks admin scope; the merge read is attributed like the write", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["admin"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["admin"] }));
     await run(["secret://k", "--url", "https://api.example.com/*", "--token", "jwt-value"]);
     expect(mockEngine.getInjectionPolicy).toHaveBeenCalledWith(
       "secret://k",
@@ -101,19 +70,21 @@ describe("secret allow — token path", () => {
   });
 
   it("a read-scoped token cannot set; refusal precedes the merge read", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["read"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
     await expect(
       run(["secret://k", "--url", "https://api.example.com/*", "--token", "jwt-value"]),
     ).rejects.toThrow("process.exit");
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("[ACCESS_DENIED]"));
     expect(mockEngine.getInjectionPolicy).not.toHaveBeenCalled();
     expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
   });
 
   it("a rotate-scoped token cannot set either — the injection policy is the widening half (R1)", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["rotate"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
     await expect(
       run(["secret://k", "--url", "https://api.example.com/*", "--token", "jwt-value"]),
     ).rejects.toThrow("process.exit");
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("[ACCESS_DENIED]"));
     expect(mockEngine.getInjectionPolicy).not.toHaveBeenCalled();
     expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
   });
@@ -130,7 +101,7 @@ describe("secret allow — token path", () => {
   });
 
   it("--imap-read-only rides the admin scope like every other write", async () => {
-    mockEngine.verifyToken.mockReturnValue(token({ scope: ["admin"] }));
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["admin"] }));
     await run(["secret://k", "--imap-read-only", "--token", "jwt-value"]);
     expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
       "secret://k",

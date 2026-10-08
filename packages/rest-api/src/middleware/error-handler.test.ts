@@ -78,7 +78,7 @@ describe("errorHandler", () => {
     expect(body.message).not.toContain("postgres");
   });
 
-  it("uses statusCode from VaultError for all error codes", async () => {
+  it("passes a VaultError's own statusCode through for a sample of codes", async () => {
     const codeStatusPairs: [ErrorCode, number][] = [
       [ErrorCode.INVALID_PASSWORD, 401],
       [ErrorCode.TOKEN_EXPIRED, 401],
@@ -97,7 +97,7 @@ describe("errorHandler", () => {
       });
 
       const res = await app.request("/test");
-      expect(res.status).toBe(code === ErrorCode.VAULT_LOCKED ? 503 : expectedStatus);
+      expect(res.status).toBe(expectedStatus);
       const body = await res.json();
       expect(body.error).toBe(code);
     }

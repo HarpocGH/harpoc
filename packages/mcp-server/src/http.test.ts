@@ -1,7 +1,5 @@
 import { request as httpRequest } from "node:http";
 import type { IncomingHttpHeaders } from "node:http";
-import { createServer as createNetServer } from "node:net";
-import type { AddressInfo } from "node:net";
 import { readFileSync } from "node:fs";
 import { isConnectionRefused, isIpv6BindUnavailable } from "@harpoc/test-utils";
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
@@ -116,16 +114,6 @@ function rawRequest(
   });
 }
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createNetServer();
-    srv.listen(0, "127.0.0.1", () => {
-      const { port } = srv.address() as AddressInfo;
-      srv.close((err) => (err ? reject(err) : resolve(port)));
-    });
-  });
-}
-
 async function connectClient(
   port: number,
   token: string,
@@ -211,9 +199,10 @@ describe("startMcpHttpServer", () => {
 
     const result = (await client.callTool({ name: "list_secrets", arguments: {} })) as {
       content: Array<{ type: string; text: string }>;
+      isError?: boolean;
     };
-    expect(result.content).toBeDefined();
-    expect(engine.listSecrets).toHaveBeenCalled();
+    expect(result.isError ?? false).toBe(false);
+    expect(engine.listSecrets).toHaveBeenCalledTimes(1);
   });
 
   it("writes exactly one server.start row at the bind — none per session (R4/B22)", async () => {
@@ -235,14 +224,16 @@ describe("startMcpHttpServer", () => {
   });
 
   it("fails closed when the listener row cannot be written — the bind is undone", async () => {
+    let boundPort = 0;
     const engine = mockEngine({
-      auditServerStart: vi.fn().mockImplementation(() => {
+      auditServerStart: vi.fn().mockImplementation(({ port }: { port: number }) => {
+        boundPort = port;
         throw new Error("audit log unwritable");
       }),
     });
-    const port = await freePort();
-    await expect(startMcpHttpServer({ engine, port })).rejects.toThrow("audit log unwritable");
-    await expect(rawRequest(port, rpcHeaders(), "{}")).rejects.toMatchObject({
+    await expect(startMcpHttpServer({ engine, port: 0 })).rejects.toThrow("audit log unwritable");
+    expect(boundPort).toBeGreaterThan(0);
+    await expect(rawRequest(boundPort, rpcHeaders(), "{}")).rejects.toMatchObject({
       code: "ECONNREFUSED",
     });
   });
@@ -646,13 +637,15 @@ describe("startMcpHttpServer", () => {
     await server?.close();
     server = undefined;
 
-    await expect(
-      fetch(`http://127.0.0.1:${port}/mcp`, {
-        method: "POST",
-        headers: rpcHeaders({ authorization: `Bearer ${TOKEN}` }),
-        body: JSON.stringify(INIT_BODY),
-      }),
-    ).rejects.toThrow();
+    const refused = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: rpcHeaders({ authorization: `Bearer ${TOKEN}` }),
+      body: JSON.stringify(INIT_BODY),
+    }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(isConnectionRefused(refused)).toBe(true);
   });
 
   it("caps concurrent sessions at 128 and frees the slot when a session closes", async () => {
@@ -990,9 +983,11 @@ describe("the 2026-07-28 leg (dual-era, design R1)", () => {
       };
       const second = (await other.callTool({ name: "list_secrets", arguments: {} })) as {
         isError?: boolean;
+        content: Array<{ text: string }>;
       };
       expect(first.isError).toBeUndefined();
       expect(second.isError).toBe(true);
+      expect(second.content[0]?.text ?? "").toContain("Access denied");
       expect(vi.mocked(engine.verifyToken).mock.calls).toContainEqual([otherToken]);
       expect(vi.mocked(engine.verifyToken).mock.calls.length - before).toBeGreaterThanOrEqual(4);
     } finally {

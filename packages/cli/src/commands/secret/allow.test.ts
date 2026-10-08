@@ -1,10 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { Command } from "commander";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InjectionPolicy } from "@harpoc/shared";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
-    getInjectionPolicy: vi.fn(),
+    getInjectionPolicy: vi.fn<() => Promise<InjectionPolicy>>(),
     setInjectionPolicy: vi.fn().mockResolvedValue(undefined),
     destroy: vi.fn().mockResolvedValue(undefined),
   },
@@ -16,8 +15,22 @@ vi.mock("../../utils/vault-loader.js", () => ({
 }));
 
 import { mergePolicy, registerSecretAllowCommand } from "./allow.js";
+import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
-const savedEnvToken = process.env.HARPOC_TOKEN;
+const run = buildCli(
+  (program) => registerSecretAllowCommand(program.command("secret")),
+  ["secret", "allow"],
+);
+
+let spies: CliSpies;
+
+beforeEach(() => {
+  spies = spyCli();
+});
+
+afterEach(() => {
+  spies.restore();
+});
 
 const STORED_POLICY: InjectionPolicy = {
   url_allowlist: [],
@@ -194,44 +207,10 @@ describe("mergePolicy", () => {
 });
 
 describe("secret allow command — interpreter acknowledgement pass-through", () => {
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let exitSpy: MockInstance;
-
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
-    mockEngine.getInjectionPolicy.mockResolvedValue({
-      url_allowlist: [],
-      command_allowlist: [],
-      env_allowlist: [],
-      host_allowlist: [],
-      response_mode: "filtered",
-      response_header_allowlist: [],
-      network_isolation: false,
-      fs_isolation: false,
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit");
-    });
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY, command_allowlist: [] });
   });
-
-  afterEach(() => {
-    errorSpy.mockRestore();
-    exitSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
-  });
-
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>", "Path to vault directory");
-    const secret = program.command("secret");
-    registerSecretAllowCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "allow", ...args]);
-  }
 
   it("--acknowledge-interpreter passes acknowledge_interpreters: true to the engine", async () => {
     await run(["secret://k", "--command", "python", "--acknowledge-interpreter"]);
@@ -255,48 +234,19 @@ describe("secret allow command — interpreter acknowledgement pass-through", ()
 
   it("renders a schema refusal value-free through the shared renderer", async () => {
     await expect(run(["secret://k", "--response-mode", "bogus"])).rejects.toThrow("process.exit");
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(spies.errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("response_mode: must be one of full, filtered, status_only"),
     );
-    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("bogus"));
+    expect(spies.errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("bogus"));
     expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
   });
 });
 
 describe("secret allow command — network isolation flags", () => {
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
-    mockEngine.getInjectionPolicy.mockResolvedValue({
-      url_allowlist: [],
-      command_allowlist: ["gh"],
-      env_allowlist: [],
-      host_allowlist: [],
-      response_mode: "filtered",
-      response_header_allowlist: [],
-      network_isolation: true,
-      fs_isolation: false,
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY, network_isolation: true });
   });
-
-  afterEach(() => {
-    errorSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
-  });
-
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>", "Path to vault directory");
-    const secret = program.command("secret");
-    registerSecretAllowCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "allow", ...args]);
-  }
 
   it("--network-isolation alone is a set (not a show) and lands as true", async () => {
     await run(["secret://k", "--network-isolation"]);
@@ -330,51 +280,13 @@ describe("secret allow command — network isolation flags", () => {
 });
 
 describe("secret allow command — filesystem isolation flags", () => {
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
-    mockEngine.getInjectionPolicy.mockResolvedValue({
-      url_allowlist: [],
-      command_allowlist: ["gh"],
-      env_allowlist: [],
-      host_allowlist: [],
-      response_mode: "filtered",
-      response_header_allowlist: [],
-      network_isolation: false,
-      fs_isolation: true,
-    });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY, fs_isolation: true });
   });
-
-  afterEach(() => {
-    errorSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
-  });
-
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>", "Path to vault directory");
-    const secret = program.command("secret");
-    registerSecretAllowCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "allow", ...args]);
-  }
 
   it("--fs-isolation alone is a set (not a show) and lands as true", async () => {
-    mockEngine.getInjectionPolicy.mockResolvedValue({
-      url_allowlist: [],
-      command_allowlist: ["gh"],
-      env_allowlist: [],
-      host_allowlist: [],
-      response_mode: "filtered",
-      response_header_allowlist: [],
-      network_isolation: false,
-      fs_isolation: false,
-    });
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY });
     await run(["secret://k", "--fs-isolation"]);
     expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
       "secret://k",
@@ -416,33 +328,13 @@ describe("secret allow command — filesystem isolation flags", () => {
 });
 
 describe("secret allow command — recipient allowlist flag (v1.3)", () => {
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.getInjectionPolicy.mockResolvedValue({
       ...STORED_POLICY,
       smtp_recipient_allowlist: ["a@b.c"],
     });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
-
-  afterEach(() => {
-    errorSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
-  });
-
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>", "Path to vault directory");
-    const secret = program.command("secret");
-    registerSecretAllowCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "allow", ...args]);
-  }
 
   it("--recipient is a set (not a show) and merges additively with the stored list", async () => {
     await run(["secret://k", "--recipient", "*@d.e"]);
@@ -466,30 +358,10 @@ describe("secret allow command — recipient allowlist flag (v1.3)", () => {
 });
 
 describe("secret allow command — imap read-only flag (v1.3)", () => {
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
-
-  afterEach(() => {
-    errorSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
-  });
-
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>", "Path to vault directory");
-    const secret = program.command("secret");
-    registerSecretAllowCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "allow", ...args]);
-  }
 
   it("--imap-read-only alone is a set (not a show) and lands as true", async () => {
     mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY, imap_read_only: false });
@@ -524,30 +396,10 @@ describe("secret allow command — imap read-only flag (v1.3)", () => {
 });
 
 describe("secret allow command — strict tree exit flag (2026-09-10)", () => {
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.HARPOC_TOKEN;
     mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY, strict_tree_exit: true });
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
-
-  afterEach(() => {
-    errorSpy.mockRestore();
-    if (savedEnvToken === undefined) delete process.env.HARPOC_TOKEN;
-    else process.env.HARPOC_TOKEN = savedEnvToken;
-  });
-
-  async function run(args: string[]): Promise<void> {
-    const program = new Command();
-    program.option("--vault-dir <path>", "Path to vault directory");
-    const secret = program.command("secret");
-    registerSecretAllowCommand(secret);
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "harpoc", "secret", "allow", ...args]);
-  }
 
   it("--strict-tree-exit alone is a set (not a show) and lands as true", async () => {
     mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY, strict_tree_exit: false });
@@ -593,16 +445,11 @@ describe("secret allow command — strict tree exit flag (2026-09-10)", () => {
   });
 
   it("a bare `secret allow <handle>` is a show: the stored policy printed, nothing set (2026-09-12)", async () => {
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    try {
-      await run(["secret://k"]);
-      expect(mockEngine.getInjectionPolicy).toHaveBeenCalledTimes(1);
-      expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
-      expect(logSpy).toHaveBeenCalledWith(
-        JSON.stringify({ ...STORED_POLICY, strict_tree_exit: true }, null, 2),
-      );
-    } finally {
-      logSpy.mockRestore();
-    }
+    await run(["secret://k"]);
+    expect(mockEngine.getInjectionPolicy).toHaveBeenCalledTimes(1);
+    expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
+    expect(spies.logSpy).toHaveBeenCalledWith(
+      JSON.stringify({ ...STORED_POLICY, strict_tree_exit: true }, null, 2),
+    );
   });
 });
