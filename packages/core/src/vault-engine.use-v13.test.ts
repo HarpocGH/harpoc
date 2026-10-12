@@ -1784,6 +1784,48 @@ describe("useSecret — status precedes the pre-decrypt guards (Wave 2, B21)", (
     expect(calls.imap).toHaveLength(0);
   });
 
+  // M-T2a-2 (test-review-2026-10-09): deferred creation (thesis 04:247) — "a
+  // use_secret invocation against a pending handle fails", for a non-OAuth type.
+  it("a PENDING non-OAuth secret × smtp reports SECRET_VALUE_REQUIRED with one failed secret.use row", async () => {
+    await engine.initVault("password");
+    await engine.createSecret({ name: "deferred", type: "api_key" });
+    const calls = installSeams(engine, {});
+
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://deferred", SMTP_ACTION),
+      ErrorCode.SECRET_VALUE_REQUIRED,
+    );
+
+    expect(err.message).toBe("Secret secret://deferred has no value set");
+    expect(calls.smtp).toHaveLength(0);
+    expect(useRows()).toHaveLength(1);
+    expect(useRows(false)[0]?.detail).toMatchObject({
+      context: "smtp",
+      error: ErrorCode.SECRET_VALUE_REQUIRED,
+    });
+  });
+
+  it("the deferred-creation sequence: the pending handle refuses, and the value supplied later serves it", async () => {
+    await engine.initVault("password");
+    await engine.createSecret({ name: "deferred", type: "api_key" });
+    const calls = installSeams(engine, {});
+
+    await expectVaultError(
+      () => engine.useSecret("secret://deferred", SMTP_ACTION),
+      ErrorCode.SECRET_VALUE_REQUIRED,
+    );
+    await engine.setSecretValue(
+      "secret://deferred",
+      new Uint8Array(Buffer.from("ops@example.com:supplied-later")),
+    );
+    const res = await engine.useSecret("secret://deferred", SMTP_ACTION);
+
+    expect(res.type).toBe("smtp");
+    expect(calls.smtp.map((call) => call.secretValue)).toEqual(["ops@example.com:supplied-later"]);
+    expect(useRows(false)).toHaveLength(1);
+    expect(useRows(true)).toHaveLength(1);
+  });
+
   it("a revoked secret × smtp starttls with tls:false reports SECRET_REVOKED", async () => {
     await initWithSecret("outbox", "ops@example.com:mailpass");
     await engine.setConnectionConfig("secret://outbox", { mail: { tls: false } });

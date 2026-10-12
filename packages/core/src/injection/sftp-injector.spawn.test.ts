@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, InjectionPolicy, SftpAction } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { controlledPathDirs } from "./allowlist.js";
+import { agentSocketAccepts } from "./__fixtures__/agent-socket.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { executeSftpAction } from "./sftp-injector.js";
@@ -295,6 +296,27 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
 
     expect(batchPath.length).toBeGreaterThan(0);
     expect(existsSync(batchPath)).toBe(false);
+  });
+
+  // I8: the agent's socket is serving at spawn and gone once the call settles.
+  it("disposes the agent's socket once the call resolves", async () => {
+    let sock = "";
+    let servingAtSpawn = false;
+    spawnMock.mockImplementation(async (_cmd, _args, opts) => {
+      sock = opts.env.SSH_AUTH_SOCK ?? "";
+      servingAtSpawn = await agentSocketAccepts(sock);
+      return OK_RESULT;
+    });
+
+    await executeSftpAction(
+      LIST_ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      allowedPolicy(),
+      SFTP_CONFIG,
+    );
+
+    expect(servingAtSpawn).toBe(true);
+    expect(await agentSocketAccepts(sock)).toBe(false);
   });
 
   // POSIX file modes only: win32 has no 0600 (the per-user temp directory's ACL is the

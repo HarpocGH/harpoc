@@ -339,7 +339,7 @@ describe.runIf(process.platform === "win32")("spawnCaptured — the real wrapper
       }
       survivor = undefined;
     }
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("the timeout kill through the wrapper takes a grandchild that no libuv job would have", async () => {
@@ -426,7 +426,7 @@ describe.runIf(process.platform !== "win32")(
         }
         survivor = undefined;
       }
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     });
 
     it("keep: a grandchild in the child's process group outlives a normal exit, as today", async () => {

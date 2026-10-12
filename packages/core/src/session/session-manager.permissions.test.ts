@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -10,7 +10,11 @@ import { SessionManager } from "./session-manager.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, writeFileSync: vi.fn(actual.writeFileSync) };
+  return {
+    ...actual,
+    writeFileSync: vi.fn(actual.writeFileSync),
+    renameSync: vi.fn(actual.renameSync),
+  };
 });
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -217,4 +221,29 @@ describe("session file permissions (owner-only from creation)", () => {
       expect(fallbacks).toHaveLength(1);
     },
   );
+});
+
+// M-T2b-12 (test-review-2026-10-09): the session file is replaced atomically —
+// written whole to a temp file beside it, then renamed into place.
+describe("session file atomic replace (M-T2b-12)", () => {
+  it("writes a temp file beside session.json and renames it into place, never writing session.json directly", async () => {
+    const manager = new SessionManager(sessionPath);
+    await manager.writeSession(makeValidSession());
+
+    const writes = vi.mocked(writeFileSync).mock;
+    const tmpIndex = writes.calls.findIndex(([path]) =>
+      String(path).includes(".session.json.tmp."),
+    );
+    expect(tmpIndex).toBeGreaterThanOrEqual(0);
+    const tmpPath = String(writes.calls[tmpIndex]?.[0]);
+    expect(writes.calls.filter(([path]) => String(path) === sessionPath)).toEqual([]);
+
+    const renames = vi.mocked(renameSync).mock;
+    expect(renames.calls).toEqual([[tmpPath, sessionPath]]);
+    expect(renames.invocationCallOrder[0]).toBeGreaterThan(
+      writes.invocationCallOrder[tmpIndex] as number,
+    );
+    expect(existsSync(tmpPath)).toBe(false);
+    expect(await manager.readSession()).not.toBeNull();
+  });
 });

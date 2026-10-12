@@ -69,7 +69,7 @@ describe("writeSession / readSession roundtrip", () => {
     expect(read?.vault_id).toBe("test-vault");
   });
 
-  it("creates the file atomically", async () => {
+  it("creates the file", async () => {
     const session = makeValidSession();
     await manager.writeSession(session);
     expect(existsSync(sessionPath)).toBe(true);

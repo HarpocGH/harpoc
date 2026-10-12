@@ -8,6 +8,7 @@ import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { validateUrl } from "./injection/url-validator.js";
+import { retainDecryptedValues } from "./__fixtures__/engine-seams.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -44,11 +45,27 @@ let engine: VaultEngine;
 let server: Server;
 let baseUrl: string;
 let requestCount = 0;
+// I9: a request to /hold records its Authorization header on arrival and is
+// answered only once the test resolves `holdGate`.
+const holdArrivals: string[] = [];
+let holdGate: Promise<void> | null = null;
+let onHoldArrival: (() => void) | null = null;
 
 beforeAll(async () => {
   server = createServer((req, res) => {
     requestCount++;
     const auth = (req.headers["authorization"] ?? "none") as string;
+    if (req.url?.startsWith("/hold")) {
+      holdArrivals.push(auth);
+      onHoldArrival?.();
+      const gate = holdGate ?? Promise.resolve();
+      holdGate = null;
+      void gate.then(() => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ path: req.url }));
+      });
+      return;
+    }
     if (req.url?.startsWith("/redirect-hop")) {
       res.writeHead(302, { Location: `http://${req.headers.host ?? "127.0.0.1"}/target` });
       res.end();
@@ -500,5 +517,146 @@ describe("audit trail for failed useSecret", () => {
       secret_id: secretId,
       detail: { context: "http", error: ErrorCode.CONNECTION_REFUSED },
     });
+  });
+});
+
+// C5 (test-review-2026-10-09): useSecret's `finally { wipeBuffer(value) }`.
+// The seam keeps the buffer the secret manager hands the engine, by reference.
+describe("useSecret wipes the decrypted plaintext when it settles (C5)", () => {
+  const PLAINTEXT = "c5-plaintext-credential";
+  const allZero = (buf: Uint8Array): boolean => buf.every((b) => b === 0);
+  let retained: Uint8Array[];
+
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "wipe",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from(PLAINTEXT)),
+    });
+    await engine.setInjectionPolicy("secret://wipe", {
+      url_allowlist: [`${baseUrl}/allowed/*`],
+    });
+    retained = retainDecryptedValues(engine);
+  });
+
+  it("after a successful use against the loopback server", async () => {
+    const res = await engine.useSecret("secret://wipe", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/allowed/ok`,
+      injection: { type: "bearer" },
+    });
+
+    if (res.type !== "http") throw new Error("expected http result");
+    expect(res.status).toBe(200);
+    expect(retained).toHaveLength(1);
+    expect(retained[0]?.length).toBe(PLAINTEXT.length);
+    expect(allZero(retained[0] as Uint8Array)).toBe(true);
+  });
+
+  it("after a policy refusal past the decrypt (URL_NOT_ALLOWED)", async () => {
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://wipe", {
+          type: "http",
+          method: "GET",
+          url: `${baseUrl}/blocked`,
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.URL_NOT_ALLOWED,
+    );
+
+    expect(retained).toHaveLength(1);
+    expect(retained[0]?.length).toBe(PLAINTEXT.length);
+    expect(allZero(retained[0] as Uint8Array)).toBe(true);
+  });
+
+  it("after an injector throw", async () => {
+    const handed: Uint8Array[] = [];
+    (
+      engine as unknown as {
+        httpInjector: { executeWithSecret: (...args: unknown[]) => Promise<unknown> };
+      }
+    ).httpInjector = {
+      executeWithSecret: (...args: unknown[]) => {
+        handed.push(args[1] as Uint8Array);
+        return Promise.reject(new Error("connect ECONNRESET (forced)"));
+      },
+    };
+
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://wipe", {
+          type: "http",
+          method: "GET",
+          url: `${baseUrl}/allowed/ok`,
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.INTERNAL_ERROR,
+    );
+
+    expect(retained).toHaveLength(1);
+    expect(handed).toEqual([retained[0]]);
+    expect(handed[0]).toBe(retained[0]);
+    expect(retained[0]?.length).toBe(PLAINTEXT.length);
+    expect(allZero(retained[0] as Uint8Array)).toBe(true);
+  });
+});
+
+// I9 (test-review-2026-10-09): "a request already in flight at the moment of
+// rotation completes with the pre-rotation credential" (thesis 04:236).
+describe("rotation while a use is in flight (I9)", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "inflight",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("pre-rotation-value")),
+    });
+    await engine.setInjectionPolicy("secret://inflight", {
+      url_allowlist: [`${baseUrl}/hold*`],
+    });
+    holdArrivals.length = 0;
+  });
+
+  afterEach(() => {
+    holdGate = null;
+    onHoldArrival = null;
+  });
+
+  function useHold(): ReturnType<VaultEngine["useSecret"]> {
+    return engine.useSecret("secret://inflight", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/hold`,
+      injection: { type: "bearer" },
+    });
+  }
+
+  it("the in-flight request carries the pre-rotation value and the next use the rotated one", async () => {
+    let release: () => void = () => undefined;
+    holdGate = new Promise<void>((resolve) => (release = resolve));
+    const arrived = new Promise<void>((resolve) => (onHoldArrival = resolve));
+
+    const inFlight = useHold();
+    try {
+      await arrived;
+      await engine.rotateSecret(
+        "secret://inflight",
+        new Uint8Array(Buffer.from("post-rotation-value")),
+      );
+      expect(holdArrivals).toEqual(["Bearer pre-rotation-value"]);
+
+      release();
+      const first = await inFlight;
+      const second = await useHold();
+
+      if (first.type !== "http" || second.type !== "http") throw new Error("expected http results");
+      expect([first.status, second.status]).toEqual([200, 200]);
+      expect(holdArrivals).toEqual(["Bearer pre-rotation-value", "Bearer post-rotation-value"]);
+    } finally {
+      release();
+    }
   });
 });

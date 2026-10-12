@@ -156,6 +156,11 @@ describe("JWT tokens", () => {
     expect(ttlSeconds).toBeLessThanOrEqual(24 * 60 * 60);
   });
 
+  it("defaults the token TTL to one hour when none is given (M-T2b-12)", () => {
+    const decoded = engine.verifyToken(engine.createToken("user-1", ["read"]));
+    expect(decoded.exp - decoded.iat).toBe(60 * 60);
+  });
+
   // The verifier recomputes HMAC-SHA256 and ignores the header entirely —
   // these pin that property so a future alg-honoring JWT library cannot
   // silently reintroduce alg:none / algorithm-confusion acceptance.

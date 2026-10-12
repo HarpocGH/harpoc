@@ -3,6 +3,7 @@ import { createServer } from "node:https";
 import type { Server } from "node:https";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
+import * as tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode, MAX_HTTP_RESPONSE_BYTES } from "@harpoc/shared";
@@ -30,11 +31,18 @@ import { HttpInjector } from "./http-injector.js";
 const CERTS = join(dirname(fileURLToPath(import.meta.url)), "..", "__fixtures__", "certs");
 const CERT_PEM = readFileSync(join(CERTS, "rsa-cert.pem"), "utf8");
 const KEY_PEM = readFileSync(join(CERTS, "rsa-key.pem"), "utf8");
+// A second self-signed CA, generated once with OpenSSL 3.5.3:
+// openssl req -x509 -newkey rsa:2048 -keyout second-ca-key.pem -out second-ca-cert.pem -days 3650 \
+//   -nodes -subj "/CN=harpoc-second-ca" \
+//   -addext "subjectAltName=DNS:fixture.example.com,DNS:localhost,IP:127.0.0.1"
+const SECOND_CA_CERT_PEM = readFileSync(join(CERTS, "second-ca-cert.pem"), "utf8");
+const SECOND_CA_KEY_PEM = readFileSync(join(CERTS, "second-ca-key.pem"), "utf8");
 const SECRET = new Uint8Array(Buffer.from("tok"));
 
 describe("HTTP private-CA pin (http.ca_pem, D2h)", () => {
   let server: Server;
   let base: string;
+  let baseB: string;
   const log = vi.fn();
   const injector = new HttpInjector({ log } as unknown as AuditLogger);
 
@@ -43,6 +51,12 @@ describe("HTTP private-CA pin (http.ca_pem, D2h)", () => {
       if (req.url === "/hop") {
         res.statusCode = 302;
         res.setHeader("location", `${base}/final`);
+        res.end();
+        return;
+      }
+      if (req.url === "/to-b") {
+        res.statusCode = 302;
+        res.setHeader("location", `${baseB}/final`);
         res.end();
         return;
       }
@@ -121,4 +135,81 @@ describe("HTTP private-CA pin (http.ca_pem, D2h)", () => {
     ).rejects.toMatchObject({ code: ErrorCode.RESPONSE_TOO_LARGE });
     expect(lastRow()).toMatchObject({ error: ErrorCode.RESPONSE_TOO_LARGE, ca_pinned: true });
   });
+
+  describe.skipIf(typeof tls.setDefaultCACertificates !== "function")(
+    "the pin replaces the default store: a second CA the store trusts is refused (C6; tls.setDefaultCACertificates needs Node >= 22.19 / 24.5)",
+    () => {
+      let serverB: Server;
+      let saved: string[];
+
+      beforeAll(async () => {
+        saved = tls.getCACertificates("default");
+        tls.setDefaultCACertificates([...saved, SECOND_CA_CERT_PEM]);
+        serverB = createServer(
+          { cert: SECOND_CA_CERT_PEM, key: SECOND_CA_KEY_PEM },
+          (_req, res) => {
+            res.setHeader("content-type", "application/json");
+            res.end('{"ok":true}');
+          },
+        );
+        await new Promise<void>((resolve) => serverB.listen(0, "127.0.0.1", resolve));
+        baseB = `https://fixture.example.com:${(serverB.address() as AddressInfo).port}`;
+      });
+
+      afterAll(async () => {
+        tls.setDefaultCACertificates(saved);
+        await new Promise<void>((resolve) => serverB.close(() => resolve()));
+      });
+
+      const toB = (caPem?: string) => ({
+        method: "GET" as const,
+        url: `${baseB}/`,
+        urlAllowlist: [`${baseB}/*`],
+        ...(caPem === undefined ? {} : { caPem }),
+      });
+
+      it("control: unpinned, the second CA's server is trusted through the default store and answers 200", async () => {
+        const result = await injector.executeWithSecret(
+          toB(),
+          SECRET,
+          { type: "bearer" },
+          "same-origin",
+          "sid-1",
+        );
+        expect(result).toMatchObject({ type: "http", status: 200 });
+      });
+
+      it("pinned to the fixture CA, the second CA's server is refused TLS_ERROR", async () => {
+        const result = await injector.executeWithSecret(
+          toB(CERT_PEM),
+          SECRET,
+          { type: "bearer" },
+          "same-origin",
+          "sid-1",
+        );
+        expect(result).toEqual({ type: "http", status: null, error: ErrorCode.TLS_ERROR });
+        expect(lastRow()).toMatchObject({
+          context: "http",
+          error: ErrorCode.TLS_ERROR,
+          ca_pinned: true,
+        });
+      });
+
+      it("pinned to the fixture CA, a redirect hop to the second CA's server is refused TLS_ERROR", async () => {
+        const result = await injector.executeWithSecret(
+          { ...request("/to-b", CERT_PEM), urlAllowlist: [`${base}/*`, `${baseB}/*`] },
+          SECRET,
+          { type: "bearer" },
+          "same-origin",
+          "sid-1",
+        );
+        expect(result).toEqual({ type: "http", status: null, error: ErrorCode.TLS_ERROR });
+        expect(lastRow()).toMatchObject({
+          context: "http",
+          error: ErrorCode.TLS_ERROR,
+          ca_pinned: true,
+        });
+      });
+    },
+  );
 });

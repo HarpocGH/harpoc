@@ -1081,6 +1081,48 @@ describe("useSecret with OAuth", () => {
     expect(failed[0]?.detail).toMatchObject({ error: ErrorCode.OAUTH_NOT_CONFIGURED });
   });
 
+  // M-T2a-2 (test-review-2026-10-09): deferred creation then use (thesis
+  // 04:247) — the same handle refuses while pending and serves once completed.
+  it("the deferred-then-use sequence: the pending handle refuses, and once the flow completes the same handle serves the token", async () => {
+    await engine.setInjectionPolicy("secret://use-test", {
+      url_allowlist: [`${targetServerUrl}/*`],
+      response_mode: "full",
+    });
+
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://use-test", {
+          type: "http",
+          method: "GET",
+          url: `${targetServerUrl}/api/data`,
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.OAUTH_NOT_CONFIGURED,
+    );
+    await engine.completeOAuthFlow(
+      secretId,
+      "deferred-access-token",
+      "refresh",
+      Date.now() + 3600_000,
+    );
+    const response = await engine.useSecret("secret://use-test", {
+      type: "http",
+      method: "GET",
+      url: `${targetServerUrl}/api/data`,
+      injection: { type: "bearer" },
+    });
+
+    if (response.type !== "http") throw new Error("expected http result");
+    expect(response.status).toBe(200);
+    const body = JSON.parse(response.body ?? "{}") as { authorization?: string };
+    expect(body.authorization).toBe("Bearer deferred-access-token");
+    const uses = engine.queryAudit({ eventType: AuditEventType.SECRET_USE, secretId });
+    expect(uses.filter((e) => !e.success).map((e) => e.detail?.error)).toEqual([
+      ErrorCode.OAUTH_NOT_CONFIGURED,
+    ]);
+    expect(uses.filter((e) => e.success)).toHaveLength(1);
+  });
+
   it("auto-refreshes expired OAuth token before HTTP injection", async () => {
     await engine.completeOAuthFlow(secretId, "old-token", "refresh-tok", Date.now() - 5000);
 

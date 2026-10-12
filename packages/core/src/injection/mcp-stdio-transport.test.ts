@@ -1,9 +1,14 @@
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/client";
-import { MAX_MCP_STDERR_BYTES } from "@harpoc/shared";
+import type { McpProtocolRevision } from "@harpoc/shared";
+import { ErrorCode, MAX_MCP_STDERR_BYTES } from "@harpoc/shared";
+import { POLICY, STDIO_CONFIG, mcpAction, secretBytes } from "./__fixtures__/mcp-downstream.js";
+import { McpInjector } from "./mcp-injector.js";
+import { McpConnectionRegistry } from "./mcp-registry.js";
 import { StdioChildTransport } from "./mcp-stdio-transport.js";
 import type { JobWrap } from "./win32-job-wrapper.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 const NODE = process.execPath;
 
@@ -93,6 +98,42 @@ describe("StdioChildTransport — pinned modern revision", () => {
     } finally {
       await client.close();
     }
+  });
+});
+
+// M-P2-9: the era pin through the injector over stdio, both directions (the http twin is
+// mcp-injector.http.test.ts's "modern-only downstream" pair).
+describe("McpInjector over stdio — the 2026-07-28 era (M-P2-9)", () => {
+  const fixturePath = fileURLToPath(
+    new URL("./__fixtures__/modern-stdio-server.mjs", import.meta.url),
+  );
+  let registry = new McpConnectionRegistry(null);
+
+  afterEach(async () => {
+    await registry.closeAll("test_cleanup");
+    registry = new McpConnectionRegistry(null);
+  });
+
+  const run = (protocol: McpProtocolRevision, args: string[]) =>
+    new McpInjector(null, registry).executeWithSecret(
+      mcpAction("reveal"),
+      secretBytes(),
+      POLICY,
+      { ...STDIO_CONFIG, protocol, args },
+      "secret-era-1",
+    );
+
+  it("pins the configured modern revision on the downstream stdio client", async () => {
+    const result = await run("2026-07-28", [fixturePath]);
+    expect(JSON.stringify(result.content)).toContain("modern-stdio-ok");
+    expect(registry.get("secret-era-1")?.client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
+  });
+
+  it("never negotiates: a legacy pin is refused by the modern-only stdio downstream", async () => {
+    await expectVaultError(
+      () => run("2025-11-25", [fixturePath, "--reject-legacy"]),
+      ErrorCode.MCP_CONNECT_FAILED,
+    );
   });
 });
 
@@ -280,6 +321,54 @@ describe.runIf(process.platform === "win32")(
     });
   },
 );
+
+// M-T2a-8: "direct invocation without shell interpretation" (shell: false) — the argv
+// canary of process-injector.test.ts, reported on stderr (stdout is the JSON-RPC channel).
+describe("StdioChildTransport — direct invocation, no shell (M-T2a-8)", () => {
+  it("delivers every metacharacter-laden argument verbatim as exactly one argv entry and executes none of them", async () => {
+    const { existsSync, mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "harpoc-mcp-argv-canary-"));
+    const keep = join(dir, "keep");
+    writeFileSync(keep, "k");
+    const canary = join(dir, "canary");
+    const META = [
+      `; rm -rf ${keep}`,
+      "$(id)",
+      "`id`",
+      `$(echo pwned > ${canary})`,
+      `\`echo pwned > ${canary}\``,
+      `&& echo pwned > ${canary}`,
+      `| echo pwned > ${canary}`,
+      `& echo pwned > ${canary}`,
+      "%PATH% ^& echo x",
+      `"; echo pwned > ${canary}; "`,
+      'a\\"b',
+      "trailing\\",
+      "",
+      "two words",
+    ];
+    try {
+      const script = "process.stderr.write(JSON.stringify(process.argv.slice(1)))";
+      const transport = new StdioChildTransport({
+        resolvedCommand: NODE,
+        args: ["-e", script, ...META],
+        env: { PATH: process.env.PATH ?? "" },
+      });
+      const closed = new Promise<void>((resolve) => {
+        transport.onclose = () => resolve();
+      });
+      await transport.start();
+      await closed;
+      expect(existsSync(canary)).toBe(false);
+      expect(existsSync(keep)).toBe(true);
+      expect(JSON.parse(transport.stderrTail.toString())).toEqual(META);
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+});
 
 describe("StdioChildTransport — exit forensics", () => {
   it("records exitInfo BEFORE onclose fires", async () => {

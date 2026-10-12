@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AAD_VAULT_KEK, AAD_WRAPPED_AUDIT_KEY, AAD_WRAPPED_JWT_KEY } from "@harpoc/shared";
+import {
+  AAD_VAULT_KEK,
+  AAD_WRAPPED_AUDIT_KEY,
+  AAD_WRAPPED_JWT_KEY,
+  HKDF_INFO_NAME_INDEX,
+} from "@harpoc/shared";
 
 // Capture every buffer the real decrypt returns, and allow forcing a failure
 // on a specific AAD so we can drive the unwrap-failure path.
@@ -10,6 +15,8 @@ let throwOnEncryptAad: string | null = null;
 const derivedKeys: Uint8Array[] = [];
 let deriveCalls = 0;
 let failDeriveCall: number | null = null;
+const derivedSubkeys: { info: string; key: Uint8Array }[] = [];
+let throwOnHmac = false;
 
 vi.mock("./aes-gcm.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./aes-gcm.js")>();
@@ -57,7 +64,37 @@ vi.mock("./argon2.js", async (importOriginal) => {
   };
 });
 
-const { changePassword, createVaultKeys, unlockVault } = await import("./key-hierarchy.js");
+// Keep every subkey the HKDF derivation returns — the buffer computeNameHmac
+// holds, by reference — and allow forcing the HMAC computation to throw.
+vi.mock("./hkdf.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./hkdf.js")>();
+  return {
+    ...original,
+    deriveSubkey: async (
+      ...args: Parameters<typeof original.deriveSubkey>
+    ): Promise<Uint8Array> => {
+      const key = await original.deriveSubkey(...args);
+      derivedSubkeys.push({ info: args[2], key });
+      return key;
+    },
+  };
+});
+
+vi.mock("node:crypto", async (importOriginal) => {
+  const original = await importOriginal<typeof import("node:crypto")>();
+  return {
+    ...original,
+    createHmac: (...args: Parameters<typeof original.createHmac>) => {
+      if (throwOnHmac) {
+        throw new Error("forced HMAC failure");
+      }
+      return original.createHmac(...args);
+    },
+  };
+});
+
+const { changePassword, computeNameHmac, createVaultKeys, unlockVault } =
+  await import("./key-hierarchy.js");
 
 const allZero = (buf: Uint8Array): boolean => buf.every((b) => b === 0);
 
@@ -69,12 +106,15 @@ beforeEach(() => {
   derivedKeys.length = 0;
   deriveCalls = 0;
   failDeriveCall = null;
+  derivedSubkeys.length = 0;
+  throwOnHmac = false;
 });
 
 afterEach(() => {
   throwOnAad = null;
   throwOnEncryptAad = null;
   failDeriveCall = null;
+  throwOnHmac = false;
 });
 
 describe("unlockVault key-buffer wiping on unwrap failure", () => {
@@ -229,5 +269,35 @@ describe("changePassword key-buffer wiping", () => {
     const kek = decryptResults.find((c) => c.aad === AAD_VAULT_KEK)?.result;
     expect(kek).toBeInstanceOf(Uint8Array);
     expect(allZero(kek as Uint8Array)).toBe(true);
+  });
+});
+
+// C5 (test-review-2026-10-09): computeNameHmac's `finally { wipeBuffer(hmacKey) }`.
+describe("computeNameHmac name-index key wiping (C5)", () => {
+  const kek = new Uint8Array(32).fill(0x2a);
+
+  function nameIndexKeys(): Uint8Array[] {
+    return derivedSubkeys.filter((d) => d.info === HKDF_INFO_NAME_INDEX).map((d) => d.key);
+  }
+
+  it("wipes the derived name-index key once the HMAC is computed", async () => {
+    const hmac = await computeNameHmac(kek, "wiped-name", null);
+
+    expect(hmac).toMatch(/^[0-9a-f]{64}$/);
+    const keys = nameIndexKeys();
+    expect(keys).toHaveLength(1);
+    expect(keys[0]?.length).toBe(32);
+    expect(allZero(keys[0] as Uint8Array)).toBe(true);
+  });
+
+  it("wipes the derived name-index key when the HMAC computation throws", async () => {
+    throwOnHmac = true;
+
+    await expect(computeNameHmac(kek, "wiped-name", "proj")).rejects.toThrow("forced HMAC failure");
+
+    const keys = nameIndexKeys();
+    expect(keys).toHaveLength(1);
+    expect(keys[0]?.length).toBe(32);
+    expect(allZero(keys[0] as Uint8Array)).toBe(true);
   });
 });

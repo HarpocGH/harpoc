@@ -76,7 +76,7 @@ beforeEach(() => {
 afterEach(() => {
   if (savedPath === undefined) delete process.env.PATH;
   else process.env.PATH = savedPath;
-  rmSync(binDir, { recursive: true, force: true });
+  rmSync(binDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 function allowed(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {

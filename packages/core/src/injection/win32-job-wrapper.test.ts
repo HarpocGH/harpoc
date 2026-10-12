@@ -87,7 +87,7 @@ beforeEach(() => {
 afterEach(() => {
   resetJobWrapperProbeForTests();
   forceJobWrapperUnavailableForTests(null);
-  rmSync(dir, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe("the source and its paths", () => {

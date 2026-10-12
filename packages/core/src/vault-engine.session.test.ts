@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuditEventType, ErrorCode, VaultState } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, SESSION_SLIDE_INTERVAL_MS, VaultState } from "@harpoc/shared";
 import { expectVaultError, protectorTimer, recordSeriesLine } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
@@ -267,6 +268,62 @@ describe("session TTL sliding (use-driven, thesis §5.4.7)", () => {
 
     expect(engine.getState()).toBe(VaultState.SEALED);
     await expectVaultError(() => engine.listSecrets(), ErrorCode.VAULT_LOCKED);
+  });
+
+  // I12 (test-review-2026-10-09): the slide "is issued again on completion of a
+  // use_secret action" (thesis 05:388) — the loopback server holds the request
+  // past the slide interval on a fake clock.
+  it("a use_secret action slides the stored expiry again on completion (fake timers)", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let arrived: () => void = () => undefined;
+    const arrival = new Promise<void>((resolve) => (arrived = resolve));
+    const server = createServer((_req, res) => {
+      arrived();
+      void gate.then(() => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end("{}");
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const { port } = server.address() as { port: number };
+    try {
+      await engine.initVault("password");
+      await engine.createSecret({
+        name: "slide",
+        type: "api_key",
+        value: new Uint8Array(Buffer.from("slide-value")),
+      });
+      await engine.setInjectionPolicy("secret://slide", {
+        url_allowlist: [`http://127.0.0.1:${port}/*`],
+      });
+      await internals(engine).sessionSlide;
+
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + SESSION_SLIDE_INTERVAL_MS + 1);
+      const use = engine.useSecret("secret://slide", {
+        type: "http",
+        method: "GET",
+        url: `http://127.0.0.1:${port}/held`,
+        injection: { type: "bearer" },
+      });
+      await arrival;
+      await internals(engine).sessionSlide;
+      const atEntry = readExpiry();
+
+      vi.setSystemTime(Date.now() + SESSION_SLIDE_INTERVAL_MS + 1);
+      release();
+      const res = await use;
+      await internals(engine).sessionSlide;
+
+      if (res.type !== "http") throw new Error("expected http result");
+      expect(res.status).toBe(200);
+      expect(readExpiry()).toBeGreaterThan(atEntry);
+    } finally {
+      vi.useRealTimers();
+      release();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { agentSocketAccepts } from "./__fixtures__/agent-socket.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
@@ -169,6 +170,43 @@ describeGitSsh("the argument build refuses (SSH)", () => {
     );
     expect(readdirSync(tempRoot)).toEqual([]);
     expect(spawnCaptured).not.toHaveBeenCalled();
+  });
+});
+
+// I8: the agent's socket is serving at spawn and gone once the call settles.
+describeGitSsh("the call completes (SSH)", () => {
+  it("disposes the agent's socket and leaves no vault-authored directory behind", async () => {
+    let sock = "";
+    let servingAtSpawn = false;
+    vi.mocked(spawnCaptured).mockImplementation(async (_cmd, _args, opts) => {
+      sock = opts.env.SSH_AUTH_SOCK ?? "";
+      servingAtSpawn = await agentSocketAccepts(sock);
+      return {
+        exit_code: 0,
+        stdout: "",
+        stderr: "",
+        timed_out: false,
+        truncated: false,
+        signal: null,
+        spawn_failed: false,
+        redacted: false,
+      };
+    });
+    const { privateKey: keyPem } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: "pkcs1", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    const injector = new GitInjector(null);
+    await injector.executeWithSecret(
+      { type: "git", operation: "clone", repository: "git@github.com:org/repo.git" },
+      new Uint8Array(Buffer.from(keyPem)),
+      policy({ command_allowlist: [GIT as string], host_allowlist: ["github.com"] }),
+      { ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] } },
+    );
+    expect(servingAtSpawn).toBe(true);
+    expect(await agentSocketAccepts(sock)).toBe(false);
+    expect(readdirSync(tempRoot)).toEqual([]);
   });
 });
 

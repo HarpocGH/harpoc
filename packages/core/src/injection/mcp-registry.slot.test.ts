@@ -259,6 +259,32 @@ describe("McpConnectionRegistry — a child already dead at publish takes the cr
 
     await registry.closeAll("test_cleanup");
   });
+
+  // M-T2b-12 (test-review-2026-10-09): the crash row's uptime is the child's
+  // age at the close, read on a fake clock.
+  it("the mcp.crash row's uptime_ms is the time from the spawn to the close", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(1_000_000);
+      const { logger, rows } = recordingLogger();
+      const registry = new McpConnectionRegistry(logger);
+      const dead = {
+        ...fakeEntry("s1", vi.fn().mockResolvedValue(undefined)),
+        stdioTransport: fakeStdio({ code: 1, signal: null }),
+        spawnedAt: 1_000_000 - 4_321,
+      };
+
+      await expectVaultError(
+        () => registry.acquire("s1", () => Promise.resolve(dead)),
+        ErrorCode.MCP_SERVER_CRASHED,
+      );
+
+      expect(rows.map((row) => row.eventType)).toEqual([AuditEventType.MCP_CRASH]);
+      expect(rows[0]?.detail?.uptime_ms).toBe(4_321);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // The seal path's per-entry teardown, pinned on fake entries: `killAllSync`

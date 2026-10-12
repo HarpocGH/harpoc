@@ -13,6 +13,7 @@ import type {
 import { ErrorCode } from "@harpoc/shared";
 import type { AuditAttribution } from "../audit/attribution.js";
 import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
+import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { DatabaseInjector } from "./database-injector.js";
 import type { DbEngineAdapter } from "./db-adapters.js";
 import { GitInjector } from "./git-injector.js";
@@ -61,6 +62,17 @@ function expectAttributed(row: AuditLogOptions): void {
   expect(row.principalId).toBe("alice");
   expect(row.sessionId).toBe("sess-attr-1");
   expect(row.detail?.interface).toBe("rest");
+}
+
+/** I7: the refusal wrote exactly one row — a failed secret.use carrying the code. */
+function expectOneFailedUse(log: ReturnType<typeof vi.fn>, code: string): AuditLogOptions {
+  const all = rows(log);
+  expect(all).toHaveLength(1);
+  const [row] = all;
+  expect(row?.eventType).toBe("secret.use");
+  expect(row?.success).toBe(false);
+  expect(row?.detail?.error).toBe(code);
+  return row as AuditLogOptions;
 }
 
 /** The trusted-local pin: no principal columns, no interface in detail. */
@@ -154,6 +166,86 @@ describe("GitInjector attribution", () => {
     expect(row?.detail?.error).toBe("GIT_UNSUPPORTED_TRANSPORT");
     expectAttributed(row as AuditLogOptions);
   });
+
+  // The target allowlists are checked after git resolves through the command allowlist.
+  const GIT = resolveExecutable("git", controlledPathDirs());
+  const allowGit = (overrides: Partial<InjectionPolicy> = {}): InjectionPolicy => ({
+    ...EMPTY_POLICY,
+    command_allowlist: [GIT as string],
+    ...overrides,
+  });
+
+  it.skipIf(GIT === null)(
+    "audits the URL-allowlist refusal (URL_NOT_ALLOWED; skipped where git does not resolve)",
+    async () => {
+      const { log, logger } = captureLogger();
+      const injector = new GitInjector(logger);
+      const action: GitAction = {
+        type: "git",
+        operation: "clone",
+        repository: "https://8.8.4.4/evil.git",
+      };
+      await expect(
+        injector.executeWithSecret(
+          action,
+          SECRET,
+          allowGit({ url_allowlist: ["https://8.8.8.8/*"] }),
+          undefined,
+          "secret-1",
+          ATTRIBUTION,
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
+      expectAttributed(expectOneFailedUse(log, "URL_NOT_ALLOWED"));
+    },
+  );
+
+  it.skipIf(GIT === null)(
+    "audits the host-allowlist refusal (HOST_NOT_ALLOWED; skipped where git does not resolve)",
+    async () => {
+      const { log, logger } = captureLogger();
+      const injector = new GitInjector(logger);
+      const action: GitAction = {
+        type: "git",
+        operation: "clone",
+        repository: "git@8.8.4.4:org/repo.git",
+      };
+      await expect(
+        injector.executeWithSecret(
+          action,
+          SECRET,
+          allowGit({ host_allowlist: ["8.8.8.8"] }),
+          undefined,
+          "secret-1",
+          ATTRIBUTION,
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.HOST_NOT_ALLOWED });
+      expectAttributed(expectOneFailedUse(log, "HOST_NOT_ALLOWED"));
+    },
+  );
+
+  it.skipIf(GIT === null)(
+    "audits the plaintext-remote refusal (URL_HTTPS_REQUIRED; skipped where git does not resolve)",
+    async () => {
+      const { log, logger } = captureLogger();
+      const injector = new GitInjector(logger);
+      const action: GitAction = {
+        type: "git",
+        operation: "clone",
+        repository: "http://8.8.4.4/repo.git",
+      };
+      await expect(
+        injector.executeWithSecret(
+          action,
+          SECRET,
+          allowGit({ url_allowlist: ["http://8.8.4.4/*"] }),
+          undefined,
+          "secret-1",
+          ATTRIBUTION,
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.URL_HTTPS_REQUIRED });
+      expectAttributed(expectOneFailedUse(log, "URL_HTTPS_REQUIRED"));
+    },
+  );
 });
 
 describe("DatabaseInjector attribution", () => {
@@ -342,6 +434,49 @@ rl.on("line", (line) => {
       ),
     ).rejects.toMatchObject({ code: ErrorCode.MCP_SERVER_MISMATCH });
     expectAttributed(rows(log)[0] as AuditLogOptions);
+  });
+
+  it("audits the http URL-allowlist refusal (URL_NOT_ALLOWED, no connect)", async () => {
+    const { log, logger } = captureLogger();
+    registry = new McpConnectionRegistry(logger);
+    const injector = new McpInjector(logger, registry);
+    const acquire = vi.spyOn(registry, "acquire");
+    await expect(
+      injector.executeWithSecret(
+        mcpAction("echo"),
+        SECRET,
+        { ...EMPTY_POLICY, url_allowlist: ["https://8.8.8.8/*"] },
+        {
+          server_name: "attr-mcp",
+          transport: "http",
+          protocol: "2025-11-25",
+          url: "https://8.8.4.4/mcp",
+        },
+        "secret-1",
+        ATTRIBUTION,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
+    expect(acquire).not.toHaveBeenCalled();
+    expectAttributed(expectOneFailedUse(log, "URL_NOT_ALLOWED"));
+  });
+
+  it("audits the stdio command-allowlist refusal (COMMAND_NOT_ALLOWED, no spawn)", async () => {
+    const { log, logger } = captureLogger();
+    registry = new McpConnectionRegistry(logger);
+    const injector = new McpInjector(logger, registry);
+    const acquire = vi.spyOn(registry, "acquire");
+    await expect(
+      injector.executeWithSecret(
+        mcpAction("echo"),
+        SECRET,
+        EMPTY_POLICY,
+        CONFIG,
+        "secret-1",
+        ATTRIBUTION,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+    expect(acquire).not.toHaveBeenCalled();
+    expectAttributed(expectOneFailedUse(log, "COMMAND_NOT_ALLOWED"));
   });
 
   it("attributes mcp.spawn and the secret.use success; the crash row and a vault-initiated terminate stay unattributed", async () => {

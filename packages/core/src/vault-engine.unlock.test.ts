@@ -3,7 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ErrorCode, VaultState, VAULT_VERSION, VAULT_VERSION_FLOOR } from "@harpoc/shared";
+import {
+  DEFAULT_SESSION_TTL_MS,
+  ErrorCode,
+  SESSION_CLEANUP_INTERVAL_MS,
+  VaultState,
+  VAULT_VERSION,
+  VAULT_VERSION_FLOOR,
+} from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { VaultEngineOptions } from "./vault-engine.js";
@@ -12,6 +19,29 @@ import { SqliteStore } from "./storage/sqlite-store.js";
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
 );
+
+// The session key the engine wraps the live keys with (writeNewSession) and
+// unwraps them with (loadSession), kept by reference for the C5 wipe pins.
+const sessionKeys = vi.hoisted(() => ({
+  wrapping: [] as Uint8Array[],
+  unwrapping: [] as Uint8Array[],
+}));
+
+vi.mock("./crypto/aes-gcm.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./crypto/aes-gcm.js")>();
+  const { AAD_SESSION_KEK } = await import("@harpoc/shared");
+  return {
+    ...original,
+    encrypt: (...args: Parameters<typeof original.encrypt>) => {
+      if (args[2] === AAD_SESSION_KEK) sessionKeys.wrapping.push(args[0]);
+      return original.encrypt(...args);
+    },
+    decrypt: (...args: Parameters<typeof original.decrypt>) => {
+      if (args[4] === AAD_SESSION_KEK) sessionKeys.unwrapping.push(args[0]);
+      return original.decrypt(...args);
+    },
+  };
+});
 
 let tempDir: string;
 let dbPath: string;
@@ -280,6 +310,89 @@ describe("key-buffer wiping on re-unlock / re-load", () => {
   });
 });
 
+// C5 (test-review-2026-10-09): every seal path's wipeKeys() call and the
+// session key's two wipes, observed on the live buffers.
+describe("key-buffer wiping on the seal paths and of the session key (C5)", () => {
+  const allZero = (buf: Uint8Array): boolean => buf.every((b) => b === 0);
+
+  function liveKeys(e: VaultEngine): Uint8Array[] {
+    const keys = e as unknown as { kek: Uint8Array; jwtKey: Uint8Array; auditKey: Uint8Array };
+    return [keys.kek, keys.jwtKey, keys.auditKey];
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("lock() wipes the live KEK, JWT key and audit key", async () => {
+    await engine.initVault("password");
+    const keys = liveKeys(engine);
+    expect(keys.map(allZero)).toEqual([false, false, false]);
+
+    await engine.lock();
+
+    expect(keys.map(allZero)).toEqual([true, true, true]);
+  });
+
+  it("destroy() wipes the live KEK, JWT key and audit key", async () => {
+    await engine.initVault("password");
+    const keys = liveKeys(engine);
+    expect(keys.map(allZero)).toEqual([false, false, false]);
+
+    await engine.destroy();
+
+    expect(keys.map(allZero)).toEqual([true, true, true]);
+  });
+
+  it("the session monitor's expiry seal wipes the live keys (fake timers)", async () => {
+    vi.useFakeTimers();
+    await engine.initVault("password");
+    const keys = liveKeys(engine);
+    expect(keys.map(allZero)).toEqual([false, false, false]);
+
+    vi.setSystemTime(Date.now() + DEFAULT_SESSION_TTL_MS + 1);
+    await vi.advanceTimersByTimeAsync(SESSION_CLEANUP_INTERVAL_MS);
+    await vi.waitFor(() => expect(engine.getState()).toBe(VaultState.SEALED));
+
+    expect(keys.map(allZero)).toEqual([true, true, true]);
+  });
+
+  it("the lazy expiry seal on the next operation wipes the live keys", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    await engine.initVault("password");
+    const keys = liveKeys(engine);
+    expect(keys.map(allZero)).toEqual([false, false, false]);
+
+    vi.setSystemTime(Date.now() + DEFAULT_SESSION_TTL_MS + 1);
+    await expectVaultError(() => engine.listSecrets(), ErrorCode.VAULT_LOCKED);
+
+    expect(keys.map(allZero)).toEqual([true, true, true]);
+  });
+
+  it("writing a session wipes the session key that wrapped the live keys", async () => {
+    sessionKeys.wrapping.length = 0;
+
+    await engine.initVault("password");
+
+    expect(sessionKeys.wrapping).toHaveLength(1);
+    expect(sessionKeys.wrapping[0]?.length).toBe(32);
+    expect(allZero(sessionKeys.wrapping[0] as Uint8Array)).toBe(true);
+  });
+
+  it("loading a session wipes the session key that unwrapped the live keys", async () => {
+    await engine.initVault("password");
+    sessionKeys.unwrapping.length = 0;
+
+    const loaded = secondEngine({ dbPath, sessionPath });
+    expect(await loaded.loadSession()).toBe(true);
+
+    expect(sessionKeys.unwrapping).toHaveLength(1);
+    expect(sessionKeys.unwrapping[0]?.length).toBe(32);
+    expect(allZero(sessionKeys.unwrapping[0] as Uint8Array)).toBe(true);
+    expect(loaded.getState()).toBe(VaultState.UNLOCKED);
+  });
+});
+
 describe("lifecycle", () => {
   it("starts sealed", () => {
     expect(engine.getState()).toBe(VaultState.SEALED);
@@ -448,5 +561,57 @@ describe("double lock / double destroy edge cases", () => {
     await engine.destroy();
     await engine.destroy();
     expect(engine.getState()).toBe(VaultState.SEALED);
+  });
+});
+
+// M-T2b-12 (test-review-2026-10-09): a no-toString tripwire for the long-lived
+// keys — the live KEK, JWT key and audit key themselves, and any Buffer holding
+// the same bytes, throw if stringified while a workflow runs over them.
+describe("long-lived key buffers are never stringified (M-T2b-12)", () => {
+  it("a workflow over the live keys stringifies none of them", async () => {
+    await engine.initVault("password");
+    const live = engine as unknown as { kek: Uint8Array; jwtKey: Uint8Array; auditKey: Uint8Array };
+    const keys = [live.kek, live.jwtKey, live.auditKey];
+    const copies = keys.map((key) => Buffer.from(key));
+    const trips: string[] = [];
+    const trip = (where: string): never => {
+      trips.push(where);
+      throw new Error(`tripwire: a long-lived key was stringified (${where})`);
+    };
+    for (const key of keys) {
+      Object.defineProperty(key, "toString", {
+        value: () => trip("key.toString"),
+        configurable: true,
+      });
+    }
+    const bufferToString = Buffer.prototype.toString;
+    const tripwire = vi.spyOn(Buffer.prototype, "toString").mockImplementation(function (
+      this: Buffer,
+      ...args: unknown[]
+    ) {
+      if (copies.some((copy) => copy.equals(this))) trip(`Buffer#toString(${String(args[0])})`);
+      return bufferToString.apply(this, args as Parameters<Buffer["toString"]>);
+    });
+    try {
+      await engine.createSecret({
+        name: "tripwire",
+        type: "api_key",
+        value: new Uint8Array(Buffer.from("tripwire-value")),
+      });
+      await engine.getSecretValue("secret://tripwire");
+      await engine.rotateSecret("secret://tripwire", new Uint8Array(Buffer.from("tripwire-next")));
+      const token = engine.createToken("tripwire-user", ["read"], undefined, {
+        principalType: "user",
+      });
+      engine.verifyToken(token);
+      engine.listSecrets();
+      engine.queryAudit({});
+      engine.verifyAuditChain();
+      await engine.lock();
+    } finally {
+      tripwire.mockRestore();
+    }
+
+    expect(trips).toEqual([]);
   });
 });

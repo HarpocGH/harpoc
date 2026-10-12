@@ -20,7 +20,7 @@ describe.runIf(process.platform === "win32")("resolveNativeSshClient", () => {
   afterEach(() => {
     if (savedPath === undefined) delete process.env.PATH;
     else process.env.PATH = savedPath;
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("returns the resolved path of a client with no runtime DLL beside it", () => {

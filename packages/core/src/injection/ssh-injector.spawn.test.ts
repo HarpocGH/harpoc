@@ -5,15 +5,17 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, InjectionPolicy, SshAction } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs } from "./allowlist.js";
+import { agentSocketAccepts } from "./__fixtures__/agent-socket.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
@@ -223,6 +225,70 @@ describeSsh("SshInjector spawn hardening (ssh resolvable)", () => {
     // The per-invocation temp file is gone once the call completes.
     expect(existsSync(identityPath)).toBe(false);
   });
+
+  // I8: the agent's socket lives for the one command — serving at spawn, gone once the call settles.
+  it("disposes the agent's socket once the call resolves", async () => {
+    let sock = "";
+    let servingAtSpawn = false;
+    spawnMock.mockImplementation(async (_cmd, _args, opts) => {
+      sock = opts.env.SSH_AUTH_SOCK ?? "";
+      servingAtSpawn = await agentSocketAccepts(sock);
+      return OK_RESULT;
+    });
+
+    await injector.executeWithSecret(
+      ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      policy({ host_allowlist: ["deploy.example.com"], command_allowlist: [SSH as string] }),
+      SSH_CONFIG,
+    );
+
+    expect(servingAtSpawn).toBe(true);
+    expect(await agentSocketAccepts(sock)).toBe(false);
+  });
+
+  it("disposes the agent's socket when the call rejects past agent start", async () => {
+    let sock = "";
+    let servingAtSpawn = false;
+    spawnMock.mockImplementation(async (_cmd, _args, opts) => {
+      sock = opts.env.SSH_AUTH_SOCK ?? "";
+      servingAtSpawn = await agentSocketAccepts(sock);
+      throw VaultError.networkIsolationUnavailable("mocked");
+    });
+
+    await expect(
+      injector.executeWithSecret(
+        ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        policy({ host_allowlist: ["deploy.example.com"], command_allowlist: [SSH as string] }),
+        SSH_CONFIG,
+      ),
+    ).rejects.toMatchObject({ code: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE });
+
+    expect(servingAtSpawn).toBe(true);
+    expect(await agentSocketAccepts(sock)).toBe(false);
+  });
+
+  // POSIX modes only: win32 serves the agent on a named pipe, no directory.
+  it.skipIf(process.platform === "win32")(
+    "serves the agent from a 0700 directory, captured at spawn time (Unix only)",
+    async () => {
+      let dirModeAtSpawn = 0;
+      spawnMock.mockImplementation((_cmd, _args, opts) => {
+        dirModeAtSpawn = statSync(dirname(opts.env.SSH_AUTH_SOCK ?? "")).mode & 0o777;
+        return Promise.resolve(OK_RESULT);
+      });
+
+      await injector.executeWithSecret(
+        ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        policy({ host_allowlist: ["deploy.example.com"], command_allowlist: [SSH as string] }),
+        SSH_CONFIG,
+      );
+
+      expect(dirModeAtSpawn).toBe(0o700);
+    },
+  );
 
   // T14: §4.5.3 layer 3 for the SSH context — the child gets a built
   // environment, never the vault process's own.

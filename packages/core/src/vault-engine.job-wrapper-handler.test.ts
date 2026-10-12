@@ -22,7 +22,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   setJobWrapperUnavailableHandler(null);
-  rmSync(dir, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe("VaultEngine — the job-wrapper warning seam (note 2, 2026-09-10)", () => {

@@ -1,11 +1,12 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuditEventType, ErrorCode } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, VaultState } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { forceNetworkIsolationUnavailableForTests } from "./injection/network-isolation.js";
+import { registryOf } from "./__fixtures__/engine-seams.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -405,5 +406,81 @@ describe("useSecret (MCP proxy)", () => {
     const terminates = engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
     expect(terminates).toHaveLength(1);
     expect(terminates[0]?.detail?.reason).toBe("vault_lock");
+  });
+
+  // M-P2-23 (test-review-2026-10-09): the downstream teardown on the seal paths
+  // beside lock — destroy, the monitor's expiry seal and the lazy expiry seal.
+  async function spawnLiveDownstream(): Promise<number> {
+    await engine.setInjectionPolicy(
+      "secret://mcpuse",
+      { url_allowlist: [], command_allowlist: [process.execPath], env_allowlist: [] },
+      { acknowledge_interpreters: true },
+    );
+    await engine.setMcpServerConfig("secret://mcpuse", {
+      server_name: "test-mcp",
+      transport: "stdio",
+      protocol: "2025-11-25",
+      command: process.execPath,
+      args: ["-e", MCP_TEST_SERVER],
+      env_var: "DOWNSTREAM_TOKEN",
+    });
+    await engine.useSecret("secret://mcpuse", { type: "mcp", server: "test-mcp", tool: "leak" });
+    const secretId = await engine.resolveSecretId("secret://mcpuse");
+    const pid = registryOf(engine).get(secretId)?.stdioTransport?.pid;
+    if (pid === undefined) throw new Error("expected a live stdio downstream child");
+    expect(isAlive(pid)).toBe(true);
+    return pid;
+  }
+
+  function isAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ESRCH") return false;
+      throw err;
+    }
+  }
+
+  function terminateReasons(): unknown[] {
+    return engine
+      .queryAudit({ eventType: AuditEventType.MCP_TERMINATE })
+      .map((row) => row.detail?.reason);
+  }
+
+  it("destroy() terminates live downstream servers and audits mcp.terminate", async () => {
+    const pid = await spawnLiveDownstream();
+
+    await engine.destroy();
+
+    await vi.waitFor(() => expect(isAlive(pid)).toBe(false));
+    await engine.unlock("password");
+    expect(terminateReasons()).toEqual(["engine_destroy"]);
+  });
+
+  it("the monitor's expiry seal terminates live downstream servers and audits mcp.terminate", async () => {
+    const pid = await spawnLiveDownstream();
+    const session = JSON.parse(readFileSync(sessionPath, "utf-8")) as Record<string, unknown>;
+    session.expires_at = Date.now() - 1;
+    writeFileSync(sessionPath, JSON.stringify(session));
+
+    await (engine as unknown as { sessionMonitorTick(): Promise<void> }).sessionMonitorTick();
+
+    expect(engine.getState()).toBe(VaultState.SEALED);
+    await vi.waitFor(() => expect(isAlive(pid)).toBe(false));
+    await engine.unlock("password");
+    expect(terminateReasons()).toEqual(["session_expired"]);
+  });
+
+  it("the lazy expiry seal kills live downstream servers and writes no mcp.terminate row (the synchronous seal)", async () => {
+    const pid = await spawnLiveDownstream();
+    (engine as unknown as { sessionExpiresAt: number }).sessionExpiresAt = Date.now() - 1;
+
+    await expectVaultError(() => engine.listSecrets(), ErrorCode.VAULT_LOCKED);
+
+    expect(engine.getState()).toBe(VaultState.SEALED);
+    await vi.waitFor(() => expect(isAlive(pid)).toBe(false));
+    await engine.unlock("password");
+    expect(terminateReasons()).toEqual([]);
   });
 });

@@ -387,6 +387,15 @@ describe("computeNameHmac", () => {
     const h2 = await computeNameHmac(cachedKeys.kek, "token", "proj");
     expect(h1).not.toBe(h2);
   });
+
+  // M-T2b-12 (test-review-2026-10-09): HKDF_INFO_NAME_INDEX's value — every
+  // stored name_hmac depends on it, so it is pinned as a known answer.
+  it("derives the name-index key under HKDF_INFO_NAME_INDEX — a known answer for a fixed KEK", async () => {
+    const kek = new Uint8Array(32).fill(0x2a);
+    expect(await computeNameHmac(kek, "kat-name", null)).toBe(
+      "2cc8caa2fe1b9ad978f1c9150a0f3bf52b7af12e258635a7a4083e2747144000",
+    );
+  });
 });
 
 describe("full key hierarchy lifecycle", () => {
