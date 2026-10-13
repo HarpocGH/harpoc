@@ -106,6 +106,29 @@ describe("audit --since validation", () => {
   });
 });
 
+// I29 (test-review-2026-10-09): getting-started documents `audit --secret <id>`.
+describe("audit --secret (I29)", () => {
+  let spies: CliSpies;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    spies = spyCli();
+  });
+
+  afterEach(() => {
+    spies.restore();
+  });
+
+  it("--secret reaches queryAudit as secretId, the other filters at their defaults", async () => {
+    await run(["--secret", "secret-id-7", "--json"]);
+    expect(mockEngine.queryAudit).toHaveBeenCalledTimes(1);
+    expect(mockEngine.queryAudit).toHaveBeenCalledWith(
+      { secretId: "secret-id-7", eventType: undefined, since: undefined, limit: 50 },
+      undefined,
+    );
+  });
+});
+
 describe("audit table Principal column (by whom, thesis §4.3.4)", () => {
   let spies: CliSpies;
 

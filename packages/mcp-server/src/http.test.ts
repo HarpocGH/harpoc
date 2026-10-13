@@ -13,6 +13,40 @@ import type { McpHttpServer } from "./http.js";
 import { startValueCollector } from "./elicitation/value-collector.js";
 import type { ValueCollector } from "./elicitation/value-collector.js";
 
+// I10 (test-review-2026-10-09): the listener builds its rate limiter and its
+// injection guard itself, so both modules are wrapped — every instance is
+// recorded, and a case may set the limiter's global tier (default: the
+// product's own tiers, so every other case here runs unchanged).
+const listenerParts = vi.hoisted(() => ({
+  globalLimit: undefined as number | undefined,
+  limiters: [] as object[],
+  guards: [] as Array<{ readonly totalRedactions: number }>,
+}));
+
+vi.mock("./guards/rate-limiter.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./guards/rate-limiter.js")>();
+  return {
+    ...actual,
+    RateLimiter: vi.fn(function RateLimiter() {
+      const limiter = new actual.RateLimiter(listenerParts.globalLimit);
+      listenerParts.limiters.push(limiter);
+      return limiter;
+    }),
+  };
+});
+
+vi.mock("./guards/injection-guard.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./guards/injection-guard.js")>();
+  return {
+    ...actual,
+    InjectionGuard: vi.fn(function InjectionGuard() {
+      const guard = new actual.InjectionGuard();
+      listenerParts.guards.push(guard);
+      return guard;
+    }),
+  };
+});
+
 const TOKEN = "valid.jwt.token";
 
 function tokenPayload(scope: string[] = ["use", "list"]): Record<string, unknown> {
@@ -885,6 +919,136 @@ describe("startMcpHttpServer — session reclamation (M6)", () => {
     expect((await ping(server.port, first.sessionId as string)).status).toBeLessThan(400);
     expect((await ping(server.port, second.sessionId as string)).status).toBeLessThan(400);
   }, 20_000);
+});
+
+// I10 (test-review-2026-10-09): `05-implementation.tex:211` — "the rate limiter
+// and injection guard are shared process-wide rather than per session, so that
+// opening a fresh session cannot reset a rate-limit budget". One listener, a
+// global tier of one: spent by one 2025-11-25 session, then refused to a fresh
+// session and to a 2026-07-28 request on their first call.
+describe("startMcpHttpServer — one rate limiter and one injection guard per listener (I10)", () => {
+  let server: McpHttpServer | undefined;
+  const clients: Client[] = [];
+
+  beforeEach(() => {
+    listenerParts.limiters.length = 0;
+    listenerParts.guards.length = 0;
+  });
+
+  afterEach(async () => {
+    for (const client of clients.splice(0)) await client.close();
+    await server?.close();
+    server = undefined;
+    listenerParts.globalLimit = undefined;
+  });
+
+  async function startListener(engine: VaultEngine, globalLimit?: number): Promise<number> {
+    listenerParts.globalLimit = globalLimit;
+    server = await startMcpHttpServer({ engine, port: 0 });
+    return server.port;
+  }
+
+  async function legacyClient(port: number): Promise<Client> {
+    const { client } = await connectClient(port, TOKEN);
+    clients.push(client);
+    return client;
+  }
+
+  async function modernClient(port: number): Promise<Client> {
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${TOKEN}` } },
+    });
+    const client = new Client(
+      { name: "modern-test-client", version: "1.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    await client.connect(transport);
+    clients.push(client);
+    return client;
+  }
+
+  type ToolResult = { isError?: boolean; content: Array<{ type: string; text: string }> };
+
+  async function listSecrets(client: Client): Promise<ToolResult> {
+    return (await client.callTool({ name: "list_secrets", arguments: {} })) as ToolResult;
+  }
+
+  function expectRateLimited(result: ToolResult): void {
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Global rate limit exceeded");
+  }
+
+  it("control: a session's own second call is refused once it spent the global tier of one", async () => {
+    const engine = mockEngine();
+    const port = await startListener(engine, 1);
+    const first = await legacyClient(port);
+
+    expect((await listSecrets(first)).isError ?? false).toBe(false);
+    expectRateLimited(await listSecrets(first));
+    expect(engine.listSecrets).toHaveBeenCalledTimes(1);
+  });
+
+  it("a fresh 2025-11-25 session is refused by the spent global tier on its first call", async () => {
+    const engine = mockEngine();
+    const port = await startListener(engine, 1);
+    const first = await legacyClient(port);
+    expect((await listSecrets(first)).isError ?? false).toBe(false);
+
+    const fresh = await legacyClient(port);
+    expectRateLimited(await listSecrets(fresh));
+    expect(engine.listSecrets).toHaveBeenCalledTimes(1);
+    expect(listenerParts.limiters).toHaveLength(1);
+  });
+
+  it("a 2026-07-28 request is refused by the spent global tier on its first call", async () => {
+    const engine = mockEngine();
+    const port = await startListener(engine, 1);
+    const first = await legacyClient(port);
+    expect((await listSecrets(first)).isError ?? false).toBe(false);
+
+    const modern = await modernClient(port);
+    expectRateLimited(await listSecrets(modern));
+    expect(engine.listSecrets).toHaveBeenCalledTimes(1);
+    expect(listenerParts.limiters).toHaveLength(1);
+  });
+
+  it("one injection guard serves every session and modern request: its redaction count accumulates across them", async () => {
+    const engine = mockEngine({
+      // A fresh result per call: the sanitizer redacts in place.
+      useSecret: vi.fn(() =>
+        Promise.resolve({
+          type: "http",
+          status: 200,
+          body: "Bearer eyJhbGciOiJIUzI1NiJ9.i10-guard.signature",
+        }),
+      ),
+    });
+    const port = await startListener(engine);
+    const action = {
+      type: "http",
+      method: "GET",
+      url: "https://127.0.0.1:8443/i10",
+      injection: { type: "bearer" },
+    };
+
+    for (const client of [
+      await legacyClient(port),
+      await legacyClient(port),
+      await modernClient(port),
+    ]) {
+      const result = (await client.callTool({
+        name: "use_secret",
+        arguments: { handle: "secret://i10-key", action },
+      })) as ToolResult;
+      expect(result.isError ?? false).toBe(false);
+      expect(result.content[0]?.text).toContain("[REDACTED]");
+      expect(result.content[0]?.text).not.toContain("eyJhbG");
+    }
+
+    expect(engine.useSecret).toHaveBeenCalledTimes(3);
+    expect(listenerParts.guards[0]?.totalRedactions).toBe(3);
+    expect(listenerParts.guards).toHaveLength(1);
+  });
 });
 
 describe("the 2026-07-28 leg (dual-era, design R1)", () => {

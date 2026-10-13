@@ -193,6 +193,17 @@ describe("buildOAuthProviderConfig", () => {
     );
   });
 
+  // I34 (test-review-2026-10-09): getting-started documents `--redirect-uri`.
+  it("passes --redirect-uri into the config as redirect_uri (I34)", () => {
+    const { config } = buildOAuthProviderConfig(
+      "gh-token",
+      OAuthGrantType.AUTHORIZATION_CODE,
+      { provider: "github", clientId: "client-1", redirectUri: "http://127.0.0.1:8765/callback" },
+      undefined,
+    );
+    expect(config.redirect_uri).toBe("http://127.0.0.1:8765/callback");
+  });
+
   it("passes project through and includes the client secret in the config", () => {
     const { config, project } = buildOAuthProviderConfig(
       "proj-token",

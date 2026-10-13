@@ -135,6 +135,29 @@ describe("secret set — type validation precedes any prompt (review fix F4)", (
   });
 });
 
+// I30 (test-review-2026-10-09): getting-started documents `secret set --type`
+// with its valid values and `--json`; the invalid value is pinned above.
+describe("secret set — a valid --type and --json (I30)", () => {
+  it("--type certificate reaches createSecret as the secret's type", async () => {
+    await run(["set", "k", "--type", "certificate"]);
+    expect(mockEngine.createSecret).toHaveBeenCalledTimes(1);
+    expect(mockEngine.createSecret).toHaveBeenCalledWith(
+      { name: "k", type: "certificate", project: undefined, value: expect.any(Buffer) },
+      undefined,
+    );
+    expect(spies.exitSpy).not.toHaveBeenCalled();
+  });
+
+  it("--json prints the engine's create result as one JSON document, not the OK line", async () => {
+    const created = { handle: "secret://k", status: "created", message: "Secret created" };
+    mockEngine.createSecret.mockResolvedValueOnce(created);
+    await run(["set", "k", "--json"]);
+    expect(JSON.parse(spies.stdout())).toEqual(created);
+    expect(spies.stderr()).toBe("");
+    expect(spies.exitSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe("secret set/rotate — --no-decrypt and --from-file Commander mapping (review T5)", () => {
   // The classic Commander negation trap: `--no-decrypt` materializes as
   // options.decrypt === false, NOT options.noDecrypt. Reading the wrong

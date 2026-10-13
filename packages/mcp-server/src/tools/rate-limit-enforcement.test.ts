@@ -234,4 +234,85 @@ describe("every MCP tool consults the rate limiter (T8)", () => {
     const otherName = await callTool(server, "rotate_secret", { handle: "secret://other-key" });
     expect(otherName.isError ?? false).toBe(false);
   });
+
+  /**
+   * I32 (test-review-2026-10-09): `start_oauth_flow` is keyed per requested
+   * `project/name` under `create:` — the key it shares with `create_secret`
+   * (`mcp.md`: "rate-limit key `create:${project}/${name}`"). The cases send
+   * `authorization_code`: it reaches the limiter and then `createOAuthSecret`
+   * without opening a value collector (`start-oauth-flow.ts:56-70`). The
+   * limiter refuses before the engine is reached.
+   */
+  const OAUTH_ARGS = {
+    provider: "github",
+    grant_type: "authorization_code",
+    client_id: "client-1",
+  };
+
+  it("start_oauth_flow buckets per requested project/name, not vault-wide (I32)", async () => {
+    const server = track(new McpServer({ name: "t", version: "0.0.0" }));
+    const limiter = new RateLimiter(10_000, 1);
+    registerStartOauthFlow(server, engine, scopeGuard, limiter, oauthManager);
+
+    const first = await callTool(server, "start_oauth_flow", {
+      name: "gh-app",
+      project: "api",
+      ...OAUTH_ARGS,
+    });
+    expect(first.isError ?? false).toBe(false);
+
+    const sameName = await callTool(server, "start_oauth_flow", {
+      name: "gh-app",
+      project: "api",
+      ...OAUTH_ARGS,
+    });
+    expect(sameName.isError).toBe(true);
+    expect(sameName.content[0]?.text ?? "").toContain("Per-secret rate limit exceeded");
+    expect(engine.createOAuthSecret).toHaveBeenCalledTimes(1);
+
+    const otherName = await callTool(server, "start_oauth_flow", {
+      name: "gh-app-2",
+      project: "api",
+      ...OAUTH_ARGS,
+    });
+    expect(otherName.isError ?? false).toBe(false);
+    const otherProject = await callTool(server, "start_oauth_flow", {
+      name: "gh-app",
+      project: "web",
+      ...OAUTH_ARGS,
+    });
+    expect(otherProject.isError ?? false).toBe(false);
+    expect(engine.createOAuthSecret).toHaveBeenCalledTimes(3);
+  });
+
+  it("start_oauth_flow shares the create: bucket with create_secret for the same project/name (I32)", async () => {
+    const server = track(new McpServer({ name: "t", version: "0.0.0" }));
+    const limiter = new RateLimiter(10_000, 1);
+    registerCreateSecret(server, engine, scopeGuard, limiter);
+    registerStartOauthFlow(server, engine, scopeGuard, limiter, oauthManager);
+
+    const created = await callTool(server, "create_secret", {
+      name: "gh-app",
+      type: "api_key",
+      project: "api",
+    });
+    expect(created.isError ?? false).toBe(false);
+
+    const oauth = await callTool(server, "start_oauth_flow", {
+      name: "gh-app",
+      project: "api",
+      ...OAUTH_ARGS,
+    });
+    expect(oauth.isError).toBe(true);
+    expect(oauth.content[0]?.text ?? "").toContain("Per-secret rate limit exceeded");
+    expect(engine.createOAuthSecret).not.toHaveBeenCalled();
+
+    const otherName = await callTool(server, "start_oauth_flow", {
+      name: "gh-app-2",
+      project: "api",
+      ...OAUTH_ARGS,
+    });
+    expect(otherName.isError ?? false).toBe(false);
+    expect(engine.createOAuthSecret).toHaveBeenCalledTimes(1);
+  });
 });

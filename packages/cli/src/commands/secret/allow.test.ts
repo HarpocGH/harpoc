@@ -453,3 +453,32 @@ describe("secret allow command — strict tree exit flag (2026-09-10)", () => {
     );
   });
 });
+
+// I25 (test-review-2026-10-09): getting-started documents `--host <pattern>`
+// and `--env <name>`; each parsed by the command lands in the engine call.
+describe("secret allow command — host and env allowlist flags (I25)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY });
+  });
+
+  it("repeated --host replaces host_allowlist in the engine call, nothing else changed", async () => {
+    await run(["secret://k", "--host", "127.0.0.1:5432", "--host", "localhost"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      { ...STORED_POLICY, host_allowlist: ["127.0.0.1:5432", "localhost"] },
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+  });
+
+  it("repeated --env replaces env_allowlist in the engine call, nothing else changed", async () => {
+    await run(["secret://k", "--env", "HOME", "--env", "LANG"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      { ...STORED_POLICY, env_allowlist: ["HOME", "LANG"] },
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+  });
+});

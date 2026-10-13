@@ -452,57 +452,58 @@ describe("compiled binary smoke: stdio MCP token gate (V3)", () => {
 // Windows is the platform where isolation is unsupported by design, so the
 // compiled binary exercises the REAL fail-closed refusal path — no test
 // hook, no mock (review T2: the third pinning level for the refusal).
-const describeWindows = process.platform === "win32" ? describe : describe.skip;
+describe.skipIf(process.platform !== "win32")(
+  "compiled binary smoke: network-isolation refusal (Windows)",
+  () => {
+    it("a policy-demanding process use exits 1 and the denial is audited", async () => {
+      const set = await runCli(["secret", "set", "net-refuse"], {
+        stdin: "refuse-secret-value\n",
+      });
+      expect(set.code).toBe(0);
 
-describeWindows("compiled binary smoke: network-isolation refusal (Windows)", () => {
-  it("a policy-demanding process use exits 1 and the denial is audited", async () => {
-    const set = await runCli(["secret", "set", "net-refuse"], {
-      stdin: "refuse-secret-value\n",
-    });
-    expect(set.code).toBe(0);
+      const allow = await runCli([
+        "secret",
+        "allow",
+        "secret://net-refuse",
+        "--command",
+        process.execPath,
+        "--acknowledge-interpreter",
+        "--network-isolation",
+      ]);
+      expect(allow.code).toBe(0);
 
-    const allow = await runCli([
-      "secret",
-      "allow",
-      "secret://net-refuse",
-      "--command",
-      process.execPath,
-      "--acknowledge-interpreter",
-      "--network-isolation",
-    ]);
-    expect(allow.code).toBe(0);
+      const use = await runCli([
+        "secret",
+        "use",
+        "secret://net-refuse",
+        "--action",
+        "process",
+        "--command",
+        process.execPath,
+        "--arg=-e",
+        "--arg=process.exit(0)",
+        "--env-var",
+        "TOKEN",
+        "--json",
+      ]);
+      expect(use.code).toBe(1);
+      expect(use.stderr).toContain("NETWORK_ISOLATION_UNAVAILABLE");
+      // The payload must never have run: a refusal happens BEFORE any spawn.
+      expect(use.stdout).not.toContain("exit_code");
 
-    const use = await runCli([
-      "secret",
-      "use",
-      "secret://net-refuse",
-      "--action",
-      "process",
-      "--command",
-      process.execPath,
-      "--arg=-e",
-      "--arg=process.exit(0)",
-      "--env-var",
-      "TOKEN",
-      "--json",
-    ]);
-    expect(use.code).toBe(1);
-    expect(use.stderr).toContain("NETWORK_ISOLATION_UNAVAILABLE");
-    // The payload must never have run: a refusal happens BEFORE any spawn.
-    expect(use.stdout).not.toContain("exit_code");
-
-    const audit = await runCli(["audit", "--json"]);
-    expect(audit.code).toBe(0);
-    const events = JSON.parse(audit.stdout) as {
-      success?: boolean | number;
-      detail?: Record<string, unknown>;
-    }[];
-    const denied = events.find((e) => e.detail?.error === "NETWORK_ISOLATION_UNAVAILABLE");
-    expect(denied).toBeDefined();
-    expect(denied?.detail?.network_isolation).toBe(true);
-    expect(Boolean(denied?.success)).toBe(false);
-  }, 60_000);
-});
+      const audit = await runCli(["audit", "--json"]);
+      expect(audit.code).toBe(0);
+      const events = JSON.parse(audit.stdout) as {
+        success?: boolean | number;
+        detail?: Record<string, unknown>;
+      }[];
+      const denied = events.find((e) => e.detail?.error === "NETWORK_ISOLATION_UNAVAILABLE");
+      expect(denied).toBeDefined();
+      expect(denied?.detail?.network_isolation).toBe(true);
+      expect(Boolean(denied?.success)).toBe(false);
+    }, 60_000);
+  },
+);
 
 // L11: the vault directory and database were created with no explicit mode —
 // on POSIX umask-dependent, typically world-readable — while the session file

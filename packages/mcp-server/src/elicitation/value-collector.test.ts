@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { describe, it, expect, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/client";
 import { CLIENT_CAPABILITIES_META_KEY, InMemoryTransport } from "@modelcontextprotocol/server";
@@ -5,8 +6,10 @@ import type { McpServer, ServerContext } from "@modelcontextprotocol/server";
 import { connectModernInMemoryClient } from "@harpoc/test-utils";
 import type { InMemoryMcpClient } from "@harpoc/test-utils";
 import type { VaultEngine } from "@harpoc/core";
+import type { OAuthManager } from "@harpoc/oauth-proxy";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { createMcpServer } from "../server.js";
+import type { CreateMcpServerOptions } from "../server.js";
 import { valueRequestState } from "./request-state.js";
 import * as ttyPrompt from "./tty-prompt.js";
 import * as valueCollector from "./value-collector.js";
@@ -17,6 +20,14 @@ import {
   runModernValueRound,
   startValueCollector,
 } from "./value-collector.js";
+import type { ValueCollector } from "./value-collector.js";
+
+// M-T2b-12 (test-review-2026-10-09): the collector's token compare, observed —
+// node:crypto's timingSafeEqual wrapped as a pass-through spy for the file.
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:crypto")>();
+  return { ...actual, timingSafeEqual: vi.fn(actual.timingSafeEqual) };
+});
 
 const FORM_HEADERS = { "content-type": "application/x-www-form-urlencoded" };
 
@@ -302,6 +313,73 @@ describe("startValueCollector — concurrency ceiling (M10b)", () => {
   }, 20_000);
 });
 
+/**
+ * M-T2b-12 (test-review-2026-10-09): the collector's stated values — it expires
+ * five minutes after it opens, every answer carries `Cache-Control: no-store`,
+ * and the URL token is compared in constant time (the docblock above
+ * `startValueCollector`: "a 256-bit single-use token (timing-safe compared)").
+ */
+describe("startValueCollector — the stated values (M-T2b-12)", () => {
+  it("expires five minutes after it opens, not before", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let collector: ValueCollector | undefined;
+    try {
+      collector = await startValueCollector({ subject: "k", operation: "create" });
+      let outcome: string | undefined;
+      collector.waitForValue().then(
+        () => (outcome = "value"),
+        (err: unknown) => (outcome = (err as Error).message),
+      );
+
+      await vi.advanceTimersByTimeAsync(5 * 60_000 - 1);
+      expect(outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(outcome).toBe("Value collection timed out");
+    } finally {
+      vi.useRealTimers();
+      await collector?.close();
+    }
+  });
+
+  it("answers the form and the submission with Cache-Control: no-store", async () => {
+    const collector = await startValueCollector({ subject: "k", operation: "create" });
+    try {
+      const form = await fetch(collector.url);
+      expect(form.status).toBe(200);
+      expect(form.headers.get("cache-control")).toBe("no-store");
+      await form.text();
+
+      const post = await fetch(collector.url, {
+        method: "POST",
+        headers: FORM_HEADERS,
+        body: postBody("no-store-value"),
+      });
+      expect(post.status).toBe(200);
+      expect(post.headers.get("cache-control")).toBe("no-store");
+      await post.text();
+      await collector.waitForValue();
+    } finally {
+      await collector.close();
+    }
+  });
+
+  it("compares the URL token with timingSafeEqual", async () => {
+    const collector = await startValueCollector({ subject: "k", operation: "create" });
+    try {
+      const token = Buffer.from(new URL(collector.url).pathname.slice("/collect/".length), "utf8");
+      expect(token).toHaveLength(43);
+      vi.mocked(timingSafeEqual).mockClear();
+
+      const form = await fetch(collector.url);
+      expect(form.status).toBe(200);
+      await form.text();
+      expect(timingSafeEqual).toHaveBeenCalledWith(token, token);
+    } finally {
+      await collector.close();
+    }
+  });
+});
+
 describe("collectValueViaUrlElicitation", () => {
   interface FakeServerParts {
     caps: Record<string, unknown> | undefined;
@@ -407,8 +485,9 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
   async function connect(
     engine: VaultEngine,
     clientOptions: ConstructorParameters<typeof Client>[1],
+    serverOptions: Omit<CreateMcpServerOptions, "engine"> = {},
   ): Promise<{ client: Client; close: () => Promise<void> }> {
-    const mcpServer = createMcpServer({ engine, allowTokenless: true });
+    const mcpServer = createMcpServer({ engine, allowTokenless: true, ...serverOptions });
     const client = new Client({ name: "e2e-client", version: "1.0.0" }, clientOptions);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await mcpServer.connect(serverTransport);
@@ -533,6 +612,147 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       expect(rotatedPayload.status).toBe("pending_rotation");
       expect(engine.rotateSecret).not.toHaveBeenCalled();
     } finally {
+      await close();
+    }
+  });
+
+  // M-T2a-9 (test-review-2026-10-09): the priority "URL-mode > CLI stdin >
+  // deferred" (`04:250`) as an ordering — a URL-capable client on a server with
+  // the terminal prompt enabled collects through the form, and the terminal
+  // prompt is never consulted.
+  it("a URL-capable client collects through the form while the enabled terminal prompt is never consulted (M-T2a-9)", async () => {
+    const engine = mockEngine();
+    const tty = vi
+      .spyOn(ttyPrompt, "collectValueFromTty")
+      .mockResolvedValue(new Uint8Array(Buffer.from("typed-at-the-terminal", "utf8")));
+    let captured = "";
+    vi.mocked(engine.setSecretValue).mockImplementation((_handle: string, value: Uint8Array) => {
+      captured = Buffer.from(value).toString("utf8");
+      return Promise.resolve();
+    });
+
+    const { client, close } = await connect(
+      engine,
+      { capabilities: { elicitation: { url: {} } } },
+      { enableTtyPrompt: true },
+    );
+    client.setRequestHandler("elicitation/create", async (request) => {
+      const params = request.params as { url?: string };
+      await fetch(params.url as string, {
+        method: "POST",
+        headers: FORM_HEADERS,
+        body: postBody("browser-entered-value"),
+      });
+      return { action: "accept" };
+    });
+
+    try {
+      const result = (await client.callTool({
+        name: "create_secret",
+        arguments: { name: "api-key", type: "api_key" },
+      })) as { content: Array<{ text: string }> };
+      const payload = JSON.parse(result.content[0]?.text ?? "{}") as {
+        status: string;
+        message: string;
+      };
+      expect(payload.status).toBe("created");
+      expect(payload.message).toContain("URL-mode elicitation");
+      expect(captured).toBe("browser-entered-value");
+      expect(tty).not.toHaveBeenCalled();
+    } finally {
+      tty.mockRestore();
+      await close();
+    }
+  });
+
+  // M-P3-6 (test-review-2026-10-09): the terminal-prompt fallback entered on
+  // the legacy (2025-11-25) leg — a client without elicitation.url, a server
+  // with the prompt enabled — for create_secret and start_oauth_flow; the value
+  // reaches the engine (or the OAuth manager) and never the tool result.
+  it("create_secret's legacy leg falls to the terminal prompt for a client without elicitation.url (M-P3-6)", async () => {
+    const engine = mockEngine();
+    const tty = vi
+      .spyOn(ttyPrompt, "collectValueFromTty")
+      .mockResolvedValue(new Uint8Array(Buffer.from("typed-at-the-terminal", "utf8")));
+    let captured = "";
+    vi.mocked(engine.setSecretValue).mockImplementation((_handle: string, value: Uint8Array) => {
+      captured = Buffer.from(value).toString("utf8");
+      return Promise.resolve();
+    });
+
+    const { client, close } = await connect(
+      engine,
+      { capabilities: {} },
+      { enableTtyPrompt: true },
+    );
+    try {
+      const result = (await client.callTool({
+        name: "create_secret",
+        arguments: { name: "api-key", type: "api_key" },
+      })) as { content: Array<{ text: string }> };
+      const payload = JSON.parse(result.content[0]?.text ?? "{}") as {
+        status: string;
+        message: string;
+      };
+      expect(payload.status).toBe("created");
+      expect(payload.message).toContain("a terminal prompt");
+      expect(tty).toHaveBeenCalledTimes(1);
+      expect(tty).toHaveBeenCalledWith({ subject: "api-key", operation: "create" });
+      expect(captured).toBe("typed-at-the-terminal");
+      expect(result.content[0]?.text).not.toContain("typed-at-the-terminal");
+    } finally {
+      tty.mockRestore();
+      await close();
+    }
+  });
+
+  it("start_oauth_flow's client-credentials leg falls to the terminal prompt for a client without elicitation.url (M-P3-6)", async () => {
+    const engine = mockEngine({
+      createOAuthSecret: vi.fn().mockResolvedValue({ handle: "secret://m2m", secretId: "uuid-1" }),
+    });
+    const tty = vi
+      .spyOn(ttyPrompt, "collectValueFromTty")
+      .mockResolvedValue(new Uint8Array(Buffer.from("client-secret-at-the-terminal", "utf8")));
+    const startClientCredentials = vi
+      .fn()
+      .mockResolvedValue({ handle: "secret://m2m", status: "active", message: "authorized" });
+    const oauthManager = {
+      startDeviceCode: vi.fn(),
+      startClientCredentials,
+    } as unknown as OAuthManager;
+
+    const { client, close } = await connect(
+      engine,
+      { capabilities: {} },
+      { enableTtyPrompt: true, oauthManager },
+    );
+    try {
+      const result = (await client.callTool({
+        name: "start_oauth_flow",
+        arguments: {
+          name: "m2m",
+          provider: "custom",
+          grant_type: "client_credentials",
+          client_id: "client-123",
+          token_endpoint: "https://127.0.0.1:8443/oauth/token",
+        },
+      })) as { content: Array<{ text: string }> };
+      const payload = JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown>;
+      expect(payload).toEqual({ handle: "secret://m2m", status: "active", message: "authorized" });
+      expect(tty).toHaveBeenCalledTimes(1);
+      expect(tty).toHaveBeenCalledWith({
+        subject: "m2m (OAuth client secret)",
+        operation: "create",
+      });
+      expect(startClientCredentials).toHaveBeenCalledWith(
+        "m2m",
+        expect.objectContaining({ client_secret: "client-secret-at-the-terminal" }),
+        undefined,
+        expect.objectContaining({ principal_id: "tokenless-stdio" }),
+      );
+      expect(result.content[0]?.text).not.toContain("client-secret-at-the-terminal");
+    } finally {
+      tty.mockRestore();
       await close();
     }
   });
@@ -1068,6 +1288,41 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         expect(payload.message).toContain("a terminal prompt");
         expect(tty).toHaveBeenCalledWith({ subject: "api-key", operation: "create" });
         expect(captured).toBe("typed-at-the-terminal");
+      } finally {
+        tty.mockRestore();
+        await modern.close();
+      }
+    });
+
+    // M-P3-6 (test-review-2026-10-09): the same fallback for rotate_secret.
+    it("rotate_secret falls to the terminal prompt when a modern retry declines (M-P3-6)", async () => {
+      const engine = mockEngine();
+      const tty = vi
+        .spyOn(ttyPrompt, "collectValueFromTty")
+        .mockResolvedValue(new Uint8Array(Buffer.from("rotated-at-the-terminal", "utf8")));
+      let captured = "";
+      vi.mocked(engine.rotateSecret).mockImplementation((_handle: string, value: Uint8Array) => {
+        captured = Buffer.from(value).toString("utf8");
+        return Promise.resolve();
+      });
+
+      const modern = await connectModern(engine, true);
+      modern.client.setRequestHandler("elicitation/create", () =>
+        Promise.resolve({ action: "decline" as const }),
+      );
+
+      try {
+        const result = await modern.callTool("rotate_secret", { handle: "secret://api-key" });
+        const payload = JSON.parse(result.content[0]?.text ?? "{}") as {
+          status: string;
+          message: string;
+        };
+        expect(payload.status).toBe("rotated");
+        expect(payload.message).toContain("a terminal prompt");
+        expect(tty).toHaveBeenCalledTimes(1);
+        expect(tty).toHaveBeenCalledWith({ subject: "api-key", operation: "rotate" });
+        expect(captured).toBe("rotated-at-the-terminal");
+        expect(result.content[0]?.text).not.toContain("rotated-at-the-terminal");
       } finally {
         tty.mockRestore();
         await modern.close();

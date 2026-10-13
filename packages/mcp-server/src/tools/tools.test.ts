@@ -9,7 +9,12 @@ import {
 import type { InMemoryToolDescriptor } from "@harpoc/test-utils";
 import type { SecretInfo } from "@harpoc/core";
 import type { VaultEngine } from "@harpoc/core";
-import type { ExpiringCertificateInfo, ExpiringOAuthTokenInfo } from "@harpoc/shared";
+import type {
+  ExpiringCertificateInfo,
+  ExpiringOAuthTokenInfo,
+  UseSecretAction,
+  UseSecretResponse,
+} from "@harpoc/shared";
 import { VaultError } from "@harpoc/shared";
 import { InjectionGuard } from "../guards/injection-guard.js";
 import { RateLimiter } from "../guards/rate-limiter.js";
@@ -366,6 +371,36 @@ describe("MCP Tools", () => {
       );
     });
 
+    // I14 (test-review-2026-10-09): the query and basic_auth injection modes
+    // reach the engine as the client sent them, beside the header case above.
+    it("passes a query-mode action to engine.useSecret verbatim (I14)", async () => {
+      const action: UseSecretAction = {
+        type: "http",
+        method: "GET",
+        url: "https://127.0.0.1:8443/i14",
+        injection: { type: "query", query_param: "api_key" },
+      };
+      const result = await callTool(server, "use_secret", { handle: "secret://my-key", action });
+
+      expect(result.isError ?? false).toBe(false);
+      expect(engine.useSecret).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(engine.useSecret).mock.calls[0]?.[1]).toStrictEqual(action);
+    });
+
+    it("passes a basic_auth-mode action to engine.useSecret verbatim (I14)", async () => {
+      const action: UseSecretAction = {
+        type: "http",
+        method: "GET",
+        url: "https://127.0.0.1:8443/i14",
+        injection: { type: "basic_auth" },
+      };
+      const result = await callTool(server, "use_secret", { handle: "secret://my-key", action });
+
+      expect(result.isError ?? false).toBe(false);
+      expect(engine.useSecret).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(engine.useSecret).mock.calls[0]?.[1]).toStrictEqual(action);
+    });
+
     it("rejects an invalid response_mode in the action", async () => {
       const result = await callTool(server, "use_secret", {
         handle: "secret://my-key",
@@ -629,6 +664,138 @@ describe("MCP Tools", () => {
       const data = JSON.parse(getToolText(result));
       expect(data.messages[0]).toContain("[REDACTED]");
       expect(data.messages[0]).not.toContain("eyJhbG");
+    });
+
+    // I13 (test-review-2026-10-09): a valid action per v1.3 context reaches the
+    // engine as the client sent it — every schema default spelled out, so the
+    // parsed action equals the input — and the sanitized result keeps its
+    // context's shape: no value field, the endpoint-authored strings redacted.
+    // Every host is a loopback literal; the mock engine never connects.
+    describe("v1.3 contexts dispatched verbatim (I13)", () => {
+      const LEAK = "Bearer eyJhbGciOiJIUzI1NiJ9.i13-leak.signature";
+
+      async function dispatch(
+        action: UseSecretAction,
+        response: UseSecretResponse,
+      ): Promise<Record<string, unknown>> {
+        vi.mocked(engine.useSecret).mockResolvedValue(response);
+        const result = await callTool(server, "use_secret", { handle: "secret://my-key", action });
+
+        expect(result.isError ?? false).toBe(false);
+        expect(engine.useSecret).toHaveBeenCalledTimes(1);
+        const [handle, sent, caller] = vi.mocked(engine.useSecret).mock.calls[0] ?? [];
+        expect(handle).toBe("secret://my-key");
+        expect(sent).toStrictEqual(action);
+        expect(caller).toMatchObject({ principal_id: "tokenless-stdio" });
+        const text = getToolText(result);
+        expect(text).not.toContain("eyJhbG");
+        const data = JSON.parse(text) as Record<string, unknown>;
+        expect(data).not.toHaveProperty("value");
+        return data;
+      }
+
+      it("smtp: a send reaches the engine verbatim; the result is the accepted count and the message id", async () => {
+        const data = await dispatch(
+          {
+            type: "smtp",
+            host: "127.0.0.1",
+            port: 2525,
+            security: "starttls",
+            from: "ops@example.com",
+            to: ["dev@example.com"],
+            cc: ["audit@example.com"],
+            subject: "I13 smtp",
+            text: "deploy finished",
+          },
+          { type: "smtp", accepted: 2, message_id: "<i13-smtp@harpoc.local>" },
+        );
+        expect(data).toEqual({ type: "smtp", accepted: 2, message_id: "<i13-smtp@harpoc.local>" });
+      });
+
+      it("imap: a fetch reaches the engine verbatim; the fetched messages come back sanitized", async () => {
+        const data = await dispatch(
+          {
+            type: "imap",
+            host: "127.0.0.1",
+            port: 993,
+            mailbox: "INBOX",
+            operation: { kind: "fetch", uids: [7], parts: "envelope" },
+          },
+          {
+            type: "imap",
+            operation: "fetch",
+            messages: [{ uid: 7, flags: ["\\Seen"], subject: LEAK }],
+          },
+        );
+        expect(data).toEqual({
+          type: "imap",
+          operation: "fetch",
+          messages: [{ uid: 7, flags: ["\\Seen"], subject: "[REDACTED]" }],
+        });
+      });
+
+      it("sftp: a download reaches the engine verbatim; the result is process-shaped and sanitized", async () => {
+        const data = await dispatch(
+          {
+            type: "sftp",
+            host: "127.0.0.1",
+            user: "deploy",
+            port: 2222,
+            operation: "download",
+            remote_path: "/srv/i13/report.txt",
+            local_path: "/var/tmp/i13-report.txt",
+          },
+          { type: "sftp", exit_code: 0, stdout: `fetched ${LEAK}`, stderr: "" },
+        );
+        expect(data).toEqual({
+          type: "sftp",
+          exit_code: 0,
+          stdout: "fetched [REDACTED]",
+          stderr: "",
+        });
+      });
+
+      it("docker_registry: a pull reaches the engine verbatim; the result is process-shaped and sanitized", async () => {
+        const data = await dispatch(
+          {
+            type: "docker_registry",
+            operation: "pull",
+            image: "127.0.0.1:5000/i13/app:1.0",
+            timeout_ms: 300_000,
+          },
+          {
+            type: "docker_registry",
+            operation: "pull",
+            exit_code: 0,
+            stdout: `pulled ${LEAK}`,
+            stderr: "",
+          },
+        );
+        expect(data).toEqual({
+          type: "docker_registry",
+          operation: "pull",
+          exit_code: 0,
+          stdout: "pulled [REDACTED]",
+          stderr: "",
+        });
+      });
+
+      it("websocket: an exchange reaches the engine verbatim; the collected frames come back sanitized", async () => {
+        const data = await dispatch(
+          {
+            type: "websocket",
+            url: "ws://127.0.0.1:8080/i13",
+            injection: { type: "header", header_name: "X-Api-Key" },
+            message: "ping",
+          },
+          { type: "websocket", messages: [`echo ${LEAK}`], close_code: 1000 },
+        );
+        expect(data).toEqual({
+          type: "websocket",
+          messages: ["echo [REDACTED]"],
+          close_code: 1000,
+        });
+      });
     });
   });
 

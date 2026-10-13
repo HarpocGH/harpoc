@@ -169,3 +169,51 @@ describe("policy grant --principal-type validation", () => {
     expect(mockEngine.grantPolicy).not.toHaveBeenCalled();
   });
 });
+
+// I31 (test-review-2026-10-09): getting-started documents `policy grant
+// --expires <minutes>`; the refusals above were its only pins.
+describe("policy grant --expires (I31)", () => {
+  let spies: CliSpies;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    spies = spyCli();
+  });
+
+  afterEach(() => {
+    spies.restore();
+  });
+
+  it("maps --expires minutes onto an absolute expiresAt", async () => {
+    const before = Date.now();
+    await run([
+      "secret://k",
+      "--principal-type",
+      "agent",
+      "--principal-id",
+      "agent-1",
+      "--permissions",
+      "use",
+      "--expires",
+      "60",
+      "--json",
+    ]);
+    const after = Date.now();
+    expect(mockEngine.grantPolicy).toHaveBeenCalledTimes(1);
+    expect(mockEngine.grantPolicy).toHaveBeenCalledWith(
+      {
+        secretId: "secret-id-1",
+        principalType: "agent",
+        principalId: "agent-1",
+        permissions: ["use"],
+        expiresAt: expect.any(Number),
+      },
+      "cli-user",
+      undefined,
+    );
+    const call = mockEngine.grantPolicy.mock.calls[0] as unknown[];
+    const expiresAt = (call[0] as { expiresAt: number }).expiresAt;
+    expect(expiresAt).toBeGreaterThanOrEqual(before + 60 * 60 * 1000);
+    expect(expiresAt).toBeLessThanOrEqual(after + 60 * 60 * 1000);
+  });
+});

@@ -1,11 +1,27 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig } from "@harpoc/shared";
 import { SecretType } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
-import { mergeConnectionConfig } from "./connection.js";
+
+const { mockEngine } = vi.hoisted(() => ({
+  mockEngine: {
+    getConnectionConfig: vi.fn(),
+    setConnectionConfig: vi.fn().mockResolvedValue(undefined),
+    deleteConnectionConfig: vi.fn(),
+    destroy: vi.fn().mockResolvedValue(undefined),
+  },
+}));
+
+vi.mock("../../utils/vault-loader.js", () => ({
+  resolveVaultDir: vi.fn().mockReturnValue("/mock/.harpoc"),
+  loadUnlockedEngine: vi.fn().mockResolvedValue(mockEngine),
+}));
+
+import { mergeConnectionConfig, registerSecretConnectionCommand } from "./connection.js";
+import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 const CA_PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
 
@@ -231,6 +247,39 @@ describe("mergeConnectionConfig — http CA group (D2h)", () => {
     expect(mergeConnectionConfig(undefined, { httpCa: caPath })).toEqual({
       http: { ca_pem: CA_PEM },
     });
+  });
+});
+
+// I25 (test-review-2026-10-09), I16's CLI pin: `--db-servername` parsed by
+// the command lands in the engine call as `database.servername`, the field
+// the four database drivers honor as the TLS identity since U3.
+describe("secret connection command — --db-servername (I25)", () => {
+  let spies: CliSpies;
+
+  const run = buildCli(
+    (program) => registerSecretConnectionCommand(program.command("secret")),
+    ["secret", "connection"],
+  );
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.getConnectionConfig.mockResolvedValue({ database: { tls_mode: "require" } });
+    spies = spyCli();
+  });
+
+  afterEach(() => {
+    spies.restore();
+  });
+
+  it("--db-servername lands in setConnectionConfig as database.servername, the stored group kept", async () => {
+    await run(["secret://k", "--db-servername", "localhost"]);
+    expect(mockEngine.setConnectionConfig).toHaveBeenCalledTimes(1);
+    expect(mockEngine.setConnectionConfig).toHaveBeenCalledWith(
+      "secret://k",
+      { database: { tls_mode: "require", servername: "localhost" } },
+      undefined,
+    );
+    expect(spies.stderr()).toBe("OK: Connection config updated (secret://k)");
   });
 });
 

@@ -140,6 +140,26 @@ describe("oauth connect", () => {
     expect(config.client_secret).toBe("env-secret");
   });
 
+  // I34 (test-review-2026-10-09): the flag reaches the manager's config; the
+  // manager's use of it (the authorization URL, the code exchange) is U5's.
+  it("--redirect-uri reaches the manager's config as redirect_uri (I34)", async () => {
+    await run([
+      "gh-token",
+      "--provider",
+      "github",
+      "--client-id",
+      "client-1",
+      "--redirect-uri",
+      "http://127.0.0.1:8765/callback",
+    ]);
+
+    expect(mockManager.startAuthorizationCode).toHaveBeenCalledTimes(1);
+    const config = mockManager.startAuthorizationCode.mock.calls[0]?.[1] as {
+      redirect_uri?: string;
+    };
+    expect(config.redirect_uri).toBe("http://127.0.0.1:8765/callback");
+  });
+
   it("--client-credentials runs the client-credentials flow", async () => {
     process.env.HARPOC_OAUTH_CLIENT_SECRET = "cc-secret";
 

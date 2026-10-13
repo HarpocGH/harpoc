@@ -48,12 +48,25 @@ describe("auth token --principal-type", () => {
 
   it("defaults the principal type to agent", async () => {
     await run(["--agent", "bot-1"]);
-    expect(mockEngine.createToken).toHaveBeenCalledWith(
-      "bot-1",
-      expect.any(Array),
-      expect.any(Number),
-      expect.objectContaining({ principalType: "agent" }),
-    );
+    expect(mockEngine.createToken).toHaveBeenCalledWith("bot-1", ["use", "list"], 60 * 60_000, {
+      project: undefined,
+      secrets: undefined,
+      principalType: "agent",
+      label: undefined,
+    });
+  });
+
+  // I28 (test-review-2026-10-09): getting-started documents `--project` and
+  // `--ttl <minutes>`; with no --scope the token carries the default use,list.
+  it("--project and an accepted --ttl reach createToken; no --scope mints use,list (I28)", async () => {
+    await run(["--agent", "bot-1", "--project", "api", "--ttl", "480"]);
+    expect(mockEngine.createToken).toHaveBeenCalledTimes(1);
+    expect(mockEngine.createToken).toHaveBeenCalledWith("bot-1", ["use", "list"], 480 * 60_000, {
+      project: "api",
+      secrets: undefined,
+      principalType: "agent",
+      label: undefined,
+    });
   });
 
   it("passes --principal-type tool through to createToken", async () => {

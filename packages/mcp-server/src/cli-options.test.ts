@@ -57,7 +57,7 @@ describe("readLaunchTokenFile (R9/A10)", () => {
   });
 
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("returns the trimmed content of a regular file", () => {

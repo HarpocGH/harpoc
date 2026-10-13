@@ -232,6 +232,17 @@ describe("MCP Resources", () => {
       expect(data).toHaveLength(1);
       expect(data[0].event_type).toBe("vault.unlock");
     });
+
+    // M-T2b-13 (test-review-2026-10-09): the tokenless waiver bypasses audit
+    // scope filtering — this describe registers the resource under
+    // `new ScopeGuard(null)`, and the engine is asked for the last 50 rows with
+    // no visibility scope (a scoped guard passes its project / name patterns).
+    it("queries the engine for the last 50 rows with no scope under the tokenless guard", async () => {
+      await readResource(server, "secret://vault/audit/recent");
+
+      expect(engine.queryAudit).toHaveBeenCalledTimes(1);
+      expect(engine.queryAudit).toHaveBeenCalledWith({ limit: 50 }, undefined);
+    });
   });
 
   describe("projects resource", () => {

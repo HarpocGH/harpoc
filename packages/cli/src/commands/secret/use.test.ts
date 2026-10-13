@@ -764,6 +764,291 @@ describe("secret use — buildAction covers the five v1.3 contexts", () => {
   });
 });
 
+// I14, I15, I24 (test-review-2026-10-09): the documented `secret use` flags
+// on the interface the documentation names — each flag parsed by the command
+// and asserted as the exact action the engine mock receives.
+describe("secret use — the query and basic_auth injection modes (I14)", () => {
+  const TARGET_URL = "https://127.0.0.1/v1";
+  let spies: CliSpies;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.useSecret.mockResolvedValue({ type: "http", status: 200 });
+    spies = spyCli();
+  });
+
+  afterEach(() => {
+    spies.restore();
+  });
+
+  function actionOf(): Record<string, unknown> {
+    const call = mockEngine.useSecret.mock.calls[0] as unknown[] | undefined;
+    if (!call) throw new Error("useSecret was never called");
+    return call[1] as Record<string, unknown>;
+  }
+
+  it("--injection query --query-param builds the query injection, nothing else changed", async () => {
+    await run([
+      "secret://k",
+      "--url",
+      TARGET_URL,
+      "--injection",
+      "query",
+      "--query-param",
+      "api_key",
+    ]);
+    expect(actionOf()).toEqual({
+      type: "http",
+      method: "GET",
+      url: TARGET_URL,
+      injection: { type: "query", query_param: "api_key" },
+    });
+  });
+
+  it("--injection basic_auth builds the basic_auth injection, nothing else changed", async () => {
+    await run(["secret://k", "--url", TARGET_URL, "--injection", "basic_auth"]);
+    expect(actionOf()).toEqual({
+      type: "http",
+      method: "GET",
+      url: TARGET_URL,
+      injection: { type: "basic_auth" },
+    });
+  });
+});
+
+describe("secret use — --response-mode (I15)", () => {
+  const TARGET_URL = "https://127.0.0.1/v1";
+  let spies: CliSpies;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.useSecret.mockResolvedValue({ type: "http", status: 200 });
+    spies = spyCli();
+  });
+
+  afterEach(() => {
+    spies.restore();
+  });
+
+  function actionOf(): Record<string, unknown> {
+    const call = mockEngine.useSecret.mock.calls[0] as unknown[] | undefined;
+    if (!call) throw new Error("useSecret was never called");
+    return call[1] as Record<string, unknown>;
+  }
+
+  // Serves I24's --response-mode row too.
+  it("--response-mode status_only builds the action's response_mode", async () => {
+    await run(["secret://k", "--url", TARGET_URL, "--response-mode", "status_only"]);
+    expect(actionOf()).toEqual({
+      type: "http",
+      method: "GET",
+      url: TARGET_URL,
+      injection: { type: "bearer" },
+      response_mode: "status_only",
+    });
+  });
+
+  // getting-started.md: an override looser than the policy is "rejected with
+  // RESPONSE_MODE_NOT_ALLOWED before the request executes". The request is the
+  // engine's to make: the mock's refusing useSecret is the one engine call and
+  // nothing reaches stdout.
+  it("a loosened override refused RESPONSE_MODE_NOT_ALLOWED exits 1 with the error and no result", async () => {
+    mockEngine.useSecret.mockRejectedValueOnce(
+      VaultError.responseModeNotAllowed("full", "filtered"),
+    );
+    await expect(
+      run(["secret://k", "--url", TARGET_URL, "--response-mode", "full"]),
+    ).rejects.toThrow("process.exit");
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.stderr()).toBe(
+      'Error: [RESPONSE_MODE_NOT_ALLOWED] Response mode "full" not allowed: secret policy is "filtered" and overrides may only tighten',
+    );
+    expect(mockEngine.useSecret).toHaveBeenCalledTimes(1);
+    expect(actionOf()).toMatchObject({ type: "http", response_mode: "full" });
+    expect(spies.stdout()).toBe("");
+    expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("secret use — buildAction maps each documented flag (I24)", () => {
+  const TARGET_URL = "https://127.0.0.1/v1";
+  const SMTP_ARGS = [
+    "--action",
+    "smtp",
+    "--host",
+    "127.0.0.1",
+    "--from",
+    "alerts@example.com",
+    "--to",
+    "a@example.com",
+    "--subject",
+    "Report",
+    "--text",
+    "body text",
+  ];
+  const SMTP_ACTION = {
+    type: "smtp",
+    host: "127.0.0.1",
+    security: "tls",
+    from: "alerts@example.com",
+    to: ["a@example.com"],
+    subject: "Report",
+    text: "body text",
+  };
+  const IMAP_ARGS = ["--action", "imap", "--host", "127.0.0.1"];
+  const IMAP_ACTION = { type: "imap", host: "127.0.0.1", port: 993, mailbox: "INBOX" };
+  let spies: CliSpies;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.useSecret.mockResolvedValue({ type: "http", status: 200 });
+    spies = spyCli();
+  });
+
+  afterEach(() => {
+    spies.restore();
+  });
+
+  function actionOf(): Record<string, unknown> {
+    const call = mockEngine.useSecret.mock.calls[0] as unknown[] | undefined;
+    if (!call) throw new Error("useSecret was never called");
+    return call[1] as Record<string, unknown>;
+  }
+
+  it("http: --follow-redirects reaches follow_redirects", async () => {
+    await run(["secret://k", "--url", TARGET_URL, "--follow-redirects", "none"]);
+    expect(actionOf()).toEqual({
+      type: "http",
+      method: "GET",
+      url: TARGET_URL,
+      injection: { type: "bearer" },
+      follow_redirects: "none",
+    });
+  });
+
+  it("smtp: repeated --cc reaches cc", async () => {
+    await run(["secret://k", ...SMTP_ARGS, "--cc", "c1@example.com", "--cc", "c2@example.com"]);
+    expect(actionOf()).toEqual({ ...SMTP_ACTION, cc: ["c1@example.com", "c2@example.com"] });
+  });
+
+  it("smtp: repeated --bcc reaches bcc", async () => {
+    await run(["secret://k", ...SMTP_ARGS, "--bcc", "b1@example.com", "--bcc", "b2@example.com"]);
+    expect(actionOf()).toEqual({ ...SMTP_ACTION, bcc: ["b1@example.com", "b2@example.com"] });
+  });
+
+  it("smtp: --html reaches html", async () => {
+    await run(["secret://k", ...SMTP_ARGS, "--html", "<p>body</p>"]);
+    expect(actionOf()).toEqual({ ...SMTP_ACTION, html: "<p>body</p>" });
+  });
+
+  it("smtp: repeated --attachment reaches attachments as paths, unread by the CLI", async () => {
+    await run([
+      "secret://k",
+      ...SMTP_ARGS,
+      "--attachment",
+      "/tmp/a.pdf",
+      "--attachment",
+      "/tmp/b.txt",
+    ]);
+    expect(actionOf()).toEqual({
+      ...SMTP_ACTION,
+      attachments: [{ path: "/tmp/a.pdf" }, { path: "/tmp/b.txt" }],
+    });
+  });
+
+  it("smtp: --port reaches port", async () => {
+    await run(["secret://k", ...SMTP_ARGS, "--port", "2525"]);
+    expect(actionOf()).toEqual({ ...SMTP_ACTION, port: 2525 });
+  });
+
+  it("imap: --search-since reaches the search operation's since", async () => {
+    await run([
+      "secret://k",
+      ...IMAP_ARGS,
+      "--operation",
+      "search",
+      "--search-since",
+      "2026-01-02",
+    ]);
+    expect(actionOf()).toEqual({
+      ...IMAP_ACTION,
+      operation: { kind: "search", since: "2026-01-02" },
+    });
+  });
+
+  it("imap: --search-from reaches the search operation's from", async () => {
+    await run([
+      "secret://k",
+      ...IMAP_ARGS,
+      "--operation",
+      "search",
+      "--search-from",
+      "boss@example.com",
+    ]);
+    expect(actionOf()).toEqual({
+      ...IMAP_ACTION,
+      operation: { kind: "search", from: "boss@example.com" },
+    });
+  });
+
+  it("imap: --search-subject reaches the search operation's subject", async () => {
+    await run(["secret://k", ...IMAP_ARGS, "--operation", "search", "--search-subject", "Invoice"]);
+    expect(actionOf()).toEqual({
+      ...IMAP_ACTION,
+      operation: { kind: "search", subject: "Invoice" },
+    });
+  });
+
+  it("imap: --search-text reaches the search operation's text", async () => {
+    await run(["secret://k", ...IMAP_ARGS, "--operation", "search", "--search-text", "overdue"]);
+    expect(actionOf()).toEqual({
+      ...IMAP_ACTION,
+      operation: { kind: "search", text: "overdue" },
+    });
+  });
+
+  it("imap: repeated --remove-flag reaches the store operation's remove_flags", async () => {
+    await run([
+      "secret://k",
+      ...IMAP_ARGS,
+      "--operation",
+      "store",
+      "--uid",
+      "7",
+      "--remove-flag",
+      "\\Seen",
+      "--remove-flag",
+      "\\Flagged",
+    ]);
+    expect(actionOf()).toEqual({
+      ...IMAP_ACTION,
+      operation: { kind: "store", uids: [7], remove_flags: ["\\Seen", "\\Flagged"] },
+    });
+  });
+
+  it("imap: --target-mailbox reaches the move operation's target_mailbox", async () => {
+    await run([
+      "secret://k",
+      ...IMAP_ARGS,
+      "--operation",
+      "move",
+      "--uid",
+      "7",
+      "--target-mailbox",
+      "Archive",
+    ]);
+    expect(actionOf()).toEqual({
+      ...IMAP_ACTION,
+      operation: { kind: "move", uids: [7], target_mailbox: "Archive" },
+    });
+  });
+
+  it("imap: --port reaches port in place of the 993 default", async () => {
+    await run(["secret://k", ...IMAP_ARGS, "--operation", "expunge", "--port", "1993"]);
+    expect(actionOf()).toEqual({ ...IMAP_ACTION, port: 1993, operation: { kind: "expunge" } });
+  });
+});
+
 describe("secret use — --action-file", () => {
   let spies: CliSpies;
   let tempDir: string;
@@ -803,6 +1088,36 @@ describe("secret use — --action-file", () => {
     await run(["secret://k", "--action-file", filePath]);
     expect(actionOf()).toEqual(action);
   });
+
+  // I24: the CLI has no flag for a redis or mongodb `command` — --action-file
+  // is the one way the CLI reaches those engines.
+  it.each([
+    {
+      type: "database",
+      engine: "redis",
+      host: "127.0.0.1",
+      port: 6379,
+      database: "0",
+      command: ["GET", "session:42"],
+    },
+    {
+      type: "database",
+      engine: "mongodb",
+      host: "127.0.0.1",
+      port: 27017,
+      database: "app",
+      command: { find: "users", filter: { active: true }, limit: 1 },
+    },
+  ])(
+    "a $engine database action with its command reaches the engine verbatim (I24)",
+    async (action) => {
+      const filePath = join(tempDir, "action.json");
+      writeFileSync(filePath, JSON.stringify(action));
+      await run(["secret://k", "--action-file", filePath]);
+      expect(mockEngine.useSecret).toHaveBeenCalledTimes(1);
+      expect(mockEngine.useSecret).toHaveBeenCalledWith("secret://k", action, undefined);
+    },
+  );
 
   it("conflicts with an action-shaping flag, naming both in an INVALID_INPUT refusal", async () => {
     const filePath = join(tempDir, "action.json");
