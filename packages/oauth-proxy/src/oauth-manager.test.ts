@@ -16,6 +16,7 @@ import {
   deviceCodeConfig,
   fakeEngineManager,
   makeFakeEngine,
+  makePerNameFakeEngine,
   useLoopbackEndpoints,
 } from "./__fixtures__/oauth-manager-fixtures.js";
 import type { Handler } from "./__fixtures__/oauth-manager-fixtures.js";
@@ -527,8 +528,10 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
 
   // I34 (test-review-2026-10-09): `oauth connect --redirect-uri` reaches the
   // config as `redirect_uri` (U4); the manager tells the provider exactly that
-  // URL — in the authorization URL and in the code exchange — while its own
-  // callback server still binds its own port and receives the code.
+  // URL — in the authorization URL and in the code exchange. An http loopback
+  // override is where the callback server itself listens (its port and path);
+  // any other override is a forwarder's address, and the callback server keeps
+  // its own port and `/oauth/callback` for the forwarder to reach.
   function recordTokenRequestBodies(): string[] {
     const bodies: string[] = [];
     tokenHandler = (req, res) => {
@@ -558,15 +561,8 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
     expect(res.status).toBe(200);
   }
 
-  it("a redirect_uri override is exactly the URL in the authorization URL and the code exchange (I34)", async () => {
-    let overrideHits = 0;
-    const registered = createServer((_req, res) => {
-      overrideHits += 1;
-      res.writeHead(404);
-      res.end();
-    });
-    await new Promise<void>((resolve) => registered.listen(0, "127.0.0.1", () => resolve()));
-    const override = `http://127.0.0.1:${(registered.address() as { port: number }).port}/cb`;
+  it("a non-loopback redirect_uri override is exactly the URL in the authorization URL and the code exchange while the callback server keeps its own port and path (I34; the forwarder contract)", async () => {
+    const override = "https://relay.example/cb";
     const tokenBodies = recordTokenRequestBodies();
     const startSpy = vi.spyOn(CallbackServer.prototype, "start");
     try {
@@ -584,11 +580,121 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
       await expect(start.completion).resolves.toBeUndefined();
       expect(tokenBodies).toHaveLength(1);
       expect(new URLSearchParams(tokenBodies[0]).get("redirect_uri")).toBe(override);
-      // The override is only what the provider is told: the manager never dials it.
-      expect(overrideHits).toBe(0);
     } finally {
       startSpy.mockRestore();
-      await new Promise<void>((resolve) => registered.close(() => resolve()));
+    }
+  });
+
+  it("an http loopback redirect_uri override moves the callback server to the override's port and path, the URL still exactly in both legs", async () => {
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", () => resolve()));
+    const port = (probe.address() as { port: number }).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    const override = `http://127.0.0.1:${port}/cb`;
+    const tokenBodies = recordTokenRequestBodies();
+    const startSpy = vi.spyOn(CallbackServer.prototype, "start");
+    try {
+      const fake = makeFakeEngine();
+      const manager = fakeEngineManager(fake, { callbackPort: 0 });
+
+      const start = await manager.startAuthorizationCodeDeferred("gh", {
+        ...makeAuthCodeConfig(),
+        redirect_uri: override,
+      });
+      const authUrl = new URL(start.authUrl);
+      expect(authUrl.searchParams.get("redirect_uri")).toBe(override);
+      expect((startSpy.mock.contexts[0] as CallbackServer).listenPort).toBe(port);
+
+      const state = authUrl.searchParams.get("state") as string;
+      const offPath = await fetch(
+        `http://127.0.0.1:${port}/oauth/callback?code=i34-code&state=${state}`,
+      );
+      expect(offPath.status).toBe(404);
+      const onPath = await fetch(`${override}?code=i34-code&state=${state}`);
+      expect(onPath.status).toBe(200);
+
+      await expect(start.completion).resolves.toBeUndefined();
+      expect(tokenBodies).toHaveLength(1);
+      expect(new URLSearchParams(tokenBodies[0]).get("redirect_uri")).toBe(override);
+    } finally {
+      startSpy.mockRestore();
+    }
+  });
+
+  it("a re-start for the same secret with the same http loopback override supersedes the predecessor's listener before binding (the resume path)", async () => {
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", () => resolve()));
+    const port = (probe.address() as { port: number }).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    const override = `http://127.0.0.1:${port}/cb`;
+    const tokenBodies = recordTokenRequestBodies();
+    const startSpy = vi.spyOn(CallbackServer.prototype, "start");
+    try {
+      const fake = makeFakeEngine();
+      const manager = fakeEngineManager(fake, { callbackPort: 0 });
+      const config = { ...makeAuthCodeConfig(), redirect_uri: override };
+
+      const first = await manager.startAuthorizationCodeDeferred("gh", config);
+      const second = await manager.startAuthorizationCodeDeferred("gh", config);
+      await expect(first.completion).rejects.toBeDefined();
+      expect((startSpy.mock.contexts[1] as CallbackServer).listenPort).toBe(port);
+
+      const state = new URL(second.authUrl).searchParams.get("state") as string;
+      const res = await fetch(`${override}?code=i34-code&state=${state}`);
+      expect(res.status).toBe(200);
+      await expect(second.completion).resolves.toBeUndefined();
+      expect(fake.completeOAuthFlow).toHaveBeenCalledTimes(1);
+      expect(tokenBodies).toHaveLength(1);
+    } finally {
+      startSpy.mockRestore();
+    }
+  });
+
+  it("two secrets cannot share one http loopback override at the same time: the second start refuses OAUTH_FLOW_FAILED and the first flow stands", async () => {
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", () => resolve()));
+    const port = (probe.address() as { port: number }).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    const override = `http://127.0.0.1:${port}/cb`;
+    recordTokenRequestBodies();
+    const fake = makePerNameFakeEngine();
+    const manager = fakeEngineManager(fake, { callbackPort: 0 });
+    const config = { ...makeAuthCodeConfig(), redirect_uri: override };
+
+    const first = await manager.startAuthorizationCodeDeferred("one", config);
+    await expectVaultError(
+      () => manager.startAuthorizationCodeDeferred("two", config),
+      ErrorCode.OAUTH_FLOW_FAILED,
+    );
+
+    const state = new URL(first.authUrl).searchParams.get("state") as string;
+    const res = await fetch(`${override}?code=i34-code&state=${state}`);
+    expect(res.status).toBe(200);
+    await expect(first.completion).resolves.toBeUndefined();
+    expect(fake.completeOAuthFlow).toHaveBeenCalledTimes(1);
+  });
+
+  it("an https loopback override is a forwarder's address: the callback server keeps its own port and path", async () => {
+    const override = "https://127.0.0.1:8443/cb";
+    const tokenBodies = recordTokenRequestBodies();
+    const startSpy = vi.spyOn(CallbackServer.prototype, "start");
+    try {
+      const fake = makeFakeEngine();
+      const manager = fakeEngineManager(fake, { callbackPort: 0 });
+
+      const start = await manager.startAuthorizationCodeDeferred("gh", {
+        ...makeAuthCodeConfig(),
+        redirect_uri: override,
+      });
+      const authUrl = new URL(start.authUrl);
+      expect(authUrl.searchParams.get("redirect_uri")).toBe(override);
+      expect((startSpy.mock.contexts[0] as CallbackServer).listenPort).not.toBe(8443);
+
+      await completeThroughCallbackServer(startSpy, authUrl);
+      await expect(start.completion).resolves.toBeUndefined();
+      expect(new URLSearchParams(tokenBodies[0]).get("redirect_uri")).toBe(override);
+    } finally {
+      startSpy.mockRestore();
     }
   });
 

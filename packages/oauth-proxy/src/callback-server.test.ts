@@ -156,6 +156,20 @@ describe("CallbackServer", () => {
 
     await callbackPromise;
   });
+  it("serves the callback on a configured path and answers 404 off it (an http loopback redirect_uri override)", async () => {
+    server = new CallbackServer(0, "/cb");
+    const state = "path-state";
+    await server.start(state, 5000);
+    const port = server.listenPort;
+
+    const offPath = await fetch(`http://127.0.0.1:${port}/oauth/callback?code=x&state=${state}`);
+    expect(offPath.status).toBe(404);
+    expect(server.isRunning).toBe(true);
+
+    const onPath = await fetch(`http://127.0.0.1:${port}/cb?code=ok&state=${state}`);
+    expect(onPath.status).toBe(200);
+    await expect(server.waitForCallback()).resolves.toEqual({ code: "ok", state });
+  });
 });
 
 describe("CallbackServer terminal-branch cleanup (code review Low O2)", () => {

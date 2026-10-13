@@ -4,6 +4,7 @@ import { timingSafeEqual } from "node:crypto";
 import { VaultError } from "@harpoc/shared";
 
 const DEFAULT_PORT = 19876;
+const DEFAULT_PATH = "/oauth/callback";
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 export interface CallbackResult {
@@ -14,6 +15,7 @@ export interface CallbackResult {
 export class CallbackServer {
   private server: Server | null = null;
   private requestedPort: number;
+  private readonly path: string;
   private boundPort: number | null = null;
   private timeoutId: ReturnType<typeof setTimeout> | null = null;
   private callbackPromise: Promise<CallbackResult> | null = null;
@@ -21,8 +23,9 @@ export class CallbackServer {
   private reject: ((err: Error) => void) | null = null;
   private settled = false;
 
-  constructor(port: number = DEFAULT_PORT) {
+  constructor(port: number = DEFAULT_PORT, path: string = DEFAULT_PATH) {
     this.requestedPort = port;
+    this.path = path;
   }
 
   /**
@@ -103,7 +106,7 @@ export class CallbackServer {
     // nulled by the post-settle stop() when a second in-flight request lands.
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
-    if (url.pathname !== "/oauth/callback") {
+    if (url.pathname !== this.path) {
       res.writeHead(404, { "Content-Type": "text/plain" });
       res.end("Not Found");
       return;

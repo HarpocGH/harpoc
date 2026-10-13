@@ -1,6 +1,6 @@
 import type { VaultEngine } from "@harpoc/core";
 import type { CallerContext, OAuthFlowResult, OAuthProviderConfig } from "@harpoc/shared";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode, VaultError, LOOPBACK_URL_HOSTS } from "@harpoc/shared";
 import { AuthorizationCodeFlow, buildAuthorizationUrl } from "./flows/authorization-code.js";
 import { ClientCredentialsFlow } from "./flows/client-credentials.js";
 import { DeviceCodeFlow } from "./flows/device-code.js";
@@ -45,6 +45,8 @@ interface PendingFlow {
   /** Set at a restart's re-insert: the row now carries the successor's config, so this flow's
    * tokens must never be stored (D1a-8, 2026-09-23). */
   superseded: boolean;
+  /** Settles once a socket-holding flow's callback server has closed (its port free again). */
+  released?: Promise<void>;
 }
 
 /**
@@ -134,6 +136,34 @@ function assertAuthMethodPairing(config: OAuthProviderConfig): void {
       "client_secret_basic requires a client secret: the method sends the client credentials in an Authorization header, which a public client cannot form — supply the secret, or choose client_secret_post (the default) for a public client",
     );
   }
+}
+
+/**
+ * An `http://localhost…` or `http://127.0.0.1…` redirect_uri override is where
+ * the callback server itself must listen: its port (80 when the URL names none)
+ * and its path. Any other override is a forwarder's address — the server keeps
+ * its own port and `/oauth/callback` for the forwarder to reach. `[::1]` is
+ * deliberately left out of shared's loopback URL hosts here: the server binds
+ * `127.0.0.1`, which a browser sent to `[::1]` would never reach.
+ */
+function loopbackCallbackTarget(
+  redirectUri: string | undefined,
+): { port: number; path: string } | undefined {
+  if (!redirectUri) return undefined;
+  let url: URL;
+  try {
+    url = new URL(redirectUri);
+  } catch {
+    return undefined;
+  }
+  if (
+    url.protocol !== "http:" ||
+    url.hostname === "[::1]" ||
+    !LOOPBACK_URL_HOSTS.has(url.hostname)
+  ) {
+    return undefined;
+  }
+  return { port: url.port === "" ? 80 : Number(url.port), path: url.pathname };
 }
 
 export class OAuthManager {
@@ -254,10 +284,12 @@ export class OAuthManager {
     // Reserve the slot before the bind (D9): a fresh start counts toward the
     // cap from here, and cancelFlow during the bind window aborts this very
     // controller. A supersede overwrites the predecessor's entry but aborts it
-    // only once the successor is bound, so two starts never race one port.
-    // A failed bind never restores the predecessor: the re-insert already
-    // replaced the row's config, so its tokens could no longer be stored
-    // correctly (D1a-8).
+    // only once the successor is bound, so two starts never race one port —
+    // except under an http loopback override, whose fixed port the predecessor
+    // may still hold: there the predecessor is aborted and its listener awaited
+    // closed before the bind (2026-10-13). A failed bind never restores the
+    // predecessor: the re-insert already replaced the row's config, so its
+    // tokens could no longer be stored correctly (D1a-8).
     const controller = new AbortController();
     const pending: PendingFlow = {
       controller,
@@ -268,7 +300,10 @@ export class OAuthManager {
     this.pendingFlows.set(secretId, pending);
     this.liveFlows.add(pending);
 
-    const callbackServer = new CallbackServer(this.callbackPort);
+    const loopbackTarget = loopbackCallbackTarget(resolved.redirect_uri);
+    const callbackServer = loopbackTarget
+      ? new CallbackServer(loopbackTarget.port, loopbackTarget.path)
+      : new CallbackServer(this.callbackPort);
     const flow = new AuthorizationCodeFlow();
 
     try {
@@ -278,6 +313,10 @@ export class OAuthManager {
         resolved.redirect_uri ?? `http://localhost:${this.callbackPort}/oauth/callback`;
       const { state, code_verifier } = flow.startFlow(resolved, tempRedirectUri);
 
+      if (loopbackTarget && predecessor?.holdsSocket) {
+        predecessor.controller.abort();
+        await predecessor.released;
+      }
       await callbackServer.start(state, this.callbackTimeoutMs);
       predecessor?.controller.abort();
 
@@ -299,6 +338,10 @@ export class OAuthManager {
         code_verifier,
         secretId,
         pending,
+      );
+      pending.released = completion.then(
+        () => undefined,
+        () => undefined,
       );
 
       return { handle, secretId, authUrl, completion };

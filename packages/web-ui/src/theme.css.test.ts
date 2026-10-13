@@ -93,14 +93,21 @@ describe("the theme's CSS contract (M-P3-8)", () => {
     expect(tokensOf(osLightRules()[0] as Rule)).toEqual(explicit);
   });
 
-  it("the light palette's text tokens meet WCAG AA (4.5:1) on its background and panel", () => {
-    const light = tokensOf(only(top, EXPLICIT_LIGHT));
+  function expectTextTokensAtAa(palette: Map<string, string>): void {
     for (const text of ["--ink", "--muted", "--brass", "--patina", "--amber", "--wax"]) {
       for (const surface of ["--bg", "--panel"]) {
-        const ratio = contrast(light.get(text) ?? "", light.get(surface) ?? "");
+        const ratio = contrast(palette.get(text) ?? "", palette.get(surface) ?? "");
         expect(ratio, `${text} on ${surface}`).toBeGreaterThanOrEqual(4.5);
       }
     }
+  }
+
+  it("the light palette's text tokens meet WCAG AA (4.5:1) on its background and panel", () => {
+    expectTextTokensAtAa(tokensOf(only(top, EXPLICIT_LIGHT)));
+  });
+
+  it("the dark palette's text tokens meet WCAG AA (4.5:1) on its background and panel", () => {
+    expectTextTokensAtAa(tokensOf(only(top, ":root")));
   });
 
   it("index.html declares both colour schemes to the browser", () => {
