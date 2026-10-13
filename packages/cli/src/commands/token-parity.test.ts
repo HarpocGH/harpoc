@@ -35,6 +35,7 @@ const { mockEngine, mockManager, mockCertManager, mockResolveSecretValue, mockPr
         getAuditChainTail: vi.fn(),
         getOAuthTokenStatus: vi.fn(),
         refreshOAuthToken: vi.fn(),
+        updateCertificate: vi.fn(),
         getCertificateStatus: vi.fn(),
         registerAgent: vi.fn(),
         getAgent: vi.fn(),
@@ -287,6 +288,16 @@ const ROWS: Row[] = [
     call: "renewCertificate",
     resolve: AuditEventType.CERT_RENEW,
   },
+  // M-P3-11 (test-review-2026-10-09): the attach step writes through the engine
+  // directly — `rotate` on the handle, the cert.issue event type, the caller on
+  // the write and on the status read.
+  {
+    argv: ["cert", "attach", "secret://k", "--cert", CERT_PATH],
+    permission: "rotate",
+    call: "updateCertificate",
+    resolve: AuditEventType.CERT_ISSUE,
+    callerArg: { updateCertificate: 4, getCertificateStatus: 1 },
+  },
   // The three creation-scoped cert commands take the same shape `secret set`
   // does — one row apiece, `create` as the permission — because `create` is not
   // grantable per secret: token scope alone governs it, so the row is the whole
@@ -428,6 +439,7 @@ describe("token permission map (Task 9 pin)", () => {
       token_endpoint_auth_method: "client_secret_post",
     });
     mockEngine.refreshOAuthToken.mockResolvedValue(2_000_000_000_000);
+    mockEngine.updateCertificate.mockResolvedValue(undefined);
     mockEngine.getCertificateStatus.mockReturnValue(CERT_STATUS);
     mockEngine.registerAgent.mockReturnValue(AGENT);
     mockEngine.getAgent.mockReturnValue(AGENT);

@@ -28,7 +28,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  rmSync(uiDir, { recursive: true, force: true });
+  rmSync(uiDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   rmSync(join(uiDir, "..", outsideName), { force: true });
 });
 
@@ -105,5 +105,24 @@ describe("createApp uiDir wiring", () => {
   it("does not mount /ui without uiDir", async () => {
     const bare = createApp(engineStub, {});
     expect((await bare.request("/ui", { headers: HOST })).status).toBe(404);
+  });
+
+  // M-P3-7 (test-review-2026-10-09): the listener's host check covers /ui —
+  // the allowlist is mounted on every path, ahead of the static handler.
+  it("refuses /ui to a Host outside the allowed set: 421 MISDIRECTED_REQUEST naming the parsed hostname", async () => {
+    const wired = createApp(engineStub, { uiDir, allowedHostSet: new Set(["vault.example"]) });
+    const res = await wired.request("/ui", { headers: { host: "evil.example:3000" } });
+    expect(res.status).toBe(421);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe("MISDIRECTED_REQUEST");
+    expect(body.message).toContain("the Host header names evil.example");
+    expect(body.message).not.toContain("3000");
+  });
+
+  it("serves /ui's index.html to an allowed Host (the control)", async () => {
+    const wired = createApp(engineStub, { uiDir, allowedHostSet: new Set(["vault.example"]) });
+    const res = await wired.request("/ui", { headers: { host: "vault.example:3000" } });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('<div id="root"></div>');
   });
 });

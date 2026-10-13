@@ -4,7 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { CertManager } from "@harpoc/cert-manager";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { DirectClient, RestClient } from "@harpoc/sdk";
-import { ErrorCode, SecretStatus, SecretType } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, SecretStatus, SecretType } from "@harpoc/shared";
 import type { CertificateStatus } from "@harpoc/shared";
 import {
   createTestVault,
@@ -16,8 +16,8 @@ import type { TestVault } from "./helpers/engine-factory.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
 import { callTool } from "./helpers/mcp-helpers.js";
-import { KEY_PEM, CERT_PEM } from "./helpers/cert-fixtures.js";
-import { silenceAuditLines } from "@harpoc/test-utils";
+import { KEY_PEM, CERT_PEM, OTHER_KEY_PEM, RENEWED_CERT_PEM } from "./helpers/cert-fixtures.js";
+import { expectVaultError, silenceAuditLines } from "@harpoc/test-utils";
 
 silenceAuditLines();
 
@@ -25,10 +25,13 @@ silenceAuditLines();
  * Certificate lifecycle across the wired surfaces (Phase 10): REST import →
  * status, the same status through both SDK clients, REST CSR generation, the
  * MCP renewal refusal on a non-ACME certificate, and the encrypted-key import
- * refusal on REST and in the SDK. Every status response is asserted over its
- * serialized form, because the invariant is about what reaches the wire: a
- * certificate secret holds a private key, and no status projection of it may
- * carry PEM material.
+ * refusal on REST and in the SDK, then the attach step: a CSR-pending secret
+ * completed through both SDK clients (DirectClient in process, RestClient over
+ * the REST route), moving `pending` → `active` with its `cert.issue` row, and
+ * the key-mismatch refusal on both legs. Every status response is asserted
+ * over its serialized form, because the invariant is about what reaches the
+ * wire: a certificate secret holds a private key, and no status projection of
+ * it may carry PEM material.
  *
  * One ordered lifecycle over a single vault and one REST server: later tests
  * read the secrets the earlier ones created, so the file runs as a whole.
@@ -41,9 +44,15 @@ const CSR_NAME = "csr-pending";
 const CSR_SUBJECT = "csr.example.com";
 const ENCRYPTED_REST_NAME = "enc-rest";
 const ENCRYPTED_DIRECT_NAME = "enc-direct";
+const ATTACH_DIRECT_NAME = "attach-direct";
+const ATTACH_REST_NAME = "attach-rest";
+const ATTACH_MISMATCH_NAME = "attach-mismatch";
 
 const FIXTURE_SUBJECT = "CN=fixture.example.com";
 const FIXTURE_NOT_AFTER = new Date("2036-08-13T19:46:24Z").getTime();
+const RENEWED_NOT_AFTER = new Date("2046-08-11T21:30:27Z").getTime();
+const PLACEHOLDER_CSR =
+  "-----BEGIN CERTIFICATE REQUEST-----\nMIIB\n-----END CERTIFICATE REQUEST-----\n";
 const PEM_ARMOR = "-----BEGIN";
 
 let vault: TestVault;
@@ -76,6 +85,30 @@ function post(path: string, body: unknown): Promise<Response> {
     headers: { ...authHeaders(), "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+/**
+ * A CSR-pending certificate secret over a key the test knows — the state
+ * `cert csr` leaves (the engine's own CSR-pending import, the path
+ * CertManager.generateCsr takes with a key it generates), so a certificate
+ * issued for that key can complete it.
+ */
+async function pendingOver(name: string, keyPem: string): Promise<string> {
+  const { handle } = await vault.engine.importCertificate(name, keyPem, {
+    csrPem: PLACEHOLDER_CSR,
+    subject: `CN=${name}.example.com`,
+  });
+  await grantOn(vault.engine, handle, PRINCIPAL, ["read", "rotate"]);
+  expect((await vault.engine.getSecretInfo(handle)).status).toBe(SecretStatus.PENDING);
+  return handle;
+}
+
+/** The `update_certificate` audit rows of one secret under one event type. */
+async function attachRows(handle: string, eventType: AuditEventType) {
+  const secretId = await vault.engine.resolveSecretId(handle);
+  return vault.engine
+    .queryAudit({ secretId, eventType })
+    .filter((row) => row.detail?.action === "update_certificate");
 }
 
 /**
@@ -276,5 +309,87 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
     // the vault still holds exactly what case 5 left.
     const names = (await vault.engine.listSecrets()).map((s) => s.name).sort();
     expect(names).toEqual([CSR_NAME, IMPORTED_NAME].sort());
+  });
+
+  // M-P3-11 (test-review-2026-10-09): the attach step on the real engine — a
+  // pending secret completed through each SDK client (DirectClient in process,
+  // RestClient over the served route with the `rotate`-scoped token), and the
+  // key-mismatch refusal on both legs.
+  it("7. DirectClient.attachCertificate moves a pending secret to active and writes cert.issue", async () => {
+    const handle = await pendingOver(ATTACH_DIRECT_NAME, KEY_PEM);
+
+    const status = await new DirectClient(vault.engine).attachCertificate(handle, {
+      certificate_pem: RENEWED_CERT_PEM,
+    });
+
+    expect(status.secret_id).toBe(await vault.engine.resolveSecretId(handle));
+    expect(status.subject).toBe(FIXTURE_SUBJECT);
+    expect(status.not_after).toBe(RENEWED_NOT_AFTER);
+    expect(status.renewal_status).toBe("ok");
+    expect(JSON.stringify(status)).not.toContain(PEM_ARMOR);
+    const info = await vault.engine.getSecretInfo(handle);
+    expect(info.status).toBe(SecretStatus.ACTIVE);
+    expect(info.expiresAt).toBe(RENEWED_NOT_AFTER);
+
+    // The trusted local path: a cert.issue row, not cert.renew, and no principal.
+    const rows = await attachRows(handle, AuditEventType.CERT_ISSUE);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ success: true, principal_type: null, principal_id: null });
+    expect(await attachRows(handle, AuditEventType.CERT_RENEW)).toEqual([]);
+  });
+
+  it("8. RestClient.attachCertificate does the same over the route, attributed to the token's principal", async () => {
+    const handle = await pendingOver(ATTACH_REST_NAME, KEY_PEM);
+
+    const status = await new RestClient({ baseUrl: rest.baseUrl, token }).attachCertificate(
+      handle,
+      { certificate_pem: CERT_PEM },
+    );
+
+    expect(status.subject).toBe(FIXTURE_SUBJECT);
+    expect(status.not_after).toBe(FIXTURE_NOT_AFTER);
+    expect(status.renewal_status).toBe("ok");
+    expect(JSON.stringify(status)).not.toContain(PEM_ARMOR);
+    expect((await vault.engine.getSecretInfo(handle)).status).toBe(SecretStatus.ACTIVE);
+    expect(await getStatus(ATTACH_REST_NAME)).toEqual(status);
+
+    const rows = await attachRows(handle, AuditEventType.CERT_ISSUE);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      success: true,
+      principal_type: "agent",
+      principal_id: PRINCIPAL,
+      detail: expect.objectContaining({ interface: "rest" }) as unknown,
+    });
+  });
+
+  it("9. a certificate for another key is refused on both legs and the secret stays pending", async () => {
+    const handle = await pendingOver(ATTACH_MISMATCH_NAME, OTHER_KEY_PEM);
+
+    await expectVaultError(
+      () => new DirectClient(vault.engine).attachCertificate(handle, { certificate_pem: CERT_PEM }),
+      ErrorCode.CERT_PRIVATE_KEY_MISMATCH,
+    );
+    const res = await post(`/${ATTACH_MISMATCH_NAME}/attach`, { certificate_pem: CERT_PEM });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      ErrorCode.CERT_PRIVATE_KEY_MISMATCH,
+    );
+
+    expect((await vault.engine.getSecretInfo(handle)).status).toBe(SecretStatus.PENDING);
+    const status = await getStatus(ATTACH_MISMATCH_NAME);
+    expect(status.not_after).toBeNull();
+    expect(status.renewal_status).toBe("no_certificate");
+    const rows = await attachRows(handle, AuditEventType.CERT_ISSUE);
+    // Sorted by row id (insertion order; queryAudit orders by timestamp DESC,
+    // which can tie within a millisecond): the Direct refusal first, then REST.
+    expect(
+      [...rows]
+        .sort((a, b) => a.id - b.id)
+        .map((row) => [row.success, row.principal_type, row.principal_id]),
+    ).toEqual([
+      [false, null, null],
+      [false, "agent", PRINCIPAL],
+    ]);
   });
 });

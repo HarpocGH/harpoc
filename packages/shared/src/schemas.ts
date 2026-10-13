@@ -1390,6 +1390,14 @@ export type CertificateImportRequest = z.infer<typeof certificateImportSchema>;
  */
 export type CertificateImportRequestInput = z.input<typeof certificateImportSchema>;
 
+/** The attach step of a `cert csr` secret: the issued certificate (and its chain) for the key the vault holds — the two public-material fields of the import request, the key never crossing the wire (2026-10-13, test-review coverage U5 — M-P3-11). */
+export const attachCertificateRequestSchema = z.strictObject({
+  certificate_pem: pemPattern,
+  chain_pem: pemPattern.optional(),
+});
+
+export type AttachCertificateRequest = z.infer<typeof attachCertificateRequestSchema>;
+
 export const generateCsrRequestSchema = z
   .strictObject({
     name: namePattern,

@@ -4,6 +4,7 @@ import type {
   Agent,
   AgentPolicy,
   AgentStatusFilter,
+  AttachCertificateRequest,
   CertificateImportRequestInput,
   CertificateStatus,
   ConnectionConfig,
@@ -117,6 +118,7 @@ export interface VaultClient {
     input: Omit<CertificateImportRequestInput, "name">,
   ): Promise<CertificateRef>;
   generateCsr(name: string, input: Omit<GenerateCsrRequest, "name">): Promise<GeneratedCsrRef>;
+  attachCertificate(handle: string, input: AttachCertificateRequest): Promise<CertificateStatus>;
   renewCertificate(handle: string): Promise<CertificateStatus>;
   getCertificateStatus(handle: string): Promise<CertificateStatus>;
 }

@@ -12,6 +12,8 @@ const read = (dir: URL, name: string): string => readFileSync(new URL(name, dir)
 
 export const KEY_PEM = read(CORE_CERTS, "rsa-key.pem");
 export const CERT_PEM = read(CORE_CERTS, "rsa-cert.pem");
+export const RENEWED_CERT_PEM = read(CORE_CERTS, "rsa-cert-renewed.pem");
+export const OTHER_KEY_PEM = read(CORE_CERTS, "other-key.pem");
 export const EXPIRED_KEY_PEM = read(CORE_CERTS, "expired-key.pem");
 export const EXPIRED_CERT_PEM = read(CORE_CERTS, "expired-cert.pem");
 export const SECOND_CA_CERT_PEM = read(CORE_CERTS, "second-ca-cert.pem");

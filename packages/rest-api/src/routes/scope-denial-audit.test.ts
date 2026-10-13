@@ -75,6 +75,7 @@ const IMPORT_BODY = {
   certificate_pem: CERTIFICATE_PEM,
 };
 const CSR_BODY = { name: "my-csr", subject: "example.com" };
+const ATTACH_BODY = { certificate_pem: CERTIFICATE_PEM };
 
 function createMocks() {
   return {
@@ -108,6 +109,7 @@ function createMocks() {
       getOAuthTokenStatus: vi.fn(),
       refreshOAuthToken: vi.fn(),
       getCertificateStatus: vi.fn(),
+      updateCertificate: vi.fn(),
       listAgents: vi.fn(),
       registerAgent: vi.fn(),
       getAgent: vi.fn(),
@@ -157,7 +159,7 @@ interface ScopeSite {
 }
 
 /**
- * One row per `checkScope(` call site under `routes/` (44). A route with a
+ * One row per `checkScope(` call site under `routes/` (45). A route with a
  * second, name-carrying check is reachable there only with the permission held,
  * so those five rows refuse on the project or the name pattern instead.
  */
@@ -275,7 +277,7 @@ const SITES: ScopeSite[] = [
     untouched: (m) => [m.engine.verifyAuditChain],
   },
   {
-    site: "certificates.ts:20",
+    site: "certificates.ts:21",
     method: "POST",
     route: "/api/v1/certificates/import",
     path: "/api/v1/certificates/import",
@@ -285,7 +287,7 @@ const SITES: ScopeSite[] = [
     untouched: (m) => [m.certManager.importCertificate],
   },
   {
-    site: "certificates.ts:26",
+    site: "certificates.ts:27",
     method: "POST",
     route: "/api/v1/certificates/import",
     path: "/api/v1/certificates/import",
@@ -295,7 +297,7 @@ const SITES: ScopeSite[] = [
     untouched: (m) => [m.certManager.importCertificate],
   },
   {
-    site: "certificates.ts:43",
+    site: "certificates.ts:44",
     method: "POST",
     route: "/api/v1/certificates/csr",
     path: "/api/v1/certificates/csr",
@@ -305,7 +307,7 @@ const SITES: ScopeSite[] = [
     untouched: (m) => [m.certManager.generateCsr],
   },
   {
-    site: "certificates.ts:49",
+    site: "certificates.ts:50",
     method: "POST",
     route: "/api/v1/certificates/csr",
     path: "/api/v1/certificates/csr",
@@ -315,7 +317,7 @@ const SITES: ScopeSite[] = [
     untouched: (m) => [m.certManager.generateCsr],
   },
   {
-    site: "certificates.ts:64",
+    site: "certificates.ts:65",
     method: "POST",
     route: "/api/v1/certificates/:handle/renew",
     path: "/api/v1/certificates/test-key/renew",
@@ -324,13 +326,23 @@ const SITES: ScopeSite[] = [
     untouched: (m) => [m.engine.resolveSecretId, m.certManager.renewCertificate],
   },
   {
-    site: "certificates.ts:78",
+    site: "certificates.ts:79",
     method: "GET",
     route: "/api/v1/certificates/:handle/status",
     path: "/api/v1/certificates/test-key/status",
     token: lacking("read"),
     reason: "permission",
     untouched: (m) => [m.engine.resolveSecretId, m.engine.getCertificateStatus],
+  },
+  {
+    site: "certificates.ts:90",
+    method: "POST",
+    route: "/api/v1/certificates/:handle/attach",
+    path: "/api/v1/certificates/test-key/attach",
+    body: ATTACH_BODY,
+    token: lacking("rotate"),
+    reason: "permission",
+    untouched: (m) => [m.engine.resolveSecretId, m.engine.updateCertificate],
   },
   {
     site: "health.ts:35",

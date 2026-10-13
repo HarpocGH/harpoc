@@ -1,6 +1,6 @@
 /**
  * The DirectClient suites' shared doubles (SDK-7): a mock VaultEngine, fake OAuth and
- * certificate managers, the full injection policy and three PEM stand-ins. Test-only —
+ * certificate managers, the full injection policy and four PEM stand-ins. Test-only —
  * excluded from the build by `tsconfig.json` (TM-10).
  */
 import { vi } from "vitest";
@@ -58,6 +58,7 @@ export interface MockEngine {
   getOAuthTokenStatus: Mock;
   refreshOAuthToken: Mock;
   importCertificate: Mock;
+  updateCertificate: Mock;
   getCertificateStatus: Mock;
 }
 
@@ -209,6 +210,7 @@ export function createMockEngine(): MockEngine {
     } satisfies OAuthTokenStatus),
     refreshOAuthToken: vi.fn().mockResolvedValue(9999),
     importCertificate: vi.fn().mockResolvedValue({ handle: "secret://web", secretId: "uuid-web" }),
+    updateCertificate: vi.fn().mockResolvedValue(undefined),
     getCertificateStatus: vi.fn().mockReturnValue({
       secret_id: "uuid-1",
       subject: "CN=web.example.com",
@@ -285,3 +287,4 @@ export const PLAIN_KEY_PEM = "-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE K
 export const ENCRYPTED_KEY_PEM =
   "-----BEGIN ENCRYPTED PRIVATE KEY-----\nk\n-----END ENCRYPTED PRIVATE KEY-----";
 export const LEAF_PEM = "-----BEGIN CERTIFICATE-----\nc\n-----END CERTIFICATE-----";
+export const CHAIN_PEM = "-----BEGIN CERTIFICATE-----\ni\n-----END CERTIFICATE-----";

@@ -3,6 +3,7 @@ import type {
   Agent,
   AgentPolicy,
   AgentStatusFilter,
+  AttachCertificateRequest,
   CertificateImportRequestInput,
   CertificateStatus,
   ConnectionConfig,
@@ -323,6 +324,17 @@ export class RestClient implements VaultClient {
       { name, ...input },
     );
     return { handle: result.handle, csrPem: result.csr_pem };
+  }
+
+  async attachCertificate(
+    handle: string,
+    input: AttachCertificateRequest,
+  ): Promise<CertificateStatus> {
+    return this.request<CertificateStatus>(
+      "POST",
+      `/api/v1/certificates/${this.encodeHandle(handle)}/attach`,
+      input,
+    );
   }
 
   async renewCertificate(handle: string): Promise<CertificateStatus> {

@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import {
   accessPolicyInputSchema,
+  attachCertificateRequestSchema,
   certificateImportSchema,
   connectionConfigSchema,
   createSecretInputSchema,
@@ -89,6 +90,7 @@ const REQUEST_BODY_SCHEMAS: Array<[string, z.ZodType]> = [
   ["updateAgentInputSchema", updateAgentInputSchema],
   ["setAgentPermissionsInputSchema", setAgentPermissionsInputSchema],
   ["certificateImportSchema", certificateImportSchema],
+  ["attachCertificateRequestSchema", attachCertificateRequestSchema],
   ["generateCsrRequestSchema", generateCsrRequestSchema],
   ["startOAuthFlowInputSchema", startOAuthFlowInputSchema],
 ];

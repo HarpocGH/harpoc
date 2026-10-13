@@ -8,9 +8,11 @@ import {
   VaultError,
   VaultState,
 } from "@harpoc/shared";
-import type { McpServerConfigInput } from "@harpoc/shared";
+import type { ConnectionConfig, McpServerConfigInput, UseSecretAction } from "@harpoc/shared";
 import { DirectClient } from "./direct-client.js";
+import type { VaultClient } from "./client.js";
 import {
+  CHAIN_PEM,
   ENCRYPTED_KEY_PEM,
   FULL_POLICY,
   LEAF_PEM,
@@ -24,6 +26,70 @@ import { expectVaultError } from "@harpoc/test-utils";
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+// I13 (test-review-2026-10-09): a valid action per v1.3 context, every
+// schema default spelled out — the client sends what it is given, no more.
+// Every host is a loopback literal; nothing connects.
+const V13_ACTIONS: UseSecretAction[] = [
+  {
+    type: "smtp",
+    host: "127.0.0.1",
+    port: 2525,
+    security: "starttls",
+    from: "ops@example.com",
+    to: ["dev@example.com"],
+    cc: ["audit@example.com"],
+    subject: "I13 sdk",
+    text: "deploy finished",
+  },
+  {
+    type: "imap",
+    host: "127.0.0.1",
+    port: 993,
+    mailbox: "INBOX",
+    operation: { kind: "fetch", uids: [7], parts: "envelope" },
+  },
+  {
+    type: "websocket",
+    url: "ws://127.0.0.1:8080/i13",
+    injection: { type: "header", header_name: "X-Api-Key" },
+    message: "ping",
+  },
+  {
+    type: "sftp",
+    host: "127.0.0.1",
+    user: "deploy",
+    port: 2222,
+    operation: "download",
+    remote_path: "/srv/i13/report.txt",
+    local_path: "/var/tmp/i13-report.txt",
+  },
+  {
+    type: "docker_registry",
+    operation: "pull",
+    image: "127.0.0.1:5000/i13/app:1.0",
+    timeout_ms: 300_000,
+  },
+];
+
+// I26 (test-review-2026-10-09): the three connection-config groups the SDK
+// had never sent, one config apiece (no group carries a schema default).
+const CONFIG_GROUPS: { group: string; config: ConnectionConfig }[] = [
+  {
+    group: "mail",
+    config: {
+      mail: { tls: { ca: "-----BEGIN CERTIFICATE-----\nmail-ca\n-----END CERTIFICATE-----" } },
+    },
+  },
+  {
+    group: "git",
+    config: { git: { ca_pem: "-----BEGIN CERTIFICATE-----\ngit-ca\n-----END CERTIFICATE-----" } },
+  },
+  {
+    group: "http",
+    config: { http: { ca_pem: "-----BEGIN CERTIFICATE-----\nhttp-ca\n-----END CERTIFICATE-----" } },
+  },
+];
 
 describe("DirectClient", () => {
   it("listSecrets delegates to engine", async () => {
@@ -128,6 +194,19 @@ describe("DirectClient", () => {
     expect(engine.useSecret).toHaveBeenCalledWith("secret://key", action);
   });
 
+  it.each(V13_ACTIONS)(
+    "useSecret forwards a $type action to the engine verbatim (I13)",
+    async (action) => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      await client.useSecret("secret://key", action);
+
+      expect(engine.useSecret).toHaveBeenCalledTimes(1);
+      expect(engine.useSecret.mock.calls[0]).toStrictEqual(["secret://key", action]);
+    },
+  );
+
   it("setInjectionPolicy and getInjectionPolicy delegate to the engine", async () => {
     const engine = createMockEngine();
     const client = new DirectClient(engine as never);
@@ -227,6 +306,19 @@ describe("DirectClient", () => {
     expect(error.message).toBe('<root>: Unrecognized key: "stray"');
     expect(engine.setConnectionConfig).not.toHaveBeenCalled();
   });
+
+  it.each(CONFIG_GROUPS)(
+    "setConnectionConfig hands the engine the $group group verbatim (I26)",
+    async ({ config }) => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      await client.setConnectionConfig("secret://key", config);
+
+      expect(engine.setConnectionConfig).toHaveBeenCalledTimes(1);
+      expect(engine.setConnectionConfig.mock.calls[0]).toStrictEqual(["secret://key", config]);
+    },
+  );
 
   it("passes no caller on the config and policy operations (trusted local path)", async () => {
     const engine = createMockEngine();
@@ -1007,6 +1099,70 @@ describe("DirectClient", () => {
       expect(status.subject).toBe("CN=web.example.com");
       expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://web");
       expect(engine.getCertificateStatus).toHaveBeenCalledWith("uuid-1");
+    });
+
+    // M-P3-11 (test-review-2026-10-09): the attach step — the engine's
+    // updateCertificate as a non-renewal (a cert.issue row), no caller on the
+    // trusted local path, the body schema-gated before the engine is reached.
+    it("attachCertificate resolves the handle, attaches as a non-renewal and returns the status", async () => {
+      const engine = createMockEngine();
+      // Through the interface: the member's presence on VaultClient is pinned at compile time.
+      const client: VaultClient = new DirectClient(engine as never);
+
+      const status = await client.attachCertificate("secret://web", {
+        certificate_pem: LEAF_PEM,
+        chain_pem: CHAIN_PEM,
+      });
+
+      expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://web");
+      expect(engine.updateCertificate).toHaveBeenCalledWith("uuid-1", LEAF_PEM, CHAIN_PEM, {
+        renewed: false,
+        handle: "secret://web",
+      });
+      expect(engine.getCertificateStatus).toHaveBeenCalledWith("uuid-1");
+      expect(status).toEqual(engine.getCertificateStatus.mock.results[0]?.value);
+    });
+
+    it("attachCertificate forwards an absent chain as undefined", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      await client.attachCertificate("secret://web", { certificate_pem: LEAF_PEM });
+
+      expect(engine.updateCertificate).toHaveBeenCalledWith("uuid-1", LEAF_PEM, undefined, {
+        renewed: false,
+        handle: "secret://web",
+      });
+    });
+
+    it("attachCertificate refuses a non-PEM certificate before any engine call", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      const error = await expectVaultError(
+        () => client.attachCertificate("secret://web", { certificate_pem: "not a certificate" }),
+        ErrorCode.SCHEMA_VALIDATION_ERROR,
+      );
+      expect(error.message).toBe("certificate_pem: Value must be PEM-encoded");
+      expect(engine.resolveSecretId).not.toHaveBeenCalled();
+      expect(engine.updateCertificate).not.toHaveBeenCalled();
+    });
+
+    it("attachCertificate refuses a stray key — the body is strict — before any engine call", async () => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      const error = await expectVaultError(
+        () =>
+          client.attachCertificate("secret://web", {
+            certificate_pem: LEAF_PEM,
+            private_key_pem: PLAIN_KEY_PEM,
+          } as never),
+        ErrorCode.SCHEMA_VALIDATION_ERROR,
+      );
+      expect(error.message).toBe('<root>: Unrecognized key: "private_key_pem"');
+      expect(engine.resolveSecretId).not.toHaveBeenCalled();
+      expect(engine.updateCertificate).not.toHaveBeenCalled();
     });
 
     it("importCertificate names the missing field the way the REST route does", async () => {

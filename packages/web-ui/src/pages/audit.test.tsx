@@ -69,6 +69,38 @@ describe("AuditPage", () => {
     );
   });
 
+  // M-P1-6 (test-review-2026-10-09): the event-type and limit filters reach the
+  // query the page sends — `api/client.test.ts` pins the query string they become.
+  it("forwards the event-type filter, and omits it once emptied", async () => {
+    const fake = api();
+    render(<AuditPage api={fake} />);
+    fireEvent.input(screen.getByLabelText("Event type"), { target: { value: "secret.use" } });
+    await waitFor(() =>
+      expect(fake.queryAudit).toHaveBeenCalledWith(
+        expect.objectContaining({ event_type: "secret.use" }),
+      ),
+    );
+    fireEvent.input(screen.getByLabelText("Event type"), { target: { value: "" } });
+    await waitFor(() =>
+      expect(fake.queryAudit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ event_type: undefined }),
+      ),
+    );
+  });
+
+  it("forwards the limit as a number, and falls back to 100 once emptied", async () => {
+    const fake = api();
+    render(<AuditPage api={fake} />);
+    fireEvent.input(screen.getByLabelText("Limit"), { target: { value: "25" } });
+    await waitFor(() =>
+      expect(fake.queryAudit).toHaveBeenCalledWith(expect.objectContaining({ limit: 25 })),
+    );
+    fireEvent.input(screen.getByLabelText("Limit"), { target: { value: "" } });
+    await waitFor(() =>
+      expect(fake.queryAudit).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 100 })),
+    );
+  });
+
   it("prefilters from the hash query the agent detail links to", async () => {
     // `#/audit?principal_type=agent&principal_id=<name>` is the agent-detail
     // page's "open in Audit" link: landing on it must prefilter the first load,

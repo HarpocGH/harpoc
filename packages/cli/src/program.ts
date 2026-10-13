@@ -37,6 +37,7 @@ import { registerCertStatusCommand } from "./commands/cert/status.js";
 import { registerCertCsrCommand } from "./commands/cert/csr.js";
 import { registerCertIssueCommand } from "./commands/cert/issue.js";
 import { registerCertRenewCommand } from "./commands/cert/renew.js";
+import { registerCertAttachCommand } from "./commands/cert/attach.js";
 import { registerServerCommand } from "./commands/server.js";
 
 /** The `harpoc` command tree — every registration and the root hook; no parse. */
@@ -106,6 +107,7 @@ export function buildProgram(): Command {
   registerCertCsrCommand(cert);
   registerCertIssueCommand(cert);
   registerCertRenewCommand(cert);
+  registerCertAttachCommand(cert);
 
   return program;
 }

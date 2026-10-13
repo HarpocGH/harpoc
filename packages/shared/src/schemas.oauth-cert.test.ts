@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  attachCertificateRequestSchema,
   certificateImportSchema,
   generateCsrRequestSchema,
   oauthGrantTypeSchema,
@@ -397,6 +398,60 @@ describe("certificateImportSchema", () => {
         certificate_pem: "not-pem",
       }),
     ).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// attachCertificateRequestSchema
+// ---------------------------------------------------------------------------
+
+// M-P3-11 (test-review-2026-10-09): the attach step's body — the issued
+// certificate and its optional chain; the private key stays in the vault.
+describe("attachCertificateRequestSchema", () => {
+  const certPem = "-----BEGIN CERTIFICATE-----\nMIIEvQ...\n-----END CERTIFICATE-----";
+  const chainPem = "-----BEGIN CERTIFICATE-----\nMIIChain...\n-----END CERTIFICATE-----";
+
+  it("parses certificate_pem with chain_pem, nothing added", () => {
+    expect(
+      attachCertificateRequestSchema.parse({ certificate_pem: certPem, chain_pem: chainPem }),
+    ).toStrictEqual({ certificate_pem: certPem, chain_pem: chainPem });
+  });
+
+  it("chain_pem is optional", () => {
+    expect(attachCertificateRequestSchema.parse({ certificate_pem: certPem })).toStrictEqual({
+      certificate_pem: certPem,
+    });
+  });
+
+  it("refuses a missing certificate_pem", () => {
+    const r = attachCertificateRequestSchema.safeParse({ chain_pem: chainPem });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(r.error.issues.map((i) => [i.path, i.message])).toEqual([
+        [["certificate_pem"], "Invalid input: expected string, received undefined"],
+      ]);
+    }
+  });
+
+  it("refuses a non-PEM certificate_pem on the PEM rule", () => {
+    const r = attachCertificateRequestSchema.safeParse({ certificate_pem: "not-pem" });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(r.error.issues.map((i) => [i.path, i.message])).toEqual([
+        [["certificate_pem"], "Value must be PEM-encoded"],
+      ]);
+    }
+  });
+
+  it("refuses a private_key_pem — the key never crosses the wire", () => {
+    const r = attachCertificateRequestSchema.safeParse({
+      certificate_pem: certPem,
+      private_key_pem: "-----BEGIN PRIVATE KEY-----\nMIIFake\n-----END PRIVATE KEY-----",
+    });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(r.error.issues[0]?.message).toContain('Unrecognized key: "private_key_pem"');
+    }
   });
 });
 

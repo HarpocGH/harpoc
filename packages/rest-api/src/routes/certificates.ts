@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import {
   AuditEventType,
   VaultError,
+  attachCertificateRequestSchema,
   certificateImportSchema,
   generateCsrRequestSchema,
   isEncryptedPrivateKeyPem,
@@ -82,6 +83,28 @@ export function createCertificateRoutes(): Hono<HarpocEnv> {
     const secretId = await engine.resolveSecretId(handle, callerOf(c));
     const status = engine.getCertificateStatus(secretId, callerOf(c), handle);
     return c.json({ data: status });
+  });
+
+  router.post("/:handle/attach", async (c) => {
+    const { project, name } = parseHandleParam(c.req.param("handle"));
+    checkScope(c, "rotate", project, name);
+    const engine = c.get("engine");
+    const body = await readJsonBody(c);
+    const parsed = attachCertificateRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      throw schemaValidationError(parsed.error);
+    }
+    const handle = buildHandle(c.req.param("handle"));
+    c.get("limiter").checkSecret(handle);
+    const secretId = await engine.resolveSecretId(handle, callerOf(c), AuditEventType.CERT_ISSUE);
+    await engine.updateCertificate(
+      secretId,
+      parsed.data.certificate_pem,
+      parsed.data.chain_pem,
+      { renewed: false, handle },
+      callerOf(c),
+    );
+    return c.json({ data: engine.getCertificateStatus(secretId, callerOf(c), handle) });
   });
 
   return router;

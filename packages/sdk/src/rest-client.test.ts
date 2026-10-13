@@ -1,8 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Mock } from "vitest";
 import { ErrorCode, injectionPolicyInputSchema } from "@harpoc/shared";
-import type { OAuthTokenStatus, SetAgentPermissionsInput } from "@harpoc/shared";
+import type {
+  ConnectionConfig,
+  OAuthTokenStatus,
+  SetAgentPermissionsInput,
+  UseSecretAction,
+} from "@harpoc/shared";
 import { RestClient } from "./rest-client.js";
+import type { VaultClient } from "./client.js";
 
 const BASE_URL = "http://localhost:3000";
 const TOKEN = "test-jwt-token";
@@ -40,6 +46,68 @@ const HTTP_ACTION = {
   injection: { type: "bearer" as const },
   follow_redirects: "none" as const,
 };
+// I13 (test-review-2026-10-09): a valid action per v1.3 context, every
+// schema default spelled out — the client sends what it is given, no more.
+// Every host is a loopback literal; nothing connects.
+const V13_ACTIONS: UseSecretAction[] = [
+  {
+    type: "smtp",
+    host: "127.0.0.1",
+    port: 2525,
+    security: "starttls",
+    from: "ops@example.com",
+    to: ["dev@example.com"],
+    cc: ["audit@example.com"],
+    subject: "I13 sdk",
+    text: "deploy finished",
+  },
+  {
+    type: "imap",
+    host: "127.0.0.1",
+    port: 993,
+    mailbox: "INBOX",
+    operation: { kind: "fetch", uids: [7], parts: "envelope" },
+  },
+  {
+    type: "websocket",
+    url: "ws://127.0.0.1:8080/i13",
+    injection: { type: "header", header_name: "X-Api-Key" },
+    message: "ping",
+  },
+  {
+    type: "sftp",
+    host: "127.0.0.1",
+    user: "deploy",
+    port: 2222,
+    operation: "download",
+    remote_path: "/srv/i13/report.txt",
+    local_path: "/var/tmp/i13-report.txt",
+  },
+  {
+    type: "docker_registry",
+    operation: "pull",
+    image: "127.0.0.1:5000/i13/app:1.0",
+    timeout_ms: 300_000,
+  },
+];
+// I26 (test-review-2026-10-09): the three connection-config groups the SDK
+// had never sent, one config apiece (no group carries a schema default).
+const CONFIG_GROUPS: { group: string; config: ConnectionConfig }[] = [
+  {
+    group: "mail",
+    config: {
+      mail: { tls: { ca: "-----BEGIN CERTIFICATE-----\nmail-ca\n-----END CERTIFICATE-----" } },
+    },
+  },
+  {
+    group: "git",
+    config: { git: { ca_pem: "-----BEGIN CERTIFICATE-----\ngit-ca\n-----END CERTIFICATE-----" } },
+  },
+  {
+    group: "http",
+    config: { http: { ca_pem: "-----BEGIN CERTIFICATE-----\nhttp-ca\n-----END CERTIFICATE-----" } },
+  },
+];
 const CERT_STATUS = {
   secret_id: "uuid-1",
   subject: "CN=web.example.com",
@@ -49,6 +117,8 @@ const CERT_STATUS = {
   auto_renew: true,
   renewal_status: "ok",
 };
+const LEAF_PEM = "-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----";
+const CHAIN_PEM = "-----BEGIN CERTIFICATE-----\nchain\n-----END CERTIFICATE-----";
 
 type Args<K extends keyof RestClient> = RestClient[K] extends (...args: infer A) => unknown
   ? A
@@ -297,6 +367,17 @@ const MEMBERS: MemberRow[] = [
       returns: { handle: "secret://web", csrPem: "csr-pem" },
     },
   ),
+  member(
+    "attachCertificate",
+    [HANDLE, { certificate_pem: LEAF_PEM, chain_pem: CHAIN_PEM }],
+    "POST",
+    `/api/v1/certificates/${ENCODED}/attach`,
+    {
+      body: { certificate_pem: LEAF_PEM, chain_pem: CHAIN_PEM },
+      data: CERT_STATUS,
+      returns: CERT_STATUS,
+    },
+  ),
   member("renewCertificate", [HANDLE], "POST", `/api/v1/certificates/${ENCODED}/renew`, {
     data: CERT_STATUS,
     returns: CERT_STATUS,
@@ -429,6 +510,20 @@ describe("RestClient", () => {
       expect(body.action.type).toBe("process");
       expect(body.action.command).toBe("gh");
     });
+
+    it.each(V13_ACTIONS)(
+      "posts a $type action verbatim as the body's action (I13)",
+      async (action) => {
+        mockFetchResponse({ type: action.type });
+        await client.useSecret(HANDLE, action);
+
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+        expect(url).toBe(`${BASE_URL}/api/v1/secrets/${ENCODED}/use`);
+        expect(init.method).toBe("POST");
+        expect(JSON.parse(init.body as string)).toStrictEqual({ action });
+      },
+    );
   });
 
   describe("injection policy", () => {
@@ -609,6 +704,20 @@ describe("RestClient", () => {
       expect(call[0]).toContain("/api/v1/secrets/k/connection-config");
       expect(config).toBeUndefined();
     });
+
+    it.each(CONFIG_GROUPS)(
+      "setConnectionConfig sends the $group group verbatim as the PUT body (I26)",
+      async ({ config }) => {
+        mockFetchResponse({ updated: true });
+        await client.setConnectionConfig(HANDLE, config);
+
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+        expect(url).toBe(`${BASE_URL}/api/v1/secrets/${ENCODED}/connection-config`);
+        expect(init.method).toBe("PUT");
+        expect(JSON.parse(init.body as string)).toStrictEqual(config);
+      },
+    );
   });
 
   describe("policies", () => {
@@ -1010,6 +1119,38 @@ describe("RestClient", () => {
         bits: 4096,
         project: "proj",
       });
+    });
+
+    // M-P3-11 (test-review-2026-10-09): the attach step of a `cert csr` secret —
+    // the issued certificate and its chain posted to the attach route, the
+    // route's status returned as the member's result.
+    it("attachCertificate posts the certificate and chain to the attach route and returns the status", async () => {
+      mockFetchResponse(CERT_STATUS);
+      // Through the interface: the member's presence on VaultClient is pinned at compile time.
+      const vaultClient: VaultClient = client;
+
+      const result = await vaultClient.attachCertificate("secret://web", {
+        certificate_pem: LEAF_PEM,
+        chain_pem: CHAIN_PEM,
+      });
+
+      expect(result).toEqual(CERT_STATUS);
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/certificates/web/attach`);
+      expect(call[1].method).toBe("POST");
+      expect(JSON.parse(call[1].body as string)).toStrictEqual({
+        certificate_pem: LEAF_PEM,
+        chain_pem: CHAIN_PEM,
+      });
+    });
+
+    it("attachCertificate sends no chain_pem when the caller gives none", async () => {
+      mockFetchResponse(CERT_STATUS);
+
+      await client.attachCertificate("secret://web", { certificate_pem: LEAF_PEM });
+
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(JSON.parse(call[1].body as string)).toStrictEqual({ certificate_pem: LEAF_PEM });
     });
 
     it("renewCertificate posts to the renew route with no body (B23/B24)", async () => {

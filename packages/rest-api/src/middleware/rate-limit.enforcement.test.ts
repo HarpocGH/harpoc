@@ -1,12 +1,16 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect, vi } from "vitest";
+import type { MockInstance } from "vitest";
 import {
+  ErrorCode,
   RATE_LIMIT_GLOBAL,
   RATE_LIMIT_PER_SECRET,
   RATE_LIMIT_USE_SECRET,
+  VaultError,
   VaultState,
 } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
 import { createApp } from "../app.js";
+import { RateLimiter } from "./rate-limit.js";
 
 /**
  * T8 (REST half): rate limiting was enforced nowhere in the tests — removing
@@ -47,6 +51,11 @@ function createMockEngine() {
       rotatedAt: null,
     }),
     useSecret: vi.fn().mockResolvedValue({ type: "http", status: 200 }),
+    getSecretValue: vi.fn().mockResolvedValue(new Uint8Array([104, 105])),
+    revokeSecret: vi.fn().mockResolvedValue(undefined),
+    rotateSecret: vi.fn().mockResolvedValue(undefined),
+    getExpiringOAuthTokenStatuses: vi.fn().mockReturnValue([]),
+    getExpiringCertificateStatuses: vi.fn().mockReturnValue([]),
     resolveSecretId: vi.fn().mockResolvedValue("uuid-1"),
     queryAudit: vi.fn().mockReturnValue([]),
     getOAuthTokenStatus: vi.fn().mockReturnValue({ secret_id: "uuid-1" }),
@@ -231,5 +240,152 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
 
     expect(engine.verifyToken).toHaveBeenCalledTimes(1);
     expect(auditLineSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// I27 (test-review-2026-10-09): the per-secret tier on the three routes the
+// hammer above does not reach — each charges the handle's bucket before its
+// engine call — and the global tier on /health/expiring, its own registration.
+describe("the per-secret tier on /value, DELETE and rotate; the global tier on /health/expiring (I27)", () => {
+  let checkSecret: MockInstance<RateLimiter["checkSecret"]>;
+
+  beforeEach(() => {
+    checkSecret = vi.spyOn(RateLimiter.prototype, "checkSecret");
+  });
+
+  afterEach(() => {
+    checkSecret.mockRestore();
+  });
+
+  it("GET /api/v1/secrets/:handle/value charges the handle before the engine read", async () => {
+    const engine = createMockEngine();
+    const res = await createApp(engine as never).request("/api/v1/secrets/k/value", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    expect(checkSecret).toHaveBeenCalledWith("secret://k");
+    expect(checkSecret.mock.invocationCallOrder[0]).toBeLessThan(
+      engine.getSecretValue.mock.invocationCallOrder[0] as number,
+    );
+  });
+
+  it("DELETE /api/v1/secrets/:handle charges the handle before the engine revoke", async () => {
+    const engine = createMockEngine();
+    const res = await createApp(engine as never).request("/api/v1/secrets/k?confirm=true", {
+      method: "DELETE",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    expect(checkSecret).toHaveBeenCalledWith("secret://k");
+    expect(checkSecret.mock.invocationCallOrder[0]).toBeLessThan(
+      engine.revokeSecret.mock.invocationCallOrder[0] as number,
+    );
+  });
+
+  it("POST /api/v1/secrets/:handle/rotate charges the handle before the engine rotate", async () => {
+    const engine = createMockEngine();
+    const res = await createApp(engine as never).request("/api/v1/secrets/k/rotate", {
+      method: "POST",
+      headers: { ...AUTH, "content-type": "application/json" },
+      body: JSON.stringify({ value: "aGVsbG8=" }),
+    });
+    expect(res.status).toBe(200);
+    expect(checkSecret).toHaveBeenCalledWith("secret://k");
+    expect(checkSecret.mock.invocationCallOrder[0]).toBeLessThan(
+      engine.rotateSecret.mock.invocationCallOrder[0] as number,
+    );
+  });
+
+  it("GET /api/v1/health/expiring answers 429 once the global bucket is drained", async () => {
+    const instance = app();
+
+    expect(await hammer(instance, "/api/v1/secrets", RATE_LIMIT_GLOBAL)).toBe(200);
+
+    const res = await instance.request("/api/v1/health/expiring", { headers: AUTH });
+    expect(res.status).toBe(429);
+    expect(((await res.json()) as { error?: string }).error).toBe("RATE_LIMIT_EXCEEDED");
+  });
+});
+
+// M-T2b-11 (test-review-2026-10-09): the limiter answers before the token
+// gate (rate-limit, audit, auth on every protected group) — past the drained
+// global bucket an unauthenticated request is a 429, not a 401.
+describe("rate limiting runs before authentication (M-T2b-11)", () => {
+  it("an unauthenticated request past the drained global bucket answers 429, not 401", async () => {
+    const instance = app();
+
+    // The control: with tokens left, the gate refuses it — after the limiter
+    // charged it a global token, so one token fewer remains to drain.
+    expect((await instance.request("/api/v1/secrets/k", { headers: HOST })).status).toBe(401);
+
+    expect(await hammer(instance, "/api/v1/secrets", RATE_LIMIT_GLOBAL - 1)).toBe(200);
+
+    const res = await instance.request("/api/v1/secrets/k", { headers: HOST });
+    expect(res.status).toBe(429);
+    expect(((await res.json()) as { error?: string }).error).toBe("RATE_LIMIT_EXCEEDED");
+  });
+});
+
+// M-P3-3 (test-review-2026-10-09): the request-audit line — its content, the
+// 401 path (the middleware wraps auth, so a refused token is still logged, as
+// anonymous), the oauth and certificates groups, /health/expiring's exemption.
+const AUDIT_FORMAT = "[audit] %s %s → %d principal=%s ip=%s";
+
+describe("the REST request-audit line (M-P3-3)", () => {
+  beforeEach(() => {
+    auditLineSpy.mockClear();
+  });
+
+  it("names the method, path, status, principal and peer of an authenticated request", async () => {
+    await app().request("/api/v1/secrets/k", { headers: AUTH });
+    expect(auditLineSpy).toHaveBeenCalledTimes(1);
+    expect(auditLineSpy).toHaveBeenCalledWith(
+      AUDIT_FORMAT,
+      "GET",
+      "/api/v1/secrets/k",
+      200,
+      "test-agent",
+      "unknown",
+    );
+  });
+
+  it("logs a request refused for a bad token, naming the principal anonymous", async () => {
+    const engine = createMockEngine();
+    engine.verifyToken.mockImplementation(() => {
+      throw new VaultError(ErrorCode.INVALID_TOKEN, "Invalid token");
+    });
+    const res = await createApp(engine as never).request("/api/v1/secrets/k", { headers: AUTH });
+    expect(res.status).toBe(401);
+    expect(auditLineSpy).toHaveBeenCalledTimes(1);
+    expect(auditLineSpy).toHaveBeenCalledWith(
+      AUDIT_FORMAT,
+      "GET",
+      "/api/v1/secrets/k",
+      401,
+      "anonymous",
+      "unknown",
+    );
+  });
+
+  it.each([
+    ["oauth", "/api/v1/oauth/k/status"],
+    ["certificates", "/api/v1/certificates/k/status"],
+  ])("the %s group writes the line", async (_group, path) => {
+    await app().request(path, { headers: AUTH });
+    expect(auditLineSpy).toHaveBeenCalledTimes(1);
+    expect(auditLineSpy).toHaveBeenCalledWith(
+      AUDIT_FORMAT,
+      "GET",
+      path,
+      200,
+      "test-agent",
+      "unknown",
+    );
+  });
+
+  it("GET /api/v1/health/expiring writes no line (rate-limit and auth only)", async () => {
+    const res = await app().request("/api/v1/health/expiring", { headers: AUTH });
+    expect(res.status).toBe(200);
+    expect(auditLineSpy).not.toHaveBeenCalled();
   });
 });

@@ -1,10 +1,13 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MockInstance } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import type { CallerContext } from "@harpoc/shared";
 import { VaultEngine } from "@harpoc/core";
+import { CallbackServer } from "./callback-server.js";
 import { OAuthManager } from "./oauth-manager.js";
 import {
   authCodeConfig,
@@ -520,6 +523,95 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
       "mgr-refresh-token",
       expect.any(Number),
     );
+  });
+
+  // I34 (test-review-2026-10-09): `oauth connect --redirect-uri` reaches the
+  // config as `redirect_uri` (U4); the manager tells the provider exactly that
+  // URL — in the authorization URL and in the code exchange — while its own
+  // callback server still binds its own port and receives the code.
+  function recordTokenRequestBodies(): string[] {
+    const bodies: string[] = [];
+    tokenHandler = (req, res) => {
+      let body = "";
+      req.setEncoding("utf8");
+      req.on("data", (chunk: string) => {
+        body += chunk;
+      });
+      req.on("end", () => {
+        bodies.push(body);
+        defaultTokenHandler(req, res);
+      });
+    };
+    return bodies;
+  }
+
+  async function completeThroughCallbackServer(
+    startSpy: MockInstance<CallbackServer["start"]>,
+    authUrl: URL,
+  ): Promise<void> {
+    const callbackPort = (startSpy.mock.contexts[0] as CallbackServer).listenPort;
+    expect(callbackPort).toBeGreaterThan(0);
+    const state = authUrl.searchParams.get("state") as string;
+    const res = await fetch(
+      `http://127.0.0.1:${callbackPort}/oauth/callback?code=i34-code&state=${state}`,
+    );
+    expect(res.status).toBe(200);
+  }
+
+  it("a redirect_uri override is exactly the URL in the authorization URL and the code exchange (I34)", async () => {
+    let overrideHits = 0;
+    const registered = createServer((_req, res) => {
+      overrideHits += 1;
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => registered.listen(0, "127.0.0.1", () => resolve()));
+    const override = `http://127.0.0.1:${(registered.address() as { port: number }).port}/cb`;
+    const tokenBodies = recordTokenRequestBodies();
+    const startSpy = vi.spyOn(CallbackServer.prototype, "start");
+    try {
+      const fake = makeFakeEngine();
+      const manager = fakeEngineManager(fake, { callbackPort: 0 });
+
+      const start = await manager.startAuthorizationCodeDeferred("gh", {
+        ...makeAuthCodeConfig(),
+        redirect_uri: override,
+      });
+      const authUrl = new URL(start.authUrl);
+      expect(authUrl.searchParams.get("redirect_uri")).toBe(override);
+
+      await completeThroughCallbackServer(startSpy, authUrl);
+      await expect(start.completion).resolves.toBeUndefined();
+      expect(tokenBodies).toHaveLength(1);
+      expect(new URLSearchParams(tokenBodies[0]).get("redirect_uri")).toBe(override);
+      // The override is only what the provider is told: the manager never dials it.
+      expect(overrideHits).toBe(0);
+    } finally {
+      startSpy.mockRestore();
+      await new Promise<void>((resolve) => registered.close(() => resolve()));
+    }
+  });
+
+  it("without an override, both legs carry the default http://localhost:<bound port>/oauth/callback (I34 control)", async () => {
+    const tokenBodies = recordTokenRequestBodies();
+    const startSpy = vi.spyOn(CallbackServer.prototype, "start");
+    try {
+      const fake = makeFakeEngine();
+      const manager = fakeEngineManager(fake, { callbackPort: 0 });
+
+      const start = await manager.startAuthorizationCodeDeferred("gh", makeAuthCodeConfig());
+      const authUrl = new URL(start.authUrl);
+      const callbackPort = (startSpy.mock.contexts[0] as CallbackServer).listenPort;
+      const expected = `http://localhost:${callbackPort}/oauth/callback`;
+      expect(authUrl.searchParams.get("redirect_uri")).toBe(expected);
+
+      await completeThroughCallbackServer(startSpy, authUrl);
+      await expect(start.completion).resolves.toBeUndefined();
+      expect(tokenBodies).toHaveLength(1);
+      expect(new URLSearchParams(tokenBodies[0]).get("redirect_uri")).toBe(expected);
+    } finally {
+      startSpy.mockRestore();
+    }
   });
 
   it("cancelFlow rejects completion and stays silent on onBackgroundFlowError", async () => {

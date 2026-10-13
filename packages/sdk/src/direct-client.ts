@@ -4,6 +4,7 @@ import type {
   Agent,
   AgentPolicy,
   AgentStatusFilter,
+  AttachCertificateRequest,
   CertificateImportRequestInput,
   CertificateStatus,
   ConnectionConfig,
@@ -38,6 +39,7 @@ import {
   ENCRYPTED_KEY_IMPORT_REFUSAL,
   HARPOC_VERSION,
   VaultError,
+  attachCertificateRequestSchema,
   certificateImportSchema,
   connectionConfigSchema,
   generateCsrRequestSchema,
@@ -349,6 +351,24 @@ export class DirectClient implements VaultClient {
       project: parsed.data.project,
     });
     return { handle: csr.handle, csrPem: csr.csrPem };
+  }
+
+  async attachCertificate(
+    handle: string,
+    input: AttachCertificateRequest,
+  ): Promise<CertificateStatus> {
+    const parsed = attachCertificateRequestSchema.safeParse(input);
+    if (!parsed.success) {
+      throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
+    }
+    const secretId = await this.engine.resolveSecretId(handle);
+    await this.engine.updateCertificate(
+      secretId,
+      parsed.data.certificate_pem,
+      parsed.data.chain_pem,
+      { renewed: false, handle },
+    );
+    return this.engine.getCertificateStatus(secretId);
   }
 
   async renewCertificate(handle: string): Promise<CertificateStatus> {

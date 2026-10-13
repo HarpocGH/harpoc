@@ -60,6 +60,8 @@ function createMockEngine() {
     getState: vi.fn().mockReturnValue("unlocked"),
     verifyToken: vi.fn().mockReturnValue(MOCK_TOKEN),
     resolveSecretId: vi.fn().mockResolvedValue("uuid-1"),
+    updateCertificate: vi.fn().mockResolvedValue(undefined),
+    getCertificateStatus: vi.fn().mockReturnValue({ secret_id: "uuid-1" }),
     createSecret: vi.fn().mockResolvedValue({
       handle: "secret://k",
       status: "created",
@@ -165,6 +167,12 @@ const BODY_ROUTES: Array<[string, string, string, Record<string, unknown>]> = [
   ["POST", "/api/v1/certificates/csr", "certificates/csr", { name: "c", subject: "example.com" }],
   [
     "POST",
+    "/api/v1/certificates/test-key/attach",
+    "certificates/attach",
+    { certificate_pem: CERTIFICATE_PEM },
+  ],
+  [
+    "POST",
     "/api/v1/oauth/authorize",
     "oauth/authorize",
     {
@@ -192,6 +200,7 @@ const BODY_ROUTE_FILE: Record<string, string> = {
   permissions: "agents.ts",
   "certificates/import": "certificates.ts",
   "certificates/csr": "certificates.ts",
+  "certificates/attach": "certificates.ts",
   "oauth/authorize": "oauth.ts",
 };
 const ROUTES_DIR = new URL(".", import.meta.url);

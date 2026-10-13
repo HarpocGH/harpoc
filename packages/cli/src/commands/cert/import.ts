@@ -25,7 +25,7 @@ interface CertImportOptions {
  * certificate path fails before the key file is touched and before an
  * encrypted key can prompt for its passphrase.
  */
-function readPemFile(path: string, label: string): string {
+export function readPemFile(path: string, label: string): string {
   let size: number;
   try {
     const stat = statSync(path);

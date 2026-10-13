@@ -419,6 +419,33 @@ describe("secret routes", () => {
       expect(call[0]).toBe("secret://test-key");
     });
 
+    // I26 (test-review-2026-10-09): the mail, git and http groups on the
+    // interface the reference documents — each PUT's parsed config reaches
+    // setConnectionConfig whole.
+    const CA_PEM = "-----BEGIN CERTIFICATE-----\nMIIFakeCa\n-----END CERTIFICATE-----\n";
+
+    it.each([
+      ["mail, a pinned CA", { mail: { tls: { ca: CA_PEM } } }],
+      ["mail, the plaintext opt-out", { mail: { tls: false } }],
+      ["git", { git: { ca_pem: CA_PEM } }],
+      ["http", { http: { ca_pem: CA_PEM } }],
+    ])(
+      "PUT sets the %s group, reaching setConnectionConfig whole (I26)",
+      async (_group, config) => {
+        const res = await app.request("/api/v1/secrets/test-key/connection-config", {
+          method: "PUT",
+          headers: { ...AUTH, "content-type": "application/json" },
+          body: JSON.stringify(config),
+        });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toStrictEqual({ data: { updated: true } });
+        expect(engine.setConnectionConfig).toHaveBeenCalledTimes(1);
+        const call = engine.setConnectionConfig.mock.calls[0] as unknown[];
+        expect(call[0]).toBe("secret://test-key");
+        expect(call[1]).toStrictEqual(config);
+      },
+    );
+
     it("PUT rejects an empty config", async () => {
       const res = await app.request("/api/v1/secrets/test-key/connection-config", {
         method: "PUT",

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type { Hono } from "hono";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import {
   AUTH,
@@ -276,5 +276,161 @@ describe("secret routes", () => {
         expect(engine.useSecret).not.toHaveBeenCalled();
       },
     );
+  });
+});
+
+function postUse(action: Record<string, unknown>): Response | Promise<Response> {
+  return app.request("/api/v1/secrets/test-key/use", {
+    method: "POST",
+    headers: { ...AUTH, "content-type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+}
+
+type ContextRow = [
+  string,
+  Record<string, unknown>,
+  Record<string, unknown>,
+  Record<string, unknown>,
+];
+
+// I13 (test-review-2026-10-09): each v1.3 context's valid action posted to the
+// use route reaches the engine as the parsed action — every schema default
+// spelled out — and the engine's result comes back as `{ data }`. Hosts and
+// URLs are loopback literals; the engine is a mock, nothing connects.
+const V13_CONTEXTS: ContextRow[] = [
+  [
+    "smtp",
+    {
+      type: "smtp",
+      host: "127.0.0.1",
+      from: "agent@example.com",
+      to: ["ops@example.com"],
+      subject: "Nightly report",
+      text: "All green",
+    },
+    {
+      type: "smtp",
+      host: "127.0.0.1",
+      security: "tls",
+      from: "agent@example.com",
+      to: ["ops@example.com"],
+      subject: "Nightly report",
+      text: "All green",
+    },
+    { type: "smtp", accepted: 1, message_id: "<report-1@harpoc.local>" },
+  ],
+  [
+    "imap",
+    { type: "imap", host: "127.0.0.1", operation: { kind: "search", unseen: true } },
+    {
+      type: "imap",
+      host: "127.0.0.1",
+      port: 993,
+      mailbox: "INBOX",
+      operation: { kind: "search", unseen: true },
+    },
+    { type: "imap", operation: "search", uids: [3, 7] },
+  ],
+  [
+    "websocket",
+    {
+      type: "websocket",
+      url: "wss://127.0.0.1/socket",
+      injection: { type: "bearer" },
+      message: "ping",
+      collect: { max_messages: 2 },
+    },
+    {
+      type: "websocket",
+      url: "wss://127.0.0.1/socket",
+      injection: { type: "bearer" },
+      message: "ping",
+      collect: { max_messages: 2, window_ms: 30_000 },
+    },
+    { type: "websocket", messages: ["pong", "done"], close_code: 1000 },
+  ],
+  [
+    "sftp",
+    {
+      type: "sftp",
+      host: "127.0.0.1",
+      user: "deploy",
+      operation: "download",
+      remote_path: "/srv/reports/daily.csv",
+      local_path: "/var/harpoc/daily.csv",
+    },
+    {
+      type: "sftp",
+      host: "127.0.0.1",
+      user: "deploy",
+      operation: "download",
+      remote_path: "/srv/reports/daily.csv",
+      local_path: "/var/harpoc/daily.csv",
+    },
+    { type: "sftp", exit_code: 0, stdout: "", stderr: "" },
+  ],
+  [
+    "docker_registry",
+    { type: "docker_registry", operation: "pull", image: "127.0.0.1:5000/team/app:1.2.0" },
+    {
+      type: "docker_registry",
+      operation: "pull",
+      image: "127.0.0.1:5000/team/app:1.2.0",
+      timeout_ms: 300_000,
+    },
+    {
+      type: "docker_registry",
+      operation: "pull",
+      exit_code: 0,
+      stdout: "1.2.0: Pulling from team/app",
+      stderr: "",
+    },
+  ],
+];
+
+describe("POST /api/v1/secrets/:handle/use — the v1.3 contexts reach the engine (I13)", () => {
+  it.each(V13_CONTEXTS)(
+    "%s: the parsed action reaches useSecret whole and the result returns as data",
+    async (_type, action, parsed, result) => {
+      engine.useSecret.mockResolvedValueOnce(result);
+      const res = await postUse(action);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toStrictEqual({ data: result });
+      expect(engine.useSecret).toHaveBeenCalledTimes(1);
+      const call = engine.useSecret.mock.calls[0] as unknown[];
+      expect(call[0]).toBe("secret://test-key");
+      expect(call[1]).toStrictEqual(parsed);
+    },
+  );
+});
+
+// I15 (test-review-2026-10-09): a per-invocation response_mode looser than the
+// secret's policy is refused by the engine before any request executes; the
+// route renders the refusal as 403 with the error body, and the engine's one
+// useSecret call is all that ran.
+describe("POST /api/v1/secrets/:handle/use — a loosened response_mode (I15)", () => {
+  it("maps the engine's RESPONSE_MODE_NOT_ALLOWED to 403 with the error body, nothing else run", async () => {
+    const action = {
+      type: "http",
+      method: "GET",
+      url: "https://127.0.0.1/data",
+      injection: { type: "bearer" },
+      response_mode: "full",
+    };
+    engine.useSecret.mockRejectedValueOnce(VaultError.responseModeNotAllowed("full", "filtered"));
+    const res = await postUse(action);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toStrictEqual({
+      error: ErrorCode.RESPONSE_MODE_NOT_ALLOWED,
+      message:
+        'Response mode "full" not allowed: secret policy is "filtered" and overrides may only tighten',
+    });
+    expect(engine.useSecret).toHaveBeenCalledTimes(1);
+    expect((engine.useSecret.mock.calls[0] as unknown[])[1]).toStrictEqual(action);
+    for (const [name, fn] of Object.entries(engine)) {
+      if (name === "useSecret" || name === "verifyToken") continue;
+      expect(fn, name).not.toHaveBeenCalled();
+    }
   });
 });

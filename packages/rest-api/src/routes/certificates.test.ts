@@ -71,6 +71,7 @@ function createMockEngine() {
     auditScopeRefusal: vi.fn(),
     resolveSecretId: vi.fn().mockResolvedValue("secret-uuid-1"),
     getCertificateStatus: vi.fn().mockReturnValue(CERT_STATUS),
+    updateCertificate: vi.fn().mockResolvedValue(undefined),
     // Only reached when `createApp` builds its own default `CertManager`: a
     // real one calls this first, before any PEM parsing that would otherwise
     // hide whether the engine was ever reached.
@@ -414,6 +415,150 @@ describe("GET /api/v1/certificates/:handle/status", () => {
     await app.request("/api/v1/certificates/myproj%2Fmy-cert/status", { headers: AUTH });
     expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://myproj/my-cert", EXPECTED_CALLER);
   });
+});
+
+// M-P3-11 (test-review-2026-10-09): the attach step of a `cert csr` secret —
+// the issued certificate (and its chain) handed to the engine's
+// updateCertificate; every refusal is the engine's own, mapped by the handler.
+const CHAIN_PEM = "-----BEGIN CERTIFICATE-----\nMIIFakeChain\n-----END CERTIFICATE-----\n";
+const ATTACH_PATH = "/api/v1/certificates/my-cert/attach";
+const ATTACH_BODY = { certificate_pem: CERTIFICATE_PEM, chain_pem: CHAIN_PEM };
+
+describe("POST /api/v1/certificates/:handle/attach", () => {
+  it("hands the certificate and chain to updateCertificate and answers 200 with the status", async () => {
+    const res = await post(ATTACH_PATH, ATTACH_BODY);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ data: CERT_STATUS });
+    expect(engine.updateCertificate).toHaveBeenCalledTimes(1);
+    expect(engine.updateCertificate).toHaveBeenCalledWith(
+      "secret-uuid-1",
+      CERTIFICATE_PEM,
+      CHAIN_PEM,
+      { renewed: false, handle: "secret://my-cert" },
+      EXPECTED_CALLER,
+    );
+    expect(engine.getCertificateStatus).toHaveBeenCalledWith(
+      "secret-uuid-1",
+      EXPECTED_CALLER,
+      "secret://my-cert",
+    );
+    expect(engine.updateCertificate.mock.invocationCallOrder[0]).toBeLessThan(
+      engine.getCertificateStatus.mock.invocationCallOrder[0] as number,
+    );
+  });
+
+  it("forwards an omitted chain_pem as undefined, so the stored chain is kept", async () => {
+    const res = await post(ATTACH_PATH, { certificate_pem: CERTIFICATE_PEM });
+    expect(res.status).toBe(200);
+    expect(engine.updateCertificate).toHaveBeenCalledWith(
+      "secret-uuid-1",
+      CERTIFICATE_PEM,
+      undefined,
+      { renewed: false, handle: "secret://my-cert" },
+      EXPECTED_CALLER,
+    );
+  });
+
+  it("probes the handle as cert.issue, the event the attach writes", async () => {
+    await post(ATTACH_PATH, ATTACH_BODY);
+    expect(engine.resolveSecretId).toHaveBeenCalledWith(
+      "secret://my-cert",
+      EXPECTED_CALLER,
+      AuditEventType.CERT_ISSUE,
+    );
+  });
+
+  it("charges the per-secret rate limiter on the handle, before resolution", async () => {
+    const checkSecret = vi.spyOn(limiter, "checkSecret");
+    await post(ATTACH_PATH, ATTACH_BODY);
+    expect(checkSecret).toHaveBeenCalledWith("secret://my-cert");
+    expect(checkSecret.mock.invocationCallOrder[0]).toBeLessThan(
+      engine.resolveSecretId.mock.invocationCallOrder[0] as number,
+    );
+  });
+
+  it("refuses a schema-invalid body before the limiter and the probe (400, no probe row)", async () => {
+    const checkSecret = vi.spyOn(limiter, "checkSecret");
+    const res = await post(ATTACH_PATH, { chain_pem: CHAIN_PEM });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+    expect(checkSecret).not.toHaveBeenCalled();
+    expect(engine.resolveSecretId).not.toHaveBeenCalled();
+    expect(engine.updateCertificate).not.toHaveBeenCalled();
+  });
+
+  it("requires the rotate scope (403, engine untouched)", async () => {
+    engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: ["read", "create"] });
+    const res = await post(ATTACH_PATH, ATTACH_BODY);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
+    expect(engine.resolveSecretId).not.toHaveBeenCalled();
+    expect(engine.updateCertificate).not.toHaveBeenCalled();
+  });
+
+  it("maps an unknown handle to 404 SECRET_NOT_FOUND (the engine's update untouched)", async () => {
+    engine.resolveSecretId.mockRejectedValueOnce(VaultError.secretNotFound("secret://my-cert"));
+    const res = await post(ATTACH_PATH, ATTACH_BODY);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({
+      error: ErrorCode.SECRET_NOT_FOUND,
+      message: "Secret not found: secret://my-cert",
+    });
+    expect(engine.updateCertificate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      ErrorCode.CERT_INVALID,
+      400,
+      VaultError.certInvalid("certificate PEM is not parseable"),
+      "Certificate invalid: certificate PEM is not parseable",
+    ],
+    [
+      ErrorCode.CERT_PRIVATE_KEY_MISMATCH,
+      400,
+      VaultError.certPrivateKeyMismatch(),
+      "Private key does not match certificate",
+    ],
+    [
+      ErrorCode.CERT_NOT_CONFIGURED,
+      400,
+      VaultError.certNotConfigured(),
+      "Certificate not configured for secret",
+    ],
+    [ErrorCode.SECRET_REVOKED, 410, VaultError.secretRevoked(), "Secret revoked"],
+  ])("maps the engine's %s refusal to %i", async (code, status, refusal, message) => {
+    engine.updateCertificate.mockRejectedValueOnce(refusal);
+    const res = await post(ATTACH_PATH, ATTACH_BODY);
+    expect(res.status).toBe(status);
+    expect(await res.json()).toEqual({ error: code, message });
+  });
+
+  it.each([
+    [
+      "a body missing certificate_pem",
+      { chain_pem: CHAIN_PEM },
+      "certificate_pem: Invalid input: expected string, received undefined",
+    ],
+    [
+      "a non-PEM certificate_pem",
+      { certificate_pem: "not-pem" },
+      "certificate_pem: Value must be PEM-encoded",
+    ],
+    [
+      "a private_key_pem beside it (the strict body)",
+      { certificate_pem: CERTIFICATE_PEM, private_key_pem: PRIVATE_KEY_PEM },
+      '<root>: Unrecognized key: "private_key_pem"',
+    ],
+  ])(
+    "refuses %s with 400 SCHEMA_VALIDATION_ERROR (the engine's update untouched)",
+    async (_kind, body, message) => {
+      const res = await post(ATTACH_PATH, body);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: ErrorCode.SCHEMA_VALIDATION_ERROR, message });
+      expect(engine.updateCertificate).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("createApp certificate wiring", () => {
