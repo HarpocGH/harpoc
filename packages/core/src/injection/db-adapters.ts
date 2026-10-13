@@ -18,8 +18,16 @@ import { RedisAdapter } from "./redis-adapter.js";
 export type DbTlsOptions = false | { ca?: string };
 
 export interface DbConnectOptions {
-  /** Logical target host as requested — TLS identity is verified against this name. */
+  /**
+   * Logical target host as requested — TLS identity is verified against this
+   * name, or against `servername` when configured.
+   */
   host: string;
+  /**
+   * `database.servername` when configured: the TLS identity — the SNI name and
+   * the certificate-verification name — in place of `host`.
+   */
+  servername?: string;
   port: number;
   /**
    * Network address to dial: the SSRF-validated address from the pre-flight DNS
@@ -68,11 +76,12 @@ export type DbSqlEngine = typeof DatabaseEngine.POSTGRESQL | typeof DatabaseEngi
 export type DbCommandEngine = typeof DatabaseEngine.REDIS | typeof DatabaseEngine.MONGODB;
 
 /**
- * TLS server-identity check bound to the LOGICAL host, whatever address the
+ * TLS server-identity check bound to the configured TLS identity —
+ * `database.servername` when set, else the LOGICAL host — whatever address the
  * socket ended up dialing. Node derives the name to verify as
- * `servername || options.host || socket._host || "localhost"`, and neither
- * driver supplies a servername for an IP-literal target (SNI forbids it), so
- * without this the check runs against the wrong name.
+ * `servername || options.host || socket._host || "localhost"`, and without an
+ * override neither driver supplies a servername for an IP-literal target (SNI
+ * forbids it), so without this the check runs against the wrong name.
  */
 export function identityCheckerFor(host: string) {
   return (_derivedHost: string, cert: PeerCertificate): Error | undefined =>
@@ -80,17 +89,18 @@ export function identityCheckerFor(host: string) {
 }
 
 /**
- * Dial the pinned address while presenting the logical host as the socket's
- * name, so a driver that leaves the TLS identity to Node's own derivation
- * verifies against the target the vault validated rather than the "localhost"
- * default. `_host` is exactly the field Node consults; `net.connect` sets it
- * for hostname dials but returns early — leaving it unset — for IP literals.
+ * Dial the pinned address while presenting the logical host (or
+ * `database.servername` when configured) as the socket's name, so a driver
+ * that leaves the TLS identity to Node's own derivation verifies against the
+ * target the vault validated rather than the "localhost" default. `_host` is
+ * exactly the field Node consults; `net.connect` sets it for hostname dials
+ * but returns early — leaving it unset — for IP literals.
  * Empirically verified against Node v24.13.1.
  */
 function dialPinned(opts: DbConnectOptions): Socket {
   const socket = netConnect(opts.port, opts.address);
   socket.setNoDelay(true);
-  (socket as Socket & { _host?: string })._host = opts.host;
+  (socket as Socket & { _host?: string })._host = opts.servername ?? opts.host;
   return socket;
 }
 
@@ -98,11 +108,13 @@ class PostgresAdapter implements DbEngineAdapter {
   async connect(opts: DbConnectOptions): Promise<DbConnection> {
     const { default: pg } = await import("pg");
     // Dial the pinned address; `servername` keeps SNI + certificate hostname
-    // verification on the logical host (pg self-derives servername only for
-    // hostname dials, so it must be explicit when connecting by IP). For an
-    // IP-literal target there is no servername at all, so the identity check
-    // is bound explicitly — pg forwards unknown ssl keys to tls.connect.
+    // verification on `database.servername` when configured, else on the
+    // logical host (pg self-derives servername only for hostname dials, so it
+    // must be explicit when connecting by IP). An IP-literal target sends SNI
+    // only when an override is configured, so the identity check is bound
+    // explicitly — pg forwards unknown ssl keys to tls.connect.
     const pinned = opts.address !== opts.host;
+    const servername = opts.servername ?? (pinned ? opts.host : undefined);
     const client = new pg.Client({
       host: opts.address,
       port: opts.port,
@@ -115,8 +127,8 @@ class PostgresAdapter implements DbEngineAdapter {
           : {
               rejectUnauthorized: true,
               ca: opts.tls.ca,
-              checkServerIdentity: identityCheckerFor(opts.host),
-              ...(pinned ? { servername: opts.host } : {}),
+              checkServerIdentity: identityCheckerFor(opts.servername ?? opts.host),
+              ...(servername === undefined ? {} : { servername }),
             },
       connectionTimeoutMillis: opts.timeoutMs,
       statement_timeout: opts.timeoutMs,
@@ -144,16 +156,17 @@ class MysqlAdapter implements DbEngineAdapter {
   async connect(opts: DbConnectOptions): Promise<DbConnection> {
     const mysql = await import("mysql2/promise");
     // mysql2 derives the TLS servername from `host` and offers no override, so
-    // `host` stays the logical name and the address is dialed through a custom
-    // socket factory. `verifyIdentity` must be set UNCONDITIONALLY: without it
-    // mysql2 swaps checkServerIdentity for a no-op and never verifies the
-    // certificate hostname at all, so any certificate from any trusted CA —
-    // for any name — is accepted and a pinned `ca_pem` degrades from "this
-    // endpoint" to "anything holding a cert from this CA". mysql2 ignores an
-    // ssl.checkServerIdentity of ours (it picks the function itself), hence
-    // the socket-side binding in dialPinned.
+    // `host` carries the TLS identity (the configured servername, else the
+    // logical name) and the address is dialed through a custom socket factory.
+    // `verifyIdentity` must be set UNCONDITIONALLY: without it mysql2 swaps
+    // checkServerIdentity for a no-op and never verifies the certificate
+    // hostname at all, so any certificate from any trusted CA — for any name —
+    // is accepted and a pinned `ca_pem` degrades from "this endpoint" to
+    // "anything holding a cert from this CA". mysql2 ignores an
+    // ssl.checkServerIdentity of ours (it picks the function itself), hence the
+    // socket-side binding in dialPinned.
     const conn = await mysql.createConnection({
-      host: opts.host,
+      host: opts.servername ?? opts.host,
       port: opts.port,
       user: opts.user,
       password: opts.password,

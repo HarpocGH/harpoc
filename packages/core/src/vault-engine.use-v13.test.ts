@@ -1,4 +1,6 @@
 import { mkdirSync, rmSync } from "node:fs";
+import { createServer } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,6 +22,7 @@ import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { ImapRunner, SmtpRunner } from "./vault-engine.js";
 import type { DockerExecution } from "./injection/docker/docker-injector.js";
+import { startFakeWsServer } from "./injection/__fixtures__/fake-ws-server.js";
 import type { ImapExecution, ImapOAuth } from "./injection/imap-injector.js";
 import { ImapInjector } from "./injection/imap-injector.js";
 import type { ImapConnectOptions } from "./injection/mail/imap-client.js";
@@ -1136,6 +1139,93 @@ describe("useSecret (websocket) — engine dispatch", () => {
       error: ErrorCode.INTERNAL_ERROR,
     });
   });
+});
+
+// M-P2-17 (test-review-2026-10-09): response_mode and timeout_ms through the
+// engine and the real executor against loopback servers — no seam installed.
+describe("useSecret (websocket) — response_mode and timeout_ms on a loopback server (M-P2-17)", () => {
+  const VALUE = "p217-ws-credential";
+
+  beforeEach(async () => {
+    await initWithSecret("ws-live", VALUE);
+  });
+
+  it("status_only returns no frame, only the close code, and the row counts none received", async () => {
+    const fake = await startFakeWsServer({ messages: [`echo: ${VALUE}`] });
+    try {
+      const url = `ws://127.0.0.1:${fake.port}/feed`;
+      await engine.setInjectionPolicy("secret://ws-live", {
+        url_allowlist: [`ws://127.0.0.1:${fake.port}/*`],
+        response_mode: "status_only",
+      });
+
+      const res = await engine.useSecret("secret://ws-live", {
+        type: "websocket",
+        url,
+        injection: { type: "bearer" },
+        message: "ping",
+      });
+
+      if (res.type !== "websocket") throw new Error("expected websocket result");
+      expect(res.messages).toEqual([]);
+      expect(res.close_code).not.toBeNull();
+      expect(fake.requests()).toHaveLength(1);
+      expect(fake.requests()[0]?.headers.authorization).toBe(`Bearer ${VALUE}`);
+      expect(useRows(true)[0]?.detail).toEqual({ context: "websocket", url, sent: 1, received: 0 });
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("a timeout_ms shorter than the handshake reply refuses WEBSOCKET_CONNECT_FAILED and closes the socket", async () => {
+    const arrived: Socket[] = [];
+    let request = "";
+    let closed = 0;
+    const silent = createServer((socket) => {
+      arrived.push(socket);
+      socket.on("data", (chunk: Buffer) => {
+        request += chunk.toString("latin1");
+      });
+      socket.on("error", () => undefined);
+      socket.on("close", () => {
+        closed += 1;
+      });
+    });
+    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve));
+    const port = (silent.address() as AddressInfo).port;
+    try {
+      const url = `ws://127.0.0.1:${port}/feed`;
+      await engine.setInjectionPolicy("secret://ws-live", {
+        url_allowlist: [`ws://127.0.0.1:${port}/*`],
+      });
+
+      await expectVaultError(
+        () =>
+          engine.useSecret("secret://ws-live", {
+            type: "websocket",
+            url,
+            injection: { type: "bearer" },
+            message: "ping",
+            timeout_ms: 300,
+          }),
+        ErrorCode.WEBSOCKET_CONNECT_FAILED,
+      );
+
+      expect(arrived).toHaveLength(1);
+      expect(request).toContain("GET /feed HTTP/1.1");
+      await vi.waitFor(() => expect(closed).toBe(1));
+      expect(useRows(false)[0]?.detail).toEqual({
+        context: "websocket",
+        url,
+        sent: 1,
+        received: 0,
+        error: ErrorCode.WEBSOCKET_CONNECT_FAILED,
+      });
+    } finally {
+      for (const socket of arrived) socket.destroy();
+      await new Promise<void>((resolve) => silent.close(() => resolve()));
+    }
+  }, 10_000);
 });
 
 // ---------------------------------------------------------------------------

@@ -64,7 +64,11 @@ beforeAll(async () => {
 
     if (url.pathname === "/echo-header") {
       const auth = String(req.headers["authorization"] ?? "").replace(/^Bearer\s+/i, "");
-      res.writeHead(200, { "Content-Type": "application/json", "X-Echo": auth });
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "X-Echo": auth,
+        "X-Echo-Method": req.method ?? "",
+      });
       res.end(JSON.stringify({ ok: true }));
       return;
     }
@@ -854,6 +858,34 @@ describe("HttpInjector", () => {
       expect(body.authorization).toBe(`Basic ${Buffer.from("user:pass").toString("base64")}`);
       expect(body.body).toBe("patch-data");
       expect(body.method).toBe("PATCH");
+    });
+  });
+
+  describe("DELETE and HEAD (I20)", () => {
+    it("DELETE with bearer injection arrives as DELETE", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "DELETE", url: `${baseUrl}/echo`, responseMode: "full" },
+        new Uint8Array(Buffer.from("delete-token")),
+        { type: "bearer" },
+      );
+
+      expect(response.status).toBe(200);
+      const body = JSON.parse(response.body ?? "{}") as Record<string, string>;
+      expect(body.method).toBe("DELETE");
+      expect(body.authorization).toBe("Bearer delete-token");
+    });
+
+    it("HEAD arrives as HEAD; its body-less response comes back with an empty body and redacted headers", async () => {
+      const response = await injector.executeWithSecret(
+        { method: "HEAD", url: `${baseUrl}/echo-header` },
+        new Uint8Array(Buffer.from("head-token")),
+        { type: "bearer" },
+      );
+
+      expect(response).toMatchObject({ type: "http", status: 200, body: "" });
+      expect(response.headers?.["x-echo-method"]).toBe("HEAD");
+      expect(response.headers?.["x-echo"]).toBe("[REDACTED]");
+      expect(JSON.stringify(response)).not.toContain("head-token");
     });
   });
 

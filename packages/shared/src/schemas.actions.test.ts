@@ -205,6 +205,18 @@ describe("processActionSchema", () => {
     const args = Array.from({ length: 257 }, () => "x");
     expect(() => processActionSchema.parse({ ...validProcess, args })).toThrow();
   });
+
+  it("leaves timeout_ms unset when omitted — the injector applies DEFAULT_PROCESS_TIMEOUT_MS (I23)", () => {
+    expect(processActionSchema.parse(validProcess).timeout_ms).toBeUndefined();
+  });
+
+  it("caps timeout_ms at 300000: 300000 accepted, 300001 and 0 rejected (I23)", () => {
+    expect(processActionSchema.parse({ ...validProcess, timeout_ms: 300_000 }).timeout_ms).toBe(
+      300_000,
+    );
+    expect(() => processActionSchema.parse({ ...validProcess, timeout_ms: 300_001 })).toThrow();
+    expect(() => processActionSchema.parse({ ...validProcess, timeout_ms: 0 })).toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------------

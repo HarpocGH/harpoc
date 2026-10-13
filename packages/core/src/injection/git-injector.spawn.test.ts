@@ -178,6 +178,50 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
     expect(opts.redact).toContain("git-user");
   });
 
+  it("push: the argv is the forced config, the operation, the caller's options, then the repository, run in the working tree (I18)", async () => {
+    const wd = mkdtempSync(join(tmpdir(), "harpoc-git-wd-"));
+    try {
+      const result = await injector.executeWithSecret(
+        {
+          type: "git",
+          operation: "push",
+          repository: "https://8.8.8.8/org/repo.git",
+          args: ["-u", "--follow-tags"],
+          working_directory: wd,
+        },
+        new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+        policy({
+          command_allowlist: [GIT as string],
+          url_allowlist: ["https://8.8.8.8/*"],
+        }),
+        undefined,
+      );
+
+      expect(result.exit_code).toBe(0);
+      expect(spawnMock).toHaveBeenCalledOnce();
+      const [command, args, opts] = spawnMock.mock.calls[0] as SpawnCall;
+      expect(command).toBe(GIT);
+      expect(args).toEqual([
+        "-c",
+        "http.followRedirects=false",
+        "-c",
+        expect.stringMatching(/^core\.hooksPath=.+harpoc-git-hooks-/),
+        "push",
+        "-u",
+        "--follow-tags",
+        "https://8.8.8.8/org/repo.git",
+      ]);
+      expect(opts.cwd).toBe(wd);
+      expect(opts.env.GIT_ASKPASS).toBeTruthy();
+      expect(opts.env.HARPOC_GIT_HOST).toBe("8.8.8.8");
+      expect(args.every((a) => !a.includes("s3cret-token-value") && !a.includes("git-user"))).toBe(
+        true,
+      );
+    } finally {
+      rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
   // T14: the child environment is built, not inherited (§4.5.3 layer 3). Both
   // git transports were unpinned here, so `{ ...process.env }` in either
   // initializer would have handed the vault process's whole environment —
@@ -718,6 +762,51 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
     expect(args.every((a) => !a.includes("PRIVATE KEY"))).toBe(true);
     expect(Object.values(opts.env).every((v) => !v.includes("PRIVATE KEY"))).toBe(true);
     expect(opts.redact).toContain(keyPem);
+  });
+
+  it("push: the argv is the forced hooksPath, the operation, the caller's options, then the repository, over the agent (I18)", async () => {
+    const { privateKey: keyPem } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: "pkcs1", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    const wd = mkdtempSync(join(tmpdir(), "harpoc-git-wd-"));
+    try {
+      const result = await injector.executeWithSecret(
+        {
+          type: "git",
+          operation: "push",
+          repository: "git@github.com:org/repo.git",
+          args: ["-u", "--follow-tags"],
+          working_directory: wd,
+        },
+        new Uint8Array(Buffer.from(keyPem)),
+        policy({
+          command_allowlist: [GIT as string],
+          host_allowlist: ["github.com"],
+        }),
+        { ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] } },
+      );
+
+      expect(result.exit_code).toBe(0);
+      expect(spawnMock).toHaveBeenCalledOnce();
+      const [command, args, opts] = spawnMock.mock.calls[0] as SpawnCall;
+      expect(command).toBe(GIT);
+      expect(args).toEqual([
+        "-c",
+        expect.stringMatching(/^core\.hooksPath=.+harpoc-git-hooks-/),
+        "push",
+        "-u",
+        "--follow-tags",
+        "git@github.com:org/repo.git",
+      ]);
+      expect(opts.cwd).toBe(wd);
+      expect(opts.env.GIT_SSH_COMMAND).toContain("IdentitiesOnly=yes");
+      expect(opts.env.SSH_AUTH_SOCK).toBeTruthy();
+      expect(Object.values(opts.env).every((v) => !v.includes("PRIVATE KEY"))).toBe(true);
+    } finally {
+      rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
   });
 
   it("hands git a built environment over SSH, not the vault's own", async () => {

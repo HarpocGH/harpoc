@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -208,6 +208,19 @@ describe("ProcessInjector — config validation", () => {
       run(nodeAction(`process.stdout.write("x")`, { working_directory: "/no/such/dir/xyz123" })),
     ).rejects.toMatchObject({ code: ErrorCode.INVALID_PROCESS_CONFIG });
   });
+
+  it("runs the child in working_directory: the cwd it prints is that directory (I23)", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-proc-cwd-")));
+    try {
+      const result = await run(
+        nodeAction(`process.stdout.write(process.cwd())`, { working_directory: dir }),
+      );
+      expect(result.exit_code).toBe(0);
+      expect(realpathSync(result.stdout)).toBe(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
 });
 
 describe("ProcessInjector — network isolation (§4.5.3 layer 4)", () => {
@@ -361,6 +374,44 @@ describe("ProcessInjector — dedicated-context binaries (C1)", () => {
     expect(log).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "secret.use",
+        success: false,
+        detail: expect.objectContaining({
+          context: "process",
+          error: ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+        }),
+      }),
+    );
+  });
+
+  // A file named ssh is enough: the classification reads the resolved basename,
+  // and the refusal lands before any spawn, so the stub is never executed.
+  it("refuses ssh in the process context and audits the denial (M-P2-19)", async () => {
+    const ssh = join(tmpRoot, process.platform === "win32" ? "ssh.exe" : "ssh");
+    writeFileSync(ssh, "");
+    const log = vi.fn();
+    const audited = new ProcessInjector({ log } as unknown as AuditLogger);
+    const err = await expectVaultError(
+      () =>
+        audited.executeWithSecret(
+          {
+            type: "process",
+            command: ssh,
+            args: ["-oProxyCommand=whoami", "host"],
+            env_var: "SECRET",
+          },
+          new Uint8Array(Buffer.from(SECRET, "utf8")),
+          { command_allowlist: [ssh], env_allowlist: [] },
+          "secret-1",
+        ),
+      ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+    );
+    expect(err.statusCode).toBe(403);
+    expect(err.message).toMatch(/action\.type 'ssh'/);
+    expect(log).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "secret.use",
+        secretId: "secret-1",
         success: false,
         detail: expect.objectContaining({
           context: "process",

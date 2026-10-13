@@ -13,6 +13,35 @@ import {
   policy,
 } from "./__fixtures__/database-injector-doubles.js";
 
+const driverQueries = vi.hoisted(() => [] as { engine: string; args: unknown[] }[]);
+vi.mock("pg", () => ({
+  default: {
+    Client: class {
+      connect(): Promise<void> {
+        return Promise.resolve();
+      }
+      query(...args: unknown[]): Promise<unknown> {
+        driverQueries.push({ engine: "postgresql", args });
+        return Promise.resolve({ rows: [], fields: [], rowCount: 0, command: "SELECT" });
+      }
+      end(): Promise<void> {
+        return Promise.resolve();
+      }
+    },
+  },
+}));
+vi.mock("mysql2/promise", () => ({
+  createConnection: vi.fn(() =>
+    Promise.resolve({
+      query: vi.fn((...args: unknown[]) => {
+        driverQueries.push({ engine: "mysql", args });
+        return Promise.resolve([[], []]);
+      }),
+      end: vi.fn(() => Promise.resolve()),
+    }),
+  ),
+}));
+
 describe("DatabaseInjector", () => {
   it("parses username:password and runs the query", async () => {
     const mock = new MockAdapter({ rows: [{ id: 1 }], fields: [{ name: "id" }] });
@@ -249,6 +278,18 @@ describe("DatabaseInjector", () => {
     expect(JSON.stringify(res.rows)).toContain("a value about nothing");
   });
 
+  it("an explicit port overrides the port embedded in host — allowlisted and dialed at it (I22)", async () => {
+    const mock = new MockAdapter({ rows: [] });
+    await injector(mock).executeWithSecret(
+      action({ host: "8.8.8.8:1111", port: 2222 }),
+      SECRET,
+      policy({ host_allowlist: ["8.8.8.8:2222"] }),
+      undefined,
+    );
+    expect(mock.lastConnect?.host).toBe("8.8.8.8");
+    expect(mock.lastConnect?.port).toBe(2222);
+  });
+
   it("refuses an out-of-range embedded port before any connection work", async () => {
     const mock = new MockAdapter({ rows: [] });
     await expect(
@@ -272,6 +313,39 @@ describe("DatabaseInjector", () => {
         undefined,
       ),
     ).rejects.toMatchObject({ code: ErrorCode.INVALID_DATABASE_CONFIG });
+  });
+
+  describe("SQL params reach the driver's query call by value (I21)", () => {
+    const params = [42, "o'brien", null, true];
+
+    it("postgresql: the params array is pg's second query argument", async () => {
+      driverQueries.length = 0;
+      await new DatabaseInjector(null).executeWithSecret(
+        action({ query: "SELECT $1, $2, $3, $4", params }),
+        SECRET,
+        policy(),
+        undefined,
+      );
+      expect(driverQueries).toEqual([
+        { engine: "postgresql", args: ["SELECT $1, $2, $3, $4", [42, "o'brien", null, true]] },
+      ]);
+    });
+
+    it("mysql: the params array is mysql2's second query argument", async () => {
+      driverQueries.length = 0;
+      await new DatabaseInjector(null).executeWithSecret(
+        action({ engine: "mysql", query: "SELECT ?, ?, ?, ?", params, timeout_ms: 5_000 }),
+        SECRET,
+        policy(),
+        undefined,
+      );
+      expect(driverQueries).toEqual([
+        {
+          engine: "mysql",
+          args: [{ sql: "SELECT ?, ?, ?, ?", timeout: 5_000 }, [42, "o'brien", null, true]],
+        },
+      ]);
+    });
   });
 
   it("flags truncation past the row cap", async () => {

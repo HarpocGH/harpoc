@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuditEventType, ErrorCode, VaultState } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, MAX_PROCESS_OUTPUT_BYTES, VaultState } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { forceNetworkIsolationUnavailableForTests } from "./injection/network-isolation.js";
@@ -133,6 +133,96 @@ describe("useSecret (process injection)", () => {
     } finally {
       forceNetworkIsolationUnavailableForTests(null);
     }
+  });
+
+  // M-P2-22 (test-review-2026-10-09): the process context's secondary behaviours
+  // through the engine — env passthrough, stderr, the exit code, the output cap.
+  async function allowNode(envAllowlist: string[] = []): Promise<void> {
+    await engine.setInjectionPolicy(
+      "secret://proc",
+      { url_allowlist: [], command_allowlist: [process.execPath], env_allowlist: envAllowlist },
+      { acknowledge_interpreters: true },
+    );
+  }
+
+  async function runNode(script: string): Promise<{
+    stdout: string;
+    stderr: string;
+    exit_code: number | null;
+    truncated?: boolean;
+    error?: string;
+  }> {
+    const res = await engine.useSecret("secret://proc", {
+      type: "process",
+      command: process.execPath,
+      args: ["-e", script],
+      env_var: "TOKEN",
+    });
+    if (res.type !== "process") throw new Error("expected process result");
+    return res;
+  }
+
+  function processRow(): { success: boolean; detail: Record<string, unknown> | null } {
+    const rows = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
+    expect(rows).toHaveLength(1);
+    return { success: rows[0]?.success as boolean, detail: rows[0]?.detail ?? null };
+  }
+
+  it("passes an allowlisted variable through to the child and no other (M-P2-22)", async () => {
+    vi.stubEnv("HARPOC_P222_ALLOWED", "p222-allowed");
+    vi.stubEnv("HARPOC_P222_OTHER", "p222-other");
+    try {
+      await allowNode(["HARPOC_P222_ALLOWED"]);
+      const res = await runNode(
+        "process.stdout.write(JSON.stringify([process.env.HARPOC_P222_ALLOWED ?? null, process.env.HARPOC_P222_OTHER ?? null]))",
+      );
+
+      expect(JSON.parse(res.stdout)).toEqual(["p222-allowed", null]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("captures stderr apart from stdout, redacted (M-P2-22)", async () => {
+    await allowNode();
+    const res = await runNode(
+      'process.stdout.write("out"); process.stderr.write("err:" + process.env.TOKEN)',
+    );
+
+    expect(res.stdout).toBe("out");
+    expect(res.stderr).toBe("err:[REDACTED]");
+    expect(processRow()).toMatchObject({
+      success: true,
+      detail: { context: "process", exit_code: 0, sanitized: true },
+    });
+  });
+
+  it("maps a non-zero exit onto the result's exit_code and the row's detail (M-P2-22)", async () => {
+    await allowNode();
+    const res = await runNode("process.exit(3)");
+
+    expect(res.exit_code).toBe(3);
+    expect(res.error).toBeUndefined();
+    expect(processRow()).toMatchObject({
+      success: true,
+      detail: { context: "process", exit_code: 3, timed_out: false },
+    });
+  });
+
+  it("keeps the first MAX_PROCESS_OUTPUT_BYTES of each stream and drops the rest (M-P2-22)", async () => {
+    await allowNode();
+    const res = await runNode(
+      `const over = "HEAD" + "a".repeat(${MAX_PROCESS_OUTPUT_BYTES + 262_144}) + "TAIL";` +
+        "process.stdout.write(over); process.stderr.write(over);",
+    );
+
+    for (const out of [res.stdout, res.stderr]) {
+      expect(Buffer.byteLength(out)).toBe(MAX_PROCESS_OUTPUT_BYTES);
+      expect(out.slice(0, 4)).toBe("HEAD");
+      expect(out.slice(-4)).toBe("aaaa");
+    }
+    expect(res.truncated).toBe(true);
+    expect(processRow()).toMatchObject({ success: true, detail: { truncated: true } });
   });
 });
 
@@ -482,5 +572,39 @@ describe("useSecret (MCP proxy)", () => {
     await vi.waitFor(() => expect(isAlive(pid)).toBe(false));
     await engine.unlock("password");
     expect(terminateReasons()).toEqual([]);
+  });
+
+  // I17 (test-review-2026-10-09): replacing or deleting the downstream config
+  // terminates the live connection (api-reference "the next invocation
+  // connects with the new config" — the injector's respawn is
+  // mcp-injector.test.ts "terminates and respawns when the config changes").
+  it("a changed server config terminates the live downstream child and audits config_changed (I17)", async () => {
+    const pid = await spawnLiveDownstream();
+    const secretId = await engine.resolveSecretId("secret://mcpuse");
+
+    await engine.setMcpServerConfig("secret://mcpuse", {
+      server_name: "test-mcp",
+      transport: "stdio",
+      protocol: "2025-11-25",
+      command: process.execPath,
+      args: ["-e", MCP_TEST_SERVER],
+      env_var: "DOWNSTREAM_TOKEN",
+      working_directory: tempDir,
+    });
+
+    await vi.waitFor(() => expect(isAlive(pid)).toBe(false));
+    expect(registryOf(engine).get(secretId)).toBeUndefined();
+    expect(terminateReasons()).toEqual(["config_changed"]);
+  });
+
+  it("a deleted server config terminates the live downstream child and audits config_removed (I17)", async () => {
+    const pid = await spawnLiveDownstream();
+    const secretId = await engine.resolveSecretId("secret://mcpuse");
+
+    await expect(engine.deleteMcpServerConfig("secret://mcpuse")).resolves.toBe(true);
+
+    await vi.waitFor(() => expect(isAlive(pid)).toBe(false));
+    expect(registryOf(engine).get(secretId)).toBeUndefined();
+    expect(terminateReasons()).toEqual(["config_removed"]);
   });
 });

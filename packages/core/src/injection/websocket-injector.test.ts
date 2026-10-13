@@ -78,6 +78,49 @@ describe("executeWebsocketAction — handshake credential injection", () => {
     expect(seenUrl).toContain(`token=${SECRET}`);
   });
 
+  it("carries a basic_auth credential in the Authorization header at the handshake (I19)", async () => {
+    const fake = await start({});
+    const action = baseAction({
+      url: `ws://127.0.0.1:${fake.port}/`,
+      injection: { type: "basic_auth" },
+    });
+
+    await executeWebsocketAction(action, secretBytes("wsuser:ws-pass"), basePolicy());
+
+    const authorization = fake.requests()[0]?.headers.authorization ?? "";
+    expect(authorization).toBe(`Basic ${Buffer.from("wsuser:ws-pass").toString("base64")}`);
+    expect(Buffer.from(authorization.slice("Basic ".length), "base64").toString("utf8")).toBe(
+      "wsuser:ws-pass",
+    );
+  });
+
+  it("offers the action's subprotocols in Sec-WebSocket-Protocol and completes when the server selects one (I19)", async () => {
+    const fake = await start({ subprotocol: "chat.v1" });
+    const action = baseAction({
+      url: `ws://127.0.0.1:${fake.port}/`,
+      subprotocols: ["chat.v2", "chat.v1"],
+    });
+
+    const { result } = await executeWebsocketAction(action, secretBytes(), basePolicy());
+
+    expect(fake.requests()[0]?.headers["sec-websocket-protocol"]).toBe("chat.v2, chat.v1");
+    expect(result).toEqual({ type: ActionType.WEBSOCKET, messages: [], close_code: 1000 });
+  });
+
+  it("refuses WEBSOCKET_CONNECT_FAILED when the server selects none of the offered subprotocols (I19)", async () => {
+    const fake = await start({});
+    const action = baseAction({
+      url: `ws://127.0.0.1:${fake.port}/`,
+      subprotocols: ["chat.v2"],
+    });
+
+    await expectVaultError(
+      () => executeWebsocketAction(action, secretBytes(), basePolicy()),
+      ErrorCode.WEBSOCKET_CONNECT_FAILED,
+    );
+    expect(fake.requests()[0]?.headers["sec-websocket-protocol"]).toBe("chat.v2");
+  });
+
   it("never places the credential in a sent frame", async () => {
     const fake = await start({});
     const action = baseAction({

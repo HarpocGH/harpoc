@@ -1,6 +1,8 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import tls from "node:tls";
+import type { ConnectionOptions } from "node:tls";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, callerFromToken, ErrorCode } from "@harpoc/shared";
 import { AAD_CONNECTION_CONFIG, AAD_MCP_SERVER_CONFIG } from "@harpoc/shared";
@@ -9,6 +11,11 @@ import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { registerAgents } from "./__fixtures__/engine-seams.js";
 import { decrypt, encrypt } from "./crypto/aes-gcm.js";
+import {
+  FIXTURE_CERT_PEM,
+  FIXTURE_NAME,
+  startDbTlsServer,
+} from "./injection/__fixtures__/db-tls-servers.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
@@ -235,6 +242,43 @@ describe("connection config", () => {
     expect(config?.database?.tls_mode).toBe("require");
     expect(config?.database?.servername).toBe("db.example.com");
     expect(config?.ssh?.known_hosts).toEqual(["db.example.com ssh-ed25519 AAAA..."]);
+  });
+
+  it("a stored database.servername is read at use: the SNI name and the verified identity (I16)", async () => {
+    await engine.createSecret({
+      name: "db",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("dbuser:dbpass")),
+    });
+    await engine.setInjectionPolicy("secret://db", { host_allowlist: ["127.0.0.1"] });
+    await engine.setConnectionConfig("secret://db", {
+      database: { ca_pem: FIXTURE_CERT_PEM, servername: FIXTURE_NAME },
+    });
+    const server = await startDbTlsServer("postgresql");
+    const connectSpy = vi.spyOn(tls, "connect");
+    try {
+      await expectVaultError(
+        () =>
+          engine.useSecret("secret://db", {
+            type: "database",
+            engine: "postgresql",
+            host: "127.0.0.1",
+            port: server.port,
+            database: "app",
+            query: "SELECT 1",
+            timeout_ms: 2_000,
+          }),
+        ErrorCode.DB_CONNECTION_FAILED,
+      );
+      expect(
+        connectSpy.mock.calls.map((call) => (call[0] as ConnectionOptions).servername),
+      ).toEqual([FIXTURE_NAME]);
+      expect(server.sni).toEqual([FIXTURE_NAME]);
+      expect(server.accepted).toBe(1);
+    } finally {
+      connectSpy.mockRestore();
+      await server.close();
+    }
   });
 
   it("returns undefined when no config is set", async () => {

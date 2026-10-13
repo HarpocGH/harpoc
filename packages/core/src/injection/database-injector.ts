@@ -138,6 +138,7 @@ export class DatabaseInjector {
 
     const connectOpts = {
       host,
+      servername: dbConfig?.servername,
       port,
       address: pinnedAddress,
       user,

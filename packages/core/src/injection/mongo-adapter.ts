@@ -25,21 +25,24 @@ import { identityCheckerFor } from "./db-adapters.js";
  * 2. Dial-target pinning. The connection URI's host is the SSRF-validated
  *    `opts.address` (always an IP literal — never `opts.host` — closing the
  *    validate-then-reconnect DNS-rebinding TOCTOU window the pg/redis
- *    adapters close via a pinned socket/dial). TLS identity is bound to the
- *    *logical* `opts.host` regardless: verified against mongodb@7.5.0's
- *    compiled `lib/cmap/connect.js`, `LEGAL_TLS_SOCKET_OPTIONS` (`ca`,
- *    `cert`, `checkServerIdentity`, `rejectUnauthorized`, `servername`, ...)
- *    is spread directly onto the object passed to `node:tls.connect()` with
- *    no field remapping — the same wire shape RedisAdapter documents for
- *    node-redis. That means:
- *      - `servername` must be supplied BY US whenever `opts.host` is a real
- *        hostname (`pinned` below): the driver's own default-servername
- *        logic (`parseSslOptions`, "set default sni servername to be the
- *        same as host") only fires when `!net.isIP(result.host)`, and
+ *    adapters close via a pinned socket/dial). TLS identity is bound to
+ *    `database.servername` when configured, else to the *logical*
+ *    `opts.host`, regardless of the pinned dial: verified against
+ *    mongodb@7.5.0's compiled `lib/cmap/connect.js`,
+ *    `LEGAL_TLS_SOCKET_OPTIONS` (`ca`, `cert`, `checkServerIdentity`,
+ *    `rejectUnauthorized`, `servername`, ...) is spread directly onto the
+ *    object passed to `node:tls.connect()` with no field remapping — the
+ *    same wire shape RedisAdapter documents for node-redis. That means:
+ *      - `servername` must be supplied BY US — `database.servername` when
+ *        configured, else whenever `opts.host` is a real hostname (`pinned`
+ *        below): the driver's own default-servername logic
+ *        (`parseSslOptions`, "set default sni servername to be the same as
+ *        host") only fires when `!net.isIP(result.host)`, and
  *        `result.host` here is always `opts.address` — an IP literal — so
  *        the driver's auto-default never engages and would otherwise send no
  *        SNI name at all.
- *      - `checkServerIdentity` must be bound to `opts.host` explicitly
+ *      - `checkServerIdentity` must be bound to `database.servername` when
+ *        configured, else to `opts.host`, explicitly
  *        (`identityCheckerFor`, shared with Postgres/Redis) rather than left
  *        to Node's own derivation (`servername || host || "localhost"`),
  *        which — dialing an IP with no servername in the unpinned
@@ -82,9 +85,11 @@ export class MongoAdapter implements DbCommandAdapter {
     const { MongoClient } = await import("mongodb");
 
     // SNI (and the driver's own servername auto-default) forbids an
-    // IP-literal servername — only supply one when `opts.host` is a hostname
-    // that was actually pinned to a different dial address.
+    // IP-literal servername — supply `database.servername` when configured,
+    // else one only when `opts.host` is a hostname that was actually pinned
+    // to a different dial address.
     const pinned = opts.address !== opts.host;
+    const servername = opts.servername ?? (pinned ? opts.host : undefined);
     const seedHost = isIP(opts.address) === 6 ? `[${opts.address}]` : opts.address;
     const uri = `mongodb://${seedHost}:${String(opts.port)}/${encodeURIComponent(opts.database)}`;
 
@@ -104,8 +109,8 @@ export class MongoAdapter implements DbCommandAdapter {
             tlsAllowInvalidCertificates: false,
             tlsAllowInvalidHostnames: false,
             ca: opts.tls.ca,
-            checkServerIdentity: identityCheckerFor(opts.host),
-            ...(pinned ? { servername: opts.host } : {}),
+            checkServerIdentity: identityCheckerFor(opts.servername ?? opts.host),
+            ...(servername === undefined ? {} : { servername }),
           }),
     });
 

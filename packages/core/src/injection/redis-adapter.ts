@@ -13,10 +13,11 @@ import { identityCheckerFor } from "./db-adapters.js";
  * into `node:tls.connect()` with no field remapping. That means the pinning
  * technique mirrors `PostgresAdapter` exactly rather than `MysqlAdapter`'s
  * raw-socket hack: `socket.host` dials the SSRF-validated `opts.address`,
- * `socket.servername` carries the *logical* `opts.host` for SNI (omitted
- * when the target was not pinned — i.e. `opts.host` is itself an IP literal,
- * since the SNI extension forbids an IP-literal servername), and
- * `checkServerIdentity` is bound to the logical host unconditionally via
+ * `socket.servername` carries `database.servername` when configured, else the
+ * *logical* `opts.host`, for SNI (with no override, omitted when the target
+ * was not pinned — i.e. `opts.host` is itself an IP literal, since the SNI
+ * extension forbids an IP-literal servername), and `checkServerIdentity` is
+ * bound to that same name unconditionally via
  * `identityCheckerFor` so certificate-name verification never falls back to
  * Node's own derivation (`servername || host || "localhost"`), which would
  * otherwise check the pinned IP instead of the target the vault validated.
@@ -29,9 +30,11 @@ export class RedisAdapter implements DbCommandAdapter {
 
     const { createClient } = await import("redis");
 
-    // SNI forbids an IP-literal servername; only send one when `opts.host`
-    // is a hostname that was actually pinned to a different dial address.
+    // SNI forbids an IP-literal servername; send `database.servername` when
+    // configured, else one only when `opts.host` is a hostname that was
+    // actually pinned to a different dial address.
     const pinned = opts.address !== opts.host;
+    const servername = opts.servername ?? (pinned ? opts.host : undefined);
     // `timeoutMs` is documented (constants.ts) as a connect+query budget —
     // PostgresAdapter mirrors it onto statement_timeout/query_timeout and
     // MysqlAdapter passes it as the per-query `timeout`, each in addition to
@@ -57,10 +60,10 @@ export class RedisAdapter implements DbCommandAdapter {
             tls: true as const,
             rejectUnauthorized: true,
             ca: opts.tls.ca,
-            checkServerIdentity: identityCheckerFor(opts.host),
+            checkServerIdentity: identityCheckerFor(opts.servername ?? opts.host),
             connectTimeout: opts.timeoutMs,
             socketTimeout: opts.timeoutMs,
-            ...(pinned ? { servername: opts.host } : {}),
+            ...(servername === undefined ? {} : { servername }),
           };
 
     // `username:password` splits the same way for every engine (redis legacy

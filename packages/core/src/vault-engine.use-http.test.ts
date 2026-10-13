@@ -1,10 +1,11 @@
 import { createServer } from "node:http";
-import type { Server } from "node:http";
+import type { IncomingHttpHeaders, Server } from "node:http";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuditEventType, ErrorCode } from "@harpoc/shared";
+import type { InjectionConfig } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, MAX_HTTP_RESPONSE_BYTES } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { validateUrl } from "./injection/url-validator.js";
@@ -50,6 +51,15 @@ let requestCount = 0;
 const holdArrivals: string[] = [];
 let holdGate: Promise<void> | null = null;
 let onHoldArrival: (() => void) | null = null;
+// I14, M-P2-18: a request to /echo is recorded as it arrived and echoed back
+// as JSON — the wire and the redaction of the echo, side by side.
+interface EchoArrival {
+  method: string;
+  url: string;
+  headers: IncomingHttpHeaders;
+  body: string;
+}
+const echoArrivals: EchoArrival[] = [];
 
 beforeAll(async () => {
   server = createServer((req, res) => {
@@ -64,6 +74,29 @@ beforeAll(async () => {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ path: req.url }));
       });
+      return;
+    }
+    if (req.url?.startsWith("/echo")) {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        const arrival: EchoArrival = {
+          method: req.method ?? "",
+          url: req.url ?? "",
+          headers: { ...req.headers },
+          body: Buffer.concat(chunks).toString("utf8"),
+        };
+        echoArrivals.push(arrival);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(arrival));
+      });
+      return;
+    }
+    if (req.url?.startsWith("/big")) {
+      // M-P2-18: one byte past the cap, streamed with no Content-Length, so
+      // only the bounded read can refuse it.
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(Buffer.alloc(MAX_HTTP_RESPONSE_BYTES + 1, 0x61));
       return;
     }
     if (req.url?.startsWith("/redirect-hop")) {
@@ -658,5 +691,193 @@ describe("rotation while a use is in flight (I9)", () => {
     } finally {
       release();
     }
+  });
+});
+
+// I14 (test-review-2026-10-09): the header, query and basic_auth modes through
+// the engine — the credential where the mode puts it on the wire, and redacted
+// in the echoed result.
+describe("HTTP injection modes on the wire (I14)", () => {
+  const VALUE = "i14-user:i14-wire-credential";
+
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "modes",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from(VALUE)),
+    });
+    await engine.setInjectionPolicy("secret://modes", { url_allowlist: [`${baseUrl}/echo*`] });
+    echoArrivals.length = 0;
+  });
+
+  async function useEcho(
+    injection: InjectionConfig,
+  ): Promise<{ arrival: EchoArrival; echoed: EchoArrival }> {
+    const res = await engine.useSecret("secret://modes", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/echo`,
+      injection,
+    });
+    if (res.type !== "http") throw new Error("expected http result");
+    expect(res.status).toBe(200);
+    expect(echoArrivals).toHaveLength(1);
+    const raw = res.body ?? "";
+    expect(raw).not.toContain(VALUE);
+    expect(raw).not.toContain(Buffer.from(VALUE).toString("base64"));
+    expect(raw).not.toContain(encodeURIComponent(VALUE));
+    return { arrival: echoArrivals[0] as EchoArrival, echoed: JSON.parse(raw) as EchoArrival };
+  }
+
+  function useRow(): { success: boolean; detail: Record<string, unknown> | null } {
+    const rows = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
+    expect(rows).toHaveLength(1);
+    return { success: rows[0]?.success as boolean, detail: rows[0]?.detail ?? null };
+  }
+
+  it("header: the named header carries the value, nothing else does, and the echo is redacted", async () => {
+    const { arrival, echoed } = await useEcho({ type: "header", header_name: "X-Api-Key" });
+
+    expect(arrival.headers["x-api-key"]).toBe(VALUE);
+    expect(arrival.headers.authorization).toBeUndefined();
+    expect(arrival.url).toBe("/echo");
+    expect(echoed.headers["x-api-key"]).toBe("[REDACTED]");
+    expect(useRow()).toMatchObject({
+      success: true,
+      detail: { context: "http", status: 200, injection_type: "header" },
+    });
+  });
+
+  it("query: the named parameter carries the value in the URL the server saw, and the echo is redacted", async () => {
+    const { arrival, echoed } = await useEcho({ type: "query", query_param: "api_key" });
+
+    expect(new URL(arrival.url, baseUrl).searchParams.get("api_key")).toBe(VALUE);
+    expect(arrival.headers.authorization).toBeUndefined();
+    expect(echoed.url).toBe("/echo?api_key=[REDACTED]");
+    expect(useRow()).toMatchObject({
+      success: true,
+      detail: { context: "http", status: 200, injection_type: "query" },
+    });
+  });
+
+  it("basic_auth: Authorization is Basic and decodes to the value, and the echo is redacted", async () => {
+    const { arrival, echoed } = await useEcho({ type: "basic_auth" });
+
+    const auth = arrival.headers.authorization ?? "";
+    expect(auth).toMatch(/^Basic /);
+    expect(Buffer.from(auth.slice("Basic ".length), "base64").toString("utf8")).toBe(VALUE);
+    expect(arrival.url).toBe("/echo");
+    expect(echoed.headers.authorization).toBe("Basic [REDACTED]");
+    expect(useRow()).toMatchObject({
+      success: true,
+      detail: { context: "http", status: 200, injection_type: "basic_auth" },
+    });
+  });
+});
+
+// M-P2-18 (test-review-2026-10-09): the HTTP context's methods with a body,
+// request headers, the response cap and the scheme floor through the engine.
+describe("HTTP bodies, request headers, the response cap and the scheme floor (M-P2-18)", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "p218",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("p218-credential")),
+    });
+    await engine.setInjectionPolicy("secret://p218", {
+      url_allowlist: [`${baseUrl}/*`, "http://192.0.2.1/*"],
+    });
+    echoArrivals.length = 0;
+  });
+
+  function failedRow(): Record<string, unknown> | null | undefined {
+    const rows = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.success).toBe(false);
+    return rows[0]?.detail;
+  }
+
+  it.each(["PUT", "PATCH"] as const)("%s delivers its body verbatim", async (method) => {
+    const body = JSON.stringify({ method, items: [1, 2, 3], note: "ünïcode ✓" });
+    const res = await engine.useSecret("secret://p218", {
+      type: "http",
+      method,
+      url: `${baseUrl}/echo/resource`,
+      headers: { "Content-Type": "application/json" },
+      body,
+      injection: { type: "bearer" },
+    });
+
+    if (res.type !== "http") throw new Error("expected http result");
+    expect(res.status).toBe(200);
+    expect(echoArrivals).toHaveLength(1);
+    expect(echoArrivals[0]?.method).toBe(method);
+    expect(echoArrivals[0]?.body).toBe(body);
+    expect(echoArrivals[0]?.headers["content-type"]).toBe("application/json");
+  });
+
+  it("delivers the action's request headers as sent, beside the credential", async () => {
+    const res = await engine.useSecret("secret://p218", {
+      type: "http",
+      method: "GET",
+      url: `${baseUrl}/echo`,
+      headers: { "X-Request-Id": "p218-trace-7", Accept: "application/vnd.harpoc+json" },
+      injection: { type: "bearer" },
+    });
+
+    if (res.type !== "http") throw new Error("expected http result");
+    expect(res.status).toBe(200);
+    expect(echoArrivals[0]?.headers).toMatchObject({
+      "x-request-id": "p218-trace-7",
+      accept: "application/vnd.harpoc+json",
+      authorization: "Bearer p218-credential",
+    });
+  });
+
+  it("refuses a body one byte past the cap RESPONSE_TOO_LARGE, with a failed row", async () => {
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://p218", {
+          type: "http",
+          method: "GET",
+          url: `${baseUrl}/big`,
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.RESPONSE_TOO_LARGE,
+    );
+
+    expect(failedRow()).toMatchObject({
+      context: "http",
+      url: `${baseUrl}/big`,
+      error: ErrorCode.RESPONSE_TOO_LARGE,
+    });
+  });
+
+  // 192.0.2.1 (RFC 5737 TEST-NET-1) is a public-classified literal that routes
+  // nowhere: the scheme check is the only guard that refuses it, and no
+  // resolver runs.
+  it("refuses plain http to a non-loopback address URL_HTTPS_REQUIRED before any request", async () => {
+    const before = requestCount;
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://p218", {
+          type: "http",
+          method: "GET",
+          url: "http://192.0.2.1/api",
+          timeout_ms: 1000,
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.URL_HTTPS_REQUIRED,
+    );
+
+    expect(validateUrl).toHaveBeenCalledWith("http://192.0.2.1/api");
+    expect(requestCount).toBe(before);
+    expect(failedRow()).toMatchObject({
+      context: "http",
+      url: "http://192.0.2.1/api",
+      error: ErrorCode.URL_HTTPS_REQUIRED,
+    });
   });
 });

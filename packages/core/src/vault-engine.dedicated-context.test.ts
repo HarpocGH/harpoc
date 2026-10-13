@@ -4,10 +4,16 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
+import { controlledPathDirs, resolveExecutable } from "./injection/allowlist.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
 );
+
+// M-P2-19: the refusal classifies the resolved binary, so the ssh case needs an
+// ssh on PATH; a host without one skips it.
+const SSH_ON_PATH = resolveExecutable("ssh", controlledPathDirs());
 
 let tempDir: string;
 let engine: VaultEngine;
@@ -82,6 +88,44 @@ describe("VaultEngine — dedicated-context refusal (C1)", () => {
     ).rejects.toMatchObject({ code: ErrorCode.DEDICATED_CONTEXT_REQUIRED });
     expect(engine.verifyAuditChain().valid).toBe(true);
   });
+
+  // M-P2-19 (test-review-2026-10-09): ssh is the other dedicated-context binary
+  // (getting-started.md:174); the injector half is process-injector.test.ts.
+  it.skipIf(SSH_ON_PATH === null)(
+    "refuses a process action that re-spawns the SSH context's binary, audited (M-P2-19)",
+    async () => {
+      await engine.createSecret({
+        name: "deploy-key",
+        type: SecretType.API_KEY,
+        value: new Uint8Array(Buffer.from("ssh-deploy-key-material", "utf8")),
+      });
+      const handle = "secret://deploy-key";
+      await engine.setInjectionPolicy(handle, { command_allowlist: ["ssh"] });
+      const secretId = await engine.resolveSecretId(handle);
+
+      const err = await expectVaultError(
+        () =>
+          engine.useSecret(handle, {
+            type: "process",
+            command: "ssh",
+            args: ["-V"],
+            env_var: "SSH_KEY",
+          }),
+        ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+      );
+
+      expect(err.message).toMatch(/action\.type 'ssh'/);
+      const rows = engine.queryAudit({ secretId, eventType: AuditEventType.SECRET_USE });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.success).toBe(false);
+      expect(rows[0]?.detail).toMatchObject({
+        context: "process",
+        command: "ssh",
+        args_count: 1,
+        error: ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+      });
+    },
+  );
 
   it("negative control: the same secret still runs an ordinary allowlisted binary", async () => {
     await engine.createSecret({

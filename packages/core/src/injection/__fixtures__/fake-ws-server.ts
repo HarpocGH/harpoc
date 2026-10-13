@@ -34,6 +34,8 @@ export interface FakeWsScript {
   neverAckClose?: boolean;
   /** Send `messages` as binary frames (opcode 0x2) carrying their UTF-8 bytes. */
   binary?: boolean;
+  /** When set, the 101 response selects this subprotocol (`Sec-WebSocket-Protocol`). */
+  subprotocol?: string;
 }
 
 /** One request the fake server received — the upgrade request's headers and
@@ -150,6 +152,9 @@ export async function startFakeWsServer(script: FakeWsScript): Promise<FakeWsSer
       "HTTP/1.1 101 Switching Protocols\r\n" +
         "Upgrade: websocket\r\n" +
         "Connection: Upgrade\r\n" +
+        (script.subprotocol === undefined
+          ? ""
+          : `Sec-WebSocket-Protocol: ${script.subprotocol}\r\n`) +
         `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
     );
 
