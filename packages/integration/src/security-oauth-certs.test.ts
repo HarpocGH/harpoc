@@ -4,7 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { providerConfigFromFlowInput } from "@harpoc/oauth-proxy";
 import { DirectClient, RestClient } from "@harpoc/sdk";
-import { ErrorCode, startOAuthFlowInputSchema } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, SecretStatus, startOAuthFlowInputSchema } from "@harpoc/shared";
 import type { ExpiringCertificateInfo, ExpiringOAuthTokenInfo } from "@harpoc/shared";
 import {
   createTestVault,
@@ -21,7 +21,7 @@ import type { MockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import { KEY_PEM, CERT_PEM, EXPIRED_KEY_PEM, EXPIRED_CERT_PEM } from "./helpers/cert-fixtures.js";
 import { canon, keyNeedles } from "./helpers/key-needles.js";
 import type { Needle } from "./helpers/key-needles.js";
-import { silenceAuditLines } from "@harpoc/test-utils";
+import { connectInMemoryClient, silenceAuditLines } from "@harpoc/test-utils";
 
 silenceAuditLines();
 
@@ -45,11 +45,15 @@ silenceAuditLines();
  * 3. the audit trail gets the same sweep;
  * 4. the two expiring-status projections (D5) hand out exactly their metadata
  *    key set, over the engine and over `check_secret_health`, which is the one
- *    wired surface that serializes them.
+ *    wired surface that serializes them;
+ * 5. an MCP client_credentials flow completes with the client secret collected
+ *    out of band, and both of its `oauth.authorize` rows are attributed to the
+ *    launch token's principal and interface.
  *
- * One ordered lifecycle over a single vault, one REST server and one MCP
- * server: the sweeps read what the flow test recorded, so the file runs as a
- * whole.
+ * One ordered lifecycle over a single vault, one REST server and one tokenless
+ * MCP server: the sweeps read what the flow test recorded, so the file runs as
+ * a whole. Case 6 starts a second, token-bearing in-memory MCP server of its
+ * own, after the sweeps.
  */
 
 const PASSWORD = "security-posture-pw";
@@ -71,6 +75,11 @@ const ROTATED_REFRESH_TOKEN = "rt17-rotated-do-not-leak";
 const SMUGGLE_NAME = "smuggle-app-17";
 const SMUGGLE_CLIENT_ID = "smuggle-client-17";
 const SMUGGLED_CLIENT_SECRET = "smuggled-secret-17";
+
+const MCP_CC_NAME = "mcp-cc-app-17";
+const MCP_CC_CLIENT_ID = "mcp-cc-client-17";
+const MCP_CC_CLIENT_SECRET = "mcp-cc-secret-17";
+const MCP_CC_ACCESS_TOKEN = "at17-mcp-cc-do-not-leak";
 
 const IMPORTED_NAME = "posture-cert-17";
 const EXPIRING_NAME = "posture-expiring-17";
@@ -637,6 +646,102 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
     // the one wired surface that serializes them.
     expect(health.oauth_refresh_needed).toEqual(oauthItems);
     expect(health.certificates_nearing_renewal).toEqual(certItems);
+  });
+
+  // I33 (test-review-2026-10-09): the MCP client_credentials path completed on
+  // the real engine — the tool stores the PENDING config (the first
+  // `oauth.authorize` row), the client secret is collected out of band through
+  // the one-time loopback form a URL-mode elicitation names, and the manager's
+  // resume exchanges it and completes (the second row, `resumed: true`). Both
+  // rows carry the launch token's principal and the in-process / stdio interface
+  // `mcp` (Streamable HTTP would be `mcp-http`).
+  it("6. an MCP client_credentials flow completes with a collected secret and writes two attributed oauth.authorize rows", async () => {
+    mock.setNextTokens({ access_token: MCP_CC_ACCESS_TOKEN, expires_in: 86_400 });
+    const providerCalls = mock.requests.length;
+    const session = await connectInMemoryClient(
+      createMcpServer({ engine: vault.engine, launchToken: token }),
+      { name: "i33-client", version: "1.0.0" },
+      { capabilities: { elicitation: { url: {} } } },
+    );
+    let elicitedMode: string | undefined;
+    let elicitedUrl: string | undefined;
+    let postedStatus: number | undefined;
+    let result: { isError?: boolean; content: Array<{ text: string }> };
+    try {
+      session.client.setRequestHandler("elicitation/create", async (request) => {
+        const params = request.params as { mode?: string; url?: string };
+        elicitedMode = params.mode;
+        elicitedUrl = params.url;
+        if (typeof params.url !== "string") return { action: "decline" };
+        const posted = await fetch(params.url, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: `value=${encodeURIComponent(MCP_CC_CLIENT_SECRET)}`,
+        });
+        postedStatus = posted.status;
+        return { action: "accept" };
+      });
+      result = await session.callTool("start_oauth_flow", {
+        name: MCP_CC_NAME,
+        provider: "custom",
+        grant_type: "client_credentials",
+        client_id: MCP_CC_CLIENT_ID,
+        token_endpoint: mock.tokenEndpoint,
+      });
+    } finally {
+      await session.close();
+    }
+
+    // The out-of-band collection itself: a URL-mode elicitation naming a
+    // loopback form that accepted the posted value.
+    expect(elicitedMode).toBe("url");
+    expect(elicitedUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\//);
+    expect(postedStatus).toBe(200);
+
+    const handle = `secret://${MCP_CC_NAME}`;
+    const text = result.content[0]?.text ?? "";
+    expect(result.isError ?? false, text).toBe(false);
+    expect(JSON.parse(text)).toEqual({
+      handle,
+      status: "authorized",
+      message: "Client credentials flow completed for custom",
+    });
+    expect(text).not.toContain(MCP_CC_CLIENT_SECRET);
+    expect(text).not.toContain(MCP_CC_ACCESS_TOKEN);
+
+    // The provider saw exactly one exchange, carrying the collected secret.
+    expect(mock.requests.slice(providerCalls)).toHaveLength(1);
+    expect(mock.requests[providerCalls]).toMatchObject({
+      grant_type: "client_credentials",
+      client_id: MCP_CC_CLIENT_ID,
+      client_secret: MCP_CC_CLIENT_SECRET,
+    });
+
+    const secretId = await vault.engine.resolveSecretId(handle);
+    expect((await vault.engine.getSecretInfo(handle)).status).toBe(SecretStatus.ACTIVE);
+    expect(await vault.engine["getOAuthAccessToken"](secretId)).toBe(MCP_CC_ACCESS_TOKEN);
+
+    const rows = vault.engine
+      .queryAudit({ secretId, eventType: AuditEventType.OAUTH_AUTHORIZE })
+      .sort((a, b) => a.id - b.id);
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row).toMatchObject({
+        success: true,
+        principal_type: "agent",
+        principal_id: PRINCIPAL,
+      });
+    }
+    const detail = {
+      handle,
+      provider: "custom",
+      grant_type: "client_credentials",
+      interface: "mcp",
+    };
+    expect(rows[0]?.detail).toEqual(detail);
+    expect(rows[1]?.detail).toEqual({ ...detail, resumed: true });
+    expect(JSON.stringify(rows)).not.toContain(MCP_CC_CLIENT_SECRET);
+    expect(JSON.stringify(rows)).not.toContain(MCP_CC_ACCESS_TOKEN);
   });
 });
 

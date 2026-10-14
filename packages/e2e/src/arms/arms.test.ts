@@ -1,12 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { Permission } from "@harpoc/shared";
+import { Permission, useSecretActionSchema } from "@harpoc/shared";
 import { createHarnessVault, grantOn, storeSecret } from "../harness/vault.js";
 import type { HarnessVault } from "../harness/vault.js";
 import { assertOpaque, assertPresent } from "../assert/opacity.js";
 import { ECHO_HTTPS, assertFleetUp } from "../harness/backends.js";
 import { resolvePrintenv } from "../harness/fixtures.js";
 import { startBaselineArm } from "./baseline.js";
-import { startHarpocArm } from "./harpoc.js";
+import { probeHarpocSurface, startHarpocArm } from "./harpoc.js";
+import type { ProbeSurface } from "./harpoc.js";
 import type { Arm } from "./arm.js";
 
 /**
@@ -139,5 +140,163 @@ describe("two-arm harness (C-3)", () => {
   it("the two arms are distinguishable by name, so evidence cannot be misfiled", () => {
     expect(baseline.name).toBe("baseline");
     expect(harpoc.name).toBe("harpoc");
+  });
+});
+
+/*
+ * What the §6.2.1 surface probe asks the server, pinned without a fleet or a
+ * vault (test-review-2026-10-09 M-T1-7): a recording double stands in for the
+ * connected MCP client, answering every read but `secret://vault/audit/recent`,
+ * which it refuses as the real server refuses a token without `admin`. The real
+ * answers are the harness's, on `e2e.yml`.
+ */
+const AUDIT_REFUSAL = "Access denied: Token lacks permission: admin";
+const USE_SECRET_TOOLS = {
+  tools: [{ name: "use_secret", inputSchema: { type: "object", required: ["handle", "action"] } }],
+};
+
+interface Recording {
+  calls: string[];
+  toolActions: unknown[];
+  toolHandles: unknown[];
+  failingActions: unknown[];
+  surface: ProbeSurface;
+}
+
+function recordingSurface(): Recording {
+  const calls: string[] = [];
+  const toolActions: unknown[] = [];
+  const toolHandles: unknown[] = [];
+  const failingActions: unknown[] = [];
+  const client = {
+    callTool: (params: { name: string; arguments?: Record<string, unknown> }) => {
+      calls.push(`callTool ${params.name}`);
+      if (params.name === "use_secret") {
+        toolActions.push(params.arguments?.action);
+        toolHandles.push(params.arguments?.handle);
+      }
+      return Promise.resolve({ content: [{ type: "text", text: `${params.name} answer` }] });
+    },
+    readResource: (params: { uri: string }) => {
+      calls.push(`readResource ${params.uri}`);
+      if (params.uri === "secret://vault/audit/recent") {
+        return Promise.reject(new Error(AUDIT_REFUSAL));
+      }
+      return Promise.resolve({ contents: [{ uri: params.uri, text: `${params.uri} answer` }] });
+    },
+    listTools: () => {
+      calls.push("listTools");
+      return Promise.resolve(USE_SECRET_TOOLS);
+    },
+  };
+  return {
+    calls,
+    toolActions,
+    toolHandles,
+    failingActions,
+    surface: {
+      client: client as unknown as ProbeSurface["client"],
+      callUseSecret: (handle, action) => {
+        calls.push(`callUseSecret ${handle}`);
+        failingActions.push(action);
+        return Promise.resolve({
+          ok: false,
+          text: `Secret not found: ${handle}`,
+          errorText: `Secret not found: ${handle}`,
+        });
+      },
+    },
+  };
+}
+
+describe("harpoc arm: the §6.2.1 surface probe, fleet-free", () => {
+  it("issues the whole surface in order: two tools, five resources, the argument surface, the failing call", async () => {
+    const { calls, surface } = recordingSurface();
+    await probeHarpocSurface(surface, "secret://prod/db-pass");
+    expect(calls).toEqual([
+      "callTool list_secrets",
+      "callTool get_secret_info",
+      "readResource secret://vault/secrets",
+      "readResource secret://vault/secrets/db-pass",
+      "readResource secret://vault/health",
+      "readResource secret://vault/projects",
+      "readResource secret://vault/audit/recent",
+      "listTools",
+      "callTool use_secret",
+      "callUseSecret secret://does-not-exist",
+    ]);
+  });
+
+  it.each([
+    { label: "a global handle", handle: "secret://my-key", name: "my-key" },
+    { label: "a project-scoped handle", handle: "secret://prod/db-pass", name: "db-pass" },
+    { label: "no handle, secret://unknown", handle: undefined, name: "unknown" },
+  ])(
+    "reads the five resources once each, the by-name read under the name of $label",
+    async ({ handle, name }) => {
+      const { calls, surface } = recordingSurface();
+      await probeHarpocSurface(surface, handle);
+      expect(calls.filter((call) => call.startsWith("readResource "))).toEqual([
+        "readResource secret://vault/secrets",
+        `readResource secret://vault/secrets/${name}`,
+        "readResource secret://vault/health",
+        "readResource secret://vault/projects",
+        "readResource secret://vault/audit/recent",
+      ]);
+    },
+  );
+
+  it("probes the use_secret argument surface: the advertised schema captured, a malformed action the tool's schema refuses", async () => {
+    const { toolActions, toolHandles, surface } = recordingSurface();
+    const outcome = await probeHarpocSurface(surface, "secret://my-key");
+    expect((outcome.result as Record<string, unknown>).useSecretArgs).toEqual({
+      tools: USE_SECRET_TOOLS,
+      malformed: { content: [{ type: "text", text: "use_secret answer" }] },
+    });
+    expect(toolActions).toHaveLength(1);
+    expect(useSecretActionSchema.safeParse(toolActions[0]).success).toBe(false);
+    expect(toolHandles).toEqual(["secret://my-key"]);
+  });
+
+  it("the failing call's action passes the tool's schema, so its refusal is the engine's not-found", async () => {
+    const { failingActions, surface } = recordingSurface();
+    const outcome = await probeHarpocSurface(surface, "secret://my-key");
+    expect(failingActions).toHaveLength(1);
+    expect(useSecretActionSchema.safeParse(failingActions[0]).success).toBe(true);
+    expect((outcome.result as Record<string, unknown>).failing).toBe(
+      "Secret not found: secret://does-not-exist",
+    );
+  });
+
+  it("every output joins result and text, the refused read captured as its error, never thrown", async () => {
+    const { surface } = recordingSurface();
+    const outcome = await probeHarpocSurface(surface, "secret://my-key");
+    expect(outcome.ok).toBe(true);
+    expect(outcome.text).toContain("list_secrets answer");
+    expect(outcome.text).toContain("get_secret_info answer");
+    const result = outcome.result as Record<string, unknown>;
+    expect(Object.keys(result)).toEqual([
+      "list",
+      "info",
+      "resource",
+      "resources",
+      "useSecretArgs",
+      "failing",
+    ]);
+    const resources = result.resources as Record<string, unknown>;
+    expect(Object.keys(resources)).toEqual(["secret", "health", "projects", "auditRecent"]);
+    expect(resources.auditRecent).toBeInstanceOf(Error);
+    for (const uri of [
+      "secret://vault/secrets",
+      "secret://vault/secrets/my-key",
+      "secret://vault/health",
+      "secret://vault/projects",
+    ]) {
+      expect(outcome.text).toContain(`${uri} answer`);
+    }
+    expect(outcome.text).toContain(AUDIT_REFUSAL);
+    expect(outcome.text).toContain('"required":["handle","action"]');
+    expect(outcome.text).toContain("use_secret answer");
+    expect(outcome.text).toContain("Secret not found: secret://does-not-exist");
   });
 });

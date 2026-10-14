@@ -22,7 +22,7 @@ describe("pre-registration", () => {
     dir = mkdtempSync(join(tmpdir(), "harpoc-prereg-"));
   });
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("loads expectations from disk", () => {
@@ -169,7 +169,9 @@ describe("pre-registration OS keying", () => {
   } as const;
 
   afterEach(() => {
-    for (const osDir of osTestDirs.splice(0)) rmSync(osDir, { recursive: true, force: true });
+    for (const osDir of osTestDirs.splice(0)) {
+      rmSync(osDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
   });
 
   it("prefers the row keyed to the running OS", () => {

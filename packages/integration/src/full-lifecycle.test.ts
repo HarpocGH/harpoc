@@ -79,6 +79,194 @@ const PARITY_REFUSALS: [string, ErrorCode, ParityRead][] = [
   ["getCertificateStatus", ErrorCode.CERT_NOT_CONFIGURED, (c, h) => c.getCertificateStatus(h)],
 ];
 
+/**
+ * One write row's own world, built on the trusted path and named for the mode
+ * and the member: a secret the REST token's principal administers, and an agent
+ * holding one `read` grant on it and one live token — so no row reads or
+ * mutates what another row touched, and the table runs in any order.
+ */
+interface WriteFixture {
+  name: string;
+  handle: string;
+  secretId: string;
+  value: string;
+  agent: string;
+  policyId: string;
+  jti: string;
+}
+
+async function writeFixture(engine: VaultEngine, tag: string): Promise<WriteFixture> {
+  const name = `wps-${tag}`;
+  const handle = `secret://${name}`;
+  const value = `wv-${tag}-9q4z`;
+  await engine.createSecret({
+    name,
+    type: SecretType.API_KEY,
+    value: new Uint8Array(Buffer.from(value)),
+  });
+  await grantOn(engine, handle, "test-agent", ["admin"]);
+  const agent = `wpa-${tag}`;
+  const policy = await grantOn(engine, handle, agent, ["read"]);
+  engine.createToken(agent, ["read"]);
+  const [issued] = engine.listIssuedTokens({ agent, status: "all" });
+  if (!issued) throw new Error(`no token issued for ${agent}`);
+  const secretId = await engine.resolveSecretId(handle);
+  return { name, handle, secretId, value, agent, policyId: policy.id, jti: issued.jti };
+}
+
+interface ParityWrite {
+  member: string;
+  /** The audit rows the write appends, in order, every one attributed to the mode's caller. */
+  events: string[];
+  prepare?: (engine: VaultEngine, f: WriteFixture) => void;
+  write: (client: VaultClient, f: WriteFixture) => Promise<unknown>;
+  /** The engine's state after the write — the client's answer read against it. */
+  oracle: (engine: VaultEngine, f: WriteFixture, got: unknown) => Promise<void> | void;
+}
+
+const text = (bytes: Uint8Array): string => Buffer.from(bytes).toString("utf8");
+
+const PARITY_WRITES: ParityWrite[] = [
+  {
+    member: "getSecretValue",
+    events: [AuditEventType.SECRET_READ],
+    write: (c, f) => c.getSecretValue(f.handle),
+    oracle: (_e, f, got) => {
+      expect(text(got as Uint8Array)).toBe(f.value);
+    },
+  },
+  {
+    member: "createSecret",
+    events: [AuditEventType.SECRET_CREATE],
+    write: (c, f) =>
+      c.createSecret({
+        name: `${f.name}-new`,
+        type: SecretType.API_KEY,
+        value: new Uint8Array(Buffer.from(`${f.value}-new`)),
+      }),
+    oracle: async (e, f, got) => {
+      const handle = `secret://${f.name}-new`;
+      expect(got).toEqual({ handle, status: "created", message: `Secret ${handle} created` });
+      expect((await e.getSecretInfo(handle)).status).toBe(SecretStatus.ACTIVE);
+      expect(text(await e.getSecretValue(handle))).toBe(`${f.value}-new`);
+    },
+  },
+  {
+    member: "rotateSecret",
+    events: [AuditEventType.SECRET_ROTATE],
+    write: (c, f) => c.rotateSecret(f.handle, new Uint8Array(Buffer.from(`${f.value}-v2`))),
+    oracle: async (e, f, got) => {
+      expect(got).toBeUndefined();
+      expect((await e.getSecretInfo(f.handle)).version).toBe(2);
+      expect(text(await e.getSecretValue(f.handle))).toBe(`${f.value}-v2`);
+    },
+  },
+  {
+    member: "revokeSecret",
+    events: [AuditEventType.SECRET_REVOKE],
+    write: (c, f) => c.revokeSecret(f.handle),
+    oracle: async (e, f) => {
+      expect((await e.getSecretInfo(f.handle)).status).toBe(SecretStatus.REVOKED);
+    },
+  },
+  {
+    member: "grantPolicy",
+    events: [AuditEventType.POLICY_GRANT],
+    write: (c, f) =>
+      c.grantPolicy(f.handle, {
+        principal_type: "agent",
+        principal_id: f.agent,
+        permissions: ["use"],
+      }),
+    oracle: (e, f, got) => {
+      const granted = e.listPolicies(f.secretId).find((p) => p.id === (got as { id: string }).id);
+      expect(granted).toMatchObject({ principal_id: f.agent, permissions: ["use"] });
+      expect(asJson(got)).toEqual(asJson(granted));
+    },
+  },
+  {
+    member: "revokePolicy",
+    events: [AuditEventType.POLICY_REVOKE],
+    write: (c, f) => c.revokePolicy(f.handle, f.policyId),
+    oracle: (e, f) => {
+      expect(e.listPolicies(f.secretId).map((p) => p.id)).not.toContain(f.policyId);
+    },
+  },
+  {
+    member: "registerAgent",
+    events: [AuditEventType.AGENT_REGISTER],
+    write: (c, f) => c.registerAgent({ name: `${f.agent}-new`, description: "registered" }),
+    oracle: (e, f, got) => {
+      expect(got).toMatchObject({ name: `${f.agent}-new`, description: "registered" });
+      expect(asJson(got)).toEqual(asJson(e.getAgent(`${f.agent}-new`)));
+    },
+  },
+  {
+    member: "updateAgent",
+    events: [AuditEventType.AGENT_UPDATE],
+    write: (c, f) => c.updateAgent(f.agent, { description: "updated", owner: "ops" }),
+    oracle: (e, f, got) => {
+      expect(got).toMatchObject({ description: "updated", owner: "ops" });
+      expect(asJson(got)).toEqual(asJson(e.getAgent(f.agent)));
+    },
+  },
+  {
+    member: "deactivateAgent",
+    events: [AuditEventType.TOKEN_REVOKE, AuditEventType.AGENT_DEACTIVATE],
+    write: (c, f) => c.deactivateAgent(f.agent),
+    oracle: (e, f, got) => {
+      expect(got).toEqual({ revoked_tokens: 1 });
+      expect(e.getAgent(f.agent).status).toBe("inactive");
+    },
+  },
+  {
+    member: "activateAgent",
+    events: [AuditEventType.AGENT_ACTIVATE],
+    prepare: (e, f) => {
+      e.deactivateAgent(f.agent);
+    },
+    write: (c, f) => c.activateAgent(f.agent),
+    oracle: (e, f, got) => {
+      expect(got).toMatchObject({ name: f.agent, status: "active" });
+      expect(asJson(got)).toEqual(asJson(e.getAgent(f.agent)));
+    },
+  },
+  {
+    member: "deleteAgent",
+    events: [
+      AuditEventType.TOKEN_REVOKE,
+      AuditEventType.POLICY_REVOKE,
+      AuditEventType.AGENT_DELETE,
+    ],
+    write: (c, f) => c.deleteAgent(f.agent),
+    oracle: async (e, f, got) => {
+      expect(got).toEqual({ revoked_tokens: 1, removed_grants: 1 });
+      await expectVaultError(() => Promise.resolve(e.getAgent(f.agent)), ErrorCode.AGENT_NOT_FOUND);
+    },
+  },
+  {
+    member: "setAgentPermissions",
+    events: [AuditEventType.POLICY_REVOKE, AuditEventType.POLICY_GRANT],
+    write: (c, f) => c.setAgentPermissions(f.agent, f.handle, { permissions: ["read", "use"] }),
+    oracle: (e, f, got) => {
+      const cells = e.listPolicies(f.secretId).filter((p) => p.principal_id === f.agent);
+      expect(cells).toHaveLength(1);
+      expect([...(cells[0]?.permissions ?? [])].sort()).toEqual(["read", "use"]);
+      expect(asJson((got as { policy: unknown }).policy)).toEqual(asJson(cells[0]));
+    },
+  },
+  {
+    member: "revokeToken",
+    events: [AuditEventType.TOKEN_REVOKE],
+    write: (c, f) => c.revokeToken(f.jti),
+    oracle: (e, f, got) => {
+      expect(got).toBeUndefined();
+      const [issued] = e.listIssuedTokens({ agent: f.agent, status: "all" });
+      expect(issued).toMatchObject({ jti: f.jti, status: "revoked" });
+    },
+  },
+];
+
 describe("Full Lifecycle", () => {
   let vault: TestVault;
   let mcpServer: McpServer;
@@ -272,6 +460,111 @@ describe("Full Lifecycle", () => {
     );
   });
 
+  // ---- Write parity (M-P1-7): the thirteen members on the real engine -----
+  describe.each([
+    ["DirectClient", "d", (): VaultClient => new DirectClient(vault.engine)],
+    ["RestClient", "r", (): VaultClient => new RestClient({ baseUrl: restServer.baseUrl, token })],
+  ])("%s write parity", (_label, mode, makeClient) => {
+    it.each(PARITY_WRITES.map((row) => [row.member, row] as const))(
+      "%s leaves the engine holding what it answered, attributed to the mode's caller",
+      async (member, row) => {
+        const f = await writeFixture(vault.engine, `${mode}-${member.toLowerCase()}`);
+        row.prepare?.(vault.engine, f);
+        const before = Math.max(...vault.engine.queryAudit().map((r) => r.id));
+
+        const got = await row.write(makeClient(), f);
+
+        const appended = vault.engine
+          .queryAudit()
+          .filter((r) => r.id > before)
+          .sort((a, b) => a.id - b.id);
+        expect(appended.map((r) => r.event_type)).toEqual(row.events);
+        for (const r of appended) {
+          // DirectClient is the trusted local path (no principal, no interface);
+          // RestClient's rows carry the token's principal and the rest interface.
+          expect(r.success).toBe(true);
+          expect(r.principal_id).toBe(mode === "r" ? "test-agent" : null);
+          expect(r.detail?.interface).toBe(mode === "r" ? "rest" : undefined);
+        }
+        await row.oracle(vault.engine, f, got);
+      },
+    );
+  });
+
+  // ---- REST write routes (M-P1-8): the wire body and the engine state -----
+  describe("REST write routes over the real engine", () => {
+    async function route(
+      method: string,
+      path: string,
+      body?: unknown,
+    ): Promise<{ status: number; json: unknown }> {
+      const res = await fetch(`${restServer.baseUrl}/api/v1${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const raw = await res.text();
+      try {
+        return { status: res.status, json: JSON.parse(raw) as unknown };
+      } catch {
+        return { status: res.status, json: raw };
+      }
+    }
+
+    it("DELETE /secrets/:handle?confirm=true revokes the secret", async () => {
+      const f = await writeFixture(vault.engine, "route-delete");
+      const res = await route("DELETE", `/secrets/${f.name}?confirm=true`);
+      expect(res).toEqual({ status: 200, json: { data: { revoked: true } } });
+      expect((await vault.engine.getSecretInfo(f.handle)).status).toBe(SecretStatus.REVOKED);
+    });
+
+    it("POST /secrets/:handle/rotate stores the decoded value as version 2", async () => {
+      const f = await writeFixture(vault.engine, "route-rotate");
+      const res = await route("POST", `/secrets/${f.name}/rotate`, {
+        value: Buffer.from(`${f.value}-v2`).toString("base64"),
+      });
+      expect(res).toEqual({ status: 200, json: { data: { rotated: true } } });
+      expect((await vault.engine.getSecretInfo(f.handle)).version).toBe(2);
+      expect(text(await vault.engine.getSecretValue(f.handle))).toBe(`${f.value}-v2`);
+    });
+
+    it("PUT /agents/:name replaces the description and owner", async () => {
+      const f = await writeFixture(vault.engine, "route-agent");
+      const res = await route("PUT", `/agents/${f.agent}`, {
+        description: "replaced",
+        owner: "route-owner",
+      });
+      expect(res.status).toBe(200);
+      expect(res.json).toEqual({ data: asJson(vault.engine.getAgent(f.agent)) });
+      expect(vault.engine.getAgent(f.agent)).toMatchObject({
+        description: "replaced",
+        owner: "route-owner",
+      });
+    });
+
+    it("DELETE /tokens/:jti revokes the issued token", async () => {
+      const f = await writeFixture(vault.engine, "route-token");
+      const res = await route("DELETE", `/tokens/${f.jti}`);
+      expect(res).toEqual({ status: 200, json: { data: { revoked: true } } });
+      expect(vault.engine.listIssuedTokens({ agent: f.agent, status: "all" })).toEqual([
+        expect.objectContaining({ jti: f.jti, status: "revoked" }),
+      ]);
+    });
+
+    it("POST /audit/verify answers the engine's chain report without the tail", async () => {
+      const report = vault.engine.verifyAuditChain();
+      const res = await route("POST", "/audit/verify");
+      expect(report.valid).toBe(true);
+      expect(res).toEqual({
+        status: 200,
+        json: { data: { valid: true, checked: report.checked, first_broken_id: null } },
+      });
+    });
+  });
+
   // ---- Test 10: rotateSecret ----------------------------------------------
   it("rotateSecret bumps version to 2", async () => {
     await vault.engine.rotateSecret(handle, new Uint8Array(Buffer.from(SECRET_VALUE_V2)));
@@ -287,22 +580,28 @@ describe("Full Lifecycle", () => {
   });
 
   // ---- Test 12: queryAudit ------------------------------------------------
-  it("audit trail contains expected events in order", () => {
+  it("audit trail contains expected events in order", async () => {
     const events = vault.engine.queryAudit();
     const types = events.map((e) => e.event_type);
     // queryAudit returns newest-first — reverse to get chronological order
     const chronological = [...types].reverse();
+    // The lifecycle secret's own rows: the write-parity fixtures add their own creates and rotates.
+    const secretId = await vault.engine.resolveSecretId(handle);
+    const lifecycle = [...events]
+      .reverse()
+      .filter((e) => e.secret_id === secretId)
+      .map((e) => e.event_type);
 
     expect(chronological).toContain(AuditEventType.VAULT_UNLOCK);
-    expect(chronological).toContain(AuditEventType.SECRET_CREATE);
-    expect(chronological).toContain(AuditEventType.SECRET_ROTATE);
+    expect(lifecycle).toContain(AuditEventType.SECRET_CREATE);
+    expect(lifecycle).toContain(AuditEventType.SECRET_ROTATE);
 
     // vault.unlock should be the earliest event
     expect(chronological[0]).toBe(AuditEventType.VAULT_UNLOCK);
 
     // secret.rotate should come after secret.create in chronological order
-    const createIdx = chronological.indexOf(AuditEventType.SECRET_CREATE);
-    const rotateIdx = chronological.indexOf(AuditEventType.SECRET_ROTATE);
+    const createIdx = lifecycle.indexOf(AuditEventType.SECRET_CREATE);
+    const rotateIdx = lifecycle.indexOf(AuditEventType.SECRET_ROTATE);
     expect(rotateIdx).toBeGreaterThan(createIdx);
   });
 
@@ -331,15 +630,21 @@ describe("Full Lifecycle", () => {
       dbPath: vault.dbPath,
       sessionPath: vault.sessionPath,
     });
-    await engine2.unlock(PASSWORD);
+    try {
+      await engine2.unlock(PASSWORD);
 
-    const events = engine2.queryAudit();
-    const types = events.map((e) => e.event_type);
-    // Should contain events from before lock + the new unlock
-    expect(types.filter((t) => t === AuditEventType.VAULT_UNLOCK).length).toBeGreaterThanOrEqual(2);
-    expect(types).toContain(AuditEventType.SECRET_CREATE);
-    expect(types).toContain(AuditEventType.SECRET_ROTATE);
-
-    await engine2.destroy();
+      const events = engine2.queryAudit();
+      const types = events.map((e) => e.event_type);
+      const secretId = await engine2.resolveSecretId(handle);
+      const lifecycle = events.filter((e) => e.secret_id === secretId).map((e) => e.event_type);
+      // Should contain events from before lock + the new unlock
+      expect(types.filter((t) => t === AuditEventType.VAULT_UNLOCK).length).toBeGreaterThanOrEqual(
+        2,
+      );
+      expect(lifecycle).toContain(AuditEventType.SECRET_CREATE);
+      expect(lifecycle).toContain(AuditEventType.SECRET_ROTATE);
+    } finally {
+      await engine2.destroy();
+    }
   });
 });

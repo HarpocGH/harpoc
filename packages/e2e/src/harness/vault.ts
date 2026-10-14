@@ -32,7 +32,7 @@ export async function createHarnessVault(password: string): Promise<HarnessVault
     tmpDir,
     async destroy() {
       await engine.destroy();
-      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     },
   };
 }

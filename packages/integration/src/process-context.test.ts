@@ -1,10 +1,13 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuditEventType, ErrorCode } from "@harpoc/shared";
+import { controlledPathDirs, resolveExecutable } from "@harpoc/core";
 import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { tierRequired } from "./helpers/platform-tiers.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 /**
  * Process-execution context (thesis §4.5.2, §6.2 sec:attack-output-channel).
@@ -28,6 +31,46 @@ function procAction(script: string, extraArgs: string[] = []) {
     env_var: "TOKEN",
   };
 }
+
+/** A binary Git for Windows ships under `usr\bin`, found from the git on the controlled PATH. */
+function gitUsrBin(name: string): string | null {
+  const git = resolveExecutable("git", controlledPathDirs());
+  if (git === null) return null;
+  let dir = dirname(git);
+  for (let up = 0; up < 3; up++, dir = dirname(dir)) {
+    const candidate = join(dir, "usr", "bin", name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * An exec wrapper with `-exec`: POSIX find; on win32 Git for Windows' GNU
+ * find.exe — win32's bare `find` is System32's text filter, which has no -exec.
+ */
+const FIND = process.platform === "win32" ? gitUsrBin("find.exe") : "find";
+
+/**
+ * A non-interpreter binary that echoes an environment variable: coreutils'
+ * printenv on POSIX; on win32 the MSYS build Git for Windows ships (where.exe
+ * cannot print a variable, and cmd and powershell are interpreters).
+ */
+const PRINTENV =
+  process.platform === "win32"
+    ? gitUsrBin("printenv.exe")
+    : resolveExecutable("printenv", controlledPathDirs());
+
+// Every leg that exports the ssh-live tier ships git — on Windows with its
+// usr\bin printenv.exe and find.exe, elsewhere beside coreutils and findutils —
+// so a missing printenv or find fails such a leg instead of letting the ladder
+// and collapse cases below skip silently.
+it("ssh-live tier: required legs fail instead of skipping when printenv or find is unresolvable", () => {
+  if ((PRINTENV === null || FIND === null) && tierRequired("ssh-live")) {
+    throw new Error(
+      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no printenv or no find resolves',
+    );
+  }
+});
 
 describe("Process execution context (I2b / output-channel leakage)", () => {
   let vault: TestVault;
@@ -154,6 +197,34 @@ describe("Process execution context (I2b / output-channel leakage)", () => {
     ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
   });
 
+  // M-T2b-10 (test-review-2026-10-09): the ladder proper — thesis 05:302's
+  // second allowlist composition. A non-interpreter binary (printenv) takes no
+  // acknowledgement, runs with the credential, and its echo comes back
+  // redacted. Skipped only where no printenv resolves (the guard above).
+  it.skipIf(PRINTENV === null)(
+    "L4: an allowlisted non-interpreter binary runs with the credential and its echo is redacted (M-T2b-10)",
+    async () => {
+      const printenv = PRINTENV as string;
+      await vault.engine.setInjectionPolicy(handle, {
+        url_allowlist: [],
+        command_allowlist: [printenv],
+        env_allowlist: [],
+      });
+      const res = await new DirectClient(vault.engine).useSecret(handle, {
+        type: "process",
+        command: printenv,
+        args: ["TOKEN"],
+        env_var: "TOKEN",
+      });
+      if (res.type !== "process") throw new Error("expected process result");
+      expect(res.exit_code).toBe(0);
+      expect(res.stdout).not.toContain(SECRET);
+      expect(res.stdout.trim()).toBe("[REDACTED]");
+      const [row] = vault.engine.queryAudit({ eventType: AuditEventType.SECRET_USE, limit: 1 });
+      expect(row?.detail).toMatchObject({ context: "process", command: printenv, sanitized: true });
+    },
+  );
+
   // --- Interpreter acknowledgement (§4.5.3: the L3 -> L4 raise is conditional) ---
 
   it("§4.5.3: refuses to allowlist an interpreter without acknowledgement and audits the refusal", async () => {
@@ -190,6 +261,78 @@ describe("Process execution context (I2b / output-channel leakage)", () => {
     expect(acked).toHaveLength(1);
     expect(acked[0]?.detail?.interpreters).toEqual([NODE]);
   });
+
+  // --- Exec wrappers (§4.5.3's second tier; M-T2a-7) -----------------------
+  // `find` is an EXEC_WRAPPERS entry: `-exec` runs any program it names, so the
+  // binary the allowlist admits hands the credential to one it never named.
+  // Allowlisting it takes the interpreters' acknowledgement; acknowledged, the
+  // ladder collapses — the residual thesis 04:355 names, demonstrated.
+
+  it("§4.5.3: refuses to allowlist the exec wrapper find without acknowledgement and audits the refusal", async () => {
+    const created = await vault.engine.createSecret({
+      name: "wrapper-gate",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from(SECRET, "utf8")),
+    });
+    await expectVaultError(
+      () =>
+        vault.engine.setInjectionPolicy(created.handle, {
+          url_allowlist: [],
+          command_allowlist: ["find"],
+          env_allowlist: [],
+        }),
+      ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED,
+    );
+
+    // The allowlist stays empty, so the fail-safe deny still holds
+    await expectVaultError(
+      () => vault.engine.useSecret(created.handle, procAction(`process.stdout.write("x")`)),
+      ErrorCode.COMMAND_NOT_ALLOWED,
+    );
+
+    const refused = vault.engine.queryAudit({
+      eventType: AuditEventType.POLICY_INTERPRETER_REFUSED,
+    });
+    expect(refused).toHaveLength(1);
+    expect(refused[0]?.detail).toMatchObject({ interpreters: [], exec_wrappers: ["find"] });
+  });
+
+  // win32's bare `find` is System32's text filter; Git for Windows' GNU
+  // `find.exe` under `usr\bin` has `-exec` — skipped only where find or printenv
+  // does not resolve (Git for Windows ships both; see the printenv tier guard).
+  it.skipIf(FIND === null || PRINTENV === null)(
+    "residual: an acknowledged find -exec printenv collapses the ladder — the credential reaches the output, redacted in the result",
+    async () => {
+      const find = FIND as string;
+      await vault.engine.setInjectionPolicy(
+        handle,
+        { url_allowlist: [], command_allowlist: [find], env_allowlist: [] },
+        { acknowledge_interpreters: true },
+      );
+      const acked = vault.engine.queryAudit({
+        eventType: AuditEventType.POLICY_INTERPRETER_ACKNOWLEDGED,
+      });
+      expect(acked).toHaveLength(2);
+      const findAck = acked.find(
+        (e) => Array.isArray(e.detail?.exec_wrappers) && e.detail.exec_wrappers.length > 0,
+      );
+      expect(findAck).toBeDefined();
+      expect(findAck?.detail).toMatchObject({ interpreters: [], exec_wrappers: [find] });
+
+      const res = await vault.engine.useSecret(handle, {
+        type: "process",
+        command: find,
+        args: [vault.tmpDir, "-maxdepth", "0", "-exec", PRINTENV as string, "TOKEN", ";"],
+        env_var: "TOKEN",
+      });
+      if (res.type !== "process") throw new Error("expected process result");
+      expect(res.exit_code).toBe(0);
+      expect(res.stdout).not.toContain(SECRET);
+      expect(res.stdout.trim()).toBe("[REDACTED]");
+      const [row] = vault.engine.queryAudit({ eventType: AuditEventType.SECRET_USE, limit: 1 });
+      expect(row?.detail).toMatchObject({ context: "process", command: find, sanitized: true });
+    },
+  );
 
   it("clean environment: the child does not inherit the vault's process env", async () => {
     process.env.HARPOC_INTEG_MARKER = "LEAKED";

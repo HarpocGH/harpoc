@@ -135,8 +135,17 @@ describe("git context — live clones over http, https and ssh", () => {
   afterAll(async () => {
     await surface?.close();
     await vault?.destroy();
-    for (const dir of cloneDirs) rmSync(dir, { recursive: true, force: true });
-    if (emptyGitConfig) rmSync(join(emptyGitConfig, ".."), { recursive: true, force: true });
+    for (const dir of cloneDirs) {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+    if (emptyGitConfig) {
+      rmSync(join(emptyGitConfig, ".."), {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      });
+    }
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) Reflect.deleteProperty(process.env, key);
       else process.env[key] = value;

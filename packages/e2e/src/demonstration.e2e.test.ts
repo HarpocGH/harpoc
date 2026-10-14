@@ -133,7 +133,12 @@ describe("demonstration matrix — six contexts × four interfaces", () => {
     for (const fixture of fixtures.values()) fixture.cleanup?.();
     await vault?.destroy();
     if (gitConfigPath !== undefined) {
-      rmSync(dirname(gitConfigPath), { recursive: true, force: true });
+      rmSync(dirname(gitConfigPath), {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      });
     }
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) Reflect.deleteProperty(process.env, key);

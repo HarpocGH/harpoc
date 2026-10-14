@@ -38,7 +38,12 @@ function freshCloneDir(): string {
 
 function wipeCloneDirs(): void {
   while (CLONE_DIRS.length > 0) {
-    rmSync(CLONE_DIRS.pop() as string, { recursive: true, force: true });
+    rmSync(CLONE_DIRS.pop() as string, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   }
 }
 

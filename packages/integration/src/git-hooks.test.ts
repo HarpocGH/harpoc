@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
   chmodSync,
   createReadStream,
@@ -10,11 +10,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
-import type { Server } from "node:http";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { AuditEventType } from "@harpoc/shared";
 import { controlledPathDirs, resolveExecutable } from "@harpoc/core";
 import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
@@ -198,5 +199,158 @@ describeGit("Git context — hooks of the caller's tree never run (N11)", () => 
     expect(result).toMatchObject({ exit_code: 0 });
     expect(readFileSync(join(wt, "a.txt"), "utf8")).toBe("two\n");
     expect(existsSync(marker)).toBe(false);
+  });
+
+  // I18 (test-review-2026-10-09): a push through the vault. Dumb HTTP cannot
+  // take a push, so the same bare repository is served again over git's smart
+  // HTTP protocol — `git http-backend` as a CGI behind a second listener on
+  // 127.0.0.1 — which admits git-receive-pack only with the Basic credential
+  // the push secret holds (http-backend enables receive-pack once REMOTE_USER
+  // is set): the push succeeds only if the vault-authored askpass helper
+  // hands git the credential.
+  describe("a push through the vault (I18)", () => {
+    const PUSH_USER = "git-pusher";
+    const PUSH_TOKEN = "push-test-token-5e4d3c2b";
+    let smart: Server;
+    let smartUrl: string;
+    let pushHandle: string;
+    let authorizedPushes = 0;
+
+    function httpBackend(req: IncomingMessage, res: ServerResponse): void {
+      const [pathname = "/", query = ""] = (req.url ?? "/").split("?");
+      const receivePack =
+        pathname.endsWith("/git-receive-pack") || query === "service=git-receive-pack";
+      const basic = `Basic ${Buffer.from(`${PUSH_USER}:${PUSH_TOKEN}`).toString("base64")}`;
+      const authorized = req.headers.authorization === basic;
+      if (receivePack && !authorized) {
+        res.writeHead(401, { "www-authenticate": 'Basic realm="harpoc-test"' }).end();
+        return;
+      }
+      let pathInfo: string;
+      try {
+        pathInfo = decodeURIComponent(pathname);
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
+      if (receivePack) authorizedPushes++;
+      const fail = (): void => {
+        if (!res.headersSent) res.writeHead(502);
+        res.end();
+      };
+      const cgi = spawn(GIT as string, ["http-backend"], {
+        timeout: GIT_TIMEOUT_MS,
+        env: {
+          ...gitEnv,
+          GIT_PROJECT_ROOT: root,
+          GIT_HTTP_EXPORT_ALL: "1",
+          PATH_INFO: pathInfo,
+          QUERY_STRING: query,
+          REQUEST_METHOD: req.method ?? "GET",
+          CONTENT_TYPE: req.headers["content-type"] ?? "",
+          REMOTE_ADDR: "127.0.0.1",
+          ...(req.headers["content-length"] === undefined
+            ? {}
+            : { CONTENT_LENGTH: req.headers["content-length"] }),
+          ...(req.headers["content-encoding"] === undefined
+            ? {}
+            : { HTTP_CONTENT_ENCODING: req.headers["content-encoding"] }),
+          ...(authorized ? { REMOTE_USER: PUSH_USER } : {}),
+        },
+      });
+      cgi.on("error", fail);
+      cgi.stdin.on("error", fail);
+      req.pipe(cgi.stdin);
+      const out: Buffer[] = [];
+      cgi.stdout.on("data", (chunk: Buffer) => out.push(chunk));
+      cgi.on("close", () => {
+        if (res.headersSent) return;
+        const raw = Buffer.concat(out);
+        const end = raw.indexOf("\r\n\r\n");
+        if (end < 0) {
+          fail();
+          return;
+        }
+        let status = 200;
+        const headers: Record<string, string> = {};
+        for (const line of raw.subarray(0, end).toString("latin1").split("\r\n")) {
+          const colon = line.indexOf(":");
+          const name = line.slice(0, colon).trim().toLowerCase();
+          const value = line.slice(colon + 1).trim();
+          if (name === "status") status = Number.parseInt(value, 10);
+          else headers[name] = value;
+        }
+        res.writeHead(status, headers).end(raw.subarray(end + 4));
+      });
+    }
+
+    beforeAll(async () => {
+      smart = createServer(httpBackend);
+      await new Promise<void>((done, fail) => {
+        smart.once("error", fail);
+        smart.listen(0, "127.0.0.1", done);
+      });
+      const smartPort = (smart.address() as AddressInfo).port;
+      smartUrl = `http://127.0.0.1:${String(smartPort)}/repo.git`;
+
+      const created = await vault.engine.createSecret({
+        name: "git-push-key",
+        type: "api_key",
+        value: new Uint8Array(Buffer.from(`${PUSH_USER}:${PUSH_TOKEN}`, "utf8")),
+      });
+      pushHandle = created.handle;
+      await vault.engine.setInjectionPolicy(pushHandle, {
+        url_allowlist: [`http://127.0.0.1:${String(smartPort)}/*`],
+        command_allowlist: [GIT as string],
+        env_allowlist: ["GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"],
+        host_allowlist: [],
+      });
+    });
+
+    afterAll(async () => {
+      if (smart !== undefined) await new Promise<void>((done) => smart.close(() => done()));
+    });
+
+    it("moves the remote ref and never runs the tree's pre-push hook", async () => {
+      const client = new DirectClient(vault.engine);
+      const clone = join(root, "push-wt");
+      const cloned = await client.useSecret(pushHandle, {
+        type: "git",
+        operation: "clone",
+        repository: smartUrl,
+        working_directory: clone,
+      });
+      expect(cloned).toMatchObject({ exit_code: 0 });
+      const prePushMarker = join(root, "pre-push-marker");
+      const hook = join(clone, ".git", "hooks", "pre-push");
+      writeFileSync(hook, `#!/bin/sh\n: > "${prePushMarker.replace(/\\/g, "/")}"\n`);
+      chmodSync(hook, 0o755);
+      writeFileSync(join(clone, "b.txt"), "pushed\n");
+      await git(clone, "add", "b.txt");
+      await git(clone, "commit", "-m", "pushed through the vault");
+      const head = (await git(clone, "rev-parse", "HEAD")).trim();
+      expect((await git(bare, "rev-parse", "refs/heads/main")).trim()).not.toBe(head);
+
+      const pushed = await client.useSecret(pushHandle, {
+        type: "git",
+        operation: "push",
+        repository: smartUrl,
+        working_directory: clone,
+      });
+
+      expect(pushed).toMatchObject({ exit_code: 0 });
+      expect((await git(bare, "rev-parse", "refs/heads/main")).trim()).toBe(head);
+      expect(authorizedPushes).toBeGreaterThan(0);
+      expect(existsSync(prePushMarker)).toBe(false);
+      expect(JSON.stringify(pushed)).not.toContain(PUSH_TOKEN);
+      const pushRows = vault.engine
+        .queryAudit({ eventType: AuditEventType.SECRET_USE })
+        .filter((event) => event.detail?.operation === "push");
+      expect(pushRows).toHaveLength(1);
+      expect(pushRows[0]).toMatchObject({
+        success: true,
+        detail: { context: "git", operation: "push", transport: "https", exit_code: 0 },
+      });
+    });
   });
 });

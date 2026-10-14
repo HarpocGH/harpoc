@@ -501,7 +501,7 @@ const GIT_ARM: ContextArm = {
       },
       cleanup: () => {
         for (const dir of dirs) {
-          rmSync(dir, { recursive: true, force: true });
+          rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
         }
       },
     };

@@ -22,6 +22,8 @@ const NOT_A_DIST_LIBRARY: Record<string, string> = {
   "web-ui": "a vite SPA served by rest-api — exports only ./package.json",
 };
 const PACKAGES = WORKSPACE.filter((p) => !Object.hasOwn(NOT_A_DIST_LIBRARY, p));
+/** The root manifest and every workspace package's, relative to the monorepo root. */
+const MANIFESTS = ["package.json", ...WORKSPACE.map((p) => `packages/${p}/package.json`)];
 
 function ciTestEnvNames(yaml: string): string[] {
   const lines = yaml.split(/\r?\n/);
@@ -54,6 +56,24 @@ function ciTestEnvNames(yaml: string): string[] {
     if (exported) names.add(exported[1] as string);
   }
   return [...names].sort();
+}
+
+/**
+ * The indented lines under one top-level key of a YAML file, comments and blank
+ * lines dropped — read as lines, the way ciTestEnvNames reads ci.yml; a key
+ * that is absent (or written in flow style) reads as an empty block.
+ */
+function yamlBlock(yaml: string, key: string): string[] {
+  const lines = yaml.split(/\r?\n/);
+  const start = lines.indexOf(`${key}:`);
+  if (start < 0) return [];
+  const block: string[] = [];
+  for (const l of lines.slice(start + 1)) {
+    if (/^\s*(#.*)?$/.test(l)) continue;
+    if (!/^\s/.test(l)) break;
+    block.push(l);
+  }
+  return block;
 }
 
 describe("shared", () => {
@@ -137,13 +157,7 @@ const DEPENDENCY_BLOCKS = [
 ] as const;
 
 describe("manifest dependency blocks are sorted (TU-2, 2026-09-29)", () => {
-  const manifests = [
-    "package.json",
-    ...readdirSync(resolve(monorepoRoot, "packages"), { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => `packages/${entry.name}/package.json`)
-      .filter((path) => existsSync(resolve(monorepoRoot, path))),
-  ];
+  const manifests = MANIFESTS;
 
   it("finds the root manifest and every package's", () => {
     expect(manifests.length).toBeGreaterThanOrEqual(14);
@@ -233,5 +247,96 @@ describe("ciTestEnvNames reads a test step's own env and every $GITHUB_ENV expor
     ],
   ])("%s", (_label, lines, expected) => {
     expect(ciTestEnvNames(lines.join("\n"))).toEqual(expected);
+  });
+});
+
+// I5 (test-review-2026-10-09): pnpm runs a dependency's install script only
+// where the workspace allows it — onlyBuiltDependencies under pnpm 10 (the
+// pinned packageManager), allowBuilds under pnpm 11 — and since DEP-9
+// (2026-10-07) both allow argon2 alone: better-sqlite3 13 loads its prebuilt
+// binary with its script refused (thesis 05:26 and its dated correction).
+describe("install-time build scripts (I5)", () => {
+  const workspaceYaml = readFileSync(resolve(monorepoRoot, "pnpm-workspace.yaml"), "utf-8");
+
+  it("onlyBuiltDependencies names argon2 alone", () => {
+    const names = yamlBlock(workspaceYaml, "onlyBuiltDependencies").map((l) => {
+      const entry = /^ {2}- ([^\s#]+)\s*$/.exec(l);
+      expect(entry, `onlyBuiltDependencies line ${JSON.stringify(l)}`).not.toBeNull();
+      return entry?.[1];
+    });
+    expect(names).toEqual(["argon2"]);
+  });
+
+  it("allowBuilds allows argon2 alone and refuses better-sqlite3", () => {
+    const verdicts = new Map<string, boolean>();
+    for (const l of yamlBlock(workspaceYaml, "allowBuilds")) {
+      const verdict = /^ {2}([^\s:#]+): (true|false)\s*$/.exec(l);
+      expect(verdict, `allowBuilds line ${JSON.stringify(l)}`).not.toBeNull();
+      verdicts.set(verdict?.[1] as string, verdict?.[2] === "true");
+    }
+    expect([...verdicts].filter(([, allowed]) => allowed).map(([name]) => name)).toEqual([
+      "argon2",
+    ]);
+    expect(verdicts.get("better-sqlite3")).toBe(false);
+  });
+});
+
+describe("yamlBlock reads one top-level key's lines", () => {
+  it.each([
+    ["stops at the next top-level key", ["a:", "  - x", "b:", "  - y"], "a", ["  - x"]],
+    [
+      "skips comments and blank lines inside the block",
+      ["a:", "  # note", "", "  x: true"],
+      "a",
+      ["  x: true"],
+    ],
+    ["an absent key reads as an empty block", ["a:", "  - x"], "b", []],
+    ["control: a flow-style value is not a block", ["a: [x]", "b:", "  - y"], "a", []],
+  ])("%s", (_label, lines, key, expected) => {
+    expect(yamlBlock(lines.join("\n"), key)).toEqual(expected);
+  });
+});
+
+// M-T2a-10 (test-review-2026-10-09): thesis 04:54 — Argon2id through the
+// argon2 binding is the only third-party code performing cryptographic
+// operations, every other primitive node:crypto. The denylist names the
+// crypto-implementing packages a manifest could pull in instead (fixed at
+// U6's opening); argon2 is the one allowed, declared by core alone. The claim
+// is the vault process's: ssh2, core's test-only devDependency (the SSH server
+// of ssh-live-auth.test.ts), is not on the list.
+const CRYPTO_DENYLIST = [
+  "node-forge",
+  "tweetnacl",
+  "sodium-native",
+  "libsodium-wrappers",
+  "bcrypt",
+  "bcryptjs",
+  "crypto-js",
+  "elliptic",
+  "jsrsasign",
+  "node-rsa",
+  "openpgp",
+] as const;
+
+/** Every `<manifest> <block>` declaring `name`, over the root and every package manifest. */
+function declarationsOf(name: string): string[] {
+  return MANIFESTS.flatMap((path) => {
+    const manifest = JSON.parse(readFileSync(resolve(monorepoRoot, path), "utf-8")) as Record<
+      string,
+      Record<string, unknown> | undefined
+    >;
+    return DEPENDENCY_BLOCKS.filter((block) => Object.hasOwn(manifest[block] ?? {}, name)).map(
+      (block) => `${path} ${block}`,
+    );
+  });
+}
+
+describe("no third-party crypto library beside argon2 (M-T2a-10)", () => {
+  it.each(CRYPTO_DENYLIST)("no manifest declares %s", (name) => {
+    expect(declarationsOf(name)).toEqual([]);
+  });
+
+  it("argon2 is declared once, in core's dependencies", () => {
+    expect(declarationsOf("argon2")).toEqual(["packages/core/package.json dependencies"]);
   });
 });
