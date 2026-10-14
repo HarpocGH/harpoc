@@ -17,9 +17,11 @@ import { BWRAP_NETWORK_PREFIX_ARGS, LINUX_BWRAP_CANDIDATES } from "./bwrap.js";
  *    loopback is unreachable. `-r` maps the caller to root inside the userns
  *    so `getpwuid`/DAC behave for children like `ssh` that stat their files.
  *    Behind it, only when unshare is absent or its probe fails: bubblewrap,
- *    `bwrap --bind / / --unshare-net --die-with-parent -- <command> <args...>`
+ *    `bwrap --dev-bind / / --unshare-net --die-with-parent -- <command> <args...>`
  *    — the same fresh namespace (bwrap raises an empty loopback inside it,
- *    nothing listens there) under the same userns grant, with bwrap staying
+ *    nothing listens there) under the same userns grant, the root bound with
+ *    device access (a plain `--bind` mounts `nodev`, and `/dev/null` with it —
+ *    git, ssh and sftp open it read-write at startup), with bwrap staying
  *    as a monitor that returns the payload's status and takes it down when
  *    the monitor dies (see bwrap.ts).
  *  - macOS:  `sandbox-exec -p '<deny-network profile>' <command> <args...>` —

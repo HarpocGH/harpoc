@@ -25,13 +25,14 @@
 export const LINUX_BWRAP_CANDIDATES = ["/usr/bin/bwrap", "/bin/bwrap"] as const;
 
 /**
- * Network only: the whole host tree bound read-write (no filesystem
- * restriction rides a network demand), a fresh network namespace — bwrap
- * raises an empty loopback inside it, with nothing listening — and the kill
- * chain.
+ * Network only: the whole host tree bound read-write with device access —
+ * `--dev-bind`, since a plain `--bind` mounts `nodev` and git, ssh and sftp
+ * open `/dev/null` read-write at startup (no filesystem restriction rides a
+ * network demand) — a fresh network namespace — bwrap raises an empty loopback
+ * inside it, with nothing listening — and the kill chain.
  */
 export const BWRAP_NETWORK_PREFIX_ARGS = [
-  "--bind",
+  "--dev-bind",
   "/",
   "/",
   "--unshare-net",

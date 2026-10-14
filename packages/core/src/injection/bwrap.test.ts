@@ -13,7 +13,7 @@ describe("bwrap wrapper constants", () => {
 
   it("pins the network prefix one token per element, the payload separator last", () => {
     expect(BWRAP_NETWORK_PREFIX_ARGS).toEqual([
-      "--bind",
+      "--dev-bind",
       "/",
       "/",
       "--unshare-net",
