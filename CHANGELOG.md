@@ -452,6 +452,7 @@ A script author should also read the _Behavioral_ notes under _Changed_ — the 
 
 ### Internal
 
+- **Benchmark (c)'s interface-bearing leg through REST (2026-10-14).** `bench-http.mjs` measures a fourth leg, `use_secret` through the in-process REST route with a scoped token, so benchmark (c) reports the deployed posture beside the engine-direct figure. The scenario's secret names its targets in a URL allowlist: the allowlist is deny-by-default since `b9f7632` (2026-09-02), and the unchanged scenario had been refused `URL_NOT_ALLOWED` at its first probe since then.
 - **The CLI's command tree built by one exported `buildProgram()` (2026-10-08).** `packages/cli/src/program.ts` holds every command registration and the root `preAction` hook; `index.ts` runs `buildProgram().parse()`, and the token-parity suite walks the shipped tree instead of a hand-maintained copy — a new `--token` command without a parity row now reds (behaviour unchanged).
 - **The MCP HTTP listener's reclamation sweep on demand (2026-10-05).** `McpHttpServer.sweepSessions()` runs the session-reclamation sweep on demand (the test seam for the reclamation suite; the interval cadence is unchanged).
 - **The CLI's port and renewal-lead bounds are one module (2026-09-23).** `MIN_PORT`, `MAX_PORT`, `MIN_RENEW_BEFORE_DAYS` and `MAX_RENEW_BEFORE_DAYS` in `utils/option-bounds.ts`, imported by the cert commands, `server start` and `oauth connect`, with a tripwire against a command-local redeclaration.

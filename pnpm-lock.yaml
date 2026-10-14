@@ -37,6 +37,9 @@ importers:
       "@harpoc/core":
         specifier: workspace:*
         version: link:../core
+      "@harpoc/rest-api":
+        specifier: workspace:*
+        version: link:../rest-api
 
   packages/cert-manager:
     dependencies:

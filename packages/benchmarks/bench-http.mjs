@@ -1,4 +1,5 @@
-// Scenario (c) — end-to-end use_secret (HTTP bearer) vs. a direct HTTP call.
+// Scenario (c) — end-to-end use_secret (HTTP bearer) vs. a direct HTTP call;
+// (c′) the same use_secret through the REST route with a scoped token.
 // Thesis: Ch. 6 §Baseline Performance. Loopback target: plaintext HTTP to
 // 127.0.0.1 is permitted by design (§4.5.2 loopback exception) and removes
 // network RTT — the worst case for the RELATIVE overhead, so the headline
@@ -11,14 +12,21 @@ import { createServer } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { randomBytes } from "node:crypto";
 
+import { createApp } from "@harpoc/rest-api";
+
 import { assertSane, isMain, measure, stats } from "./lib/harness.mjs";
 import { printScenario } from "./lib/report.mjs";
 import { createBenchSecret, createVault } from "./lib/vault-fixture.mjs";
 
 const SAMPLES = 200;
 const WARMUP = 20;
+// The REST route's per-secret use_secret bucket holds 120 calls a minute
+// (RATE_LIMIT_USE_SECRET); the leg and its probe stay inside it.
+const REST_SAMPLES = 100;
+const REST_WARMUP = 10;
+const REST_AGENT = "bench-rest-agent";
 
-function startEchoServer() {
+export function startEchoServer() {
   let count = 0;
   const server = createServer((req, res) => {
     count += 1;
@@ -37,6 +45,40 @@ function startEchoServer() {
   });
 }
 
+/**
+ * (c′): an agent registered with a `use` grant on `handle`, a `["use"]` token,
+ * the in-process REST app; probes `action` once through
+ * `POST /api/v1/secrets/:handle/use` and returns the call the leg times.
+ */
+export async function restLeg(engine, handle, action) {
+  engine.registerAgent({ name: REST_AGENT });
+  const secretId = await engine.resolveSecretId(handle);
+  engine.grantPolicy(
+    { secretId, principalType: "agent", principalId: REST_AGENT, permissions: ["use"] },
+    "benchmarks",
+  );
+  const bearer = engine.createToken(REST_AGENT, ["use"]);
+  const app = createApp(engine);
+  const path = `/api/v1/secrets/${handle.slice("secret://".length)}/use`;
+  const init = {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${bearer}`,
+      "content-type": "application/json",
+      host: "localhost",
+    },
+    body: JSON.stringify({ action }),
+  };
+  const call = () => app.request(path, init);
+
+  const probe = await call();
+  const text = await probe.text();
+  assertSane(probe.status === 200, `REST probe returned ${probe.status}: ${text.slice(0, 200)}`);
+  const status = JSON.parse(text).data?.status;
+  assertSane(status === 200, `REST probe's request returned ${JSON.stringify(status)}`);
+  return call;
+}
+
 export async function run({ remoteUrl } = {}) {
   const fx = await createVault();
   const echo = await startEchoServer();
@@ -44,6 +86,10 @@ export async function run({ remoteUrl } = {}) {
     const token = `bench-${randomBytes(24).toString("base64url")}`;
     const handle = await createBenchSecret(fx.engine, "bench-http", Buffer.from(token, "utf8"));
     const action = { type: "http", method: "GET", url: echo.url, injection: { type: "bearer" } };
+    // The URL allowlist is deny-by-default: it names every target the scenario calls.
+    const allowed = [echo.url];
+    if (remoteUrl) allowed.push(`${new URL(remoteUrl).origin}${new URL(remoteUrl).pathname}`);
+    await fx.engine.setInjectionPolicy(handle, { url_allowlist: allowed });
 
     // Probe both paths once before timing (fails fast on a miswired setup).
     const probeDirect = await fetch(echo.url, { headers: { authorization: `Bearer ${token}` } });
@@ -52,6 +98,7 @@ export async function run({ remoteUrl } = {}) {
     const probeVault = await fx.engine.useSecret(handle, action);
     const probeStatus = probeVault?.result?.status ?? probeVault?.status;
     assertSane(probeStatus === 200, `vault probe returned ${JSON.stringify(probeStatus)}`);
+    const restCall = await restLeg(fx.engine, handle, action);
 
     const before = echo.getCount();
     const directNs = await measure(
@@ -65,23 +112,38 @@ export async function run({ remoteUrl } = {}) {
       samples: SAMPLES,
       warmup: WARMUP,
     });
+    const restNs = await measure(
+      async () => {
+        const res = await restCall();
+        await res.text();
+      },
+      { samples: REST_SAMPLES, warmup: REST_WARMUP },
+    );
     const requests = echo.getCount() - before;
+    const expected = 2 * (SAMPLES + WARMUP) + REST_SAMPLES + REST_WARMUP;
     assertSane(
-      requests === 2 * (SAMPLES + WARMUP),
-      `loopback server saw ${requests} requests, expected ${2 * (SAMPLES + WARMUP)}`,
+      requests === expected,
+      `loopback server saw ${requests} requests, expected ${expected}`,
     );
 
     const direct = stats(directNs);
     const vault = stats(vaultNs);
+    const rest = stats(restNs);
     const deltaMs = Math.round((vault.medianMs - direct.medianMs) * 1000) / 1000;
+    const restOwnMs = Math.round((rest.medianMs - vault.medianMs) * 1000) / 1000;
+    const restDeltaMs = Math.round((rest.medianMs - direct.medianMs) * 1000) / 1000;
 
     const metrics = {
       "direct fetch (loopback)": direct,
       "use_secret http/bearer (loopback)": vault,
+      "(c′) use_secret through REST POST /api/v1/secrets/:handle/use (loopback, scoped token)":
+        rest,
     };
     const notes = [
       `Absolute overhead (median delta): ${deltaMs} ms — URL/SSRF validation with DNS pre-flight, policy load, value decrypt, audit write, response redaction (default \`filtered\` mode).`,
       "Loopback removes network RTT: this is the worst case for the relative figure; against a real endpoint the delta is amortized by the round-trip.",
+      `(c′) through REST: ${restOwnMs} ms over the engine-direct median, ${restDeltaMs} ms over the direct fetch — the listener's host check, the global rate-limit bucket, bearer verification with the revocation lookup, the token's scope, the body schema, the per-secret use_secret bucket, the per-secret grant, response sanitizing and the request-audit line, on the in-process app (no socket).`,
+      `(c′) uses ${REST_SAMPLES} samples after ${REST_WARMUP} warmup: the route's per-secret use_secret bucket allows 120 calls a minute.`,
     ];
 
     if (remoteUrl) {
@@ -145,7 +207,7 @@ export async function run({ remoteUrl } = {}) {
 
     return {
       scenario: "http-end-to-end",
-      thesis: "(c) end-to-end use_secret vs. direct HTTP call",
+      thesis: "(c) end-to-end use_secret vs. direct HTTP call; (c′) end-to-end through REST",
       metrics,
       notes,
     };

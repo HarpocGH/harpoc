@@ -10,7 +10,8 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
-    "@harpoc/core": "workspace:*"
+    "@harpoc/core": "workspace:*",
+    "@harpoc/rest-api": "workspace:*"
   },
   "scripts": {
     "bench": "node run-all.mjs",
