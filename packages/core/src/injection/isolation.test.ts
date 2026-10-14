@@ -195,7 +195,16 @@ describe("requireIsolation — both dimensions", () => {
       netMock.mockImplementation((command: string, args: string[]) =>
         Promise.resolve({
           command: "/usr/bin/bwrap",
-          args: ["--bind", "/", "/", "--unshare-net", "--die-with-parent", "--", command, ...args],
+          args: [
+            "--dev-bind",
+            "/",
+            "/",
+            "--unshare-net",
+            "--die-with-parent",
+            "--",
+            command,
+            ...args,
+          ],
           mechanism: "bwrap" as const,
         }),
       );

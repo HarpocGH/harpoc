@@ -96,7 +96,7 @@ describe("requireNetworkIsolation", () => {
     expect(wrap).toEqual({
       command: "/usr/bin/bwrap",
       args: [
-        "--bind",
+        "--dev-bind",
         "/",
         "/",
         "--unshare-net",
