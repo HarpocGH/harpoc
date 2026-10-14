@@ -708,7 +708,7 @@ export class SqliteStore {
       params.push(...ids);
     }
 
-    sql += " ORDER BY timestamp DESC";
+    sql += " ORDER BY timestamp DESC, id DESC";
 
     if (filter?.limit && (ids === undefined || inlineVisibility)) {
       sql += " LIMIT ?";

@@ -1,4 +1,4 @@
-import { connect as netConnect } from "node:net";
+import { connect as netConnect, isIP } from "node:net";
 import type { Socket } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import type { ConnectionOptions, TLSSocket } from "node:tls";
@@ -208,7 +208,9 @@ class SmtpChannel {
 function tlsOptions(opts: SmtpSendOptions): ConnectionOptions {
   const ca = opts.tls ? opts.tls.ca : undefined;
   return {
-    servername: opts.host,
+    // RFC 6066 admits no IP literal as the SNI name (Node: DEP0123); the identity
+    // check below pins the logical host either way.
+    ...(isIP(opts.host) ? {} : { servername: opts.host }),
     checkServerIdentity: identityCheckerFor(opts.host),
     rejectUnauthorized: true,
     ...(ca !== undefined ? { ca } : {}),

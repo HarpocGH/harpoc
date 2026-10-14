@@ -23,10 +23,12 @@ import { VaultEngine } from "./vault-engine.js";
 import type { ImapRunner, SmtpRunner } from "./vault-engine.js";
 import type { DockerExecution } from "./injection/docker/docker-injector.js";
 import { startFakeWsServer } from "./injection/__fixtures__/fake-ws-server.js";
+import type { FsIsolationMechanism } from "./injection/fs-isolation.js";
 import type { ImapExecution, ImapOAuth } from "./injection/imap-injector.js";
 import { ImapInjector } from "./injection/imap-injector.js";
 import type { ImapConnectOptions } from "./injection/mail/imap-client.js";
 import type { SmtpSendOptions } from "./injection/mail/smtp-client.js";
+import type { NetworkIsolationMechanism } from "./injection/network-isolation.js";
 import type { SftpExecution } from "./injection/sftp-injector.js";
 import type { MailTlsConfig, SmtpExecution, SmtpOAuth } from "./injection/smtp-injector.js";
 import { SmtpInjector } from "./injection/smtp-injector.js";
@@ -151,6 +153,8 @@ interface SeamOutcomes {
   sftpDescendantSweep?: { killed: number; failed: boolean };
   sftpTreeKill?: TreeKillMechanism;
   sftpStrictTreeExit?: boolean;
+  sftpIsolationMechanism?: NetworkIsolationMechanism;
+  sftpFsIsolationMechanism?: FsIsolationMechanism;
   docker?: DockerOutcome;
   dockerSanitized?: boolean;
   dockerDescendantSweep?: { killed: number; failed: boolean };
@@ -246,6 +250,12 @@ function installSeams(e: VaultEngine, outcomes: SeamOutcomes): Seams {
       ...(outcomes.sftpDescendantSweep ? { descendantSweep: outcomes.sftpDescendantSweep } : {}),
       ...(outcomes.sftpTreeKill ? { treeKill: outcomes.sftpTreeKill } : {}),
       ...(outcomes.sftpStrictTreeExit ? { strictTreeExit: true } : {}),
+      ...(outcomes.sftpIsolationMechanism
+        ? { isolationMechanism: outcomes.sftpIsolationMechanism }
+        : {}),
+      ...(outcomes.sftpFsIsolationMechanism
+        ? { fsIsolationMechanism: outcomes.sftpFsIsolationMechanism }
+        : {}),
     };
   };
 
@@ -1267,6 +1277,8 @@ describe("useSecret (sftp) — engine dispatch", () => {
       port: null,
       remote_path: "/srv/report.pdf",
       local_path: "/tmp/report.pdf",
+      network_isolation: false,
+      fs_isolation: false,
     });
   });
 
@@ -1290,6 +1302,8 @@ describe("useSecret (sftp) — engine dispatch", () => {
       port: null,
       remote_path: "/srv/reports",
       local_path: null,
+      network_isolation: false,
+      fs_isolation: false,
       error: ErrorCode.HOST_NOT_ALLOWED,
     });
   });
@@ -1316,6 +1330,8 @@ describe("useSecret (sftp) — engine dispatch", () => {
       port: null,
       remote_path: "/srv/reports",
       local_path: null,
+      network_isolation: false,
+      fs_isolation: false,
       error: ErrorCode.PROCESS_TIMEOUT,
     });
   });
@@ -1344,6 +1360,8 @@ describe("useSecret (sftp) — engine dispatch", () => {
       port: null,
       remote_path: "/srv/reports",
       local_path: null,
+      network_isolation: false,
+      fs_isolation: false,
       error: ErrorCode.PROCESS_TIMEOUT,
       descendant_sweep: { killed: 0, failed: true },
     });
@@ -1386,6 +1404,8 @@ describe("useSecret (sftp) — engine dispatch", () => {
       port: null,
       remote_path: "/srv/reports",
       local_path: null,
+      network_isolation: false,
+      fs_isolation: false,
       error: ErrorCode.INTERNAL_ERROR,
     });
   });
@@ -1419,6 +1439,54 @@ describe("useSecret (sftp) — engine dispatch", () => {
     expect(calls.sftp).toHaveLength(1);
     expect(calls.sftp[0]?.policy.network_isolation).toBe(true);
     expect(calls.sftp[0]?.policy.fs_isolation).toBe(true);
+  });
+
+  it("the row carries the isolation posture — the policy's flags, and the tiers the spawn reported (2026-10-14)", async () => {
+    await engine.setInjectionPolicy("secret://deploy", {
+      network_isolation: true,
+      fs_isolation: true,
+    });
+    installSeams(engine, { sftpIsolationMechanism: "unshare", sftpFsIsolationMechanism: "bwrap" });
+
+    await engine.useSecret("secret://deploy", SFTP_ACTION);
+
+    const rows = useRows(true);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.detail).toMatchObject({
+      context: "sftp",
+      network_isolation: true,
+      isolation_mechanism: "unshare",
+      fs_isolation: true,
+      fs_isolation_mechanism: "bwrap",
+    });
+  });
+
+  it("a refusal row carries the policy's flags and no tier — the catch arm never saw a spawn result", async () => {
+    await engine.setInjectionPolicy("secret://deploy", {
+      network_isolation: true,
+      fs_isolation: true,
+    });
+    installSeams(engine, {
+      sftp: () => {
+        throw VaultError.sshHostKeyMismatch("deploy.example.com");
+      },
+    });
+
+    await expectVaultError(
+      () => engine.useSecret("secret://deploy", SFTP_ACTION),
+      ErrorCode.SSH_HOST_KEY_MISMATCH,
+    );
+
+    const rows = useRows(false);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.detail).toMatchObject({
+      context: "sftp",
+      network_isolation: true,
+      fs_isolation: true,
+      error: ErrorCode.SSH_HOST_KEY_MISMATCH,
+    });
+    expect(rows[0]?.detail).not.toHaveProperty("isolation_mechanism");
+    expect(rows[0]?.detail).not.toHaveProperty("fs_isolation_mechanism");
   });
 });
 

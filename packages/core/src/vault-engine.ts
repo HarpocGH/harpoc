@@ -1402,16 +1402,18 @@ export class VaultEngine {
 
         case "sftp": {
           const config = this.loadConnectionConfig(s, secret.id);
-          // Every SftpAuditDetails field the builder writes is request-derived
-          // (design §7.2: host, operation, remote/local paths — no result-derived
-          // counter to zero on a denial), so the same projection covers the
-          // attempt and the outcome (Task 12's rule, applied where nothing needs
-          // zeroing). The four result-derived keys (`sanitized`,
-          // `descendant_sweep`, `tree_kill`, `strict_tree_exit`) are folded in
-          // below onto whichever row the spawn produced — a success, or a
-          // graceful non-throwing failure such as PROCESS_TIMEOUT; a refusal
-          // row (the catch arm, which never reached a spawn) is never flagged.
-          const auditDetail = { context: "sftp", ...buildSftpAuditDetails(action) };
+          // Every SftpAuditDetails field the builder writes is request- or
+          // policy-derived (design §7.2: host, operation, remote/local paths; the
+          // policy's two isolation flags — no result-derived counter to zero on a
+          // denial), so the same projection covers the attempt and the outcome
+          // (Task 12's rule, applied where nothing needs zeroing). The six
+          // result-derived keys (`sanitized`, `descendant_sweep`, `tree_kill`,
+          // `strict_tree_exit`, `isolation_mechanism`, `fs_isolation_mechanism`) are folded in
+          // below onto a row whose spawn returned a result — a success, or a
+          // graceful non-throwing failure such as PROCESS_TIMEOUT; a throw —
+          // before the spawn, or from the injector after it — reaches the catch
+          // arm, whose row carries the request- and policy-derived keys only.
+          const auditDetail = { context: "sftp", ...buildSftpAuditDetails(action, policy) };
 
           let execution: SftpExecution;
           try {
@@ -1428,6 +1430,12 @@ export class VaultEngine {
             ...(execution.descendantSweep ? { descendant_sweep: execution.descendantSweep } : {}),
             ...(execution.treeKill ? { tree_kill: execution.treeKill } : {}),
             ...(execution.strictTreeExit ? { strict_tree_exit: true } : {}),
+            ...(execution.isolationMechanism
+              ? { isolation_mechanism: execution.isolationMechanism }
+              : {}),
+            ...(execution.fsIsolationMechanism
+              ? { fs_isolation_mechanism: execution.fsIsolationMechanism }
+              : {}),
           };
 
           // A process-shaped result can carry a graceful, non-throwing

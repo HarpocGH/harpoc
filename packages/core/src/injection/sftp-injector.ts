@@ -1,6 +1,8 @@
 import type { ConnectionConfig, InjectionPolicy, SftpAction, SftpResult } from "@harpoc/shared";
 import { DEFAULT_SSH_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
 import { controlledPathDirs, matchesHostAllowlist, resolveAndMatchCommand } from "./allowlist.js";
+import type { FsIsolationMechanism } from "./fs-isolation.js";
+import type { NetworkIsolationMechanism } from "./network-isolation.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
@@ -18,14 +20,16 @@ import type { TreeKillMechanism } from "./win32-job-wrapper.js";
 
 /**
  * Metadata-only audit projection of an SFTP operation (design §7.2) — never a
- * credential or file content. Every field the builder writes is request-derived
- * (available before the operation runs), so the same projection covers both a
- * successful use and a denial: `buildSftpAuditDetails` needs only the action,
- * not a result. Optional are the four result-derived keys (`sanitized`,
- * `descendant_sweep`, `tree_kill`, `strict_tree_exit`): the engine folds them
- * onto whichever row the spawn produced — a success, or a graceful
- * non-throwing failure such as PROCESS_TIMEOUT — never onto a refusal row,
- * which never reached a spawn.
+ * credential or file content. Every field the builder writes is request- or
+ * policy-derived (available before the operation runs), so the same projection
+ * covers both a successful use and a denial: `buildSftpAuditDetails` needs only
+ * the action and the policy's two isolation flags, not a result. Optional are the
+ * six result-derived keys (`sanitized`, `descendant_sweep`, `tree_kill`,
+ * `strict_tree_exit`, `isolation_mechanism`, `fs_isolation_mechanism`): the engine folds them
+ * onto a row whose spawn returned a result — a success, or a graceful
+ * non-throwing failure such as PROCESS_TIMEOUT; a throw — before the spawn, or
+ * from `toSftpResult` after it — carries the request- and policy-derived keys
+ * only.
  */
 export interface SftpAuditDetails {
   host: string;
@@ -33,6 +37,14 @@ export interface SftpAuditDetails {
   port: number | null;
   remote_path: string;
   local_path: string | null;
+  /** The policy's network-isolation demand — on every row, like git's and ssh's (2026-10-14). */
+  network_isolation: boolean;
+  /** Present on a spawned row when the network tier delivered the demand. */
+  isolation_mechanism?: NetworkIsolationMechanism;
+  /** The policy's filesystem-isolation demand — on every row. */
+  fs_isolation: boolean;
+  /** Present on a spawned row when the filesystem tier delivered the demand. */
+  fs_isolation_mechanism?: FsIsolationMechanism;
   /** Present only when the credential redaction changed the captured output (E70). */
   sanitized?: true;
   /** Present only when the win32 descendant sweep ran after a timed-out spawn (2026-09-08). */
@@ -44,11 +56,12 @@ export interface SftpAuditDetails {
 }
 
 /**
- * The sftp executor's return to the engine: the wire result plus the four
+ * The sftp executor's return to the engine: the wire result plus the six
  * result-derived keys the engine folds onto its post-spawn audit row —
  * whether the spawn seam's redaction changed the captured output, when a
- * sweep ran its outcome, on win32 the tier the spawn ran under, and whether
- * the policy's strict tree exit applied. {@link SftpResult} stays byte-identical.
+ * sweep ran its outcome, on win32 the tier the spawn ran under, whether the
+ * policy's strict tree exit applied, and the isolation tiers that delivered the
+ * policy's demands. {@link SftpResult} stays byte-identical.
  */
 export interface SftpExecution {
   result: SftpResult;
@@ -59,17 +72,27 @@ export interface SftpExecution {
   treeKill?: TreeKillMechanism;
   /** Present when the policy's strict tree exit applied to the spawn (D2, 2026-09-10). */
   strictTreeExit?: true;
+  /** The network tier that delivered the policy's demand — rides the audit row, never the wire result (2026-10-14). */
+  isolationMechanism?: NetworkIsolationMechanism;
+  /** The filesystem tier that delivered the policy's demand — rides the audit row, never the wire result. */
+  fsIsolationMechanism?: FsIsolationMechanism;
 }
 
-/** Builds the metadata-only audit projection for an SFTP action. Pure — the
- * engine calls it for both success and failed `secret.use` rows. */
-export function buildSftpAuditDetails(action: SftpAction): SftpAuditDetails {
+/** Builds the metadata-only audit projection for an SFTP action and its policy's
+ * isolation flags. Pure — the engine calls it for both success and failed
+ * `secret.use` rows. */
+export function buildSftpAuditDetails(
+  action: SftpAction,
+  policy: InjectionPolicy,
+): SftpAuditDetails {
   return {
     host: action.host,
     operation: action.operation,
     port: action.port ?? null,
     remote_path: action.remote_path,
     local_path: action.local_path ?? null,
+    network_isolation: policy.network_isolation === true,
+    fs_isolation: policy.fs_isolation === true,
   };
 }
 
@@ -302,6 +325,8 @@ export async function executeSftpAction(
       ...(r.descendant_sweep ? { descendantSweep: r.descendant_sweep } : {}),
       ...(r.tree_kill ? { treeKill: r.tree_kill } : {}),
       ...(r.strict_tree_exit ? { strictTreeExit: true } : {}),
+      ...(r.isolation_mechanism ? { isolationMechanism: r.isolation_mechanism } : {}),
+      ...(r.fs_isolation_mechanism ? { fsIsolationMechanism: r.fs_isolation_mechanism } : {}),
     };
   } finally {
     agent.dispose();

@@ -296,6 +296,8 @@ describe("v1.3 contexts — lifecycle through the real engine", () => {
       port: null,
       remote_path: "/srv/report.pdf",
       local_path: "/tmp/report.pdf",
+      network_isolation: false,
+      fs_isolation: false,
       error: ErrorCode.HOST_NOT_ALLOWED,
     });
   });

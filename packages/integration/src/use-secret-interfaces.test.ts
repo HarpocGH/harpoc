@@ -196,6 +196,8 @@ const CELLS: Cell[] = [
       port: null,
       remote_path: `/srv/reports/${via}.csv`,
       local_path: `/var/harpoc/${via}.csv`,
+      network_isolation: false,
+      fs_isolation: false,
       error: ErrorCode.HOST_NOT_ALLOWED,
     }),
     outcome: { code: ErrorCode.HOST_NOT_ALLOWED, message: `Host not in secret allowlist: ${HOST}` },

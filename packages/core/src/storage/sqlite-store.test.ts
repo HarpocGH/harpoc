@@ -2,7 +2,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AccessPolicy, Secret } from "@harpoc/shared";
+import type { AccessPolicy, AuditEvent, Secret } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretStatus, SecretType } from "@harpoc/shared";
 import type {
   CertificateRow,
@@ -274,6 +274,34 @@ describe("access_policies CRUD", () => {
 });
 
 describe("audit_log", () => {
+  it("orders rows that share a timestamp by id, newest first (2026-10-14)", () => {
+    const sameMillisecond: Omit<AuditEvent, "id"> = {
+      timestamp: 1_700_000_000_000,
+      event_type: AuditEventType.SECRET_READ,
+      secret_id: "s1",
+      principal_type: "user",
+      principal_id: "user-1",
+      detail_encrypted: null,
+      detail_iv: null,
+      detail_tag: null,
+      ip_address: null,
+      session_id: "sess-1",
+      success: true,
+    };
+    const first = store.insertAuditEvent(sameMillisecond, LINK);
+    const second = store.insertAuditEvent(sameMillisecond, LINK);
+    const third = store.insertAuditEvent(sameMillisecond, LINK);
+
+    expect(store.queryAuditLog().map((event) => event.id)).toEqual([third, second, first]);
+    expect(store.queryAuditLog({ limit: 1 })[0]?.id).toBe(third);
+    expect(store.queryAuditLog({ secretId: "s1" }).map((event) => event.id)).toEqual([
+      third,
+      second,
+      first,
+    ]);
+    expect(store.queryAuditLog({ secretId: "s1", limit: 1 })[0]?.id).toBe(third);
+  });
+
   it("inserts and queries audit events", () => {
     const eventId = store.insertAuditEvent(
       {

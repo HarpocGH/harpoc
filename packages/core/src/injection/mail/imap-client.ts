@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import type { ConnectionOptions, TLSSocket } from "node:tls";
 import { VaultError } from "@harpoc/shared";
@@ -323,7 +324,9 @@ class ImapChannel {
 function tlsOptions(opts: ImapConnectOptions): ConnectionOptions {
   const ca = opts.tls?.ca;
   return {
-    servername: opts.host,
+    // RFC 6066 admits no IP literal as the SNI name (Node: DEP0123); the identity
+    // check below pins the logical host either way.
+    ...(isIP(opts.host) ? {} : { servername: opts.host }),
     checkServerIdentity: identityCheckerFor(opts.host),
     rejectUnauthorized: true,
     ...(ca !== undefined ? { ca } : {}),

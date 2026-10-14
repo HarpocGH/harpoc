@@ -110,35 +110,48 @@ describe("executeSftpAction enforcement", () => {
 describe("buildSftpAuditDetails", () => {
   it("names host, operation and remote/local paths from the action (design §7.2)", () => {
     expect(
-      buildSftpAuditDetails({
-        type: "sftp",
-        host: "deploy.example.com",
-        user: "deploy",
-        operation: "upload",
-        remote_path: "/srv/report.pdf",
-        local_path: "/tmp/report.pdf",
-      }),
+      buildSftpAuditDetails(
+        {
+          type: "sftp",
+          host: "deploy.example.com",
+          user: "deploy",
+          operation: "upload",
+          remote_path: "/srv/report.pdf",
+          local_path: "/tmp/report.pdf",
+        },
+        policy(),
+      ),
     ).toEqual({
       host: "deploy.example.com",
       operation: "upload",
       port: null,
       remote_path: "/srv/report.pdf",
       local_path: "/tmp/report.pdf",
+      network_isolation: false,
+      fs_isolation: false,
     });
   });
 
   it("reports local_path as null for a list operation", () => {
-    expect(buildSftpAuditDetails(ACTION)).toEqual({
+    expect(buildSftpAuditDetails(ACTION, policy())).toEqual({
       host: "deploy.example.com",
       operation: "list",
       port: null,
       remote_path: "/srv/reports",
       local_path: null,
+      network_isolation: false,
+      fs_isolation: false,
     });
   });
 
   it("carries a non-22 port and reports null when the action names none", () => {
-    expect(buildSftpAuditDetails({ ...ACTION, port: 2222 }).port).toBe(2222);
-    expect(buildSftpAuditDetails(ACTION).port).toBeNull();
+    expect(buildSftpAuditDetails({ ...ACTION, port: 2222 }, policy()).port).toBe(2222);
+    expect(buildSftpAuditDetails(ACTION, policy()).port).toBeNull();
+  });
+
+  it("carries the policy's isolation flags on every row — the posture the other spawned contexts record (2026-10-14)", () => {
+    expect(
+      buildSftpAuditDetails(ACTION, policy({ network_isolation: true, fs_isolation: true })),
+    ).toMatchObject({ network_isolation: true, fs_isolation: true });
   });
 });

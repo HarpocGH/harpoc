@@ -585,6 +585,40 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     expect("strictTreeExit" in result).toBe(false);
   });
 
+  it("carries the isolation tiers the spawn ran under on the envelope, never the wire result (2026-10-14)", async () => {
+    spawnMock.mockResolvedValue({
+      ...OK_RESULT,
+      isolation_mechanism: "unshare",
+      fs_isolation_mechanism: "bwrap",
+    });
+
+    const result = await executeSftpAction(
+      LIST_ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      allowedPolicy({ network_isolation: true, fs_isolation: true }),
+      SFTP_CONFIG,
+    );
+
+    expect(result.isolationMechanism).toBe("unshare");
+    expect(result.fsIsolationMechanism).toBe("bwrap");
+    expect(result.result).not.toHaveProperty("isolation_mechanism");
+    expect(result.result).not.toHaveProperty("fs_isolation_mechanism");
+  });
+
+  it("leaves both tiers off the envelope when the result carries none", async () => {
+    spawnMock.mockResolvedValue(OK_RESULT);
+
+    const result = await executeSftpAction(
+      LIST_ACTION,
+      new Uint8Array(Buffer.from(makeKeyPem())),
+      allowedPolicy(),
+      SFTP_CONFIG,
+    );
+
+    expect("isolationMechanism" in result).toBe(false);
+    expect("fsIsolationMechanism" in result).toBe(false);
+  });
+
   it("maps a non-zero exit to SFTP_OPERATION_FAILED", async () => {
     spawnMock.mockResolvedValue({ ...OK_RESULT, exit_code: 1, stderr: "No such file" });
 

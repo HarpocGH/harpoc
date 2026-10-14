@@ -149,8 +149,10 @@ describe.skipIf(!posixWithIsolation)("network isolation — real kernel (Linux/m
 // listener accepts and closes, so the control fails on the protocol (git: an
 // empty reply; ssh and sftp: the banner exchange cut) and the isolated client
 // on the kernel: told apart by the listener's connection count, the client's
-// own connect-failure line and, for git and ssh, the row's isolation
-// mechanism — the sftp row carries no isolation field, and its error is
+// own connect-failure line and the row's isolation posture — every row carries
+// the policy's flags (sftp's since 2026-10-14); git's and ssh's result rows the
+// mechanism too, while sftp's connect refusal is thrown after the spawn, so its
+// row is the engine's refusal row: the flags, no mechanism, and the error
 // SSH_CONNECT_FAILED either way.
 const GIT = resolveExecutable("git", controlledPathDirs());
 const SSH = resolveExecutable("ssh", controlledPathDirs());
@@ -161,8 +163,6 @@ interface IsolationCell {
   action: (port: number, dir: string) => UseSecretAction;
   /** The `error` both halves carry: the result's for git and ssh, the refusal's for sftp. */
   error: string | undefined;
-  /** Whether the context's secret.use row carries the isolation posture. */
-  posture: boolean;
   /** The line the client prints when its own connect is refused; null where nothing surfaces it. */
   refused: RegExp | null;
 }
@@ -178,7 +178,6 @@ const CELLS: IsolationCell[] = [
       timeout_ms: 20_000,
     }),
     error: undefined,
-    posture: true,
     refused: /Failed to connect to 127\.0\.0\.1 port \d+/,
   },
   {
@@ -192,7 +191,6 @@ const CELLS: IsolationCell[] = [
       timeout_ms: 20_000,
     }),
     error: ErrorCode.SSH_CONNECT_FAILED,
-    posture: true,
     refused: /connect to host 127\.0\.0\.1 port \d+/,
   },
   {
@@ -208,7 +206,6 @@ const CELLS: IsolationCell[] = [
       timeout_ms: 20_000,
     }),
     error: ErrorCode.SSH_CONNECT_FAILED,
-    posture: false,
     refused: null,
   },
 ];
@@ -318,9 +315,9 @@ describe.skipIf(!posixWithIsolation)(
           if (cell.refused !== null) expect(outcome.stderr).not.toMatch(cell.refused);
           expect(outcome.stderr).not.toContain(keyLine);
           const [row] = vault.engine.queryAudit({ eventType: AuditEventType.SECRET_USE, limit: 1 });
-          expect(row?.detail?.context).toBe(cell.context);
-          if (cell.posture) expect(row?.detail).toMatchObject({ network_isolation: false });
-          else expect(row?.detail).toMatchObject({ error: ErrorCode.SSH_CONNECT_FAILED });
+          expect(row?.detail).toMatchObject({ context: cell.context, network_isolation: false });
+          if (cell.context === "sftp")
+            expect(row?.detail).toMatchObject({ error: ErrorCode.SSH_CONNECT_FAILED });
           expect(row?.detail?.isolation_mechanism).toBeUndefined();
         } finally {
           await destroyTestVault(vault);
@@ -341,14 +338,14 @@ describe.skipIf(!posixWithIsolation)(
           if (cell.refused !== null) expect(outcome.stderr).toMatch(cell.refused);
           expect(outcome.stderr).not.toContain(keyLine);
           const [row] = vault.engine.queryAudit({ eventType: AuditEventType.SECRET_USE, limit: 1 });
-          expect(row?.detail?.context).toBe(cell.context);
-          if (cell.posture) {
-            expect(row?.detail).toMatchObject({ network_isolation: true });
+          expect(row?.detail).toMatchObject({ context: cell.context, network_isolation: true });
+          if (cell.context === "sftp") {
+            expect(row?.detail).toMatchObject({ error: ErrorCode.SSH_CONNECT_FAILED });
+            expect(row?.detail?.isolation_mechanism).toBeUndefined();
+          } else {
             expect(["unshare", "sandbox-exec", "bwrap"]).toContain(
               row?.detail?.isolation_mechanism,
             );
-          } else {
-            expect(row?.detail).toMatchObject({ error: ErrorCode.SSH_CONNECT_FAILED });
           }
         } finally {
           await destroyTestVault(vault);
