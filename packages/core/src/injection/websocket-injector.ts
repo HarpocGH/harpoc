@@ -319,7 +319,16 @@ export async function executeWebsocketAction(
   if (validated.resolvedAddresses) {
     pins.set(url.hostname.toLowerCase(), validated.resolvedAddresses);
   }
-  const dispatcher = new Agent({ connect: { lookup: createPinnedLookup(pins) } });
+  // `connect.timeout`: `waitForOpen`'s timer and `ws.close()` cannot reach an
+  // in-flight connect, so undici's connector keeps a half-open socket until
+  // its own timer fires (10 s by default); bound to the budget it releases the
+  // socket at `timeout_ms` (the HTTP injector's form).
+  const dispatcher = new Agent({
+    connect: {
+      lookup: createPinnedLookup(pins),
+      timeout: action.timeout_ms ?? DEFAULT_HTTP_TIMEOUT_MS,
+    },
+  });
 
   try {
     return await dialAndCollect(finalUrl, headers, dispatcher, action, responseMode, valueStr);
@@ -328,6 +337,10 @@ export async function executeWebsocketAction(
     if (err instanceof VaultError) throw err;
     throw VaultError.websocketConnectFailed(origin);
   } finally {
-    await dispatcher.close();
+    // destroy(), not close(): close() waited for a pending connect the
+    // handshake timeout could not cancel, so a stalled connect refused ~10 s
+    // late. The dispatcher is per-call and the socket is closed by now —
+    // nothing is left to drain.
+    await dispatcher.destroy();
   }
 }

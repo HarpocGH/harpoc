@@ -1,5 +1,7 @@
 import { createServer } from "node:http";
 import type { Server } from "node:http";
+import { createServer as createTcpServer } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import { ErrorCode, MAX_HTTP_RESPONSE_BYTES } from "@harpoc/shared";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { AuditLogger } from "../audit/audit-logger.js";
@@ -291,6 +293,57 @@ describe("HttpInjector", () => {
 
       expect(response.status).toBeNull();
       expect(response.error).toBe("TIMEOUT");
+    });
+
+    // U3-k of test-review-2026-10-09's coverage program (fixed after U3's
+    // close): a connect that never completes — here a listener that accepts
+    // the TCP connection and never answers the TLS ClientHello. The abort at
+    // `timeout_ms` settles the fetch on time, but it does not reach undici's
+    // connector, whose own timer defaults to 10 s; a `close()` of the per-call
+    // dispatcher waited for it, so the use settled after ~10.6 s instead of
+    // the budget, and the half-open socket was held until that timer fired.
+    it("a connect that never completes settles with TIMEOUT within the budget and releases the socket at the budget, not at undici's default connect timer", async () => {
+      const sockets = new Set<Socket>();
+      let releasedAt: Promise<number> | undefined;
+      const blackhole = createTcpServer((socket) => {
+        sockets.add(socket);
+        // Consumed, never answered: a paused socket holding the unread
+        // ClientHello would never emit `end`, so the release could not be seen.
+        socket.resume();
+        releasedAt ??= new Promise((resolve) =>
+          socket.once("close", () => resolve(performance.now())),
+        );
+        socket.once("close", () => sockets.delete(socket));
+      });
+      await new Promise<void>((resolve) => blackhole.listen(0, "127.0.0.1", resolve));
+      const { port } = blackhole.address() as AddressInfo;
+      try {
+        const started = performance.now();
+        const response = await injector.executeWithSecret(
+          { method: "GET", url: `https://127.0.0.1:${port}/x`, timeoutMs: 1_000 },
+          new Uint8Array(Buffer.from("val")),
+          { type: "bearer" },
+        );
+        const elapsed = performance.now() - started;
+        expect(response.status).toBeNull();
+        expect(response.error).toBe("TIMEOUT");
+        expect(elapsed).toBeLessThan(5_000);
+        expect(releasedAt).toBeDefined();
+        let guard: NodeJS.Timeout | undefined;
+        const released = await Promise.race([
+          releasedAt as Promise<number>,
+          new Promise<number>((resolve) => {
+            guard = setTimeout(() => resolve(Number.POSITIVE_INFINITY), 8_000);
+          }),
+        ]);
+        clearTimeout(guard);
+        expect(released - started).toBeLessThan(5_000);
+      } finally {
+        for (const socket of sockets) socket.destroy();
+        await new Promise<void>((resolve, reject) =>
+          blackhole.close((err) => (err ? reject(err) : resolve())),
+        );
+      }
     });
   });
 

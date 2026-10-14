@@ -205,14 +205,18 @@ export class HttpInjector {
       if (validated.resolvedAddresses) {
         pins.set(url.hostname.toLowerCase(), validated.resolvedAddresses);
       }
+      const timeoutMs = request.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
+      // `connect.timeout`: the abort below cannot reach an in-flight connect,
+      // so undici's connector keeps a half-open socket until its own timer
+      // fires (10 s by default); bound to the budget it releases the socket
+      // at `timeoutMs`.
       const dispatcher = new Agent({
         connect: {
           lookup: createPinnedLookup(pins),
+          timeout: timeoutMs,
           ...(request.caPem === undefined ? {} : { ca: request.caPem }),
         },
       });
-
-      const timeoutMs = request.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
 
       let response: HttpResult;
       try {
@@ -231,7 +235,12 @@ export class HttpInjector {
           dispatcher,
         );
       } finally {
-        await dispatcher.close();
+        // destroy(), not close(): the abort at `timeoutMs` settles the fetch
+        // but does not reach undici's connector, and close() waited for that
+        // pending connect — a stalled connect settled the use ~10 s late. The
+        // dispatcher is per-call and the response body is fully read by now —
+        // nothing is left to drain.
+        await dispatcher.destroy();
       }
 
       // Value + encodings redaction (I2a) — the injector's own, so the flag

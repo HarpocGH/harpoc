@@ -1,3 +1,5 @@
+import { createServer as createTcpServer } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import type { InjectionPolicy, InjectionPolicyInput, WebsocketAction } from "@harpoc/shared";
 import { ActionType, ErrorCode, injectionPolicyInputSchema } from "@harpoc/shared";
@@ -346,6 +348,57 @@ describe("executeWebsocketAction — non-101 / connection failure", () => {
         basePolicy({ url_allowlist: ["ws://127.0.0.1:1/*"] }),
       ),
     ).rejects.toMatchObject({ code: ErrorCode.WEBSOCKET_CONNECT_FAILED });
+  });
+
+  // The HTTP injector's U3-k sibling (fixed after U3's close): a connect that
+  // never completes — a listener that accepts the TCP connection and never
+  // answers the TLS ClientHello. `waitForOpen` gives up at `timeout_ms`, but
+  // neither it nor `ws.close()` reaches undici's connector, whose own timer
+  // defaults to 10 s; a `close()` of the per-call dispatcher waited for it, so
+  // the refusal settled ~10.6 s late and the half-open socket was held as long.
+  it("a connect that never completes refuses WEBSOCKET_CONNECT_FAILED within timeout_ms and releases the socket at the budget", async () => {
+    const sockets = new Set<Socket>();
+    let releasedAt: Promise<number> | undefined;
+    const blackhole = createTcpServer((socket) => {
+      sockets.add(socket);
+      // Consumed, never answered: a paused socket holding the unread
+      // ClientHello would never emit `end`, so the release could not be seen.
+      socket.resume();
+      releasedAt ??= new Promise((resolve) =>
+        socket.once("close", () => resolve(performance.now())),
+      );
+      socket.once("close", () => sockets.delete(socket));
+    });
+    await new Promise<void>((resolve) => blackhole.listen(0, "127.0.0.1", resolve));
+    const { port } = blackhole.address() as AddressInfo;
+    try {
+      const started = performance.now();
+      await expectVaultError(
+        () =>
+          executeWebsocketAction(
+            baseAction({ url: `wss://127.0.0.1:${port}/`, timeout_ms: 1_000 }),
+            secretBytes(),
+            basePolicy({ url_allowlist: [`wss://127.0.0.1:${port}/*`] }),
+          ),
+        ErrorCode.WEBSOCKET_CONNECT_FAILED,
+      );
+      expect(performance.now() - started).toBeLessThan(5_000);
+      expect(releasedAt).toBeDefined();
+      let guard: NodeJS.Timeout | undefined;
+      const released = await Promise.race([
+        releasedAt as Promise<number>,
+        new Promise<number>((resolve) => {
+          guard = setTimeout(() => resolve(Number.POSITIVE_INFINITY), 8_000);
+        }),
+      ]);
+      clearTimeout(guard);
+      expect(released - started).toBeLessThan(5_000);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) =>
+        blackhole.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
   });
 
   it("does not leak the credential in a thrown error's message", async () => {

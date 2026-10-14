@@ -44,7 +44,9 @@ export class RedisAdapter implements DbCommandAdapter {
     // denylist) would otherwise hang `sendCommand` forever, and the
     // `finally`/`close()` below would never run. `socketTimeout` closes the
     // socket once the same budget elapses mid-command, which rejects the
-    // pending `sendCommand` instead.
+    // pending `sendCommand` instead. `reconnectStrategy: false`: this client
+    // runs one command and is closed, so a dropped socket has nothing to
+    // reconnect for — node-redis's default strategy would retry forever.
     const socket =
       opts.tls === false
         ? {
@@ -53,6 +55,7 @@ export class RedisAdapter implements DbCommandAdapter {
             tls: false as const,
             connectTimeout: opts.timeoutMs,
             socketTimeout: opts.timeoutMs,
+            reconnectStrategy: false as const,
           }
         : {
             host: opts.address,
@@ -63,6 +66,7 @@ export class RedisAdapter implements DbCommandAdapter {
             checkServerIdentity: identityCheckerFor(opts.servername ?? opts.host),
             connectTimeout: opts.timeoutMs,
             socketTimeout: opts.timeoutMs,
+            reconnectStrategy: false as const,
             ...(servername === undefined ? {} : { servername }),
           };
 
@@ -77,6 +81,13 @@ export class RedisAdapter implements DbCommandAdapter {
       password: opts.password,
       database: Number(opts.database),
     });
+    // node-redis emits `error` on the client for every socket failure, beside
+    // rejecting the pending connect() / sendCommand(). An emitter with no
+    // listener throws the event inside the socket's own handler: an uncaught
+    // exception for the process and, on a FIN during the handshake, a connect
+    // promise that never settles. The rejection carries the error; the event
+    // needs only a listener.
+    client.on("error", () => {});
 
     await client.connect();
     try {

@@ -16,6 +16,7 @@ interface FakeClientBehavior {
 }
 
 interface FakeClient {
+  on: ReturnType<typeof vi.fn>;
   connect: ReturnType<typeof vi.fn>;
   sendCommand: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
@@ -29,6 +30,7 @@ vi.mock("redis", () => ({
   createClient: vi.fn((cfg: unknown) => {
     createClientCalls.push(cfg);
     const client: FakeClient = {
+      on: vi.fn(() => client),
       connect: vi.fn(() =>
         behavior.connectError ? Promise.reject(behavior.connectError) : Promise.resolve(client),
       ),
@@ -52,6 +54,7 @@ interface SocketConfig {
   tls: boolean;
   connectTimeout?: number;
   socketTimeout?: number;
+  reconnectStrategy?: false | number;
   rejectUnauthorized?: boolean;
   ca?: string;
   servername?: string;
@@ -177,6 +180,28 @@ describe("RedisAdapter connection config (SSRF pinning + TLS identity, spec §10
     await new RedisAdapter().execute(opts({ database: "3" }), ["PING"]);
     const cfg = createClientCalls[0] as RedisClientConfig;
     expect(cfg.database).toBe(3);
+  });
+
+  // U3-k (fixed after U3's close): the adapter runs one command on a throwaway
+  // client. node-redis's default strategy reconnects forever after a dropped
+  // socket, and it emits `error` on the client for every socket failure — an
+  // emitter with no listener throws that inside the socket's own event
+  // handler, an uncaught exception (`redis-adapter.socket-drop.test.ts` runs
+  // the real driver against a dropping listener).
+  it("never reconnects: both socket shapes carry reconnectStrategy false", async () => {
+    await new RedisAdapter().execute(opts(), ["PING"]);
+    await new RedisAdapter().execute(opts({ tls: false }), ["PING"]);
+    const shapes = createClientCalls as RedisClientConfig[];
+    expect(shapes).toHaveLength(2);
+    expect(shapes.map((cfg) => cfg.socket.reconnectStrategy)).toEqual([false, false]);
+  });
+
+  it("listens for the client's error events before connecting", async () => {
+    await new RedisAdapter().execute(opts(), ["PING"]);
+    expect(lastClient?.on).toHaveBeenCalledWith("error", expect.any(Function));
+    const [listened] = lastClient?.on.mock.invocationCallOrder ?? [];
+    const [connected] = lastClient?.connect.mock.invocationCallOrder ?? [];
+    expect(listened).toBeLessThan(connected as number);
   });
 
   it("refuses a non-integer database index before loading the driver (belt-and-braces under the schema)", async () => {
