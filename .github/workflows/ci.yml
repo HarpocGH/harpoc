@@ -46,7 +46,7 @@ jobs:
           sudo apparmor_parser -r /etc/apparmor.d/harpoc-bwrap
           sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true
           unshare -rn -- /bin/true && echo "::warning::unshare -rn passes on this leg - the bwrap network tier will not be exercised" || echo "unshare -rn refused (expected on this leg)"
-          bwrap --bind / / --unshare-net --die-with-parent -- /bin/true && echo "bwrap --unshare-net OK under the profile" || echo "::warning::bwrap --unshare-net failed under the profile"
+          bwrap --dev-bind / / --unshare-net --die-with-parent -- /bin/true && echo "bwrap --unshare-net OK under the profile" || echo "::warning::bwrap --unshare-net failed under the profile"
       - name: Probe network isolation (diagnostic; relaxes the userns restriction on the node 24 leg)
         if: runner.os == 'Linux' && matrix.node-version == 24
         # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor
