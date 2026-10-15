@@ -778,7 +778,9 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
           "",
         ].join("\n"),
       );
-      expect(realpathSync(files.alternates.trim())).toBe(realpathSync(join(wd, ".git", "objects")));
+      expect(realpathSync.native(files.alternates.trim())).toBe(
+        realpathSync.native(join(wd, ".git", "objects")),
+      );
       expect(files.packedRefs).toMatch(new RegExp(`^${tip} refs/harpoc/local/heads/`));
       expect(files.head).toBe("ref: refs/heads/harpoc-relay\n");
       expect(existsSync(relay)).toBe(false);
