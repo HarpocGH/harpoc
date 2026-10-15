@@ -34,6 +34,12 @@ import { tierRequired } from "./helpers/platform-tiers.js";
  * Every git run here is asynchronous by necessity: the static server shares
  * this process's event loop, so a synchronous `execFileSync` git would block
  * the very handler its own transfer needs and deadlock the suite.
+ *
+ * S1 (code review 2026-10-15): the vault's git reads no system config. The
+ * policies allowlist GIT_CONFIG_SYSTEM, pointed at a scratch file whose
+ * credential helper logs every call, so the suite never reaches the host's
+ * own system config (Git for Windows names its credential manager there) and
+ * each use asserts the logging helper never ran.
  */
 
 const GIT = resolveExecutable("git", controlledPathDirs());
@@ -63,7 +69,8 @@ describeGit("Git context — hooks of the caller's tree never run (N11)", () => 
   let vault: TestVault;
   let handle: string;
   let gitEnv: NodeJS.ProcessEnv;
-  const savedEnv: Record<string, string | undefined> = {};
+  let helperLog: string;
+  let savedSystem: string | undefined;
 
   function git(cwd: string, ...args: string[]): Promise<string> {
     return new Promise((done, fail) => {
@@ -97,10 +104,17 @@ describeGit("Git context — hooks of the caller's tree never run (N11)", () => 
       GIT_COMMITTER_NAME: "harpoc-test",
       GIT_COMMITTER_EMAIL: "test@example.com",
     };
-    for (const key of ["GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"]) {
-      savedEnv[key] = process.env[key];
-      process.env[key] = gitEnv[key];
-    }
+    helperLog = join(root, "system-helper.log");
+    const helper = join(root, "system-helper.sh");
+    writeFileSync(
+      helper,
+      `#!/bin/sh\necho "$1" >> "${helperLog.replace(/\\/g, "/")}"\ncat > /dev/null\n`,
+    );
+    chmodSync(helper, 0o755);
+    const systemConfig = join(root, "system.gitconfig");
+    writeFileSync(systemConfig, `[credential]\n\thelper = !${helper.replace(/\\/g, "/")}\n`);
+    savedSystem = process.env.GIT_CONFIG_SYSTEM;
+    process.env.GIT_CONFIG_SYSTEM = systemConfig;
 
     bare = join(root, "repo.git");
     await git(root, "init", "--bare", "repo.git");
@@ -159,7 +173,7 @@ describeGit("Git context — hooks of the caller's tree never run (N11)", () => 
     await vault.engine.setInjectionPolicy(handle, {
       url_allowlist: [`http://127.0.0.1:${String(port)}/*`],
       command_allowlist: [GIT as string],
-      env_allowlist: ["GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"],
+      env_allowlist: ["GIT_CONFIG_SYSTEM"],
       host_allowlist: [],
     });
   });
@@ -169,10 +183,8 @@ describeGit("Git context — hooks of the caller's tree never run (N11)", () => 
       if (server !== undefined) await new Promise<void>((done) => server.close(() => done()));
       await destroyTestVault(vault);
     } finally {
-      for (const [key, value] of Object.entries(savedEnv)) {
-        if (value === undefined) Reflect.deleteProperty(process.env, key);
-        else process.env[key] = value;
-      }
+      if (savedSystem === undefined) Reflect.deleteProperty(process.env, "GIT_CONFIG_SYSTEM");
+      else process.env.GIT_CONFIG_SYSTEM = savedSystem;
       if (root !== undefined)
         rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
@@ -199,6 +211,7 @@ describeGit("Git context — hooks of the caller's tree never run (N11)", () => 
     expect(result).toMatchObject({ exit_code: 0 });
     expect(readFileSync(join(wt, "a.txt"), "utf8")).toBe("two\n");
     expect(existsSync(marker)).toBe(false);
+    expect(existsSync(helperLog)).toBe(false);
   });
 
   // I18 (test-review-2026-10-09): a push through the vault. Dumb HTTP cannot
@@ -302,7 +315,7 @@ describeGit("Git context — hooks of the caller's tree never run (N11)", () => 
       await vault.engine.setInjectionPolicy(pushHandle, {
         url_allowlist: [`http://127.0.0.1:${String(smartPort)}/*`],
         command_allowlist: [GIT as string],
-        env_allowlist: ["GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"],
+        env_allowlist: ["GIT_CONFIG_SYSTEM"],
         host_allowlist: [],
       });
     });
@@ -339,6 +352,7 @@ describeGit("Git context — hooks of the caller's tree never run (N11)", () => 
       });
 
       expect(pushed).toMatchObject({ exit_code: 0 });
+      expect(existsSync(helperLog)).toBe(false);
       expect((await git(bare, "rev-parse", "refs/heads/main")).trim()).toBe(head);
       expect(authorizedPushes).toBeGreaterThan(0);
       expect(existsSync(prePushMarker)).toBe(false);

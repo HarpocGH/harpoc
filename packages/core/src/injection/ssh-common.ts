@@ -80,7 +80,8 @@ function quoteSshOptionValue(value: string): string {
 
 /**
  * Hardened ssh options (thesis §4.5.7): strict host-key verification against the
- * pinned known_hosts (no TOFU), agent-only auth, and no user ssh config. Shared
+ * pinned known_hosts alone (no TOFU, and no host-wide `ssh_known_hosts` — S9),
+ * agent-only auth, and no user ssh config. Shared
  * verbatim by the SSH context (as argv) and the Git-over-SSH context (folded
  * into GIT_SSH_COMMAND).
  *
@@ -101,6 +102,8 @@ export function sshHardeningArgs(
     "StrictHostKeyChecking=yes",
     "-o",
     `UserKnownHostsFile=${quoteSshOptionValue(knownHostsFile)}`,
+    "-o",
+    "GlobalKnownHostsFile=none",
     "-o",
     "IdentitiesOnly=yes",
     "-i",

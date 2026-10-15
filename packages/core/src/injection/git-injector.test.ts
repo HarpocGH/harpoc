@@ -108,7 +108,7 @@ describe("GitInjector enforcement (no git binary required)", () => {
     ["--tags", "clone"],
     ["--depth=1", "clone"],
     ["--single-branch", "clone"],
-    ["--set-upstream", "push"],
+    ["--no-set-upstream", "push"],
     ["--force", "push"],
     ["--rebase", "pull"],
     ["--exclude=x", "clone"],
@@ -147,21 +147,109 @@ describe("GitInjector enforcement (no git binary required)", () => {
     ).rejects.toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
   });
 
-  it("allows push -u (--set-upstream) — the shorthand is clone-only dangerous", async () => {
-    // -u is benign for push; args pass the safety filter and enforcement proceeds
-    // past it to the command allowlist (deny-by-default here), not INVALID_GIT_CONFIG.
-    await expect(
-      injector.executeWithSecret(
-        gitAction({
-          operation: "push",
-          repository: "git@github.com:org/repo.git",
-          args: ["-u", "origin", "main"],
-        }),
-        SECRET,
-        policy(),
-        undefined,
-      ),
-    ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+  // C1 final fix X1: a relayed push cannot record an upstream in the caller's
+  // tree — git writes `[branch "<b>"]` into the relay's config instead, which
+  // the after-check then reports as a failed push although the remote moved.
+  // The flag is refused (cluster-aware, git's abbreviations included).
+  describe("X1: a push refuses -u / --set-upstream", () => {
+    it.each(["-u", "--set-upstream", "--set-up", "-fu"])("refuses %s", async (arg) => {
+      const err = await expectVaultError(
+        () =>
+          injector.executeWithSecret(
+            gitAction({
+              operation: "push",
+              repository: "git@github.com:org/repo.git",
+              args: [arg],
+              working_directory: "./wd",
+            }),
+            SECRET,
+            policy(),
+            undefined,
+          ),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
+      expect(err.message).toContain("disallowed git argument");
+    });
+
+    it("control: push --force-with-lease and --no-set-upstream reach the allowlist", async () => {
+      await expect(
+        injector.executeWithSecret(
+          gitAction({
+            operation: "push",
+            repository: "git@github.com:org/repo.git",
+            args: ["--force-with-lease", "--no-set-upstream"],
+            working_directory: "./wd",
+          }),
+          SECRET,
+          policy(),
+          undefined,
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+    });
+  });
+
+  // C1 final fix X3: git reads `-xyz` as -x -y -z until the first short option
+  // that takes a value, so a denied letter inside a cluster is reached too.
+  describe("X3: a denied short option inside a cluster is refused", () => {
+    it.each([
+      { operation: "clone" as const, arg: "-4u" },
+      { operation: "clone" as const, arg: "-4uprog" },
+      { operation: "clone" as const, arg: "-qc" },
+      { operation: "clone" as const, arg: "-qcfoo=bar" },
+      { operation: "pull" as const, arg: "-vc" },
+      { operation: "push" as const, arg: "-qu" },
+    ])("refuses $operation $arg", async ({ operation, arg }) => {
+      const err = await expectVaultError(
+        () =>
+          injector.executeWithSecret(
+            gitAction({ operation, args: [arg], working_directory: "./wd" }),
+            SECRET,
+            policy(),
+            undefined,
+          ),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
+      expect(err.message).toContain("disallowed git argument");
+    });
+
+    it.each([
+      { operation: "clone" as const, arg: "-ofoo" },
+      { operation: "clone" as const, arg: "-4q" },
+      { operation: "clone" as const, arg: "-bcu" },
+      { operation: "pull" as const, arg: "-oc" },
+      { operation: "push" as const, arg: "-ou" },
+    ])(
+      "control: $operation $arg — the letter is the value of an earlier option — reaches the allowlist",
+      async ({ operation, arg }) => {
+        await expect(
+          injector.executeWithSecret(
+            gitAction({ operation, args: [arg], working_directory: "./wd" }),
+            SECRET,
+            policy(),
+            undefined,
+          ),
+        ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+      },
+    );
+  });
+
+  // C1 final fix X4a: --bundle-uri fetches an arbitrary URI the URL allowlist never saw.
+  describe("X4: a clone refuses --bundle-uri", () => {
+    it.each(["--bundle-uri=https://8.8.8.8/b.bundle", "--bundle-uri", "--bundle=x"])(
+      "refuses %s",
+      async (arg) => {
+        await expectVaultError(
+          () =>
+            injector.executeWithSecret(
+              gitAction({ args: [arg], working_directory: "./checkout-dir" }),
+              SECRET,
+              policy(),
+              undefined,
+            ),
+          ErrorCode.INVALID_GIT_CONFIG,
+        );
+      },
+    );
   });
 
   it("denies git by default when no command allowlist is set", async () => {
@@ -207,6 +295,155 @@ describe("GitInjector enforcement (no git binary required)", () => {
       await expect(
         injector.executeWithSecret(
           gitAction({ working_directory: "./checkout-dir" }),
+          SECRET,
+          policy(),
+          undefined,
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+    });
+  });
+
+  // S5 (code review 2026-10-15): without working_directory git reads a second
+  // positional as the destination, so `clone <arg> -- <repository>` clones
+  // `<arg>` — a host the allowlist never saw — into a directory named after
+  // the validated URL. The refusal comes before the command allowlist.
+  describe("S5: a clone without working_directory takes no positional argument", () => {
+    it.each([
+      "https://8.8.8.8/org/other.git",
+      "/tmp/local-repo",
+      "1",
+      "-",
+      "--",
+      "--end-of-options",
+    ])("refuses %s", async (arg) => {
+      const err = await expectVaultError(
+        () => injector.executeWithSecret(gitAction({ args: [arg] }), SECRET, policy(), undefined),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
+      expect(err.message).toContain("takes no positional argument");
+    });
+
+    it("control: --option=value without working_directory, and a separate value with it, reach the allowlist", async () => {
+      for (const action of [
+        gitAction({ args: ["--depth=1", "-bmain"] }),
+        gitAction({ args: ["--depth", "1"], working_directory: "./checkout-dir" }),
+      ]) {
+        await expect(
+          injector.executeWithSecret(action, SECRET, policy(), undefined),
+        ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+      }
+    });
+  });
+
+  // S1 (fix round 1, F-1): a clone's transfer runs into the vault's relay in
+  // full and the caller's clone is made from it, so a partial-clone filter
+  // would leave a promisor origin whose lazy fetches run without the
+  // credential. A clone refuses the filter family before any spawn.
+  describe("S1: a clone takes no partial-clone filter", () => {
+    it.each([
+      "--filter=blob:none",
+      "--filter",
+      "--filt=tree:0",
+      "--also-filter-submodules",
+      "--also-filter",
+    ])("refuses %s", async (arg) => {
+      const err = await expectVaultError(
+        () =>
+          injector.executeWithSecret(
+            gitAction({ args: [arg], working_directory: "./checkout-dir" }),
+            SECRET,
+            policy(),
+            undefined,
+          ),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
+      expect(err.message).toContain("disallowed git argument");
+    });
+
+    it("control: the negations, and --filter on a pull, reach the allowlist", async () => {
+      for (const action of [
+        gitAction({ args: ["--no-filter", "--no-also-filter-submodules"] }),
+        gitAction({ operation: "pull", args: ["--filter=blob:none"], working_directory: "./wd" }),
+      ]) {
+        await expect(
+          injector.executeWithSecret(action, SECRET, policy(), undefined),
+        ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+      }
+    });
+  });
+
+  // C1 final fix X2: a pull's positional would be git's repository for the
+  // credential-free local pull, with the vault's `-- <repository>` demoted to a
+  // refspec — an scp-form URL is a valid refspec, so the local pull connects to
+  // the positional's host. A pull takes option-shaped arguments only.
+  describe("X2: a pull takes no positional argument", () => {
+    it.each(["git@evil.example:x/y.git", "origin", "main", "-", "--", "--end-of-options"])(
+      "refuses %s",
+      async (arg) => {
+        const err = await expectVaultError(
+          () =>
+            injector.executeWithSecret(
+              gitAction({ operation: "pull", args: [arg], working_directory: "./wd" }),
+              SECRET,
+              policy(),
+              undefined,
+            ),
+          ErrorCode.INVALID_GIT_CONFIG,
+        );
+        expect(err.message).toContain("a pull takes no positional argument");
+      },
+    );
+
+    it("control: option-shaped pull arguments reach the allowlist", async () => {
+      await expect(
+        injector.executeWithSecret(
+          gitAction({
+            operation: "pull",
+            args: ["--ff-only", "--depth=1", "-Xours", "--rebase=false"],
+            working_directory: "./wd",
+          }),
+          SECRET,
+          policy(),
+          undefined,
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+    });
+  });
+
+  // S5 (fix round 1, F-2): a positional in a push's args would be git's
+  // repository and the vault's trailing `-- <repository>` a refspec. git aborts
+  // on that refspec before connecting today, but only by accident, so the push
+  // takes option-shaped arguments only, as a clone without working_directory does.
+  describe("S5: a push takes no positional argument", () => {
+    it.each([
+      "https://8.8.8.8/org/other.git",
+      "main",
+      "HEAD:refs/heads/other",
+      "-",
+      "--",
+      "--end-of-options",
+    ])("refuses %s", async (arg) => {
+      const err = await expectVaultError(
+        () =>
+          injector.executeWithSecret(
+            gitAction({ operation: "push", args: [arg], working_directory: "./wd" }),
+            SECRET,
+            policy(),
+            undefined,
+          ),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
+      expect(err.message).toContain("a push takes no positional argument");
+    });
+
+    it("control: option-shaped push arguments reach the allowlist", async () => {
+      await expect(
+        injector.executeWithSecret(
+          gitAction({
+            operation: "push",
+            args: ["--force-with-lease", "--push-option=ci.skip", "-otrace"],
+            working_directory: "./wd",
+          }),
           SECRET,
           policy(),
           undefined,

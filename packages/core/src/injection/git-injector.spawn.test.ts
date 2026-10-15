@@ -98,6 +98,48 @@ const OK_RESULT: SpawnCapturedResult = {
   redacted: false,
 };
 
+const { spawnCaptured: realSpawnCaptured } =
+  await vi.importActual<typeof import("./spawn-captured.js")>("./spawn-captured.js");
+
+const NULL_GIT_CONFIG = process.platform === "win32" ? "NUL" : "/dev/null";
+
+/** The git subcommand of an argv: the first word that is neither a `-c` pair nor an option. */
+function gitSubcommand(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (a === "-c") i++;
+    else if (!a.startsWith("-")) return a;
+  }
+  return undefined;
+}
+
+/** An empty repository: a relayed pull's or push's working-tree steps run in it for real. */
+function initRepo(): string {
+  const wd = mkdtempSync(join(tmpdir(), "harpoc-git-wd-"));
+  execFileSync(GIT as string, ["init", "-q", wd], {
+    env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: NULL_GIT_CONFIG },
+  });
+  return wd;
+}
+
+/** The working-tree probes run for real; the network step and the final pull answer OK_RESULT. */
+function relayWithRealProbes(): void {
+  vi.mocked(spawnCaptured).mockImplementation((cmd, args, opts) =>
+    ["fetch", "push", "pull"].includes(gitSubcommand(args) ?? "")
+      ? Promise.resolve(OK_RESULT)
+      : realSpawnCaptured(cmd, args, opts),
+  );
+}
+
+const FORCED = [
+  "-c",
+  expect.stringMatching(/^core\.hooksPath=.+harpoc-git-hooks-/),
+  "-c",
+  "credential.helper=",
+  "-c",
+  "core.fsmonitor=false",
+];
+
 function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
   return {
     url_allowlist: [],
@@ -151,42 +193,43 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
     );
 
     expect(result.exit_code).toBe(0);
-    expect(spawnMock).toHaveBeenCalledOnce();
-    const [command, args, opts] = spawnMock.mock.calls[0] as SpawnCall;
+    const calls = spawnMock.mock.calls as SpawnCall[];
+    // The clone's two credential-bearing steps (ls-remote, fetch) run in the
+    // relay; the third makes the clone from it (F-1).
+    expect(calls.map(([, a]) => gitSubcommand(a))).toEqual(["ls-remote", "fetch", "clone"]);
+    for (const [command, args, opts] of calls.slice(0, 2)) {
+      expect(command).toBe(GIT);
+      expect(args.slice(0, 8)).toEqual(["-c", "http.followRedirects=false", ...FORCED]);
+      expect(opts.env.GIT_ASKPASS).toBeTruthy();
+      expect(opts.env.HARPOC_GIT_USERNAME).toBe("git-user");
+      expect(opts.env.HARPOC_GIT_PASSWORD).toBe("s3cret-token-value");
+      expect(opts.env.GIT_TERMINAL_PROMPT).toBe("0");
+      // Both credential halves are redacted from any captured output.
+      expect(opts.redact).toContain("s3cret-token-value");
+      expect(opts.redact).toContain("git-user");
+    }
+    const [, , cloneOpts] = calls[2] as SpawnCall;
+    expect(cloneOpts.env.GIT_ASKPASS).toBeUndefined();
+    expect(cloneOpts.env.HARPOC_GIT_PASSWORD).toBeUndefined();
 
-    expect(command).toBe(GIT);
-    expect(args).toEqual([
-      "-c",
-      "http.followRedirects=false",
-      "-c",
-      expect.stringMatching(/^core\.hooksPath=.+harpoc-git-hooks-/),
-      "clone",
-      "https://8.8.8.8/org/repo.git",
-    ]);
-
-    expect(opts.env.GIT_ASKPASS).toBeTruthy();
-    expect(opts.env.HARPOC_GIT_USERNAME).toBe("git-user");
-    expect(opts.env.HARPOC_GIT_PASSWORD).toBe("s3cret-token-value");
-    expect(opts.env.GIT_TERMINAL_PROMPT).toBe("0");
-
-    // The credential appears in no argv element in any form.
-    expect(args.every((a) => !a.includes("s3cret-token-value") && !a.includes("git-user"))).toBe(
-      true,
-    );
-    // Both credential halves are redacted from any captured output.
-    expect(opts.redact).toContain("s3cret-token-value");
-    expect(opts.redact).toContain("git-user");
+    // The credential appears in no argv element of any step in any form.
+    expect(
+      calls.every(([, a]) =>
+        a.every((x) => !x.includes("s3cret-token-value") && !x.includes("git-user")),
+      ),
+    ).toBe(true);
   });
 
-  it("push: the argv is the forced config, the operation, the caller's options, then the repository, run in the working tree (I18)", async () => {
-    const wd = mkdtempSync(join(tmpdir(), "harpoc-git-wd-"));
+  it("push: the network step is the forced config, --git-dir of the relay, the operation, the caller's options, `--`, then the repository; the working-tree steps carry no credential (I18, S1)", async () => {
+    const wd = initRepo();
+    relayWithRealProbes();
     try {
       const result = await injector.executeWithSecret(
         {
           type: "git",
           operation: "push",
           repository: "https://8.8.8.8/org/repo.git",
-          args: ["-u", "--follow-tags"],
+          args: ["--force-with-lease", "--follow-tags"],
           working_directory: wd,
         },
         new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
@@ -198,25 +241,41 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       );
 
       expect(result.exit_code).toBe(0);
-      expect(spawnMock).toHaveBeenCalledOnce();
-      const [command, args, opts] = spawnMock.mock.calls[0] as SpawnCall;
+      const calls = spawnMock.mock.calls as SpawnCall[];
+      expect(calls.map(([, a]) => gitSubcommand(a))).toEqual([
+        "rev-parse",
+        "symbolic-ref",
+        "for-each-ref",
+        "push",
+      ]);
+      const [command, args, opts] = calls[3] as SpawnCall;
       expect(command).toBe(GIT);
       expect(args).toEqual([
         "-c",
         "http.followRedirects=false",
-        "-c",
-        expect.stringMatching(/^core\.hooksPath=.+harpoc-git-hooks-/),
+        ...FORCED,
+        expect.stringMatching(/^--git-dir=.+harpoc-git-relay-/),
         "push",
-        "-u",
+        "--force-with-lease",
         "--follow-tags",
+        "--",
         "https://8.8.8.8/org/repo.git",
       ]);
-      expect(opts.cwd).toBe(wd);
+      expect(opts.cwd).toBe((args[8] as string).slice("--git-dir=".length));
       expect(opts.env.GIT_ASKPASS).toBeTruthy();
-      expect(opts.env.HARPOC_GIT_HOST).toBe("8.8.8.8");
-      expect(args.every((a) => !a.includes("s3cret-token-value") && !a.includes("git-user"))).toBe(
-        true,
-      );
+      expect(opts.env.HARPOC_GIT_ORIGIN).toBe("https://8.8.8.8");
+      for (const [, local, localOpts] of calls.slice(0, 3)) {
+        expect(local.slice(0, 6)).toEqual(FORCED);
+        expect(localOpts.cwd).toBe(wd);
+        expect(localOpts.env.GIT_ASKPASS).toBeUndefined();
+        expect(localOpts.env.HARPOC_GIT_PASSWORD).toBeUndefined();
+        expect(localOpts.env.HARPOC_GIT_USERNAME).toBeUndefined();
+      }
+      expect(
+        calls.every(([, a]) =>
+          a.every((x) => !x.includes("s3cret-token-value") && !x.includes("git-user")),
+        ),
+      ).toBe(true);
     } finally {
       rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
@@ -248,17 +307,562 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       const expected = new Set([
         "PATH",
         "SystemRoot",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_GLOBAL",
         "GIT_ASKPASS",
         "GIT_TERMINAL_PROMPT",
         "HARPOC_GIT_USERNAME",
         "HARPOC_GIT_PASSWORD",
-        "HARPOC_GIT_HOST",
+        "HARPOC_GIT_ORIGIN",
         "HARPOC_T14_GIT_ALLOWED",
       ]);
       expect(Object.keys(opts.env).filter((k) => !expected.has(k))).toEqual([]);
     } finally {
       delete process.env.HARPOC_T14_GIT_AMBIENT;
       delete process.env.HARPOC_T14_GIT_ALLOWED;
+    }
+  });
+
+  it("S1: no git run reads a system or global config, and an allowlist entry cannot reintroduce either", async () => {
+    const saved = {
+      nosystem: process.env.GIT_CONFIG_NOSYSTEM,
+      global: process.env.GIT_CONFIG_GLOBAL,
+    };
+    process.env.GIT_CONFIG_NOSYSTEM = "0";
+    process.env.GIT_CONFIG_GLOBAL = join(tmpdir(), "harpoc-ambient.gitconfig");
+    const wd = initRepo();
+    relayWithRealProbes();
+    try {
+      await injector.executeWithSecret(
+        {
+          type: "git",
+          operation: "pull",
+          repository: "https://8.8.8.8/org/repo.git",
+          working_directory: wd,
+        },
+        new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+        policy({
+          command_allowlist: [GIT as string],
+          url_allowlist: ["https://8.8.8.8/*"],
+          env_allowlist: ["GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"],
+        }),
+        undefined,
+      );
+      const calls = spawnMock.mock.calls as SpawnCall[];
+      expect(calls.length).toBeGreaterThan(1);
+      for (const [, , opts] of calls) {
+        expect(opts.env.GIT_CONFIG_NOSYSTEM).toBe("1");
+        expect(opts.env.GIT_CONFIG_GLOBAL).toBe(NULL_GIT_CONFIG);
+      }
+    } finally {
+      if (saved.nosystem === undefined) delete process.env.GIT_CONFIG_NOSYSTEM;
+      else process.env.GIT_CONFIG_NOSYSTEM = saved.nosystem;
+      if (saved.global === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = saved.global;
+      rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  it("S5: the clone repository rides behind `--`, after every caller argument", async () => {
+    const dest = join(tmpdir(), "harpoc-s5-dest");
+    await injector.executeWithSecret(
+      {
+        type: "git",
+        operation: "clone",
+        repository: "https://8.8.8.8/org/repo.git",
+        args: ["--depth", "1", "https://8.8.8.8/org/other.git"],
+        working_directory: dest,
+      },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] }),
+      undefined,
+    );
+    const calls = spawnMock.mock.calls as SpawnCall[];
+    // The local clone takes the caller's arguments, then `--`, the repository, the destination.
+    const [, args] = calls[2] as SpawnCall;
+    expect(args.slice(args.indexOf("clone"))).toEqual([
+      "clone",
+      "--depth",
+      "1",
+      "https://8.8.8.8/org/other.git",
+      "--",
+      "https://8.8.8.8/org/repo.git",
+      dest,
+    ]);
+    // The credential-bearing steps name the repository behind `--` and no caller positional.
+    for (const [, network] of calls.slice(0, 2)) {
+      expect(network[network.indexOf("--") + 1]).toBe("https://8.8.8.8/org/repo.git");
+      expect(network).not.toContain("https://8.8.8.8/org/other.git");
+    }
+  });
+
+  it("S1: a clone's credential-bearing steps — ls-remote, then fetch — run in the relay, never the destination; the clone itself runs from the relay without the credential (F-1)", async () => {
+    const dest = join(tmpdir(), "harpoc-f1-dest");
+    const result = await injector.executeWithSecret(
+      {
+        type: "git",
+        operation: "clone",
+        repository: "https://8.8.8.8/org/repo.git",
+        args: ["--depth", "1", "--branch", "main"],
+        working_directory: dest,
+      },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] }),
+      undefined,
+    );
+
+    expect(result.exit_code).toBe(0);
+    const calls = spawnMock.mock.calls as SpawnCall[];
+    expect(calls.map(([, a]) => gitSubcommand(a))).toEqual(["ls-remote", "fetch", "clone"]);
+    const [, lsArgs, lsOpts] = calls[0] as SpawnCall;
+    const [, fetchArgs, fetchOpts] = calls[1] as SpawnCall;
+    const [, cloneArgs, cloneOpts] = calls[2] as SpawnCall;
+    const relay = (fetchArgs[8] as string).slice("--git-dir=".length);
+    expect(lsArgs).toEqual([
+      "-c",
+      "http.followRedirects=false",
+      ...FORCED,
+      expect.stringMatching(/^--git-dir=.+harpoc-git-relay-/),
+      "ls-remote",
+      "--symref",
+      "--",
+      "https://8.8.8.8/org/repo.git",
+      "HEAD",
+    ]);
+    expect(fetchArgs).toEqual([
+      "-c",
+      "http.followRedirects=false",
+      ...FORCED,
+      expect.stringMatching(/^--git-dir=.+harpoc-git-relay-/),
+      "fetch",
+      "--quiet",
+      "--no-write-fetch-head",
+      "--depth=1",
+      "--",
+      "https://8.8.8.8/org/repo.git",
+      "+refs/heads/*:refs/heads/*",
+      "+refs/tags/*:refs/tags/*",
+    ]);
+    for (const [, args, opts] of [calls[0], calls[1]] as SpawnCall[]) {
+      expect(opts.cwd).toBe((args[8] as string).slice("--git-dir=".length));
+      expect(args.some((a) => a.includes("harpoc-f1-dest"))).toBe(false);
+      expect(opts.env.GIT_ASKPASS).toBeTruthy();
+      expect(opts.env.HARPOC_GIT_PASSWORD).toBe("s3cret-token-value");
+    }
+    expect(fetchOpts.cwd).toBe(relay);
+    expect(lsOpts.cwd).toBe(relay);
+    const fileRelay = relay.replace(/\\/g, "/");
+    expect(cloneArgs).toEqual([
+      ...FORCED,
+      // X2: the credential-free local hop speaks no transport but file.
+      "-c",
+      "protocol.allow=never",
+      "-c",
+      "protocol.file.allow=always",
+      "-c",
+      `url.file://${fileRelay.startsWith("/") ? "" : "/"}${fileRelay}.insteadOf=https://8.8.8.8/org/repo.git`,
+      "clone",
+      "--depth",
+      "1",
+      "--branch",
+      "main",
+      "--",
+      "https://8.8.8.8/org/repo.git",
+      dest,
+    ]);
+    expect(cloneOpts.cwd).toBeUndefined();
+    expect(cloneOpts.env.GIT_ASKPASS).toBeUndefined();
+    expect(cloneOpts.env.HARPOC_GIT_PASSWORD).toBeUndefined();
+    expect(cloneOpts.env.HARPOC_GIT_USERNAME).toBeUndefined();
+    expect(cloneOpts.env.HARPOC_GIT_ORIGIN).toBeUndefined();
+    expect(cloneOpts.env.GIT_TERMINAL_PROMPT).toBe("0");
+    expect(existsSync(relay)).toBe(false);
+  });
+
+  it("S1: the clone options that shape the transfer reach the relay's fetch, normalized; the rest stay with the local clone (F-1)", async () => {
+    const args = [
+      "--dep",
+      "2",
+      "--shallow-since=2020-01-01",
+      "--shallow-exclude",
+      "old",
+      "--no-tags",
+      "-4",
+      "--server-option=trace",
+      "-o",
+      "upstream",
+      "--branch",
+      "main",
+      "--single-branch",
+      "-qn",
+    ];
+    await injector.executeWithSecret(
+      {
+        type: "git",
+        operation: "clone",
+        repository: "https://8.8.8.8/org/repo.git",
+        args,
+        working_directory: join(tmpdir(), "harpoc-f1-dest"),
+      },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] }),
+      undefined,
+    );
+    const calls = spawnMock.mock.calls as SpawnCall[];
+    const [, fetchArgs] = calls[1] as SpawnCall;
+    expect(fetchArgs.slice(fetchArgs.indexOf("fetch"))).toEqual([
+      "fetch",
+      "--quiet",
+      "--no-write-fetch-head",
+      "--depth=2",
+      "--shallow-since=2020-01-01",
+      "--shallow-exclude=old",
+      "--no-tags",
+      "--ipv4",
+      "--server-option=trace",
+      "--",
+      "https://8.8.8.8/org/repo.git",
+      "+refs/heads/*:refs/heads/*",
+    ]);
+    const [, cloneArgs] = calls[2] as SpawnCall;
+    expect(cloneArgs.slice(cloneArgs.indexOf("clone") + 1, cloneArgs.indexOf("--"))).toEqual(args);
+
+    spawnMock.mockClear();
+    await injector.executeWithSecret(
+      {
+        type: "git",
+        operation: "clone",
+        repository: "https://8.8.8.8/org/repo.git",
+        args: ["--mirror"],
+        working_directory: join(tmpdir(), "harpoc-f1-dest"),
+      },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] }),
+      undefined,
+    );
+    const [, mirrorFetch] = (spawnMock.mock.calls as SpawnCall[])[1] as SpawnCall;
+    expect(mirrorFetch.slice(mirrorFetch.indexOf("--"))).toEqual([
+      "--",
+      "https://8.8.8.8/org/repo.git",
+      "+refs/*:refs/*",
+    ]);
+  });
+
+  it.each([
+    {
+      remote: "a symref HEAD",
+      listing: `ref: refs/heads/trunk\tHEAD\n${"a".repeat(40)}\tHEAD\n`,
+      fetchHead: "ref: refs/heads/trunk\n",
+      cloneHead: "ref: refs/heads/trunk\n",
+      sha256: false,
+      extraRefspec: [],
+    },
+    {
+      remote: "a sha256 repository",
+      listing: `ref: refs/heads/main\tHEAD\n${"b".repeat(64)}\tHEAD\n`,
+      fetchHead: "ref: refs/heads/main\n",
+      cloneHead: "ref: refs/heads/main\n",
+      sha256: true,
+      extraRefspec: [],
+    },
+    {
+      remote: "a detached HEAD",
+      listing: `${"c".repeat(40)}\tHEAD\n`,
+      fetchHead: "ref: refs/heads/master\n",
+      cloneHead: `${"c".repeat(40)}\n`,
+      sha256: false,
+      extraRefspec: ["+HEAD:refs/harpoc/remote-head"],
+    },
+    {
+      remote: "an empty repository",
+      listing: "",
+      fetchHead: "ref: refs/heads/master\n",
+      cloneHead: "ref: refs/heads/master\n",
+      sha256: false,
+      extraRefspec: [],
+    },
+    // X4b: a symref that is no well-formed refname is not written into the relay;
+    // the advertised oid is taken as a detached HEAD instead.
+    {
+      remote: "a HEAD symref that is no well-formed refname",
+      listing: `ref: refs/heads/../../x\tHEAD\n${"d".repeat(40)}\tHEAD\n`,
+      fetchHead: "ref: refs/heads/master\n",
+      cloneHead: `${"d".repeat(40)}\n`,
+      sha256: false,
+      extraRefspec: ["+HEAD:refs/harpoc/remote-head"],
+    },
+  ])(
+    "S1: the relay follows $remote as ls-remote reports it (F-1)",
+    async ({ listing, fetchHead, cloneHead, sha256, extraRefspec }) => {
+      const seen: {
+        lsRelay?: string;
+        fetchRelay?: string;
+        fetchHead?: string;
+        config?: string;
+        cloneHead?: string;
+      } = {};
+      spawnMock.mockImplementation((_cmd, args) => {
+        const sub = gitSubcommand(args);
+        if (sub === "ls-remote") {
+          seen.lsRelay = (args[8] as string).slice("--git-dir=".length);
+          return Promise.resolve({ ...OK_RESULT, stdout: listing });
+        }
+        if (sub === "fetch") {
+          seen.fetchRelay = (args[8] as string).slice("--git-dir=".length);
+          seen.fetchHead = readFileSync(join(seen.fetchRelay, "HEAD"), "utf8");
+          seen.config = readFileSync(join(seen.fetchRelay, "config"), "utf8");
+          expect(args.slice(args.indexOf("--") + 2)).toEqual([
+            "+refs/heads/*:refs/heads/*",
+            "+refs/tags/*:refs/tags/*",
+            ...extraRefspec,
+          ]);
+        }
+        if (sub === "clone") {
+          seen.cloneHead = readFileSync(join(seen.fetchRelay as string, "HEAD"), "utf8");
+        }
+        return Promise.resolve(OK_RESULT);
+      });
+      await injector.executeWithSecret(
+        {
+          type: "git",
+          operation: "clone",
+          repository: "https://8.8.8.8/org/repo.git",
+          working_directory: join(tmpdir(), "harpoc-f1-dest"),
+        },
+        new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+        policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] }),
+        undefined,
+      );
+      expect(seen.fetchHead).toBe(fetchHead);
+      expect(seen.cloneHead).toBe(cloneHead);
+      expect(seen.config?.includes("objectFormat = sha256")).toBe(sha256);
+      expect(seen.fetchRelay === seen.lsRelay).toBe(!sha256);
+      expect(existsSync(seen.lsRelay as string)).toBe(false);
+      expect(existsSync(seen.fetchRelay as string)).toBe(false);
+    },
+  );
+
+  it("S1: a pull's one credential-bearing step fetches the remote's HEAD into the relay; the final pull reads the relay without the credential", async () => {
+    const wd = initRepo();
+    relayWithRealProbes();
+    try {
+      const result = await injector.executeWithSecret(
+        {
+          type: "git",
+          operation: "pull",
+          repository: "https://8.8.8.8/org/repo.git",
+          args: ["--ff-only"],
+          working_directory: wd,
+        },
+        new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+        policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] }),
+        undefined,
+      );
+
+      expect(result.exit_code).toBe(0);
+      const calls = spawnMock.mock.calls as SpawnCall[];
+      expect(calls.map(([, a]) => gitSubcommand(a))).toEqual([
+        "rev-parse",
+        "for-each-ref",
+        "fetch",
+        "pull",
+      ]);
+      const [, fetchArgs, fetchOpts] = calls[2] as SpawnCall;
+      expect(fetchArgs).toEqual([
+        "-c",
+        "http.followRedirects=false",
+        ...FORCED,
+        expect.stringMatching(/^--git-dir=.+harpoc-git-relay-/),
+        "fetch",
+        "--quiet",
+        "--no-write-fetch-head",
+        "--",
+        "https://8.8.8.8/org/repo.git",
+        "+HEAD:refs/heads/harpoc-relay",
+      ]);
+      const relay = (fetchArgs[8] as string).slice("--git-dir=".length);
+      expect(fetchOpts.cwd).toBe(relay);
+      expect(fetchOpts.env.HARPOC_GIT_PASSWORD).toBe("s3cret-token-value");
+
+      const [, pullArgs, pullOpts] = calls[3] as SpawnCall;
+      expect(pullArgs).toEqual([
+        ...FORCED,
+        // X2: the credential-free local hop speaks no transport but file.
+        "-c",
+        "protocol.allow=never",
+        "-c",
+        "protocol.file.allow=always",
+        "-c",
+        `url.${relay.replace(/\\/g, "/")}.insteadOf=https://8.8.8.8/org/repo.git`,
+        "pull",
+        "--ff-only",
+        "--",
+        "https://8.8.8.8/org/repo.git",
+      ]);
+      for (const [, , opts] of [calls[0], calls[1], calls[3]] as SpawnCall[]) {
+        expect(opts.cwd).toBe(wd);
+        expect(opts.env.GIT_ASKPASS).toBeUndefined();
+        expect(opts.env.HARPOC_GIT_PASSWORD).toBeUndefined();
+        expect(opts.env.HARPOC_GIT_USERNAME).toBeUndefined();
+      }
+      expect(pullOpts.env.GIT_TERMINAL_PROMPT).toBe("0");
+    } finally {
+      rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  it("S1: the relay is vault-written — its own config, the caller's objects as an alternate, the caller's refs as tips — and gone after the call", async () => {
+    const wd = initRepo();
+    execFileSync(GIT as string, ["-C", wd, "commit", "-q", "--allow-empty", "-m", "tip"], {
+      env: {
+        ...process.env,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: NULL_GIT_CONFIG,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.com",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.com",
+      },
+    });
+    const tip = execFileSync(GIT as string, ["-C", wd, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    let relay = "";
+    let seen: { config: string; alternates: string; packedRefs: string; head: string } | null =
+      null;
+    spawnMock.mockImplementation((cmd, args, opts) => {
+      if (gitSubcommand(args) === "fetch") {
+        relay = (args.find((a) => a.startsWith("--git-dir=")) as string).slice(10);
+        seen = {
+          config: readFileSync(join(relay, "config"), "utf8"),
+          alternates: readFileSync(join(relay, "objects", "info", "alternates"), "utf8"),
+          packedRefs: readFileSync(join(relay, "packed-refs"), "utf8"),
+          head: readFileSync(join(relay, "HEAD"), "utf8"),
+        };
+        return Promise.resolve(OK_RESULT);
+      }
+      if (gitSubcommand(args) === "pull") return Promise.resolve(OK_RESULT);
+      return realSpawnCaptured(cmd, args, opts);
+    });
+    try {
+      await injector.executeWithSecret(
+        {
+          type: "git",
+          operation: "pull",
+          repository: "https://8.8.8.8/org/repo.git",
+          working_directory: wd,
+        },
+        new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+        policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] }),
+        undefined,
+      );
+      expect(seen).not.toBeNull();
+      const files = seen as unknown as {
+        config: string;
+        alternates: string;
+        packedRefs: string;
+        head: string;
+      };
+      expect(files.config).toBe(
+        [
+          "[core]",
+          "\trepositoryformatversion = 0",
+          "\tbare = true",
+          "\talternateRefsCommand = : no alternate refs",
+          "[push]",
+          "\tdefault = current",
+          "[gc]",
+          "\tauto = 0",
+          "[maintenance]",
+          "\tauto = false",
+          "",
+        ].join("\n"),
+      );
+      expect(realpathSync(files.alternates.trim())).toBe(realpathSync(join(wd, ".git", "objects")));
+      expect(files.packedRefs).toMatch(new RegExp(`^${tip} refs/harpoc/local/heads/`));
+      expect(files.head).toBe("ref: refs/heads/harpoc-relay\n");
+      expect(existsSync(relay)).toBe(false);
+    } finally {
+      rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  it("S1: the pull options that shape the fetch reach the network step too, normalized; the rest stay with the local pull", async () => {
+    const wd = initRepo();
+    relayWithRealProbes();
+    const args = [
+      "--tags",
+      // A separate value would be a positional, which a pull refuses (X2).
+      "--depth=3",
+      "-4",
+      "--rebase",
+      "-Xtheirs",
+      "--shallow-since=2020-01-01",
+    ];
+    try {
+      await injector.executeWithSecret(
+        {
+          type: "git",
+          operation: "pull",
+          repository: "https://8.8.8.8/org/repo.git",
+          args,
+          working_directory: wd,
+        },
+        new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+        policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] }),
+        undefined,
+      );
+      const calls = spawnMock.mock.calls as SpawnCall[];
+      const [, fetchArgs] = calls.find(([, a]) => gitSubcommand(a) === "fetch") as SpawnCall;
+      const fetchTail = fetchArgs.slice(fetchArgs.indexOf("fetch"));
+      expect(fetchTail).toEqual([
+        "fetch",
+        "--quiet",
+        "--no-write-fetch-head",
+        "--tags",
+        "--depth=3",
+        "--ipv4",
+        "--shallow-since=2020-01-01",
+        "--",
+        "https://8.8.8.8/org/repo.git",
+        "+HEAD:refs/heads/harpoc-relay",
+      ]);
+      const [, pullArgs] = calls.find(([, a]) => gitSubcommand(a) === "pull") as SpawnCall;
+      expect(pullArgs.slice(pullArgs.indexOf("pull"))).toEqual([
+        "pull",
+        ...args,
+        "--",
+        "https://8.8.8.8/org/repo.git",
+      ]);
+    } finally {
+      rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  it.each([
+    ["-rt", false],
+    ["-t", true],
+  ])("S1b: pull %s forwards --tags to the network fetch: %s", async (arg, forwarded) => {
+    const wd = initRepo();
+    relayWithRealProbes();
+    try {
+      await injector.executeWithSecret(
+        {
+          type: "git",
+          operation: "pull",
+          repository: "https://8.8.8.8/org/repo.git",
+          args: [arg as string],
+          working_directory: wd,
+        },
+        new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+        policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] }),
+        undefined,
+      );
+      const calls = spawnMock.mock.calls as SpawnCall[];
+      const [, fetchArgs] = calls.find(([, a]) => gitSubcommand(a) === "fetch") as SpawnCall;
+      expect(fetchArgs.slice(fetchArgs.indexOf("fetch")).includes("--tags")).toBe(forwarded);
+    } finally {
+      rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 
@@ -339,10 +943,14 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
       httpsPolicy(),
       undefined,
     );
-    const [, args] = spawnMock.mock.calls[0] as SpawnCall;
-    expect(args.slice(0, 2)).toEqual(["-c", "http.followRedirects=false"]);
-    // The forced config must precede the subcommand or git ignores it.
-    expect(args.indexOf("clone")).toBeGreaterThan(args.indexOf("http.followRedirects=false"));
+    // Both credential-bearing steps of the clone (ls-remote, fetch) carry it.
+    for (const [, args] of (spawnMock.mock.calls as SpawnCall[]).slice(0, 2)) {
+      expect(args.slice(0, 2)).toEqual(["-c", "http.followRedirects=false"]);
+      // The forced config must precede the subcommand or git ignores it.
+      expect(args.indexOf(gitSubcommand(args) as string)).toBeGreaterThan(
+        args.indexOf("http.followRedirects=false"),
+      );
+    }
   });
 
   it("pins a stored git CA through vault-authored config, on a 0600 file that is removed after the call", async () => {
@@ -366,7 +974,6 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
       { git: { ca_pem: CA_PEM } },
     );
 
-    const [, args] = spawnMock.mock.calls[0] as SpawnCall;
     const caConfig = [
       "-c",
       "http.followRedirects=false",
@@ -378,10 +985,13 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
         ? ["-c", "http.sslBackend=schannel", "-c", "http.schannelCheckRevoke=best-effort"]
         : []),
     ];
-    expect(args.slice(0, caConfig.length)).toEqual(caConfig);
-    expect(args[caConfig.length]).toBe("-c");
-    expect(args[caConfig.length + 1]).toMatch(/^core\.hooksPath=/);
-    expect(args.indexOf("clone")).toBe(caConfig.length + 2);
+    // Both credential-bearing steps of the clone (ls-remote, fetch) carry the pin.
+    for (const [, args] of (spawnMock.mock.calls as SpawnCall[]).slice(0, 2)) {
+      expect(args.slice(0, caConfig.length)).toEqual(caConfig);
+      expect(args.slice(caConfig.length, caConfig.length + 6)).toEqual(FORCED);
+      expect(args[caConfig.length + 6]).toMatch(/^--git-dir=/);
+      expect(args.indexOf(gitSubcommand(args) as string)).toBe(caConfig.length + 7);
+    }
     expect(caContent).toBe(CA_PEM);
     if (process.platform !== "win32") expect(caMode).toBe(0o600);
     expect(existsSync(caPathSeen as string)).toBe(false);
@@ -394,9 +1004,12 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
       httpsPolicy(),
       { database: { tls_mode: "require" } },
     );
-    const [, args] = spawnMock.mock.calls[0] as SpawnCall;
-    expect(args.join(" ")).not.toContain("sslCAInfo");
-    expect(args.indexOf("clone")).toBe(4);
+    const calls = spawnMock.mock.calls as SpawnCall[];
+    expect(calls.every(([, a]) => !a.join(" ").includes("sslCAInfo"))).toBe(true);
+    for (const [, args] of calls.slice(0, 2)) {
+      expect(args[8]).toMatch(/^--git-dir=/);
+      expect(args.indexOf(gitSubcommand(args) as string)).toBe(9);
+    }
   });
 
   it("leaves the TLS backend to the host's git when no CA is pinned", async () => {
@@ -414,12 +1027,17 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
   it("N11: forces core.hooksPath to an empty vault-authored directory that exists only for the run", async () => {
     let hooksDir: string | undefined;
     let entriesAtSpawn: string[] | undefined;
-    spawnMock.mockImplementationOnce(async (_cmd: string, args: string[]) => {
+    const seenDirs = new Set<string>();
+    // Every step of the clone — ls-remote, fetch, the local clone — carries it.
+    spawnMock.mockImplementation(async (_cmd: string, args: string[]) => {
       const at = args.findIndex((a) => a.startsWith("core.hooksPath="));
       hooksDir = args[at]?.slice("core.hooksPath=".length);
       expect(args[at - 1]).toBe("-c");
-      expect(at).toBeLessThan(args.indexOf("clone"));
-      if (hooksDir) entriesAtSpawn = readdirSync(hooksDir);
+      expect(at).toBeLessThan(args.indexOf(gitSubcommand(args) as string));
+      if (hooksDir) {
+        seenDirs.add(hooksDir);
+        entriesAtSpawn = readdirSync(hooksDir);
+      }
       return OK_RESULT;
     });
 
@@ -430,13 +1048,16 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
       undefined,
     );
 
+    expect(spawnMock).toHaveBeenCalledTimes(3);
+    expect(seenDirs.size).toBe(1);
     expect(hooksDir).toBeDefined();
     expect(entriesAtSpawn).toEqual([]);
     expect(existsSync(hooksDir as string)).toBe(false);
   });
 
-  it("N11: a pull into a caller-supplied working tree carries the forced hooksPath too", async () => {
-    const wd = mkdtempSync(join(tmpdir(), "harpoc-git-wd-"));
+  it("N11: every step of a pull into a caller-supplied working tree carries the forced hooksPath", async () => {
+    const wd = initRepo();
+    relayWithRealProbes();
     try {
       await injector.executeWithSecret(
         {
@@ -449,12 +1070,15 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
         httpsPolicy(),
         undefined,
       );
-      const [, args, opts] = spawnMock.mock.calls[0] as SpawnCall;
-      const at = args.findIndex((a) => a.startsWith("core.hooksPath="));
-      expect(at).toBeGreaterThan(0);
-      expect(args[at - 1]).toBe("-c");
-      expect(at).toBeLessThan(args.indexOf("pull"));
-      expect(opts.cwd).toBe(wd);
+      const calls = spawnMock.mock.calls as SpawnCall[];
+      expect(calls).toHaveLength(4);
+      for (const [, args] of calls) {
+        const at = args.findIndex((a) => a.startsWith("core.hooksPath="));
+        expect(at).toBeGreaterThan(0);
+        expect(args[at - 1]).toBe("-c");
+        expect(at).toBeLessThan(args.indexOf(gitSubcommand(args) as string));
+      }
+      expect((calls[3] as SpawnCall)[2].cwd).toBe(wd);
     } finally {
       rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
@@ -623,7 +1247,7 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
     expect("strict_tree_exit" in row.detail).toBe(false);
   });
 
-  it("binds the credential to the validated host", async () => {
+  it("binds the credential to the validated origin", async () => {
     await injector.executeWithSecret(
       { type: "git", operation: "clone", repository: REPO },
       new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
@@ -631,7 +1255,7 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
       undefined,
     );
     const [, , opts] = spawnMock.mock.calls[0] as SpawnCall;
-    expect(opts.env.HARPOC_GIT_HOST).toBe("8.8.8.8");
+    expect(opts.env.HARPOC_GIT_ORIGIN).toBe("https://8.8.8.8");
   });
 
   it("the askpass helper answers for the validated host and refuses any other", async () => {
@@ -640,8 +1264,12 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
     let refused: { out: string; status: number } | undefined;
     let refusedNoUrl: { out: string; status: number } | undefined;
 
-    // The launcher only exists for the duration of the spawn, so exercise it here.
+    // The launcher only exists for the duration of the spawn, so exercise it here —
+    // in the credential-bearing steps; the clone's local step carries no askpass.
     spawnMock.mockImplementation((_cmd, _args, opts) => {
+      if ((opts as { env: Record<string, string> }).env.GIT_ASKPASS === undefined) {
+        return Promise.resolve(OK_RESULT);
+      }
       captured = (opts as { env: Record<string, string> }).env;
       answered = askpass(captured, "Password for 'https://git-user@8.8.8.8': ");
       refused = askpass(captured, "Password for 'https://8.8.8.8.attacker.tld/leak': ");
@@ -670,6 +1298,9 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
   it("answers the username prompt for the validated host too", async () => {
     let answered: { out: string; status: number } | undefined;
     spawnMock.mockImplementation((_cmd, _args, opts) => {
+      if ((opts as { env: Record<string, string> }).env.GIT_ASKPASS === undefined) {
+        return Promise.resolve(OK_RESULT);
+      }
       answered = askpass(
         (opts as { env: Record<string, string> }).env,
         "Username for 'https://8.8.8.8': ",
@@ -736,48 +1367,66 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
     );
 
     expect(result.exit_code).toBe(0);
-    expect(spawnMock).toHaveBeenCalledOnce();
-    const [command, args, opts] = spawnMock.mock.calls[0] as SpawnCall;
-
-    expect(command).toBe(GIT);
-    expect(args).toEqual([
-      "-c",
-      expect.stringMatching(/^core\.hooksPath=.+harpoc-git-hooks-/),
-      "clone",
+    const calls = spawnMock.mock.calls as SpawnCall[];
+    // ls-remote and fetch run over the agent in the relay; the clone is made from it (F-1).
+    expect(calls.map(([, a]) => gitSubcommand(a))).toEqual(["ls-remote", "fetch", "clone"]);
+    const [, lsArgs] = calls[0] as SpawnCall;
+    expect(lsArgs).toEqual([
+      ...FORCED,
+      expect.stringMatching(/^--git-dir=.+harpoc-git-relay-/),
+      "ls-remote",
+      "--symref",
+      "--",
       "git@github.com:org/repo.git",
+      "HEAD",
     ]);
 
-    const sshCommand = opts.env.GIT_SSH_COMMAND ?? "";
-    expect(sshCommand).toContain("StrictHostKeyChecking=yes");
-    expect(sshCommand).toContain("BatchMode=yes");
-    expect(sshCommand).toContain("UserKnownHostsFile=");
-    expect(sshCommand).toContain("IdentitiesOnly=yes");
-    // IdentitiesOnly restricts ssh to file-backed identities — the vault-written
-    // .pub must ride along in GIT_SSH_COMMAND or the agent key is never offered.
-    expect(sshCommand).toMatch(/ -i "?[^"]*identity\.pub"?/);
-    expect(opts.env.SSH_AUTH_SOCK).toBeTruthy();
-    expect(opts.env.GIT_TERMINAL_PROMPT).toBe("0");
+    for (const [command, , opts] of calls.slice(0, 2)) {
+      expect(command).toBe(GIT);
+      const sshCommand = opts.env.GIT_SSH_COMMAND ?? "";
+      expect(sshCommand).toContain("StrictHostKeyChecking=yes");
+      expect(sshCommand).toContain(" -o GlobalKnownHostsFile=none ");
+      expect(sshCommand).toContain("BatchMode=yes");
+      expect(sshCommand).toContain("UserKnownHostsFile=");
+      expect(sshCommand).toContain("IdentitiesOnly=yes");
+      // IdentitiesOnly restricts ssh to file-backed identities — the vault-written
+      // .pub must ride along in GIT_SSH_COMMAND or the agent key is never offered.
+      expect(sshCommand).toMatch(/ -i "?[^"]*identity\.pub"?/);
+      expect(opts.env.SSH_AUTH_SOCK).toBeTruthy();
+      expect(opts.env.GIT_TERMINAL_PROMPT).toBe("0");
+      expect(opts.redact).toContain(keyPem);
+    }
+    const [, cloneArgs, cloneOpts] = calls[2] as SpawnCall;
+    expect(cloneArgs.slice(cloneArgs.indexOf("clone"))).toEqual([
+      "clone",
+      "--",
+      "git@github.com:org/repo.git",
+    ]);
+    expect(cloneOpts.env.SSH_AUTH_SOCK).toBeUndefined();
+    expect(cloneOpts.env.GIT_SSH_COMMAND).toBeUndefined();
 
     // The private key reaches ssh only through the ephemeral agent socket.
-    expect(args.every((a) => !a.includes("PRIVATE KEY"))).toBe(true);
-    expect(Object.values(opts.env).every((v) => !v.includes("PRIVATE KEY"))).toBe(true);
-    expect(opts.redact).toContain(keyPem);
+    for (const [, args, opts] of calls) {
+      expect(args.every((a) => !a.includes("PRIVATE KEY"))).toBe(true);
+      expect(Object.values(opts.env).every((v) => !v.includes("PRIVATE KEY"))).toBe(true);
+    }
   });
 
-  it("push: the argv is the forced hooksPath, the operation, the caller's options, then the repository, over the agent (I18)", async () => {
+  it("push: the network step is the forced config, --git-dir of the relay, the operation, the caller's options, `--`, then the repository, over the agent; the working-tree steps have no agent (I18, S1)", async () => {
     const { privateKey: keyPem } = generateKeyPairSync("rsa", {
       modulusLength: 2048,
       privateKeyEncoding: { type: "pkcs1", format: "pem" },
       publicKeyEncoding: { type: "spki", format: "pem" },
     });
-    const wd = mkdtempSync(join(tmpdir(), "harpoc-git-wd-"));
+    const wd = initRepo();
+    relayWithRealProbes();
     try {
       const result = await injector.executeWithSecret(
         {
           type: "git",
           operation: "push",
           repository: "git@github.com:org/repo.git",
-          args: ["-u", "--follow-tags"],
+          args: ["--force-with-lease", "--follow-tags"],
           working_directory: wd,
         },
         new Uint8Array(Buffer.from(keyPem)),
@@ -789,21 +1438,36 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
       );
 
       expect(result.exit_code).toBe(0);
-      expect(spawnMock).toHaveBeenCalledOnce();
-      const [command, args, opts] = spawnMock.mock.calls[0] as SpawnCall;
+      const calls = spawnMock.mock.calls as SpawnCall[];
+      expect(calls.map(([, a]) => gitSubcommand(a))).toEqual([
+        "rev-parse",
+        "symbolic-ref",
+        "for-each-ref",
+        "push",
+      ]);
+      const [command, args, opts] = calls[3] as SpawnCall;
       expect(command).toBe(GIT);
       expect(args).toEqual([
-        "-c",
-        expect.stringMatching(/^core\.hooksPath=.+harpoc-git-hooks-/),
+        ...FORCED,
+        expect.stringMatching(/^--git-dir=.+harpoc-git-relay-/),
         "push",
-        "-u",
+        "--force-with-lease",
         "--follow-tags",
+        "--",
         "git@github.com:org/repo.git",
       ]);
-      expect(opts.cwd).toBe(wd);
       expect(opts.env.GIT_SSH_COMMAND).toContain("IdentitiesOnly=yes");
       expect(opts.env.SSH_AUTH_SOCK).toBeTruthy();
+      expect(opts.env.GIT_CONFIG_NOSYSTEM).toBe("1");
+      expect(opts.env.GIT_CONFIG_GLOBAL).toBe(NULL_GIT_CONFIG);
       expect(Object.values(opts.env).every((v) => !v.includes("PRIVATE KEY"))).toBe(true);
+      for (const [, , localOpts] of calls.slice(0, 3)) {
+        expect(localOpts.cwd).toBe(wd);
+        expect(localOpts.env.SSH_AUTH_SOCK).toBeUndefined();
+        expect(localOpts.env.GIT_SSH_COMMAND).toBeUndefined();
+        expect(localOpts.env.GIT_CONFIG_NOSYSTEM).toBe("1");
+        expect(localOpts.env.GIT_CONFIG_GLOBAL).toBe(NULL_GIT_CONFIG);
+      }
     } finally {
       rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
@@ -839,6 +1503,8 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
         "SSH_AUTH_SOCK",
         "GIT_SSH_COMMAND",
         "GIT_TERMINAL_PROMPT",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_GLOBAL",
         "HARPOC_T14_GIT_SSH_ALLOWED",
       ]);
       expect(Object.keys(opts.env).filter((k) => !expected.has(k))).toEqual([]);
@@ -1026,6 +1692,8 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
     let identityContentAtSpawn = "";
     spawnMock.mockImplementation((_cmd, _args, opts) => {
       const sshCommand = (opts as { env?: Record<string, string> }).env?.GIT_SSH_COMMAND ?? "";
+      // The clone's local step runs without ssh (F-1); the network steps carry it.
+      if (sshCommand === "") return Promise.resolve(OK_RESULT);
       // The identity path may be single-quoted for sh, double-quoted, or bare —
       // `toGitSshCommand` quotes only the parts that are not shell-neutral. A
       // CI runner's temp path contains `~` (C:\Users\RUNNER~1\...), so it IS
@@ -1693,11 +2361,13 @@ describeGitSshWin32("GitInjector refuses an MSYS/Cygwin ssh client (D58)", () =>
       msysPolicy(),
       msysConfig,
     );
-    expect(spawnMock).toHaveBeenCalledOnce();
-    const [command, , opts] = spawnMock.mock.calls[0] as SpawnCall;
-    expect(command).toBe(GIT);
-    expect((opts.env.GIT_SSH_COMMAND ?? "").toLowerCase()).toContain(
-      stub.replaceAll("\\", "/").toLowerCase(),
-    );
+    // The clone's two network steps run over the stub; the local clone has no ssh (F-1).
+    expect(spawnMock).toHaveBeenCalledTimes(3);
+    for (const [command, , opts] of (spawnMock.mock.calls as SpawnCall[]).slice(0, 2)) {
+      expect(command).toBe(GIT);
+      expect((opts.env.GIT_SSH_COMMAND ?? "").toLowerCase()).toContain(
+        stub.replaceAll("\\", "/").toLowerCase(),
+      );
+    }
   });
 });

@@ -179,8 +179,11 @@ describeGitSsh("the call completes (SSH)", () => {
     let sock = "";
     let servingAtSpawn = false;
     vi.mocked(spawnCaptured).mockImplementation(async (_cmd, _args, opts) => {
-      sock = opts.env.SSH_AUTH_SOCK ?? "";
-      servingAtSpawn = await agentSocketAccepts(sock);
+      // The clone's network steps carry the agent; its local step does not (F-1).
+      if (opts.env.SSH_AUTH_SOCK !== undefined) {
+        sock = opts.env.SSH_AUTH_SOCK;
+        servingAtSpawn = await agentSocketAccepts(sock);
+      }
       return {
         exit_code: 0,
         stdout: "",
