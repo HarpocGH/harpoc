@@ -229,4 +229,60 @@ describe("evidence records", () => {
     const raw = readFileSync(file, "utf8").trim();
     expect(raw).not.toContain("variant");
   });
+
+  // I1 (test-review-2026-10-09): a record carries the calls its verdict was
+  // judged on, so the verdict can be re-checked from the record's own content.
+  it("carries the calls the verdict was judged on into the written record", () => {
+    const file = join(dir, "run.jsonl");
+    const calls = [
+      { ok: true, text: '{"stdout":"[REDACTED]\\nmarker"}' },
+      { ok: false, text: "", error: "URL not in secret allowlist" },
+    ];
+    const rec = emit(file, {
+      scenario: "output-channel-leakage",
+      context: "process",
+      variant: "naive-echo",
+      surface: "mcp-http",
+      interface: "mcp",
+      arm: "harpoc",
+      expected: "BLOCKED",
+      observed: "BLOCKED",
+      calls,
+    });
+    expect(rec.calls).toEqual(calls);
+    const written = JSON.parse(readFileSync(file, "utf8").trim()) as EvidenceRecord;
+    expect(written.calls).toEqual(calls);
+  });
+
+  // A guard on the record's shape, not on this change: a record emitted without
+  // calls is the twelve- or thirteen-field record every earlier run carries
+  // (the `recordArm` branch that omits the key is pinned in harness/evidence.test.ts).
+  it("a record emitted without calls keeps the earlier runs' shape — no calls key", () => {
+    const file = join(dir, "run.jsonl");
+    emit(file, {
+      scenario: "database-happy-path",
+      context: "database",
+      surface: "mcp-http",
+      interface: "mcp",
+      arm: "harpoc",
+      expected: "SUCCEEDED",
+      observed: "SUCCEEDED",
+    });
+    const raw = readFileSync(file, "utf8").trim();
+    expect(raw).not.toContain("calls");
+    expect(Object.keys(JSON.parse(raw) as object).sort()).toEqual([
+      "arm",
+      "at",
+      "commit",
+      "context",
+      "dirty",
+      "expected",
+      "host_os",
+      "interface",
+      "match",
+      "observed",
+      "scenario",
+      "surface",
+    ]);
+  });
 });

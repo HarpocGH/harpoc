@@ -4,6 +4,7 @@ import { assertOpaque } from "./assert/opacity.js";
 import { createHarnessVault, grantOn, storeSecret } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
 import { recordArm } from "./harness/evidence.js";
+import { callEvidence } from "./evidence/calls.js";
 import { startMcpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import type { McpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import { caPem } from "./harness/pki.js";
@@ -73,6 +74,7 @@ describe("database context — live MySQL over fixture TLS", () => {
         arm: "harpoc",
       },
       "SUCCEEDED",
+      [callEvidence(outcome, DB_SECRET, MYSQL.password)],
     );
     expect(record.match).toBe(true);
   });

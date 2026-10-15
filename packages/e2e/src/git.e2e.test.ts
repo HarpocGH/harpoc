@@ -8,6 +8,7 @@ import { createHarnessVault, grantOn, storeSecret } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
 import { expectAttributedSuccess } from "./harness/audit.js";
 import { recordArm } from "./harness/evidence.js";
+import { callEvidence } from "./evidence/calls.js";
 import { startMcpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import type { CallOutcome, McpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import { preferNativeSsh, resolveGit } from "./harness/fixtures.js";
@@ -180,6 +181,7 @@ describe("git context — live clones over http, https and ssh", () => {
         arm: "harpoc",
       },
       "SUCCEEDED",
+      [callEvidence(outcome, GIT_HTTP_SECRET, GIT_HTTP.password)],
     );
     expect(record.match).toBe(true);
   });
@@ -213,6 +215,7 @@ describe("git context — live clones over http, https and ssh", () => {
         arm: "harpoc",
       },
       "SUCCEEDED",
+      [callEvidence(outcome, sshKey)],
     );
     expect(record.match).toBe(true);
   });
@@ -258,6 +261,7 @@ describe("git context — live clones over http, https and ssh", () => {
         arm: "harpoc",
       },
       "BLOCKED",
+      [callEvidence(outcome, GIT_HTTP_SECRET, GIT_HTTP.password)],
     );
     expect(record.match).toBe(true);
   });
@@ -298,6 +302,7 @@ describe("git context — live clones over http, https and ssh", () => {
         arm: "harpoc",
       },
       "REJECTED",
+      [callEvidence(outcome, GIT_HTTP_SECRET, GIT_HTTP.password)],
     );
     expect(record.match).toBe(true);
   });
@@ -343,6 +348,7 @@ describe("git context — live clones over http, https and ssh", () => {
         arm: "harpoc",
       },
       "REJECTED",
+      [callEvidence(outcome, GIT_HTTP_SECRET, GIT_HTTPS.password)],
     );
     expect(record.match).toBe(true);
   });
@@ -380,6 +386,7 @@ describe("git context — live clones over http, https and ssh", () => {
         arm: "harpoc",
       },
       "SUCCEEDED",
+      [callEvidence(outcome, GIT_HTTP_SECRET, GIT_HTTPS.password)],
     );
     expect(record.match).toBe(true);
   });

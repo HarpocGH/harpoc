@@ -8,6 +8,8 @@ import { OUTPUT_CHANNEL_ARMS } from "./output-channel.js";
 import { RESPONSE_CHANNEL_ARMS } from "./response-channel.js";
 import { Outcome } from "./scenario.js";
 import type { ScenarioArm, ScenarioSetup } from "./scenario.js";
+import { RECORD_REDACTION } from "../assert/opacity.js";
+import { recordingArm } from "../evidence/calls.js";
 
 /**
  * The Harpoc verdicts of §6.2.6, §6.2.7 and the context-opacity Redis row,
@@ -222,5 +224,54 @@ describe("context-opacity Harpoc verdicts", () => {
     await expect(redis.observe(harpocAnswering(outcome), ECHO_SETUP)).rejects.toThrow(
       /redaction is blanket, not targeted/,
     );
+  });
+});
+
+/**
+ * I1 (test-review-2026-10-09): the calls a record carries are the ones the
+ * verdict was judged on — captured around the arm `observe` drives, so the
+ * record shows the proof (`ok`, the sanitizer's `[REDACTED]`, a refusal by
+ * name) and never the credential itself.
+ */
+describe("the recorded calls carry the verdict's proof", () => {
+  const echo = armOf(OUTPUT_CHANNEL_ARMS, "encoding-base64");
+
+  it("a BLOCKED echo: one completed call with [REDACTED], the credential nowhere", async () => {
+    const outcome = completed({
+      type: "process",
+      exit_code: 0,
+      stdout: `[REDACTED]\n${ECHO_SETUP.marker}`,
+      stderr: "",
+    });
+    const arm = recordingArm(harpocAnswering(outcome), CREDENTIAL);
+    await expect(echo.observe(arm, ECHO_SETUP)).resolves.toBe(Outcome.BLOCKED);
+    const calls = arm.calls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.ok).toBe(true);
+    expect(calls[0]?.text).toContain("[REDACTED]");
+    expect(calls[0]?.text).not.toContain(RECORD_REDACTION);
+  });
+
+  it("a LEAKED baseline: the call's text shows the record marker, not the credential", async () => {
+    const leaking: Arm = {
+      name: "baseline",
+      invoke: () =>
+        Promise.resolve(
+          completed({
+            type: "process",
+            exit_code: 0,
+            stdout: `${Buffer.from(CREDENTIAL).toString("base64")}\n${ECHO_SETUP.marker}`,
+            stderr: "",
+          }),
+        ),
+      probeMetadata: () => Promise.reject(new Error("not probed")),
+      close: () => Promise.resolve(),
+    };
+    const arm = recordingArm(leaking, CREDENTIAL);
+    await expect(echo.observe(arm, ECHO_SETUP)).resolves.toBe(Outcome.LEAKED);
+    const text = arm.calls()[0]?.text ?? "";
+    expect(text).toContain(RECORD_REDACTION);
+    expect(text).not.toContain(CREDENTIAL);
+    expect(text).not.toContain(Buffer.from(CREDENTIAL).toString("base64"));
   });
 });

@@ -4,6 +4,7 @@ import { assertOpaque, assertPresent } from "./assert/opacity.js";
 import { createHarnessVault, storeSecret, EVIDENCE_FILE } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
 import { recordArm } from "./harness/evidence.js";
+import { callEvidence } from "./evidence/calls.js";
 import { resolvePrintenv } from "./harness/fixtures.js";
 import { SCENARIO_ARMS, armSetupKey } from "./scenarios/index.js";
 
@@ -70,6 +71,7 @@ describe("harness machinery, proven against the process context", () => {
         arm: "harpoc",
       },
       "OPAQUE",
+      [callEvidence({ ok: true, text: JSON.stringify(result) }, SECRET)],
     );
 
     expect(record.match).toBe(true);

@@ -6,6 +6,7 @@ import { loadExpectations } from "./evidence/preregistration.js";
 import type { EvidenceRecord } from "./evidence/record.js";
 import { assertFleetUp } from "./harness/backends.js";
 import { recordArm } from "./harness/evidence.js";
+import { recordingArm } from "./evidence/calls.js";
 import { startBaselineArm } from "./arms/baseline.js";
 import { startHarpocArm } from "./arms/harpoc.js";
 import type { Arm } from "./arms/arm.js";
@@ -123,9 +124,13 @@ describe("attack scenarios — baseline versus Harpoc", () => {
           // scenario's credential and quietly mis-measure all the others.
           const perArmBaseline =
             armName === "baseline" ? await startBaselineArm(setup.credential) : undefined;
+          // The arm `observe` drives is wrapped so the record carries the
+          // calls the verdict was judged on (I1): the scenario stays
+          // untouched, the capture is this one site's.
+          const observing = recordingArm(perArmBaseline ?? harpoc, setup.credential);
           let observed: string;
           try {
-            observed = await scenarioArm.observe(perArmBaseline ?? harpoc, setup);
+            observed = await scenarioArm.observe(observing, setup);
           } finally {
             await perArmBaseline?.close();
           }
@@ -140,6 +145,7 @@ describe("attack scenarios — baseline versus Harpoc", () => {
               arm: armName,
             },
             observed,
+            observing.calls(),
           );
           emitted.push(record);
 

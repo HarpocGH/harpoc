@@ -6,6 +6,7 @@ import type { HarnessVault } from "./harness/vault.js";
 import { expectAttributedSuccess } from "./harness/audit.js";
 import type { AuditRow } from "./harness/audit.js";
 import { recordArm } from "./harness/evidence.js";
+import { callEvidence } from "./evidence/calls.js";
 import { startMcpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import type { CallOutcome, McpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import { preferNativeSsh, resolveSsh } from "./harness/fixtures.js";
@@ -199,6 +200,7 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
         arm: "harpoc",
       },
       "SUCCEEDED",
+      [callEvidence(outcome, sshKey)],
     );
     expect(record.match).toBe(true);
   });
@@ -291,6 +293,7 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
         arm: "harpoc",
       },
       "REJECTED",
+      [callEvidence(outcome, sshKey)],
     );
     expect(record.match).toBe(true);
   });
@@ -316,6 +319,7 @@ describe("ssh context — live OpenSSH over the fixture host keys", () => {
         arm: "harpoc",
       },
       "REJECTED",
+      [callEvidence(outcome, sshKey)],
     );
     expect(record.match).toBe(true);
   });

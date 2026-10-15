@@ -75,10 +75,78 @@ export function assertOpaque(secret: string, obs: Observation): void {
  * matches still waiting to be spliced.
  */
 export function redactForDiagnostics(text: string, secret: string): string {
+  return redactEncodings(text, secret, "[REDACTED]");
+}
+
+/**
+ * The marker the evidence records write in place of a credential
+ * (`EvidenceRecord.calls`, test-review-2026-10-09 I1). Not the sanitizer's
+ * `[REDACTED]`: that marker is one of the things a reader re-checks a record
+ * for, so the record's own redaction must be tellable apart from it.
+ */
+export const RECORD_REDACTION = "[CREDENTIAL]";
+
+/**
+ * The record-time redaction: every credential given, in every encoding
+ * `encodingsOf` knows, replaced by `RECORD_REDACTION`. The same splice as the
+ * diagnostics form, with its marker.
+ */
+export function redactForRecord(text: string, ...secrets: string[]): string {
+  return redactRecordText(
+    text,
+    secrets.filter((secret) => secret.length > 0),
+    0,
+  );
+}
+
+/** `scan`'s reach: a string leaf that is itself JSON is parsed and walked, this many levels deep. */
+const MAX_RECORD_PARSE_DEPTH = 6;
+
+/**
+ * The flat pass first (every encoding, one level of JSON escaping); then, while
+ * the opacity scan still sights a credential and the text is JSON, the
+ * structure is parsed and every string leaf and key redacted at its own level
+ * — the descent `scan` makes, so what the verdict's instrument can see the
+ * record's redaction can reach. The text is re-serialized only on that path —
+ * compactly, so its whitespace is not kept; a record's text is read for its
+ * markers and sentinels, not byte for byte.
+ */
+function redactRecordText(text: string, secrets: string[], depth: number): string {
+  let out = text;
+  for (const secret of secrets) out = redactEncodings(out, secret, RECORD_REDACTION);
+  if (depth >= MAX_RECORD_PARSE_DEPTH) return out;
+  if (!secrets.some((secret) => scan(secret, out).length > 0)) return out;
+  const trimmed = out.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return out;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return out;
+  }
+  if (typeof parsed !== "object" || parsed === null) return out;
+  return JSON.stringify(redactRecordNode(parsed, secrets, depth + 1));
+}
+
+function redactRecordNode(node: unknown, secrets: string[], depth: number): unknown {
+  if (typeof node === "string") return redactRecordText(node, secrets, depth);
+  if (Array.isArray(node)) return node.map((item) => redactRecordNode(item, secrets, depth));
+  if (typeof node === "object" && node !== null) {
+    const out = Object.create(null) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      out[redactRecordText(key, secrets, depth)] = redactRecordNode(value, secrets, depth);
+    }
+    return out;
+  }
+  return node;
+}
+
+function redactEncodings(text: string, secret: string, marker: string): string {
+  if (secret.length === 0) return text;
   let out = text;
   for (const enc of encodingsOf(secret)) {
     for (const match of findEscapeTolerant(out, enc.needle).reverse()) {
-      out = out.slice(0, match.start) + "[REDACTED]" + out.slice(match.end);
+      out = out.slice(0, match.start) + marker + out.slice(match.end);
     }
   }
   return out;

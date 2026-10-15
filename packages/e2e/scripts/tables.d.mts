@@ -23,6 +23,8 @@ export interface EvidenceRecord {
   at: string;
   host_os: string;
   dirty: boolean;
+  /** The calls the verdict was judged on (since 2026-10-15); the generator carries it, never reads it. */
+  calls?: Array<{ ok: boolean; error?: string; text: string; stderr?: string; truncated?: true }>;
 }
 
 export interface Expectation {

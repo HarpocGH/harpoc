@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { assertOpaque, assertPresent, sightings } from "./opacity.js";
+import {
+  RECORD_REDACTION,
+  assertOpaque,
+  assertPresent,
+  redactForDiagnostics,
+  redactForRecord,
+  sightings,
+} from "./opacity.js";
 import { serializeError } from "./serialize-error.js";
+import { scan } from "./scan.js";
 
 /**
  * A scenario has to CLASSIFY an outcome (LEAKED vs OPAQUE) rather than assert
@@ -109,5 +117,61 @@ describe("assertPresent (negative control against blanket redaction)", () => {
 
   it("fails when everything was redacted", () => {
     expect(() => assertPresent("keep-me", { result: { note: "[REDACTED]" } })).toThrow(/keep-me/);
+  });
+});
+
+/**
+ * I1 (test-review-2026-10-09): the record-time redaction behind
+ * `EvidenceRecord.calls`. Its marker must differ from the sanitizer's, because
+ * the sanitizer's `[REDACTED]` is one of the things a reader re-checks for.
+ */
+describe("redactForRecord (the record-time marker behind EvidenceRecord.calls)", () => {
+  const secret = 'sk-record/ab+cd 123"x';
+
+  it("replaces the credential and its encodings with a marker that is not the sanitizer's", () => {
+    const b64 = Buffer.from(secret).toString("base64");
+    const text = `plain ${secret}, base64 ${b64}, json ${JSON.stringify({ k: secret })}, kept [REDACTED]`;
+    const out = redactForRecord(text, secret);
+    expect(out).not.toContain(secret);
+    expect(out).not.toContain(b64);
+    expect(out).toContain(RECORD_REDACTION);
+    expect(out).toContain("kept [REDACTED]");
+    expect(RECORD_REDACTION).not.toBe("[REDACTED]");
+    expect(redactForDiagnostics(text, secret)).not.toContain(RECORD_REDACTION);
+  });
+
+  it("takes several credentials and leaves a text without any of them untouched", () => {
+    expect(redactForRecord("alpha-one beta-two", "alpha-one", "beta-two")).toBe(
+      `${RECORD_REDACTION} ${RECORD_REDACTION}`,
+    );
+    expect(redactForRecord("clean", secret)).toBe("clean");
+  });
+});
+
+describe("redactForRecord on nested JSON (the structural pass)", () => {
+  const secret = 'sk-nested"credential\\x';
+
+  it("marks a credential two and three JSON levels deep and keeps the text parseable", () => {
+    const inner = JSON.stringify({ body: JSON.stringify({ token: secret, note: "kept" }) });
+    const text = JSON.stringify({ content: [{ type: "text", text: inner }] });
+    expect(scan(secret, text).length).toBeGreaterThan(0);
+    const out = redactForRecord(text, secret);
+    expect(scan(secret, out)).toEqual([]);
+    expect(out).toContain(RECORD_REDACTION);
+    const parsed = JSON.parse(out) as { content: Array<{ type: string; text: string }> };
+    const leaf = JSON.parse(parsed.content[0]?.text ?? "{}") as { body: string };
+    expect(JSON.parse(leaf.body)).toEqual({ token: RECORD_REDACTION, note: "kept" });
+  });
+
+  it("marks a credential sitting in an object key", () => {
+    const text = JSON.stringify({ outer: JSON.stringify({ [secret]: "v" }) });
+    const out = redactForRecord(text, secret);
+    expect(scan(secret, out)).toEqual([]);
+    expect(out).toContain(RECORD_REDACTION);
+  });
+
+  it("leaves a text without a nested sighting byte-identical, formatting included", () => {
+    const text = JSON.stringify({ a: JSON.stringify({ b: "clean" }) }, null, 2);
+    expect(redactForRecord(text, secret)).toBe(text);
   });
 });

@@ -5,6 +5,7 @@ import { createHarnessVault, grantOn, storeSecret } from "./harness/vault.js";
 import type { HarnessVault } from "./harness/vault.js";
 import { expectAttributedSuccess } from "./harness/audit.js";
 import { recordArm } from "./harness/evidence.js";
+import { callEvidence } from "./evidence/calls.js";
 import { startMcpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import type { McpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import { caPem } from "./harness/pki.js";
@@ -73,6 +74,7 @@ describe("database context — live PostgreSQL over fixture TLS", () => {
         arm: "harpoc",
       },
       "SUCCEEDED",
+      [callEvidence(outcome, DB_SECRET, PG.password)],
     );
     expect(record.match).toBe(true);
   });
@@ -134,6 +136,7 @@ describe("database context — M3: IP-literal targets have no name to verify", (
         arm: "harpoc",
       },
       "REJECTED",
+      [callEvidence(outcome, DB_SECRET, PG.password)],
     );
     expect(record.match).toBe(true);
   });
@@ -187,6 +190,7 @@ describe("database context — a plaintext target is refused by default", () => 
         arm: "harpoc",
       },
       "REJECTED",
+      [callEvidence(outcome, DB_SECRET, PG.password)],
     );
     expect(record.match).toBe(true);
   });

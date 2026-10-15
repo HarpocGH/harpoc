@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname } from "node:path";
+import type { CallEvidence } from "./calls.js";
 
 export interface EvidenceRecord {
   scenario: string;
@@ -34,6 +35,15 @@ export interface EvidenceRecord {
    * evidence, and reads exactly like a clean run.
    */
   dirty: boolean;
+  /**
+   * The surface calls the verdict was judged on, in order — `ok`, the response
+   * text, the error text and the child's stderr, the credential and its
+   * encodings replaced by `[CREDENTIAL]` and each field capped (I1,
+   * test-review-2026-10-09). A record that carries it can be re-checked from
+   * its own content (`scripts/recheck.mjs`); absent on the runs before
+   * 2026-10-15 and on a record whose emitter captured none.
+   */
+  calls?: CallEvidence[];
 }
 
 let cached: string | null = null;

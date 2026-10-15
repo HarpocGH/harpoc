@@ -11,6 +11,7 @@ import { preferNativeSsh } from "./harness/fixtures.js";
 import { assertOpaque, assertPresent } from "./assert/opacity.js";
 import { expectAttributedSuccess } from "./harness/audit.js";
 import { recordArm } from "./harness/evidence.js";
+import { callEvidence } from "./evidence/calls.js";
 import { startMcpHttpSurface } from "./harness/surfaces/mcp-http.js";
 import { startMcpStdioSurface } from "./harness/surfaces/mcp-stdio.js";
 import { startMcpHttp2026Surface } from "./harness/surfaces/mcp-http-2026.js";
@@ -199,6 +200,7 @@ describe("demonstration matrix — six contexts × four interfaces", () => {
         arm: "harpoc",
       },
       "SUCCEEDED",
+      [callEvidence(outcome, ...fixture.opacitySubjects)],
     );
     expect(record.match).toBe(true);
     emitted.push(record);

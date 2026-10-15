@@ -1,5 +1,6 @@
 import { emit } from "../evidence/record.js";
 import type { EvidenceRecord } from "../evidence/record.js";
+import type { CallEvidence } from "../evidence/calls.js";
 import { loadExpectations, expectationFor } from "../evidence/preregistration.js";
 import type { Expectation, ExpectationKey } from "../evidence/preregistration.js";
 import { EVIDENCE_FILE, PREREGISTRATION_FILE } from "./vault.js";
@@ -18,12 +19,22 @@ let cached: Expectation[] | null = null;
  * `interface` is carried beside the pre-registration key rather than inside it:
  * it is a property of the surface, not a dimension the outcome was registered
  * against, and pre-registration keys must stay byte-stable across tranches.
+ *
+ * `calls` are the surface calls the verdict was judged on (`callEvidence` /
+ * `recordingArm` in evidence/calls.ts), written into the record so it can be
+ * re-checked from its own content (I1, test-review-2026-10-09).
  */
 export function recordArm(
   key: ExpectationKey & { interface: string },
   observed: string,
+  calls?: CallEvidence[],
 ): EvidenceRecord {
   cached ??= loadExpectations(PREREGISTRATION_FILE);
   const expected = expectationFor(cached, key);
-  return emit(EVIDENCE_FILE, { ...key, expected, observed });
+  return emit(EVIDENCE_FILE, {
+    ...key,
+    expected,
+    observed,
+    ...(calls === undefined ? {} : { calls }),
+  });
 }

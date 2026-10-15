@@ -38,6 +38,7 @@
     "typecheck": "tsc --noEmit",
     "test:e2e": "node scripts/run-e2e.mjs",
     "tables": "node scripts/generate-tables.mjs",
+    "recheck": "node scripts/recheck-evidence.mjs",
     "lint": "eslint src/"
   }
 }
