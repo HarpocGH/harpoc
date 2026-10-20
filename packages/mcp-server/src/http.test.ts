@@ -1202,7 +1202,7 @@ describe("the 2026-07-28 leg (dual-era, design R1)", () => {
     }
   });
 
-  it("answers a modern client_credentials start_oauth_flow as pending and leaves no collector live", async () => {
+  it("answers a modern client_credentials start_oauth_flow as not_created, creates nothing and leaves no collector live (S2)", async () => {
     vi.mocked(engine.verifyToken).mockReturnValue(
       tokenPayload(["create"]) as unknown as VaultApiToken,
     );
@@ -1234,13 +1234,12 @@ describe("the 2026-07-28 leg (dual-era, design R1)", () => {
 
       expect(result.isError).toBeUndefined();
       expect(JSON.parse(result.content[0]?.text ?? "{}")).toEqual({
-        handle: "secret://m2m",
-        status: "pending",
+        status: "not_created",
         message:
-          "No out-of-band channel was available to collect the client secret. Complete with: " +
+          "No out-of-band channel was available to collect the client secret, so nothing was created. Create it with: " +
           "harpoc oauth connect m2m --client-credentials --provider custom --client-id client-123",
       });
-      expect(createOAuthSecret).toHaveBeenCalledTimes(1);
+      expect(createOAuthSecret).not.toHaveBeenCalled();
       expect(exchange).not.toHaveBeenCalled();
       expect(elicited).not.toHaveBeenCalled();
 

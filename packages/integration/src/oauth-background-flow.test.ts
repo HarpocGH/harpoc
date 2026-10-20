@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { OAuthManager } from "@harpoc/oauth-proxy";
+import { OAuthManager, providerConfigFromFlowInput } from "@harpoc/oauth-proxy";
 import {
   createTestVault,
   destroyTestVault,
@@ -12,6 +12,7 @@ import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
 import { startMockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import type { MockOAuthProvider } from "./helpers/mock-oauth-provider.js";
+import { AuditEventType, ErrorCode, SecretStatus } from "@harpoc/shared";
 import { silenceAuditLines } from "@harpoc/test-utils";
 
 silenceAuditLines();
@@ -22,13 +23,20 @@ silenceAuditLines();
  * request. The manager is injected so the flow the app started is the flow this
  * file can observe and cancel; the callback server and the token endpoint are
  * both real loopback servers, so the redirect and the code exchange are
- * observable from outside the vault.
+ * observable from outside the vault. Case 5 revokes a secret while its browser
+ * leg is pending and then drives the redirect: the late completion must not
+ * revive it (code-review-2026-10-15 S4). Case 6 re-POSTs a PENDING name with a
+ * token holding no `rotate` on it: the REST interface answers what an ACTIVE
+ * collision answers and the first flow stands (S2).
  */
 
 const PASSWORD = "oauth-background-pw";
 const PRINCIPAL = "background-agent";
 const OK_NAME = "bg-ok";
 const PENDING_NAME = "bg-pending";
+const REVOKED_NAME = "bg-revoked";
+const GATED_NAME = "bg-gated";
+const ACTIVE_NAME = "bg-active";
 const CLIENT_ID = "bg-client";
 const CLIENT_SECRET = "bg-secret-1";
 const ACCESS_TOKEN = "at-bg-1";
@@ -256,5 +264,118 @@ describe("REST background authorization-code flow", () => {
     expect(after.data.has_access_token).toBe(false);
     expect(mock.requests).toHaveLength(1);
     expect(backgroundErrors).toEqual([]);
+  });
+
+  it("5. a callback after the secret was revoked does not revive it: the completion refuses SECRET_REVOKED and the secret stays revoked (S4)", async () => {
+    const res = await postAuthorize(REVOKED_NAME);
+    expect(res.status).toBe(201);
+    const started = (await res.json()) as { data: { handle: string; auth_url: string } };
+    const handle = started.data.handle;
+    const authUrl = new URL(started.data.auth_url);
+    const redirectUri = authUrl.searchParams.get("redirect_uri") as string;
+    const state = authUrl.searchParams.get("state") as string;
+    const port = new URL(redirectUri).port;
+    const secretId = await vault.engine.resolveSecretId(handle);
+
+    await vault.engine.revokeSecret(handle);
+    expect((await vault.engine.getSecretInfo(handle)).status).toBe(SecretStatus.REVOKED);
+    const exchangesBefore = mock.requests.length;
+
+    const redirect = await fetch(`${redirectUri}?code=${AUTH_CODE}&state=${state}`);
+    expect(redirect.status).toBe(200);
+    await vi.waitFor(async () => {
+      await expect(fetch(`http://127.0.0.1:${port}/not-the-callback`)).rejects.toThrow();
+    });
+
+    expect((await vault.engine.getSecretInfo(handle)).status).toBe(SecretStatus.REVOKED);
+    expect(vault.engine.getOAuthTokenStatus(secretId).has_access_token).toBe(false);
+    expect(mock.requests.length).toBe(exchangesBefore + 1);
+    await vi.waitFor(() => {
+      expect(backgroundErrors.filter((e) => e.secretId === secretId)).toHaveLength(1);
+    });
+    expect(backgroundErrors.find((e) => e.secretId === secretId)?.err).toMatchObject({
+      code: ErrorCode.SECRET_REVOKED,
+    });
+
+    const callbackRows = vault.engine.queryAudit({
+      secretId,
+      eventType: AuditEventType.OAUTH_CALLBACK,
+    });
+    expect(callbackRows).toHaveLength(1);
+    expect(callbackRows[0]).toMatchObject({ success: false });
+    expect(callbackRows[0]?.detail).toMatchObject({ error: ErrorCode.SECRET_REVOKED });
+  });
+
+  it("6. a re-POST by a token without rotate on the PENDING secret is refused 409 DUPLICATE_SECRET like an ACTIVE collision, and the first flow stands", async () => {
+    const firstRes = await postAuthorize(GATED_NAME);
+    expect(firstRes.status).toBe(201);
+    const first = (await firstRes.json()) as { data: { handle: string; auth_url: string } };
+    const handle = first.data.handle;
+    const firstPort = new URL(
+      new URL(first.data.auth_url).searchParams.get("redirect_uri") as string,
+    ).port;
+    const gatedId = await vault.engine.resolveSecretId(handle);
+    const exchangesBefore = mock.requests.length;
+    const backgroundErrorsBefore = backgroundErrors.length;
+    const failedAuthorizeRows = (): number =>
+      vault.engine
+        .queryAudit({ eventType: AuditEventType.OAUTH_AUTHORIZE })
+        .filter((r) => !r.success).length;
+    const failedBefore = failedAuthorizeRows();
+
+    const gatedRes = await postAuthorize(GATED_NAME);
+    expect(gatedRes.status).toBe(409);
+    const gatedRaw = await gatedRes.text();
+    expect(JSON.parse(gatedRaw)).toEqual({
+      error: ErrorCode.DUPLICATE_SECRET,
+      message: `Secret already exists: ${GATED_NAME}`,
+    });
+    expect(failedAuthorizeRows()).toBe(failedBefore + 1);
+
+    const { config } = providerConfigFromFlowInput({
+      name: ACTIVE_NAME,
+      provider: "custom",
+      grant_type: "authorization_code",
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      auth_endpoint: AUTH_ENDPOINT,
+      token_endpoint: mock.tokenEndpoint,
+    });
+    const active = await vault.engine.createOAuthSecret(ACTIVE_NAME, config);
+    await vault.engine.completeOAuthFlow(active.secretId, ACCESS_TOKEN);
+    expect((await vault.engine.getSecretInfo(`secret://${ACTIVE_NAME}`)).status).toBe(
+      SecretStatus.ACTIVE,
+    );
+    const activeRes = await postAuthorize(ACTIVE_NAME);
+    expect(activeRes.status).toBe(409);
+    const activeRaw = await activeRes.text();
+    expect(JSON.parse(activeRaw)).toEqual({
+      error: ErrorCode.DUPLICATE_SECRET,
+      message: `Secret already exists: ${ACTIVE_NAME}`,
+    });
+    expect(gatedRaw).toBe(activeRaw.replace(ACTIVE_NAME, GATED_NAME));
+    expect(gatedRes.headers.get("content-type")).toBe(activeRes.headers.get("content-type"));
+
+    expect(await vault.engine.resolveSecretId(handle)).toBe(gatedId);
+    expect((await vault.engine.getSecretInfo(handle)).status).toBe(SecretStatus.PENDING);
+    expect(vault.engine.getOAuthTokenStatus(gatedId).has_access_token).toBe(false);
+    const probe = await fetch(`http://127.0.0.1:${firstPort}/not-the-callback`);
+    expect(probe.status).toBe(404);
+    expect(mock.requests).toHaveLength(exchangesBefore);
+    expect(backgroundErrors).toHaveLength(backgroundErrorsBefore);
+
+    const denied = vault.engine
+      .queryAudit({ secretId: gatedId, eventType: AuditEventType.OAUTH_AUTHORIZE })
+      .filter((r) => !r.success);
+    expect(denied).toHaveLength(1);
+    expect(denied[0]).toMatchObject({ principal_id: PRINCIPAL });
+    expect(denied[0]?.detail).toMatchObject({
+      required_permission: "rotate",
+      error: ErrorCode.ACCESS_DENIED,
+      interface: "rest",
+    });
+
+    expect(manager.cancelFlow(gatedId)).toBe(true);
+    expect(backgroundErrors).toHaveLength(backgroundErrorsBefore);
   });
 });

@@ -293,8 +293,18 @@ describe("createOAuthSecret — caller attribution", () => {
     expect(engine.getOAuthTokenStatus(secretId).provider).toBe("github");
   });
 
-  it("the resume path returns the same handle and attributes the resumed row", async () => {
+  it("a rotate-granted caller's resume returns the same handle and attributes the resumed row", async () => {
     const first = await engine.createOAuthSecret("resume-attributed", defaultProviderConfig());
+    registerAgents(engine, "tok-sub");
+    engine.grantPolicy(
+      {
+        secretId: first.secretId,
+        principalType: PrincipalType.AGENT,
+        principalId: "tok-sub",
+        permissions: ["rotate"] as Permission[],
+      },
+      "test-setup",
+    );
     const second = await engine.createOAuthSecret(
       "resume-attributed",
       defaultProviderConfig(),

@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenRefreshScheduler } from "./token-refresh.js";
 
+interface ExpiringRow {
+  secret_id: string;
+  grant_type?: string;
+  refresh_token_encrypted?: Uint8Array | null;
+}
+
 // Mock VaultEngine
 function createMockEngine(options?: {
-  expiringTokens?: { secret_id: string }[];
+  expiringTokens?: ExpiringRow[];
   refreshResult?: number | null;
   refreshError?: Error;
 }) {
@@ -505,5 +511,74 @@ describe("TokenRefreshScheduler failure quarantine (code review Low O4)", () => 
     const brokenCalls = engine.refreshOAuthToken.mock.calls.filter((c) => c[0] === "broken");
     expect(healthyCalls.length).toBe(2);
     expect(brokenCalls.length).toBe(3);
+  });
+});
+
+describe("TokenRefreshScheduler rows no refresh can renew (code review Q7)", () => {
+  let scheduler: TokenRefreshScheduler;
+
+  afterEach(() => {
+    scheduler?.stop();
+  });
+
+  function row(secretId: string, grantType: string, withRefreshToken: boolean): ExpiringRow {
+    return {
+      secret_id: secretId,
+      grant_type: grantType,
+      refresh_token_encrypted: withRefreshToken ? new Uint8Array([1, 2, 3]) : null,
+    };
+  }
+
+  it("tick never passes an authorization_code row without a refresh token to the engine and raises no onRefreshError", async () => {
+    const { engine, refreshCalls } = createMockEngine({
+      expiringTokens: [row("ac-none", "authorization_code", false)],
+      refreshError: new Error("No refresh token available"),
+    });
+    const onRefreshError = vi.fn();
+    scheduler = new TokenRefreshScheduler(engine as never, {
+      initialRetryDelayMs: 0,
+      onRefreshError,
+    });
+
+    await scheduler.tick();
+    await scheduler.tick();
+
+    expect(engine.getExpiringOAuthTokens).toHaveBeenCalledTimes(2);
+    expect(refreshCalls).toEqual([]);
+    expect(onRefreshError).not.toHaveBeenCalled();
+  });
+
+  it("tick passes a client_credentials row without a refresh token and every row holding one, and skips the other grants without one", async () => {
+    const { engine, refreshCalls } = createMockEngine({
+      expiringTokens: [
+        row("ac-none", "authorization_code", false),
+        row("cc-none", "client_credentials", false),
+        row("dc-none", "device_code", false),
+        row("ac-rt", "authorization_code", true),
+        row("dc-rt", "device_code", true),
+      ],
+    });
+    scheduler = new TokenRefreshScheduler(engine as never, { initialRetryDelayMs: 0 });
+
+    await scheduler.tick();
+
+    expect(refreshCalls).toEqual(["cc-none", "ac-rt", "dc-rt"]);
+  });
+
+  it("the skip is per tick, not a quarantine: the same row is refreshed on the next tick once it holds a refresh token", async () => {
+    const { engine, refreshCalls } = createMockEngine();
+    engine.getExpiringOAuthTokens
+      .mockReturnValueOnce([row("ac-1", "authorization_code", false)])
+      .mockReturnValueOnce([row("ac-1", "authorization_code", true)]);
+    scheduler = new TokenRefreshScheduler(engine as never, {
+      checkIntervalMs: 60_000,
+      initialRetryDelayMs: 0,
+    });
+
+    await scheduler.tick();
+    expect(refreshCalls).toEqual([]);
+
+    await scheduler.tick();
+    expect(refreshCalls).toEqual(["ac-1"]);
   });
 });

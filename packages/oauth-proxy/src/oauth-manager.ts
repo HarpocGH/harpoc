@@ -271,8 +271,8 @@ export class OAuthManager {
     // secretId is known, so a supersede (same secret, its predecessor already
     // holding a socket that this start replaces) is exempt — and before the
     // CallbackServer exists, so a refusal binds no socket and arms no timer.
-    // The PENDING secret row above stays and is resumable: that row is what
-    // `create` scope already buys.
+    // The PENDING secret row above stays; resuming it takes `rotate` on it
+    // (or the trusted path), as a refresh does.
     if (
       predecessor?.holdsSocket !== true &&
       this.countSocketFlows() >= this.maxPendingAuthorizations

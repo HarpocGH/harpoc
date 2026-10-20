@@ -1,4 +1,4 @@
-import { VaultError } from "@harpoc/shared";
+import { VaultError, oauthScopesSeparator } from "@harpoc/shared";
 import type { OAuthProviderConfig, OAuthProviderPreset } from "@harpoc/shared";
 
 export interface ProviderPreset {
@@ -65,10 +65,10 @@ export function resolveProvider(config: OAuthProviderConfig): OAuthProviderConfi
 }
 
 /**
- * Get the scopes separator for a provider (defaults to space).
+ * Get the scopes separator for a provider: shared's one table, which core's
+ * client-credentials re-exchange joins through too (a space unless the preset
+ * documents its own).
  */
 export function getScopesSeparator(provider: OAuthProviderPreset): string {
-  if (provider === "custom") return " ";
-  const preset = PROVIDER_PRESETS[provider];
-  return preset?.scopes_separator ?? " ";
+  return oauthScopesSeparator(provider);
 }

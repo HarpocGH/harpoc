@@ -1,4 +1,5 @@
 import type { VaultEngine } from "@harpoc/core";
+import { OAuthGrantType } from "@harpoc/shared";
 
 const DEFAULT_CHECK_INTERVAL_MS = 60_000; // 60 seconds
 const EXPIRING_WITHIN_MS = 5 * 60 * 1000; // 5 minutes
@@ -116,13 +117,21 @@ export class TokenRefreshScheduler {
   /**
    * Run one tick: find expiring tokens and refresh them. Tokens inside their
    * quarantine window are skipped — without the backoff, a permanently broken
-   * token is retried every tick, forever.
+   * token is retried every tick, forever. A row without a refresh token is
+   * skipped too, every tick, unless its grant is client_credentials, which the
+   * engine renews by re-running the exchange.
    */
   async tick(): Promise<void> {
     const expiringTokens = this.engine.getExpiringOAuthTokens(EXPIRING_WITHIN_MS);
     const now = Date.now();
 
     for (const token of expiringTokens) {
+      if (
+        token.refresh_token_encrypted === null &&
+        token.grant_type !== OAuthGrantType.CLIENT_CREDENTIALS
+      ) {
+        continue;
+      }
       const entry = this.quarantine.get(token.secret_id);
       if (entry && now < entry.nextAttemptAt) continue;
       try {

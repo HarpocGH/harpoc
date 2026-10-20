@@ -486,11 +486,12 @@ describe("fail-closed audit: tokens, OAuth flow, password change", () => {
 
     expect(rawStatus(secretId)).toBe(SecretStatus.PENDING);
     expect(liveStore().getOAuthToken(secretId)?.access_token_encrypted).toBeNull();
-    expect(auditCount(AuditEventType.OAUTH_CALLBACK)).toBe(0);
+    expect(auditCount(AuditEventType.OAUTH_CALLBACK, true)).toBe(0);
+    expect(auditCount(AuditEventType.OAUTH_CALLBACK, false)).toBe(1);
 
     await engine.completeOAuthFlow(secretId, "access-token", "refresh-token");
     expect(rawStatus(secretId)).toBe(SecretStatus.ACTIVE);
-    expect(auditCount(AuditEventType.OAUTH_CALLBACK)).toBe(1);
+    expect(auditCount(AuditEventType.OAUTH_CALLBACK, true)).toBe(1);
   });
 
   it("refreshOAuthToken rolls back the rotated tokens when the audit write fails", async () => {

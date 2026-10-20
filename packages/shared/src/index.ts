@@ -10,6 +10,7 @@ export * from "./dedicated-contexts.js";
 export * from "./decimal-integer.js";
 export * from "./interpreters.js";
 export * from "./name-pattern.js";
+export * from "./oauth-scopes.js";
 export * from "./pem.js";
 export * from "./recipient-pattern.js";
 export * from "./schema-issues.js";

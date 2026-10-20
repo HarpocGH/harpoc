@@ -75,14 +75,8 @@ export function registerStartOauthFlow(
         return text(await startOAuthFlowResult(oauthManager, input, scopeGuard.caller));
       }
 
-      // client_credentials — config-then-collect: the PENDING secret exists either way.
-      const { config, project } = providerConfigFromFlowInput(input);
-      const { handle } = await engine.createOAuthSecret(
-        args.name,
-        config,
-        project,
-        scopeGuard.caller,
-      );
+      // client_credentials — collect-then-create: a declined collection creates nothing.
+      providerConfigFromFlowInput(input);
       const subject = `${args.name} (OAuth client secret)`;
       let secretBytes = await collectValueViaUrlElicitation(server, {
         subject,
@@ -94,10 +88,9 @@ export function registerStartOauthFlow(
       }
       if (!secretBytes) {
         return text({
-          handle,
-          status: "pending",
+          status: "not_created",
           message:
-            `No out-of-band channel was available to collect the client secret. Complete with: ` +
+            `No out-of-band channel was available to collect the client secret, so nothing was created. Create it with: ` +
             `harpoc oauth connect ${args.name} --client-credentials --provider ${args.provider} --client-id ${args.client_id}`,
         });
       }

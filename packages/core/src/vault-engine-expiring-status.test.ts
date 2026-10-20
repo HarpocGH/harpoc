@@ -92,6 +92,19 @@ function windowDaysCovering(certPem: string): number {
   return Math.min(365, Math.max(1, Math.ceil((validToMs - Date.now()) / DAY_MS) + 1));
 }
 
+/** Move an OAuth row's access-token expiry out of band — a completion runs once per secret. */
+function setAccessTokenExpiry(secretId: string, expiresAt: number): void {
+  const db = new Database(dbPath);
+  try {
+    const { changes }: { changes: number } = db
+      .prepare("UPDATE oauth_tokens SET access_token_expires_at = ? WHERE secret_id = ?")
+      .run(expiresAt, secretId);
+    expect(changes).toBe(1);
+  } finally {
+    db.close();
+  }
+}
+
 /**
  * Fixture surgery: every checked-in certificate is either long expired or valid
  * for a decade, so none of them lands strictly inside the scheduler's wide net
@@ -444,7 +457,7 @@ describe("inclusive window and status edges", () => {
     await engine.completeOAuthFlow(secretId, "at", "rt", Date.now() + HOUR_MS);
     expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS)).toHaveLength(1);
 
-    await engine.completeOAuthFlow(secretId, "at", "rt", Date.now() + HOUR_MS + 1);
+    setAccessTokenExpiry(secretId, Date.now() + HOUR_MS + 1);
     expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS)).toEqual([]);
   });
 
@@ -454,7 +467,7 @@ describe("inclusive window and status edges", () => {
     await engine.completeOAuthFlow(secretId, "at", "rt", Date.now() + 5 * MINUTE_MS);
     expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS)[0]?.refresh_status).toBe("expiring_soon");
 
-    await engine.completeOAuthFlow(secretId, "at", "rt", Date.now() + 5 * MINUTE_MS + 1);
+    setAccessTokenExpiry(secretId, Date.now() + 5 * MINUTE_MS + 1);
     expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS)[0]?.refresh_status).toBe("ok");
   });
 

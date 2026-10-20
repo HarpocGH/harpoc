@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { providerConfigFromFlowInput } from "@harpoc/oauth-proxy";
-import { AuditEventType, ErrorCode } from "@harpoc/shared";
+import { AuditEventType } from "@harpoc/shared";
 import {
   createTestVault,
   destroyTestVault,
@@ -50,6 +50,7 @@ let token: string;
 let ccSecretId: string;
 let acSecretId: string;
 let seededExpiresAt: number;
+let ccRefreshedExpiresAt: number;
 let refreshedExpiresAt: number;
 
 function authHeaders(): Record<string, string> {
@@ -153,9 +154,7 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
     expect(body.data.has_refresh_token).toBe(false);
   });
 
-  it("3a. REST refresh on a client_credentials secret is refused before any provider call", async () => {
-    // Tokens armed before the refusal on purpose: the provider is ready to
-    // hand out at-2, so an unrecorded request would mean the engine POSTed.
+  it("3a. REST refresh on a client_credentials secret re-exchanges its client credentials (Q7, TC-11)", async () => {
     mock.setNextTokens({ access_token: "at-2", expires_in: 3600 });
     const before = mock.requests.length;
 
@@ -164,12 +163,23 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
       headers: authHeaders(),
     });
 
-    // Pinned: a client-credentials grant stores no refresh token, so the engine
-    // refuses with OAUTH_REFRESH_FAILED (502 via the shared ERROR_STATUS table).
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(200);
     const raw = await res.text();
-    expect(JSON.parse(raw)).toMatchObject({ error: ErrorCode.OAUTH_REFRESH_FAILED });
-    expect(mock.requests.length).toBe(before);
+    const body = JSON.parse(raw) as { data: { refreshed: boolean; expires_at: number } };
+    expect(body.data.refreshed).toBe(true);
+    expect(body.data.expires_at).toBeGreaterThan(Date.now());
+    ccRefreshedExpiresAt = body.data.expires_at;
+
+    expect(mock.requests.length).toBe(before + 1);
+    expect(mock.requests[before]).toMatchObject({
+      grant_type: "client_credentials",
+      client_id: CC_CLIENT_ID,
+      client_secret: CC_CLIENT_SECRET,
+    });
+    expect(mock.requests[before]).not.toHaveProperty("refresh_token");
+    expect(await vault.engine["getOAuthAccessToken"](ccSecretId)).toBe("at-2");
+    expect(raw).not.toContain(CC_CLIENT_SECRET);
+    expect(raw).not.toContain("at-2");
   });
 
   it("3b. REST refresh on an authorization-code-shaped secret rotates the access token", async () => {
@@ -200,9 +210,9 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
     expect(body.data.expires_at).toBeGreaterThan(seededExpiresAt);
     refreshedExpiresAt = body.data.expires_at;
 
-    // Exactly one more provider call than step 1's: the refresh_token is POSTed
-    // once, so a double-exchange regression shows up here.
-    expect(mock.requests).toHaveLength(2);
+    // Exactly one more provider call than step 3a's: the refresh_token is
+    // POSTed once, so a double-exchange regression shows up here.
+    expect(mock.requests).toHaveLength(3);
     const last = mock.requests[mock.requests.length - 1];
     expect(last).toMatchObject({
       grant_type: "refresh_token",
@@ -269,15 +279,15 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
     // secret creation.
     expect(vault.engine.queryAudit({ eventType: AuditEventType.SECRET_CREATE })).toHaveLength(0);
 
-    const refusedRows = vault.engine.queryAudit({
+    const ccRefreshRows = vault.engine.queryAudit({
       eventType: AuditEventType.OAUTH_REFRESH,
       secretId: ccSecretId,
     });
-    expect(refusedRows).toHaveLength(1);
-    expect(refusedRows[0]?.success).toBe(false);
-    expect(refusedRows[0]?.detail?.error).toBe(ErrorCode.OAUTH_REFRESH_FAILED);
-    expect(refusedRows[0]?.principal_id).toBe(PRINCIPAL);
-    expect(refusedRows[0]?.detail?.interface).toBe("rest");
+    expect(ccRefreshRows).toHaveLength(1);
+    expect(ccRefreshRows[0]?.success).toBe(true);
+    expect(ccRefreshRows[0]?.principal_id).toBe(PRINCIPAL);
+    expect(ccRefreshRows[0]?.detail?.interface).toBe("rest");
+    expect(ccRefreshRows[0]?.detail?.new_expires_at).toBe(ccRefreshedExpiresAt);
 
     const refreshRows = vault.engine.queryAudit({
       eventType: AuditEventType.OAUTH_REFRESH,

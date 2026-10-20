@@ -245,7 +245,7 @@ describe("start_oauth_flow", () => {
     expect("completion" in data).toBe(false);
   });
 
-  it("client_credentials without an out-of-band channel leaves a PENDING secret and skips the manager", async () => {
+  it("client_credentials without an out-of-band channel creates nothing: no engine call, no manager call, a not_created answer naming the CLI command (S2)", async () => {
     const { server, engine, oauthManager } = harness();
 
     const result = await callTool(server, "start_oauth_flow", {
@@ -256,16 +256,37 @@ describe("start_oauth_flow", () => {
       token_endpoint: "https://idp.example.com/oauth/token",
     });
 
-    expect(engine.createOAuthSecret).toHaveBeenCalledTimes(1);
+    expect(engine.createOAuthSecret).not.toHaveBeenCalled();
     expect(oauthManager.startClientCredentials).not.toHaveBeenCalled();
 
-    const data = toolData(result);
-    expect(data.status).toBe("pending");
-    expect(data.message).toContain("harpoc oauth connect");
-    expect(data.message).toContain("--client-credentials");
+    expect(result.isError).toBeUndefined();
+    expect(toolData(result)).toEqual({
+      status: "not_created",
+      message:
+        "No out-of-band channel was available to collect the client secret, so nothing was created. Create it with: " +
+        "harpoc oauth connect m2m --client-credentials --provider custom --client-id client-123",
+    });
   });
 
-  it("client_credentials completes with the collected secret, zeroes the bytes and returns metadata only", async () => {
+  it("client_credentials with an unusable configuration refuses before any collection and creates nothing (S2)", async () => {
+    vi.mocked(collectValueViaUrlElicitation).mockClear();
+    const { server, engine, oauthManager } = harness();
+
+    const result = await callTool(server, "start_oauth_flow", {
+      name: "m2m",
+      provider: "custom",
+      grant_type: "client_credentials",
+      client_id: "client-123",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("token_endpoint is required for provider");
+    expect(collectValueViaUrlElicitation).not.toHaveBeenCalled();
+    expect(engine.createOAuthSecret).not.toHaveBeenCalled();
+    expect(oauthManager.startClientCredentials).not.toHaveBeenCalled();
+  });
+
+  it("client_credentials collects the secret first, then creates exactly once through the manager, zeroes the bytes and returns metadata only (S2)", async () => {
     const secret = "cc-collected-secret";
     const bytes = new TextEncoder().encode(secret);
     vi.mocked(collectValueViaUrlElicitation).mockResolvedValueOnce(bytes);
@@ -281,15 +302,17 @@ describe("start_oauth_flow", () => {
       client_id: "client-123",
     });
 
-    // The PENDING config is written before the secret is collected.
-    expect(engine.createOAuthSecret).toHaveBeenCalledTimes(1);
-    expect(oauthConfigOf(engine).client_secret).toBeUndefined();
+    expect(engine.createOAuthSecret).not.toHaveBeenCalled();
 
     expect(collectValueViaUrlElicitation).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ principal: "jti-1" }),
     );
 
+    expect(startClientCredentials).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(collectValueViaUrlElicitation).mock.invocationCallOrder.at(-1)).toBeLessThan(
+      startClientCredentials.mock.invocationCallOrder[0] ?? 0,
+    );
     expect(startClientCredentials).toHaveBeenCalledWith(
       "gh-m2m",
       expect.objectContaining({

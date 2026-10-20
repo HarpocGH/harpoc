@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { OAuthProviderConfig } from "@harpoc/shared";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, OAuthProviderPreset, oauthScopesSeparator } from "@harpoc/shared";
 import { PROVIDER_PRESETS, getScopesSeparator, resolveProvider } from "./providers.js";
 import { expectVaultError } from "@harpoc/test-utils";
+
+vi.mock("@harpoc/shared", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@harpoc/shared")>();
+  return { ...actual, oauthScopesSeparator: vi.fn(actual.oauthScopesSeparator) };
+});
 
 function baseConfig(overrides: Partial<OAuthProviderConfig> = {}): OAuthProviderConfig {
   return {
@@ -123,6 +128,25 @@ describe("getScopesSeparator", () => {
 
   it("returns space for custom provider", () => {
     expect(getScopesSeparator("custom")).toBe(" ");
+  });
+});
+
+describe("the scope separator is shared's one table (code review Q7)", () => {
+  it("every preset's scopes_separator equals shared's oauthScopesSeparator", () => {
+    for (const [name, preset] of Object.entries(PROVIDER_PRESETS)) {
+      expect(preset.scopes_separator ?? " ", name).toBe(
+        oauthScopesSeparator(name as OAuthProviderPreset),
+      );
+    }
+  });
+
+  it("getScopesSeparator delegates to shared's oauthScopesSeparator for every provider", () => {
+    for (const provider of Object.values(OAuthProviderPreset)) {
+      vi.mocked(oauthScopesSeparator).mockClear();
+      expect(getScopesSeparator(provider)).toBe(oauthScopesSeparator(provider));
+      expect(oauthScopesSeparator).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(oauthScopesSeparator).mock.calls[0]).toEqual([provider]);
+    }
   });
 });
 

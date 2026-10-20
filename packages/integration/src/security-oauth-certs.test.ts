@@ -21,7 +21,7 @@ import type { MockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import { KEY_PEM, CERT_PEM, EXPIRED_KEY_PEM, EXPIRED_CERT_PEM } from "./helpers/cert-fixtures.js";
 import { canon, keyNeedles } from "./helpers/key-needles.js";
 import type { Needle } from "./helpers/key-needles.js";
-import { connectInMemoryClient, silenceAuditLines } from "@harpoc/test-utils";
+import { connectInMemoryClient, expectVaultError, silenceAuditLines } from "@harpoc/test-utils";
 
 silenceAuditLines();
 
@@ -46,14 +46,15 @@ silenceAuditLines();
  * 4. the two expiring-status projections (D5) hand out exactly their metadata
  *    key set, over the engine and over `check_secret_health`, which is the one
  *    wired surface that serializes them;
- * 5. an MCP client_credentials flow completes with the client secret collected
- *    out of band, and both of its `oauth.authorize` rows are attributed to the
- *    launch token's principal and interface.
+ * 5. an MCP client_credentials flow collects the client secret out of band
+ *    before anything is created, then completes, and its one `oauth.authorize`
+ *    row is attributed to the launch token's principal and interface; a
+ *    declined collection creates nothing.
  *
  * One ordered lifecycle over a single vault, one REST server and one tokenless
  * MCP server: the sweeps read what the flow test recorded, so the file runs as
- * a whole. Case 6 starts a second, token-bearing in-memory MCP server of its
- * own, after the sweeps.
+ * a whole. Cases 6 and 7 each start a second, token-bearing in-memory MCP
+ * server of their own, after the sweeps.
  */
 
 const PASSWORD = "security-posture-pw";
@@ -80,6 +81,7 @@ const MCP_CC_NAME = "mcp-cc-app-17";
 const MCP_CC_CLIENT_ID = "mcp-cc-client-17";
 const MCP_CC_CLIENT_SECRET = "mcp-cc-secret-17";
 const MCP_CC_ACCESS_TOKEN = "at17-mcp-cc-do-not-leak";
+const MCP_CC_DECLINED_NAME = "mcp-cc-declined-17";
 
 const IMPORTED_NAME = "posture-cert-17";
 const EXPIRING_NAME = "posture-expiring-17";
@@ -498,7 +500,7 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
       },
     );
     expect(smuggled.isError).toBe(false);
-    expect(JSON.parse(smuggled.text)).toMatchObject({ status: "pending" });
+    expect(JSON.parse(smuggled.text)).toMatchObject({ status: "not_created" });
     expect(smuggled.text).toContain("No out-of-band channel was available");
     expect(mock.requests.length).toBe(providerCalls);
 
@@ -609,7 +611,7 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
 
   it("5. the expiring-status projections are metadata only (D5)", () => {
     const oauthItems = vault.engine.getExpiringOAuthTokenStatuses(HOUR_MS);
-    // The smuggle flow's secret holds no token at all, so it is not expiring.
+    // The smuggle flow created no secret, so nothing of it is expiring.
     expect(oauthItems.map((i) => i.name).sort()).toEqual([AC_NAME, CC_NAME].sort());
     for (const item of oauthItems) {
       expect(Object.keys(item).sort()).toEqual(OAUTH_PROJECTION_KEYS);
@@ -648,14 +650,14 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
     expect(health.certificates_nearing_renewal).toEqual(certItems);
   });
 
-  // I33 (test-review-2026-10-09): the MCP client_credentials path completed on
-  // the real engine — the tool stores the PENDING config (the first
-  // `oauth.authorize` row), the client secret is collected out of band through
-  // the one-time loopback form a URL-mode elicitation names, and the manager's
-  // resume exchanges it and completes (the second row, `resumed: true`). Both
-  // rows carry the launch token's principal and the in-process / stdio interface
-  // `mcp` (Streamable HTTP would be `mcp-http`).
-  it("6. an MCP client_credentials flow completes with a collected secret and writes two attributed oauth.authorize rows", async () => {
+  // I33 (test-review-2026-10-09), S2 (code-review-2026-10-15): the MCP
+  // client_credentials path completed on the real engine — the client secret is
+  // collected out of band through the one-time loopback form a URL-mode
+  // elicitation names, then the manager creates the secret once, exchanges and
+  // completes. The one `oauth.authorize` row carries the launch token's
+  // principal and the in-process / stdio interface `mcp` (Streamable HTTP would
+  // be `mcp-http`).
+  it("6. an MCP client_credentials flow collects the secret first and completes with one attributed oauth.authorize row (S2)", async () => {
     mock.setNextTokens({ access_token: MCP_CC_ACCESS_TOKEN, expires_in: 86_400 });
     const providerCalls = mock.requests.length;
     const session = await connectInMemoryClient(
@@ -724,24 +726,60 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
     const rows = vault.engine
       .queryAudit({ secretId, eventType: AuditEventType.OAUTH_AUTHORIZE })
       .sort((a, b) => a.id - b.id);
-    expect(rows).toHaveLength(2);
-    for (const row of rows) {
-      expect(row).toMatchObject({
-        success: true,
-        principal_type: "agent",
-        principal_id: PRINCIPAL,
-      });
-    }
-    const detail = {
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      success: true,
+      principal_type: "agent",
+      principal_id: PRINCIPAL,
+    });
+    expect(rows[0]?.detail).toEqual({
       handle,
       provider: "custom",
       grant_type: "client_credentials",
       interface: "mcp",
-    };
-    expect(rows[0]?.detail).toEqual(detail);
-    expect(rows[1]?.detail).toEqual({ ...detail, resumed: true });
+    });
     expect(JSON.stringify(rows)).not.toContain(MCP_CC_CLIENT_SECRET);
     expect(JSON.stringify(rows)).not.toContain(MCP_CC_ACCESS_TOKEN);
+  });
+
+  it("7. a declined MCP client_credentials collection creates nothing: no secret, no oauth.authorize row, no provider call (S2)", async () => {
+    const providerCalls = mock.requests.length;
+    const session = await connectInMemoryClient(
+      createMcpServer({ engine: vault.engine, launchToken: token }),
+      { name: "s2-declined-client", version: "1.0.0" },
+      { capabilities: { elicitation: { url: {} } } },
+    );
+    let elicitations = 0;
+    let result: { isError?: boolean; content: Array<{ text: string }> };
+    try {
+      session.client.setRequestHandler("elicitation/create", async () => {
+        elicitations++;
+        return { action: "decline" };
+      });
+      result = await session.callTool("start_oauth_flow", {
+        name: MCP_CC_DECLINED_NAME,
+        provider: "custom",
+        grant_type: "client_credentials",
+        client_id: MCP_CC_CLIENT_ID,
+        token_endpoint: mock.tokenEndpoint,
+      });
+    } finally {
+      await session.close();
+    }
+
+    expect(elicitations).toBe(1);
+    const text = result.content[0]?.text ?? "";
+    expect(result.isError ?? false, text).toBe(false);
+    expect(JSON.parse(text)).toMatchObject({ status: "not_created" });
+    expect(JSON.parse(text)).not.toHaveProperty("handle");
+
+    await expectVaultError(
+      () => vault.engine.getSecretInfo(`secret://${MCP_CC_DECLINED_NAME}`),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
+    const authorizeRows = vault.engine.queryAudit({ eventType: AuditEventType.OAUTH_AUTHORIZE });
+    expect(JSON.stringify(authorizeRows)).not.toContain(MCP_CC_DECLINED_NAME);
+    expect(mock.requests.length).toBe(providerCalls);
   });
 });
 

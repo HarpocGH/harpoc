@@ -75,7 +75,9 @@ import {
   mcpServerConfigSchema,
   meetsVaultVersionFloor,
   MIN_PASSWORD_LENGTH,
+  OAuthGrantType,
   OAuthProviderPreset,
+  oauthScopesSeparator,
   PrincipalType,
   renderSchemaIssues,
   SecretStatus,
@@ -2326,15 +2328,19 @@ export class VaultEngine {
    * cancelled/failed flow works. ACTIVE or non-OAuth collisions stay
    * DUPLICATE_SECRET.
    *
-   * `caller` is attribution only, exactly as on `createSecret`: `create` is not
-   * grantable per secret (W2), so token scope governs it — but without the
-   * caller a token-bearing connect wrote NULL-principal rows, which is the
-   * documented marker for the *trusted local path* (L3), so a REST/MCP/CLI-token
-   * connect was indistinguishable from a local one in the trail (V2 attribution
-   * parity). `oauth.authorize` is this operation's own row and carries the
-   * attribution on both the fresh-create and the resume path; refusals are
-   * audited as a failed `oauth.authorize`, like `refreshOAuthToken` audits its
-   * own.
+   * On the fresh path `caller` is attribution only, exactly as on
+   * `createSecret`: `create` is not grantable per secret (W2), so token scope
+   * governs it — but without the caller a token-bearing connect wrote
+   * NULL-principal rows, which is the documented marker for the *trusted local
+   * path* (L3), so a REST/MCP/CLI-token connect was indistinguishable from a
+   * local one in the trail (V2 attribution parity). The resume is gated: a
+   * token caller resumes a PENDING secret only holding `rotate` (or `admin`) on
+   * it, or as an admin-scoped user token (R7); a refused resume answers
+   * `DUPLICATE_SECRET`, as an ACTIVE collision does, and writes the policy
+   * helper's one failed `oauth.authorize` row. `oauth.authorize` is this
+   * operation's own row and carries the attribution on both paths; every other
+   * refusal is audited as a failed `oauth.authorize`, like `refreshOAuthToken`
+   * audits its own.
    */
   async createOAuthSecret(
     name: string,
@@ -2344,24 +2350,28 @@ export class VaultEngine {
   ): Promise<{ handle: string; secretId: string }> {
     const s = this.assertUnlocked();
     let secretId: string | undefined;
+    let denialAudited = false;
     try {
       return await this.doCreateOAuthSecret(
         s,
         name,
         providerConfig,
         (id) => (secretId = id),
+        () => (denialAudited = true),
         project,
         caller,
       );
     } catch (err) {
-      this.auditDenied(
-        s,
-        AuditEventType.OAUTH_AUTHORIZE,
-        err,
-        { name, provider: providerConfig.provider, grant_type: providerConfig.grant_type },
-        secretId,
-        caller,
-      );
+      if (!denialAudited) {
+        this.auditDenied(
+          s,
+          AuditEventType.OAUTH_AUTHORIZE,
+          err,
+          { name, provider: providerConfig.provider, grant_type: providerConfig.grant_type },
+          secretId,
+          caller,
+        );
+      }
       throw err;
     }
   }
@@ -2371,6 +2381,7 @@ export class VaultEngine {
     name: string,
     providerConfig: OAuthProviderConfig,
     onResolved: (secretId: string) => void,
+    onDenialAudited: () => void,
     project?: string,
     caller?: CallerContext,
   ): Promise<{ handle: string; secretId: string }> {
@@ -2465,6 +2476,26 @@ export class VaultEngine {
       // would reopen the window P10-7 named (P1R-3, 2026-09-23).
       const existingId = existing.id;
       onResolved(existingId);
+      try {
+        this.checkResolvedCallerPolicy(
+          s,
+          existingId,
+          caller,
+          "rotate",
+          AuditEventType.OAUTH_AUTHORIZE,
+          { name, provider: providerConfig.provider, grant_type: providerConfig.grant_type },
+          handle,
+        );
+      } catch (gateErr) {
+        if (
+          gateErr instanceof VaultError &&
+          (gateErr.code === ErrorCode.ACCESS_DENIED || gateErr.code === ErrorCode.SECRET_NOT_FOUND)
+        ) {
+          onDenialAudited();
+          throw createErr;
+        }
+        throw gateErr;
+      }
       s.store.transaction(() => {
         s.store.deleteOAuthToken(existingId);
         commitOAuthRow(existingId, handle, true);
@@ -2475,6 +2506,9 @@ export class VaultEngine {
 
   /**
    * Complete an OAuth flow: encrypt and store tokens, transition secret to ACTIVE.
+   * Completes only a PENDING secret — a REVOKED one is refused `SECRET_REVOKED`,
+   * an ACTIVE or EXPIRED one `OAUTH_FLOW_FAILED`; every refusal is one failed
+   * `oauth.callback` row.
    * Synchronous from entry through the transaction — no `await` precedes the
    * store write — so the manager's supersede check immediately before this call
    * cannot be split from the write; an `await` added above the transaction
@@ -2487,11 +2521,36 @@ export class VaultEngine {
     expiresAt?: number,
   ): Promise<void> {
     const s = this.assertUnlocked();
+    try {
+      this.doCompleteOAuthFlow(s, secretId, accessToken, refreshToken, expiresAt);
+    } catch (err) {
+      const status = s.store.getSecret(secretId)?.status;
+      this.auditDenied(
+        s,
+        AuditEventType.OAUTH_CALLBACK,
+        err,
+        status === undefined ? {} : { status },
+        secretId,
+      );
+      throw err;
+    }
+  }
 
+  private doCompleteOAuthFlow(
+    s: UnlockedState,
+    secretId: string,
+    accessToken: string,
+    refreshToken: string | undefined,
+    expiresAt: number | undefined,
+  ): void {
     const secret = s.store.getSecret(secretId);
     if (!secret) throw VaultError.secretNotFound();
     if (secret.type !== SecretType.OAUTH_TOKEN) {
       throw VaultError.oauthNotConfigured();
+    }
+    if (secret.status === SecretStatus.REVOKED) throw VaultError.secretRevoked();
+    if (secret.status !== SecretStatus.PENDING) {
+      throw VaultError.oauthFlowFailed("the secret is no longer pending");
     }
 
     const oauthRow = s.store.getOAuthToken(secretId);
@@ -2555,6 +2614,11 @@ export class VaultEngine {
 
   /**
    * Refresh an OAuth token: decrypt refresh_token, call token endpoint, encrypt new tokens.
+   * The secret's status is read first: an EXPIRED or REVOKED secret is refused
+   * before any token is decrypted, and a PENDING one keeps `OAUTH_REFRESH_FAILED`.
+   * A `client_credentials` secret re-runs the client-credentials exchange with
+   * its stored client instead. A secret revoked during the token-endpoint round
+   * trip is refused at the write, which stores nothing.
    * Returns the new access_token expiry timestamp (or null if no expires_in in response).
    *
    * Concurrent callers for the same secret coalesce onto one in-flight refresh:
@@ -2634,24 +2698,48 @@ export class VaultEngine {
     const oauthRow = s.store.getOAuthToken(secretId);
     if (!oauthRow) throw VaultError.oauthNotConfigured();
 
-    if (
-      !oauthRow.refresh_token_encrypted ||
-      !oauthRow.refresh_token_iv ||
-      !oauthRow.refresh_token_tag
-    ) {
-      throw VaultError.oauthRefreshFailed("No refresh token available");
-    }
+    const secret = s.store.getSecret(secretId);
+    if (!secret) throw VaultError.secretNotFound();
+    const handle = formatHandle(
+      decryptName(s.kek, secret.name_encrypted, secret.name_iv, secret.name_tag, secret.id),
+      secret.project ?? undefined,
+    );
+    s.secretManager.assertUsable(secret, handle, {
+      pending: () => VaultError.oauthRefreshFailed("No refresh token available"),
+    });
 
-    // Decrypt refresh token
-    const refreshToken = Buffer.from(
-      decrypt(
-        s.kek,
-        oauthRow.refresh_token_encrypted,
-        oauthRow.refresh_token_iv,
-        oauthRow.refresh_token_tag,
-        AAD_OAUTH_REFRESH_TOKEN(secretId),
-      ),
-    ).toString("utf8");
+    const clientCredentials = oauthRow.grant_type === OAuthGrantType.CLIENT_CREDENTIALS;
+    let params: URLSearchParams;
+    if (clientCredentials) {
+      params = new URLSearchParams({ grant_type: "client_credentials" });
+      const scopes = oauthRow.scopes === null ? [] : (JSON.parse(oauthRow.scopes) as string[]);
+      if (scopes.length > 0) {
+        params.set(
+          "scope",
+          scopes.join(oauthScopesSeparator(oauthRow.provider as OAuthProviderPreset)),
+        );
+      }
+    } else {
+      if (
+        !oauthRow.refresh_token_encrypted ||
+        !oauthRow.refresh_token_iv ||
+        !oauthRow.refresh_token_tag
+      ) {
+        throw VaultError.oauthRefreshFailed("No refresh token available");
+      }
+
+      // Decrypt refresh token
+      const refreshToken = Buffer.from(
+        decrypt(
+          s.kek,
+          oauthRow.refresh_token_encrypted,
+          oauthRow.refresh_token_iv,
+          oauthRow.refresh_token_tag,
+          AAD_OAUTH_REFRESH_TOKEN(secretId),
+        ),
+      ).toString("utf8");
+      params = new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken });
+    }
 
     // Decrypt client_id
     const clientId = Buffer.from(
@@ -2681,18 +2769,20 @@ export class VaultEngine {
         ),
       ).toString("utf8");
     }
+    if (clientCredentials && clientSecret === undefined) {
+      throw VaultError.oauthRefreshFailed(
+        "No client secret stored for the client credentials grant",
+      );
+    }
 
     // Validate token endpoint (SSRF protection)
     await validateUrl(oauthRow.token_endpoint);
 
     // POST to token endpoint. Client authentication follows the stored method; an unknown value is corruption (fail closed).
     const authMethod = this.storedAuthMethod(oauthRow);
-    const params = new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-    });
     const headers: Record<string, string> = {
       "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
     };
     applyTokenEndpointAuth(
       { client_id: clientId, client_secret: clientSecret, token_endpoint_auth_method: authMethod },
@@ -2761,6 +2851,9 @@ export class VaultEngine {
     // Rotated tokens and their audit row commit together (NM3): a possibly
     // rotated-away refresh_token is never stored unaudited.
     s.store.transaction(() => {
+      if (s.store.getSecret(secretId)?.status === SecretStatus.REVOKED) {
+        throw VaultError.secretRevoked(handle);
+      }
       s.store.updateOAuthToken(secretId, tokenUpdate);
 
       s.store.updateSecret(secretId, { updated_at: Date.now() });
@@ -2864,7 +2957,10 @@ export class VaultEngine {
       oauthRow.access_token_expires_at !== null &&
       oauthRow.access_token_expires_at <= Date.now() + AUTO_REFRESH_BUFFER_MS
     ) {
-      if (oauthRow.refresh_token_encrypted) {
+      if (
+        oauthRow.refresh_token_encrypted ||
+        oauthRow.grant_type === OAuthGrantType.CLIENT_CREDENTIALS
+      ) {
         try {
           await this.joinOrStartRefresh(secretId, caller);
           const refreshed = s.store.getOAuthToken(secretId);
