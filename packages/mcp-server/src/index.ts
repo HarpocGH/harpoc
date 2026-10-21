@@ -19,6 +19,7 @@ import {
   parseAllowTokenlessOption,
   parseHttpPortOption,
   parseTokenFileOption,
+  parseVaultDirOption,
   readLaunchTokenFile,
 } from "./cli-options.js";
 import { createStdioServerFactory } from "./server.js";
@@ -39,7 +40,7 @@ export {
 export type { AllowedHostsParse, TokenFileRead } from "./cli-options.js";
 
 function resolveVaultDir(vaultDirOption?: string): string {
-  if (vaultDirOption) return vaultDirOption;
+  if (vaultDirOption !== undefined) return vaultDirOption;
   const cwdVault = join(process.cwd(), VAULT_DIR_NAME);
   if (existsSync(cwdVault)) return cwdVault;
   return join(homedir(), VAULT_DIR_NAME);
@@ -85,6 +86,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const allowTokenless = allowTokenlessOption.value;
+
+  const vaultDirOption = parseVaultDirOption(values["vault-dir"]);
+  if (!vaultDirOption.ok) {
+    process.stderr.write(vaultDirOption.message);
+    process.exit(1);
+  }
 
   if (values.http && tokenFile !== undefined) {
     process.stderr.write(
@@ -147,7 +154,7 @@ async function main(): Promise<void> {
     fileToken = read.token;
   }
 
-  const vaultDir = resolveVaultDir(values["vault-dir"] as string | undefined);
+  const vaultDir = resolveVaultDir(vaultDirOption.value);
   const dbPath = join(vaultDir, VAULT_DB_NAME);
   const sessionPath = join(vaultDir, SESSION_FILE_NAME);
 

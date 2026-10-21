@@ -4,7 +4,7 @@ import type { OAuthFlowResult } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
 import { promptHidden } from "../../utils/prompt.js";
-import { buildOAuthProviderConfig } from "../../utils/oauth-config.js";
+import { buildOAuthProviderConfig, validateOAuthConnectFlags } from "../../utils/oauth-config.js";
 import { parseIntOption } from "../../utils/options.js";
 import { MAX_PORT } from "../../utils/option-bounds.js";
 
@@ -77,31 +77,34 @@ export function registerOAuthConnectCommand(oauth: Command): void {
             : options.clientCredentials
               ? OAuthGrantType.CLIENT_CREDENTIALS
               : OAuthGrantType.AUTHORIZATION_CODE;
-
-          // The client secret never travels via argv: an ambient env var wins
-          // (HARPOC_TOKEN precedent), otherwise a hidden prompt. Empty = public client.
-          let clientSecret: string | undefined = process.env.HARPOC_OAUTH_CLIENT_SECRET;
-          if (clientSecret === undefined) {
-            clientSecret = await promptHidden("Client secret (leave empty for a public client): ");
-          }
-          if (clientSecret === "") clientSecret = undefined;
-          if (grantType === OAuthGrantType.CLIENT_CREDENTIALS && clientSecret === undefined) {
-            throw VaultError.invalidInput(
-              "client_credentials requires a client secret. Set HARPOC_OAUTH_CLIENT_SECRET or enter it at the prompt.",
-            );
-          }
-
-          const { config, project } = buildOAuthProviderConfig(
-            name,
-            grantType,
-            options,
-            clientSecret,
-          );
+          validateOAuthConnectFlags(name, grantType, options);
 
           const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
           const engine = await loadUnlockedEngine(vaultDir);
           let onSigint: (() => void) | undefined;
           try {
+            // The client secret never travels via argv: an ambient env var wins
+            // (HARPOC_TOKEN precedent), otherwise a hidden prompt. Empty = public client.
+            let clientSecret: string | undefined = process.env.HARPOC_OAUTH_CLIENT_SECRET;
+            if (clientSecret === undefined) {
+              clientSecret = await promptHidden(
+                "Client secret (leave empty for a public client): ",
+              );
+            }
+            if (clientSecret === "") clientSecret = undefined;
+            if (grantType === OAuthGrantType.CLIENT_CREDENTIALS && clientSecret === undefined) {
+              throw VaultError.invalidInput(
+                "client_credentials requires a client secret. Set HARPOC_OAUTH_CLIENT_SECRET or enter it at the prompt.",
+              );
+            }
+
+            const { config, project } = buildOAuthProviderConfig(
+              name,
+              grantType,
+              options,
+              clientSecret,
+            );
+
             const { OAuthManager, defaultOpenBrowser } = await import("@harpoc/oauth-proxy");
             const manager = new OAuthManager(engine, {
               callbackPort,

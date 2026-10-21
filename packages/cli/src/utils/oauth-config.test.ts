@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { ErrorCode, OAuthGrantType } from "@harpoc/shared";
+import { ErrorCode, OAuthGrantType, VaultError } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
-import { buildOAuthProviderConfig } from "./oauth-config.js";
+import { buildOAuthProviderConfig, validateOAuthConnectFlags } from "./oauth-config.js";
+import type { OAuthConnectFlags } from "./oauth-config.js";
 
 describe("buildOAuthProviderConfig", () => {
   it("merges github preset token and auth endpoints", () => {
@@ -227,5 +228,84 @@ describe("buildOAuthProviderConfig", () => {
       ErrorCode.SCHEMA_VALIDATION_ERROR,
     );
     expect(err.message).toMatch(/^name: /);
+  });
+});
+
+describe("validateOAuthConnectFlags", () => {
+  it.each<{ flag: string; flags: OAuthConnectFlags; message: string }>([
+    {
+      flag: "--provider",
+      flags: { clientId: "client-1" },
+      message: "--provider is required (github | google | microsoft | slack | custom).",
+    },
+    { flag: "--client-id", flags: { provider: "github" }, message: "--client-id is required." },
+  ])("refuses a missing $flag INVALID_INPUT (Q11)", async ({ flags, message }) => {
+    const err = await expectVaultError(
+      () => validateOAuthConnectFlags("gh-token", OAuthGrantType.AUTHORIZATION_CODE, flags),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(message);
+  });
+
+  it("refuses what the build's schema parse refuses, SCHEMA_VALIDATION_ERROR (Q11)", async () => {
+    const err = await expectVaultError(
+      () =>
+        validateOAuthConnectFlags("custom-token", OAuthGrantType.CLIENT_CREDENTIALS, {
+          provider: "custom",
+          clientId: "client-1",
+          tokenEndpoint: "http://192.0.2.10/token",
+        }),
+      ErrorCode.SCHEMA_VALIDATION_ERROR,
+    );
+    expect(err.message).toBe(
+      "token_endpoint: URL must use HTTPS (plain HTTP is allowed for loopback only)",
+    );
+  });
+
+  it.each<{ row: string; grant: OAuthGrantType; flags: OAuthConnectFlags }>([
+    {
+      row: "github authorization_code",
+      grant: OAuthGrantType.AUTHORIZATION_CODE,
+      flags: { provider: "github", clientId: "c" },
+    },
+    {
+      row: "github authorization_code with client_secret_basic",
+      grant: OAuthGrantType.AUTHORIZATION_CODE,
+      flags: { provider: "github", clientId: "c", authMethod: "client_secret_basic" },
+    },
+    {
+      row: "custom client_credentials with a token endpoint",
+      grant: OAuthGrantType.CLIENT_CREDENTIALS,
+      flags: { provider: "custom", clientId: "c", tokenEndpoint: "https://192.0.2.10/token" },
+    },
+    {
+      row: "google device_code",
+      grant: OAuthGrantType.DEVICE_CODE,
+      flags: { provider: "google", clientId: "c" },
+    },
+    {
+      row: "slack device_code, refused",
+      grant: OAuthGrantType.DEVICE_CODE,
+      flags: { provider: "slack", clientId: "c" },
+    },
+    {
+      row: "custom client_credentials without a token endpoint, refused",
+      grant: OAuthGrantType.CLIENT_CREDENTIALS,
+      flags: { provider: "custom", clientId: "c" },
+    },
+  ])("agrees with the build with and without a client secret: $row (Q11)", ({ grant, flags }) => {
+    const outcome = (fn: () => unknown): string => {
+      try {
+        fn();
+        return "accepted";
+      } catch (err) {
+        return err instanceof VaultError ? `${err.code}: ${err.message}` : String(err);
+      }
+    };
+    const validated = outcome(() => validateOAuthConnectFlags("t", grant, flags));
+    expect(outcome(() => buildOAuthProviderConfig("t", grant, flags, undefined))).toBe(validated);
+    expect(outcome(() => buildOAuthProviderConfig("t", grant, flags, "S3CRET-TOKEN-xyz"))).toBe(
+      validated,
+    );
   });
 });

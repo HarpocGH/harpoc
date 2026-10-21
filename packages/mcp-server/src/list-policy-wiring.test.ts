@@ -35,7 +35,7 @@ const EXPECTED_CALLER = {
 };
 
 const VISIBLE: SecretInfo = {
-  handle: "secret://visible",
+  handle: "secret://api/visible",
   name: "visible",
   type: "api_key",
   project: "api",
@@ -156,11 +156,12 @@ describe("resources", () => {
     expect(census.map((c) => c.project)).toEqual(["api"]);
   });
 
-  it("secret-by-name reads through the gated getSecretInfo, not the listing", async () => {
+  it("secret-by-name reads the advertised handle path through the gated getSecretInfo, not the listing", async () => {
     registerSecretsResource(server, engine, scopeGuard);
 
-    const text = firstText(await readResource(server, "secret://vault/secrets/visible"));
-    expect(engine.getSecretInfo).toHaveBeenCalledWith("secret://visible", EXPECTED_CALLER);
+    const text = firstText(await readResource(server, "secret://vault/secrets/api%2Fvisible"));
+    expect(engine.getSecretInfo).toHaveBeenCalledWith("secret://api/visible", EXPECTED_CALLER);
+    expect(engine.listSecrets).not.toHaveBeenCalled();
     expect(JSON.parse(text).name).toBe("visible");
   });
 

@@ -62,6 +62,24 @@ describe("createUiRoutes", () => {
     },
   );
 
+  it.each(["/ui/assets%2F..%2Findex.html", "/ui/assets/..%2Findex.html"])(
+    "%s — an encoded alias of index.html under assets/ — answers the shell no-cache, not immutable",
+    async (path) => {
+      const res = await app.request(path);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+      expect(await res.text()).toContain('<div id="root"></div>');
+      expect(res.headers.get("cache-control")).toBe("no-cache");
+    },
+  );
+
+  it("serves an asset reached through an encoded slash with immutable caching", async () => {
+    const res = await app.request("/ui/assets%2Fapp-abc123.js");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/javascript");
+    expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  });
+
   it("SPA-falls-back extension-less routes to index.html", async () => {
     const res = await app.request("/ui/secrets");
     expect(res.status).toBe(200);

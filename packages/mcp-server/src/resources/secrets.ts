@@ -1,7 +1,16 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { ResourceTemplate } from "@modelcontextprotocol/server";
 import type { VaultEngine } from "@harpoc/core";
+import { formatHandle, parseHandle } from "@harpoc/shared";
 import type { ScopeGuard } from "../guards/scope-guard.js";
+
+function decodeHandlePath(variable: string): string {
+  try {
+    return decodeURIComponent(variable);
+  } catch {
+    return variable;
+  }
+}
 
 export function registerSecretsResource(
   server: McpServer,
@@ -35,7 +44,7 @@ export function registerSecretsResource(
     },
   );
 
-  // Template: single secret by name
+  // Template: single secret by handle
   server.registerResource(
     "secret-by-name",
     new ResourceTemplate("secret://vault/secrets/{name}", {
@@ -48,12 +57,15 @@ export function registerSecretsResource(
         );
         const secrets = scopeGuard.filterByScope(engine.listSecrets(undefined, scopeGuard.caller));
         return {
-          resources: secrets.map((s) => ({
-            uri: `secret://vault/secrets/${s.name}`,
-            name: s.name,
-            description: `Secret: ${s.name} (${s.type}, ${s.status})`,
-            mimeType: "application/json",
-          })),
+          resources: secrets.map((s) => {
+            const path = s.handle.slice("secret://".length);
+            return {
+              uri: `secret://vault/secrets/${encodeURIComponent(path)}`,
+              name: s.name,
+              description: `Secret: ${path} (${s.type}, ${s.status})`,
+              mimeType: "application/json",
+            };
+          }),
         };
       },
     }),
@@ -62,29 +74,12 @@ export function registerSecretsResource(
       mimeType: "application/json",
     },
     async (uri, variables) => {
-      const name = variables.name as string;
-      scopeGuard.checkAccess("read", undefined, name, `resources/read ${uri.href}`);
+      const { project, name } = parseHandle(
+        `secret://${decodeHandlePath(variables.name as string)}`,
+      );
+      scopeGuard.checkAccess("read", project, name, `resources/read ${uri.href}`);
 
-      // The template variable is a bare name, which does not resolve to a
-      // handle for project-scoped secrets — so the listing (unfiltered, no
-      // caller) is used only to map name → handle. Nothing from it is
-      // returned: the metadata comes from getSecretInfo, which applies the
-      // per-secret `read` gate this resource used to sidestep by answering
-      // straight out of the list.
-      const located = engine.listSecrets().find((s) => s.name === name);
-      if (!located) {
-        return {
-          contents: [
-            {
-              uri: uri.href,
-              mimeType: "application/json",
-              text: JSON.stringify({ error: "Secret not found" }),
-            },
-          ],
-        };
-      }
-
-      const secret = await engine.getSecretInfo(located.handle, scopeGuard.caller);
+      const secret = await engine.getSecretInfo(formatHandle(name, project), scopeGuard.caller);
       return {
         contents: [
           {

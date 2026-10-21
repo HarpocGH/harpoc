@@ -176,7 +176,7 @@ describe("oauth connect", () => {
     expect(mockManager.startAuthorizationCode).not.toHaveBeenCalled();
   });
 
-  it("client_credentials without a client secret exits with guidance (negative control)", async () => {
+  it("client_credentials without a client secret exits with guidance after the vault loads, the engine released (negative control, TC-12)", async () => {
     vi.mocked(promptHidden).mockResolvedValue("");
 
     await expect(
@@ -188,7 +188,108 @@ describe("oauth connect", () => {
       expect.stringContaining("client_credentials requires a client secret"),
     );
     expect(mockManager.startClientCredentials).not.toHaveBeenCalled();
-    expect(vi.mocked(loadUnlockedEngine)).not.toHaveBeenCalled();
+    expect(vi.mocked(loadUnlockedEngine)).toHaveBeenCalledTimes(1);
+    expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads the vault before prompting for the client secret (Q11, TC-12)", async () => {
+    await run(["gh-token", "--provider", "github", "--client-id", "client-1"]);
+
+    const [loaded] = vi.mocked(loadUnlockedEngine).mock.invocationCallOrder;
+    const [prompted] = vi.mocked(promptHidden).mock.invocationCallOrder;
+    expect(loaded).toBeDefined();
+    expect(prompted).toBeDefined();
+    expect(loaded as number).toBeLessThan(prompted as number);
+    expect(mockManager.startAuthorizationCode).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<{ flag: string; args: string[]; message: string }>([
+    {
+      flag: "--provider",
+      args: ["gh-token", "--client-id", "client-1"],
+      message: "--provider is required (github | google | microsoft | slack | custom).",
+    },
+    {
+      flag: "--client-id",
+      args: ["gh-token", "--provider", "github"],
+      message: "--client-id is required.",
+    },
+  ])(
+    "a missing $flag is refused INVALID_INPUT before the vault loads and before the prompt (Q11)",
+    async ({ args, message }) => {
+      await expect(run([...args, "--json"])).rejects.toThrow("process.exit");
+
+      expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
+        error: "INVALID_INPUT",
+        message,
+      });
+      expect(promptHidden).not.toHaveBeenCalled();
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each<{ refusal: string; args: string[]; message: string }>([
+    {
+      refusal: "a plain-http non-loopback --token-endpoint",
+      args: [
+        "c-token",
+        "--provider",
+        "custom",
+        "--client-id",
+        "client-1",
+        "--client-credentials",
+        "--token-endpoint",
+        "http://192.0.2.10/token",
+      ],
+      message: "token_endpoint: URL must use HTTPS (plain HTTP is allowed for loopback only)",
+    },
+    {
+      refusal: "a custom provider without --token-endpoint",
+      args: ["c-token", "--provider", "custom", "--client-id", "client-1", "--client-credentials"],
+      message: 'token_endpoint is required for provider "custom"',
+    },
+    {
+      refusal: "an unknown --auth-method",
+      args: [
+        "gh-token",
+        "--provider",
+        "github",
+        "--client-id",
+        "client-1",
+        "--auth-method",
+        "none",
+      ],
+      message:
+        'token_endpoint_auth_method: Invalid option: expected one of "client_secret_post"|"client_secret_basic"',
+    },
+  ])(
+    "$refusal is refused SCHEMA_VALIDATION_ERROR before the vault loads and before the prompt (Q11)",
+    async ({ args, message }) => {
+      vi.mocked(promptHidden).mockResolvedValue("S3CRET-TOKEN-xyz");
+
+      await expect(run([...args, "--json"])).rejects.toThrow("process.exit");
+
+      expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
+        error: "SCHEMA_VALIDATION_ERROR",
+        message,
+      });
+      expect(promptHidden).not.toHaveBeenCalled();
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a cancelled client-secret prompt releases the loaded engine (Q11)", async () => {
+    vi.mocked(promptHidden).mockRejectedValue(new Error("User cancelled"));
+
+    await expect(
+      run(["gh-token", "--provider", "github", "--client-id", "client-1"]),
+    ).rejects.toThrow("process.exit");
+
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("User cancelled"));
+    expect(vi.mocked(loadUnlockedEngine)).toHaveBeenCalledTimes(1);
+    expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+    expect(managerCtorCalls).toHaveLength(0);
   });
 
   it("--device and --client-credentials are mutually exclusive", async () => {

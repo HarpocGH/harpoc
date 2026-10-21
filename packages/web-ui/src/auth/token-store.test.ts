@@ -35,6 +35,19 @@ describe("token store", () => {
     expect(window.location.hash).toBe("");
   });
 
+  it("returns true when it adopts a launch token", () => {
+    history.replaceState(null, "", "/ui#token=abc.def.ghi");
+    expect(adoptLaunchToken()).toBe(true);
+  });
+
+  it("returns false without a token fragment to adopt, an empty one included", () => {
+    history.replaceState(null, "", "/ui#/secrets");
+    expect(adoptLaunchToken()).toBe(false);
+    history.replaceState(null, "", "/ui#token=");
+    expect(adoptLaunchToken()).toBe(false);
+    expect(getToken()).toBeNull();
+  });
+
   it("set/clear round-trip", () => {
     setToken("t1");
     expect(getToken()).toBe("t1");

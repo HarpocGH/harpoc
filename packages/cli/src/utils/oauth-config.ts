@@ -58,3 +58,17 @@ export function buildOAuthProviderConfig(
 
   return providerConfigFromFlowInput(parsedInput.data, { redirect_uri: flags.redirectUri });
 }
+
+/**
+ * The builder's flag refusals without the client secret, for `oauth connect` to
+ * run before the vault loads and the secret is prompted for. No rule of the
+ * input schema, the mapper or the config schema reads the secret beyond its own
+ * optional non-empty string, so flags accepted here build with any secret.
+ */
+export function validateOAuthConnectFlags(
+  name: string,
+  grantType: OAuthGrantType,
+  flags: OAuthConnectFlags,
+): void {
+  buildOAuthProviderConfig(name, grantType, flags, undefined);
+}

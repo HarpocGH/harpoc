@@ -217,7 +217,7 @@ describe("harpoc arm: the §6.2.1 surface probe, fleet-free", () => {
       "callTool list_secrets",
       "callTool get_secret_info",
       "readResource secret://vault/secrets",
-      "readResource secret://vault/secrets/db-pass",
+      "readResource secret://vault/secrets/prod%2Fdb-pass",
       "readResource secret://vault/health",
       "readResource secret://vault/projects",
       "readResource secret://vault/audit/recent",
@@ -228,17 +228,17 @@ describe("harpoc arm: the §6.2.1 surface probe, fleet-free", () => {
   });
 
   it.each([
-    { label: "a global handle", handle: "secret://my-key", name: "my-key" },
-    { label: "a project-scoped handle", handle: "secret://prod/db-pass", name: "db-pass" },
-    { label: "no handle, secret://unknown", handle: undefined, name: "unknown" },
+    { label: "a global handle", handle: "secret://my-key", path: "my-key" },
+    { label: "a project-scoped handle", handle: "secret://prod/db-pass", path: "prod%2Fdb-pass" },
+    { label: "no handle, secret://unknown", handle: undefined, path: "unknown" },
   ])(
-    "reads the five resources once each, the by-name read under the name of $label",
-    async ({ handle, name }) => {
+    "reads the five resources once each, the by-name read at the handle path of $label",
+    async ({ handle, path }) => {
       const { calls, surface } = recordingSurface();
       await probeHarpocSurface(surface, handle);
       expect(calls.filter((call) => call.startsWith("readResource "))).toEqual([
         "readResource secret://vault/secrets",
-        `readResource secret://vault/secrets/${name}`,
+        `readResource secret://vault/secrets/${path}`,
         "readResource secret://vault/health",
         "readResource secret://vault/projects",
         "readResource secret://vault/audit/recent",

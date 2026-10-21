@@ -730,6 +730,15 @@ describe("RestClient", () => {
       expect(call[1].method).toBe("DELETE");
     });
 
+    it("revokePolicy sends a policy id carrying reserved characters encoded (Q12)", async () => {
+      mockFetchResponse({ revoked: true });
+      await client.revokePolicy("secret://k", "p/1?x");
+
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe(`${BASE_URL}/api/v1/secrets/k/policies/p%2F1%3Fx`);
+      expect(init.method).toBe("DELETE");
+    });
+
     it("listPolicies sends GET", async () => {
       mockFetchResponse([]);
       await client.listPolicies("secret://k");

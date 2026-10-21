@@ -7,12 +7,13 @@ const KEY = "harpoc.ui.token";
  * only — the token dies with the tab (spec § 3.3); the persistent web-storage
  * area is deliberately never written, and `posture.test.ts` pins that.
  */
-export function adoptLaunchToken(): void {
+export function adoptLaunchToken(): boolean {
   const match = /^#token=(?<jwt>.+)$/.exec(window.location.hash);
   const jwt = match?.groups?.jwt;
-  if (jwt === undefined) return;
+  if (jwt === undefined) return false;
   window.sessionStorage.setItem(KEY, jwt);
   history.replaceState(null, "", window.location.pathname + window.location.search);
+  return true;
 }
 
 export function getToken(): string | null {

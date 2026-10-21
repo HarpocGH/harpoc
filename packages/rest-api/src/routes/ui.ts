@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { extname, join, normalize, resolve, sep } from "node:path";
+import { extname, join, normalize, relative, resolve, sep } from "node:path";
 import { Hono } from "hono";
 import type { Context } from "hono";
 
@@ -69,7 +69,9 @@ export function createUiRoutes(uiDir: string): Hono {
     c.header("X-Content-Type-Options", "nosniff");
     c.header(
       "Cache-Control",
-      isAsset && decoded.startsWith("assets/") ? "public, max-age=31536000, immutable" : "no-cache",
+      isAsset && relative(root, candidate).split(sep)[0] === "assets"
+        ? "public, max-age=31536000, immutable"
+        : "no-cache",
     );
     return c.body(body);
   };

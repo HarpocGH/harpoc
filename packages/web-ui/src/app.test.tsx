@@ -467,3 +467,125 @@ describe("App shell v1.4 routes", () => {
     expect(screen.getByRole("button", { name: /theme:/ }).textContent).toBe("theme: dark");
   });
 });
+
+describe("App route decode (Q8)", () => {
+  it.each([
+    ["#/secrets/100%", "getSecret"],
+    ["#/agents/100%", "getAgent"],
+  ] as const)(
+    "%s — a malformed percent-escape — renders the not-found branch beside the nav instead of throwing",
+    async (hash, member) => {
+      setToken("t");
+      window.location.hash = hash;
+      const api = fakeApi();
+      render(<App api={api} />);
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Not found" })).toBeTruthy());
+      expect(screen.getByRole("navigation")).toBeTruthy();
+      expect(screen.getByRole("link", { name: "Back to the dashboard" }).getAttribute("href")).toBe(
+        "#/",
+      );
+      expect(api[member]).not.toHaveBeenCalled();
+    },
+  );
+
+  it("#/nope — a route no page answers — renders the not-found branch, not an empty main", async () => {
+    setToken("t");
+    window.location.hash = "#/nope";
+    render(<App api={fakeApi()} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Not found" })).toBeTruthy());
+    expect(screen.getByRole("navigation")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Dashboard" })).toBeNull();
+  });
+});
+
+describe("App launch token on hashchange (Q9)", () => {
+  const pasteLaunchUrl = (jwt: string): void => {
+    window.location.hash = `#token=${jwt}`;
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  };
+
+  it("adopts a launch URL pasted into a signed-in tab: the new token stored, the fragment scrubbed, health asked again", async () => {
+    setToken("token-a");
+    const api = fakeApi();
+    render(<App api={api} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Dashboard" })).toBeTruthy());
+    expect(api.health).toHaveBeenCalledTimes(1);
+
+    pasteLaunchUrl("token-b");
+
+    await waitFor(() => expect(getToken()).toBe("token-b"));
+    expect(window.location.hash).toBe("");
+    await waitFor(() => expect(api.health).toHaveBeenCalledTimes(2));
+  });
+
+  it("lifts a stale sealed takeover when a launch URL is pasted, and calls on with the new token", async () => {
+    let locked = true;
+    const seen: SeenRequest[] = [];
+    vi.stubGlobal(
+      "fetch",
+      routeFetch(
+        () =>
+          locked
+            ? jsonResponse(503, { error: "VAULT_LOCKED", message: "Vault is locked" })
+            : jsonResponse(200, HEALTHY),
+        seen,
+      ),
+    );
+    setToken("token-a");
+    render(<App />);
+    await waitFor(() => expect(screen.getByText(/harpoc unlock/)).toBeTruthy());
+
+    locked = false;
+    const before = seen.length;
+    pasteLaunchUrl("token-b");
+
+    await waitFor(() => expect(screen.getByText("UNLOCKED")).toBeTruthy());
+    expect(screen.queryByText(/harpoc unlock/)).toBeNull();
+    const sentAfterPaste = (): string[] => seen.slice(before).flatMap((r) => r.authorization ?? []);
+    await waitFor(() => expect(sentAfterPaste().length).toBeGreaterThan(0));
+    expect([...new Set(sentAfterPaste())]).toEqual(["Bearer token-b"]);
+  });
+
+  it("signs a signed-out tab in from a pasted launch URL, health asked again", async () => {
+    const api = fakeApi();
+    render(<App api={api} />);
+    expect(screen.getByText("Sign in")).toBeTruthy();
+    expect(api.health).toHaveBeenCalledTimes(1);
+
+    pasteLaunchUrl("token-b");
+
+    await waitFor(() => expect(screen.getByText("UNLOCKED")).toBeTruthy());
+    expect(getToken()).toBe("token-b");
+    expect(window.location.hash).toBe("");
+    await waitFor(() => expect(api.health).toHaveBeenCalledTimes(2));
+  });
+
+  it("adopts nothing and asks health nothing again on a hashchange to an ordinary route (control)", async () => {
+    setToken("token-a");
+    const api = fakeApi();
+    render(<App api={api} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Dashboard" })).toBeTruthy());
+
+    window.location.hash = "#/audit";
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Audit" })).toBeTruthy());
+    expect(getToken()).toBe("token-a");
+    expect(window.location.hash).toBe("#/audit");
+    expect(api.health).toHaveBeenCalledTimes(1);
+  });
+
+  it("remounts the mounted dashboard for the new session when a launch URL is pasted on #/", async () => {
+    setToken("token-a");
+    const api = fakeApi();
+    render(<App api={api} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Dashboard" })).toBeTruthy());
+    await waitFor(() => expect(api.expiringReport).toHaveBeenCalledTimes(1));
+
+    pasteLaunchUrl("token-b");
+
+    await waitFor(() => expect(getToken()).toBe("token-b"));
+    expect(window.location.hash).toBe("");
+    await waitFor(() => expect(api.expiringReport).toHaveBeenCalledTimes(2));
+  });
+});

@@ -183,6 +183,78 @@ describe("promptHidden", () => {
       expect(input.setRawMode.mock.calls).toEqual([[true], [isRaw ?? false]]);
     },
   );
+
+  it.each<{ keys: string; chunks: string[]; expected: string }>([
+    { keys: "an arrow key (CSI)", chunks: ["\x1b[D", "p", "w", "\r"], expected: "pw" },
+    {
+      keys: "a CSI with parameters (Ctrl+Left)",
+      chunks: ["\x1b[1;5D", "pw", "\r"],
+      expected: "pw",
+    },
+    { keys: "an application-mode arrow (SS3)", chunks: ["\x1bOD", "pw\r"], expected: "pw" },
+    { keys: "F1 (SS3)", chunks: ["p", "\x1bOP", "w\r"], expected: "pw" },
+    { keys: "a CSI split across two chunks", chunks: ["\x1b[", "Dpw\r"], expected: "pw" },
+    {
+      keys: "bracketed-paste markers around pasted text",
+      chunks: ["\x1b[200~pw\x1b[201~", "\r"],
+      expected: "pw",
+    },
+    { keys: "an Alt chord (ESC and one printable)", chunks: ["\x1bx", "pw\r"], expected: "pw" },
+    {
+      keys: "a second ESC that re-opens the sequence (ESC ESC [ D consumed whole)",
+      chunks: ["\x1b\x1b[D", "pw\r"],
+      expected: "pw",
+    },
+    {
+      keys: "a bare ESC keypress, the next key kept",
+      chunks: ["\x1b", "p", "w\r"],
+      expected: "pw",
+    },
+    { keys: "a bare ESC before Enter", chunks: ["pw", "\x1b", "\r"], expected: "pw" },
+    { keys: "a sequence cut short by Enter", chunks: ["pw\x1b[1;", "\r"], expected: "pw" },
+    {
+      keys: "an arrow before a backspace",
+      chunks: ["pwx", "\x1b[D", "\x7f", "\r"],
+      expected: "pw",
+    },
+    {
+      keys: "C0 control bytes (Ctrl+A, Ctrl+Z, NUL)",
+      chunks: ["\x01p\x1aw\x00", "\r"],
+      expected: "pw",
+    },
+    { keys: "a tab", chunks: ["p\tw\r"], expected: "pw" },
+  ])("in raw mode drops $keys and keeps the typed text (Q5)", async ({ chunks, expected }) => {
+    const input = rawModeInput();
+    const pending = promptHidden("Password: ", input, sink());
+    for (const chunk of chunks) {
+      input.write(chunk);
+    }
+    await expect(pending).resolves.toBe(expected);
+  });
+
+  it("in raw mode keeps multibyte text beside an arrow key (Q5)", async () => {
+    const input = rawModeInput();
+    const pending = promptHidden("Password: ", input, sink());
+    input.write("\u00fc");
+    input.write("\x1b[C");
+    input.write("\u20ac\ud83d\udd11\r");
+    await expect(pending).resolves.toBe("\u00fc\u20ac\ud83d\udd11");
+  });
+
+  it("in raw mode Ctrl+C inside a pending sequence still cancels (Q5)", async () => {
+    const input = rawModeInput();
+    const pending = promptHidden("Password: ", input, sink());
+    input.write("pw\x1b[1;");
+    input.write("\x03");
+    await expect(pending).rejects.toThrow("User cancelled");
+  });
+
+  it("piped stdin keeps escape sequences and control bytes (Q5, the raw-mode-only control)", async () => {
+    const input = new PassThrough();
+    const pending = promptHidden("pw: ", input, sink());
+    input.write("\x1b[Dp\tw\x01\n");
+    await expect(pending).resolves.toBe("\x1b[Dp\tw\x01");
+  });
 });
 
 describe("promptConfirm", () => {

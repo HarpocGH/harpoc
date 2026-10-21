@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import type { ApiClient } from "./api/client";
 import { createApiClient } from "./api/client";
-import { clearToken, getToken } from "./auth/token-store";
+import { adoptLaunchToken, clearToken, getToken } from "./auth/token-store";
 import { Nav } from "./components/nav";
 import { SealBar } from "./components/seal-bar";
 import { useAsync } from "./hooks";
@@ -16,6 +16,27 @@ import { TokensPage } from "./pages/tokens";
 import { useHashRoute } from "./router";
 import { Sealed } from "./screens/sealed";
 import { Unauthorized } from "./screens/unauthorized";
+
+const PAGES = new Set(["/", "/secrets", "/audit", "/agents", "/permissions", "/tokens"]);
+
+function decodeSegment(raw: string): string | null {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
+
+function NotFound() {
+  return (
+    <>
+      <h1>Not found</h1>
+      <p class="empty">
+        No such page. <a href="#/">Back to the dashboard</a>
+      </p>
+    </>
+  );
+}
 
 export function App({ api }: { api?: ApiClient }) {
   const [authTick, setAuthTick] = useState(0);
@@ -44,6 +65,14 @@ export function App({ api }: { api?: ApiClient }) {
   // vault's state is stale, so the takeover lifts and `health` re-answers.
   useEffect(() => setSealed(false), [authTick]);
 
+  useEffect(() => {
+    const onHashChange = (): void => {
+      if (adoptLaunchToken()) setAuthTick((t) => t + 1);
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
   if (getToken() === null) {
     return <Unauthorized onToken={() => setAuthTick((t) => t + 1)} />;
   }
@@ -64,29 +93,27 @@ export function App({ api }: { api?: ApiClient }) {
   // are therefore matched on the path alone, and a page that wants the query
   // reads it off `window.location.hash` itself.
   const path = route.split("?")[0] ?? route;
-  const detailMatch = /^\/secrets\/(?<handle>.+)$/.exec(path);
-  const detailHandle = detailMatch?.groups?.["handle"];
-  const agentMatch = /^\/agents\/(?<name>[^/]+)$/.exec(path);
-  const agentName = agentMatch?.groups?.["name"];
+  const rawHandle = /^\/secrets\/(?<handle>.+)$/.exec(path)?.groups?.["handle"];
+  const rawName = /^\/agents\/(?<name>[^/]+)$/.exec(path)?.groups?.["name"];
+  const detailHandle = rawHandle === undefined ? null : decodeSegment(rawHandle);
+  const agentName = rawName === undefined ? null : decodeSegment(rawName);
+  const notFound = !PAGES.has(path) && detailHandle === null && agentName === null;
 
   return (
     <>
       <SealBar state={state} />
-      <div class="layout">
+      <div class="layout" key={authTick}>
         <Nav route={path} />
         <main class="content">
           {path === "/" && <DashboardPage api={client} />}
           {path === "/secrets" && <SecretsPage api={client} />}
-          {detailHandle !== undefined && (
-            <SecretDetailPage api={client} handle={decodeURIComponent(detailHandle)} />
-          )}
+          {detailHandle !== null && <SecretDetailPage api={client} handle={detailHandle} />}
           {path === "/audit" && <AuditPage api={client} />}
           {path === "/agents" && <AgentsPage api={client} />}
           {path === "/permissions" && <PermissionsPage api={client} />}
           {path === "/tokens" && <TokensPage api={client} />}
-          {agentName !== undefined && (
-            <AgentDetailPage api={client} name={decodeURIComponent(agentName)} />
-          )}
+          {agentName !== null && <AgentDetailPage api={client} name={agentName} />}
+          {notFound && <NotFound />}
         </main>
       </div>
     </>

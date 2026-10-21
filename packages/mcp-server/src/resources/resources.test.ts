@@ -9,7 +9,7 @@ import {
 import type { SecretInfo } from "@harpoc/core";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission, VaultApiToken } from "@harpoc/shared";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 import { ScopeGuard } from "../guards/scope-guard.js";
 import { registerSecretsResource } from "./secrets.js";
 import { registerHealthResource } from "./health.js";
@@ -50,16 +50,16 @@ const LISTED_SECRETS: SecretInfo[] = [
   },
 ];
 
-function mockEngine(): VaultEngine {
+function mockEngine(secrets: SecretInfo[] = LISTED_SECRETS): VaultEngine {
   return {
     // W2/D5: the by-name resource reads through getSecretInfo (per-secret
     // `read` gate) instead of answering out of the listing.
     getSecretInfo: vi.fn(async (handle: string) => {
-      const found = LISTED_SECRETS.find((s) => s.handle === handle);
-      if (!found) throw new Error(`unexpected handle: ${handle}`);
+      const found = secrets.find((s) => s.handle === handle);
+      if (!found) throw VaultError.secretNotFound(handle);
       return found;
     }),
-    listSecrets: vi.fn().mockReturnValue(LISTED_SECRETS),
+    listSecrets: vi.fn().mockReturnValue(secrets),
     getState: vi.fn().mockReturnValue("unlocked"),
     queryAudit: vi.fn().mockReturnValue([
       {
@@ -95,6 +95,19 @@ function track(server: McpServer): McpServer {
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
 });
+
+function makeScopedToken(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
+  return {
+    sub: "scoped-agent",
+    vault_id: "vault-1",
+    scope: ["list", "read", "admin"],
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    jti: "jti-scoped",
+    principal_type: "agent",
+    ...overrides,
+  };
+}
 
 describe("MCP Resources", () => {
   let server: McpServer;
@@ -164,23 +177,139 @@ describe("MCP Resources", () => {
       expect(text).not.toContain(SENTINEL);
     });
 
-    it("returns error for non-existent secret", async () => {
-      const result = await readResource(server, "secret://vault/secrets/nonexistent");
-      const data = JSON.parse(getResourceText(result));
-      expect(data.error).toBe("Secret not found");
+    it("answers the engine's SECRET_NOT_FOUND for a nonexistent secret", async () => {
+      await expectVaultError(
+        () =>
+          invokeHandler(server, "resources/read", { uri: "secret://vault/secrets/nonexistent" }),
+        ErrorCode.SECRET_NOT_FOUND,
+      );
+      await expect(readResource(server, "secret://vault/secrets/nonexistent")).rejects.toThrow(
+        "Secret not found: secret://nonexistent",
+      );
     });
 
-    it("returns the same not-found error on the 2026-07-28 leg", async () => {
+    it("answers the same not-found error on the 2026-07-28 leg", async () => {
       const modern = await connectModernInMemoryClient(() => server);
       try {
         expect(modern.client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
-        const result = await modern.readResource("secret://vault/secrets/nonexistent");
-        const data = JSON.parse(getResourceText(result));
-        expect(data.error).toBe("Secret not found");
+        await expect(modern.readResource("secret://vault/secrets/nonexistent")).rejects.toThrow(
+          "Secret not found: secret://nonexistent",
+        );
       } finally {
         await modern.close();
       }
     });
+
+    it("lists an unprojected secret at its name and a projected one at its handle path, %2F-encoded", async () => {
+      const { resources } = await (await inMemoryClientFor(server)).client.listResources();
+      expect(resources.map(({ uri, name, description }) => ({ uri, name, description }))).toEqual([
+        {
+          uri: "secret://vault/secrets",
+          name: "secrets-list",
+          description: "List of all secret handles with metadata (never values)",
+        },
+        {
+          uri: "secret://vault/secrets/my-key",
+          name: "my-key",
+          description: "Secret: my-key (api_key, active)",
+        },
+        {
+          uri: "secret://vault/secrets/prod%2Fdb-pass",
+          name: "db-pass",
+          description: "Secret: prod/db-pass (api_key, active)",
+        },
+      ]);
+    });
+
+    it("reads every listed secret back at exactly the URI the list advertised", async () => {
+      const { client } = await inMemoryClientFor(server);
+      const { resources } = await client.listResources();
+      const read: unknown[] = [];
+      for (const { uri } of resources.filter((r) => r.uri !== "secret://vault/secrets")) {
+        const data = JSON.parse(getResourceText(await client.readResource({ uri }))) as {
+          handle: string;
+          project: string | null;
+        };
+        read.push([uri, data.handle, data.project]);
+      }
+      expect(read).toEqual([
+        ["secret://vault/secrets/my-key", "secret://my-key", null],
+        ["secret://vault/secrets/prod%2Fdb-pass", "secret://prod/db-pass", "prod"],
+      ]);
+      expect(vi.mocked(engine.getSecretInfo).mock.calls.map(([handle]) => handle)).toEqual([
+        "secret://my-key",
+        "secret://prod/db-pass",
+      ]);
+    });
+
+    it("answers SECRET_NOT_FOUND for the bare name of a secret that exists only inside a project", async () => {
+      await expectVaultError(
+        () => invokeHandler(server, "resources/read", { uri: "secret://vault/secrets/db-pass" }),
+        ErrorCode.SECRET_NOT_FOUND,
+      );
+      expect(engine.getSecretInfo).toHaveBeenCalledExactlyOnceWith(
+        "secret://db-pass",
+        expect.anything(),
+      );
+      expect(engine.listSecrets).not.toHaveBeenCalled();
+    });
+
+    it("reads two same-name secrets in two projects each at its own advertised URI", async () => {
+      const prod = LISTED_SECRETS[1] as SecretInfo;
+      const staging: SecretInfo = {
+        ...prod,
+        handle: "secret://staging/db-pass",
+        project: "staging",
+        createdAt: 5000,
+        updatedAt: 5000,
+      };
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
+      registerSecretsResource(srv, mockEngine([staging, prod]), scopeGuard);
+      const { client } = await inMemoryClientFor(srv);
+      const uris = (await client.listResources()).resources.map((r) => r.uri);
+      expect(uris).toEqual([
+        "secret://vault/secrets",
+        "secret://vault/secrets/staging%2Fdb-pass",
+        "secret://vault/secrets/prod%2Fdb-pass",
+      ]);
+      const handles: string[] = [];
+      for (const uri of uris.slice(1)) {
+        const data = JSON.parse(getResourceText(await client.readResource({ uri }))) as {
+          handle: string;
+        };
+        handles.push(data.handle);
+      }
+      expect(handles).toEqual(["secret://staging/db-pass", "secret://prod/db-pass"]);
+    });
+
+    it.each([
+      "secret://vault/secrets/prod%252Fdb-pass",
+      "secret://vault/secrets/a%2Fb%2Fc",
+      "secret://vault/secrets/db%20pass",
+      "secret://vault/secrets/%E0%A4%A",
+    ])(
+      "refuses the malformed handle path %s as INVALID_HANDLE before the scope check and any engine call",
+      async (uri) => {
+        const seen = vi.fn();
+        const scoped = new ScopeGuard(
+          makeScopedToken({ project: "prod", scope: ["list", "read"] }),
+          "mcp",
+          undefined,
+          undefined,
+          seen,
+        );
+        const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
+        registerSecretsResource(srv, engine, scoped);
+
+        await expectVaultError(
+          () => invokeHandler(srv, "resources/read", { uri }),
+          ErrorCode.INVALID_HANDLE,
+        );
+        expect(seen).not.toHaveBeenCalled();
+        expect(engine.getSecretInfo).not.toHaveBeenCalled();
+        expect(engine.listSecrets).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe("health resource", () => {
@@ -274,19 +403,6 @@ describe("MCP Resources", () => {
   });
 
   describe("scope filtering on resources", () => {
-    function makeScopedToken(overrides: Partial<VaultApiToken> = {}): VaultApiToken {
-      return {
-        sub: "scoped-agent",
-        vault_id: "vault-1",
-        scope: ["list", "read", "admin"],
-        iat: Math.floor(Date.now() / 1000),
-        exp: Math.floor(Date.now() / 1000) + 3600,
-        jti: "jti-scoped",
-        principal_type: "agent",
-        ...overrides,
-      };
-    }
-
     it("secrets resource filters by project scope", async () => {
       const scoped = new ScopeGuard(makeScopedToken({ project: "prod" }));
       const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
@@ -308,6 +424,93 @@ describe("MCP Resources", () => {
       const data = JSON.parse(getResourceText(result));
       expect(data).toHaveLength(1);
       expect(data[0].name).toBe("my-key");
+    });
+
+    it("a project-scoped token lists its project's secret and reads it at the advertised URI", async () => {
+      const scoped = new ScopeGuard(makeScopedToken({ project: "prod", scope: ["list", "read"] }));
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
+      registerSecretsResource(srv, engine, scoped);
+      const { client } = await inMemoryClientFor(srv);
+
+      const uris = (await client.listResources()).resources.map((r) => r.uri);
+      expect(uris).toEqual(["secret://vault/secrets", "secret://vault/secrets/prod%2Fdb-pass"]);
+      const data = JSON.parse(
+        getResourceText(
+          await client.readResource({ uri: "secret://vault/secrets/prod%2Fdb-pass" }),
+        ),
+      ) as { handle: string };
+      expect(data.handle).toBe("secret://prod/db-pass");
+      expect(engine.getSecretInfo).toHaveBeenCalledExactlyOnceWith(
+        "secret://prod/db-pass",
+        scoped.caller,
+      );
+    });
+
+    it.each([
+      { label: "a global secret", uri: "secret://vault/secrets/my-key" },
+      { label: "another project's secret", uri: "secret://vault/secrets/dev%2Fdb-pass" },
+    ])("a project-scoped token is refused $label, reason project", async ({ uri }) => {
+      const seen = vi.fn();
+      const scoped = new ScopeGuard(
+        makeScopedToken({ project: "prod", scope: ["list", "read"] }),
+        "mcp",
+        undefined,
+        undefined,
+        seen,
+      );
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
+      registerSecretsResource(srv, engine, scoped);
+
+      await expectVaultError(
+        () => invokeHandler(srv, "resources/read", { uri }),
+        ErrorCode.ACCESS_DENIED,
+      );
+      expect(seen).toHaveBeenCalledExactlyOnceWith(`resources/read ${uri}`, "project");
+      expect(engine.getSecretInfo).not.toHaveBeenCalled();
+    });
+
+    it("a read-scoped token without a grant meets one refusal for an ungranted and a nonexistent secret on both protocol legs", async () => {
+      const token = makeScopedToken({ scope: ["read"] });
+      const ungranted = mockEngine();
+      vi.mocked(ungranted.getSecretInfo).mockImplementation((handle: string) =>
+        Promise.reject(VaultError.secretNotFound(handle)),
+      );
+      const uri = "secret://vault/secrets/prod%2Fdb-key";
+      const refusals: string[] = [];
+      const codes: unknown[] = [];
+      const record = (read: Promise<unknown>): Promise<void> =>
+        read.then(
+          (answered) => {
+            refusals.push(`answered ${JSON.stringify(answered)}`);
+            codes.push(undefined);
+          },
+          (err: unknown) => {
+            refusals.push(String(err));
+            codes.push((err as { code?: number }).code);
+          },
+        );
+      const serverFor = (vault: VaultEngine): McpServer => {
+        const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
+        registerSecretsResource(srv, vault, new ScopeGuard(token));
+        return srv;
+      };
+      for (const vault of [ungranted, mockEngine([])]) {
+        await record(readResource(serverFor(vault), uri));
+        const modernServer = serverFor(vault);
+        const modern = await connectModernInMemoryClient(() => modernServer);
+        try {
+          expect(modern.client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
+          await record(modern.readResource(uri));
+        } finally {
+          await modern.close();
+        }
+      }
+      expect(refusals).toHaveLength(4);
+      for (const refusal of refusals) {
+        expect(refusal).toContain("Secret not found: secret://prod/db-key");
+        expect(refusal).toBe(refusals[0]);
+      }
+      expect(codes).toEqual([-32603, -32603, -32603, -32603]);
     });
 
     it("health resource respects scope filtering", async () => {

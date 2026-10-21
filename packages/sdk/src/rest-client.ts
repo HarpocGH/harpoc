@@ -186,7 +186,7 @@ export class RestClient implements VaultClient {
   async revokePolicy(handle: string, policyId: string): Promise<void> {
     await this.request<{ revoked: boolean }>(
       "DELETE",
-      `/api/v1/secrets/${this.encodeHandle(handle)}/policies/${policyId}`,
+      `/api/v1/secrets/${this.encodeHandle(handle)}/policies/${encodeURIComponent(policyId)}`,
     );
   }
 

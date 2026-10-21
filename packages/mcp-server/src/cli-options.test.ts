@@ -10,6 +10,7 @@ import {
   parseAllowTokenlessOption,
   parseHttpPortOption,
   parseTokenFileOption,
+  parseVaultDirOption,
   readLaunchTokenFile,
 } from "./cli-options.js";
 
@@ -145,6 +146,30 @@ describe("parseTokenFileOption", () => {
       ok: false,
       message: "Error: --token-file requires a path.\n",
     });
+  });
+});
+
+describe("parseVaultDirOption", () => {
+  it("returns undefined when --vault-dir is absent", () => {
+    expect(parseVaultDirOption(undefined)).toEqual({ ok: true, value: undefined });
+  });
+
+  it("accepts a path", () => {
+    expect(parseVaultDirOption("/tmp/vault")).toEqual({ ok: true, value: "/tmp/vault" });
+  });
+
+  it.each(["", "  ", true])("refuses an empty, blank or value-less --vault-dir %j", (raw) => {
+    expect(parseVaultDirOption(raw)).toEqual({
+      ok: false,
+      message: "Error: --vault-dir requires a path.\n",
+    });
+  });
+
+  it("index.ts routes --vault-dir through parseVaultDirOption and never tests it for truthiness", () => {
+    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    expect(source).toContain('parseVaultDirOption(values["vault-dir"])');
+    expect(source).not.toContain('values["vault-dir"] as string');
+    expect(source).not.toMatch(/if \(vaultDirOption\) return/);
   });
 });
 

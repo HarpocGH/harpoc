@@ -26,6 +26,23 @@ export interface ControllingTerminal {
   close(): void;
 }
 
+type EscapeState = "ground" | "escape" | "csi" | "ss3";
+
+function nextEscapeState(state: EscapeState, char: string): EscapeState | null {
+  const code = char.charCodeAt(0);
+  if (state === "escape") {
+    if (char === "[") return "csi";
+    if (char === "O") return "ss3";
+    if (code >= 0x20 && code <= 0x7e) return "ground";
+  } else if (state === "csi") {
+    if (code >= 0x20 && code <= 0x3f) return "csi";
+    if (code >= 0x40 && code <= 0x7e) return "ground";
+  } else if (state === "ss3") {
+    if (code >= 0x40 && code <= 0x7e) return "ground";
+  }
+  return char === "\x1b" ? "escape" : null;
+}
+
 /**
  * Open the process's controlling terminal directly — NOT stdin/stdout, which
  * over the stdio MCP transport carry the JSON-RPC stream. Returns null when no
@@ -83,8 +100,11 @@ function openTerminalFds(inputPath: string, outputPath: string): ControllingTerm
 /**
  * Masked line read on an already-open terminal: raw mode, no echo, Enter
  * confirms, Backspace edits, Ctrl+C / Ctrl+D / empty input / timeout cancel
- * (→ null, the caller falls through to the deferred channel). Mirrors the CLI's
- * hidden prompt semantics.
+ * (→ null, the caller falls through to the deferred channel). A key that is not
+ * text is dropped whole: an ESC-led CSI (`ESC [`) or SS3 (`ESC O`) sequence,
+ * even when split across chunks after its introducer, an Alt chord (ESC and one
+ * printable), a bare ESC, and every other C0 control byte. Mirrors the CLI's
+ * hidden prompt semantics in raw mode.
  */
 export function promptForValueMasked(
   terminal: ControllingTerminal,
@@ -94,6 +114,7 @@ export function promptForValueMasked(
   return new Promise((resolve) => {
     const { input, output } = terminal;
     let value = "";
+    let escape: EscapeState = "ground";
     let done = false;
 
     const finish = (result: Uint8Array | null): void => {
@@ -111,6 +132,9 @@ export function promptForValueMasked(
     const onData = (chunk: Buffer): void => {
       const text = chunk.toString("utf8");
       for (const char of text) {
+        const next = nextEscapeState(escape, char);
+        escape = next ?? "ground";
+        if (next !== null) continue;
         if (char === "\r" || char === "\n") {
           finish(value.length > 0 ? new Uint8Array(Buffer.from(value, "utf8")) : null);
           return;
@@ -128,6 +152,7 @@ export function promptForValueMasked(
         }
         value += char;
       }
+      if (escape === "escape") escape = "ground";
     };
 
     output.write(promptText);

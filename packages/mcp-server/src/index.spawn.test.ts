@@ -27,9 +27,9 @@ interface McpResult {
 }
 
 /** The child is killed at the deadline (SIGKILL after the grace) and the promise rejects after its `close`. */
-function spawnMcp(args: string[], env: NodeJS.ProcessEnv): Promise<McpResult> {
+function spawnMcp(args: string[], env: NodeJS.ProcessEnv, cwd?: string): Promise<McpResult> {
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(process.execPath, [MCP_ENTRY, ...args], { env, windowsHide: true });
+    const child = spawn(process.execPath, [MCP_ENTRY, ...args], { env, cwd, windowsHide: true });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -139,4 +139,24 @@ describe("harpoc-mcp --allow-tokenless conflicts (spawned binary, I35)", () => {
     expectRefusedBeforeAnyVault(result, CONFLICTS_WITH_A_TOKEN);
     expect(result.stderr).not.toContain("Cannot read --token-file");
   }, 30_000);
+});
+
+describe("harpoc-mcp --vault-dir without a path (spawned binary, Q4)", () => {
+  it.each([
+    { label: 'an empty --vault-dir ""', args: ["--vault-dir", ""] },
+    { label: "a blank --vault-dir", args: ["--vault-dir", "  "] },
+    { label: "a value-less --vault-dir as the last argument", args: ["--vault-dir"] },
+    { label: 'an empty --vault-dir "" with --http', args: ["--http", "--vault-dir", ""] },
+  ])(
+    "refuses $label before any vault is opened, the working directory and home untouched",
+    async ({ args }) => {
+      const result = await spawnMcp(
+        args,
+        childEnv({ HOME: vaultDir, USERPROFILE: vaultDir }),
+        vaultDir,
+      );
+      expectRefusedBeforeAnyVault(result, "Error: --vault-dir requires a path.");
+    },
+    30_000,
+  );
 });

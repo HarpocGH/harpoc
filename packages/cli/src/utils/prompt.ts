@@ -9,6 +9,23 @@ type ConfirmPromptInput = Readable & {
   isTTY?: boolean;
 };
 
+type EscapeState = "ground" | "escape" | "csi" | "ss3";
+
+function nextEscapeState(state: EscapeState, char: string): EscapeState | null {
+  const code = char.charCodeAt(0);
+  if (state === "escape") {
+    if (char === "[") return "csi";
+    if (char === "O") return "ss3";
+    if (code >= 0x20 && code <= 0x7e) return "ground";
+  } else if (state === "csi") {
+    if (code >= 0x20 && code <= 0x3f) return "csi";
+    if (code >= 0x40 && code <= 0x7e) return "ground";
+  } else if (state === "ss3") {
+    if (code >= 0x40 && code <= 0x7e) return "ground";
+  }
+  return char === "\x1b" ? "escape" : null;
+}
+
 /**
  * Prompt for a password with hidden input.
  */
@@ -107,6 +124,12 @@ export function promptConfirm(
  * empty value as an error), so a closed stdin can no longer leave the promise
  * dangling and the process exiting 0 without having run the command.
  *
+ * In raw mode a key that is not text is dropped whole: an ESC-led CSI
+ * (`ESC [`) or SS3 (`ESC O`) sequence — an arrow, a function key, a bracketed
+ * paste marker — even when split across chunks after its introducer, an Alt
+ * chord (ESC and one printable), a bare ESC, and every other C0 control byte
+ * — Enter, Backspace and Ctrl+C still act. Piped input keeps its bytes.
+ *
  * No readline interface may be attached here: with a TTY output, readline
  * runs in terminal mode and echoes every keypress, printing the secret.
  */
@@ -128,6 +151,8 @@ export function promptHidden(
       input.setRawMode(true);
     }
 
+    const scanKeys = typeof input.setRawMode === "function";
+    let escape: EscapeState = "ground";
     let value = "";
 
     const finish = (remainder: string): void => {
@@ -150,6 +175,11 @@ export function promptHidden(
       const chunk = data.toString("utf8");
       for (let i = 0; i < chunk.length; i++) {
         const char = chunk.charAt(i);
+        if (scanKeys) {
+          const next = nextEscapeState(escape, char);
+          escape = next ?? "ground";
+          if (next !== null) continue;
+        }
         // Handle enter
         if (char === "\n" || char === "\r") {
           let rest = chunk.slice(i + 1);
@@ -171,8 +201,10 @@ export function promptHidden(
           reject(new Error("User cancelled"));
           return;
         }
+        if (scanKeys && char < " ") continue;
         value += char;
       }
+      if (escape === "escape") escape = "ground";
     };
 
     const onEnd = (): void => {

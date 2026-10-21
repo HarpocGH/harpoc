@@ -102,6 +102,12 @@ export function parseAllowTokenlessOption(raw: unknown): OptionParse<boolean> {
   return { ok: false, message: "Error: --allow-tokenless takes no value.\n" };
 }
 
+export function parseVaultDirOption(raw: unknown): OptionParse<string | undefined> {
+  if (raw === undefined) return { ok: true, value: undefined };
+  if (typeof raw === "string" && raw.trim() !== "") return { ok: true, value: raw };
+  return { ok: false, message: "Error: --vault-dir requires a path.\n" };
+}
+
 export type AllowedHostsParse = { ok: true; hosts: string[] } | { ok: false; message: string };
 
 /**

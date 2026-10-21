@@ -57,7 +57,7 @@ export async function probeHarpocSurface(
   handle?: string,
 ): Promise<CallOutcome> {
   const probed = handle ?? "secret://unknown";
-  const name = probed.slice(probed.lastIndexOf("/") + 1);
+  const handlePath = encodeURIComponent(probed.slice("secret://".length));
   const read = (uri: string): Promise<unknown> =>
     surface.client
       .readResource({ uri })
@@ -73,7 +73,7 @@ export async function probeHarpocSurface(
     .then((r) => r as unknown)
     .catch((err: unknown) => err);
   const resource = await read("secret://vault/secrets");
-  const secret = await read(`secret://vault/secrets/${name}`);
+  const secret = await read(`secret://vault/secrets/${handlePath}`);
   const health = await read("secret://vault/health");
   const projects = await read("secret://vault/projects");
   const auditRecent = await read("secret://vault/audit/recent");
