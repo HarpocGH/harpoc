@@ -551,6 +551,26 @@ describe("PUT /api/v1/agents/:name/secrets/:handle/permissions", () => {
     expect(engine.resolveSecretId).not.toHaveBeenCalled();
   });
 
+  it("refuses a handle outside a name-scoped admin token with one audited secret denial", async () => {
+    engine = createMockEngine({ ...ADMIN_TOKEN, secrets: ["db-*"] });
+    app = buildApp(engine);
+    const res = await app.request("/api/v1/agents/deploy-bot/secrets/test-key/permissions", {
+      method: "PUT",
+      headers: JSON_AUTH,
+      body: JSON.stringify({ permissions: ["read"] }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
+    expect(engine.auditScopeRefusal).toHaveBeenCalledTimes(1);
+    expect(engine.auditScopeRefusal).toHaveBeenCalledWith(
+      expect.objectContaining({ principal_id: "admin-agent", interface: "rest" }),
+      "PUT /api/v1/agents/deploy-bot/secrets/test-key/permissions",
+      "secret",
+    );
+    expect(engine.setAgentPermissions).not.toHaveBeenCalled();
+    expect(engine.resolveSecretId).not.toHaveBeenCalled();
+  });
+
   it("rejects a malformed :name before the engine call", async () => {
     const res = await app.request("/api/v1/agents/bad%20name/secrets/test-key/permissions", {
       method: "PUT",

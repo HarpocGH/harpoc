@@ -129,3 +129,113 @@ describe("audit visibility scope end-to-end (L10)", () => {
     expect(vault.engine.verifyAuditChain().valid).toBe(true);
   });
 });
+
+/**
+ * S6 (review 2026-10-15) over the real REST stack: a failed row without a
+ * `secret_id` can still name a handle in its detail — a D2g scope refusal's
+ * operation, a resolution failure's handle, and until Q14 the failed re-revoke —
+ * so a scoped reader no longer sees such rows; the re-revoke row carries the
+ * secret's id and follows that secret's visibility.
+ */
+describe("failed rows that name an out-of-scope handle (S6, Q14)", () => {
+  let vault: TestVault;
+  let app: ReturnType<typeof createApp>;
+  let hrId: string;
+  let dbId: string;
+
+  beforeAll(async () => {
+    vault = createTestVault();
+    await vault.engine.initVault(PASSWORD);
+    registerAgents(vault.engine, "db-admin", "pay-agent", "full-admin");
+    for (const name of ["hr-salaries", "db-prod"]) {
+      await vault.engine.createSecret({
+        name,
+        type: SecretType.API_KEY,
+        value: new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+      });
+    }
+    hrId = await vault.engine.resolveSecretId("secret://hr-salaries");
+    dbId = await vault.engine.resolveSecretId("secret://db-prod");
+    app = createApp(vault.engine);
+
+    const payToken = vault.engine.createToken("pay-agent", ["read"], undefined, {
+      secrets: ["pay-*"],
+    });
+    expect((await request("GET", "/api/v1/secrets/hr-salaries/value", payToken)).status).toBe(403);
+
+    const rootToken = vault.engine.createToken("root-admin", ["admin"], undefined, {
+      principalType: "user",
+    });
+    expect(
+      (await request("DELETE", "/api/v1/secrets/hr-salaries?confirm=true", rootToken)).status,
+    ).toBe(200);
+    expect(
+      (await request("DELETE", "/api/v1/secrets/hr-salaries?confirm=true", rootToken)).status,
+    ).toBe(410);
+  });
+
+  afterAll(async () => {
+    await destroyTestVault(vault);
+  });
+
+  function request(method: string, path: string, token: string): Promise<Response> {
+    return Promise.resolve(
+      app.request(path, {
+        method,
+        headers: { authorization: `Bearer ${token}`, host: "localhost" },
+      }),
+    );
+  }
+
+  async function readAudit(token: string, query = ""): Promise<AuditRow[]> {
+    const res = await request("GET", `/api/v1/audit${query}`, token);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { data: AuditRow[] }).data;
+  }
+
+  const namesHrSalaries = (row: AuditRow): boolean =>
+    JSON.stringify(row.detail ?? {}).includes("hr-salaries");
+
+  it("a name-pattern-scoped reader sees neither the refusal naming hr-salaries nor its failed re-revoke", async () => {
+    const reader = vault.engine.createToken("db-admin", ["admin"], undefined, {
+      secrets: ["db-*"],
+    });
+    const rows = await readAudit(reader);
+    expect(rows.filter(namesHrSalaries)).toEqual([]);
+    expect(rows.some((r) => r.event_type === "access.denied")).toBe(false);
+    expect(rows.map((r) => r.secret_id)).toContain(dbId);
+    expect(rows.some((r) => r.event_type === "vault.unlock")).toBe(true);
+  });
+
+  it("an unrestricted reader sees both rows, the failed re-revoke under the secret's id", async () => {
+    const reader = vault.engine.createToken("full-admin", ["admin"]);
+    const rows = await readAudit(reader);
+    const refusal = rows.find((r) => r.event_type === "access.denied" && namesHrSalaries(r));
+    expect(refusal?.secret_id).toBeNull();
+    expect(refusal?.detail).toMatchObject({
+      operation: "GET /api/v1/secrets/hr-salaries/value",
+      reason: "secret",
+    });
+    const reRevoke = rows.find((r) => r.event_type === "secret.revoke" && r.detail?.error);
+    expect(reRevoke?.secret_id).toBe(hrId);
+    expect(reRevoke?.detail).toMatchObject({
+      handle: "secret://hr-salaries",
+      error: "SECRET_REVOKED",
+    });
+  });
+
+  it("the unrestricted reader's per-secret read returns the failed re-revoke (Q14)", async () => {
+    const reader = vault.engine.createToken("full-admin", ["admin"]);
+    const rows = await readAudit(reader, `?secret_id=${hrId}`);
+    expect(
+      rows.filter((r) => r.event_type === "secret.revoke").map((r) => r.detail?.error),
+    ).toEqual(["SECRET_REVOKED", undefined]);
+  });
+
+  it("unchanged: the scoped reader's targeted read of the out-of-scope id still answers nothing", async () => {
+    const reader = vault.engine.createToken("db-admin", ["admin"], undefined, {
+      secrets: ["db-*"],
+    });
+    expect(await readAudit(reader, `?secret_id=${hrId}`)).toEqual([]);
+  });
+});

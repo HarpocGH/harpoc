@@ -161,7 +161,10 @@ interface ScopeSite {
 /**
  * One row per `checkScope(` call site under `routes/` (45). A route with a
  * second, name-carrying check is reachable there only with the permission held,
- * so those five rows refuse on the project or the name pattern instead.
+ * so those five rows refuse on the project or the name pattern instead — the
+ * matrix cell's through the governance middleware, which refuses a token with
+ * either claim before the route runs (S3, 2026-10-20; the route's own refusal
+ * is pinned in `agents.test.ts`).
  */
 const SITES: ScopeSite[] = [
   {
@@ -255,7 +258,7 @@ const SITES: ScopeSite[] = [
     path: "/api/v1/agents/bot/secrets/test-key/permissions",
     body: { permissions: ["read"] },
     token: NAME_PATTERN_TOKEN,
-    reason: "secret",
+    reason: "governance",
     untouched: (m) => [m.engine.resolveSecretId, m.engine.setAgentPermissions],
   },
   {
@@ -626,13 +629,22 @@ describe("every checkScope site writes the audited scope denial (D2g)", () => {
 
       expect(res.status).toBe(403);
       expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
-      expect(mocks.engine.auditScopeRefusal).toHaveBeenCalledTimes(1);
-      expect(mocks.engine.auditScopeRefusal).toHaveBeenCalledWith(
-        expect.objectContaining({ principal_id: row.token.sub, interface: "rest" }),
-        `${row.method} ${row.path}`,
-        row.reason,
-      );
-      expect(mocks.engine.auditGovernanceRefusal).not.toHaveBeenCalled();
+      if (row.reason === "governance") {
+        expect(mocks.engine.auditGovernanceRefusal).toHaveBeenCalledTimes(1);
+        expect(mocks.engine.auditGovernanceRefusal).toHaveBeenCalledWith(
+          expect.objectContaining({ principal_id: row.token.sub, interface: "rest" }),
+          `${row.method} ${row.path}`,
+        );
+        expect(mocks.engine.auditScopeRefusal).not.toHaveBeenCalled();
+      } else {
+        expect(mocks.engine.auditScopeRefusal).toHaveBeenCalledTimes(1);
+        expect(mocks.engine.auditScopeRefusal).toHaveBeenCalledWith(
+          expect.objectContaining({ principal_id: row.token.sub, interface: "rest" }),
+          `${row.method} ${row.path}`,
+          row.reason,
+        );
+        expect(mocks.engine.auditGovernanceRefusal).not.toHaveBeenCalled();
+      }
       for (const fn of row.untouched(mocks)) {
         expect(fn).not.toHaveBeenCalled();
       }

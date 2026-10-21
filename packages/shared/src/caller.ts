@@ -31,6 +31,9 @@ export function callerFromToken(
   if (token.project) {
     caller.project = token.project;
   }
+  if (token.secrets?.length) {
+    caller.secrets = token.secrets;
+  }
   if (iface) {
     caller.interface = iface;
   }

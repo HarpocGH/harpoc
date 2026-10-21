@@ -244,13 +244,15 @@ describe("secret routes", () => {
   });
 
   /**
-   * R14/D6: both endpoint-configuration writes take `rotate`, not `admin`.
+   * R14/D6: both endpoint-configuration routes gate on `rotate`, not `admin`.
    * The denial table above only proves that a token *missing* `rotate` is
    * refused — a route re-gated on `admin` would satisfy it too. This is the
    * other half, and the only place the tree states the endpoint scope
-   * positively.
+   * positively. Since 2026-10-20 (TC-14) the engine adds `admin` for an MCP
+   * configuration that launches anything new; the route passes the caller
+   * through and answers the engine's refusal.
    */
-  describe("a rotate-only token completes both configuration writes (R14/D6)", () => {
+  describe("a rotate-only token passes both configuration routes to the engine (R14/D6)", () => {
     const ROTATE_CALLER = {
       principal_type: "agent",
       principal_id: "test-agent",
@@ -269,11 +271,9 @@ describe("secret routes", () => {
         engineFn: "setMcpServerConfig",
         body: {
           server_name: "github-mcp",
-          transport: "stdio",
+          transport: "http",
           protocol: "2025-11-25",
-          command: "node",
-          args: ["server.js"],
-          env_var: "GITHUB_TOKEN",
+          url: "https://mcp.example.com/mcp",
         },
       },
       {
@@ -305,6 +305,39 @@ describe("secret routes", () => {
         );
       });
     }
+
+    it("PUT /:handle/mcp-server answers the engine's admin refusal of a launch change with 403 ACCESS_DENIED", async () => {
+      engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: ["rotate"] });
+      engine.setMcpServerConfig.mockRejectedValueOnce(
+        VaultError.accessDenied("Token lacks permission: admin"),
+      );
+      const body = {
+        server_name: "github-mcp",
+        transport: "stdio",
+        protocol: "2025-11-25",
+        command: "node",
+        args: ["server.js"],
+        env_var: "GITHUB_TOKEN",
+      };
+
+      const res = await app.request("/api/v1/secrets/test-key/mcp-server", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({
+        error: ErrorCode.ACCESS_DENIED,
+        message: "Access denied: Token lacks permission: admin",
+      });
+      expect(engine.setMcpServerConfig).toHaveBeenCalledWith(
+        "secret://test-key",
+        body,
+        ROTATE_CALLER,
+      );
+      expect(engine.auditScopeRefusal).not.toHaveBeenCalled();
+    });
 
     it('DELETE /:handle/connection-config succeeds on scope ["rotate"] and the engine deleter is called', async () => {
       engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: ["rotate"] });

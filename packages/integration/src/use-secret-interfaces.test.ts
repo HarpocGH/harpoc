@@ -350,3 +350,55 @@ describe("use_secret through REST and MCP Streamable HTTP — the v1.3 contexts 
     expect(vault.engine.verifyAuditChain().valid).toBe(true);
   });
 });
+
+describe("use_secret smtp through REST — the vault's own files are no attachment source (B1)", () => {
+  it("refuses the vault database as an attachment 400 ATTACHMENT_REJECTED, unsent, with one failed row", async () => {
+    const name = "uif-smtp-vault-file";
+    const handle = `secret://${name}`;
+    await vault.engine.createSecret({
+      name,
+      type: SecretType.API_KEY,
+      value: new Uint8Array(Buffer.from("uif-smtp-user:S3CRET-TOKEN-xyz", "utf8")),
+    });
+    await vault.engine.setInjectionPolicy(handle, {
+      host_allowlist: [`${HOST}:${String(smtp.port)}`],
+      smtp_recipient_allowlist: ["*@example.com"],
+    });
+    await vault.engine.setConnectionConfig(handle, { mail: { tls: { ca: FIXTURE_CA_PEM } } });
+    await grantOn(vault.engine, handle, REST_AGENT, ["use"]);
+    const wireBefore = smtp.wire();
+
+    const rendered = await viaRest(name, {
+      type: "smtp",
+      host: HOST,
+      port: smtp.port,
+      security: "tls",
+      from: "agent@harpoc.local",
+      to: ["ops@example.com"],
+      subject: "the vault",
+      text: "attached",
+      attachments: [{ path: vault.dbPath }],
+    });
+
+    expect(rendered.status).toBe(400);
+    expect(JSON.parse(rendered.text)).toEqual({
+      error: ErrorCode.ATTACHMENT_REJECTED,
+      message: "Attachment rejected: an attachment path is inside the vault directory",
+    });
+    expect(smtp.wire()).toEqual(wireBefore);
+    const secretId = await vault.engine.resolveSecretId(handle);
+    const rows = vault.engine.queryAudit({ eventType: AuditEventType.SECRET_USE, secretId });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ success: false, principal_id: REST_AGENT });
+    expect(rows[0]?.detail).toEqual({
+      context: "smtp",
+      host: HOST,
+      from: "agent@harpoc.local",
+      recipients: ["ops@example.com"],
+      attachment_paths: [vault.dbPath],
+      attachment_total_bytes: 0,
+      error: ErrorCode.ATTACHMENT_REJECTED,
+      interface: "rest",
+    });
+  });
+});

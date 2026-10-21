@@ -1,5 +1,9 @@
-import { readFile as nodeReadFile, stat as nodeStat } from "node:fs/promises";
-import { basename } from "node:path";
+import {
+  readFile as nodeReadFile,
+  realpath as nodeRealpath,
+  stat as nodeStat,
+} from "node:fs/promises";
+import { basename, dirname, isAbsolute, posix, relative, resolve, sep, win32 } from "node:path";
 import type { InjectionPolicy, SmtpAction, SmtpResult } from "@harpoc/shared";
 import {
   ActionType,
@@ -65,14 +69,18 @@ export interface SmtpExecution {
 
 /**
  * Injectable dependencies (mirrors `DatabaseInjector`'s constructor-DI style):
- * a fake `sendSmtp` for the send seam, and `stat`/`readFile` so the
+ * a fake `sendSmtp` for the send seam, and `realpath`/`stat`/`readFile` so the
  * refusal-ordering tests can prove no attachment file is touched before the
- * recipient/attachment-policy checks have passed.
+ * recipient/attachment-policy checks have passed. `vaultFiles` names the
+ * vault's own files (the database and the session file): no attachment is
+ * read from the directory of any of them.
  */
 export interface SmtpInjectorDeps {
   sendSmtp?: (opts: SmtpSendOptions) => Promise<{ accepted: number; messageId: null }>;
-  stat?: (path: string) => Promise<{ size: number }>;
+  realpath?: (path: string) => Promise<string>;
+  stat?: (path: string) => Promise<{ size: number; isFile(): boolean }>;
   readFile?: (path: string) => Promise<Buffer>;
+  vaultFiles?: readonly string[];
 }
 
 /**
@@ -99,9 +107,11 @@ export function buildSmtpAuditDetails(
  * `SmtpAction` into an assembled MIME message and a single `sendSmtp` call,
  * enforcing — in this exact, load-bearing order — the target host allowlist,
  * the recipient-allowlist coupling (attachments demand a configured allowlist;
- * a configured allowlist constrains every recipient), the attachment count/size
- * caps (checked via `stat` BEFORE any byte is read — an over-policy send never
- * touches a local file), then SSRF pre-flight with address pinning. Every throw
+ * a configured allowlist constrains every recipient), the attachment count cap,
+ * the attachment sources (never a device, a network share, a file inside the
+ * vault directory or anything but a regular file) and the size caps (checked
+ * via `realpath` and `stat` BEFORE any byte is read — an over-policy send never
+ * reads a local file), then SSRF pre-flight with address pinning. Every throw
  * leaves the injector with the credential stripped (`redactErrorMessage`), and
  * `assembleMessage`'s plain-`Error` reserved-header guard is translated to a
  * `VaultError` so no raw error escapes.
@@ -112,13 +122,17 @@ export function buildSmtpAuditDetails(
  */
 export class SmtpInjector {
   private readonly sendSmtp: NonNullable<SmtpInjectorDeps["sendSmtp"]>;
+  private readonly realpath: NonNullable<SmtpInjectorDeps["realpath"]>;
   private readonly stat: NonNullable<SmtpInjectorDeps["stat"]>;
   private readonly readFile: NonNullable<SmtpInjectorDeps["readFile"]>;
+  private readonly vaultDirs: readonly string[];
 
   constructor(deps: SmtpInjectorDeps = {}) {
     this.sendSmtp = deps.sendSmtp ?? realSendSmtp;
+    this.realpath = deps.realpath ?? ((p) => nodeRealpath(p));
     this.stat = deps.stat ?? ((p) => nodeStat(p));
     this.readFile = deps.readFile ?? ((p) => nodeReadFile(p));
+    this.vaultDirs = [...new Set((deps.vaultFiles ?? []).map((f) => dirname(resolve(f))))];
   }
 
   async run(
@@ -171,16 +185,42 @@ export class SmtpInjector {
       }
     }
 
-    // 3. Attachment caps — count first (no stat), then per-file and running
-    //    total via `stat`, all BEFORE any byte is read. Every rejection reason
-    //    is a vault-authored policy string; it never carries a path or content.
+    // 3. Attachment sources and caps — count first (no fs call), then each path
+    //    as given (no fs call), then its `realpath` against the vault directory,
+    //    then per-file and running total via `stat`, all BEFORE any byte is
+    //    read. Every rejection reason is a vault-authored policy string; it
+    //    never carries a path or content.
     const specs = action.attachments ?? [];
     if (specs.length > MAX_SMTP_ATTACHMENTS) {
       throw VaultError.attachmentRejected(`too many attachments (max ${MAX_SMTP_ATTACHMENTS})`);
     }
-    let total = 0;
     for (const spec of specs) {
-      const { size } = await this.stat(spec.path);
+      if (namesDevice(spec.path, process.platform)) {
+        throw VaultError.attachmentRejected("an attachment path names a device");
+      }
+      if (namesNetworkShare(spec.path, process.platform)) {
+        throw VaultError.attachmentRejected("an attachment path names a network share");
+      }
+    }
+    const vaultDirs = specs.length > 0 ? await this.resolvedVaultDirs() : [];
+    const sources: { spec: (typeof specs)[number]; source: string }[] = [];
+    for (const spec of specs) {
+      const source = await this.realpath(spec.path);
+      if (namesDevice(source, process.platform)) {
+        throw VaultError.attachmentRejected("an attachment path names a device");
+      }
+      if (vaultDirs.some((dir) => isWithin(dir, source))) {
+        throw VaultError.attachmentRejected("an attachment path is inside the vault directory");
+      }
+      sources.push({ spec, source });
+    }
+    let total = 0;
+    for (const { source } of sources) {
+      const stats = await this.stat(source);
+      if (!stats.isFile()) {
+        throw VaultError.attachmentRejected("an attachment path is not a regular file");
+      }
+      const size = stats.size;
       if (size > MAX_ATTACHMENT_BYTES) {
         throw VaultError.attachmentRejected(
           `an attachment exceeds the ${MAX_ATTACHMENT_BYTES}-byte per-file limit`,
@@ -194,11 +234,12 @@ export class SmtpInjector {
       }
     }
 
-    // 4. Read attachment bytes (only now that the policy has passed).
+    // 4. Read attachment bytes (only now that the policy has passed), from the
+    //    resolved path the checks above examined.
     const mimeAttachments: MimeAttachment[] = [];
     const resolved: SmtpResolvedAttachment[] = [];
-    for (const spec of specs) {
-      const data = await this.readFile(spec.path);
+    for (const { spec, source } of sources) {
+      const data = await this.readFile(source);
       mimeAttachments.push({
         filename: spec.filename ?? basename(spec.path),
         contentType: spec.content_type ?? "application/octet-stream",
@@ -261,6 +302,46 @@ export class SmtpInjector {
       auditDetails: buildSmtpAuditDetails(action, resolved),
     };
   }
+
+  private resolvedVaultDirs(): Promise<string[]> {
+    return Promise.all(
+      this.vaultDirs.map((dir) =>
+        this.realpath(dir).catch((err: unknown) => {
+          if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return dir;
+          throw err;
+        }),
+      ),
+    );
+  }
+}
+
+const POSIX_DEVICE_ROOTS = ["/dev", "/proc", "/sys"];
+
+/**
+ * Whether an attachment path names a device rather than a file: on win32 the
+ * `\\.\` and `\\?\` namespaces in either slash form (`\\?\UNC\` is a network
+ * share); elsewhere anything under `/dev`, `/proc` or `/sys`.
+ */
+export function namesDevice(path: string, platform: NodeJS.Platform): boolean {
+  if (platform === "win32") {
+    const normalized = win32.normalize(path).toUpperCase();
+    if (normalized.startsWith("\\\\?\\UNC\\")) return false;
+    return normalized.startsWith("\\\\.\\") || normalized.startsWith("\\\\?\\");
+  }
+  const normalized = posix.normalize(path);
+  return POSIX_DEVICE_ROOTS.some(
+    (root) => normalized === root || normalized.startsWith(`${root}/`),
+  );
+}
+
+/** Whether an attachment path names a win32 network share (`\\server\share`, `//server/share`, `\\?\UNC\`). */
+export function namesNetworkShare(path: string, platform: NodeJS.Platform): boolean {
+  return platform === "win32" && win32.normalize(path).startsWith("\\\\");
+}
+
+function isWithin(dir: string, target: string): boolean {
+  const rel = relative(dir, target);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 /**

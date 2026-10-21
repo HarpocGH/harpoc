@@ -4,7 +4,6 @@ import type {
   AccessPolicy,
   AgentStatus,
   AuditEvent,
-  AuditEventType,
   Permission,
   PrincipalType,
   Secret,
@@ -13,6 +12,7 @@ import type {
   TokenPrincipalType,
 } from "@harpoc/shared";
 import {
+  AuditEventType,
   permissionListSchema,
   secretIdListSchema,
   SQLITE_PRAGMAS,
@@ -51,7 +51,9 @@ export interface AuditFilter {
    * The secret ids a scoped caller may see (L10). Applied inside the query,
    * ahead of `limit`, so a scoped read gets up to `limit` rows it may see
    * instead of the visible remainder of the newest `limit` rows. Rows without
-   * a `secret_id` carry no per-secret metadata and stay visible.
+   * a `secret_id` stay visible, except a failed row of a per-secret event type
+   * or `access.denied`, whose detail may name a handle the caller may not
+   * address (S6).
    */
   visibleSecretIds?: string[];
 }
@@ -62,6 +64,23 @@ export interface AuditFilter {
  * what fits alongside the other predicates is filtered in JS instead.
  */
 const MAX_SQL_VARIABLES = 32_000;
+
+/**
+ * The event types whose failed rows without a `secret_id` a scoped caller does
+ * not see (S6): the per-secret families and `access.denied`.
+ */
+const HIDDEN_SECRETLESS_FAILURE_TYPES: ReadonlySet<string> = new Set(
+  Object.values(AuditEventType).filter(
+    (type) =>
+      type === AuditEventType.ACCESS_DENIED ||
+      ["secret.", "policy.", "oauth.", "cert.", "mcp."].some((family) => type.startsWith(family)),
+  ),
+);
+
+const HIDE_SECRETLESS_FAILURES =
+  " AND NOT (secret_id IS NULL AND success = 0 AND event_type IN (" +
+  [...HIDDEN_SECRETLESS_FAILURE_TYPES].map((type) => `'${type}'`).join(",") +
+  "))";
 
 /** Raw audit row plus its chain link, for tamper-evidence verification. */
 export interface AuditChainRow {
@@ -700,11 +719,12 @@ export class SqliteStore {
     const inlineVisibility = ids !== undefined && params.length + ids.length <= MAX_SQL_VARIABLES;
     if (ids !== undefined && inlineVisibility) {
       // An empty visibility list is a scope that matches no secret: only the
-      // secret-less rows remain (`IN ()` is not valid SQLite).
+      // visible secret-less rows remain (`IN ()` is not valid SQLite).
       sql +=
         ids.length === 0
           ? " AND secret_id IS NULL"
           : ` AND (secret_id IS NULL OR secret_id IN (${ids.map(() => "?").join(",")}))`;
+      sql += HIDE_SECRETLESS_FAILURES;
       params.push(...ids);
     }
 
@@ -719,7 +739,11 @@ export class SqliteStore {
     let events = rows.map((row) => this.rowToAuditEvent(row));
     if (ids !== undefined && !inlineVisibility) {
       const visible = new Set(ids);
-      events = events.filter((event) => event.secret_id === null || visible.has(event.secret_id));
+      events = events.filter((event) =>
+        event.secret_id === null
+          ? event.success || !HIDDEN_SECRETLESS_FAILURE_TYPES.has(event.event_type)
+          : visible.has(event.secret_id),
+      );
       if (filter?.limit) events = events.slice(0, filter.limit);
     }
     return events;

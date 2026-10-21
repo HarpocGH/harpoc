@@ -4,7 +4,8 @@ import { callerOf } from "../utils/caller.js";
 import type { HarpocEnv } from "../types.js";
 
 /**
- * Governance is vault-wide (R11/N12): a token carrying a `project` claim is
+ * Governance is vault-wide (R11/N12): a token carrying a `project` claim or a
+ * non-empty `secrets` claim — `["*"]` included (S3, 2026-10-20) — is
  * refused on every `/api/v1/agents/*` and `/api/v1/tokens/*` route before a
  * body is read — the same rule the engine enforces on its governance methods,
  * answered at the interface like the `admin` scope check. The refusal writes
@@ -14,7 +15,8 @@ import type { HarpocEnv } from "../types.js";
  * one, whichever layer refused it.
  */
 export const unscopedTokenMiddleware: MiddlewareHandler<HarpocEnv> = async (c, next) => {
-  if (c.get("token").project) {
+  const token = c.get("token");
+  if (token.project || token.secrets?.length) {
     c.get("engine").auditGovernanceRefusal(callerOf(c), `${c.req.method} ${c.req.path}`);
     throw VaultError.accessDenied("governance requires an unscoped admin token");
   }

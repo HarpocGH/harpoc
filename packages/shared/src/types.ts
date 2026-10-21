@@ -384,6 +384,13 @@ export interface CallerContext {
   principal_id: string;
   /** Token project claim; derives an additional (project, <claim>) principal. */
   project?: string;
+  /**
+   * Token secret-name patterns (thesis §4.7), set by callerFromToken only
+   * when the claim is non-empty — `["*"]` included. Consulted by governance
+   * alone, which refuses a caller carrying it as it refuses a project claim
+   * (S3, 2026-10-20); per-secret name scope stays the interfaces' check.
+   */
+  secrets?: string[];
   /** Interface the request arrived through; audit attribution only. */
   interface?: AccessInterface;
   /**

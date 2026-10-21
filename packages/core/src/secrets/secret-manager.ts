@@ -403,8 +403,9 @@ export class SecretManager {
   /**
    * Revoke a secret (sets status to REVOKED).
    * `onCommit` runs inside the update transaction (see createSecret).
-   * `resolved` is the record the engine's caller gate already resolved from
-   * this same handle (R16): given, it replaces the resolution outright.
+   * `resolved` is the record the engine already resolved from this same
+   * handle — its caller gate's (R16) or, on the trusted path, its own, so the
+   * failed row carries the id (S6): given, it replaces the resolution outright.
    */
   async revokeSecret(
     handle: string,

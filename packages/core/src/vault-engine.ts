@@ -286,7 +286,7 @@ function attemptedAttachments(action: SmtpAction): SmtpResolvedAttachment[] {
 
 /**
  * Every throw out of the SMTP injector is already a redacted `VaultError`
- * except a raw `node:fs` error from the attachment `stat`/`readFile` pair,
+ * except a raw `node:fs` error from the attachment `realpath`/`stat`/`readFile` calls,
  * whose message carries the filesystem path. Remapped path-free here so no raw
  * error message reaches an interface boundary (design §7.1 reuses
  * `FILE_IO_ERROR` for an unreadable attachment).
@@ -404,18 +404,30 @@ export class VaultEngine {
       throw err;
     }
 
-    store.setMeta("vault_id", keys.vaultId);
-    store.setMeta("vault_version", VAULT_VERSION);
+    try {
+      store.transaction(() => {
+        store.setMeta("vault_id", keys.vaultId);
+        store.setMeta("vault_version", VAULT_VERSION);
 
-    // Store wrapped KEK
-    store.setMeta("kdf_salt", Buffer.from(keys.salt).toString("base64"));
-    store.setMeta("wrapped_kek", Buffer.from(keys.wrappedKek).toString("base64"));
-    store.setMeta("wrapped_kek_iv", Buffer.from(keys.wrappedKekIv).toString("base64"));
-    store.setMeta("wrapped_kek_tag", Buffer.from(keys.wrappedKekTag).toString("base64"));
+        // Store wrapped KEK
+        store.setMeta("kdf_salt", Buffer.from(keys.salt).toString("base64"));
+        store.setMeta("wrapped_kek", Buffer.from(keys.wrappedKek).toString("base64"));
+        store.setMeta("wrapped_kek_iv", Buffer.from(keys.wrappedKekIv).toString("base64"));
+        store.setMeta("wrapped_kek_tag", Buffer.from(keys.wrappedKekTag).toString("base64"));
 
-    // Store wrapped JWT and audit keys in vault_meta
-    this.storeWrappedKey(store, "wrapped_jwt_key", keys.wrappedJwtKey);
-    this.storeWrappedKey(store, "wrapped_audit_key", keys.wrappedAuditKey);
+        // Store wrapped JWT and audit keys in vault_meta
+        this.storeWrappedKey(store, "wrapped_jwt_key", keys.wrappedJwtKey);
+        this.storeWrappedKey(store, "wrapped_audit_key", keys.wrappedAuditKey);
+      });
+    } catch (err) {
+      wipeBuffer(keys.kek);
+      wipeBuffer(keys.jwtKey);
+      wipeBuffer(keys.auditKey);
+      if (this.store === null) {
+        store.close();
+      }
+      throw err;
+    }
 
     // Set internal state
     this.store = store;
@@ -933,8 +945,11 @@ export class VaultEngine {
       AuditEventType.SECRET_REVOKE,
       { handle },
     );
+    let resolvedId: string | undefined;
     let revokedId: string | undefined;
     try {
+      const secret = resolved ?? (await s.secretManager.resolveHandle(handle));
+      resolvedId = secret.id;
       await s.secretManager.revokeSecret(
         handle,
         (secretId) => {
@@ -947,10 +962,10 @@ export class VaultEngine {
             sessionId: this.sessionId ?? undefined,
           });
         },
-        resolved,
+        secret,
       );
     } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_REVOKE, err, { handle }, undefined, caller);
+      this.auditDenied(s, AuditEventType.SECRET_REVOKE, err, { handle }, resolvedId, caller);
       throw await this.concealHandleError(s, err, handle, caller);
     }
 
@@ -2022,6 +2037,10 @@ export class VaultEngine {
    * administrative operation (CLI/REST only — never an MCP tool); the config
    * is encrypted under the KEK. A live downstream connection for this secret
    * is terminated so the next invocation connects with the new config.
+   * `rotate` pins endpoints; a token caller whose stdio config launches
+   * anything the stored one did not (a first stdio config, a change from
+   * http, or different `args`, `working_directory` or `env_var`) also needs
+   * `admin` — in its token scope and on the secret.
    */
   async setMcpServerConfig(
     handle: string,
@@ -2049,6 +2068,24 @@ export class VaultEngine {
         handle,
       },
     );
+    if (
+      caller !== undefined &&
+      this.mcpLaunchChanged(this.loadMcpServerConfig(s, secret.id), validated.data)
+    ) {
+      if (caller.admin_scope !== true) {
+        this.auditScopeRefusal(caller, "setMcpServerConfig", "permission");
+        throw VaultError.accessDenied("Token lacks permission: admin");
+      }
+      this.checkResolvedCallerPolicy(
+        s,
+        secret.id,
+        caller,
+        "admin",
+        AuditEventType.POLICY_GRANT,
+        { policy: "mcp_server", handle },
+        handle,
+      );
+    }
 
     const json = JSON.stringify(validated.data);
     const enc = encrypt(
@@ -2085,6 +2122,19 @@ export class VaultEngine {
       secret.id,
       "config_changed",
       attributionFromCaller(caller, this.sessionId),
+    );
+  }
+
+  private mcpLaunchChanged(stored: McpServerConfig | undefined, next: McpServerConfig): boolean {
+    if (next.transport !== "stdio") return false;
+    if (stored?.transport !== "stdio") return true;
+    const storedArgs = stored.args ?? [];
+    const nextArgs = next.args ?? [];
+    return (
+      stored.env_var !== next.env_var ||
+      stored.working_directory !== next.working_directory ||
+      storedArgs.length !== nextArgs.length ||
+      storedArgs.some((arg, i) => arg !== nextArgs[i])
     );
   }
 
@@ -3630,7 +3680,8 @@ export class VaultEngine {
 
   /**
    * Governance is vault-wide by definition (R11/N12, 2026-09-04): a token
-   * carrying a `project` claim administers nothing here. The trusted path
+   * carrying a `project` claim or a non-empty `secrets` claim — `["*"]`
+   * included (S3, 2026-10-20) — administers nothing here. The trusted path
    * passes no caller and is exempt; R7's admin_scope does not waive it. Since
    * R32 (2026-09-06) the refusal is audited before it throws — the standing
    * "interface scope refusals are unaudited" rule keeps holding for every
@@ -3640,7 +3691,7 @@ export class VaultEngine {
     caller: CallerContext | undefined,
     operation: string,
   ): void {
-    if (caller?.project !== undefined) {
+    if (caller?.project !== undefined || (caller?.secrets?.length ?? 0) > 0) {
       this.auditGovernanceRefusal(caller, operation);
       throw VaultError.accessDenied("governance requires an unscoped admin token");
     }
@@ -4149,7 +4200,8 @@ export class VaultEngine {
    * token may not address are dropped, so a project- or name-scoped admin token
    * can no longer read every secret's audit detail — nor use `secret_id` as a
    * targeted oracle (L10). Rows without a `secret_id` (vault lifecycle, token
-   * issuance, server start) carry no per-secret metadata and stay visible.
+   * issuance, server start) stay visible, except a failed row of a per-secret
+   * event type or `access.denied`, whose detail may name a handle (S6).
    *
    * The visibility filter is applied inside the query, ahead of `limit`, so a
    * scoped token gets up to `limit` rows it may see. An absent scope is the
@@ -4560,7 +4612,12 @@ export class VaultEngine {
 
     // A wrong old password is a master-password guess — subject to the same
     // lockout as unlock() (shared counter: they are one guessing surface).
-    this.checkLockout(s.store);
+    try {
+      this.checkLockout(s.store);
+    } catch (err) {
+      this.auditDenied(s, AuditEventType.VAULT_PASSWORD_CHANGE, err, {});
+      throw err;
+    }
 
     const salt = this.loadBase64Meta(s.store, "kdf_salt");
     const wrappedKek = this.loadBase64Meta(s.store, "wrapped_kek");
@@ -4965,7 +5022,9 @@ export class VaultEngine {
     this.gitInjector = new GitInjector(this.auditLogger);
     // The v1.3 mail injectors take no AuditLogger: they return a metadata-only
     // projection and the engine writes the `secret.use` row (design §7.2).
-    this.smtpInjector = new SmtpInjector();
+    this.smtpInjector = new SmtpInjector({
+      vaultFiles: [this.options.dbPath, this.options.sessionPath],
+    });
     this.imapInjector = new ImapInjector();
   }
 

@@ -6,6 +6,7 @@ import { AuditEventType, ErrorCode, VaultState } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { VaultEngineOptions } from "./vault-engine.js";
+import { SqliteStore } from "./storage/sqlite-store.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -255,6 +256,57 @@ describe("lockout mechanism", () => {
       expect(eng3.getState()).toBe(VaultState.UNLOCKED);
     } finally {
       await eng3.destroy();
+    }
+  });
+});
+
+describe("lockout refusals in the audit trail", () => {
+  it("writes one failed vault.password_change row when an active lockout refuses changePassword", async () => {
+    await engine.initVault("correct-pass");
+    for (let i = 0; i < 5; i++) {
+      await expectVaultError(
+        () => engine.changePassword("wrong-pass", "new-pass1"),
+        ErrorCode.INVALID_PASSWORD,
+      );
+    }
+    const before = engine.queryAudit().length;
+
+    await expectVaultError(
+      () => engine.changePassword("correct-pass", "new-pass1"),
+      ErrorCode.LOCKOUT_ACTIVE,
+    );
+
+    const rows = engine.queryAudit();
+    expect(rows).toHaveLength(before + 1);
+    expect(rows[0]).toMatchObject({
+      event_type: AuditEventType.VAULT_PASSWORD_CHANGE,
+      success: false,
+      secret_id: null,
+      principal_type: null,
+      principal_id: null,
+      detail: { error: ErrorCode.LOCKOUT_ACTIVE },
+    });
+  });
+
+  it("leaves no row when an active lockout refuses unlock (the locked engine holds no audit key)", async () => {
+    await engine.initVault("correct-pass");
+    for (let i = 0; i < 5; i++) {
+      await expectVaultError(
+        () => engine.changePassword("wrong-pass", "new-pass1"),
+        ErrorCode.INVALID_PASSWORD,
+      );
+    }
+    await engine.lock();
+    const store = new SqliteStore(dbPath);
+    try {
+      const before = store.queryAuditLog().length;
+
+      const locked = secondEngine({ dbPath, sessionPath });
+      await expectVaultError(() => locked.unlock("correct-pass"), ErrorCode.LOCKOUT_ACTIVE);
+
+      expect(store.queryAuditLog()).toHaveLength(before);
+    } finally {
+      store.close();
     }
   });
 });

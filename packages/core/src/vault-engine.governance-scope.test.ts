@@ -22,6 +22,12 @@ const UNSCOPED: CallerContext = {
 /** The same caller with a project claim: R7's admin_scope does not waive N12. */
 const PROJECT_SCOPED: CallerContext = { ...UNSCOPED, project: "acme" };
 
+/** The same caller with a secret-name claim (S3): R7's admin_scope does not waive it either. */
+const NAME_SCOPED: CallerContext = { ...UNSCOPED, secrets: ["db-*"] };
+
+/** `["*"]` is a present claim and counts as scoped (TC-7, the auditScopeFromToken precedent). */
+const STAR_SCOPED: CallerContext = { ...UNSCOPED, secrets: ["*"] };
+
 const MESSAGE = "Access denied: governance requires an unscoped admin token";
 
 let tempDir: string;
@@ -151,5 +157,47 @@ describe("N12: governance is vault-wide — a project-claimed caller is refused"
       reason: "permission",
       interface: "rest",
     });
+  });
+});
+
+type GovernanceCall = (caller: CallerContext | undefined) => unknown;
+
+const SECRETS_CASES: Array<[string, string, CallerContext, GovernanceCall]> = CASES.flatMap(
+  ([name, call]): Array<[string, string, CallerContext, GovernanceCall]> => [
+    [name, '["db-*"]', NAME_SCOPED, call],
+    [name, '["*"]', STAR_SCOPED, call],
+  ],
+);
+
+describe("S3: governance is vault-wide — a secrets-claimed caller is refused", () => {
+  it.each(SECRETS_CASES)(
+    "%s refuses a secrets: %s caller ACCESS_DENIED, mutates no governance state and writes one access.denied row",
+    async (name, _claim, caller, call) => {
+      const before = snapshot();
+      const err = await expectVaultError(
+        () => Promise.resolve().then(() => call(caller)),
+        ErrorCode.ACCESS_DENIED,
+      );
+      expect(err.message).toBe(MESSAGE);
+      expect(snapshot()).toBe(before);
+
+      const rows = engine.queryAudit({ eventType: AuditEventType.ACCESS_DENIED });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.success).toBe(false);
+      expect(rows[0]?.secret_id).toBeNull();
+      expect(rows[0]?.principal_type).toBe("user");
+      expect(rows[0]?.principal_id).toBe("admin-1");
+      expect(rows[0]?.detail).toEqual({
+        operation: name,
+        error: ErrorCode.ACCESS_DENIED,
+        reason: "governance",
+        interface: "rest",
+      });
+    },
+  );
+
+  it("an empty secrets list is no claim: the caller is admitted and leaves no access.denied row", () => {
+    expect(() => engine.listAgents("all", { ...UNSCOPED, secrets: [] })).not.toThrow();
+    expect(engine.queryAudit({ eventType: AuditEventType.ACCESS_DENIED })).toHaveLength(0);
   });
 });

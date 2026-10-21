@@ -39,10 +39,11 @@ function makeFakeSend(): {
   return { fn, calls };
 }
 
-/** Small in-cap attachment stat/readFile pair for the attachment-bearing cases. */
-function smallFs(): Required<Pick<SmtpInjectorDeps, "stat" | "readFile">> {
+/** Small in-cap attachment realpath/stat/readFile triple for the attachment-bearing cases. */
+function smallFs(): Required<Pick<SmtpInjectorDeps, "realpath" | "stat" | "readFile">> {
   return {
-    stat: () => Promise.resolve({ size: 16 }),
+    realpath: (p) => Promise.resolve(p),
+    stat: () => Promise.resolve({ size: 16, isFile: () => true }),
     readFile: () => Promise.resolve(Buffer.alloc(16)),
   };
 }

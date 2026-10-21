@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  auditScopeFromToken,
   callerFromToken,
   checkTokenScope,
   isAdminUserCaller,
@@ -61,6 +62,20 @@ describe("callerFromToken", () => {
   it("omits the interface key entirely when no interface is given", () => {
     const caller = callerFromToken(baseToken());
     expect("interface" in caller).toBe(false);
+  });
+
+  it('carries a non-empty secrets claim through, ["*"] included, for the governance refusal (S3)', () => {
+    expect(callerFromToken(baseToken({ secrets: ["db-*"] }))).toEqual({
+      principal_type: "agent",
+      principal_id: "alice",
+      secrets: ["db-*"],
+    });
+    expect(callerFromToken(baseToken({ secrets: ["*"] })).secrets).toEqual(["*"]);
+  });
+
+  it("omits the secrets key entirely when the claim is absent or empty", () => {
+    expect("secrets" in callerFromToken(baseToken())).toBe(false);
+    expect("secrets" in callerFromToken(baseToken({ secrets: [] }))).toBe(false);
   });
 });
 
@@ -238,5 +253,13 @@ describe("checkTokenScope — onRefusal (D2g)", () => {
     const seen = vi.fn();
     checkTokenScope(base, "read", undefined, "db", seen);
     expect(seen).not.toHaveBeenCalled();
+  });
+});
+
+describe("auditScopeFromToken", () => {
+  it('copies the secrets claim by the ?.length rule: absent or [] is no scope, ["*"] scopes', () => {
+    expect(auditScopeFromToken(baseToken())).toBeUndefined();
+    expect(auditScopeFromToken(baseToken({ secrets: [] }))).toBeUndefined();
+    expect(auditScopeFromToken(baseToken({ secrets: ["*"] }))).toEqual({ secrets: ["*"] });
   });
 });

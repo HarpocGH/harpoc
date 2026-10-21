@@ -370,6 +370,106 @@ describe("governance requires an unscoped token (R11/N12)", () => {
   );
 });
 
+describe("governance refuses a secrets-claimed admin token (S3)", () => {
+  const ROUTES: Array<[string, string, string[]]> = [
+    ["/api/v1/agents", '["db-*"]', ["db-*"]],
+    ["/api/v1/agents", '["*"]', ["*"]],
+    ["/api/v1/tokens", '["db-*"]', ["db-*"]],
+    ["/api/v1/tokens", '["*"]', ["*"]],
+  ];
+
+  it.each(ROUTES)(
+    "%s refuses a secrets: %s admin token 403 before the engine is reached, with one access.denied row",
+    async (path, _claim, secrets) => {
+      const engine = createMockEngine();
+      engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets });
+      const app = createApp(engine as never);
+      const res = await app.request(path, {
+        headers: { ...HOST, authorization: "Bearer valid-jwt" },
+      });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string; message: string };
+      expect(body.error).toBe("ACCESS_DENIED");
+      expect(body.message).toBe("Access denied: governance requires an unscoped admin token");
+      expect(engine.listAgents).not.toHaveBeenCalled();
+      expect(engine.listIssuedTokens).not.toHaveBeenCalled();
+      expect(engine.auditGovernanceRefusal).toHaveBeenCalledTimes(1);
+      expect(engine.auditGovernanceRefusal).toHaveBeenCalledWith(
+        {
+          principal_type: "agent",
+          principal_id: "test-agent",
+          secrets,
+          interface: "rest",
+          admin_scope: true,
+        },
+        `GET ${path}`,
+      );
+    },
+  );
+
+  it("POST /api/v1/agents refuses a secrets-claimed token before the body is read: a malformed body answers 403, not 400", async () => {
+    const engine = { ...createMockEngine(), registerAgent: vi.fn() };
+    engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["db-*"] });
+    const app = createApp(engine as never);
+    const res = await app.request("/api/v1/agents", {
+      method: "POST",
+      headers: { ...HOST, authorization: "Bearer valid-jwt", "content-type": "application/json" },
+      body: "{not json",
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("ACCESS_DENIED");
+    expect(engine.registerAgent).not.toHaveBeenCalled();
+    expect(engine.auditGovernanceRefusal).toHaveBeenCalledTimes(1);
+    expect(engine.auditGovernanceRefusal.mock.calls[0]?.[1]).toBe("POST /api/v1/agents");
+  });
+
+  it("the permission-matrix cell refuses a name-scoped admin token whose pattern matches the handle (TC-7)", async () => {
+    const engine = {
+      ...createMockEngine(),
+      setAgentPermissions: vi.fn().mockReturnValue({ agent: "deploy-bot", permissions: ["read"] }),
+    };
+    engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["db-*"] });
+    const app = createApp(engine as never);
+    const path = "/api/v1/agents/deploy-bot/secrets/db-main/permissions";
+    const res = await app.request(path, {
+      method: "PUT",
+      headers: { ...HOST, authorization: "Bearer valid-jwt", "content-type": "application/json" },
+      body: JSON.stringify({ permissions: ["read"] }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("ACCESS_DENIED");
+    expect(engine.resolveSecretId).not.toHaveBeenCalled();
+    expect(engine.setAgentPermissions).not.toHaveBeenCalled();
+    expect(engine.auditGovernanceRefusal).toHaveBeenCalledTimes(1);
+    expect(engine.auditGovernanceRefusal.mock.calls[0]?.[1]).toBe(`PUT ${path}`);
+  });
+
+  it("a secrets-claimed token still reaches the secrets routes (control)", async () => {
+    const engine = createMockEngine();
+    engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["db-*"] });
+    const app = createApp(engine as never);
+    const res = await app.request("/api/v1/secrets", {
+      headers: { ...HOST, authorization: "Bearer valid-jwt" },
+    });
+    expect(res.status).toBe(200);
+    expect(engine.auditGovernanceRefusal).not.toHaveBeenCalled();
+  });
+
+  it.each(["/api/v1/agents", "/api/v1/tokens"])(
+    "%s admits a token whose secrets claim is empty: an empty list is no claim (control)",
+    async (path) => {
+      const engine = createMockEngine();
+      engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: [] });
+      const app = createApp(engine as never);
+      const res = await app.request(path, {
+        headers: { ...HOST, authorization: "Bearer valid-jwt" },
+      });
+      expect(res.status).toBe(200);
+      expect(engine.auditGovernanceRefusal).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe("createDefaultOAuthManager", () => {
   it("builds the REST-shaped manager an owner can dispose", () => {
     const engine = createMockEngine();

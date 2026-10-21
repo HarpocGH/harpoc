@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { registerAgents } from "./__fixtures__/engine-seams.js";
 
@@ -128,6 +129,63 @@ describe("L4 — lifecycle success rows are addressable by secret_id", () => {
       .find((r) => !r.success);
     expect(row).toBeDefined();
     expect(row?.secret_id).toBeNull();
+  });
+
+  it("a failed re-revoke on the trusted path carries the secret's id, so a per-secret read returns it (Q14)", async () => {
+    const id = await makeSecret("re-revoke");
+    await engine.revokeSecret("secret://re-revoke");
+    await expectVaultError(
+      () => engine.revokeSecret("secret://re-revoke"),
+      ErrorCode.SECRET_REVOKED,
+    );
+
+    const failed = engine
+      .queryAudit({ secretId: id, eventType: AuditEventType.SECRET_REVOKE })
+      .filter((r) => !r.success);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.detail).toEqual({
+      handle: "secret://re-revoke",
+      error: ErrorCode.SECRET_REVOKED,
+    });
+  });
+
+  it("a failed re-revoke by a revoke-granted caller carries the secret's id and the caller", async () => {
+    const id = await makeSecret("re-revoke-granted");
+    registerAgents(engine, "revoker");
+    engine.grantPolicy(
+      { secretId: id, principalType: "agent", principalId: "revoker", permissions: ["revoke"] },
+      "test-admin",
+    );
+    await engine.revokeSecret("secret://re-revoke-granted", agent("revoker"));
+    await expectVaultError(
+      () => engine.revokeSecret("secret://re-revoke-granted", agent("revoker")),
+      ErrorCode.SECRET_REVOKED,
+    );
+
+    const failed = engine
+      .queryAudit({ secretId: id, eventType: AuditEventType.SECRET_REVOKE })
+      .filter((r) => !r.success);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.principal_id).toBe("revoker");
+    expect(failed[0]?.detail).toMatchObject({ error: ErrorCode.SECRET_REVOKED, interface: "rest" });
+  });
+
+  it("control: a revoked-then-recreated name revokes the new secret, and a further revoke is ambiguous and audits without an id", async () => {
+    const oldId = await makeSecret("recreated");
+    await engine.revokeSecret("secret://recreated");
+    const newId = await makeSecret("recreated");
+    await engine.revokeSecret("secret://recreated");
+    await expectVaultError(
+      () => engine.revokeSecret("secret://recreated"),
+      ErrorCode.AMBIGUOUS_HANDLE,
+    );
+
+    const revokes = engine.queryAudit({ eventType: AuditEventType.SECRET_REVOKE });
+    expect(revokes.filter((r) => r.success).map((r) => r.secret_id)).toEqual([newId, oldId]);
+    const failed = revokes.filter((r) => !r.success);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.secret_id).toBeNull();
+    expect(failed[0]?.detail?.error).toBe(ErrorCode.AMBIGUOUS_HANDLE);
   });
 
   it("a failed useSecret handle resolution audits with secret_id null", async () => {
@@ -266,6 +324,25 @@ describe("L10 — audit visibility scope", () => {
 
     expect(visible.map((r) => r.secret_id)).toContain(dbId);
     expect(visible.map((r) => r.secret_id)).not.toContain(apiId);
+  });
+
+  it("hides a failed handle-resolution row and an access.denied row from a scoped read; the unscoped read keeps both (S6)", async () => {
+    await expectVaultError(
+      () => engine.getSecretInfo("secret://hr-salaries"),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
+    engine.auditScopeRefusal(agent("pay-agent"), "GET /api/v1/secrets/hr-salaries/value", "secret");
+
+    const failedSecretless = <T extends { secret_id: string | null; success: boolean }>(
+      rows: T[],
+    ) => rows.filter((r) => r.secret_id === null && !r.success);
+    expect(failedSecretless(engine.queryAudit({}, { secrets: ["db-*"] }))).toEqual([]);
+    expect(failedSecretless(engine.queryAudit({}, { project: "finance" }))).toEqual([]);
+    expect(
+      failedSecretless(engine.queryAudit())
+        .map((r) => r.event_type)
+        .sort(),
+    ).toEqual([AuditEventType.ACCESS_DENIED, AuditEventType.SECRET_READ]);
   });
 
   it("control: an unscoped read (CLI / unrestricted admin token) sees everything", async () => {

@@ -51,9 +51,15 @@ function makeFakeSend(): {
   return { fn, calls };
 }
 
-/** A stat/readFile pair that throws if ever touched — proves no file was read. */
-function throwingFsProbe(probed: string[]): Required<Pick<SmtpInjectorDeps, "stat" | "readFile">> {
+/** A realpath/stat/readFile triple that throws if ever touched — proves no file was examined. */
+function throwingFsProbe(
+  probed: string[],
+): Required<Pick<SmtpInjectorDeps, "realpath" | "stat" | "readFile">> {
   return {
+    realpath: (p: string) => {
+      probed.push(p);
+      return Promise.reject(new Error("realpath must not be reached"));
+    },
     stat: (p: string) => {
       probed.push(p);
       return Promise.reject(new Error("stat must not be reached"));
@@ -194,7 +200,8 @@ describe("SmtpInjector — attachment caps (vault-authored reasons only)", () =>
     const { fn } = makeFakeSend();
     const injector = new SmtpInjector({
       sendSmtp: fn,
-      stat: () => Promise.resolve({ size: MAX_ATTACHMENT_BYTES + 1 }),
+      realpath: (p: string) => Promise.resolve(p),
+      stat: () => Promise.resolve({ size: MAX_ATTACHMENT_BYTES + 1, isFile: () => true }),
       readFile: () => Promise.reject(new Error("must not read an over-cap file")),
     });
 
@@ -217,7 +224,8 @@ describe("SmtpInjector — attachment caps (vault-authored reasons only)", () =>
     const per = 9 * 1024 * 1024; // 9 MiB each, three files → 27 MiB > 25 MiB
     const injector = new SmtpInjector({
       sendSmtp: fn,
-      stat: () => Promise.resolve({ size: per }),
+      realpath: (p: string) => Promise.resolve(p),
+      stat: () => Promise.resolve({ size: per, isFile: () => true }),
       readFile: () => Promise.reject(new Error("must not read once total exceeded")),
     });
 
@@ -478,7 +486,9 @@ describe("buildSmtpAuditDetails", () => {
     const { fn } = makeFakeSend();
     const injector = new SmtpInjector({
       sendSmtp: fn,
-      stat: (p: string) => Promise.resolve({ size: p === "/a.txt" ? 100 : 250 }),
+      realpath: (p: string) => Promise.resolve(p),
+      stat: (p: string) =>
+        Promise.resolve({ size: p === "/a.txt" ? 100 : 250, isFile: () => true }),
       readFile: (p: string) => Promise.resolve(Buffer.alloc(p === "/a.txt" ? 100 : 250)),
     });
     const { auditDetails } = await injector.run(
