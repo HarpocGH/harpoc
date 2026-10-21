@@ -30,14 +30,14 @@
     "@harpoc/oauth-proxy": "workspace:*",
     "@harpoc/shared": "workspace:*",
     "@modelcontextprotocol/node": "^2.0.0",
-    "@modelcontextprotocol/server": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.3.0",
     "hono": "^4.13.5",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@harpoc/test-utils": "workspace:*",
-    "@modelcontextprotocol/client": "^2.0.0",
-    "@modelcontextprotocol/core": "^2.0.0"
+    "@modelcontextprotocol/client": "^2.3.0",
+    "@modelcontextprotocol/core": "^2.3.0"
   },
   "scripts": {
     "build": "tsc",

@@ -30,7 +30,7 @@ importers:
         version: 8.71.0(eslint@10.11.0)(typescript@6.0.3)
       vitest:
         specifier: ^4.1.11
-        version: 4.1.11(@types/node@26.6.4)(@vitest/coverage-v8@4.1.11)(jsdom@30.1.1)(vite@7.3.6(@types/node@26.6.4))
+        version: 4.1.11(@types/node@26.6.4)(@vitest/coverage-v8@4.1.11)(jsdom@30.1.1)(vite@7.3.7(@types/node@26.6.4))
 
   packages/benchmarks:
     dependencies:
@@ -81,8 +81,8 @@ importers:
         specifier: workspace:*
         version: link:../web-ui
       "@modelcontextprotocol/server":
-        specifier: ^2.0.0
-        version: 2.2.0
+        specifier: ^2.3.0
+        version: 2.3.1
       commander:
         specifier: ^15.0.0
         version: 15.0.0
@@ -100,8 +100,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
       "@modelcontextprotocol/client":
-        specifier: ^2.0.0
-        version: 2.2.0
+        specifier: ^2.3.0
+        version: 2.3.1
       argon2:
         specifier: ^0.45.1
         version: 0.45.1
@@ -129,10 +129,10 @@ importers:
         version: link:../test-utils
       "@modelcontextprotocol/node":
         specifier: ^2.0.0
-        version: 2.1.0(@modelcontextprotocol/server@2.2.0)(hono@4.13.11)
+        version: 2.1.0(@modelcontextprotocol/server@2.3.1)(hono@4.13.11)
       "@modelcontextprotocol/server":
-        specifier: ^2.0.0
-        version: 2.2.0
+        specifier: ^2.3.0
+        version: 2.3.1
       "@types/better-sqlite3":
         specifier: ^7.6.13
         version: 7.6.13
@@ -176,14 +176,14 @@ importers:
         specifier: ^2.1.3
         version: 2.1.3(hono@4.13.11)
       "@modelcontextprotocol/client":
-        specifier: ^2.0.0
-        version: 2.2.0
+        specifier: ^2.3.0
+        version: 2.3.1
       "@modelcontextprotocol/node":
         specifier: ^2.0.0
-        version: 2.1.0(@modelcontextprotocol/server@2.2.0)(hono@4.13.11)
+        version: 2.1.0(@modelcontextprotocol/server@2.3.1)(hono@4.13.11)
       "@modelcontextprotocol/server":
-        specifier: ^2.0.0
-        version: 2.2.0
+        specifier: ^2.3.0
+        version: 2.3.1
       hono:
         specifier: ^4.13.5
         version: 4.13.11
@@ -228,14 +228,14 @@ importers:
         specifier: ^2.1.3
         version: 2.1.3(hono@4.13.11)
       "@modelcontextprotocol/client":
-        specifier: ^2.0.0
-        version: 2.2.0
+        specifier: ^2.3.0
+        version: 2.3.1
       "@modelcontextprotocol/node":
         specifier: ^2.0.0
-        version: 2.1.0(@modelcontextprotocol/server@2.2.0)(hono@4.13.11)
+        version: 2.1.0(@modelcontextprotocol/server@2.3.1)(hono@4.13.11)
       "@modelcontextprotocol/server":
-        specifier: ^2.0.0
-        version: 2.2.0
+        specifier: ^2.3.0
+        version: 2.3.1
       hono:
         specifier: ^4.13.5
         version: 4.13.11
@@ -266,10 +266,10 @@ importers:
         version: link:../shared
       "@modelcontextprotocol/node":
         specifier: ^2.0.0
-        version: 2.1.0(@modelcontextprotocol/server@2.2.0)(hono@4.13.11)
+        version: 2.1.0(@modelcontextprotocol/server@2.3.1)(hono@4.13.11)
       "@modelcontextprotocol/server":
-        specifier: ^2.0.0
-        version: 2.2.0
+        specifier: ^2.3.0
+        version: 2.3.1
       hono:
         specifier: ^4.13.5
         version: 4.13.11
@@ -281,11 +281,11 @@ importers:
         specifier: workspace:*
         version: link:../test-utils
       "@modelcontextprotocol/client":
-        specifier: ^2.0.0
-        version: 2.2.0
+        specifier: ^2.3.0
+        version: 2.3.1
       "@modelcontextprotocol/core":
-        specifier: ^2.0.0
-        version: 2.2.0
+        specifier: ^2.3.0
+        version: 2.3.1
 
   packages/oauth-proxy:
     dependencies:
@@ -366,11 +366,11 @@ importers:
         specifier: workspace:*
         version: link:../shared
       "@modelcontextprotocol/client":
-        specifier: ^2.0.0
-        version: 2.2.0
+        specifier: ^2.3.0
+        version: 2.3.1
       "@modelcontextprotocol/server":
-        specifier: ^2.0.0
-        version: 2.2.0
+        specifier: ^2.3.0
+        version: 2.3.1
     devDependencies:
       "@types/node":
         specifier: ^26.6.4
@@ -396,7 +396,7 @@ importers:
         version: link:../test-utils
       "@preact/preset-vite":
         specifier: ^2.10.1
-        version: 2.10.6(@babel/core@7.29.7)(preact@10.29.8)(rollup@4.59.0)(vite@7.3.6(@types/node@26.6.4))
+        version: 2.10.6(@babel/core@7.29.7)(preact@10.29.8)(rollup@4.59.0)(vite@7.3.7(@types/node@26.6.4))
       "@testing-library/preact":
         specifier: ^3.2.4
         version: 3.2.4(preact@10.29.8)
@@ -407,8 +407,8 @@ importers:
         specifier: ^30.1.1
         version: 30.1.1
       vite:
-        specifier: ^7.3.5
-        version: 7.3.6(@types/node@26.6.4)
+        specifier: ^7.3.7
+        version: 7.3.7(@types/node@26.6.4)
 
 packages:
   "@asamuzakjp/css-color@7.1.2":
@@ -1103,17 +1103,17 @@ packages:
         integrity: sha512-dXn3FZhPv0US+7dtJsIi2R+c7qWYiReoEh5zUntWCf4oSpMNib8FDhSoed6m3QyZdx5hK7iLFkYk3rNxwt8vTA==,
       }
 
-  "@modelcontextprotocol/client@2.2.0":
+  "@modelcontextprotocol/client@2.3.1":
     resolution:
       {
-        integrity: sha512-LxCou/CSYQ6dwEnjhLZY0KnEuc8V4UJ3IEQCl/uR2yHobSQIEdJKUlKLRYRF5i5FqRGHy1eK7une3aAWDHLtig==,
+        integrity: sha512-mIGZXpHsjnZ6lD+gD/WCMpR5k8yVQQ8nNFH1N0Srf7AvnwTUMYD6pvTY8ng2+He5FfV7YMZLmrjL7cLa/cc3dQ==,
       }
     engines: { node: ">=20" }
 
-  "@modelcontextprotocol/core@2.2.0":
+  "@modelcontextprotocol/core@2.3.1":
     resolution:
       {
-        integrity: sha512-iLhmprRmWI8EcosOA3wVvww22z02NkgqhV4fBH6f/odQBsi7xnJc0HGmi21yWO+/iKw2yzqVE127Zhna5/+JXw==,
+        integrity: sha512-laVmIhPGpWi7rG9q+0UigblRN0Hws/Yjlb6qLFtVqryXVLkc4h+yN8z731POD2LnAGQlFe7/tXhUm7Bi0YB91g==,
       }
     engines: { node: ">=20" }
 
@@ -1130,10 +1130,10 @@ packages:
       hono:
         optional: true
 
-  "@modelcontextprotocol/server@2.2.0":
+  "@modelcontextprotocol/server@2.3.1":
     resolution:
       {
-        integrity: sha512-qFnltjus6Gk8Lx6J1w2RXmr3YPN22MNT6qD6zjAkaiWIlFIFxWClz0rXHNuJF/KSUyn5YGhkSvXkWDbQHVLFEQ==,
+        integrity: sha512-e59MfWuSssj6DoQ96JCTqdW1AXT5/XtnTl0WWd6MU1Ka434fFUGGosCLJbGNySDhHGvxQWoRWK137FXYFkYNWw==,
       }
     engines: { node: ">=20" }
 
@@ -2326,10 +2326,10 @@ packages:
       }
     engines: { node: ">=0.10.0" }
 
-  eventsource-parser@3.0.6:
+  eventsource-parser@3.1.1:
     resolution:
       {
-        integrity: sha512-Vo1ab+QXPzZ4tCa8SwIHJFaSzy4R6SHf7BY79rFBDf0idraZWAkYrDjDj8uWaSm3S2TK+hJ7/t1CEmZ7jXw+pg==,
+        integrity: sha512-EKN1vKAMcZ8MlYMpaNuxN6R9yakzH6uajHcHVTqWJzvu5pWw9DyhbP35HH8MVBQ+dZjAfDxk+A8NiR9KWaXiyQ==,
       }
     engines: { node: ">=18.0.0" }
 
@@ -3692,10 +3692,10 @@ packages:
     peerDependencies:
       vite: 5.x || 6.x || 7.x || 8.x
 
-  vite@7.3.6:
+  vite@7.3.7:
     resolution:
       {
-        integrity: sha512-4XP60spRGjSZFf1qYH+dJIkK2znL3zQfl9KkOV9MkkRR/3Dls0dxaBsQPTloEc5BLXWPL9vsOxopxyKoMmDueg==,
+        integrity: sha512-AHEzTORMbi7/7aXp7w7KZ5+DCUdSeLsJz0grY8xHpc9DHdYb0vQu6DqJfm2tOw3gDExNgPgnJTXxM6syYFHaCA==,
       }
     engines: { node: ^20.19.0 || >=22.12.0 }
     hasBin: true
@@ -4291,30 +4291,30 @@ snapshots:
 
   "@keyv/serialize@1.1.1": {}
 
-  "@modelcontextprotocol/client@2.2.0":
+  "@modelcontextprotocol/client@2.3.1":
     dependencies:
-      "@modelcontextprotocol/core": 2.2.0
+      "@modelcontextprotocol/core": 2.3.1
       cross-spawn: 7.0.6
       eventsource: 3.0.7
-      eventsource-parser: 3.0.6
+      eventsource-parser: 3.1.1
       jose: 6.1.3
       pkce-challenge: 5.0.1
       zod: 4.6.5
 
-  "@modelcontextprotocol/core@2.2.0":
+  "@modelcontextprotocol/core@2.3.1":
     dependencies:
       zod: 4.6.5
 
-  "@modelcontextprotocol/node@2.1.0(@modelcontextprotocol/server@2.2.0)(hono@4.13.11)":
+  "@modelcontextprotocol/node@2.1.0(@modelcontextprotocol/server@2.3.1)(hono@4.13.11)":
     dependencies:
       "@hono/node-server": 1.19.17(hono@4.13.11)
-      "@modelcontextprotocol/server": 2.2.0
+      "@modelcontextprotocol/server": 2.3.1
     optionalDependencies:
       hono: 4.13.11
 
-  "@modelcontextprotocol/server@2.2.0":
+  "@modelcontextprotocol/server@2.3.1":
     dependencies:
-      "@modelcontextprotocol/core": 2.2.0
+      "@modelcontextprotocol/core": 2.3.1
       zod: 4.6.5
 
   "@mongodb-js/saslprep@1.5.0":
@@ -4323,19 +4323,19 @@ snapshots:
 
   "@phc/format@1.0.0": {}
 
-  "@preact/preset-vite@2.10.6(@babel/core@7.29.7)(preact@10.29.8)(rollup@4.59.0)(vite@7.3.6(@types/node@26.6.4))":
+  "@preact/preset-vite@2.10.6(@babel/core@7.29.7)(preact@10.29.8)(rollup@4.59.0)(vite@7.3.7(@types/node@26.6.4))":
     dependencies:
       "@babel/core": 7.29.7
       "@babel/plugin-transform-react-jsx": 7.29.7(@babel/core@7.29.7)
       "@babel/plugin-transform-react-jsx-development": 7.29.7(@babel/core@7.29.7)
-      "@prefresh/vite": 2.4.12(preact@10.29.8)(vite@7.3.6(@types/node@26.6.4))
+      "@prefresh/vite": 2.4.12(preact@10.29.8)(vite@7.3.7(@types/node@26.6.4))
       "@rollup/pluginutils": 5.4.0(rollup@4.59.0)
       babel-plugin-transform-hook-names: 1.0.2(@babel/core@7.29.7)
       debug: 4.4.3
       magic-string: 0.30.21
       picocolors: 1.1.1
-      vite: 7.3.6(@types/node@26.6.4)
-      vite-prerender-plugin: 0.5.13(vite@7.3.6(@types/node@26.6.4))
+      vite: 7.3.7(@types/node@26.6.4)
+      vite-prerender-plugin: 0.5.13(vite@7.3.7(@types/node@26.6.4))
       zimmerframe: 1.1.4
     transitivePeerDependencies:
       - preact
@@ -4350,7 +4350,7 @@ snapshots:
 
   "@prefresh/utils@1.2.1": {}
 
-  "@prefresh/vite@2.4.12(preact@10.29.8)(vite@7.3.6(@types/node@26.6.4))":
+  "@prefresh/vite@2.4.12(preact@10.29.8)(vite@7.3.7(@types/node@26.6.4))":
     dependencies:
       "@babel/core": 7.29.7
       "@prefresh/babel-plugin": 0.5.3
@@ -4358,7 +4358,7 @@ snapshots:
       "@prefresh/utils": 1.2.1
       "@rollup/pluginutils": 4.2.1
       preact: 10.29.8
-      vite: 7.3.6(@types/node@26.6.4)
+      vite: 7.3.7(@types/node@26.6.4)
     transitivePeerDependencies:
       - supports-color
 
@@ -4652,7 +4652,7 @@ snapshots:
       obug: 2.2.1
       std-env: 4.3.0
       tinyrainbow: 3.1.1
-      vitest: 4.1.11(@types/node@26.6.4)(@vitest/coverage-v8@4.1.11)(jsdom@30.1.1)(vite@7.3.6(@types/node@26.6.4))
+      vitest: 4.1.11(@types/node@26.6.4)(@vitest/coverage-v8@4.1.11)(jsdom@30.1.1)(vite@7.3.7(@types/node@26.6.4))
 
   "@vitest/expect@4.1.11":
     dependencies:
@@ -4663,13 +4663,13 @@ snapshots:
       chai: 6.2.2
       tinyrainbow: 3.1.1
 
-  "@vitest/mocker@4.1.11(vite@7.3.6(@types/node@26.6.4))":
+  "@vitest/mocker@4.1.11(vite@7.3.7(@types/node@26.6.4))":
     dependencies:
       "@vitest/spy": 4.1.11
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
-      vite: 7.3.6(@types/node@26.6.4)
+      vite: 7.3.7(@types/node@26.6.4)
 
   "@vitest/pretty-format@4.1.11":
     dependencies:
@@ -5085,11 +5085,11 @@ snapshots:
 
   esutils@2.0.3: {}
 
-  eventsource-parser@3.0.6: {}
+  eventsource-parser@3.1.1: {}
 
   eventsource@3.0.7:
     dependencies:
-      eventsource-parser: 3.0.6
+      eventsource-parser: 3.1.1
 
   expect-type@1.3.0: {}
 
@@ -5835,7 +5835,7 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
-  vite-prerender-plugin@0.5.13(vite@7.3.6(@types/node@26.6.4)):
+  vite-prerender-plugin@0.5.13(vite@7.3.7(@types/node@26.6.4)):
     dependencies:
       kolorist: 1.8.0
       magic-string: 0.30.21
@@ -5843,9 +5843,9 @@ snapshots:
       simple-code-frame: 1.3.0
       source-map: 0.7.6
       stack-trace: 1.0.0
-      vite: 7.3.6(@types/node@26.6.4)
+      vite: 7.3.7(@types/node@26.6.4)
 
-  vite@7.3.6(@types/node@26.6.4):
+  vite@7.3.7(@types/node@26.6.4):
     dependencies:
       esbuild: 0.28.2
       fdir: 6.5.0(picomatch@4.0.7)
@@ -5857,10 +5857,10 @@ snapshots:
       "@types/node": 26.6.4
       fsevents: 2.3.3
 
-  vitest@4.1.11(@types/node@26.6.4)(@vitest/coverage-v8@4.1.11)(jsdom@30.1.1)(vite@7.3.6(@types/node@26.6.4)):
+  vitest@4.1.11(@types/node@26.6.4)(@vitest/coverage-v8@4.1.11)(jsdom@30.1.1)(vite@7.3.7(@types/node@26.6.4)):
     dependencies:
       "@vitest/expect": 4.1.11
-      "@vitest/mocker": 4.1.11(vite@7.3.6(@types/node@26.6.4))
+      "@vitest/mocker": 4.1.11(vite@7.3.7(@types/node@26.6.4))
       "@vitest/pretty-format": 4.1.11
       "@vitest/runner": 4.1.11
       "@vitest/snapshot": 4.1.11
@@ -5877,7 +5877,7 @@ snapshots:
       tinyexec: 1.3.1
       tinyglobby: 0.2.15
       tinyrainbow: 3.1.1
-      vite: 7.3.6(@types/node@26.6.4)
+      vite: 7.3.7(@types/node@26.6.4)
       why-is-node-running: 2.3.0
     optionalDependencies:
       "@types/node": 26.6.4
