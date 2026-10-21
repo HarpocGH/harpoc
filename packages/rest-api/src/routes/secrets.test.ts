@@ -116,6 +116,17 @@ describe("secret routes", () => {
       expect(Buffer.from(call[0].value as Uint8Array).toString()).toBe("my-secret-value");
     });
 
+    it("an empty create value still means no value: the engine receives none", async () => {
+      const res = await app.request("/api/v1/secrets", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ name: "new-key", type: "api_key", value: "" }),
+      });
+      expect(res.status).toBe(201);
+      const call = engine.createSecret.mock.calls[0] as [{ value?: Uint8Array }];
+      expect(call[0].value).toBeUndefined();
+    });
+
     it("rejects if token lacks create scope", async () => {
       engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, scope: ["read"] });
       const res = await app.request("/api/v1/secrets", {
@@ -243,6 +254,20 @@ describe("secret routes", () => {
         body: JSON.stringify({ value: 42 }),
       });
       expect(res.status).toBe(400);
+      expect(engine.rotateSecret).not.toHaveBeenCalled();
+    });
+
+    it("refuses an empty value with a 400 naming value before the engine is touched (TC-18)", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/rotate", {
+        method: "POST",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ value: "" }),
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: ErrorCode.SCHEMA_VALIDATION_ERROR,
+        message: "value: Too small: expected string to have >=1 characters",
+      });
       expect(engine.rotateSecret).not.toHaveBeenCalled();
     });
   });

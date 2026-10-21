@@ -1200,6 +1200,24 @@ describe("RestClient", () => {
       );
     });
 
+    it("rotateSecret sends an empty value as an empty string and surfaces the route's 400 (TC-18)", async () => {
+      fetchSpy.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          error: ErrorCode.SCHEMA_VALIDATION_ERROR,
+          message: "value: Too small: expected string to have >=1 characters",
+        }),
+      });
+
+      await expect(client.rotateSecret(HANDLE, new Uint8Array(0))).rejects.toThrow(
+        expect.objectContaining({ code: ErrorCode.SCHEMA_VALIDATION_ERROR }),
+      );
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/secrets/${ENCODED}/rotate`);
+      expect(call[1].body).toBe('{"value":""}');
+    });
+
     it("maps 401 responses to VaultError", async () => {
       fetchSpy.mockResolvedValueOnce({
         ok: false,

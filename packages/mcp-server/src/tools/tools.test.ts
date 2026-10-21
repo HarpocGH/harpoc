@@ -609,6 +609,17 @@ describe("MCP Tools", () => {
       expect(engine.useSecret).not.toHaveBeenCalled();
     });
 
+    it("refuses a process env_var of __proto__ at the schema boundary (validation refusal, S11)", async () => {
+      const result = await callTool(server, "use_secret", {
+        handle: "secret://my-key",
+        action: { type: "process", command: "gh", env_var: "__proto__" },
+      });
+      expect(result.isError).toBe(true);
+      expect(getToolText(result)).toContain("Input validation error");
+      expect(getToolText(result)).toMatch(/action\.env_var: Invalid environment variable name/);
+      expect(engine.useSecret).not.toHaveBeenCalled();
+    });
+
     it("refuses an undeclared key on the mcp action by name at the schema boundary (validation refusal)", async () => {
       const result = await callTool(server, "use_secret", {
         handle: "secret://my-key",

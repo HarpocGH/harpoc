@@ -44,10 +44,13 @@ export type ImapArg =
   | { kind: "string"; value: string }
   | { kind: "list"; items: ImapArg[] };
 
-// `raw` is the logical line's reconstructed text with any server literals
-// elided (their bytes live in `literals`, in encounter order) — needed by the
-// FETCH parser below because a naive whitespace split (`atoms`) breaks on the
-// parenthesized, unspaced structure of an ENVELOPE response.
+// `raw` is the logical line's reconstructed text with each server literal
+// replaced, where it stood, by the placeholder `\0<k>\0` — `k` its index in
+// `literals`, which hold the octets in encounter order; NUL is outside RFC
+// 3501's CHAR and a text line carrying one is refused, so no server text can
+// spell a placeholder — needed by the FETCH parser below because a naive
+// whitespace split (`atoms`) breaks on the parenthesized, unspaced structure
+// of an ENVELOPE response.
 export type UntaggedLine = { atoms: string[]; literals: Buffer[]; raw: string };
 
 export interface ImapResponse {
@@ -88,6 +91,11 @@ const MAX_SESSION_BYTES = 8 * 1024 * 1024;
 // An IMAP quoted string may hold any 7-bit char but `"`, `\`, CR, LF and NUL;
 // beyond this length (or with any excluded byte) the value goes as a literal.
 const MAX_QUOTED_BYTES = 1024;
+const LITERAL_MARK = "\0";
+
+function literalPlaceholder(index: number): string {
+  return `${LITERAL_MARK}${index}${LITERAL_MARK}`;
+}
 
 type Segment = { kind: "inline"; text: string } | { kind: "literal"; bytes: Buffer };
 
@@ -274,6 +282,10 @@ class ImapChannel {
   }
 
   private onLine(line: string): void {
+    if (line.includes(LITERAL_MARK)) {
+      this.fail(this.opError());
+      return;
+    }
     const match = /\{(\d+)\}$/.exec(line);
     if (match) {
       const n = Number(match[1]);
@@ -282,7 +294,8 @@ class ImapChannel {
         this.fail(VaultError.imapOperationFailed(this.origin, "read"));
         return;
       }
-      this.curTextChunks.push(line.slice(0, line.length - match[0].length));
+      const before = line.slice(0, line.length - match[0].length);
+      this.curTextChunks.push(before + literalPlaceholder(this.curLiterals.length));
       this.mode = "literal";
       this.literalRemaining = n;
       this.literalParts = [];
@@ -472,15 +485,17 @@ function fetchItemsArg(parts: ImapFetchParts): ImapArg {
   }
 }
 
-/** Minimal parenthesized-list / quoted-string / NIL parser for IMAP ENVELOPE
- * structures. Envelope fields are short header values the server always
- * sends inline (never as literals), so this never has to reconcile against
- * the literal queue the way FETCH's BODY[...] sections do. */
+/** Minimal parenthesized-list / quoted-string / NIL parser for IMAP FETCH
+ * attribute lists. Any `nstring` may arrive as a literal (RFC 3501 — Dovecot
+ * sends one for an envelope field it will not quote), so a literal's
+ * placeholder in `raw` resolves, where it stands, to that literal's octets
+ * decoded as UTF-8. */
 type SExpr = string | null | SExpr[];
 
 class SExprParser {
   constructor(
     private readonly text: string,
+    private readonly literals: Buffer[],
     private pos: number = 0,
   ) {}
 
@@ -501,7 +516,18 @@ class SExprParser {
     if (ch === '"') {
       return this.parseQuoted();
     }
+    if (ch === LITERAL_MARK) {
+      return this.parseLiteral();
+    }
     return this.parseAtom();
+  }
+
+  private parseLiteral(): string | null {
+    const end = this.text.indexOf(LITERAL_MARK, this.pos + 1);
+    const close = end === -1 ? this.text.length : end;
+    const index = Number(this.text.slice(this.pos + 1, close));
+    this.pos = close + 1;
+    return this.literals[index]?.toString("utf8") ?? null;
   }
 
   private skipSpace(): void {
@@ -529,7 +555,7 @@ class SExprParser {
 
   private parseAtom(): string | null {
     const start = this.pos;
-    while (this.pos < this.text.length && !"() ".includes(this.text[this.pos] ?? "")) {
+    while (this.pos < this.text.length && !"() \0".includes(this.text[this.pos] ?? "")) {
       this.pos += 1;
     }
     const token = this.text.slice(start, this.pos);
@@ -573,15 +599,16 @@ function toEnvelope(parsed: SExpr): ImapEnvelope {
   };
 }
 
-/** FETCH response parser: UID/FLAGS come off the naive `atoms` split (they
- * never contain nested structure), ENVELOPE is parsed from `raw` via
- * {@link SExprParser}, and BODY[HEADER]/BODY[TEXT] content is matched to the
- * per-line `literals` queue in the order both appear in `raw` — the queue is
- * FIFO because the server necessarily wrote them in that order on the wire. */
+/** FETCH response parser: UID/FLAGS come off `raw` by pattern (they never
+ * contain nested structure); the attribute list is parsed from `raw` via
+ * {@link SExprParser} as name/value pairs, so ENVELOPE, BODY[HEADER] and
+ * BODY[TEXT] each take the value that stands after their name — a literal
+ * where the server sent one, a quoted string or NIL. */
 function parseFetchMessages(untagged: UntaggedLine[]): ImapMessage[] {
   const messages: ImapMessage[] = [];
   for (const line of untagged) {
-    if (!/^\*\s+\d+\s+FETCH\s+\(/i.test(line.raw)) {
+    const head = /^\*\s+\d+\s+FETCH\s+(?=\()/i.exec(line.raw);
+    if (!head) {
       continue;
     }
     const uidMatch = /\bUID\s+(\d+)\b/.exec(line.raw);
@@ -594,31 +621,21 @@ function parseFetchMessages(untagged: UntaggedLine[]): ImapMessage[] {
 
     const message: ImapMessage = { uid, flags };
 
-    const envIdx = line.raw.indexOf("ENVELOPE");
-    if (envIdx !== -1) {
-      const parser = new SExprParser(line.raw, envIdx + "ENVELOPE".length);
-      message.envelope = toEnvelope(parser.parseOne());
-    }
-
-    const literalQueue = [...line.literals];
-    const markers: Array<{ idx: number; kind: "headers" | "text" }> = [];
-    const headerIdx = line.raw.indexOf("BODY[HEADER]");
-    if (headerIdx !== -1) {
-      markers.push({ idx: headerIdx, kind: "headers" });
-    }
-    const textIdx = line.raw.indexOf("BODY[TEXT]");
-    if (textIdx !== -1) {
-      markers.push({ idx: textIdx, kind: "text" });
-    }
-    markers.sort((a, b) => a.idx - b.idx);
-    for (const marker of markers) {
-      const buf = literalQueue.shift();
-      if (buf) {
-        if (marker.kind === "headers") {
-          message.headers = buf.toString("utf8");
-        } else {
-          message.text = buf.toString("utf8");
-        }
+    const parsed = new SExprParser(line.raw, line.literals, head[0].length).parseOne();
+    const items = Array.isArray(parsed) ? parsed : [];
+    for (let i = 0; i + 1 < items.length; i += 2) {
+      const name = items[i];
+      const value = items[i + 1] ?? null;
+      if (typeof name !== "string") {
+        continue;
+      }
+      const key = name.toUpperCase();
+      if (key === "ENVELOPE") {
+        message.envelope = toEnvelope(value);
+      } else if (key === "BODY[HEADER]" && typeof value === "string") {
+        message.headers = value;
+      } else if (key === "BODY[TEXT]" && typeof value === "string") {
+        message.text = value;
       }
     }
 

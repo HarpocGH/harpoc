@@ -45,8 +45,10 @@ export class ProcessInjector {
     attribution?: AuditAttribution,
   ): Promise<ProcessResult> {
     const pathDirs = controlledPathDirs();
+    const valueStr = Buffer.from(secretValue).toString("utf8");
 
     let resolvedPath: string;
+    let env: Record<string, string>;
     try {
       resolvedPath = resolveAndMatchCommand(action.command, policy.command_allowlist, pathDirs);
       // A binary with its own injection context is only in the allowlist so that
@@ -60,6 +62,7 @@ export class ProcessInjector {
       if (action.working_directory !== undefined) {
         this.assertDirectory(action.working_directory);
       }
+      env = buildCleanEnv(action.env_var, valueStr, policy.env_allowlist);
     } catch (err) {
       if (err instanceof VaultError) {
         this.audit(action, secretId, { error: err.code }, false, attribution);
@@ -68,8 +71,6 @@ export class ProcessInjector {
       throw err;
     }
 
-    const valueStr = Buffer.from(secretValue).toString("utf8");
-    const env = buildCleanEnv(action.env_var, valueStr, policy.env_allowlist);
     const args = action.args ?? [];
     const timeoutMs = action.timeout_ms ?? DEFAULT_PROCESS_TIMEOUT_MS;
     const networkIsolation = policy.network_isolation === true;

@@ -4,7 +4,9 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ErrorCode } from "@harpoc/shared";
+import Database from "better-sqlite3";
+import { AuditEventType, ErrorCode } from "@harpoc/shared";
+import type { CallerContext } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { registerAgents } from "./__fixtures__/engine-seams.js";
@@ -417,5 +419,335 @@ describe("lazy expiry in info/list", () => {
     const list = engine.listSecrets();
     const found = list.find((s) => s.name === "exp-list");
     expect(found?.status).toBe("expired");
+  });
+});
+
+describe("lazy expiry never rewrites a revoked secret (Q2)", () => {
+  const MINUTE_MS = 60_000;
+
+  beforeEach(async () => {
+    await engine.initVault("password");
+    vi.useFakeTimers({ toFake: ["Date"] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function revokedPastExpiry(name: string): Promise<string> {
+    await engine.createSecret({
+      name,
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+      expiresAt: Date.now() + MINUTE_MS,
+    });
+    const id = await engine.resolveSecretId(`secret://${name}`);
+    await engine.revokeSecret(`secret://${name}`);
+    vi.setSystemTime(Date.now() + 2 * MINUTE_MS);
+    return id;
+  }
+
+  function storedStatus(id: string): string {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      return (db.prepare("SELECT status FROM secrets WHERE id = ?").get(id) as { status: string })
+        .status;
+    } finally {
+      db.close();
+    }
+  }
+
+  function storedExpiresAt(id: string): number | null {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      return (
+        db.prepare("SELECT expires_at FROM secrets WHERE id = ?").get(id) as {
+          expires_at: number | null;
+        }
+      ).expires_at;
+    } finally {
+      db.close();
+    }
+  }
+
+  function trail(id: string): [string, boolean][] {
+    return engine
+      .queryAudit({ secretId: id })
+      .map((r): [string, boolean] => [r.event_type, r.success])
+      .reverse();
+  }
+
+  it("getSecretInfo and listSecrets report a revoked secret past its expiry as revoked", async () => {
+    await revokedPastExpiry("rev-info");
+
+    expect((await engine.getSecretInfo("secret://rev-info")).status).toBe("revoked");
+    expect(engine.listSecrets().find((s) => s.name === "rev-info")?.status).toBe("revoked");
+  });
+
+  it("getSecretValue answers SECRET_REVOKED, the stored status stays revoked and no secret.expire row is written", async () => {
+    const id = await revokedPastExpiry("rev-value");
+
+    await expectVaultError(
+      () => engine.getSecretValue("secret://rev-value"),
+      ErrorCode.SECRET_REVOKED,
+    );
+    expect(storedStatus(id)).toBe("revoked");
+    expect(trail(id)).toEqual([
+      [AuditEventType.SECRET_CREATE, true],
+      [AuditEventType.SECRET_REVOKE, true],
+      [AuditEventType.SECRET_READ, false],
+    ]);
+  });
+
+  it("useSecret on a revoked secret past expiry answers SECRET_REVOKED and writes no status", async () => {
+    const id = await revokedPastExpiry("rev-use");
+
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://rev-use", {
+          type: "http",
+          method: "GET",
+          url: "http://127.0.0.1:9/never",
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.SECRET_REVOKED,
+    );
+    expect(storedStatus(id)).toBe("revoked");
+    expect(trail(id)).toEqual([
+      [AuditEventType.SECRET_CREATE, true],
+      [AuditEventType.SECRET_REVOKE, true],
+      [AuditEventType.SECRET_USE, false],
+    ]);
+  });
+
+  it("rotateSecret answers SECRET_REVOKED", async () => {
+    const id = await revokedPastExpiry("rev-rotate");
+
+    await expectVaultError(
+      () =>
+        engine.rotateSecret("secret://rev-rotate", new Uint8Array(Buffer.from("S3CRET-TOKEN-new"))),
+      ErrorCode.SECRET_REVOKED,
+    );
+    expect(storedStatus(id)).toBe("revoked");
+  });
+
+  it("after a value read the name can be created again", async () => {
+    await revokedPastExpiry("rev-recreate");
+    await expectVaultError(
+      () => engine.getSecretValue("secret://rev-recreate"),
+      ErrorCode.SECRET_REVOKED,
+    );
+
+    await engine.createSecret({
+      name: "rev-recreate",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("S3CRET-TOKEN-new")),
+    });
+    expect((await engine.getSecretInfo("secret://rev-recreate")).status).toBe("active");
+  });
+
+  it("after a value read a further revoke still answers SECRET_REVOKED", async () => {
+    const id = await revokedPastExpiry("rev-again");
+    await expectVaultError(
+      () => engine.getSecretValue("secret://rev-again"),
+      ErrorCode.SECRET_REVOKED,
+    );
+
+    await expectVaultError(
+      () => engine.revokeSecret("secret://rev-again"),
+      ErrorCode.SECRET_REVOKED,
+    );
+    expect(storedStatus(id)).toBe("revoked");
+  });
+
+  it("an active secret past its expiry still expires on a value read, with one secret.expire row", async () => {
+    await engine.createSecret({
+      name: "act-past",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+      expiresAt: Date.now() + MINUTE_MS,
+    });
+    const id = await engine.resolveSecretId("secret://act-past");
+    vi.setSystemTime(Date.now() + 2 * MINUTE_MS);
+
+    await expectVaultError(
+      () => engine.getSecretValue("secret://act-past"),
+      ErrorCode.SECRET_EXPIRED,
+    );
+    expect(storedStatus(id)).toBe("expired");
+    expect(trail(id)).toEqual([
+      [AuditEventType.SECRET_CREATE, true],
+      [AuditEventType.SECRET_EXPIRE, true],
+      [AuditEventType.SECRET_READ, false],
+    ]);
+  });
+
+  it("a pending secret past its expiry reads expired and expires on a value read, unchanged", async () => {
+    await engine.createSecret({
+      name: "pend-past",
+      type: "api_key",
+      expiresAt: Date.now() + MINUTE_MS,
+    });
+    const id = await engine.resolveSecretId("secret://pend-past");
+    vi.setSystemTime(Date.now() + 2 * MINUTE_MS);
+
+    expect((await engine.getSecretInfo("secret://pend-past")).status).toBe("expired");
+    expect(storedStatus(id)).toBe("pending");
+    await expectVaultError(
+      () => engine.getSecretValue("secret://pend-past"),
+      ErrorCode.SECRET_EXPIRED,
+    );
+    expect(storedStatus(id)).toBe("expired");
+  });
+
+  it("a pending secret past expiry still accepts setSecretValue before any value read, stored active with the past expires_at, and the next value read expires it (C4-t control)", async () => {
+    const expiresAt = Date.now() + MINUTE_MS;
+    await engine.createSecret({ name: "pend-set", type: "api_key", expiresAt });
+    const id = await engine.resolveSecretId("secret://pend-set");
+    vi.setSystemTime(Date.now() + 2 * MINUTE_MS);
+
+    await engine.setSecretValue(
+      "secret://pend-set",
+      new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+    );
+    expect(storedStatus(id)).toBe("active");
+    expect(storedExpiresAt(id)).toBe(expiresAt);
+
+    await expectVaultError(
+      () => engine.getSecretValue("secret://pend-set"),
+      ErrorCode.SECRET_EXPIRED,
+    );
+    expect(storedStatus(id)).toBe("expired");
+    expect(trail(id)).toEqual([
+      [AuditEventType.SECRET_CREATE, true],
+      [AuditEventType.SECRET_CREATE, true],
+      [AuditEventType.SECRET_EXPIRE, true],
+      [AuditEventType.SECRET_READ, false],
+    ]);
+  });
+
+  it("a pending secret past expiry expired by a value read refuses setSecretValue with INVALID_INPUT and is still revocable (C4-t control)", async () => {
+    await engine.createSecret({
+      name: "pend-read",
+      type: "api_key",
+      expiresAt: Date.now() + MINUTE_MS,
+    });
+    const id = await engine.resolveSecretId("secret://pend-read");
+    vi.setSystemTime(Date.now() + 2 * MINUTE_MS);
+
+    await expectVaultError(
+      () => engine.getSecretValue("secret://pend-read"),
+      ErrorCode.SECRET_EXPIRED,
+    );
+    expect(storedStatus(id)).toBe("expired");
+
+    await expectVaultError(
+      () =>
+        engine.setSecretValue(
+          "secret://pend-read",
+          new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+        ),
+      ErrorCode.INVALID_INPUT,
+    );
+
+    await engine.revokeSecret("secret://pend-read");
+    expect(storedStatus(id)).toBe("revoked");
+    expect(trail(id)).toEqual([
+      [AuditEventType.SECRET_CREATE, true],
+      [AuditEventType.SECRET_EXPIRE, true],
+      [AuditEventType.SECRET_READ, false],
+      [AuditEventType.SECRET_CREATE, false],
+      [AuditEventType.SECRET_REVOKE, true],
+    ]);
+  });
+});
+
+describe("rotateSecret refuses an empty value (Q3, TC-18)", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+  });
+
+  it("the trusted path answers INVALID_INPUT, keeps version 1 and its value, and writes one failed secret.rotate row carrying the id", async () => {
+    await engine.createSecret({
+      name: "rot-empty",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+    });
+    const id = await engine.resolveSecretId("secret://rot-empty");
+
+    const err = await expectVaultError(
+      () => engine.rotateSecret("secret://rot-empty", new Uint8Array(0)),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe("Secret secret://rot-empty cannot be rotated to an empty value");
+
+    expect((await engine.getSecretInfo("secret://rot-empty")).version).toBe(1);
+    expect(Buffer.from(await engine.getSecretValue("secret://rot-empty")).toString()).toBe(
+      "S3CRET-TOKEN-xyz",
+    );
+    const rows = engine.queryAudit({ eventType: AuditEventType.SECRET_ROTATE });
+    expect(
+      rows.map((r) => ({
+        success: r.success,
+        secret_id: r.secret_id,
+        principal_id: r.principal_id,
+        detail: r.detail,
+      })),
+    ).toEqual([
+      {
+        success: false,
+        secret_id: id,
+        principal_id: null,
+        detail: { handle: "secret://rot-empty", error: ErrorCode.INVALID_INPUT },
+      },
+    ]);
+  });
+
+  it("a rotate-granted token caller answers INVALID_INPUT and its failed row carries the id, the principal and the interface", async () => {
+    await engine.createSecret({
+      name: "rot-empty-agent",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+    });
+    const id = await engine.resolveSecretId("secret://rot-empty-agent");
+    registerAgents(engine, "rotator");
+    engine.grantPolicy(
+      { secretId: id, principalType: "agent", principalId: "rotator", permissions: ["rotate"] },
+      "test-admin",
+    );
+    const caller: CallerContext = {
+      principal_type: "agent",
+      principal_id: "rotator",
+      interface: "rest",
+    };
+
+    await expectVaultError(
+      () => engine.rotateSecret("secret://rot-empty-agent", new Uint8Array(0), caller),
+      ErrorCode.INVALID_INPUT,
+    );
+
+    expect((await engine.getSecretInfo("secret://rot-empty-agent")).version).toBe(1);
+    const rows = engine.queryAudit({ eventType: AuditEventType.SECRET_ROTATE });
+    expect(
+      rows.map((r) => ({
+        success: r.success,
+        secret_id: r.secret_id,
+        principal_type: r.principal_type,
+        principal_id: r.principal_id,
+        detail: r.detail,
+      })),
+    ).toEqual([
+      {
+        success: false,
+        secret_id: id,
+        principal_type: "agent",
+        principal_id: "rotator",
+        detail: {
+          handle: "secret://rot-empty-agent",
+          error: ErrorCode.INVALID_INPUT,
+          interface: "rest",
+        },
+      },
+    ]);
   });
 });

@@ -321,8 +321,10 @@ async function runDocker(
   user: string,
   secret: string,
 ): Promise<DockerExecution> {
-  // Defense in depth beside the schema's alphanumeric-anchored image regex: the
-  // image reaches argv, so a leading dash must never parse as a docker flag.
+  // The image reaches argv, so a leading dash must never parse as a docker
+  // flag. The schema's image grammar refuses one too, but VaultEngine.useSecret
+  // and DirectClient.useSecret take the action unparsed — on that path this
+  // guard is the only check.
   if (action.image.startsWith("-")) {
     throw VaultError.invalidInput("docker image reference must not start with '-'");
   }

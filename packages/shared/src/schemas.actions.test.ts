@@ -12,6 +12,7 @@ import {
   useSecretBodySchema,
   useSecretRequestSchema,
 } from "./schemas.js";
+import { renderSchemaIssues } from "./schema-issues.js";
 
 // ---------------------------------------------------------------------------
 // injectionConfigSchema
@@ -82,6 +83,23 @@ describe("injectionConfigSchema", () => {
       injectionConfigSchema.parse({ type: "header", header_name: "Auth\r\n" }),
     ).toThrow();
   });
+
+  it("refuses header_name __proto__ with the charset message (S11)", () => {
+    const parsed = injectionConfigSchema.safeParse({ type: "header", header_name: "__proto__" });
+    expect(parsed.success ? "" : renderSchemaIssues(parsed.error)).toBe(
+      "header_name: Invalid header name characters",
+    );
+  });
+
+  it.each(["constructor", "prototype", "__PROTO__", "__proto__x", "x__proto__"])(
+    "accepts header_name %j (control — an ordinary property name)",
+    (header_name) => {
+      expect(injectionConfigSchema.parse({ type: "header", header_name })).toEqual({
+        type: "header",
+        header_name,
+      });
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -200,6 +218,20 @@ describe("processActionSchema", () => {
   it.each(["GH_TOKEN", "_underscore", "A", "PATH2"])("accepts valid env_var name %j", (env_var) => {
     expect(processActionSchema.parse({ ...validProcess, env_var }).env_var).toBe(env_var);
   });
+
+  it("refuses env_var __proto__ with the name message (S11)", () => {
+    const parsed = processActionSchema.safeParse({ ...validProcess, env_var: "__proto__" });
+    expect(parsed.success ? "" : renderSchemaIssues(parsed.error)).toBe(
+      "env_var: Invalid environment variable name",
+    );
+  });
+
+  it.each(["constructor", "prototype", "__PROTO__", "__proto__x", "x__proto__"])(
+    "accepts env_var %j (control — an ordinary property name)",
+    (env_var) => {
+      expect(processActionSchema.parse({ ...validProcess, env_var }).env_var).toBe(env_var);
+    },
+  );
 
   it("rejects args beyond the max count", () => {
     const args = Array.from({ length: 257 }, () => "x");

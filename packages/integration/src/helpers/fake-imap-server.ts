@@ -14,7 +14,8 @@ import { LOOPBACK_CERT_PEM, LOOPBACK_KEY_PEM } from "./loopback-cert.js";
  * command line ending in `{n}` is answered with a `+` continuation and the next
  * `n` octets consumed as literal content, never re-parsed as a command. A
  * trimmed copy: the original carries script options this one does not
- * (`postLoginCapabilities`, `fetchLiteral`, `fetchOversizedLiteral`, `flood`).
+ * (`postLoginCapabilities`, `fetchLiteral`, `fetchOversizedLiteral`, `flood`,
+ * `envelopeSegments`, `headerInline`, `textInline`, `textGlued`).
  */
 
 const SECURE_CONTEXT = createSecureContext({ key: LOOPBACK_KEY_PEM, cert: LOOPBACK_CERT_PEM });

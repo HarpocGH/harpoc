@@ -280,6 +280,25 @@ describe("secret use — buildAction covers all six contexts", () => {
     });
   });
 
+  it("process: --env-var __proto__ is refused by the schema, exit 1, and the engine is never reached", async () => {
+    await expect(
+      run([
+        "secret://k",
+        "--action",
+        "process",
+        "--command",
+        "/usr/bin/printenv",
+        "--env-var",
+        "__proto__",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.stderr()).toBe(
+      "Error: [SCHEMA_VALIDATION_ERROR] env_var: Invalid environment variable name",
+    );
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+  });
+
   it("mcp: server, tool and JSON-parsed arguments", async () => {
     await run([
       "secret://k",

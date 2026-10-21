@@ -119,7 +119,7 @@ export const injectionConfigSchema = z.discriminatedUnion("type", [
     header_name: z
       .string()
       .min(1)
-      .regex(/^[a-zA-Z0-9\-_]+$/, "Invalid header name characters"),
+      .regex(/^(?!__proto__$)[a-zA-Z0-9\-_]+$/, "Invalid header name characters"),
   }),
   z.strictObject({
     type: z.literal(InjectionType.QUERY),
@@ -160,10 +160,12 @@ export type CreateSecretRequest = z.infer<typeof createSecretInputSchema>;
  * Rotate-secret request body. The value is validated exactly like the create
  * route's: `Buffer.from(value, "base64")` silently discards invalid characters,
  * so a truthiness check alone let a malformed value irreversibly rotate the
- * credential to garbage while the API answered 200 (L7).
+ * credential to garbage while the API answered 200 (L7). Unlike the create
+ * route's, where `""` means "no value", an empty value is refused: it decodes
+ * to zero bytes and would rotate the credential to nothing (TC-18).
  */
 export const rotateSecretInputSchema = z.strictObject({
-  value: z.base64(),
+  value: z.base64().min(1),
 });
 
 export type RotateSecretRequest = z.infer<typeof rotateSecretInputSchema>;
@@ -243,7 +245,7 @@ export const processActionSchema = z.strictObject({
   env_var: z
     .string()
     .min(1)
-    .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Invalid environment variable name"),
+    .regex(/^(?!__proto__$)[A-Za-z_][A-Za-z0-9_]*$/, "Invalid environment variable name"),
   timeout_ms: z.number().int().positive().max(300_000).optional(),
 });
 
@@ -761,7 +763,7 @@ export type SftpAction = z.infer<typeof sftpActionSchema>;
  * registry component (when present) is the allowlist subject.
  */
 const DOCKER_IMAGE_REGEX =
-  /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::\d{1,5})?\/)?[a-zA-Z0-9._-]+(?:\/[a-zA-Z0-9._-]+)*(?::[a-zA-Z0-9._-]+)?(?:@sha256:[a-f0-9]{64})?$/;
+  /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::\d{1,5})?\/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*(?::\w[\w.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/;
 
 const dockerImageSchema = z
   .string()
@@ -854,7 +856,9 @@ export const useSecretBodySchema = z.strictObject({ action: useSecretActionSchem
 const urlAllowlistSchema = z.array(z.string().min(1).max(2048)).max(100);
 const commandAllowlistSchema = z.array(z.string().min(1).max(4096)).max(100);
 const envAllowlistSchema = z
-  .array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Invalid environment variable name"))
+  .array(
+    z.string().regex(/^(?!__proto__$)[A-Za-z_][A-Za-z0-9_]*$/, "Invalid environment variable name"),
+  )
   .max(100);
 const hostAllowlistSchema = z.array(z.string().min(1).max(2048)).max(100);
 const responseHeaderAllowlistSchema = z
@@ -863,7 +867,7 @@ const responseHeaderAllowlistSchema = z
       .string()
       .min(1)
       .max(256)
-      .regex(/^[a-zA-Z0-9\-_]+$/, "Invalid header name characters"),
+      .regex(/^(?!__proto__$)[a-zA-Z0-9\-_]+$/, "Invalid header name characters"),
   )
   .max(100);
 const smtpRecipientAllowlistSchema = z.array(recipientPatternSchema).max(100);
@@ -1087,7 +1091,7 @@ export const mcpServerConfigSchema = z
     args: z.array(z.string().max(4096)).max(MAX_PROCESS_ARGS).optional(),
     env_var: z
       .string()
-      .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Invalid environment variable name")
+      .regex(/^(?!__proto__$)[A-Za-z_][A-Za-z0-9_]*$/, "Invalid environment variable name")
       .optional(),
     working_directory: z.string().min(1).max(4096).optional(),
     url: httpishUrlSchema.optional(),

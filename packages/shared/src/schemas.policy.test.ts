@@ -8,6 +8,7 @@ import {
   injectionPolicySchema,
   setInjectionPolicyRequestSchema,
 } from "./schemas.js";
+import { renderSchemaIssues } from "./schema-issues.js";
 import type { InjectionPolicy, SetInjectionPolicyRequest } from "./schemas.js";
 
 // ---------------------------------------------------------------------------
@@ -96,6 +97,29 @@ describe("injectionPolicyInputSchema", () => {
       injectionPolicyInputSchema.parse({ response_header_allowlist: ["x\r\ny"] }),
     ).toThrow();
     expect(() => injectionPolicyInputSchema.parse({ response_header_allowlist: [""] })).toThrow();
+  });
+
+  it("refuses __proto__ in env_allowlist and in response_header_allowlist, naming the entry (S11)", () => {
+    const env = injectionPolicyInputSchema.safeParse({ env_allowlist: ["PATH", "__proto__"] });
+    expect(env.success ? "" : renderSchemaIssues(env.error)).toBe(
+      "env_allowlist.1: Invalid environment variable name",
+    );
+    const headers = injectionPolicyInputSchema.safeParse({
+      response_header_allowlist: ["__proto__"],
+    });
+    expect(headers.success ? "" : renderSchemaIssues(headers.error)).toBe(
+      "response_header_allowlist.0: Invalid header name characters",
+    );
+  });
+
+  it("accepts constructor, prototype, __PROTO__, __proto__x and x__proto__ in both lists (control)", () => {
+    const names = ["constructor", "prototype", "__PROTO__", "__proto__x", "x__proto__"];
+    const parsed = injectionPolicyInputSchema.parse({
+      env_allowlist: names,
+      response_header_allowlist: names,
+    });
+    expect(parsed.env_allowlist).toEqual(names);
+    expect(parsed.response_header_allowlist).toEqual(names);
   });
 
   it("refuses an unknown key, naming it (strict — D2c)", () => {

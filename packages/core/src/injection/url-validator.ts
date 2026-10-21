@@ -14,12 +14,13 @@ const PRIVATE_IPV4_RANGES: [number, number, number][] = [
 ];
 
 /**
- * Check if an IPv4 address is in a private range.
+ * Check if an IP address is private, loopback, link-local or unspecified. An
+ * IPv6 literal is classified in the canonical form `URL.hostname` gives it.
  */
 export function isPrivateIp(ip: string): boolean {
-  // IPv4-mapped IPv6 (::ffff:x.x.x.x or ::ffff:XXXX:XXXX hex) — extract IPv4 part and recurse
-  const normalized = ip.replace(/^\[|\]$/g, "");
+  const normalized = canonicalIpv6(ip.replace(/^\[|\]$/g, ""));
 
+  // IPv4-mapped IPv6 (::ffff:x.x.x.x or ::ffff:XXXX:XXXX hex) — extract IPv4 part and recurse
   // Dotted-decimal form: ::ffff:192.168.1.1
   const ffmpDotted = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(normalized);
   if (ffmpDotted?.[1]) {
@@ -62,13 +63,25 @@ export function isPrivateIp(ip: string): boolean {
     return false;
   }
 
-  // IPv6 ULA fc00::/7 and loopback ::1
+  // IPv6 ULA fc00::/7, loopback ::1 and unspecified :: (the twin of 0.0.0.0/8)
   const normalizedLower = normalized.toLowerCase();
   if (normalizedLower === "::1") return true;
+  if (normalizedLower === "::") return true;
   if (normalizedLower.startsWith("fc") || normalizedLower.startsWith("fd")) return true;
   if (normalizedLower.startsWith("fe80")) return true; // link-local
 
   return false;
+}
+
+/** An IPv6 literal compressed and lowercased as the WHATWG URL parser renders it; anything else unchanged. */
+function canonicalIpv6(host: string): string {
+  if (!host.includes(":")) return host;
+  if (!/^[0-9a-f:.]+$/i.test(host)) return host;
+  try {
+    return new URL(`http://[${host}]/`).hostname.replace(/^\[|\]$/g, "");
+  } catch {
+    return host;
+  }
 }
 
 /**

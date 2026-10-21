@@ -11,6 +11,7 @@ import {
   permissionSchema,
   principalTypeSchema,
   responseModeSchema,
+  rotateSecretInputSchema,
   secretStatusSchema,
   secretTypeSchema,
   smtpActionSchema,
@@ -236,6 +237,24 @@ describe("createSecretInputSchema", () => {
     expect(() =>
       createSecretInputSchema.parse({ name: "key", type: "api_key", expires_at: 0 }),
     ).toThrow();
+  });
+});
+
+describe("rotateSecretInputSchema", () => {
+  it("refuses an empty value, which would decode to a zero-length credential (TC-18)", () => {
+    const result = rotateSecretInputSchema.safeParse({ value: "" });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((i) => ({ path: i.path, code: i.code }))).toEqual([
+      { path: ["value"], code: "too_small" },
+    ]);
+  });
+
+  it("accepts a one-byte value", () => {
+    expect(rotateSecretInputSchema.parse({ value: "AA==" })).toEqual({ value: "AA==" });
+  });
+
+  it("leaves the create schema's empty value accepted: on create it means no value", () => {
+    expect(createSecretInputSchema.parse({ name: "k", type: "api_key", value: "" }).value).toBe("");
   });
 });
 

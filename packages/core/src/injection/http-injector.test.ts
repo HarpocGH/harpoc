@@ -5,7 +5,7 @@ import type { AddressInfo, Socket } from "node:net";
 import { ErrorCode, MAX_HTTP_RESPONSE_BYTES } from "@harpoc/shared";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { AuditLogger } from "../audit/audit-logger.js";
-import { HttpInjector } from "./http-injector.js";
+import { HttpInjector, applyInjectionConfig } from "./http-injector.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
 let server: Server;
@@ -253,6 +253,46 @@ describe("HttpInjector", () => {
       const body = JSON.parse(response.body ?? "{}") as Record<string, string>;
       expect(body.custom_header).toBe("key-123");
     });
+
+    it("refuses header_name __proto__ INVALID_INJECTION_CONFIG before any request, with a failed row (S11)", async () => {
+      const audited = new HttpInjector(logger);
+      const before = requestPaths.length;
+      const err = await expectVaultError(
+        () =>
+          audited.executeWithSecret(
+            { method: "GET", url: `${baseUrl}/echo` },
+            new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+            { type: "header", header_name: "__proto__" },
+          ),
+        ErrorCode.INVALID_INJECTION_CONFIG,
+      );
+      expect(err.message).toBe("header_name must not be __proto__");
+      expect(requestPaths.length).toBe(before);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        eventType: "secret.use",
+        success: false,
+        detail: {
+          context: "http",
+          error: ErrorCode.INVALID_INJECTION_CONFIG,
+          injection_type: "header",
+        },
+      });
+    });
+
+    it.each(["constructor", "prototype", "__PROTO__", "__proto__x", "x__proto__"])(
+      "places header_name %s as an own header carrying the value (control)",
+      (name) => {
+        const { headers } = applyInjectionConfig(
+          new URL(`${baseUrl}/echo`),
+          {},
+          { type: "header", header_name: name },
+          new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+        );
+        expect(Object.keys(headers)).toEqual([name]);
+        expect(headers[name]).toBe("S3CRET-TOKEN-xyz");
+      },
+    );
   });
 
   describe("query injection", () => {

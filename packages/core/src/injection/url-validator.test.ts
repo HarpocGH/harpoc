@@ -97,18 +97,8 @@ describe("isPrivateIp", () => {
     },
   );
 
-  /**
-   * T20: this case used to assert `typeof result === "boolean"` — true for
-   * every possible implementation, so it pinned nothing. The real question is
-   * whether the un-normalized expanded form is *reachable*: it is not, because
-   * every path into `isPrivateIp` hands it an address already normalized (the
-   * WHATWG URL parser compresses IPv6 literals; `dns.lookup` returns the
-   * compressed form). Both halves are now asserted — the helper's literal
-   * behavior, and the end-to-end refusal that makes it harmless.
-   */
-  it("does not normalize an expanded IPv6 literal on its own (known limitation)", () => {
-    expect(isPrivateIp("0000:0000:0000:0000:0000:0000:0000:0001")).toBe(false);
-    // The compressed form every caller actually supplies is recognized.
+  it("classifies an expanded IPv6 literal as its compressed twin (S8)", () => {
+    expect(isPrivateIp("0000:0000:0000:0000:0000:0000:0000:0001")).toBe(true);
     expect(isPrivateIp("::1")).toBe(true);
   });
 
@@ -147,6 +137,78 @@ describe("isPrivateIp", () => {
   it.each(["2600:1f18::1", "2607:f8b0:4004:800::200e"])("public IPv6 %s is not private", (ip) => {
     expect(isPrivateIp(ip)).toBe(false);
   });
+});
+
+describe("the SSRF floor canonicalises IPv6 literals and blocks :: (S8)", () => {
+  it.each([
+    "::",
+    "[::]",
+    "0::0",
+    "::0",
+    "0:0:0:0:0:0:0:0",
+    "0:0:0:0:0:0:0:1",
+    "0:0:0:0:0:ffff:127.0.0.1",
+    "0:0:0:0:0:ffff:0:0",
+  ])("isPrivateIp(%j) is true — the unspecified address or an uncompressed private twin", (ip) => {
+    expect(isPrivateIp(ip)).toBe(true);
+  });
+
+  it.each(["::ffff:7f00:1", "::FFFF:127.0.0.1", "::ffff:0.0.0.0", "::ffff:0:0"])(
+    "isPrivateIp(%j) is true — a compressed mapped form classified before S8 too (control)",
+    (ip) => {
+      expect(isPrivateIp(ip)).toBe(true);
+    },
+  );
+
+  it.each(["2001:db8::1", "::ffff:8.8.8.8", "2001:0db8:0000:0000:0000:0000:0000:0001"])(
+    "isPrivateIp(%j) stays false — a public address, compressed, mapped or expanded",
+    (ip) => {
+      expect(isPrivateIp(ip)).toBe(false);
+    },
+  );
+
+  it("a zone id the URL parser refuses falls through to the prefix checks: fe80::1%eth0 is private", () => {
+    expect(() => new URL("http://[fe80::1%eth0]/")).toThrow();
+    expect(isPrivateIp("fe80::1%eth0")).toBe(true);
+  });
+
+  it('isPrivateIp("fd00::1]@[2001:db8::1") is true — the floor classifies a malformed literal by its own prefix test, not by the URL parser\'s rewrite', () => {
+    expect(isPrivateIp("fd00::1]@[2001:db8::1")).toBe(true);
+  });
+
+  it('isPrivateIp("::1]@[2001:db8::1") is false — a malformed loopback spelling stays unclassified as at HEAD: no exact ::1, no private prefix, and the parser\'s rewrite does not decide it', () => {
+    expect(isPrivateIp("::1]@[2001:db8::1")).toBe(false);
+  });
+
+  it("validateUrl refuses https://[::]/api SSRF_BLOCKED, the message naming the hostname", async () => {
+    expect(isLoopback("[::]")).toBe(false);
+    const err = await expectVaultError(
+      () => validateUrl("https://[::]/api"),
+      ErrorCode.SSRF_BLOCKED,
+    );
+    expect(err.message).toBe("SSRF blocked: [::] resolves to a private/internal IP address");
+  });
+
+  it.each(["https://[0::0]/api", "https://[0:0:0:0:0:0:0:0]:8443/api"])(
+    "validateUrl refuses %s — the URL parser compresses it to [::]",
+    async (url) => {
+      await expectVaultError(() => validateUrl(url), ErrorCode.SSRF_BLOCKED);
+    },
+  );
+
+  it("validateUrl refuses wss://[::]/socket under the WebSocket scheme policy", async () => {
+    await expectVaultError(
+      () => validateUrl("wss://[::]/socket", WS_SCHEMES),
+      ErrorCode.SSRF_BLOCKED,
+    );
+  });
+
+  it.each(["::", "[::]", "0:0:0:0:0:0:0:0", "0:0:0:0:0:ffff:127.0.0.1"])(
+    "validateHostPort(%j, 443) is SSRF_BLOCKED",
+    async (host) => {
+      await expectVaultError(() => validateHostPort(host, 443), ErrorCode.SSRF_BLOCKED);
+    },
+  );
 });
 
 describe("isLoopback", () => {

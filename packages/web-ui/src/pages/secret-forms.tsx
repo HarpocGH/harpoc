@@ -193,8 +193,8 @@ export function RotateForm({
       />
       {error && <p class="error-text">{error.message}</p>}
       <p>
-        {/* An empty value is a valid base64 string, so the API would accept it
-            and rotate the credential to zero bytes — irreversibly. */}
+        {/* The form's guard disables Rotate on an empty value, and the API
+            refuses one too (400, SCHEMA_VALIDATION_ERROR — TC-18). */}
         <button type="submit" disabled={busy || value === ""}>
           Rotate
         </button>

@@ -84,6 +84,20 @@ describe("mcpServerConfigSchema", () => {
     expect(() => mcpServerConfigSchema.parse({ ...validStdio, env_var: "has-dash" })).toThrow();
   });
 
+  it("refuses env_var __proto__ with the name message (S11)", () => {
+    const parsed = mcpServerConfigSchema.safeParse({ ...validStdio, env_var: "__proto__" });
+    expect(parsed.success ? "" : renderSchemaIssues(parsed.error)).toBe(
+      "env_var: Invalid environment variable name",
+    );
+  });
+
+  it.each(["constructor", "prototype", "__PROTO__", "__proto__x", "x__proto__"])(
+    "accepts env_var %j (control — an ordinary property name)",
+    (env_var) => {
+      expect(mcpServerConfigSchema.parse({ ...validStdio, env_var }).env_var).toBe(env_var);
+    },
+  );
+
   it("rejects an invalid server_name format", () => {
     expect(() => mcpServerConfigSchema.parse({ ...validStdio, server_name: "bad name" })).toThrow();
   });

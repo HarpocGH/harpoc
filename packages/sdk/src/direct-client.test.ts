@@ -1,5 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   ENCRYPTED_KEY_IMPORT_REFUSAL,
@@ -9,6 +12,7 @@ import {
   VaultState,
 } from "@harpoc/shared";
 import type { ConnectionConfig, McpServerConfigInput, UseSecretAction } from "@harpoc/shared";
+import { VaultEngine } from "@harpoc/core";
 import { DirectClient } from "./direct-client.js";
 import type { VaultClient } from "./client.js";
 import {
@@ -153,6 +157,35 @@ describe("DirectClient", () => {
 
     await client.rotateSecret("secret://key", new Uint8Array([1, 2, 3]));
     expect(engine.rotateSecret).toHaveBeenCalledWith("secret://key", new Uint8Array([1, 2, 3]));
+  });
+
+  it("rotateSecret to an empty value is refused by a real engine with INVALID_INPUT, the value kept (TC-18)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harpoc-sdk-rotate-"));
+    const engine = new VaultEngine({
+      dbPath: join(dir, "vault.db"),
+      sessionPath: join(dir, "session.json"),
+    });
+    try {
+      await engine.initVault("password");
+      const client = new DirectClient(engine);
+      await client.createSecret({
+        name: "k",
+        type: "api_key",
+        value: new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+      });
+
+      await expectVaultError(
+        () => client.rotateSecret("secret://k", new Uint8Array(0)),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect((await client.getSecretInfo("secret://k")).version).toBe(1);
+      expect(Buffer.from(await client.getSecretValue("secret://k")).toString()).toBe(
+        "S3CRET-TOKEN-xyz",
+      );
+    } finally {
+      await engine.destroy();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
   });
 
   it("revokeSecret delegates to engine", async () => {

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -223,6 +223,31 @@ describe("useSecret (process injection)", () => {
     }
     expect(res.truncated).toBe(true);
     expect(processRow()).toMatchObject({ success: true, detail: { truncated: true } });
+  });
+
+  it("refuses env_var __proto__ INVALID_INJECTION_CONFIG with a failed row, nothing spawned (S11)", async () => {
+    await allowNode();
+    const marker = join(tempDir, "spawned.txt");
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://proc", {
+          type: "process",
+          command: process.execPath,
+          args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")`],
+          env_var: "__proto__",
+        }),
+      ErrorCode.INVALID_INJECTION_CONFIG,
+    );
+    expect(existsSync(marker)).toBe(false);
+    expect(processRow()).toMatchObject({
+      success: false,
+      detail: {
+        context: "process",
+        command: process.execPath,
+        args_count: 2,
+        error: ErrorCode.INVALID_INJECTION_CONFIG,
+      },
+    });
   });
 });
 

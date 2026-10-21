@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import { dropSecretsNameHmacConstraint, expectVaultError } from "@harpoc/test-utils";
 import { createVaultKeys } from "../crypto/key-hierarchy.js";
@@ -304,6 +304,77 @@ describe("rotateSecret", () => {
       ErrorCode.SECRET_REVOKED,
     );
   });
+
+  it("refuses an empty value with INVALID_INPUT and keeps the stored value at version 1", async () => {
+    await manager.createSecret({
+      name: "rotate-empty",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+    });
+
+    const err = await expectVaultError(
+      () => manager.rotateSecret("secret://rotate-empty", new Uint8Array(0)),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe("Secret secret://rotate-empty cannot be rotated to an empty value");
+
+    const info = await manager.getSecretInfo("secret://rotate-empty");
+    expect(info.version).toBe(1);
+    expect(info.rotatedAt).toBeNull();
+    const value = await manager.getSecretValue("secret://rotate-empty");
+    expect(Buffer.from(value).toString()).toBe("S3CRET-TOKEN-xyz");
+  });
+
+  it("reports the resolved id before refusing an empty value and never reaches the commit", async () => {
+    await manager.createSecret({
+      name: "rotate-empty-id",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+    });
+    const { id } = await manager.resolveHandle("secret://rotate-empty-id");
+    const onCommit = vi.fn();
+    const onResolved = vi.fn();
+
+    await expectVaultError(
+      () =>
+        manager.rotateSecret("secret://rotate-empty-id", new Uint8Array(0), onCommit, onResolved),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(onResolved.mock.calls).toEqual([[id]]);
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("an empty value for an unknown handle answers SECRET_NOT_FOUND: the handle resolves first", async () => {
+    await expectVaultError(
+      () => manager.rotateSecret("secret://no-such-secret", new Uint8Array(0)),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
+  });
+
+  it("an empty value for a revoked secret answers INVALID_INPUT, not SECRET_REVOKED: the refusal precedes the usability check", async () => {
+    await manager.createSecret({
+      name: "rotate-empty-revoked",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+    });
+    const { id } = await manager.resolveHandle("secret://rotate-empty-revoked");
+    await manager.revokeSecret("secret://rotate-empty-revoked");
+    const onCommit = vi.fn();
+    const onResolved = vi.fn();
+
+    await expectVaultError(
+      () =>
+        manager.rotateSecret(
+          "secret://rotate-empty-revoked",
+          new Uint8Array(0),
+          onCommit,
+          onResolved,
+        ),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(onResolved.mock.calls).toEqual([[id]]);
+    expect(onCommit).not.toHaveBeenCalled();
+  });
 });
 
 describe("revokeSecret", () => {
@@ -537,6 +608,97 @@ describe("expiresAt handling", () => {
     // Status should now be EXPIRED in the DB
     const info = await manager.getSecretInfo("secret://lazy-expire");
     expect(info.status).toBe("expired");
+  });
+
+  it("lazy expiry leaves a revoked secret past its expiry revoked in getSecretInfo and listSecrets", async () => {
+    await manager.createSecret({
+      name: "revoked-past",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+      expiresAt: Date.now() - 1000,
+    });
+    await manager.revokeSecret("secret://revoked-past");
+
+    expect((await manager.getSecretInfo("secret://revoked-past")).status).toBe("revoked");
+    expect(manager.listSecrets().map((s) => s.status)).toEqual(["revoked"]);
+  });
+
+  it("a value read of a revoked secret past its expiry answers SECRET_REVOKED and writes no EXPIRED status", async () => {
+    const onLazyExpire = vi.fn();
+    const watched = new SecretManager(store, kek, onLazyExpire);
+    await watched.createSecret({
+      name: "revoked-read",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+      expiresAt: Date.now() - 1000,
+    });
+    await watched.revokeSecret("secret://revoked-read");
+
+    await expectVaultError(
+      () => watched.getSecretValue("secret://revoked-read"),
+      ErrorCode.SECRET_REVOKED,
+    );
+    expect((await watched.resolveHandle("secret://revoked-read")).status).toBe("revoked");
+    expect(onLazyExpire).not.toHaveBeenCalled();
+  });
+
+  it("rotateSecret on a revoked secret past its expiry answers SECRET_REVOKED", async () => {
+    await manager.createSecret({
+      name: "revoked-rotate",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+      expiresAt: Date.now() - 1000,
+    });
+    await manager.revokeSecret("secret://revoked-rotate");
+
+    await expectVaultError(
+      () =>
+        manager.rotateSecret(
+          "secret://revoked-rotate",
+          new Uint8Array(Buffer.from("S3CRET-TOKEN-new")),
+        ),
+      ErrorCode.SECRET_REVOKED,
+    );
+    expect((await manager.resolveHandle("secret://revoked-rotate")).status).toBe("revoked");
+  });
+
+  it("an active secret past its expiry still transitions to EXPIRED once, through onLazyExpire", async () => {
+    const onLazyExpire = vi.fn();
+    const watched = new SecretManager(store, kek, onLazyExpire);
+    await watched.createSecret({
+      name: "active-past",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+      expiresAt: Date.now() - 1000,
+    });
+    const { id } = await watched.resolveHandle("secret://active-past");
+
+    await expectVaultError(
+      () => watched.getSecretValue("secret://active-past"),
+      ErrorCode.SECRET_EXPIRED,
+    );
+    expect((await watched.resolveHandle("secret://active-past")).status).toBe("expired");
+    expect(onLazyExpire.mock.calls).toEqual([[id, "secret://active-past"]]);
+  });
+
+  it("a pending secret past its expiry reads expired, and a value read expires it", async () => {
+    const onLazyExpire = vi.fn();
+    const watched = new SecretManager(store, kek, onLazyExpire);
+    await watched.createSecret({
+      name: "pending-past",
+      type: "api_key",
+      expiresAt: Date.now() - 1000,
+    });
+    const { id } = await watched.resolveHandle("secret://pending-past");
+
+    expect((await watched.getSecretInfo("secret://pending-past")).status).toBe("expired");
+    expect((await watched.resolveHandle("secret://pending-past")).status).toBe("pending");
+    await expectVaultError(
+      () => watched.getSecretValue("secret://pending-past"),
+      ErrorCode.SECRET_EXPIRED,
+    );
+    expect((await watched.resolveHandle("secret://pending-past")).status).toBe("expired");
+    expect(onLazyExpire.mock.calls).toEqual([[id, "secret://pending-past"]]);
   });
 });
 

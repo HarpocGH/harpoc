@@ -151,6 +151,38 @@ describe("secret routes", () => {
       expect(res.status).toBe(400);
     });
 
+    it.each([
+      [
+        "a process env_var",
+        { type: "process", command: "gh", env_var: "__proto__" },
+        "action.env_var: Invalid environment variable name",
+      ],
+      [
+        "an http header_name",
+        {
+          type: "http",
+          method: "GET",
+          url: "https://api.example.com/x",
+          injection: { type: "header", header_name: "__proto__" },
+        },
+        "action.injection.header_name: Invalid header name characters",
+      ],
+    ])(
+      "refuses %s of __proto__ 400 SCHEMA_VALIDATION_ERROR naming the field, never reaching the engine (S11)",
+      async (_kind, action, message) => {
+        const res = await app.request("/api/v1/secrets/test-key/use", {
+          method: "POST",
+          headers: { ...AUTH, "content-type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        expect(res.status).toBe(400);
+        const body = (await res.json()) as { error: string; message: string };
+        expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+        expect(body.message).toBe(message);
+        expect(engine.useSecret).not.toHaveBeenCalled();
+      },
+    );
+
     it("sanitizes credential patterns in an HTTP response body", async () => {
       engine.useSecret.mockResolvedValueOnce({
         type: "http",

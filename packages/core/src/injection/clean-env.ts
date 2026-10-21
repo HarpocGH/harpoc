@@ -1,3 +1,5 @@
+import { ErrorCode, VaultError } from "@harpoc/shared";
+
 /**
  * Build a clean child environment: the injected credential, a controlled PATH
  * and the explicitly allowlisted pass-through variables — nothing inherited
@@ -9,6 +11,12 @@ export function buildCleanEnv(
   value: string,
   envAllowlist: string[],
 ): Record<string, string> {
+  if (envVar === "__proto__") {
+    throw new VaultError(
+      ErrorCode.INVALID_INJECTION_CONFIG,
+      "environment variable name must not be __proto__",
+    );
+  }
   const env: Record<string, string> = {};
   const path = process.env.PATH ?? process.env.Path;
   if (path) env.PATH = path;

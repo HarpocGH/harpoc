@@ -108,6 +108,12 @@ export function applyInjectionConfig(
           "header_name required for header injection",
         );
       }
+      if (injection.header_name === "__proto__") {
+        throw new VaultError(
+          ErrorCode.INVALID_INJECTION_CONFIG,
+          "header_name must not be __proto__",
+        );
+      }
       outHeaders[injection.header_name] = valueStr;
       break;
     case "query":

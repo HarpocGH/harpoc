@@ -881,3 +881,71 @@ describe("HTTP bodies, request headers, the response cap and the scheme floor (M
     });
   });
 });
+
+describe("the SSRF floor and the header sink through the engine (S8, S11)", () => {
+  beforeEach(async () => {
+    await engine.initVault("password");
+    await engine.createSecret({
+      name: "floor",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("S3CRET-TOKEN-xyz")),
+    });
+  });
+
+  function useRows(): { success: boolean; detail: Record<string, unknown> | null }[] {
+    return engine
+      .queryAudit({ eventType: AuditEventType.SECRET_USE })
+      .map((row) => ({ success: row.success, detail: row.detail ?? null }));
+  }
+
+  it("refuses an allowlisted https://[::]/api SSRF_BLOCKED with a failed secret.use row (S8)", async () => {
+    await engine.setInjectionPolicy("secret://floor", { url_allowlist: ["https://[::]/*"] });
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://floor", {
+          type: "http",
+          method: "GET",
+          url: "https://[::]/api",
+          timeout_ms: 1000,
+          injection: { type: "bearer" },
+        }),
+      ErrorCode.SSRF_BLOCKED,
+    );
+    expect(useRows()).toEqual([
+      {
+        success: false,
+        detail: expect.objectContaining({
+          context: "http",
+          url: "https://[::]/api",
+          error: ErrorCode.SSRF_BLOCKED,
+        }),
+      },
+    ]);
+  });
+
+  it("refuses header_name __proto__ INVALID_INJECTION_CONFIG with a failed row, nothing sent (S11)", async () => {
+    await engine.setInjectionPolicy("secret://floor", { url_allowlist: [`${baseUrl}/*`] });
+    const before = requestCount;
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://floor", {
+          type: "http",
+          method: "GET",
+          url: `${baseUrl}/echo`,
+          injection: { type: "header", header_name: "__proto__" },
+        }),
+      ErrorCode.INVALID_INJECTION_CONFIG,
+    );
+    expect(requestCount).toBe(before);
+    expect(useRows()).toEqual([
+      {
+        success: false,
+        detail: expect.objectContaining({
+          context: "http",
+          error: ErrorCode.INVALID_INJECTION_CONFIG,
+          injection_type: "header",
+        }),
+      },
+    ]);
+  });
+});

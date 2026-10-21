@@ -60,10 +60,23 @@ export interface UidFetchMessageSpec {
   flags?: string[];
   /** Raw ENVELOPE list text, e.g. `("date" "subj" ((NIL NIL "a" "b")) NIL NIL NIL NIL NIL NIL NIL)`. */
   envelope?: string;
+  /**
+   * The ENVELOPE list as segments, in place of `envelope`: a string is raw list
+   * text, a `{ literal }` is sent as a genuine `{n}\r\n<bytes>` literal in the
+   * middle of the list and the line continues after its octets — how Dovecot
+   * sends an envelope field it will not quote.
+   */
+  envelopeSegments?: Array<string | { literal: Buffer }>;
   /** Sent as a genuine `{n}\r\n<bytes>` literal for `BODY[HEADER]`. */
   header?: string;
+  /** Sent inline as the `BODY[HEADER]` value (`NIL` or a quoted string), in place of `header`. */
+  headerInline?: string;
   /** Sent as a genuine `{n}\r\n<bytes>` literal for `BODY[TEXT]`. */
   text?: string;
+  /** Sent inline as the `BODY[TEXT]` value (`NIL` or a quoted string), in place of `text`. */
+  textInline?: string;
+  /** `text`'s `{n}` announcement sent with no SP after `BODY[TEXT]` (forbidden by RFC 3501). */
+  textGlued?: boolean;
 }
 
 export interface ImapScript {
@@ -361,14 +374,33 @@ class Connection {
         items.push(`ENVELOPE ${msg.envelope}`);
       }
       this.send(`* ${msg.uid} FETCH (${items.join(" ")}`);
-      if (msg.header !== undefined) {
+      if (msg.envelopeSegments !== undefined) {
+        this.send(" ENVELOPE ");
+        for (const segment of msg.envelopeSegments) {
+          if (typeof segment === "string") {
+            this.send(segment);
+          } else {
+            this.send(`{${segment.literal.length}}\r\n`);
+            this.tls.write(segment.literal);
+          }
+        }
+      }
+      if (msg.headerInline !== undefined) {
+        this.send(` BODY[HEADER] ${msg.headerInline}`);
+      } else if (msg.header !== undefined) {
         const bytes = Buffer.from(msg.header, "utf8");
         this.send(` BODY[HEADER] {${bytes.length}}\r\n`);
         this.tls.write(bytes);
       }
-      if (msg.text !== undefined) {
+      if (msg.textInline !== undefined) {
+        this.send(` BODY[TEXT] ${msg.textInline}`);
+      } else if (msg.text !== undefined) {
         const bytes = Buffer.from(msg.text, "utf8");
-        this.send(` BODY[TEXT] {${bytes.length}}\r\n`);
+        this.send(
+          msg.textGlued === true
+            ? ` BODY[TEXT]{${bytes.length}}\r\n`
+            : ` BODY[TEXT] {${bytes.length}}\r\n`,
+        );
         this.tls.write(bytes);
       }
       this.send(")\r\n");

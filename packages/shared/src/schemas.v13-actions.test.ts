@@ -498,6 +498,56 @@ describe("v1.3 action schemas", () => {
   });
 });
 
+describe("docker_registry image — docker's reference grammar (Q13)", () => {
+  const digest = `sha256:${"a".repeat(64)}`;
+  const accepts = (image: string): boolean =>
+    dockerRegistryActionSchema.safeParse({ type: "docker_registry", operation: "pull", image })
+      .success;
+
+  it.each([
+    "-x",
+    "--help",
+    ".",
+    "..",
+    "_x",
+    "x_",
+    "a..b",
+    "a___b",
+    "a-_b",
+    "Ubuntu",
+    "myhost/App",
+    "app:-x",
+    `app:${"t".repeat(129)}`,
+  ])("refuses %j, which the pre-Q13 regex accepted", (image) => {
+    expect(accepts(image)).toBe(false);
+  });
+
+  it.each(["app:", "/app", "app/"])("refuses %j (refused before Q13 too — control)", (image) => {
+    expect(accepts(image)).toBe(false);
+  });
+
+  it.each([
+    "nginx",
+    "a__b",
+    "a--b",
+    "a.b_c-d",
+    "my_org/app",
+    "a/b/c/d",
+    "MyHost/app",
+    "localhost/app",
+    "localhost:5000/app:dev",
+    "registry.example.com/team/app:1.0",
+    "127.0.0.1:5000/team/app:1.2.0",
+    "nginx:latest",
+    "app:_build.1-x",
+    `app:${"t".repeat(128)}`,
+    `nginx@${digest}`,
+    `nginx:1.0@${digest}`,
+  ])("accepts %j", (image) => {
+    expect(accepts(image)).toBe(true);
+  });
+});
+
 describe("gitActionSchema", () => {
   const git = { type: "git", operation: "clone", repository: "https://github.com/o/r.git" };
   it.each<[string, Record<string, unknown>, PropertyKey[][]]>([

@@ -198,8 +198,8 @@ describe("RotateForm", () => {
   });
 
   it("refuses to rotate to an empty value", () => {
-    // `z.string().base64()` accepts the empty string, so an accidental empty
-    // submit would irreversibly rotate the credential to zero bytes.
+    // The API refuses an empty value too (400, SCHEMA_VALIDATION_ERROR —
+    // TC-18); the form disables Rotate so it never sends one.
     render(
       <RotateForm
         api={{ rotateSecret: vi.fn() } as unknown as ApiClient}

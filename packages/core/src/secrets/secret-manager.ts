@@ -363,6 +363,10 @@ export class SecretManager {
     const secret = resolved ?? (await this.resolveHandleToSecret(handle));
     onResolved?.(secret.id);
 
+    if (newValue.length === 0) {
+      throw VaultError.invalidInput(`Secret ${handle} cannot be rotated to an empty value`);
+    }
+
     // A vault-managed certificate is rotated by issuing a new certificate
     // against the stored key (`updateCertificate`), never by writing the
     // generic value column: the payload would be unreachable behind
@@ -476,6 +480,7 @@ export class SecretManager {
   private effectiveStatus(secret: Secret): string {
     if (
       secret.status !== SecretStatus.EXPIRED &&
+      secret.status !== SecretStatus.REVOKED &&
       secret.expires_at !== null &&
       secret.expires_at <= Date.now()
     ) {
@@ -500,15 +505,17 @@ export class SecretManager {
   /**
    * Status ladder shared by the value paths and, since Wave 2 (B21), by
    * `useSecret`'s pre-decrypt guards: the lazy EXPIRED transition (status write
-   * + the engine's `secret.expire` row via `onLazyExpire`, one transaction),
-   * then EXPIRED / REVOKED / PENDING — the PENDING error is the caller's when
-   * it has a better one (an OAuth secret's `OAUTH_NOT_CONFIGURED`).
+   * + the engine's `secret.expire` row via `onLazyExpire`, one transaction) of a
+   * secret neither expired nor revoked — REVOKED is terminal — then EXPIRED /
+   * REVOKED / PENDING — the PENDING error is the caller's when it has a better
+   * one (an OAuth secret's `OAUTH_NOT_CONFIGURED`).
    *
    * @internal Engine seam, not part of the `@harpoc/core` public API.
    */
   assertUsable(secret: Secret, handle: string, opts?: { pending?: () => VaultError }): void {
     if (
       secret.status !== SecretStatus.EXPIRED &&
+      secret.status !== SecretStatus.REVOKED &&
       secret.expires_at !== null &&
       secret.expires_at <= Date.now()
     ) {
