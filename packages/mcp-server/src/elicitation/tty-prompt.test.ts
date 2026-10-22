@@ -6,6 +6,7 @@ import type { ControllingTerminal } from "./tty-prompt.js";
 interface FakeTerminal {
   terminal: ControllingTerminal;
   emit: (data: string) => void;
+  emitBytes: (data: Buffer) => void;
   written: () => string;
   setRawMode: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
@@ -32,6 +33,7 @@ function fakeTerminal(): FakeTerminal {
   return {
     terminal,
     emit: (data: string) => emitter.emit("data", Buffer.from(data, "utf8")),
+    emitBytes: (data: Buffer) => emitter.emit("data", data),
     written: () => chunks.join(""),
     setRawMode,
     close,
@@ -139,6 +141,68 @@ describe("promptForValueMasked", () => {
       fake.emit(chunk);
     }
     expect(await promise).toEqual(new TextEncoder().encode(expected));
+  });
+
+  it.each<{ keys: string; chunks: string[]; expected: string }>([
+    {
+      keys: "an astral character after text",
+      chunks: ["a\ud83d\ude00", "\x7f", "\r"],
+      expected: "a",
+    },
+    {
+      keys: "an astral character, more text typed after",
+      chunks: ["\ud83d\ude00", "\x7f", "pw\r"],
+      expected: "pw",
+    },
+    {
+      keys: "two astral characters, one removed",
+      chunks: ["\ud83d\ude00\ud83d\udd11", "\x7f", "\r"],
+      expected: "\ud83d\ude00",
+    },
+    { keys: "an astral character, Ctrl+H", chunks: ["a\ud83d\ude00\b\r"], expected: "a" },
+    { keys: "a BMP character (one unit)", chunks: ["a€", "\x7f", "\r"], expected: "a" },
+  ])("Backspace after $keys removes one code point", async ({ chunks, expected }) => {
+    const fake = fakeTerminal();
+    const promise = promptForValueMasked(fake.terminal, "> ", 1000);
+    for (const chunk of chunks) {
+      fake.emit(chunk);
+    }
+    expect(await promise).toEqual(new TextEncoder().encode(expected));
+  });
+
+  it("treats an astral character erased by Backspace as empty and cancelled", async () => {
+    const fake = fakeTerminal();
+    const promise = promptForValueMasked(fake.terminal, "> ", 1000);
+    fake.emit("\ud83d\ude00");
+    fake.emit("\x7f");
+    fake.emit("\r");
+    expect(await promise).toBe(null);
+  });
+
+  it.each<{ split: string; text: string; at: number }>([
+    { split: "an astral character split 1+3", text: "\ud83d\ude00", at: 1 },
+    { split: "an astral character split 2+2", text: "\ud83d\ude00", at: 2 },
+    { split: "an astral character split 3+1", text: "\ud83d\ude00", at: 3 },
+    { split: "a three-byte character split 1+2", text: "€", at: 1 },
+  ])("reassembles $split across two chunks", async ({ text, at }) => {
+    const fake = fakeTerminal();
+    const promise = promptForValueMasked(fake.terminal, "> ", 1000);
+    const bytes = Buffer.from(text, "utf8");
+    fake.emitBytes(bytes.subarray(0, at));
+    fake.emitBytes(bytes.subarray(at));
+    fake.emit("\r");
+    expect(await promise).toEqual(new TextEncoder().encode(text));
+  });
+
+  it("treats a split astral character erased by Backspace as empty and cancelled", async () => {
+    const fake = fakeTerminal();
+    const promise = promptForValueMasked(fake.terminal, "> ", 1000);
+    const bytes = Buffer.from("\ud83d\ude00", "utf8");
+    fake.emitBytes(bytes.subarray(0, 2));
+    fake.emitBytes(bytes.subarray(2));
+    fake.emit("\x7f");
+    fake.emit("\r");
+    expect(await promise).toBe(null);
   });
 
   it("treats input of arrow keys alone as empty and cancelled (Q5)", async () => {

@@ -130,6 +130,12 @@ describe("callEvidence", () => {
     expect(ev.text).toContain(RECORD_REDACTION);
     expect(scan(quoted, ev.text)).toEqual([]);
   });
+
+  it("marks a credential whose own backslash reads as a JSON escape, raw — not committed, not elided (C6-ae)", () => {
+    const backslashed = "pw\\tail";
+    const ev = callEvidence(completed(`x ${backslashed} y`), backslashed);
+    expect(ev).toEqual({ ok: true, text: `x ${RECORD_REDACTION} y` });
+  });
 });
 
 /** `inner` under `layers` JSON escape layers, each one more JSON.parse away. */

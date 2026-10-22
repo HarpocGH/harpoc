@@ -396,6 +396,46 @@ describe("server start", () => {
     expect(createStdioServerFactory).not.toHaveBeenCalled();
   });
 
+  it.each(["--allow-tokenless", "-"])(
+    "refuses a flag Commander took as the --token-file path (%j) before the file is read",
+    async (value) => {
+      const { createStdioServerFactory, readLaunchTokenFile } = await import("@harpoc/mcp-server");
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+      await expect(run(["--mcp", "--token-file", value])).rejects.toThrow("process.exit");
+      expect(spies.exitSpy).toHaveBeenCalledWith(1);
+      expect(spies.errorSpy).toHaveBeenCalledWith(
+        "Error: --token-file requires a path (give a path that starts with a dash as ./-name).",
+      );
+      expect(readLaunchTokenFile).not.toHaveBeenCalled();
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(createStdioServerFactory).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses `--token-file --mcp` with the dash-led message, not the transport refusal", async () => {
+    const { createStdioServerFactory, readLaunchTokenFile } = await import("@harpoc/mcp-server");
+    const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+    await expect(run(["--token-file", "--mcp"])).rejects.toThrow("process.exit");
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.errorSpy.mock.calls[0]).toEqual([
+      "Error: --token-file requires a path (give a path that starts with a dash as ./-name).",
+    ]);
+    expect(spies.errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("At least one of"));
+    expect(readLaunchTokenFile).not.toHaveBeenCalled();
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    expect(createStdioServerFactory).not.toHaveBeenCalled();
+  });
+
+  it("reads a dash-led --token-file written as ./-name", async () => {
+    const { readLaunchTokenFile } = await import("@harpoc/mcp-server");
+
+    await run(["--mcp", "--token-file", "./-launch-token"]);
+
+    expect(readLaunchTokenFile).toHaveBeenCalledWith("./-launch-token");
+  });
+
   // ── HARPOC_TOKEN environment variable ───────────────────────────
 
   describe("HARPOC_TOKEN environment variable", () => {

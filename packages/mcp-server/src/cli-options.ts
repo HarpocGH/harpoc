@@ -88,10 +88,12 @@ export function readLaunchTokenFile(path: string): TokenFileRead {
 
 export type OptionParse<T> = { ok: true; value: T } | { ok: false; message: string };
 
-/** `--token-file` under `strict: false` parses to `true` when it carries no value; only a non-empty path passes (2026-09-23). */
+/** `--token-file` under `strict: false` parses to `true` when it carries no value; only a non-empty path passes (2026-09-23). A value starting with `-` is the next flag `parseArgs` took as the path (`--token-file --allow-tokenless`); a path that starts with a dash is given as `./-name` (2026-10-22). */
 export function parseTokenFileOption(raw: unknown): OptionParse<string | undefined> {
   if (raw === undefined) return { ok: true, value: undefined };
-  if (typeof raw === "string" && raw !== "") return { ok: true, value: raw };
+  if (typeof raw === "string" && raw !== "" && !raw.startsWith("-")) {
+    return { ok: true, value: raw };
+  }
   return { ok: false, message: "Error: --token-file requires a path.\n" };
 }
 
@@ -102,9 +104,12 @@ export function parseAllowTokenlessOption(raw: unknown): OptionParse<boolean> {
   return { ok: false, message: "Error: --allow-tokenless takes no value.\n" };
 }
 
+/** A value starting with `-` is the next flag `parseArgs` took as the path (`--vault-dir --http`); a path that starts with a dash is given as `./-name` (2026-10-22). */
 export function parseVaultDirOption(raw: unknown): OptionParse<string | undefined> {
   if (raw === undefined) return { ok: true, value: undefined };
-  if (typeof raw === "string" && raw.trim() !== "") return { ok: true, value: raw };
+  if (typeof raw === "string" && raw.trim() !== "" && !raw.startsWith("-")) {
+    return { ok: true, value: raw };
+  }
   return { ok: false, message: "Error: --vault-dir requires a path.\n" };
 }
 

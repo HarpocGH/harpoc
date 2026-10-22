@@ -44,6 +44,9 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
+const FLAG_AS_PATH =
+  "--vault-dir: a flag, not a path (give a path that starts with a dash as ./-name)";
+
 /** Run `fn` with `dir` as the working directory, restored afterwards. */
 function inCwd<T>(dir: string, fn: () => T): T {
   const saved = process.cwd();
@@ -64,6 +67,18 @@ describe("resolveVaultDir", () => {
   it.each(["", "  "])("refuses an empty --vault-dir (%j) as INVALID_INPUT", async (value) => {
     const err = await expectVaultError(() => resolveVaultDir(value), ErrorCode.INVALID_INPUT);
     expect(err.message).toBe("--vault-dir: empty path");
+  });
+
+  it.each(["--http", "-x", "--json"])(
+    "refuses a flag Commander took as the --vault-dir path (%j) as INVALID_INPUT",
+    async (value) => {
+      const err = await expectVaultError(() => resolveVaultDir(value), ErrorCode.INVALID_INPUT);
+      expect(err.message).toBe(FLAG_AS_PATH);
+    },
+  );
+
+  it("accepts a dash-led path written as ./-name", () => {
+    expect(resolveVaultDir("./-vault")).toBe("./-vault");
   });
 
   it("falls back to the home vault with no flag and no .harpoc in the working directory", () => {
@@ -120,6 +135,33 @@ describe("refuseEmptyVaultDir (the root preAction hook)", () => {
       [JSON.stringify({ error: "INVALID_INPUT", message: "--vault-dir: empty path" })],
     ]);
     expect(spies.logSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: "lock --vault-dir --http", args: ["--vault-dir", "--http", "lock"] },
+    { label: "lock --vault-dir -x", args: ["--vault-dir", "-x", "lock"] },
+    { label: "secret list --vault-dir --json", args: ["secret", "list", "--vault-dir", "--json"] },
+  ])("refuses $label with the INVALID_INPUT line and exit 1", async ({ args }) => {
+    await expect(run(args)).rejects.toThrow("process.exit");
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(spies.errorSpy.mock.calls).toEqual([[`Error: [INVALID_INPUT] ${FLAG_AS_PATH}`]]);
+  });
+
+  it("refuses `secret list --json --vault-dir -x` through the JSON envelope", async () => {
+    await expect(run(["secret", "list", "--json", "--vault-dir", "-x"])).rejects.toThrow(
+      "process.exit",
+    );
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [JSON.stringify({ error: "INVALID_INPUT", message: FLAG_AS_PATH })],
+    ]);
+    expect(spies.logSpy).not.toHaveBeenCalled();
+  });
+
+  it("refuses `lock --vault-dir=-x` with the INVALID_INPUT line and exit 1", async () => {
+    await expect(run(["--vault-dir=-x", "lock"])).rejects.toThrow("process.exit");
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(spies.errorSpy.mock.calls).toEqual([[`Error: [INVALID_INPUT] ${FLAG_AS_PATH}`]]);
   });
 });
 

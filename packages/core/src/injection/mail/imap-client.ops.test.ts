@@ -202,6 +202,61 @@ describe("ImapClient — fetch (UID FETCH, always .PEEK)", () => {
     await expectVaultError(() => client.fetch([], "envelope"), ErrorCode.INVALID_INPUT);
     expect(srv.commands().map((c) => c.name)).not.toContain("UID FETCH");
   });
+
+  it("reads UID and FLAGS from their own items: a quoted subject spelling 'UID 999 FLAGS (Junk)' sent ahead of them decides nothing", async () => {
+    const srv = await fake({
+      uidFetch: [
+        {
+          uid: 21,
+          flags: ["\\Seen"],
+          envelope: '("d" "UID 999 FLAGS (Junk)" NIL NIL NIL NIL NIL NIL NIL NIL)',
+          uidFlagsLast: true,
+        },
+      ],
+    });
+    const client = await connect(srv);
+
+    const messages = await client.fetch([21], "envelope");
+
+    expect(messages).toEqual([
+      {
+        uid: 21,
+        flags: ["\\Seen"],
+        envelope: { date: "d", subject: "UID 999 FLAGS (Junk)", from: [], to: [] },
+      },
+    ]);
+  });
+
+  it("a quoted subject spelling 'FLAGS (Junk)' beside no FLAGS item leaves the flags empty", async () => {
+    const srv = await fake({
+      uidFetch: [{ uid: 22, envelope: '("d" "FLAGS (Junk)" NIL NIL NIL NIL NIL NIL NIL NIL)' }],
+    });
+    const client = await connect(srv);
+
+    const messages = await client.fetch([22], "envelope");
+
+    expect(messages).toEqual([
+      { uid: 22, flags: [], envelope: { date: "d", subject: "FLAGS (Junk)", from: [], to: [] } },
+    ]);
+  });
+
+  it("control: UID and FLAGS sent after the ENVELOPE are the real values", async () => {
+    const srv = await fake({
+      uidFetch: [
+        {
+          uid: 23,
+          flags: ["\\Flagged"],
+          envelope: '("d" "s" NIL NIL NIL NIL NIL NIL NIL NIL)',
+          uidFlagsLast: true,
+        },
+      ],
+    });
+    const client = await connect(srv);
+
+    const messages = await client.fetch([23], "envelope");
+
+    expect(messages[0]).toMatchObject({ uid: 23, flags: ["\\Flagged"] });
+  });
 });
 
 describe("ImapClient — store (UID STORE)", () => {

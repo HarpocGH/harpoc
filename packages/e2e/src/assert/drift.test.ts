@@ -148,6 +148,22 @@ describe("product/harness drift (decision D2)", () => {
     expect(scan(secret, { body: t8 })).toEqual([]); // harness: its own cap, stated
   });
 
+  it("detects the literal form the vault's literal pass redacts, a backslash escape in it (C6-ae)", () => {
+    const blindSpots: string[] = [];
+    for (const secret of SECRETS) {
+      const body = `echo ${secret} end`;
+      const vaultRedacted = redactSecretEncodings(body, secret) !== body;
+      const harnessSaw = scan(secret, { body }).length > 0;
+      if (vaultRedacted && !harnessSaw) blindSpots.push(secret);
+    }
+    expect(blindSpots).toEqual([]);
+
+    const literal = 'quote"and\\backslash';
+    const body = `echo ${literal} end`;
+    expect(redactSecretEncodings(body, literal)).not.toBe(body); // vault: redacts
+    expect(scan(literal, { body }).length).toBeGreaterThan(0); // harness: sees
+  });
+
   it("negative control: both are blind to a transform outside the class", () => {
     // Base64 OF the escaped form — a second encoding layer neither side claims
     // to cover. Characterized in the evaluation, not claimed to be blocked.

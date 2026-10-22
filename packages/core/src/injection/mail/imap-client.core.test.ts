@@ -41,6 +41,18 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => s.close()));
 });
 
+/** An ENVELOPE of `depth` nested lists, every 4096 parens broken by a one-byte
+ * literal so that no physical line reaches the 8 KiB line cap. */
+function nestedEnvelope(depth: number): Array<string | { literal: Buffer }> {
+  const segments: Array<string | { literal: Buffer }> = [];
+  for (const paren of ["(", ")"]) {
+    for (let left = depth; left > 0; left -= 4096) {
+      segments.push(paren.repeat(Math.min(left, 4096)), { literal: Buffer.from("x") });
+    }
+  }
+  return segments;
+}
+
 describe("ImapClient — command injection is impossible by construction", () => {
   it("a CRLF-bearing mailbox arrives as ONE command inside a literal, never a second command", async () => {
     const srv = await fake({ capabilities: ["IMAP4rev1"] });
@@ -190,5 +202,32 @@ describe("ImapClient — capped-output discipline and failures", () => {
       () => ImapClient.connect(optsFor(srv, { timeoutMs: 300 })),
       ErrorCode.IMAP_OPERATION_FAILED,
     );
+  });
+
+  it("refuses a FETCH list nested 100 000 deep IMAP_OPERATION_FAILED naming the origin only — literals continue a logical line past the line cap, so nesting is bounded by the parser, not the cap", async () => {
+    const srv = await fake({ uidFetch: [{ uid: 1, envelopeSegments: nestedEnvelope(100_000) }] });
+    const client = await connect(srv);
+    const err = await expectVaultError(
+      () => client.fetch([1], "envelope"),
+      ErrorCode.IMAP_OPERATION_FAILED,
+    );
+    expect(err.message).toBe(`IMAP operation 'fetch' failed: ${FIXTURE_HOST}:${srv.port}`);
+    expect(err.message).not.toContain("hunter2secret");
+  });
+
+  it("parses a FETCH response of 32 nested lists (the item list, then 31 inside the ENVELOPE) and refuses a 33rd IMAP_OPERATION_FAILED", async () => {
+    const atBound = await fake({
+      uidFetch: [{ uid: 2, envelope: "(".repeat(31) + ")".repeat(31) }],
+    });
+    const within = await connect(atBound);
+    await expect(within.fetch([2], "envelope")).resolves.toEqual([
+      { uid: 2, flags: [], envelope: { date: null, subject: null, from: [], to: [] } },
+    ]);
+
+    const pastBound = await fake({
+      uidFetch: [{ uid: 3, envelope: "(".repeat(32) + ")".repeat(32) }],
+    });
+    const beyond = await connect(pastBound);
+    await expectVaultError(() => beyond.fetch([3], "envelope"), ErrorCode.IMAP_OPERATION_FAILED);
   });
 });

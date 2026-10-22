@@ -77,6 +77,8 @@ export interface UidFetchMessageSpec {
   textInline?: string;
   /** `text`'s `{n}` announcement sent with no SP after `BODY[TEXT]` (forbidden by RFC 3501). */
   textGlued?: boolean;
+  /** `UID` and `FLAGS` sent after the other items instead of first (RFC 3501 fixes no item order). */
+  uidFlagsLast?: boolean;
 }
 
 export interface ImapScript {
@@ -366,10 +368,11 @@ class Connection {
 
   private handleUidFetch(tag: string): void {
     for (const msg of this.script.uidFetch ?? []) {
-      const items: string[] = [`UID ${msg.uid}`];
+      const identity: string[] = [`UID ${msg.uid}`];
       if (msg.flags) {
-        items.push(`FLAGS (${msg.flags.join(" ")})`);
+        identity.push(`FLAGS (${msg.flags.join(" ")})`);
       }
+      const items: string[] = msg.uidFlagsLast === true ? [] : [...identity];
       if (msg.envelope !== undefined) {
         items.push(`ENVELOPE ${msg.envelope}`);
       }
@@ -402,6 +405,9 @@ class Connection {
             : ` BODY[TEXT] {${bytes.length}}\r\n`,
         );
         this.tls.write(bytes);
+      }
+      if (msg.uidFlagsLast === true) {
+        this.send(` ${identity.join(" ")}`);
       }
       this.send(")\r\n");
     }

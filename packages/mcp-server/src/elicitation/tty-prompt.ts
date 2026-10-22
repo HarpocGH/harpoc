@@ -1,4 +1,5 @@
 import { closeSync, openSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { ReadStream, WriteStream } from "node:tty";
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -41,6 +42,13 @@ function nextEscapeState(state: EscapeState, char: string): EscapeState | null {
     if (code >= 0x40 && code <= 0x7e) return "ground";
   }
   return char === "\x1b" ? "escape" : null;
+}
+
+function dropLastCodePoint(value: string): string {
+  const last = value.charCodeAt(value.length - 1);
+  const previous = value.charCodeAt(value.length - 2);
+  const pair = last >= 0xdc00 && last <= 0xdfff && previous >= 0xd800 && previous <= 0xdbff;
+  return value.slice(0, pair ? -2 : -1);
 }
 
 /**
@@ -114,6 +122,7 @@ export function promptForValueMasked(
   return new Promise((resolve) => {
     const { input, output } = terminal;
     let value = "";
+    const decoder = new StringDecoder("utf8");
     let escape: EscapeState = "ground";
     let done = false;
 
@@ -130,7 +139,7 @@ export function promptForValueMasked(
     const timeoutId = setTimeout(() => finish(null), timeoutMs);
 
     const onData = (chunk: Buffer): void => {
-      const text = chunk.toString("utf8");
+      const text = decoder.write(chunk);
       for (const char of text) {
         const next = nextEscapeState(escape, char);
         escape = next ?? "ground";
@@ -140,7 +149,7 @@ export function promptForValueMasked(
           return;
         }
         if (char === "\x7f" || char === "\b") {
-          value = value.slice(0, -1);
+          value = dropLastCodePoint(value);
           continue;
         }
         if (char === "\x03" || char === "\x04") {

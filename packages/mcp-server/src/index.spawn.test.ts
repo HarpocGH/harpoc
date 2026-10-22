@@ -147,6 +147,7 @@ describe("harpoc-mcp --vault-dir without a path (spawned binary, Q4)", () => {
     { label: "a blank --vault-dir", args: ["--vault-dir", "  "] },
     { label: "a value-less --vault-dir as the last argument", args: ["--vault-dir"] },
     { label: 'an empty --vault-dir "" with --http', args: ["--http", "--vault-dir", ""] },
+    { label: "a flag consumed as the path (--vault-dir --http)", args: ["--vault-dir", "--http"] },
   ])(
     "refuses $label before any vault is opened, the working directory and home untouched",
     async ({ args }) => {

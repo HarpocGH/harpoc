@@ -88,6 +88,11 @@ export interface ImapEnvelope {
 const MAX_LINE_BYTES = 8 * 1024;
 const MAX_LITERAL_BYTES = 1024 * 1024;
 const MAX_SESSION_BYTES = 8 * 1024 * 1024;
+// Parenthesized lists a FETCH response may nest (the attribute list counted):
+// ENVELOPE needs four. A literal continues a logical line past MAX_LINE_BYTES,
+// so nesting is bounded here, not by the line cap — the parser recurses once
+// per list and an unbounded depth would overflow the stack.
+const MAX_LIST_DEPTH = 32;
 // An IMAP quoted string may hold any 7-bit char but `"`, `\`, CR, LF and NUL;
 // beyond this length (or with any excluded byte) the value goes as a literal.
 const MAX_QUOTED_BYTES = 1024;
@@ -489,25 +494,30 @@ function fetchItemsArg(parts: ImapFetchParts): ImapArg {
  * attribute lists. Any `nstring` may arrive as a literal (RFC 3501 — Dovecot
  * sends one for an envelope field it will not quote), so a literal's
  * placeholder in `raw` resolves, where it stands, to that literal's octets
- * decoded as UTF-8. */
+ * decoded as UTF-8. A list nested past {@link MAX_LIST_DEPTH} fails the
+ * operation as a protocol fault, naming the origin only. */
 type SExpr = string | null | SExpr[];
 
 class SExprParser {
   constructor(
     private readonly text: string,
     private readonly literals: Buffer[],
+    private readonly origin: string,
     private pos: number = 0,
   ) {}
 
-  parseOne(): SExpr {
+  parseOne(depth = 0): SExpr {
     this.skipSpace();
     const ch = this.text[this.pos];
     if (ch === "(") {
+      if (depth >= MAX_LIST_DEPTH) {
+        throw VaultError.imapOperationFailed(this.origin, "fetch");
+      }
       this.pos += 1;
       const items: SExpr[] = [];
       this.skipSpace();
       while (this.pos < this.text.length && this.text[this.pos] !== ")") {
-        items.push(this.parseOne());
+        items.push(this.parseOne(depth + 1));
         this.skipSpace();
       }
       this.pos += 1;
@@ -599,29 +609,22 @@ function toEnvelope(parsed: SExpr): ImapEnvelope {
   };
 }
 
-/** FETCH response parser: UID/FLAGS come off `raw` by pattern (they never
- * contain nested structure); the attribute list is parsed from `raw` via
- * {@link SExprParser} as name/value pairs, so ENVELOPE, BODY[HEADER] and
- * BODY[TEXT] each take the value that stands after their name — a literal
- * where the server sent one, a quoted string or NIL. */
-function parseFetchMessages(untagged: UntaggedLine[]): ImapMessage[] {
+/** FETCH response parser: the attribute list is parsed from `raw` via
+ * {@link SExprParser} as name/value pairs, so UID, FLAGS, ENVELOPE,
+ * BODY[HEADER] and BODY[TEXT] each take the value that stands after their
+ * name — a literal where the server sent one, a quoted string or NIL — and a
+ * quoted field spelling `UID 999` decides nothing. A line with no UID item is
+ * skipped. */
+function parseFetchMessages(untagged: UntaggedLine[], origin: string): ImapMessage[] {
   const messages: ImapMessage[] = [];
   for (const line of untagged) {
     const head = /^\*\s+\d+\s+FETCH\s+(?=\()/i.exec(line.raw);
     if (!head) {
       continue;
     }
-    const uidMatch = /\bUID\s+(\d+)\b/.exec(line.raw);
-    const uid = uidMatch?.[1] !== undefined ? Number(uidMatch[1]) : NaN;
-    if (!Number.isFinite(uid)) {
-      continue;
-    }
-    const flagsMatch = /\bFLAGS\s*\(([^)]*)\)/.exec(line.raw);
-    const flags = (flagsMatch?.[1] ?? "").split(/\s+/).filter((f) => f.length > 0);
+    const message: ImapMessage = { uid: NaN, flags: [] };
 
-    const message: ImapMessage = { uid, flags };
-
-    const parsed = new SExprParser(line.raw, line.literals, head[0].length).parseOne();
+    const parsed = new SExprParser(line.raw, line.literals, origin, head[0].length).parseOne();
     const items = Array.isArray(parsed) ? parsed : [];
     for (let i = 0; i + 1 < items.length; i += 2) {
       const name = items[i];
@@ -630,13 +633,20 @@ function parseFetchMessages(untagged: UntaggedLine[]): ImapMessage[] {
         continue;
       }
       const key = name.toUpperCase();
-      if (key === "ENVELOPE") {
+      if (key === "UID" && typeof value === "string" && /^\d+$/.test(value)) {
+        message.uid = Number(value);
+      } else if (key === "FLAGS" && Array.isArray(value)) {
+        message.flags = value.filter((flag): flag is string => typeof flag === "string");
+      } else if (key === "ENVELOPE") {
         message.envelope = toEnvelope(value);
       } else if (key === "BODY[HEADER]" && typeof value === "string") {
         message.headers = value;
       } else if (key === "BODY[TEXT]" && typeof value === "string") {
         message.text = value;
       }
+    }
+    if (!Number.isFinite(message.uid)) {
+      continue;
     }
 
     messages.push(message);
@@ -781,7 +791,7 @@ export class ImapClient {
     if (response.tagged.status !== "OK") {
       throw VaultError.imapOperationFailed(this.origin, "fetch");
     }
-    return parseFetchMessages(response.untagged);
+    return parseFetchMessages(response.untagged, this.origin);
   }
 
   /** The returned count is the requested UID count, not a server-confirmed count. */

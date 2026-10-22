@@ -1,4 +1,5 @@
 import { promises as dns } from "node:dns";
+import { isIPv4, isIPv6 } from "node:net";
 import { ErrorCode, LOOPBACK_BIND_HOSTS, LOOPBACK_URL_HOSTS, VaultError } from "@harpoc/shared";
 
 /** RFC 1918 and link-local IPv4 ranges. */
@@ -63,25 +64,50 @@ export function isPrivateIp(ip: string): boolean {
     return false;
   }
 
-  // IPv6 ULA fc00::/7, loopback ::1 and unspecified :: (the twin of 0.0.0.0/8)
+  // IPv6 loopback ::1 and unspecified :: (the twin of 0.0.0.0/8), then ULA
+  // fc00::/7 and link-local fe80::/10 by the first hextet — on an IPv6 literal
+  // only: a hostname whose leading hex run reads inside a block (fdcc.io) goes
+  // to DNS, whose address is re-checked.
   const normalizedLower = normalized.toLowerCase();
   if (normalizedLower === "::1") return true;
   if (normalizedLower === "::") return true;
-  if (normalizedLower.startsWith("fc") || normalizedLower.startsWith("fd")) return true;
-  if (normalizedLower.startsWith("fe80")) return true; // link-local
+  if (!isIPv6(normalizedLower)) return false;
+  if (isUniqueLocal(normalizedLower)) return true;
+  if (isLinkLocal(normalizedLower)) return true;
 
   return false;
 }
 
+/** The hex digits, `:` and `.` of an IPv6 literal — the input `canonicalIpv6` canonicalises. */
+const IPV6_LITERAL_ALPHABET = /^[0-9a-f:.]+$/i;
+
+/** Four dot-separated digit groups — the IPv4 shape `isIpAddress` reads; `isIPv4` decides whether it is a literal. */
+const IPV4_DOTTED_QUAD = /^\d{1,3}(\.\d{1,3}){3}$/;
+
 /** An IPv6 literal compressed and lowercased as the WHATWG URL parser renders it; anything else unchanged. */
 function canonicalIpv6(host: string): string {
   if (!host.includes(":")) return host;
-  if (!/^[0-9a-f:.]+$/i.test(host)) return host;
+  if (!IPV6_LITERAL_ALPHABET.test(host)) return host;
   try {
     return new URL(`http://[${host}]/`).hostname.replace(/^\[|\]$/g, "");
   } catch {
     return host;
   }
+}
+
+/** The first hextet read numerically (`NaN` for a `::`-leading literal), so a block is a mask, not a text prefix. */
+function firstHextet(ipv6: string): number {
+  return Number.parseInt(ipv6.split(":")[0] ?? "", 16);
+}
+
+/** fc00::/7 — the canonical `fc::1` (`00fc::1`) is not ULA. */
+function isUniqueLocal(ipv6: string): boolean {
+  return (firstHextet(ipv6) & 0xfe00) === 0xfc00;
+}
+
+/** fe80::/10 — `fe81::1` through `febf::1` are link-local too, `fec0::1` is not. */
+function isLinkLocal(ipv6: string): boolean {
+  return (firstHextet(ipv6) & 0xffc0) === 0xfe80;
 }
 
 /**
@@ -209,10 +235,37 @@ export async function validateUrl(
 function isIpAddress(host: string): boolean {
   const normalized = host.replace(/^\[|\]$/g, "");
   // IPv4: four dot-separated octets
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(normalized)) return true;
+  if (IPV4_DOTTED_QUAD.test(normalized)) return true;
   // IPv6: contains a colon
   if (normalized.includes(":")) return true;
   return false;
+}
+
+/**
+ * A bare host the floor can classify as what the dialer will dial: not empty,
+ * no whitespace or control character, brackets only as one `[<IPv6 literal>]`
+ * pair, no `@`, a bracketed or `:`-bearing host that is an IPv6 literal
+ * spelled in the IPv6-literal alphabet alone — `isIPv6` as the dialer judges
+ * it (so `1:2:3` and `:::` are not literals), the alphabet keeping a zone id
+ * out — and a four-part dotted-digit host that is an IPv4 literal by `isIPv4`
+ * (so `012.0.0.1`, which a dotted-octal `inet_aton` reads as `10.0.0.1`, and
+ * `999.1.1.1` are not). Anything else (`::1]@[2001:db8::1`, a tab inside
+ * `::1`, `8.8.8.8]`, the empty string) would otherwise pass as "an IP literal"
+ * or be handed to the resolver.
+ */
+function isWellFormedHost(host: string): boolean {
+  if (host.length === 0) return false;
+  if (/[\s\p{Cc}]/u.test(host)) return false;
+  const bracketed = /^\[(.*)\]$/.exec(host);
+  const inner = bracketed?.[1] ?? host;
+  if (/[[\]@]/.test(inner)) return false;
+  if (bracketed || inner.includes(":")) {
+    return IPV6_LITERAL_ALPHABET.test(inner) && isIPv6(inner);
+  }
+  if (IPV4_DOTTED_QUAD.test(inner)) {
+    return isIPv4(inner);
+  }
+  return true;
 }
 
 export interface ValidatedHostPort {
@@ -227,9 +280,17 @@ export interface ValidatedHostPort {
  * without the HTTPS-scheme requirement: private/internal targets are rejected,
  * hostnames are resolved and the resolved IP re-checked, and the resolved
  * address is returned so callers can pin the connection. Loopback is permitted
- * (trusted local sockets — e.g. a database over 127.0.0.1).
+ * (trusted local sockets — e.g. a database over 127.0.0.1). A host the floor
+ * cannot classify (see {@link isWellFormedHost}) is refused `SSRF_BLOCKED`
+ * before any lookup, named escaped so no control character reaches a log.
  */
 export async function validateHostPort(host: string, port: number): Promise<ValidatedHostPort> {
+  if (!isWellFormedHost(host)) {
+    throw new VaultError(
+      ErrorCode.SSRF_BLOCKED,
+      `SSRF blocked: ${JSON.stringify(host)} is not a well-formed host`,
+    );
+  }
   const hostname = host.replace(/^\[|\]$/g, "");
 
   if (isLoopback(hostname)) {

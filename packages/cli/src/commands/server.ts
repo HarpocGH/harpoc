@@ -83,6 +83,16 @@ export function registerServerCommand(program: Command): void {
       ) => {
         let engine: Awaited<ReturnType<typeof loadUnlockedEngine>> | undefined;
         try {
+          // Commander takes the next flag as the path (`--token-file
+          // --allow-tokenless`, `--token-file --mcp`); a dash-led path is given
+          // as ./-name (2026-10-22).
+          if (opts.tokenFile?.startsWith("-")) {
+            console.error(
+              "Error: --token-file requires a path (give a path that starts with a dash as ./-name).",
+            );
+            process.exit(1);
+          }
+
           if (opts.ui && !opts.rest) {
             console.error("Error: --ui requires --rest.");
             process.exit(1);

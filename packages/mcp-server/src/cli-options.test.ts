@@ -147,6 +147,20 @@ describe("parseTokenFileOption", () => {
       message: "Error: --token-file requires a path.\n",
     });
   });
+
+  it.each(["--allow-tokenless", "-"])(
+    "refuses a flag-shaped value %j, the next flag parseArgs consumed as the path",
+    (raw) => {
+      expect(parseTokenFileOption(raw)).toEqual({
+        ok: false,
+        message: "Error: --token-file requires a path.\n",
+      });
+    },
+  );
+
+  it("accepts a dash-led path written as ./-name", () => {
+    expect(parseTokenFileOption("./-weird")).toEqual({ ok: true, value: "./-weird" });
+  });
 });
 
 describe("parseVaultDirOption", () => {
@@ -163,6 +177,20 @@ describe("parseVaultDirOption", () => {
       ok: false,
       message: "Error: --vault-dir requires a path.\n",
     });
+  });
+
+  it.each(["--http", "-x"])(
+    "refuses a flag-shaped value %j, the next flag parseArgs consumed as the path",
+    (raw) => {
+      expect(parseVaultDirOption(raw)).toEqual({
+        ok: false,
+        message: "Error: --vault-dir requires a path.\n",
+      });
+    },
+  );
+
+  it("accepts a dash-led path written as ./-name", () => {
+    expect(parseVaultDirOption("./-weird")).toEqual({ ok: true, value: "./-weird" });
   });
 
   it("index.ts routes --vault-dir through parseVaultDirOption and never tests it for truthiness", () => {

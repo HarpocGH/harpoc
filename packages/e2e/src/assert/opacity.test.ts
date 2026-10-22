@@ -190,6 +190,44 @@ describe("redactForRecord on nested JSON (the structural pass)", () => {
   });
 });
 
+describe("redactForRecord on a credential whose own backslash reads as a JSON escape (C6-ae)", () => {
+  const credential = "pw\\tail";
+
+  it("marks it raw at level 0, for the record and for diagnostics", () => {
+    expect(redactForRecord(`x ${credential} y`, credential)).toBe(`x ${RECORD_REDACTION} y`);
+    expect(redactForDiagnostics(`x ${credential} y`, credential)).toBe("x [REDACTED] y");
+  });
+
+  it("marks the literal and the level-1 escaped form in one JSON text, each once", () => {
+    const text = `{"raw":"${credential}","escaped":${JSON.stringify(credential)}}`;
+    expect(redactForRecord(text, credential)).toBe(
+      `{"raw":"${RECORD_REDACTION}","escaped":"${RECORD_REDACTION}"}`,
+    );
+  });
+
+  it("marks a span both readings reach as one range", () => {
+    const needle = "\\u0041";
+    expect(redactForRecord(`${JSON.stringify(needle)} ${needle}`, needle)).toBe(
+      `"${RECORD_REDACTION}" ${RECORD_REDACTION}`,
+    );
+  });
+
+  it("leaves no sighting at any escape layer the opacity scan reaches, the literal included", () => {
+    const outcomes: Array<{ layers: number; sighted: number; marked: boolean }> = [];
+    const expected: typeof outcomes = [];
+    for (let layers = 0; layers <= MAX_PARSE_DEPTH + 2; layers++) {
+      const out = redactForRecord(nest(credential, layers), credential);
+      outcomes.push({
+        layers,
+        sighted: scan(credential, out).length,
+        marked: out.includes(RECORD_REDACTION),
+      });
+      expected.push({ layers, sighted: 0, marked: layers <= MAX_PARSE_DEPTH + 1 });
+    }
+    expect(outcomes).toEqual(expected);
+  });
+});
+
 /** `inner` under `layers` JSON escape layers, each one more JSON.parse away. */
 function nest(inner: string, layers: number): string {
   return new Array<null>(layers).fill(null).reduce((out) => JSON.stringify({ next: out }), inner);

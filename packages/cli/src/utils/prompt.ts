@@ -1,3 +1,4 @@
+import { StringDecoder } from "node:string_decoder";
 import type { Readable } from "node:stream";
 
 type HiddenPromptInput = Readable & {
@@ -24,6 +25,37 @@ function nextEscapeState(state: EscapeState, char: string): EscapeState | null {
     if (code >= 0x40 && code <= 0x7e) return "ground";
   }
   return char === "\x1b" ? "escape" : null;
+}
+
+function dropLastCodePoint(value: string): string {
+  const last = value.charCodeAt(value.length - 1);
+  const previous = value.charCodeAt(value.length - 2);
+  const pair = last >= 0xdc00 && last <= 0xdfff && previous >= 0xd800 && previous <= 0xdbff;
+  return value.slice(0, pair ? -2 : -1);
+}
+
+/**
+ * The bytes of `data` after the Enter at `chunk[enterIndex]` (and its `\n` when
+ * the Enter is `\r`). CR and LF are ASCII and never held by the decoder, so the
+ * k-th CR/LF character of `chunk` is the k-th CR/LF byte of `data`; a partial
+ * character after the Enter is pushed back as raw bytes, not as decoded text.
+ */
+function rawRemainderAfterEnter(data: Buffer, chunk: string, enterIndex: number): Buffer {
+  let k = 0;
+  for (let i = 0; i <= enterIndex; i++) {
+    const code = chunk.charCodeAt(i);
+    if (code === 0x0a || code === 0x0d) k++;
+  }
+  for (let j = 0; j < data.length; j++) {
+    const byte = data[j];
+    if (byte !== 0x0a && byte !== 0x0d) continue;
+    k--;
+    if (k > 0) continue;
+    let start = j + 1;
+    if (byte === 0x0d && data[start] === 0x0a) start++;
+    return data.subarray(start);
+  }
+  return data.subarray(data.length);
 }
 
 /**
@@ -154,8 +186,9 @@ export function promptHidden(
     const scanKeys = typeof input.setRawMode === "function";
     let escape: EscapeState = "ground";
     let value = "";
+    const decoder = new StringDecoder("utf8");
 
-    const finish = (remainder: string): void => {
+    const finish = (remainder: Buffer): void => {
       if (typeof input.setRawMode === "function") {
         input.setRawMode(wasRaw ?? false);
       }
@@ -166,13 +199,13 @@ export function promptHidden(
       // pushed-back input buffered until the next prompt resumes the stream.
       input.pause();
       if (remainder.length > 0) {
-        input.unshift(Buffer.from(remainder, "utf8"));
+        input.unshift(remainder);
       }
       output.write("\n");
     };
 
     const onData = (data: Buffer): void => {
-      const chunk = data.toString("utf8");
+      const chunk = decoder.write(data);
       for (let i = 0; i < chunk.length; i++) {
         const char = chunk.charAt(i);
         if (scanKeys) {
@@ -182,22 +215,18 @@ export function promptHidden(
         }
         // Handle enter
         if (char === "\n" || char === "\r") {
-          let rest = chunk.slice(i + 1);
-          if (char === "\r" && rest.startsWith("\n")) {
-            rest = rest.slice(1);
-          }
-          finish(rest);
+          finish(rawRemainderAfterEnter(data, chunk, i));
           resolve(value);
           return;
         }
         // Handle backspace
         if (char === "\x7f" || char === "\b") {
-          value = value.slice(0, -1);
+          value = dropLastCodePoint(value);
           continue;
         }
         // Handle Ctrl+C
         if (char === "\x03") {
-          finish("");
+          finish(Buffer.alloc(0));
           reject(new Error("User cancelled"));
           return;
         }
@@ -208,12 +237,12 @@ export function promptHidden(
     };
 
     const onEnd = (): void => {
-      finish("");
+      finish(Buffer.alloc(0));
       resolve(value);
     };
 
     const onError = (err: Error): void => {
-      finish("");
+      finish(Buffer.alloc(0));
       reject(err);
     };
 

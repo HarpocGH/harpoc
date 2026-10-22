@@ -9,11 +9,19 @@ import { handleError } from "./output.js";
 
 /**
  * Resolve the vault directory. Checks --vault-dir option, then cwd, then home;
- * an empty or whitespace-only --vault-dir refuses INVALID_INPUT.
+ * an empty or whitespace-only --vault-dir refuses INVALID_INPUT, and so does a
+ * value starting with `-`: Commander takes the next flag as the path
+ * (`--vault-dir --http`); a path that starts with a dash is given as `./-name`
+ * (2026-10-22).
  */
 export function resolveVaultDir(vaultDirOption?: string): string {
   if (vaultDirOption !== undefined) {
     if (vaultDirOption.trim() === "") throw VaultError.invalidInput("--vault-dir: empty path");
+    if (vaultDirOption.startsWith("-")) {
+      throw VaultError.invalidInput(
+        "--vault-dir: a flag, not a path (give a path that starts with a dash as ./-name)",
+      );
+    }
     return vaultDirOption;
   }
 
@@ -24,7 +32,7 @@ export function resolveVaultDir(vaultDirOption?: string): string {
 }
 
 /**
- * The root program's preAction hook: an empty --vault-dir refuses before any
+ * The root program's preAction hook: an empty or flag-shaped --vault-dir refuses before any
  * command's action runs, through the --json envelope where the command has one.
  */
 export function refuseEmptyVaultDir(program: Command, actionCommand: Command): void {

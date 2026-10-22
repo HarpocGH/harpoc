@@ -167,6 +167,35 @@ describe("scan — escape tolerance and serialized depth (review 2026-08-14, F1/
   });
 });
 
+describe("scan — a credential whose own backslash reads as a JSON escape (C6-ae)", () => {
+  const credential = "pw\\tail";
+  const nest = (layers: number): string =>
+    new Array<null>(layers).fill(null).reduce((out) => JSON.stringify({ next: out }), credential);
+
+  it("sights it raw in a string leaf and in a key", () => {
+    expect(scan(credential, { out: `x ${credential} y`, [credential]: 1 })).toEqual([
+      { encoding: "raw", path: "$.out", position: "value" },
+      { encoding: "raw", path: `$.${credential}`, position: "key" },
+    ]);
+  });
+
+  it("sights it raw inside a JSON text whose escape reading decodes it to a tab", () => {
+    const body = `{"echo":"${credential}"}`;
+    expect(JSON.parse(body)).toEqual({ echo: "pw\tail" });
+    expect(scan(credential, { body })).toEqual([
+      { encoding: "raw", path: "$.body", position: "value" },
+    ]);
+  });
+
+  it("sights it at every escape layer the descent reaches, from the literal up — not beyond", () => {
+    const sighted: number[] = [];
+    for (let layers = 0; layers <= MAX_PARSE_DEPTH + 2; layers++) {
+      sighted.push(scan(credential, { body: nest(layers) }).length);
+    }
+    expect(sighted).toEqual([...new Array<number>(MAX_PARSE_DEPTH + 2).fill(1), 0]);
+  });
+});
+
 describe("scan — Error objects nested in a result (review 2026-10-01, I46)", () => {
   const raw = (path: string) => ({ encoding: "raw", path, position: "value" });
 

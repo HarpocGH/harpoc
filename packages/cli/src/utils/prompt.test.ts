@@ -51,6 +51,20 @@ describe("promptHidden", () => {
     await expect(second).resolves.toBe("beta");
   });
 
+  it.each<{ enter: string }>([{ enter: "\n" }, { enter: "\r\n" }])(
+    "pushes back the raw bytes after Enter ($enter): a character split across the Enter chunk reaches the next prompt whole",
+    async ({ enter }) => {
+      const input = new PassThrough();
+      const bytes = Buffer.from("😀", "utf8");
+      const first = promptHidden("1: ", input, sink());
+      input.write(Buffer.concat([Buffer.from(`pw${enter}`, "utf8"), bytes.subarray(0, 2)]));
+      await expect(first).resolves.toBe("pw");
+      const second = promptHidden("2: ", input, sink());
+      input.write(Buffer.concat([bytes.subarray(2), Buffer.from(enter, "utf8")]));
+      await expect(second).resolves.toBe("😀");
+    },
+  );
+
   it("treats EOF as the line terminator", async () => {
     const input = new PassThrough();
     const p = promptHidden("pw: ", input, sink());
@@ -239,6 +253,77 @@ describe("promptHidden", () => {
     input.write("\x1b[C");
     input.write("\u20ac\ud83d\udd11\r");
     await expect(pending).resolves.toBe("\u00fc\u20ac\ud83d\udd11");
+  });
+
+  it.each<{ keys: string; chunks: string[]; expected: string }>([
+    { keys: "an astral character alone", chunks: ["\ud83d\ude00", "\x7f", "\r"], expected: "" },
+    {
+      keys: "an astral character after text",
+      chunks: ["a\ud83d\ude00", "\x7f", "\r"],
+      expected: "a",
+    },
+    {
+      keys: "an astral character, more text typed after",
+      chunks: ["\ud83d\ude00", "\x7f", "pw\r"],
+      expected: "pw",
+    },
+    {
+      keys: "two astral characters, one removed",
+      chunks: ["\ud83d\ude00\ud83d\udd11", "\x7f", "\r"],
+      expected: "\ud83d\ude00",
+    },
+    { keys: "an astral character, Ctrl+H", chunks: ["a\ud83d\ude00\b\r"], expected: "a" },
+    { keys: "a BMP character (one unit)", chunks: ["a\u20ac", "\x7f", "\r"], expected: "a" },
+  ])("in raw mode Backspace after $keys removes one code point", async ({ chunks, expected }) => {
+    const input = rawModeInput();
+    const pending = promptHidden("Password: ", input, sink());
+    for (const chunk of chunks) {
+      input.write(chunk);
+    }
+    await expect(pending).resolves.toBe(expected);
+  });
+
+  it("piped Backspace after an astral character removes one code point", async () => {
+    const input = new PassThrough();
+    const pending = promptHidden("pw: ", input, sink());
+    input.write("a\ud83d\ude00\x7f\n");
+    await expect(pending).resolves.toBe("a");
+  });
+
+  it.each<{ split: string; text: string; at: number }>([
+    { split: "an astral character split 1+3", text: "\ud83d\ude00", at: 1 },
+    { split: "an astral character split 2+2", text: "\ud83d\ude00", at: 2 },
+    { split: "an astral character split 3+1", text: "\ud83d\ude00", at: 3 },
+    { split: "a three-byte character split 1+2", text: "\u20ac", at: 1 },
+  ])("in raw mode reassembles $split across two chunks", async ({ text, at }) => {
+    const input = rawModeInput();
+    const pending = promptHidden("Password: ", input, sink());
+    const bytes = Buffer.from(text, "utf8");
+    input.write(bytes.subarray(0, at));
+    input.write(bytes.subarray(at));
+    input.write("\r");
+    await expect(pending).resolves.toBe(text);
+  });
+
+  it("in raw mode Backspace after a split astral character removes it whole", async () => {
+    const input = rawModeInput();
+    const pending = promptHidden("Password: ", input, sink());
+    const bytes = Buffer.from("\ud83d\ude00", "utf8");
+    input.write(bytes.subarray(0, 2));
+    input.write(bytes.subarray(2));
+    input.write("\x7f");
+    input.write("\r");
+    await expect(pending).resolves.toBe("");
+  });
+
+  it("piped stdin reassembles an astral character split across two chunks", async () => {
+    const input = new PassThrough();
+    const pending = promptHidden("pw: ", input, sink());
+    const bytes = Buffer.from("\ud83d\ude00", "utf8");
+    input.write(bytes.subarray(0, 2));
+    input.write(bytes.subarray(2));
+    input.write("\n");
+    await expect(pending).resolves.toBe("\ud83d\ude00");
   });
 
   it("in raw mode Ctrl+C inside a pending sequence still cancels (Q5)", async () => {

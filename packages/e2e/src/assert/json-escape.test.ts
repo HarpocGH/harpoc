@@ -56,4 +56,32 @@ describe("findEscapeTolerant", () => {
     const [hit] = findEscapeTolerant('"a\\qb"', "a\\qb");
     expect(hit).toMatchObject({ escaped: false });
   });
+
+  it("finds a needle whose own backslash reads as an escape, literally (C6-ae)", () => {
+    expect(findEscapeTolerant("x pw\\tail y", "pw\\tail")).toEqual([
+      { start: 2, end: 9, escaped: false },
+    ]);
+  });
+
+  it("finds a needle ending in a backslash the text continues into an escape, literally", () => {
+    expect(findEscapeTolerant("ab\\n", "ab\\")).toEqual([{ start: 0, end: 3, escaped: false }]);
+  });
+
+  it("finds the literal and the JSON-escaped form once each, left to right", () => {
+    expect(findEscapeTolerant("pw\\tail pw\\\\tail", "pw\\tail")).toEqual([
+      { start: 0, end: 7, escaped: false },
+      { start: 8, end: 16, escaped: true },
+    ]);
+  });
+
+  it("reports a span both readings reach once, with the escape reading's range", () => {
+    expect(findEscapeTolerant("\\\\u0041 \\u0041", "\\u0041")).toEqual([
+      { start: 0, end: 7, escaped: true },
+      { start: 8, end: 14, escaped: false },
+    ]);
+  });
+
+  it("takes the escape reading where both readings start at one position", () => {
+    expect(findEscapeTolerant("ab\\\\", "ab\\")).toEqual([{ start: 0, end: 4, escaped: true }]);
+  });
 });

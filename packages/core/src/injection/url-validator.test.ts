@@ -126,6 +126,73 @@ describe("isPrivateIp", () => {
     expect(isPrivateIp(ip)).toBe(true);
   });
 
+  it.each(["fc00::1", "fdff::1", "fd12:3456::1"])(
+    "IPv6 ULA %s is private — the first hextet lies in fc00::/7",
+    (ip) => {
+      expect(isPrivateIp(ip)).toBe(true);
+    },
+  );
+
+  it.each([
+    ["fc::1", "00fc::1"],
+    ["fc0::1", "0fc0::1"],
+    ["fe00::1", "fe00::1"],
+    ["fbff::1", "fbff::1"],
+  ])(
+    "%s (spelled %s) lies outside fc00::/7 and no other rule covers it: isPrivateIp is false and validateHostPort dials it as the literal it is",
+    async (compressed, spelled) => {
+      expect(isPrivateIp(compressed)).toBe(false);
+      expect(isPrivateIp(spelled)).toBe(false);
+      await expect(validateHostPort(spelled, 993)).resolves.toMatchObject({
+        host: spelled,
+        resolvedAddress: spelled,
+      });
+    },
+  );
+
+  it.each(["fe81::1", "febf::1", "fe80:1::1"])(
+    "IPv6 link-local %s is private — the first hextet lies in fe80::/10",
+    (ip) => {
+      expect(isPrivateIp(ip)).toBe(true);
+    },
+  );
+
+  it.each(["fec0::1", "fe7f::1"])(
+    "%s lies outside fe80::/10 and no other rule covers it: isPrivateIp is false (control)",
+    (ip) => {
+      expect(isPrivateIp(ip)).toBe(false);
+    },
+  );
+
+  it('a link-local literal past fe80:: is refused end to end: validateHostPort("fe81::1") is SSRF_BLOCKED as a private literal', async () => {
+    const err = await expectVaultError(
+      () => validateHostPort("fe81::1", 993),
+      ErrorCode.SSRF_BLOCKED,
+    );
+    expect(err.message).toBe("SSRF blocked: fe81::1 is a private/internal IP address");
+  });
+
+  it.each(["fdcc.io", "fd00.example.com", "fe80.example.com"])(
+    "hostname %s is not private — its leading hex run reads inside a block, but the block masks classify an IPv6 literal (net.isIPv6) only; a hostname goes to DNS, whose address is re-checked",
+    (host) => {
+      expect(isPrivateIp(host)).toBe(false);
+    },
+  );
+
+  it.each(["fdroid.org", "fcc.gov"])(
+    "control: hostname %s is not private — true at HEAD under the fc / fd text prefixes, false since the C7 masks, false still",
+    (host) => {
+      expect(isPrivateIp(host)).toBe(false);
+    },
+  );
+
+  it.each(["fd00::1", "fe80::1", "fdcc::1"])(
+    "control: literal %s is private — an IPv6 literal by net.isIPv6, classified by the block masks as before",
+    (ip) => {
+      expect(isPrivateIp(ip)).toBe(true);
+    },
+  );
+
   it("IPv4-mapped IPv6 hex form ::ffff:c0a8:0101 (192.168.1.1) is private", () => {
     expect(isPrivateIp("::ffff:c0a8:0101")).toBe(true);
   });
@@ -172,8 +239,13 @@ describe("the SSRF floor canonicalises IPv6 literals and blocks :: (S8)", () => 
     expect(isPrivateIp("fe80::1%eth0")).toBe(true);
   });
 
-  it('isPrivateIp("fd00::1]@[2001:db8::1") is true — the floor classifies a malformed literal by its own prefix test, not by the URL parser\'s rewrite', () => {
-    expect(isPrivateIp("fd00::1]@[2001:db8::1")).toBe(true);
+  it('isPrivateIp("fd00::1]@[2001:db8::1") is false since C7.6-a — no IPv6 literal by net.isIPv6, so no block mask classifies it (true before, by the fd prefix); validateHostPort refuses it SSRF_BLOCKED as a malformed host before the floor classifies anything', async () => {
+    expect(isPrivateIp("fd00::1]@[2001:db8::1")).toBe(false);
+    const err = await expectVaultError(
+      () => validateHostPort("fd00::1]@[2001:db8::1", 993),
+      ErrorCode.SSRF_BLOCKED,
+    );
+    expect(err.message).toBe('SSRF blocked: "fd00::1]@[2001:db8::1" is not a well-formed host');
   });
 
   it('isPrivateIp("::1]@[2001:db8::1") is false — a malformed loopback spelling stays unclassified as at HEAD: no exact ::1, no private prefix, and the parser\'s rewrite does not decide it', () => {
@@ -340,6 +412,25 @@ describe("validateUrl", () => {
       ErrorCode.SSRF_BLOCKED,
     );
   });
+
+  it.each([
+    ["http://[::\t1]:8080/api", "[::1]"],
+    ["https://[::1]@[2001:db8::1]/api", "[2001:db8::1]"],
+  ])(
+    "control: sees URL.hostname only — the parser renders %j as host %s, and that host is judged",
+    async (url, hostname) => {
+      const result = await validateUrl(url);
+      expect(result.url.hostname).toBe(hostname);
+    },
+  );
+
+  it("control: sees URL.hostname only — https://[fd00::\\n1]/api parses to [fd00::1] and is refused as that private literal", async () => {
+    const err = await expectVaultError(
+      () => validateUrl("https://[fd00::\n1]/api"),
+      ErrorCode.SSRF_BLOCKED,
+    );
+    expect(err.message).toBe("SSRF blocked: [fd00::1] resolves to a private/internal IP address");
+  });
 });
 
 describe("validateHostPort", () => {
@@ -368,6 +459,124 @@ describe("validateHostPort", () => {
     await expect(validateHostPort("fc00::1", 5432)).rejects.toMatchObject({
       code: ErrorCode.SSRF_BLOCKED,
     });
+  });
+
+  it.each(["::1]@[2001:db8::1", "::\t1"])(
+    "refuses the malformed literal %j SSRF_BLOCKED itself, the host named escaped — never classified, resolved or dialed",
+    async (host) => {
+      const err = await expectVaultError(() => validateHostPort(host, 993), ErrorCode.SSRF_BLOCKED);
+      expect(err.message).toBe(`SSRF blocked: ${JSON.stringify(host)} is not a well-formed host`);
+    },
+  );
+
+  it('validateHostPort("fd00::\\n1") keeps SSRF_BLOCKED, now as a malformed host rather than by the ULA test — the message alone moves, the host named escaped', async () => {
+    const host = "fd00::\n1";
+    const err = await expectVaultError(() => validateHostPort(host, 993), ErrorCode.SSRF_BLOCKED);
+    expect(err.message).toBe(`SSRF blocked: ${JSON.stringify(host)} is not a well-formed host`);
+  });
+
+  it.each(["8.8.8.8]", "[8.8.8.8", "[::1]:993", "user@[::1]", "::1 ", "[8.8.8.8]"])(
+    "refuses %j SSRF_BLOCKED — a bracket or @ outside one [<IPv6 literal>] pair, or whitespace",
+    async (host) => {
+      await expectVaultError(() => validateHostPort(host, 993), ErrorCode.SSRF_BLOCKED);
+    },
+  );
+
+  it.each(["1:2:3", ":::"])(
+    "refuses %j SSRF_BLOCKED — spelled in the literal alphabet but not an IPv6 literal (net.isIPv6), never handed to the dialer",
+    async (host) => {
+      const err = await expectVaultError(() => validateHostPort(host, 993), ErrorCode.SSRF_BLOCKED);
+      expect(err.message).toBe(`SSRF blocked: ${JSON.stringify(host)} is not a well-formed host`);
+    },
+  );
+
+  it('validateHostPort("fc000::1") keeps SSRF_BLOCKED, now as a malformed host (no IPv6 literal by net.isIPv6) rather than by the fc prefix test — the message alone moves', async () => {
+    const host = "fc000::1";
+    const err = await expectVaultError(() => validateHostPort(host, 993), ErrorCode.SSRF_BLOCKED);
+    expect(err.message).toBe(`SSRF blocked: ${JSON.stringify(host)} is not a well-formed host`);
+  });
+
+  it('refuses a zone id: validateHostPort("2001:db8::1%eth0") is SSRF_BLOCKED "is not a well-formed host" — dialed as given before', async () => {
+    const err = await expectVaultError(
+      () => validateHostPort("2001:db8::1%eth0", 993),
+      ErrorCode.SSRF_BLOCKED,
+    );
+    expect(err.message).toBe('SSRF blocked: "2001:db8::1%eth0" is not a well-formed host');
+  });
+
+  it('control: validateHostPort("fe80::1%eth0") keeps SSRF_BLOCKED, now as a malformed host rather than by the link-local test', async () => {
+    const err = await expectVaultError(
+      () => validateHostPort("fe80::1%eth0", 993),
+      ErrorCode.SSRF_BLOCKED,
+    );
+    expect(err.message).toBe('SSRF blocked: "fe80::1%eth0" is not a well-formed host');
+  });
+
+  it.each(["012.0.0.1", "999.1.1.1", "1.2.3.04"])(
+    "refuses %j SSRF_BLOCKED — four dotted-digit parts that are no IPv4 literal by net.isIPv4 (a leading zero, an octet past 255), never classified, resolved or dialed",
+    async (host) => {
+      const err = await expectVaultError(() => validateHostPort(host, 993), ErrorCode.SSRF_BLOCKED);
+      expect(err.message).toBe(`SSRF blocked: ${JSON.stringify(host)} is not a well-formed host`);
+    },
+  );
+
+  it('validateHostPort("010.0.0.1") keeps SSRF_BLOCKED, now as a malformed host rather than by the private test reading its octets decimal — the message alone moves', async () => {
+    const host = "010.0.0.1";
+    const err = await expectVaultError(() => validateHostPort(host, 993), ErrorCode.SSRF_BLOCKED);
+    expect(err.message).toBe(`SSRF blocked: ${JSON.stringify(host)} is not a well-formed host`);
+  });
+
+  it.each(["8.8.8.8", "1.2.3.4"])(
+    "control: %j is an IPv4 literal by net.isIPv4 — dialed as given",
+    async (host) => {
+      await expect(validateHostPort(host, 993)).resolves.toEqual({
+        host,
+        port: 993,
+        resolvedAddress: host,
+      });
+    },
+  );
+
+  it("control: 10.0.0.1 keeps its classification — SSRF_BLOCKED as a private literal, the message unchanged", async () => {
+    const err = await expectVaultError(
+      () => validateHostPort("10.0.0.1", 993),
+      ErrorCode.SSRF_BLOCKED,
+    );
+    expect(err.message).toBe("SSRF blocked: 10.0.0.1 is a private/internal IP address");
+  });
+
+  it('refuses the empty host: validateHostPort("") is SSRF_BLOCKED "is not a well-formed host" — DNS_RESOLUTION_FAILED carrying a raw TypeError text before', async () => {
+    const err = await expectVaultError(() => validateHostPort("", 993), ErrorCode.SSRF_BLOCKED);
+    expect(err.message).toBe('SSRF blocked: "" is not a well-formed host');
+  });
+
+  it.each(["0:0:0:0:0:ffff:127.0.0.1", "::ffff:127.0.0.1"])(
+    "control: %j is well-formed and classified as before — SSRF_BLOCKED as a private literal",
+    async (host) => {
+      const err = await expectVaultError(() => validateHostPort(host, 993), ErrorCode.SSRF_BLOCKED);
+      expect(err.message).toBe(`SSRF blocked: ${host} is a private/internal IP address`);
+    },
+  );
+
+  it.each([
+    ["::1", "::1"],
+    ["[::1]", "::1"],
+    ["2001:db8::1", "2001:db8::1"],
+    ["2001:DB8::1", "2001:DB8::1"],
+  ])("control: %j keeps its classification — host %j, dialed as given", async (host, expected) => {
+    await expect(validateHostPort(host, 993)).resolves.toEqual({
+      host: expected,
+      port: 993,
+      resolvedAddress: expected,
+    });
+  });
+
+  it("control: fd00::1 keeps its classification — SSRF_BLOCKED as a private literal, the message unchanged", async () => {
+    const err = await expectVaultError(
+      () => validateHostPort("fd00::1", 993),
+      ErrorCode.SSRF_BLOCKED,
+    );
+    expect(err.message).toBe("SSRF blocked: fd00::1 is a private/internal IP address");
   });
 });
 

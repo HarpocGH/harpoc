@@ -49,6 +49,14 @@ function unitAt(text: string, at: number): { ch: string; width: number; escaped:
   return { ch: here, width: 1, escaped: false };
 }
 
+/**
+ * Each position is read through its escapes first, then literally. A needle
+ * whose own backslash starts an escape (`pw\tail`) decodes to something else,
+ * so the escape reading alone never sees it where it stands raw (C6-ae). The
+ * escape reading wins where both match, and a needle without a backslash
+ * matches exactly as before: its literal reading succeeds only where the
+ * escape reading already has.
+ */
 export function findEscapeTolerant(text: string, needle: string): EscapeMatch[] {
   const matches: EscapeMatch[] = [];
   if (text.length === 0 || needle.length === 0) return matches;
@@ -72,6 +80,9 @@ export function findEscapeTolerant(text: string, needle: string): EscapeMatch[] 
     if (matched) {
       matches.push({ start: i, end: at, escaped });
       i = at;
+    } else if (text.startsWith(needle, i)) {
+      matches.push({ start: i, end: i + needle.length, escaped: false });
+      i += needle.length;
     } else {
       i++;
     }

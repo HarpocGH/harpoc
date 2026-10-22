@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +33,7 @@ const KILL_GRACE_MS = 2_000;
 interface SpawnOptions {
   stdin?: string;
   timeoutMs?: number;
+  cwd?: string;
 }
 
 /** The subcommand words before the first flag: a rejection never prints a flag's value. */
@@ -49,7 +50,7 @@ function spawnNode(
 ): Promise<CliResult> {
   const timeoutMs = options.timeoutMs ?? CHILD_TIMEOUT_MS;
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(process.execPath, argv, { env, windowsHide: true });
+    const child = spawn(process.execPath, argv, { env, cwd: options.cwd, windowsHide: true });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -542,6 +543,38 @@ describe("compiled binary smoke: an empty --vault-dir (I27)", () => {
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("Error: [INVALID_INPUT] --vault-dir: empty path\n");
   });
+});
+
+describe("compiled binary smoke: a flag taken as the --vault-dir path (C7)", () => {
+  it("refuses `init --vault-dir --http` before any vault is created in the working directory", async () => {
+    const cwd = join(
+      tmpdir(),
+      `harpoc-flagpath-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(cwd);
+    try {
+      const env: NodeJS.ProcessEnv = { ...process.env, HOME: cwd, USERPROFILE: cwd };
+      delete env.HARPOC_TOKEN;
+      const result = await spawnNode(
+        [CLI_PATH, "init", "--vault-dir", "--http"],
+        "harpoc init",
+        env,
+        {
+          stdin: `${MASTER_PASSWORD}\n${MASTER_PASSWORD}\n`,
+          timeoutMs: 55_000,
+          cwd,
+        },
+      );
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe(
+        "Error: [INVALID_INPUT] --vault-dir: a flag, not a path (give a path that starts with a dash as ./-name)\n",
+      );
+      expect(readdirSync(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  }, 60_000);
 });
 
 // Phase 3 D1: `secret use` accepts a scoped token, so the CLI is no longer

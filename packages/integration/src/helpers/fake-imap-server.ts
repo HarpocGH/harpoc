@@ -15,7 +15,7 @@ import { LOOPBACK_CERT_PEM, LOOPBACK_KEY_PEM } from "./loopback-cert.js";
  * `n` octets consumed as literal content, never re-parsed as a command. A
  * trimmed copy: the original carries script options this one does not
  * (`postLoginCapabilities`, `fetchLiteral`, `fetchOversizedLiteral`, `flood`,
- * `envelopeSegments`, `headerInline`, `textInline`, `textGlued`).
+ * `envelopeSegments`, `headerInline`, `textInline`, `textGlued`, `uidFlagsLast`).
  */
 
 const SECURE_CONTEXT = createSecureContext({ key: LOOPBACK_KEY_PEM, cert: LOOPBACK_CERT_PEM });
