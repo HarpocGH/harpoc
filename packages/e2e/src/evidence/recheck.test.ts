@@ -1,20 +1,29 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RECORD_REDACTION } from "../assert/opacity.js";
+import { runNodeChild } from "../harness/child.js";
 import {
   HELD_OUTCOMES,
   LEAKED_OUTCOMES,
   LEAK_NOT_MARKABLE,
   RECORD_MARKER,
+  keyOf,
   leakKeyOf,
+  readJsonl,
   recheck,
   renderRecheck,
 } from "../../scripts/recheck.mjs";
-import type { RecheckRecord } from "../../scripts/recheck.mjs";
+import type { CallEvidence, RecheckRecord } from "../../scripts/recheck.mjs";
+import { keyOf as tablesKeyOf, readJsonl as tablesReadJsonl } from "../../scripts/tables.mjs";
 
 const PREREGISTRATION = join(dirname(fileURLToPath(import.meta.url)), "../../preregistration.json");
+const RECHECK_CLI = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../scripts/recheck-evidence.mjs",
+);
 
 function record(over: Partial<RecheckRecord>): RecheckRecord {
   return {
@@ -30,6 +39,147 @@ function record(over: Partial<RecheckRecord>): RecheckRecord {
 }
 
 const CLEAN = { total: 0, checked: 0, unchecked: 0, partial: 0, inconsistent: [] };
+
+/** A call list the capture never writes, typed past the declaration so the re-check can be handed it. */
+function malformed(...calls: unknown[]): CallEvidence[] {
+  return calls as CallEvidence[];
+}
+
+/**
+ * Q15 (review 2026-10-15): an empty `calls` is a record with nothing to judge,
+ * and an entry that is not the capture's shape is reported, never thrown on.
+ */
+describe("recheck on empty and malformed calls", () => {
+  const KEY = "output-channel-leakage|process|naive-echo|mcp-http|harpoc";
+
+  it("counts a held Harpoc record with an empty calls array as unchecked, not checked", () => {
+    expect(recheck([record({ calls: [] })])).toEqual({ ...CLEAN, total: 1, unchecked: 1 });
+  });
+
+  it("counts a LEAKED baseline with an empty calls array as unchecked — the leak rule does not run on it", () => {
+    const out = recheck([record({ arm: "baseline", observed: "LEAKED", calls: [] })]);
+    expect(out).toEqual({ ...CLEAN, total: 1, unchecked: 1 });
+  });
+
+  it("reports an entry that is not an object as an inconsistency keyed by the record, without throwing", () => {
+    for (const entry of [null, "x", 1, []]) {
+      const out = recheck([record({ calls: malformed(entry) })]);
+      expect(out).toEqual({
+        ...CLEAN,
+        total: 1,
+        checked: 1,
+        inconsistent: [
+          { key: KEY, observed: "BLOCKED", reason: "malformed call entry at index 0" },
+        ],
+      });
+    }
+  });
+
+  it("reports an entry whose ok, text, error or stderr has the wrong type as an inconsistency", () => {
+    for (const entry of [
+      { ok: "yes", text: "" },
+      { ok: true, text: 7 },
+      { ok: true },
+      { ok: true, text: "", error: 7 },
+      { ok: true, text: "", stderr: null },
+    ]) {
+      expect(recheck([record({ calls: malformed(entry) })]).inconsistent).toEqual([
+        { key: KEY, observed: "BLOCKED", reason: "malformed call entry at index 0" },
+      ]);
+    }
+  });
+
+  it("still judges the well-formed calls after a malformed one", () => {
+    const out = recheck([
+      record({ calls: malformed(null, { ok: true, text: `x ${RECORD_MARKER}` }) }),
+    ]);
+    expect(out.inconsistent).toEqual([
+      { key: KEY, observed: "BLOCKED", reason: "malformed call entry at index 0" },
+      { key: KEY, observed: "BLOCKED", reason: "credential marker in a held BLOCKED verdict" },
+    ]);
+  });
+
+  it("renders the malformed entry's line under the summary", () => {
+    const out = recheck([record({ calls: malformed({ ok: true, text: "" }, 5) })]);
+    expect(renderRecheck(out).split("\n")).toEqual([
+      "recheck: 1 record(s), 1 re-checkable, 0 without calls, 0 partial (truncated or elided), 1 inconsistent",
+      `  ${KEY}: BLOCKED — malformed call entry at index 1`,
+    ]);
+  });
+
+  it("does not take the <TMP> or <HOME> placeholder for the credential marker (a held record stays clean)", () => {
+    const calls = [{ ok: true, text: '{"stderr":"Cloning into \'<TMP>/x\' from <HOME>/repo"}' }];
+    expect(recheck([record({ calls })])).toEqual({ ...CLEAN, total: 1, checked: 1 });
+  });
+});
+
+/**
+ * Q16 (review 2026-10-15): the re-check keys and reads records with the table
+ * generator's own functions — one `keyOf`, one `readJsonl` with its field check.
+ */
+describe("recheck's record key and reader", () => {
+  it("are the table generator's functions, not copies", () => {
+    expect(keyOf).toBe(tablesKeyOf);
+    expect(readJsonl).toBe(tablesReadJsonl);
+  });
+});
+
+/**
+ * The CLI's documented exit rule (`recheck-evidence.mjs`): an inconsistency
+ * exits 1; under `--require-calls`, so does a record the re-check could not
+ * judge whole.
+ */
+describe("recheck CLI (recheck-evidence.mjs) on empty and malformed calls", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "harpoc-recheck-cli-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  function leg(calls: unknown): string {
+    const path = join(dir, "leg.jsonl");
+    const full = { ...record({}), expected: "BLOCKED", commit: "0".repeat(40), calls };
+    writeFileSync(path, `${JSON.stringify(full)}\n`, "utf8");
+    return path;
+  }
+
+  it("exits 1 under --require-calls on a record whose calls array is empty, counted without calls", async () => {
+    const run = await runNodeChild([RECHECK_CLI, "--require-calls", leg([])], {
+      label: "recheck CLI",
+    });
+    expect(run.stdout.trim()).toBe(
+      "recheck: 1 record(s), 0 re-checkable, 1 without calls, 0 partial (truncated or elided), 0 inconsistent",
+    );
+    expect(run.code).toBe(1);
+  });
+
+  it("exits 1 on a malformed call entry and prints the inconsistency instead of a stack trace", async () => {
+    const run = await runNodeChild([RECHECK_CLI, leg([null])], { label: "recheck CLI" });
+    expect(run.stdout.trim().split("\n")).toEqual([
+      "recheck: 1 record(s), 1 re-checkable, 0 without calls, 0 partial (truncated or elided), 1 inconsistent",
+      "  output-channel-leakage|process|naive-echo|mcp-http|harpoc: BLOCKED — malformed call entry at index 0",
+    ]);
+    expect(run.stderr).toBe("");
+    expect(run.code).toBe(1);
+  });
+
+  it("exits 1 on a record with no observed, printing the generator's refusal instead of a stack trace", async () => {
+    const path = join(dir, "leg.jsonl");
+    const full = { ...record({}), expected: "BLOCKED", commit: "0".repeat(40) };
+    const bare = Object.fromEntries(Object.entries(full).filter(([key]) => key !== "observed"));
+    writeFileSync(path, `${JSON.stringify(bare)}\n`, "utf8");
+    const run = await runNodeChild([RECHECK_CLI, path], { label: "recheck CLI" });
+    expect(run.stderr.trim()).toBe(
+      `recheck: evidence record at line 1 of ${path} has no observed: ` +
+        "a record the generator cannot key is a table cell that silently disappears",
+    );
+    expect(run.stderr).not.toMatch(/^\s+at /m);
+    expect(run.stdout).toBe("");
+    expect(run.code).toBe(1);
+  });
+});
 
 /**
  * The re-check over committed evidence (test-review-2026-10-09 I1): what a

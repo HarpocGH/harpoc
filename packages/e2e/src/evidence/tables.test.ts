@@ -1,9 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it, expect } from "vitest";
 import {
+  REQUIRED_FIELDS,
   checkGates,
   classify,
   escapeLatex,
   groupPaired,
+  readJsonl,
   renderMatrixTable,
   renderProvenance,
   renderScenarioTable,
@@ -704,5 +709,67 @@ describe("duplicate and multi-commit record sets (review 2026-08-14, F6)", () =>
     expect(unclassified).toEqual([records[0]]);
     expect(other).toEqual([records[1]]);
     expect(checkGates(records, []).some((p) => p.includes("fits no table"))).toBe(true);
+  });
+});
+
+/**
+ * Q16 (review 2026-10-15): the one reader both CLIs use (`generate-tables.mjs`
+ * and `recheck-evidence.mjs`), and the one record type the capture declares.
+ */
+describe("readJsonl (the evidence reader both CLIs share)", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "harpoc-tables-read-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  function jsonl(...lines: string[]): string {
+    const path = join(dir, "leg.jsonl");
+    writeFileSync(path, `${lines.join("\n")}\n`, "utf8");
+    return path;
+  }
+
+  it("requires the seven fields a record is keyed and judged by", () => {
+    expect(REQUIRED_FIELDS).toEqual([
+      "scenario",
+      "context",
+      "surface",
+      "arm",
+      "expected",
+      "observed",
+      "commit",
+    ]);
+  });
+
+  it("reads every record of a well-formed file in order", () => {
+    const a = record({ scenario: "a" });
+    const b = record({ scenario: "b" });
+    expect(readJsonl(jsonl(JSON.stringify(a), JSON.stringify(b)))).toEqual([a, b]);
+  });
+
+  it("refuses a record with no observed and one with no arm, naming the line and the field", () => {
+    for (const field of ["observed", "arm"] as const) {
+      const bare = Object.fromEntries(Object.entries(record()).filter(([key]) => key !== field));
+      const path = jsonl(JSON.stringify(record()), JSON.stringify(bare));
+      expect(() => readJsonl(path)).toThrow(
+        `evidence record at line 2 of ${path} has no ${field}: ` +
+          "a record the generator cannot key is a table cell that silently disappears",
+      );
+    }
+  });
+
+  it("refuses a line that is not JSON, naming it", () => {
+    const path = jsonl(JSON.stringify(record()), "{not json");
+    expect(() => readJsonl(path)).toThrow(`malformed evidence record at line 2 of ${path}`);
+  });
+
+  it("types a record's calls as the capture's CallEvidence, elided included", () => {
+    const elided = {
+      ...record(),
+      calls: [{ ok: true, text: "[CREDENTIAL]", elided: true as const }],
+    } satisfies EvidenceRecord;
+    expect(elided.calls[0]?.elided).toBe(true);
   });
 });

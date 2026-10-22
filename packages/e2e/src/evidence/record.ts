@@ -38,7 +38,8 @@ export interface EvidenceRecord {
   /**
    * The surface calls the verdict was judged on, in order — `ok`, the response
    * text, the error text and the child's stderr, the credential and its
-   * encodings replaced by `[CREDENTIAL]` and each field capped (I1,
+   * encodings replaced by `[CREDENTIAL]`, the host's temp and home roots by
+   * `<TMP>` and `<HOME>` (S10, review 2026-10-15), and each field capped (I1,
    * test-review-2026-10-09). A record that carries it can be re-checked from
    * its own content (`scripts/recheck.mjs`); absent on the runs before
    * 2026-10-15 and on a record whose emitter captured none.

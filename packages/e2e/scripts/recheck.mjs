@@ -28,10 +28,15 @@
 //
 // Not judged: EXFILTRATED (the attacker sink saw the credential) and BYPASSED
 // (a partial reveal). A record without `calls` — every run before 2026-10-15 —
-// is counted, not judged. A record whose calls carry `truncated` or `elided`
-// is judged on what it carries and counted `partial`: its text is a prefix or
-// a placeholder, so a held verdict there is checked in part only.
-import { readFileSync } from "node:fs";
+// or with an empty `calls` is counted, not judged. A call entry that is not the
+// shape the capture writes (an object with a boolean `ok`, a string `text`, and
+// `error` / `stderr` strings where present) is an inconsistency of its record,
+// whose other calls are judged. A record whose calls carry `truncated` or
+// `elided` is judged on what it carries and counted `partial`: its text is a
+// prefix or a placeholder, so a held verdict there is checked in part only.
+import { keyOf } from "./tables.mjs";
+
+export { keyOf, readJsonl } from "./tables.mjs";
 
 /** Mirrors `RECORD_REDACTION` in src/assert/opacity.ts (pinned by recheck.test.ts). */
 export const RECORD_MARKER = "[CREDENTIAL]";
@@ -60,11 +65,6 @@ export const LEAK_NOT_MARKABLE = Object.freeze([
   "response-channel-echo|http|partial-alternating",
 ]);
 
-/** The pre-registration key, as evidence/preregistration.ts forms it. */
-export function keyOf(r) {
-  return `${r.scenario}|${r.context}|${r.variant ?? ""}|${r.surface}|${r.arm}`;
-}
-
 export function leakKeyOf(r) {
   return `${r.scenario}|${r.context}|${r.variant ?? ""}`;
 }
@@ -77,17 +77,34 @@ function anyText(calls, predicate) {
   return calls.some((call) => textsOf(call).some(predicate));
 }
 
+function isCallEvidence(call) {
+  return (
+    typeof call === "object" &&
+    call !== null &&
+    !Array.isArray(call) &&
+    typeof call.ok === "boolean" &&
+    typeof call.text === "string" &&
+    ["error", "stderr"].every(
+      (field) => call[field] === undefined || typeof call[field] === "string",
+    )
+  );
+}
+
 export function recheck(records) {
   const out = { total: records.length, checked: 0, unchecked: 0, partial: 0, inconsistent: [] };
   for (const r of records) {
-    if (!Array.isArray(r.calls)) {
+    if (!Array.isArray(r.calls) || r.calls.length === 0) {
       out.unchecked += 1;
       continue;
     }
     out.checked += 1;
-    if (r.calls.some((call) => call.truncated === true || call.elided === true)) out.partial += 1;
     const flag = (reason) => out.inconsistent.push({ key: keyOf(r), observed: r.observed, reason });
-    const markerSeen = anyText(r.calls, (text) => text.includes(RECORD_MARKER));
+    r.calls.forEach((call, i) => {
+      if (!isCallEvidence(call)) flag(`malformed call entry at index ${String(i)}`);
+    });
+    const calls = r.calls.filter(isCallEvidence);
+    if (calls.some((call) => call.truncated === true || call.elided === true)) out.partial += 1;
+    const markerSeen = anyText(calls, (text) => text.includes(RECORD_MARKER));
     if (r.arm === "harpoc" && HELD_OUTCOMES.includes(r.observed) && markerSeen) {
       flag(`credential marker in a held ${r.observed} verdict`);
     }
@@ -98,7 +115,7 @@ export function recheck(records) {
     ) {
       flag(`${r.observed}, but no call shows the credential`);
     }
-    if (r.observed === "SUCCEEDED" && !r.calls.some((call) => call.ok === true)) {
+    if (r.observed === "SUCCEEDED" && !calls.some((call) => call.ok === true)) {
       flag("SUCCEEDED, but no call completed");
     }
   }
@@ -113,16 +130,4 @@ export function renderRecheck(out) {
   ];
   for (const i of out.inconsistent) lines.push(`  ${i.key}: ${i.observed} — ${i.reason}`);
   return lines.join("\n");
-}
-
-export function readJsonl(path) {
-  const text = readFileSync(path, "utf8").trim();
-  if (text === "") return [];
-  return text.split(/\r?\n/).map((line, i) => {
-    try {
-      return JSON.parse(line);
-    } catch (cause) {
-      throw new Error(`malformed evidence record at line ${String(i + 1)} of ${path}`, { cause });
-    }
-  });
 }

@@ -9,6 +9,7 @@
 // for the same reason — provisioning and artifact production must work before
 // anything in the workspace is built. The benchmarks package sets the same
 // precedent for artifact-producing scripts.
+import { readFileSync } from "node:fs";
 
 /**
  * LaTeX-escape a value that came from the evidence, not from the author.
@@ -56,6 +57,41 @@ export function keyOf(r) {
 /** The same key without the arm — the identity of a paired ROW. */
 export function rowKeyOf(r) {
   return [r.scenario, r.context, r.variant ?? "", r.surface].join("|");
+}
+
+// `interface` is deliberately not required here: pre-Phase-3 records
+// legitimately lack it, and the matrix-cell gate in checkGates() catches
+// exactly the case where its absence matters (review 2026-08-14, F3).
+export const REQUIRED_FIELDS = Object.freeze([
+  "scenario",
+  "context",
+  "surface",
+  "arm",
+  "expected",
+  "observed",
+  "commit",
+]);
+
+export function readJsonl(path) {
+  const text = readFileSync(path, "utf8").trim();
+  if (text === "") return [];
+  return text.split(/\r?\n/).map((line, i) => {
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch (cause) {
+      throw new Error(`malformed evidence record at line ${String(i + 1)} of ${path}`, { cause });
+    }
+    for (const field of REQUIRED_FIELDS) {
+      if (typeof record[field] !== "string" || record[field] === "") {
+        throw new Error(
+          `evidence record at line ${String(i + 1)} of ${path} has no ${field}: ` +
+            "a record the generator cannot key is a table cell that silently disappears",
+        );
+      }
+    }
+    return record;
+  });
 }
 
 /**

@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import {
   checkGates,
   classify,
+  readJsonl,
   renderMatrixTable,
   renderProvenance,
   renderScenarioTable,
@@ -53,33 +54,6 @@ function parseArgs(argv) {
     }
   }
   return { records, out, options };
-}
-
-// `interface` is deliberately not required here: pre-Phase-3 records
-// legitimately lack it, and the matrix-cell gate in checkGates() catches
-// exactly the case where its absence matters (review 2026-08-14, F3).
-const REQUIRED_FIELDS = ["scenario", "context", "surface", "arm", "expected", "observed", "commit"];
-
-function readJsonl(path) {
-  const text = readFileSync(path, "utf8").trim();
-  if (text === "") return [];
-  return text.split(/\r?\n/).map((line, i) => {
-    let record;
-    try {
-      record = JSON.parse(line);
-    } catch (cause) {
-      throw new Error(`malformed evidence record at line ${String(i + 1)} of ${path}`, { cause });
-    }
-    for (const field of REQUIRED_FIELDS) {
-      if (typeof record[field] !== "string" || record[field] === "") {
-        throw new Error(
-          `evidence record at line ${String(i + 1)} of ${path} has no ${field}: ` +
-            "a record the generator cannot key is a table cell that silently disappears",
-        );
-      }
-    }
-    return record;
-  });
 }
 
 const { records: recordsArg, out: outArg, options } = parseArgs(process.argv.slice(2));

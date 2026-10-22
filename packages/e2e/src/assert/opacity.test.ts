@@ -8,7 +8,7 @@ import {
   sightings,
 } from "./opacity.js";
 import { serializeError } from "./serialize-error.js";
-import { scan } from "./scan.js";
+import { MAX_PARSE_DEPTH, scan } from "./scan.js";
 
 /**
  * A scenario has to CLASSIFY an outcome (LEAKED vs OPAQUE) rather than assert
@@ -174,4 +174,23 @@ describe("redactForRecord on nested JSON (the structural pass)", () => {
     const text = JSON.stringify({ a: JSON.stringify({ b: "clean" }) }, null, 2);
     expect(redactForRecord(text, secret)).toBe(text);
   });
+
+  it("marks in place a credential the opacity scan sights at its deepest parse (MAX_PARSE_DEPTH)", () => {
+    const text = nest(secret, MAX_PARSE_DEPTH + 1);
+    expect(scan(secret, text).length).toBeGreaterThan(0);
+    const out = redactForRecord(text, secret);
+    expect(scan(secret, out)).toEqual([]);
+    expect(out).toContain(RECORD_REDACTION);
+  });
+
+  it("reaches no deeper than the opacity scan: one escape layer beyond, neither sights nor marks (characterization)", () => {
+    const text = nest(secret, MAX_PARSE_DEPTH + 2);
+    expect(scan(secret, text)).toEqual([]);
+    expect(redactForRecord(text, secret)).toBe(text);
+  });
 });
+
+/** `inner` under `layers` JSON escape layers, each one more JSON.parse away. */
+function nest(inner: string, layers: number): string {
+  return new Array<null>(layers).fill(null).reduce((out) => JSON.stringify({ next: out }), inner);
+}

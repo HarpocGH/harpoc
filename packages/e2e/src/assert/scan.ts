@@ -16,7 +16,7 @@ export interface Sighting {
  * Symmetric caps would push the shared blind spot to a depth neither side can
  * observe, which is how the V8-only needle survived four reviews (decision D2).
  */
-const MAX_PARSE_DEPTH = 6;
+export const MAX_PARSE_DEPTH = 6;
 
 /**
  * Walk an arbitrary structure and report every position at which the secret

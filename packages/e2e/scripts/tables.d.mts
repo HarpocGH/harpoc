@@ -8,6 +8,7 @@
 // A `.d.ts` sibling here silently fails to resolve under this package's
 // `moduleResolution: "bundler"` and leaves the import back at implicit `any` —
 // verified empirically while implementing this file.
+import type { CallEvidence } from "../src/evidence/calls.js";
 
 export interface EvidenceRecord {
   scenario: string;
@@ -24,7 +25,7 @@ export interface EvidenceRecord {
   host_os: string;
   dirty: boolean;
   /** The calls the verdict was judged on (since 2026-10-15); the generator carries it, never reads it. */
-  calls?: Array<{ ok: boolean; error?: string; text: string; stderr?: string; truncated?: true }>;
+  calls?: CallEvidence[];
 }
 
 export interface Expectation {
@@ -64,6 +65,8 @@ export declare const MATRIX_INTERFACES: string[];
 export declare function escapeLatex(value: unknown): string;
 export declare function keyOf(r: Partial<EvidenceRecord>): string;
 export declare function rowKeyOf(r: Partial<EvidenceRecord>): string;
+export declare const REQUIRED_FIELDS: readonly string[];
+export declare function readJsonl(path: string): EvidenceRecord[];
 export declare function classify(records: EvidenceRecord[]): Classification;
 export declare function checkGates(
   records: EvidenceRecord[],

@@ -124,9 +124,6 @@ describe("attack scenarios — baseline versus Harpoc", () => {
           // scenario's credential and quietly mis-measure all the others.
           const perArmBaseline =
             armName === "baseline" ? await startBaselineArm(setup.credential) : undefined;
-          // The arm `observe` drives is wrapped so the record carries the
-          // calls the verdict was judged on (I1): the scenario stays
-          // untouched, the capture is this one site's.
           const observing = recordingArm(perArmBaseline ?? harpoc, setup.credential);
           let observed: string;
           try {

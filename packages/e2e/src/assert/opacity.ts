@@ -1,4 +1,4 @@
-import { scan } from "./scan.js";
+import { MAX_PARSE_DEPTH, scan } from "./scan.js";
 import type { Sighting } from "./scan.js";
 import { serializeError } from "./serialize-error.js";
 import { encodingsOf } from "./encodings.js";
@@ -99,9 +99,6 @@ export function redactForRecord(text: string, ...secrets: string[]): string {
   );
 }
 
-/** `scan`'s reach: a string leaf that is itself JSON is parsed and walked, this many levels deep. */
-const MAX_RECORD_PARSE_DEPTH = 6;
-
 /**
  * The flat pass first (every encoding, one level of JSON escaping); then, while
  * the opacity scan still sights a credential and the text is JSON, the
@@ -114,7 +111,7 @@ const MAX_RECORD_PARSE_DEPTH = 6;
 function redactRecordText(text: string, secrets: string[], depth: number): string {
   let out = text;
   for (const secret of secrets) out = redactEncodings(out, secret, RECORD_REDACTION);
-  if (depth >= MAX_RECORD_PARSE_DEPTH) return out;
+  if (depth >= MAX_PARSE_DEPTH) return out;
   if (!secrets.some((secret) => scan(secret, out).length > 0)) return out;
   const trimmed = out.trim();
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return out;

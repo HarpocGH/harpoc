@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { encodingsOf } from "./encodings.js";
-import { scan } from "./scan.js";
+import { MAX_PARSE_DEPTH, scan } from "./scan.js";
 
 // Deliberately adversarial: the "/" and "+" force base64url to diverge from
 // base64, the space and '"' force urlEncoded to diverge from raw. A tamer
@@ -131,13 +131,13 @@ describe("scan — escape tolerance and serialized depth (review 2026-08-14, F1/
     // (depth 0->1->2->3->4->5->6) to reach 1 layer — exactly MAX_PARSE_DEPTH
     // (raised to 6 in Task 4, nested-json-redaction plan, so the harness stays
     // strictly deeper than the vault's own 4-parse cap — decision D2). Found.
-    const atCap = wrapLayers(singlyEscaped, 6);
+    const atCap = wrapLayers(singlyEscaped, MAX_PARSE_DEPTH);
     expect(scan(credential, { body: atCap }).length).toBeGreaterThan(0);
 
     // +7 wraps = 8 total escape layers, needing a 7th parse from depth 6 —
     // `depth < MAX_PARSE_DEPTH` refuses it (6 < 6 is false). Not found: the
     // cap is doing something, not merely failing to throw.
-    const beyondCap = wrapLayers(singlyEscaped, 7);
+    const beyondCap = wrapLayers(singlyEscaped, MAX_PARSE_DEPTH + 1);
     expect(scan(credential, { body: beyondCap })).toEqual([]);
   });
 
