@@ -22,7 +22,7 @@
   "scripts": {
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
-    "test": "turbo run test",
+    "test": "turbo run test --continue=dependencies-successful",
     "test:coverage": "pnpm -r --workspace-concurrency=1 exec vitest run --coverage",
     "lint": "turbo run lint",
     "format": "prettier --write .",
@@ -32,7 +32,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@vitest/coverage-v8": "^4.1.12",
-    "eslint": "^10.11.0",
+    "eslint": "^10.13.0",
     "prettier": "^3.9.9",
     "turbo": "^2.9.14",
     "typescript": "~6.0.3",

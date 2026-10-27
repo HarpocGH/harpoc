@@ -205,6 +205,20 @@ describe("turbo env pass-through (D5, 2026-09-08; the series file 2026-09-09)", 
   });
 });
 
+describe("the root test script and the lockfile's formatting (DR, 2026-10-27)", () => {
+  it("pnpm test runs turbo with --continue=dependencies-successful, so a red package never cancels the others", () => {
+    const root = JSON.parse(readFileSync(resolve(monorepoRoot, "package.json"), "utf-8")) as {
+      scripts: Record<string, string>;
+    };
+    expect(root.scripts["test"]).toBe("turbo run test --continue=dependencies-successful");
+  });
+
+  it("pnpm-lock.yaml is outside prettier's scope", () => {
+    const ignored = readFileSync(resolve(monorepoRoot, ".prettierignore"), "utf-8").split(/\r?\n/);
+    expect(ignored).toContain("pnpm-lock.yaml");
+  });
+});
+
 describe("ciTestEnvNames reads a test step's own env and every $GITHUB_ENV export form", () => {
   it.each([
     [

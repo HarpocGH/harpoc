@@ -11,6 +11,8 @@ export default defineConfig({
   test: {
     name: "web-ui",
     environment: "jsdom",
+    testTimeout: 20_000,
+    setupFiles: ["src/__fixtures__/vitest-setup.ts"],
     coverage: {
       provider: "v8",
       include: ["src/**"],

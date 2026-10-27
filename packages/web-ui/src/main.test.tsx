@@ -14,16 +14,16 @@ describe("main boot", () => {
     vi.resetModules();
     await import("./main");
     expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
-    // Let Preact's after-paint scheduling settle before the file's jsdom is
-    // torn down. The boot render arms `afterNextFrame` — a requestAnimationFrame
-    // racing a 100 ms setTimeout — and queues the router's `hashchange` effect
-    // behind it; on a loaded runner both outlived this one-test file: the
-    // effect hit `window is not defined` (ubuntu-24, 576f85c) and, once the
-    // effect was dropped by unmounting, the fallback timer's own
-    // `cancelAnimationFrame` hit a torn-down global (windows-22, 08f74be).
-    // Preact registered its rAF before ours, so by the time our frame callback
-    // and the macrotask after it run, `done` has cleared its timer and the
-    // effect flush it queued has already executed. Then unmount.
+    // Let the boot render's scheduled work settle before the file's jsdom is
+    // torn down. Under `src/__fixtures__/vitest-setup.ts` Preact hands its
+    // after-paint flush to `options.requestAnimationFrame`, a microtask, so the
+    // boot render's effects flush right after the render instead of behind a
+    // frame. The wait for our own rAF callback and the macrotask after it stays
+    // so that the router's `hashchange` effect and the unmount land in order
+    // before teardown: on a loaded runner, before the setup, the effect hit
+    // `window is not defined` (ubuntu-24, 576f85c) and, once the effect was
+    // dropped by unmounting, the fallback timer's own `cancelAnimationFrame`
+    // hit a torn-down global (windows-22, 08f74be). Then unmount.
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => setTimeout(resolve, 0));
     });
