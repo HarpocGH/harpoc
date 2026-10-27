@@ -32,7 +32,7 @@
     "@harpoc/rest-api": "workspace:*",
     "@harpoc/shared": "workspace:*",
     "@harpoc/web-ui": "workspace:*",
-    "@modelcontextprotocol/server": "^2.3.0",
+    "@modelcontextprotocol/server": "^2.4.0",
     "commander": "^15.0.0"
   },
   "devDependencies": {
