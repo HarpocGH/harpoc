@@ -22,3 +22,9 @@ allowBuilds:
   cpu-features: false
   esbuild: false
   ssh2: false
+
+# minimatch 11.0.1 closes GHSA-g3hv-75wg-m249 (>=7.0.0 <11.0.1, moderate; 2026-11-06); eslint 10.14,
+# @eslint/config-array and @typescript-eslint/typescript-estree still declare ^10.2.6, so the floor
+# stands here until they move to 11 (then this block goes).
+overrides:
+  minimatch: ^11.0.1
