@@ -11,7 +11,13 @@
     },
     "test": {
       "dependsOn": ["build", "^build"],
-      "env": ["HARPOC_REQUIRE_PLATFORM_TESTS", "HARPOC_TEST_KEYCHAIN", "HARPOC_SERIES_FILE"]
+      "env": [
+        "HARPOC_REQUIRE_PLATFORM_TESTS",
+        "HARPOC_TEST_KEYCHAIN",
+        "HARPOC_SERIES_FILE",
+        "HARPOC_TWO_UID_VAULT_USER",
+        "HARPOC_TWO_UID_AGENT_USER"
+      ]
     },
     "lint": {},
     "dev": {

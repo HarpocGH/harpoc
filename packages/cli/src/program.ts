@@ -1,6 +1,7 @@
-import { Command } from "commander";
+import { Command, type ParseOptionsResult } from "commander";
 import { HARPOC_VERSION } from "@harpoc/shared";
 import { refuseEmptyVaultDir } from "./utils/vault-loader.js";
+import { extractRestModeOptions, prepareRestMode, REST_MODE_HELP } from "./utils/rest-mode.js";
 import { registerInitCommand } from "./commands/init.js";
 import { registerUnlockCommand } from "./commands/unlock.js";
 import { registerLockCommand } from "./commands/lock.js";
@@ -40,16 +41,25 @@ import { registerCertRenewCommand } from "./commands/cert/renew.js";
 import { registerCertAttachCommand } from "./commands/cert/attach.js";
 import { registerServerCommand } from "./commands/server.js";
 
-/** The `harpoc` command tree — every registration and the root hook; no parse. */
+/** The root: `--url` / `--token-file` are taken off a leading run before Commander parses (rest-mode.ts). */
+class HarpocProgram extends Command {
+  override parseOptions(argv: string[]): ParseOptionsResult {
+    return super.parseOptions(extractRestModeOptions(this, argv));
+  }
+}
+
+/** The `harpoc` command tree — every registration and the root hooks; no parse. */
 export function buildProgram(): Command {
-  const program = new Command();
+  const program = new HarpocProgram();
 
   program
     .name("harpoc")
     .description("Secret vault for AI agents")
     .version(HARPOC_VERSION)
     .option("--vault-dir <path>", "Path to vault directory")
-    .hook("preAction", refuseEmptyVaultDir);
+    .addHelpText("after", REST_MODE_HELP)
+    .hook("preAction", refuseEmptyVaultDir)
+    .hook("preAction", prepareRestMode);
 
   // Top-level commands
   registerInitCommand(program);

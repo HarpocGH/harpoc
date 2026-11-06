@@ -75,6 +75,9 @@ importers:
       '@harpoc/rest-api':
         specifier: workspace:*
         version: link:../rest-api
+      '@harpoc/sdk':
+        specifier: workspace:*
+        version: link:../sdk
       '@harpoc/shared':
         specifier: workspace:*
         version: link:../shared
@@ -262,6 +265,9 @@ importers:
       '@harpoc/oauth-proxy':
         specifier: workspace:*
         version: link:../oauth-proxy
+      '@harpoc/sdk':
+        specifier: workspace:*
+        version: link:../sdk
       '@harpoc/shared':
         specifier: workspace:*
         version: link:../shared
@@ -278,6 +284,9 @@ importers:
         specifier: ^4.6.5
         version: 4.6.7
     devDependencies:
+      '@harpoc/rest-api':
+        specifier: workspace:*
+        version: link:../rest-api
       '@harpoc/test-utils':
         specifier: workspace:*
         version: link:../test-utils

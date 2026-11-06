@@ -4,6 +4,7 @@ import { injectionPolicyInputSchema, renderSchemaIssues, VaultError } from "@har
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 function collect(value: string, acc: string[]): string[] {
   acc.push(value);
@@ -154,6 +155,38 @@ export function registerSecretAllowCommand(secret: Command): void {
     .action(async (handle: string, options: AllowOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            const setCount =
+              (options.command?.length ?? 0) +
+              (options.url?.length ?? 0) +
+              (options.host?.length ?? 0) +
+              (options.env?.length ?? 0) +
+              (options.responseHeader?.length ?? 0) +
+              (options.responseMode !== undefined ? 1 : 0) +
+              (options.networkIsolation !== undefined ? 1 : 0) +
+              (options.fsIsolation !== undefined ? 1 : 0) +
+              (options.recipient?.length ?? 0) +
+              (options.imapReadOnly !== undefined ? 1 : 0) +
+              (options.strictTreeExit !== undefined ? 1 : 0) +
+              (options.clear ? 1 : 0);
+            if (options.show || setCount === 0) {
+              printJson(await client.getInjectionPolicy(handle));
+              return;
+            }
+            const current = await client.getInjectionPolicy(handle);
+            const parsed = injectionPolicyInputSchema.safeParse(mergePolicy(current, options));
+            if (!parsed.success) {
+              throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
+            }
+            await client.setInjectionPolicy(handle, parsed.data, {
+              acknowledge_interpreters: options.acknowledgeInterpreter === true,
+            });
+            printSuccess(`Injection policy updated (${handle})`);
+          });
+          return;
+        }
         const engine = await loadUnlockedEngine(vaultDir);
         try {
           const setCount =

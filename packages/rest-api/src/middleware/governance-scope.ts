@@ -12,7 +12,8 @@ import type { HarpocEnv } from "../types.js";
  * one `access.denied` row first (D4, 2026-09-06): this middleware always
  * answers before the engine's own assertion can, so the engine's row is the
  * SDK/direct-mode row and this one is the REST row — a probe leaves exactly
- * one, whichever layer refused it.
+ * one, whichever layer refused it. The vault lock (`/api/v1/vault/*`,
+ * deployment model B) is vault-wide too and mounts this middleware the same way.
  */
 export const unscopedTokenMiddleware: MiddlewareHandler<HarpocEnv> = async (c, next) => {
   const token = c.get("token");

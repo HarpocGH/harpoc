@@ -63,6 +63,7 @@ function createMockEngine() {
     listAgents: vi.fn().mockReturnValue([]),
     getAgent: vi.fn().mockReturnValue({ id: "agent-1", name: "x", status: "active" }),
     listIssuedTokens: vi.fn().mockReturnValue([]),
+    lock: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -179,6 +180,28 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
 
     const tokensOverflow = await instance.request("/api/v1/tokens", { headers: AUTH });
     expect(tokensOverflow.status).toBe(429);
+  });
+
+  /**
+   * The vault prefix's own registration, ahead of authentication (B1): once
+   * the global bucket is drained the lock route answers 429 — to a request
+   * without a token rather than 401, and to an admin token before the lock.
+   */
+  it("draining the global bucket 429s POST /api/v1/vault/lock before authentication and the lock", async () => {
+    const engine = createMockEngine();
+    const instance = createApp(engine as never);
+
+    expect(await hammer(instance, "/api/v1/secrets", RATE_LIMIT_GLOBAL)).toBe(200);
+
+    const anonymous = await instance.request("/api/v1/vault/lock", {
+      method: "POST",
+      headers: HOST,
+    });
+    expect(anonymous.status).toBe(429);
+    expect(((await anonymous.json()) as { error?: string }).error).toBe("RATE_LIMIT_EXCEEDED");
+    const admin = await instance.request("/api/v1/vault/lock", { method: "POST", headers: AUTH });
+    expect(admin.status).toBe(429);
+    expect(engine.lock).not.toHaveBeenCalled();
   });
 
   it("use carries its own, higher tier", async () => {
@@ -377,6 +400,25 @@ describe("the REST request-audit line (M-P3-3)", () => {
       AUDIT_FORMAT,
       "GET",
       path,
+      200,
+      "test-agent",
+      "unknown",
+    );
+  });
+
+  it("the vault group writes the line once and verifies the token once", async () => {
+    const engine = createMockEngine();
+    const res = await createApp(engine as never).request("/api/v1/vault/lock", {
+      method: "POST",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    expect(engine.verifyToken).toHaveBeenCalledTimes(1);
+    expect(auditLineSpy).toHaveBeenCalledTimes(1);
+    expect(auditLineSpy).toHaveBeenCalledWith(
+      AUDIT_FORMAT,
+      "POST",
+      "/api/v1/vault/lock",
       200,
       "test-agent",
       "unknown",

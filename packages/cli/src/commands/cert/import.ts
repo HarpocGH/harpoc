@@ -8,6 +8,7 @@ import { parseIntOption } from "../../utils/options.js";
 import { MAX_RENEW_BEFORE_DAYS, MIN_RENEW_BEFORE_DAYS } from "../../utils/option-bounds.js";
 import { MAX_SECRET_FILE_BYTES, resolveSecretValue } from "../../utils/secret-value.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 interface CertImportOptions {
   key: string;
@@ -86,6 +87,35 @@ export function registerCertImportCommand(cert: Command): void {
           MIN_RENEW_BEFORE_DAYS,
           MAX_RENEW_BEFORE_DAYS,
         );
+
+        // The key is decrypted here as on the local path and sent as PEM in the import body:
+        // the route refuses an encrypted key, and the operator holding it runs this CLI.
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            const certificatePem = readPemFile(options.cert, "certificate");
+            const chainPem =
+              options.chain === undefined ? undefined : readPemFile(options.chain, "chain");
+            const keyBuffer = await resolveSecretValue({ fromFile: options.key });
+            try {
+              const { handle } = await client.importCertificate(name, {
+                private_key_pem: keyBuffer.toString("utf8"),
+                certificate_pem: certificatePem,
+                chain_pem: chainPem,
+                project: options.project,
+                renew_before_days: renewBeforeDays,
+              });
+              if (options.json) {
+                printJson({ handle });
+              } else {
+                printRecord({ Handle: handle, Status: "imported" });
+              }
+            } finally {
+              wipeBuffer(keyBuffer);
+            }
+          });
+          return;
+        }
 
         const engine = await loadUnlockedEngine(vaultDir);
         try {

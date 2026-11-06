@@ -5,6 +5,7 @@ import { connectionConfigSchema, renderSchemaIssues, VaultError } from "@harpoc/
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 function collect(value: string, acc: string[]): string[] {
   acc.push(value);
@@ -70,6 +71,47 @@ export function registerSecretConnectionCommand(secret: Command): void {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
         assertPathOptions(options);
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            if (options.delete) {
+              const deleted = await client.deleteConnectionConfig(handle);
+              printSuccess(
+                deleted
+                  ? `Connection config removed (${handle})`
+                  : `No connection config set (${handle})`,
+              );
+              return;
+            }
+            const hasInput =
+              options.dbTls !== undefined ||
+              options.dbCaFile !== undefined ||
+              options.dbServername !== undefined ||
+              (options.knownHost?.length ?? 0) > 0 ||
+              options.knownHostsFile !== undefined ||
+              options.mailNoTls === true ||
+              options.mailCa !== undefined ||
+              options.gitCa !== undefined ||
+              options.httpCa !== undefined ||
+              options.clear === true;
+            if (options.show || !hasInput) {
+              printJson((await client.getConnectionConfig(handle)) ?? null);
+              return;
+            }
+            // The merge read is GET .../connection-config, gated on `read` by the route (the
+            // in-process token path reads under the write's `rotate`).
+            const current = await client.getConnectionConfig(handle);
+            const parsed = connectionConfigSchema.safeParse(
+              mergeConnectionConfig(current, options),
+            );
+            if (!parsed.success) {
+              throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
+            }
+            await client.setConnectionConfig(handle, parsed.data);
+            printSuccess(`Connection config updated (${handle})`);
+          });
+          return;
+        }
         const engine = await loadUnlockedEngine(vaultDir);
         try {
           const tokenValue = options.token ?? process.env.HARPOC_TOKEN;

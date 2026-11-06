@@ -150,6 +150,9 @@ const STATUS_CASES = [
   [ErrorCode.RATE_LIMIT_EXCEEDED, 429],
   // Listener host allowlist (D61)
   [ErrorCode.MISDIRECTED_REQUEST, 421],
+  // Deployment model B
+  [ErrorCode.REST_MODE_UNSUPPORTED, 501],
+  [ErrorCode.SESSION_MODE_CONFLICT, 400],
   // System
   [ErrorCode.INTERNAL_ERROR, 500],
   [ErrorCode.DATABASE_ERROR, 500],
@@ -846,6 +849,13 @@ describe("factory methods", () => {
     expect(err.message).toBe(
       'Optional dependency "@harpoc/oauth-proxy" is not installed. Install it to use this feature.',
     );
+  });
+
+  it("restModeUnsupported() names the command and the in-process remedy", () => {
+    const err = VaultError.restModeUnsupported("unlock");
+    expect(err.code).toBe(ErrorCode.REST_MODE_UNSUPPORTED);
+    expect(err.statusCode).toBe(501);
+    expect(err.message).toBe("unlock has no REST mode; run it on the vault host");
   });
 
   it("v1.3 context factory messages never contain the word 'password'", () => {

@@ -4,6 +4,7 @@ import { VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 import {
   assertAlgorithmPairing,
   parseAlgorithm,
@@ -68,6 +69,27 @@ export function registerCertCsrCommand(cert: Command): void {
         const namedCurve = parseCurve(options.curve);
         assertAlgorithmPairing(algorithm, modulusLength, namedCurve);
         const sans = parseSans(options.sans);
+
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            const { handle, csrPem } = await client.generateCsr(name, {
+              subject: options.subject,
+              sans,
+              algorithm,
+              bits: modulusLength,
+              curve: namedCurve,
+              project: options.project,
+            });
+            if (options.json) {
+              printJson({ handle, csrPem });
+            } else {
+              process.stdout.write(csrPem);
+              printSuccess(`CSR generated: ${handle} (PENDING — awaiting the issued certificate)`);
+            }
+          });
+          return;
+        }
 
         const engine = await loadUnlockedEngine(vaultDir);
         try {

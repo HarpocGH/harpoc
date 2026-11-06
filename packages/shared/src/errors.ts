@@ -138,6 +138,10 @@ export enum ErrorCode {
   // Listener host allowlist (D61)
   MISDIRECTED_REQUEST = "MISDIRECTED_REQUEST",
 
+  // Deployment model B
+  REST_MODE_UNSUPPORTED = "REST_MODE_UNSUPPORTED",
+  SESSION_MODE_CONFLICT = "SESSION_MODE_CONFLICT",
+
   // System
   INTERNAL_ERROR = "INTERNAL_ERROR",
   DATABASE_ERROR = "DATABASE_ERROR",
@@ -283,6 +287,10 @@ const STATUS_MAP: Record<ErrorCode, number> = {
 
   // Listener host allowlist (D61)
   [ErrorCode.MISDIRECTED_REQUEST]: 421,
+
+  // Deployment model B
+  [ErrorCode.REST_MODE_UNSUPPORTED]: 501,
+  [ErrorCode.SESSION_MODE_CONFLICT]: 400,
 
   // System
   [ErrorCode.INTERNAL_ERROR]: 500,
@@ -853,6 +861,13 @@ export class VaultError extends Error {
     return new VaultError(
       ErrorCode.MISSING_DEPENDENCY,
       `Optional dependency "${specifier}" is not installed. Install it to use this feature.`,
+    );
+  }
+
+  static restModeUnsupported(what: string): VaultError {
+    return new VaultError(
+      ErrorCode.REST_MODE_UNSUPPORTED,
+      `${what} has no REST mode; run it on the vault host`,
     );
   }
 

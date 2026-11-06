@@ -7,6 +7,7 @@ import {
   resolveTokenCallerForHandle,
   TOKEN_OPTION_DESCRIPTION,
 } from "../../utils/token-caller.js";
+import { restModeOf, restModeUnsupported, runRestMode } from "../../utils/rest-mode.js";
 
 export function registerPolicyListCommand(policy: Command): void {
   policy
@@ -22,6 +23,30 @@ export function registerPolicyListCommand(policy: Command): void {
       ) => {
         const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
         try {
+          const rest = restModeOf(cmd);
+          if (rest) {
+            // The REST surface lists the policies of one secret; the vault-wide listing is local.
+            if (!handle) throw restModeUnsupported("policy list without a handle");
+            const target = handle;
+            await runRestMode(rest, async (client) => {
+              const policies = await client.listPolicies(target);
+              if (options.json) {
+                printJson(policies);
+              } else {
+                printTable(
+                  policies.map((p) => ({
+                    ID: p.id.slice(0, 8) + "...",
+                    Secret: p.secret_id.slice(0, 12) + "...",
+                    Principal: `${p.principal_type}:${p.principal_id}`,
+                    Permissions: p.permissions.join(","),
+                    Created: formatTimestamp(p.created_at),
+                    Expires: formatTimestamp(p.expires_at),
+                  })),
+                );
+              }
+            });
+            return;
+          }
           const engine = await loadUnlockedEngine(vaultDir);
           try {
             const tokenValue = options.token ?? process.env.HARPOC_TOKEN;

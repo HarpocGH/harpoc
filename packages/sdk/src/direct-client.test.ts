@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -627,6 +627,39 @@ describe("DirectClient", () => {
     });
   });
 
+  describe("vault lock", () => {
+    it("lockVault locks the engine on the trusted path, no caller, through the VaultClient interface", async () => {
+      const engine = createMockEngine();
+      // Through the interface: the member's presence on VaultClient is pinned at compile time.
+      const client: VaultClient = new DirectClient(engine as never);
+
+      await expect(client.lockVault()).resolves.toBeUndefined();
+
+      expect(engine.lock).toHaveBeenCalledTimes(1);
+      expect(engine.lock.mock.calls[0]).toEqual([]);
+    });
+
+    it("lockVault seals a real engine and erases its session file", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "harpoc-sdk-lock-"));
+      const sessionPath = join(dir, "session.json");
+      const engine = new VaultEngine({ dbPath: join(dir, "vault.db"), sessionPath });
+      try {
+        await engine.initVault("password");
+        expect(existsSync(sessionPath)).toBe(true);
+        const client = new DirectClient(engine);
+
+        await client.lockVault();
+
+        expect(engine.getState()).toBe(VaultState.SEALED);
+        expect(existsSync(sessionPath)).toBe(false);
+        await expectVaultError(() => client.listSecrets(), ErrorCode.VAULT_LOCKED);
+      } finally {
+        await engine.destroy();
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
+    });
+  });
+
   it("getHealth returns state and version", async () => {
     const engine = createMockEngine();
     const client = new DirectClient(engine as never);
@@ -635,6 +668,61 @@ describe("DirectClient", () => {
     expect(health.state).toBe(VaultState.UNLOCKED);
     expect(health.version).toBe(HARPOC_VERSION);
   });
+
+  it("getExpiringReport lists the active secrets inside the window beside the engine's two projections", async () => {
+    const day = 24 * 60 * 60 * 1000;
+    const row = {
+      type: "api_key",
+      project: null,
+      version: 1,
+      createdAt: 1000,
+      updatedAt: 1000,
+      rotatedAt: null,
+    };
+    const soon = { ...row, handle: "secret://soon", name: "soon", status: "active" };
+    const later = { ...row, handle: "secret://later", name: "later", status: "active" };
+    const gone = { ...row, handle: "secret://gone", name: "gone", status: "revoked" };
+    const oauth = [
+      {
+        handle: "secret://gh",
+        name: "gh",
+        project: null,
+        provider: "github",
+        access_token_expires_at: 1,
+        has_refresh_token: true,
+        refresh_status: "expiring_soon",
+      },
+    ];
+    const now = Date.now();
+    const engine = {
+      ...createMockEngine(),
+      listSecrets: vi.fn().mockReturnValue([
+        { ...soon, expiresAt: now + 2 * day },
+        { ...later, expiresAt: now + 30 * day },
+        { ...gone, expiresAt: now + day },
+      ]),
+      getExpiringOAuthTokenStatuses: vi.fn().mockReturnValue(oauth),
+      getExpiringCertificateStatuses: vi.fn().mockReturnValue([]),
+    };
+    const client: VaultClient = new DirectClient(engine as never);
+
+    await expect(client.getExpiringReport()).resolves.toEqual({
+      expiring: [{ ...soon, expiresAt: now + 2 * day }],
+      oauth_refresh_needed: oauth,
+      certificates_nearing_renewal: [],
+    });
+    expect(engine.listSecrets).toHaveBeenCalledWith();
+    expect(engine.getExpiringOAuthTokenStatuses).toHaveBeenCalledWith(60 * 60 * 1000);
+    expect(engine.getExpiringCertificateStatuses).toHaveBeenCalledWith();
+  });
+
+  it.each([0, 366, 1.5])(
+    "getExpiringReport refuses a %j-day window INVALID_INPUT, as the route does",
+    async (days) => {
+      const client: VaultClient = new DirectClient(createMockEngine() as never);
+      await expectVaultError(() => client.getExpiringReport(days), ErrorCode.INVALID_INPUT);
+    },
+  );
 
   describe("oauth flows (injected manager)", () => {
     it("startOAuthFlow authorization_code returns the deferred start's auth URL", async () => {

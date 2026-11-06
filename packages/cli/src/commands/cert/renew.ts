@@ -6,6 +6,7 @@ import { handleError, printJson, printRecord, formatTimestamp } from "../../util
 import { parseIntOption } from "../../utils/options.js";
 import { MAX_PORT, MIN_PORT } from "../../utils/option-bounds.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, restModeUnsupported, runRestMode } from "../../utils/rest-mode.js";
 
 interface CertRenewOptions {
   httpPort?: string;
@@ -30,6 +31,27 @@ export function registerCertRenewCommand(cert: Command): void {
           options.httpPort === undefined
             ? undefined
             : parseIntOption(options.httpPort, "http-port", MIN_PORT, MAX_PORT);
+
+        const rest = restModeOf(cmd);
+        if (rest) {
+          // POST /certificates/:handle/renew takes no port: the server's CertManager answers
+          // the http-01 challenge on its default port 80.
+          if (httpPort !== undefined) throw restModeUnsupported("cert renew --http-port");
+          await runRestMode(rest, async (client) => {
+            const status = await client.renewCertificate(handle);
+            if (options.json) {
+              printJson(status);
+            } else {
+              printRecord({
+                Handle: handle,
+                Subject: status.subject,
+                "Not after": formatTimestamp(status.not_after),
+                "Renewal status": status.renewal_status,
+              });
+            }
+          });
+          return;
+        }
 
         const engine = await loadUnlockedEngine(vaultDir);
         try {

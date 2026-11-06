@@ -661,11 +661,16 @@ export class VaultEngine {
   }
 
   /**
-   * Lock the vault: wipe keys, erase session.
+   * Lock the vault: wipe keys, erase session. `caller` is attribution only —
+   * the REST lock route's token (`POST /api/v1/vault/lock`, deployment model
+   * B) stamps its principal and interface onto the `vault.lock` row; the
+   * trusted local path passes none and keeps the NULL-principal row.
    */
-  async lock(): Promise<void> {
+  async lock(caller?: CallerContext): Promise<void> {
     this.auditLogger?.log({
       eventType: AuditEventType.VAULT_LOCK,
+      ...callerColumns(caller),
+      ...(caller ? { detail: callerInterfaceDetail(caller) } : {}),
       sessionId: this.sessionId ?? undefined,
     });
 

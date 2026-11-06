@@ -3,6 +3,7 @@ import { VaultError, matchesSecretNameScope } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printTable, printJson, formatTimestamp } from "../../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 export function registerSecretListCommand(secret: Command): void {
   secret
@@ -26,6 +27,36 @@ export function registerSecretListCommand(secret: Command): void {
       ) => {
         const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
         try {
+          const rest = restModeOf(cmd);
+          if (rest) {
+            await runRestMode(rest, async (client) => {
+              // The route treats an empty --project as absent and applies the bearer's project
+              // and name scope itself — the in-process token path's semantics.
+              let secrets = await client.listSecrets(options.project);
+              if (options.type) {
+                secrets = secrets.filter((s) => s.type === options.type);
+              }
+              if (options.status) {
+                secrets = secrets.filter((s) => s.status === options.status);
+              }
+              if (options.json) {
+                printJson(secrets);
+              } else {
+                printTable(
+                  secrets.map((s) => ({
+                    Handle: s.handle,
+                    Name: s.name,
+                    Type: s.type,
+                    Project: s.project ?? "-",
+                    Status: s.status,
+                    Version: s.version,
+                    Updated: formatTimestamp(s.updatedAt),
+                  })),
+                );
+              }
+            });
+            return;
+          }
           const engine = await loadUnlockedEngine(vaultDir);
           try {
             const resolved = resolveTokenCaller(

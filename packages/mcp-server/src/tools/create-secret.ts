@@ -1,8 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/server";
-import { z } from "zod";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
-import { VaultError, secretTypeSchema } from "@harpoc/shared";
+import { VaultError } from "@harpoc/shared";
 import { collectValueFromTty } from "../elicitation/tty-prompt.js";
 import {
   collectValueViaUrlElicitation,
@@ -11,6 +10,7 @@ import {
 } from "../elicitation/value-collector.js";
 import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
+import { CREATE_SECRET_TOOL } from "./definitions.js";
 
 const PERMISSION: Permission = "create";
 
@@ -21,121 +21,102 @@ export function registerCreateSecret(
   rateLimiter: RateLimiter,
   enableTtyPrompt = false,
 ): void {
-  server.registerTool(
-    "create_secret",
-    {
-      description:
-        "Create a new secret. The value is collected out-of-band — via a one-time browser form (URL-mode elicitation) when the client supports it, otherwise set separately via CLI. Secret values never pass through the LLM.",
-      inputSchema: z.object({
-        name: z
-          .string()
-          .regex(/^[a-zA-Z0-9_-]+$/)
-          .describe("Secret name (alphanumeric, hyphens, underscores)"),
-        type: secretTypeSchema.describe("Secret type"),
-        project: z
-          .string()
-          .regex(/^[a-zA-Z0-9_-]+$/)
-          .optional()
-          .describe("Project namespace"),
-      }),
-    },
-    async (args, ctx) => {
-      scopeGuard.checkAccess(PERMISSION, args.project, args.name, "create_secret");
-      // Bucketed by name, not just globally: this tool opens a URL-mode value
-      // collector (a loopback listener plus a timer) per call, and the global
-      // tier alone is far too generous a ceiling on that. No secret id exists
-      // yet, so the requested name is the stable key.
-      rateLimiter.checkLimit(`create:${args.project ?? ""}/${args.name}`);
+  server.registerTool(CREATE_SECRET_TOOL.name, CREATE_SECRET_TOOL.config, async (args, ctx) => {
+    scopeGuard.checkAccess(PERMISSION, args.project, args.name, "create_secret");
+    // Bucketed by name, not just globally: this tool opens a URL-mode value
+    // collector (a loopback listener plus a timer) per call, and the global
+    // tier alone is far too generous a ceiling on that. No secret id exists
+    // yet, so the requested name is the stable key.
+    rateLimiter.checkLimit(`create:${args.project ?? ""}/${args.name}`);
 
-      const modern = isModernRequest(ctx);
-      const finishCreate = async (
-        collect: () => Promise<{ value: Uint8Array | null; channel: string }>,
-      ) => {
-        // Create secret without a value — it starts in "pending" status. The
-        // value is then collected out-of-band, per the thesis's channel
-        // priority: URL-mode elicitation > controlling-terminal prompt >
-        // deferred (CLI: harpoc secret set).
-        const result = await engine.createSecret(
-          {
-            name: args.name,
-            type: args.type,
-            project: args.project,
-          },
-          scopeGuard.caller,
-        );
+    const modern = isModernRequest(ctx);
+    const finishCreate = async (
+      collect: () => Promise<{ value: Uint8Array | null; channel: string }>,
+    ) => {
+      // Create secret without a value — it starts in "pending" status. The
+      // value is then collected out-of-band, per the thesis's channel
+      // priority: URL-mode elicitation > controlling-terminal prompt >
+      // deferred (CLI: harpoc secret set).
+      const result = await engine.createSecret(
+        {
+          name: args.name,
+          type: args.type,
+          project: args.project,
+        },
+        scopeGuard.caller,
+      );
 
-        let status: string = result.status;
-        let message =
-          result.status === "pending"
-            ? `Secret created. Set the value with: harpoc secret set ${args.name}`
-            : result.message;
+      let status: string = result.status;
+      let message =
+        result.status === "pending"
+          ? `Secret created. Set the value with: harpoc secret set ${args.name}`
+          : result.message;
 
-        if (result.status === "pending") {
-          const collected = await collect();
-          if (collected.value) {
-            try {
-              // The caller is attribution only here: the row is written by the
-              // token that just created the secret (`create` is interface-scoped),
-              // and under R1 that token holds no grant on the fresh secret — the
-              // set is part of creation, not a later access (N17).
-              await engine.setSecretValue(result.handle, collected.value, scopeGuard.caller);
-            } finally {
-              collected.value.fill(0);
-            }
-            status = "created";
-            message = `Secret created. The value was collected via ${collected.channel}, out-of-band of the model context.`;
+      if (result.status === "pending") {
+        const collected = await collect();
+        if (collected.value) {
+          try {
+            // The caller is attribution only here: the row is written by the
+            // token that just created the secret (`create` is interface-scoped),
+            // and under R1 that token holds no grant on the fresh secret — the
+            // set is part of creation, not a later access (N17).
+            await engine.setSecretValue(result.handle, collected.value, scopeGuard.caller);
+          } finally {
+            collected.value.fill(0);
           }
+          status = "created";
+          message = `Secret created. The value was collected via ${collected.channel}, out-of-band of the model context.`;
         }
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ handle: result.handle, status, message }, null, 2),
-            },
-          ],
-        };
-      };
-
-      const collectOutOfBand = async (
-        collected: Uint8Array | null,
-      ): Promise<{ value: Uint8Array | null; channel: string }> => {
-        let channel = "URL-mode elicitation";
-        let value = collected;
-        if (value === null && !modern) {
-          value = await collectValueViaUrlElicitation(server, {
-            subject: args.name,
-            operation: "create",
-            principal: scopeGuard.principalBinding,
-          });
-        }
-        if (value === null && enableTtyPrompt) {
-          channel = "a terminal prompt";
-          value = await collectValueFromTty({ subject: args.name, operation: "create" });
-        }
-        return { value, channel };
-      };
-
-      if (modern) {
-        const round = await runModernValueRound(
-          ctx,
-          {
-            subject: args.name,
-            operation: "create",
-            principal: scopeGuard.principalBinding,
-            target: `${args.project ?? ""}/${args.name}`,
-            preflight: async () => {
-              if (await engine.secretNameTaken(args.name, args.project)) {
-                throw VaultError.duplicateSecret(args.name);
-              }
-            },
-          },
-          (value) => finishCreate(() => collectOutOfBand(value)),
-        );
-        if (round.kind !== "fallthrough") return round.result;
       }
 
-      return finishCreate(() => collectOutOfBand(null));
-    },
-  );
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ handle: result.handle, status, message }, null, 2),
+          },
+        ],
+      };
+    };
+
+    const collectOutOfBand = async (
+      collected: Uint8Array | null,
+    ): Promise<{ value: Uint8Array | null; channel: string }> => {
+      let channel = "URL-mode elicitation";
+      let value = collected;
+      if (value === null && !modern) {
+        value = await collectValueViaUrlElicitation(server, {
+          subject: args.name,
+          operation: "create",
+          principal: scopeGuard.principalBinding,
+        });
+      }
+      if (value === null && enableTtyPrompt) {
+        channel = "a terminal prompt";
+        value = await collectValueFromTty({ subject: args.name, operation: "create" });
+      }
+      return { value, channel };
+    };
+
+    if (modern) {
+      const round = await runModernValueRound(
+        ctx,
+        {
+          subject: args.name,
+          operation: "create",
+          principal: scopeGuard.principalBinding,
+          target: `${args.project ?? ""}/${args.name}`,
+          preflight: async () => {
+            if (await engine.secretNameTaken(args.name, args.project)) {
+              throw VaultError.duplicateSecret(args.name);
+            }
+          },
+        },
+        (value) => finishCreate(() => collectOutOfBand(value)),
+      );
+      if (round.kind !== "fallthrough") return round.result;
+    }
+
+    return finishCreate(() => collectOutOfBand(null));
+  });
 }

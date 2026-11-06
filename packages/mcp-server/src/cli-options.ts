@@ -1,6 +1,9 @@
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
-import { isDecimalInteger, normalizeAllowedHost } from "@harpoc/shared";
-import { DEFAULT_MCP_HTTP_PORT } from "./http.js";
+import { isDecimalInteger, normalizeAllowedHost, parseRestBaseUrl } from "@harpoc/shared";
+import type { RestBaseUrlRefusal } from "@harpoc/shared";
+
+/** Declared here, not in `http.ts`, so the bridge path loads no engine module (B1). */
+export const DEFAULT_MCP_HTTP_PORT = 3001;
 
 export type PortParse = { ok: true; port: number } | { ok: false; message: string };
 
@@ -111,6 +114,34 @@ export function parseVaultDirOption(raw: unknown): OptionParse<string | undefine
     return { ok: true, value: raw };
   }
   return { ok: false, message: "Error: --vault-dir requires a path.\n" };
+}
+
+const URL_REFUSALS: Readonly<Record<RestBaseUrlRefusal, string>> = {
+  flag: "Error: --url requires a base URL.\n",
+  not_a_url: "Error: --url is not an absolute URL.\n",
+  scheme: "Error: --url must use http: or https:.\n",
+  credentials: "Error: --url must not carry credentials; pass the token with --token-file.\n",
+  query_or_fragment: "Error: --url must be a base URL, without a query or fragment.\n",
+  plain_http_off_loopback:
+    "Error: --url over plain http: is accepted for a loopback host only; use https:.\n",
+};
+
+/**
+ * `harpoc-mcp --url <base>` — the REST server the bridge forwards to (B1).
+ * Only an http(s) base URL passes: no credentials (the token travels in
+ * `--token-file`, never in an argument), no query or fragment (the client
+ * appends `/api/v1/…` to it), and plain `http:` to a loopback host only — the
+ * bearer would otherwise cross the network in cleartext. A refusal never
+ * echoes the value, which may hold the very credential it refuses.
+ */
+export function parseUrlOption(raw: unknown): OptionParse<URL | undefined> {
+  if (raw === undefined) return { ok: true, value: undefined };
+  if (typeof raw !== "string" || raw.trim() === "") {
+    return { ok: false, message: "Error: --url requires a base URL.\n" };
+  }
+  const parsed = parseRestBaseUrl(raw);
+  if (parsed.ok) return { ok: true, value: parsed.url };
+  return { ok: false, message: URL_REFUSALS[parsed.reason] };
 }
 
 export type AllowedHostsParse = { ok: true; hosts: string[] } | { ok: false; message: string };

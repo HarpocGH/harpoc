@@ -3,6 +3,7 @@ import { mcpServerConfigSchema, renderSchemaIssues, VaultError } from "@harpoc/s
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, restModeUnsupported, runRestMode } from "../../utils/rest-mode.js";
 
 function collect(value: string, acc: string[]): string[] {
   acc.push(value);
@@ -48,6 +49,33 @@ export function registerSecretMcpServerCommand(secret: Command): void {
     .action(async (handle: string, options: McpServerOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        const rest = restModeOf(cmd);
+        if (rest) {
+          // DELETE /secrets/:handle/mcp-server exists, but VaultClient has no member for it.
+          if (options.delete) throw restModeUnsupported("secret mcp-server --delete");
+          await runRestMode(rest, async (client) => {
+            if (options.show || (!options.name && !options.transport)) {
+              printJson((await client.getMcpServerConfig(handle)) ?? null);
+              return;
+            }
+            const parsed = mcpServerConfigSchema.safeParse({
+              server_name: options.name,
+              transport: options.transport,
+              command: options.command,
+              args: options.arg && options.arg.length > 0 ? options.arg : undefined,
+              env_var: options.envVar,
+              working_directory: options.cwd,
+              url: options.url,
+              protocol: options.protocol,
+            });
+            if (!parsed.success) {
+              throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
+            }
+            await client.setMcpServerConfig(handle, parsed.data);
+            printSuccess(`MCP server config updated (${handle})`);
+          });
+          return;
+        }
         const engine = await loadUnlockedEngine(vaultDir);
         try {
           const tokenValue = options.token ?? process.env.HARPOC_TOKEN;

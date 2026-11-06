@@ -4,7 +4,13 @@ import { VaultEngine } from "@harpoc/core";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { DirectClient } from "@harpoc/sdk";
-import { ErrorCode, SESSION_CLEANUP_INTERVAL_MS, SecretType, VaultState } from "@harpoc/shared";
+import {
+  AuditEventType,
+  ErrorCode,
+  SESSION_CLEANUP_INTERVAL_MS,
+  SecretType,
+  VaultState,
+} from "@harpoc/shared";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
@@ -247,5 +253,55 @@ describe("Lock Coordination", () => {
 
     await engine2.destroy();
     await engine1.destroy();
+  });
+
+  // ---- Test 8: the REST lock seals the serving engine and Engine2 ---------
+  // B1: `POST /api/v1/vault/lock` on the file-mode engine erases the shared
+  // session file as `harpoc lock` does, so Engine2 seals at its next tick.
+  it("POST /api/v1/vault/lock seals the REST app's engine at once and Engine2 at its next tick", async () => {
+    const engine1 = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
+    await engine1.unlock(PASSWORD);
+    const token = engine1.createToken("test-agent", ["admin"]);
+    const headers = { authorization: `Bearer ${token}`, host: "localhost" };
+
+    vi.useFakeTimers();
+    const engine2 = new VaultEngine({
+      dbPath: vault.dbPath,
+      sessionPath: vault.sessionPath,
+    });
+    const reader = new VaultEngine({ dbPath: vault.dbPath, sessionPath: vault.sessionPath });
+    try {
+      await engine2.loadSession();
+      const app = createApp(engine1);
+
+      const res = await app.request("/api/v1/vault/lock", { method: "POST", headers });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ data: { locked: true } });
+      expect(engine1.getState()).toBe(VaultState.SEALED);
+      expect(existsSync(vault.sessionPath)).toBe(false);
+
+      const after = await app.request("/api/v1/secrets", { headers });
+      expect(after.status).toBe(503);
+      expect(((await after.json()) as { error: string }).error).toBe(ErrorCode.VAULT_LOCKED);
+      const again = await app.request("/api/v1/vault/lock", { method: "POST", headers });
+      expect(again.status).toBe(503);
+      const health = await app.request("/api/v1/health", { headers: { host: "localhost" } });
+      expect(((await health.json()) as { data: { state: string } }).data.state).toBe("sealed");
+
+      await advanceMonitorAndAwaitSeal(engine2);
+
+      await reader.unlock(PASSWORD);
+      const remoteLocks = reader
+        .queryAudit({ eventType: AuditEventType.VAULT_LOCK })
+        .filter((row) => row.principal_id === "test-agent");
+      expect(remoteLocks).toHaveLength(1);
+      expect(remoteLocks[0]).toMatchObject({ principal_type: "agent", success: true });
+      expect(remoteLocks[0]?.detail).toEqual({ interface: "rest" });
+    } finally {
+      vi.useRealTimers();
+      await engine1.destroy();
+      await engine2.destroy();
+      await reader.destroy();
+    }
   });
 });

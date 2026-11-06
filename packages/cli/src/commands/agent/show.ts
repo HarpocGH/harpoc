@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord, formatTimestamp } from "../../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 export function registerAgentShowCommand(agent: Command): void {
   agent
@@ -12,6 +13,30 @@ export function registerAgentShowCommand(agent: Command): void {
     .action(async (name: string, options: { token?: string; json?: boolean }, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            const found = await client.getAgent(name);
+            if (options.json) {
+              printJson(found);
+            } else {
+              printRecord({
+                ID: found.id,
+                Name: found.name,
+                Description: found.description,
+                Owner: found.owner,
+                Status: found.status,
+                Created: formatTimestamp(found.created_at),
+                Updated: formatTimestamp(found.updated_at),
+                Deactivated: formatTimestamp(found.deactivated_at),
+                "Last active": formatTimestamp(found.last_active_at),
+                "Active tokens": found.active_tokens,
+                Grants: found.grants,
+              });
+            }
+          });
+          return;
+        }
         const engine = await loadUnlockedEngine(vaultDir);
         try {
           const resolved = resolveTokenCaller(

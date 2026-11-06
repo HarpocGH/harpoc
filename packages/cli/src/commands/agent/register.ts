@@ -8,6 +8,7 @@ import {
   formatTimestamp,
 } from "../../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 export function registerAgentRegisterCommand(agent: Command): void {
   agent
@@ -25,6 +26,29 @@ export function registerAgentRegisterCommand(agent: Command): void {
       ) => {
         const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
         try {
+          const rest = restModeOf(cmd);
+          if (rest) {
+            await runRestMode(rest, async (client) => {
+              const registered = await client.registerAgent({
+                name,
+                description: options.description,
+                owner: options.owner,
+              });
+              if (options.json) {
+                printJson(registered);
+              } else {
+                printRecord({
+                  Name: registered.name,
+                  Status: registered.status,
+                  Owner: registered.owner,
+                  Description: registered.description,
+                  Created: formatTimestamp(registered.created_at),
+                });
+                printSuccess("Agent registered.");
+              }
+            });
+            return;
+          }
           const engine = await loadUnlockedEngine(vaultDir);
           try {
             const resolved = resolveTokenCaller(

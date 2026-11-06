@@ -2,6 +2,7 @@ export type {
   VaultClient,
   CertificateRef,
   CreateSecretInput,
+  ExpiringReport,
   GeneratedCsrRef,
   GrantPolicyInput,
   HealthResponse,

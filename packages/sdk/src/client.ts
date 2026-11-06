@@ -10,6 +10,8 @@ import type {
   ConnectionConfig,
   CreateSecretRequest,
   CreateSecretResponse,
+  ExpiringCertificateInfo,
+  ExpiringOAuthTokenInfo,
   GenerateCsrRequest,
   HealthResponse,
   InjectionPolicy,
@@ -54,6 +56,17 @@ export type {
 export interface ListTokensOptions {
   agent?: string;
   status?: IssuedTokenStatusFilter;
+}
+
+/**
+ * `GET /api/v1/health/expiring`: the three lists over the caller-addressable
+ * set — the active secrets expiring within `days`, the OAuth access tokens
+ * expiring within the hour, and the certificates inside their renewal window.
+ */
+export interface ExpiringReport {
+  expiring: SecretInfo[];
+  oauth_refresh_needed: ExpiringOAuthTokenInfo[];
+  certificates_nearing_renewal: ExpiringCertificateInfo[];
 }
 
 /**
@@ -109,7 +122,9 @@ export interface VaultClient {
   ): Promise<SetAgentPermissionsResult>;
   listTokens(options?: ListTokensOptions): Promise<IssuedToken[]>;
   revokeToken(jti: string): Promise<void>;
+  lockVault(): Promise<void>;
   getHealth(): Promise<HealthResponse>;
+  getExpiringReport(days?: number): Promise<ExpiringReport>;
   startOAuthFlow(input: StartOAuthFlowInput): Promise<OAuthFlowResult>;
   getOAuthStatus(handle: string): Promise<OAuthTokenStatus>;
   refreshOAuthToken(handle: string): Promise<number | null>;

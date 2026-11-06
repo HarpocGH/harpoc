@@ -5,7 +5,6 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
-import { VaultEngine } from "@harpoc/core";
 import {
   assertBindAllowed,
   VAULT_DB_NAME,
@@ -13,31 +12,23 @@ import {
   SESSION_FILE_NAME,
 } from "@harpoc/shared";
 import type { ServerStopTrigger, ServerTransport } from "@harpoc/shared";
-import { DEFAULT_MCP_HTTP_PORT, startMcpHttpServer } from "./http.js";
+import { createBridgeServer, restClientFromTokenFile } from "./bridge.js";
 import {
+  DEFAULT_MCP_HTTP_PORT,
   parseAllowedHostsOption,
   parseAllowTokenlessOption,
   parseHttpPortOption,
   parseTokenFileOption,
+  parseUrlOption,
   parseVaultDirOption,
   readLaunchTokenFile,
 } from "./cli-options.js";
-import { createStdioServerFactory } from "./server.js";
 import { installSignalLatch } from "./signal-latch.js";
+import type { SignalLatch } from "./signal-latch.js";
 
-export { createMcpServer, createStdioServerFactory } from "./server.js";
-export type { CreateMcpServerOptions } from "./server.js";
-export { startMcpHttpServer, DEFAULT_MCP_HTTP_PORT } from "./http.js";
-export type { McpHttpServer, McpHttpServerOptions } from "./http.js";
-export { RateLimiter } from "./guards/rate-limiter.js";
-export { ScopeGuard } from "./guards/scope-guard.js";
-export { InjectionGuard } from "./guards/injection-guard.js";
-export {
-  parseAllowedHostsOption,
-  readLaunchTokenFile,
-  MAX_LAUNCH_TOKEN_FILE_BYTES,
-} from "./cli-options.js";
-export type { AllowedHostsParse, TokenFileRead } from "./cli-options.js";
+// The `harpoc-mcp` binary only — the library entry is `lib.ts`. Nothing on
+// this static graph loads the engine: `--url` runs without it (B1).
+export {};
 
 function resolveVaultDir(vaultDirOption?: string): string {
   if (vaultDirOption !== undefined) return vaultDirOption;
@@ -56,6 +47,7 @@ async function main(): Promise<void> {
       "token-file": { type: "string" },
       "allow-tokenless": { type: "boolean" },
       "vault-dir": { type: "string" },
+      url: { type: "string" },
       http: { type: "boolean" },
       port: { type: "string" },
       host: { type: "string" },
@@ -90,6 +82,33 @@ async function main(): Promise<void> {
   const vaultDirOption = parseVaultDirOption(values["vault-dir"]);
   if (!vaultDirOption.ok) {
     process.stderr.write(vaultDirOption.message);
+    process.exit(1);
+  }
+
+  // `--url` is the REST bridge (B1): stdio in, REST out, no engine — so the
+  // flags that reach for a vault, a listener or the waiver are refused here.
+  const urlOption = parseUrlOption(values.url);
+  if (!urlOption.ok) {
+    process.stderr.write(urlOption.message);
+    process.exit(1);
+  }
+  const url = urlOption.value;
+  if (url !== undefined && values.http) {
+    process.stderr.write(
+      "Error: --url is not supported with --http. The bridge serves stdio only; the Streamable HTTP listener runs in the vault's own process.\n",
+    );
+    process.exit(1);
+  }
+  if (url !== undefined && vaultDirOption.value !== undefined) {
+    process.stderr.write(
+      "Error: --url conflicts with --vault-dir. The bridge opens no vault; the REST server at --url holds it.\n",
+    );
+    process.exit(1);
+  }
+  if (url !== undefined && allowTokenless) {
+    process.stderr.write(
+      "Error: --allow-tokenless is not supported with --url. The bridge holds no engine; the REST server verifies the token on every request.\n",
+    );
     process.exit(1);
   }
 
@@ -142,6 +161,13 @@ async function main(): Promise<void> {
     }
   }
 
+  if (url !== undefined && tokenFile === undefined) {
+    process.stderr.write(
+      "Error: --url requires --token-file <path>. The REST server verifies that token on every request.\n",
+    );
+    process.exit(1);
+  }
+
   // Read before any vault is opened, like the port refusal: a bad file never
   // touches the session.
   let fileToken: string | undefined;
@@ -154,9 +180,20 @@ async function main(): Promise<void> {
     fileToken = read.token;
   }
 
+  if (url !== undefined && tokenFile !== undefined) {
+    await serveBridge(url, tokenFile, latch);
+    return;
+  }
+
   const vaultDir = resolveVaultDir(vaultDirOption.value);
   const dbPath = join(vaultDir, VAULT_DB_NAME);
   const sessionPath = join(vaultDir, SESSION_FILE_NAME);
+
+  // The engine path's modules load here, past every refusal — never on the
+  // bridge path, whose process must not resolve `@harpoc/core` (B1).
+  const [{ VaultEngine }, { startMcpHttpServer }, { createStdioServerFactory }] = await Promise.all(
+    [import("@harpoc/core"), import("./http.js"), import("./server.js")],
+  );
 
   // stdout is the transport; a session-file or job-wrapper warning goes where the banner goes.
   const engine = new VaultEngine({
@@ -261,6 +298,32 @@ async function main(): Promise<void> {
   latch.arm((trigger) => void shutdown(trigger));
   if (shuttingDown) return;
   process.stderr.write(banner);
+}
+
+/**
+ * `harpoc-mcp --url <base> --token-file <path>` (B1): the stdio transport in
+ * front of the REST server, holding no engine and no session — so it writes
+ * no `server.start` row; the REST server's own rows record every request it
+ * forwards. The stop is the stdio server's: stdin EOF or a stop signal, then
+ * exit 0; the banner follows the arming, as above.
+ */
+async function serveBridge(url: URL, tokenFile: string, latch: SignalLatch): Promise<void> {
+  const baseUrl = `${url.origin}${url.pathname}`.replace(/\/+$/, "");
+  const client = restClientFromTokenFile(baseUrl, tokenFile);
+  const bridge = serveStdio(() => createBridgeServer({ client, baseUrl }), {
+    onerror: (error) => process.stderr.write(`[harpoc] MCP stdio error: ${error.message}\n`),
+  });
+  let stopping = false;
+  const stop = async (): Promise<void> => {
+    if (stopping) return;
+    stopping = true;
+    await bridge.close();
+    process.exit(0);
+  };
+  process.stdin.once("end", () => void stop());
+  latch.arm(() => void stop());
+  if (stopping) return;
+  process.stderr.write(`Harpoc MCP bridge → ${baseUrl} (stdio)\n`);
 }
 
 // Only run main when executed directly (not imported)

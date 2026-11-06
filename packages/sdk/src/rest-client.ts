@@ -29,6 +29,7 @@ import type { AuditQueryOptions, DecryptedAuditEvent, SecretInfo } from "@harpoc
 import type {
   CertificateRef,
   CreateSecretInput,
+  ExpiringReport,
   GeneratedCsrRef,
   GrantPolicyInput,
   HealthResponse,
@@ -279,8 +280,17 @@ export class RestClient implements VaultClient {
     await this.request<{ revoked: boolean }>("DELETE", `/api/v1/tokens/${encodeURIComponent(jti)}`);
   }
 
+  async lockVault(): Promise<void> {
+    await this.request<{ locked: boolean }>("POST", "/api/v1/vault/lock");
+  }
+
   async getHealth(): Promise<HealthResponse> {
     return this.request<HealthResponse>("GET", "/api/v1/health");
+  }
+
+  async getExpiringReport(days?: number): Promise<ExpiringReport> {
+    const params = days === undefined ? "" : `?days=${encodeURIComponent(String(days))}`;
+    return this.request<ExpiringReport>("GET", `/api/v1/health/expiring${params}`);
   }
 
   async startOAuthFlow(input: StartOAuthFlowInput): Promise<OAuthFlowResult> {

@@ -3,6 +3,7 @@ import { AuditEventType } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess, formatTimestamp } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 export function registerOAuthRefreshCommand(oauth: Command): void {
   oauth
@@ -13,6 +14,22 @@ export function registerOAuthRefreshCommand(oauth: Command): void {
     .action(async (handle: string, options: { json?: boolean; token?: string }, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            const newExpiresAt = await client.refreshOAuthToken(handle);
+            if (options.json) {
+              printJson({ handle, new_expires_at: newExpiresAt });
+            } else if (newExpiresAt === null) {
+              printSuccess(`Token refreshed for ${handle} (provider returned no expiry)`);
+            } else {
+              printSuccess(
+                `Token refreshed for ${handle} (expires ${formatTimestamp(newExpiresAt)})`,
+              );
+            }
+          });
+          return;
+        }
         const engine = await loadUnlockedEngine(vaultDir);
         try {
           const resolved = resolveTokenCallerForHandle(

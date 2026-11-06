@@ -8,6 +8,7 @@ import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError } from "../utils/output.js";
 import { parseIntOption } from "../utils/options.js";
 import { MAX_PORT, MIN_PORT } from "../utils/option-bounds.js";
+import { assertRuntimeDir, resolveRuntimeDir } from "../utils/runtime-dir.js";
 
 function resolveUiDistDir(): string {
   const require = createRequire(import.meta.url);
@@ -60,6 +61,10 @@ export function registerServerCommand(program: Command): void {
       "HTTP port for the http-01 challenge responder during renewal",
       "80",
     )
+    .option(
+      "--runtime-dir <path>",
+      "Runtime directory holding one subdirectory per consumer (owned by this user, mode 0750 or stricter; created by deploy/linux/install-two-identity.sh and recreated at boot by its tmpfiles.d entry — never a unit's RuntimeDirectory=, which systemd empties at every stop); checked before the vault opens",
+    )
     .action(
       async (
         opts: {
@@ -78,6 +83,7 @@ export function registerServerCommand(program: Command): void {
           oauthRefresh?: boolean;
           certRenew?: boolean;
           certRenewPort: string;
+          runtimeDir?: string;
         },
         cmd: Command,
       ) => {
@@ -92,6 +98,10 @@ export function registerServerCommand(program: Command): void {
             );
             process.exit(1);
           }
+          // An ambient $RUNTIME_DIRECTORY is the default only for a
+          // per-consumer feature (none exists yet): a unit's RuntimeDirectory=
+          // (0755 by default) must not refuse a start that asked for none.
+          const runtimeDir = resolveRuntimeDir(opts.runtimeDir, {});
 
           if (opts.ui && !opts.rest) {
             console.error("Error: --ui requires --rest.");
@@ -212,6 +222,7 @@ export function registerServerCommand(program: Command): void {
             }
             fileToken = read.token;
           }
+          if (runtimeDir !== undefined) assertRuntimeDir(runtimeDir);
 
           const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir as string | undefined);
           engine = await loadUnlockedEngine(vaultDir);

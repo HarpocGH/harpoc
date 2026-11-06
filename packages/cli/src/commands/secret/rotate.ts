@@ -4,6 +4,7 @@ import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js
 import { resolveSecretValue } from "../../utils/secret-value.js";
 import { handleError, printSuccess } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 interface SecretRotateOptions {
   fromFile?: string;
@@ -24,6 +25,23 @@ export function registerSecretRotateCommand(secret: Command): void {
     .action(async (handle: string, options: SecretRotateOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            const newValue = await resolveSecretValue({
+              fromFile: options.fromFile,
+              noDecrypt: options.decrypt === false,
+              promptMessage: "New secret value: ",
+            });
+            try {
+              await client.rotateSecret(handle, newValue);
+              printSuccess(`Secret rotated (${handle})`);
+            } finally {
+              wipeBuffer(newValue);
+            }
+          });
+          return;
+        }
         // Engine first: a sealed vault must fail before the user types a
         // value or key passphrase, and the resolved plaintext must never
         // exist outside a wiping finally.

@@ -19,8 +19,8 @@
   },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/lib.d.ts",
+      "import": "./dist/lib.js"
     },
     "./package.json": "./package.json"
   },
@@ -28,6 +28,7 @@
     "@harpoc/cert-manager": "workspace:*",
     "@harpoc/core": "workspace:*",
     "@harpoc/oauth-proxy": "workspace:*",
+    "@harpoc/sdk": "workspace:*",
     "@harpoc/shared": "workspace:*",
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.4.0",
@@ -35,6 +36,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@harpoc/rest-api": "workspace:*",
     "@harpoc/test-utils": "workspace:*",
     "@modelcontextprotocol/client": "^2.3.0",
     "@modelcontextprotocol/core": "^2.3.0"

@@ -1,9 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/server";
-import { z } from "zod";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
 import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
+import { LIST_SECRETS_TOOL } from "./definitions.js";
 
 const PERMISSION: Permission = "list";
 
@@ -13,53 +13,36 @@ export function registerListSecrets(
   scopeGuard: ScopeGuard,
   rateLimiter: RateLimiter,
 ): void {
-  server.registerTool(
-    "list_secrets",
-    {
-      description: "List all secrets in the vault (metadata only, never values)",
-      inputSchema: z.object({
-        project: z.string().optional().describe("Filter by project name"),
-        type: z
-          .string()
-          .optional()
-          .describe("Filter by secret type (api_key, oauth_token, certificate)"),
-        status: z
-          .string()
-          .optional()
-          .describe("Filter by status (active, pending, expired, revoked)"),
-      }),
-    },
-    async (args) => {
-      scopeGuard.checkAccess(PERMISSION, args.project, undefined, "list_secrets");
-      rateLimiter.checkLimit();
+  server.registerTool(LIST_SECRETS_TOOL.name, LIST_SECRETS_TOOL.config, async (args) => {
+    scopeGuard.checkAccess(PERMISSION, args.project, undefined, "list_secrets");
+    rateLimiter.checkLimit();
 
-      let secrets = engine.listSecrets(args.project, scopeGuard.caller);
+    let secrets = engine.listSecrets(args.project, scopeGuard.caller);
 
-      // Filter by token's secret-name scope
-      secrets = scopeGuard.filterByScope(secrets);
+    // Filter by token's secret-name scope
+    secrets = scopeGuard.filterByScope(secrets);
 
-      if (args.type) {
-        secrets = secrets.filter((s) => s.type === args.type);
-      }
-      if (args.status) {
-        secrets = secrets.filter((s) => s.status === args.status);
-      }
+    if (args.type) {
+      secrets = secrets.filter((s) => s.type === args.type);
+    }
+    if (args.status) {
+      secrets = secrets.filter((s) => s.status === args.status);
+    }
 
-      const result = secrets.map((s) => ({
-        handle: s.handle,
-        name: s.name,
-        type: s.type,
-        project: s.project,
-        status: s.status,
-        version: s.version,
-        created_at: s.createdAt,
-        updated_at: s.updatedAt,
-        expires_at: s.expiresAt,
-      }));
+    const result = secrets.map((s) => ({
+      handle: s.handle,
+      name: s.name,
+      type: s.type,
+      project: s.project,
+      status: s.status,
+      version: s.version,
+      created_at: s.createdAt,
+      updated_at: s.updatedAt,
+      expires_at: s.expiresAt,
+    }));
 
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
-      };
-    },
-  );
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+    };
+  });
 }

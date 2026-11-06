@@ -4,6 +4,7 @@ import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../util
 import { handleError, printJson, printRecord, formatTimestamp } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
 import { readPemFile } from "./import.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 interface CertAttachOptions {
   cert: string;
@@ -33,6 +34,27 @@ export function registerCertAttachCommand(cert: Command): void {
         const certificatePem = readPemFile(options.cert, "certificate");
         const chainPem =
           options.chain === undefined ? undefined : readPemFile(options.chain, "chain");
+
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            const status = await client.attachCertificate(handle, {
+              certificate_pem: certificatePem,
+              chain_pem: chainPem,
+            });
+            if (options.json) {
+              printJson(status);
+            } else {
+              printRecord({
+                Handle: handle,
+                Subject: status.subject,
+                "Not after": formatTimestamp(status.not_after),
+                "Renewal status": status.renewal_status,
+              });
+            }
+          });
+          return;
+        }
 
         const engine = await loadUnlockedEngine(vaultDir);
         try {

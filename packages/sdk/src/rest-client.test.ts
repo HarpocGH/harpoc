@@ -153,6 +153,22 @@ function member<K extends keyof RestClient>(
   };
 }
 
+const EXPIRING_REPORT = {
+  expiring: [],
+  oauth_refresh_needed: [
+    {
+      handle: "secret://gh",
+      name: "gh",
+      project: null,
+      provider: "github",
+      access_token_expires_at: 1_000,
+      has_refresh_token: true,
+      refresh_status: "expiring_soon",
+    },
+  ],
+  certificates_nearing_renewal: [],
+};
+
 const MEMBERS: MemberRow[] = [
   member("listSecrets", ["proj"], "GET", "/api/v1/secrets?project=proj", {
     data: [],
@@ -322,9 +338,14 @@ const MEMBERS: MemberRow[] = [
     { data: [], returns: [] },
   ),
   member("revokeToken", ["jti-1"], "DELETE", "/api/v1/tokens/jti-1", { data: { revoked: true } }),
+  member("lockVault", [], "POST", "/api/v1/vault/lock", { data: { locked: true } }),
   member("getHealth", [], "GET", "/api/v1/health", {
     data: { state: "unlocked", version: "1.0.0" },
     returns: { state: "unlocked", version: "1.0.0" },
+  }),
+  member("getExpiringReport", [30], "GET", "/api/v1/health/expiring?days=30", {
+    data: EXPIRING_REPORT,
+    returns: EXPIRING_REPORT,
   }),
   member(
     "startOAuthFlow",
@@ -957,6 +978,23 @@ describe("RestClient", () => {
     });
   });
 
+  describe("vault lock", () => {
+    it("lockVault posts to the lock route with the bearer and no body, through the VaultClient interface", async () => {
+      mockFetchResponse({ locked: true });
+      // Through the interface: the member's presence on VaultClient is pinned at compile time.
+      const vaultClient: VaultClient = client;
+
+      await expect(vaultClient.lockVault()).resolves.toBeUndefined();
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(call[0]).toBe(`${BASE_URL}/api/v1/vault/lock`);
+      expect(call[1].method).toBe("POST");
+      expect(call[1].headers).toEqual({ authorization: `Bearer ${TOKEN}` });
+      expect(call[1].body).toBeUndefined();
+    });
+  });
+
   describe("oauth", () => {
     it("startOAuthFlow posts the input verbatim to /api/v1/oauth/authorize", async () => {
       mockFetchResponse(
@@ -1193,6 +1231,19 @@ describe("RestClient", () => {
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];
       expect(call[0]).toBe(`${BASE_URL}/api/v1/certificates/web/status`);
       expect(call[1].method).toBe("GET");
+    });
+  });
+
+  describe("getExpiringReport", () => {
+    it("sends no days query without a window — the route's 7-day default", async () => {
+      mockFetchResponse(EXPIRING_REPORT);
+      const viaInterface: VaultClient = client;
+
+      await expect(viaInterface.getExpiringReport()).resolves.toEqual(EXPIRING_REPORT);
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe(`${BASE_URL}/api/v1/health/expiring`);
+      expect(init.method).toBe("GET");
+      expect(init.body).toBeUndefined();
     });
   });
 

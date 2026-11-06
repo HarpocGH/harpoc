@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printRecord, printJson, formatTimestamp } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 export function registerSecretGetCommand(secret: Command): void {
   secret
@@ -18,6 +19,39 @@ export function registerSecretGetCommand(secret: Command): void {
       ) => {
         const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
         try {
+          const rest = restModeOf(cmd);
+          if (rest) {
+            await runRestMode(rest, async (client) => {
+              if (options.value) {
+                const text = new TextDecoder().decode(await client.getSecretValue(handle));
+                if (options.json) {
+                  printJson({ handle, value: text });
+                } else {
+                  process.stdout.write(text);
+                  if (process.stdout.isTTY) process.stdout.write("\n");
+                }
+                return;
+              }
+              const info = await client.getSecretInfo(handle);
+              if (options.json) {
+                printJson(info);
+              } else {
+                printRecord({
+                  Handle: info.handle,
+                  Name: info.name,
+                  Type: info.type,
+                  Project: info.project ?? "-",
+                  Status: info.status,
+                  Version: info.version,
+                  Created: formatTimestamp(info.createdAt),
+                  Updated: formatTimestamp(info.updatedAt),
+                  Expires: formatTimestamp(info.expiresAt),
+                  Rotated: formatTimestamp(info.rotatedAt),
+                });
+              }
+            });
+            return;
+          }
           const engine = await loadUnlockedEngine(vaultDir);
           try {
             const resolved = resolveTokenCallerForHandle(

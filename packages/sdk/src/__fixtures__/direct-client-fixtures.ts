@@ -55,6 +55,7 @@ export interface MockEngine {
   setAgentPermissions: Mock;
   listIssuedTokens: Mock;
   revokeToken: Mock;
+  lock: Mock;
   getOAuthTokenStatus: Mock;
   refreshOAuthToken: Mock;
   importCertificate: Mock;
@@ -198,6 +199,7 @@ export function createMockEngine(): MockEngine {
     }),
     listIssuedTokens: vi.fn().mockReturnValue([]),
     revokeToken: vi.fn(),
+    lock: vi.fn().mockResolvedValue(undefined),
     getOAuthTokenStatus: vi.fn().mockReturnValue({
       secret_id: "uuid-1",
       provider: "github",

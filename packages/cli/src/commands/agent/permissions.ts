@@ -11,6 +11,7 @@ import {
 } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
 import { parsePositiveInteger } from "../../utils/options.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 interface PermissionsOptions {
   permissions?: string;
@@ -41,6 +42,58 @@ export function registerAgentPermissionsCommand(agent: Command): void {
             : undefined;
         const expiresAt =
           expiresMinutes !== undefined ? Date.now() + expiresMinutes * 60 * 1000 : undefined;
+
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            if (options.permissions !== undefined && options.clear) {
+              throw VaultError.invalidInput("--permissions and --clear are mutually exclusive");
+            }
+            if (options.permissions === undefined && !options.clear) {
+              throw VaultError.invalidInput(
+                "one of --permissions or --clear is required (an empty cell is never written)",
+              );
+            }
+            if (options.clear && options.expires !== undefined) {
+              throw VaultError.invalidInput("--expires cannot be combined with --clear");
+            }
+            const permStrings =
+              options.permissions === undefined
+                ? []
+                : options.permissions.split(",").map((p) => p.trim());
+            for (const p of permStrings) {
+              if (!permissionSchema.safeParse(p).success) {
+                throw VaultError.invalidInput(
+                  `Invalid permission: "${p}". Valid: list, read, use, create, rotate, revoke, admin`,
+                );
+              }
+            }
+            const permissions = permStrings as Permission[];
+            const result = await client.setAgentPermissions(name, handle, {
+              permissions,
+              expires_at: expiresAt,
+            });
+            if (options.json) {
+              printJson(result);
+            } else {
+              printRecord({
+                Agent: name,
+                Secret: handle,
+                Permissions: result.policy ? result.policy.permissions.join(", ") : null,
+                Expires: formatTimestamp(result.policy?.expires_at ?? null),
+              });
+              if (result.gated_before !== result.gated_after) {
+                console.error(
+                  result.gated_after
+                    ? `Note: ${handle} received its first grant — until now no agent or tool token could reach it.`
+                    : `Note: ${handle} has no grants left — no agent or tool token can reach it until one is written.`,
+                );
+              }
+              printSuccess(permissions.length > 0 ? "Permissions set." : "Permissions cleared.");
+            }
+          });
+          return;
+        }
 
         const engine = await loadUnlockedEngine(vaultDir);
         try {

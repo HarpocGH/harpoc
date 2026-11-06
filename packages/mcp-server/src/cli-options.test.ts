@@ -10,6 +10,7 @@ import {
   parseAllowTokenlessOption,
   parseHttpPortOption,
   parseTokenFileOption,
+  parseUrlOption,
   parseVaultDirOption,
   readLaunchTokenFile,
 } from "./cli-options.js";
@@ -198,6 +199,107 @@ describe("parseVaultDirOption", () => {
     expect(source).toContain('parseVaultDirOption(values["vault-dir"])');
     expect(source).not.toContain('values["vault-dir"] as string');
     expect(source).not.toMatch(/if \(vaultDirOption\) return/);
+  });
+});
+
+describe("parseUrlOption (B1)", () => {
+  it("returns undefined when --url is absent", () => {
+    expect(parseUrlOption(undefined)).toEqual({ ok: true, value: undefined });
+  });
+
+  it.each([
+    "http://127.0.0.1:3000",
+    "http://localhost:3000/",
+    "http://[::1]:3000",
+    "https://vault.example",
+    "https://vault.example/harpoc/",
+    "http://127.0.0.1:3000/?",
+  ])("accepts %j", (raw) => {
+    const parsed = parseUrlOption(raw);
+    expect(parsed.ok).toBe(true);
+    expect((parsed as { value: URL }).value.href).toBe(new URL(raw).href);
+  });
+
+  it.each([true, "", "  ", "--token-file", "-"])(
+    "refuses a value-less, blank or flag-shaped --url %j",
+    (raw) => {
+      expect(parseUrlOption(raw)).toEqual({
+        ok: false,
+        message: "Error: --url requires a base URL.\n",
+      });
+    },
+  );
+
+  it.each(["127.0.0.1:3000", "vault", "http://"])("refuses %j as no absolute URL", (raw) => {
+    expect(parseUrlOption(raw)).toEqual({
+      ok: false,
+      message: "Error: --url is not an absolute URL.\n",
+    });
+  });
+
+  it.each(["ftp://127.0.0.1", "ws://127.0.0.1:3000", "file:///tmp/vault", "localhost:3000"])(
+    "refuses the scheme of %j",
+    (raw) => {
+      expect(parseUrlOption(raw)).toEqual({
+        ok: false,
+        message: "Error: --url must use http: or https:.\n",
+      });
+    },
+  );
+
+  // The refusal names the defect, never the value: the value is the credential.
+  it.each(["http://agent:s3cret@127.0.0.1:3000", "https://s3cret@vault.example"])(
+    "refuses credentials in %j without echoing them",
+    (raw) => {
+      const parsed = parseUrlOption(raw);
+      expect(parsed).toEqual({
+        ok: false,
+        message: "Error: --url must not carry credentials; pass the token with --token-file.\n",
+      });
+      expect(JSON.stringify(parsed)).not.toContain("s3cret");
+    },
+  );
+
+  it.each(["http://127.0.0.1:3000?token=s3cret", "http://127.0.0.1:3000/#s3cret"])(
+    "refuses the query or fragment of %j without echoing it",
+    (raw) => {
+      const parsed = parseUrlOption(raw);
+      expect(parsed).toEqual({
+        ok: false,
+        message: "Error: --url must be a base URL, without a query or fragment.\n",
+      });
+      expect(JSON.stringify(parsed)).not.toContain("s3cret");
+    },
+  );
+
+  it.each(["http://vault.example:3000", "http://10.0.0.5:3000", "http://0.0.0.0:3000"])(
+    "refuses plain http: to the non-loopback %j",
+    (raw) => {
+      expect(parseUrlOption(raw)).toEqual({
+        ok: false,
+        message:
+          "Error: --url over plain http: is accepted for a loopback host only; use https:.\n",
+      });
+    },
+  );
+
+  it("index.ts routes --url through parseUrlOption", () => {
+    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    expect(source).toContain("parseUrlOption(values.url)");
+    expect(source).not.toMatch(/new URL\(values\.url/);
+  });
+
+  // Source-text tripwire beside the spawned binary's resolve hook
+  // (`index.spawn.test.ts`): the binary's static graph holds no engine module,
+  // so `--url` runs without one even when that dist is stale.
+  it("index.ts and cli-options.ts import no engine module statically", () => {
+    const index = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    expect(index).not.toMatch(/^import (?!type )[^;]*from "@harpoc\/core";$/m);
+    expect(index).not.toMatch(/^import (?!type )[^;]*from "\.\/(server|http)\.js";$/m);
+    expect(index).not.toMatch(/^export [^;]*from "/m);
+    expect(index).toContain('import("@harpoc/core")');
+    const options = readFileSync(new URL("./cli-options.ts", import.meta.url), "utf8");
+    expect(options).not.toMatch(/from "\.\/(server|http)\.js";/);
   });
 });
 

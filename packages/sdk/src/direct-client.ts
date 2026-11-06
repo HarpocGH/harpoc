@@ -29,6 +29,7 @@ import type { AuditQueryOptions, DecryptedAuditEvent, SecretInfo } from "@harpoc
 import type {
   CertificateRef,
   CreateSecretInput,
+  ExpiringReport,
   GeneratedCsrRef,
   GrantPolicyInput,
   HealthResponse,
@@ -55,6 +56,11 @@ import { importPeer } from "./import-peer.js";
  */
 type OAuthManagerT = import("@harpoc/oauth-proxy").OAuthManager;
 type CertManagerT = import("@harpoc/cert-manager").CertManager;
+
+/** `getExpiringReport`'s window bounds, as the REST route reads them (`rest-api/src/routes/health.ts`). */
+const EXPIRING_DEFAULT_DAYS = 7;
+const EXPIRING_MAX_DAYS = 365;
+const OAUTH_REFRESH_WINDOW_MS = 60 * 60 * 1000;
 
 export interface DirectClientOptions {
   oauthManager?: OAuthManagerT;
@@ -266,10 +272,29 @@ export class DirectClient implements VaultClient {
     this.engine.revokeToken(jti);
   }
 
+  async lockVault(): Promise<void> {
+    await this.engine.lock();
+  }
+
   async getHealth(): Promise<HealthResponse> {
     return {
       state: this.engine.getState(),
       version: HARPOC_VERSION,
+    };
+  }
+
+  /** The `GET /api/v1/health/expiring` report on the trusted local path (`rest-api/src/routes/health.ts`). */
+  async getExpiringReport(days = EXPIRING_DEFAULT_DAYS): Promise<ExpiringReport> {
+    if (!Number.isInteger(days) || days < 1 || days > EXPIRING_MAX_DAYS) {
+      throw VaultError.invalidInput(`days must be an integer between 1 and ${EXPIRING_MAX_DAYS}`);
+    }
+    const threshold = Date.now() + days * 24 * 60 * 60 * 1000;
+    return {
+      expiring: this.engine
+        .listSecrets()
+        .filter((s) => s.expiresAt !== null && s.expiresAt <= threshold && s.status === "active"),
+      oauth_refresh_needed: this.engine.getExpiringOAuthTokenStatuses(OAUTH_REFRESH_WINDOW_MS),
+      certificates_nearing_renewal: this.engine.getExpiringCertificateStatuses(),
     };
   }
 

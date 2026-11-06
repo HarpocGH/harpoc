@@ -4,7 +4,9 @@ export {
   describeCrossPackageImports,
   describeRuntimeDependencyConfinement,
   describeWorkspaceDeps,
+  FORBIDDEN_MODULE_MARKER,
   getPkgRoot,
+  resolveTripwireImportUrl,
 } from "./scaffold-helpers.js";
 export { isConnectionRefused, isIpv6BindUnavailable } from "./skip-reasons.js";
 export { protectorTimer } from "./protector-timer.js";

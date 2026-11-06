@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord, formatTimestamp } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 export function registerOAuthStatusCommand(oauth: Command): void {
   oauth
@@ -12,6 +13,27 @@ export function registerOAuthStatusCommand(oauth: Command): void {
     .action(async (handle: string, options: { json?: boolean; token?: string }, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            const status = await client.getOAuthStatus(handle);
+            if (options.json) {
+              printJson(status);
+            } else {
+              printRecord({
+                Handle: handle,
+                Provider: status.provider,
+                "Access token": status.has_access_token ? "yes" : "no",
+                "Token expires": formatTimestamp(status.access_token_expires_at),
+                "Refresh token": status.has_refresh_token ? "yes" : "no",
+                "Last refreshed": formatTimestamp(status.last_refreshed_at),
+                "Refresh status": status.refresh_status,
+                "Token endpoint auth": status.token_endpoint_auth_method,
+              });
+            }
+          });
+          return;
+        }
         const engine = await loadUnlockedEngine(vaultDir);
         try {
           const resolved = resolveTokenCallerForHandle(

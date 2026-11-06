@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Hoisted mocks (available inside vi.mock factories) ─────────────
@@ -108,10 +110,18 @@ vi.mock("@harpoc/cert-manager", () => ({
   }),
 }));
 
+// Spy wrapper around the real implementation: the assertion's argument and its
+// order against loadUnlockedEngine are observable.
+vi.mock("../utils/runtime-dir.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../utils/runtime-dir.js")>();
+  return { ...actual, assertRuntimeDir: vi.fn(actual.assertRuntimeDir) };
+});
+
 // ── Helpers ────────────────────────────────────────────────────────
 
 import { registerServerCommand } from "./server.js";
 import { buildCli, spyCli, type CliSpies } from "../__fixtures__/cli-harness.js";
+import { assertRuntimeDir } from "../utils/runtime-dir.js";
 
 const run = buildCli(registerServerCommand, ["server", "start"]);
 
@@ -486,6 +496,144 @@ describe("server start", () => {
 
       expect(startServer).toHaveBeenCalled();
       expect(createStdioServerFactory).not.toHaveBeenCalled();
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── --runtime-dir ───────────────────────────────────────────────
+
+  describe("--runtime-dir", () => {
+    const FLAG_AS_PATH =
+      "Error: [INVALID_INPUT] --runtime-dir: a flag, not a path (give a path that starts with a dash as ./-name)";
+    let dir: string;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "harpoc-server-runtime-dir-"));
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    });
+
+    it.each([[["--runtime-dir", "--rest"]], [["--rest", "--runtime-dir=-x"]]])(
+      "refuses a flag taken as the --runtime-dir path first (%j), before the vault opens",
+      async (argv) => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+        await expect(run(argv)).rejects.toThrow("process.exit");
+        expect(spies.exitSpy).toHaveBeenCalledWith(1);
+        expect(spies.errorSpy.mock.calls[0]).toEqual([FLAG_AS_PATH]);
+        expect(spies.errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("At least one of"));
+        expect(assertRuntimeDir).not.toHaveBeenCalled();
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["", "  "])(
+      "refuses an empty --runtime-dir (%j) before the vault opens",
+      async (value) => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+        await expect(run(["--rest", "--runtime-dir", value])).rejects.toThrow("process.exit");
+        expect(spies.exitSpy).toHaveBeenCalledWith(1);
+        expect(spies.errorSpy.mock.calls[0]).toEqual([
+          "Error: [INVALID_INPUT] --runtime-dir: empty path",
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      },
+    );
+
+    it("refuses a missing --runtime-dir before the vault opens", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      const { startServer } = await import("@harpoc/rest-api");
+      const missing = join(dir, "missing");
+
+      await expect(run(["--rest", "--runtime-dir", missing])).rejects.toThrow("process.exit");
+      expect(spies.exitSpy).toHaveBeenCalledWith(1);
+      expect(spies.errorSpy.mock.calls[0]).toEqual([
+        `Error: [INVALID_INPUT] --runtime-dir: no such directory: ${missing}`,
+      ]);
+      expect(assertRuntimeDir).toHaveBeenCalledWith({ path: missing, source: "--runtime-dir" });
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(startServer).not.toHaveBeenCalled();
+    });
+
+    it("checks the directory after the option parses: a port typo reports the port", async () => {
+      await expect(
+        run(["--rest", "--port", "abc", "--runtime-dir", join(dir, "missing")]),
+      ).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls[0]).toEqual([
+        'Error: [INVALID_INPUT] Invalid port "abc". Must be 1-65535.',
+      ]);
+      expect(assertRuntimeDir).not.toHaveBeenCalled();
+    });
+
+    // mkdtemp creates the directory 0700, owned by this user (mkdtemp(3));
+    // win32 refuses the option (the runIf row below).
+    it.skipIf(process.platform === "win32")(
+      "asserts --runtime-dir before the vault opens, then starts the daemon (POSIX)",
+      async () => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+        const { startServer } = await import("@harpoc/rest-api");
+
+        await run(["--rest", "--runtime-dir", dir]);
+
+        expect(assertRuntimeDir).toHaveBeenCalledWith({ path: dir, source: "--runtime-dir" });
+        const [asserted] = vi.mocked(assertRuntimeDir).mock.invocationCallOrder;
+        const [loaded] = vi.mocked(loadUnlockedEngine).mock.invocationCallOrder;
+        expect(asserted).toBeDefined();
+        expect(asserted as number).toBeLessThan(loaded as number);
+        expect(startServer).toHaveBeenCalledWith({
+          engine: mockEngine,
+          port: 3000,
+          hostname: "127.0.0.1",
+          allowedHosts: [],
+          oauthManager: mockRestOAuthManager,
+        });
+        expect(spies.exitSpy).not.toHaveBeenCalled();
+      },
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "refuses a 0755 --runtime-dir before the vault opens (chmod; POSIX)",
+      async () => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+        chmodSync(dir, 0o755);
+
+        await expect(run(["--rest", "--runtime-dir", dir])).rejects.toThrow("process.exit");
+        expect(spies.exitSpy).toHaveBeenCalledWith(1);
+        expect(spies.errorSpy.mock.calls[0]).toEqual([
+          `Error: [INVALID_INPUT] --runtime-dir: mode 0755 is not 0750 or stricter (group-writable or world-accessible): ${dir}`,
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      },
+    );
+
+    it.runIf(process.platform === "win32")(
+      "refuses --runtime-dir on Windows before the vault opens: the owner and mode cannot be checked",
+      async () => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+        await expect(run(["--rest", "--runtime-dir", dir])).rejects.toThrow("process.exit");
+        expect(spies.exitSpy).toHaveBeenCalledWith(1);
+        expect(spies.errorSpy.mock.calls[0]).toEqual([
+          `Error: [INVALID_INPUT] --runtime-dir: not supported on this platform (the owner and mode cannot be checked): ${dir}`,
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      },
+    );
+
+    // Model A untouched: a unit's RuntimeDirectory= (0755 by default) sets the
+    // variable for a daemon that asked for no runtime directory.
+    it("an ambient RUNTIME_DIRECTORY without --runtime-dir is not read: --rest starts", async () => {
+      const { startServer } = await import("@harpoc/rest-api");
+      vi.stubEnv("RUNTIME_DIRECTORY", join(dir, "missing"));
+
+      await run(["--rest"]);
+
+      expect(startServer).toHaveBeenCalled();
+      expect(assertRuntimeDir).not.toHaveBeenCalled();
       expect(spies.exitSpy).not.toHaveBeenCalled();
     });
   });

@@ -121,6 +121,7 @@ function createMocks() {
       setAgentPermissions: vi.fn(),
       listIssuedTokens: vi.fn(),
       revokeToken: vi.fn(),
+      lock: vi.fn(),
     },
     oauthManager: {
       startClientCredentials: vi.fn(),
@@ -159,7 +160,7 @@ interface ScopeSite {
 }
 
 /**
- * One row per `checkScope(` call site under `routes/` (45). A route with a
+ * One row per `checkScope(` call site under `routes/` (46). A route with a
  * second, name-carrying check is reachable there only with the permission held,
  * so those five rows refuse on the project or the name pattern instead — the
  * matrix cell's through the governance middleware, which refuses a token with
@@ -603,6 +604,15 @@ const SITES: ScopeSite[] = [
     token: lacking("admin"),
     reason: "permission",
     untouched: (m) => [m.engine.revokeToken],
+  },
+  {
+    site: "vault.ts:16",
+    method: "POST",
+    route: "/api/v1/vault/lock",
+    path: "/api/v1/vault/lock",
+    token: lacking("admin"),
+    reason: "permission",
+    untouched: (m) => [m.engine.lock],
   },
 ];
 

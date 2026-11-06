@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printSuccess, printJson } from "../../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 export function registerAgentDeactivateCommand(agent: Command): void {
   agent
@@ -12,6 +13,20 @@ export function registerAgentDeactivateCommand(agent: Command): void {
     .action(async (name: string, options: { token?: string; json?: boolean }, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            const result = await client.deactivateAgent(name);
+            if (options.json) {
+              printJson(result);
+            } else {
+              printSuccess(
+                `Agent deactivated (${name}); ${String(result.revoked_tokens)} token(s) revoked`,
+              );
+            }
+          });
+          return;
+        }
         const engine = await loadUnlockedEngine(vaultDir);
         try {
           const resolved = resolveTokenCaller(

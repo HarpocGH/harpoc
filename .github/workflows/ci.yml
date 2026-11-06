@@ -24,6 +24,28 @@ jobs:
       - name: Enable Linux keystore tiers and the bwrap isolation tier (keyutils + Secret Service + bubblewrap)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y keyutils gnome-keyring libsecret-tools dbus-x11 bubblewrap
+      - name: Provision the two identities (Linux, the two-uid tier) with the deploy recipe
+        if: runner.os == 'Linux'
+        # deploy/linux/install-two-identity.sh creates the vault user harpoc, the
+        # group harpoc-clients and the directories of deployment model B; it runs
+        # twice (idempotence) and the layout is checked. two-identity.test.ts then
+        # runs the built CLI as harpoc and probes it as harpoc-ci-agent through
+        # `sudo -n -u` (the runner's sudo is passwordless). ubuntu-22.04+ home
+        # directories are private (0750), so both users get traverse-only access to
+        # $HOME, which holds the checkout; the node probe fails this step if either
+        # user cannot read it.
+        run: |
+          sudo useradd --create-home --shell /bin/bash harpoc-ci-agent
+          sudo bash deploy/linux/install-two-identity.sh harpoc-ci-agent
+          sudo bash deploy/linux/install-two-identity.sh harpoc-ci-agent
+          test "$(sudo stat -c '%a %U:%G' /var/lib/harpoc /run/harpoc /run/harpoc/harpoc-ci-agent | tr '\n' ' ')" = "700 harpoc:harpoc 750 harpoc:harpoc-clients 2750 harpoc:harpoc-ci-agent "
+          id -nG harpoc-ci-agent | grep -qw harpoc-clients
+          sudo chmod o+x "$HOME"
+          for user in harpoc harpoc-ci-agent; do
+            sudo -n -u "$user" -- "$(command -v node)" -e "require('node:fs').accessSync(process.argv[1])" "$GITHUB_WORKSPACE/package.json"
+          done
+          echo "HARPOC_TWO_UID_VAULT_USER=harpoc" >> "$GITHUB_ENV"
+          echo "HARPOC_TWO_UID_AGENT_USER=harpoc-ci-agent" >> "$GITHUB_ENV"
       - name: Probe Linux keystores (diagnostic)
         if: runner.os == 'Linux'
         run: |
@@ -158,6 +180,6 @@ jobs:
         # (non-login processes lack the pam_keyinit link, so @u operations get
         # EACCES without it); gnome-keyring provides the Secret Service.
         env:
-          HARPOC_REQUIRE_PLATFORM_TESTS: secret-service,keyring,isolation,fs-isolation,ssh-live
+          HARPOC_REQUIRE_PLATFORM_TESTS: secret-service,keyring,isolation,fs-isolation,ssh-live,two-uid
         run: dbus-run-session -- sh -c 'echo harpoc-ci | gnome-keyring-daemon --unlock; keyctl link @u @s || true; pnpm test'
       - run: pnpm format:check

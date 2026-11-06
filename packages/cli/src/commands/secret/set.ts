@@ -6,6 +6,7 @@ import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js
 import { resolveSecretValue } from "../../utils/secret-value.js";
 import { handleError, printSuccess, printJson } from "../../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 interface SecretSetOptions {
   type?: string;
@@ -41,6 +42,34 @@ export function registerSecretSetCommand(secret: Command): void {
           );
         }
         const secretType = typeResult.data as SecretType;
+
+        // The value is read here and sent base64 in the create body: the operator typing it
+        // runs this CLI, and the server never echoes it back.
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            const value = await resolveSecretValue({
+              fromFile: options.fromFile,
+              noDecrypt: options.decrypt === false,
+            });
+            try {
+              const result = await client.createSecret({
+                name,
+                type: secretType,
+                project: options.project,
+                value,
+              });
+              if (json) {
+                printJson(result);
+              } else {
+                printSuccess(`Secret '${name}' created (${result.handle})`);
+              }
+            } finally {
+              wipeBuffer(value);
+            }
+          });
+          return;
+        }
 
         // Engine first: a sealed vault must fail before the user types a
         // value or key passphrase, and the resolved plaintext must never

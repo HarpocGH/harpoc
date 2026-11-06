@@ -5,6 +5,7 @@ import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../util
 import { handleError, printSuccess, printJson, printRecord } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
 import { parsePositiveInteger } from "../../utils/options.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 export function registerPolicyGrantCommand(policy: Command): void {
   policy
@@ -40,6 +41,47 @@ export function registerPolicyGrantCommand(policy: Command): void {
               : undefined;
           const expiresAt =
             expiresMinutes !== undefined ? Date.now() + expiresMinutes * 60 * 1000 : undefined;
+
+          const rest = restModeOf(cmd);
+          if (rest) {
+            await runRestMode(rest, async (client) => {
+              const permStrings = options.permissions.split(",").map((p) => p.trim());
+              for (const p of permStrings) {
+                if (!permissionSchema.safeParse(p).success) {
+                  throw VaultError.invalidInput(
+                    `Invalid permission: "${p}". Valid: list, read, use, create, rotate, revoke, admin`,
+                  );
+                }
+              }
+              const parsedType = principalTypeSchema.safeParse(options.principalType);
+              if (!parsedType.success) {
+                throw VaultError.invalidInput(
+                  `Invalid principal type: "${options.principalType}". Valid: agent, tool, project, user`,
+                );
+              }
+              const policyResult = await client.grantPolicy(handle, {
+                principal_type: parsedType.data,
+                principal_id: options.principalId,
+                permissions: permStrings as Permission[],
+                expires_at: expiresAt,
+              });
+              if (options.json) {
+                printJson(policyResult);
+              } else {
+                printRecord({
+                  "Policy ID": policyResult.id,
+                  Secret: handle,
+                  Principal: `${policyResult.principal_type}:${policyResult.principal_id}`,
+                  Permissions: policyResult.permissions.join(", "),
+                  Expires: policyResult.expires_at
+                    ? new Date(policyResult.expires_at).toISOString()
+                    : "-",
+                });
+                printSuccess("Policy granted.");
+              }
+            });
+            return;
+          }
 
           const engine = await loadUnlockedEngine(vaultDir);
           try {

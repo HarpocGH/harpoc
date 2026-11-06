@@ -17,11 +17,13 @@ describe("mcp-server", () => {
     "@harpoc/core": () => import("@harpoc/core"),
     "@harpoc/oauth-proxy": () => import("@harpoc/oauth-proxy"),
     "@harpoc/cert-manager": () => import("@harpoc/cert-manager"),
+    "@harpoc/sdk": () => import("@harpoc/sdk"),
   });
   describeWorkspaceDeps(pkgRoot, [
     "@harpoc/shared",
     "@harpoc/core",
     "@harpoc/oauth-proxy",
     "@harpoc/cert-manager",
+    "@harpoc/sdk",
   ]);
 });

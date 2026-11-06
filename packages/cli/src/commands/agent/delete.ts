@@ -3,6 +3,7 @@ import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js
 import { promptConfirm } from "../../utils/prompt.js";
 import { handleError, printSuccess, printJson } from "../../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 export function registerAgentDeleteCommand(agent: Command): void {
   agent
@@ -19,6 +20,30 @@ export function registerAgentDeleteCommand(agent: Command): void {
       ) => {
         const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
         try {
+          const rest = restModeOf(cmd);
+          if (rest) {
+            await runRestMode(rest, async (client) => {
+              const current = await client.getAgent(name);
+              if (!options.confirm) {
+                const yes = await promptConfirm(
+                  `Delete agent ${name}? This revokes ${String(current.active_tokens)} live token(s) and removes ${String(current.grants)} grant(s).`,
+                );
+                if (!yes) {
+                  console.error("Aborted.");
+                  return;
+                }
+              }
+              const result = await client.deleteAgent(name);
+              if (options.json) {
+                printJson(result);
+              } else {
+                printSuccess(
+                  `Agent deleted (${name}); ${String(result.revoked_tokens)} token(s) revoked, ${String(result.removed_grants)} grant(s) removed`,
+                );
+              }
+            });
+            return;
+          }
           // Engine first (the secret/delete.ts precedent): a sealed vault, a
           // scope refusal and an unknown agent all precede the prompt.
           const engine = await loadUnlockedEngine(vaultDir);

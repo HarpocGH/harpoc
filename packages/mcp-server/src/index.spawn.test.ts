@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { FORBIDDEN_MODULE_MARKER, resolveTripwireImportUrl } from "@harpoc/test-utils";
 
 /**
  * I35 (test-review-2026-10-09): `harpoc-mcp`'s own `--allow-tokenless` conflict
@@ -27,9 +28,18 @@ interface McpResult {
 }
 
 /** The child is killed at the deadline (SIGKILL after the grace) and the promise rejects after its `close`. */
-function spawnMcp(args: string[], env: NodeJS.ProcessEnv, cwd?: string): Promise<McpResult> {
+function spawnMcp(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  cwd?: string,
+  nodeArgs: string[] = [],
+): Promise<McpResult> {
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(process.execPath, [MCP_ENTRY, ...args], { env, cwd, windowsHide: true });
+    const child = spawn(process.execPath, [...nodeArgs, MCP_ENTRY, ...args], {
+      env,
+      cwd,
+      windowsHide: true,
+    });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -160,4 +170,109 @@ describe("harpoc-mcp --vault-dir without a path (spawned binary, Q4)", () => {
     },
     30_000,
   );
+});
+
+/**
+ * B1: `harpoc-mcp --url` is the stdio→REST bridge. Its refusals, like the
+ * stdio ones, land before the token file is read or any vault is opened; each
+ * runs from an empty working directory and home, so a binary that ignored
+ * `--url` would meet no vault either. An ambient HARPOC_TOKEN rides along and
+ * is no channel for `--url`.
+ */
+describe("harpoc-mcp --url refusals (spawned binary, B1)", () => {
+  it.each([
+    {
+      label: "--http",
+      args: ["--url", "http://127.0.0.1:3000", "--http", "--token-file", "TOKEN"],
+      message:
+        "Error: --url is not supported with --http. The bridge serves stdio only; the Streamable HTTP listener runs in the vault's own process.",
+    },
+    {
+      label: "--vault-dir",
+      args: ["--url", "http://127.0.0.1:3000", "--vault-dir", "VAULT", "--token-file", "TOKEN"],
+      message:
+        "Error: --url conflicts with --vault-dir. The bridge opens no vault; the REST server at --url holds it.",
+    },
+    {
+      label: "--allow-tokenless",
+      args: ["--url", "http://127.0.0.1:3000", "--allow-tokenless"],
+      message:
+        "Error: --allow-tokenless is not supported with --url. The bridge holds no engine; the REST server verifies the token on every request.",
+    },
+    {
+      label: "no --token-file",
+      args: ["--url", "http://127.0.0.1:3000"],
+      message:
+        "Error: --url requires --token-file <path>. The REST server verifies that token on every request.",
+    },
+    {
+      label: "a scheme other than http(s)",
+      args: ["--url", "ftp://127.0.0.1:3000", "--token-file", "TOKEN"],
+      message: "Error: --url must use http: or https:.",
+    },
+    {
+      label: "credentials in the URL",
+      args: ["--url", "http://agent:s3cret@127.0.0.1:3000", "--token-file", "TOKEN"],
+      message: "Error: --url must not carry credentials; pass the token with --token-file.",
+    },
+  ])(
+    "refuses --url with $label before the token file is read or any vault is opened",
+    async ({ args, message }) => {
+      const tokenFile = join(vaultDir, "no-such-token");
+      const result = await spawnMcp(
+        args.map((arg) => (arg === "TOKEN" ? tokenFile : arg === "VAULT" ? vaultDir : arg)),
+        childEnv({
+          HARPOC_TOKEN: "b1.ambient.launch-token",
+          HOME: vaultDir,
+          USERPROFILE: vaultDir,
+        }),
+        vaultDir,
+      );
+      expectRefusedBeforeAnyVault(result, message);
+      expect(result.stderr).not.toContain("Cannot read --token-file");
+      expect(result.stderr).not.toContain("s3cret");
+      expect(result.stderr).not.toContain("b1.ambient.launch-token");
+    },
+    30_000,
+  );
+});
+
+/**
+ * B1: the bridge process never resolves `@harpoc/core` — the confinement
+ * test's resolve hook (`@harpoc/test-utils`), preloaded with `--import` so
+ * the binary stays its own entry. The REST server is never contacted: the
+ * bridge forwards nothing until a tool is called, and stdin's EOF (the
+ * spawner ends it at once) is its graceful stop.
+ */
+describe("harpoc-mcp --url holds no engine (spawned binary under the resolve-hook tripwire, B1)", () => {
+  const tripwire = resolveTripwireImportUrl(["@harpoc/core"]);
+
+  it("serves stdio as the bridge without resolving @harpoc/core and stops at stdin EOF", async () => {
+    const tokenFile = join(vaultDir, "token.jwt");
+    writeFileSync(tokenFile, "b1.bridge.token\n", "utf8");
+    const result = await spawnMcp(
+      ["--url", "http://127.0.0.1:1", "--token-file", tokenFile],
+      childEnv({ HOME: vaultDir, USERPROFILE: vaultDir }),
+      vaultDir,
+      ["--import", tripwire],
+    );
+    expect(result.stderr).not.toContain(FORBIDDEN_MODULE_MARKER);
+    expect(result.stderr).toContain("Harpoc MCP bridge → http://127.0.0.1:1 (stdio)");
+    expect(result.stderr).not.toContain("b1.bridge.token");
+    expect(result.stdout).toBe("");
+    expect(result.code).toBe(0);
+    expect(readdirSync(vaultDir)).toEqual(["token.jwt"]);
+  }, 30_000);
+
+  it("control: the engine path resolves @harpoc/core under the same hook", async () => {
+    const result = await spawnMcp(
+      [],
+      childEnv({ HARPOC_TOKEN: "b1.control.token", HOME: vaultDir, USERPROFILE: vaultDir }),
+      vaultDir,
+      ["--import", tripwire],
+    );
+    expect(result.stderr).toContain(`${FORBIDDEN_MODULE_MARKER} @harpoc/core`);
+    expect(result.stderr).toContain("Error: Vault is locked.");
+    expect(result.code).toBe(1);
+  }, 30_000);
 });

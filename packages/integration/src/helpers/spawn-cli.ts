@@ -23,13 +23,43 @@ export const KILL_GRACE_MS = 2_000;
 export const STOP_GRACE_MS = 5_000;
 export const RAW_GET_TIMEOUT_MS = 10_000;
 
-export function runNode(
+/**
+ * The variables a CLI child inherits from the integration worker (vitest.config.ts
+ * sets the keystore switch) that sudo's `env_reset` drops; `runCliAs` and
+ * `startNodeAs` hand them on by name through `/usr/bin/env`.
+ */
+const SUDO_FORWARDED_ENV = ["HARPOC_SESSION_KEYSTORE"] as const;
+
+/** The `sudo` argv that runs `argv` as `user`: `-n` (never prompt), no shell, `env` assignments first. */
+export function sudoArgv(user: string, argv: string[], env: Record<string, string> = {}): string[] {
+  const assignments = Object.entries(env).map(([name, value]) => `${name}=${value}`);
+  return [
+    "-n",
+    "-u",
+    user,
+    "--",
+    ...(assignments.length > 0 ? ["/usr/bin/env", ...assignments] : []),
+    ...argv,
+  ];
+}
+
+function forwardedEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of SUDO_FORWARDED_ENV) {
+    const value = process.env[name];
+    if (value !== undefined) env[name] = value;
+  }
+  return env;
+}
+
+function runChild(
+  command: string,
   argv: string[],
-  opts: { stdin?: string; timeoutMs?: number } = {},
+  opts: { stdin?: string; timeoutMs?: number },
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const timeoutMs = opts.timeoutMs ?? CHILD_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, argv, {
+    const child = spawn(command, argv, {
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
@@ -78,6 +108,13 @@ export function runNode(
   });
 }
 
+export function runNode(
+  argv: string[],
+  opts: { stdin?: string; timeoutMs?: number } = {},
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return runChild(process.execPath, argv, opts);
+}
+
 export function runCli(
   args: string[],
   opts: { vaultDir: string; stdin?: string; timeoutMs?: number },
@@ -85,6 +122,31 @@ export function runCli(
   return runNode(withVaultDir(args, opts.vaultDir), {
     stdin: opts.stdin,
     timeoutMs: opts.timeoutMs,
+  });
+}
+
+/** `argv` run as `user` through `sudo -n -u`, under `runNode`'s deadline. */
+export function runAs(
+  user: string,
+  argv: string[],
+  opts: { stdin?: string; timeoutMs?: number; env?: Record<string, string> } = {},
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return runChild("sudo", sudoArgv(user, argv, opts.env), {
+    stdin: opts.stdin,
+    timeoutMs: opts.timeoutMs,
+  });
+}
+
+/** The built CLI run as `user`: `runCli` through `sudo -n -u`. */
+export function runCliAs(
+  user: string,
+  args: string[],
+  opts: { vaultDir: string; stdin?: string; timeoutMs?: number },
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return runAs(user, [process.execPath, ...withVaultDir(args, opts.vaultDir)], {
+    stdin: opts.stdin,
+    timeoutMs: opts.timeoutMs,
+    env: forwardedEnv(),
   });
 }
 
@@ -108,6 +170,8 @@ export interface StartNodeOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+type SignalDelivery = (child: ChildProcess, signal: NodeJS.Signals) => Promise<void> | void;
+
 export function startCliServer(
   args: string[],
   opts: { vaultDir: string } & StartNodeOptions,
@@ -115,15 +179,70 @@ export function startCliServer(
   return startNode(withVaultDir(args, opts.vaultDir), { stdin: opts.stdin, env: opts.env });
 }
 
+/** `startCliServer` as `user`, through `startNodeAs`. */
+export function startCliServerAs(
+  user: string,
+  args: string[],
+  opts: { vaultDir: string },
+): CliServer {
+  return startNodeAs(user, withVaultDir(args, opts.vaultDir));
+}
+
 export function startNode(argv: string[], opts: StartNodeOptions = {}): CliServer {
-  const child = spawn(process.execPath, argv, {
+  return startChild(process.execPath, argv, opts, (child, signal) => {
+    child.kill(signal);
+  });
+}
+
+/**
+ * `startNode` as `user` through `sudo -n -u`. sudo forks the command and waits
+ * for it; `stop()` signals that command, found as `user`'s child of the sudo
+ * process, with `kill` run as `user` — never the setuid sudo process, which
+ * cannot relay a SIGKILL and is not the invoking user's to signal everywhere.
+ */
+export function startNodeAs(user: string, argv: string[]): CliServer {
+  return startChild(
+    "sudo",
+    sudoArgv(user, [process.execPath, ...argv], forwardedEnv()),
+    {},
+    (child, signal) => signalCommandAs(user, child.pid, signal),
+  );
+}
+
+async function signalCommandAs(
+  user: string,
+  sudoPid: number | undefined,
+  signal: NodeJS.Signals,
+): Promise<void> {
+  if (sudoPid === undefined) return;
+  const listed = await runChild("pgrep", ["-u", user, "-P", String(sudoPid)], {});
+  for (const pid of listed.stdout.split("\n").filter((line) => line !== "")) {
+    await runAs(user, ["kill", "-s", signal.replace(/^SIG/, ""), pid]);
+  }
+}
+
+function startChild(
+  command: string,
+  argv: string[],
+  opts: StartNodeOptions,
+  deliver: SignalDelivery,
+): CliServer {
+  const child = spawn(command, argv, {
     stdio: [opts.stdin ?? "ignore", "pipe", "pipe"],
     env: opts.env,
   });
   let stdout = "";
   let stderr = "";
   let spawnError: Error | undefined;
+  let deliveryError: unknown;
   let exited = false;
+  const signal = (name: NodeJS.Signals): void => {
+    Promise.resolve()
+      .then(() => deliver(child, name))
+      .catch((err: unknown) => {
+        deliveryError = err;
+      });
+  };
   child.on("error", (err: Error) => {
     spawnError = err;
   });
@@ -233,15 +352,18 @@ export function startNode(argv: string[], opts: StartNodeOptions = {}): CliServe
           for (const timer of timers) clearTimeout(timer);
           resolve();
         });
-        child.kill();
+        signal("SIGTERM");
         timers.push(
           setTimeout(() => {
-            child.kill("SIGKILL");
+            signal("SIGKILL");
             timers.push(
               setTimeout(() => {
                 reject(
                   new Error(
-                    `CLI child pid ${String(child.pid)} did not close within ${String(2 * graceMs)} ms of kill() and SIGKILL`,
+                    `CLI child pid ${String(child.pid)} did not close within ${String(2 * graceMs)} ms of kill() and SIGKILL` +
+                      (deliveryError === undefined
+                        ? ""
+                        : `; signal delivery failed: ${String(deliveryError)}`),
                   ),
                 );
               }, graceMs),
@@ -292,14 +414,17 @@ async function waitForHealth(port: number, server: CliServer, timeoutMs = 30_000
 
 export async function startCliServerOnFreePort(
   buildArgs: (port: number) => string[],
-  opts: { vaultDir: string; attempts?: number; pickPort?: () => Promise<number> },
+  opts: { vaultDir: string; attempts?: number; pickPort?: () => Promise<number>; user?: string },
 ): Promise<{ server: CliServer; port: number }> {
   const attempts = opts.attempts ?? 3;
   const pickPort = opts.pickPort ?? freePort;
   let last = "";
   for (let attempt = 0; attempt < attempts; attempt++) {
     const port = await pickPort();
-    const server = startCliServer(buildArgs(port), { vaultDir: opts.vaultDir });
+    const server =
+      opts.user === undefined
+        ? startCliServer(buildArgs(port), { vaultDir: opts.vaultDir })
+        : startCliServerAs(opts.user, buildArgs(port), { vaultDir: opts.vaultDir });
     try {
       await waitForHealth(port, server);
       return { server, port };

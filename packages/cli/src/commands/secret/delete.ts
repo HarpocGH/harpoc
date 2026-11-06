@@ -3,6 +3,7 @@ import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js
 import { promptConfirm } from "../../utils/prompt.js";
 import { handleError, printSuccess } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 export function registerSecretDeleteCommand(secret: Command): void {
   secret
@@ -14,6 +15,21 @@ export function registerSecretDeleteCommand(secret: Command): void {
       async (handle: string, options: { confirm?: boolean; token?: string }, cmd: Command) => {
         const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
         try {
+          const rest = restModeOf(cmd);
+          if (rest) {
+            await runRestMode(rest, async (client) => {
+              if (!options.confirm) {
+                const yes = await promptConfirm(`Delete secret ${handle}?`);
+                if (!yes) {
+                  console.error("Aborted.");
+                  return;
+                }
+              }
+              await client.revokeSecret(handle);
+              printSuccess(`Secret deleted (${handle})`);
+            });
+            return;
+          }
           // Engine first (the set.ts precedent): a sealed vault and scope
           // refusal both precede the confirmation prompt.
           const engine = await loadUnlockedEngine(vaultDir);

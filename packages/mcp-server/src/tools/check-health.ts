@@ -1,9 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/server";
-import { z } from "zod";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
 import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
+import { CHECK_SECRET_HEALTH_TOOL } from "./definitions.js";
 
 const PERMISSION: Permission = "list";
 const EXPIRING_SOON_DAYS = 7;
@@ -16,13 +16,8 @@ export function registerCheckHealth(
   rateLimiter: RateLimiter,
 ): void {
   server.registerTool(
-    "check_secret_health",
-    {
-      description: "Check vault and secret health status",
-      inputSchema: z.object({
-        handle: z.string().optional().describe("Optional: check a specific secret (omit for all)"),
-      }),
-    },
+    CHECK_SECRET_HEALTH_TOOL.name,
+    CHECK_SECRET_HEALTH_TOOL.config,
     async (args) => {
       scopeGuard.checkAccess(PERMISSION, undefined, undefined, "check_secret_health");
       rateLimiter.checkLimit();

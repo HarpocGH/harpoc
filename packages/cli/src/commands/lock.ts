@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError, printSuccess } from "../utils/output.js";
+import { restModeOf, runRestMode } from "../utils/rest-mode.js";
 
 export function registerLockCommand(program: Command): void {
   program
@@ -9,6 +10,14 @@ export function registerLockCommand(program: Command): void {
     .action(async (_options, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            await client.lockVault();
+            printSuccess("Vault locked.");
+          });
+          return;
+        }
         const engine = await loadUnlockedEngine(vaultDir);
         try {
           await engine.lock();

@@ -3,6 +3,7 @@ import { IssuedTokenStatus } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printTable, formatTimestamp } from "../../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 /**
  * The issued-token registry (v1.4): claims metadata only. No listing can hand
@@ -23,6 +24,33 @@ export function registerAuthListCommand(auth: Command): void {
       ) => {
         const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
         try {
+          const rest = restModeOf(cmd);
+          if (rest) {
+            await runRestMode(rest, async (client) => {
+              const tokens = await client.listTokens({
+                agent: options.agent,
+                status: options.all ? "all" : IssuedTokenStatus.ACTIVE,
+              });
+              if (options.json) {
+                printJson(tokens);
+              } else {
+                printTable(
+                  tokens.map((t) => ({
+                    JTI: t.jti,
+                    Subject: t.subject,
+                    Type: t.principal_type,
+                    Agent: t.agent,
+                    Scope: t.scope.join(","),
+                    Label: t.label,
+                    Issued: formatTimestamp(t.issued_at),
+                    Expires: formatTimestamp(t.expires_at),
+                    Status: t.status,
+                  })),
+                );
+              }
+            });
+            return;
+          }
           const engine = await loadUnlockedEngine(vaultDir);
           try {
             const resolved = resolveTokenCaller(

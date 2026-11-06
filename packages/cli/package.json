@@ -30,6 +30,7 @@
     "@harpoc/mcp-server": "workspace:*",
     "@harpoc/oauth-proxy": "workspace:*",
     "@harpoc/rest-api": "workspace:*",
+    "@harpoc/sdk": "workspace:*",
     "@harpoc/shared": "workspace:*",
     "@harpoc/web-ui": "workspace:*",
     "@modelcontextprotocol/server": "^2.4.0",

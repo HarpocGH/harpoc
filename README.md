@@ -139,6 +139,8 @@ By default, Harpoc looks for a `.harpoc` directory in the current working direct
 }
 ```
 
+`--vault-dir` opens a local vault; `harpoc --url <base> --token-file <path> <command>` instead sends the command to a running REST server (see [Deployment models](#deployment-models)) — the two exclude each other.
+
 ### Streamable HTTP Transport
 
 For clients that connect to a URL instead of spawning a process:
@@ -148,6 +150,23 @@ npx harpoc server start --mcp-http --mcp-http-port 3001
 ```
 
 The endpoint is `http://127.0.0.1:3001/mcp`. Every request requires a vault-issued JWT (`Authorization: Bearer`) — there is no tokenless mode over HTTP. Since 2026-09-16 the same endpoint also serves the `2026-07-28` revision: a client that speaks it gets a per-request server with no session; a client that sends `initialize` gets the session path exactly as before.
+
+### REST Bridge (Deployment Model B)
+
+When the vault runs under its own user and the agent under another (see [Deployment models](#deployment-models)), the agent's host does not spawn the in-process server — it cannot read the vault's session. It spawns `harpoc-mcp --url` instead: a stdio server that holds no engine and reaches the vault only through its REST API, with the agent's token file as the bearer, read again for every call so a rotated token is picked up:
+
+```json
+{
+  "mcpServers": {
+    "harpoc": {
+      "command": "harpoc-mcp",
+      "args": ["--url", "http://127.0.0.1:3000", "--token-file", "/run/harpoc/<consumer>/token.jwt"]
+    }
+  }
+}
+```
+
+The tools and resources are the stdio server's. The bridge runs as the agent, so it never collects a value: `create_secret` creates the secret without one (the vault user sets it with `harpoc secret set`), and `rotate_secret` and the `authorization_code` and `client_credentials` grants of `start_oauth_flow` refuse, naming the command to run as the vault user. The REST server scopes and audits every call. `--url` is refused together with `--http`, `--vault-dir` or `--allow-tokenless`, and plain `http:` is accepted for a loopback host only.
 
 ### Launch Token Options
 
@@ -177,6 +196,8 @@ Flags:
 - `--project` — Project scope (a project-scoped token administers no governance route or command)
 - `--secrets` — Comma-separated secret-name patterns the token can access (`*` wildcards, e.g. `db-*`; full-anchored, case-sensitive)
 - `--ttl` — Token lifetime in minutes (default: 60)
+
+A token written with `auth token --out <file>` is also the bearer of the CLI's REST mode: `harpoc --url http://127.0.0.1:3000 --token-file <file> secret list` (see [Deployment models](#deployment-models)).
 
 ## OAuth Secrets
 
@@ -279,6 +300,75 @@ Summary — the detailed security policy, design overview and accepted risks liv
 - **Lazy secret expiry**: secrets with an `expires_at` timestamp are checked on access and automatically transitioned to expired status.
 - **JWT sessions** with sliding window TTL (15 min default, 24 h maximum), store-based token revocation with automatic pruning of expired entries.
 - **Listener host allowlist**: both HTTP listeners validate every request's `Host` (and `Origin`) against `--allowed-host` plus, on a loopback bind, the loopback names; a non-loopback bind without the flag is refused. Terminate TLS at a reverse proxy and list its public name — forwarded headers are never trusted.
+
+## Deployment models
+
+Harpoc runs in one of two deployment models. They differ in who runs what, not in the cryptography — and that decides what a subverted or shell-wielding agent can read.
+
+### Model A — attended, single-identity
+
+One OS user unlocks the vault; the CLI, the MCP server and the REST API each embed the vault engine and coordinate through the SQLite file and the `0600` session file, so all of them run as that user. A **tool-only agent** — an MCP host holding a launch token, or a REST / MCP-over-HTTP client holding a bearer — holds a use-scoped token and nothing else. An agent that runs shell commands **under the same user** holds everything that user holds: it can read the session file and unwrap the key-encryption key from it, load the engine in-process, call `harpoc secret get --value`, and read `/proc/<pid>/environ` of every process the vault spawned for it. File modes cannot separate two processes of one user. Model A is the default — every default of `init`, `unlock`, `server start` and the stdio MCP server is model A — and stays the model for attended use.
+
+### Model B — two identities
+
+The vault runs as a dedicated system user, `harpoc`; each agent runs under an OS user of its own and reaches the vault only over REST or MCP over HTTP, with a token. Nothing an agent user can read holds a key or a plaintext: the vault directory is `0700 harpoc`, the session file `0600 harpoc`, and every child the vault spawns runs as `harpoc`, so its environment is out of the agent's reach.
+
+Not in this build (2026-11-05): the memory session that keeps the daemon's keys out of any file (`server start --session memory`), the machine-bound unlock credential that starts the daemon after a reboot without a human, issuer-side token rotation into the consumer directories, the egress credential proxy and the persistent ssh-agent socket. Until they land the daemon runs in file session mode — it reads the session file the administrator's unlock wrote, seals when that session expires (15 minutes idle, 24 hours at most) and needs a person to unlock again — and an agent's own tools (`git`, `curl`, SDKs) get no credential from the vault.
+
+**The layout.** Run the recipe as root once per host, naming the agent users (each needs its own primary group — `useradd --create-home agent1` makes one):
+
+```bash
+sudo deploy/linux/install-two-identity.sh agent1 agent2
+```
+
+It is idempotent and creates the system group `harpoc-clients`, the system user `harpoc` (primary group `harpoc`, no login shell, home `/var/lib/harpoc`), the vault directory `/var/lib/harpoc` (`0700 harpoc:harpoc`), the runtime directory `/run/harpoc` (`0750 harpoc:harpoc-clients`, so only agent users can enter it) and one consumer directory per agent user, `/run/harpoc/<agent>` (`02750 harpoc:<agent's group>`): the set-group-ID bit gives every file the vault writes there the agent's group without `harpoc` belonging to it. Each agent user joins `harpoc-clients`. An agent user's name is its consumer name — lowercase letters, digits, `_` and `-`, not dash-led — and the recipe refuses any other. `/run` is a tmpfs: on a systemd host the recipe also writes `/etc/tmpfiles.d/harpoc.conf`, which `systemd-tmpfiles` applies at every boot; elsewhere run the recipe again at boot. Do not let a unit's `RuntimeDirectory=` own `/run/harpoc`: systemd removes that directory, consumer directories included, whenever the unit stops.
+
+**Administration — attended, as the vault user.** Every administrative command runs in-process under `harpoc`, as model A does under one user: the session file `unlock` writes is `harpoc`'s own and unreadable to every agent user. Token issuance stays CLI-only, so the administrator mints each consumer's token into its consumer directory and gives the agent's group read access:
+
+```bash
+sudo -u harpoc harpoc --vault-dir /var/lib/harpoc init
+sudo -u harpoc harpoc --vault-dir /var/lib/harpoc agent register agent1
+sudo -u harpoc harpoc --vault-dir /var/lib/harpoc secret set api-key
+sudo -u harpoc harpoc --vault-dir /var/lib/harpoc secret allow secret://api-key --url "https://api.example.com/*"
+sudo -u harpoc harpoc --vault-dir /var/lib/harpoc policy grant secret://api-key --principal-type agent --principal-id agent1 --permissions use
+sudo -u harpoc harpoc --vault-dir /var/lib/harpoc auth token --agent agent1 --scope use --ttl 1440 --out /run/harpoc/agent1/token.jwt
+sudo -u harpoc chmod 0640 /run/harpoc/agent1/token.jwt
+```
+
+`harpoc` here is the built CLI and `harpoc-mcp` the built MCP server (`packages/cli/dist/index.js` and `packages/mcp-server/dist/index.js` of a checkout every one of these users can read), linked into a directory on `sudo`'s `secure_path` such as `/usr/local/bin`. Pass `--vault-dir` on every command: without it the CLI looks for `.harpoc` in the administrator's working directory first. Under `sudo` there is no D-Bus session and the kernel keyring is not one the vault user possesses, so `init` and `unlock` answer `SESSION_KEYSTORE_UNAVAILABLE` (measured on Debian 12): run the administrative commands as `sudo -u harpoc env HARPOC_SESSION_KEYSTORE=off harpoc …` — the session file is then protected by its `0600` mode under the `harpoc` UID alone, which is the boundary model B draws. A failed `init` leaves `default.vault.db` behind and a retry reports an existing vault; remove the file before retrying. A token expires within 24 hours; re-mint it the same way (`--out` refuses an existing file, so remove the old one first).
+
+**The daemon**, as the vault user (loopback only, port 3000 by default; `--runtime-dir` refuses a runtime directory that is not `harpoc`'s own and `0750` or stricter, reads no ambient `$RUNTIME_DIRECTORY` in this build, and is refused on Windows):
+
+```bash
+sudo -u harpoc harpoc --vault-dir /var/lib/harpoc server start --rest --runtime-dir /run/harpoc
+```
+
+**The consumers**, as an agent user — the CLI in its REST mode, and the stdio→REST bridge as an MCP host entry; neither opens a vault, the bearer comes from `--token-file` only (an ambient `HARPOC_TOKEN` is refused by the CLI and ignored by the bridge), and commands that have no REST route (`init`, `unlock`, token issuance) refuse with `REST_MODE_UNSUPPORTED`:
+
+```bash
+harpoc --url http://127.0.0.1:3000 --token-file /run/harpoc/agent1/token.jwt secret list
+```
+
+```json
+{
+  "mcpServers": {
+    "harpoc": {
+      "command": "harpoc-mcp",
+      "args": ["--url", "http://127.0.0.1:3000", "--token-file", "/run/harpoc/agent1/token.jwt"]
+    }
+  }
+}
+```
+
+**Locking.** In this build the daemon runs on the administrator's session, so `harpoc lock` as the vault user — which erases the session file — seals the daemon as well, at its next session check (within 30 seconds); so does a fresh `unlock`, whose new session is not the daemon's. Without a shell as `harpoc`, lock the daemon over REST, at once, with an admin-scoped token — `harpoc --url http://127.0.0.1:3000 --token-file <admin token file> lock`, which is `POST /api/v1/vault/lock` — or stop it with `SIGTERM`; a use-scoped token is refused (`403`). With the memory session of a later build the daemon reads no session file, and `harpoc lock` reaches only the administrator's own session.
+
+**The consumer rule.** The `process` context of `use_secret` stays for vault-owned work — anything that may run as `harpoc`. For agent-owned work a consumer must not call it: the child would run the agent's command under the vault's UID. The corollary is stricter: a secret whose command allowlist holds an acknowledged interpreter or exec wrapper (`secret allow --acknowledge-interpreter`) runs agent-authored programs as `harpoc`, and **model B collapses to model A for that secret** — such a program can read the vault directory and the session file.
+
+**What model B does not close.** The confused deputy: an agent uses every secret its grant allows, inside the allowlists, as far as the credential's own permissions reach. Root and any code under the `harpoc` UID read the unlocked key-encryption key, as in model A. An agent's own `/proc`, its environment and its loopback traffic are its own to read — other agent users see none of them, root sees all. The REST listener is loopback TCP, which every local user can reach: the token is the authentication on every request, and the consumer directory's mode is the second factor only for the socket listeners later builds add. Model B is single-host; a vault on another host is future work.
+
+**Identity tokens and third-party secrets.** An agent's own identity — its chat-channel bot token, its model provider's OAuth token — is what makes the process the agent: the agent must present it, so it cannot be hidden from the agent, only kept off its disk, and whoever controls the agent process can act as the agent in either model. Model B brokers **third-party** secrets — the credentials an agent uses on someone else's API — and leaves identity tokens with the principal that holds them by definition.
+
+**The Linux loop.** `deploy/dev-container/run.sh` (bash; Git Bash on Windows) builds a Debian container with Node 24, runs the recipe in it twice (the idempotence check), copies the working tree in, installs and builds, and runs the whole suite as a local Linux leg requiring the ubuntu leg's tiers (`HARPOC_DEV_TIERS` narrows them) — the two-UID suite included, as the vault user `harpoc` and the agent user `agent`; `run.sh shell` opens a shell there instead (it needs a terminal).
 
 ## Tech Stack
 

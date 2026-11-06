@@ -88,6 +88,34 @@ export function describeWorkspaceDeps(pkgRoot: string, deps: string[]): void {
   });
 }
 
+/** What the confinement resolve hook writes to fd 2, once per forbidden specifier it resolves. */
+export const FORBIDDEN_MODULE_MARKER = "FORBIDDEN_MODULE_RESOLVED";
+
+/** The resolve hook itself, as a `data:` module URL for `node:module`'s `register`. */
+function resolveTripwireHookUrl(forbidden: readonly string[]): string {
+  const hook =
+    'import { writeSync } from "node:fs";\n' +
+    `const FORBIDDEN = ${JSON.stringify(forbidden)};\n` +
+    "export async function resolve(specifier, context, nextResolve) {\n" +
+    '  if (FORBIDDEN.some((pattern) => specifier === pattern || specifier.startsWith(pattern + "/"))) {\n' +
+    `    writeSync(2, "${FORBIDDEN_MODULE_MARKER} " + specifier + "\\n");\n` +
+    "  }\n" +
+    "  return nextResolve(specifier, context);\n" +
+    "}\n";
+  return `data:text/javascript,${encodeURIComponent(hook)}`;
+}
+
+/**
+ * The same tripwire as a `node --import <url>` preload, for a spawned binary
+ * that must stay its own entry (`process.argv[1]` — `harpoc-mcp`'s direct-run
+ * guard): every forbidden specifier the process resolves writes
+ * {@link FORBIDDEN_MODULE_MARKER} to its stderr (B1).
+ */
+export function resolveTripwireImportUrl(forbidden: readonly string[]): string {
+  const register = `import { register } from "node:module";\nregister(${JSON.stringify(resolveTripwireHookUrl(forbidden))});\n`;
+  return `data:text/javascript,${encodeURIComponent(register)}`;
+}
+
 /**
  * Assert that importing `entryUrl` in a fresh Node process never resolves a
  * `forbidden` package (exact specifier or a subpath of it — dependency
@@ -102,17 +130,8 @@ export function describeRuntimeDependencyConfinement(options: {
   forbidden: string[];
   control: string;
 }): void {
-  const MARKER = "FORBIDDEN_MODULE_RESOLVED";
-  const hook =
-    'import { writeSync } from "node:fs";\n' +
-    `const FORBIDDEN = ${JSON.stringify(options.forbidden)};\n` +
-    "export async function resolve(specifier, context, nextResolve) {\n" +
-    '  if (FORBIDDEN.some((pattern) => specifier === pattern || specifier.startsWith(pattern + "/"))) {\n' +
-    `    writeSync(2, "${MARKER} " + specifier + "\\n");\n` +
-    "  }\n" +
-    "  return nextResolve(specifier, context);\n" +
-    "}\n";
-  const hookUrl = `data:text/javascript,${encodeURIComponent(hook)}`;
+  const MARKER = FORBIDDEN_MODULE_MARKER;
+  const hookUrl = resolveTripwireHookUrl(options.forbidden);
 
   function runWithTripwire(body: string): Promise<{ exitCode: number | null; stderr: string }> {
     const script = [

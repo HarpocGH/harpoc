@@ -1,17 +1,21 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { tmpdir, userInfo } from "node:os";
+import { delimiter, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import { VaultEngine } from "@harpoc/core";
 import { SESSION_FILE_NAME, VAULT_DB_NAME } from "@harpoc/shared";
 import {
+  CLI_ENTRY,
   freePort,
   runCli,
+  runCliAs,
   runNode,
   startCliServer,
   startCliServerOnFreePort,
   startNode,
+  startNodeAs,
+  sudoArgv,
   type CliServer,
 } from "./spawn-cli.js";
 
@@ -247,5 +251,104 @@ describe("child deadlines (SG-33, W1-11, DM26-11)", () => {
       }
     },
     10_000,
+  );
+});
+
+describe("sudo -n -u children (the two-UID suite)", () => {
+  it("sudoArgv runs the argv as the user, non-interactively, with no shell and no assignment", () => {
+    expect(sudoArgv("vault", ["/usr/bin/id", "-u"])).toEqual([
+      "-n",
+      "-u",
+      "vault",
+      "--",
+      "/usr/bin/id",
+      "-u",
+    ]);
+  });
+
+  it("sudoArgv carries named variables through /usr/bin/env, past sudo's env_reset", () => {
+    expect(sudoArgv("vault", ["/bin/true"], { HARPOC_SESSION_KEYSTORE: "off" })).toEqual([
+      "-n",
+      "-u",
+      "vault",
+      "--",
+      "/usr/bin/env",
+      "HARPOC_SESSION_KEYSTORE=off",
+      "/bin/true",
+    ]);
+  });
+
+  describe.skipIf(process.platform === "win32")(
+    "through a fake sudo on PATH (POSIX: spawn runs the script without a shell)",
+    () => {
+      let fakeDir: string;
+      const savedPath = process.env["PATH"];
+
+      beforeAll(() => {
+        fakeDir = mkdtempSync(join(tmpdir(), "harpoc-fake-sudo-"));
+      });
+
+      afterAll(() => {
+        process.env["PATH"] = savedPath;
+        rmSync(fakeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      });
+
+      function installFakeSudo(lines: string[]): void {
+        const path = join(fakeDir, "sudo");
+        writeFileSync(path, `${lines.join("\n")}\n`);
+        chmodSync(path, 0o755);
+        process.env["PATH"] = `${fakeDir}${delimiter}${savedPath ?? ""}`;
+      }
+
+      it("runCliAs spawns sudo with node, the CLI entry and the forwarded keystore switch", async () => {
+        installFakeSudo(["#!/bin/sh", `for a in "$@"; do printf '%s\\n' "$a"; done`]);
+        const run = await runCliAs("vault", ["--version"], { vaultDir: "/v" });
+        expect(run.code).toBe(0);
+        expect(run.stdout.split("\n").slice(0, -1)).toEqual([
+          "-n",
+          "-u",
+          "vault",
+          "--",
+          "/usr/bin/env",
+          "HARPOC_SESSION_KEYSTORE=off",
+          process.execPath,
+          CLI_ENTRY,
+          "--vault-dir",
+          "/v",
+          "--version",
+        ]);
+      });
+
+      it("startNodeAs' stop() signals the command as its user, not the sudo process", async () => {
+        installFakeSudo([
+          "#!/bin/sh",
+          'trap "" TERM',
+          "shift 4",
+          '"$@" &',
+          "child=$!",
+          'wait "$child"',
+          "exit $?",
+        ]);
+        const s = startNodeAs(userInfo().username, [
+          "-e",
+          "process.on('SIGTERM', () => { process.stderr.write('term\\n'); process.exit(0); }); process.stderr.write('ready ' + process.pid + '\\n'); setInterval(() => {}, 1e6)",
+        ]);
+        const command: { pid?: number } = {};
+        onTestFinished(async () => {
+          if (command.pid !== undefined) {
+            try {
+              process.kill(command.pid, "SIGKILL");
+            } catch (err) {
+              if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
+            }
+          }
+          await s.stop(200);
+        });
+        command.pid = Number((await s.waitForStderr(/ready (\d+)/, 5_000))[1]);
+        await s.stop(2_000);
+        expect(s.stderrSoFar()).toMatch(/term/);
+        expect(s.child.exitCode).toBe(0);
+      }, 15_000);
+    },
   );
 });

@@ -75,10 +75,10 @@ describe("enum member counts", () => {
     expect(Object.values(OAuthProviderPreset)).toHaveLength(5);
   });
 
-  it("ErrorCode has 110 members", () => {
+  it("ErrorCode has 112 members", () => {
     // Filter out reverse mappings (numeric keys) from TypeScript enum
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(110);
+    expect(members).toHaveLength(112);
   });
 
   it("TokenPrincipalType has 3 members and excludes project", () => {
@@ -199,5 +199,12 @@ describe("AuditEventType agent governance values (v1.4)", () => {
     expect(AuditEventType.AGENT_ACTIVATE).toBe("agent.activate");
     expect(AuditEventType.AGENT_DEACTIVATE).toBe("agent.deactivate");
     expect(AuditEventType.AGENT_DELETE).toBe("agent.delete");
+  });
+});
+
+describe("ErrorCode deployment model B values (B1)", () => {
+  it("ErrorCode carries the REST-mode refusal and the reserved session-mode conflict", () => {
+    expect(ErrorCode.REST_MODE_UNSUPPORTED).toBe("REST_MODE_UNSUPPORTED");
+    expect(ErrorCode.SESSION_MODE_CONFLICT).toBe("SESSION_MODE_CONFLICT");
   });
 });

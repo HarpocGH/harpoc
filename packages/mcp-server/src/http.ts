@@ -28,9 +28,10 @@ import {
 } from "@harpoc/shared";
 import { InjectionGuard } from "./guards/injection-guard.js";
 import { RateLimiter } from "./guards/rate-limiter.js";
+import { DEFAULT_MCP_HTTP_PORT } from "./cli-options.js";
 import { createDefaultOAuthManager, createMcpServer } from "./server.js";
 
-export const DEFAULT_MCP_HTTP_PORT = 3001;
+export { DEFAULT_MCP_HTTP_PORT };
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_ENDPOINT = "/mcp";
 const MAX_SESSIONS = 128;

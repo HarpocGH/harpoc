@@ -21,6 +21,14 @@ const NOT_A_DIST_LIBRARY: Record<string, string> = {
   "test-utils": "source-only — exports ./src/index.ts",
   "web-ui": "a vite SPA served by rest-api — exports only ./package.json",
 };
+/** Dist libraries whose `exports["."]` is not `dist/index` — the entry's basename, and why. */
+const LIBRARY_ENTRY: Record<string, { entry: string; reason: string }> = {
+  "mcp-server": {
+    entry: "lib",
+    reason:
+      "dist/index.js is the harpoc-mcp binary, whose static graph must not load the engine (B1)",
+  },
+};
 const PACKAGES = WORKSPACE.filter((p) => !Object.hasOwn(NOT_A_DIST_LIBRARY, p));
 /** The root manifest and every workspace package's, relative to the monorepo root. */
 const MANIFESTS = ["package.json", ...WORKSPACE.map((p) => `packages/${p}/package.json`)];
@@ -99,8 +107,9 @@ describe("monorepo structure", () => {
         const exports = pkgJson.exports as Record<string, Record<string, string>>;
         expect(exports["."]).toBeDefined();
         const entry = exports["."] as Record<string, string>;
-        expect(entry.types).toBe("./dist/index.d.ts");
-        expect(entry.import).toBe("./dist/index.js");
+        const base = LIBRARY_ENTRY[pkg]?.entry ?? "index";
+        expect(entry.types).toBe(`./dist/${base}.d.ts`);
+        expect(entry.import).toBe(`./dist/${base}.js`);
       });
 
       it('has "build" script', () => {
@@ -118,7 +127,8 @@ describe("monorepo structure", () => {
   }
 
   it("every exemption names a workspace package", () => {
-    expect(Object.keys(NOT_A_DIST_LIBRARY).filter((p) => !WORKSPACE.includes(p))).toEqual([]);
+    const exempted = [...Object.keys(NOT_A_DIST_LIBRARY), ...Object.keys(LIBRARY_ENTRY)];
+    expect(exempted.filter((p) => !WORKSPACE.includes(p))).toEqual([]);
   });
 
   it.each(Object.keys(NOT_A_DIST_LIBRARY))('%s has "type": "module"', (pkg) => {
@@ -180,9 +190,10 @@ describe("manifest dependency blocks are sorted (TU-2, 2026-09-29)", () => {
 // T3, 2026-07-16) and the provisioned macOS keychain, two at the 2026-09-08 RED
 // (D5), the series file the Windows legs upload joining them 2026-09-09 — never
 // reached a vitest worker under `pnpm test`; the gate was inert and the
-// keychain suites ran against the runner's login keychain.
+// keychain suites ran against the runner's login keychain. The two-UID suite's
+// users (tranche B1) ride the same list.
 describe("turbo env pass-through (D5, 2026-09-08; the series file 2026-09-09)", () => {
-  it("the test task names the three variables ci.yml sets for it", () => {
+  it("the test task names the five variables ci.yml sets for it", () => {
     const raw = readFileSync(resolve(monorepoRoot, "turbo.json"), "utf-8");
     const turbo = JSON.parse(raw) as {
       tasks: Record<string, { env?: string[] }>;
@@ -191,6 +202,8 @@ describe("turbo env pass-through (D5, 2026-09-08; the series file 2026-09-09)", 
       "HARPOC_REQUIRE_PLATFORM_TESTS",
       "HARPOC_TEST_KEYCHAIN",
       "HARPOC_SERIES_FILE",
+      "HARPOC_TWO_UID_VAULT_USER",
+      "HARPOC_TWO_UID_AGENT_USER",
     ]);
   });
 

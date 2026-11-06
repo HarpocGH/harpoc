@@ -1,10 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/server";
-import { z } from "zod";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
 import { parseHandle } from "@harpoc/shared";
 import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
+import { REVOKE_SECRET_TOOL } from "./definitions.js";
 
 const PERMISSION: Permission = "revoke";
 
@@ -14,37 +14,28 @@ export function registerRevokeSecret(
   scopeGuard: ScopeGuard,
   rateLimiter: RateLimiter,
 ): void {
-  server.registerTool(
-    "revoke_secret",
-    {
-      description: "Permanently revoke a secret (cannot be undone)",
-      inputSchema: z.object({
-        handle: z.string().describe("Secret handle to revoke"),
-      }),
-    },
-    async (args) => {
-      const parsed = parseHandle(args.handle);
-      scopeGuard.checkAccess(PERMISSION, parsed.project, parsed.name, "revoke_secret");
-      rateLimiter.checkLimit();
+  server.registerTool(REVOKE_SECRET_TOOL.name, REVOKE_SECRET_TOOL.config, async (args) => {
+    const parsed = parseHandle(args.handle);
+    scopeGuard.checkAccess(PERMISSION, parsed.project, parsed.name, "revoke_secret");
+    rateLimiter.checkLimit();
 
-      await engine.revokeSecret(args.handle, scopeGuard.caller);
+    await engine.revokeSecret(args.handle, scopeGuard.caller);
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                handle: args.handle,
-                status: "revoked",
-                message: "Secret has been permanently revoked",
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    },
-  );
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              handle: args.handle,
+              status: "revoked",
+              message: "Secret has been permanently revoked",
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  });
 }

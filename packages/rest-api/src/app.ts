@@ -17,6 +17,7 @@ import { createOAuthRoutes } from "./routes/oauth.js";
 import { createCertificateRoutes } from "./routes/certificates.js";
 import { createAgentRoutes } from "./routes/agents.js";
 import { createTokenRoutes } from "./routes/tokens.js";
+import { createVaultRoutes } from "./routes/vault.js";
 import { createUiRoutes } from "./routes/ui.js";
 import type { HarpocEnv } from "./types.js";
 
@@ -115,6 +116,7 @@ export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono
   app.use("/api/v1/certificates/*", createRateLimitMiddleware(limiter));
   app.use("/api/v1/agents/*", createRateLimitMiddleware(limiter));
   app.use("/api/v1/tokens/*", createRateLimitMiddleware(limiter));
+  app.use("/api/v1/vault/*", createRateLimitMiddleware(limiter));
 
   // Audit logging (runs after handler via await next())
   app.use("/api/v1/secrets/*", auditMiddleware);
@@ -123,6 +125,7 @@ export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono
   app.use("/api/v1/certificates/*", auditMiddleware);
   app.use("/api/v1/agents/*", auditMiddleware);
   app.use("/api/v1/tokens/*", auditMiddleware);
+  app.use("/api/v1/vault/*", auditMiddleware);
 
   // Auth middleware for protected routes
   app.use("/api/v1/secrets/*", authMiddleware);
@@ -132,11 +135,13 @@ export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono
   app.use("/api/v1/certificates/*", authMiddleware);
   app.use("/api/v1/agents/*", authMiddleware);
   app.use("/api/v1/tokens/*", authMiddleware);
+  app.use("/api/v1/vault/*", authMiddleware);
 
-  // Governance is vault-wide: a project-claimed token is refused on both
-  // prefixes before any route reads a body (R11/N12).
+  // Governance and the lock are vault-wide: a project- or secrets-claimed
+  // token is refused on these prefixes before any route reads a body (R11/N12).
   app.use("/api/v1/agents/*", unscopedTokenMiddleware);
   app.use("/api/v1/tokens/*", unscopedTokenMiddleware);
+  app.use("/api/v1/vault/*", unscopedTokenMiddleware);
 
   // Routes
   app.route("/api/v1/secrets", createSecretRoutes());
@@ -147,6 +152,7 @@ export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono
   app.route("/api/v1/certificates", createCertificateRoutes());
   app.route("/api/v1/agents", createAgentRoutes());
   app.route("/api/v1/tokens", createTokenRoutes());
+  app.route("/api/v1/vault", createVaultRoutes());
 
   if (options?.uiDir !== undefined) {
     app.route("/ui", createUiRoutes(options.uiDir));

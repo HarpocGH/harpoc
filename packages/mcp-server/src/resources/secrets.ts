@@ -4,7 +4,7 @@ import type { VaultEngine } from "@harpoc/core";
 import { formatHandle, parseHandle } from "@harpoc/shared";
 import type { ScopeGuard } from "../guards/scope-guard.js";
 
-function decodeHandlePath(variable: string): string {
+export function decodeHandlePath(variable: string): string {
   try {
     return decodeURIComponent(variable);
   } catch {

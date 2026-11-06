@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+import { VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import {
   handleError,
@@ -8,6 +9,7 @@ import {
   formatTimestamp,
 } from "../../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 interface UpdateOptions {
   description?: string;
@@ -31,6 +33,49 @@ export function registerAgentUpdateCommand(agent: Command): void {
     .action(async (name: string, options: UpdateOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            if (options.description !== undefined && options.clearDescription) {
+              throw VaultError.invalidInput(
+                "--description and --clear-description are mutually exclusive",
+              );
+            }
+            if (options.owner !== undefined && options.clearOwner) {
+              throw VaultError.invalidInput("--owner and --clear-owner are mutually exclusive");
+            }
+            if (
+              options.description === undefined &&
+              options.owner === undefined &&
+              !options.clearDescription &&
+              !options.clearOwner
+            ) {
+              throw VaultError.invalidInput(
+                "Nothing to update. Pass --description, --owner, --clear-description or --clear-owner.",
+              );
+            }
+            const current = await client.getAgent(name);
+            const updated = await client.updateAgent(name, {
+              description: options.clearDescription
+                ? undefined
+                : (options.description ?? current.description ?? undefined),
+              owner: options.clearOwner ? undefined : (options.owner ?? current.owner ?? undefined),
+            });
+            if (options.json) {
+              printJson(updated);
+            } else {
+              printRecord({
+                Name: updated.name,
+                Status: updated.status,
+                Owner: updated.owner,
+                Description: updated.description,
+                Updated: formatTimestamp(updated.updated_at),
+              });
+              printSuccess("Agent updated.");
+            }
+          });
+          return;
+        }
         const engine = await loadUnlockedEngine(vaultDir);
         try {
           const resolved = resolveTokenCaller(

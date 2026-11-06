@@ -12,6 +12,7 @@ import {
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 function collect(value: string, acc: string[]): string[] {
   acc.push(value);
@@ -219,6 +220,16 @@ export function registerSecretUseCommand(secret: Command): void {
         const parsed = useSecretActionSchema.safeParse(actionInput);
         if (!parsed.success) {
           throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
+        }
+
+        const rest = restModeOf(cmd);
+        if (rest) {
+          await runRestMode(rest, async (client) => {
+            const result = await client.useSecret(handle, parsed.data);
+            sanitizeUseSecretResult(result, new InjectionGuard());
+            printResult(result, options.json);
+          });
+          return;
         }
 
         const engine = await loadUnlockedEngine(vaultDir);

@@ -577,6 +577,34 @@ describe("compiled binary smoke: a flag taken as the --vault-dir path (C7)", () 
   }, 60_000);
 });
 
+describe("compiled binary smoke: the REST mode without a token (B1)", () => {
+  it("refuses `--url http://127.0.0.1:1 secret list` without --token-file before anything", async () => {
+    const cwd = join(
+      tmpdir(),
+      `harpoc-resturl-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(cwd);
+    try {
+      const env: NodeJS.ProcessEnv = { ...process.env, HOME: cwd, USERPROFILE: cwd };
+      delete env.HARPOC_TOKEN;
+      const result = await spawnNode(
+        [CLI_PATH, "--url", "http://127.0.0.1:1", "secret", "list"],
+        "harpoc secret list",
+        env,
+        { cwd },
+      );
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe(
+        "Error: [INVALID_INPUT] --url requires --token-file <path> (the bearer token)\n",
+      );
+      expect(readdirSync(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  }, 60_000);
+});
+
 // Phase 3 D1: `secret use` accepts a scoped token, so the CLI is no longer
 // exempt from the token checks every other interface applies. Walked through
 // the real binary — the surface the e2e demonstration matrix drives.

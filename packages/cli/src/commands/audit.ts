@@ -6,6 +6,7 @@ import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError, printTable, printJson, formatTimestamp } from "../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../utils/token-caller.js";
 import { parsePositiveInteger } from "../utils/options.js";
+import { restModeOf, runRestMode } from "../utils/rest-mode.js";
 
 const OFF_HOST_GUIDANCE =
   "Store this anchor OFF-HOST (another machine, a sync target the attacker cannot write, or paper).\n" +
@@ -73,6 +74,38 @@ export function registerAuditCommand(program: Command): void {
             throw VaultError.invalidInput(
               "--since must be a valid date (e.g. 2026-07-01 or 2026-07-01T12:00:00Z)",
             );
+          }
+
+          const rest = restModeOf(cmd);
+          if (rest) {
+            await runRestMode(rest, async (client) => {
+              const events = await client.queryAudit({
+                secretId: options.secret,
+                eventType: options.event as AuditEventType | undefined,
+                since,
+                limit,
+              });
+              if (options.json) {
+                printJson(events);
+              } else {
+                printTable(
+                  events.map((e) => ({
+                    ID: e.id,
+                    Time: formatTimestamp(e.timestamp),
+                    Event: e.event_type,
+                    Secret: e.secret_id ?? "-",
+                    Principal:
+                      e.principal_type && e.principal_id
+                        ? `${e.principal_type}:${e.principal_id}`
+                        : "-",
+                    IP: e.ip_address ?? "-",
+                    Session: e.session_id ? e.session_id.slice(0, 8) + "..." : "-",
+                    Success: e.success ? "yes" : "no",
+                  })),
+                );
+              }
+            });
+            return;
           }
 
           const engine = await loadUnlockedEngine(vaultDir);

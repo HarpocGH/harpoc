@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CallerContext } from "@harpoc/shared";
 import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
@@ -343,6 +344,40 @@ describe("audit trail completeness", () => {
     expect(events.length).toBe(1);
 
     await engine2.destroy();
+  });
+
+  it("attributes a caller's lock to its principal, peer and interface; the trusted lock keeps NULL columns", async () => {
+    const caller: CallerContext = {
+      principal_type: "agent",
+      principal_id: "agent-1",
+      interface: "rest",
+      remote_address: "127.0.0.1",
+      admin_scope: true,
+    };
+    await engine.lock(caller);
+
+    const relocker = secondEngine({ dbPath, sessionPath });
+    await relocker.unlock("password");
+    await relocker.lock();
+
+    const reader = secondEngine({ dbPath, sessionPath });
+    await reader.unlock("password");
+    const [trusted, remote] = reader.queryAudit({ eventType: AuditEventType.VAULT_LOCK });
+    expect(remote).toMatchObject({
+      secret_id: null,
+      principal_type: "agent",
+      principal_id: "agent-1",
+      ip_address: "127.0.0.1",
+      success: true,
+    });
+    expect(remote?.detail).toEqual({ interface: "rest" });
+    expect(trusted).toMatchObject({
+      principal_type: null,
+      principal_id: null,
+      ip_address: null,
+      success: true,
+      detail: null,
+    });
   });
 
   it("logs password change", async () => {

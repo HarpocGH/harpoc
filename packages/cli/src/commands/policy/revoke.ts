@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { AuditEventType } from "@harpoc/shared";
+import { AuditEventType, parseHandle, VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printSuccess } from "../../utils/output.js";
 import type { ResolvedToken } from "../../utils/token-caller.js";
@@ -8,6 +8,7 @@ import {
   resolveTokenCallerForHandle,
   TOKEN_OPTION_DESCRIPTION,
 } from "../../utils/token-caller.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 export function registerPolicyRevokeCommand(policy: Command): void {
   policy
@@ -19,6 +20,21 @@ export function registerPolicyRevokeCommand(policy: Command): void {
       async (policyId: string, options: { secret?: string; token?: string }, cmd: Command) => {
         const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
         try {
+          const rest = restModeOf(cmd);
+          if (rest) {
+            const secret = options.secret;
+            if (!secret) {
+              throw VaultError.invalidInput(
+                "--secret <handle> is required under --url: the REST route addresses the policy through its secret.",
+              );
+            }
+            parseHandle(secret);
+            await runRestMode(rest, async (client) => {
+              await client.revokePolicy(secret, policyId);
+              printSuccess(`Policy revoked (${policyId})`);
+            });
+            return;
+          }
           const engine = await loadUnlockedEngine(vaultDir);
           try {
             const tokenValue = options.token ?? process.env.HARPOC_TOKEN;
