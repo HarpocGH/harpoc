@@ -63,12 +63,41 @@ jobs:
         # and the route getting-started.md documents for operators who will
         # not relax the restriction host-wide. Verified by the step 9 probe
         # (implementation-plan-compromise-wave3-isolation-r7-2026-09-04.md).
+        # 2026-11-06: ubuntu-latest moved from ubuntu-24.04 to ubuntu-26.04 and
+        # the bare profile stopped working there (bwrap: loopback: Failed
+        # RTM_NEWADDR: Operation not permitted - the loopback setup inside the
+        # new network namespace lost CAP_NET_ADMIN under the image's AppArmor).
+        # The step now prints the image's kernel, AppArmor and bubblewrap
+        # versions and the bwrap profiles the image loads, disables a
+        # distribution profile attached to /usr/bin/bwrap (it would shadow
+        # ours), grants the profile the capabilities and netlink access the
+        # namespace setup needs, re-probes, and - only if bwrap still fails -
+        # falls back to the node 24 leg's sysctl route with a warning, so the
+        # leg stays green and the log says which route it took.
         run: |
-          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' 'profile harpoc-bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' | sudo tee /etc/apparmor.d/harpoc-bwrap >/dev/null
+          uname -r
+          dpkg-query -W -f='${Package} ${Version}\n' apparmor bubblewrap 2>/dev/null || true
+          grep -i bwrap /sys/kernel/security/apparmor/profiles || echo "no bwrap profile loaded by the image"
+          for f in /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/bwrap /etc/apparmor.d/usr.bin.bwrap; do
+            if [ -f "$f" ]; then
+              sudo apparmor_parser -R "$f" || true
+              sudo mkdir -p /etc/apparmor.d/disable && sudo ln -sf "$f" /etc/apparmor.d/disable/
+              echo "disabled the distribution profile $f"
+            fi
+          done
+          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' 'profile harpoc-bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '  capability,' '  network,' '  mount,' '  umount,' '  pivot_root,' '}' | sudo tee /etc/apparmor.d/harpoc-bwrap >/dev/null
           sudo apparmor_parser -r /etc/apparmor.d/harpoc-bwrap
+          grep -i bwrap /sys/kernel/security/apparmor/profiles || true
           sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true
           unshare -rn -- /bin/true && echo "::warning::unshare -rn passes on this leg - the bwrap network tier will not be exercised" || echo "unshare -rn refused (expected on this leg)"
-          bwrap --dev-bind / / --unshare-net --die-with-parent -- /bin/true && echo "bwrap --unshare-net OK under the profile" || echo "::warning::bwrap --unshare-net failed under the profile"
+          if bwrap --dev-bind / / --unshare-net --die-with-parent -- /bin/true; then
+            echo "bwrap --unshare-net OK under the profile"
+          else
+            echo "::warning::bwrap --unshare-net failed under the profile on this image - falling back to the sysctl route (the bwrap tier is not exercised on this leg)"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+            bwrap --dev-bind / / --unshare-net --die-with-parent -- /bin/true && echo "bwrap --unshare-net OK after the sysctl" || echo "::warning::bwrap --unshare-net still failing after the sysctl"
+            unshare -rn -- /bin/true && echo "unshare -rn OK after the sysctl" || echo "::warning::unshare -rn still failing after the sysctl"
+          fi
       - name: Probe network isolation (diagnostic; relaxes the userns restriction on the node 24 leg)
         if: runner.os == 'Linux' && matrix.node-version == 24
         # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor
