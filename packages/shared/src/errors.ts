@@ -141,6 +141,8 @@ export enum ErrorCode {
   // Deployment model B
   REST_MODE_UNSUPPORTED = "REST_MODE_UNSUPPORTED",
   SESSION_MODE_CONFLICT = "SESSION_MODE_CONFLICT",
+  PROXY_PLACEHOLDER_DENIED = "PROXY_PLACEHOLDER_DENIED",
+  PROXY_UPSTREAM_FAILED = "PROXY_UPSTREAM_FAILED",
 
   // System
   INTERNAL_ERROR = "INTERNAL_ERROR",
@@ -291,6 +293,8 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   // Deployment model B
   [ErrorCode.REST_MODE_UNSUPPORTED]: 501,
   [ErrorCode.SESSION_MODE_CONFLICT]: 400,
+  [ErrorCode.PROXY_PLACEHOLDER_DENIED]: 403,
+  [ErrorCode.PROXY_UPSTREAM_FAILED]: 502,
 
   // System
   [ErrorCode.INTERNAL_ERROR]: 500,
@@ -301,6 +305,9 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.SESSION_FILE_ERROR]: 500,
   [ErrorCode.SESSION_KEYSTORE_UNAVAILABLE]: 501,
 };
+
+/** The closed set of upstream-failure classes the egress proxy may name — never an upstream error's text (hard rule 4). */
+export type ProxyUpstreamFailureReason = "refused" | "timeout" | "tls";
 
 export class VaultError extends Error {
   readonly code: ErrorCode;
@@ -868,6 +875,29 @@ export class VaultError extends Error {
     return new VaultError(
       ErrorCode.REST_MODE_UNSUPPORTED,
       `${what} has no REST mode; run it on the vault host`,
+    );
+  }
+
+  static proxyPlaceholderDenied(origin: string): VaultError {
+    return new VaultError(
+      ErrorCode.PROXY_PLACEHOLDER_DENIED,
+      `Placeholder refused for ${origin}: the secret is not enabled for the egress proxy (harpoc secret allow --proxy)`,
+    );
+  }
+
+  static proxyMultiplePlaceholders(origin: string): VaultError {
+    return new VaultError(
+      ErrorCode.PROXY_PLACEHOLDER_DENIED,
+      `Placeholder refused for ${origin}: one placeholder per request`,
+    );
+  }
+
+  static proxyUpstreamFailed(origin: string, reason?: ProxyUpstreamFailureReason): VaultError {
+    return new VaultError(
+      ErrorCode.PROXY_UPSTREAM_FAILED,
+      reason === undefined
+        ? `Egress proxy upstream request failed: ${origin}`
+        : `Egress proxy upstream request failed (${reason}): ${origin}`,
     );
   }
 

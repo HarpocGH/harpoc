@@ -3,8 +3,8 @@ import { SERVER_STOP_TRIGGERS, SERVER_TRANSPORTS } from "./server-lifecycle.js";
 import type { ServerStopTrigger, ServerTransport } from "./server-lifecycle.js";
 
 describe("server-lifecycle", () => {
-  it("names exactly the three listener transports", () => {
-    expect([...SERVER_TRANSPORTS]).toEqual(["stdio", "http", "rest"]);
+  it("names exactly the four listener transports (the egress proxy since B2)", () => {
+    expect([...SERVER_TRANSPORTS]).toEqual(["stdio", "http", "rest", "proxy"]);
   });
 
   it("names exactly the three stop triggers", () => {

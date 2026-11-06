@@ -153,6 +153,8 @@ const STATUS_CASES = [
   // Deployment model B
   [ErrorCode.REST_MODE_UNSUPPORTED, 501],
   [ErrorCode.SESSION_MODE_CONFLICT, 400],
+  [ErrorCode.PROXY_PLACEHOLDER_DENIED, 403],
+  [ErrorCode.PROXY_UPSTREAM_FAILED, 502],
   // System
   [ErrorCode.INTERNAL_ERROR, 500],
   [ErrorCode.DATABASE_ERROR, 500],
@@ -857,6 +859,43 @@ describe("factory methods", () => {
     expect(err.statusCode).toBe(501);
     expect(err.message).toBe("unlock has no REST mode; run it on the vault host");
   });
+
+  it("proxyPlaceholderDenied() names the origin and the opt-in remedy, nothing else", () => {
+    const err = VaultError.proxyPlaceholderDenied("https://api.github.com");
+    expect(err.code).toBe(ErrorCode.PROXY_PLACEHOLDER_DENIED);
+    expect(err.statusCode).toBe(403);
+    expect(err.message).toBe(
+      "Placeholder refused for https://api.github.com: the secret is not enabled for the egress proxy (harpoc secret allow --proxy)",
+    );
+  });
+
+  it("proxyMultiplePlaceholders() names the origin and the one-placeholder rule", () => {
+    const err = VaultError.proxyMultiplePlaceholders("https://api.github.com");
+    expect(err.code).toBe(ErrorCode.PROXY_PLACEHOLDER_DENIED);
+    expect(err.statusCode).toBe(403);
+    expect(err.message).toBe(
+      "Placeholder refused for https://api.github.com: one placeholder per request",
+    );
+  });
+
+  it("proxyUpstreamFailed() maps to 502 and names the origin only", () => {
+    const err = VaultError.proxyUpstreamFailed("https://api.github.com");
+    expect(err.code).toBe(ErrorCode.PROXY_UPSTREAM_FAILED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toBe("Egress proxy upstream request failed: https://api.github.com");
+  });
+
+  it.each(["refused", "timeout", "tls"] as const)(
+    "proxyUpstreamFailed names the %s class in its message and never the upstream text",
+    (reason) => {
+      const err = VaultError.proxyUpstreamFailed("https://api.github.com", reason);
+      expect(err.code).toBe(ErrorCode.PROXY_UPSTREAM_FAILED);
+      expect(err.message).toBe(
+        `Egress proxy upstream request failed (${reason}): https://api.github.com`,
+      );
+      expect(err.message).not.toMatch(/ECONNREFUSED|UND_ERR|self.signed|DEPTH_ZERO/);
+    },
+  );
 
   it("v1.3 context factory messages never contain the word 'password'", () => {
     const messages = [

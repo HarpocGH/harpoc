@@ -1,0 +1,125 @@
+import { spawn } from "node:child_process";
+import { createServer } from "node:https";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
+import { SECOND_CA_CERT_PEM, SECOND_CA_KEY_PEM } from "./cert-fixtures.js";
+
+/** One request the fixture received. */
+export interface SeenRequest {
+  method: string;
+  url: string;
+  headers: IncomingMessage["headers"];
+}
+
+export interface GitSmartHttps {
+  port: number;
+  requests: SeenRequest[];
+  close: () => Promise<void>;
+}
+
+/** The certificate the fixture presents — the CA a client pins to reach it. */
+export const GIT_SMART_HTTPS_CA_PEM = SECOND_CA_CERT_PEM;
+
+/**
+ * git's smart HTTP protocol over `git http-backend` as a CGI, served over TLS
+ * on 127.0.0.1 — a local copy of core's
+ * `packages/core/src/injection/__fixtures__/git-smart-http.ts` (integration
+ * cannot import a module out of core's `src/` — see the SMTP fake's header).
+ * A trimmed copy: it always serves TLS with core's `second-ca` pair (self-signed,
+ * SAN `IP:127.0.0.1`), because the egress proxy's upstream is HTTPS by
+ * construction; it has no `startRecorder`, and `SeenRequest` keeps the method,
+ * the URL and the headers. Every request must carry the Basic credential
+ * `user:token`; any other is answered 401, so a fetch or a push succeeds only
+ * when the credential reached the fixture.
+ */
+export async function startGitSmartHttps(opts: {
+  git: string;
+  projectRoot: string;
+  user: string;
+  token: string;
+  env: NodeJS.ProcessEnv;
+}): Promise<GitSmartHttps> {
+  const requests: SeenRequest[] = [];
+  const basic = `Basic ${Buffer.from(`${opts.user}:${opts.token}`).toString("base64")}`;
+  const server = createServer(
+    { cert: SECOND_CA_CERT_PEM, key: SECOND_CA_KEY_PEM },
+    (req: IncomingMessage, res: ServerResponse) => {
+      requests.push({ method: req.method ?? "GET", url: req.url ?? "/", headers: req.headers });
+      if (req.headers.authorization !== basic) {
+        res.writeHead(401, { "www-authenticate": 'Basic realm="harpoc-test"' }).end();
+        return;
+      }
+      const [pathname = "/", query = ""] = (req.url ?? "/").split("?");
+      let pathInfo: string;
+      try {
+        pathInfo = decodeURIComponent(pathname);
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
+      const fail = (): void => {
+        if (!res.headersSent) res.writeHead(502);
+        res.end();
+      };
+      const cgi = spawn(opts.git, ["http-backend"], {
+        env: {
+          ...opts.env,
+          GIT_PROJECT_ROOT: opts.projectRoot,
+          GIT_HTTP_EXPORT_ALL: "1",
+          PATH_INFO: pathInfo,
+          QUERY_STRING: query,
+          REQUEST_METHOD: req.method ?? "GET",
+          CONTENT_TYPE: req.headers["content-type"] ?? "",
+          REMOTE_ADDR: "127.0.0.1",
+          REMOTE_USER: opts.user,
+          ...(req.headers["content-length"] === undefined
+            ? {}
+            : { CONTENT_LENGTH: req.headers["content-length"] }),
+          ...(req.headers["content-encoding"] === undefined
+            ? {}
+            : { HTTP_CONTENT_ENCODING: req.headers["content-encoding"] }),
+          ...(req.headers["git-protocol"] === undefined
+            ? {}
+            : { GIT_PROTOCOL: String(req.headers["git-protocol"]) }),
+        },
+      });
+      cgi.on("error", fail);
+      cgi.stdin.on("error", fail);
+      req.pipe(cgi.stdin);
+      const out: Buffer[] = [];
+      cgi.stdout.on("data", (chunk: Buffer) => out.push(chunk));
+      cgi.on("close", () => {
+        if (res.headersSent) return;
+        const raw = Buffer.concat(out);
+        const end = raw.indexOf("\r\n\r\n");
+        if (end < 0) {
+          fail();
+          return;
+        }
+        let status = 200;
+        const headers: Record<string, string> = {};
+        for (const line of raw.subarray(0, end).toString("latin1").split("\r\n")) {
+          const colon = line.indexOf(":");
+          const name = line.slice(0, colon).trim().toLowerCase();
+          const value = line.slice(colon + 1).trim();
+          if (name === "status") status = Number.parseInt(value, 10);
+          else headers[name] = value;
+        }
+        res.writeHead(status, headers).end(raw.subarray(end + 4));
+      });
+    },
+  );
+  await new Promise<void>((done, fail) => {
+    server.once("error", fail);
+    server.listen(0, "127.0.0.1", done);
+  });
+  return {
+    port: (server.address() as AddressInfo).port,
+    requests,
+    close: () =>
+      new Promise<void>((done) => {
+        server.closeAllConnections();
+        server.close(() => done());
+      }),
+  };
+}

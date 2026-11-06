@@ -75,10 +75,10 @@ describe("enum member counts", () => {
     expect(Object.values(OAuthProviderPreset)).toHaveLength(5);
   });
 
-  it("ErrorCode has 112 members", () => {
+  it("ErrorCode has 114 members", () => {
     // Filter out reverse mappings (numeric keys) from TypeScript enum
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(112);
+    expect(members).toHaveLength(114);
   });
 
   it("TokenPrincipalType has 3 members and excludes project", () => {
@@ -206,5 +206,12 @@ describe("ErrorCode deployment model B values (B1)", () => {
   it("ErrorCode carries the REST-mode refusal and the reserved session-mode conflict", () => {
     expect(ErrorCode.REST_MODE_UNSUPPORTED).toBe("REST_MODE_UNSUPPORTED");
     expect(ErrorCode.SESSION_MODE_CONFLICT).toBe("SESSION_MODE_CONFLICT");
+  });
+});
+
+describe("ErrorCode deployment model B values (B2)", () => {
+  it("ErrorCode carries the egress proxy's placeholder refusal and upstream failure", () => {
+    expect(ErrorCode.PROXY_PLACEHOLDER_DENIED).toBe("PROXY_PLACEHOLDER_DENIED");
+    expect(ErrorCode.PROXY_UPSTREAM_FAILED).toBe("PROXY_UPSTREAM_FAILED");
   });
 });

@@ -34,6 +34,7 @@ const FULL_POLICY = {
   smtp_recipient_allowlist: [],
   imap_read_only: false,
   strict_tree_exit: false,
+  proxy: false,
 };
 
 function createMockEngine() {

@@ -1,6 +1,6 @@
-import { statSync, type Stats } from "node:fs";
+import { readdirSync, statSync, type Dirent, type Stats } from "node:fs";
 import { join } from "node:path";
-import { agentNameSchema, VaultError } from "@harpoc/shared";
+import { agentNameSchema, MAX_UNIX_SOCKET_PATH_BYTES, VaultError } from "@harpoc/shared";
 
 /** Where the runtime directory came from — the label its refusals name. */
 export type RuntimeDirSource = "--runtime-dir" | "$RUNTIME_DIRECTORY";
@@ -60,14 +60,52 @@ export function assertRuntimeDir(dir: RuntimeDir): void {
   assertPrivateDir(dir.path, dir.source);
 }
 
-/** `<runtime-dir>/<consumer>`, the consumer being an agent's name that is also a safe path segment. */
-export function consumerDir(runtimeDir: string, consumer: string): string {
+/** Refuses `INVALID_INPUT` unless the consumer is an agent's name that is also a safe path segment. */
+export function assertConsumerName(consumer: string): void {
   if (!agentNameSchema.safeParse(consumer).success || !CONSUMER_SEGMENT.test(consumer)) {
     throw VaultError.invalidInput(
       `consumer ${JSON.stringify(consumer)}: not a directory name (lowercase letters, digits, _ and -, not starting with -; at most 255)`,
     );
   }
+}
+
+/** `<runtime-dir>/<consumer>`, the consumer being an agent's name that is also a safe path segment. */
+export function consumerDir(runtimeDir: string, consumer: string): string {
+  assertConsumerName(consumer);
   return join(runtimeDir, consumer);
+}
+
+/**
+ * `<runtime-dir>/<consumer>/<socketName>` for every consumer directory under the runtime
+ * directory, by name. A directory entry is a consumer: its name must be a consumer name, the
+ * socket path must fit a Unix socket address and the directory must pass `assertConsumerDir` — a
+ * misconfigured consumer refuses the start instead of being skipped. Other entries are ignored.
+ */
+export function consumerSocketPaths(runtimeDir: RuntimeDir, socketName: string): string[] {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(runtimeDir.path, { withFileTypes: true });
+  } catch {
+    throw VaultError.invalidInput(
+      `${runtimeDir.source}: the consumer directories cannot be listed: ${runtimeDir.path}`,
+    );
+  }
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort()
+    .map((consumer) => {
+      const dir = consumerDir(runtimeDir.path, consumer);
+      const path = join(dir, socketName);
+      const bytes = Buffer.byteLength(path);
+      if (bytes > MAX_UNIX_SOCKET_PATH_BYTES) {
+        throw VaultError.invalidInput(
+          `consumer ${JSON.stringify(consumer)}: the socket path is ${String(bytes)} bytes, over the ${String(MAX_UNIX_SOCKET_PATH_BYTES)} a Unix socket path holds: ${path}`,
+        );
+      }
+      assertConsumerDir(dir);
+      return path;
+    });
 }
 
 /** Refuses `INVALID_INPUT` unless the consumer directory is this user's own, `0750` or stricter. */

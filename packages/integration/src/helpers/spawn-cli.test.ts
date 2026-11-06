@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir, userInfo } from "node:os";
 import { delimiter, join } from "node:path";
@@ -10,6 +10,7 @@ import {
   freePort,
   runCli,
   runCliAs,
+  runCommand,
   runNode,
   startCliServer,
   startCliServerOnFreePort,
@@ -88,6 +89,49 @@ describe("startCliServerOnFreePort", () => {
     ).rejects.toThrow(/exited before \/api\/v1\/health/);
     expect(pickPort).toHaveBeenCalledTimes(1);
   });
+
+  // RED before the ready option: every start waited on /api/v1/health, which a
+  // listener without the REST app never answers.
+  it("waits on the caller's ready probe instead of /api/v1/health", async () => {
+    const ready = vi.fn((server: CliServer) =>
+      server.waitForStderr(/\(Streamable HTTP\) listening on http:\/\/127\.0\.0\.1:(\d+)/),
+    );
+    const started = await startCliServerOnFreePort(
+      (p) => ["server", "start", "--mcp-http", "--mcp-http-port", String(p)],
+      { vaultDir, ready },
+    );
+    try {
+      expect(ready).toHaveBeenCalledTimes(1);
+      const match = (await ready.mock.results[0]?.value) as RegExpMatchArray;
+      expect(match[1]).toBe(String(started.port));
+    } finally {
+      await started.server.stop();
+    }
+  }, 60_000);
+
+  // RED before the env option: every start inherited the worker's environment.
+  it("starts the CLI with the caller's env", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harpoc-spawn-env-"));
+    onTestFinished(() => {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    });
+    const preload = join(dir, "env-probe.cjs");
+    writeFileSync(preload, 'process.stderr.write("harpoc-env-probe");');
+    const started = await startCliServerOnFreePort(
+      (p) => ["server", "start", "--mcp-http", "--mcp-http-port", String(p)],
+      {
+        vaultDir,
+        env: { ...process.env, NODE_OPTIONS: `--require "${preload.replace(/[\\"]/g, "\\$&")}"` },
+        ready: (server) =>
+          server.waitForStderr(/\(Streamable HTTP\) listening on http:\/\/127\.0\.0\.1:(\d+)/),
+      },
+    );
+    try {
+      expect(started.server.stderrSoFar().includes("harpoc-env-probe")).toBe(true);
+    } finally {
+      await started.server.stop();
+    }
+  }, 60_000);
 });
 
 describe("child deadlines (SG-33, W1-11, DM26-11)", () => {
@@ -109,6 +153,22 @@ describe("child deadlines (SG-33, W1-11, DM26-11)", () => {
     await expect(
       runCli(["server", "start", "--rest", "--port", String(port)], { vaultDir, timeoutMs: 500 }),
     ).rejects.toThrow(/timed out after 500 ms/);
+  }, 10_000);
+
+  it("runCommand runs a command in its cwd with its env and kills it at its deadline", async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-run-command-")));
+    onTestFinished(() => {
+      rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    });
+    const ran = await runCommand(
+      process.execPath,
+      ["-e", "process.stdout.write(process.cwd() + '|' + process.env.HARPOC_RUN_COMMAND_PROBE)"],
+      { cwd, env: { ...process.env, HARPOC_RUN_COMMAND_PROBE: "probe-1" } },
+    );
+    expect(ran).toEqual({ code: 0, stdout: `${cwd}|probe-1`, stderr: "" });
+    await expect(
+      runCommand(process.execPath, ["-e", "setInterval(() => {}, 1e6)"], { timeoutMs: 200 }),
+    ).rejects.toThrow(/timed out after 200 ms and was killed \(SIGTERM\)/);
   }, 10_000);
 
   it("closed() kills a child that ignores stdin EOF at its deadline and rejects naming it", async () => {

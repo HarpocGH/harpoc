@@ -101,6 +101,7 @@ export {
 } from "./injection/url-validator.js";
 export type { ValidatedHostPort } from "./injection/url-validator.js";
 export { HttpInjector } from "./injection/http-injector.js";
+export { createPinnedLookup } from "./injection/http-injector.js";
 export type { HttpInjectorRequest } from "./injection/http-injector.js";
 export { InjectionGuard } from "./injection/injection-guard.js";
 export { ProcessInjector } from "./injection/process-injector.js";
@@ -192,4 +193,10 @@ export type { ChildExitInfo, StdioChildParams } from "./injection/mcp-stdio-tran
 
 // VaultEngine
 export { VaultEngine } from "./vault-engine.js";
-export type { AuditChainVerificationReport, VaultEngineOptions } from "./vault-engine.js";
+export type {
+  AuditChainVerificationReport,
+  ProxyLease,
+  ProxyOutcome,
+  ProxyTarget,
+  VaultEngineOptions,
+} from "./vault-engine.js";

@@ -192,6 +192,34 @@ export interface AuditChainVerificationReport extends AuditChainVerification {
 }
 
 /**
+ * What one brokered request of the egress proxy targets (`resolveForProxy`):
+ * its method, the upstream origin in the URL's own serialization
+ * (`https://host[:port]`) and the path without the query — the query is a
+ * credential placement, so it is neither matched nor recorded.
+ */
+export interface ProxyTarget {
+  method: string;
+  origin: string;
+  path: string;
+}
+
+/** How a brokered request ended: the upstream status and whether the redaction changed the response, or the code that ended it. */
+export type ProxyOutcome = { status: number; sanitized: boolean } | { error: ErrorCode };
+
+/**
+ * The credential `resolveForProxy` hands the egress proxy for one request: a
+ * copy of the value the proxy owns and zero-fills after the swap, the handle's
+ * pinned HTTP CA when one is stored, and `complete`, which writes the
+ * request's one `secret.use` row once the upstream exchange has ended — on the
+ * first call only; a later call, or one after the vault sealed, does nothing.
+ */
+export interface ProxyLease {
+  readonly value: Uint8Array;
+  readonly caPem?: string;
+  complete(outcome: ProxyOutcome): void;
+}
+
+/**
  * The v1.3 mail/WebSocket dispatch seams. Unlike the older injectors these
  * write no audit row of their own — they hand the engine a metadata-only
  * projection and the engine writes the `secret.use` row — so the engine holds
@@ -311,6 +339,27 @@ function toVaultError(err: unknown): VaultError {
   return VaultError.internalError("the injection context failed unexpectedly");
 }
 
+/** RFC 9110 § 5.6.2 `token`: a method the audit row can record as it stands. */
+const HTTP_METHOD_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+/**
+ * The URL a proxy target names, or null when it names none: an http(s)
+ * origin in the URL's own serialization and a path the parser keeps as given,
+ * so the origin the allowlist judges, the row records and the proxy connects
+ * to are one, and no query, fragment or userinfo rides in.
+ */
+function proxyTargetUrl(target: ProxyTarget): URL | null {
+  if (!HTTP_METHOD_TOKEN.test(target.method) || !target.path.startsWith("/")) return null;
+  let url: URL;
+  try {
+    url = new URL(target.path, target.origin);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  return url.origin === target.origin && url.pathname === target.path ? url : null;
+}
+
 /** The certificate counterpart of {@link computeOAuthRefreshStatus}. */
 function computeCertificateRenewalStatus(row: CertificateRow): CertificateStatus["renewal_status"] {
   if (!row.certificate_pem || row.not_after === null) return "no_certificate";
@@ -365,6 +414,8 @@ export class VaultEngine {
   private sessionExpiresAt: number | null = null;
   private readonly sessionTtlMs: number;
   private readonly oauthRefreshInFlight = new Map<string, Promise<number | null>>();
+  /** The egress proxy's open leases, each its own closer — drained by `wipeKeys`. */
+  private readonly openProxyLeases = new Set<(outcome: ProxyOutcome) => void>();
 
   constructor(private readonly options: VaultEngineOptions) {
     this.sessionManager = new SessionManager(options.sessionPath, {
@@ -1552,6 +1603,188 @@ export class VaultEngine {
   }
 
   /**
+   * Resolve one egress-proxy placeholder for one brokered request (design
+   * M4). `use_secret`'s ladder for a token caller — resolve the handle, the
+   * caller's `use` grant, the secret's status, each refusal the failed
+   * `secret.use` row `use_secret` writes, `context: "proxy"` — then the
+   * secret's `proxy` opt-in and its URL allowlist over the target's origin and
+   * path, both before the credential is decrypted or an OAuth token refreshed
+   * (no credential can satisfy either: the docker, SMTP and IMAP guards'
+   * placement), each refused with a failed row and a message naming the
+   * origin, never the query. The lease carries a copy of the value — the
+   * engine wipes its own before returning, the proxy wipes the copy after the
+   * swap and `complete` wipes it again — and the handle's `http.ca_pem` pin.
+   * The request's one success or failure row is `complete`'s, written after
+   * the upstream exchange as the HTTP injector writes its row after the
+   * response; a lease still open when the vault seals is recorded then,
+   * `VAULT_LOCKED`, by `wipeKeys`.
+   */
+  async resolveForProxy(
+    handle: string,
+    caller: CallerContext,
+    target: ProxyTarget,
+  ): Promise<ProxyLease> {
+    // The proxy always holds a token (design § 8 decision 5): a caller-less
+    // call would read as the trusted local path and skip the grant check.
+    if (!caller) {
+      throw VaultError.invalidInput("resolveForProxy needs the token caller of the request");
+    }
+    const url = proxyTargetUrl(target);
+    if (url === null) {
+      throw VaultError.invalidInput(
+        "Invalid proxy target: an http(s) origin and a path without query or fragment",
+      );
+    }
+    const s = this.assertUnlocked();
+    const request = {
+      context: "proxy",
+      method: target.method,
+      origin: target.origin,
+      path: target.path,
+    };
+    const denied = { handle, ...request };
+
+    let secret: Secret;
+    try {
+      secret = await s.secretManager.resolveHandle(handle);
+    } catch (err) {
+      this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, undefined, caller);
+      throw await this.concealHandleError(s, err, handle, caller);
+    }
+
+    const attribution = attributionFromCaller(caller, this.sessionId);
+    try {
+      this.checkResolvedCallerPolicy(
+        s,
+        secret.id,
+        caller,
+        "use",
+        AuditEventType.SECRET_USE,
+        denied,
+        handle,
+      );
+    } catch (err) {
+      await s.mcpRegistry.terminate(secret.id, "use_denied", attribution);
+      throw err;
+    }
+
+    const policy = this.loadInjectionPolicy(s, secret.id);
+    try {
+      if (isVaultManagedCertificate(s.store, secret)) {
+        throw VaultError.certValueUnsupported(handle);
+      }
+      s.secretManager.assertUsable(secret, handle, {
+        pending:
+          secret.type === SecretType.OAUTH_TOKEN
+            ? () => VaultError.oauthNotConfigured("OAuth flow not completed")
+            : undefined,
+      });
+    } catch (err) {
+      this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, secret.id, caller);
+      await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
+      throw err;
+    }
+
+    if (!policy.proxy) {
+      this.auditUse(
+        s,
+        secret.id,
+        { ...request, error: ErrorCode.PROXY_PLACEHOLDER_DENIED },
+        false,
+        attribution,
+      );
+      throw VaultError.proxyPlaceholderDenied(target.origin);
+    }
+    if (!matchesUrlAllowlist(url.href, policy.url_allowlist)) {
+      this.auditUse(
+        s,
+        secret.id,
+        { ...request, error: ErrorCode.URL_NOT_ALLOWED },
+        false,
+        attribution,
+      );
+      throw VaultError.urlNotAllowed(target.origin);
+    }
+
+    const caPem = this.loadConnectionConfig(s, secret.id)?.http?.ca_pem;
+
+    let value: Uint8Array;
+    try {
+      if (secret.type === SecretType.OAUTH_TOKEN) {
+        const accessToken = await this.getOAuthAccessToken(secret.id, handle, caller);
+        value = new Uint8Array(Buffer.from(accessToken, "utf8"));
+      } else {
+        value = await s.secretManager.getSecretValue(handle);
+      }
+    } catch (err) {
+      this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, secret.id, caller);
+      await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
+      throw err;
+    }
+
+    try {
+      // A seal during the awaits above has drained the open leases already: no
+      // lease opens on a sealed engine.
+      this.assertUnlocked();
+      return this.openProxyLease(secret.id, value.slice(), caPem, request, attribution);
+    } finally {
+      wipeBuffer(value);
+    }
+  }
+
+  /**
+   * The lease `resolveForProxy` returns. Its closer writes the request's one
+   * `secret.use` row — the HTTP injector's detail shape, the origin and path
+   * for the URL — and wipes the value, once: it leaves `openProxyLeases` first,
+   * so a second `complete`, or a `complete` after `wipeKeys` drained the set,
+   * finds nothing to do. While it is in the set the keys and the logger are the
+   * live ones.
+   */
+  private openProxyLease(
+    secretId: string,
+    value: Uint8Array,
+    caPem: string | undefined,
+    request: Record<string, unknown>,
+    attribution: AuditAttribution | undefined,
+  ): ProxyLease {
+    const pinned = caPem === undefined ? {} : { ca_pinned: true };
+    const close = (outcome: ProxyOutcome): boolean => {
+      if (!this.openProxyLeases.delete(close)) return false;
+      wipeBuffer(value);
+      const detail =
+        "error" in outcome
+          ? { ...request, error: outcome.error, ...pinned }
+          : {
+              ...request,
+              status: outcome.status,
+              ...pinned,
+              ...(outcome.sanitized ? { sanitized: true } : {}),
+            };
+      (this.auditLogger as AuditLogger).log(
+        withAttribution(
+          {
+            eventType: AuditEventType.SECRET_USE,
+            secretId,
+            detail,
+            success: !("error" in outcome),
+          },
+          attribution,
+        ),
+      );
+      return true;
+    };
+    this.openProxyLeases.add(close);
+    return {
+      value,
+      ...(caPem === undefined ? {} : { caPem }),
+      complete: (outcome) => {
+        // Completion slide, as useSecret's: the request ends with a fresh window.
+        if (close(outcome)) this.touchSession();
+      },
+    };
+  }
+
+  /**
    * Refuse a `docker_registry` action on a secret demanding process isolation
    * (design §5.4). Engine-level and pre-dispatch: unlike the platform-capability
    * refusals, this one is architectural — the Docker daemon, not the spawned
@@ -1768,9 +2001,9 @@ export class VaultEngine {
    * allowlists when no policy is set — and every allowlist denies by default
    * (R1, 2026-09-01), so an unconfigured secret is usable in no target context
    * until an administrator writes its policy. A stored blob is parsed strictly
-   * (R2/C43): the writer always emits all eleven fields, so a miss (other
-   * than the post-baseline `strict_tree_exit`, defaulted below) or an extra
-   * key is corruption.
+   * (R2/C43): the writer always emits all twelve fields, so a miss (other
+   * than the post-baseline `strict_tree_exit` and `proxy`, defaulted below)
+   * or an extra key is corruption.
    */
   private loadInjectionPolicy(s: UnlockedState, secretId: string): InjectionPolicy {
     const row = s.store.getInjectionPolicy(secretId);
@@ -1787,6 +2020,7 @@ export class VaultEngine {
         smtp_recipient_allowlist: [],
         imap_read_only: false,
         strict_tree_exit: false,
+        proxy: false,
       };
     }
     const bytes = decrypt(
@@ -1802,11 +2036,11 @@ export class VaultEngine {
     } catch {
       throw VaultError.vaultCorrupted(`injection policy for secret ${secretId} is not JSON`);
     }
-    // The post-baseline field (D1, 2026-09-10): blobs written by the prepared
-    // v1.5.0 tree carry the baseline ten and nothing else, so this one field
-    // — and only this one — defaults on read; no rewrite (policy writes are
-    // POLICY_GRANT events). The writer below writes all eleven; any other
-    // miss stays corruption (R2/C43).
+    // The post-baseline fields (D1, 2026-09-10; B2, 2026-11-06): blobs written
+    // by the prepared v1.5.0 tree carry the baseline ten, blobs written before
+    // the egress proxy eleven, so these two fields — and only these — default
+    // on read; no rewrite (policy writes are POLICY_GRANT events). The writer
+    // writes all twelve; any other miss stays corruption (R2/C43).
     if (
       typeof raw === "object" &&
       raw !== null &&
@@ -1814,6 +2048,15 @@ export class VaultEngine {
       !Object.hasOwn(raw, "strict_tree_exit")
     ) {
       (raw as Record<string, unknown>)["strict_tree_exit"] = false;
+    }
+    // `proxy` off is the opt-in withheld: the proxy refuses the placeholder.
+    if (
+      typeof raw === "object" &&
+      raw !== null &&
+      !Array.isArray(raw) &&
+      !Object.hasOwn(raw, "proxy")
+    ) {
+      (raw as Record<string, unknown>)["proxy"] = false;
     }
     const parsed = injectionPolicySchema.safeParse(raw);
     if (!parsed.success) {
@@ -1944,6 +2187,7 @@ export class VaultEngine {
           recipient_count: input.smtp_recipient_allowlist.length,
           imap_read_only: input.imap_read_only,
           strict_tree_exit: input.strict_tree_exit,
+          proxy: input.proxy,
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
@@ -2981,9 +3225,9 @@ export class VaultEngine {
   ): Promise<string> {
     const s = this.assertUnlocked();
 
-    // No denial row here: the only caller is `useSecret`, whose own catch
-    // writes the attributed `secret.use` refusal — a second, unattributed
-    // `secret.read` row would double-count one refused use (E75h).
+    // No denial row here: the callers are `useSecret` and `resolveForProxy`,
+    // whose own catch writes the attributed `secret.use` refusal — a second,
+    // unattributed `secret.read` row would double-count one refused use (E75h).
     const secret = s.store.getSecret(secretId);
     if (!secret) throw VaultError.secretNotFound();
     if (secret.type !== SecretType.OAUTH_TOKEN) {
@@ -5034,6 +5278,15 @@ export class VaultEngine {
   }
 
   private wipeKeys(): void {
+    // A credential the egress proxy still holds is recorded before the keys go,
+    // while the logger lives: its one row says the vault sealed under it.
+    for (const close of [...this.openProxyLeases]) {
+      try {
+        close({ error: ErrorCode.VAULT_LOCKED });
+      } catch {
+        // The wipe goes on: a failed write must not keep the keys in memory.
+      }
+    }
     if (this.kek) {
       wipeBuffer(this.kek);
       this.kek = null;

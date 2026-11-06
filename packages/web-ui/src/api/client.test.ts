@@ -205,6 +205,7 @@ describe("api client", () => {
       smtp_recipient_allowlist: [],
       imap_read_only: false,
       strict_tree_exit: false,
+      proxy: true,
       acknowledge_interpreters: true,
     };
     await api.putInjectionPolicy("secret://k1", policy);

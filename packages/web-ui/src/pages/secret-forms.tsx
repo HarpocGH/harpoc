@@ -266,6 +266,7 @@ export function PolicyEditor({
   const [networkIsolation, setNetworkIsolation] = useState(initial.network_isolation ?? false);
   const [fsIsolation, setFsIsolation] = useState(initial.fs_isolation ?? false);
   const [strictTreeExit, setStrictTreeExit] = useState(initial.strict_tree_exit ?? false);
+  const [proxy, setProxy] = useState(initial.proxy ?? false);
   const [ack, setAck] = useState(false);
 
   const { error, busy, onSubmit } = useSubmit(async () => {
@@ -285,6 +286,7 @@ export function PolicyEditor({
       network_isolation: networkIsolation,
       fs_isolation: fsIsolation,
       strict_tree_exit: strictTreeExit,
+      proxy,
       ...(ack ? { acknowledge_interpreters: true } : {}),
     };
     await api.putInjectionPolicy(handle, body);
@@ -371,6 +373,16 @@ export function PolicyEditor({
         Strict tree exit: nothing a process-mediated child started outlives the call (Windows: the
         job wrapper in strict mode, refused where unavailable; POSIX: the process group killed after
         the child exits)
+      </label>
+      <label for="policy-proxy">
+        <input
+          id="policy-proxy"
+          type="checkbox"
+          checked={proxy}
+          onChange={(e) => setProxy(e.currentTarget.checked)}
+        />
+        Egress proxy: the proxy may swap this secret in for its placeholder on a request to a URL
+        the allowlist admits
       </label>
       <label for="ack">
         <input

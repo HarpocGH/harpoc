@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import {
   assertConsumerDir,
+  assertConsumerName,
   assertRuntimeDir,
   consumerDir,
+  consumerSocketPaths,
   isPrivateDirMode,
   resolveRuntimeDir,
 } from "./runtime-dir.js";
@@ -211,6 +213,98 @@ describe("consumerDir", () => {
       `consumer ${JSON.stringify(name)}: not a directory name (lowercase letters, digits, _ and -, not starting with -; at most 255)`,
     );
   });
+});
+
+describe("assertConsumerName", () => {
+  it("accepts a consumer name and refuses any other with consumerDir's message", async () => {
+    expect(() => assertConsumerName("ci_bot-2")).not.toThrow();
+    const err = await expectVaultError(() => assertConsumerName("Alice"), ErrorCode.INVALID_INPUT);
+    expect(err.message).toBe(
+      'consumer "Alice": not a directory name (lowercase letters, digits, _ and -, not starting with -; at most 255)',
+    );
+  });
+});
+
+describe("consumerSocketPaths", () => {
+  const source = "--runtime-dir" as const;
+
+  /** A consumer directory as the recipe leaves it: this user's own, 0750 whatever the umask. */
+  function consumer(name: string): string {
+    const path = join(dir, name);
+    mkdirSync(path);
+    chmodSync(path, 0o750);
+    return path;
+  }
+
+  it("lists nothing under a runtime directory without consumer directories", () => {
+    writeFileSync(join(dir, "a-file"), "");
+    expect(consumerSocketPaths({ path: dir, source }, "proxy.sock")).toEqual([]);
+  });
+
+  // The name and length checks come before the filesystem assertion: they run on win32 too.
+  it("refuses a directory whose name is not a consumer name, before any directory is asserted", async () => {
+    mkdirSync(join(dir, "Alice"));
+    const err = await expectVaultError(
+      () => consumerSocketPaths({ path: dir, source }, "proxy.sock"),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      'consumer "Alice": not a directory name (lowercase letters, digits, _ and -, not starting with -; at most 255)',
+    );
+  });
+
+  // unix(7): Linux's sun_path is 108 bytes, the terminating NUL included (X-3).
+  it("refuses a consumer whose socket path would not fit a Unix socket address", async () => {
+    const name = "a".repeat(100);
+    mkdirSync(join(dir, name));
+    const path = join(dir, name, "proxy.sock");
+    const err = await expectVaultError(
+      () => consumerSocketPaths({ path: dir, source }, "proxy.sock"),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `consumer "${name}": the socket path is ${String(Buffer.byteLength(path))} bytes, over the 107 a Unix socket path holds: ${path}`,
+    );
+  });
+
+  it("names the runtime directory's source when it cannot be listed", async () => {
+    const missing = join(dir, "missing");
+    const err = await expectVaultError(
+      () => consumerSocketPaths({ path: missing, source: "$RUNTIME_DIRECTORY" }, "proxy.sock"),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `$RUNTIME_DIRECTORY: the consumer directories cannot be listed: ${missing}`,
+    );
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "composes <consumer>/<socket> for every consumer directory, by name, other entries ignored (POSIX)",
+    () => {
+      consumer("bob");
+      consumer("alice");
+      writeFileSync(join(dir, "a-file"), "");
+      expect(consumerSocketPaths({ path: dir, source }, "proxy.sock")).toEqual([
+        join(dir, "alice", "proxy.sock"),
+        join(dir, "bob", "proxy.sock"),
+      ]);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "refuses a consumer directory assertConsumerDir refuses — never skipped (POSIX)",
+    async () => {
+      consumer("alice");
+      chmodSync(consumer("bob"), 0o755);
+      const err = await expectVaultError(
+        () => consumerSocketPaths({ path: dir, source }, "proxy.sock"),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message).toBe(
+        `consumer directory: mode 0755 is not 0750 or stricter (group-writable or world-accessible): ${join(dir, "bob")}`,
+      );
+    },
+  );
 });
 
 describe("assertConsumerDir", () => {

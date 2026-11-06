@@ -55,12 +55,14 @@ function forwardedEnv(): Record<string, string> {
 function runChild(
   command: string,
   argv: string[],
-  opts: { stdin?: string; timeoutMs?: number },
+  opts: { stdin?: string; timeoutMs?: number; cwd?: string; env?: NodeJS.ProcessEnv },
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const timeoutMs = opts.timeoutMs ?? CHILD_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     const child = spawn(command, argv, {
       stdio: ["pipe", "pipe", "pipe"],
+      cwd: opts.cwd,
+      env: opts.env,
     });
     let stdout = "";
     let stderr = "";
@@ -113,6 +115,19 @@ export function runNode(
   opts: { stdin?: string; timeoutMs?: number } = {},
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return runChild(process.execPath, argv, opts);
+}
+
+/**
+ * `command` with `argv` (no shell) in `cwd` with `env` — the process
+ * environment when absent — under `runNode`'s deadline: the real `git` and
+ * `curl` of the egress-proxy suite.
+ */
+export function runCommand(
+  command: string,
+  argv: string[],
+  opts: { cwd?: string; env?: NodeJS.ProcessEnv; stdin?: string; timeoutMs?: number } = {},
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return runChild(command, argv, opts);
 }
 
 export function runCli(
@@ -412,21 +427,36 @@ async function waitForHealth(port: number, server: CliServer, timeoutMs = 30_000
   }
 }
 
+/**
+ * The built CLI started on a free port, retried onto a fresh one when the child
+ * died on `EADDRINUSE`. `ready` is the readiness probe — the REST listener's
+ * `/api/v1/health` by default; a listener without that route (the egress
+ * proxy) passes its own, such as its startup line. `env` is the child's
+ * environment — the worker's when absent; a start as `user` keeps sudo's.
+ */
 export async function startCliServerOnFreePort(
   buildArgs: (port: number) => string[],
-  opts: { vaultDir: string; attempts?: number; pickPort?: () => Promise<number>; user?: string },
+  opts: {
+    vaultDir: string;
+    attempts?: number;
+    pickPort?: () => Promise<number>;
+    user?: string;
+    env?: NodeJS.ProcessEnv;
+    ready?: (server: CliServer, port: number) => Promise<unknown>;
+  },
 ): Promise<{ server: CliServer; port: number }> {
   const attempts = opts.attempts ?? 3;
   const pickPort = opts.pickPort ?? freePort;
+  const ready = opts.ready ?? ((server: CliServer, port: number) => waitForHealth(port, server));
   let last = "";
   for (let attempt = 0; attempt < attempts; attempt++) {
     const port = await pickPort();
     const server =
       opts.user === undefined
-        ? startCliServer(buildArgs(port), { vaultDir: opts.vaultDir })
+        ? startCliServer(buildArgs(port), { vaultDir: opts.vaultDir, env: opts.env })
         : startCliServerAs(opts.user, buildArgs(port), { vaultDir: opts.vaultDir });
     try {
-      await waitForHealth(port, server);
+      await ready(server, port);
       return { server, port };
     } catch (err) {
       // Read before stop(): stop() kills the child, so only a child that had

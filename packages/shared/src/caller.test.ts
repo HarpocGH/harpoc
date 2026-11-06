@@ -52,7 +52,7 @@ describe("callerFromToken", () => {
   });
 
   it("carries the access interface through when provided", () => {
-    for (const iface of ["rest", "mcp", "mcp-http", "cli"] as const) {
+    for (const iface of ["rest", "mcp", "mcp-http", "cli", "proxy"] as const) {
       const caller = callerFromToken(baseToken(), iface);
       expect(caller.interface).toBe(iface);
       expect(caller.principal_id).toBe("alice");

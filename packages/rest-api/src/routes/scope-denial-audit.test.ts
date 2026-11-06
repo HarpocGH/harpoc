@@ -44,6 +44,7 @@ const FULL_POLICY = {
   smtp_recipient_allowlist: [],
   imap_read_only: false,
   strict_tree_exit: false,
+  proxy: false,
 };
 const CREATE_BODY = { name: "k", type: "api_key" };
 const USE_BODY = {

@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_PROXY_PORT,
   MAX_PORT,
   MAX_RENEW_BEFORE_DAYS,
   MIN_PORT,
@@ -31,6 +32,10 @@ describe("option-bounds", () => {
     expect(MAX_PORT).toBe(65535);
     expect(MIN_RENEW_BEFORE_DAYS).toBe(1);
     expect(MAX_RENEW_BEFORE_DAYS).toBe(365);
+  });
+
+  it("names the egress proxy's default port (DB-14)", () => {
+    expect(DEFAULT_PROXY_PORT).toBe(3128);
   });
 
   it("no command declares a bound of its own (CM-5 tripwire)", () => {

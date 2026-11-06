@@ -874,12 +874,14 @@ const smtpRecipientAllowlistSchema = z.array(recipientPatternSchema).max(100);
 
 /**
  * Per-secret injection policy as stored and loaded: every field present, no
- * defaults, no unknown keys. The vault always writes all eleven fields, so a
+ * defaults, no unknown keys. The vault always writes all twelve fields, so a
  * decrypted blob that fails this schema is corruption (R2/C43), not a policy
- * from before a field existed — no such vault opens under v1.5. The one
- * exception is read-side and lives in core: `strict_tree_exit` (2026-09-10)
- * is defaulted to `false` by `loadInjectionPolicy` before this parse, because
- * blobs written by the prepared v1.5.0 tree carry the baseline ten.
+ * from before a field existed — no such vault opens under v1.5. The two
+ * exceptions are read-side and live in core: the post-baseline fields
+ * `strict_tree_exit` (2026-09-10) and `proxy` (2026-11-06) are defaulted to
+ * `false` by `loadInjectionPolicy` before this parse, because blobs written by
+ * the prepared v1.5.0 tree carry the baseline ten, and blobs written before
+ * deployment model B's egress proxy carry eleven.
  */
 export const injectionPolicySchema = z.strictObject({
   url_allowlist: urlAllowlistSchema,
@@ -893,6 +895,7 @@ export const injectionPolicySchema = z.strictObject({
   smtp_recipient_allowlist: smtpRecipientAllowlistSchema,
   imap_read_only: z.boolean(),
   strict_tree_exit: z.boolean(),
+  proxy: z.boolean(),
 });
 
 /** Per-secret injection policy input (URL + host + command + env allowlists + HTTP response mode); every field defaults, an unknown key is refused (D2c, 2026-09-23). */
@@ -908,6 +911,7 @@ export const injectionPolicyInputSchema = z.strictObject({
   smtp_recipient_allowlist: smtpRecipientAllowlistSchema.optional().default([]),
   imap_read_only: z.boolean().optional().default(false),
   strict_tree_exit: z.boolean().optional().default(false),
+  proxy: z.boolean().optional().default(false),
 });
 
 /**
@@ -945,7 +949,15 @@ export const injectionPolicyInputSchema = z.strictObject({
  * fail-closed (`STRICT_TREE_EXIT_UNAVAILABLE`); POSIX kills the child's
  * process group after its own exit (a descendant that called `setsid`
  * escapes, as on the timeout path). Request-mediated actions spawn no child
- * and are unaffected. The shape the vault stores, loads and
+ * and are unaffected.
+ * `proxy` (2026-11-06, deployment model B, default `false`) is the secret's
+ * opt-in to the egress credential proxy (`harpoc server start --proxy`):
+ * set, a placeholder naming this secret in a request through the proxy is
+ * swapped for the value when the target lies inside `url_allowlist`; unset,
+ * the proxy refuses the placeholder (`PROXY_PLACEHOLDER_DENIED`).
+ * `response_mode` and `response_header_allowlist` do not reach a proxied
+ * response, which streams to the agent's client under the proxy's
+ * best-effort exact-value redaction. The shape the vault stores, loads and
  * returns: every field present, no defaults — defaults apply at
  * `injectionPolicyInputSchema`, never on the stored blob.
  */

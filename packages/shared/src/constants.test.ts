@@ -37,6 +37,7 @@ import {
   MAX_MCP_WRAPPER_FAILURE_CHARS,
   MAX_NAME_LENGTH,
   MAX_PROCESS_OUTPUT_BYTES,
+  MAX_UNIX_SOCKET_PATH_BYTES,
   MIN_REDACTABLE_FRAGMENT,
   LOCKOUT_DURATIONS_MS,
   LOCKOUT_MAX_ATTEMPTS,
@@ -336,6 +337,10 @@ describe("vault defaults", () => {
     expect(MAX_HTTP_RESPONSE_BYTES).toBe(4 * 1024 * 1024);
   });
 
+  it("MAX_UNIX_SOCKET_PATH_BYTES is 107 — sun_path's 108 bytes less the NUL (RA-6)", () => {
+    expect(MAX_UNIX_SOCKET_PATH_BYTES).toBe(107);
+  });
+
   it("MAX_NAME_LENGTH is 255", () => {
     expect(MAX_NAME_LENGTH).toBe(255);
   });
@@ -377,7 +382,7 @@ describe("MCP stderr caps (2026-09-11)", () => {
 });
 
 /**
- * The product version is one constant and fourteen manifests. A bump that
+ * The product version is one constant and fifteen manifests. A bump that
  * misses one, or a manifest bumped without the constant, fails here — so
  * `harpoc --version`, the MCP serverInfo and GET /health can never disagree
  * with the package they ship in.
@@ -395,8 +400,8 @@ describe("HARPOC_VERSION", () => {
     expect(HARPOC_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  it("covers the root and all thirteen packages", () => {
-    expect(manifests).toHaveLength(14);
+  it("covers the root and all fourteen packages", () => {
+    expect(manifests).toHaveLength(15);
   });
 
   it.each(manifests)("%s carries the product version", (manifest) => {

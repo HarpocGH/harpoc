@@ -462,6 +462,57 @@ describe("PolicyEditor", () => {
     expect((put.mock.calls[0]?.[1] as Record<string, unknown>)["strict_tree_exit"]).toBe(true);
   });
 
+  it("edits proxy as a checkbox from the stored value and sends it in the whole policy (B2)", async () => {
+    const put = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PolicyEditor
+        api={{ putInjectionPolicy: put } as unknown as ApiClient}
+        handle="k1"
+        initial={{ url_allowlist: ["https://api.github.com/*"], proxy: true }}
+        onDone={vi.fn()}
+      />,
+    );
+    const box = screen.getByLabelText(/Egress proxy/) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    fireEvent.click(box);
+    fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    expect(put.mock.calls[0]).toEqual([
+      "k1",
+      {
+        url_allowlist: ["https://api.github.com/*"],
+        command_allowlist: [],
+        host_allowlist: [],
+        env_allowlist: [],
+        response_header_allowlist: [],
+        smtp_recipient_allowlist: [],
+        imap_read_only: false,
+        response_mode: "filtered",
+        network_isolation: false,
+        fs_isolation: false,
+        strict_tree_exit: false,
+        proxy: false,
+      },
+    ]);
+  });
+
+  it("an absent proxy reads as unchecked and is saved as false (B2)", async () => {
+    const put = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PolicyEditor
+        api={{ putInjectionPolicy: put } as unknown as ApiClient}
+        handle="k1"
+        initial={{}}
+        onDone={vi.fn()}
+      />,
+    );
+    const box = screen.getByLabelText(/Egress proxy/) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    expect((put.mock.calls[0]?.[1] as Record<string, unknown>)["proxy"]).toBe(false);
+  });
+
   it("sends every injectionPolicyInputSchema key on save (drift pin)", async () => {
     const put = vi.fn().mockResolvedValue(undefined);
     render(

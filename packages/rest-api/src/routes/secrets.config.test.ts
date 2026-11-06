@@ -279,6 +279,21 @@ describe("secret routes", () => {
       expect((call[1] as { strict_tree_exit: boolean }).strict_tree_exit).toBe(true);
     });
 
+    it("PUT forwards proxy: true to the engine in the whole policy (B2)", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ ...FULL_POLICY, proxy: true }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+      expect(call.slice(0, 3)).toEqual([
+        "secret://test-key",
+        { ...FULL_POLICY, proxy: true },
+        { acknowledge_interpreters: false },
+      ]);
+    });
+
     it("PUT rejects a malformed recipient pattern with SCHEMA_VALIDATION_ERROR", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",

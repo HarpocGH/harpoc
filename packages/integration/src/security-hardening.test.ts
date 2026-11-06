@@ -759,9 +759,11 @@ describe("No-Logging Static Audit", () => {
    * (any diagnostic they need goes through an injected callback, as core does
    * with `onSessionFilePermissionRepairFailure`).
    * `web-ui` joined them with the `.tsx` widening (D3 a, 2026-09): the SPA is
-   * console-free too.
+   * console-free too. `egress-proxy` (2026-11, B2) holds the swapped credential
+   * of every brokered request: it reports through the caller's `onError`, never
+   * a console or a stream.
    */
-  it.each(["cert-manager", "oauth-proxy", "sdk", "shared", "web-ui"])(
+  it.each(["cert-manager", "egress-proxy", "oauth-proxy", "sdk", "shared", "web-ui"])(
     "%s/src/ has zero console calls",
     (pkg) => {
       const files = collectTsFiles(join(REPO_ROOT, "packages", pkg, "src"));
@@ -794,7 +796,7 @@ describe("No-Logging Static Audit", () => {
     "sdk/src/direct-client.ts": 1,
   };
 
-  it.each(["core", "cert-manager", "oauth-proxy", "sdk", "shared", "web-ui"])(
+  it.each(["core", "cert-manager", "egress-proxy", "oauth-proxy", "sdk", "shared", "web-ui"])(
     "%s/src/ writes to process.stdout / process.stderr only at its recorded sites",
     (pkg) => {
       const packagesDir = join(REPO_ROOT, "packages");
@@ -952,6 +954,7 @@ describe("No-Logging Static Audit", () => {
       "cert-manager",
       "cli",
       "core",
+      "egress-proxy",
       "mcp-server",
       "oauth-proxy",
       "rest-api",

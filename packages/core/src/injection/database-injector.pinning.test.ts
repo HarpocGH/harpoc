@@ -47,6 +47,7 @@ const POLICY: InjectionPolicy = {
   smtp_recipient_allowlist: [],
   imap_read_only: false,
   strict_tree_exit: false,
+  proxy: false,
 };
 
 function action(overrides: Partial<DatabaseAction> = {}): DatabaseAction {

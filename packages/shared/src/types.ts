@@ -368,9 +368,11 @@ export interface VaultApiToken {
  * "through which interface" dimension of the audit trail (thesis §4.3.4).
  * Forensic attribution only; never consulted by policy matching. `cli` marks
  * the token-scoped CLI path (`secret use --token`); a tokenless CLI call
- * remains the trusted local path and carries no interface at all.
+ * remains the trusted local path and carries no interface at all. `proxy`
+ * marks a request brokered by the egress credential proxy (deployment model
+ * B, 2026-11-06), over its loopback TCP listener or a consumer's socket.
  */
-export type AccessInterface = "rest" | "mcp" | "mcp-http" | "cli";
+export type AccessInterface = "rest" | "mcp" | "mcp-http" | "cli" | "proxy";
 
 /**
  * Token-derived caller identity threaded from an interface layer into the
@@ -394,10 +396,11 @@ export interface CallerContext {
   /** Interface the request arrived through; audit attribution only. */
   interface?: AccessInterface;
   /**
-   * Socket peer of the connection the request arrived on — REST and MCP
-   * Streamable HTTP only, never a forwarded header (E75i, 2026-09-02): behind
-   * a reverse proxy the trail records the proxy. Lands in the audit row's
-   * `ip_address` column; absent for stdio, the CLI and the SDK.
+   * Socket peer of the connection the request arrived on — REST, MCP
+   * Streamable HTTP and the egress proxy's TCP listener only, never a
+   * forwarded header (E75i, 2026-09-02): behind a reverse proxy the trail
+   * records the proxy. Lands in the audit row's `ip_address` column; absent
+   * for stdio, the CLI, the SDK and a Unix-socket peer.
    */
   remote_address?: string;
   /**

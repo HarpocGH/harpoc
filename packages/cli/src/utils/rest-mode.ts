@@ -44,8 +44,9 @@ REST mode (both before the command):
 
 /**
  * Every command that runs over REST — the route its RestClient member reaches, or, for
- * `oauth providers`, no vault at all. Any other command refuses REST_MODE_UNSUPPORTED, so a
- * command registered later never runs in-process under --url by default.
+ * `oauth providers` and `proxy env`, no vault at all. Any other command refuses
+ * REST_MODE_UNSUPPORTED, so a command registered later never runs in-process under --url by
+ * default.
  */
 export const REST_MODE_COMMANDS: ReadonlySet<string> = new Set([
   "lock",
@@ -80,6 +81,7 @@ export const REST_MODE_COMMANDS: ReadonlySet<string> = new Set([
   "cert csr",
   "cert renew",
   "cert attach",
+  "proxy env",
 ]);
 
 /**

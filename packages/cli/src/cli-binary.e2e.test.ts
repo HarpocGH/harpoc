@@ -605,6 +605,42 @@ describe("compiled binary smoke: the REST mode without a token (B1)", () => {
   }, 60_000);
 });
 
+describe("compiled binary smoke: proxy env opens no vault (B2)", () => {
+  it("prints the consumer's environment block from its arguments alone, exit 0, nothing created", async () => {
+    const cwd = join(
+      tmpdir(),
+      `harpoc-proxyenv-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(cwd);
+    try {
+      const env: NodeJS.ProcessEnv = { ...process.env, HOME: cwd, USERPROFILE: cwd };
+      delete env.HARPOC_TOKEN;
+      const runtimeDir = join(cwd, "run");
+      const result = await spawnNode(
+        [CLI_PATH, "proxy", "env", "agent", "secret://gh-pat", "--runtime-dir", runtimeDir],
+        "harpoc proxy env",
+        env,
+        { cwd },
+      );
+      expect(result.code).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe(
+        [
+          "HARPOC_PROXY_URL=http://127.0.0.1:3128",
+          "HARPOC_PROXY_BASE=http://127.0.0.1:3128/",
+          `HARPOC_PROXY_TOKEN_FILE=${join(runtimeDir, "agent", "token.jwt")}`,
+          `HARPOC_PROXY_SOCKET=${join(runtimeDir, "agent", "proxy.sock")}`,
+          "HARPOC_PLACEHOLDER_GH_PAT=harpoc:gh-pat",
+          "",
+        ].join("\n"),
+      );
+      expect(readdirSync(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  }, 60_000);
+});
+
 // Phase 3 D1: `secret use` accepts a scoped token, so the CLI is no longer
 // exempt from the token checks every other interface applies. Walked through
 // the real binary — the surface the e2e demonstration matrix drives.

@@ -39,6 +39,7 @@ import { registerCertCsrCommand } from "./commands/cert/csr.js";
 import { registerCertIssueCommand } from "./commands/cert/issue.js";
 import { registerCertRenewCommand } from "./commands/cert/renew.js";
 import { registerCertAttachCommand } from "./commands/cert/attach.js";
+import { registerProxyEnvCommand } from "./commands/proxy/env.js";
 import { registerServerCommand } from "./commands/server.js";
 
 /** The root: `--url` / `--token-file` are taken off a leading run before Commander parses (rest-mode.ts). */
@@ -118,6 +119,10 @@ export function buildProgram(): Command {
   registerCertIssueCommand(cert);
   registerCertRenewCommand(cert);
   registerCertAttachCommand(cert);
+
+  // proxy subcommands
+  const proxy = program.command("proxy").description("Egress credential proxy");
+  registerProxyEnvCommand(proxy);
 
   return program;
 }

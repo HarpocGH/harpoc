@@ -28,6 +28,8 @@ export interface AllowOptions {
   imapReadOnly?: boolean;
   /** Tri-state: true (--strict-tree-exit), false (--no-strict-tree-exit), undefined (keep stored). */
   strictTreeExit?: boolean;
+  /** Tri-state: true (--proxy), false (--no-proxy), undefined (keep stored). */
+  proxy?: boolean;
   acknowledgeInterpreter?: boolean;
   clear?: boolean;
   show?: boolean;
@@ -47,6 +49,7 @@ const EMPTY_POLICY: InjectionPolicy = {
   smtp_recipient_allowlist: [],
   imap_read_only: false,
   strict_tree_exit: false,
+  proxy: false,
 };
 
 /**
@@ -80,7 +83,17 @@ export function mergePolicy(current: InjectionPolicy, options: AllowOptions): In
       : base.smtp_recipient_allowlist,
     imap_read_only: options.imapReadOnly ?? base.imap_read_only,
     strict_tree_exit: options.strictTreeExit ?? base.strict_tree_exit,
+    proxy: options.proxy ?? base.proxy,
   };
+}
+
+/** The opt-in alone brokers nothing: the URL allowlist is deny-by-default. */
+function noteProxyWithoutUrl(handle: string, options: AllowOptions, policy: InjectionPolicy): void {
+  if (options.proxy === true && policy.url_allowlist.length === 0) {
+    console.error(
+      `Note: ${handle} is open to the egress proxy but allowlists no URL — the proxy brokers it to no origin until --url <pattern> adds one.`,
+    );
+  }
 }
 
 export function registerSecretAllowCommand(secret: Command): void {
@@ -145,6 +158,11 @@ export function registerSecretAllowCommand(secret: Command): void {
     )
     .option("--no-strict-tree-exit", "Remove a stored strict-tree-exit requirement")
     .option(
+      "--proxy",
+      "Allow the egress credential proxy (server start --proxy) to broker this secret: a request carrying its placeholder (harpoc:<name> or harpoc://<project>/<name>) is sent to an origin the --url allowlist admits, with the real value swapped in",
+    )
+    .option("--no-proxy", "Remove a stored egress-proxy opt-in")
+    .option(
       "--acknowledge-interpreter",
       "Explicitly acknowledge allowlisting a known interpreter (sh, bash, python, node, ...) or exec wrapper (sudo, xargs, find, tar, ...) — collapses the capability ladder for this secret; refused and audited otherwise",
     )
@@ -170,6 +188,7 @@ export function registerSecretAllowCommand(secret: Command): void {
               (options.recipient?.length ?? 0) +
               (options.imapReadOnly !== undefined ? 1 : 0) +
               (options.strictTreeExit !== undefined ? 1 : 0) +
+              (options.proxy !== undefined ? 1 : 0) +
               (options.clear ? 1 : 0);
             if (options.show || setCount === 0) {
               printJson(await client.getInjectionPolicy(handle));
@@ -183,6 +202,7 @@ export function registerSecretAllowCommand(secret: Command): void {
             await client.setInjectionPolicy(handle, parsed.data, {
               acknowledge_interpreters: options.acknowledgeInterpreter === true,
             });
+            noteProxyWithoutUrl(handle, options, parsed.data);
             printSuccess(`Injection policy updated (${handle})`);
           });
           return;
@@ -201,6 +221,7 @@ export function registerSecretAllowCommand(secret: Command): void {
             (options.recipient?.length ?? 0) +
             (options.imapReadOnly !== undefined ? 1 : 0) +
             (options.strictTreeExit !== undefined ? 1 : 0) +
+            (options.proxy !== undefined ? 1 : 0) +
             (options.clear ? 1 : 0);
 
           const tokenValue = options.token ?? process.env.HARPOC_TOKEN;
@@ -228,6 +249,7 @@ export function registerSecretAllowCommand(secret: Command): void {
             { acknowledge_interpreters: options.acknowledgeInterpreter === true },
             resolved?.caller,
           );
+          noteProxyWithoutUrl(handle, options, parsed.data);
           printSuccess(`Injection policy updated (${handle})`);
         } finally {
           await engine.destroy();

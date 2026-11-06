@@ -23,8 +23,9 @@
  *    2026-09-05). The list only decides whether a failed probe is fatal; the
  *    live probe gates the enforcement describe.
  *  - `ssh-live` — every leg; it covers git as well (TM-11, 2026-10): every
- *    leg that exports it ships git, so the two integration git suites fail
- *    instead of skipping where git does not resolve.
+ *    leg that exports it ships git, so the integration git suites —
+ *    `git-context`, `git-hooks`, `egress-proxy` — fail instead of skipping
+ *    where git does not resolve.
  *  - `two-uid` — Linux (the ubuntu legs and the dev container): the users
  *    named by HARPOC_TWO_UID_VAULT_USER / HARPOC_TWO_UID_AGENT_USER exist and
  *    `sudo -n -u` runs the built CLI as each (`two-identity.test.ts`).

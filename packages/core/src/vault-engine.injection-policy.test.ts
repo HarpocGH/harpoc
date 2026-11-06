@@ -142,6 +142,7 @@ describe("injection policy", () => {
       smtp_recipient_allowlist: [],
       imap_read_only: false,
       strict_tree_exit: false,
+      proxy: false,
     });
   });
 
@@ -259,7 +260,58 @@ describe("injection policy", () => {
     expect(grant?.detail?.strict_tree_exit).toBe(false);
   });
 
-  it("loads a ten-field blob written before strict_tree_exit existed as false — the one post-baseline read default (D1)", async () => {
+  it("round-trips proxy, defaults it to false when omitted, and audits it in the POLICY_GRANT detail (B2)", async () => {
+    await engine.setInjectionPolicy("secret://pol", { proxy: true });
+    expect((await engine.getInjectionPolicy("secret://pol")).proxy).toBe(true);
+    expect(engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0]?.detail?.proxy).toBe(
+      true,
+    );
+    await engine.setInjectionPolicy("secret://pol", { url_allowlist: [] });
+    expect((await engine.getInjectionPolicy("secret://pol")).proxy).toBe(false);
+    expect(engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0]?.detail?.proxy).toBe(
+      false,
+    );
+  });
+
+  it("loads an eleven-field blob written before proxy existed as proxy: false — the second post-baseline read default (B2)", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
+    const elevenFields = JSON.stringify({
+      url_allowlist: ["https://api.example.com/*"],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: false,
+      smtp_recipient_allowlist: [],
+      imap_read_only: false,
+      strict_tree_exit: true,
+    });
+    const enc = encrypt(
+      kek,
+      new Uint8Array(Buffer.from(elevenFields, "utf8")),
+      AAD_INJECTION_POLICY(secretId),
+    );
+    const now = Date.now();
+    store.upsertInjectionPolicy({
+      secret_id: secretId,
+      policy_encrypted: enc.ciphertext,
+      policy_iv: enc.iv,
+      policy_tag: enc.tag,
+      created_at: now,
+      updated_at: now,
+    });
+    const loaded = await engine.getInjectionPolicy("secret://pol");
+    expect(loaded.proxy).toBe(false);
+    expect(loaded.strict_tree_exit).toBe(true);
+    expect(loaded.url_allowlist).toEqual(["https://api.example.com/*"]);
+    // No rewrite on read: the blob is the eleven-field one until the next set.
+    expect(store.getInjectionPolicy(secretId)?.updated_at).toBe(now);
+  });
+
+  it("loads a ten-field blob written before strict_tree_exit existed as false — a post-baseline read default (D1)", async () => {
     const secretId = await engine.resolveSecretId("secret://pol");
     const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
     const tenFields = JSON.stringify({
@@ -329,6 +381,7 @@ describe("injection policy", () => {
     expect(err.message).toContain(`injection policy for secret ${secretId} is malformed`);
     expect(err.message).toContain("fs_isolation");
     expect(err.message).not.toContain("strict_tree_exit");
+    expect(err.message).not.toContain("proxy");
     expect(err.message).not.toContain("gh");
   });
 

@@ -44,6 +44,7 @@ const STORED_POLICY: InjectionPolicy = {
   smtp_recipient_allowlist: [],
   imap_read_only: true,
   strict_tree_exit: false,
+  proxy: false,
 };
 
 const current: InjectionPolicy = {
@@ -58,6 +59,7 @@ const current: InjectionPolicy = {
   smtp_recipient_allowlist: [],
   imap_read_only: false,
   strict_tree_exit: false,
+  proxy: false,
 };
 
 describe("mergePolicy", () => {
@@ -140,6 +142,7 @@ describe("mergePolicy", () => {
       smtp_recipient_allowlist: [],
       imap_read_only: false,
       strict_tree_exit: false,
+      proxy: false,
     });
   });
 
@@ -451,6 +454,68 @@ describe("secret allow command — strict tree exit flag (2026-09-10)", () => {
     expect(spies.logSpy).toHaveBeenCalledWith(
       JSON.stringify({ ...STORED_POLICY, strict_tree_exit: true }, null, 2),
     );
+  });
+});
+
+describe("secret allow command — egress proxy opt-in (B2)", () => {
+  const GITHUB = ["https://api.github.com/*"];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY, url_allowlist: GITHUB });
+  });
+
+  it("--proxy alone is a set (not a show): the whole policy lands with proxy: true", async () => {
+    await run(["secret://k", "--proxy"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      { ...STORED_POLICY, url_allowlist: GITHUB, proxy: true },
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+    expect(spies.errorSpy.mock.calls).toEqual([["OK: Injection policy updated (secret://k)"]]);
+  });
+
+  it("--no-proxy clears a stored opt-in", async () => {
+    mockEngine.getInjectionPolicy.mockResolvedValue({
+      ...STORED_POLICY,
+      url_allowlist: GITHUB,
+      proxy: true,
+    });
+    await run(["secret://k", "--no-proxy"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      { ...STORED_POLICY, url_allowlist: GITHUB, proxy: false },
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+  });
+
+  it("keeps a stored opt-in when neither spelling is passed (commander tri-state pin)", async () => {
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY, proxy: true });
+    await run(["secret://k", "--url", "https://api.example.com/*"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      { ...STORED_POLICY, url_allowlist: ["https://api.example.com/*"], proxy: true },
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+  });
+
+  it("--proxy on a secret that allowlists no URL notes that the proxy brokers it to no origin", async () => {
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY });
+    await run(["secret://k", "--proxy"]);
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        "Note: secret://k is open to the egress proxy but allowlists no URL — the proxy brokers it to no origin until --url <pattern> adds one.",
+      ],
+      ["OK: Injection policy updated (secret://k)"],
+    ]);
+  });
+
+  it("mergePolicy: --clear resets proxy to false unless --proxy re-asserts it", () => {
+    expect(mergePolicy({ ...STORED_POLICY, proxy: true }, { clear: true }).proxy).toBe(false);
+    expect(mergePolicy({ ...STORED_POLICY }, { clear: true, proxy: true }).proxy).toBe(true);
   });
 });
 

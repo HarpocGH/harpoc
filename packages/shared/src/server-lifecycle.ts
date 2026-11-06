@@ -8,7 +8,7 @@
  */
 
 /** Every transport a Harpoc listener runs. */
-export const SERVER_TRANSPORTS = ["stdio", "http", "rest"] as const;
+export const SERVER_TRANSPORTS = ["stdio", "http", "rest", "proxy"] as const;
 
 /** Every reason a Harpoc listener stops. */
 export const SERVER_STOP_TRIGGERS = ["SIGINT", "SIGTERM", "transport_closed"] as const;

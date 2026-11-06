@@ -13,6 +13,7 @@ export * from "./interpreters.js";
 export * from "./name-pattern.js";
 export * from "./oauth-scopes.js";
 export * from "./pem.js";
+export * from "./rate-limiter.js";
 export * from "./recipient-pattern.js";
 export * from "./schema-issues.js";
 export * from "./schemas.js";

@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -18,6 +18,7 @@ const {
   certManagerCtorCalls,
   mockRenewalScheduler,
   renewalSchedulerCtorCalls,
+  mockEgressProxy,
 } = vi.hoisted(() => ({
   mockEngine: {
     destroy: vi.fn().mockResolvedValue(undefined),
@@ -60,6 +61,11 @@ const {
     renewer: unknown;
     options: Record<string, unknown>;
   }[],
+  mockEgressProxy: {
+    listenTcp: vi.fn(async (port: number) => ({ port })),
+    listenSocket: vi.fn().mockResolvedValue(undefined),
+    close: vi.fn().mockResolvedValue(undefined),
+  },
 }));
 
 // ── Module mocks ───────────────────────────────────────────────────
@@ -108,6 +114,10 @@ vi.mock("@harpoc/cert-manager", () => ({
     });
     return mockRenewalScheduler;
   }),
+}));
+
+vi.mock("@harpoc/egress-proxy", () => ({
+  createEgressProxy: vi.fn().mockReturnValue(mockEgressProxy),
 }));
 
 // Spy wrapper around the real implementation: the assertion's argument and its
@@ -635,6 +645,278 @@ describe("server start", () => {
       expect(startServer).toHaveBeenCalled();
       expect(assertRuntimeDir).not.toHaveBeenCalled();
       expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── --proxy (the egress credential proxy, B2) ──────────────────
+
+  describe("--proxy", () => {
+    let dir: string;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "harpoc-server-proxy-"));
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    });
+
+    /** A consumer directory as the recipe leaves it: this user's own, 0750 whatever the umask. */
+    function consumer(name: string): string {
+      const path = join(dir, name);
+      mkdirSync(path);
+      chmodSync(path, 0o750);
+      return path;
+    }
+
+    it("--proxy alone is a valid start: the proxy on the engine, TCP on 127.0.0.1:3128, no socket", async () => {
+      const { createEgressProxy } = await import("@harpoc/egress-proxy");
+
+      await run(["--proxy"]);
+
+      expect(createEgressProxy).toHaveBeenCalledWith({ engine: mockEngine });
+      expect(mockEgressProxy.listenTcp.mock.calls).toEqual([[3128, "127.0.0.1"]]);
+      expect(mockEgressProxy.listenSocket).not.toHaveBeenCalled();
+      expect(spies.errorSpy).toHaveBeenCalledWith(
+        "[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: no --runtime-dir)",
+      );
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("--proxy-port moves the TCP listener", async () => {
+      await run(["--proxy", "--proxy-port", "4000"]);
+
+      expect(mockEgressProxy.listenTcp.mock.calls).toEqual([[4000, "127.0.0.1"]]);
+    });
+
+    it("--proxy-port refuses a hex form INVALID_INPUT before the vault opens", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+      await expect(run(["--proxy", "--proxy-port", "0x10"])).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls[0]).toEqual([
+        'Error: [INVALID_INPUT] Invalid proxy port "0x10". Must be 1-65535.',
+      ]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    });
+
+    it("--proxy-port requires --proxy", async () => {
+      await expect(run(["--rest", "--proxy-port", "4000"])).rejects.toThrow("process.exit");
+      expect(spies.exitSpy).toHaveBeenCalledWith(1);
+      expect(spies.errorSpy).toHaveBeenCalledWith("Error: --proxy-port requires --proxy.");
+    });
+
+    it.each([
+      {
+        argv: ["--rest", "--port", "4000", "--proxy-port", "4000"],
+        line: "Error: --port and --proxy-port must differ (both are 4000).",
+      },
+      {
+        argv: ["--mcp-http", "--mcp-http-port", "3128"],
+        line: "Error: --mcp-http-port and --proxy-port must differ (both are 3128).",
+      },
+      {
+        argv: ["--cert-renew", "--cert-renew-port", "3128"],
+        line: "Error: --cert-renew-port and --proxy-port must differ (both are 3128).",
+      },
+    ])("refuses a port the proxy shares before the vault opens: $line", async ({ argv, line }) => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+      await expect(run(["--proxy", ...argv])).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls[0]).toEqual([line]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    });
+
+    // Model A untouched: without --proxy nothing creates the proxy.
+    it("--rest alone creates no proxy (negative control)", async () => {
+      const { createEgressProxy } = await import("@harpoc/egress-proxy");
+
+      await run(["--rest"]);
+
+      expect(createEgressProxy).not.toHaveBeenCalled();
+    });
+
+    // RD-1: --proxy is the first per-consumer feature, so systemd's variable is its default.
+    // A drive-less absolute path: on win32 a drive letter's colon would read as RD-2's list.
+    it("under --proxy the ambient RUNTIME_DIRECTORY is read and asserted before the vault opens", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      const missing = "/harpoc-b2-no-such-runtime-dir";
+      vi.stubEnv("RUNTIME_DIRECTORY", missing);
+
+      await expect(run(["--proxy"])).rejects.toThrow("process.exit");
+      expect(assertRuntimeDir).toHaveBeenCalledWith({
+        path: missing,
+        source: "$RUNTIME_DIRECTORY",
+      });
+      expect(spies.errorSpy.mock.calls[0]).toEqual([
+        `Error: [INVALID_INPUT] $RUNTIME_DIRECTORY: no such directory: ${missing}`,
+      ]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    });
+
+    // --runtime-dir is refused on win32 (RD-3): the socket half is POSIX-only.
+    it.skipIf(process.platform === "win32")(
+      "opens one proxy.sock per consumer directory, by name, after the TCP listener (POSIX)",
+      async () => {
+        consumer("bob");
+        consumer("alice");
+        writeFileSync(join(dir, "not-a-consumer"), "");
+
+        await run(["--proxy", "--runtime-dir", dir]);
+
+        expect(mockEgressProxy.listenSocket.mock.calls).toEqual([
+          [join(dir, "alice", "proxy.sock")],
+          [join(dir, "bob", "proxy.sock")],
+        ]);
+        const [tcp] = mockEgressProxy.listenTcp.mock.invocationCallOrder;
+        const [firstSocket] = mockEgressProxy.listenSocket.mock.invocationCallOrder;
+        expect(tcp as number).toBeLessThan(firstSocket as number);
+        expect(spies.errorSpy).toHaveBeenCalledWith(
+          "[harpoc] egress proxy listening on http://127.0.0.1:3128 and 2 consumer sockets (<consumer>/proxy.sock)",
+        );
+      },
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "a runtime directory without consumer directories starts the TCP listener alone (POSIX)",
+      async () => {
+        await run(["--proxy", "--runtime-dir", dir]);
+
+        expect(mockEgressProxy.listenTcp).toHaveBeenCalledTimes(1);
+        expect(mockEgressProxy.listenSocket).not.toHaveBeenCalled();
+        expect(spies.errorSpy).toHaveBeenCalledWith(
+          `[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: no consumer directory under ${dir})`,
+        );
+      },
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "a misconfigured consumer directory refuses the start before the vault opens (POSIX)",
+      async () => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+        chmodSync(consumer("alice"), 0o770);
+
+        await expect(run(["--proxy", "--runtime-dir", dir])).rejects.toThrow("process.exit");
+        expect(spies.errorSpy.mock.calls[0]).toEqual([
+          `Error: [INVALID_INPUT] consumer directory: mode 0770 is not 0750 or stricter (group-writable or world-accessible): ${join(dir, "alice")}`,
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      },
+    );
+
+    // B1's --rest --runtime-dir start reads no consumer directory.
+    it.skipIf(process.platform === "win32")(
+      "without --proxy no consumer directory is read: --rest --runtime-dir starts (POSIX)",
+      async () => {
+        const { startServer } = await import("@harpoc/rest-api");
+        chmodSync(consumer("alice"), 0o770);
+
+        await run(["--rest", "--runtime-dir", dir]);
+
+        expect(startServer).toHaveBeenCalled();
+        expect(spies.exitSpy).not.toHaveBeenCalled();
+      },
+    );
+
+    it("a rejected proxy bind reaches the fatal path: the error on stderr, exit 1, engine destroyed", async () => {
+      mockEgressProxy.listenTcp.mockRejectedValueOnce(
+        new Error("listen EADDRINUSE: address already in use 127.0.0.1:3128"),
+      );
+
+      await expect(run(["--proxy"])).rejects.toThrow("process.exit");
+      expect(spies.exitSpy).toHaveBeenCalledWith(1);
+      expect(spies.errorSpy).toHaveBeenCalledWith(
+        "Error: listen EADDRINUSE: address already in use 127.0.0.1:3128",
+      );
+      expect(mockEngine.destroy).toHaveBeenCalled();
+    });
+
+    it("redirects console.log to stderr beside the stdio server (--mcp --proxy)", async () => {
+      await run(["--mcp", "--proxy"]);
+
+      expect(console.log).toBe(console.error);
+    });
+
+    it("SIGTERM: one server.stop per listener in start order, each before its close, all before destroy", async () => {
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+
+      await run(["--rest", "--proxy", "--proxy-port", "4000"]);
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [
+          expect.objectContaining({
+            transport: "rest",
+            tokenless: false,
+            port: 3000,
+            trigger: "SIGTERM",
+          }),
+        ],
+        [
+          {
+            transport: "proxy",
+            tokenless: false,
+            port: 4000,
+            uptimeMs: expect.any(Number),
+            trigger: "SIGTERM",
+          },
+        ],
+      ]);
+      const [, proxyRow] = mockEngine.auditServerStop.mock.invocationCallOrder as number[];
+      const restClose = mockRestServer.close.mock.invocationCallOrder[0] as number;
+      const proxyClose = mockEgressProxy.close.mock.invocationCallOrder[0] as number;
+      const destroy = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+      expect(restClose).toBeLessThan(proxyRow as number);
+      expect(proxyRow as number).toBeLessThan(proxyClose);
+      expect(proxyClose).toBeLessThan(destroy);
+
+      onSpy.mockRestore();
+    });
+
+    it("SIGTERM while the proxy's bind is pending writes no proxy stop row and closes nothing (RA-4)", async () => {
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+      let releaseBind: (bound: { port: number }) => void = () => undefined;
+      const bind = new Promise<{ port: number }>((resolve) => {
+        releaseBind = resolve;
+      });
+      mockEgressProxy.listenTcp.mockReturnValueOnce(bind);
+
+      const started = run(["--proxy"]);
+      await vi.waitFor(() => expect(mockEgressProxy.listenTcp).toHaveBeenCalledTimes(1));
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+      releaseBind({ port: 3128 });
+      await started;
+
+      expect(mockEngine.auditServerStop).not.toHaveBeenCalled();
+      expect(mockEgressProxy.close).not.toHaveBeenCalled();
+
+      onSpy.mockRestore();
+    });
+
+    it("stdin EOF beside --proxy: only the stdio server stops, the proxy keeps serving", async () => {
+      const onceSpy = vi.spyOn(process.stdin, "once");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+
+      await run(["--mcp", "--allow-tokenless", "--proxy"]);
+      const endCall = onceSpy.mock.calls.find((call) => (call[0] as string) === "end");
+      (endCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(mockHandle.close).toHaveBeenCalledTimes(1));
+      // A shutdown would be chained on the close's settlement: let it run before the negative.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [expect.objectContaining({ transport: "stdio", trigger: "transport_closed" })],
+      ]);
+      expect(mockEgressProxy.close).not.toHaveBeenCalled();
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+
+      onceSpy.mockRestore();
     });
   });
 

@@ -20,6 +20,7 @@ export const FULL_POLICY = {
   smtp_recipient_allowlist: [] as string[],
   imap_read_only: false,
   strict_tree_exit: false,
+  proxy: false,
 };
 
 /** The VaultEngine methods DirectClient calls, each a vitest mock. */

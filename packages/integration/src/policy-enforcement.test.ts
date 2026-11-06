@@ -256,6 +256,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
           smtp_recipient_allowlist: [],
           imap_read_only: false,
           strict_tree_exit: false,
+          proxy: false,
         }),
       });
       expect(res.status).toBe(403);

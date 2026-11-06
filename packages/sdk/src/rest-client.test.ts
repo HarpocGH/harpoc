@@ -25,6 +25,7 @@ const FULL_POLICY = {
   smtp_recipient_allowlist: [] as string[],
   imap_read_only: false,
   strict_tree_exit: false,
+  proxy: false,
 };
 
 const HANDLE = "secret://proj/k";
@@ -634,6 +635,17 @@ describe("RestClient", () => {
       expect(JSON.parse(call[1].body as string).strict_tree_exit).toBe(true);
     });
 
+    it("setInjectionPolicy sends proxy in the whole-policy body (B2)", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", { ...FULL_POLICY, proxy: true });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(JSON.parse(call[1].body as string)).toStrictEqual({
+        ...FULL_POLICY,
+        proxy: true,
+        acknowledge_interpreters: false,
+      });
+    });
+
     it("setInjectionPolicy serializes every injectionPolicyInputSchema key when supplied (drift pin)", async () => {
       mockFetchResponse({ updated: true });
       const full = {
@@ -648,6 +660,7 @@ describe("RestClient", () => {
         smtp_recipient_allowlist: ["*@corp.example"],
         imap_read_only: true,
         strict_tree_exit: false,
+        proxy: true,
       };
       await client.setInjectionPolicy("secret://k", full);
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];

@@ -198,6 +198,7 @@ const STORED_POLICY = {
   smtp_recipient_allowlist: [],
   imap_read_only: false,
   strict_tree_exit: false,
+  proxy: false,
 };
 const MCP_CONFIG = { server_name: "srv", transport: "http", url: "https://mcp.example.com/mcp" };
 /** The config `--name srv --transport http --url …` parses to: the schema adds the default revision. */
@@ -473,6 +474,15 @@ const REST_ROWS: RestRow[] = [
     },
   },
   {
+    argv: ["secret", "allow", "secret://k", "--proxy"],
+    calls: {
+      getInjectionPolicy: [["secret://k"]],
+      setInjectionPolicy: [
+        ["secret://k", { ...STORED_POLICY, proxy: true }, { acknowledge_interpreters: false }],
+      ],
+    },
+  },
+  {
     argv: ["secret", "mcp-server", "secret://k", "--show"],
     calls: { getMcpServerConfig: [["secret://k"]] },
   },
@@ -575,6 +585,7 @@ const REST_ROWS: RestRow[] = [
   { argv: ["oauth", "status", "secret://k"], calls: { getOAuthStatus: [["secret://k"]] } },
   { argv: ["oauth", "refresh", "secret://k"], calls: { refreshOAuthToken: [["secret://k"]] } },
   { argv: ["oauth", "providers"], calls: {} },
+  { argv: ["proxy", "env", "agent", "secret://k"], calls: {} },
   {
     argv: ["cert", "import", "c", "--key", KEY_PATH, "--cert", CERT_PATH],
     calls: {
@@ -641,6 +652,16 @@ describe("the REST mode of every REST-capable command (--url / --token-file)", (
       expect(spies.exitSpy).not.toHaveBeenCalled();
       expect(remote).toEqual(local);
     });
+  });
+
+  it("secret allow --proxy over REST prints the empty-allowlist note before the OK line (B2)", async () => {
+    await capture([...rest, "secret", "allow", "secret://k", "--proxy"]);
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        "Note: secret://k is open to the egress proxy but allowlists no URL — the proxy brokers it to no origin until --url <pattern> adds one.",
+      ],
+      ["OK: Injection policy updated (secret://k)"],
+    ]);
   });
 
   it("sends the value read from --from-file and wipes it after the call (secret set, secret rotate)", async () => {
@@ -988,7 +1009,7 @@ describe("the commands' own --url and --token-file after the command stay theirs
 describe("the REST mode's place in the command tree", () => {
   // Pure groups carry no action. Everything else is classified here: a command added later reds
   // this row until it is listed as REST-capable (with a REST_ROWS row) or unsupported.
-  const GROUPS = ["agent", "auth", "cert", "oauth", "policy", "secret", "server"];
+  const GROUPS = ["agent", "auth", "cert", "oauth", "policy", "proxy", "secret", "server"];
   const REST_CAPABLE = [
     "agent activate",
     "agent deactivate",
@@ -1013,6 +1034,7 @@ describe("the REST mode's place in the command tree", () => {
     "policy grant",
     "policy list",
     "policy revoke",
+    "proxy env",
     "secret allow",
     "secret connection",
     "secret delete",

@@ -30,7 +30,17 @@ describe("injectionPolicyInputSchema", () => {
       smtp_recipient_allowlist: [],
       imap_read_only: false,
       strict_tree_exit: false,
+      proxy: false,
     });
+  });
+
+  it("proxy defaults to false, round-trips true and refuses a non-boolean (B2)", () => {
+    expect(injectionPolicyInputSchema.parse({}).proxy).toBe(false);
+    const enabled = injectionPolicyInputSchema.parse({ proxy: true });
+    expect(enabled.proxy).toBe(true);
+    expect(injectionPolicyInputSchema.parse(JSON.parse(JSON.stringify(enabled))).proxy).toBe(true);
+    expect(injectionPolicyInputSchema.safeParse({ proxy: "yes" }).success).toBe(false);
+    expect(injectionPolicyInputSchema.safeParse({ proxy: 1 }).success).toBe(false);
   });
 
   it("round-trips network_isolation true", () => {
@@ -154,6 +164,7 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
     smtp_recipient_allowlist: ["*@example.com"],
     imap_read_only: false,
     strict_tree_exit: false,
+    proxy: false,
   };
 
   it("accepts a complete policy unchanged", () => {
@@ -170,14 +181,24 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
     }
   });
 
+  it("refuses a missing proxy, naming it — the read-side default lives in core, never here (B2)", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { proxy: _dropped, ...partial } = complete;
+    const result = injectionPolicySchema.safeParse(partial);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((i) => i.path.join("."))).toEqual(["proxy"]);
+    }
+  });
+
   it("refuses an unknown key (strict)", () => {
     expect(injectionPolicySchema.safeParse({ ...complete, extra: 1 }).success).toBe(false);
   });
 
-  it("applies no defaults — an empty object is eleven misses", () => {
+  it("applies no defaults — an empty object is twelve misses", () => {
     const result = injectionPolicySchema.safeParse({});
     expect(result.success).toBe(false);
-    if (!result.success) expect(result.error.issues).toHaveLength(11);
+    if (!result.success) expect(result.error.issues).toHaveLength(12);
   });
 
   it("shares the field validators with the input schema", () => {
@@ -217,6 +238,7 @@ describe("setInjectionPolicyRequestSchema", () => {
     smtp_recipient_allowlist: ["*@corp.example"],
     imap_read_only: false,
     strict_tree_exit: false,
+    proxy: false,
   };
 
   it("is the stored policy shape plus the acknowledgement flag (key-set pin)", () => {
@@ -238,6 +260,14 @@ describe("setInjectionPolicyRequestSchema", () => {
       }
     },
   );
+
+  it("requires proxy on the wire — a body without it is refused naming proxy alone (R3, B2)", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { proxy: _omitted, ...elevenFields } = complete;
+    const wire = setInjectionPolicyRequestSchema.safeParse(elevenFields);
+    expect(wire.success).toBe(false);
+    if (!wire.success) expect(wire.error.issues.map((i) => i.path.join("."))).toEqual(["proxy"]);
+  });
 
   it("refuses an unknown key (strict — inherited from injectionPolicySchema through .extend)", () => {
     const result = setInjectionPolicyRequestSchema.safeParse({

@@ -31,6 +31,7 @@ pnpm test
 | `@harpoc/sdk`          | `packages/sdk`          | VaultClient with direct and REST modes                                                                       |
 | `@harpoc/oauth-proxy`  | `packages/oauth-proxy`  | OAuth 2.1 proxy: PKCE flows, provider presets, token refresh                                                 |
 | `@harpoc/cert-manager` | `packages/cert-manager` | Certificate lifecycle: PKCS#10 CSR builder, ACME client, renewal scheduler                                   |
+| `@harpoc/egress-proxy` | `packages/egress-proxy` | Egress credential proxy: placeholder swap, plain-HTTP rewrite mode, response redaction                       |
 | `@harpoc/web-ui`       | `packages/web-ui`       | Preact + Vite SPA served by the REST API at `/ui`                                                            |
 | `@harpoc/integration`  | `packages/integration`  | Cross-package integration tests                                                                              |
 | `@harpoc/e2e`          | `packages/e2e`          | End-to-end evaluation harness (Linux + Docker; `test:e2e`)                                                   |

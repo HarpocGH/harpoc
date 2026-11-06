@@ -7,8 +7,8 @@ import type { ServerStopTrigger, ServerTransport } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError } from "../utils/output.js";
 import { parseIntOption } from "../utils/options.js";
-import { MAX_PORT, MIN_PORT } from "../utils/option-bounds.js";
-import { assertRuntimeDir, resolveRuntimeDir } from "../utils/runtime-dir.js";
+import { DEFAULT_PROXY_PORT, MAX_PORT, MIN_PORT } from "../utils/option-bounds.js";
+import { assertRuntimeDir, consumerSocketPaths, resolveRuntimeDir } from "../utils/runtime-dir.js";
 
 function resolveUiDistDir(): string {
   const require = createRequire(import.meta.url);
@@ -65,6 +65,11 @@ export function registerServerCommand(program: Command): void {
       "--runtime-dir <path>",
       "Runtime directory holding one subdirectory per consumer (owned by this user, mode 0750 or stricter; created by deploy/linux/install-two-identity.sh and recreated at boot by its tmpfiles.d entry — never a unit's RuntimeDirectory=, which systemd empties at every stop); checked before the vault opens",
     )
+    .option(
+      "--proxy",
+      "Start the egress credential proxy (plain-HTTP rewrite mode) on 127.0.0.1:<--proxy-port>, and one proxy.sock per consumer directory under --runtime-dir (default $RUNTIME_DIRECTORY)",
+    )
+    .option("--proxy-port <port>", "Egress proxy port (loopback)", String(DEFAULT_PROXY_PORT))
     .action(
       async (
         opts: {
@@ -84,6 +89,8 @@ export function registerServerCommand(program: Command): void {
           certRenew?: boolean;
           certRenewPort: string;
           runtimeDir?: string;
+          proxy?: boolean;
+          proxyPort: string;
         },
         cmd: Command,
       ) => {
@@ -99,9 +106,9 @@ export function registerServerCommand(program: Command): void {
             process.exit(1);
           }
           // An ambient $RUNTIME_DIRECTORY is the default only for a
-          // per-consumer feature (none exists yet): a unit's RuntimeDirectory=
+          // per-consumer feature (--proxy's sockets): a unit's RuntimeDirectory=
           // (0755 by default) must not refuse a start that asked for none.
-          const runtimeDir = resolveRuntimeDir(opts.runtimeDir, {});
+          const runtimeDir = resolveRuntimeDir(opts.runtimeDir, opts.proxy ? process.env : {});
 
           if (opts.ui && !opts.rest) {
             console.error("Error: --ui requires --rest.");
@@ -126,7 +133,14 @@ export function registerServerCommand(program: Command): void {
             uiTokenTtlMs = minutes * 60_000;
           }
 
-          if (!opts.mcp && !opts.mcpHttp && !opts.rest && !opts.oauthRefresh && !opts.certRenew) {
+          if (
+            !opts.mcp &&
+            !opts.mcpHttp &&
+            !opts.rest &&
+            !opts.proxy &&
+            !opts.oauthRefresh &&
+            !opts.certRenew
+          ) {
             console.error(
               "Error: At least one of --mcp, --mcp-http, --rest, --oauth-refresh or --cert-renew is required.",
             );
@@ -138,6 +152,11 @@ export function registerServerCommand(program: Command): void {
             process.exit(1);
           }
 
+          if (cmd.getOptionValueSource("proxyPort") === "cli" && !opts.proxy) {
+            console.error("Error: --proxy-port requires --proxy.");
+            process.exit(1);
+          }
+
           const port = parseIntOption(opts.port, "port", MIN_PORT, MAX_PORT);
           const mcpHttpPort = parseIntOption(opts.mcpHttpPort, "MCP HTTP port", MIN_PORT, MAX_PORT);
           const certRenewPort = parseIntOption(
@@ -146,6 +165,7 @@ export function registerServerCommand(program: Command): void {
             MIN_PORT,
             MAX_PORT,
           );
+          const proxyPort = parseIntOption(opts.proxyPort, "proxy port", MIN_PORT, MAX_PORT);
 
           if (opts.token !== undefined) {
             console.error(
@@ -209,6 +229,18 @@ export function registerServerCommand(program: Command): void {
             );
             process.exit(1);
           }
+          for (const [flag, enabled, other] of [
+            ["--port", opts.rest, port],
+            ["--mcp-http-port", opts.mcpHttp, mcpHttpPort],
+            ["--cert-renew-port", opts.certRenew, certRenewPort],
+          ] as const) {
+            if (opts.proxy && enabled && other === proxyPort) {
+              console.error(
+                `Error: ${flag} and --proxy-port must differ (both are ${String(proxyPort)}).`,
+              );
+              process.exit(1);
+            }
+          }
 
           // Read before the vault is loaded, like every other refusal above: a
           // bad file never touches the session.
@@ -223,6 +255,12 @@ export function registerServerCommand(program: Command): void {
             fileToken = read.token;
           }
           if (runtimeDir !== undefined) assertRuntimeDir(runtimeDir);
+          // One proxy.sock per consumer directory present: each directory is an
+          // enrolment, and a misconfigured one refuses the start (R-A1).
+          const proxySockets =
+            opts.proxy && runtimeDir !== undefined
+              ? consumerSocketPaths(runtimeDir, "proxy.sock")
+              : [];
 
           const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir as string | undefined);
           engine = await loadUnlockedEngine(vaultDir);
@@ -233,6 +271,8 @@ export function registerServerCommand(program: Command): void {
           let restOAuthManager: { cancelPendingFlows(): void } | undefined;
           let refreshScheduler: { stop(): Promise<void> } | undefined;
           let renewalScheduler: { stop(): Promise<void> } | undefined;
+          let egressProxy: { close(): Promise<void> } | undefined;
+          let proxyBoundPort: number | undefined;
           let shuttingDown = false;
 
           const startedAt = Date.now();
@@ -283,6 +323,10 @@ export function registerServerCommand(program: Command): void {
               auditStop("rest", false, port, trigger);
               restServer.close();
             }
+            if (egressProxy) {
+              auditStop("proxy", false, proxyBoundPort, trigger);
+              await egressProxy.close();
+            }
             // Abort the REST app's pending background OAuth flows before the
             // store closes: each authorization-code flow pins a loopback
             // listener and a 5-minute timer, and its completion writes to the
@@ -298,7 +342,7 @@ export function registerServerCommand(program: Command): void {
 
           // When stdio MCP runs alongside an HTTP server, MCP owns stdout for JSON-RPC.
           // Redirect console.log to stderr so HTTP startup messages don't corrupt the stream.
-          if (opts.mcp && (opts.rest || opts.mcpHttp)) {
+          if (opts.mcp && (opts.rest || opts.mcpHttp || opts.proxy)) {
             console.log = console.error;
           }
 
@@ -329,7 +373,8 @@ export function registerServerCommand(program: Command): void {
               if (stdioClosed || shuttingDown) return;
               stdioClosed = true;
               auditStop("stdio", opts.allowTokenless === true, undefined, "transport_closed");
-              const alone = !opts.rest && !opts.mcpHttp && !opts.oauthRefresh && !opts.certRenew;
+              const alone =
+                !opts.rest && !opts.mcpHttp && !opts.proxy && !opts.oauthRefresh && !opts.certRenew;
               const closed = handle.close().catch(() => undefined);
               if (alone) void closed.then(() => shutdown("transport_closed"));
             });
@@ -382,6 +427,24 @@ export function registerServerCommand(program: Command): void {
                 `[harpoc] The link grants admin access until the token expires (${validity}). Do not share it.`,
               );
             }
+          }
+
+          if (opts.proxy) {
+            const { createEgressProxy } = await import("@harpoc/egress-proxy");
+            const proxy = createEgressProxy({ engine });
+            const { port: boundPort } = await proxy.listenTcp(proxyPort, "127.0.0.1");
+            egressProxy = proxy;
+            proxyBoundPort = boundPort;
+            for (const socketPath of proxySockets) await proxy.listenSocket(socketPath);
+            const sockets =
+              runtimeDir === undefined
+                ? " (TCP only: no --runtime-dir)"
+                : proxySockets.length === 0
+                  ? ` (TCP only: no consumer directory under ${runtimeDir.path})`
+                  : ` and ${String(proxySockets.length)} consumer socket${proxySockets.length === 1 ? "" : "s"} (<consumer>/proxy.sock)`;
+            console.error(
+              `[harpoc] egress proxy listening on http://127.0.0.1:${String(boundPort)}${sockets}`,
+            );
           }
 
           if (opts.oauthRefresh) {
