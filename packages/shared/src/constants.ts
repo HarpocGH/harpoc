@@ -32,6 +32,7 @@ export const AES_TAG_LENGTH = 16; // 128 bits
 // -- AAD (Additional Authenticated Data) strings -----------------------------
 
 export const AAD_VAULT_KEK = "vault-kek";
+export const AAD_UNLOCK_KEY_WRAP = "vault-kek-unlock-key";
 export const AAD_SESSION_KEK = "session-kek";
 export const AAD_SESSION_JWT = "session-jwt";
 export const AAD_SESSION_AUDIT = "session-audit";

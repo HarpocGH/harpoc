@@ -3,6 +3,7 @@ import {
   AAD_DEK_WRAP,
   AAD_NAME_ENCRYPTION,
   AAD_SECRET_PAYLOAD,
+  AAD_UNLOCK_KEY_WRAP,
   AAD_VAULT_KEK,
   AAD_WRAPPED_AUDIT_KEY,
   AAD_WRAPPED_JWT_KEY,
@@ -42,6 +43,14 @@ export interface UnlockedKeys {
   kek: Uint8Array;
   jwtKey: Uint8Array;
   auditKey: Uint8Array;
+}
+
+/** The unlock-key slot: the KEK wrapped under a random unlock key (deployment model B, M1). */
+export interface UnlockKeySlot {
+  unlockKey: Uint8Array;
+  wrappedKekUk: Uint8Array;
+  wrappedKekUkIv: Uint8Array;
+  wrappedKekUkTag: Uint8Array;
 }
 
 /** Wrapped DEK result. */
@@ -140,38 +149,88 @@ export async function unlockVault(
 
   try {
     const kek = decrypt(masterKey, wrappedKek, wrappedKekIv, wrappedKekTag, AAD_VAULT_KEK);
-
-    // On success, key ownership passes to the caller; on a later unwrap
-    // failure the keys derived so far must not be abandoned live in memory.
-    let jwtKey: Uint8Array | null = null;
-    try {
-      jwtKey = decrypt(
-        kek,
-        wrappedJwtKey.ciphertext,
-        wrappedJwtKey.iv,
-        wrappedJwtKey.tag,
-        AAD_WRAPPED_JWT_KEY,
-      );
-      const auditKey = decrypt(
-        kek,
-        wrappedAuditKey.ciphertext,
-        wrappedAuditKey.iv,
-        wrappedAuditKey.tag,
-        AAD_WRAPPED_AUDIT_KEY,
-      );
-
-      return { kek, jwtKey, auditKey };
-    } catch (err) {
-      wipeBuffer(kek);
-      if (jwtKey) {
-        wipeBuffer(jwtKey);
-      }
-      throw err instanceof VaultError && err.code === ErrorCode.ENCRYPTION_ERROR
-        ? VaultError.vaultCorrupted("wrapped key hierarchy does not unwrap under the vault key")
-        : err;
-    }
+    return unwrapSubKeys(kek, wrappedJwtKey, wrappedAuditKey);
   } finally {
     wipeBuffer(masterKey);
+  }
+}
+
+/**
+ * Wrap the KEK under a fresh random 256-bit unlock key — the vault's second
+ * KEK slot (deployment model B, M1): the password slot's AES-256-GCM wrap
+ * without a KDF. The unlock key is the caller's to hand over and wipe.
+ */
+export function wrapKekWithUnlockKey(kek: Uint8Array): UnlockKeySlot {
+  const unlockKey = generateRandomBytes(AES_KEY_LENGTH);
+  try {
+    const { ciphertext, iv, tag } = encrypt(unlockKey, kek, AAD_UNLOCK_KEY_WRAP);
+    return { unlockKey, wrappedKekUk: ciphertext, wrappedKekUkIv: iv, wrappedKekUkTag: tag };
+  } catch (err) {
+    wipeBuffer(unlockKey);
+    throw err;
+  }
+}
+
+/**
+ * Unlock through the unlock-key slot: unwrap the KEK under the unlock key,
+ * then the JWT and audit keys as unlockVault does. A failed KEK unwrap is a
+ * wrong key (ENCRYPTION_ERROR); a failed sub-key unwrap is corruption. The
+ * unlock key stays the caller's to wipe.
+ */
+export function unlockVaultWithKey(
+  unlockKey: Uint8Array,
+  wrappedKekUk: Uint8Array,
+  wrappedKekUkIv: Uint8Array,
+  wrappedKekUkTag: Uint8Array,
+  wrappedJwtKey: WrappedKey,
+  wrappedAuditKey: WrappedKey,
+): UnlockedKeys {
+  const kek = decrypt(
+    unlockKey,
+    wrappedKekUk,
+    wrappedKekUkIv,
+    wrappedKekUkTag,
+    AAD_UNLOCK_KEY_WRAP,
+  );
+  return unwrapSubKeys(kek, wrappedJwtKey, wrappedAuditKey);
+}
+
+/**
+ * The JWT and audit keys under a KEK that unwrapped — the tail both slots
+ * share. On success, key ownership passes to the caller; on a failure the keys
+ * unwrapped so far must not be abandoned live in memory.
+ */
+function unwrapSubKeys(
+  kek: Uint8Array,
+  wrappedJwtKey: WrappedKey,
+  wrappedAuditKey: WrappedKey,
+): UnlockedKeys {
+  let jwtKey: Uint8Array | null = null;
+  try {
+    jwtKey = decrypt(
+      kek,
+      wrappedJwtKey.ciphertext,
+      wrappedJwtKey.iv,
+      wrappedJwtKey.tag,
+      AAD_WRAPPED_JWT_KEY,
+    );
+    const auditKey = decrypt(
+      kek,
+      wrappedAuditKey.ciphertext,
+      wrappedAuditKey.iv,
+      wrappedAuditKey.tag,
+      AAD_WRAPPED_AUDIT_KEY,
+    );
+
+    return { kek, jwtKey, auditKey };
+  } catch (err) {
+    wipeBuffer(kek);
+    if (jwtKey) {
+      wipeBuffer(jwtKey);
+    }
+    throw err instanceof VaultError && err.code === ErrorCode.ENCRYPTION_ERROR
+      ? VaultError.vaultCorrupted("wrapped key hierarchy does not unwrap under the vault key")
+      : err;
   }
 }
 

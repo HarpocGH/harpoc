@@ -35,8 +35,8 @@ describe("enum member counts", () => {
     expect(Object.values(Permission)).toHaveLength(7);
   });
 
-  it("AuditEventType has 36 members", () => {
-    expect(Object.values(AuditEventType)).toHaveLength(36);
+  it("AuditEventType has 38 members", () => {
+    expect(Object.values(AuditEventType)).toHaveLength(38);
   });
 
   it("PrincipalType has 4 members", () => {
@@ -75,10 +75,10 @@ describe("enum member counts", () => {
     expect(Object.values(OAuthProviderPreset)).toHaveLength(5);
   });
 
-  it("ErrorCode has 115 members", () => {
+  it("ErrorCode has 119 members", () => {
     // Filter out reverse mappings (numeric keys) from TypeScript enum
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(115);
+    expect(members).toHaveLength(119);
   });
 
   it("TokenPrincipalType has 3 members and excludes project", () => {
@@ -219,5 +219,21 @@ describe("ErrorCode deployment model B values (B2)", () => {
 describe("ErrorCode deployment model B values (B3)", () => {
   it("ErrorCode carries the agent socket's unbound-signature refusal", () => {
     expect(ErrorCode.SSH_AGENT_UNBOUND).toBe("SSH_AGENT_UNBOUND");
+  });
+});
+
+describe("AuditEventType deployment model B values (B4)", () => {
+  it("AuditEventType carries the unlock-key slot's enrol and revoke events", () => {
+    expect(AuditEventType.VAULT_UNLOCK_KEY_ENROLL).toBe("vault.unlock_key.enroll");
+    expect(AuditEventType.VAULT_UNLOCK_KEY_REVOKE).toBe("vault.unlock_key.revoke");
+  });
+});
+
+describe("ErrorCode deployment model B values (B4)", () => {
+  it("ErrorCode carries the unlock-key slot's four refusals", () => {
+    expect(ErrorCode.INVALID_UNLOCK_KEY).toBe("INVALID_UNLOCK_KEY");
+    expect(ErrorCode.UNLOCK_KEY_NOT_ENROLLED).toBe("UNLOCK_KEY_NOT_ENROLLED");
+    expect(ErrorCode.UNLOCK_KEY_SOURCE_UNSAFE).toBe("UNLOCK_KEY_SOURCE_UNSAFE");
+    expect(ErrorCode.UNLOCK_KEY_PASSWORD_REQUIRED).toBe("UNLOCK_KEY_PASSWORD_REQUIRED");
   });
 });

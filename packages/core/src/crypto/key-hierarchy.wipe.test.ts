@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  AAD_UNLOCK_KEY_WRAP,
   AAD_VAULT_KEK,
   AAD_WRAPPED_AUDIT_KEY,
   AAD_WRAPPED_JWT_KEY,
@@ -10,7 +11,7 @@ import {
 // on a specific AAD so we can drive the unwrap-failure path.
 const decryptResults: { aad: string; result: Uint8Array }[] = [];
 let throwOnAad: string | null = null;
-const encryptInputs: { aad: string; plaintext: Uint8Array }[] = [];
+const encryptInputs: { aad: string; key: Uint8Array; plaintext: Uint8Array }[] = [];
 let throwOnEncryptAad: string | null = null;
 const derivedKeys: Uint8Array[] = [];
 let deriveCalls = 0;
@@ -23,7 +24,7 @@ vi.mock("./aes-gcm.js", async (importOriginal) => {
   return {
     ...original,
     encrypt: (key: Uint8Array, plaintext: Uint8Array, aad: string) => {
-      encryptInputs.push({ aad, plaintext });
+      encryptInputs.push({ aad, key, plaintext });
       if (throwOnEncryptAad !== null && aad === throwOnEncryptAad) {
         throw new Error("forced encrypt failure");
       }
@@ -93,8 +94,14 @@ vi.mock("node:crypto", async (importOriginal) => {
   };
 });
 
-const { changePassword, computeNameHmac, createVaultKeys, unlockVault } =
-  await import("./key-hierarchy.js");
+const {
+  changePassword,
+  computeNameHmac,
+  createVaultKeys,
+  unlockVault,
+  unlockVaultWithKey,
+  wrapKekWithUnlockKey,
+} = await import("./key-hierarchy.js");
 
 const allZero = (buf: Uint8Array): boolean => buf.every((b) => b === 0);
 
@@ -204,6 +211,84 @@ describe("unlockVault master-key wiping", () => {
 
     expect(derivedKeys).toHaveLength(1);
     expect(allZero(derivedKeys[0] as Uint8Array)).toBe(true);
+  });
+});
+
+describe("unlock-key slot key-buffer wiping", () => {
+  it("wrapKekWithUnlockKey wipes the unlock key it drew when the wrap throws, and leaves the KEK live", async () => {
+    const keys = await createVaultKeys("password");
+    encryptInputs.length = 0;
+    throwOnEncryptAad = AAD_UNLOCK_KEY_WRAP;
+
+    expect(() => wrapKekWithUnlockKey(keys.kek)).toThrow("forced encrypt failure");
+
+    const unlockKey = encryptInputs.find((c) => c.aad === AAD_UNLOCK_KEY_WRAP)?.key;
+    expect(unlockKey).toBeInstanceOf(Uint8Array);
+    expect(unlockKey?.length).toBe(32);
+    expect(allZero(unlockKey as Uint8Array)).toBe(true);
+    expect(allZero(keys.kek)).toBe(false);
+  });
+
+  it("wrapKekWithUnlockKey leaves the KEK it wraps and the key it returns live (control)", async () => {
+    const keys = await createVaultKeys("password");
+
+    const slot = wrapKekWithUnlockKey(keys.kek);
+
+    expect(allZero(keys.kek)).toBe(false);
+    expect(allZero(slot.unlockKey)).toBe(false);
+  });
+
+  it.each([
+    {
+      failing: "audit key",
+      aad: AAD_WRAPPED_AUDIT_KEY,
+      unwrapped: [AAD_UNLOCK_KEY_WRAP, AAD_WRAPPED_JWT_KEY],
+    },
+    { failing: "JWT key", aad: AAD_WRAPPED_JWT_KEY, unwrapped: [AAD_UNLOCK_KEY_WRAP] },
+  ])(
+    "unlockVaultWithKey wipes every key it unwrapped when the $failing unwrap throws",
+    async ({ aad, unwrapped }) => {
+      const keys = await createVaultKeys("password");
+      const slot = wrapKekWithUnlockKey(keys.kek);
+      decryptResults.length = 0;
+      throwOnAad = aad;
+
+      expect(() =>
+        unlockVaultWithKey(
+          slot.unlockKey,
+          slot.wrappedKekUk,
+          slot.wrappedKekUkIv,
+          slot.wrappedKekUkTag,
+          keys.wrappedJwtKey,
+          keys.wrappedAuditKey,
+        ),
+      ).toThrow("forced decrypt failure");
+
+      for (const step of unwrapped) {
+        const key = decryptResults.find((c) => c.aad === step)?.result;
+        expect(key).toBeInstanceOf(Uint8Array);
+        expect(allZero(key as Uint8Array)).toBe(true);
+      }
+    },
+  );
+
+  it("unlockVaultWithKey returns live keys and leaves the unlock key to its caller (control)", async () => {
+    const keys = await createVaultKeys("password");
+    const slot = wrapKekWithUnlockKey(keys.kek);
+
+    const unlocked = unlockVaultWithKey(
+      slot.unlockKey,
+      slot.wrappedKekUk,
+      slot.wrappedKekUkIv,
+      slot.wrappedKekUkTag,
+      keys.wrappedJwtKey,
+      keys.wrappedAuditKey,
+    );
+
+    expect(allZero(unlocked.kek)).toBe(false);
+    expect(allZero(unlocked.jwtKey)).toBe(false);
+    expect(allZero(unlocked.auditKey)).toBe(false);
+    expect(allZero(slot.unlockKey)).toBe(false);
   });
 });
 

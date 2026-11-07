@@ -14,6 +14,7 @@ import {
   AAD_SECRET_PAYLOAD,
   AAD_SESSION_JWT,
   AAD_SESSION_KEK,
+  AAD_UNLOCK_KEY_WRAP,
   AAD_VAULT_KEK,
   AES_IV_LENGTH,
   AES_KEY_LENGTH,
@@ -146,6 +147,10 @@ describe("static AAD strings", () => {
 
   it("AAD_SESSION_JWT", () => {
     expect(AAD_SESSION_JWT).toBe("session-jwt");
+  });
+
+  it("AAD_UNLOCK_KEY_WRAP", () => {
+    expect(AAD_UNLOCK_KEY_WRAP).toBe("vault-kek-unlock-key");
   });
 });
 

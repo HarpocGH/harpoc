@@ -22,6 +22,7 @@ const {
   renewalSchedulerCtorCalls,
   mockEgressProxy,
   mockAgentSocketServer,
+  mockUnlockKeySource,
 } = vi.hoisted(() => ({
   mockEngine: {
     destroy: vi.fn().mockResolvedValue(undefined),
@@ -74,6 +75,10 @@ const {
     /** Every server start() resolved, in order. */
     started: [] as { socketPath: string; consumer: string; stop: Mock<() => Promise<void>> }[],
   },
+  mockUnlockKeySource: {
+    readUnlockKeyFile: vi.fn(),
+    readUnlockCredential: vi.fn(),
+  },
 }));
 
 // ── Module mocks ───────────────────────────────────────────────────
@@ -81,6 +86,7 @@ const {
 vi.mock("../utils/vault-loader.js", () => ({
   resolveVaultDir: vi.fn().mockReturnValue("/mock/.harpoc"),
   loadUnlockedEngine: vi.fn().mockResolvedValue(mockEngine),
+  unlockEngineWithKey: vi.fn().mockResolvedValue(mockEngine),
 }));
 
 vi.mock("@harpoc/mcp-server", () => ({
@@ -128,9 +134,13 @@ vi.mock("@harpoc/egress-proxy", () => ({
   createEgressProxy: vi.fn().mockReturnValue(mockEgressProxy),
 }));
 
-// server.ts reaches core only for AgentSocketServer (vault-loader.js, the engine's one other
-// path, is mocked above).
-vi.mock("@harpoc/core", () => ({ AgentSocketServer: mockAgentSocketServer }));
+// server.ts reaches core only for AgentSocketServer and the unlock key's two readers
+// (vault-loader.js, the engine's one other path, is mocked above).
+vi.mock("@harpoc/core", () => ({
+  AgentSocketServer: mockAgentSocketServer,
+  readUnlockKeyFile: mockUnlockKeySource.readUnlockKeyFile,
+  readUnlockCredential: mockUnlockKeySource.readUnlockCredential,
+}));
 
 // Spy wrapper around the real implementation: the assertion's argument and its
 // order against loadUnlockedEngine are observable.
@@ -1312,6 +1322,358 @@ describe("server start", () => {
         expect(loadUnlockedEngine).not.toHaveBeenCalled();
       },
     );
+  });
+
+  // ── --unlock-key-file / --unlock-credential (the unlock key, B4) ──
+
+  describe("--unlock-key-file / --unlock-credential", () => {
+    const KEY_FILE = "/etc/harpoc/unlock.key";
+    const standing = (path: string): string =>
+      `Warning: --unlock-key-file is a password file by another name: without a sealer, whoever can read ${path} unlocks the vault.`;
+    const KEY_BYTES = Array.from({ length: 32 }, (_, i) => 0xa0 + i);
+    let key: Uint8Array;
+
+    beforeEach(() => {
+      key = Uint8Array.from(KEY_BYTES);
+      mockUnlockKeySource.readUnlockKeyFile.mockResolvedValue(key);
+      mockUnlockKeySource.readUnlockCredential.mockResolvedValue(key);
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      mockUnlockKeySource.readUnlockKeyFile.mockReset();
+      mockUnlockKeySource.readUnlockCredential.mockReset();
+    });
+
+    /**
+     * No form of the fixture key reached stdout or stderr, `JSON.stringify`'s object included —
+     * every assertion a boolean naming the form, so a red never echoes the output it searched
+     * (two-identity.test.ts's form); a row sweeps before it asserts on the captured output.
+     */
+    function expectNoKeyBytes(): void {
+      const bytes = Buffer.from(KEY_BYTES);
+      const forms: [form: string, needle: string][] = [
+        ["hex", bytes.toString("hex")],
+        ["base64", bytes.toString("base64")],
+        ["a decimal list", KEY_BYTES.join(",")],
+        ["util.inspect's list", KEY_BYTES.join(", ")],
+        ["a JSON object", JSON.stringify(new Uint8Array(KEY_BYTES))],
+        ["raw bytes", bytes.toString("latin1")],
+      ];
+      for (const [form, needle] of forms) {
+        expect(spies.stdout().includes(needle), `stdout carries the key as ${form}`).toBe(false);
+        expect(spies.stderr().includes(needle), `stderr carries the key as ${form}`).toBe(false);
+      }
+      const decimal = KEY_BYTES.join(",");
+      const stripped = (text: string): string => text.replace(/\s+/g, "");
+      expect(
+        stripped(spies.stdout()).includes(decimal),
+        "stdout carries the key as an inspected array",
+      ).toBe(false);
+      expect(
+        stripped(spies.stderr()).includes(decimal),
+        "stderr carries the key as an inspected array",
+      ).toBe(false);
+    }
+
+    /** The engine was unlocked once, from the vault directory, with the reader's buffer itself. */
+    async function expectUnlockedWithKey(): Promise<void> {
+      const { unlockEngineWithKey } = await import("../utils/vault-loader.js");
+      const calls = vi.mocked(unlockEngineWithKey).mock.calls;
+      expect(calls.length).toBe(1);
+      expect(calls[0]?.[0]).toBe("/mock/.harpoc");
+      // Handed over, not copied, so the engine's wipe reaches it; compared by identity so a red
+      // prints no byte of the key.
+      expect(calls[0]?.[1] === key).toBe(true);
+    }
+
+    it("--unlock-key-file reads the key before the vault opens and unlocks the daemon's own engine with it", async () => {
+      const { loadUnlockedEngine, unlockEngineWithKey } = await import("../utils/vault-loader.js");
+      const { startServer } = await import("@harpoc/rest-api");
+
+      await run(["--rest", "--unlock-key-file", KEY_FILE]);
+
+      expectNoKeyBytes();
+      expect(mockUnlockKeySource.readUnlockKeyFile.mock.calls).toEqual([
+        [KEY_FILE, { onWarning: expect.any(Function) }],
+      ]);
+      expect(mockUnlockKeySource.readUnlockCredential.mock.calls.length).toBe(0);
+      await expectUnlockedWithKey();
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      const [read] = mockUnlockKeySource.readUnlockKeyFile.mock.invocationCallOrder;
+      const [unlocked] = vi.mocked(unlockEngineWithKey).mock.invocationCallOrder;
+      const [served] = vi.mocked(startServer).mock.invocationCallOrder;
+      expect(read as number).toBeLessThan(unlocked as number);
+      expect(unlocked as number).toBeLessThan(served as number);
+      expect(startServer).toHaveBeenCalledWith(expect.objectContaining({ engine: mockEngine }));
+      // The standing warning, exactly once, and nothing else on stderr.
+      expect(spies.errorSpy.mock.calls).toEqual([[standing(KEY_FILE)]]);
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("--unlock-credential reads systemd's credential through the process environment, with no standing warning", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+      await run(["--rest", "--unlock-credential", "harpoc-unlock"]);
+
+      expectNoKeyBytes();
+      const reads = mockUnlockKeySource.readUnlockCredential.mock.calls;
+      expect(reads.length).toBe(1);
+      expect(reads[0]?.[0]).toBe("harpoc-unlock");
+      // The process environment itself, by identity: a red prints no variable of the runner's.
+      expect(reads[0]?.[1] === process.env).toBe(true);
+      expect(mockUnlockKeySource.readUnlockKeyFile).not.toHaveBeenCalled();
+      await expectUnlockedWithKey();
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(spies.errorSpy).not.toHaveBeenCalled();
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("prints each warning the reader reports as a Warning: line after the standing one", async () => {
+      mockUnlockKeySource.readUnlockKeyFile.mockImplementationOnce(
+        async (path: string, options?: { onWarning?: (warning: string) => void }) => {
+          options?.onWarning?.(
+            `${path} is on a vfat filesystem — its modes are the mount's options, not the file's`,
+          );
+          return key;
+        },
+      );
+
+      await run(["--rest", "--unlock-key-file", "/mnt/usb/unlock.key"]);
+
+      expectNoKeyBytes();
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [standing("/mnt/usb/unlock.key")],
+        [
+          "Warning: --unlock-key-file: /mnt/usb/unlock.key is on a vfat filesystem — its modes are the mount's options, not the file's",
+        ],
+      ]);
+    });
+
+    it("the key-unlocked engine serves the stdio server under its own launch token and mints the UI token after the unlock", async () => {
+      const { createStdioServerFactory } = await import("@harpoc/mcp-server");
+      const { unlockEngineWithKey } = await import("../utils/vault-loader.js");
+
+      await run([
+        "--mcp",
+        "--token-file",
+        "/tmp/launch-token",
+        "--rest",
+        "--ui",
+        "--unlock-credential",
+        "harpoc-unlock",
+      ]);
+
+      expectNoKeyBytes();
+      expect(createStdioServerFactory).toHaveBeenCalledWith({
+        engine: mockEngine,
+        launchToken: "file.jwt.token",
+        enableTtyPrompt: true,
+      });
+      const [unlocked] = vi.mocked(unlockEngineWithKey).mock.invocationCallOrder;
+      const [minted] = mockEngine.createToken.mock.invocationCallOrder;
+      expect(unlocked as number).toBeLessThan(minted as number);
+    });
+
+    it("refuses both sources at once before anything is read or the vault opens", async () => {
+      const { loadUnlockedEngine, unlockEngineWithKey } = await import("../utils/vault-loader.js");
+
+      await expect(
+        run(["--rest", "--unlock-key-file", KEY_FILE, "--unlock-credential", "harpoc-unlock"]),
+      ).rejects.toThrow("process.exit");
+      expect(spies.exitSpy).toHaveBeenCalledWith(1);
+      // The combination-check form: the line, then exit 1 (the stub's throw is handleError's).
+      expect(spies.errorSpy.mock.calls[0]).toEqual([
+        "Error: --unlock-key-file and --unlock-credential exclude each other: one unlock key source per start.",
+      ]);
+      expect(mockUnlockKeySource.readUnlockKeyFile).not.toHaveBeenCalled();
+      expect(mockUnlockKeySource.readUnlockCredential.mock.calls.length).toBe(0);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(vi.mocked(unlockEngineWithKey).mock.calls.length).toBe(0);
+    });
+
+    it.each([
+      {
+        argv: ["--unlock-key-file", "--rest"],
+        line: "Error: [INVALID_INPUT] --unlock-key-file: a flag, not a path (give a path that starts with a dash as ./-name)",
+      },
+      {
+        argv: ["--rest", "--unlock-key-file=-k"],
+        line: "Error: [INVALID_INPUT] --unlock-key-file: a flag, not a path (give a path that starts with a dash as ./-name)",
+      },
+      {
+        argv: ["--rest", "--unlock-key-file", ""],
+        line: "Error: [INVALID_INPUT] --unlock-key-file: empty path",
+      },
+      {
+        argv: ["--unlock-credential", "--rest"],
+        line: "Error: [INVALID_INPUT] --unlock-credential: a flag, not a credential name",
+      },
+      {
+        argv: ["--rest", "--unlock-credential", " "],
+        line: "Error: [INVALID_INPUT] --unlock-credential: empty name",
+      },
+    ])(
+      "refuses $argv first, before the transport check, any read or the vault",
+      async ({ argv, line }) => {
+        const { loadUnlockedEngine, unlockEngineWithKey } =
+          await import("../utils/vault-loader.js");
+
+        await expect(run(argv)).rejects.toThrow("process.exit");
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([[line]]);
+        expect(mockUnlockKeySource.readUnlockKeyFile).not.toHaveBeenCalled();
+        expect(mockUnlockKeySource.readUnlockCredential.mock.calls.length).toBe(0);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        expect(vi.mocked(unlockEngineWithKey).mock.calls.length).toBe(0);
+      },
+    );
+
+    // Model A's line is byte-identical: an unlock key source is not a start mode.
+    it.each([
+      ["--unlock-key-file", KEY_FILE],
+      ["--unlock-credential", "harpoc-unlock"],
+    ])(
+      "%s alone meets the at-least-one-mode refusal, its line unchanged, nothing read",
+      async (flag, value) => {
+        await expect(run([flag, value])).rejects.toThrow("process.exit");
+        expect(spies.errorSpy.mock.calls[0]).toEqual([
+          "Error: At least one of --mcp, --mcp-http, --rest, --oauth-refresh or --cert-renew is required.",
+        ]);
+        expect(mockUnlockKeySource.readUnlockKeyFile).not.toHaveBeenCalled();
+        expect(mockUnlockKeySource.readUnlockCredential.mock.calls.length).toBe(0);
+      },
+    );
+
+    it.each([
+      {
+        label: "a --port typo",
+        argv: ["--rest", "--port", "abc", "--unlock-key-file", KEY_FILE],
+        line: 'Error: [INVALID_INPUT] Invalid port "abc". Must be 1-65535.',
+      },
+      {
+        // The ladder's first rung, on every platform (exists → directory → platform → owner → mode).
+        label: "a --runtime-dir refusal",
+        argv: [
+          "--rest",
+          "--runtime-dir",
+          "/harpoc-b4-no-such-runtime-dir",
+          "--unlock-key-file",
+          KEY_FILE,
+        ],
+        line: "Error: [INVALID_INPUT] --runtime-dir: no such directory: /harpoc-b4-no-such-runtime-dir",
+      },
+    ])(
+      "the key is read after every other refusal: $label is reported first",
+      async ({ argv, line }) => {
+        await expect(run(argv)).rejects.toThrow("process.exit");
+        expect(spies.errorSpy.mock.calls).toEqual([[line]]);
+        expect(mockUnlockKeySource.readUnlockKeyFile).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      {
+        label: "a refused key file (UNLOCK_KEY_SOURCE_UNSAFE)",
+        argv: ["--rest", "--unlock-key-file", KEY_FILE],
+        reader: mockUnlockKeySource.readUnlockKeyFile,
+        refusal: VaultError.unlockKeySourceUnsafe(KEY_FILE, "mode", "mode 0640"),
+      },
+      {
+        label: "an unset CREDENTIALS_DIRECTORY (INVALID_INPUT)",
+        argv: ["--rest", "--unlock-credential", "harpoc-unlock"],
+        reader: mockUnlockKeySource.readUnlockCredential,
+        refusal: VaultError.invalidInput(
+          "--unlock-credential: $CREDENTIALS_DIRECTORY is not set (systemd sets it for a unit with LoadCredential= or LoadCredentialEncrypted=)",
+        ),
+      },
+    ])(
+      "$label: the reader's refusal exits 1 with its line, no warning, before any engine is built",
+      async ({ argv, reader, refusal }) => {
+        const { loadUnlockedEngine, unlockEngineWithKey } =
+          await import("../utils/vault-loader.js");
+        reader.mockRejectedValueOnce(refusal);
+
+        await expect(run(argv)).rejects.toThrow("process.exit");
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [`Error: [${refusal.code}] ${refusal.message}`],
+        ]);
+        expect(vi.mocked(unlockEngineWithKey).mock.calls.length).toBe(0);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      },
+    );
+
+    it("a reader warning before the reader's refusal is not printed: the refusal's line alone, no standing warning", async () => {
+      const { loadUnlockedEngine, unlockEngineWithKey } = await import("../utils/vault-loader.js");
+      const err = VaultError.invalidUnlockKey(
+        `${KEY_FILE} holds 31 bytes; an unlock key file holds exactly 32 raw bytes`,
+      );
+      mockUnlockKeySource.readUnlockKeyFile.mockImplementationOnce(
+        async (_path: string, options?: { onWarning?: (warning: string) => void }) => {
+          options?.onWarning?.(
+            "/mnt/usb/unlock.key is on a vfat filesystem — its modes are the mount's options, not the file's",
+          );
+          throw err;
+        },
+      );
+
+      await expect(run(["--rest", "--unlock-key-file", KEY_FILE])).rejects.toThrow("process.exit");
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([[`Error: [INVALID_UNLOCK_KEY] ${err.message}`]]);
+      expect(vi.mocked(unlockEngineWithKey).mock.calls.length).toBe(0);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      {
+        label: "a wrong key",
+        refusal: () => VaultError.invalidUnlockKey(),
+        line: (err: VaultError) => `Error: [INVALID_UNLOCK_KEY] ${err.message}`,
+      },
+      {
+        label: "no enrolled key",
+        refusal: () => VaultError.unlockKeyNotEnrolled(),
+        line: (err: VaultError) => `Error: [UNLOCK_KEY_NOT_ENROLLED] ${err.message}`,
+      },
+      {
+        label: "the lockout the password path shares",
+        refusal: () => VaultError.lockoutActive(30_000),
+        line: () => "Error: Account locked. Try again in 30s.",
+      },
+    ])(
+      "$label: the refused unlock exits 1 with the code's line, nothing served, no key byte",
+      async ({ refusal, line }) => {
+        const { unlockEngineWithKey } = await import("../utils/vault-loader.js");
+        const { startServer } = await import("@harpoc/rest-api");
+        const err = refusal();
+        vi.mocked(unlockEngineWithKey).mockRejectedValueOnce(err);
+
+        await expect(run(["--rest", "--unlock-credential", "harpoc-unlock"])).rejects.toThrow(
+          "process.exit",
+        );
+        expectNoKeyBytes();
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([[line(err)]]);
+        expect(startServer).not.toHaveBeenCalled();
+        expect(mockEngine.destroy).not.toHaveBeenCalled();
+      },
+    );
+
+    // Model A untouched: a unit's LoadCredentialEncrypted= sets the variable for a daemon that
+    // asked for no unlock key.
+    it("without either option an ambient CREDENTIALS_DIRECTORY is not read and the session loads as before", async () => {
+      const { loadUnlockedEngine, unlockEngineWithKey } = await import("../utils/vault-loader.js");
+      vi.stubEnv("CREDENTIALS_DIRECTORY", "/run/credentials/harpoc.service");
+
+      await run(["--rest"]);
+
+      expect(vi.mocked(loadUnlockedEngine).mock.calls).toEqual([["/mock/.harpoc"]]);
+      expect(vi.mocked(unlockEngineWithKey).mock.calls.length).toBe(0);
+      expect(mockUnlockKeySource.readUnlockKeyFile).not.toHaveBeenCalled();
+      expect(mockUnlockKeySource.readUnlockCredential.mock.calls.length).toBe(0);
+      expect(spies.errorSpy).not.toHaveBeenCalled();
+    });
   });
 
   // ── MCP Streamable HTTP mode ────────────────────────────────────

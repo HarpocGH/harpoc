@@ -41,6 +41,9 @@ import { registerCertRenewCommand } from "./commands/cert/renew.js";
 import { registerCertAttachCommand } from "./commands/cert/attach.js";
 import { registerProxyEnvCommand } from "./commands/proxy/env.js";
 import { registerSshAgentStatusCommand } from "./commands/ssh-agent/status.js";
+import { registerUnlockKeyEnrollCommand } from "./commands/unlock-key/enroll.js";
+import { registerUnlockKeyRevokeCommand } from "./commands/unlock-key/revoke.js";
+import { registerUnlockKeyStatusCommand } from "./commands/unlock-key/status.js";
 import { registerServerCommand } from "./commands/server.js";
 
 /** The root: `--url` / `--token-file` are taken off a leading run before Commander parses (rest-mode.ts). */
@@ -130,6 +133,16 @@ export function buildProgram(): Command {
     .command("ssh-agent")
     .description("The ssh-agent socket of server start --ssh-agent");
   registerSshAgentStatusCommand(sshAgent);
+
+  // unlock-key subcommands
+  const unlockKey = program
+    .command("unlock-key")
+    .description(
+      "The machine-bound unlock key: a second KEK slot for server start --unlock-key-file / --unlock-credential",
+    );
+  registerUnlockKeyEnrollCommand(unlockKey);
+  registerUnlockKeyRevokeCommand(unlockKey);
+  registerUnlockKeyStatusCommand(unlockKey);
 
   return program;
 }

@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
@@ -15,7 +14,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { readFile, chmod } from "node:fs/promises";
-import { userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { randomFillSync, randomUUID } from "node:crypto";
 import type { SessionFile, SessionKeyProtectionScheme } from "@harpoc/shared";
@@ -28,7 +26,7 @@ import {
   sessionFileSchema,
 } from "@harpoc/shared";
 import { wipeBuffer } from "../crypto/random.js";
-import { system32Path } from "../win32-paths.js";
+import { restrictWindowsAclToOwner } from "./owner-only.js";
 import { createSessionKeyProtector } from "./session-key-protector.js";
 import type { SessionKeyProtector } from "./session-key-protector.js";
 
@@ -435,35 +433,13 @@ export class SessionManager {
 
   /**
    * Reduce the session file's ACL to the current user (the Windows counterpart
-   * of the POSIX 0600 chmod).
-   *
-   * `icacls` is invoked through the pinned System32 path with `shell:false` and
-   * the vault path as an *argument* — the previous `execSync` built a cmd.exe
-   * string with the path interpolated into it, against the project's own
-   * "never a shell; args are data" doctrine, and swallowed every failure while
-   * the POSIX sibling reported through the permission-repair callback. The ACL
-   * is the file's on-host protection beside the DPAPI wrap, so a failed
-   * restriction is reported, not swallowed. `%USERNAME%` was a cmd.exe
-   * expansion and cannot survive the shell's removal, so the account name
-   * comes from the process itself.
+   * of the POSIX 0600 chmod — `restrictWindowsAclToOwner`). The ACL is the
+   * file's on-host protection beside the DPAPI wrap, so a failed restriction is
+   * reported through the permission-repair callback, not swallowed (L9).
    */
   private restrictWindowsAcl(): void {
-    const icacls = system32Path("icacls.exe");
     try {
-      const account = userInfo().username;
-      if (!account) throw new Error("could not determine the current account name");
-      const res = spawnSync(
-        icacls,
-        [this.sessionPath, "/inheritance:r", "/grant:r", `${account}:F`],
-        { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], timeout: 15_000 },
-      );
-      if (res.error) throw res.error;
-      if (res.status !== 0) {
-        const detail = (res.stderr?.toString() || res.stdout?.toString() || "")
-          .trim()
-          .slice(0, 200);
-        throw new Error(`icacls exited ${String(res.status)}${detail ? `: ${detail}` : ""}`);
-      }
+      restrictWindowsAclToOwner(this.sessionPath);
     } catch (err) {
       this.onPermissionRepairFailure(
         new Error(

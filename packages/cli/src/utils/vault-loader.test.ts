@@ -8,6 +8,7 @@ import {
   ErrorCode,
   VAULT_DB_NAME,
   VAULT_DIR_NAME,
+  VaultError,
 } from "@harpoc/shared";
 import {
   resetJobWrapperProbeForTests,
@@ -22,6 +23,7 @@ import {
   refuseEmptyVaultDir,
   resolveSecretId,
   resolveVaultDir,
+  unlockEngineWithKey,
 } from "./vault-loader.js";
 import { registerLockCommand } from "../commands/lock.js";
 import { registerSecretListCommand } from "../commands/secret/list.js";
@@ -220,6 +222,80 @@ describe("loadUnlockedEngine", () => {
     await setupEngine.destroy();
 
     await expectVaultError(() => loadUnlockedEngine(tempDir), ErrorCode.VAULT_LOCKED);
+  });
+});
+
+describe("unlockEngineWithKey", () => {
+  const KEY_BYTES = Array.from({ length: 32 }, (_, i) => i + 1);
+  // Every assertion on a key is a boolean: a red never echoes a byte of it.
+  const isWiped = (bytes: Uint8Array): boolean => bytes.every((byte) => byte === 0);
+
+  it("hands the key itself to unlockWithKey, returns that engine and wipes the key after the call", async () => {
+    let seen: number[] | undefined;
+    const unlock = vi
+      .spyOn(VaultEngine.prototype, "unlockWithKey")
+      .mockImplementation(async (bytes: Uint8Array) => {
+        seen = Array.from(bytes);
+      });
+    const key = Uint8Array.from(KEY_BYTES);
+    try {
+      const engine = await unlockEngineWithKey(tempDir, key);
+      try {
+        expect(engine).toBeInstanceOf(VaultEngine);
+        expect(unlock).toHaveBeenCalledTimes(1);
+        expect(unlock.mock.calls[0]?.[0] === key).toBe(true);
+        expect(unlock.mock.contexts[0]).toBe(engine);
+        expect(seen !== undefined && Buffer.from(seen).equals(Buffer.from(KEY_BYTES))).toBe(true);
+        expect(isWiped(key)).toBe(true);
+      } finally {
+        await engine.destroy();
+      }
+    } finally {
+      unlock.mockRestore();
+    }
+  });
+
+  it("a refused unlock destroys that engine, wipes the key and rethrows the refusal", async () => {
+    const refusal = VaultError.invalidUnlockKey();
+    const unlock = vi.spyOn(VaultEngine.prototype, "unlockWithKey").mockRejectedValue(refusal);
+    const destroy = vi.spyOn(VaultEngine.prototype, "destroy");
+    const key = Uint8Array.from(KEY_BYTES);
+    try {
+      const err = await expectVaultError(
+        () => unlockEngineWithKey(tempDir, key),
+        ErrorCode.INVALID_UNLOCK_KEY,
+      );
+
+      expect(err).toBe(refusal);
+      expect(destroy).toHaveBeenCalledTimes(1);
+      expect(destroy.mock.contexts[0]).toBe(unlock.mock.contexts[0]);
+      expect(isWiped(key)).toBe(true);
+    } finally {
+      unlock.mockRestore();
+      destroy.mockRestore();
+    }
+  });
+
+  it("unlocks a real sealed vault from the key it enrolled, and wipes the key", async () => {
+    const dbPath = join(tempDir, VAULT_DB_NAME);
+    const sessionPath = join(tempDir, "session.json");
+    const setupEngine = new VaultEngine({ dbPath, sessionPath });
+    let key: Uint8Array;
+    try {
+      await setupEngine.initVault("test-password");
+      key = await setupEngine.enrollUnlockKey();
+      await setupEngine.lock();
+    } finally {
+      await setupEngine.destroy();
+    }
+
+    const engine = await unlockEngineWithKey(tempDir, key);
+    try {
+      expect(engine.getState()).toBe("unlocked");
+      expect(isWiped(key)).toBe(true);
+    } finally {
+      await engine.destroy();
+    }
   });
 });
 

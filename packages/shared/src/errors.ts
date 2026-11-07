@@ -144,6 +144,10 @@ export enum ErrorCode {
   PROXY_PLACEHOLDER_DENIED = "PROXY_PLACEHOLDER_DENIED",
   PROXY_UPSTREAM_FAILED = "PROXY_UPSTREAM_FAILED",
   SSH_AGENT_UNBOUND = "SSH_AGENT_UNBOUND",
+  INVALID_UNLOCK_KEY = "INVALID_UNLOCK_KEY",
+  UNLOCK_KEY_NOT_ENROLLED = "UNLOCK_KEY_NOT_ENROLLED",
+  UNLOCK_KEY_SOURCE_UNSAFE = "UNLOCK_KEY_SOURCE_UNSAFE",
+  UNLOCK_KEY_PASSWORD_REQUIRED = "UNLOCK_KEY_PASSWORD_REQUIRED",
 
   // System
   INTERNAL_ERROR = "INTERNAL_ERROR",
@@ -297,6 +301,10 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.PROXY_PLACEHOLDER_DENIED]: 403,
   [ErrorCode.PROXY_UPSTREAM_FAILED]: 502,
   [ErrorCode.SSH_AGENT_UNBOUND]: 403,
+  [ErrorCode.INVALID_UNLOCK_KEY]: 401,
+  [ErrorCode.UNLOCK_KEY_NOT_ENROLLED]: 400,
+  [ErrorCode.UNLOCK_KEY_SOURCE_UNSAFE]: 400,
+  [ErrorCode.UNLOCK_KEY_PASSWORD_REQUIRED]: 403,
 
   // System
   [ErrorCode.INTERNAL_ERROR]: 500,
@@ -326,6 +334,21 @@ const SSH_AGENT_UNBOUND_TEXT: Record<SshAgentUnboundReason, string> = {
   not_userauth: "the data to sign is not a user authentication request for the key",
   session_mismatch: "the user authentication request is not for the bound session",
   host_unpinned: "the bound host key matches no pinned known_hosts line of the secret",
+};
+
+/**
+ * Why a source of the unlock key was refused before the vault opened
+ * (deployment model B, M1) — a closed vocabulary, never a byte of the key
+ * (hard rule 4).
+ */
+export type UnlockKeySourceUnsafeReason = "symlink" | "owner" | "mode" | "acl" | "acl_unverified";
+
+const UNLOCK_KEY_SOURCE_UNSAFE_TEXT: Record<UnlockKeySourceUnsafeReason, string> = {
+  symlink: "is a symbolic link; name the file itself",
+  owner: "is owned by another account",
+  mode: "has permission bits that grant access beyond its owner",
+  acl: "grants access to an account other than this process's account, SYSTEM and Administrators",
+  acl_unverified: "has an access list that could not be read",
 };
 
 export class VaultError extends Error {
@@ -925,6 +948,39 @@ export class VaultError extends Error {
       ErrorCode.SSH_AGENT_UNBOUND,
       `Agent socket signature refused: ${SSH_AGENT_UNBOUND_TEXT[reason]}`,
       { reason },
+    );
+  }
+
+  static invalidUnlockKey(detail?: string): VaultError {
+    return new VaultError(
+      ErrorCode.INVALID_UNLOCK_KEY,
+      detail === undefined ? "Invalid unlock key" : `Invalid unlock key: ${detail}`,
+    );
+  }
+
+  static unlockKeyNotEnrolled(): VaultError {
+    return new VaultError(
+      ErrorCode.UNLOCK_KEY_NOT_ENROLLED,
+      "No unlock key is enrolled for this vault (harpoc unlock-key enroll)",
+    );
+  }
+
+  static unlockKeySourceUnsafe(
+    path: string,
+    reason: UnlockKeySourceUnsafeReason,
+    observed?: string,
+  ): VaultError {
+    return new VaultError(
+      ErrorCode.UNLOCK_KEY_SOURCE_UNSAFE,
+      `Unlock key source refused: ${path} ${UNLOCK_KEY_SOURCE_UNSAFE_TEXT[reason]}${observed === undefined ? "" : ` (${observed})`}`,
+      { reason },
+    );
+  }
+
+  static unlockKeyPasswordRequired(): VaultError {
+    return new VaultError(
+      ErrorCode.UNLOCK_KEY_PASSWORD_REQUIRED,
+      "Enrolling or revoking an unlock key requires an unlock by password in this process",
     );
   }
 

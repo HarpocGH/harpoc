@@ -80,6 +80,40 @@ describe("at-rest opacity (thesis: encrypted at rest)", () => {
     }
   });
 
+  it("the enrolled unlock key reaches neither the vault files nor the session file in any common encoding", async () => {
+    const dbPath = join(tempDir, "unlock-key.vault.db");
+    const sessionPath = join(tempDir, "session.json");
+    const engine = new VaultEngine({ dbPath, sessionPath });
+
+    let unlockKey: Buffer;
+    try {
+      await engine.initVault("at-rest-unlock-key-password");
+      unlockKey = Buffer.from(await engine.enrollUnlockKey());
+      await engine.lock();
+      await engine.unlockWithKey(new Uint8Array(unlockKey));
+    } finally {
+      await engine.destroy(); // keeps the session file the key unlock wrote
+    }
+
+    const haystacks: Buffer[] = [readFileSync(dbPath), readFileSync(sessionPath)];
+    for (const suffix of ["-wal", "-shm"]) {
+      if (existsSync(dbPath + suffix)) haystacks.push(readFileSync(dbPath + suffix));
+    }
+    const combined = Buffer.concat(haystacks);
+
+    // Positive control: the slot's rows are on disk under their plain keys.
+    expect(combined.includes(Buffer.from("wrapped_kek_uk", "utf8"))).toBe(true);
+
+    for (const needle of [
+      unlockKey,
+      Buffer.from(unlockKey.toString("base64"), "utf8"),
+      Buffer.from(unlockKey.toString("base64url"), "utf8"),
+      Buffer.from(unlockKey.toString("hex"), "utf8"),
+    ]) {
+      expect(combined.includes(needle)).toBe(false);
+    }
+  });
+
   /**
    * T17: the secret value/name path was scanned, the OAuth path never — yet
    * `oauth_tokens` holds the longest-lived material in the vault (a refresh

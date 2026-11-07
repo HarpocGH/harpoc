@@ -361,6 +361,10 @@ export class SqliteStore {
     this.db.prepare("INSERT OR REPLACE INTO vault_meta (key, value) VALUES (?, ?)").run(key, value);
   }
 
+  deleteMeta(key: string): void {
+    this.db.prepare("DELETE FROM vault_meta WHERE key = ?").run(key);
+  }
+
   // ---------------------------------------------------------------------------
   // secrets
   // ---------------------------------------------------------------------------

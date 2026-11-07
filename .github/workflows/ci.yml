@@ -209,6 +209,6 @@ jobs:
         # (non-login processes lack the pam_keyinit link, so @u operations get
         # EACCES without it); gnome-keyring provides the Secret Service.
         env:
-          HARPOC_REQUIRE_PLATFORM_TESTS: secret-service,keyring,isolation,fs-isolation,ssh-live,two-uid
+          HARPOC_REQUIRE_PLATFORM_TESTS: secret-service,keyring,isolation,fs-isolation,ssh-live,two-uid,systemd-creds
         run: dbus-run-session -- sh -c 'echo harpoc-ci | gnome-keyring-daemon --unlock; keyctl link @u @s || true; pnpm test'
       - run: pnpm format:check

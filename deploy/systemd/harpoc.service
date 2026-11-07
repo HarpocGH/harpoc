@@ -1,0 +1,66 @@
+# Harpoc, deployment model B: the vault daemon as the system user harpoc, unlocked
+# at boot from an unlock key sealed with systemd-creds: no person, no password.
+#
+# Before the first start, as root (README.md, "Deployment models"):
+#   deploy/linux/install-two-identity.sh <agent-user>...
+#   then as harpoc, each command run as
+#   "sudo -u harpoc env HARPOC_SESSION_KEYSTORE=off harpoc --vault-dir /var/lib/harpoc":
+#   init, then unlock-key enroll --out /var/lib/harpoc/unlock.key
+#   deploy/linux/enroll-unlock-key.sh /var/lib/harpoc/unlock.key
+# Install and start:
+#   install -m 0644 deploy/systemd/harpoc.service /etc/systemd/system/harpoc.service
+#   systemctl daemon-reload
+#   systemctl enable --now harpoc
+#
+# ExecStart= expects the built CLI linked as /usr/local/bin/harpoc and node on the
+# service's PATH (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin); adjust the path
+# if yours differs. ProtectHome=yes hides /home, /root and /run/user: the checkout the
+# link points into must lie elsewhere, such as /opt/harpoc.
+
+[Unit]
+Description=Harpoc secret vault (deployment model B)
+Documentation=https://github.com/HarpocGH/harpoc#deployment-models
+After=network.target
+# A wrong or revoked key fails every start, and each failure counts against the
+# lockout the password shares (the fifth locks it): stop after three starts.
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=exec
+User=harpoc
+Group=harpoc
+# An absolute path: a missing credential fails the start instead of being skipped.
+LoadCredentialEncrypted=harpoc-unlock:/etc/credstore.encrypted/harpoc-unlock.cred
+# File session mode until the memory session lands: the daemon's session file is
+# protected by its 0600 mode under harpoc alone, as the administrator's sudo commands'
+# is, and both read the one session.
+Environment=HARPOC_SESSION_KEYSTORE=off
+ExecStart=/usr/local/bin/harpoc --vault-dir /var/lib/harpoc server start --rest --unlock-credential harpoc-unlock --runtime-dir /run/harpoc
+# /run/harpoc is /etc/tmpfiles.d/harpoc.conf's, never RuntimeDirectory='s: systemd
+# would remove it, consumer directories included, whenever the unit stops.
+StateDirectory=harpoc
+StateDirectoryMode=0700
+ReadWritePaths=/run/harpoc
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=
+# Not set: MemoryDenyWriteExecute= (V8's JIT maps executable memory), and
+# RestrictNamespaces= and SystemCallFilter= (the process context's network and
+# filesystem isolation runs unshare and bwrap, which create namespaces and mount).
+
+[Install]
+WantedBy=multi-user.target

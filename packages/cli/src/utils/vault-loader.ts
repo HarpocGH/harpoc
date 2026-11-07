@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { Command } from "commander";
 import { VAULT_DB_NAME, VAULT_DIR_NAME, SESSION_FILE_NAME, VaultError } from "@harpoc/shared";
 import type { AuditEventType, CallerContext } from "@harpoc/shared";
-import { VaultEngine } from "@harpoc/core";
+import { VaultEngine, wipeBuffer } from "@harpoc/core";
 import { handleError } from "./output.js";
 
 /**
@@ -91,4 +91,25 @@ export async function loadUnlockedEngine(vaultDir: string): Promise<VaultEngine>
     throw VaultError.vaultLocked();
   }
   return engine;
+}
+
+/**
+ * Unlock a VaultEngine with the machine-bound unlock key (`server start --unlock-key-file` /
+ * `--unlock-credential`): the daemon unlocks its own engine instead of loading a session. The key
+ * is handed over as it is — not copied, so the engine's own wipe reaches it — and wiped here as
+ * well, whatever happens; a refused unlock destroys the engine and rethrows.
+ */
+export async function unlockEngineWithKey(vaultDir: string, key: Uint8Array): Promise<VaultEngine> {
+  try {
+    const engine = createEngine(vaultDir);
+    try {
+      await engine.unlockWithKey(key);
+    } catch (err) {
+      await engine.destroy();
+      throw err;
+    }
+    return engine;
+  } finally {
+    wipeBuffer(key);
+  }
 }

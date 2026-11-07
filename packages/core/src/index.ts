@@ -6,6 +6,8 @@ export { deriveSubkey } from "./crypto/hkdf.js";
 export {
   createVaultKeys,
   unlockVault,
+  wrapKekWithUnlockKey,
+  unlockVaultWithKey,
   wrapDek,
   unwrapDek,
   encryptSecretValue,
@@ -23,6 +25,7 @@ export type {
   WrappedDek,
   EncryptedValue,
   WrappedKey,
+  UnlockKeySlot,
 } from "./crypto/key-hierarchy.js";
 export { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
 
@@ -69,6 +72,12 @@ export type {
   KeyringWrappingKeyStoreOptions,
   SecretServiceWrappingKeyStoreOptions,
 } from "./session/linux-keystores.js";
+export {
+  readUnlockCredential,
+  readUnlockKeyFile,
+  writeUnlockKeyFile,
+} from "./session/unlock-key-source.js";
+export type { ReadUnlockKeyFileOptions } from "./session/unlock-key-source.js";
 
 // Audit
 export { AuditLogger } from "./audit/audit-logger.js";

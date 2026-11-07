@@ -672,6 +672,59 @@ describe("compiled binary smoke: ssh-agent status opens no vault (B3)", () => {
   }, 60_000);
 });
 
+describe("compiled binary smoke: unlock-key status without a vault (B4)", () => {
+  it("answers as lock does — the vault is locked, exit 1, nothing created", async () => {
+    const cwd = join(
+      tmpdir(),
+      `harpoc-unlockkeystatus-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(cwd);
+    try {
+      const env: NodeJS.ProcessEnv = { ...process.env, HOME: cwd, USERPROFILE: cwd };
+      delete env.HARPOC_TOKEN;
+      const result = await spawnNode(
+        [CLI_PATH, "unlock-key", "status"],
+        "harpoc unlock-key status",
+        env,
+        { cwd },
+      );
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe("Error: Vault is locked. Run 'harpoc unlock' first.\n");
+      expect(readdirSync(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  }, 60_000);
+});
+
+describe("compiled binary smoke: a missing --unlock-key-file (B4)", () => {
+  it("refuses the start before any vault opens: exit 1, one INVALID_INPUT line naming the path", async () => {
+    const cwd = join(
+      tmpdir(),
+      `harpoc-unlockkeyfile-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(cwd);
+    try {
+      const env: NodeJS.ProcessEnv = { ...process.env, HOME: cwd, USERPROFILE: cwd };
+      delete env.HARPOC_TOKEN;
+      const result = await spawnNode(
+        [CLI_PATH, "server", "start", "--rest", "--unlock-key-file", join(cwd, "missing.key")],
+        "harpoc server start",
+        env,
+        { cwd },
+      );
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      // The reader's text is core's; the line is one INVALID_INPUT naming the path, no warning.
+      expect(result.stderr).toMatch(/^Error: \[INVALID_INPUT\] [^\n]*missing\.key[^\n]*\n$/);
+      expect(readdirSync(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  }, 60_000);
+});
+
 // Phase 3 D1: `secret use` accepts a scoped token, so the CLI is no longer
 // exempt from the token checks every other interface applies. Walked through
 // the real binary — the surface the e2e demonstration matrix drives.

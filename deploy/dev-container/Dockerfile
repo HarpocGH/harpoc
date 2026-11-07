@@ -2,7 +2,7 @@ FROM node:24-bookworm
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-    bubblewrap dbus-x11 git gnome-keyring keyutils libsecret-tools openssh-client procps rsync sudo \
+    bubblewrap dbus-x11 git gnome-keyring keyutils libsecret-tools openssh-client procps rsync sudo systemd \
   && rm -rf /var/lib/apt/lists/*
 
 RUN npm install --global pnpm@10.11.0

@@ -106,6 +106,18 @@ describe("vault_meta", () => {
     store.setMeta("key", "value2");
     expect(store.getMeta("key")).toBe("value2");
   });
+
+  it("deletes a key", () => {
+    store.setMeta("doomed", "value");
+    store.deleteMeta("doomed");
+    expect(store.getMeta("doomed")).toBeUndefined();
+  });
+
+  it("deleting a missing key is a no-op that leaves the other keys", () => {
+    store.setMeta("kept", "value");
+    expect(() => store.deleteMeta("never-set")).not.toThrow();
+    expect(store.getMeta("kept")).toBe("value");
+  });
 });
 
 describe("secrets CRUD", () => {
@@ -683,6 +695,8 @@ describe("audit_log visibility — failed rows without a secret_id (S6)", () => 
     AuditEventType.AGENT_ACTIVATE,
     AuditEventType.AGENT_DEACTIVATE,
     AuditEventType.AGENT_DELETE,
+    AuditEventType.VAULT_UNLOCK_KEY_ENROLL,
+    AuditEventType.VAULT_UNLOCK_KEY_REVOKE,
   ];
   const BEYOND_SQL_CEILING = ["id-a", ...Array.from({ length: 40_000 }, (_, i) => `unseen-${i}`)];
 
@@ -720,10 +734,10 @@ describe("audit_log visibility — failed rows without a secret_id (S6)", () => 
       .map((event) => event.event_type)
       .sort();
 
-  it("self-check: the two lists classify all 36 audit event types exactly once", () => {
+  it("self-check: the two lists classify all 38 audit event types exactly once", () => {
     const classified = [...HIDDEN_WHEN_FAILED, ...VAULT_LEVEL];
-    expect(classified).toHaveLength(36);
-    expect(new Set(classified).size).toBe(36);
+    expect(classified).toHaveLength(38);
+    expect(new Set(classified).size).toBe(38);
     expect([...classified].sort()).toEqual([...Object.values(AuditEventType)].sort());
   });
 
@@ -751,7 +765,7 @@ describe("audit_log visibility — failed rows without a secret_id (S6)", () => 
   it("control: a scoped read keeps every successful secret-less row, whatever its type", () => {
     for (const type of [...HIDDEN_WHEN_FAILED, ...VAULT_LEVEL]) insert(type, null, true);
     for (const visibleSecretIds of [["id-a"], [], BEYOND_SQL_CEILING]) {
-      expect(store.queryAuditLog({ visibleSecretIds })).toHaveLength(36);
+      expect(store.queryAuditLog({ visibleSecretIds })).toHaveLength(38);
     }
   });
 

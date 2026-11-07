@@ -79,6 +79,11 @@ describe("enum schemas", () => {
     expect(auditEventTypeSchema.parse("mcp.terminate")).toBe("mcp.terminate");
   });
 
+  it("auditEventTypeSchema accepts the unlock-key slot's two event types (B4)", () => {
+    expect(auditEventTypeSchema.parse("vault.unlock_key.enroll")).toBe("vault.unlock_key.enroll");
+    expect(auditEventTypeSchema.parse("vault.unlock_key.revoke")).toBe("vault.unlock_key.revoke");
+  });
+
   it("principalTypeSchema accepts valid values", () => {
     for (const p of ["agent", "tool", "project", "user"]) {
       expect(principalTypeSchema.parse(p)).toBe(p);

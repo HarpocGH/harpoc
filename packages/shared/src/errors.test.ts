@@ -156,6 +156,10 @@ const STATUS_CASES = [
   [ErrorCode.PROXY_PLACEHOLDER_DENIED, 403],
   [ErrorCode.PROXY_UPSTREAM_FAILED, 502],
   [ErrorCode.SSH_AGENT_UNBOUND, 403],
+  [ErrorCode.INVALID_UNLOCK_KEY, 401],
+  [ErrorCode.UNLOCK_KEY_NOT_ENROLLED, 400],
+  [ErrorCode.UNLOCK_KEY_SOURCE_UNSAFE, 400],
+  [ErrorCode.UNLOCK_KEY_PASSWORD_REQUIRED, 403],
   // System
   [ErrorCode.INTERNAL_ERROR, 500],
   [ErrorCode.DATABASE_ERROR, 500],
@@ -917,6 +921,70 @@ describe("factory methods", () => {
       expect(err.details).toEqual({ reason });
     },
   );
+
+  it("invalidUnlockKey() maps to 401 like invalidPassword() and carries no detail", () => {
+    const err = VaultError.invalidUnlockKey();
+    expect(err.code).toBe(ErrorCode.INVALID_UNLOCK_KEY);
+    expect(err.statusCode).toBe(401);
+    expect(err.message).toBe("Invalid unlock key");
+    expect(err.details).toBeUndefined();
+  });
+
+  it("invalidUnlockKey(detail) renders the reader's wrong-length detail after a colon", () => {
+    const err = VaultError.invalidUnlockKey(
+      "/etc/harpoc/unlock.key holds 31 bytes; an unlock key file holds exactly 32 raw bytes",
+    );
+    expect(err.code).toBe(ErrorCode.INVALID_UNLOCK_KEY);
+    expect(err.statusCode).toBe(401);
+    expect(err.message).toBe(
+      "Invalid unlock key: /etc/harpoc/unlock.key holds 31 bytes; an unlock key file holds exactly 32 raw bytes",
+    );
+    expect(err.details).toBeUndefined();
+  });
+
+  it("unlockKeyNotEnrolled() maps to 400 and names the enrol command", () => {
+    const err = VaultError.unlockKeyNotEnrolled();
+    expect(err.code).toBe(ErrorCode.UNLOCK_KEY_NOT_ENROLLED);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toBe("No unlock key is enrolled for this vault (harpoc unlock-key enroll)");
+  });
+
+  it.each([
+    ["symlink", "is a symbolic link; name the file itself"],
+    ["owner", "is owned by another account"],
+    ["mode", "has permission bits that grant access beyond its owner"],
+    [
+      "acl",
+      "grants access to an account other than this process's account, SYSTEM and Administrators",
+    ],
+    ["acl_unverified", "has an access list that could not be read"],
+  ] as const)(
+    "unlockKeySourceUnsafe(%s) maps to 400 with the path, its fixed text and the reason in details",
+    (reason, text) => {
+      const err = VaultError.unlockKeySourceUnsafe("/etc/harpoc/unlock.key", reason);
+      expect(err.code).toBe(ErrorCode.UNLOCK_KEY_SOURCE_UNSAFE);
+      expect(err.statusCode).toBe(400);
+      expect(err.message).toBe(`Unlock key source refused: /etc/harpoc/unlock.key ${text}`);
+      expect(err.details).toEqual({ reason });
+    },
+  );
+
+  it("unlockKeySourceUnsafe() appends the observed fact in parentheses and never a byte of a key", () => {
+    const err = VaultError.unlockKeySourceUnsafe("/etc/harpoc/unlock.key", "mode", "mode 0640");
+    expect(err.message).toBe(
+      "Unlock key source refused: /etc/harpoc/unlock.key has permission bits that grant access beyond its owner (mode 0640)",
+    );
+    expect(err.details).toEqual({ reason: "mode" });
+  });
+
+  it("unlockKeyPasswordRequired() maps to 403 and names the password unlock", () => {
+    const err = VaultError.unlockKeyPasswordRequired();
+    expect(err.code).toBe(ErrorCode.UNLOCK_KEY_PASSWORD_REQUIRED);
+    expect(err.statusCode).toBe(403);
+    expect(err.message).toBe(
+      "Enrolling or revoking an unlock key requires an unlock by password in this process",
+    );
+  });
 
   it("v1.3 context factory messages never contain the word 'password'", () => {
     const messages = [

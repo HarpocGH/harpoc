@@ -1,5 +1,13 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { AES_KEY_LENGTH, ErrorCode, VaultError } from "@harpoc/shared";
+import {
+  AAD_UNLOCK_KEY_WRAP,
+  AAD_VAULT_KEK,
+  AES_KEY_LENGTH,
+  ErrorCode,
+  VaultError,
+} from "@harpoc/shared";
+import type { UnlockKeySlot, WrappedKey } from "./key-hierarchy.js";
+import { decrypt, encrypt } from "./aes-gcm.js";
 import {
   changePassword,
   computeNameHmac,
@@ -9,8 +17,10 @@ import {
   encryptName,
   encryptSecretValue,
   unlockVault,
+  unlockVaultWithKey,
   unwrapDek,
   wrapDek,
+  wrapKekWithUnlockKey,
 } from "./key-hierarchy.js";
 import { generateRandomBytes } from "./random.js";
 import { expectVaultError } from "@harpoc/test-utils";
@@ -112,6 +122,123 @@ describe("unlockVault", () => {
           created.wrappedJwtKey,
           created.wrappedAuditKey,
         ),
+      ErrorCode.ENCRYPTION_ERROR,
+    );
+  });
+});
+
+describe("the unlock-key slot (wrapKekWithUnlockKey / unlockVaultWithKey)", () => {
+  function unlockWith(
+    unlockKey: Uint8Array,
+    slot: Omit<UnlockKeySlot, "unlockKey">,
+    wrappedJwtKey: WrappedKey = cachedKeys.wrappedJwtKey,
+  ): ReturnType<typeof unlockVaultWithKey> {
+    return unlockVaultWithKey(
+      unlockKey,
+      slot.wrappedKekUk,
+      slot.wrappedKekUkIv,
+      slot.wrappedKekUkTag,
+      wrappedJwtKey,
+      cachedKeys.wrappedAuditKey,
+    );
+  }
+
+  it("wraps the KEK under a fresh 32-byte unlock key and recovers the same KEK, JWT key and audit key", () => {
+    const slot = wrapKekWithUnlockKey(cachedKeys.kek);
+
+    expect(slot.unlockKey instanceof Uint8Array).toBe(true);
+    expect(slot.unlockKey.length).toBe(AES_KEY_LENGTH);
+    expect(slot.wrappedKekUkIv.length).toBe(12);
+    expect(slot.wrappedKekUkTag.length).toBe(16);
+    expect(Buffer.from(slot.wrappedKekUk).equals(Buffer.from(cachedKeys.kek))).toBe(false);
+
+    const unlocked = unlockWith(slot.unlockKey, slot);
+    expect(Buffer.from(unlocked.kek).equals(Buffer.from(cachedKeys.kek))).toBe(true);
+    expect(Buffer.from(unlocked.jwtKey).equals(Buffer.from(cachedKeys.jwtKey))).toBe(true);
+    expect(Buffer.from(unlocked.auditKey).equals(Buffer.from(cachedKeys.auditKey))).toBe(true);
+  });
+
+  it("draws a fresh unlock key and IV on every wrap — one slot's key opens no other", () => {
+    const first = wrapKekWithUnlockKey(cachedKeys.kek);
+    const second = wrapKekWithUnlockKey(cachedKeys.kek);
+
+    expect(Buffer.from(first.unlockKey).equals(Buffer.from(second.unlockKey))).toBe(false);
+    expect(Buffer.from(first.wrappedKekUkIv).equals(Buffer.from(second.wrappedKekUkIv))).toBe(
+      false,
+    );
+    expect(() => unlockWith(first.unlockKey, second)).toThrow("decryption failed");
+  });
+
+  it("refuses a wrong unlock key with ENCRYPTION_ERROR — the engine's wrong-key signal", async () => {
+    const slot = wrapKekWithUnlockKey(cachedKeys.kek);
+
+    await expectVaultError(
+      () => unlockWith(generateRandomBytes(AES_KEY_LENGTH), slot),
+      ErrorCode.ENCRYPTION_ERROR,
+    );
+  });
+
+  it("refuses a tampered tag with ENCRYPTION_ERROR", async () => {
+    const slot = wrapKekWithUnlockKey(cachedKeys.kek);
+    const tampered = { ...slot, wrappedKekUkTag: slot.wrappedKekUkTag.map((b) => b ^ 0xff) };
+
+    await expectVaultError(() => unlockWith(slot.unlockKey, tampered), ErrorCode.ENCRYPTION_ERROR);
+  });
+
+  it("binds the slot to AAD_UNLOCK_KEY_WRAP — a KEK wrapped under the password slot's AAD does not open, nor the slot under it", async () => {
+    const slot = wrapKekWithUnlockKey(cachedKeys.kek);
+    const underVaultKekAad = encrypt(slot.unlockKey, cachedKeys.kek, AAD_VAULT_KEK);
+
+    expect(AAD_UNLOCK_KEY_WRAP).not.toBe(AAD_VAULT_KEK);
+    await expectVaultError(
+      () =>
+        unlockWith(slot.unlockKey, {
+          wrappedKekUk: underVaultKekAad.ciphertext,
+          wrappedKekUkIv: underVaultKekAad.iv,
+          wrappedKekUkTag: underVaultKekAad.tag,
+        }),
+      ErrorCode.ENCRYPTION_ERROR,
+    );
+    await expectVaultError(
+      () =>
+        decrypt(
+          slot.unlockKey,
+          slot.wrappedKekUk,
+          slot.wrappedKekUkIv,
+          slot.wrappedKekUkTag,
+          AAD_VAULT_KEK,
+        ),
+      ErrorCode.ENCRYPTION_ERROR,
+    );
+  });
+
+  it("reports a sub-key that does not unwrap under the recovered KEK as VAULT_CORRUPTED, never as a wrong key", async () => {
+    const slot = wrapKekWithUnlockKey(cachedKeys.kek);
+    const tamperedJwt = {
+      ...cachedKeys.wrappedJwtKey,
+      tag: cachedKeys.wrappedJwtKey.tag.map((b) => b ^ 0xff),
+    };
+
+    await expectVaultError(
+      () => unlockWith(slot.unlockKey, slot, tamperedJwt),
+      ErrorCode.VAULT_CORRUPTED,
+    );
+  });
+
+  it("leaves the caller's unlock key intact — the engine owns and wipes it", () => {
+    const slot = wrapKekWithUnlockKey(cachedKeys.kek);
+    const copy = Buffer.from(slot.unlockKey);
+
+    unlockWith(slot.unlockKey, slot);
+
+    expect(Buffer.from(slot.unlockKey).equals(copy)).toBe(true);
+  });
+
+  it("refuses a 31-byte unlock key as ENCRYPTION_ERROR before any sub-key is touched (the engine checks the length first — RC-6)", async () => {
+    const slot = wrapKekWithUnlockKey(cachedKeys.kek);
+
+    await expectVaultError(
+      () => unlockWith(generateRandomBytes(AES_KEY_LENGTH - 1), slot),
       ErrorCode.ENCRYPTION_ERROR,
     );
   });

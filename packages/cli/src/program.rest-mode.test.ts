@@ -937,6 +937,21 @@ describe("REST_MODE_UNSUPPORTED: the commands without a REST mode", () => {
       message: "cert renew --http-port has no REST mode; run it on the vault host",
       json: false,
     },
+    {
+      args: ["unlock-key", "enroll", "--out", "harpoc-unlock.key"],
+      message: "unlock-key enroll has no REST mode; run it on the vault host",
+      json: false,
+    },
+    {
+      args: ["unlock-key", "revoke"],
+      message: "unlock-key revoke has no REST mode; run it on the vault host",
+      json: false,
+    },
+    {
+      args: ["unlock-key", "status", "--json"],
+      message: "unlock-key status has no REST mode; run it on the vault host",
+      json: true,
+    },
   ];
 
   it.each(unsupported)("refuses $args", async ({ args, message, json }) => {
@@ -1054,6 +1069,7 @@ describe("the REST mode's place in the command tree", () => {
     "secret",
     "server",
     "ssh-agent",
+    "unlock-key",
   ];
   const REST_CAPABLE = [
     "agent activate",
@@ -1100,6 +1116,9 @@ describe("the REST mode's place in the command tree", () => {
     "oauth connect",
     "server start",
     "unlock",
+    "unlock-key enroll",
+    "unlock-key revoke",
+    "unlock-key status",
   ];
 
   function paths(parent: Command, prefix: string[] = []): string[] {

@@ -84,6 +84,10 @@ export const AuditEventType = {
   AGENT_DEACTIVATE: "agent.deactivate",
   /** An agent was deleted from the registry (v1.4). */
   AGENT_DELETE: "agent.delete",
+  /** The unlock-key slot was enrolled or replaced (deployment model B, M1). */
+  VAULT_UNLOCK_KEY_ENROLL: "vault.unlock_key.enroll",
+  /** The unlock-key slot was removed (deployment model B, M1). */
+  VAULT_UNLOCK_KEY_REVOKE: "vault.unlock_key.revoke",
 } as const;
 export type AuditEventType = (typeof AuditEventType)[keyof typeof AuditEventType];
 

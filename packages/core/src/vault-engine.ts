@@ -118,12 +118,14 @@ import type {
   DecryptedAuditEvent,
 } from "./audit/audit-query.js";
 import { decrypt, encrypt } from "./crypto/aes-gcm.js";
-import type { WrappedKey } from "./crypto/key-hierarchy.js";
+import type { UnlockedKeys, WrappedKey } from "./crypto/key-hierarchy.js";
 import {
   changePassword,
   createVaultKeys,
   decryptName,
   unlockVault,
+  unlockVaultWithKey,
+  wrapKekWithUnlockKey,
 } from "./crypto/key-hierarchy.js";
 import { assertNever } from "./assert-never.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
@@ -258,6 +260,17 @@ export type ImapRunner = Pick<ImapInjector, "run">;
 export type WebsocketExecutor = typeof executeWebsocketAction;
 export type SftpExecutor = typeof executeSftpAction;
 export type DockerExecutor = typeof executeDockerRegistryAction;
+
+/** How an engine's keys were installed — the unlock-key slot is administered after a password unlock only. */
+type UnlockMethod = "password" | "credential" | "session";
+
+/** The unlock-key slot's `vault_meta` rows (design M1) — additive; a vault without them is not enrolled. */
+const UNLOCK_KEY_META_KEYS = [
+  "wrapped_kek_uk",
+  "wrapped_kek_uk_iv",
+  "wrapped_kek_uk_tag",
+  "unlock_key_enrolled_at",
+] as const;
 
 interface UnlockedState {
   store: SqliteStore;
@@ -434,6 +447,7 @@ export class VaultEngine {
   private auditKey: Uint8Array | null = null;
   private vaultId: string | null = null;
   private sessionId: string | null = null;
+  private unlockedBy: UnlockMethod | null = null;
   /**
    * Suspends the session-file identity check while this engine's own fresh
    * write (initVault / unlock / changePassword) is between the id assignment
@@ -557,6 +571,7 @@ export class VaultEngine {
     this.jwtKey = keys.jwtKey;
     this.auditKey = keys.auditKey;
     this.state = VaultState.UNLOCKED;
+    this.unlockedBy = "password";
 
     this.initManagers();
 
@@ -611,6 +626,73 @@ export class VaultEngine {
    * Unlock an existing vault with a password.
    */
   async unlock(password: string): Promise<void> {
+    await this.unlockFromSlot("password", async (store) => {
+      const salt = this.loadBase64Meta(store, "kdf_salt");
+      const wrappedKek = this.loadBase64Meta(store, "wrapped_kek");
+      const wrappedKekIv = this.loadBase64Meta(store, "wrapped_kek_iv");
+      const wrappedKekTag = this.loadBase64Meta(store, "wrapped_kek_tag");
+
+      // Wrapped JWT/audit keys are mandatory — the key hierarchy has exactly
+      // one instantiation (random keys wrapped with the KEK); a vault without
+      // them is corrupted, never a candidate for a derivation fallback.
+      const wrappedJwtKey = this.loadWrappedKey(store, "wrapped_jwt_key");
+      const wrappedAuditKey = this.loadWrappedKey(store, "wrapped_audit_key");
+
+      return unlockVault(
+        password,
+        salt,
+        wrappedKek,
+        wrappedKekIv,
+        wrappedKekTag,
+        wrappedJwtKey,
+        wrappedAuditKey,
+      );
+    });
+  }
+
+  /**
+   * Unlock through the unlock-key slot (deployment model B, M1) — the
+   * daemon's headless path. The engine takes ownership of `key` and wipes it
+   * whatever happens. A key that is not 32 bytes is refused before the vault
+   * opens and counts against nothing; a vault without the slot is
+   * UNLOCK_KEY_NOT_ENROLLED and counts nothing (no key was tried); a wrong key
+   * is INVALID_UNLOCK_KEY and counts against the lockout the password shares.
+   */
+  async unlockWithKey(key: Uint8Array): Promise<void> {
+    try {
+      if (key.length !== AES_KEY_LENGTH) throw VaultError.invalidUnlockKey();
+      await this.unlockFromSlot("credential", (store) => {
+        if (store.getMeta("wrapped_kek_uk") === undefined) {
+          throw VaultError.unlockKeyNotEnrolled();
+        }
+        const slot = this.loadWrappedKey(store, "wrapped_kek_uk");
+        const wrappedJwtKey = this.loadWrappedKey(store, "wrapped_jwt_key");
+        const wrappedAuditKey = this.loadWrappedKey(store, "wrapped_audit_key");
+        return unlockVaultWithKey(
+          key,
+          slot.ciphertext,
+          slot.iv,
+          slot.tag,
+          wrappedJwtKey,
+          wrappedAuditKey,
+        );
+      });
+    } finally {
+      wipeBuffer(key);
+    }
+  }
+
+  /**
+   * The path both KEK slots share: the store opened or reused, the version
+   * guard, the one lockout counter, the slot's own unwrap, then the keys
+   * installed, the counter reset, the session written fail-closed, the
+   * monitor started and the `vault.unlock` row written — `detail.method` on
+   * the key path only, the password row as it always was.
+   */
+  private async unlockFromSlot(
+    method: "password" | "credential",
+    unwrapSlot: (store: SqliteStore) => Promise<UnlockedKeys> | UnlockedKeys,
+  ): Promise<void> {
     const isNewStore = this.store === null;
     const store = this.store ?? new SqliteStore(this.options.dbPath);
 
@@ -629,26 +711,7 @@ export class VaultEngine {
       // active, corrupted meta) closes the store we opened in this call.
       this.checkLockout(store);
 
-      const salt = this.loadBase64Meta(store, "kdf_salt");
-      const wrappedKek = this.loadBase64Meta(store, "wrapped_kek");
-      const wrappedKekIv = this.loadBase64Meta(store, "wrapped_kek_iv");
-      const wrappedKekTag = this.loadBase64Meta(store, "wrapped_kek_tag");
-
-      // Wrapped JWT/audit keys are mandatory — the key hierarchy has exactly
-      // one instantiation (random keys wrapped with the KEK); a vault without
-      // them is corrupted, never a candidate for a derivation fallback.
-      const wrappedJwtKey = this.loadWrappedKey(store, "wrapped_jwt_key");
-      const wrappedAuditKey = this.loadWrappedKey(store, "wrapped_audit_key");
-
-      const keys = await unlockVault(
-        password,
-        salt,
-        wrappedKek,
-        wrappedKekIv,
-        wrappedKekTag,
-        wrappedJwtKey,
-        wrappedAuditKey,
-      );
+      const keys = await unwrapSlot(store);
 
       // Re-unlock over a live engine: wipe the old key buffers before they
       // are overwritten. Success-path only — a failed re-unlock must not
@@ -664,6 +727,7 @@ export class VaultEngine {
       this.jwtKey = keys.jwtKey;
       this.auditKey = keys.auditKey;
       this.state = VaultState.UNLOCKED;
+      this.unlockedBy = method;
 
       // Reset lockout on success
       store.setMeta("failed_attempts", "0");
@@ -686,17 +750,18 @@ export class VaultEngine {
       const logger = this.auditLogger as AuditLogger;
       logger.log({
         eventType: AuditEventType.VAULT_UNLOCK,
+        ...(method === "credential" ? { detail: { method } } : {}),
         sessionId: this.sessionId ?? undefined,
       });
     } catch (err) {
       if (err instanceof VaultError && err.code === ErrorCode.ENCRYPTION_ERROR) {
-        // Wrong password — increment lockout counter (persisted synchronously)
-        // before closing the store we opened in this call.
+        // Wrong password or unlock key — increment the shared lockout counter
+        // (persisted synchronously) before closing the store we opened here.
         this.incrementLockout(store);
         if (isNewStore) store.close();
-        throw VaultError.invalidPassword();
+        throw method === "password" ? VaultError.invalidPassword() : VaultError.invalidUnlockKey();
       }
-      // Non-password error: close store if we opened it in this call
+      // Any other error: close the store if we opened it in this call
       if (isNewStore && !sealedOnFailedWrite) store.close();
       throw err;
     }
@@ -768,6 +833,7 @@ export class VaultEngine {
       this.sessionId = session.session_id;
       this.sessionExpiresAt = session.expires_at;
       this.state = VaultState.UNLOCKED;
+      this.unlockedBy = "session";
 
       this.initManagers();
       this.startSessionMonitor();
@@ -5294,6 +5360,90 @@ export class VaultEngine {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Unlock key (deployment model B, M1)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Enrol the unlock-key slot: wrap the KEK under a fresh random 256-bit key
+   * and return the key — the caller writes it to its sealer and wipes it; the
+   * vault never stores it. Only an engine unlocked by password in this
+   * process may enrol. An existing slot is replaced (the enrolment is the
+   * key's rotation; the old key stops unlocking). The rows and the
+   * `vault.unlock_key.enroll` row commit in one transaction.
+   */
+  async enrollUnlockKey(): Promise<Uint8Array> {
+    const s = this.assertUnlocked();
+    this.assertUnlockedByPassword(s, AuditEventType.VAULT_UNLOCK_KEY_ENROLL);
+
+    const slot = wrapKekWithUnlockKey(s.kek);
+    try {
+      s.store.transaction(() => {
+        const replaced = s.store.getMeta("wrapped_kek_uk") !== undefined;
+        this.storeWrappedKey(s.store, "wrapped_kek_uk", {
+          ciphertext: slot.wrappedKekUk,
+          iv: slot.wrappedKekUkIv,
+          tag: slot.wrappedKekUkTag,
+        });
+        s.store.setMeta("unlock_key_enrolled_at", new Date().toISOString());
+        s.auditLogger.log({
+          eventType: AuditEventType.VAULT_UNLOCK_KEY_ENROLL,
+          detail: { replaced },
+          sessionId: this.sessionId ?? undefined,
+        });
+      });
+    } catch (err) {
+      wipeBuffer(slot.unlockKey);
+      throw err;
+    }
+    return slot.unlockKey;
+  }
+
+  /**
+   * Remove the unlock-key slot — the four rows and the
+   * `vault.unlock_key.revoke` row in one transaction. Only an engine unlocked
+   * by password in this process may revoke. An engine already unlocked by the
+   * key keeps its keys until it locks or its session ends.
+   */
+  async revokeUnlockKey(): Promise<void> {
+    const s = this.assertUnlocked();
+    this.assertUnlockedByPassword(s, AuditEventType.VAULT_UNLOCK_KEY_REVOKE);
+
+    const revoked = s.store.transaction(() => {
+      if (s.store.getMeta("wrapped_kek_uk") === undefined) return false;
+      for (const key of UNLOCK_KEY_META_KEYS) s.store.deleteMeta(key);
+      s.auditLogger.log({
+        eventType: AuditEventType.VAULT_UNLOCK_KEY_REVOKE,
+        sessionId: this.sessionId ?? undefined,
+      });
+      return true;
+    });
+    if (!revoked) {
+      const err = VaultError.unlockKeyNotEnrolled();
+      this.auditDenied(s, AuditEventType.VAULT_UNLOCK_KEY_REVOKE, err, {});
+      throw err;
+    }
+  }
+
+  /**
+   * Whether the unlock-key slot is enrolled, and since when. Unaudited, as the
+   * listings are (RC-B3-6): a presence read that touches no key.
+   */
+  async unlockKeyStatus(): Promise<{ enrolled: boolean; enrolledAt?: string }> {
+    const s = this.assertUnlocked();
+    if (s.store.getMeta("wrapped_kek_uk") === undefined) return { enrolled: false };
+    const enrolledAt = s.store.getMeta("unlock_key_enrolled_at");
+    return enrolledAt === undefined ? { enrolled: true } : { enrolled: true, enrolledAt };
+  }
+
+  /** The slot's administration needs this engine unlocked by password (design M1); a refusal is audited. */
+  private assertUnlockedByPassword(s: UnlockedState, eventType: AuditEventType): void {
+    if (this.unlockedBy === "password") return;
+    const err = VaultError.unlockKeyPasswordRequired();
+    this.auditDenied(s, eventType, err, {});
+    throw err;
+  }
+
   /**
    * Resolve a secret handle to its internal UUID. A failed resolution is
    * audited as a failed row under `eventType` — `secret.read { handle }` by
@@ -5693,6 +5843,7 @@ export class VaultEngine {
     this.mcpInjector = null;
     this.mcpRegistry = null;
     this.sessionId = null;
+    this.unlockedBy = null;
     this.vaultId = null;
     this.sessionExpiresAt = null;
   }

@@ -29,6 +29,12 @@
  *  - `two-uid` — Linux (the ubuntu legs and the dev container): the users
  *    named by HARPOC_TWO_UID_VAULT_USER / HARPOC_TWO_UID_AGENT_USER exist and
  *    `sudo -n -u` runs the built CLI as each (`two-identity.test.ts`).
+ *  - `systemd-creds` — Linux with systemd as PID 1 (the ubuntu legs; the dev
+ *    container has none): `systemd-creds` of systemd 254 or later, passwordless
+ *    `sudo -n` and the vault user of `two-uid` — the host-key credential round
+ *    trip through `systemd-run` and the built CLI under a transient unit
+ *    (`systemd-credential.test.ts`); where systemd is installed, also
+ *    `systemd-analyze verify` of the unit (`deploy-unit.test.ts`).
  */
 export function tierRequired(tier: string): boolean {
   return (process.env["HARPOC_REQUIRE_PLATFORM_TESTS"] ?? "")

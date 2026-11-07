@@ -10,7 +10,7 @@ import {
   isDecimalInteger,
 } from "@harpoc/shared";
 import type { ServerStopTrigger, ServerTransport } from "@harpoc/shared";
-import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
+import { resolveVaultDir, loadUnlockedEngine, unlockEngineWithKey } from "../utils/vault-loader.js";
 import { handleError } from "../utils/output.js";
 import { parseIntOption } from "../utils/options.js";
 import { DEFAULT_PROXY_PORT, MAX_PORT, MIN_PORT } from "../utils/option-bounds.js";
@@ -80,6 +80,14 @@ export function registerServerCommand(program: Command): void {
       "--ssh-agent",
       "Serve one ssh-agent.sock per consumer directory under --runtime-dir (default $RUNTIME_DIRECTORY): signatures with the keys each consumer is granted, host-bound by session-bind",
     )
+    .option(
+      "--unlock-key-file <path>",
+      "Unlock the vault at start from the 32-byte unlock key in <path> (owner-only mode required; written by harpoc unlock-key enroll) — a password file by another name: prefer --unlock-credential under a systemd sealer",
+    )
+    .option(
+      "--unlock-credential <name>",
+      "Unlock the vault at start from the systemd credential <name> in $CREDENTIALS_DIRECTORY (LoadCredentialEncrypted= in deploy/systemd/harpoc.service)",
+    )
     .action(
       async (
         opts: {
@@ -102,6 +110,8 @@ export function registerServerCommand(program: Command): void {
           proxy?: boolean;
           proxyPort: string;
           sshAgent?: boolean;
+          unlockKeyFile?: string;
+          unlockCredential?: string;
         },
         cmd: Command,
       ) => {
@@ -113,6 +123,32 @@ export function registerServerCommand(program: Command): void {
           if (opts.tokenFile?.startsWith("-")) {
             console.error(
               "Error: --token-file requires a path (give a path that starts with a dash as ./-name).",
+            );
+            process.exit(1);
+          }
+          // The same slip for the unlock key's two sources (`--unlock-key-file --rest`), refused
+          // before the transport check reads the flag it swallowed as missing.
+          if (opts.unlockKeyFile !== undefined) {
+            if (opts.unlockKeyFile.trim() === "") {
+              throw VaultError.invalidInput("--unlock-key-file: empty path");
+            }
+            if (opts.unlockKeyFile.startsWith("-")) {
+              throw VaultError.invalidInput(
+                "--unlock-key-file: a flag, not a path (give a path that starts with a dash as ./-name)",
+              );
+            }
+          }
+          if (opts.unlockCredential !== undefined) {
+            if (opts.unlockCredential.trim() === "") {
+              throw VaultError.invalidInput("--unlock-credential: empty name");
+            }
+            if (opts.unlockCredential.startsWith("-")) {
+              throw VaultError.invalidInput("--unlock-credential: a flag, not a credential name");
+            }
+          }
+          if (opts.unlockKeyFile !== undefined && opts.unlockCredential !== undefined) {
+            console.error(
+              "Error: --unlock-key-file and --unlock-credential exclude each other: one unlock key source per start.",
             );
             process.exit(1);
           }
@@ -298,7 +334,28 @@ export function registerServerCommand(program: Command): void {
           }
 
           const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir as string | undefined);
-          engine = await loadUnlockedEngine(vaultDir);
+          // The unlock key is read last, after every refusal above — a bad source never costs a
+          // session — and handed to the engine, which wipes it (B4). Without either option the
+          // daemon loads the session as before.
+          let unlockKey: Uint8Array | undefined;
+          if (opts.unlockKeyFile !== undefined) {
+            const { readUnlockKeyFile } = await import("@harpoc/core");
+            const warnings: string[] = [];
+            unlockKey = await readUnlockKeyFile(opts.unlockKeyFile, {
+              onWarning: (warning) => warnings.push(warning),
+            });
+            console.error(
+              `Warning: --unlock-key-file is a password file by another name: without a sealer, whoever can read ${opts.unlockKeyFile} unlocks the vault.`,
+            );
+            for (const warning of warnings) console.error(`Warning: --unlock-key-file: ${warning}`);
+          } else if (opts.unlockCredential !== undefined) {
+            const { readUnlockCredential } = await import("@harpoc/core");
+            unlockKey = await readUnlockCredential(opts.unlockCredential, process.env);
+          }
+          engine =
+            unlockKey === undefined
+              ? await loadUnlockedEngine(vaultDir)
+              : await unlockEngineWithKey(vaultDir, unlockKey);
 
           let mcpServer: { close(): Promise<void> } | undefined;
           let mcpHttpServer: { close(): Promise<void> } | undefined;
