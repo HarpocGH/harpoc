@@ -294,6 +294,21 @@ describe("secret routes", () => {
       ]);
     });
 
+    it("PUT forwards ssh_agent_socket: true to the engine in the whole policy (B3)", async () => {
+      const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ ...FULL_POLICY, ssh_agent_socket: true }),
+      });
+      expect(res.status).toBe(200);
+      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+      expect(call.slice(0, 3)).toEqual([
+        "secret://test-key",
+        { ...FULL_POLICY, ssh_agent_socket: true },
+        { acknowledge_interpreters: false },
+      ]);
+    });
+
     it("PUT rejects a malformed recipient pattern with SCHEMA_VALIDATION_ERROR", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",

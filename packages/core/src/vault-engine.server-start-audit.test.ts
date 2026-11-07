@@ -181,6 +181,18 @@ describe("auditServerStart on every transport (R4/B22)", () => {
     });
   });
 
+  it("an agent-socket start carries its consumer, tokenless: true, no port or host (B3)", () => {
+    engine.auditServerStart({ transport: "ssh-agent", tokenless: true, consumer: "ci-bot" });
+    const [row] = engine.queryAudit({ eventType: AuditEventType.SERVER_START });
+    expect(row?.principal_type).toBeNull();
+    expect(row?.detail).toEqual({
+      transport: "ssh-agent",
+      tokenless: true,
+      tty_prompt: false,
+      consumer: "ci-bot",
+    });
+  });
+
   it("the waiver row keeps its exact shape", () => {
     engine.auditServerStart({
       transport: "stdio",
@@ -243,6 +255,35 @@ describe("auditServerStop (R4/D67)", () => {
       uptime_ms: 10,
       trigger: "transport_closed",
     });
+  });
+
+  it("an agent-socket stop names its consumer, so two sockets' stops tell apart (B3)", () => {
+    for (const consumer of ["ci-bot", "deploy-bot"]) {
+      engine.auditServerStop({
+        transport: "ssh-agent",
+        tokenless: true,
+        consumer,
+        uptimeMs: 5,
+        trigger: "SIGTERM",
+      });
+    }
+    const rows = engine.queryAudit({ eventType: AuditEventType.SERVER_STOP });
+    expect(rows.map((row) => row.detail)).toEqual([
+      {
+        transport: "ssh-agent",
+        tokenless: true,
+        consumer: "deploy-bot",
+        uptime_ms: 5,
+        trigger: "SIGTERM",
+      },
+      {
+        transport: "ssh-agent",
+        tokenless: true,
+        consumer: "ci-bot",
+        uptime_ms: 5,
+        trigger: "SIGTERM",
+      },
+    ]);
   });
 
   it("refuses on a sealed vault — the callers make it best-effort", async () => {

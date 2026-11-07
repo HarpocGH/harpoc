@@ -50,6 +50,7 @@ describePosixGit("Git clone — a positional in args never becomes the remote (S
       imap_read_only: false,
       strict_tree_exit: false,
       proxy: false,
+      ssh_agent_socket: false,
     };
   }
 

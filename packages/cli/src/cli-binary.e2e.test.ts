@@ -641,6 +641,37 @@ describe("compiled binary smoke: proxy env opens no vault (B2)", () => {
   }, 60_000);
 });
 
+describe("compiled binary smoke: ssh-agent status opens no vault (B3)", () => {
+  it("reports each consumer directory's socket from the filesystem alone, exit 0, nothing created", async () => {
+    const cwd = join(
+      tmpdir(),
+      `harpoc-sshagentstatus-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(cwd);
+    try {
+      const env: NodeJS.ProcessEnv = { ...process.env, HOME: cwd, USERPROFILE: cwd };
+      delete env.HARPOC_TOKEN;
+      const runtimeDir = join(cwd, "run");
+      mkdirSync(join(runtimeDir, "agent"), { recursive: true });
+      const result = await spawnNode(
+        [CLI_PATH, "ssh-agent", "status", "--runtime-dir", runtimeDir],
+        "harpoc ssh-agent status",
+        env,
+        { cwd },
+      );
+      expect(result.code).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe(
+        `consumer agent: not listening — no socket (${join(runtimeDir, "agent", "ssh-agent.sock")})\n`,
+      );
+      expect(readdirSync(cwd)).toEqual(["run"]);
+      expect(readdirSync(join(runtimeDir, "agent"))).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  }, 60_000);
+});
+
 // Phase 3 D1: `secret use` accepts a scoped token, so the CLI is no longer
 // exempt from the token checks every other interface applies. Walked through
 // the real binary — the surface the e2e demonstration matrix drives.

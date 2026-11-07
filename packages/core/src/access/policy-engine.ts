@@ -147,4 +147,27 @@ export class PolicyEngine {
     }
     return held;
   }
+
+  /**
+   * Every secret the principals hold an unexpired row on, with the union of
+   * the permissions those rows carry — {@link grantedPermissions} for all of a
+   * caller's secrets at once, one indexed query per principal instead of one
+   * check per secret (the agent socket's enumeration, deployment model B).
+   */
+  grantedPermissionsBySecret(principals: readonly PolicyPrincipal[]): Map<string, Set<Permission>> {
+    const bySecret = new Map<string, Set<Permission>>();
+    const now = Date.now();
+    for (const principal of principals) {
+      for (const p of this.store.listPoliciesByPrincipal(principal.type, principal.id)) {
+        if (p.expires_at !== null && p.expires_at <= now) continue;
+        let held = bySecret.get(p.secret_id);
+        if (held === undefined) {
+          held = new Set<Permission>();
+          bySecret.set(p.secret_id, held);
+        }
+        for (const permission of p.permissions) held.add(permission);
+      }
+    }
+    return bySecret;
+  }
 }

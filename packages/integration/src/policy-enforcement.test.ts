@@ -257,6 +257,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
           imap_read_only: false,
           strict_tree_exit: false,
           proxy: false,
+          ssh_agent_socket: false,
         }),
       });
       expect(res.status).toBe(403);

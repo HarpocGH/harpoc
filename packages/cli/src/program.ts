@@ -40,6 +40,7 @@ import { registerCertIssueCommand } from "./commands/cert/issue.js";
 import { registerCertRenewCommand } from "./commands/cert/renew.js";
 import { registerCertAttachCommand } from "./commands/cert/attach.js";
 import { registerProxyEnvCommand } from "./commands/proxy/env.js";
+import { registerSshAgentStatusCommand } from "./commands/ssh-agent/status.js";
 import { registerServerCommand } from "./commands/server.js";
 
 /** The root: `--url` / `--token-file` are taken off a leading run before Commander parses (rest-mode.ts). */
@@ -123,6 +124,12 @@ export function buildProgram(): Command {
   // proxy subcommands
   const proxy = program.command("proxy").description("Egress credential proxy");
   registerProxyEnvCommand(proxy);
+
+  // ssh-agent subcommands
+  const sshAgent = program
+    .command("ssh-agent")
+    .description("The ssh-agent socket of server start --ssh-agent");
+  registerSshAgentStatusCommand(sshAgent);
 
   return program;
 }

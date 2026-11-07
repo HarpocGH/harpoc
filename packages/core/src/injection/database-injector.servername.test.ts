@@ -41,6 +41,7 @@ const POLICY: InjectionPolicy = {
   imap_read_only: false,
   strict_tree_exit: false,
   proxy: false,
+  ssh_agent_socket: false,
 };
 
 function action(engine: DbTlsEngine, host: string, port: number): DatabaseAction {

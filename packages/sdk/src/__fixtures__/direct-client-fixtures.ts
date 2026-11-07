@@ -21,6 +21,7 @@ export const FULL_POLICY = {
   imap_read_only: false,
   strict_tree_exit: false,
   proxy: false,
+  ssh_agent_socket: false,
 };
 
 /** The VaultEngine methods DirectClient calls, each a vitest mock. */

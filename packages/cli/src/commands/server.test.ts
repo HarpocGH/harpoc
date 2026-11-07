@@ -2,6 +2,8 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { Mock } from "vitest";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 
 // ── Hoisted mocks (available inside vi.mock factories) ─────────────
 
@@ -19,6 +21,7 @@ const {
   mockRenewalScheduler,
   renewalSchedulerCtorCalls,
   mockEgressProxy,
+  mockAgentSocketServer,
 } = vi.hoisted(() => ({
   mockEngine: {
     destroy: vi.fn().mockResolvedValue(undefined),
@@ -65,6 +68,11 @@ const {
     listenTcp: vi.fn(async (port: number) => ({ port })),
     listenSocket: vi.fn().mockResolvedValue(undefined),
     close: vi.fn().mockResolvedValue(undefined),
+  },
+  mockAgentSocketServer: {
+    start: vi.fn(),
+    /** Every server start() resolved, in order. */
+    started: [] as { socketPath: string; consumer: string; stop: Mock<() => Promise<void>> }[],
   },
 }));
 
@@ -120,18 +128,26 @@ vi.mock("@harpoc/egress-proxy", () => ({
   createEgressProxy: vi.fn().mockReturnValue(mockEgressProxy),
 }));
 
+// server.ts reaches core only for AgentSocketServer (vault-loader.js, the engine's one other
+// path, is mocked above).
+vi.mock("@harpoc/core", () => ({ AgentSocketServer: mockAgentSocketServer }));
+
 // Spy wrapper around the real implementation: the assertion's argument and its
 // order against loadUnlockedEngine are observable.
 vi.mock("../utils/runtime-dir.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../utils/runtime-dir.js")>();
-  return { ...actual, assertRuntimeDir: vi.fn(actual.assertRuntimeDir) };
+  return {
+    ...actual,
+    assertRuntimeDir: vi.fn(actual.assertRuntimeDir),
+    consumerSocketPaths: vi.fn(actual.consumerSocketPaths),
+  };
 });
 
 // ── Helpers ────────────────────────────────────────────────────────
 
 import { registerServerCommand } from "./server.js";
 import { buildCli, spyCli, type CliSpies } from "../__fixtures__/cli-harness.js";
-import { assertRuntimeDir } from "../utils/runtime-dir.js";
+import { assertRuntimeDir, consumerSocketPaths } from "../utils/runtime-dir.js";
 
 const run = buildCli(registerServerCommand, ["server", "start"]);
 
@@ -918,6 +934,384 @@ describe("server start", () => {
 
       onceSpy.mockRestore();
     });
+  });
+
+  // ── --ssh-agent (the persistent agent socket, B3) ──────────────
+
+  describe("--ssh-agent", () => {
+    const REQUIRES =
+      "Error: --ssh-agent requires --runtime-dir (or systemd's $RUNTIME_DIRECTORY): one ssh-agent.sock per consumer directory.";
+    let dir: string;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "harpoc-server-ssh-agent-"));
+      mockAgentSocketServer.started.length = 0;
+      mockAgentSocketServer.start.mockImplementation(
+        async (options: { socketPath: string; consumer: string }) => {
+          const server = {
+            socketPath: options.socketPath,
+            consumer: options.consumer,
+            stop: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+          };
+          mockAgentSocketServer.started.push(server);
+          return server;
+        },
+      );
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      // Back to the real implementations the spy wrapper was built on.
+      vi.mocked(assertRuntimeDir).mockReset();
+      vi.mocked(consumerSocketPaths).mockReset();
+      mockAgentSocketServer.start.mockReset();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    });
+
+    /**
+     * The runtime-directory ladder stubbed for one start, so a start row runs on every platform
+     * (--runtime-dir is refused on win32 — RD-3; the real ladder's rows are runtime-dir.test.ts's,
+     * the --proxy describe's and the POSIX rows below): the directory passes, and the listing
+     * names `<dir>/<consumer>/<socket>` for each consumer, by name.
+     */
+    function stubConsumers(...names: string[]): void {
+      vi.mocked(assertRuntimeDir).mockImplementation(() => undefined);
+      vi.mocked(consumerSocketPaths).mockImplementation((_runtimeDir, socketName) =>
+        names.map((name) => join(dir, name, socketName)),
+      );
+    }
+
+    /** A consumer directory as the recipe leaves it: this user's own, 0750 whatever the umask. */
+    function consumer(name: string): string {
+      const path = join(dir, name);
+      mkdirSync(path);
+      chmodSync(path, 0o750);
+      return path;
+    }
+
+    it("--ssh-agent without a runtime directory is refused before the vault opens", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+      await expect(run(["--ssh-agent"])).rejects.toThrow("process.exit");
+      expect(spies.exitSpy).toHaveBeenCalledWith(1);
+      // The combination-check form: the line, then exit 1 (the stub's throw is handleError's).
+      expect(spies.errorSpy.mock.calls[0]).toEqual([REQUIRES]);
+      expect(spies.errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("At least one of"));
+      expect(assertRuntimeDir).not.toHaveBeenCalled();
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(mockAgentSocketServer.start).not.toHaveBeenCalled();
+    });
+
+    // RD-1: the socket is a per-consumer feature, so systemd's variable is its default.
+    // A drive-less absolute path: on win32 a drive letter's colon would read as RD-2's list.
+    it("under --ssh-agent the ambient RUNTIME_DIRECTORY is read and asserted before the vault opens", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      const missing = "/harpoc-b3-no-such-runtime-dir";
+      vi.stubEnv("RUNTIME_DIRECTORY", missing);
+
+      await expect(run(["--ssh-agent"])).rejects.toThrow("process.exit");
+      expect(assertRuntimeDir).toHaveBeenCalledWith({
+        path: missing,
+        source: "$RUNTIME_DIRECTORY",
+      });
+      expect(spies.errorSpy.mock.calls[0]).toEqual([
+        `Error: [INVALID_INPUT] $RUNTIME_DIRECTORY: no such directory: ${missing}`,
+      ]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    });
+
+    it.runIf(process.platform === "win32")(
+      "--ssh-agent --runtime-dir on Windows meets the RD-3 refusal before the vault opens",
+      async () => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+        await expect(run(["--ssh-agent", "--runtime-dir", dir])).rejects.toThrow("process.exit");
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [
+            `Error: [INVALID_INPUT] --runtime-dir: not supported on this platform (the owner and mode cannot be checked): ${dir}`,
+          ],
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        expect(mockAgentSocketServer.start).not.toHaveBeenCalled();
+      },
+    );
+
+    it("starts one AgentSocketServer per consumer directory on the engine, by name, after the REST listener", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      const { startServer } = await import("@harpoc/rest-api");
+      stubConsumers("alice", "bob");
+
+      await run(["--rest", "--ssh-agent", "--runtime-dir", dir]);
+
+      expect(vi.mocked(consumerSocketPaths).mock.calls).toEqual([
+        [{ path: dir, source: "--runtime-dir" }, "ssh-agent.sock"],
+      ]);
+      const [listed] = vi.mocked(consumerSocketPaths).mock.invocationCallOrder;
+      const [loaded] = vi.mocked(loadUnlockedEngine).mock.invocationCallOrder;
+      expect(listed as number).toBeLessThan(loaded as number);
+      expect(mockAgentSocketServer.start.mock.calls).toEqual([
+        [
+          {
+            socketPath: join(dir, "alice", "ssh-agent.sock"),
+            consumer: "alice",
+            engine: mockEngine,
+            onError: expect.any(Function),
+          },
+        ],
+        [
+          {
+            socketPath: join(dir, "bob", "ssh-agent.sock"),
+            consumer: "bob",
+            engine: mockEngine,
+            onError: expect.any(Function),
+          },
+        ],
+      ]);
+      const [rest] = vi.mocked(startServer).mock.invocationCallOrder;
+      const [firstSocket] = mockAgentSocketServer.start.mock.invocationCallOrder;
+      expect(rest as number).toBeLessThan(firstSocket as number);
+      expect(spies.errorSpy).toHaveBeenCalledWith(
+        `[harpoc] ssh-agent listening on 2 consumer sockets (<consumer>/ssh-agent.sock) under ${dir}`,
+      );
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("--ssh-agent alone is a start mode: one consumer, the singular line", async () => {
+      stubConsumers("alice");
+
+      await run(["--ssh-agent", "--runtime-dir", dir]);
+
+      expect(mockAgentSocketServer.start).toHaveBeenCalledTimes(1);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [
+          `[harpoc] ssh-agent listening on 1 consumer socket (<consumer>/ssh-agent.sock) under ${dir}`,
+        ],
+      ]);
+    });
+
+    it("a runtime directory listing no consumer refuses the start before the vault opens", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      stubConsumers();
+
+      await expect(run(["--rest", "--ssh-agent", "--runtime-dir", dir])).rejects.toThrow(
+        "process.exit",
+      );
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [
+          `Error: [INVALID_INPUT] --runtime-dir: --ssh-agent found no consumer directory under ${dir} (one per agent user: deploy/linux/install-two-identity.sh)`,
+        ],
+      ]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    });
+
+    // Model A untouched: without --ssh-agent nothing lists a consumer directory for a socket.
+    it("--rest --runtime-dir starts no agent socket and lists no consumer directory (negative control)", async () => {
+      stubConsumers("alice");
+
+      await run(["--rest", "--runtime-dir", dir]);
+
+      expect(consumerSocketPaths).not.toHaveBeenCalled();
+      expect(mockAgentSocketServer.start).not.toHaveBeenCalled();
+      expect(spies.errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("ssh-agent"));
+    });
+
+    it("onError names the consumer and the code, never the message; silent once shutdown began", async () => {
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+      stubConsumers("alice");
+
+      await run(["--ssh-agent", "--runtime-dir", dir]);
+      const [[options]] = mockAgentSocketServer.start.mock.calls as [
+        [{ onError: (err: VaultError) => void }],
+      ];
+      spies.errorSpy.mockClear();
+      options.onError(new VaultError(ErrorCode.INTERNAL_ERROR, "a message that names a value"));
+      expect(spies.errorSpy.mock.calls).toEqual([["[harpoc] ssh-agent alice: INTERNAL_ERROR"]]);
+
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+      spies.errorSpy.mockClear();
+      options.onError(new VaultError(ErrorCode.VAULT_LOCKED, "Vault is locked"));
+      expect(spies.errorSpy).not.toHaveBeenCalled();
+
+      onSpy.mockRestore();
+    });
+
+    it("a rejected start reaches the fatal path: the error on stderr, exit 1, engine destroyed", async () => {
+      stubConsumers("alice");
+      mockAgentSocketServer.start.mockRejectedValueOnce(
+        VaultError.invalidInput("ssh-agent socket: a live socket answers at the path"),
+      );
+
+      await expect(run(["--ssh-agent", "--runtime-dir", dir])).rejects.toThrow("process.exit");
+      expect(spies.exitSpy).toHaveBeenCalledWith(1);
+      expect(spies.errorSpy).toHaveBeenCalledWith(
+        "Error: [INVALID_INPUT] ssh-agent socket: a live socket answers at the path",
+      );
+      expect(mockEngine.destroy).toHaveBeenCalled();
+    });
+
+    it("SIGTERM: the proxy's pair, then one server.stop per consumer socket, each before its stop(), all before destroy", async () => {
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+      stubConsumers("alice", "bob");
+
+      await run(["--proxy", "--ssh-agent", "--runtime-dir", dir]);
+      // Beside --proxy both sockets live in each consumer directory.
+      expect(vi.mocked(consumerSocketPaths).mock.calls.map((call) => call[1])).toEqual([
+        "proxy.sock",
+        "ssh-agent.sock",
+      ]);
+      expect(mockEgressProxy.listenSocket.mock.calls).toEqual([
+        [join(dir, "alice", "proxy.sock")],
+        [join(dir, "bob", "proxy.sock")],
+      ]);
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [expect.objectContaining({ transport: "proxy", port: 3128, trigger: "SIGTERM" })],
+        [
+          {
+            transport: "ssh-agent",
+            tokenless: true,
+            consumer: "alice",
+            uptimeMs: expect.any(Number),
+            trigger: "SIGTERM",
+          },
+        ],
+        [
+          {
+            transport: "ssh-agent",
+            tokenless: true,
+            consumer: "bob",
+            uptimeMs: expect.any(Number),
+            trigger: "SIGTERM",
+          },
+        ],
+      ]);
+      const [alice, bob] = mockAgentSocketServer.started;
+      const [, aliceRow, bobRow] = mockEngine.auditServerStop.mock.invocationCallOrder as number[];
+      const proxyClose = mockEgressProxy.close.mock.invocationCallOrder[0] as number;
+      const aliceStop = alice?.stop.mock.invocationCallOrder[0] as number;
+      const bobStop = bob?.stop.mock.invocationCallOrder[0] as number;
+      const destroy = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+      expect(proxyClose).toBeLessThan(aliceRow as number);
+      expect(aliceRow as number).toBeLessThan(aliceStop);
+      expect(aliceStop).toBeLessThan(bobRow as number);
+      expect(bobRow as number).toBeLessThan(bobStop);
+      expect(bobStop).toBeLessThan(destroy);
+
+      onSpy.mockRestore();
+    });
+
+    it("SIGTERM while a socket's start is pending stops only the sockets already serving (E-11)", async () => {
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+      stubConsumers("alice", "bob");
+      let releaseBob: () => void = () => undefined;
+      const bobStop = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+      mockAgentSocketServer.start.mockImplementationOnce(
+        async (options: { socketPath: string; consumer: string }) => {
+          const server = {
+            ...options,
+            stop: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+          };
+          mockAgentSocketServer.started.push(server);
+          return server;
+        },
+      );
+      mockAgentSocketServer.start.mockImplementationOnce(
+        (options: { socketPath: string; consumer: string }) =>
+          new Promise((resolve) => {
+            releaseBob = () => resolve({ ...options, stop: bobStop });
+          }),
+      );
+
+      const started = run(["--ssh-agent", "--runtime-dir", dir]);
+      await vi.waitFor(() => expect(mockAgentSocketServer.start).toHaveBeenCalledTimes(2));
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+      releaseBob();
+      await started;
+
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [expect.objectContaining({ transport: "ssh-agent", consumer: "alice" })],
+      ]);
+      expect(mockAgentSocketServer.started[0]?.stop).toHaveBeenCalledTimes(1);
+      expect(bobStop).not.toHaveBeenCalled();
+
+      onSpy.mockRestore();
+    });
+
+    it("redirects console.log to stderr beside the stdio server (--mcp --ssh-agent)", async () => {
+      stubConsumers("alice");
+
+      await run(["--mcp", "--ssh-agent", "--runtime-dir", dir]);
+
+      expect(console.log).toBe(console.error);
+    });
+
+    it("stdin EOF beside --ssh-agent: only the stdio server stops, the sockets keep serving", async () => {
+      const onceSpy = vi.spyOn(process.stdin, "once");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+      stubConsumers("alice");
+
+      await run(["--mcp", "--allow-tokenless", "--ssh-agent", "--runtime-dir", dir]);
+      const endCall = onceSpy.mock.calls.find((call) => (call[0] as string) === "end");
+      (endCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(mockHandle.close).toHaveBeenCalledTimes(1));
+      // A shutdown would be chained on the close's settlement: let it run before the negative.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [expect.objectContaining({ transport: "stdio", trigger: "transport_closed" })],
+      ]);
+      expect(mockAgentSocketServer.started[0]?.stop).not.toHaveBeenCalled();
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+
+      onceSpy.mockRestore();
+    });
+
+    // The real ladder: mkdtemp creates the directory 0700, owned by this user (mkdtemp(3)), and
+    // --runtime-dir is refused on win32 (RD-3).
+    it.skipIf(process.platform === "win32")(
+      "opens one ssh-agent.sock per real consumer directory, by name; a plain file is no consumer (POSIX)",
+      async () => {
+        consumer("bob");
+        consumer("alice");
+        writeFileSync(join(dir, "not-a-consumer"), "");
+
+        await run(["--ssh-agent", "--runtime-dir", dir]);
+
+        expect(mockAgentSocketServer.start.mock.calls.map((call) => call[0])).toEqual([
+          expect.objectContaining({
+            socketPath: join(dir, "alice", "ssh-agent.sock"),
+            consumer: "alice",
+          }),
+          expect.objectContaining({
+            socketPath: join(dir, "bob", "ssh-agent.sock"),
+            consumer: "bob",
+          }),
+        ]);
+      },
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "a real runtime directory without consumer directories refuses --ssh-agent (POSIX)",
+      async () => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+        await expect(run(["--ssh-agent", "--runtime-dir", dir])).rejects.toThrow("process.exit");
+        expect(spies.errorSpy.mock.calls[0]).toEqual([
+          `Error: [INVALID_INPUT] --runtime-dir: --ssh-agent found no consumer directory under ${dir} (one per agent user: deploy/linux/install-two-identity.sh)`,
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      },
+    );
   });
 
   // ── MCP Streamable HTTP mode ────────────────────────────────────

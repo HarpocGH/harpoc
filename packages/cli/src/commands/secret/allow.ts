@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import type { InjectionPolicy, ResponseMode } from "@harpoc/shared";
+import type { ConnectionConfig, InjectionPolicy, ResponseMode } from "@harpoc/shared";
 import { injectionPolicyInputSchema, renderSchemaIssues, VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
@@ -30,6 +30,8 @@ export interface AllowOptions {
   strictTreeExit?: boolean;
   /** Tri-state: true (--proxy), false (--no-proxy), undefined (keep stored). */
   proxy?: boolean;
+  /** Tri-state: true (--ssh-agent-socket), false (--no-ssh-agent-socket), undefined (keep stored). */
+  sshAgentSocket?: boolean;
   acknowledgeInterpreter?: boolean;
   clear?: boolean;
   show?: boolean;
@@ -50,6 +52,7 @@ const EMPTY_POLICY: InjectionPolicy = {
   imap_read_only: false,
   strict_tree_exit: false,
   proxy: false,
+  ssh_agent_socket: false,
 };
 
 /**
@@ -84,6 +87,7 @@ export function mergePolicy(current: InjectionPolicy, options: AllowOptions): In
     imap_read_only: options.imapReadOnly ?? base.imap_read_only,
     strict_tree_exit: options.strictTreeExit ?? base.strict_tree_exit,
     proxy: options.proxy ?? base.proxy,
+    ssh_agent_socket: options.sshAgentSocket ?? base.ssh_agent_socket,
   };
 }
 
@@ -92,6 +96,29 @@ function noteProxyWithoutUrl(handle: string, options: AllowOptions, policy: Inje
   if (options.proxy === true && policy.url_allowlist.length === 0) {
     console.error(
       `Note: ${handle} is open to the egress proxy but allowlists no URL — the proxy brokers it to no origin until --url <pattern> adds one.`,
+    );
+  }
+}
+
+/**
+ * The opt-in alone signs nothing: the agent socket signs for a host only when the secret pins its
+ * host key (`secret connection --known-host`) and allowlists it (`--host`).
+ */
+function noteSshAgentSocketWithoutHost(
+  handle: string,
+  options: AllowOptions,
+  policy: InjectionPolicy,
+  connection: ConnectionConfig | undefined,
+): void {
+  if (options.sshAgentSocket !== true) return;
+  if (policy.host_allowlist.length === 0) {
+    console.error(
+      `Note: ${handle} is open to the ssh-agent socket but allowlists no host — the socket signs with it for no host until --host <pattern> adds one.`,
+    );
+  }
+  if ((connection?.ssh?.known_hosts.length ?? 0) === 0) {
+    console.error(
+      `Note: ${handle} is open to the ssh-agent socket but pins no host key — the socket signs with it for no host until secret connection ${handle} --known-host <line> pins one.`,
     );
   }
 }
@@ -163,6 +190,11 @@ export function registerSecretAllowCommand(secret: Command): void {
     )
     .option("--no-proxy", "Remove a stored egress-proxy opt-in")
     .option(
+      "--ssh-agent-socket",
+      "Allow the ssh-agent socket (server start --ssh-agent) to sign with this secret's SSH key for a consumer granted use, for a host that secret connection --known-host pins and the --host allowlist admits (session-bind@openssh.com)",
+    )
+    .option("--no-ssh-agent-socket", "Remove a stored ssh-agent-socket opt-in")
+    .option(
       "--acknowledge-interpreter",
       "Explicitly acknowledge allowlisting a known interpreter (sh, bash, python, node, ...) or exec wrapper (sudo, xargs, find, tar, ...) — collapses the capability ladder for this secret; refused and audited otherwise",
     )
@@ -189,12 +221,17 @@ export function registerSecretAllowCommand(secret: Command): void {
               (options.imapReadOnly !== undefined ? 1 : 0) +
               (options.strictTreeExit !== undefined ? 1 : 0) +
               (options.proxy !== undefined ? 1 : 0) +
+              (options.sshAgentSocket !== undefined ? 1 : 0) +
               (options.clear ? 1 : 0);
             if (options.show || setCount === 0) {
               printJson(await client.getInjectionPolicy(handle));
               return;
             }
             const current = await client.getInjectionPolicy(handle);
+            const connection =
+              options.sshAgentSocket === true
+                ? await client.getConnectionConfig(handle)
+                : undefined;
             const parsed = injectionPolicyInputSchema.safeParse(mergePolicy(current, options));
             if (!parsed.success) {
               throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
@@ -203,6 +240,7 @@ export function registerSecretAllowCommand(secret: Command): void {
               acknowledge_interpreters: options.acknowledgeInterpreter === true,
             });
             noteProxyWithoutUrl(handle, options, parsed.data);
+            noteSshAgentSocketWithoutHost(handle, options, parsed.data, connection);
             printSuccess(`Injection policy updated (${handle})`);
           });
           return;
@@ -222,6 +260,7 @@ export function registerSecretAllowCommand(secret: Command): void {
             (options.imapReadOnly !== undefined ? 1 : 0) +
             (options.strictTreeExit !== undefined ? 1 : 0) +
             (options.proxy !== undefined ? 1 : 0) +
+            (options.sshAgentSocket !== undefined ? 1 : 0) +
             (options.clear ? 1 : 0);
 
           const tokenValue = options.token ?? process.env.HARPOC_TOKEN;
@@ -238,6 +277,12 @@ export function registerSecretAllowCommand(secret: Command): void {
           // satisfies the `read` gate this call runs, so nothing a caller
           // could not already reach is read and the row names the principal.
           const current = await engine.getInjectionPolicy(handle, resolved?.caller);
+          // The pin the opt-in's note reads rides the same `read` gate and caller, before the
+          // write: a refusal leaves the policy untouched.
+          const connection =
+            options.sshAgentSocket === true
+              ? await engine.getConnectionConfig(handle, resolved?.caller)
+              : undefined;
           const parsed = injectionPolicyInputSchema.safeParse(mergePolicy(current, options));
           if (!parsed.success) {
             throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
@@ -250,6 +295,7 @@ export function registerSecretAllowCommand(secret: Command): void {
             resolved?.caller,
           );
           noteProxyWithoutUrl(handle, options, parsed.data);
+          noteSshAgentSocketWithoutHost(handle, options, parsed.data, connection);
           printSuccess(`Injection policy updated (${handle})`);
         } finally {
           await engine.destroy();

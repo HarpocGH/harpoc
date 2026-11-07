@@ -31,7 +31,19 @@ describe("injectionPolicyInputSchema", () => {
       imap_read_only: false,
       strict_tree_exit: false,
       proxy: false,
+      ssh_agent_socket: false,
     });
+  });
+
+  it("ssh_agent_socket defaults to false, round-trips true and refuses a non-boolean (B3)", () => {
+    expect(injectionPolicyInputSchema.parse({}).ssh_agent_socket).toBe(false);
+    const enabled = injectionPolicyInputSchema.parse({ ssh_agent_socket: true });
+    expect(enabled.ssh_agent_socket).toBe(true);
+    expect(
+      injectionPolicyInputSchema.parse(JSON.parse(JSON.stringify(enabled))).ssh_agent_socket,
+    ).toBe(true);
+    expect(injectionPolicyInputSchema.safeParse({ ssh_agent_socket: "yes" }).success).toBe(false);
+    expect(injectionPolicyInputSchema.safeParse({ ssh_agent_socket: 1 }).success).toBe(false);
   });
 
   it("proxy defaults to false, round-trips true and refuses a non-boolean (B2)", () => {
@@ -165,6 +177,7 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
     imap_read_only: false,
     strict_tree_exit: false,
     proxy: false,
+    ssh_agent_socket: false,
   };
 
   it("accepts a complete policy unchanged", () => {
@@ -191,14 +204,24 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
     }
   });
 
+  it("refuses a missing ssh_agent_socket, naming it — the read-side default lives in core, never here (B3)", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { ssh_agent_socket: _dropped, ...partial } = complete;
+    const result = injectionPolicySchema.safeParse(partial);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((i) => i.path.join("."))).toEqual(["ssh_agent_socket"]);
+    }
+  });
+
   it("refuses an unknown key (strict)", () => {
     expect(injectionPolicySchema.safeParse({ ...complete, extra: 1 }).success).toBe(false);
   });
 
-  it("applies no defaults — an empty object is twelve misses", () => {
+  it("applies no defaults — an empty object is thirteen misses", () => {
     const result = injectionPolicySchema.safeParse({});
     expect(result.success).toBe(false);
-    if (!result.success) expect(result.error.issues).toHaveLength(12);
+    if (!result.success) expect(result.error.issues).toHaveLength(13);
   });
 
   it("shares the field validators with the input schema", () => {
@@ -239,6 +262,7 @@ describe("setInjectionPolicyRequestSchema", () => {
     imap_read_only: false,
     strict_tree_exit: false,
     proxy: false,
+    ssh_agent_socket: false,
   };
 
   it("is the stored policy shape plus the acknowledgement flag (key-set pin)", () => {
@@ -267,6 +291,16 @@ describe("setInjectionPolicyRequestSchema", () => {
     const wire = setInjectionPolicyRequestSchema.safeParse(elevenFields);
     expect(wire.success).toBe(false);
     if (!wire.success) expect(wire.error.issues.map((i) => i.path.join("."))).toEqual(["proxy"]);
+  });
+
+  it("requires ssh_agent_socket on the wire — a body without it is refused naming ssh_agent_socket alone (R3, B3)", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { ssh_agent_socket: _omitted, ...twelveFields } = complete;
+    const wire = setInjectionPolicyRequestSchema.safeParse(twelveFields);
+    expect(wire.success).toBe(false);
+    if (!wire.success) {
+      expect(wire.error.issues.map((i) => i.path.join("."))).toEqual(["ssh_agent_socket"]);
+    }
   });
 
   it("refuses an unknown key (strict — inherited from injectionPolicySchema through .extend)", () => {

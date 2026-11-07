@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { EphemeralSshAgent } from "./index.js";
+import { loadPrivateKey } from "./key-loader.js";
 import { writeByte, writeString, writeUint32 } from "./ssh-wire.js";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "..", "__fixtures__", "ssh");
@@ -15,6 +16,7 @@ const SSH_AGENT_IDENTITIES_ANSWER = 12;
 const SSH_AGENTC_SIGN_REQUEST = 13;
 const SSH_AGENTC_ADD_IDENTITY = 17;
 const SSH_AGENTC_REMOVE_ALL_IDENTITIES = 19;
+const SSH_AGENTC_EXTENSION = 27;
 const MAX_MESSAGE = 256 * 1024;
 
 const frame = (body: Buffer): Buffer => Buffer.concat([writeUint32(body.length), body]);
@@ -127,5 +129,27 @@ describe("agent protocol: every foreign or malformed request is answered SSH_AGE
 
   it("an implausible length (past the 256 KiB message cap)", async () => {
     await withConnection((c) => expectFailureThenServed(c, writeUint32(MAX_MESSAGE + 1)));
+  });
+
+  // ssh >= 8.9 sends this bind ahead of every identities request (measured on Win32-OpenSSH
+  // 9.5p2); the ephemeral agent binds nothing — the persistent socket's extension only (B3).
+  it("SSH_AGENTC_EXTENSION (27) session-bind@openssh.com, a verifying bind included", async () => {
+    const host = loadPrivateKey(readFileSync(join(FIXTURES, "ed25519_openssh"), "utf8"));
+    const sessionId = Buffer.alloc(32, 7);
+    await withConnection((c) =>
+      expectFailureThenServed(
+        c,
+        frame(
+          Buffer.concat([
+            writeByte(SSH_AGENTC_EXTENSION),
+            writeString("session-bind@openssh.com"),
+            writeString(host.publicKeyBlob),
+            writeString(sessionId),
+            writeString(host.sign(sessionId, 0)),
+            writeByte(0),
+          ]),
+        ),
+      ),
+    );
   });
 });

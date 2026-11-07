@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  agentSocketCaller,
   auditScopeFromToken,
   callerFromToken,
   checkTokenScope,
@@ -52,7 +53,7 @@ describe("callerFromToken", () => {
   });
 
   it("carries the access interface through when provided", () => {
-    for (const iface of ["rest", "mcp", "mcp-http", "cli", "proxy"] as const) {
+    for (const iface of ["rest", "mcp", "mcp-http", "cli", "proxy", "ssh_agent"] as const) {
       const caller = callerFromToken(baseToken(), iface);
       expect(caller.interface).toBe(iface);
       expect(caller.principal_id).toBe("alice");
@@ -206,6 +207,24 @@ describe("tokenlessStdioCaller (R4/E78b)", () => {
 
   it("is exempt exactly like an admin-scoped user token (R7)", () => {
     expect(isAdminUserCaller(tokenlessStdioCaller("mcp"))).toBe(true);
+  });
+});
+
+describe("agentSocketCaller (B3)", () => {
+  it("is the consumer as an agent-type principal on the ssh_agent interface, and nothing else", () => {
+    const caller = agentSocketCaller("ci-bot");
+    expect(caller).toEqual({
+      principal_type: "agent",
+      principal_id: "ci-bot",
+      interface: "ssh_agent",
+    });
+    expect(Object.keys(caller).sort()).toEqual(["interface", "principal_id", "principal_type"]);
+  });
+
+  it("is never exempt from the per-secret grants (R7): no admin_scope, not an admin user", () => {
+    const caller = agentSocketCaller("ci-bot");
+    expect("admin_scope" in caller).toBe(false);
+    expect(isAdminUserCaller(caller)).toBe(false);
   });
 });
 

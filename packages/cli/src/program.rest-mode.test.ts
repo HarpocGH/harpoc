@@ -154,6 +154,8 @@ const CERT_PEM = readFileSync(CERT_PATH, "utf8");
 const BASE = "http://127.0.0.1:3000";
 const TOKEN = "rest-mode.jwt";
 const CONSTRUCTED = { baseUrl: `${BASE}/`, token: TOKEN };
+/** Never created: `ssh-agent status --consumer` probes the one socket path and lists nothing. */
+const NO_RUNTIME_DIR = join(tmpdir(), "harpoc-rest-mode-no-runtime-dir");
 
 let dir: string;
 let tokenFile: string;
@@ -199,6 +201,7 @@ const STORED_POLICY = {
   imap_read_only: false,
   strict_tree_exit: false,
   proxy: false,
+  ssh_agent_socket: false,
 };
 const MCP_CONFIG = { server_name: "srv", transport: "http", url: "https://mcp.example.com/mcp" };
 /** The config `--name srv --transport http --url …` parses to: the schema adds the default revision. */
@@ -483,6 +486,20 @@ const REST_ROWS: RestRow[] = [
     },
   },
   {
+    argv: ["secret", "allow", "secret://k", "--ssh-agent-socket"],
+    calls: {
+      getInjectionPolicy: [["secret://k"]],
+      getConnectionConfig: [["secret://k"]],
+      setInjectionPolicy: [
+        [
+          "secret://k",
+          { ...STORED_POLICY, ssh_agent_socket: true },
+          { acknowledge_interpreters: false },
+        ],
+      ],
+    },
+  },
+  {
     argv: ["secret", "mcp-server", "secret://k", "--show"],
     calls: { getMcpServerConfig: [["secret://k"]] },
   },
@@ -587,6 +604,10 @@ const REST_ROWS: RestRow[] = [
   { argv: ["oauth", "providers"], calls: {} },
   { argv: ["proxy", "env", "agent", "secret://k"], calls: {} },
   {
+    argv: ["ssh-agent", "status", "--consumer", "agent", "--runtime-dir", NO_RUNTIME_DIR],
+    calls: {},
+  },
+  {
     argv: ["cert", "import", "c", "--key", KEY_PATH, "--cert", CERT_PATH],
     calls: {
       importCertificate: [
@@ -659,6 +680,20 @@ describe("the REST mode of every REST-capable command (--url / --token-file)", (
     expect(spies.errorSpy.mock.calls).toEqual([
       [
         "Note: secret://k is open to the egress proxy but allowlists no URL — the proxy brokers it to no origin until --url <pattern> adds one.",
+      ],
+      ["OK: Injection policy updated (secret://k)"],
+    ]);
+  });
+
+  it("secret allow --ssh-agent-socket over REST reads the pin through the route and prints both notes before the OK line (B3)", async () => {
+    await capture([...rest, "secret", "allow", "secret://k", "--ssh-agent-socket"]);
+    expect(mockClient.getConnectionConfig.mock.calls).toEqual([["secret://k"]]);
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        "Note: secret://k is open to the ssh-agent socket but allowlists no host — the socket signs with it for no host until --host <pattern> adds one.",
+      ],
+      [
+        "Note: secret://k is open to the ssh-agent socket but pins no host key — the socket signs with it for no host until secret connection secret://k --known-host <line> pins one.",
       ],
       ["OK: Injection policy updated (secret://k)"],
     ]);
@@ -1009,7 +1044,17 @@ describe("the commands' own --url and --token-file after the command stay theirs
 describe("the REST mode's place in the command tree", () => {
   // Pure groups carry no action. Everything else is classified here: a command added later reds
   // this row until it is listed as REST-capable (with a REST_ROWS row) or unsupported.
-  const GROUPS = ["agent", "auth", "cert", "oauth", "policy", "proxy", "secret", "server"];
+  const GROUPS = [
+    "agent",
+    "auth",
+    "cert",
+    "oauth",
+    "policy",
+    "proxy",
+    "secret",
+    "server",
+    "ssh-agent",
+  ];
   const REST_CAPABLE = [
     "agent activate",
     "agent deactivate",
@@ -1044,6 +1089,7 @@ describe("the REST mode's place in the command tree", () => {
     "secret rotate",
     "secret set",
     "secret use",
+    "ssh-agent status",
   ];
   const UNSUPPORTED = [
     "audit anchor",

@@ -172,6 +172,17 @@ export type {
 } from "./injection/db-adapters.js";
 export { SshInjector } from "./injection/ssh-injector.js";
 export { EphemeralSshAgent } from "./injection/ssh-agent/index.js";
+export type {
+  AgentBinding,
+  AgentIdentity,
+  AgentSignRequest,
+} from "./injection/ssh-agent/agent-connection.js";
+export { AgentSocketServer } from "./injection/ssh-agent/agent-socket-server.js";
+export type {
+  AgentSocketEngine,
+  AgentSocketServerOptions,
+} from "./injection/ssh-agent/agent-socket-server.js";
+export { prepareUnixSocketPath } from "./injection/ssh-agent/unix-socket.js";
 export { analyzeKeyMaterial, decryptKeyForImport } from "./injection/ssh-agent/key-import.js";
 export type { KeyMaterialKind } from "./injection/ssh-agent/key-import.js";
 export { GitInjector } from "./injection/git-injector.js";

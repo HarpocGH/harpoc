@@ -874,14 +874,15 @@ const smtpRecipientAllowlistSchema = z.array(recipientPatternSchema).max(100);
 
 /**
  * Per-secret injection policy as stored and loaded: every field present, no
- * defaults, no unknown keys. The vault always writes all twelve fields, so a
+ * defaults, no unknown keys. The vault always writes all thirteen fields, so a
  * decrypted blob that fails this schema is corruption (R2/C43), not a policy
- * from before a field existed — no such vault opens under v1.5. The two
+ * from before a field existed — no such vault opens under v1.5. The three
  * exceptions are read-side and live in core: the post-baseline fields
- * `strict_tree_exit` (2026-09-10) and `proxy` (2026-11-06) are defaulted to
- * `false` by `loadInjectionPolicy` before this parse, because blobs written by
- * the prepared v1.5.0 tree carry the baseline ten, and blobs written before
- * deployment model B's egress proxy carry eleven.
+ * `strict_tree_exit` (2026-09-10), `proxy` (2026-11-06) and `ssh_agent_socket`
+ * (2026-11-06) are defaulted to `false` by `loadInjectionPolicy` before this
+ * parse, because blobs written by the prepared v1.5.0 tree carry the baseline
+ * ten, blobs written before deployment model B's egress proxy carry eleven,
+ * and blobs written before its agent socket carry twelve.
  */
 export const injectionPolicySchema = z.strictObject({
   url_allowlist: urlAllowlistSchema,
@@ -896,6 +897,7 @@ export const injectionPolicySchema = z.strictObject({
   imap_read_only: z.boolean(),
   strict_tree_exit: z.boolean(),
   proxy: z.boolean(),
+  ssh_agent_socket: z.boolean(),
 });
 
 /** Per-secret injection policy input (URL + host + command + env allowlists + HTTP response mode); every field defaults, an unknown key is refused (D2c, 2026-09-23). */
@@ -912,6 +914,7 @@ export const injectionPolicyInputSchema = z.strictObject({
   imap_read_only: z.boolean().optional().default(false),
   strict_tree_exit: z.boolean().optional().default(false),
   proxy: z.boolean().optional().default(false),
+  ssh_agent_socket: z.boolean().optional().default(false),
 });
 
 /**
@@ -957,9 +960,16 @@ export const injectionPolicyInputSchema = z.strictObject({
  * the proxy refuses the placeholder (`PROXY_PLACEHOLDER_DENIED`).
  * `response_mode` and `response_header_allowlist` do not reach a proxied
  * response, which streams to the agent's client under the proxy's
- * best-effort exact-value redaction. The shape the vault stores, loads and
- * returns: every field present, no defaults — defaults apply at
- * `injectionPolicyInputSchema`, never on the stored blob.
+ * best-effort exact-value redaction.
+ * `ssh_agent_socket` (2026-11-06, deployment model B, default `false`) is the
+ * secret's opt-in to the consumer ssh-agent sockets (`harpoc server start
+ * --ssh-agent`): set, a consumer holding the `use` grant is served the key's
+ * public half and may have it sign a user authentication request for a
+ * session bound to a host whose pinned `ssh.known_hosts` key it presented and
+ * which `host_allowlist` admits; unset, the socket neither lists nor signs
+ * with the key. The shape the vault stores, loads and returns: every field
+ * present, no defaults — defaults apply at `injectionPolicyInputSchema`, never
+ * on the stored blob.
  */
 export type InjectionPolicy = z.output<typeof injectionPolicySchema>;
 

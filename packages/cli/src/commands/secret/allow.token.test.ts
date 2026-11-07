@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
     getInjectionPolicy: vi.fn(),
+    getConnectionConfig: vi.fn().mockResolvedValue(undefined),
     setInjectionPolicy: vi.fn().mockResolvedValue(undefined),
     verifyToken: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),
@@ -66,6 +67,19 @@ describe("secret allow — token path", () => {
       expect.objectContaining({ url_allowlist: ["https://api.example.com/*"] }),
       { acknowledge_interpreters: false },
       expect.objectContaining({ principal_id: "agent-1", interface: "cli" }),
+    );
+  });
+
+  it("--ssh-agent-socket reads the connection config with the merge read's caller (RA-B3-1)", async () => {
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["admin"] }));
+    await run(["secret://k", "--ssh-agent-socket", "--token", "jwt-value"]);
+    expect(mockEngine.getConnectionConfig).toHaveBeenCalledTimes(1);
+    expect(mockEngine.getConnectionConfig).toHaveBeenCalledWith(
+      "secret://k",
+      expect.objectContaining({ principal_id: "agent-1", interface: "cli" }),
+    );
+    expect(mockEngine.getConnectionConfig.mock.calls[0]?.[1]).toEqual(
+      mockEngine.getInjectionPolicy.mock.calls[0]?.[1],
     );
   });
 

@@ -32,6 +32,7 @@ export const FULL_POLICY = {
   imap_read_only: false,
   strict_tree_exit: false,
   proxy: false,
+  ssh_agent_socket: false,
 };
 
 export const MOCK_TOKEN: VaultApiToken = {

@@ -155,6 +155,7 @@ const STATUS_CASES = [
   [ErrorCode.SESSION_MODE_CONFLICT, 400],
   [ErrorCode.PROXY_PLACEHOLDER_DENIED, 403],
   [ErrorCode.PROXY_UPSTREAM_FAILED, 502],
+  [ErrorCode.SSH_AGENT_UNBOUND, 403],
   // System
   [ErrorCode.INTERNAL_ERROR, 500],
   [ErrorCode.DATABASE_ERROR, 500],
@@ -894,6 +895,26 @@ describe("factory methods", () => {
         `Egress proxy upstream request failed (${reason}): https://api.github.com`,
       );
       expect(err.message).not.toMatch(/ECONNREFUSED|UND_ERR|self.signed|DEPTH_ZERO/);
+    },
+  );
+
+  it.each([
+    ["unbound", "the connection is not bound to a host (session-bind@openssh.com)"],
+    [
+      "forwarding",
+      "the connection was bound for agent forwarding, which the socket does not serve",
+    ],
+    ["not_userauth", "the data to sign is not a user authentication request for the key"],
+    ["session_mismatch", "the user authentication request is not for the bound session"],
+    ["host_unpinned", "the bound host key matches no pinned known_hosts line of the secret"],
+  ] as const)(
+    "sshAgentUnbound(%s) maps to 403 with its fixed text and the reason in details, never a value",
+    (reason, text) => {
+      const err = VaultError.sshAgentUnbound(reason);
+      expect(err.code).toBe(ErrorCode.SSH_AGENT_UNBOUND);
+      expect(err.statusCode).toBe(403);
+      expect(err.message).toBe(`Agent socket signature refused: ${text}`);
+      expect(err.details).toEqual({ reason });
     },
   );
 

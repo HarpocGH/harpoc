@@ -370,9 +370,11 @@ export interface VaultApiToken {
  * the token-scoped CLI path (`secret use --token`); a tokenless CLI call
  * remains the trusted local path and carries no interface at all. `proxy`
  * marks a request brokered by the egress credential proxy (deployment model
- * B, 2026-11-06), over its loopback TCP listener or a consumer's socket.
+ * B, 2026-11-06), over its loopback TCP listener or a consumer's socket;
+ * `ssh_agent` a request on a consumer's ssh-agent socket (deployment model B,
+ * M5), which carries no token.
  */
-export type AccessInterface = "rest" | "mcp" | "mcp-http" | "cli" | "proxy";
+export type AccessInterface = "rest" | "mcp" | "mcp-http" | "cli" | "proxy" | "ssh_agent";
 
 /**
  * Token-derived caller identity threaded from an interface layer into the

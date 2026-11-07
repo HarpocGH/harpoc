@@ -1,15 +1,13 @@
-import { chmodSync, lstatSync, rmSync, unlinkSync } from "node:fs";
+import { chmodSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
-import { connect } from "node:net";
 import type { AddressInfo, Socket } from "node:net";
 import { pipeline } from "node:stream/promises";
-import { validateUrl } from "@harpoc/core";
+import { prepareUnixSocketPath, validateUrl } from "@harpoc/core";
 import type { ProxyLease, ProxyOutcome, ProxyTarget } from "@harpoc/core";
 import {
   DEFAULT_HTTP_TIMEOUT_MS,
   ErrorCode,
-  MAX_UNIX_SOCKET_PATH_BYTES,
   RateLimiter,
   VaultError,
   callerFromToken,
@@ -127,38 +125,6 @@ function refuseConnect(_req: IncomingMessage, socket: Socket): void {
     "HTTP/1.1 501 Not Implemented\r\ncontent-type: application/json\r\nconnection: close\r\n" +
       `content-length: ${Buffer.byteLength(CONNECT_REFUSAL)}\r\n\r\n${CONNECT_REFUSAL}`,
   );
-}
-
-/** A connect, not `existsSync` (the `agentSocketAccepts` probe): true when something accepts on `path`. */
-function socketAccepts(path: string): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    const probe = connect(path);
-    probe.on("connect", () => {
-      probe.destroy();
-      resolve(true);
-    });
-    probe.on("error", (err: NodeJS.ErrnoException) => {
-      if (err.code === "ECONNREFUSED" || err.code === "ENOENT") resolve(false);
-      else reject(err);
-    });
-  });
-}
-
-async function clearStaleSocket(path: string): Promise<void> {
-  let isSocket: boolean;
-  try {
-    isSocket = lstatSync(path).isSocket();
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw err;
-  }
-  if (!isSocket) {
-    throw VaultError.invalidInput(`Egress proxy socket: ${path} exists and is not a socket`);
-  }
-  if (await socketAccepts(path)) {
-    throw VaultError.invalidInput(`Egress proxy socket: another process is listening on ${path}`);
-  }
-  unlinkSync(path);
 }
 
 function listen(server: Server, target: { port: number; host: string } | { path: string }) {
@@ -492,13 +458,7 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
           `Egress proxy socket: not supported on Windows (no socket directory mode to rely on): ${path}`,
         );
       }
-      const bytes = Buffer.byteLength(path);
-      if (bytes > MAX_UNIX_SOCKET_PATH_BYTES) {
-        throw VaultError.invalidInput(
-          `Egress proxy socket: path is ${bytes} bytes, over the ${MAX_UNIX_SOCKET_PATH_BYTES} a Unix socket address holds: ${path}`,
-        );
-      }
-      await clearStaleSocket(path);
+      await prepareUnixSocketPath(path, "Egress proxy socket");
       const server = newServer();
       await startListener(server, { path });
       socketPaths.add(path);

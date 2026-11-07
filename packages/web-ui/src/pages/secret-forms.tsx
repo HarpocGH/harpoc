@@ -267,6 +267,7 @@ export function PolicyEditor({
   const [fsIsolation, setFsIsolation] = useState(initial.fs_isolation ?? false);
   const [strictTreeExit, setStrictTreeExit] = useState(initial.strict_tree_exit ?? false);
   const [proxy, setProxy] = useState(initial.proxy ?? false);
+  const [sshAgentSocket, setSshAgentSocket] = useState(initial.ssh_agent_socket ?? false);
   const [ack, setAck] = useState(false);
 
   const { error, busy, onSubmit } = useSubmit(async () => {
@@ -287,6 +288,7 @@ export function PolicyEditor({
       fs_isolation: fsIsolation,
       strict_tree_exit: strictTreeExit,
       proxy,
+      ssh_agent_socket: sshAgentSocket,
       ...(ack ? { acknowledge_interpreters: true } : {}),
     };
     await api.putInjectionPolicy(handle, body);
@@ -383,6 +385,16 @@ export function PolicyEditor({
         />
         Egress proxy: the proxy may swap this secret in for its placeholder on a request to a URL
         the allowlist admits
+      </label>
+      <label for="policy-ssh-agent-socket">
+        <input
+          id="policy-ssh-agent-socket"
+          type="checkbox"
+          checked={sshAgentSocket}
+          onChange={(e) => setSshAgentSocket(e.currentTarget.checked)}
+        />
+        Agent socket: the ssh-agent socket may sign with this key for a host the allowlist admits
+        and the connection config pins
       </label>
       <label for="ack">
         <input

@@ -1,8 +1,14 @@
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { Option } from "commander";
 import type { Command } from "commander";
-import { MAX_TOKEN_TTL_MS, Permission, assertBindAllowed, isDecimalInteger } from "@harpoc/shared";
+import {
+  MAX_TOKEN_TTL_MS,
+  Permission,
+  VaultError,
+  assertBindAllowed,
+  isDecimalInteger,
+} from "@harpoc/shared";
 import type { ServerStopTrigger, ServerTransport } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError } from "../utils/output.js";
@@ -70,6 +76,10 @@ export function registerServerCommand(program: Command): void {
       "Start the egress credential proxy (plain-HTTP rewrite mode) on 127.0.0.1:<--proxy-port>, and one proxy.sock per consumer directory under --runtime-dir (default $RUNTIME_DIRECTORY)",
     )
     .option("--proxy-port <port>", "Egress proxy port (loopback)", String(DEFAULT_PROXY_PORT))
+    .option(
+      "--ssh-agent",
+      "Serve one ssh-agent.sock per consumer directory under --runtime-dir (default $RUNTIME_DIRECTORY): signatures with the keys each consumer is granted, host-bound by session-bind",
+    )
     .action(
       async (
         opts: {
@@ -91,6 +101,7 @@ export function registerServerCommand(program: Command): void {
           runtimeDir?: string;
           proxy?: boolean;
           proxyPort: string;
+          sshAgent?: boolean;
         },
         cmd: Command,
       ) => {
@@ -106,9 +117,13 @@ export function registerServerCommand(program: Command): void {
             process.exit(1);
           }
           // An ambient $RUNTIME_DIRECTORY is the default only for a
-          // per-consumer feature (--proxy's sockets): a unit's RuntimeDirectory=
-          // (0755 by default) must not refuse a start that asked for none.
-          const runtimeDir = resolveRuntimeDir(opts.runtimeDir, opts.proxy ? process.env : {});
+          // per-consumer feature (--proxy's and --ssh-agent's sockets): a unit's
+          // RuntimeDirectory= (0755 by default) must not refuse a start that
+          // asked for none.
+          const runtimeDir = resolveRuntimeDir(
+            opts.runtimeDir,
+            opts.proxy || opts.sshAgent ? process.env : {},
+          );
 
           if (opts.ui && !opts.rest) {
             console.error("Error: --ui requires --rest.");
@@ -138,6 +153,7 @@ export function registerServerCommand(program: Command): void {
             !opts.mcpHttp &&
             !opts.rest &&
             !opts.proxy &&
+            !opts.sshAgent &&
             !opts.oauthRefresh &&
             !opts.certRenew
           ) {
@@ -154,6 +170,14 @@ export function registerServerCommand(program: Command): void {
 
           if (cmd.getOptionValueSource("proxyPort") === "cli" && !opts.proxy) {
             console.error("Error: --proxy-port requires --proxy.");
+            process.exit(1);
+          }
+
+          // The agent socket has no TCP half: it is served in the consumer directories only.
+          if (opts.sshAgent && runtimeDir === undefined) {
+            console.error(
+              "Error: --ssh-agent requires --runtime-dir (or systemd's $RUNTIME_DIRECTORY): one ssh-agent.sock per consumer directory.",
+            );
             process.exit(1);
           }
 
@@ -261,6 +285,17 @@ export function registerServerCommand(program: Command): void {
             opts.proxy && runtimeDir !== undefined
               ? consumerSocketPaths(runtimeDir, "proxy.sock")
               : [];
+          // One ssh-agent.sock per consumer directory; a --ssh-agent that serves no consumer
+          // refuses the start (a consumer directory named as the runtime directory lists none).
+          const sshAgentSockets =
+            opts.sshAgent && runtimeDir !== undefined
+              ? consumerSocketPaths(runtimeDir, "ssh-agent.sock")
+              : [];
+          if (opts.sshAgent && runtimeDir !== undefined && sshAgentSockets.length === 0) {
+            throw VaultError.invalidInput(
+              `${runtimeDir.source}: --ssh-agent found no consumer directory under ${runtimeDir.path} (one per agent user: deploy/linux/install-two-identity.sh)`,
+            );
+          }
 
           const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir as string | undefined);
           engine = await loadUnlockedEngine(vaultDir);
@@ -273,6 +308,7 @@ export function registerServerCommand(program: Command): void {
           let renewalScheduler: { stop(): Promise<void> } | undefined;
           let egressProxy: { close(): Promise<void> } | undefined;
           let proxyBoundPort: number | undefined;
+          const agentSockets: { readonly consumer: string; stop(): Promise<void> }[] = [];
           let shuttingDown = false;
 
           const startedAt = Date.now();
@@ -287,12 +323,14 @@ export function registerServerCommand(program: Command): void {
             tokenless: boolean,
             listenerPort: number | undefined,
             trigger: ServerStopTrigger,
+            consumer?: string,
           ): void => {
             try {
               engine?.auditServerStop({
                 transport,
                 tokenless,
                 ...(listenerPort !== undefined ? { port: listenerPort } : {}),
+                ...(consumer !== undefined ? { consumer } : {}),
                 uptimeMs: Date.now() - startedAt,
                 trigger,
               });
@@ -327,6 +365,10 @@ export function registerServerCommand(program: Command): void {
               auditStop("proxy", false, proxyBoundPort, trigger);
               await egressProxy.close();
             }
+            for (const agentSocket of agentSockets) {
+              auditStop("ssh-agent", true, undefined, trigger, agentSocket.consumer);
+              await agentSocket.stop();
+            }
             // Abort the REST app's pending background OAuth flows before the
             // store closes: each authorization-code flow pins a loopback
             // listener and a 5-minute timer, and its completion writes to the
@@ -342,7 +384,7 @@ export function registerServerCommand(program: Command): void {
 
           // When stdio MCP runs alongside an HTTP server, MCP owns stdout for JSON-RPC.
           // Redirect console.log to stderr so HTTP startup messages don't corrupt the stream.
-          if (opts.mcp && (opts.rest || opts.mcpHttp || opts.proxy)) {
+          if (opts.mcp && (opts.rest || opts.mcpHttp || opts.proxy || opts.sshAgent)) {
             console.log = console.error;
           }
 
@@ -374,7 +416,12 @@ export function registerServerCommand(program: Command): void {
               stdioClosed = true;
               auditStop("stdio", opts.allowTokenless === true, undefined, "transport_closed");
               const alone =
-                !opts.rest && !opts.mcpHttp && !opts.proxy && !opts.oauthRefresh && !opts.certRenew;
+                !opts.rest &&
+                !opts.mcpHttp &&
+                !opts.proxy &&
+                !opts.sshAgent &&
+                !opts.oauthRefresh &&
+                !opts.certRenew;
               const closed = handle.close().catch(() => undefined);
               if (alone) void closed.then(() => shutdown("transport_closed"));
             });
@@ -444,6 +491,31 @@ export function registerServerCommand(program: Command): void {
                   : ` and ${String(proxySockets.length)} consumer socket${proxySockets.length === 1 ? "" : "s"} (<consumer>/proxy.sock)`;
             console.error(
               `[harpoc] egress proxy listening on http://127.0.0.1:${String(boundPort)}${sockets}`,
+            );
+          }
+
+          if (opts.sshAgent && runtimeDir !== undefined) {
+            const { AgentSocketServer } = await import("@harpoc/core");
+            for (const socketPath of sshAgentSockets) {
+              const consumer = basename(dirname(socketPath));
+              // Kept as each start resolves: a signal during a start stops only the sockets
+              // already serving and writes no stop row for the pending one (E-11).
+              agentSockets.push(
+                await AgentSocketServer.start({
+                  socketPath,
+                  consumer,
+                  engine,
+                  onError: (err) => {
+                    // The code alone: the refusal's row is the engine's; no message reaches stderr.
+                    if (shuttingDown) return;
+                    console.error(`[harpoc] ssh-agent ${consumer}: ${err.code}`);
+                  },
+                }),
+              );
+            }
+            const count = sshAgentSockets.length;
+            console.error(
+              `[harpoc] ssh-agent listening on ${String(count)} consumer socket${count === 1 ? "" : "s"} (<consumer>/ssh-agent.sock) under ${runtimeDir.path}`,
             );
           }
 

@@ -67,6 +67,22 @@ export function tokenlessStdioCaller(iface: AccessInterface): CallerContext {
 }
 
 /**
+ * The caller of a consumer's ssh-agent socket (deployment model B, M5): the
+ * registered agent the consumer directory is named for, without a token — the
+ * ssh-agent protocol carries no caller identity, so the directory's mode is
+ * the authentication (design § 3 M5). An agent-type principal without
+ * `admin_scope`, so every per-secret grant applies; no project, no name
+ * patterns, and no socket peer (a Unix-socket peer's `ip_address` is NULL).
+ */
+export function agentSocketCaller(consumer: string): CallerContext {
+  return {
+    principal_type: TokenPrincipalType.AGENT,
+    principal_id: consumer,
+    interface: "ssh_agent",
+  };
+}
+
+/**
  * R7 (v1.4.1): the one caller class exempt from per-secret access policies —
  * a user-type principal whose token carried admin scope, or the tokenless
  * stdio server's synthetic caller. The flag exists only on contexts built by

@@ -492,6 +492,7 @@ describe("PolicyEditor", () => {
         fs_isolation: false,
         strict_tree_exit: false,
         proxy: false,
+        ssh_agent_socket: false,
       },
     ]);
   });
@@ -511,6 +512,58 @@ describe("PolicyEditor", () => {
     fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
     await waitFor(() => expect(put).toHaveBeenCalled());
     expect((put.mock.calls[0]?.[1] as Record<string, unknown>)["proxy"]).toBe(false);
+  });
+
+  it("edits ssh_agent_socket as a checkbox from the stored value and sends it in the whole policy (B3)", async () => {
+    const put = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PolicyEditor
+        api={{ putInjectionPolicy: put } as unknown as ApiClient}
+        handle="k1"
+        initial={{ host_allowlist: ["github.com"], ssh_agent_socket: true }}
+        onDone={vi.fn()}
+      />,
+    );
+    const box = screen.getByLabelText(/Agent socket/) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    fireEvent.click(box);
+    fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    expect(put.mock.calls[0]).toEqual([
+      "k1",
+      {
+        url_allowlist: [],
+        command_allowlist: [],
+        host_allowlist: ["github.com"],
+        env_allowlist: [],
+        response_header_allowlist: [],
+        smtp_recipient_allowlist: [],
+        imap_read_only: false,
+        response_mode: "filtered",
+        network_isolation: false,
+        fs_isolation: false,
+        strict_tree_exit: false,
+        proxy: false,
+        ssh_agent_socket: false,
+      },
+    ]);
+  });
+
+  it("an absent ssh_agent_socket reads as unchecked and is saved as false (B3)", async () => {
+    const put = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PolicyEditor
+        api={{ putInjectionPolicy: put } as unknown as ApiClient}
+        handle="k1"
+        initial={{}}
+        onDone={vi.fn()}
+      />,
+    );
+    const box = screen.getByLabelText(/Agent socket/) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    expect((put.mock.calls[0]?.[1] as Record<string, unknown>)["ssh_agent_socket"]).toBe(false);
   });
 
   it("sends every injectionPolicyInputSchema key on save (drift pin)", async () => {

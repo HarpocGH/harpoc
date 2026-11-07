@@ -143,6 +143,7 @@ export enum ErrorCode {
   SESSION_MODE_CONFLICT = "SESSION_MODE_CONFLICT",
   PROXY_PLACEHOLDER_DENIED = "PROXY_PLACEHOLDER_DENIED",
   PROXY_UPSTREAM_FAILED = "PROXY_UPSTREAM_FAILED",
+  SSH_AGENT_UNBOUND = "SSH_AGENT_UNBOUND",
 
   // System
   INTERNAL_ERROR = "INTERNAL_ERROR",
@@ -295,6 +296,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.SESSION_MODE_CONFLICT]: 400,
   [ErrorCode.PROXY_PLACEHOLDER_DENIED]: 403,
   [ErrorCode.PROXY_UPSTREAM_FAILED]: 502,
+  [ErrorCode.SSH_AGENT_UNBOUND]: 403,
 
   // System
   [ErrorCode.INTERNAL_ERROR]: 500,
@@ -308,6 +310,23 @@ const STATUS_MAP: Record<ErrorCode, number> = {
 
 /** The closed set of upstream-failure classes the egress proxy may name — never an upstream error's text (hard rule 4). */
 export type ProxyUpstreamFailureReason = "refused" | "timeout" | "tls";
+
+/**
+ * Why a consumer's ssh-agent socket refused a signature on its connection's
+ * session binding or on the data to sign (deployment model B, M5) — a closed
+ * vocabulary, never a host key, a session identifier or the data to sign
+ * (hard rule 4).
+ */
+export type SshAgentUnboundReason =
+  "unbound" | "forwarding" | "not_userauth" | "session_mismatch" | "host_unpinned";
+
+const SSH_AGENT_UNBOUND_TEXT: Record<SshAgentUnboundReason, string> = {
+  unbound: "the connection is not bound to a host (session-bind@openssh.com)",
+  forwarding: "the connection was bound for agent forwarding, which the socket does not serve",
+  not_userauth: "the data to sign is not a user authentication request for the key",
+  session_mismatch: "the user authentication request is not for the bound session",
+  host_unpinned: "the bound host key matches no pinned known_hosts line of the secret",
+};
 
 export class VaultError extends Error {
   readonly code: ErrorCode;
@@ -898,6 +917,14 @@ export class VaultError extends Error {
       reason === undefined
         ? `Egress proxy upstream request failed: ${origin}`
         : `Egress proxy upstream request failed (${reason}): ${origin}`,
+    );
+  }
+
+  static sshAgentUnbound(reason: SshAgentUnboundReason): VaultError {
+    return new VaultError(
+      ErrorCode.SSH_AGENT_UNBOUND,
+      `Agent socket signature refused: ${SSH_AGENT_UNBOUND_TEXT[reason]}`,
+      { reason },
     );
   }
 

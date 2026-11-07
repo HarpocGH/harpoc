@@ -143,6 +143,7 @@ describe("injection policy", () => {
       imap_read_only: false,
       strict_tree_exit: false,
       proxy: false,
+      ssh_agent_socket: false,
     });
   });
 
@@ -271,6 +272,58 @@ describe("injection policy", () => {
     expect(engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0]?.detail?.proxy).toBe(
       false,
     );
+  });
+
+  it("round-trips ssh_agent_socket, defaults it to false when omitted, and audits it in the POLICY_GRANT detail (B3)", async () => {
+    await engine.setInjectionPolicy("secret://pol", { ssh_agent_socket: true });
+    expect((await engine.getInjectionPolicy("secret://pol")).ssh_agent_socket).toBe(true);
+    expect(
+      engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0]?.detail?.ssh_agent_socket,
+    ).toBe(true);
+    await engine.setInjectionPolicy("secret://pol", { url_allowlist: [] });
+    expect((await engine.getInjectionPolicy("secret://pol")).ssh_agent_socket).toBe(false);
+    expect(
+      engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0]?.detail?.ssh_agent_socket,
+    ).toBe(false);
+  });
+
+  it("loads a twelve-field blob written before ssh_agent_socket existed as false — the third post-baseline read default (B3)", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
+    const twelveFields = JSON.stringify({
+      url_allowlist: [],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: ["github.com"],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: false,
+      smtp_recipient_allowlist: [],
+      imap_read_only: false,
+      strict_tree_exit: false,
+      proxy: true,
+    });
+    const enc = encrypt(
+      kek,
+      new Uint8Array(Buffer.from(twelveFields, "utf8")),
+      AAD_INJECTION_POLICY(secretId),
+    );
+    const now = Date.now();
+    store.upsertInjectionPolicy({
+      secret_id: secretId,
+      policy_encrypted: enc.ciphertext,
+      policy_iv: enc.iv,
+      policy_tag: enc.tag,
+      created_at: now,
+      updated_at: now,
+    });
+    const loaded = await engine.getInjectionPolicy("secret://pol");
+    expect(loaded.ssh_agent_socket).toBe(false);
+    expect(loaded.proxy).toBe(true);
+    expect(loaded.host_allowlist).toEqual(["github.com"]);
+    // No rewrite on read: the blob is the twelve-field one until the next set.
+    expect(store.getInjectionPolicy(secretId)?.updated_at).toBe(now);
   });
 
   it("loads an eleven-field blob written before proxy existed as proxy: false — the second post-baseline read default (B2)", async () => {

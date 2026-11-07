@@ -26,6 +26,7 @@ const FULL_POLICY = {
   imap_read_only: false,
   strict_tree_exit: false,
   proxy: false,
+  ssh_agent_socket: false,
 };
 
 const HANDLE = "secret://proj/k";
@@ -646,6 +647,17 @@ describe("RestClient", () => {
       });
     });
 
+    it("setInjectionPolicy sends ssh_agent_socket in the whole-policy body (B3)", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", { ...FULL_POLICY, ssh_agent_socket: true });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(JSON.parse(call[1].body as string)).toStrictEqual({
+        ...FULL_POLICY,
+        ssh_agent_socket: true,
+        acknowledge_interpreters: false,
+      });
+    });
+
     it("setInjectionPolicy serializes every injectionPolicyInputSchema key when supplied (drift pin)", async () => {
       mockFetchResponse({ updated: true });
       const full = {
@@ -661,6 +673,7 @@ describe("RestClient", () => {
         imap_read_only: true,
         strict_tree_exit: false,
         proxy: true,
+        ssh_agent_socket: true,
       };
       await client.setInjectionPolicy("secret://k", full);
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];

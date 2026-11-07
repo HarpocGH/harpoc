@@ -244,6 +244,60 @@ describe("grantedPermissions", () => {
   });
 });
 
+describe("grantedPermissionsBySecret", () => {
+  it("maps every secret a principal holds an unexpired row on to the union of its permissions", () => {
+    engine.grantPolicy({
+      secretId: "s1",
+      principalType: "agent",
+      principalId: "alice",
+      permissions: ["use"],
+      createdBy: "t",
+    });
+    engine.grantPolicy({
+      secretId: "s1",
+      principalType: "project",
+      principalId: "api",
+      permissions: ["read"],
+      createdBy: "t",
+    });
+    engine.grantPolicy({
+      secretId: "s2",
+      principalType: "agent",
+      principalId: "alice",
+      permissions: ["admin"],
+      createdBy: "t",
+    });
+    engine.grantPolicy({
+      secretId: "s2",
+      principalType: "agent",
+      principalId: "bob",
+      permissions: ["use"],
+      createdBy: "t",
+    });
+
+    const bySecret = engine.grantedPermissionsBySecret([
+      { type: "agent", id: "alice" },
+      { type: "project", id: "api" },
+    ]);
+    expect([...bySecret.keys()].sort()).toEqual(["s1", "s2"]);
+    expect([...(bySecret.get("s1") ?? [])].sort()).toEqual(["read", "use"]);
+    expect([...(bySecret.get("s2") ?? [])]).toEqual(["admin"]);
+  });
+
+  it("drops an expired row and is empty for a principal with none", () => {
+    engine.grantPolicy({
+      secretId: "s1",
+      principalType: "agent",
+      principalId: "alice",
+      permissions: ["use"],
+      expiresAt: Date.now() - 1,
+      createdBy: "t",
+    });
+    expect(engine.grantedPermissionsBySecret([{ type: "agent", id: "alice" }]).size).toBe(0);
+    expect(engine.grantedPermissionsBySecret([{ type: "agent", id: "carol" }]).size).toBe(0);
+  });
+});
+
 describe("filterPermitted (explicit grant, R1)", () => {
   beforeEach(() => {
     for (const id of [

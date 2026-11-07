@@ -75,10 +75,10 @@ describe("enum member counts", () => {
     expect(Object.values(OAuthProviderPreset)).toHaveLength(5);
   });
 
-  it("ErrorCode has 114 members", () => {
+  it("ErrorCode has 115 members", () => {
     // Filter out reverse mappings (numeric keys) from TypeScript enum
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(114);
+    expect(members).toHaveLength(115);
   });
 
   it("TokenPrincipalType has 3 members and excludes project", () => {
@@ -213,5 +213,11 @@ describe("ErrorCode deployment model B values (B2)", () => {
   it("ErrorCode carries the egress proxy's placeholder refusal and upstream failure", () => {
     expect(ErrorCode.PROXY_PLACEHOLDER_DENIED).toBe("PROXY_PLACEHOLDER_DENIED");
     expect(ErrorCode.PROXY_UPSTREAM_FAILED).toBe("PROXY_UPSTREAM_FAILED");
+  });
+});
+
+describe("ErrorCode deployment model B values (B3)", () => {
+  it("ErrorCode carries the agent socket's unbound-signature refusal", () => {
+    expect(ErrorCode.SSH_AGENT_UNBOUND).toBe("SSH_AGENT_UNBOUND");
   });
 });

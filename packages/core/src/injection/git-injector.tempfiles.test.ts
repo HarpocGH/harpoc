@@ -70,6 +70,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     imap_read_only: false,
     strict_tree_exit: false,
     proxy: false,
+    ssh_agent_socket: false,
     ...overrides,
   };
 }

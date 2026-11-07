@@ -125,6 +125,7 @@ export class RestClient implements VaultClient {
         imap_read_only: policy.imap_read_only,
         strict_tree_exit: policy.strict_tree_exit,
         proxy: policy.proxy,
+        ssh_agent_socket: policy.ssh_agent_socket,
         acknowledge_interpreters: options?.acknowledge_interpreters ?? false,
       },
     );

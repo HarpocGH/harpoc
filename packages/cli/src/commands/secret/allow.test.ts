@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { InjectionPolicy } from "@harpoc/shared";
+import type { ConnectionConfig, InjectionPolicy } from "@harpoc/shared";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
     getInjectionPolicy: vi.fn<() => Promise<InjectionPolicy>>(),
     setInjectionPolicy: vi.fn().mockResolvedValue(undefined),
+    getConnectionConfig: vi.fn<() => Promise<ConnectionConfig | undefined>>(),
     destroy: vi.fn().mockResolvedValue(undefined),
   },
 }));
@@ -45,6 +46,7 @@ const STORED_POLICY: InjectionPolicy = {
   imap_read_only: true,
   strict_tree_exit: false,
   proxy: false,
+  ssh_agent_socket: false,
 };
 
 const current: InjectionPolicy = {
@@ -60,6 +62,7 @@ const current: InjectionPolicy = {
   imap_read_only: false,
   strict_tree_exit: false,
   proxy: false,
+  ssh_agent_socket: false,
 };
 
 describe("mergePolicy", () => {
@@ -143,6 +146,7 @@ describe("mergePolicy", () => {
       imap_read_only: false,
       strict_tree_exit: false,
       proxy: false,
+      ssh_agent_socket: false,
     });
   });
 
@@ -516,6 +520,113 @@ describe("secret allow command — egress proxy opt-in (B2)", () => {
   it("mergePolicy: --clear resets proxy to false unless --proxy re-asserts it", () => {
     expect(mergePolicy({ ...STORED_POLICY, proxy: true }, { clear: true }).proxy).toBe(false);
     expect(mergePolicy({ ...STORED_POLICY }, { clear: true, proxy: true }).proxy).toBe(true);
+  });
+});
+
+describe("secret allow command — ssh-agent socket opt-in (B3)", () => {
+  const PINNED: ConnectionConfig = {
+    ssh: {
+      known_hosts: [
+        "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOCrwIj6+onGT6amn11WaE7DBDJU/Zcim3GZknGAAwyw",
+      ],
+    },
+  };
+  const HOST_NOTE =
+    "Note: secret://k is open to the ssh-agent socket but allowlists no host — the socket signs with it for no host until --host <pattern> adds one.";
+  const PIN_NOTE =
+    "Note: secret://k is open to the ssh-agent socket but pins no host key — the socket signs with it for no host until secret connection secret://k --known-host <line> pins one.";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.getInjectionPolicy.mockResolvedValue({
+      ...STORED_POLICY,
+      host_allowlist: ["github.com"],
+    });
+    mockEngine.getConnectionConfig.mockResolvedValue(PINNED);
+  });
+
+  it("--ssh-agent-socket alone is a set (not a show): the whole policy lands with ssh_agent_socket: true", async () => {
+    await run(["secret://k", "--ssh-agent-socket"]);
+    expect(mockEngine.setInjectionPolicy.mock.calls).toEqual([
+      [
+        "secret://k",
+        { ...STORED_POLICY, host_allowlist: ["github.com"], ssh_agent_socket: true },
+        { acknowledge_interpreters: false },
+        undefined,
+      ],
+    ]);
+    // The pin is read with the merge read's caller, before the write.
+    expect(mockEngine.getConnectionConfig.mock.calls).toEqual([["secret://k", undefined]]);
+    const [read] = mockEngine.getConnectionConfig.mock.invocationCallOrder;
+    const [write] = mockEngine.setInjectionPolicy.mock.invocationCallOrder;
+    expect(read as number).toBeLessThan(write as number);
+    expect(spies.errorSpy.mock.calls).toEqual([["OK: Injection policy updated (secret://k)"]]);
+  });
+
+  it("--no-ssh-agent-socket clears a stored opt-in and reads no connection config", async () => {
+    mockEngine.getInjectionPolicy.mockResolvedValue({
+      ...STORED_POLICY,
+      host_allowlist: ["github.com"],
+      ssh_agent_socket: true,
+    });
+    await run(["secret://k", "--no-ssh-agent-socket"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      { ...STORED_POLICY, host_allowlist: ["github.com"], ssh_agent_socket: false },
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+    expect(mockEngine.getConnectionConfig).not.toHaveBeenCalled();
+  });
+
+  it("keeps a stored opt-in when neither spelling is passed (commander tri-state pin)", async () => {
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY, ssh_agent_socket: true });
+    await run(["secret://k", "--host", "gitlab.com"]);
+    expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
+      "secret://k",
+      { ...STORED_POLICY, host_allowlist: ["gitlab.com"], ssh_agent_socket: true },
+      { acknowledge_interpreters: false },
+      undefined,
+    );
+    expect(mockEngine.getConnectionConfig).not.toHaveBeenCalled();
+  });
+
+  it("--ssh-agent-socket on a secret that allowlists no host notes that the socket signs for no host", async () => {
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY });
+    await run(["secret://k", "--ssh-agent-socket"]);
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [HOST_NOTE],
+      ["OK: Injection policy updated (secret://k)"],
+    ]);
+  });
+
+  it("--ssh-agent-socket on a secret that pins no host key notes it, naming secret connection --known-host", async () => {
+    mockEngine.getConnectionConfig.mockResolvedValue(undefined);
+    await run(["secret://k", "--ssh-agent-socket"]);
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [PIN_NOTE],
+      ["OK: Injection policy updated (secret://k)"],
+    ]);
+  });
+
+  it("--ssh-agent-socket with neither prints both notes, the allowlist's first", async () => {
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY });
+    mockEngine.getConnectionConfig.mockResolvedValue({ database: { tls_mode: "require" } });
+    await run(["secret://k", "--ssh-agent-socket"]);
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [HOST_NOTE],
+      [PIN_NOTE],
+      ["OK: Injection policy updated (secret://k)"],
+    ]);
+  });
+
+  it("mergePolicy: --clear resets ssh_agent_socket to false unless --ssh-agent-socket re-asserts it", () => {
+    expect(
+      mergePolicy({ ...STORED_POLICY, ssh_agent_socket: true }, { clear: true }).ssh_agent_socket,
+    ).toBe(false);
+    expect(
+      mergePolicy({ ...STORED_POLICY }, { clear: true, sshAgentSocket: true }).ssh_agent_socket,
+    ).toBe(true);
   });
 });
 

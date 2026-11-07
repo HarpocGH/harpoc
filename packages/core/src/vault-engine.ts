@@ -1,4 +1,10 @@
-import { createHmac, createPrivateKey, timingSafeEqual, X509Certificate } from "node:crypto";
+import {
+  createHash,
+  createHmac,
+  createPrivateKey,
+  timingSafeEqual,
+  X509Certificate,
+} from "node:crypto";
 import type {
   AccessPolicy,
   Agent,
@@ -30,6 +36,7 @@ import type {
   SetAgentPermissionsResult,
   SetInjectionPolicyOptions,
   SmtpAction,
+  SshAgentUnboundReason,
   TokenPrincipalType,
   UpdateAgentInput,
   UseSecretAction,
@@ -79,6 +86,7 @@ import {
   OAuthProviderPreset,
   oauthScopesSeparator,
   PrincipalType,
+  RateLimiter,
   renderSchemaIssues,
   SecretStatus,
   SecretType,
@@ -121,6 +129,7 @@ import { assertNever } from "./assert-never.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
 import {
   controlledPathDirs,
+  matchesHostAllowlist,
   matchesUrlAllowlist,
   resolveExecutable,
 } from "./injection/allowlist.js";
@@ -147,6 +156,15 @@ import type {
   SmtpResolvedAttachment,
 } from "./injection/smtp-injector.js";
 import { buildSmtpAuditDetails, SmtpInjector } from "./injection/smtp-injector.js";
+import { loadPrivateKey } from "./injection/ssh-agent/key-loader.js";
+import type {
+  AgentBinding,
+  AgentIdentity,
+  AgentSignRequest,
+} from "./injection/ssh-agent/agent-connection.js";
+import { hostsForHostKey } from "./injection/ssh-agent/known-hosts.js";
+import { SshReader } from "./injection/ssh-agent/ssh-wire.js";
+import { parseUserauthRequest } from "./injection/ssh-agent/userauth-request.js";
 import { SshInjector } from "./injection/ssh-injector.js";
 import { validateUrl } from "./injection/url-validator.js";
 import type { WebsocketExecution } from "./injection/websocket-injector.js";
@@ -217,6 +235,14 @@ export interface ProxyLease {
   readonly value: Uint8Array;
   readonly caPem?: string;
   complete(outcome: ProxyOutcome): void;
+}
+
+/** A key a consumer's socket may serve: the secret, its handle, its policy and the derived public half. */
+interface AgentSocketKey {
+  secret: Secret;
+  handle: string;
+  policy: InjectionPolicy;
+  publicKeyBlob: Buffer;
 }
 
 /**
@@ -360,6 +386,35 @@ function proxyTargetUrl(target: ProxyTarget): URL | null {
   return url.origin === target.origin && url.pathname === target.path ? url : null;
 }
 
+/**
+ * An agent socket's caller (`agentSocketCaller`): an agent-type principal on
+ * the `ssh_agent` interface carrying nothing that widens it — no project, no
+ * admin flag — so the per-secret grants and the registry gate always apply.
+ */
+function isAgentSocketCaller(caller: CallerContext | undefined): caller is CallerContext {
+  return (
+    caller !== undefined &&
+    caller.principal_type === PrincipalType.AGENT &&
+    caller.interface === "ssh_agent" &&
+    caller.project === undefined &&
+    caller.admin_scope === undefined
+  );
+}
+
+/** Active and unexpired by the clock, the read-only twin of `assertUsable` an enumeration may apply. */
+function isServableNow(secret: Secret): boolean {
+  return (
+    secret.status === SecretStatus.ACTIVE &&
+    (secret.expires_at === null || secret.expires_at > Date.now()) &&
+    secret.type !== SecretType.OAUTH_TOKEN
+  );
+}
+
+/** `ssh-keygen -l`'s SHA256 fingerprint of a public key blob — the one fact a row records about a key no secret holds. */
+function sshKeyFingerprint(blob: Uint8Array): string {
+  return `SHA256:${createHash("sha256").update(blob).digest("base64").replace(/=+$/, "")}`;
+}
+
 /** The certificate counterpart of {@link computeOAuthRefreshStatus}. */
 function computeCertificateRenewalStatus(row: CertificateRow): CertificateStatus["renewal_status"] {
   if (!row.certificate_pem || row.not_after === null) return "no_certificate";
@@ -416,6 +471,21 @@ export class VaultEngine {
   private readonly oauthRefreshInFlight = new Map<string, Promise<number | null>>();
   /** The egress proxy's open leases, each its own closer — drained by `wipeKeys`. */
   private readonly openProxyLeases = new Set<(outcome: ProxyOutcome) => void>();
+  /**
+   * The public halves the agent sockets derived, by secret id, with the stored
+   * value each came from (`version` and the ciphertext's IV) — null for a value
+   * that is no loadable private key. Public material only; cleared by `wipeKeys`.
+   */
+  private readonly agentSocketBlobs = new Map<
+    string,
+    { version: number; ctIv: string; publicKeyBlob: Buffer | null }
+  >();
+  /**
+   * The agent sockets' per-secret signature bucket, `use_secret`'s budget
+   * (`RATE_LIMIT_USE_SECRET` a minute): the socket answers no token, so no
+   * interface in front of the engine limits it as REST, MCP and the proxy do.
+   */
+  private readonly agentSocketLimiter = new RateLimiter();
 
   constructor(private readonly options: VaultEngineOptions) {
     this.sessionManager = new SessionManager(options.sessionPath, {
@@ -1785,6 +1855,284 @@ export class VaultEngine {
   }
 
   /**
+   * The identities a consumer's ssh-agent socket lists (deployment model B,
+   * M5): the public half of every SSH key on which the consumer holds `use`
+   * (or `admin`), whose policy opts into the socket (`ssh_agent_socket`) and
+   * which is active, each under its handle — and on a bound connection only
+   * those whose pinned `ssh.known_hosts` holds the bound host key (R-P3, RT-1:
+   * the pin alone — `host_allowlist` is judged at the signature, so ssh offers
+   * the key and a refusal is recorded). An enumeration like `listSecrets`, it
+   * writes no listing row of its own; a deactivated or unregistered consumer is
+   * served nothing, a value that is no loadable private key is skipped. Only
+   * these keys are ever decrypted, each once per stored value, and wiped. It
+   * fails closed: a key whose ciphertext does not decrypt (`VAULT_CORRUPTED`)
+   * fails the consumer's listing and signatures until that secret is revoked
+   * or rotated, and one whose expiry crosses during the enumeration
+   * (`SECRET_EXPIRED`, with its ordinary lazy `secret.expire` row) fails that
+   * request, the transition then dropping it — the decrypt's `await` stands
+   * outside the derivation's `try` for that reason.
+   */
+  async listAgentSocketIdentities(
+    caller: CallerContext,
+    binding: AgentBinding | null,
+  ): Promise<AgentIdentity[]> {
+    if (!isAgentSocketCaller(caller)) {
+      throw VaultError.invalidInput("listAgentSocketIdentities needs an agent socket's caller");
+    }
+    // A listing is no use of a secret: it keeps no session alive (polled without a token).
+    let s = this.assertUnlockedWithoutSlide();
+    if (s.agentRegistry.findByName(caller.principal_id)?.status !== AgentStatus.ACTIVE) return [];
+    const keys = await this.agentSocketKeys(s, caller);
+    // A seal during a decrypt: the keys are gone, so is the answer.
+    s = this.assertUnlockedWithoutSlide();
+    return keys
+      .filter(
+        (key) =>
+          binding === null ||
+          this.agentSocketHost(s, key.secret.id, key.policy, binding.hostKeyBlob) !== null,
+      )
+      .map((key) => ({ publicKeyBlob: key.publicKeyBlob, comment: key.handle }));
+  }
+
+  /**
+   * Sign one request on a consumer's ssh-agent socket (deployment model B, M5,
+   * R-P2). `use_secret`'s ladder for the consumer: the registry gate (the
+   * socket has no token to revoke, so a deactivation takes effect here), the
+   * key blob to the secret holding it, the `use` grant, the status, the
+   * `ssh_agent_socket` opt-in — then the binding, on the engine's own parse of
+   * the bytes it signs (RC-B3-9: the responder parses nothing): not refused for
+   * forwarding, bound (`session-bind@openssh.com`), the data a userauth request
+   * (`not_userauth` else) for this key of the bound session — its session
+   * identifier, its key and a hostbound host key the bound ones
+   * (`session_mismatch` else) — and the bound host key pinned by the secret's
+   * `ssh.known_hosts` for a name `host_allowlist` admits: the first such name
+   * in pin order is the host, else the first pinned name is refused
+   * `HOST_NOT_ALLOWED`. A bracketed pin names its host unbracketed —
+   * `[2001:db8::1]:22` is the host `2001:db8::1`, the spelling the allowlist
+   * must carry and the row records. Every refusal is the failed `secret.use` row
+   * `use_secret` writes, before the key is decrypted; the signature's one row
+   * names the host as the pin spells it and the key type. No row and no
+   * message carries the key, the signature, the session identifier, the data
+   * or the user name. A blob the vault has not derived since it unlocked is
+   * the concealed `SECRET_NOT_FOUND`, its row the key's fingerprint.
+   */
+  async signForAgentSocket(caller: CallerContext, request: AgentSignRequest): Promise<Buffer> {
+    if (!isAgentSocketCaller(caller)) {
+      throw VaultError.invalidInput("signForAgentSocket needs an agent socket's caller");
+    }
+    // Only the signature slides the session (below); a refusal keeps none alive.
+    let s = this.assertUnlockedWithoutSlide();
+    const keyBlob = request.keyBlob;
+    const unresolved = { context: "ssh_agent", key_fingerprint: sshKeyFingerprint(keyBlob) };
+
+    const agent = s.agentRegistry.findByName(caller.principal_id);
+    if (agent?.status !== AgentStatus.ACTIVE) {
+      const err = agent
+        ? VaultError.agentInactive(agent.name)
+        : VaultError.agentNotFound(caller.principal_id);
+      this.auditDenied(s, AuditEventType.SECRET_USE, err, unresolved, undefined, caller);
+      throw err;
+    }
+
+    const servable = await this.agentSocketKeys(s, caller);
+    s = this.assertUnlockedWithoutSlide();
+    const served = servable.find((key) => key.publicKeyBlob.equals(keyBlob));
+    const secret = served?.secret ?? this.agentSocketDerivedSecret(s, keyBlob);
+    if (secret === undefined) {
+      const err = VaultError.secretNotFound();
+      this.auditDenied(s, AuditEventType.SECRET_USE, err, unresolved, undefined, caller);
+      throw err;
+    }
+    const handle = served?.handle ?? this.handleOf(s, secret);
+    const detail = { context: "ssh_agent", key_type: new SshReader(keyBlob).readCString() };
+    const denied = { handle, ...detail };
+    const attribution = attributionFromCaller(caller, this.sessionId);
+
+    try {
+      this.checkResolvedCallerPolicy(
+        s,
+        secret.id,
+        caller,
+        "use",
+        AuditEventType.SECRET_USE,
+        denied,
+        handle,
+      );
+    } catch (err) {
+      await s.mcpRegistry.terminate(secret.id, "use_denied", attribution);
+      throw err;
+    }
+    // After the grant, so a consumer without one cannot drain the key's bucket;
+    // refused like the other interfaces' limits, before any row.
+    this.agentSocketLimiter.checkSecret(secret.id, true);
+    try {
+      s.secretManager.assertUsable(secret, handle);
+    } catch (err) {
+      this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, secret.id, caller);
+      await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
+      throw err;
+    }
+
+    const refuse = (err: VaultError, extra: Record<string, unknown> = {}): VaultError => {
+      this.auditUse(s, secret.id, { ...detail, ...extra, error: err.code }, false, attribution);
+      return err;
+    };
+    const unbound = (reason: SshAgentUnboundReason): VaultError =>
+      refuse(VaultError.sshAgentUnbound(reason), { reason });
+
+    const policy = this.loadInjectionPolicy(s, secret.id);
+    if (!policy.ssh_agent_socket) {
+      throw refuse(
+        VaultError.accessDenied(
+          "the secret is not enabled for the agent socket (harpoc secret allow --ssh-agent-socket)",
+        ),
+        { required_policy: "ssh_agent_socket" },
+      );
+    }
+    if (request.forwarding) throw unbound("forwarding");
+    const binding = request.binding;
+    if (binding === null) throw unbound("unbound");
+    // The engine's own parse of the bytes it signs (RC-B3-9).
+    const userauth = parseUserauthRequest(request.data);
+    if (userauth === null) throw unbound("not_userauth");
+    if (
+      !userauth.sessionId.equals(binding.sessionId) ||
+      !userauth.publicKeyBlob.equals(keyBlob) ||
+      (userauth.hostKeyBlob !== undefined && !userauth.hostKeyBlob.equals(binding.hostKeyBlob))
+    ) {
+      throw unbound("session_mismatch");
+    }
+    const bound = this.agentSocketHost(s, secret.id, policy, binding.hostKeyBlob);
+    if (bound === null) throw unbound("host_unpinned");
+    const host = { host: bound.host, ...(bound.port !== undefined ? { port: bound.port } : {}) };
+    if (!bound.allowed) throw refuse(VaultError.hostNotAllowed(bound.host), host);
+
+    let value: Uint8Array;
+    try {
+      value = await s.secretManager.getSecretValue(handle);
+    } catch (err) {
+      this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, secret.id, caller);
+      throw err;
+    }
+    let signature: Buffer;
+    try {
+      // A seal during the decrypt: no signature leaves a sealed engine.
+      s = this.assertUnlockedWithoutSlide();
+      const key = loadPrivateKey(Buffer.from(value).toString("utf8"));
+      signature = key.sign(request.data, request.flags);
+    } catch (err) {
+      if (err instanceof VaultError && err.code === ErrorCode.VAULT_LOCKED) throw err;
+      throw refuse(toVaultError(err), host);
+    } finally {
+      wipeBuffer(value);
+    }
+    this.auditUse(s, secret.id, { ...detail, ...host }, true, attribution);
+    // The use slides the session, as useSecret's completion does.
+    this.touchSession();
+    return signature;
+  }
+
+  /** The keys a consumer's socket may serve, sorted by handle — the identities before the binding's filter. */
+  private async agentSocketKeys(
+    s: UnlockedState,
+    caller: CallerContext,
+  ): Promise<AgentSocketKey[]> {
+    const keys: AgentSocketKey[] = [];
+    const grants = s.policyEngine.grantedPermissionsBySecret(this.callerPrincipals(caller));
+    for (const [secretId, held] of grants) {
+      if (!held.has("use") && !held.has("admin")) continue;
+      const secret = s.store.getSecret(secretId);
+      if (!secret || !isServableNow(secret) || isVaultManagedCertificate(s.store, secret)) continue;
+      const policy = this.loadInjectionPolicy(s, secretId);
+      if (!policy.ssh_agent_socket) continue;
+      const handle = this.handleOf(s, secret);
+      const publicKeyBlob = await this.agentSocketPublicKey(s, secret, handle);
+      if (publicKeyBlob !== null) keys.push({ secret, handle, policy, publicKeyBlob });
+    }
+    return keys.sort((a, b) => (a.handle < b.handle ? -1 : a.handle > b.handle ? 1 : 0));
+  }
+
+  /**
+   * A key secret's public half, derived from the private key once per stored
+   * value and kept (public material only) — null, kept too, for a value that is
+   * no loadable private key. The decrypted value is wiped at once.
+   */
+  private async agentSocketPublicKey(
+    s: UnlockedState,
+    secret: Secret,
+    handle: string,
+  ): Promise<Buffer | null> {
+    const ctIv = Buffer.from(secret.ct_iv).toString("hex");
+    const known = this.agentSocketBlobs.get(secret.id);
+    if (known && known.version === secret.version && known.ctIv === ctIv) {
+      return known.publicKeyBlob;
+    }
+    let resolvedId: string | undefined;
+    const value = await s.secretManager.getSecretValue(handle, (id) => (resolvedId = id));
+    let publicKeyBlob: Buffer | null = null;
+    try {
+      if (resolvedId !== secret.id) return null;
+      publicKeyBlob = loadPrivateKey(Buffer.from(value).toString("utf8")).publicKeyBlob;
+    } catch {
+      // Not a loadable private key (a password opted in by mistake): never listed.
+    } finally {
+      wipeBuffer(value);
+    }
+    this.agentSocketBlobs.set(secret.id, { version: secret.version, ctIv, publicKeyBlob });
+    return publicKeyBlob;
+  }
+
+  /**
+   * The secret a key blob was derived from since the vault unlocked, while it
+   * still stores that value — a key this caller's socket does not serve, which
+   * the ladder then refuses with its own code and the real id.
+   */
+  private agentSocketDerivedSecret(s: UnlockedState, keyBlob: Buffer): Secret | undefined {
+    for (const [secretId, known] of this.agentSocketBlobs) {
+      if (known.publicKeyBlob === null || !known.publicKeyBlob.equals(keyBlob)) continue;
+      const secret = s.store.getSecret(secretId);
+      if (
+        secret !== undefined &&
+        secret.version === known.version &&
+        Buffer.from(secret.ct_iv).toString("hex") === known.ctIv
+      ) {
+        return secret;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * The host a binding's host key names through the secret's pinned
+   * `ssh.known_hosts` lines (the SSH context's own no-TOFU pin; lane P's
+   * `hostsForHostKey`, in pin order): the first named host `host_allowlist`
+   * admits, else the first named host, not allowed — or null when no pinned
+   * line names one (none holds the key, or a `@revoked` line does).
+   */
+  private agentSocketHost(
+    s: UnlockedState,
+    secretId: string,
+    policy: InjectionPolicy,
+    hostKeyBlob: Buffer,
+  ): { host: string; port?: number; allowed: boolean } | null {
+    const lines = this.loadConnectionConfig(s, secretId)?.ssh?.known_hosts ?? [];
+    const matches = hostsForHostKey(lines, hostKeyBlob);
+    const admitted = matches.find((match) =>
+      matchesHostAllowlist(match.host, policy.host_allowlist),
+    );
+    const named = admitted ?? matches[0];
+    return named === undefined ? null : { ...named, allowed: admitted !== undefined };
+  }
+
+  /** A stored secret's handle, as `listSecrets` spells it. */
+  private handleOf(s: UnlockedState, secret: Secret): string {
+    return formatHandle(
+      decryptName(s.kek, secret.name_encrypted, secret.name_iv, secret.name_tag, secret.id),
+      secret.project ?? undefined,
+    );
+  }
+
+  /**
    * Refuse a `docker_registry` action on a secret demanding process isolation
    * (design §5.4). Engine-level and pre-dispatch: unlike the platform-capability
    * refusals, this one is architectural — the Docker daemon, not the spawned
@@ -2001,9 +2349,9 @@ export class VaultEngine {
    * allowlists when no policy is set — and every allowlist denies by default
    * (R1, 2026-09-01), so an unconfigured secret is usable in no target context
    * until an administrator writes its policy. A stored blob is parsed strictly
-   * (R2/C43): the writer always emits all twelve fields, so a miss (other
-   * than the post-baseline `strict_tree_exit` and `proxy`, defaulted below)
-   * or an extra key is corruption.
+   * (R2/C43): the writer always emits all thirteen fields, so a miss (other
+   * than the post-baseline `strict_tree_exit`, `proxy` and `ssh_agent_socket`,
+   * defaulted below) or an extra key is corruption.
    */
   private loadInjectionPolicy(s: UnlockedState, secretId: string): InjectionPolicy {
     const row = s.store.getInjectionPolicy(secretId);
@@ -2021,6 +2369,7 @@ export class VaultEngine {
         imap_read_only: false,
         strict_tree_exit: false,
         proxy: false,
+        ssh_agent_socket: false,
       };
     }
     const bytes = decrypt(
@@ -2036,11 +2385,12 @@ export class VaultEngine {
     } catch {
       throw VaultError.vaultCorrupted(`injection policy for secret ${secretId} is not JSON`);
     }
-    // The post-baseline fields (D1, 2026-09-10; B2, 2026-11-06): blobs written
-    // by the prepared v1.5.0 tree carry the baseline ten, blobs written before
-    // the egress proxy eleven, so these two fields — and only these — default
-    // on read; no rewrite (policy writes are POLICY_GRANT events). The writer
-    // writes all twelve; any other miss stays corruption (R2/C43).
+    // The post-baseline fields (D1, 2026-09-10; B2 and B3, 2026-11-06): blobs
+    // written by the prepared v1.5.0 tree carry the baseline ten, blobs written
+    // before the egress proxy eleven, blobs written before the agent socket
+    // twelve, so these three fields — and only these — default on read; no
+    // rewrite (policy writes are POLICY_GRANT events). The writer writes all
+    // thirteen; any other miss stays corruption (R2/C43).
     if (
       typeof raw === "object" &&
       raw !== null &&
@@ -2057,6 +2407,15 @@ export class VaultEngine {
       !Object.hasOwn(raw, "proxy")
     ) {
       (raw as Record<string, unknown>)["proxy"] = false;
+    }
+    // `ssh_agent_socket` off is the opt-in withheld: the socket neither lists nor signs.
+    if (
+      typeof raw === "object" &&
+      raw !== null &&
+      !Array.isArray(raw) &&
+      !Object.hasOwn(raw, "ssh_agent_socket")
+    ) {
+      (raw as Record<string, unknown>)["ssh_agent_socket"] = false;
     }
     const parsed = injectionPolicySchema.safeParse(raw);
     if (!parsed.success) {
@@ -2188,6 +2547,7 @@ export class VaultEngine {
           imap_read_only: input.imap_read_only,
           strict_tree_exit: input.strict_tree_exit,
           proxy: input.proxy,
+          ssh_agent_socket: input.ssh_agent_socket,
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
@@ -4482,7 +4842,9 @@ export class VaultEngine {
    * (`tokenless: true`), the token-bearing start (`tokenless: false` plus the
    * launch token's `subject`) and the refused start (`success: false` with
    * the refusal code). The MCP Streamable HTTP and REST listeners write it
-   * once per listener with the bound `port` and `host`, never per session.
+   * once per listener with the bound `port` and `host`, never per session; a
+   * consumer's ssh-agent socket once per socket with its `consumer`
+   * (`tokenless: true` — the ssh-agent protocol carries no token).
    *
    * Deliberately unattributed (NULL principal columns, `vault.unlock` shape):
    * a server start is a process-level event, not a requesting principal's
@@ -4502,6 +4864,7 @@ export class VaultEngine {
     subject?: string;
     port?: number;
     host?: string;
+    consumer?: string;
     success?: false;
     error?: ErrorCode;
   }): void {
@@ -4515,6 +4878,7 @@ export class VaultEngine {
         ...(options.subject !== undefined ? { subject: options.subject } : {}),
         ...(options.port !== undefined ? { port: options.port } : {}),
         ...(options.host !== undefined ? { host: options.host } : {}),
+        ...(options.consumer !== undefined ? { consumer: options.consumer } : {}),
         ...(options.error ? { error: options.error } : {}),
       },
       success: options.success ?? true,
@@ -4534,6 +4898,7 @@ export class VaultEngine {
     transport: ServerTransport;
     tokenless: boolean;
     port?: number;
+    consumer?: string;
     uptimeMs: number;
     trigger: ServerStopTrigger;
   }): void {
@@ -4544,6 +4909,7 @@ export class VaultEngine {
         transport: options.transport,
         tokenless: options.tokenless,
         ...(options.port !== undefined ? { port: options.port } : {}),
+        ...(options.consumer !== undefined ? { consumer: options.consumer } : {}),
         uptime_ms: options.uptimeMs,
         trigger: options.trigger,
       },
@@ -5194,6 +5560,20 @@ export class VaultEngine {
   }
 
   private assertUnlocked(): UnlockedState {
+    const s = this.assertUnlockedWithoutSlide();
+    // Every authenticated operation passes through here — the session TTL
+    // slides on use (thesis §5.4.7), not on process liveness.
+    this.touchSession();
+    return s;
+  }
+
+  /**
+   * `assertUnlocked` without the slide: the TTL enforcement and the sealed
+   * refusal only. For the agent socket's listings and refusals, which arrive
+   * with no token — the consumer directory's mode is all that admits them —
+   * and must not hold a file session open by polling (only a signature slides).
+   */
+  private assertUnlockedWithoutSlide(): UnlockedState {
     // Synchronous TTL enforcement: an engine kept alive past its session
     // expiry (SDK direct mode never ran the monitor before) seals here on the
     // next authenticated operation — the monitor stays the ≤30 s backstop.
@@ -5207,9 +5587,6 @@ export class VaultEngine {
     if (this.state !== VaultState.UNLOCKED) {
       throw VaultError.vaultLocked();
     }
-    // Every authenticated operation passes through here — the session TTL
-    // slides on use (thesis §5.4.7), not on process liveness.
-    this.touchSession();
     return {
       store: this.store as SqliteStore,
       kek: this.kek as Uint8Array,
@@ -5304,6 +5681,7 @@ export class VaultEngine {
     // outlive the keys that authorized it.
     this.mcpRegistry?.killAllSync();
     this.oauthRefreshInFlight.clear();
+    this.agentSocketBlobs.clear();
 
     this.secretManager = null;
     this.policyEngine = null;
