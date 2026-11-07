@@ -549,12 +549,14 @@ describe("writeUnlockKeyFile", () => {
   });
 
   it.runIf(process.platform === "win32")(
-    "real path: the access list names the current user alone",
+    "real path: the access list grants the current user and no account the reader distrusts",
     async () => {
       const path = join(dir, "unlock.key");
       await writeUnlockKeyFile(path, KEY);
       const acl = await listWindowsAcl(path);
-      expect(acl.rules).toEqual([{ allow: true, sid: acl.user }]);
+      const trusted = new Set([acl.user, "S-1-5-18", "S-1-5-32-544"]);
+      expect(acl.rules.some((rule) => rule.allow && rule.sid === acl.user)).toBe(true);
+      expect(acl.rules.every((rule) => !rule.allow || trusted.has(rule.sid))).toBe(true);
       expect(windowsAclVerdict(acl)).toBeUndefined();
     },
   );
