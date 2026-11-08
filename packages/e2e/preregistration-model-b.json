@@ -1,0 +1,65 @@
+[
+  {
+    "scenario": "b-headless-fake-credential",
+    "context": "http",
+    "surface": "two-identity",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "b-two-uid-value-route",
+    "context": "rest",
+    "surface": "two-identity",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "b-two-uid-session-file",
+    "context": "session",
+    "surface": "two-identity",
+    "arm": "harpoc",
+    "expected": "CHANNEL_ABSENT"
+  },
+  {
+    "scenario": "b-proxy-exposure",
+    "context": "http",
+    "surface": "two-identity",
+    "arm": "harpoc",
+    "expected": "OPAQUE"
+  },
+  {
+    "scenario": "b-proxy-echo-redaction",
+    "context": "http",
+    "surface": "two-identity",
+    "arm": "harpoc",
+    "expected": "BYPASSED"
+  },
+  {
+    "scenario": "b-agent-socket-exposure",
+    "context": "ssh",
+    "surface": "two-identity",
+    "arm": "harpoc",
+    "expected": "OPAQUE"
+  },
+  {
+    "scenario": "b-two-uid-environ",
+    "context": "process",
+    "surface": "two-identity",
+    "arm": "harpoc",
+    "expected": "HANDLE_ONLY"
+  },
+  {
+    "scenario": "b-docker-inspect",
+    "context": "docker",
+    "surface": "two-identity",
+    "arm": "harpoc",
+    "expected": "HANDLE_ONLY"
+  },
+  {
+    "scenario": "b-negative-same-uid-environ",
+    "context": "process",
+    "surface": "engine",
+    "arm": "harpoc",
+    "expected": "LEAKED"
+  }
+]

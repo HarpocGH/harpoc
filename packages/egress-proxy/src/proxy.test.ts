@@ -14,6 +14,7 @@ import {
   PROXY_CLIENT_TIMEOUT_MS,
   proxyRequest,
   rawProxyExchange,
+  rawProxyExchangeThenReset,
 } from "./__fixtures__/proxy-client.js";
 import type { ProxyReply } from "./__fixtures__/proxy-client.js";
 import {
@@ -680,6 +681,18 @@ describe("the upstream leg", () => {
       error: ErrorCode.INVALID_INPUT,
     });
     expect(double.verifyToken).not.toHaveBeenCalled();
+    expect(upstream.seen).toHaveLength(0);
+  });
+
+  it("a client that resets the connection on the 501 leaves the proxy serving: the next request is answered", async () => {
+    const answer = await rawProxyExchangeThenReset(
+      port,
+      `CONNECT 127.0.0.1:${upstream.port} HTTP/1.1\r\nHost: 127.0.0.1:${upstream.port}\r\n\r\n`,
+    );
+
+    expect(answer.startsWith("HTTP/1.1 501 Not Implemented\r\n")).toBe(true);
+    const next = await send("/after-reset", {}, { token: null });
+    expect(next.status).toBe(407);
     expect(upstream.seen).toHaveLength(0);
   });
 

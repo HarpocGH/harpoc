@@ -77,3 +77,70 @@ jobs:
       - name: Tear down
         if: always()
         run: pnpm --filter @harpoc/e2e fleet:down
+  two-identity:
+    name: Deployment model B, two identities (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Provision the two identities with the deploy recipe (the agent user in the docker group)
+        # As ci.yml's two-uid step: deploy/linux/install-two-identity.sh creates the vault
+        # user harpoc, the group harpoc-clients and the directories of deployment model B; it
+        # runs twice (idempotence) and the layout is checked. model-b.e2e.test.ts runs the
+        # built CLI as harpoc and every agent process as harpoc-ci-agent through `sudo -n -u`.
+        # The agent user joins the runner's docker group for the docker inspect row; that group
+        # is root-equivalent (Docker's post-install notes), so the row measures what a container
+        # and its inspect output show, not the two-identity boundary. sudo initialises the
+        # groups at each exec, so the membership holds for every later `sudo -n -u`. Home
+        # directories are private (0750): both users get traverse-only access to $HOME, which
+        # holds the checkout; both probe the built CLI.
+        run: |
+          sudo useradd --create-home --shell /bin/bash harpoc-ci-agent
+          sudo bash deploy/linux/install-two-identity.sh harpoc-ci-agent
+          sudo bash deploy/linux/install-two-identity.sh harpoc-ci-agent
+          test "$(sudo stat -c '%a %U:%G' /var/lib/harpoc /run/harpoc /run/harpoc/harpoc-ci-agent | tr '\n' ' ')" = "700 harpoc:harpoc 750 harpoc:harpoc-clients 2750 harpoc:harpoc-ci-agent "
+          id -nG harpoc-ci-agent | grep -qw harpoc-clients
+          sudo usermod -aG docker harpoc-ci-agent
+          sudo chmod o+x "$HOME"
+          for user in harpoc harpoc-ci-agent; do
+            sudo -n -u "$user" -- "$(command -v node)" "$GITHUB_WORKSPACE/packages/cli/dist/index.js" --version
+          done
+          sudo -n -u harpoc-ci-agent -- id -nG | grep -qw docker
+          sudo -n -u harpoc-ci-agent -- docker version --format '{{.Server.Version}}'
+          findmnt -no OPTIONS /proc
+          echo "HARPOC_TWO_UID_VAULT_USER=harpoc" >> "$GITHUB_ENV"
+          echo "HARPOC_TWO_UID_AGENT_USER=harpoc-ci-agent" >> "$GITHUB_ENV"
+      - name: Generate the fixture PKI and SSH keys (no fleet)
+        # The suite runs its TLS echo and its SSH server in the harness process on this
+        # material; the generators are dist-free.
+        run: |
+          pnpm --filter @harpoc/e2e pki
+          pnpm --filter @harpoc/e2e keys
+      - name: Pull the docker row's image
+        # The tag model-b.e2e.test.ts names, pulled before the suite so the pull is outside the
+        # row's deadline; no image is cached on the runner.
+        run: docker pull node:22-alpine
+      - name: Run the model B suite
+        env:
+          HARPOC_REQUIRE_PLATFORM_TESTS: two-uid,docker
+        run: pnpm --filter @harpoc/e2e test:e2e src/model-b.e2e.test.ts
+      - name: Upload the B evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-evidence-b
+          path: packages/e2e/evidence/run-b.jsonl
+          if-no-files-found: warn
+      - name: The runtime directory and the two users' processes on failure
+        if: failure()
+        run: |
+          sudo ls -la /run/harpoc /run/harpoc/harpoc-ci-agent
+          pgrep -l -u harpoc || true
+          pgrep -l -u harpoc-ci-agent || true

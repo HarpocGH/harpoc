@@ -210,6 +210,12 @@ importers:
       '@types/node':
         specifier: ^26.6.4
         version: 26.6.5
+      '@types/ssh2':
+        specifier: ^1.15.5
+        version: 1.15.6
+      ssh2:
+        specifier: ^1.17.0
+        version: 1.17.0
 
   packages/egress-proxy:
     dependencies:

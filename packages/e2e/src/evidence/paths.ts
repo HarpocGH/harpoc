@@ -13,3 +13,15 @@ export const EVIDENCE_FILE = fileURLToPath(new URL("../../evidence/run.jsonl", i
 export const PREREGISTRATION_FILE = fileURLToPath(
   new URL("../../preregistration.json", import.meta.url),
 );
+
+/**
+ * Deployment model B's own pair (RD-B6-2): `scripts/tables.mjs`'s `checkGates`
+ * refuses a pre-registered key no record of the run exercised, so B's rows
+ * cannot share A's expectations or A's run without breaking A's tables.
+ */
+export const EVIDENCE_FILE_B = fileURLToPath(
+  new URL("../../evidence/run-b.jsonl", import.meta.url),
+);
+export const PREREGISTRATION_FILE_B = fileURLToPath(
+  new URL("../../preregistration-model-b.json", import.meta.url),
+);

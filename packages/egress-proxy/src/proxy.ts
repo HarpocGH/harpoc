@@ -121,6 +121,8 @@ function hasBody(req: IncomingMessage): boolean {
 }
 
 function refuseConnect(_req: IncomingMessage, socket: Socket): void {
+  // The CONNECT socket is detached from the HTTP server: an unhandled reset would end the process.
+  socket.on("error", () => socket.destroy());
   socket.end(
     "HTTP/1.1 501 Not Implemented\r\ncontent-type: application/json\r\nconnection: close\r\n" +
       `content-length: ${Buffer.byteLength(CONNECT_REFUSAL)}\r\n\r\n${CONNECT_REFUSAL}`,

@@ -77,3 +77,20 @@ export function rawProxyExchange(port: number, text: string): Promise<string> {
     socket.write(text);
   });
 }
+
+/** `rawProxyExchange`, but the client resets the connection (RST) on the first answer bytes, as curl does. */
+export function rawProxyExchangeThenReset(port: number, text: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1");
+    socket.setTimeout(PROXY_CLIENT_TIMEOUT_MS, () =>
+      socket.destroy(new Error("raw exchange timed out")),
+    );
+    socket.on("error", reject);
+    socket.on("close", () => reject(new Error("raw exchange closed before any answer byte")));
+    socket.once("data", (chunk: Buffer) => {
+      socket.resetAndDestroy();
+      resolve(chunk.toString("latin1"));
+    });
+    socket.write(text);
+  });
+}

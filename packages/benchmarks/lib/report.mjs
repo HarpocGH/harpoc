@@ -61,11 +61,23 @@ export function printScenario(result) {
   console.log(scenarioMarkdown(result));
 }
 
+/**
+ * A run's file name: `<date>-<hostname>`, or `<date>-<hostname>-<suffix>` with
+ * run-all's `--suffix` (a second run of the day, or a run named for its pin).
+ */
+export function resultsBaseName(env, { suffix } = {}) {
+  if (suffix !== undefined && !/^[a-z0-9][a-z0-9-]*$/.test(suffix)) {
+    throw new Error(`--suffix "${suffix}" is not a name of lowercase letters, digits and -`);
+  }
+  const base = `${env.timestamp.slice(0, 10)}-${env.hostname.toLowerCase()}`;
+  return suffix === undefined ? base : `${base}-${suffix}`;
+}
+
 /** Write the combined results of a run-all invocation. Returns the file paths. */
-export function writeResults(env, results) {
+export function writeResults(env, results, { suffix } = {}) {
   mkdirSync(RESULTS_DIR, { recursive: true });
   const stamp = env.timestamp.slice(0, 10);
-  const base = `${stamp}-${env.hostname.toLowerCase()}`;
+  const base = resultsBaseName(env, { suffix });
   const jsonPath = join(RESULTS_DIR, `${base}.json`);
   const mdPath = join(RESULTS_DIR, `${base}.md`);
 
@@ -75,8 +87,8 @@ export function writeResults(env, results) {
     `# Harpoc baseline latency — ${stamp} (${env.hostname})`,
     "",
     "Produced by `packages/benchmarks/run-all.mjs` in the code repository. Scenario → thesis mapping: (a)–(c) feed",
-    "Ch. 6 §Baseline Performance, (c′) being (c) end-to-end through REST; (d) reproduces the Ch. 5 § Session File",
-    "DPAPI figure.",
+    "Ch. 6 §Baseline Performance, (b′) being (b) through the unlock key and (c′) (c) end-to-end through REST; (d)",
+    "reproduces the Ch. 5 § Session File DPAPI figure.",
     "",
     envMarkdown(env),
     ...results.map(scenarioMarkdown),
