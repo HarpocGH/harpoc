@@ -40,6 +40,8 @@ export { captureCalls };
 export const NEGATIVE_CONTROL_VALUE_WINDOWS = "b7-negative-control-value-9c3d";
 
 const REDACTED = "[REDACTED]";
+/** How much of ssh's stderr the pipe row's diagnostic carries, taken from the call its capture recorded (redacted with the capture's needles). */
+const SSH_STDERR_TAIL_LINES = 20;
 const HEADLESS = "b-win-headless-dpapi";
 const VALUE_ROUTE = "b-win-two-account-value-route";
 const VAULT_DIR = "b-win-two-account-vault-dir";
@@ -178,26 +180,36 @@ async function observePipe(d: TwoAccountDeployment, capture: CallCapture): Promi
     env: { SSH_AUTH_SOCK: d.consumer.agentPipe },
     timeoutMs: 60_000,
   });
+  const sshCall = capture.calls().length;
   capture.record(asOutcome(run));
   const rows = newRows(await d.auditRows(AuditEventType.SECRET_USE), before).filter(
     (row) => row.detail?.["context"] === "ssh_agent",
   );
   capture.record({ ok: true, text: JSON.stringify(rows) });
   if (sighted(d.credentials.all, run.stdout, run.stderr)) return Outcome.LEAKED;
-  requireProofs(PIPE, {
-    completed: run.code === 0 && run.stdout.trim() === SSH2_EXEC_REPLY,
-    bound: run.stderr.includes("bound agent to hostkey"),
-    signatureVerified: d.sshServer.events
-      .slice(seen)
-      .some((e) => e.method === "publickey" && e.signed && e.verified),
-    attributed:
-      rows.length === 1 &&
-      rows[0]?.success === true &&
-      rows[0]?.principal_id === d.agentUser &&
-      rows[0]?.detail?.["interface"] === "ssh_agent" &&
-      rows[0]?.detail?.["host"] === "127.0.0.1" &&
-      rows[0]?.detail?.["key_type"] === "ssh-ed25519",
-  });
+  try {
+    requireProofs(PIPE, {
+      completed: run.code === 0 && run.stdout.trim() === SSH2_EXEC_REPLY,
+      bound: run.stderr.includes("bound agent to hostkey"),
+      signatureVerified: d.sshServer.events
+        .slice(seen)
+        .some((e) => e.method === "publickey" && e.signed && e.verified),
+      attributed:
+        rows.length === 1 &&
+        rows[0]?.success === true &&
+        rows[0]?.principal_id === d.agentUser &&
+        rows[0]?.detail?.["interface"] === "ssh_agent" &&
+        rows[0]?.detail?.["host"] === "127.0.0.1" &&
+        rows[0]?.detail?.["key_type"] === "ssh-ed25519",
+    });
+  } catch (err) {
+    const tail = (capture.calls()[sshCall]?.stderr ?? "").split(/\r?\n/);
+    while (tail.length > 0 && tail[tail.length - 1] === "") tail.pop();
+    throw new Error(
+      `${(err as Error).message}; ssh exited ${String(run.code)}; the last ${String(SSH_STDERR_TAIL_LINES)} lines of its stderr, redacted as its record:\n${tail.slice(-SSH_STDERR_TAIL_LINES).join("\n")}`,
+      { cause: err },
+    );
+  }
   return Outcome.OPAQUE;
 }
 

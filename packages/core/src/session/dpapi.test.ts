@@ -156,7 +156,7 @@ describe.runIf(process.platform === "win32")("the DPAPI bridge (Windows)", () =>
         "-NonInteractive",
         "-Command",
         "[void][System.Reflection.Assembly]::Load('System.Security, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a');" +
-          "[System.Console]::Out.Write([System.Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Protect((New-Object byte[] 32),$null,[System.Security.Cryptography.DataProtectionScope]::LocalMachine)))",
+          "[System.Console]::Out.Write([System.Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Protect([byte[]]::new(32),$null,[System.Security.Cryptography.DataProtectionScope]::LocalMachine)))",
       ],
       { shell: false, windowsHide: true, encoding: "utf8", timeout: 15_000 },
     );

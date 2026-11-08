@@ -403,7 +403,7 @@ describe("the headless start on the built CLI (unlock-key enroll, server start -
           "-NonInteractive",
           "-Command",
           "[void][System.Reflection.Assembly]::Load('System.Security, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a');" +
-            "$k=New-Object byte[] 32;(New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($k);" +
+            "$k=[byte[]]::new(32);[System.Security.Cryptography.RNGCryptoServiceProvider]::new().GetBytes($k);" +
             "[System.Console]::Out.Write([System.Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Protect($k,[System.Text.Encoding]::UTF8.GetBytes('another.use.v1'),[System.Security.Cryptography.DataProtectionScope]::CurrentUser)))",
         ],
         { shell: false, windowsHide: true, encoding: "utf8", timeout: 15_000 },

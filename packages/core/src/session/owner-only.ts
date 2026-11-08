@@ -68,8 +68,8 @@ export interface WindowsAclListing extends WindowsAcl {
 /** `FileSystemRights.ReadAndExecute | Synchronize` — `icacls`' `(RX)`, measured 0x001200A9. */
 export const WINDOWS_READ_EXECUTE_RIGHTS = 0x001200a9;
 
-/** What the agent pipe grants its consumer: read and write data, read attributes and the DACL, synchronize — never `CreateNewInstance` (0x4). */
-export const WINDOWS_PIPE_CONSUMER_RIGHTS = 0x00120083;
+/** What the agent pipe grants its consumer: `FILE_GENERIC_READ | FILE_GENERIC_WRITE` without `CreateNewInstance` (0x4) — the `GENERIC_READ | GENERIC_WRITE` Win32-OpenSSH opens the pipe for, measured 0x0012019B. */
+export const WINDOWS_PIPE_CONSUMER_RIGHTS = 0x0012019b;
 
 const SID_PATTERN = /^S-1-\d+(-\d+)*$/;
 const HEX_MASK = /^[0-9A-F]{8}$/;
@@ -128,7 +128,7 @@ const PIPE_DACL_SCRIPT =
   "foreach($r in @($a.GetAccessRules($true,$true,$s))){[void]$a.RemoveAccessRuleSpecific($r)};" +
   "$u=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;" +
   "foreach($o in @($u,[System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'),[System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))){$a.AddAccessRule([System.IO.Pipes.PipeAccessRule]::new($o,[System.IO.Pipes.PipeAccessRights]::FullControl,'Allow'))};" +
-  "$a.AddAccessRule([System.IO.Pipes.PipeAccessRule]::new($c,[System.IO.Pipes.PipeAccessRights]'ReadData, WriteData, ReadAttributes, ReadPermissions, Synchronize','Allow'));" +
+  "$a.AddAccessRule([System.IO.Pipes.PipeAccessRule]::new($c,[System.IO.Pipes.PipeAccessRights]'ReadData, WriteData, ReadExtendedAttributes, WriteExtendedAttributes, ReadAttributes, WriteAttributes, ReadPermissions, Synchronize','Allow'));" +
   "$q.SetAccessControl($a);$a=$q.GetAccessControl();" +
   "[System.Console]::Out.WriteLine('user '+$u.Value);" +
   "[System.Console]::Out.WriteLine('owner '+$a.GetOwner($s).Value);" +

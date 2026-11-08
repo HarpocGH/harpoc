@@ -7,7 +7,7 @@ import type { AsUserOptions, StartedChild } from "./sudo.js";
 
 const VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PID_LINE = /^\[runas\] pid=(\d+)\r?\n/;
-const START_FAILED = /^\[runas\] start failed: native=(\d+)/m;
+const START_FAILED = /^\[runas\] start failed: native=(-?\d+)/m;
 
 /** Exit code of the launcher when the account's process could not be started at all. */
 export const LAUNCH_FAILED_EXIT = 125;
@@ -173,6 +173,31 @@ export function windowsCommandLine(argv: string[]): string {
   return argv.map(windowsArgument).join(" ");
 }
 
+/** `CreateProcessWithLogonW`'s `lpCommandLine` holds at most 1024 characters (Microsoft Learn, "CreateProcessWithLogonW function"). */
+export const LOGON_COMMAND_LINE_LIMIT = 1024;
+
+/**
+ * The length of the command line the launcher's `Process.Start` hands
+ * `CreateProcessWithLogonW` (.NET Framework's `BuildCommandLine`): `FileName`
+ * trimmed and wrapped in quotes unless it already starts and ends with one,
+ * then a space and `Arguments` when there are any.
+ */
+export function launcherCommandLineLength(spec: Pick<LauncherSpec, "file" | "arguments">): number {
+  const file = spec.file.trim();
+  const quoted = file.startsWith('"') && file.endsWith('"') ? file.length : file.length + 2;
+  return quoted + (spec.arguments === "" ? 0 : 1 + spec.arguments.length);
+}
+
+/** Refuses a spec whose command line is over `LOGON_COMMAND_LINE_LIMIT`, naming its length and the limit, never its text. */
+export function assertLauncherCommandLine(spec: Pick<LauncherSpec, "file" | "arguments">): void {
+  const length = launcherCommandLineLength(spec);
+  if (length > LOGON_COMMAND_LINE_LIMIT) {
+    throw new Error(
+      `runAsWindows: the command line is ${String(length)} characters, over the ${String(LOGON_COMMAND_LINE_LIMIT)} CreateProcessWithLogonW takes`,
+    );
+  }
+}
+
 /**
  * The environment the child gets: the system's names from `base`, the
  * account's `USERNAME`, `TEMP` and `TMP`, then `extra` — never the runner's own
@@ -271,12 +296,14 @@ export async function runLauncher(
  * the launcher only when the child has exited with it; a child that outlives
  * the deadline is the teardown's to stop (`stopAs`).
  */
-export function runAsWindows(
+export async function runAsWindows(
   account: WindowsAccount,
   argv: string[],
   opts: WindowsRunOptions = {},
 ): Promise<ChildRun> {
-  return runLauncher(launcherSpec(account, argv, opts), {
+  const spec = launcherSpec(account, argv, opts);
+  assertLauncherCommandLine(spec);
+  return runLauncher(spec, {
     timeoutMs: opts.timeoutMs ?? CHILD_TIMEOUT_MS,
     label: opts.label ?? `runas ${account.user} ${win32.basename(argv[0] ?? "")}`,
   });
@@ -312,6 +339,7 @@ export function startAsWindows(
   opts: { env?: Record<string, string>; cwd?: string; tempDir?: string; label: string },
 ): StartedChild & { pid(): number | undefined } {
   const spec = launcherSpec(account, argv, opts);
+  assertLauncherCommandLine(spec);
   const child = spawn(systemPaths().powershell, launcherArgv(), {
     shell: false,
     stdio: ["pipe", "pipe", "pipe"],

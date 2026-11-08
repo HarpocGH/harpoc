@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { getPkgRoot } from "@harpoc/test-utils";
 import { POWERSHELL } from "./helpers/spawn-cli.js";
 
@@ -237,6 +237,82 @@ describe("deploy PowerShell scripts (deployment model B on Windows)", () => {
 /** One argument as the Windows C runtime reads it back (the scripts' ConvertTo-Argument, for paths without quotes). */
 const winArg = (value: string): string => (/\s/.test(value) ? `"${value}"` : value);
 
+/** A recipe row's spawn budget: a module-loading cmdlet answers in tens of seconds under the full gate on windows-latest (`decisions.md` § "The WMI listing series"). */
+const PS1_TIMEOUT_MS = 90_000;
+
+/** The recipe rows' environment: the inherited one with `PSModulePath` narrowed to the in-box modules the three scripts load (Management, Utility, Security, LocalAccounts, ScheduledTasks). */
+function recipeEnvironment(): NodeJS.ProcessEnv {
+  return {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(([name]) => name.toLowerCase() !== "psmodulepath"),
+    ),
+    PSModulePath: join(
+      process.env["SystemRoot"] ?? "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "Modules",
+    ),
+  };
+}
+
+/** The elevation probe's answer: exit 0 and exactly `True` or `False`; anything else throws, naming the status. */
+function elevationVerdict(probe: {
+  status: number | null;
+  stdout: string | null | undefined;
+  error?: Error;
+  signal?: NodeJS.Signals | null;
+}): boolean {
+  if (probe.status === 0 && (probe.stdout === "True" || probe.stdout === "False")) {
+    return probe.stdout === "True";
+  }
+  const code = (probe.error as NodeJS.ErrnoException | undefined)?.code;
+  const cause = [code, probe.signal].filter((part) => part !== undefined && part !== null);
+  throw new Error(
+    `the elevation probe answered exit ${String(probe.status)}${cause.length > 0 ? ` (${cause.join(", ")})` : ""}, stdout ${JSON.stringify((probe.stdout ?? "").slice(0, 80))}: not exactly True or False`,
+  );
+}
+
+describe("the elevation probe's verdict (the win32 suite's beforeAll — it fails closed)", () => {
+  it("reads exit 0 with exactly True as elevated and exactly False as not", () => {
+    expect(elevationVerdict({ status: 0, stdout: "True" })).toBe(true);
+    expect(elevationVerdict({ status: 0, stdout: "False" })).toBe(false);
+  });
+
+  it.each([
+    [
+      "a timeout",
+      {
+        status: null,
+        stdout: "",
+        error: Object.assign(new Error("spawnSync powershell.exe ETIMEDOUT"), {
+          code: "ETIMEDOUT",
+        }),
+        signal: "SIGTERM" as const,
+      },
+      /^the elevation probe answered exit null \(ETIMEDOUT, SIGTERM\)/,
+    ],
+    [
+      "a host that cannot be spawned",
+      {
+        status: null,
+        stdout: undefined,
+        error: Object.assign(new Error("spawnSync powershell.exe ENOENT"), { code: "ENOENT" }),
+      },
+      /^the elevation probe answered exit null \(ENOENT\), stdout "": not exactly True or False$/,
+    ],
+    ["a non-zero status", { status: 1, stdout: "True" }, /^the elevation probe answered exit 1\b/],
+    [
+      "other text",
+      { status: 0, stdout: "WARNING: x\r\nTrue" },
+      /^the elevation probe answered exit 0\b/,
+    ],
+    ["no output", { status: 0, stdout: "" }, /^the elevation probe answered exit 0\b/],
+  ])("refuses %s, naming the status — never a silent 'not elevated'", (_, probe, says) => {
+    expect(() => elevationVerdict(probe)).toThrow(says);
+  });
+});
+
 describe.skipIf(process.platform !== "win32")(
   "deploy PowerShell scripts on win32 (the pinned Windows PowerShell 5.1 host; a .ps1 runs under -ExecutionPolicy Bypass, the client default refuses script files)",
   () => {
@@ -246,10 +322,17 @@ describe.skipIf(process.platform !== "win32")(
     let junction = "";
     const denied: string[] = [];
 
+    let rowStart = 0;
+
+    beforeEach(() => {
+      rowStart = performance.now();
+    });
+
     function runPs1(
       script: string,
       args: string[],
-    ): { status: number | null; stdout: string; stderr: string } {
+    ): { status: number | null; stdout: string; stderr: string; measured: string } {
+      const started = performance.now();
       const run = spawnSync(
         POWERSHELL,
         [
@@ -261,10 +344,18 @@ describe.skipIf(process.platform !== "win32")(
           resolve(deployRoot, script),
           ...args,
         ],
-        { shell: false, windowsHide: true, encoding: "utf8", timeout: 30_000 },
+        {
+          shell: false,
+          windowsHide: true,
+          encoding: "utf8",
+          timeout: PS1_TIMEOUT_MS,
+          env: recipeEnvironment(),
+        },
       );
-      expect(run.error).toBeUndefined();
-      return { status: run.status, stdout: run.stdout, stderr: run.stderr };
+      const ended = performance.now();
+      const measured = `${script}: exit ${String(run.status)}, error ${(run.error as NodeJS.ErrnoException | undefined)?.code ?? "none"}, the spawn ${String(Math.round(ended - started))} ms, the row ${String(Math.round(ended - rowStart))} ms`;
+      expect(run.error, measured).toBeUndefined();
+      return { status: run.status, stdout: run.stdout, stderr: run.stderr, measured };
     }
 
     beforeAll(() => {
@@ -278,11 +369,11 @@ describe.skipIf(process.platform !== "win32")(
           "-NoProfile",
           "-NonInteractive",
           "-Command",
-          "(New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
+          "[System.Console]::Out.Write([System.Security.Principal.WindowsPrincipal]::new([System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))",
         ],
         { shell: false, windowsHide: true, encoding: "utf8", timeout: 30_000 },
       );
-      elevated = probe.stdout.trim() === "True";
+      elevated = elevationVerdict(probe);
     });
 
     afterAll(() => {
@@ -335,12 +426,16 @@ describe.skipIf(process.platform !== "win32")(
       },
     );
 
-    it.each(PS_SCRIPTS)("%s -Help prints its usage and exits 0", (script) => {
-      const run = runPs1(script, ["-Help"]);
-      expect(run.status).toBe(0);
-      expect(run.stdout).toContain(`Usage: ${script.slice("windows/".length)}`);
-      expect(run.stderr).toBe("");
-    });
+    it.each(PS_SCRIPTS)(
+      "%s -Help prints its usage and exits 0",
+      (script) => {
+        const run = runPs1(script, ["-Help"]);
+        expect(run.status, run.measured).toBe(0);
+        expect(run.stdout).toContain(`Usage: ${script.slice("windows/".length)}`);
+        expect(run.stderr, run.measured).toBe("");
+      },
+      120_000,
+    );
 
     it("register-service.ps1 -DryRun prints the startup task: the memory session, the DPAPI-sealed key, no time limit — and registers nothing", () => {
       const programData = join(root, "ProgramData");
@@ -360,8 +455,8 @@ describe.skipIf(process.platform !== "win32")(
         "-IssueToken",
         spec,
       ]);
-      expect(run.stderr).toBe("");
-      expect(run.status).toBe(0);
+      expect(run.stderr, run.measured).toBe("");
+      expect(run.status, run.measured).toBe(0);
       const vault = join(base, "vault");
       const argument = [
         join(cli, "dist", "index.js"),
@@ -394,7 +489,7 @@ describe.skipIf(process.platform !== "win32")(
         "dry run: nothing registered",
       ]);
       expect(existsSync(base)).toBe(false);
-    });
+    }, 120_000);
 
     it.each([
       {
@@ -466,11 +561,12 @@ describe.skipIf(process.platform !== "win32")(
       "$script refuses ($says) with exit 2 before its administrator check",
       ({ script, args, says }) => {
         const run = runPs1(`windows/${script}`, args());
-        expect(run.status).toBe(2);
+        expect(run.status, run.measured).toBe(2);
         expect(run.stderr.startsWith(`${script}: `)).toBe(true);
         expect(run.stderr).toContain(says);
         expect(run.stderr).not.toContain("must run elevated");
       },
+      120_000,
     );
 
     // Elevated, the scripts pass their administrator check and would create the account, the
@@ -492,12 +588,14 @@ describe.skipIf(process.platform !== "win32")(
         ],
       ] as const) {
         const run = runPs1(`windows/${script}`, [...args]);
-        expect(run.status, script).toBe(1);
-        expect(run.stderr).toBe(`${script}: must run elevated (an Administrator PowerShell)\r\n`);
+        expect(run.status, run.measured).toBe(1);
+        expect(run.stderr, run.measured).toBe(
+          `${script}: must run elevated (an Administrator PowerShell)\r\n`,
+        );
       }
       expect(existsSync(base)).toBe(false);
       expect(existsSync(join(root, "unlock.key.dpapi"))).toBe(false);
-    });
+    }, 300_000);
 
     // Elevated, the layout is readable and the scripts go on past their checks: like the row above, the desktop's.
     it("on the layout the recipe leaves (harpoc and harpoc\\vault open to SYSTEM and Administrators alone) install-two-identity.ps1 and enroll-unlock-key.ps1 stop at their administrator check for a non-elevated user (exit 1, no PowerShell text)", (ctx) => {
@@ -537,10 +635,12 @@ describe.skipIf(process.platform !== "win32")(
         ],
       ] as const) {
         const run = runPs1(`windows/${script}`, [...args]);
-        expect(run.status, script).toBe(1);
-        expect(run.stderr).toBe(`${script}: must run elevated (an Administrator PowerShell)\r\n`);
+        expect(run.status, run.measured).toBe(1);
+        expect(run.stderr, run.measured).toBe(
+          `${script}: must run elevated (an Administrator PowerShell)\r\n`,
+        );
       }
-    });
+    }, 360_000);
 
     it("install-two-identity.ps1 refuses an existing harpoc directory that is a junction (a reparse point) as a usage error before its administrator check", () => {
       const programData = join(root, "ProgramData-junction");
@@ -551,12 +651,12 @@ describe.skipIf(process.platform !== "win32")(
       symlinkSync(target, link, "junction");
       junction = link;
       const run = runPs1("windows/install-two-identity.ps1", ["-ProgramData", programData]);
-      expect(run.stderr).toBe(
+      expect(run.stderr, run.measured).toBe(
         `install-two-identity.ps1: ${link} is a reparse point (junction or symbolic link); remove it\r\n`,
       );
-      expect(run.status).toBe(2);
+      expect(run.status, run.measured).toBe(2);
       expect(readdirSync(target)).toEqual([]);
-    });
+    }, 120_000);
 
     it("install-two-identity.ps1 refuses an existing harpoc that is a file, not a directory, as a usage error before its administrator check", () => {
       const programData = join(root, "ProgramData-file");
@@ -564,10 +664,10 @@ describe.skipIf(process.platform !== "win32")(
       const file = join(programData, "harpoc");
       writeFileSync(file, "");
       const run = runPs1("windows/install-two-identity.ps1", ["-ProgramData", programData]);
-      expect(run.stderr).toBe(
+      expect(run.stderr, run.measured).toBe(
         `install-two-identity.ps1: ${file} exists and is not a directory; remove it\r\n`,
       );
-      expect(run.status).toBe(2);
-    });
+      expect(run.status, run.measured).toBe(2);
+    }, 120_000);
   },
 );

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createPrivateKey, randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,7 +10,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
 import type { VaultError } from "@harpoc/shared";
 import { registerAgents } from "../__fixtures__/engine-seams.js";
+import { WINDOWS_PIPE_CONSUMER_RIGHTS } from "../session/owner-only.js";
 import { VaultEngine } from "../vault-engine.js";
+import { system32Path } from "../win32-paths.js";
 import { resolveExecutable } from "./allowlist.js";
 import {
   SSH_AGENT_FAILURE,
@@ -120,6 +122,7 @@ describe.skipIf(SSH === null)(
     let socket: AgentSocketServer | undefined;
     let strangerSocket: AgentSocketServer | undefined;
     let restrictedSocket: AgentSocketServer | undefined;
+    let reducedSocket: AgentSocketServer | undefined;
     const ids: Record<string, string> = {};
     const blobs: Record<string, Buffer> = {};
     const events: AuthEvent[] = [];
@@ -181,6 +184,50 @@ describe.skipIf(SSH === null)(
         kh.dispose();
         identity.dispose();
       });
+    }
+
+    /** The real `ssh-add -l` beside the resolved ssh, on `authSock`: the agent's listing, nothing signed. */
+    function runSshAdd(
+      authSock: string,
+    ): Promise<{ exit: number | null; stdout: string; stderr: string }> {
+      return new Promise((resolve, reject) => {
+        const child = spawn(join(dirname(SSH as string), "ssh-add.exe"), ["-l"], {
+          env: buildSshEnv(authSock, []),
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        const timer = setTimeout(() => child.kill(), 25_000);
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
+        child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+        child.on("error", reject);
+        child.on("close", (code) => {
+          clearTimeout(timer);
+          outputs.push(stdout, stderr);
+          resolve({ exit: code, stdout, stderr });
+        });
+      });
+    }
+
+    /** As the pipe's owner (WRITE_DAC is the owner's own), remove every DACL entry but `sid`'s; the DACL left, in SDDL. */
+    function keepOnlyEntry(path: string, sid: string): string {
+      const name = path.slice("\\\\.\\pipe\\".length);
+      const res = spawnSync(
+        system32Path("WindowsPowerShell", "v1.0", "powershell.exe"),
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "$ErrorActionPreference='Stop';$s=[System.Security.Principal.SecurityIdentifier];" +
+            `$q=[System.IO.Pipes.NamedPipeClientStream]::new('.','${name}',[System.IO.Pipes.PipeAccessRights]'ReadData, ReadPermissions, ChangePermissions',[System.IO.Pipes.PipeOptions]::None,[System.Security.Principal.TokenImpersonationLevel]::Identification,[System.IO.HandleInheritability]::None);` +
+            "$q.Connect(5000);try{$a=$q.GetAccessControl();" +
+            `foreach($r in @($a.GetAccessRules($true,$true,$s))){if($r.IdentityReference.Value -ne '${sid}'){[void]$a.RemoveAccessRuleSpecific($r)}};` +
+            "$q.SetAccessControl($a);[System.Console]::Out.Write($q.GetAccessControl().GetSecurityDescriptorSddlForm('Access'))}finally{$q.Dispose()}",
+        ],
+        { encoding: "utf8", shell: false, windowsHide: true, timeout: 15_000 },
+      );
+      expect(res.status).toBe(0);
+      return res.stdout;
     }
 
     beforeAll(async () => {
@@ -295,6 +342,7 @@ describe.skipIf(SSH === null)(
         socket?.stop(),
         strangerSocket?.stop(),
         restrictedSocket?.stop(),
+        reducedSocket?.stop(),
         engine?.destroy(),
         new Promise<void>((resolve) => {
           if (sshServer) sshServer.close(() => resolve());
@@ -521,6 +569,32 @@ describe.skipIf(SSH === null)(
         expect(rows[0]?.detail).toMatchObject({ context: "ssh_agent", host: "127.0.0.1" });
       },
       30_000,
+    );
+
+    it.runIf(process.platform === "win32")(
+      "win32 only (the consumer's grant decides): the DACL the server sets for the consumer (BUILTIN\\Users standing in), reduced to the consumer's entry alone, lets the real ssh-add list both keys through the pipe",
+      async () => {
+        reducedSocket = await AgentSocketServer.start({
+          socketPath: socketPath(CONSUMER),
+          consumer: CONSUMER,
+          engine: vault(),
+          onError: (err) => outputs.push(`${err.code}: ${err.message}`),
+          win32ConsumerSid: "S-1-5-32-545",
+        });
+        try {
+          expect(keepOnlyEntry(reducedSocket.socketPath, "S-1-5-32-545")).toBe(
+            `D:P(A;;0x${WINDOWS_PIPE_CONSUMER_RIGHTS.toString(16)};;;BU)`,
+          );
+          const r = await runSshAdd(reducedSocket.socketPath);
+
+          expect(r.exit, r.stderr).toBe(0);
+          expect(r.stdout).toContain("secret://deploy-ed");
+          expect(r.stdout).toContain("secret://deploy-ec");
+        } finally {
+          await reducedSocket.stop();
+        }
+      },
+      60_000,
     );
 
     it("no audit row, no ssh output and no onError report carries a private key or a session identifier", () => {

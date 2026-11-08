@@ -167,7 +167,9 @@ describe.runIf(process.platform === "win32")(
       mkdirSync(consumer);
       restrict(consumer, "/grant:r", `*${USERS_SID}:(OI)(CI)(RX)`);
       const acl = listWindowsAclSync(consumer);
-      expect(acl.owner).toBe(acl.user);
+      // An elevated administrator's new directory is owned by Administrators (the GitHub runners run
+      // elevated), a standard token's by the account; judgeWindowsDirAcl trusts both owners.
+      expect([acl.user, "S-1-5-32-544"]).toContain(acl.owner);
       const bySid = new Map(acl.rules.map((rule) => [rule.sid, rule]));
       expect([...bySid.keys()].sort()).toEqual(
         [acl.user, "S-1-5-18", "S-1-5-32-544", USERS_SID].sort(),
@@ -271,7 +273,7 @@ describe.runIf(process.platform === "win32")("restrictWindowsPipeToAccount on wi
       new Map([
         ["S-1-5-18", 0x1f019f],
         ["S-1-5-32-544", 0x1f019f],
-        [USERS_SID, WINDOWS_PIPE_CONSUMER_RIGHTS],
+        [USERS_SID, 0x12019b],
         [acl.user, 0x1f019f],
       ]),
     );
@@ -290,7 +292,7 @@ describe.runIf(process.platform === "win32")("restrictWindowsPipeToAccount on wi
 
     const sddl = pipeSddl(path);
     expect(sddl.startsWith("D:P")).toBe(true);
-    expect(sddl).toContain("(A;;0x120083;;;BU)");
+    expect(sddl).toContain("(A;;0x12019b;;;BU)");
     expect(sddl).not.toContain(";;;WD)");
     expect(sddl).not.toContain(";;;AN)");
   });
@@ -314,13 +316,39 @@ describe.runIf(process.platform === "win32")("restrictWindowsPipeToAccount on wi
   });
 });
 
+describe.runIf(process.platform === "win32")("WINDOWS_PIPE_CONSUMER_RIGHTS on win32", () => {
+  it("a pipe whose protected DACL grants this account the consumer rights alone opens GENERIC_READ | GENERIC_WRITE and round-trips a byte", () => {
+    const name = `harpoc-owner-only-${randomBytes(6).toString("hex")}`;
+    const res = spawnSync(
+      system32Path("WindowsPowerShell", "v1.0", "powershell.exe"),
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$ErrorActionPreference='Stop';" +
+          "$sec=[System.IO.Pipes.PipeSecurity]::new();$sec.SetAccessRuleProtection($true,$false);" +
+          `$sec.AddAccessRule([System.IO.Pipes.PipeAccessRule]::new([System.Security.Principal.WindowsIdentity]::GetCurrent().User,[System.IO.Pipes.PipeAccessRights]${String(WINDOWS_PIPE_CONSUMER_RIGHTS)},'Allow'));` +
+          `$srv=[System.IO.Pipes.NamedPipeServerStream]::new('${name}',[System.IO.Pipes.PipeDirection]::InOut,1,[System.IO.Pipes.PipeTransmissionMode]::Byte,[System.IO.Pipes.PipeOptions]::Asynchronous,4096,4096,$sec);` +
+          "try{$w=$srv.WaitForConnectionAsync();" +
+          `$cli=[System.IO.Pipes.NamedPipeClientStream]::new('.','${name}',[System.IO.Pipes.PipeDirection]::InOut);` +
+          "try{$cli.Connect(5000);[void]$w.Wait(5000);$cli.WriteByte(42);$cli.Flush();$srv.WriteByte($srv.ReadByte()+1);$srv.Flush();[System.Console]::Out.Write('round trip '+$cli.ReadByte())}" +
+          "catch{$e=$_.Exception;while($null -ne $e.InnerException){$e=$e.InnerException};[System.Console]::Out.Write($e.GetType().Name)}" +
+          "finally{$cli.Dispose()}}finally{$srv.Dispose()}",
+      ],
+      { encoding: "utf8", shell: false, windowsHide: true, timeout: 15_000 },
+    );
+    expect(res.status).toBe(0);
+    expect(res.stdout).toBe("round trip 43");
+  });
+});
+
 describe("restrictWindowsPipeToAccount's read-back check (the host's output stubbed)", () => {
   const PIPE = "\\\\.\\pipe\\harpoc-owner-only-read-back";
   const ME = "S-1-5-21-1000-2000-3000-1001";
   const SYSTEM_RULE = "rule 0 S-1-5-18 001F019F 0 0 0";
   const ADMINISTRATORS_RULE = "rule 0 S-1-5-32-544 001F019F 0 0 0";
   const OWNER_RULE = `rule 0 ${ME} 001F019F 0 0 0`;
-  const CONSUMER_RULE = `rule 0 ${USERS_SID} 00120083 0 0 0`;
+  const CONSUMER_RULE = `rule 0 ${USERS_SID} 0012019B 0 0 0`;
 
   afterEach(() => {
     vi.mocked(runKeystoreHelper).mockReset();

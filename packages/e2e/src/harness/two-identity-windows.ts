@@ -56,6 +56,9 @@ export const LIST_DIRECTORY =
 export const READ_FILE = "process.stdout.write(require('node:fs').readFileSync(process.argv[1]))";
 export const EXISTS_PROBE = "process.exit(require('node:fs').existsSync(process.argv[1]) ? 0 : 1)";
 export const REMOVE_FILE = "require('node:fs').rmSync(process.argv[1], { force: true })";
+/** `rm -rf` as the vault account: a file its owner-only access list keeps from the runner (the sealed key) goes with the tree. */
+export const REMOVE_TREE =
+  "require('node:fs').rmSync(process.argv[1], { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })";
 /** A program's own report of what it was given: the agent's view of itself, names of variables and its argument vector. */
 export const REPORT_SELF =
   "process.stdout.write(JSON.stringify({ env: process.env, argv: process.argv.slice(1) }))";
@@ -63,6 +66,31 @@ export const REPORT_SELF =
 /** A one-liner as either account runs it: its own arguments first (each script reads `process.argv[1]` at most), the marker last, so the teardown's sweep reaches it. */
 export function nodeOneLiner(script: string, ...args: string[]): string[] {
   return [process.execPath, "-e", script, ...args, B7_MARKER];
+}
+
+/** The agent's driver run from its file (`AGENT_DRIVER_WINDOWS` on a command line is over the 1024 characters `CreateProcessWithLogonW` takes), the marker last. */
+export function agentDriverArgv(driverFile: string): string[] {
+  return [process.execPath, driverFile, B7_MARKER];
+}
+
+/** The teardown's removal of the run's root: as the vault account first (`removeAsVault`, the sealed key is its alone) — a failure that leaves the root refuses there, naming its exit code — then as the runner for anything left. */
+export async function removeVaultRoot(
+  root: string,
+  vaultUser: string,
+  removeAsVault: () => Promise<ChildRun>,
+): Promise<void> {
+  const asOwner = await removeAsVault();
+  if (asOwner.code !== 0 && existsSync(root)) {
+    throw new Error(
+      `${root}: removing it as ${vaultUser} exited ${String(asOwner.code)}, and the runner cannot remove what the vault account's access list keeps (the sealed key)`,
+    );
+  }
+  rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  if (existsSync(root)) {
+    throw new Error(
+      `${root} outlived its removal (as ${vaultUser}: exit ${String(asOwner.code)}; then as the runner)`,
+    );
+  }
 }
 
 /** The built CLI as either account runs it: the marker as node's own `--title`, which the CLI's parser never sees. */
@@ -301,9 +329,13 @@ export async function startTwoAccountDeployment(
         for (const pid of left) await stopAs(vault, pid);
         if (left.length > 0) throw new Error("a process of the vault account outlived the suite");
       });
-      steps.push(async () => {
-        rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-      });
+      steps.push(() =>
+        removeVaultRoot(root, vault.user, () =>
+          asVault(nodeOneLiner(REMOVE_TREE, root), {
+            label: `removing ${root} as ${vault.user}`,
+          }),
+        ),
+      );
     }
     if (echo !== undefined) steps.push(() => echo.close());
     if (sshServer !== undefined) steps.push(() => sshServer.close());
@@ -347,6 +379,8 @@ export async function startTwoAccountDeployment(
       agentFiles.identity,
       readFileSync(win32.join(KEYS_DIR, "out", "client_ed25519.pub")),
     );
+    const driverFile = win32.join(publicDir, "driver.cjs");
+    writeFileSync(driverFile, AGENT_DRIVER_WINDOWS);
 
     const root = mkdtempSync(win32.join(options.vaultRoot, `${B7_MARKER}-`));
     held.root = root;
@@ -569,7 +603,7 @@ export async function startTwoAccountDeployment(
       asVault,
       asAgent,
       async driveAgent(commands, timeoutMs = 90_000): Promise<DriverResult[]> {
-        const run = await asAgent(nodeOneLiner(AGENT_DRIVER_WINDOWS), {
+        const run = await asAgent(agentDriverArgv(driverFile), {
           env: agentEnv,
           stdin: JSON.stringify({ commands }),
           timeoutMs,

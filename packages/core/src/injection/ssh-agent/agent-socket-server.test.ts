@@ -476,7 +476,7 @@ describe.runIf(process.platform === "win32")("AgentSocketServer on Windows", () 
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        `$c=New-Object System.IO.Pipes.NamedPipeClientStream('.','${name}',[System.IO.Pipes.PipeAccessRights]'ReadData, ReadPermissions',[System.IO.Pipes.PipeOptions]::None,[System.Security.Principal.TokenImpersonationLevel]::Identification,[System.IO.HandleInheritability]::None);$c.Connect(5000);[System.Console]::Out.WriteLine($c.GetAccessControl().GetSecurityDescriptorSddlForm('Access'));$c.Dispose()`,
+        `$c=[System.IO.Pipes.NamedPipeClientStream]::new('.','${name}',[System.IO.Pipes.PipeAccessRights]'ReadData, ReadPermissions',[System.IO.Pipes.PipeOptions]::None,[System.Security.Principal.TokenImpersonationLevel]::Identification,[System.IO.HandleInheritability]::None);$c.Connect(5000);[System.Console]::Out.WriteLine($c.GetAccessControl().GetSecurityDescriptorSddlForm('Access'));$c.Dispose()`,
       ],
       { encoding: "utf8", shell: false, windowsHide: true, timeout: 15_000 },
     );
@@ -498,7 +498,7 @@ describe.runIf(process.platform === "win32")("AgentSocketServer on Windows", () 
     const server = await start({ win32ConsumerSid: "S-1-5-32-545" });
     const dacl = pipeDacl(server.socketPath);
     expect(dacl.startsWith("D:P")).toBe(true);
-    expect(dacl).toContain("(A;;0x120083;;;BU)");
+    expect(dacl).toContain("(A;;0x12019b;;;BU)");
     expect(dacl).toContain("(A;;0x1f019f;;;SY)");
     expect(dacl).toContain("(A;;0x1f019f;;;BA)");
     expect(dacl).not.toContain(";;;WD)");

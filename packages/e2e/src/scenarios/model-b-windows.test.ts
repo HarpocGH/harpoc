@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { HELD_OUTCOMES, LEAKED_OUTCOMES } from "../../scripts/recheck.mjs";
 import { PREREGISTRATION_FILE_B } from "../evidence/paths.js";
 import { PREREGISTRATION_FILE_B_WINDOWS } from "../evidence/paths-windows.js";
@@ -7,7 +7,14 @@ import {
   loadExpectations,
   validateExpectationSet,
 } from "../evidence/preregistration.js";
-import { MODEL_B_WINDOWS_SCENARIOS } from "./model-b-windows.js";
+import type { ChildRun } from "../harness/child.js";
+import { SSH2_EXEC_REPLY } from "../harness/ssh2-server.js";
+import type { SshAuthEvent } from "../harness/ssh2-server.js";
+import type { AuditRow } from "../harness/two-identity.js";
+import type { TwoAccountDeployment } from "../harness/two-identity-windows.js";
+import { MODEL_B_WINDOWS_SCENARIOS, captureCalls } from "./model-b-windows.js";
+import type { ModelBWindowsScenario } from "./model-b-windows.js";
+import { Outcome } from "./scenario.js";
 
 /**
  * The Windows ids (RE-B7-3 as ruled) as a literal: a list derived from the
@@ -87,5 +94,93 @@ describe("the model-B Windows scenario table and its pre-registration", () => {
       "b-win-two-account-inventory": "proxy+ssh_agent",
       "b-win-negative-same-account": "process-inventory",
     });
+  });
+});
+
+/**
+ * The pipe row on a stubbed deployment: the agent's ssh is a canned run and the
+ * audit trail a canned list, so the row's verdict and its diagnostic are read
+ * without accounts (`systemPaths` needs a `SystemRoot`, stubbed off Windows).
+ */
+describe("the pipe row's verdict and its diagnostic (a stubbed deployment)", () => {
+  const AGENT = "agent1";
+  const API_KEY = "unit-fixture-api-key-7c2b";
+  const PASSWORD_NEEDLE = "unit-fixture-agent-pw-9d1e";
+  const pipeRow = MODEL_B_WINDOWS_SCENARIOS.find(
+    (r) => r.scenario === "b-win-agent-pipe-exposure",
+  ) as ModelBWindowsScenario;
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  function stubbed(run: ChildRun, after: AuditRow[], event?: SshAuthEvent): TwoAccountDeployment {
+    const events: SshAuthEvent[] = [];
+    let reads = 0;
+    vi.stubEnv("SystemRoot", "C:\\Windows");
+    return {
+      agentUser: AGENT,
+      consumer: { agentPipe: `\\\\.\\pipe\\harpoc-${AGENT}-ssh-agent` },
+      agentFiles: { knownHosts: "C:/b7/known_hosts", identity: "C:/b7/id.pub" },
+      sshServer: { events, port: 2222 },
+      credentials: { all: [API_KEY] },
+      auditRows: async () => (reads++ === 0 ? [] : after),
+      asAgent: async () => {
+        if (event !== undefined) events.push(event);
+        return run;
+      },
+    } as unknown as TwoAccountDeployment;
+  }
+
+  it("lacking its proof, rethrows the same message with ssh's exit code and its stderr's last 20 lines, redacted as the row's capture redacts", async () => {
+    const lines = Array.from({ length: 25 }, (_, i) => `debug1: line ${String(i + 1)}`);
+    const stderr = [
+      ...lines,
+      `debug1: an echo of ${PASSWORD_NEEDLE}`,
+      "Permission denied (publickey).",
+    ].join("\r\n");
+    const d = stubbed({ code: 255, stdout: "", stderr: `${stderr}\r\n` }, []);
+    let thrown: unknown;
+    try {
+      await pipeRow.observe(d, captureCalls(API_KEY, PASSWORD_NEEDLE));
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    const message = (thrown as Error).message;
+    expect(
+      message.startsWith(
+        "arm is not discriminating: b-win-agent-pipe-exposure lacks its proof (completed, bound, signatureVerified, attributed)",
+      ),
+    ).toBe(true);
+    expect(message.includes("ssh exited 255")).toBe(true);
+    expect(message.includes(PASSWORD_NEEDLE)).toBe(false);
+    expect(
+      message.includes("debug1: an echo of [CREDENTIAL]\nPermission denied (publickey)."),
+    ).toBe(true);
+    expect(message.includes("debug1: line 8\n")).toBe(true);
+    expect(message.includes("debug1: line 7\n")).toBe(false);
+  });
+
+  it("on its proof the row is OPAQUE, as before", async () => {
+    const used: AuditRow = {
+      id: 7,
+      event_type: "secret.use",
+      success: true,
+      principal_id: AGENT,
+      secret_id: "s1",
+      detail: {
+        context: "ssh_agent",
+        interface: "ssh_agent",
+        host: "127.0.0.1",
+        key_type: "ssh-ed25519",
+      },
+    };
+    const d = stubbed(
+      { code: 0, stdout: `${SSH2_EXEC_REPLY}\n`, stderr: "debug1: bound agent to hostkey\r\n" },
+      [used],
+      { user: "harpoc-b7", method: "publickey", signed: true, verified: true },
+    );
+    expect(await pipeRow.observe(d, captureCalls(API_KEY))).toBe(Outcome.OPAQUE);
   });
 });

@@ -1,7 +1,7 @@
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   AGENT_DRIVER_WINDOWS,
   B7_MARKER,
@@ -9,7 +9,9 @@ import {
   LIST_DIRECTORY,
   READ_FILE,
   REMOVE_FILE,
+  REMOVE_TREE,
   REPORT_SELF,
+  agentDriverArgv,
   agentTools,
   cliArgv,
   consumerPathsWindows,
@@ -18,6 +20,7 @@ import {
   defaultRuntimeDirWindows,
   forwardSlashes,
   nodeOneLiner,
+  removeVaultRoot,
   sshArgsWindows,
   startTwoAccountDeployment,
 } from "./two-identity-windows.js";
@@ -148,7 +151,6 @@ describe("what either account runs carries the marker, so the teardown's sweep r
       REPORT_SELF,
       TOKEN_FILE_REQUEST,
       WRITE_STDIN_TO_FILE,
-      AGENT_DRIVER_WINDOWS,
     ]) {
       expect(nodeOneLiner(script, "C:\\x")).toEqual([
         process.execPath,
@@ -160,6 +162,22 @@ describe("what either account runs carries the marker, so the teardown's sweep r
     }
   });
 
+  it("runs the agent's driver from its file in the agent's own directory, the marker last (its text is over the 1024 characters CreateProcessWithLogonW takes)", () => {
+    const driverFile = "C:\\ProgramData\\harpoc-b7-public\\harpoc-b7-agent-ab12\\driver.cjs";
+    expect(agentDriverArgv(driverFile)).toEqual([process.execPath, driverFile, B7_MARKER]);
+  });
+
+  it("removes the run's root as the vault account with one node one-liner — rmSync in the X-1 form on its argument, the marker last", () => {
+    const root = "C:\\ProgramData\\harpoc\\vault\\harpoc-b7-ab12";
+    expect(nodeOneLiner(REMOVE_TREE, root)).toEqual([
+      process.execPath,
+      "-e",
+      "require('node:fs').rmSync(process.argv[1], { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })",
+      root,
+      B7_MARKER,
+    ]);
+  });
+
   it("runs the built CLI with the marker as node's own --title, which the CLI's parser never sees", () => {
     expect(cliArgv("C:\\cli\\dist\\index.js", ["proxy", "env"])).toEqual([
       process.execPath,
@@ -168,6 +186,43 @@ describe("what either account runs carries the marker, so the teardown's sweep r
       "proxy",
       "env",
     ]);
+  });
+});
+
+/**
+ * The root's removal with the vault account's run stubbed: a scratch directory
+ * this process owns stands in for the vault-owned root, so whether the
+ * runner's `rmSync` ran is read from whether the directory is gone.
+ */
+describe("removeVaultRoot (the vault account's run stubbed)", () => {
+  let root = "";
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "harpoc-b7-root-"));
+    writeFileSync(join(root, "unlock.key.dpapi"), "unit-fixture-not-a-blob");
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  it("a removal as the vault account that fails and leaves the root refuses before the runner's rmSync, naming the vault account and its exit code", async () => {
+    let thrown: unknown;
+    try {
+      await removeVaultRoot(root, "harpoc", async () => ({ code: 1, stdout: "", stderr: "" }));
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe(
+      `${root}: removing it as harpoc exited 1, and the runner cannot remove what the vault account's access list keeps (the sealed key)`,
+    );
+    expect(existsSync(join(root, "unlock.key.dpapi"))).toBe(true);
+  });
+
+  it("after a removal as the vault account that succeeded, the runner removes what is left and nothing is thrown", async () => {
+    await removeVaultRoot(root, "harpoc", async () => ({ code: 0, stdout: "", stderr: "" }));
+    expect(existsSync(root)).toBe(false);
   });
 });
 
