@@ -154,10 +154,12 @@ describe.skipIf(process.platform === "win32")(
       ]);
 
       // No port and no /health: the readiness signal is the socket line the CLI prints once
-      // every consumer socket is bound.
-      daemon = startCliServer(["server", "start", "--ssh-agent", "--runtime-dir", runtimeDir], {
-        vaultDir,
-      });
+      // every consumer socket is bound. --ssh-agent runs in the memory session (B5): the daemon
+      // loads the session init wrote once and leaves it to the CLI below.
+      daemon = startCliServer(
+        ["server", "start", "--ssh-agent", "--runtime-dir", runtimeDir, "--session", "memory"],
+        { vaultDir },
+      );
       await daemon.waitForStderr(SSH_AGENT_READY);
     }, 180_000);
 

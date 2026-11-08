@@ -96,6 +96,12 @@ export type {
 export { AgentRegistry } from "./access/agent-registry.js";
 export { PolicyEngine } from "./access/policy-engine.js";
 export type { GrantPolicyInput, PolicyPrincipal } from "./access/policy-engine.js";
+export { TokenRotationScheduler } from "./access/token-rotation.js";
+export type {
+  TokenRotationEngine,
+  TokenRotationSchedulerOptions,
+  TokenRotationSpec,
+} from "./access/token-rotation.js";
 
 // Secrets
 export { SecretManager } from "./secrets/secret-manager.js";

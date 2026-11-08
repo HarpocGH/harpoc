@@ -3,6 +3,7 @@ import { basename, dirname, join } from "node:path";
 import { Option } from "commander";
 import type { Command } from "commander";
 import {
+  ErrorCode,
   MAX_TOKEN_TTL_MS,
   Permission,
   VaultError,
@@ -15,6 +16,7 @@ import { handleError } from "../utils/output.js";
 import { parseIntOption } from "../utils/options.js";
 import { DEFAULT_PROXY_PORT, MAX_PORT, MIN_PORT } from "../utils/option-bounds.js";
 import { assertRuntimeDir, consumerSocketPaths, resolveRuntimeDir } from "../utils/runtime-dir.js";
+import { assertIssueTokenFile, parseIssueTokenSpecs } from "../utils/issue-token-spec.js";
 
 function resolveUiDistDir(): string {
   const require = createRequire(import.meta.url);
@@ -88,6 +90,17 @@ export function registerServerCommand(program: Command): void {
       "--unlock-credential <name>",
       "Unlock the vault at start from the systemd credential <name> in $CREDENTIALS_DIRECTORY (LoadCredentialEncrypted= in deploy/systemd/harpoc.service)",
     )
+    .option(
+      "--session <mode>",
+      "Session mode: file runs the daemon on the vault's session file (sealed after 15 min idle or 24 h); memory keeps the keys from the unlock in this process alone — no session file, no idle seal, locked by POST /api/v1/vault/lock or SIGTERM (required by --issue-token, --unlock-credential, --unlock-key-file, --proxy and --ssh-agent)",
+      "file",
+    )
+    .option(
+      "--issue-token <spec>",
+      "Mint a consumer's token into a file and re-mint it at half its TTL (repeatable; requires --session memory): agent=<name>,file=<absolute path>,scope=<permission>[+<permission>…],secrets=<pattern>[+<pattern>…][,ttl=<minutes, 1-1440, default 1440>]",
+      collect,
+      [],
+    )
     .action(
       async (
         opts: {
@@ -112,6 +125,8 @@ export function registerServerCommand(program: Command): void {
           sshAgent?: boolean;
           unlockKeyFile?: string;
           unlockCredential?: string;
+          session: string;
+          issueToken: string[];
         },
         cmd: Command,
       ) => {
@@ -151,6 +166,31 @@ export function registerServerCommand(program: Command): void {
               "Error: --unlock-key-file and --unlock-credential exclude each other: one unlock key source per start.",
             );
             process.exit(1);
+          }
+          if (opts.session !== "memory" && opts.session !== "file") {
+            throw VaultError.invalidInput(
+              `--session: ${JSON.stringify(opts.session)} is not a session mode (memory or file)`,
+            );
+          }
+          // Deployment model B runs on the memory session only (design M3 § Administration): a
+          // daemon on a session file seals at its expiry or when an administrator's unlock
+          // replaces the file.
+          if (opts.session === "file") {
+            for (const [flag, present] of [
+              ["--issue-token", opts.issueToken.length > 0],
+              ["--unlock-credential", opts.unlockCredential !== undefined],
+              ["--unlock-key-file", opts.unlockKeyFile !== undefined],
+              ["--proxy", opts.proxy === true],
+              ["--ssh-agent", opts.sshAgent === true],
+            ] as const) {
+              if (present) throw VaultError.sessionModeConflict(flag);
+            }
+          }
+          const rotationSpecs = parseIssueTokenSpecs(opts.issueToken);
+          if (rotationSpecs.length > 0 && process.platform === "win32") {
+            throw VaultError.invalidInput(
+              "--issue-token: the token file's access list on Windows is not built (deployment model B on Windows is a later tranche)",
+            );
           }
           // An ambient $RUNTIME_DIRECTORY is the default only for a
           // per-consumer feature (--proxy's and --ssh-agent's sockets): a unit's
@@ -332,6 +372,7 @@ export function registerServerCommand(program: Command): void {
               `${runtimeDir.source}: --ssh-agent found no consumer directory under ${runtimeDir.path} (one per agent user: deploy/linux/install-two-identity.sh)`,
             );
           }
+          for (const { file } of rotationSpecs) assertIssueTokenFile(file);
 
           const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir as string | undefined);
           // The unlock key is read last, after every refusal above — a bad source never costs a
@@ -352,11 +393,20 @@ export function registerServerCommand(program: Command): void {
             const { readUnlockCredential } = await import("@harpoc/core");
             unlockKey = await readUnlockCredential(opts.unlockCredential, process.env);
           }
+          // Model A's calls stay byte-identical: the options object in memory mode only.
+          const engineOptions: [] | [{ sessionMode: "memory" }] =
+            opts.session === "memory" ? [{ sessionMode: "memory" }] : [];
           engine =
             unlockKey === undefined
-              ? await loadUnlockedEngine(vaultDir)
-              : await unlockEngineWithKey(vaultDir, unlockKey);
+              ? await loadUnlockedEngine(vaultDir, ...engineOptions)
+              : await unlockEngineWithKey(vaultDir, unlockKey, ...engineOptions);
+          if (opts.session === "memory") {
+            console.error(
+              "[harpoc] memory session: the vault stays unlocked in this process alone (no session file, no idle seal) until POST /api/v1/vault/lock or SIGTERM",
+            );
+          }
 
+          let rotationScheduler: { stop(): Promise<void> } | undefined;
           let mcpServer: { close(): Promise<void> } | undefined;
           let mcpHttpServer: { close(): Promise<void> } | undefined;
           let restServer: { close(): void } | undefined;
@@ -399,6 +449,8 @@ export function registerServerCommand(program: Command): void {
           const shutdown = async (trigger: ServerStopTrigger): Promise<void> => {
             if (shuttingDown) return;
             shuttingDown = true;
+            // First: no token file is written after the stop rows.
+            if (rotationScheduler) await rotationScheduler.stop();
             // Drain an in-flight refresh tick before the store closes — a
             // rotated refresh_token arriving on a closed database is lost
             // permanently (the provider already invalidated the old one).
@@ -443,6 +495,29 @@ export function registerServerCommand(program: Command): void {
           // Redirect console.log to stderr so HTTP startup messages don't corrupt the stream.
           if (opts.mcp && (opts.rest || opts.mcpHttp || opts.proxy || opts.sshAgent)) {
             console.log = console.error;
+          }
+
+          // Every token file is written before the first listener accepts a request; a refused
+          // first mint (an unknown or inactive agent, an unwritable file) fails the start.
+          if (rotationSpecs.length > 0) {
+            const { TokenRotationScheduler } = await import("@harpoc/core");
+            const scheduler = new TokenRotationScheduler(engine, rotationSpecs, {
+              onError: (spec, err) => {
+                // The code alone: the refusal's row is the engine's, and no message reaches stderr.
+                if (shuttingDown) return;
+                const code = err instanceof VaultError ? err.code : ErrorCode.INTERNAL_ERROR;
+                console.error(`Warning: --issue-token agent=${spec.agent}: ${code}`);
+              },
+            });
+            await scheduler.start();
+            rotationScheduler = scheduler;
+            const count = rotationSpecs.length;
+            const agents = rotationSpecs.map((spec) => spec.agent).join(", ");
+            console.error(
+              count === 1
+                ? `[harpoc] token rotation: 1 token file written (${agents}), re-minted at half its TTL`
+                : `[harpoc] token rotation: ${String(count)} token files written (${agents}), each re-minted at half its TTL`,
+            );
           }
 
           if (opts.mcp) {

@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { AuditEventType, VaultState } from "@harpoc/shared";
+import { AuditEventType, SESSION_FILE_NAME, VaultState } from "@harpoc/shared";
 import { getPkgRoot } from "@harpoc/test-utils";
 import { assertTierAvailable } from "./helpers/platform-tiers.js";
 import { CLI_ENTRY, freePort, runAs, runCliAs, runCommand } from "./helpers/spawn-cli.js";
@@ -42,7 +42,7 @@ const UNIT = resolve(
 /**
  * The [Service] directives of deploy/systemd/harpoc.service the transient unit takes over,
  * so the daemon runs under the unit's own sandbox. Left out: what the test sets itself (the
- * user, the command, the credential, the environment), what a transient unit does not need
+ * user, the command, the credential), what a transient unit does not need
  * (the restart policy, the type it sets), and what the runner's layout forbids — the
  * checkout lives under /home (ProtectHome=) and the vault directory under /tmp (PrivateTmp=),
  * which the test makes writable in place of the unit's StateDirectory= and ReadWritePaths=.
@@ -52,7 +52,6 @@ const NOT_TAKEN_OVER = new Set([
   "User",
   "Group",
   "LoadCredentialEncrypted",
-  "Environment",
   "ExecStart",
   "StateDirectory",
   "StateDirectoryMode",
@@ -207,7 +206,7 @@ describe.skipIf(process.platform !== "linux")(
       expect(mode & 0o222).toBe(0);
     }, 60_000);
 
-    it("the built CLI under a transient unit with the unit's sandbox, as the vault user, unlocks from the sealed unlock key with no person: health unlocked, the vault.unlock row method credential, SIGTERM through systemctl stop", async (ctx) => {
+    it("the built CLI under a transient unit with the unit's sandbox, as the vault user, unlocks from the sealed unlock key with no person in the memory session: health unlocked, no session file, the vault.unlock row method credential, SIGTERM through systemctl stop", async (ctx) => {
       if (!available) return ctx.skip();
       const made = await runAs(vault, ["mktemp", "-d", join(tmpdir(), "harpoc-sdc-vault-XXXXXX")]);
       expect(made.code, made.stderr).toBe(0);
@@ -240,7 +239,6 @@ describe.skipIf(process.platform !== "linux")(
         "--property=Type=exec",
         `--uid=${vault}`,
         `--property=LoadCredentialEncrypted=harpoc-unlock:${sealed}`,
-        "--setenv=HARPOC_SESSION_KEYSTORE=off",
         ...unitSandbox(),
         `--property=ReadWritePaths=${vaultDir}`,
         "--",
@@ -251,6 +249,8 @@ describe.skipIf(process.platform !== "linux")(
         "server",
         "start",
         "--rest",
+        "--session",
+        "memory",
         "--port",
         String(port),
         "--unlock-credential",
@@ -282,6 +282,20 @@ describe.skipIf(process.platform !== "linux")(
         await new Promise<void>((resolve) => setTimeout(resolve, 250));
       }
 
+      // The memory session writes no session file: the vault directory holds none while the
+      // daemon serves, and the administrator unlocks for their own reads below.
+      const session = await runAs(vault, [
+        "/usr/bin/test",
+        "-e",
+        join(vaultDir, SESSION_FILE_NAME),
+      ]);
+      expect(session.code).toBe(1);
+      const unlocked = await asVault(["unlock"], {
+        stdin: `${PASSWORD}\n`,
+        timeoutMs: ARGON2_TIMEOUT_MS,
+      });
+      expect(unlocked.code, unlocked.stderr).toBe(0);
+
       const audit = await asVault(["audit", "--event", AuditEventType.VAULT_UNLOCK, "--json"]);
       expect(audit.code, audit.stderr).toBe(0);
       const rows = (JSON.parse(audit.stdout) as AuditRow[]).filter(
@@ -297,6 +311,6 @@ describe.skipIf(process.platform !== "linux")(
         transport: "rest",
         trigger: "SIGTERM",
       });
-    }, 300_000);
+    }, 420_000);
   },
 );

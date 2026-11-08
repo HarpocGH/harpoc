@@ -25,8 +25,8 @@ import type { CliServer } from "./helpers/spawn-cli.js";
  * suite fills the way systemd's `LoadCredentialEncrypted=` does (DB-1: the fake directory
  * on every leg; the real systemd delivery is `systemd-credential.test.ts`, Linux only) —
  * with no prompt and no session file before it, then serves an authenticated request.
- * In this build the daemon runs in file session mode, so the administrator's CLI mints
- * the token through the daemon's own session file; the memory session replaces that.
+ * The daemon runs in the memory session (tranche B5) and writes no session file, so the
+ * administrator unlocks again for their own commands, which the daemon serves through.
  * `--unlock-key-file` is the sealer-agnostic input. The refusals: the variable unset, a
  * credential the directory lacks, a group- or world-readable key file, and a wrong key,
  * which counts against the lockout the password path shares.
@@ -60,6 +60,7 @@ describe("the headless start on the built CLI (unlock-key enroll, server start -
   let daemon: CliServer | undefined;
   let origin = "";
   let sessionFileBeforeStart = true;
+  let sessionFileAfterStart = true;
   let enrollOutput = "";
   const outputs: string[] = [];
 
@@ -146,6 +147,8 @@ describe("the headless start on the built CLI (unlock-key enroll, server start -
         "--rest",
         "--port",
         String(port),
+        "--session",
+        "memory",
         "--unlock-credential",
         CREDENTIAL_ID,
       ],
@@ -153,7 +156,11 @@ describe("the headless start on the built CLI (unlock-key enroll, server start -
     );
     daemon = started.server;
     origin = `http://127.0.0.1:${String(started.port)}`;
-  }, 240_000);
+    sessionFileAfterStart = existsSync(join(vaultDir, SESSION_FILE_NAME));
+    // The administrator's own session for the commands below (a third Argon2id): the daemon
+    // holds none, so this unlock neither feeds nor seals it.
+    await cli(["unlock"], `${PASSWORD}\n`, ARGON2_TIMEOUT_MS);
+  }, 360_000);
 
   afterAll(async () => {
     try {
@@ -175,8 +182,9 @@ describe("the headless start on the built CLI (unlock-key enroll, server start -
     expect((statSync(keyPath).mode & 0o777).toString(8)).toBe("400");
   });
 
-  it("the daemon starts from the credentials directory with no prompt and no session file before it: health reports the vault unlocked", async () => {
+  it("the daemon starts from the credentials directory with no prompt, no session file before it and none after it: health reports the vault unlocked", async () => {
     expect(sessionFileBeforeStart).toBe(false);
+    expect(sessionFileAfterStart).toBe(false);
     const res = await fetch(`${origin}/api/v1/health`);
     expect(res.status).toBe(200);
     expect(((await res.json()) as { data: { state: string } }).data.state).toBe(
@@ -184,7 +192,7 @@ describe("the headless start on the built CLI (unlock-key enroll, server start -
     );
   }, 60_000);
 
-  it("the first authenticated request needs no person: a read-scoped token minted through the daemon's session reads the secret the daemon decrypts", async () => {
+  it("the first authenticated request needs no person: a read-scoped token the administrator mints through their own session reads the secret the daemon decrypts", async () => {
     const tokenFile = join(root, "token.jwt");
     await cli([
       "auth",
@@ -250,7 +258,7 @@ describe("the headless start on the built CLI (unlock-key enroll, server start -
   it("--unlock-credential with CREDENTIALS_DIRECTORY unset is refused INVALID_INPUT naming the variable, before any vault is opened", async () => {
     const noVault = join(root, "no-vault-here");
     const run = await failedStart(
-      ["server", "start", "--rest", "--unlock-credential", CREDENTIAL_ID],
+      ["server", "start", "--rest", "--session", "memory", "--unlock-credential", CREDENTIAL_ID],
       withoutCredentialsDirectory(),
       noVault,
     );
@@ -263,7 +271,7 @@ describe("the headless start on the built CLI (unlock-key enroll, server start -
   it("a credential the directory does not hold is refused INVALID_INPUT naming it, and opens no session", async () => {
     const before = (await auditRows(AuditEventType.VAULT_UNLOCK)).length;
     const run = await failedStart(
-      ["server", "start", "--rest", "--unlock-credential", "harpoc-absent"],
+      ["server", "start", "--rest", "--session", "memory", "--unlock-credential", "harpoc-absent"],
       { ...process.env, CREDENTIALS_DIRECTORY: credentials },
     );
     expect(run.code).toBe(1);
@@ -281,7 +289,7 @@ describe("the headless start on the built CLI (unlock-key enroll, server start -
       chmodSync(lax, 0o644);
       const noVault = join(root, "no-vault-here");
       const run = await failedStart(
-        ["server", "start", "--rest", "--unlock-key-file", lax],
+        ["server", "start", "--rest", "--session", "memory", "--unlock-key-file", lax],
         withoutCredentialsDirectory(),
         noVault,
       );
@@ -295,7 +303,17 @@ describe("the headless start on the built CLI (unlock-key enroll, server start -
 
   it("--unlock-key-file with the owner-only key unlocks the daemon and prints the standing warning once", async () => {
     const started = await startCliServerOnFreePort(
-      (port) => ["server", "start", "--rest", "--port", String(port), "--unlock-key-file", keyPath],
+      (port) => [
+        "server",
+        "start",
+        "--rest",
+        "--port",
+        String(port),
+        "--session",
+        "memory",
+        "--unlock-key-file",
+        keyPath,
+      ],
       { vaultDir, env: withoutCredentialsDirectory() },
     );
     try {
@@ -315,7 +333,7 @@ describe("the headless start on the built CLI (unlock-key enroll, server start -
     const unlocksBefore = (await auditRows(AuditEventType.VAULT_UNLOCK)).length;
     for (let attempt = 1; attempt <= 5; attempt++) {
       const run = await failedStart(
-        ["server", "start", "--rest", "--unlock-credential", CREDENTIAL_ID],
+        ["server", "start", "--rest", "--session", "memory", "--unlock-credential", CREDENTIAL_ID],
         { ...process.env, CREDENTIALS_DIRECTORY: wrong },
       );
       expect(run.code, `attempt ${String(attempt)}`).toBe(1);

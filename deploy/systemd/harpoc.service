@@ -32,11 +32,10 @@ User=harpoc
 Group=harpoc
 # An absolute path: a missing credential fails the start instead of being skipped.
 LoadCredentialEncrypted=harpoc-unlock:/etc/credstore.encrypted/harpoc-unlock.cred
-# File session mode until the memory session lands: the daemon's session file is
-# protected by its 0600 mode under harpoc alone, as the administrator's sudo commands'
-# is, and both read the one session.
-Environment=HARPOC_SESSION_KEYSTORE=off
-ExecStart=/usr/local/bin/harpoc --vault-dir /var/lib/harpoc server start --rest --unlock-credential harpoc-unlock --runtime-dir /run/harpoc
+# The memory session: the keys stay in this process and no session file is written or
+# read, so an administrator's own unlock or lock as harpoc leaves the daemon serving;
+# systemctl stop (SIGTERM) or POST /api/v1/vault/lock with an admin token locks it.
+ExecStart=/usr/local/bin/harpoc --vault-dir /var/lib/harpoc server start --rest --session memory --unlock-credential harpoc-unlock --runtime-dir /run/harpoc
 # /run/harpoc is /etc/tmpfiles.d/harpoc.conf's, never RuntimeDirectory='s: systemd
 # would remove it, consumer directories included, whenever the unit stops.
 StateDirectory=harpoc

@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -223,6 +223,27 @@ describe("loadUnlockedEngine", () => {
 
     await expectVaultError(() => loadUnlockedEngine(tempDir), ErrorCode.VAULT_LOCKED);
   });
+
+  it("in memory mode installs the administrator's session and leaves its file on lock (B5)", async () => {
+    const dbPath = join(tempDir, VAULT_DB_NAME);
+    const sessionPath = join(tempDir, "session.json");
+    const setupEngine = new VaultEngine({ dbPath, sessionPath });
+    try {
+      await setupEngine.initVault("test-password");
+    } finally {
+      await setupEngine.destroy();
+    }
+
+    const engine = await loadUnlockedEngine(tempDir, { sessionMode: "memory" });
+    try {
+      expect(engine.getState()).toBe("unlocked");
+      await engine.lock();
+      expect(engine.getState()).toBe("sealed");
+      expect(existsSync(sessionPath)).toBe(true);
+    } finally {
+      await engine.destroy();
+    }
+  });
 });
 
 describe("unlockEngineWithKey", () => {
@@ -293,6 +314,29 @@ describe("unlockEngineWithKey", () => {
     try {
       expect(engine.getState()).toBe("unlocked");
       expect(isWiped(key)).toBe(true);
+    } finally {
+      await engine.destroy();
+    }
+  });
+
+  it("in memory mode unlocks a real sealed vault from its key and writes no session file (B5)", async () => {
+    const dbPath = join(tempDir, VAULT_DB_NAME);
+    const sessionPath = join(tempDir, "session.json");
+    const setupEngine = new VaultEngine({ dbPath, sessionPath });
+    let key: Uint8Array;
+    try {
+      await setupEngine.initVault("test-password");
+      key = await setupEngine.enrollUnlockKey();
+      await setupEngine.lock();
+    } finally {
+      await setupEngine.destroy();
+    }
+    expect(existsSync(sessionPath)).toBe(false);
+
+    const engine = await unlockEngineWithKey(tempDir, key, { sessionMode: "memory" });
+    try {
+      expect(engine.getState()).toBe("unlocked");
+      expect(existsSync(sessionPath)).toBe(false);
     } finally {
       await engine.destroy();
     }

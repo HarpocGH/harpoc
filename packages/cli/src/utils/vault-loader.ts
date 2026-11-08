@@ -5,7 +5,11 @@ import type { Command } from "commander";
 import { VAULT_DB_NAME, VAULT_DIR_NAME, SESSION_FILE_NAME, VaultError } from "@harpoc/shared";
 import type { AuditEventType, CallerContext } from "@harpoc/shared";
 import { VaultEngine, wipeBuffer } from "@harpoc/core";
+import type { VaultEngineOptions } from "@harpoc/core";
 import { handleError } from "./output.js";
+
+/** The engine options a command chooses: the session mode alone (`server start --session`). */
+export type EngineOptions = Pick<VaultEngineOptions, "sessionMode">;
 
 /**
  * Resolve the vault directory. Checks --vault-dir option, then cwd, then home;
@@ -44,14 +48,16 @@ export function refuseEmptyVaultDir(program: Command, actionCommand: Command): v
 }
 
 /**
- * Create a VaultEngine instance pointed at the resolved vault directory.
+ * Create a VaultEngine instance pointed at the resolved vault directory. Without `options` the
+ * engine is built exactly as before B5 — no `sessionMode` key, the engine's file default.
  */
-export function createEngine(vaultDir: string): VaultEngine {
+export function createEngine(vaultDir: string, options?: EngineOptions): VaultEngine {
   const dbPath = join(vaultDir, VAULT_DB_NAME);
   const sessionPath = join(vaultDir, SESSION_FILE_NAME);
   return new VaultEngine({
     dbPath,
     sessionPath,
+    ...(options?.sessionMode !== undefined ? { sessionMode: options.sessionMode } : {}),
     onSessionFilePermissionRepairFailure: (error) => {
       console.error(`Warning: ${error.message}`);
     },
@@ -80,10 +86,14 @@ export async function resolveSecretId(
 
 /**
  * Load a VaultEngine with an active session (for commands that need an unlocked vault).
- * Throws VaultError.vaultLocked() if no valid session.
+ * Throws VaultError.vaultLocked() if no valid session. In memory mode the engine installs the
+ * session's keys and holds no session of its own (`server start --session memory`).
  */
-export async function loadUnlockedEngine(vaultDir: string): Promise<VaultEngine> {
-  const engine = createEngine(vaultDir);
+export async function loadUnlockedEngine(
+  vaultDir: string,
+  options?: EngineOptions,
+): Promise<VaultEngine> {
+  const engine = createEngine(vaultDir, options);
   const loaded = await engine.loadSession();
   if (!loaded) {
     await engine.destroy();
@@ -99,9 +109,13 @@ export async function loadUnlockedEngine(vaultDir: string): Promise<VaultEngine>
  * is handed over as it is — not copied, so the engine's own wipe reaches it — and wiped here as
  * well, whatever happens; a refused unlock destroys the engine and rethrows.
  */
-export async function unlockEngineWithKey(vaultDir: string, key: Uint8Array): Promise<VaultEngine> {
+export async function unlockEngineWithKey(
+  vaultDir: string,
+  key: Uint8Array,
+  options?: EngineOptions,
+): Promise<VaultEngine> {
   try {
-    const engine = createEngine(vaultDir);
+    const engine = createEngine(vaultDir, options);
     try {
       await engine.unlockWithKey(key);
     } catch (err) {

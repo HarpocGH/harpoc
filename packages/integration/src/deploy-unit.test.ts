@@ -9,7 +9,8 @@ import { assertTierAvailable } from "./helpers/platform-tiers.js";
 /**
  * The systemd unit of deployment model B (tranche B4): `deploy/systemd/harpoc.service`
  * runs the daemon as `harpoc` and unlocks it at boot from the unlock key sealed by
- * `deploy/linux/enroll-unlock-key.sh` — no human, no password. Its text is pinned here;
+ * `deploy/linux/enroll-unlock-key.sh` — no human, no password — in the memory session
+ * (tranche B5: no session file is written or read). Its text is pinned here;
  * `systemd-analyze verify` judges it where systemd is installed (the ubuntu legs and the
  * dev container), on a copy whose `ExecStart=` names an executable that exists, since
  * the operator's install path (`/usr/local/bin/harpoc`) does not exist on a test host.
@@ -69,6 +70,8 @@ describe("the systemd unit (deployment model B)", () => {
       "server",
       "start",
       "--rest",
+      "--session",
+      "memory",
       "--unlock-credential",
       "harpoc-unlock",
       "--runtime-dir",
@@ -77,8 +80,14 @@ describe("the systemd unit (deployment model B)", () => {
     expect(values(text, "WantedBy")).toEqual(["multi-user.target"]);
   });
 
-  it("the daemon writes its file session with the keystore off, as the administrator's sudo commands do, so both read one session (file session mode, until the memory session)", () => {
-    expect(values(unitText(), "Environment")).toEqual(["HARPOC_SESSION_KEYSTORE=off"]);
+  it("the daemon runs in the memory session and reads or writes no session file, so the unit sets no Environment=: HARPOC_SESSION_KEYSTORE=off stays on the administrator's sudo command lines", () => {
+    const text = unitText();
+    expect(values(text, "Environment")).toEqual([]);
+    const argv = values(text, "ExecStart")[0]?.split(" ") ?? [];
+    expect(argv.slice(argv.indexOf("--session"), argv.indexOf("--session") + 2)).toEqual([
+      "--session",
+      "memory",
+    ]);
   });
 
   it("/run/harpoc stays tmpfiles.d's (no RuntimeDirectory=), V8's JIT keeps its executable memory (no MemoryDenyWriteExecute=) and the user is static (no DynamicUser=)", () => {

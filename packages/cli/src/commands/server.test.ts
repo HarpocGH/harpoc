@@ -23,6 +23,8 @@ const {
   mockEgressProxy,
   mockAgentSocketServer,
   mockUnlockKeySource,
+  mockRotationScheduler,
+  rotationSchedulerCtorCalls,
 } = vi.hoisted(() => ({
   mockEngine: {
     destroy: vi.fn().mockResolvedValue(undefined),
@@ -79,6 +81,15 @@ const {
     readUnlockKeyFile: vi.fn(),
     readUnlockCredential: vi.fn(),
   },
+  mockRotationScheduler: {
+    start: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
+  },
+  rotationSchedulerCtorCalls: [] as {
+    engine: unknown;
+    specs: unknown;
+    options: Record<string, unknown>;
+  }[],
 }));
 
 // ── Module mocks ───────────────────────────────────────────────────
@@ -134,12 +145,20 @@ vi.mock("@harpoc/egress-proxy", () => ({
   createEgressProxy: vi.fn().mockReturnValue(mockEgressProxy),
 }));
 
-// server.ts reaches core only for AgentSocketServer and the unlock key's two readers
-// (vault-loader.js, the engine's one other path, is mocked above).
+// server.ts reaches core only for AgentSocketServer, the unlock key's two readers and the token
+// rotation's scheduler (vault-loader.js, the engine's one other path, is mocked above).
 vi.mock("@harpoc/core", () => ({
   AgentSocketServer: mockAgentSocketServer,
   readUnlockKeyFile: mockUnlockKeySource.readUnlockKeyFile,
   readUnlockCredential: mockUnlockKeySource.readUnlockCredential,
+  TokenRotationScheduler: vi.fn().mockImplementation(function (
+    engine: unknown,
+    specs: unknown,
+    options: unknown,
+  ) {
+    rotationSchedulerCtorCalls.push({ engine, specs, options: options as Record<string, unknown> });
+    return mockRotationScheduler;
+  }),
 }));
 
 // Spy wrapper around the real implementation: the assertion's argument and its
@@ -161,6 +180,10 @@ import { assertRuntimeDir, consumerSocketPaths } from "../utils/runtime-dir.js";
 
 const run = buildCli(registerServerCommand, ["server", "start"]);
 
+/** The memory session's line, printed once the engine opens (B5). */
+const MEMORY_SESSION =
+  "[harpoc] memory session: the vault stays unlocked in this process alone (no session file, no idle seal) until POST /api/v1/vault/lock or SIGTERM";
+
 // ── Tests ──────────────────────────────────────────────────────────
 
 describe("server start", () => {
@@ -176,6 +199,7 @@ describe("server start", () => {
     schedulerCtorCalls.length = 0;
     certManagerCtorCalls.length = 0;
     renewalSchedulerCtorCalls.length = 0;
+    rotationSchedulerCtorCalls.length = 0;
     priorSigintListeners = process.listeners("SIGINT");
     priorSigtermListeners = process.listeners("SIGTERM");
     priorStdinEndListeners = process.stdin.listeners("end") as ((...args: unknown[]) => void)[];
@@ -699,7 +723,7 @@ describe("server start", () => {
     it("--proxy alone is a valid start: the proxy on the engine, TCP on 127.0.0.1:3128, no socket", async () => {
       const { createEgressProxy } = await import("@harpoc/egress-proxy");
 
-      await run(["--proxy"]);
+      await run(["--session", "memory", "--proxy"]);
 
       expect(createEgressProxy).toHaveBeenCalledWith({ engine: mockEngine });
       expect(mockEgressProxy.listenTcp.mock.calls).toEqual([[3128, "127.0.0.1"]]);
@@ -711,7 +735,7 @@ describe("server start", () => {
     });
 
     it("--proxy-port moves the TCP listener", async () => {
-      await run(["--proxy", "--proxy-port", "4000"]);
+      await run(["--session", "memory", "--proxy", "--proxy-port", "4000"]);
 
       expect(mockEgressProxy.listenTcp.mock.calls).toEqual([[4000, "127.0.0.1"]]);
     });
@@ -719,7 +743,9 @@ describe("server start", () => {
     it("--proxy-port refuses a hex form INVALID_INPUT before the vault opens", async () => {
       const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
 
-      await expect(run(["--proxy", "--proxy-port", "0x10"])).rejects.toThrow("process.exit");
+      await expect(run(["--session", "memory", "--proxy", "--proxy-port", "0x10"])).rejects.toThrow(
+        "process.exit",
+      );
       expect(spies.errorSpy.mock.calls[0]).toEqual([
         'Error: [INVALID_INPUT] Invalid proxy port "0x10". Must be 1-65535.',
       ]);
@@ -748,7 +774,9 @@ describe("server start", () => {
     ])("refuses a port the proxy shares before the vault opens: $line", async ({ argv, line }) => {
       const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
 
-      await expect(run(["--proxy", ...argv])).rejects.toThrow("process.exit");
+      await expect(run(["--session", "memory", "--proxy", ...argv])).rejects.toThrow(
+        "process.exit",
+      );
       expect(spies.errorSpy.mock.calls[0]).toEqual([line]);
       expect(loadUnlockedEngine).not.toHaveBeenCalled();
     });
@@ -769,7 +797,7 @@ describe("server start", () => {
       const missing = "/harpoc-b2-no-such-runtime-dir";
       vi.stubEnv("RUNTIME_DIRECTORY", missing);
 
-      await expect(run(["--proxy"])).rejects.toThrow("process.exit");
+      await expect(run(["--session", "memory", "--proxy"])).rejects.toThrow("process.exit");
       expect(assertRuntimeDir).toHaveBeenCalledWith({
         path: missing,
         source: "$RUNTIME_DIRECTORY",
@@ -788,7 +816,7 @@ describe("server start", () => {
         consumer("alice");
         writeFileSync(join(dir, "not-a-consumer"), "");
 
-        await run(["--proxy", "--runtime-dir", dir]);
+        await run(["--session", "memory", "--proxy", "--runtime-dir", dir]);
 
         expect(mockEgressProxy.listenSocket.mock.calls).toEqual([
           [join(dir, "alice", "proxy.sock")],
@@ -806,7 +834,7 @@ describe("server start", () => {
     it.skipIf(process.platform === "win32")(
       "a runtime directory without consumer directories starts the TCP listener alone (POSIX)",
       async () => {
-        await run(["--proxy", "--runtime-dir", dir]);
+        await run(["--session", "memory", "--proxy", "--runtime-dir", dir]);
 
         expect(mockEgressProxy.listenTcp).toHaveBeenCalledTimes(1);
         expect(mockEgressProxy.listenSocket).not.toHaveBeenCalled();
@@ -822,7 +850,9 @@ describe("server start", () => {
         const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
         chmodSync(consumer("alice"), 0o770);
 
-        await expect(run(["--proxy", "--runtime-dir", dir])).rejects.toThrow("process.exit");
+        await expect(run(["--session", "memory", "--proxy", "--runtime-dir", dir])).rejects.toThrow(
+          "process.exit",
+        );
         expect(spies.errorSpy.mock.calls[0]).toEqual([
           `Error: [INVALID_INPUT] consumer directory: mode 0770 is not 0750 or stricter (group-writable or world-accessible): ${join(dir, "alice")}`,
         ]);
@@ -849,7 +879,7 @@ describe("server start", () => {
         new Error("listen EADDRINUSE: address already in use 127.0.0.1:3128"),
       );
 
-      await expect(run(["--proxy"])).rejects.toThrow("process.exit");
+      await expect(run(["--session", "memory", "--proxy"])).rejects.toThrow("process.exit");
       expect(spies.exitSpy).toHaveBeenCalledWith(1);
       expect(spies.errorSpy).toHaveBeenCalledWith(
         "Error: listen EADDRINUSE: address already in use 127.0.0.1:3128",
@@ -858,7 +888,7 @@ describe("server start", () => {
     });
 
     it("redirects console.log to stderr beside the stdio server (--mcp --proxy)", async () => {
-      await run(["--mcp", "--proxy"]);
+      await run(["--session", "memory", "--mcp", "--proxy"]);
 
       expect(console.log).toBe(console.error);
     });
@@ -867,7 +897,7 @@ describe("server start", () => {
       const onSpy = vi.spyOn(process, "on");
       spies.exitSpy.mockImplementation(() => undefined as never);
 
-      await run(["--rest", "--proxy", "--proxy-port", "4000"]);
+      await run(["--session", "memory", "--rest", "--proxy", "--proxy-port", "4000"]);
       const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
       (sigtermCall?.[1] as () => void)();
       await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
@@ -911,7 +941,7 @@ describe("server start", () => {
       });
       mockEgressProxy.listenTcp.mockReturnValueOnce(bind);
 
-      const started = run(["--proxy"]);
+      const started = run(["--session", "memory", "--proxy"]);
       await vi.waitFor(() => expect(mockEgressProxy.listenTcp).toHaveBeenCalledTimes(1));
       const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
       (sigtermCall?.[1] as () => void)();
@@ -929,7 +959,7 @@ describe("server start", () => {
       const onceSpy = vi.spyOn(process.stdin, "once");
       spies.exitSpy.mockImplementation(() => undefined as never);
 
-      await run(["--mcp", "--allow-tokenless", "--proxy"]);
+      await run(["--session", "memory", "--mcp", "--allow-tokenless", "--proxy"]);
       const endCall = onceSpy.mock.calls.find((call) => (call[0] as string) === "end");
       (endCall?.[1] as () => void)();
       await vi.waitFor(() => expect(mockHandle.close).toHaveBeenCalledTimes(1));
@@ -1002,7 +1032,7 @@ describe("server start", () => {
     it("--ssh-agent without a runtime directory is refused before the vault opens", async () => {
       const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
 
-      await expect(run(["--ssh-agent"])).rejects.toThrow("process.exit");
+      await expect(run(["--session", "memory", "--ssh-agent"])).rejects.toThrow("process.exit");
       expect(spies.exitSpy).toHaveBeenCalledWith(1);
       // The combination-check form: the line, then exit 1 (the stub's throw is handleError's).
       expect(spies.errorSpy.mock.calls[0]).toEqual([REQUIRES]);
@@ -1019,7 +1049,7 @@ describe("server start", () => {
       const missing = "/harpoc-b3-no-such-runtime-dir";
       vi.stubEnv("RUNTIME_DIRECTORY", missing);
 
-      await expect(run(["--ssh-agent"])).rejects.toThrow("process.exit");
+      await expect(run(["--session", "memory", "--ssh-agent"])).rejects.toThrow("process.exit");
       expect(assertRuntimeDir).toHaveBeenCalledWith({
         path: missing,
         source: "$RUNTIME_DIRECTORY",
@@ -1035,7 +1065,9 @@ describe("server start", () => {
       async () => {
         const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
 
-        await expect(run(["--ssh-agent", "--runtime-dir", dir])).rejects.toThrow("process.exit");
+        await expect(
+          run(["--session", "memory", "--ssh-agent", "--runtime-dir", dir]),
+        ).rejects.toThrow("process.exit");
         expect(spies.errorSpy.mock.calls).toEqual([
           [
             `Error: [INVALID_INPUT] --runtime-dir: not supported on this platform (the owner and mode cannot be checked): ${dir}`,
@@ -1051,7 +1083,7 @@ describe("server start", () => {
       const { startServer } = await import("@harpoc/rest-api");
       stubConsumers("alice", "bob");
 
-      await run(["--rest", "--ssh-agent", "--runtime-dir", dir]);
+      await run(["--session", "memory", "--rest", "--ssh-agent", "--runtime-dir", dir]);
 
       expect(vi.mocked(consumerSocketPaths).mock.calls).toEqual([
         [{ path: dir, source: "--runtime-dir" }, "ssh-agent.sock"],
@@ -1089,10 +1121,11 @@ describe("server start", () => {
     it("--ssh-agent alone is a start mode: one consumer, the singular line", async () => {
       stubConsumers("alice");
 
-      await run(["--ssh-agent", "--runtime-dir", dir]);
+      await run(["--session", "memory", "--ssh-agent", "--runtime-dir", dir]);
 
       expect(mockAgentSocketServer.start).toHaveBeenCalledTimes(1);
       expect(spies.errorSpy.mock.calls).toEqual([
+        [MEMORY_SESSION],
         [
           `[harpoc] ssh-agent listening on 1 consumer socket (<consumer>/ssh-agent.sock) under ${dir}`,
         ],
@@ -1103,9 +1136,9 @@ describe("server start", () => {
       const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
       stubConsumers();
 
-      await expect(run(["--rest", "--ssh-agent", "--runtime-dir", dir])).rejects.toThrow(
-        "process.exit",
-      );
+      await expect(
+        run(["--session", "memory", "--rest", "--ssh-agent", "--runtime-dir", dir]),
+      ).rejects.toThrow("process.exit");
       expect(spies.errorSpy.mock.calls).toEqual([
         [
           `Error: [INVALID_INPUT] --runtime-dir: --ssh-agent found no consumer directory under ${dir} (one per agent user: deploy/linux/install-two-identity.sh)`,
@@ -1130,7 +1163,7 @@ describe("server start", () => {
       spies.exitSpy.mockImplementation(() => undefined as never);
       stubConsumers("alice");
 
-      await run(["--ssh-agent", "--runtime-dir", dir]);
+      await run(["--session", "memory", "--ssh-agent", "--runtime-dir", dir]);
       const [[options]] = mockAgentSocketServer.start.mock.calls as [
         [{ onError: (err: VaultError) => void }],
       ];
@@ -1154,7 +1187,9 @@ describe("server start", () => {
         VaultError.invalidInput("ssh-agent socket: a live socket answers at the path"),
       );
 
-      await expect(run(["--ssh-agent", "--runtime-dir", dir])).rejects.toThrow("process.exit");
+      await expect(
+        run(["--session", "memory", "--ssh-agent", "--runtime-dir", dir]),
+      ).rejects.toThrow("process.exit");
       expect(spies.exitSpy).toHaveBeenCalledWith(1);
       expect(spies.errorSpy).toHaveBeenCalledWith(
         "Error: [INVALID_INPUT] ssh-agent socket: a live socket answers at the path",
@@ -1167,7 +1202,7 @@ describe("server start", () => {
       spies.exitSpy.mockImplementation(() => undefined as never);
       stubConsumers("alice", "bob");
 
-      await run(["--proxy", "--ssh-agent", "--runtime-dir", dir]);
+      await run(["--session", "memory", "--proxy", "--ssh-agent", "--runtime-dir", dir]);
       // Beside --proxy both sockets live in each consumer directory.
       expect(vi.mocked(consumerSocketPaths).mock.calls.map((call) => call[1])).toEqual([
         "proxy.sock",
@@ -1240,7 +1275,7 @@ describe("server start", () => {
           }),
       );
 
-      const started = run(["--ssh-agent", "--runtime-dir", dir]);
+      const started = run(["--session", "memory", "--ssh-agent", "--runtime-dir", dir]);
       await vi.waitFor(() => expect(mockAgentSocketServer.start).toHaveBeenCalledTimes(2));
       const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
       (sigtermCall?.[1] as () => void)();
@@ -1260,7 +1295,7 @@ describe("server start", () => {
     it("redirects console.log to stderr beside the stdio server (--mcp --ssh-agent)", async () => {
       stubConsumers("alice");
 
-      await run(["--mcp", "--ssh-agent", "--runtime-dir", dir]);
+      await run(["--session", "memory", "--mcp", "--ssh-agent", "--runtime-dir", dir]);
 
       expect(console.log).toBe(console.error);
     });
@@ -1270,7 +1305,15 @@ describe("server start", () => {
       spies.exitSpy.mockImplementation(() => undefined as never);
       stubConsumers("alice");
 
-      await run(["--mcp", "--allow-tokenless", "--ssh-agent", "--runtime-dir", dir]);
+      await run([
+        "--session",
+        "memory",
+        "--mcp",
+        "--allow-tokenless",
+        "--ssh-agent",
+        "--runtime-dir",
+        dir,
+      ]);
       const endCall = onceSpy.mock.calls.find((call) => (call[0] as string) === "end");
       (endCall?.[1] as () => void)();
       await vi.waitFor(() => expect(mockHandle.close).toHaveBeenCalledTimes(1));
@@ -1295,7 +1338,7 @@ describe("server start", () => {
         consumer("alice");
         writeFileSync(join(dir, "not-a-consumer"), "");
 
-        await run(["--ssh-agent", "--runtime-dir", dir]);
+        await run(["--session", "memory", "--ssh-agent", "--runtime-dir", dir]);
 
         expect(mockAgentSocketServer.start.mock.calls.map((call) => call[0])).toEqual([
           expect.objectContaining({
@@ -1315,7 +1358,9 @@ describe("server start", () => {
       async () => {
         const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
 
-        await expect(run(["--ssh-agent", "--runtime-dir", dir])).rejects.toThrow("process.exit");
+        await expect(
+          run(["--session", "memory", "--ssh-agent", "--runtime-dir", dir]),
+        ).rejects.toThrow("process.exit");
         expect(spies.errorSpy.mock.calls[0]).toEqual([
           `Error: [INVALID_INPUT] --runtime-dir: --ssh-agent found no consumer directory under ${dir} (one per agent user: deploy/linux/install-two-identity.sh)`,
         ]);
@@ -1391,7 +1436,7 @@ describe("server start", () => {
       const { loadUnlockedEngine, unlockEngineWithKey } = await import("../utils/vault-loader.js");
       const { startServer } = await import("@harpoc/rest-api");
 
-      await run(["--rest", "--unlock-key-file", KEY_FILE]);
+      await run(["--session", "memory", "--rest", "--unlock-key-file", KEY_FILE]);
 
       expectNoKeyBytes();
       expect(mockUnlockKeySource.readUnlockKeyFile.mock.calls).toEqual([
@@ -1406,15 +1451,15 @@ describe("server start", () => {
       expect(read as number).toBeLessThan(unlocked as number);
       expect(unlocked as number).toBeLessThan(served as number);
       expect(startServer).toHaveBeenCalledWith(expect.objectContaining({ engine: mockEngine }));
-      // The standing warning, exactly once, and nothing else on stderr.
-      expect(spies.errorSpy.mock.calls).toEqual([[standing(KEY_FILE)]]);
+      // The standing warning, exactly once, then the memory session's line.
+      expect(spies.errorSpy.mock.calls).toEqual([[standing(KEY_FILE)], [MEMORY_SESSION]]);
       expect(spies.exitSpy).not.toHaveBeenCalled();
     });
 
     it("--unlock-credential reads systemd's credential through the process environment, with no standing warning", async () => {
       const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
 
-      await run(["--rest", "--unlock-credential", "harpoc-unlock"]);
+      await run(["--session", "memory", "--rest", "--unlock-credential", "harpoc-unlock"]);
 
       expectNoKeyBytes();
       const reads = mockUnlockKeySource.readUnlockCredential.mock.calls;
@@ -1425,7 +1470,7 @@ describe("server start", () => {
       expect(mockUnlockKeySource.readUnlockKeyFile).not.toHaveBeenCalled();
       await expectUnlockedWithKey();
       expect(loadUnlockedEngine).not.toHaveBeenCalled();
-      expect(spies.errorSpy).not.toHaveBeenCalled();
+      expect(spies.errorSpy.mock.calls).toEqual([[MEMORY_SESSION]]);
       expect(spies.exitSpy).not.toHaveBeenCalled();
     });
 
@@ -1439,7 +1484,7 @@ describe("server start", () => {
         },
       );
 
-      await run(["--rest", "--unlock-key-file", "/mnt/usb/unlock.key"]);
+      await run(["--session", "memory", "--rest", "--unlock-key-file", "/mnt/usb/unlock.key"]);
 
       expectNoKeyBytes();
       expect(spies.errorSpy.mock.calls).toEqual([
@@ -1447,6 +1492,7 @@ describe("server start", () => {
         [
           "Warning: --unlock-key-file: /mnt/usb/unlock.key is on a vfat filesystem — its modes are the mount's options, not the file's",
         ],
+        [MEMORY_SESSION],
       ]);
     });
 
@@ -1455,6 +1501,8 @@ describe("server start", () => {
       const { unlockEngineWithKey } = await import("../utils/vault-loader.js");
 
       await run([
+        "--session",
+        "memory",
         "--mcp",
         "--token-file",
         "/tmp/launch-token",
@@ -1536,7 +1584,7 @@ describe("server start", () => {
     ])(
       "%s alone meets the at-least-one-mode refusal, its line unchanged, nothing read",
       async (flag, value) => {
-        await expect(run([flag, value])).rejects.toThrow("process.exit");
+        await expect(run(["--session", "memory", flag, value])).rejects.toThrow("process.exit");
         expect(spies.errorSpy.mock.calls[0]).toEqual([
           "Error: At least one of --mcp, --mcp-http, --rest, --oauth-refresh or --cert-renew is required.",
         ]);
@@ -1566,7 +1614,7 @@ describe("server start", () => {
     ])(
       "the key is read after every other refusal: $label is reported first",
       async ({ argv, line }) => {
-        await expect(run(argv)).rejects.toThrow("process.exit");
+        await expect(run(["--session", "memory", ...argv])).rejects.toThrow("process.exit");
         expect(spies.errorSpy.mock.calls).toEqual([[line]]);
         expect(mockUnlockKeySource.readUnlockKeyFile).not.toHaveBeenCalled();
       },
@@ -1594,7 +1642,7 @@ describe("server start", () => {
           await import("../utils/vault-loader.js");
         reader.mockRejectedValueOnce(refusal);
 
-        await expect(run(argv)).rejects.toThrow("process.exit");
+        await expect(run(["--session", "memory", ...argv])).rejects.toThrow("process.exit");
         expect(spies.exitSpy.mock.calls).toEqual([[1]]);
         expect(spies.errorSpy.mock.calls).toEqual([
           [`Error: [${refusal.code}] ${refusal.message}`],
@@ -1618,7 +1666,9 @@ describe("server start", () => {
         },
       );
 
-      await expect(run(["--rest", "--unlock-key-file", KEY_FILE])).rejects.toThrow("process.exit");
+      await expect(
+        run(["--session", "memory", "--rest", "--unlock-key-file", KEY_FILE]),
+      ).rejects.toThrow("process.exit");
       expect(spies.exitSpy.mock.calls).toEqual([[1]]);
       expect(spies.errorSpy.mock.calls).toEqual([[`Error: [INVALID_UNLOCK_KEY] ${err.message}`]]);
       expect(vi.mocked(unlockEngineWithKey).mock.calls.length).toBe(0);
@@ -1649,9 +1699,9 @@ describe("server start", () => {
         const err = refusal();
         vi.mocked(unlockEngineWithKey).mockRejectedValueOnce(err);
 
-        await expect(run(["--rest", "--unlock-credential", "harpoc-unlock"])).rejects.toThrow(
-          "process.exit",
-        );
+        await expect(
+          run(["--session", "memory", "--rest", "--unlock-credential", "harpoc-unlock"]),
+        ).rejects.toThrow("process.exit");
         expectNoKeyBytes();
         expect(spies.exitSpy.mock.calls).toEqual([[1]]);
         expect(spies.errorSpy.mock.calls).toEqual([[line(err)]]);
@@ -1673,6 +1723,476 @@ describe("server start", () => {
       expect(mockUnlockKeySource.readUnlockKeyFile).not.toHaveBeenCalled();
       expect(mockUnlockKeySource.readUnlockCredential.mock.calls.length).toBe(0);
       expect(spies.errorSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── --session and the B-flag conflict (the memory session, B5) ──
+
+  describe("--session and the B-flag conflict", () => {
+    const KEY_FILE = "/etc/harpoc/unlock.key";
+    const AT_LEAST_ONE =
+      "Error: At least one of --mcp, --mcp-http, --rest, --oauth-refresh or --cert-renew is required.";
+    const conflictLine = (flag: string): string =>
+      `Error: [SESSION_MODE_CONFLICT] ${VaultError.sessionModeConflict(flag).message}`;
+
+    beforeEach(() => {
+      mockUnlockKeySource.readUnlockKeyFile.mockResolvedValue(new Uint8Array(32));
+      mockUnlockKeySource.readUnlockCredential.mockResolvedValue(new Uint8Array(32));
+    });
+
+    afterEach(() => {
+      mockUnlockKeySource.readUnlockKeyFile.mockReset();
+      mockUnlockKeySource.readUnlockCredential.mockReset();
+    });
+
+    it("--session memory --rest builds the engine in memory mode and prints the memory session's line once it opens", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      const { startServer } = await import("@harpoc/rest-api");
+      const { TokenRotationScheduler } = await import("@harpoc/core");
+
+      await run(["--session", "memory", "--rest"]);
+
+      expect(vi.mocked(loadUnlockedEngine).mock.calls).toEqual([
+        ["/mock/.harpoc", { sessionMode: "memory" }],
+      ]);
+      expect(spies.errorSpy.mock.calls).toEqual([[MEMORY_SESSION]]);
+      const [loaded] = vi.mocked(loadUnlockedEngine).mock.invocationCallOrder;
+      const [line] = spies.errorSpy.mock.invocationCallOrder;
+      const [served] = vi.mocked(startServer).mock.invocationCallOrder;
+      expect(loaded as number).toBeLessThan(line as number);
+      expect(line as number).toBeLessThan(served as number);
+      expect(TokenRotationScheduler).not.toHaveBeenCalled();
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    // Model A untouched: file mode, the default, calls the loader exactly as before.
+    it.each([[["--rest"]], [["--session", "file", "--rest"]]])(
+      "%j loads the session as before: the loader gets the vault directory alone, no memory line",
+      async (argv) => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+        await run(argv);
+
+        expect(vi.mocked(loadUnlockedEngine).mock.calls).toEqual([["/mock/.harpoc"]]);
+        expect(spies.errorSpy).not.toHaveBeenCalled();
+        expect(spies.exitSpy).not.toHaveBeenCalled();
+      },
+    );
+
+    it("--session memory beside an unlock key source builds the key-unlocked engine in memory mode", async () => {
+      const { loadUnlockedEngine, unlockEngineWithKey } = await import("../utils/vault-loader.js");
+
+      await run(["--session", "memory", "--rest", "--unlock-credential", "harpoc-unlock"]);
+
+      const calls = vi.mocked(unlockEngineWithKey).mock.calls;
+      expect(calls.length).toBe(1);
+      expect(calls[0]?.[0]).toBe("/mock/.harpoc");
+      expect(calls[0]?.[2]).toEqual({ sessionMode: "memory" });
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(spies.errorSpy.mock.calls).toEqual([[MEMORY_SESSION]]);
+    });
+
+    it.each([
+      { value: "nonsense", argv: ["--session", "nonsense", "--rest"] },
+      { value: "MEMORY", argv: ["--session", "MEMORY", "--rest"] },
+      { value: "", argv: ["--session", "", "--rest"] },
+      { value: "--rest", argv: ["--session", "--rest"] },
+    ])(
+      "refuses --session $value INVALID_INPUT naming the two modes, before the transport check or any read",
+      async ({ value, argv }) => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+        await expect(run(argv)).rejects.toThrow("process.exit");
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [
+            `Error: [INVALID_INPUT] --session: ${JSON.stringify(value)} is not a session mode (memory or file)`,
+          ],
+        ]);
+        expect(assertRuntimeDir).not.toHaveBeenCalled();
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      },
+    );
+
+    // Review Focus 5: each B flag in file mode is refused at parse, before the flag's own checks
+    // (the spec grammar, the readers, the runtime directory's empty-path refusal, the ssh-agent
+    // requirement) and before the vault opens.
+    it.each([
+      { flag: "--issue-token", argv: ["--rest", "--issue-token", "not-a-spec"] },
+      { flag: "--unlock-credential", argv: ["--rest", "--unlock-credential", "harpoc-unlock"] },
+      { flag: "--unlock-key-file", argv: ["--rest", "--unlock-key-file", KEY_FILE] },
+      { flag: "--proxy", argv: ["--proxy", "--runtime-dir", ""] },
+      { flag: "--ssh-agent", argv: ["--ssh-agent"] },
+    ])(
+      "$flag in file mode (the default) is refused SESSION_MODE_CONFLICT naming it, nothing read or loaded",
+      async ({ flag, argv }) => {
+        const { loadUnlockedEngine, unlockEngineWithKey } =
+          await import("../utils/vault-loader.js");
+        const { TokenRotationScheduler } = await import("@harpoc/core");
+
+        await expect(run(argv)).rejects.toThrow("process.exit");
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([[conflictLine(flag)]]);
+        expect(
+          VaultError.sessionModeConflict(flag).message.startsWith(
+            `${flag} requires --session memory`,
+          ),
+        ).toBe(true);
+        expect(mockUnlockKeySource.readUnlockKeyFile).not.toHaveBeenCalled();
+        expect(mockUnlockKeySource.readUnlockCredential.mock.calls.length).toBe(0);
+        expect(assertRuntimeDir).not.toHaveBeenCalled();
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        expect(vi.mocked(unlockEngineWithKey).mock.calls.length).toBe(0);
+        expect(TokenRotationScheduler).not.toHaveBeenCalled();
+      },
+    );
+
+    it("an explicit --session file is file mode: --proxy is refused the same way", async () => {
+      await expect(run(["--session", "file", "--rest", "--proxy"])).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls).toEqual([[conflictLine("--proxy")]]);
+    });
+
+    it.each([
+      {
+        flag: "--issue-token",
+        argv: ["--ssh-agent", "--proxy", "--unlock-key-file", KEY_FILE, "--issue-token", "x"],
+      },
+      {
+        flag: "--unlock-credential",
+        argv: ["--proxy", "--ssh-agent", "--rest", "--unlock-credential", "harpoc-unlock"],
+      },
+      { flag: "--proxy", argv: ["--ssh-agent", "--proxy"] },
+    ])(
+      "several B flags in file mode: the first in the check's order is named ($flag)",
+      async ({ flag, argv }) => {
+        await expect(run(argv)).rejects.toThrow("process.exit");
+        expect(spies.errorSpy.mock.calls).toEqual([[conflictLine(flag)]]);
+      },
+    );
+
+    // Model A's line is byte-identical: --session is not a start mode.
+    it("--session memory alone meets the at-least-one-mode refusal, its line unchanged", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+      await expect(run(["--session", "memory"])).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls[0]).toEqual([AT_LEAST_ONE]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── --issue-token (the issuer-side token rotation, B5) ─────────
+
+  describe("--issue-token", () => {
+    const WIN32_REFUSAL =
+      "Error: [INVALID_INPUT] --issue-token: the token file's access list on Windows is not built (deployment model B on Windows is a later tranche)";
+    const platform = process.platform;
+    let dir: string;
+
+    /**
+     * The platform the action reads for the Windows refusal, stubbed per row so that every row
+     * runs on every leg: the wiring rows as Linux, the refusal rows as win32.
+     */
+    function stubPlatform(value: NodeJS.Platform): void {
+      Object.defineProperty(process, "platform", { value, configurable: true });
+    }
+
+    /** A spec for `agent`, its token file in this row's own directory. */
+    function spec(agent: string, extra = ""): string {
+      return `agent=${agent},file=${join(dir, `${agent}.jwt`)},scope=use,secrets=db-*${extra}`;
+    }
+
+    /** What the parser makes of `spec(agent)`. */
+    function parsed(agent: string, ttlMinutes = 1440): Record<string, unknown> {
+      return {
+        agent,
+        file: join(dir, `${agent}.jwt`),
+        scope: ["use"],
+        secrets: ["db-*"],
+        ttlMinutes,
+      };
+    }
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "harpoc-server-issue-token-"));
+      stubPlatform("linux");
+    });
+
+    afterEach(() => {
+      stubPlatform(platform);
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    });
+
+    it("one spec: the scheduler is built on the memory-mode engine with the parsed spec and started before any listener", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      const { startServer } = await import("@harpoc/rest-api");
+      const { TokenRotationScheduler } = await import("@harpoc/core");
+
+      await run(["--session", "memory", "--rest", "--issue-token", spec("alice")]);
+
+      expect(vi.mocked(loadUnlockedEngine).mock.calls).toEqual([
+        ["/mock/.harpoc", { sessionMode: "memory" }],
+      ]);
+      expect(rotationSchedulerCtorCalls).toEqual([
+        {
+          engine: mockEngine,
+          specs: [parsed("alice")],
+          options: { onError: expect.any(Function) },
+        },
+      ]);
+      expect(mockRotationScheduler.start).toHaveBeenCalledTimes(1);
+      const [loaded] = vi.mocked(loadUnlockedEngine).mock.invocationCallOrder;
+      const [built] = vi.mocked(TokenRotationScheduler).mock.invocationCallOrder;
+      const [started] = mockRotationScheduler.start.mock.invocationCallOrder;
+      const [served] = vi.mocked(startServer).mock.invocationCallOrder;
+      expect(loaded as number).toBeLessThan(built as number);
+      expect(built as number).toBeLessThan(started as number);
+      expect(started as number).toBeLessThan(served as number);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [MEMORY_SESSION],
+        ["[harpoc] token rotation: 1 token file written (alice), re-minted at half its TTL"],
+      ]);
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("the listeners wait for the first mint: startServer is not called before start() resolves", async () => {
+      const { startServer } = await import("@harpoc/rest-api");
+      let release: () => void = () => undefined;
+      mockRotationScheduler.start.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      );
+
+      const started = run(["--session", "memory", "--rest", "--issue-token", spec("alice")]);
+      await vi.waitFor(() => expect(mockRotationScheduler.start).toHaveBeenCalledTimes(1));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(startServer).not.toHaveBeenCalled();
+      release();
+      await started;
+
+      expect(startServer).toHaveBeenCalledTimes(1);
+    });
+
+    it("two specs: one scheduler for both, in order; the line names both agents", async () => {
+      await run([
+        "--session",
+        "memory",
+        "--rest",
+        "--issue-token",
+        spec("alice"),
+        "--issue-token",
+        spec("bob", ",ttl=60"),
+      ]);
+
+      expect(rotationSchedulerCtorCalls.map((call) => call.specs)).toEqual([
+        [parsed("alice"), parsed("bob", 60)],
+      ]);
+      expect(spies.errorSpy).toHaveBeenCalledWith(
+        "[harpoc] token rotation: 2 token files written (alice, bob), each re-minted at half its TTL",
+      );
+    });
+
+    // A consumer of the proxy alone uses the token there: no listener couples with --issue-token.
+    it("beside --proxy alone the rotation starts before the proxy listens", async () => {
+      await run(["--session", "memory", "--proxy", "--issue-token", spec("alice")]);
+
+      const [started] = mockRotationScheduler.start.mock.invocationCallOrder;
+      const [listening] = mockEgressProxy.listenTcp.mock.invocationCallOrder;
+      expect(started as number).toBeLessThan(listening as number);
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("a refused first mint is a start failure: the code's line, exit 1, the engine destroyed, no listener", async () => {
+      const { startServer } = await import("@harpoc/rest-api");
+      const refusal = VaultError.agentNotFound("alice");
+      mockRotationScheduler.start.mockRejectedValueOnce(refusal);
+
+      await expect(
+        run(["--session", "memory", "--rest", "--issue-token", spec("alice")]),
+      ).rejects.toThrow("process.exit");
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [MEMORY_SESSION],
+        [`Error: [AGENT_NOT_FOUND] ${refusal.message}`],
+      ]);
+      expect(startServer).not.toHaveBeenCalled();
+      expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+    });
+
+    it("SIGTERM stops the rotation first: before the refresh drain, every stop row and destroy", async () => {
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+
+      await run([
+        "--session",
+        "memory",
+        "--rest",
+        "--oauth-refresh",
+        "--issue-token",
+        spec("alice"),
+      ]);
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+
+      expect(mockRotationScheduler.stop).toHaveBeenCalledTimes(1);
+      const rotationStop = mockRotationScheduler.stop.mock.invocationCallOrder[0] as number;
+      const refreshStop = mockScheduler.stop.mock.invocationCallOrder[0] as number;
+      const restRow = mockEngine.auditServerStop.mock.invocationCallOrder[0] as number;
+      const destroy = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+      expect(rotationStop).toBeLessThan(refreshStop);
+      expect(refreshStop).toBeLessThan(restRow);
+      expect(restRow).toBeLessThan(destroy);
+
+      onSpy.mockRestore();
+    });
+
+    it("the shutdown awaits the rotation's stop: nothing else stops while a mint is in flight", async () => {
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+      let releaseStop: () => void = () => undefined;
+      mockRotationScheduler.stop.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          releaseStop = resolve;
+        }),
+      );
+
+      await run(["--session", "memory", "--rest", "--issue-token", spec("alice")]);
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(mockRotationScheduler.stop).toHaveBeenCalled());
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(mockEngine.auditServerStop).not.toHaveBeenCalled();
+      expect(mockEngine.destroy).not.toHaveBeenCalled();
+
+      releaseStop();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+      expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+
+      onSpy.mockRestore();
+    });
+
+    it("onError prints the agent and the code alone, a non-VaultError as INTERNAL_ERROR; silent once shutdown began", async () => {
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+      const needle = "needle-4a1f-not-for-stderr";
+
+      await run(["--session", "memory", "--rest", "--issue-token", spec("alice")]);
+      const specs = rotationSchedulerCtorCalls[0]?.specs as unknown[];
+      const options = rotationSchedulerCtorCalls[0]?.options as {
+        onError: (spec: unknown, err: unknown) => void;
+      };
+      spies.errorSpy.mockClear();
+      options.onError(specs[0], new VaultError(ErrorCode.TOKEN_REVOKED, `Token revoked ${needle}`));
+      options.onError(specs[0], new Error(`EACCES: open '${needle}.tmp'`));
+      options.onError(specs[0], needle);
+      expect(spies.stderr().includes(needle)).toBe(false);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        ["Warning: --issue-token agent=alice: TOKEN_REVOKED"],
+        ["Warning: --issue-token agent=alice: INTERNAL_ERROR"],
+        ["Warning: --issue-token agent=alice: INTERNAL_ERROR"],
+      ]);
+
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+      spies.errorSpy.mockClear();
+      options.onError(specs[0], VaultError.vaultLocked());
+      expect(spies.errorSpy).not.toHaveBeenCalled();
+
+      onSpy.mockRestore();
+    });
+
+    it("a spec over the token cap is refused INVALID_INPUT naming ttl, before the vault opens", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+      await expect(
+        run(["--session", "memory", "--rest", "--issue-token", spec("alice", ",ttl=1441")]),
+      ).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls).toEqual([
+        ["Error: [INVALID_INPUT] --issue-token: ttl exceeds the 24 h token cap (1440)"],
+      ]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    });
+
+    it("a missing token-file directory is refused INVALID_INPUT naming the file, before the vault opens", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      const missing = join(dir, "missing", "alice.jwt");
+
+      await expect(
+        run([
+          "--session",
+          "memory",
+          "--rest",
+          "--issue-token",
+          `agent=alice,file=${missing},scope=use,secrets=db-*`,
+        ]),
+      ).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [
+          `Error: [INVALID_INPUT] --issue-token: file ${missing}: no such directory: ${join(dir, "missing")}`,
+        ],
+      ]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    });
+
+    it("the directory is checked after the option parses: a port typo reports the port", async () => {
+      const missing = join(dir, "missing", "alice.jwt");
+
+      await expect(
+        run([
+          "--session",
+          "memory",
+          "--rest",
+          "--port",
+          "abc",
+          "--issue-token",
+          `agent=alice,file=${missing},scope=use,secrets=db-*`,
+        ]),
+      ).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls[0]).toEqual([
+        'Error: [INVALID_INPUT] Invalid port "abc". Must be 1-65535.',
+      ]);
+    });
+
+    it("on Windows --issue-token is refused after its grammar, before anything is read or the vault opens", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      const { TokenRotationScheduler } = await import("@harpoc/core");
+      stubPlatform("win32");
+
+      await expect(
+        run(["--session", "memory", "--rest", "--issue-token", spec("alice")]),
+      ).rejects.toThrow("process.exit");
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([[WIN32_REFUSAL]]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(TokenRotationScheduler).not.toHaveBeenCalled();
+    });
+
+    it("on Windows a spec typo still names its field: the grammar precedes the platform", async () => {
+      stubPlatform("win32");
+
+      await expect(
+        run(["--session", "memory", "--rest", "--issue-token", "agent=alice"]),
+      ).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [
+          "Error: [INVALID_INPUT] --issue-token: file is missing (agent, file, scope and secrets are required)",
+        ],
+      ]);
+    });
+
+    // Model A's line is byte-identical: --issue-token is not a start mode.
+    it("--issue-token is not a start mode: beside --session memory alone it meets the at-least-one line", async () => {
+      const { TokenRotationScheduler } = await import("@harpoc/core");
+
+      await expect(run(["--session", "memory", "--issue-token", spec("alice")])).rejects.toThrow(
+        "process.exit",
+      );
+      expect(spies.errorSpy.mock.calls[0]).toEqual([
+        "Error: At least one of --mcp, --mcp-http, --rest, --oauth-refresh or --cert-renew is required.",
+      ]);
+      expect(TokenRotationScheduler).not.toHaveBeenCalled();
     });
   });
 

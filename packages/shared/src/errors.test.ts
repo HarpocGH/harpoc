@@ -865,6 +865,16 @@ describe("factory methods", () => {
     expect(err.message).toBe("unlock has no REST mode; run it on the vault host");
   });
 
+  it("sessionModeConflict() maps to 400 and names the flag and the memory session it needs, never a value", () => {
+    const err = VaultError.sessionModeConflict("--issue-token");
+    expect(err.code).toBe(ErrorCode.SESSION_MODE_CONFLICT);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toBe(
+      "--issue-token requires --session memory: on a session file the daemon would seal when the session expires or an administrator unlocks the vault",
+    );
+    expect(err.details).toBeUndefined();
+  });
+
   it("proxyPlaceholderDenied() names the origin and the opt-in remedy, nothing else", () => {
     const err = VaultError.proxyPlaceholderDenied("https://api.github.com");
     expect(err.code).toBe(ErrorCode.PROXY_PLACEHOLDER_DENIED);

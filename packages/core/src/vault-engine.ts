@@ -204,6 +204,12 @@ export interface VaultEngineOptions {
   onJobWrapperUnavailable?: (reason: string) => void;
   /** Sliding session TTL in ms (default DEFAULT_SESSION_TTL_MS, capped at MAX_SESSION_TTL_MS). Operator knob / test seam. */
   sessionTtlMs?: number;
+  /**
+   * `"memory"` (deployment model B, M2): no session file is written, slid or watched, and `lock()`
+   * erases none — the keys stay in this process until `lock()` or `destroy()`. Default `"file"`,
+   * the session file as before.
+   */
+  sessionMode?: "file" | "memory";
 }
 
 /** Chain verification plus the current tail (for printing/comparison and re-anchoring). */
@@ -482,6 +488,7 @@ export class VaultEngine {
   // ≤30 s granularity) is the backstop, not the sole enforcer.
   private sessionExpiresAt: number | null = null;
   private readonly sessionTtlMs: number;
+  private readonly sessionMode: "file" | "memory";
   private readonly oauthRefreshInFlight = new Map<string, Promise<number | null>>();
   /** The egress proxy's open leases, each its own closer — drained by `wipeKeys`. */
   private readonly openProxyLeases = new Set<(outcome: ProxyOutcome) => void>();
@@ -511,6 +518,7 @@ export class VaultEngine {
       options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS,
       MAX_SESSION_TTL_MS,
     );
+    this.sessionMode = options.sessionMode ?? "file";
   }
 
   // ---------------------------------------------------------------------------
@@ -830,8 +838,11 @@ export class VaultEngine {
       this.kek = kek;
       this.jwtKey = jwtKey;
       this.auditKey = auditKey;
-      this.sessionId = session.session_id;
-      this.sessionExpiresAt = session.expires_at;
+      // Memory mode takes the keys and leaves the file to its owner: no session of its own.
+      if (this.sessionMode === "file") {
+        this.sessionId = session.session_id;
+        this.sessionExpiresAt = session.expires_at;
+      }
       this.state = VaultState.UNLOCKED;
       this.unlockedBy = "session";
 
@@ -848,7 +859,8 @@ export class VaultEngine {
   }
 
   /**
-   * Lock the vault: wipe keys, erase session. `caller` is attribution only —
+   * Lock the vault: wipe keys, erase the session file (file mode — a memory-mode engine wrote
+   * none, and one in its directory is an administrator's). `caller` is attribution only —
    * the REST lock route's token (`POST /api/v1/vault/lock`, deployment model
    * B) stamps its principal and interface onto the `vault.lock` row; the
    * trusted local path passes none and keeps the NULL-principal row.
@@ -872,7 +884,7 @@ export class VaultEngine {
     await this.mcpRegistry?.closeAll("vault_lock");
 
     this.wipeKeys();
-    await this.sessionManager.eraseSession();
+    if (this.sessionMode === "file") await this.sessionManager.eraseSession();
     this.stopSessionMonitor();
   }
 
@@ -5065,6 +5077,12 @@ export class VaultEngine {
    * advisory. The claims metadata of every issued token is recorded in
    * `issued_tokens` in the same transaction as its `token.create` row; the JWT
    * itself is never stored.
+   *
+   * `options.rotation` marks an issuer-side re-mint (deployment model B, M2 —
+   * `TokenRotationScheduler`): the row gains `rotation: true`, and before the
+   * mint the subject's registration and the replaced token's revocation are
+   * judged by `assertRotationLive`, whose refusals are audited. Without it the
+   * method and its row are as before.
    */
   createToken(
     subject: string,
@@ -5075,6 +5093,7 @@ export class VaultEngine {
       secrets?: string[];
       principalType?: TokenPrincipalType;
       label?: string;
+      rotation?: { previousJti?: string };
     },
   ): string {
     const s = this.assertUnlocked();
@@ -5103,6 +5122,9 @@ export class VaultEngine {
     }
 
     const effectiveType = options?.principalType ?? "agent";
+    if (options?.rotation !== undefined) {
+      this.assertRotationLive(s, subject, effectiveType, options.rotation.previousJti);
+    }
     const agent = effectiveType === "agent" ? s.agentRegistry.assertActive(subject) : undefined;
 
     const effectiveTtl = Math.min(Math.max(ttlMs, 0), MAX_TOKEN_TTL_MS);
@@ -5150,12 +5172,52 @@ export class VaultEngine {
           project: options?.project,
           principal_type: effectiveType,
           ...(options?.label !== undefined ? { label: options.label } : {}),
+          ...(options?.rotation !== undefined ? { rotation: true } : {}),
         },
         sessionId: this.sessionId ?? undefined,
       });
     });
 
     return token;
+  }
+
+  /**
+   * The issuer-side rotation's gate (deployment model B, M2): a re-mint goes
+   * ahead only while the subject is still a registered, active agent — judged
+   * first, so a deactivation reads `AGENT_INACTIVE` and a deletion
+   * `AGENT_NOT_FOUND` although both also revoked the replaced token — and the
+   * token it replaces was not revoked: `revoked_tokens`, the revocation truth,
+   * or the registry's `revoked_at` mirror, which outlives the denylist entry
+   * pruned at the token's expiry (a re-mint delayed past it). A refusal writes
+   * a failed `token.create` row `{ subject, principal_type, rotation: true,
+   * error }` before the throw, so the rotator stops with its cause on the
+   * trail; `auth token`'s refusals stay row-less.
+   */
+  private assertRotationLive(
+    s: UnlockedState,
+    subject: string,
+    principalType: TokenPrincipalType,
+    previousJti: string | undefined,
+  ): void {
+    const detail = { subject, principal_type: principalType, rotation: true };
+    if (principalType === "agent") {
+      try {
+        s.agentRegistry.assertActive(subject);
+      } catch (err) {
+        this.auditDenied(s, AuditEventType.TOKEN_CREATE, err, detail);
+        throw err;
+      }
+    }
+    if (previousJti === undefined) return;
+    const previous = s.store.getIssuedToken(previousJti);
+    if (
+      s.store.isTokenRevoked(previousJti) ||
+      (previous !== null && previous.revoked_at !== null)
+    ) {
+      const err = VaultError.tokenRevoked();
+      this.auditDenied(s, AuditEventType.TOKEN_CREATE, err, detail);
+      throw err;
+    }
   }
 
   /**
@@ -5853,6 +5915,8 @@ export class VaultEngine {
   // ---------------------------------------------------------------------------
 
   private async writeNewSession(): Promise<void> {
+    // Memory mode keeps the keys in this process alone: there is no file to write.
+    if (this.sessionMode === "memory") return;
     this.sessionWriteInFlight = true;
     try {
       // A use-driven expiry slide may be writing the session file right now
@@ -5902,6 +5966,8 @@ export class VaultEngine {
   }
 
   private startSessionMonitor(): void {
+    // Memory mode has no session file to watch: no monitor, no idle seal.
+    if (this.sessionMode === "memory") return;
     this.stopSessionMonitor();
     this.lastSessionSlideAt = 0;
     this.sessionMonitorInterval = setInterval(() => {
@@ -6005,6 +6071,8 @@ export class VaultEngine {
    */
   private touchSession(): void {
     if (this.state !== VaultState.UNLOCKED) return;
+    // Memory mode has no session file to slide; one in the directory is an administrator's.
+    if (this.sessionMode === "memory") return;
     const now = Date.now();
     if (this.sessionSlide !== null || now - this.lastSessionSlideAt < SESSION_SLIDE_INTERVAL_MS) {
       return;

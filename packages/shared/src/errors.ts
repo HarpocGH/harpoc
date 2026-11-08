@@ -920,6 +920,13 @@ export class VaultError extends Error {
     );
   }
 
+  static sessionModeConflict(flag: string): VaultError {
+    return new VaultError(
+      ErrorCode.SESSION_MODE_CONFLICT,
+      `${flag} requires --session memory: on a session file the daemon would seal when the session expires or an administrator unlocks the vault`,
+    );
+  }
+
   static proxyPlaceholderDenied(origin: string): VaultError {
     return new VaultError(
       ErrorCode.PROXY_PLACEHOLDER_DENIED,

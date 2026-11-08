@@ -709,7 +709,16 @@ describe("compiled binary smoke: a missing --unlock-key-file (B4)", () => {
       const env: NodeJS.ProcessEnv = { ...process.env, HOME: cwd, USERPROFILE: cwd };
       delete env.HARPOC_TOKEN;
       const result = await spawnNode(
-        [CLI_PATH, "server", "start", "--rest", "--unlock-key-file", join(cwd, "missing.key")],
+        [
+          CLI_PATH,
+          "server",
+          "start",
+          "--session",
+          "memory",
+          "--rest",
+          "--unlock-key-file",
+          join(cwd, "missing.key"),
+        ],
         "harpoc server start",
         env,
         { cwd },
@@ -723,6 +732,55 @@ describe("compiled binary smoke: a missing --unlock-key-file (B4)", () => {
       rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   }, 60_000);
+});
+
+describe("compiled binary smoke: the memory session's refusals before any vault (B5)", () => {
+  it.each([
+    {
+      label: "a B flag in file mode is SESSION_MODE_CONFLICT",
+      args: ["--rest", "--proxy"],
+      // The factory's text is shared's; the line names the flag and the mode it needs.
+      stderr: /^Error: \[SESSION_MODE_CONFLICT\] --proxy requires --session memory[^\n]*\n$/,
+    },
+    {
+      label: "a session mode that is neither memory nor file is INVALID_INPUT",
+      args: ["--rest", "--session", "nonsense"],
+      stderr:
+        /^Error: \[INVALID_INPUT\] --session: "nonsense" is not a session mode \(memory or file\)\n$/,
+    },
+    {
+      label: "an --issue-token spec without its file is INVALID_INPUT naming the key",
+      args: ["--rest", "--session", "memory", "--issue-token", "agent=a"],
+      stderr:
+        /^Error: \[INVALID_INPUT\] --issue-token: file is missing \(agent, file, scope and secrets are required\)\n$/,
+    },
+  ])(
+    "server start: $label — exit 1, one line, nothing created",
+    async ({ args, stderr }) => {
+      const cwd = join(
+        tmpdir(),
+        `harpoc-sessionmode-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      );
+      mkdirSync(cwd);
+      try {
+        const env: NodeJS.ProcessEnv = { ...process.env, HOME: cwd, USERPROFILE: cwd };
+        delete env.HARPOC_TOKEN;
+        const result = await spawnNode(
+          [CLI_PATH, "server", "start", ...args],
+          "harpoc server start",
+          env,
+          { cwd },
+        );
+        expect(result.code).toBe(1);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toMatch(stderr);
+        expect(readdirSync(cwd)).toEqual([]);
+      } finally {
+        rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
+    },
+    60_000,
+  );
 });
 
 // Phase 3 D1: `secret use` accepts a scoped token, so the CLI is no longer

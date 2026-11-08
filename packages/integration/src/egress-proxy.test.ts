@@ -238,9 +238,18 @@ describe.skipIf(GIT === null)(
       useToken = readFileSync(tokenFile, "utf8").trim();
 
       // A pass-through (git's credential-less probe) carries no CA pin, so the daemon trusts the
-      // fixture's CA by default, as it trusts a public upstream's.
+      // fixture's CA by default, as it trusts a public upstream's. --proxy runs in the memory
+      // session (B5): the daemon loads the session init wrote once and leaves it to the CLI below.
       const started = await startCliServerOnFreePort(
-        (port) => ["server", "start", "--proxy", "--proxy-port", String(port)],
+        (port) => [
+          "server",
+          "start",
+          "--proxy",
+          "--proxy-port",
+          String(port),
+          "--session",
+          "memory",
+        ],
         {
           vaultDir,
           env: { ...process.env, NODE_EXTRA_CA_CERTS: caFile },
