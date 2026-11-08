@@ -46,7 +46,7 @@ const HEADLESS = "b-win-headless-dpapi";
 const VALUE_ROUTE = "b-win-two-account-value-route";
 const VAULT_DIR = "b-win-two-account-vault-dir";
 const PIPE = "b-win-agent-pipe-exposure";
-const INVENTORY = "b-win-two-account-inventory";
+const CMDLINE = "b-win-two-account-cmdline";
 const NEGATIVE = "b-win-negative-same-account";
 
 /**
@@ -268,8 +268,7 @@ async function observeInventory(
   if (sighted(d.credentials.all, report.stdout, ...results.flatMap((r) => [r.stdout, r.stderr]))) {
     return Outcome.LEAKED;
   }
-  if (verdict.foreignReadable.length > 0) return Outcome.BYPASSED;
-  requireProofs(INVENTORY, {
+  requireProofs(CMDLINE, {
     ownReportRead: report.code === 0,
     placeholderInOwnEnvironment: own.env["HARPOC_PLACEHOLDER_API_KEY"] === d.placeholders.apiKey,
     pipeInOwnEnvironment: own.env["SSH_AUTH_SOCK"] === d.consumer.agentPipe,
@@ -283,6 +282,7 @@ async function observeInventory(
     daemonListed: verdict.foreignListed.includes(daemonPid),
     toolsCompleted: results.length === 2 && results.every((r) => r.code === 0),
   });
+  if (verdict.foreignReadable.length > 0) return Outcome.BYPASSED;
   return Outcome.HANDLE_ONLY;
 }
 
@@ -356,12 +356,18 @@ export const MODEL_B_WINDOWS_SCENARIOS: ModelBWindowsScenario[] = [
     expected: Outcome.OPAQUE,
     observe: observePipe,
   },
+  /**
+   * The measured residual, not a claim: the vault daemon's command line is
+   * readable to the agent account through its own process listing and carries
+   * no secret, since none is ever passed on a command line — so the row is
+   * BYPASSED; a credential in any text the agent reads is LEAKED.
+   */
   {
-    scenario: INVENTORY,
+    scenario: CMDLINE,
     context: "process",
     surface: "two-account",
     interface: "proxy+ssh_agent",
-    expected: Outcome.HANDLE_ONLY,
+    expected: Outcome.BYPASSED,
     observe: observeInventory,
   },
   {

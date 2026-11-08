@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HELD_OUTCOMES, LEAKED_OUTCOMES } from "../../scripts/recheck.mjs";
+import { INVENTORY_COMMAND } from "../assert/process-inventory-windows.js";
 import { PREREGISTRATION_FILE_B } from "../evidence/paths.js";
 import { PREREGISTRATION_FILE_B_WINDOWS } from "../evidence/paths-windows.js";
 import {
@@ -25,7 +26,7 @@ const WINDOWS_IDS = [
   "b-win-two-account-value-route",
   "b-win-two-account-vault-dir",
   "b-win-agent-pipe-exposure",
-  "b-win-two-account-inventory",
+  "b-win-two-account-cmdline",
   "b-win-negative-same-account",
 ];
 
@@ -91,7 +92,7 @@ describe("the model-B Windows scenario table and its pre-registration", () => {
       "b-win-two-account-value-route": "rest",
       "b-win-two-account-vault-dir": "filesystem",
       "b-win-agent-pipe-exposure": "ssh_agent",
-      "b-win-two-account-inventory": "proxy+ssh_agent",
+      "b-win-two-account-cmdline": "proxy+ssh_agent",
       "b-win-negative-same-account": "process-inventory",
     });
   });
@@ -182,5 +183,105 @@ describe("the pipe row's verdict and its diagnostic (a stubbed deployment)", () 
       { user: "harpoc-b7", method: "publickey", signed: true, verified: true },
     );
     expect(await pipeRow.observe(d, captureCalls(API_KEY))).toBe(Outcome.OPAQUE);
+  });
+});
+
+/**
+ * The command-line row on a stubbed deployment: the agent's report, its held
+ * curl and ssh and its own process listing are canned, so the row's verdict is
+ * read without accounts (`systemPaths` needs a `SystemRoot`, stubbed off
+ * Windows).
+ */
+describe("the command-line row's verdict (a stubbed deployment)", () => {
+  const AGENT = "agent1";
+  const API_KEY = "unit-fixture-api-key-4e8a";
+  const PLACEHOLDER = "harpoc:api-key";
+  const DAEMON_PID = 4242;
+  const AGENT_PIPE = `\\\\.\\pipe\\harpoc-${AGENT}-ssh-agent`;
+  const TOKEN_FILE = `C:\\ProgramData\\harpoc\\run\\${AGENT}\\token.jwt`;
+  const DAEMON_LINE = `"C:\\node\\node.exe" --title=harpoc-b7 C:\\cli\\dist\\index.js --vault-dir C:\\ProgramData\\harpoc\\vault server start --rest --runtime-dir C:\\ProgramData\\harpoc\\run --issue-token agent=${AGENT},file=${TOKEN_FILE},scope=use,secrets=api-key`;
+  const TOOLS = [
+    {
+      ProcessId: 7001,
+      Name: "curl.exe",
+      CommandLine: `C:\\Windows\\System32\\curl.exe -sS --user-agent harpoc-b7 -H @- -H "Authorization: Bearer ${PLACEHOLDER}" http://127.0.0.1:3128/127.0.0.1:8443/echo/held`,
+    },
+    {
+      ProcessId: 7002,
+      Name: "ssh.exe",
+      CommandLine: "C:\\Windows\\System32\\OpenSSH\\ssh.exe -F none -l harpoc-b7 -- 127.0.0.1 true",
+    },
+  ];
+  const cmdlineRow = MODEL_B_WINDOWS_SCENARIOS.find(
+    (r) => r.scenario === "b-win-two-account-cmdline",
+  ) as ModelBWindowsScenario;
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  function stubbed(daemonLine: string, tools: object[]): TwoAccountDeployment {
+    vi.stubEnv("SystemRoot", "C:\\Windows");
+    let released = (): void => undefined;
+    const finished = new Promise<void>((resolve) => {
+      released = resolve;
+    });
+    const hold = () => ({ arrived: Promise.resolve(), release: () => released() });
+    const ok = { code: 0, stdout: "", stderr: "" };
+    const report = JSON.stringify({
+      env: {
+        HARPOC_PLACEHOLDER_API_KEY: PLACEHOLDER,
+        HARPOC_PROXY_TOKEN_FILE: TOKEN_FILE,
+        SSH_AUTH_SOCK: AGENT_PIPE,
+      },
+      argv: [],
+    });
+    const listing = JSON.stringify([
+      { ProcessId: DAEMON_PID, Name: "node.exe", CommandLine: daemonLine },
+      ...tools,
+    ]);
+    return {
+      daemon: { pid: () => DAEMON_PID },
+      credentials: { all: [API_KEY] },
+      placeholders: { apiKey: PLACEHOLDER },
+      consumer: { agentPipe: AGENT_PIPE, tokenFile: TOKEN_FILE },
+      agentEnv: { HARPOC_PROXY_BASE: "http://127.0.0.1:3128/" },
+      agentFiles: { knownHosts: "C:/b7/known_hosts", identity: "C:/b7/id.pub" },
+      echo: { port: 8443, hold },
+      sshServer: { port: 2222, hold },
+      asAgent: async (argv: string[]) => ({
+        ...ok,
+        stdout: argv.at(-1) === INVENTORY_COMMAND ? listing : report,
+      }),
+      driveAgent: async () => {
+        await finished;
+        return [ok, ok];
+      },
+    } as unknown as TwoAccountDeployment;
+  }
+
+  it("lacking its proof (its own curl and ssh not in its listing), throws rather than reporting the vault process's readable command line BYPASSED", async () => {
+    let thrown: unknown;
+    try {
+      await cmdlineRow.observe(stubbed(DAEMON_LINE, []), captureCalls(API_KEY));
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe(
+      "arm is not discriminating: b-win-two-account-cmdline lacks its proof (placeholderListed, curlListed, sshListed)",
+    );
+  });
+
+  it("on its proof, the vault process's command line, readable to the agent and carrying no secret, is BYPASSED: the measured residual", async () => {
+    expect(await cmdlineRow.observe(stubbed(DAEMON_LINE, TOOLS), captureCalls(API_KEY))).toBe(
+      Outcome.BYPASSED,
+    );
+  });
+
+  it("a credential on the vault process's command line is LEAKED, never the residual", async () => {
+    expect(
+      await cmdlineRow.observe(stubbed(`${DAEMON_LINE} ${API_KEY}`, TOOLS), captureCalls(API_KEY)),
+    ).toBe(Outcome.LEAKED);
   });
 });

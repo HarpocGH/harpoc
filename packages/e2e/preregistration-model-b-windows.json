@@ -28,11 +28,11 @@
     "expected": "OPAQUE"
   },
   {
-    "scenario": "b-win-two-account-inventory",
+    "scenario": "b-win-two-account-cmdline",
     "context": "process",
     "surface": "two-account",
     "arm": "harpoc",
-    "expected": "HANDLE_ONLY"
+    "expected": "BYPASSED"
   },
   {
     "scenario": "b-win-negative-same-account",

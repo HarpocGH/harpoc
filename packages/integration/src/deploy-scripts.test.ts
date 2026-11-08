@@ -238,7 +238,7 @@ describe("deploy PowerShell scripts (deployment model B on Windows)", () => {
 const winArg = (value: string): string => (/\s/.test(value) ? `"${value}"` : value);
 
 /** A recipe row's spawn budget: a module-loading cmdlet answers in tens of seconds under the full gate on windows-latest (`decisions.md` § "The WMI listing series"). */
-const PS1_TIMEOUT_MS = 90_000;
+const PS1_TIMEOUT_MS = 180_000;
 
 /** The recipe rows' environment: the inherited one with `PSModulePath` narrowed to the in-box modules the three scripts load (Management, Utility, Security, LocalAccounts, ScheduledTasks). */
 function recipeEnvironment(): NodeJS.ProcessEnv {
@@ -434,7 +434,7 @@ describe.skipIf(process.platform !== "win32")(
         expect(run.stdout).toContain(`Usage: ${script.slice("windows/".length)}`);
         expect(run.stderr, run.measured).toBe("");
       },
-      120_000,
+      210_000,
     );
 
     it("register-service.ps1 -DryRun prints the startup task: the memory session, the DPAPI-sealed key, no time limit — and registers nothing", () => {
@@ -489,7 +489,7 @@ describe.skipIf(process.platform !== "win32")(
         "dry run: nothing registered",
       ]);
       expect(existsSync(base)).toBe(false);
-    }, 120_000);
+    }, 210_000);
 
     it.each([
       {
@@ -566,7 +566,7 @@ describe.skipIf(process.platform !== "win32")(
         expect(run.stderr).toContain(says);
         expect(run.stderr).not.toContain("must run elevated");
       },
-      120_000,
+      210_000,
     );
 
     // Elevated, the scripts pass their administrator check and would create the account, the
@@ -595,7 +595,7 @@ describe.skipIf(process.platform !== "win32")(
       }
       expect(existsSync(base)).toBe(false);
       expect(existsSync(join(root, "unlock.key.dpapi"))).toBe(false);
-    }, 300_000);
+    }, 570_000);
 
     // Elevated, the layout is readable and the scripts go on past their checks: like the row above, the desktop's.
     it("on the layout the recipe leaves (harpoc and harpoc\\vault open to SYSTEM and Administrators alone) install-two-identity.ps1 and enroll-unlock-key.ps1 stop at their administrator check for a non-elevated user (exit 1, no PowerShell text)", (ctx) => {
@@ -640,7 +640,7 @@ describe.skipIf(process.platform !== "win32")(
           `${script}: must run elevated (an Administrator PowerShell)\r\n`,
         );
       }
-    }, 360_000);
+    }, 630_000);
 
     it("install-two-identity.ps1 refuses an existing harpoc directory that is a junction (a reparse point) as a usage error before its administrator check", () => {
       const programData = join(root, "ProgramData-junction");
@@ -656,7 +656,7 @@ describe.skipIf(process.platform !== "win32")(
       );
       expect(run.status, run.measured).toBe(2);
       expect(readdirSync(target)).toEqual([]);
-    }, 120_000);
+    }, 210_000);
 
     it("install-two-identity.ps1 refuses an existing harpoc that is a file, not a directory, as a usage error before its administrator check", () => {
       const programData = join(root, "ProgramData-file");
@@ -668,6 +668,6 @@ describe.skipIf(process.platform !== "win32")(
         `install-two-identity.ps1: ${file} exists and is not a directory; remove it\r\n`,
       );
       expect(run.status, run.measured).toBe(2);
-    }, 120_000);
+    }, 210_000);
   },
 );

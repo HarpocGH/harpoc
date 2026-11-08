@@ -256,6 +256,7 @@ jobs:
           & "$env:SystemRoot\System32\curl.exe" --version
           & "$env:SystemRoot\System32\OpenSSH\ssh.exe" -V
       - name: Run the model B Windows suite
+        id: suite
         shell: pwsh
         env:
           HARPOC_REQUIRE_PLATFORM_TESTS: two-account-windows
@@ -271,8 +272,9 @@ jobs:
         # smoke master password on each child's stdin. The task is then stopped (a kill: no
         # server.stop row) and unregistered, and the scratch vault's files are removed. A red
         # here is the signal for B7-U2's fallback (a WinSW service with the same account, sealer
-        # and layout), not a defect of the suite.
-        if: success()
+        # and layout), not a defect of the suite. It runs whenever the suite ran, green or red (a
+        # red row does not hide the cell); a failure before the suite skips both.
+        if: ${{ !cancelled() && (steps.suite.outcome == 'success' || steps.suite.outcome == 'failure') }}
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'

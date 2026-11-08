@@ -50,7 +50,7 @@ const MODEL_B_WINDOWS_SCENARIO_IDS = [
   "b-win-two-account-value-route",
   "b-win-two-account-vault-dir",
   "b-win-agent-pipe-exposure",
-  "b-win-two-account-inventory",
+  "b-win-two-account-cmdline",
   "b-win-negative-same-account",
 ];
 
