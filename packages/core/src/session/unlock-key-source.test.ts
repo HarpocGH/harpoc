@@ -10,10 +10,12 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
+import { system32Path } from "../win32-paths.js";
+import { dpapiBlobScope, dpapiProtect, dpapiUnprotect } from "./dpapi.js";
 import { listWindowsAcl, restrictWindowsAclToOwner } from "./owner-only.js";
 import type { WindowsAcl } from "./owner-only.js";
 import {
@@ -22,8 +24,10 @@ import {
   mountFilesystemType,
   mountWarningFor,
   readUnlockCredential,
+  readUnlockKeyDpapi,
   readUnlockKeyFile,
   windowsAclVerdict,
+  writeUnlockKeyDpapi,
   writeUnlockKeyFile,
 } from "./unlock-key-source.js";
 import { expectVaultError } from "@harpoc/test-utils";
@@ -39,6 +43,15 @@ vi.mock("./owner-only.js", async (importOriginal) => {
     ...actual,
     listWindowsAcl: vi.fn(actual.listWindowsAcl),
     restrictWindowsAclToOwner: vi.fn(actual.restrictWindowsAclToOwner),
+  };
+});
+
+vi.mock("./dpapi.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./dpapi.js")>();
+  return {
+    ...actual,
+    dpapiProtect: vi.fn(actual.dpapiProtect),
+    dpapiUnprotect: vi.fn(actual.dpapiUnprotect),
   };
 });
 
@@ -65,7 +78,7 @@ function expectNoKeyIn(message: string): void {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   dir = mkdtempSync(join(tmpdir(), "harpoc-unlock-key-"));
 });
 
@@ -570,3 +583,250 @@ describe("writeUnlockKeyFile", () => {
     expect(existsSync(path)).toBe(false);
   });
 });
+
+/** A version-1 DPAPI blob header of `length` bytes whose flags word (byte 40) is `flags`. */
+function blobHeader(length: number, flags: number): Buffer {
+  const bytes = Buffer.alloc(length, 0x5a);
+  bytes.writeUInt32LE(1, 0);
+  bytes.writeUInt32LE(flags, 40);
+  return bytes;
+}
+
+const OWNER_ONLY_ACL: WindowsAcl = {
+  user: USER_SID,
+  owner: USER_SID,
+  rules: [{ allow: true, sid: USER_SID }],
+};
+
+// The ladder and the content checks on every leg: the platform faked as win32, the access
+// list and the DPAPI bridge mocked. The real bridge runs in the win32 describe below.
+describe("readUnlockKeyDpapi", () => {
+  it("refuses on a platform other than win32 INVALID_INPUT naming it, before anything is read", async () => {
+    const path = join(dir, "absent.dpapi");
+    const error = await withPlatform("linux", () =>
+      expectVaultError(() => readUnlockKeyDpapi(path), ErrorCode.INVALID_INPUT),
+    );
+    expect(error.message).toBe(
+      "--unlock-key-dpapi: DPAPI is Windows' own and this platform is linux (systemd's sealer is --unlock-credential)",
+    );
+    expect(vi.mocked(listWindowsAcl)).not.toHaveBeenCalled();
+    expect(vi.mocked(dpapiUnprotect)).not.toHaveBeenCalled();
+  });
+
+  it("refuses a missing path INVALID_INPUT naming the option and the path", async () => {
+    const path = join(dir, "absent.dpapi");
+    const error = await withPlatform("win32", () =>
+      expectVaultError(() => readUnlockKeyDpapi(path), ErrorCode.INVALID_INPUT),
+    );
+    expect(error.message).toBe(`--unlock-key-dpapi: no such file: ${path}`);
+  });
+
+  it("refuses UNLOCK_KEY_SOURCE_UNSAFE acl_unverified when the access list cannot be read — no unseal", async () => {
+    const path = join(dir, "unlock.key.dpapi");
+    writeFileSync(path, blobHeader(262, 0));
+    vi.mocked(listWindowsAcl).mockRejectedValueOnce(new Error("ACL listing failed (exit 1)"));
+    const error = await withPlatform("win32", () =>
+      expectVaultError(() => readUnlockKeyDpapi(path), ErrorCode.UNLOCK_KEY_SOURCE_UNSAFE),
+    );
+    expect(error.details).toEqual({ reason: "acl_unverified" });
+    expect(vi.mocked(dpapiUnprotect)).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "a file over the 4096-byte cap",
+      bytes: () => blobHeader(4097, 0),
+      message: (path: string) =>
+        `Invalid unlock key: ${path} holds 4097 bytes; a DPAPI-sealed unlock key file holds at most 4096`,
+    },
+    {
+      label: "the raw 32-byte key given in place of the sealed file",
+      bytes: () => Buffer.from(KEY),
+      message: (path: string) =>
+        `Invalid unlock key: ${path} is not a DPAPI-sealed unlock key (harpoc unlock-key enroll --out <path> --dpapi writes one)`,
+    },
+    {
+      label: "a LocalMachine blob (its header's 0x4 flag)",
+      bytes: () => blobHeader(262, 0x4),
+      message: (path: string) =>
+        `Invalid unlock key: ${path} is sealed to the machine (DPAPI LocalMachine scope), which every local account can unseal; seal it to the daemon's account with harpoc unlock-key enroll --dpapi`,
+    },
+  ])(
+    "refuses $label INVALID_UNLOCK_KEY before any unseal, the key in no message",
+    async ({ bytes, message }) => {
+      const path = join(dir, "unlock.key.dpapi");
+      writeFileSync(path, bytes());
+      vi.mocked(listWindowsAcl).mockResolvedValueOnce(OWNER_ONLY_ACL);
+      const error = await withPlatform("win32", () =>
+        expectVaultError(() => readUnlockKeyDpapi(path), ErrorCode.INVALID_UNLOCK_KEY),
+      );
+      expectNoKeyIn(error.message);
+      expect(error.message).toBe(message(path));
+      expect(vi.mocked(dpapiUnprotect)).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a blob DPAPI refuses is INVALID_UNLOCK_KEY naming the path and the account", async () => {
+    const path = join(dir, "unlock.key.dpapi");
+    writeFileSync(path, blobHeader(262, 0));
+    vi.mocked(listWindowsAcl).mockResolvedValueOnce(OWNER_ONLY_ACL);
+    vi.mocked(dpapiUnprotect).mockResolvedValueOnce(undefined);
+    const error = await withPlatform("win32", () =>
+      expectVaultError(() => readUnlockKeyDpapi(path), ErrorCode.INVALID_UNLOCK_KEY),
+    );
+    expect(error.message).toBe(
+      `Invalid unlock key: ${path} could not be unsealed as ${userInfo().username}: DPAPI refused it (sealed by another account or for another use, damaged, or this account's profile is not loaded)`,
+    );
+  });
+
+  it("a blob that unseals to 31 bytes is INVALID_UNLOCK_KEY, the unsealed bytes wiped", async () => {
+    const path = join(dir, "unlock.key.dpapi");
+    writeFileSync(path, blobHeader(262, 0));
+    const short = Uint8Array.from(KEY.subarray(0, 31));
+    vi.mocked(listWindowsAcl).mockResolvedValueOnce(OWNER_ONLY_ACL);
+    vi.mocked(dpapiUnprotect).mockResolvedValueOnce(short);
+    const error = await withPlatform("win32", () =>
+      expectVaultError(() => readUnlockKeyDpapi(path), ErrorCode.INVALID_UNLOCK_KEY),
+    );
+    expect(error.message).toBe(
+      `Invalid unlock key: ${path} unsealed to 31 bytes; an unlock key is exactly 32`,
+    );
+    expect(short.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("hands the file's bytes to the bridge with the unlock key's entropy, returns the key and wipes the blob", async () => {
+    const path = join(dir, "unlock.key.dpapi");
+    const blob = blobHeader(262, 0);
+    writeFileSync(path, blob);
+    let handed: Uint8Array | undefined;
+    let handedMatched = false;
+    vi.mocked(listWindowsAcl).mockResolvedValueOnce(OWNER_ONLY_ACL);
+    vi.mocked(dpapiUnprotect).mockImplementationOnce(async (bytes, entropy) => {
+      handed = bytes;
+      handedMatched = Buffer.from(bytes).equals(blob) && entropy === "harpoc.unlock-key.v1";
+      return Uint8Array.from(KEY);
+    });
+    const key = await withPlatform("win32", () => readUnlockKeyDpapi(path));
+    expect(Buffer.from(key).equals(KEY)).toBe(true);
+    expect(handedMatched).toBe(true);
+    expect(handed !== undefined && handed.every((byte) => byte === 0)).toBe(true);
+  });
+});
+
+describe("writeUnlockKeyDpapi", () => {
+  it("refuses on a platform other than win32 INVALID_INPUT before sealing or creating anything", async () => {
+    const path = join(dir, "unlock.key.dpapi");
+    const error = await withPlatform("linux", () =>
+      expectVaultError(() => writeUnlockKeyDpapi(path, KEY), ErrorCode.INVALID_INPUT),
+    );
+    expect(error.message).toBe(
+      "--dpapi: DPAPI is Windows' own and this platform is linux (seal the raw key with this platform's sealer: deploy/linux/enroll-unlock-key.sh)",
+    );
+    expect(vi.mocked(dpapiProtect)).not.toHaveBeenCalled();
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("refuses a key that is not 32 bytes INVALID_INPUT before sealing or creating anything", async () => {
+    const path = join(dir, "unlock.key.dpapi");
+    await withPlatform("win32", () =>
+      expectVaultError(
+        () => writeUnlockKeyDpapi(path, KEY.subarray(0, 31)),
+        ErrorCode.INVALID_INPUT,
+      ),
+    );
+    expect(vi.mocked(dpapiProtect)).not.toHaveBeenCalled();
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("a refused seal creates no file", async () => {
+    const path = join(dir, "unlock.key.dpapi");
+    vi.mocked(dpapiProtect).mockRejectedValueOnce(new Error("DPAPI seal was refused by DPAPI"));
+    await withPlatform("win32", async () => {
+      await expect(writeUnlockKeyDpapi(path, KEY)).rejects.toThrow("refused");
+    });
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("seals with the unlock key's entropy, reduces the access list before a byte, writes the blob and wipes it", async () => {
+    const path = join(dir, "unlock.key.dpapi");
+    const blob = blobHeader(262, 0);
+    const expected = Buffer.from(blob);
+    let sealedKey = false;
+    let sizeAtRestriction = -1;
+    vi.mocked(dpapiProtect).mockImplementationOnce(async (bytes, entropy) => {
+      sealedKey = Buffer.from(bytes).equals(KEY) && entropy === "harpoc.unlock-key.v1";
+      return blob;
+    });
+    vi.mocked(restrictWindowsAclToOwner).mockImplementationOnce((target) => {
+      sizeAtRestriction = statSync(target).size;
+    });
+    await withPlatform("win32", () => writeUnlockKeyDpapi(path, KEY));
+    expect(sealedKey).toBe(true);
+    expect(sizeAtRestriction).toBe(0);
+    expect(readFileSync(path).equals(expected)).toBe(true);
+    expect(blob.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("a failed access-list reduction removes the file and refuses FILE_IO_ERROR naming the sealed file", async () => {
+    const path = join(dir, "unlock.key.dpapi");
+    vi.mocked(dpapiProtect).mockResolvedValueOnce(blobHeader(262, 0));
+    vi.mocked(restrictWindowsAclToOwner).mockImplementationOnce(() => {
+      throw new Error("icacls exited 5: Access is denied.");
+    });
+    const error = await withPlatform("win32", () =>
+      expectVaultError(() => writeUnlockKeyDpapi(path, KEY), ErrorCode.FILE_IO_ERROR),
+    );
+    expect(error.message).toBe(
+      `could not write the sealed unlock key file ${path} (icacls exited 5: Access is denied.)`,
+    );
+    expect(existsSync(path)).toBe(false);
+  });
+});
+
+describe.runIf(process.platform === "win32")(
+  "the DPAPI-sealed unlock key on win32 — the real bridge",
+  () => {
+    it("writeUnlockKeyDpapi seals a blob of this account's scope that readUnlockKeyDpapi unseals to the key", async () => {
+      const path = join(dir, "unlock.key.dpapi");
+      await writeUnlockKeyDpapi(path, KEY);
+      const onDisk = readFileSync(path);
+      expect(onDisk.length).toBeGreaterThan(32);
+      expect(onDisk.includes(Buffer.from(KEY))).toBe(false);
+      expect(dpapiBlobScope(onDisk)).toBe("user");
+      expect(windowsAclVerdict(await listWindowsAcl(path))).toBeUndefined();
+      expect(Buffer.from(await readUnlockKeyDpapi(path)).equals(KEY)).toBe(true);
+    });
+
+    it("a blob sealed under this account for another use is INVALID_UNLOCK_KEY", async () => {
+      const path = join(dir, "unlock.key.dpapi");
+      writeFileSync(
+        path,
+        await dpapiProtect(KEY, "another.use.v1", { label: "DPAPI seal (fixture)" }),
+      );
+      const error = await expectVaultError(
+        () => readUnlockKeyDpapi(path),
+        ErrorCode.INVALID_UNLOCK_KEY,
+      );
+      expectNoKeyIn(error.message);
+      expect(error.message.includes("could not be unsealed")).toBe(true);
+    });
+
+    it("a sealed file that also grants Everyone read is UNLOCK_KEY_SOURCE_UNSAFE acl, before any unseal", async () => {
+      const path = join(dir, "unlock.key.dpapi");
+      await writeUnlockKeyDpapi(path, KEY);
+      const grant = spawnSync(system32Path("icacls.exe"), [path, "/grant", "*S-1-1-0:(R)"], {
+        shell: false,
+        windowsHide: true,
+        timeout: 15_000,
+      });
+      expect(grant.status).toBe(0);
+      vi.mocked(dpapiUnprotect).mockClear();
+      const error = await expectVaultError(
+        () => readUnlockKeyDpapi(path),
+        ErrorCode.UNLOCK_KEY_SOURCE_UNSAFE,
+      );
+      expect(error.details).toEqual({ reason: "acl" });
+      expect(vi.mocked(dpapiUnprotect)).not.toHaveBeenCalled();
+    });
+  },
+);

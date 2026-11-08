@@ -1,0 +1,44 @@
+[
+  {
+    "scenario": "b-win-headless-dpapi",
+    "context": "http",
+    "surface": "two-account",
+    "arm": "harpoc",
+    "expected": "SUCCEEDED"
+  },
+  {
+    "scenario": "b-win-two-account-value-route",
+    "context": "rest",
+    "surface": "two-account",
+    "arm": "harpoc",
+    "expected": "BLOCKED"
+  },
+  {
+    "scenario": "b-win-two-account-vault-dir",
+    "context": "session",
+    "surface": "two-account",
+    "arm": "harpoc",
+    "expected": "CHANNEL_ABSENT"
+  },
+  {
+    "scenario": "b-win-agent-pipe-exposure",
+    "context": "ssh",
+    "surface": "two-account",
+    "arm": "harpoc",
+    "expected": "OPAQUE"
+  },
+  {
+    "scenario": "b-win-two-account-inventory",
+    "context": "process",
+    "surface": "two-account",
+    "arm": "harpoc",
+    "expected": "HANDLE_ONLY"
+  },
+  {
+    "scenario": "b-win-negative-same-account",
+    "context": "process",
+    "surface": "process",
+    "arm": "harpoc",
+    "expected": "LEAKED"
+  }
+]

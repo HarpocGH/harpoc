@@ -50,14 +50,22 @@ function listed(key: typeof ED25519, comment: string) {
 
 let spies: CliSpies;
 let dir: string;
+const platform = process.platform;
+
+/** The platform the command reads for the socket path, stubbed so the rows run on every leg. */
+function stubPlatform(value: NodeJS.Platform): void {
+  Object.defineProperty(process, "platform", { value, configurable: true });
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
   spies = spyCli();
   dir = mkdtempSync(join(tmpdir(), "harpoc-sas-"));
+  stubPlatform(platform === "win32" ? "linux" : platform);
 });
 
 afterEach(() => {
+  stubPlatform(platform);
   vi.unstubAllEnvs();
   vi.mocked(probeAgentSocket).mockReset();
   spies.restore();
@@ -226,6 +234,26 @@ describe("ssh-agent status — each consumer's socket, as ssh-add -l reads it", 
       ],
     ]);
     expect(probeAgentSocket).not.toHaveBeenCalled();
+  });
+});
+
+// B7 (RP-B7-2): on Windows each consumer directory's agent is its pipe, derived from the name.
+describe("ssh-agent status on Windows (the platform stubbed)", () => {
+  it("probes \\\\.\\pipe\\harpoc-<consumer>-ssh-agent for every consumer directory, by name", async () => {
+    for (const name of ["bob", "alice"]) mkdirSync(join(dir, name));
+    stubPlatform("win32");
+    vi.mocked(probeAgentSocket).mockResolvedValue({ listening: true, identities: [] });
+
+    await run(["--runtime-dir", dir]);
+
+    expect(vi.mocked(probeAgentSocket).mock.calls).toEqual([
+      ["\\\\.\\pipe\\harpoc-alice-ssh-agent", 2_000],
+      ["\\\\.\\pipe\\harpoc-bob-ssh-agent", 2_000],
+    ]);
+    expect(spies.stdout().split("\n")).toEqual([
+      "consumer alice: listening — no identities (\\\\.\\pipe\\harpoc-alice-ssh-agent)",
+      "consumer bob: listening — no identities (\\\\.\\pipe\\harpoc-bob-ssh-agent)",
+    ]);
   });
 });
 

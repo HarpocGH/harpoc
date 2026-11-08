@@ -13,10 +13,12 @@ import {
   writeSync,
 } from "node:fs";
 import type { Stats } from "node:fs";
+import { userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { AES_KEY_LENGTH, ErrorCode, VaultError } from "@harpoc/shared";
 import type { UnlockKeySourceUnsafeReason } from "@harpoc/shared";
 import { wipeBuffer } from "../crypto/random.js";
+import { UNLOCK_KEY_DPAPI_ENTROPY, dpapiBlobScope, dpapiProtect, dpapiUnprotect } from "./dpapi.js";
 import { listWindowsAcl, restrictWindowsAclToOwner } from "./owner-only.js";
 import type { WindowsAcl } from "./owner-only.js";
 
@@ -37,6 +39,12 @@ export interface ReadUnlockKeyFileOptions {
 const GROUP_OR_WORLD = 0o077;
 /** Group write and every world bit (`0o027`): a credential file allows neither. */
 const GROUP_WRITE_OR_WORLD = 0o027;
+/**
+ * The largest file `--unlock-key-dpapi` reads: the DPAPI blob of a 32-byte key is 262 bytes
+ * (measured on Windows 11 25H2, with and without entropy); anything far larger is not one.
+ */
+export const UNLOCK_KEY_DPAPI_MAX_BYTES = 4096;
+const DPAPI_LABEL = "--unlock-key-dpapi";
 const SYSTEM_SID = "S-1-5-18";
 const ADMINISTRATORS_SID = "S-1-5-32-544";
 
@@ -197,20 +205,19 @@ function posixVerdict(stat: Stats, kind: "key-file" | "credential"): UnlockKeySo
 }
 
 /**
- * The ladder both readers share: `lstat` (a symlink refused, anything but a
+ * The ladder every reader shares: `lstat` (a symlink refused, anything but a
  * regular file refused), one descriptor opened without following a symlink
  * and without blocking on a FIFO, the owner and mode (POSIX) or the access
- * list (win32) checked, a key file's mount warning issued, then exactly
- * `AES_KEY_LENGTH` bytes read. Nothing is read before every check has passed;
- * the returned buffer is fresh, never a view of a pooled one, and the caller
- * wipes it.
+ * list (win32) checked, a key file's mount warning issued, then `read` on the
+ * open descriptor. Nothing is read before every check has passed.
  */
-async function readKeySource(
+async function withCheckedSource<T>(
   path: string,
   label: string,
   kind: "key-file" | "credential",
-  onWarning?: (warning: string) => void,
-): Promise<Uint8Array> {
+  onWarning: ((warning: string) => void) | undefined,
+  read: (fd: number, stat: Stats) => T,
+): Promise<T> {
   let link: Stats;
   try {
     link = lstatSync(path);
@@ -246,31 +253,55 @@ async function readKeySource(
       const warning = linuxMountWarning(path);
       if (warning !== undefined) onWarning(warning);
     }
+    return read(fd, stat);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * `size` bytes from `fd` into a fresh buffer — one more is asked for, so a file that grew
+ * since its `fstat` is refused rather than cut. The scratch is wiped; the caller wipes the
+ * result.
+ */
+function readExactly(fd: number, size: number, path: string): Uint8Array {
+  const scratch = Buffer.alloc(size + 1);
+  try {
+    let total = 0;
+    while (total < scratch.length) {
+      const n = readSync(fd, scratch, total, scratch.length - total, null);
+      if (n === 0) break;
+      total += n;
+    }
+    if (total !== size) {
+      throw VaultError.invalidUnlockKey(`${path} changed size while it was read`);
+    }
+    const bytes = new Uint8Array(size);
+    bytes.set(scratch.subarray(0, size));
+    return bytes;
+  } finally {
+    wipeBuffer(scratch);
+  }
+}
+
+/**
+ * The raw readers' ladder: the shared checks, then exactly `AES_KEY_LENGTH` bytes. The
+ * returned buffer is fresh, never a view of a pooled one, and the caller wipes it.
+ */
+async function readKeySource(
+  path: string,
+  label: string,
+  kind: "key-file" | "credential",
+  onWarning?: (warning: string) => void,
+): Promise<Uint8Array> {
+  return withCheckedSource(path, label, kind, onWarning, (fd, stat) => {
     if (stat.size !== AES_KEY_LENGTH) {
       throw VaultError.invalidUnlockKey(
         `${path} holds ${stat.size} bytes; an unlock key file holds exactly ${AES_KEY_LENGTH} raw bytes`,
       );
     }
-    const scratch = Buffer.alloc(AES_KEY_LENGTH + 1);
-    try {
-      let total = 0;
-      while (total < scratch.length) {
-        const n = readSync(fd, scratch, total, scratch.length - total, null);
-        if (n === 0) break;
-        total += n;
-      }
-      if (total !== AES_KEY_LENGTH) {
-        throw VaultError.invalidUnlockKey(`${path} changed size while it was read`);
-      }
-      const key = new Uint8Array(AES_KEY_LENGTH);
-      key.set(scratch.subarray(0, AES_KEY_LENGTH));
-      return key;
-    } finally {
-      wipeBuffer(scratch);
-    }
-  } finally {
-    closeSync(fd);
-  }
+    return readExactly(fd, AES_KEY_LENGTH, path);
+  });
 }
 
 /**
@@ -322,6 +353,63 @@ export async function readUnlockCredential(
 }
 
 /**
+ * `server start --unlock-key-dpapi <path>` (win32 only): the unlock key sealed by
+ * `harpoc unlock-key enroll --out <path> --dpapi` — `ProtectedData.Protect(key,
+ * "harpoc.unlock-key.v1", CurrentUser)` under the account the daemon runs as. The file
+ * takes the key file's ladder (the access list: this account, SYSTEM and Administrators
+ * only), holds at most `UNLOCK_KEY_DPAPI_MAX_BYTES`, must be a DPAPI blob of the
+ * account's own scope — a LocalMachine blob, which every local account can unseal, is
+ * refused — and must unseal, through the pinned Windows PowerShell host, to exactly 32
+ * bytes. Every refusal of the file's content is `INVALID_UNLOCK_KEY` naming the path and
+ * the account, never a byte; none reaches the engine, so none counts against the lockout.
+ * On another platform `INVALID_INPUT` before anything is read.
+ */
+export async function readUnlockKeyDpapi(path: string): Promise<Uint8Array> {
+  if (process.platform !== "win32") {
+    throw VaultError.invalidInput(
+      `${DPAPI_LABEL}: DPAPI is Windows' own and this platform is ${process.platform} (systemd's sealer is --unlock-credential)`,
+    );
+  }
+  const blob = await withCheckedSource(path, DPAPI_LABEL, "key-file", undefined, (fd, stat) => {
+    if (stat.size > UNLOCK_KEY_DPAPI_MAX_BYTES) {
+      throw VaultError.invalidUnlockKey(
+        `${path} holds ${stat.size} bytes; a DPAPI-sealed unlock key file holds at most ${UNLOCK_KEY_DPAPI_MAX_BYTES}`,
+      );
+    }
+    return readExactly(fd, stat.size, path);
+  });
+  try {
+    const scope = dpapiBlobScope(blob);
+    if (scope === undefined) {
+      throw VaultError.invalidUnlockKey(
+        `${path} is not a DPAPI-sealed unlock key (harpoc unlock-key enroll --out <path> --dpapi writes one)`,
+      );
+    }
+    if (scope === "machine") {
+      throw VaultError.invalidUnlockKey(
+        `${path} is sealed to the machine (DPAPI LocalMachine scope), which every local account can unseal; seal it to the daemon's account with harpoc unlock-key enroll --dpapi`,
+      );
+    }
+    const key = await dpapiUnprotect(blob, UNLOCK_KEY_DPAPI_ENTROPY, { label: "DPAPI unseal" });
+    if (key === undefined) {
+      throw VaultError.invalidUnlockKey(
+        `${path} could not be unsealed as ${userInfo().username}: DPAPI refused it (sealed by another account or for another use, damaged, or this account's profile is not loaded)`,
+      );
+    }
+    if (key.length !== AES_KEY_LENGTH) {
+      const length = key.length;
+      wipeBuffer(key);
+      throw VaultError.invalidUnlockKey(
+        `${path} unsealed to ${length} bytes; an unlock key is exactly ${AES_KEY_LENGTH}`,
+      );
+    }
+    return key;
+  } finally {
+    wipeBuffer(blob);
+  }
+}
+
+/**
  * `unlock-key enroll --out <path>`: write the key to a new file only the owner
  * can read — created exclusively (`EEXIST` refused naming the path; the parent
  * must exist), on POSIX mode `0400` set on the descriptor whatever the umask,
@@ -336,6 +424,39 @@ export async function writeUnlockKeyFile(path: string, key: Uint8Array): Promise
       `--out: an unlock key is ${AES_KEY_LENGTH} bytes; got ${key.length}`,
     );
   }
+  writeOwnerOnlyNewFile(path, key, "the unlock key file");
+}
+
+/**
+ * `unlock-key enroll --out <path> --dpapi` (win32 only): seal the key with
+ * `ProtectedData.Protect(key, "harpoc.unlock-key.v1", CurrentUser)` under the account
+ * running the command — the account the daemon will run as — then write the blob as
+ * `writeUnlockKeyFile` writes the raw key: a new file, its access list reduced to the
+ * owner before a byte, `fsync`ed, removed on a failure. The seal runs before the file is
+ * created, so a refused seal leaves nothing. On another platform `INVALID_INPUT` first; the
+ * caller keeps and wipes the key.
+ */
+export async function writeUnlockKeyDpapi(path: string, key: Uint8Array): Promise<void> {
+  if (process.platform !== "win32") {
+    throw VaultError.invalidInput(
+      `--dpapi: DPAPI is Windows' own and this platform is ${process.platform} (seal the raw key with this platform's sealer: deploy/linux/enroll-unlock-key.sh)`,
+    );
+  }
+  if (key.length !== AES_KEY_LENGTH) {
+    throw VaultError.invalidInput(
+      `--out: an unlock key is ${AES_KEY_LENGTH} bytes; got ${key.length}`,
+    );
+  }
+  const blob = await dpapiProtect(key, UNLOCK_KEY_DPAPI_ENTROPY, { label: "DPAPI seal" });
+  try {
+    writeOwnerOnlyNewFile(path, blob, "the sealed unlock key file");
+  } finally {
+    wipeBuffer(blob);
+  }
+}
+
+/** The owner-only, exclusive, `fsync`ed write both unlock key writers share. */
+function writeOwnerOnlyNewFile(path: string, bytes: Uint8Array, what: string): void {
   let fd: number;
   try {
     fd = openSync(path, "wx", 0o400);
@@ -359,15 +480,15 @@ export async function writeUnlockKeyFile(path: string, key: Uint8Array): Promise
       fchmodSync(fd, 0o400);
     }
     let offset = 0;
-    while (offset < key.length) {
-      offset += writeSync(fd, key, offset, key.length - offset);
+    while (offset < bytes.length) {
+      offset += writeSync(fd, bytes, offset, bytes.length - offset);
     }
     fsyncSync(fd);
     written = true;
   } catch (err) {
     throw new VaultError(
       ErrorCode.FILE_IO_ERROR,
-      `could not write the unlock key file ${path} (${err instanceof Error ? err.message : String(err)})`,
+      `could not write ${what} ${path} (${err instanceof Error ? err.message : String(err)})`,
     );
   } finally {
     closeSync(fd);

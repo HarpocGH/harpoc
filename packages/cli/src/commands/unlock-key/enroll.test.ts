@@ -1,19 +1,21 @@
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 
-const { mockEngine, mockPromptPassword, mockWriteUnlockKeyFile } = vi.hoisted(() => ({
-  mockEngine: {
-    unlock: vi.fn(),
-    unlockKeyStatus: vi.fn(),
-    enrollUnlockKey: vi.fn(),
-    destroy: vi.fn(),
-  },
-  mockPromptPassword: vi.fn(),
-  mockWriteUnlockKeyFile: vi.fn(),
-}));
+const { mockEngine, mockPromptPassword, mockWriteUnlockKeyFile, mockWriteUnlockKeyDpapi } =
+  vi.hoisted(() => ({
+    mockEngine: {
+      unlock: vi.fn(),
+      unlockKeyStatus: vi.fn(),
+      enrollUnlockKey: vi.fn(),
+      destroy: vi.fn(),
+    },
+    mockPromptPassword: vi.fn(),
+    mockWriteUnlockKeyFile: vi.fn(),
+    mockWriteUnlockKeyDpapi: vi.fn(),
+  }));
 
 vi.mock("../../utils/vault-loader.js", () => ({
   resolveVaultDir: vi.fn().mockReturnValue("/mock/.harpoc"),
@@ -24,6 +26,7 @@ vi.mock("../../utils/prompt.js", () => ({ promptPassword: mockPromptPassword }))
 vi.mock("@harpoc/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@harpoc/core")>()),
   writeUnlockKeyFile: mockWriteUnlockKeyFile,
+  writeUnlockKeyDpapi: mockWriteUnlockKeyDpapi,
 }));
 
 import { createEngine } from "../../utils/vault-loader.js";
@@ -60,6 +63,9 @@ beforeEach(() => {
   mockEngine.enrollUnlockKey.mockResolvedValue(key);
   mockEngine.destroy.mockResolvedValue(undefined);
   mockWriteUnlockKeyFile.mockImplementation(async (_path: string, bytes: Uint8Array) => {
+    written = Array.from(bytes);
+  });
+  mockWriteUnlockKeyDpapi.mockImplementation(async (_path: string, bytes: Uint8Array) => {
     written = Array.from(bytes);
   });
   spies = spyCli();
@@ -267,6 +273,88 @@ describe("harpoc unlock-key enroll", () => {
     expectNoKeyBytes();
     expect(spies.exitSpy.mock.calls).toEqual([[1]]);
     expect(spies.errorSpy.mock.calls).toEqual([[`Error: [FILE_IO_ERROR] ${failure.message}`]]);
+    expect(isWiped(key)).toBe(true);
+    expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** Run `fn` with `process.platform` reading `platform` (the DPAPI branch is win32's). */
+async function onPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
+  const original = process.platform;
+  Object.defineProperty(process, "platform", { value: platform, configurable: true });
+  try {
+    return await fn();
+  } finally {
+    Object.defineProperty(process, "platform", { value: original, configurable: true });
+  }
+}
+
+describe("harpoc unlock-key enroll --dpapi", () => {
+  it("seals the engine's key through the DPAPI writer to --out, never the raw writer, wipes it and names the account and the start option", async () => {
+    await onPlatform("win32", () => run(["--out", out, "--dpapi"]));
+
+    expectNoKeyBytes();
+    expect(mockEngine.unlock.mock.calls).toEqual([[PASSWORD]]);
+    const calls = mockWriteUnlockKeyDpapi.mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[0]).toBe(out);
+    expect(calls[0]?.[1] === key).toBe(true);
+    expect(written !== undefined && Buffer.from(written).equals(Buffer.from(KEY_BYTES))).toBe(true);
+    expect(mockWriteUnlockKeyFile).not.toHaveBeenCalled();
+    expect(isWiped(key)).toBe(true);
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        `OK: Unlock key enrolled: sealed with DPAPI for ${userInfo().username} and written to ${out} (owner-only). The daemon reads it as the same account: server start --unlock-key-dpapi ${out}.`,
+      ],
+    ]);
+    expect(spies.exitSpy).not.toHaveBeenCalled();
+  });
+
+  it("over an enrolled slot the line says the previous key no longer unlocks and names the restart", async () => {
+    mockEngine.unlockKeyStatus.mockResolvedValueOnce({
+      enrolled: true,
+      enrolledAt: "2026-11-01T09:00:00.000Z",
+    });
+
+    await onPlatform("win32", () => run(["--out", out, "--dpapi"]));
+
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        `OK: Unlock key replaced: sealed with DPAPI for ${userInfo().username} and written to ${out} (owner-only); the previous key no longer unlocks the vault. Restart the daemon (server start --unlock-key-dpapi ${out}).`,
+      ],
+    ]);
+  });
+
+  it("off win32 --dpapi is refused INVALID_INPUT naming the platform, before the prompt, the vault or the slot", async () => {
+    await expect(onPlatform("linux", () => run(["--out", out, "--dpapi"]))).rejects.toThrow(
+      "process.exit",
+    );
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        "Error: [INVALID_INPUT] --dpapi: DPAPI is Windows' own and this platform is linux (seal the raw key with this platform's sealer: deploy/linux/enroll-unlock-key.sh)",
+      ],
+    ]);
+    expect(mockPromptPassword).not.toHaveBeenCalled();
+    expect(createEngine).not.toHaveBeenCalled();
+    expect(mockWriteUnlockKeyDpapi).not.toHaveBeenCalled();
+  });
+
+  it("without --dpapi the DPAPI writer is never called", async () => {
+    await onPlatform("win32", () => run(["--out", out]));
+    expectWrittenTo(out);
+    expect(mockWriteUnlockKeyDpapi).not.toHaveBeenCalled();
+  });
+
+  it("a seal that fails after the enrolment still wipes the key and destroys the engine", async () => {
+    const failure = new VaultError(ErrorCode.SESSION_FILE_ERROR, "DPAPI seal failed (exit 1)");
+    mockWriteUnlockKeyDpapi.mockRejectedValueOnce(failure);
+
+    await expect(onPlatform("win32", () => run(["--out", out, "--dpapi"]))).rejects.toThrow(
+      "process.exit",
+    );
+    expectNoKeyBytes();
+    expect(spies.errorSpy.mock.calls).toEqual([[`Error: [SESSION_FILE_ERROR] ${failure.message}`]]);
     expect(isWiped(key)).toBe(true);
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
   });

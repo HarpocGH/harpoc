@@ -11,6 +11,7 @@ import type {
   AgentSignRequest,
 } from "./agent-connection.js";
 import { prepareUnixSocketPath } from "./unix-socket.js";
+import { restrictWindowsPipeToAccount } from "../../session/owner-only.js";
 
 /**
  * The engine surface the agent socket uses — three members a `VaultEngine`
@@ -32,7 +33,7 @@ export interface AgentSocketEngine {
 }
 
 export interface AgentSocketServerOptions {
-  /** `<runtime-dir>/<consumer>/ssh-agent.sock`; on Windows a named pipe `\\.\pipe\<name>` (the suites' path until B7). */
+  /** `<runtime-dir>/<consumer>/ssh-agent.sock`; on Windows a named pipe `\\.\pipe\<name>` (the daemon's `\\.\pipe\harpoc-<consumer>-ssh-agent`). */
   socketPath: string;
   /** The registered agent the socket signs for; the socket's directory is its only authentication. */
   consumer: string;
@@ -43,6 +44,13 @@ export interface AgentSocketServerOptions {
   maxConnections?: number;
   /** A connection with no traffic for this long is closed; `AGENT_SOCKET_IDLE_TIMEOUT_MS` by default. */
   idleTimeoutMs?: number;
+  /**
+   * Windows only: the consumer's account SID. The pipe's DACL is then set to this account,
+   * SYSTEM and Administrators (full) and the consumer (read and write) — Everyone's and
+   * Anonymous's read removed — before the start row; without it the pipe keeps Node's default
+   * DACL (read and write for this account, SYSTEM and Administrators only). Ignored on POSIX.
+   */
+  win32ConsumerSid?: string;
 }
 
 /** ssh holds its agent connection for the authentication only (`sshconnect2.c` `pubkey_cleanup`). */
@@ -78,6 +86,8 @@ export class AgentSocketServer {
   private readonly sockets = new Set<Socket>();
   private readonly inFlight = new Set<Promise<void>>();
   private stopping: Promise<void> | null = null;
+  /** Connections accepted before the start row is written wait here, unread, until it is. */
+  private early: Socket[] | null = [];
 
   private constructor(
     readonly socketPath: string,
@@ -114,7 +124,7 @@ export class AgentSocketServer {
       sign: (request) => instance.track(() => engine.signForAgentSocket(caller, request), onError),
     };
     const idleTimeoutMs = options.idleTimeoutMs ?? AGENT_SOCKET_IDLE_TIMEOUT_MS;
-    server.on("connection", (stream: Socket) => instance.serve(stream, provider, idleTimeoutMs));
+    server.on("connection", (stream: Socket) => instance.accept(stream, provider, idleTimeoutMs));
 
     await new Promise<void>((resolve, reject) => {
       const refuse = (err: Error): void => reject(bindRefusal(err, socketPath));
@@ -126,12 +136,22 @@ export class AgentSocketServer {
         resolve();
       });
     });
-    // No await between the bind and the row: no connection is served before it is written.
+    // A connection accepted before the row waits unread: none is served before it is written.
     try {
       if (posix) chmodSync(socketPath, 0o660);
     } catch (err) {
       await instance.stop();
       throw bindRefusal(err, socketPath);
+    }
+    if (!posix && options.win32ConsumerSid !== undefined) {
+      try {
+        await restrictWindowsPipeToAccount(socketPath, options.win32ConsumerSid);
+      } catch {
+        await instance.stop();
+        throw VaultError.invalidInput(
+          `${LABEL}: the access list of ${socketPath} could not be set to the consumer's account`,
+        );
+      }
     }
     try {
       engine.auditServerStart({ transport: "ssh-agent", tokenless: true, consumer });
@@ -139,6 +159,7 @@ export class AgentSocketServer {
       await instance.stop();
       throw err;
     }
+    instance.release(provider, idleTimeoutMs);
     return instance;
   }
 
@@ -148,6 +169,7 @@ export class AgentSocketServer {
       const closed = new Promise<void>((resolve) => this.server.close(() => resolve()));
       for (const stream of this.sockets) stream.destroy();
       this.sockets.clear();
+      this.early = null;
       await closed;
       while (this.inFlight.size > 0) await Promise.all(this.inFlight);
       if (this.posix) rmSync(this.socketPath, { force: true });
@@ -155,7 +177,8 @@ export class AgentSocketServer {
     return this.stopping;
   }
 
-  private serve(stream: Socket, provider: AgentIdentityProvider, idleTimeoutMs: number): void {
+  /** Serve a connection once the start row is written; until then keep it, unread, for `release`. */
+  private accept(stream: Socket, provider: AgentIdentityProvider, idleTimeoutMs: number): void {
     if (this.stopping) {
       stream.destroy();
       return;
@@ -165,6 +188,27 @@ export class AgentSocketServer {
     stream.on("error", () => {
       /* per-connection transport error — ignore, the client sees its connection end */
     });
+    if (this.early !== null) {
+      this.early.push(stream);
+      return;
+    }
+    this.serve(stream, provider, idleTimeoutMs);
+  }
+
+  /** The start row is written: serve every connection that arrived before it, in order. */
+  private release(provider: AgentIdentityProvider, idleTimeoutMs: number): void {
+    const waiting = this.early ?? [];
+    this.early = null;
+    for (const stream of waiting) {
+      if (!stream.destroyed) this.serve(stream, provider, idleTimeoutMs);
+    }
+  }
+
+  private serve(stream: Socket, provider: AgentIdentityProvider, idleTimeoutMs: number): void {
+    if (this.stopping) {
+      stream.destroy();
+      return;
+    }
     stream.setTimeout(idleTimeoutMs, () => stream.destroy());
 
     const respond = createAgentConnectionResponder(provider);

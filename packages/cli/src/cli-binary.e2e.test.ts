@@ -629,7 +629,9 @@ describe("compiled binary smoke: proxy env opens no vault (B2)", () => {
           "HARPOC_PROXY_URL=http://127.0.0.1:3128",
           "HARPOC_PROXY_BASE=http://127.0.0.1:3128/",
           `HARPOC_PROXY_TOKEN_FILE=${join(runtimeDir, "agent", "token.jwt")}`,
-          `HARPOC_PROXY_SOCKET=${join(runtimeDir, "agent", "proxy.sock")}`,
+          process.platform === "win32"
+            ? "# Windows: the proxy serves no socket — the HARPOC_PROXY_SOCKET line is omitted (the TCP listener with the token file's token)"
+            : `HARPOC_PROXY_SOCKET=${join(runtimeDir, "agent", "proxy.sock")}`,
           "HARPOC_PLACEHOLDER_GH_PAT=harpoc:gh-pat",
           "",
         ].join("\n"),
@@ -662,7 +664,7 @@ describe("compiled binary smoke: ssh-agent status opens no vault (B3)", () => {
       expect(result.code).toBe(0);
       expect(result.stderr).toBe("");
       expect(result.stdout).toBe(
-        `consumer agent: not listening — no socket (${join(runtimeDir, "agent", "ssh-agent.sock")})\n`,
+        `consumer agent: not listening — no socket (${process.platform === "win32" ? "\\\\.\\pipe\\harpoc-agent-ssh-agent" : join(runtimeDir, "agent", "ssh-agent.sock")})\n`,
       );
       expect(readdirSync(cwd)).toEqual(["run"]);
       expect(readdirSync(join(runtimeDir, "agent"))).toEqual([]);

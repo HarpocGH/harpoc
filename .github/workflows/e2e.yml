@@ -144,3 +144,260 @@ jobs:
           sudo ls -la /run/harpoc /run/harpoc/harpoc-ci-agent
           pgrep -l -u harpoc || true
           pgrep -l -u harpoc-ci-agent || true
+  two-identity-windows:
+    name: Deployment model B, two accounts (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        shell: pwsh
+      - run: pnpm build
+        shell: pwsh
+      - name: Create the agent account and provision the layout with the deploy recipe
+        # Windows PowerShell 5.1 (`shell: powershell`): deploy/windows/*.ps1 target it. The
+        # runner's account is an administrator with the full token (the recipe's own elevation
+        # check passes). The job makes both passwords here, masks them before any use, and
+        # exports them through $GITHUB_ENV written without a byte-order mark; they reach the
+        # suite's environment and no command line (the suite hands each to its launcher on
+        # stdin). The agent is a standard local account made with New-LocalUser; the recipe
+        # makes the vault account harpoc, with its password, a standard account as well. The
+        # recipe runs twice (idempotence) and the layout is read back with icacls. The
+        # Secondary Logon service is started explicitly: ProcessStartInfo with UserName goes
+        # through CreateProcessWithLogonW.
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+          function Get-Index([int]$Bound) {
+            $limit = [uint64]([math]::Floor(4294967296 / $Bound) * $Bound)
+            $bytes = New-Object byte[] 4
+            do { $rng.GetBytes($bytes); $value = [BitConverter]::ToUInt32($bytes, 0) } while ([uint64]$value -ge $limit)
+            return [int]($value % $Bound)
+          }
+          function New-JobPassword {
+            $sets = @('ABCDEFGHJKLMNPQRSTUVWXYZ', 'abcdefghijkmnopqrstuvwxyz', '23456789', '-_=+')
+            $all = $sets -join ''
+            $chars = New-Object System.Collections.Generic.List[char]
+            foreach ($set in $sets) { $chars.Add($set[(Get-Index $set.Length)]) }
+            while ($chars.Count -lt 24) { $chars.Add($all[(Get-Index $all.Length)]) }
+            for ($i = $chars.Count - 1; $i -gt 0; $i--) {
+              $j = Get-Index ($i + 1)
+              $swap = $chars[$i]; $chars[$i] = $chars[$j]; $chars[$j] = $swap
+            }
+            return -join $chars
+          }
+          function Export-JobVariable([string]$Name, [string]$Value) {
+            [System.IO.File]::AppendAllText($env:GITHUB_ENV, "$Name=$Value`n", (New-Object System.Text.UTF8Encoding($false)))
+          }
+          $vaultUser = 'harpoc'
+          $agentUser = 'harpoc-ci-agent'
+          $vaultPassword = New-JobPassword
+          $agentPassword = New-JobPassword
+          Write-Output "::add-mask::$vaultPassword"
+          Write-Output "::add-mask::$agentPassword"
+          Export-JobVariable 'HARPOC_TWO_USER_VAULT_USER' $vaultUser
+          Export-JobVariable 'HARPOC_TWO_USER_AGENT_USER' $agentUser
+          Export-JobVariable 'HARPOC_TWO_USER_VAULT_PASSWORD' $vaultPassword
+          Export-JobVariable 'HARPOC_TWO_USER_AGENT_PASSWORD' $agentPassword
+          $agentSecure = ConvertTo-SecureString -String $agentPassword -AsPlainText -Force
+          New-LocalUser -Name $agentUser -Password $agentSecure -PasswordNeverExpires -UserMayNotChangePassword -AccountNeverExpires -Description 'Harpoc e2e agent account' | Out-Null
+          if (-not (@(Get-LocalGroupMember -SID 'S-1-5-32-545' | ForEach-Object { $_.SID.Value }) -contains (Get-LocalUser -Name $agentUser).SID.Value)) { Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $agentUser }
+          $vaultSecure = ConvertTo-SecureString -String $vaultPassword -AsPlainText -Force
+          Start-Service -Name seclogon
+          Get-Service -Name seclogon | Format-Table Name, Status, StartType -AutoSize | Out-String | Write-Output
+          foreach ($run in 1, 2) {
+            & .\deploy\windows\install-two-identity.ps1 -AgentUser $agentUser -Password $vaultSecure
+            if ($LASTEXITCODE -ne 0) { throw "install-two-identity.ps1 run $run exited $LASTEXITCODE" }
+          }
+          $base = Join-Path $env:ProgramData 'harpoc'
+          $vaultSid = [System.Security.Principal.NTAccount]::new($env:COMPUTERNAME, $vaultUser).Translate([System.Security.Principal.SecurityIdentifier]).Value
+          $agentSid = [System.Security.Principal.NTAccount]::new($env:COMPUTERNAME, $agentUser).Translate([System.Security.Principal.SecurityIdentifier]).Value
+          $trustedSids = @($vaultSid, 'S-1-5-18', 'S-1-5-32-544')
+          $consumerDir = Join-Path $base "run\$agentUser"
+          foreach ($dir in $base, (Join-Path $base 'vault'), (Join-Path $base 'run'), $consumerDir) {
+            $listing = (& "$env:SystemRoot\System32\icacls.exe" $dir | Out-String)
+            if ($LASTEXITCODE -ne 0) { throw "icacls exited $LASTEXITCODE on $dir" }
+            Write-Output $listing
+            $allowed = $trustedSids
+            if ($dir -eq $consumerDir) { $allowed = $trustedSids + $agentSid }
+            $acl = Get-Acl -LiteralPath $dir
+            $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+            if ($trustedSids -notcontains $owner) { throw "$dir is owned by $owner, outside the trusted set" }
+            foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+              if ($rule.AccessControlType -eq 'Allow' -and $allowed -notcontains $rule.IdentityReference.Value) {
+                throw "$dir grants $($rule.IdentityReference.Value), outside the trusted set"
+              }
+            }
+          }
+          $agentAcl = (& "$env:SystemRoot\System32\icacls.exe" $consumerDir | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "icacls exited $LASTEXITCODE on $consumerDir" }
+          if ($agentAcl -notmatch [regex]::Escape("$agentUser`:(OI)(CI)(RX)")) { throw "the consumer directory does not grant $agentUser read and execute" }
+          $admins = @(Get-LocalGroupMember -SID 'S-1-5-32-544' | ForEach-Object { $_.Name })
+          if ($admins -match "\\($vaultUser|$agentUser)$") { throw 'a test account is an administrator' }
+      - name: Generate the fixture PKI and SSH keys (no fleet)
+        # The suite runs its TLS echo and its SSH server in the harness process on this
+        # material; the generators are dist-free and run through Git for Windows' bash.
+        shell: pwsh
+        run: |
+          pnpm --filter @harpoc/e2e pki
+          pnpm --filter @harpoc/e2e keys
+      - name: Probe the native clients
+        # The agent's tools are the System32 curl.exe and OpenSSH ssh.exe, by absolute path
+        # (Git's usr\bin ssh is an MSYS client the vault refuses).
+        shell: pwsh
+        run: |
+          & "$env:SystemRoot\System32\curl.exe" --version
+          & "$env:SystemRoot\System32\OpenSSH\ssh.exe" -V
+      - name: Run the model B Windows suite
+        shell: pwsh
+        env:
+          HARPOC_REQUIRE_PLATFORM_TESTS: two-account-windows
+        run: pnpm --filter @harpoc/e2e test:e2e src/model-b-windows.e2e.test.ts
+      - name: Register, start and stop the daemon as a startup task (the Password-logon cell)
+        # The cell of B7-U2's service model no row of the suite reaches: register-service.ps1
+        # registers the real Harpoc task as the vault account harpoc (logon type Password, the
+        # account's password a SecureString in this process, never on a command line), the Task
+        # Scheduler starts it, and the daemon must unseal the unlock key DPAPI-sealed under that
+        # account and report the vault unlocked on the health route within 60 s. The scratch
+        # vault is made first as harpoc through System.Diagnostics.Process with its profile
+        # loaded, as the suite's launcher does: init, then unlock-key enroll --dpapi, a fixed
+        # smoke master password on each child's stdin. The task is then stopped (a kill: no
+        # server.stop row) and unregistered, and the scratch vault's files are removed. A red
+        # here is the signal for B7-U2's fallback (a WinSW service with the same account, sealer
+        # and layout), not a defect of the suite.
+        if: success()
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          $vaultUser = 'harpoc'
+          $vaultSecure = ConvertTo-SecureString -String $env:HARPOC_TWO_USER_VAULT_PASSWORD -AsPlainText -Force
+          $node = (Get-Command node.exe -CommandType Application | Select-Object -First 1).Source
+          $cli = Join-Path $env:GITHUB_WORKSPACE 'packages\cli'
+          $base = Join-Path $env:ProgramData 'harpoc'
+          $vaultDir = Join-Path $base 'vault'
+          $sealedKey = Join-Path $vaultDir 'unlock.key.dpapi'
+          $temp = Join-Path $env:SystemRoot 'Temp'
+          $smokePassword = 'b7-smoke-master-password'
+          $inherited = @('ALLUSERSPROFILE', 'CommonProgramFiles', 'ComSpec', 'NUMBER_OF_PROCESSORS', 'OS', 'PATH', 'PATHEXT', 'PROCESSOR_ARCHITECTURE', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'PUBLIC', 'SystemDrive', 'SystemRoot', 'windir')
+          function Invoke-AsVaultAccount([string]$Label, [string[]]$Arguments, [string]$InputText) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $node
+            $argv = @((Join-Path $cli 'dist\index.js'), '--vault-dir', $vaultDir) + $Arguments
+            $psi.Arguments = ($argv | ForEach-Object { '"' + $_ + '"' }) -join ' '
+            $psi.WorkingDirectory = $base
+            $psi.UserName = $vaultUser
+            $psi.Domain = '.'
+            $psi.Password = $vaultSecure
+            $psi.LoadUserProfile = $true
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.EnvironmentVariables.Clear()
+            foreach ($name in $inherited) {
+              $value = [Environment]::GetEnvironmentVariable($name)
+              if ($null -ne $value) { $psi.EnvironmentVariables[$name] = $value }
+            }
+            $psi.EnvironmentVariables['USERNAME'] = $vaultUser
+            $psi.EnvironmentVariables['TEMP'] = $temp
+            $psi.EnvironmentVariables['TMP'] = $temp
+            $psi.EnvironmentVariables['HARPOC_SESSION_KEYSTORE'] = 'off'
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $stdout = $proc.StandardOutput.ReadToEndAsync()
+            $stderr = $proc.StandardError.ReadToEndAsync()
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($InputText)
+            try {
+              $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+              $proc.StandardInput.Close()
+            } catch { }
+            if (-not $proc.WaitForExit(90000)) {
+              $proc.Kill()
+              try { [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($stdout, $stderr), 5000) | Out-Null } catch { }
+              foreach ($stream in $stdout, $stderr) { if ($stream.Status -eq 'RanToCompletion') { Write-Output $stream.Result } }
+              throw "$Label as $vaultUser did not exit within 90 s"
+            }
+            Write-Output $stdout.Result
+            Write-Output $stderr.Result
+            if ($proc.ExitCode -ne 0) { throw "$Label as $vaultUser exited $($proc.ExitCode)" }
+          }
+          $failure = $null
+          $leftover = $false
+          try {
+            Invoke-AsVaultAccount 'init' @('init') "$smokePassword`n$smokePassword`n"
+            Invoke-AsVaultAccount 'unlock-key enroll --dpapi' @('unlock-key', 'enroll', '--out', $sealedKey, '--dpapi') "$smokePassword`n"
+            $global:LASTEXITCODE = 0
+            & .\deploy\windows\register-service.ps1 -Node $node -Cli $cli -Password $vaultSecure
+            if ($LASTEXITCODE -ne 0) { throw "register-service.ps1 exited $LASTEXITCODE" }
+            Start-ScheduledTask -TaskName Harpoc
+            $state = 'no answer'
+            $deadline = [DateTime]::UtcNow.AddSeconds(60)
+            while ([DateTime]::UtcNow -lt $deadline) {
+              try {
+                $state = (Invoke-RestMethod -Uri 'http://127.0.0.1:3000/api/v1/health' -UseBasicParsing -TimeoutSec 5).data.state
+              } catch {
+                $state = 'no answer'
+              }
+              if ($state -eq 'unlocked') { break }
+              Start-Sleep -Seconds 1
+            }
+            Write-Output "health: $state"
+            if ($state -ne 'unlocked') {
+              $info = Get-ScheduledTaskInfo -TaskName Harpoc
+              Write-Output ('task {0}, LastRunTime {1}, LastTaskResult 0x{2:X8}' -f (Get-ScheduledTask -TaskName Harpoc).State, $info.LastRunTime, $info.LastTaskResult)
+              Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object LocalAddress, OwningProcess | Format-Table -AutoSize | Out-String | Write-Output
+              Get-Process -Name node -ErrorAction SilentlyContinue | Select-Object Id, ProcessName | Format-Table -AutoSize | Out-String | Write-Output
+              throw 'the Harpoc task did not report the vault unlocked within 60 s'
+            }
+          } catch {
+            $failure = $_
+          } finally {
+            Stop-ScheduledTask -TaskName Harpoc -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName Harpoc -Confirm:$false -ErrorAction SilentlyContinue
+            foreach ($name in 'default.vault.db', 'default.vault.db-wal', 'default.vault.db-shm', 'session.json', 'unlock.key.dpapi') {
+              $path = Join-Path $vaultDir $name
+              for ($attempt = 1; Test-Path -LiteralPath $path; $attempt++) {
+                try {
+                  Remove-Item -LiteralPath $path -Force
+                } catch {
+                  if ($attempt -ge 20) {
+                    Write-Output "could not remove $path"
+                    $leftover = $true
+                    break
+                  }
+                  Start-Sleep -Milliseconds 500
+                }
+              }
+            }
+          }
+          if ($null -ne $failure) { throw $failure }
+          if ($leftover) { throw 'the scratch vault left files behind (listed above)' }
+      - name: Upload the B Windows evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-evidence-b-windows
+          path: packages/e2e/evidence/run-b-windows.jsonl
+          if-no-files-found: warn
+      - name: The runtime directory, the accounts and their processes on failure
+        if: failure()
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & "$env:SystemRoot\System32\icacls.exe" (Join-Path $env:ProgramData 'harpoc\run')
+          & "$env:SystemRoot\System32\icacls.exe" (Join-Path $env:ProgramData 'harpoc\run\harpoc-ci-agent')
+          Get-ChildItem -Force (Join-Path $env:ProgramData 'harpoc\run\harpoc-ci-agent') | Select-Object Name, Length | Format-Table -AutoSize
+          Get-Service -Name seclogon | Format-Table Name, Status, StartType -AutoSize
+          Get-LocalUser | Select-Object Name, Enabled | Format-Table -AutoSize
+          Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'harpoc-b7' -or $_.Name -in 'curl.exe', 'ssh.exe', 'node.exe' } | Select-Object ProcessId, Name | Format-Table -AutoSize
+          Get-ScheduledTask -TaskName Harpoc -ErrorAction SilentlyContinue | Select-Object TaskName, State | Format-Table -AutoSize
+          $global:LASTEXITCODE = 0

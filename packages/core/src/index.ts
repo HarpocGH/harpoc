@@ -74,10 +74,15 @@ export type {
 } from "./session/linux-keystores.js";
 export {
   readUnlockCredential,
+  readUnlockKeyDpapi,
   readUnlockKeyFile,
+  UNLOCK_KEY_DPAPI_MAX_BYTES,
+  writeUnlockKeyDpapi,
   writeUnlockKeyFile,
 } from "./session/unlock-key-source.js";
 export type { ReadUnlockKeyFileOptions } from "./session/unlock-key-source.js";
+export { listWindowsAclSync } from "./session/owner-only.js";
+export type { WindowsAclListing, WindowsAclEntry } from "./session/owner-only.js";
 
 // Audit
 export { AuditLogger } from "./audit/audit-logger.js";

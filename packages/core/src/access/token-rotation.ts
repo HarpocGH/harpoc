@@ -21,6 +21,16 @@ const TOKEN_ROTATION_LABEL = "rotation";
 const MAX_TTL_MINUTES = MAX_TOKEN_TTL_MS / 60_000;
 
 /**
+ * win32: `rename` is `MoveFileExW(…, MOVEFILE_REPLACE_EXISTING)` (libuv `fs__rename`), which
+ * fails `EPERM` while any handle holds the token file open — FILE_SHARE_DELETE or not (measured,
+ * Node v24.13.1). A consumer's read closes at once; the rename is tried this often, this far
+ * apart (about half a second), before the write is refused.
+ */
+export const WIN32_RENAME_ATTEMPTS = 20;
+export const WIN32_RENAME_RETRY_MS = 25;
+const WIN32_RENAME_RETRIED = new Set(["EPERM", "EBUSY", "EACCES"]);
+
+/**
  * One `server start --issue-token` spec (DB-13): the registered agent the
  * token names, the file it is written to, the token's scope and secret-name
  * patterns, its lifetime in whole minutes (1–1440).
@@ -274,6 +284,38 @@ function closeQuietly(fd: number): void {
   }
 }
 
+/** A synchronous pause: the write runs inside the scheduler's synchronous tick. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * `rename(tmp, path)`: once on POSIX; on win32 retried while another handle holds `path` open
+ * (`WIN32_RENAME_ATTEMPTS` × `WIN32_RENAME_RETRY_MS`), the last errno thrown.
+ */
+function renameOver(tmp: string, path: string): void {
+  if (process.platform !== "win32") {
+    renameSync(tmp, path);
+    return;
+  }
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      renameSync(tmp, path);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (
+        attempt >= WIN32_RENAME_ATTEMPTS ||
+        code === undefined ||
+        !WIN32_RENAME_RETRIED.has(code)
+      ) {
+        throw err;
+      }
+      sleepSync(WIN32_RENAME_RETRY_MS);
+    }
+  }
+}
+
 interface PendingTokenFile {
   commit(token: string): void;
   discard(): void;
@@ -284,7 +326,10 @@ interface PendingTokenFile {
  * crosses a file system): `wx`, mode `0640`, on POSIX `fchmod(0640)` before
  * any byte because the umask may have narrowed the mode at the open. The
  * group is the directory's — the consumer directory is set-group-ID (R-E1a),
- * and `chown(2)` would refuse the vault user any group it is not in.
+ * and `chown(2)` would refuse the vault user any group it is not in. On
+ * win32 the mode is advisory and no `icacls` runs: the temporary inherits the
+ * consumer directory's ACEs (the daemon, SYSTEM and Administrators full, the
+ * consumer read and execute — measured), and the rename keeps them.
  */
 function openTokenFile(path: string): PendingTokenFile {
   const tmp = join(dirname(path), `${basename(path)}.${randomBytes(6).toString("hex")}.tmp`);
@@ -313,7 +358,7 @@ function openTokenFile(path: string): PendingTokenFile {
         fsyncSync(fd);
         open = false;
         closeSync(fd);
-        renameSync(tmp, path);
+        renameOver(tmp, path);
       } catch (err) {
         if (open) closeQuietly(fd);
         open = false;
@@ -335,9 +380,9 @@ function openTokenFile(path: string): PendingTokenFile {
  * Replace `path` with `<token>\n` — the bytes `auth token --out` writes and
  * `readLaunchTokenFile` trims — through a temporary and `rename(2)`: a reader
  * opening the path sees the old token or the new one, whole (POSIX; on win32
- * a rename over a file another handle holds open fails `EPERM`, the write is
- * refused and the old file stays). A failure removes the temporary and throws
- * `FILE_IO_ERROR` naming the path.
+ * a rename over a file another handle holds open fails `EPERM` and is retried
+ * for about half a second, then the write is refused and the old file stays).
+ * A failure removes the temporary and throws `FILE_IO_ERROR` naming the path.
  */
 export function writeTokenFile(path: string, token: string): void {
   openTokenFile(path).commit(token);

@@ -138,7 +138,7 @@ export function buildProgram(): Command {
   const unlockKey = program
     .command("unlock-key")
     .description(
-      "The machine-bound unlock key: a second KEK slot for server start --unlock-key-file / --unlock-credential",
+      "The machine-bound unlock key: a second KEK slot for server start --unlock-key-file / --unlock-credential / --unlock-key-dpapi",
     );
   registerUnlockKeyEnrollCommand(unlockKey);
   registerUnlockKeyRevokeCommand(unlockKey);

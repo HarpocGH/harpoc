@@ -5,7 +5,12 @@ import { VaultError } from "@harpoc/shared";
 import { probeAgentSocket } from "../../utils/agent-probe.js";
 import type { AgentProbe, AgentProbeFailure } from "../../utils/agent-probe.js";
 import { handleError, printJson } from "../../utils/output.js";
-import { assertConsumerName, consumerDir, resolveRuntimeDir } from "../../utils/runtime-dir.js";
+import {
+  agentSocketPipeName,
+  assertConsumerName,
+  consumerDir,
+  resolveRuntimeDir,
+} from "../../utils/runtime-dir.js";
 
 interface SshAgentStatusOptions {
   consumer?: string;
@@ -76,7 +81,8 @@ function printable(text: string): string {
 }
 
 /**
- * Probe each consumer's `<runtime-dir>/<consumer>/ssh-agent.sock` with one identities request —
+ * Probe each consumer's `<runtime-dir>/<consumer>/ssh-agent.sock` (win32: its pipe
+ * `agentSocketPipeName(consumer)`) with one identities request —
  * what `ssh-add -l` sends — under one deadline. Opens no vault and reads no ambient
  * `$RUNTIME_DIRECTORY`: the socket answers for the daemon, and the command runs as any user that
  * can reach the directory.
@@ -84,10 +90,14 @@ function printable(text: string): string {
 export async function sshAgentStatus(
   runtimeDir: string,
   consumer: string | undefined,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<ConsumerSocketStatus[]> {
   const sockets = consumersOf(runtimeDir, consumer).map((name) => ({
     consumer: name,
-    socketPath: join(consumerDir(runtimeDir, name), "ssh-agent.sock"),
+    socketPath:
+      platform === "win32"
+        ? agentSocketPipeName(name)
+        : join(consumerDir(runtimeDir, name), "ssh-agent.sock"),
   }));
   return Promise.all(
     sockets.map(async (socket) => ({
@@ -142,7 +152,7 @@ export function registerSshAgentStatusCommand(sshAgent: Command): void {
     .option("--json", "Output as JSON")
     .action(async (options: SshAgentStatusOptions) => {
       try {
-        const runtimeDir = resolveRuntimeDir(options.runtimeDir, {});
+        const runtimeDir = resolveRuntimeDir(options.runtimeDir, undefined);
         if (runtimeDir === undefined) {
           throw VaultError.invalidInput(
             "--runtime-dir <path> is required: the daemon's runtime directory (no $RUNTIME_DIRECTORY is read)",

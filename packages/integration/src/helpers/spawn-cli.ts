@@ -23,6 +23,15 @@ export const KILL_GRACE_MS = 2_000;
 export const STOP_GRACE_MS = 5_000;
 export const RAW_GET_TIMEOUT_MS = 10_000;
 
+/** The pinned Windows PowerShell 5.1 host. */
+export const POWERSHELL = join(
+  process.env["SystemRoot"] ?? "C:\\Windows",
+  "System32",
+  "WindowsPowerShell",
+  "v1.0",
+  "powershell.exe",
+);
+
 /**
  * The variables a CLI child inherits from the integration worker (vitest.config.ts
  * sets the keystore switch) that sudo's `env_reset` drops; `runCliAs` and

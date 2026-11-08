@@ -119,6 +119,7 @@ describe.skipIf(SSH === null)(
     let engine: VaultEngine | undefined;
     let socket: AgentSocketServer | undefined;
     let strangerSocket: AgentSocketServer | undefined;
+    let restrictedSocket: AgentSocketServer | undefined;
     const ids: Record<string, string> = {};
     const blobs: Record<string, Buffer> = {};
     const events: AuthEvent[] = [];
@@ -293,6 +294,7 @@ describe.skipIf(SSH === null)(
       const settled = await Promise.allSettled([
         socket?.stop(),
         strangerSocket?.stop(),
+        restrictedSocket?.stop(),
         engine?.destroy(),
         new Promise<void>((resolve) => {
           if (sshServer) sshServer.close(() => resolve());
@@ -490,6 +492,36 @@ describe.skipIf(SSH === null)(
         sock.close();
       }
     }, 30_000);
+
+    it.runIf(process.platform === "win32")(
+      "win32 only (the pipe's DACL): with the DACL replaced for the consumer (BUILTIN\\Users standing in), ssh still authenticates through the pipe and the engine audits one secret.use row",
+      async () => {
+        restrictedSocket = await AgentSocketServer.start({
+          socketPath: socketPath(CONSUMER),
+          consumer: CONSUMER,
+          engine: vault(),
+          onError: (err) => outputs.push(`${err.code}: ${err.message}`),
+          win32ConsumerSid: "S-1-5-32-545",
+        });
+        const seen = rowIds();
+        const r = await runSsh("ed25519_openssh", restrictedSocket.socketPath);
+
+        expect(r.exit, r.stderr).toBe(0);
+        expect(r.stdout.trim()).toBe("live-ok");
+        expect(r.stderr).toContain("bound agent to hostkey");
+        expect(events.some((e) => e.key === "deploy-ed" && e.signed && e.verified)).toBe(true);
+        const rows = rowsSince(seen);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          success: true,
+          secret_id: ids["deploy-ed"],
+          principal_type: "agent",
+          principal_id: CONSUMER,
+        });
+        expect(rows[0]?.detail).toMatchObject({ context: "ssh_agent", host: "127.0.0.1" });
+      },
+      30_000,
+    );
 
     it("no audit row, no ssh output and no onError report carries a private key or a session identifier", () => {
       const trail = JSON.stringify(vault().queryAudit());

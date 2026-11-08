@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
@@ -15,7 +16,12 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AuditEventType, ErrorCode, SESSION_FILE_NAME, VaultState } from "@harpoc/shared";
 import { canon } from "./helpers/key-needles.js";
-import { runCli, startCliServer, startCliServerOnFreePort } from "./helpers/spawn-cli.js";
+import {
+  POWERSHELL,
+  runCli,
+  startCliServer,
+  startCliServerOnFreePort,
+} from "./helpers/spawn-cli.js";
 import type { CliServer } from "./helpers/spawn-cli.js";
 
 /**
@@ -29,7 +35,10 @@ import type { CliServer } from "./helpers/spawn-cli.js";
  * administrator unlocks again for their own commands, which the daemon serves through.
  * `--unlock-key-file` is the sealer-agnostic input. The refusals: the variable unset, a
  * credential the directory lacks, a group- or world-readable key file, and a wrong key,
- * which counts against the lockout the password path shares.
+ * which counts against the lockout the password path shares. On win32 (tranche B7)
+ * `unlock-key enroll --dpapi` seals the key under this account and `--unlock-key-dpapi`
+ * starts the daemon from it; a blob sealed for another use is refused before the slot is
+ * tried; elsewhere the option is refused.
  */
 
 const PASSWORD = "unlock-key-master-pw-1";
@@ -327,6 +336,111 @@ describe("the headless start on the built CLI (unlock-key enroll, server start -
       outputs.push(started.server.stdoutSoFar(), started.server.stderrSoFar());
     }
   }, 60_000);
+
+  // DPAPI is Windows' own: the sealed key is the win32 sealer (tranche B7). The enrolment
+  // replaces the slot the key file above opened, so these rows run after its rows; the wrong-key
+  // row below then proves an unseal refusal counted nothing (its fifth attempt is the one that
+  // locks).
+  it.runIf(process.platform === "win32")(
+    "unlock-key enroll --dpapi seals a new key for this account, and the daemon starts from it with --unlock-key-dpapi: no prompt, no warning, health unlocked, a vault.unlock row with method credential",
+    async () => {
+      const sealed = join(root, "unlock.key.dpapi");
+      await cli(
+        ["unlock-key", "enroll", "--out", sealed, "--dpapi"],
+        `${PASSWORD}\n`,
+        ARGON2_TIMEOUT_MS,
+      );
+      expect((outputs.at(-1) ?? "").includes(`server start --unlock-key-dpapi ${sealed}`)).toBe(
+        true,
+      );
+      const size = statSync(sealed).size;
+      expect(size > 32 && size <= 4096).toBe(true);
+      const credentialRowsBefore = (await auditRows(AuditEventType.VAULT_UNLOCK)).filter(
+        (r) => r.detail?.["method"] === "credential",
+      ).length;
+      const started = await startCliServerOnFreePort(
+        (port) => [
+          "server",
+          "start",
+          "--rest",
+          "--port",
+          String(port),
+          "--session",
+          "memory",
+          "--unlock-key-dpapi",
+          sealed,
+        ],
+        { vaultDir, env: withoutCredentialsDirectory() },
+      );
+      try {
+        const res = await fetch(`http://127.0.0.1:${String(started.port)}/api/v1/health`);
+        expect(((await res.json()) as { data: { state: string } }).data.state).toBe(
+          VaultState.UNLOCKED,
+        );
+        expect(started.server.stderrSoFar().includes("a password file by another name")).toBe(
+          false,
+        );
+      } finally {
+        await started.server.stop();
+        outputs.push(started.server.stdoutSoFar(), started.server.stderrSoFar());
+      }
+      const credentialRowsAfter = (await auditRows(AuditEventType.VAULT_UNLOCK)).filter(
+        (r) => r.detail?.["method"] === "credential",
+      ).length;
+      expect(credentialRowsAfter).toBe(credentialRowsBefore + 1);
+    },
+    360_000,
+  );
+
+  it.runIf(process.platform === "win32")(
+    "a blob this account sealed for another use is refused INVALID_UNLOCK_KEY before the vault's slot is tried: no vault.unlock row",
+    async () => {
+      const foreign = join(root, "foreign.key.dpapi");
+      const seal = spawnSync(
+        POWERSHELL,
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "[void][System.Reflection.Assembly]::Load('System.Security, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a');" +
+            "$k=New-Object byte[] 32;(New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($k);" +
+            "[System.Console]::Out.Write([System.Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Protect($k,[System.Text.Encoding]::UTF8.GetBytes('another.use.v1'),[System.Security.Cryptography.DataProtectionScope]::CurrentUser)))",
+        ],
+        { shell: false, windowsHide: true, encoding: "utf8", timeout: 15_000 },
+      );
+      expect(seal.status).toBe(0);
+      writeFileSync(foreign, Buffer.from(seal.stdout.trim(), "base64"));
+      const before = (await auditRows(AuditEventType.VAULT_UNLOCK)).length;
+      const run = await failedStart(
+        ["server", "start", "--rest", "--session", "memory", "--unlock-key-dpapi", foreign],
+        withoutCredentialsDirectory(),
+      );
+      expect(run.code).toBe(1);
+      expect(run.stderr.includes(`[${ErrorCode.INVALID_UNLOCK_KEY}]`)).toBe(true);
+      expect(run.stderr.includes("could not be unsealed")).toBe(true);
+      expect((await auditRows(AuditEventType.VAULT_UNLOCK)).length).toBe(before);
+    },
+    60_000,
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "--unlock-key-dpapi off Windows is refused INVALID_INPUT naming the platform, before any vault is opened",
+    async () => {
+      const noVault = join(root, "no-vault-here");
+      const run = await failedStart(
+        ["server", "start", "--rest", "--session", "memory", "--unlock-key-dpapi", keyPath],
+        withoutCredentialsDirectory(),
+        noVault,
+      );
+      expect(run.code).toBe(1);
+      expect(run.stderr).toContain(`[${ErrorCode.INVALID_INPUT}]`);
+      expect(run.stderr).toContain(
+        `--unlock-key-dpapi: DPAPI is Windows' own and this platform is ${process.platform}`,
+      );
+      expect(existsSync(noVault)).toBe(false);
+    },
+    60_000,
+  );
 
   it("a wrong key is refused INVALID_UNLOCK_KEY and counts against the lockout the password shares: after five, the password is refused too", async () => {
     const wrong = credentialsDirectory("credentials-wrong", randomBytes(32));

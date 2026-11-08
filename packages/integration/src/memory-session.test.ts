@@ -284,9 +284,9 @@ describe("the memory session on the built CLI (server start --session memory, th
     expect(existsSync(noVault)).toBe(false);
   }, 60_000);
 
-  // The token file's access list on Windows is B7's (RA-B5-4): the option is refused there.
+  // The token file's access list on Windows is B7's: the option is accepted there as on POSIX (RA-B5-4's refusal lifted) — the start reaches the vault and is refused there, not at the option.
   it.runIf(process.platform === "win32")(
-    "--issue-token on Windows is refused INVALID_INPUT naming the option, before the vault opens",
+    "--issue-token on Windows is accepted past the option checks: the start reaches the locked vault and is refused there, not at the option",
     async () => {
       const noVault = join(root, "no-vault-here");
       const run = await failedStart(
@@ -295,8 +295,9 @@ describe("the memory session on the built CLI (server start --session memory, th
         noVault,
       );
       expect(run.code).toBe(1);
-      expect(run.stderr).toContain(`[${ErrorCode.INVALID_INPUT}]`);
-      expect(run.stderr).toContain("--issue-token");
+      expect(run.stderr).not.toContain(`[${ErrorCode.INVALID_INPUT}]`);
+      expect(run.stderr).not.toContain("--issue-token:");
+      expect(run.stderr).toContain("Vault is locked");
       expect(existsSync(noVault)).toBe(false);
     },
     60_000,
@@ -359,7 +360,7 @@ describe("the memory session on the built CLI (server start --session memory, th
     expect(await secretsStatus(originOf(credentialed))).toBe(200);
   }, 60_000);
 
-  // --issue-token is refused on Windows (RA-B5-4): the rotation rows run on the POSIX legs.
+  // The rotation rows run on the POSIX legs: on Windows the token file lives in an access-listed consumer directory under %ProgramData% (B7), measured by the two-identity-windows e2e job.
   it.skipIf(process.platform === "win32")(
     "--issue-token: the token file is in place, 0640, before the first request; the consumer's per-command read observes the re-mint at half the TTL with no restart, and the earlier token still verifies",
     async () => {

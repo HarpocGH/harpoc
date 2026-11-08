@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
@@ -18,7 +19,12 @@ import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
-import { TokenRotationScheduler, writeTokenFile } from "./token-rotation.js";
+import {
+  TokenRotationScheduler,
+  WIN32_RENAME_ATTEMPTS,
+  WIN32_RENAME_RETRY_MS,
+  writeTokenFile,
+} from "./token-rotation.js";
 import type {
   TokenRotationEngine,
   TokenRotationSchedulerOptions,
@@ -563,6 +569,78 @@ describe("writeTokenFile", () => {
       expect(exitCode).toBe(0);
       expect(Atomics.load(counters, 1)).toBeGreaterThanOrEqual(1_000);
       expect(Atomics.load(counters, 2)).toBe(0);
+    },
+  );
+
+  /**
+   * Another process holding `file` open for `holdMs` — the writer's retry sleeps synchronously, so
+   * an in-process holder could not let go. Resolves once the handle is open, with a promise of its
+   * exit (wrapped: an async function returning the bare promise would adopt it and wait for the exit).
+   */
+  async function holdOpen(file: string, holdMs: number): Promise<{ exited: Promise<unknown> }> {
+    const holder = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const fs=require("fs");const fd=fs.openSync(process.argv[1],"r");process.stdout.write("open");setTimeout(()=>fs.closeSync(fd),${String(holdMs)})`,
+        file,
+      ],
+      { stdio: ["ignore", "pipe", "inherit"] },
+    );
+    const exited = once(holder, "close");
+    const opened = await Promise.race([
+      once(holder.stdout, "data").then(() => true),
+      exited.then(() => false),
+    ]);
+    if (!opened) {
+      const [code] = (await exited) as [number | null];
+      throw new Error(`the holder exited (code ${String(code)}) before it held ${file} open`);
+    }
+    return { exited };
+  }
+
+  // RP-B7-3: on win32 the rename over a held file fails EPERM (MoveFileExW); a reader that lets
+  // go within WIN32_RENAME_ATTEMPTS × WIN32_RENAME_RETRY_MS is waited out.
+  it.runIf(process.platform === "win32")(
+    "win32: a reader holding the token file open for 150 ms delays the rename, which then lands",
+    async () => {
+      const consumer = consumerDir("bot");
+      const file = join(consumer, "token.jwt");
+      writeTokenFile(file, fakeJwt("jti-1"));
+      const { exited } = await holdOpen(file, 150);
+      const second = fakeJwt("jti-2");
+
+      writeTokenFile(file, second);
+
+      await exited;
+      expect(holds(file, second)).toBe(true);
+      expect(readdirSync(consumer)).toEqual(["token.jwt"]);
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "win32: a reader holding it past the retries refuses FILE_IO_ERROR naming the path and EPERM; the old token stays, no temporary left",
+    async () => {
+      const consumer = consumerDir("bot");
+      const file = join(consumer, "token.jwt");
+      const first = fakeJwt("jti-1");
+      writeTokenFile(file, first);
+      const { exited } = await holdOpen(file, 3_000);
+      const second = fakeJwt("jti-2");
+
+      const started = Date.now();
+      const err = await expectVaultError(
+        () => writeTokenFile(file, second),
+        ErrorCode.FILE_IO_ERROR,
+      );
+      const waited = Date.now() - started;
+
+      await exited;
+      expect(err.message).toBe(`could not write the token file ${file} (EPERM)`);
+      expect(err.message.includes(second)).toBe(false);
+      expect(waited).toBeGreaterThanOrEqual((WIN32_RENAME_ATTEMPTS - 1) * WIN32_RENAME_RETRY_MS);
+      expect(holds(file, first)).toBe(true);
+      expect(readdirSync(consumer)).toEqual(["token.jwt"]);
     },
   );
 });

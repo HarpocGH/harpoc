@@ -1,5 +1,7 @@
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,7 +23,18 @@ import {
   requestSignature,
 } from "../__fixtures__/agent-client.js";
 import type { AgentClient } from "../__fixtures__/agent-client.js";
+import { restrictWindowsPipeToAccount } from "../../session/owner-only.js";
+import { system32Path } from "../../win32-paths.js";
 import { expectVaultError } from "@harpoc/test-utils";
+
+// A spy around the real DACL step: the Windows rows observe it and make it fail once.
+vi.mock("../../session/owner-only.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../session/owner-only.js")>();
+  return {
+    ...actual,
+    restrictWindowsPipeToAccount: vi.fn(actual.restrictWindowsPipeToAccount),
+  };
+});
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "..", "__fixtures__", "ssh");
 const blobOf = (name: string): Buffer =>
@@ -97,6 +110,7 @@ async function connect(path: string): Promise<AgentClient> {
 }
 
 beforeEach(() => {
+  vi.mocked(restrictWindowsPipeToAccount).mockReset();
   double = engineDouble();
   onError = vi.fn<(err: VaultError) => void>();
 });
@@ -452,6 +466,120 @@ describe.runIf(process.platform === "win32")("AgentSocketServer on Windows", () 
     );
     expect(double.auditServerStart).not.toHaveBeenCalled();
   });
+
+  /** The pipe's DACL in SDDL, read through a client handle opened for ReadPermissions only. */
+  function pipeDacl(path: string): string {
+    const name = path.slice("\\\\.\\pipe\\".length);
+    const res = spawnSync(
+      system32Path("WindowsPowerShell", "v1.0", "powershell.exe"),
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `$c=New-Object System.IO.Pipes.NamedPipeClientStream('.','${name}',[System.IO.Pipes.PipeAccessRights]'ReadData, ReadPermissions',[System.IO.Pipes.PipeOptions]::None,[System.Security.Principal.TokenImpersonationLevel]::Identification,[System.IO.HandleInheritability]::None);$c.Connect(5000);[System.Console]::Out.WriteLine($c.GetAccessControl().GetSecurityDescriptorSddlForm('Access'));$c.Dispose()`,
+      ],
+      { encoding: "utf8", shell: false, windowsHide: true, timeout: 15_000 },
+    );
+    expect(res.status).toBe(0);
+    return res.stdout.trim();
+  }
+
+  // P1 (B7): Node's pipe grants Everyone and Anonymous read (FR) and nobody else but the owner,
+  // SYSTEM and Administrators write — so neither another user nor the consumer can send a request.
+  it("without win32ConsumerSid the pipe keeps Node's default DACL: Everyone and Anonymous read, no other writer", async () => {
+    const server = await start();
+    const dacl = pipeDacl(server.socketPath);
+    expect(dacl).toContain("(A;;FR;;;WD)");
+    expect(dacl).toContain("(A;;FR;;;AN)");
+    expect(vi.mocked(restrictWindowsPipeToAccount)).not.toHaveBeenCalled();
+  });
+
+  it("with win32ConsumerSid the DACL is protected: this account, SYSTEM and Administrators full, the consumer read-write, before the one start row", async () => {
+    const server = await start({ win32ConsumerSid: "S-1-5-32-545" });
+    const dacl = pipeDacl(server.socketPath);
+    expect(dacl.startsWith("D:P")).toBe(true);
+    expect(dacl).toContain("(A;;0x120083;;;BU)");
+    expect(dacl).toContain("(A;;0x1f019f;;;SY)");
+    expect(dacl).toContain("(A;;0x1f019f;;;BA)");
+    expect(dacl).not.toContain(";;;WD)");
+    expect(dacl).not.toContain(";;;AN)");
+    const [restricted] = vi.mocked(restrictWindowsPipeToAccount).mock.invocationCallOrder;
+    const [recorded] = double.auditServerStart.mock.invocationCallOrder;
+    expect(restricted).toBeLessThan(recorded as number);
+    expect(double.auditServerStart.mock.calls).toEqual([
+      [{ transport: "ssh-agent", tokenless: true, consumer: "consumer" }],
+    ]);
+    const client = await connect(server.socketPath);
+    expect(parseIdentities(await requestIdentities(client))).toHaveLength(2);
+  });
+
+  it("a DACL that cannot be set refuses INVALID_INPUT naming the pipe, writes no row and stops listening", async () => {
+    vi.mocked(restrictWindowsPipeToAccount).mockRejectedValueOnce(
+      new Error("pipe access list: not as set"),
+    );
+    const socketPath = socketPathFor("consumer");
+    const err = await expectVaultError(
+      () => start({ socketPath, win32ConsumerSid: "S-1-5-32-545" }),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `ssh-agent socket: the access list of ${socketPath} could not be set to the consumer's account`,
+    );
+    expect(double.auditServerStart).not.toHaveBeenCalled();
+    await expect(connectAgent(socketPath)).rejects.toThrow();
+  });
+
+  it("a connection accepted while the DACL is set is served only after the start row", async () => {
+    let release: () => void = () => undefined;
+    const socketPath = socketPathFor("consumer");
+    vi.mocked(restrictWindowsPipeToAccount).mockImplementationOnce(
+      () => new Promise((resolve) => (release = () => resolve({ user: "", owner: "", rules: [] }))),
+    );
+    const starting = start({ socketPath, win32ConsumerSid: "S-1-5-32-545" });
+    await vi.waitFor(() => expect(restrictWindowsPipeToAccount).toHaveBeenCalled());
+    const client = await connect(socketPath);
+    const answer = requestIdentities(client);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(double.listAgentSocketIdentities).not.toHaveBeenCalled();
+    release();
+    await starting;
+    expect(parseIdentities(await answer)).toHaveLength(2);
+    const [recorded] = double.auditServerStart.mock.invocationCallOrder;
+    const [listed] = double.listAgentSocketIdentities.mock.invocationCallOrder;
+    expect(recorded).toBeLessThan(listed as number);
+  });
+
+  it("an early connection is tracked once: served, it carries the close and error listeners of a connection accepted after the row", async () => {
+    let release: () => void = () => undefined;
+    const socketPath = socketPathFor("consumer");
+    vi.mocked(restrictWindowsPipeToAccount).mockImplementationOnce(
+      () => new Promise((resolve) => (release = () => resolve({ user: "", owner: "", rules: [] }))),
+    );
+    const accept = vi.spyOn(
+      AgentSocketServer.prototype as unknown as { accept: (...args: unknown[]) => void },
+      "accept",
+    );
+    try {
+      const starting = start({ socketPath, win32ConsumerSid: "S-1-5-32-545" });
+      await vi.waitFor(() => expect(restrictWindowsPipeToAccount).toHaveBeenCalled());
+      const early = await connect(socketPath);
+      const earlyAnswer = requestIdentities(early);
+      await vi.waitFor(() => expect(accept).toHaveBeenCalledTimes(1));
+      release();
+      const server = await starting;
+      expect(parseIdentities(await earlyAnswer)).toHaveLength(2);
+      const late = await connect(socketPath);
+      expect(parseIdentities(await requestIdentities(late))).toHaveLength(2);
+
+      const streams = [...(server as unknown as { sockets: Set<Socket> }).sockets];
+      expect(streams).toHaveLength(2);
+      const [first, second] = streams as [Socket, Socket];
+      expect(first.listenerCount("close")).toBe(second.listenerCount("close"));
+      expect(first.listenerCount("error")).toBe(second.listenerCount("error"));
+    } finally {
+      accept.mockRestore();
+    }
+  });
 });
 
 // The Unix-socket ladder (prepareUnixSocketPath, its own suite) and the 0660 mode exist
@@ -463,6 +591,13 @@ describe.skipIf(process.platform === "win32")("AgentSocketServer on a Unix socke
     expect(statSync(server.socketPath).mode & 0o777).toBe(0o660);
     await server.stop();
     expect(existsSync(server.socketPath)).toBe(false);
+  });
+
+  it("ignores win32ConsumerSid: the socket's 0660 is the factor, no DACL step runs", async () => {
+    const server = await start({ win32ConsumerSid: "S-1-5-32-545" });
+
+    expect(statSync(server.socketPath).mode & 0o777).toBe(0o660);
+    expect(vi.mocked(restrictWindowsPipeToAccount)).not.toHaveBeenCalled();
   });
 
   it("refuses a path over 107 bytes, naming its length, before anything is created or recorded", async () => {

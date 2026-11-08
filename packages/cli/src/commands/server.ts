@@ -15,7 +15,13 @@ import { resolveVaultDir, loadUnlockedEngine, unlockEngineWithKey } from "../uti
 import { handleError } from "../utils/output.js";
 import { parseIntOption } from "../utils/options.js";
 import { DEFAULT_PROXY_PORT, MAX_PORT, MIN_PORT } from "../utils/option-bounds.js";
-import { assertRuntimeDir, consumerSocketPaths, resolveRuntimeDir } from "../utils/runtime-dir.js";
+import {
+  agentSocketPipeName,
+  assertRuntimeDir,
+  consumerDirs,
+  consumerSocketPaths,
+  resolveRuntimeDir,
+} from "../utils/runtime-dir.js";
 import { assertIssueTokenFile, parseIssueTokenSpecs } from "../utils/issue-token-spec.js";
 
 function resolveUiDistDir(): string {
@@ -91,8 +97,12 @@ export function registerServerCommand(program: Command): void {
       "Unlock the vault at start from the systemd credential <name> in $CREDENTIALS_DIRECTORY (LoadCredentialEncrypted= in deploy/systemd/harpoc.service)",
     )
     .option(
+      "--unlock-key-dpapi <path>",
+      "Windows: unlock the vault at start from the unlock key in <path> sealed with DPAPI for the account the daemon runs as (written by harpoc unlock-key enroll --dpapi run as that account)",
+    )
+    .option(
       "--session <mode>",
-      "Session mode: file runs the daemon on the vault's session file (sealed after 15 min idle or 24 h); memory keeps the keys from the unlock in this process alone — no session file, no idle seal, locked by POST /api/v1/vault/lock or SIGTERM (required by --issue-token, --unlock-credential, --unlock-key-file, --proxy and --ssh-agent)",
+      "Session mode: file runs the daemon on the vault's session file (sealed after 15 min idle or 24 h); memory keeps the keys from the unlock in this process alone — no session file, no idle seal, locked by POST /api/v1/vault/lock or SIGTERM (required by --issue-token, --unlock-credential, --unlock-key-file, --unlock-key-dpapi, --proxy and --ssh-agent)",
       "file",
     )
     .option(
@@ -125,6 +135,7 @@ export function registerServerCommand(program: Command): void {
           sshAgent?: boolean;
           unlockKeyFile?: string;
           unlockCredential?: string;
+          unlockKeyDpapi?: string;
           session: string;
           issueToken: string[];
         },
@@ -161,11 +172,35 @@ export function registerServerCommand(program: Command): void {
               throw VaultError.invalidInput("--unlock-credential: a flag, not a credential name");
             }
           }
+          if (opts.unlockKeyDpapi !== undefined) {
+            if (opts.unlockKeyDpapi.trim() === "") {
+              throw VaultError.invalidInput("--unlock-key-dpapi: empty path");
+            }
+            if (opts.unlockKeyDpapi.startsWith("-")) {
+              throw VaultError.invalidInput(
+                "--unlock-key-dpapi: a flag, not a path (give a path that starts with a dash as ./-name)",
+              );
+            }
+          }
           if (opts.unlockKeyFile !== undefined && opts.unlockCredential !== undefined) {
             console.error(
               "Error: --unlock-key-file and --unlock-credential exclude each other: one unlock key source per start.",
             );
             process.exit(1);
+          }
+          if (opts.unlockKeyDpapi !== undefined) {
+            const other =
+              opts.unlockKeyFile !== undefined
+                ? "--unlock-key-file"
+                : opts.unlockCredential !== undefined
+                  ? "--unlock-credential"
+                  : undefined;
+            if (other !== undefined) {
+              console.error(
+                `Error: --unlock-key-dpapi and ${other} exclude each other: one unlock key source per start.`,
+              );
+              process.exit(1);
+            }
           }
           if (opts.session !== "memory" && opts.session !== "file") {
             throw VaultError.invalidInput(
@@ -180,25 +215,29 @@ export function registerServerCommand(program: Command): void {
               ["--issue-token", opts.issueToken.length > 0],
               ["--unlock-credential", opts.unlockCredential !== undefined],
               ["--unlock-key-file", opts.unlockKeyFile !== undefined],
+              ["--unlock-key-dpapi", opts.unlockKeyDpapi !== undefined],
               ["--proxy", opts.proxy === true],
               ["--ssh-agent", opts.sshAgent === true],
             ] as const) {
               if (present) throw VaultError.sessionModeConflict(flag);
             }
           }
-          const rotationSpecs = parseIssueTokenSpecs(opts.issueToken);
-          if (rotationSpecs.length > 0 && process.platform === "win32") {
+          if (opts.unlockKeyDpapi !== undefined && process.platform !== "win32") {
             throw VaultError.invalidInput(
-              "--issue-token: the token file's access list on Windows is not built (deployment model B on Windows is a later tranche)",
+              `--unlock-key-dpapi: DPAPI is Windows' own and this platform is ${process.platform} (systemd's sealer is --unlock-credential)`,
             );
           }
+          const rotationSpecs = parseIssueTokenSpecs(opts.issueToken);
+          const win32 = process.platform === "win32";
           // An ambient $RUNTIME_DIRECTORY is the default only for a
           // per-consumer feature (--proxy's and --ssh-agent's sockets): a unit's
           // RuntimeDirectory= (0755 by default) must not refuse a start that
-          // asked for none.
+          // asked for none. On win32 %ProgramData%\harpoc\run is --ssh-agent's
+          // default alone: the proxy serves no socket there, and ProgramData is
+          // always set.
           const runtimeDir = resolveRuntimeDir(
             opts.runtimeDir,
-            opts.proxy || opts.sshAgent ? process.env : {},
+            (win32 ? opts.sshAgent : opts.proxy || opts.sshAgent) ? process.env : undefined,
           );
 
           if (opts.ui && !opts.rest) {
@@ -355,21 +394,43 @@ export function registerServerCommand(program: Command): void {
             fileToken = read.token;
           }
           if (runtimeDir !== undefined) assertRuntimeDir(runtimeDir);
+          // win32: no socket in a consumer directory — the proxy is TCP only and the agent a
+          // named pipe per consumer; each consumer directory is still checked (an enrolment).
+          const windowsConsumers =
+            win32 && runtimeDir !== undefined && (opts.proxy || opts.sshAgent)
+              ? consumerDirs(runtimeDir)
+              : [];
           // One proxy.sock per consumer directory present: each directory is an
           // enrolment, and a misconfigured one refuses the start (R-A1).
           const proxySockets =
-            opts.proxy && runtimeDir !== undefined
+            opts.proxy && runtimeDir !== undefined && !win32
               ? consumerSocketPaths(runtimeDir, "proxy.sock")
               : [];
-          // One ssh-agent.sock per consumer directory; a --ssh-agent that serves no consumer
-          // refuses the start (a consumer directory named as the runtime directory lists none).
-          const sshAgentSockets =
-            opts.sshAgent && runtimeDir !== undefined
-              ? consumerSocketPaths(runtimeDir, "ssh-agent.sock")
-              : [];
+          // One ssh-agent.sock per consumer directory (win32: one pipe, granting the consumer's
+          // account); a --ssh-agent that serves no consumer refuses the start (a consumer
+          // directory named as the runtime directory lists none).
+          const sshAgentSockets: { consumer: string; socketPath: string; sid?: string }[] =
+            !opts.sshAgent || runtimeDir === undefined
+              ? []
+              : win32
+                ? windowsConsumers.map(({ consumer, sid }) => {
+                    if (sid === undefined) {
+                      throw VaultError.invalidInput(
+                        `consumer ${JSON.stringify(consumer)}: no account SID resolved for the pipe's access list`,
+                      );
+                    }
+                    return { consumer, socketPath: agentSocketPipeName(consumer), sid };
+                  })
+                : consumerSocketPaths(runtimeDir, "ssh-agent.sock").map((socketPath) => ({
+                    consumer: basename(dirname(socketPath)),
+                    socketPath,
+                  }));
           if (opts.sshAgent && runtimeDir !== undefined && sshAgentSockets.length === 0) {
+            const recipe = win32
+              ? "deploy/windows/install-two-identity.ps1"
+              : "deploy/linux/install-two-identity.sh";
             throw VaultError.invalidInput(
-              `${runtimeDir.source}: --ssh-agent found no consumer directory under ${runtimeDir.path} (one per agent user: deploy/linux/install-two-identity.sh)`,
+              `${runtimeDir.source}: --ssh-agent found no consumer directory under ${runtimeDir.path} (one per agent user: ${recipe})`,
             );
           }
           for (const { file } of rotationSpecs) assertIssueTokenFile(file);
@@ -392,6 +453,9 @@ export function registerServerCommand(program: Command): void {
           } else if (opts.unlockCredential !== undefined) {
             const { readUnlockCredential } = await import("@harpoc/core");
             unlockKey = await readUnlockCredential(opts.unlockCredential, process.env);
+          } else if (opts.unlockKeyDpapi !== undefined) {
+            const { readUnlockKeyDpapi } = await import("@harpoc/core");
+            unlockKey = await readUnlockKeyDpapi(opts.unlockKeyDpapi);
           }
           // Model A's calls stay byte-identical: the options object in memory mode only.
           const engineOptions: [] | [{ sessionMode: "memory" }] =
@@ -618,9 +682,11 @@ export function registerServerCommand(program: Command): void {
             const sockets =
               runtimeDir === undefined
                 ? " (TCP only: no --runtime-dir)"
-                : proxySockets.length === 0
-                  ? ` (TCP only: no consumer directory under ${runtimeDir.path})`
-                  : ` and ${String(proxySockets.length)} consumer socket${proxySockets.length === 1 ? "" : "s"} (<consumer>/proxy.sock)`;
+                : win32
+                  ? " (TCP only: Windows serves no proxy.sock)"
+                  : proxySockets.length === 0
+                    ? ` (TCP only: no consumer directory under ${runtimeDir.path})`
+                    : ` and ${String(proxySockets.length)} consumer socket${proxySockets.length === 1 ? "" : "s"} (<consumer>/proxy.sock)`;
             console.error(
               `[harpoc] egress proxy listening on http://127.0.0.1:${String(boundPort)}${sockets}`,
             );
@@ -628,8 +694,7 @@ export function registerServerCommand(program: Command): void {
 
           if (opts.sshAgent && runtimeDir !== undefined) {
             const { AgentSocketServer } = await import("@harpoc/core");
-            for (const socketPath of sshAgentSockets) {
-              const consumer = basename(dirname(socketPath));
+            for (const { consumer, socketPath, sid } of sshAgentSockets) {
               // Kept as each start resolves: a signal during a start stops only the sockets
               // already serving and writes no stop row for the pending one (E-11).
               agentSockets.push(
@@ -637,6 +702,7 @@ export function registerServerCommand(program: Command): void {
                   socketPath,
                   consumer,
                   engine,
+                  ...(sid !== undefined ? { win32ConsumerSid: sid } : {}),
                   onError: (err) => {
                     // The code alone: the refusal's row is the engine's; no message reaches stderr.
                     if (shuttingDown) return;
@@ -647,7 +713,9 @@ export function registerServerCommand(program: Command): void {
             }
             const count = sshAgentSockets.length;
             console.error(
-              `[harpoc] ssh-agent listening on ${String(count)} consumer socket${count === 1 ? "" : "s"} (<consumer>/ssh-agent.sock) under ${runtimeDir.path}`,
+              win32
+                ? `[harpoc] ssh-agent listening on ${String(count)} consumer pipe${count === 1 ? "" : "s"} (\\\\.\\pipe\\harpoc-<consumer>-ssh-agent) for the consumer directories under ${runtimeDir.path}`
+                : `[harpoc] ssh-agent listening on ${String(count)} consumer socket${count === 1 ? "" : "s"} (<consumer>/ssh-agent.sock) under ${runtimeDir.path}`,
             );
           }
 

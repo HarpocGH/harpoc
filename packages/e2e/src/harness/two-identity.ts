@@ -217,7 +217,7 @@ export function daemonArgs(
   ];
 }
 
-function freePort(): Promise<number> {
+export function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = createServer();
     srv.once("error", reject);
@@ -228,7 +228,7 @@ function freePort(): Promise<number> {
   });
 }
 
-function expectExit(run: ChildRun, code: number, what: string): ChildRun {
+export function expectExit(run: ChildRun, code: number, what: string): ChildRun {
   if (run.code !== code) {
     throw new Error(
       `${what}: exited ${String(run.code)}, not ${String(code)}: ${run.stderr.trim()}`,
@@ -238,7 +238,7 @@ function expectExit(run: ChildRun, code: number, what: string): ChildRun {
 }
 
 /** Runs every step, then throws the first failure: a teardown never stops at its first error. */
-async function settleSteps(steps: Array<() => Promise<void>>): Promise<void> {
+export async function settleSteps(steps: Array<() => Promise<void>>): Promise<void> {
   const failures: unknown[] = [];
   for (const step of steps) {
     try {

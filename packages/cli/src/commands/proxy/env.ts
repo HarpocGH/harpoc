@@ -15,6 +15,10 @@ interface ProxyEnvOptions {
 const NO_RUNTIME_DIR =
   "# no --runtime-dir: the HARPOC_PROXY_TOKEN_FILE and HARPOC_PROXY_SOCKET lines are omitted";
 
+/** win32 (DB-14): the proxy is the loopback TCP listener alone — no proxy.sock to name. */
+export const NO_SOCKET_ON_WINDOWS =
+  "# Windows: the proxy serves no socket — the HARPOC_PROXY_SOCKET line is omitted (the TCP listener with the token file's token)";
+
 /**
  * The placeholder a consumer's client sends where the credential would go: the handle's own
  * path, `harpoc:<name>` for the project-less `secret://<name>` and `harpoc://<project>/<name>`
@@ -41,7 +45,7 @@ export function placeholderVariable(handle: string): string {
 export function proxyEnvironment(
   consumer: string,
   handles: string[],
-  options: { port: number; runtimeDir?: string },
+  options: { port: number; runtimeDir?: string; platform?: NodeJS.Platform },
 ): Record<string, string> {
   assertConsumerName(consumer);
   const origin = `http://127.0.0.1:${String(options.port)}`;
@@ -52,7 +56,9 @@ export function proxyEnvironment(
   if (options.runtimeDir !== undefined) {
     const dir = consumerDir(options.runtimeDir, consumer);
     env.HARPOC_PROXY_TOKEN_FILE = join(dir, "token.jwt");
-    env.HARPOC_PROXY_SOCKET = join(dir, "proxy.sock");
+    if ((options.platform ?? process.platform) !== "win32") {
+      env.HARPOC_PROXY_SOCKET = join(dir, "proxy.sock");
+    }
   }
   for (const handle of handles) {
     const variable = placeholderVariable(handle);
@@ -87,7 +93,7 @@ export function registerProxyEnvCommand(proxy: Command): void {
     .action((consumer: string, handles: string[], options: ProxyEnvOptions) => {
       try {
         const port = parseIntOption(options.proxyPort, "proxy port", MIN_PORT, MAX_PORT);
-        const runtimeDir = resolveRuntimeDir(options.runtimeDir, {});
+        const runtimeDir = resolveRuntimeDir(options.runtimeDir, undefined);
         const env = proxyEnvironment(consumer, handles, { port, runtimeDir: runtimeDir?.path });
         if (options.json) {
           printJson(env);
@@ -95,6 +101,7 @@ export function registerProxyEnvCommand(proxy: Command): void {
         }
         const lines = Object.entries(env).map(([key, value]) => `${key}=${value}`);
         if (runtimeDir === undefined) lines.splice(2, 0, NO_RUNTIME_DIR);
+        else if (process.platform === "win32") lines.splice(3, 0, NO_SOCKET_ON_WINDOWS);
         for (const line of lines) console.log(line);
       } catch (err) {
         handleError(err, options.json);

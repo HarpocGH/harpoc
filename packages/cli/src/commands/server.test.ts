@@ -80,6 +80,7 @@ const {
   mockUnlockKeySource: {
     readUnlockKeyFile: vi.fn(),
     readUnlockCredential: vi.fn(),
+    readUnlockKeyDpapi: vi.fn(),
   },
   mockRotationScheduler: {
     start: vi.fn().mockResolvedValue(undefined),
@@ -145,12 +146,18 @@ vi.mock("@harpoc/egress-proxy", () => ({
   createEgressProxy: vi.fn().mockReturnValue(mockEgressProxy),
 }));
 
-// server.ts reaches core only for AgentSocketServer, the unlock key's two readers and the token
+// server.ts reaches core only for AgentSocketServer, the unlock key's three readers and the token
 // rotation's scheduler (vault-loader.js, the engine's one other path, is mocked above).
 vi.mock("@harpoc/core", () => ({
   AgentSocketServer: mockAgentSocketServer,
   readUnlockKeyFile: mockUnlockKeySource.readUnlockKeyFile,
   readUnlockCredential: mockUnlockKeySource.readUnlockCredential,
+  readUnlockKeyDpapi: mockUnlockKeySource.readUnlockKeyDpapi,
+  // runtime-dir.ts's win32 access-list read (B7): a listing that fails, so the real ladder on
+  // win32 refuses fail-closed unless a row stubs the ladder.
+  listWindowsAclSync: vi.fn(() => {
+    throw new Error("ACL listing failed (exit 1)");
+  }),
   TokenRotationScheduler: vi.fn().mockImplementation(function (
     engine: unknown,
     specs: unknown,
@@ -169,6 +176,7 @@ vi.mock("../utils/runtime-dir.js", async (importOriginal) => {
     ...actual,
     assertRuntimeDir: vi.fn(actual.assertRuntimeDir),
     consumerSocketPaths: vi.fn(actual.consumerSocketPaths),
+    consumerDirs: vi.fn(actual.consumerDirs),
   };
 });
 
@@ -176,9 +184,19 @@ vi.mock("../utils/runtime-dir.js", async (importOriginal) => {
 
 import { registerServerCommand } from "./server.js";
 import { buildCli, spyCli, type CliSpies } from "../__fixtures__/cli-harness.js";
-import { assertRuntimeDir, consumerSocketPaths } from "../utils/runtime-dir.js";
+import { assertRuntimeDir, consumerDirs, consumerSocketPaths } from "../utils/runtime-dir.js";
 
 const run = buildCli(registerServerCommand, ["server", "start"]);
+
+const REAL_PLATFORM = process.platform;
+
+/**
+ * The platform server.ts and runtime-dir.ts read, stubbed so that every row runs on every leg
+ * (RA-B5-6): Linux by default, win32 in the Windows rows (B7's branches).
+ */
+function stubPlatform(value: NodeJS.Platform): void {
+  Object.defineProperty(process, "platform", { value, configurable: true });
+}
 
 /** The memory session's line, printed once the engine opens (B5). */
 const MEMORY_SESSION =
@@ -204,6 +222,7 @@ describe("server start", () => {
     priorSigtermListeners = process.listeners("SIGTERM");
     priorStdinEndListeners = process.stdin.listeners("end") as ((...args: unknown[]) => void)[];
     spies = spyCli();
+    stubPlatform("linux");
   });
 
   afterEach(() => {
@@ -219,6 +238,7 @@ describe("server start", () => {
       if (!priorStdinEndListeners.includes(listener)) process.stdin.removeListener("end", listener);
     }
     spies.restore();
+    stubPlatform(REAL_PLATFORM);
     console.log = originalLog;
   });
 
@@ -670,19 +690,19 @@ describe("server start", () => {
       },
     );
 
-    it.runIf(process.platform === "win32")(
-      "refuses --runtime-dir on Windows before the vault opens: the owner and mode cannot be checked",
-      async () => {
-        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+    // B7 flips B1's RD-3 refusal: the directory is judged by its access list; a listing that
+    // cannot be read refuses fail-closed (core's listing is mocked to fail in this suite).
+    it("on Windows --runtime-dir is judged by its access list before the vault opens; an unreadable list refuses", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      stubPlatform("win32");
 
-        await expect(run(["--rest", "--runtime-dir", dir])).rejects.toThrow("process.exit");
-        expect(spies.exitSpy).toHaveBeenCalledWith(1);
-        expect(spies.errorSpy.mock.calls[0]).toEqual([
-          `Error: [INVALID_INPUT] --runtime-dir: not supported on this platform (the owner and mode cannot be checked): ${dir}`,
-        ]);
-        expect(loadUnlockedEngine).not.toHaveBeenCalled();
-      },
-    );
+      await expect(run(["--rest", "--runtime-dir", dir])).rejects.toThrow("process.exit");
+      expect(spies.exitSpy).toHaveBeenCalledWith(1);
+      expect(spies.errorSpy.mock.calls[0]).toEqual([
+        `Error: [INVALID_INPUT] --runtime-dir: the access list cannot be read: ${dir}`,
+      ]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    });
 
     // Model A untouched: a unit's RuntimeDirectory= (0755 by default) sets the
     // variable for a daemon that asked for no runtime directory.
@@ -1060,23 +1080,151 @@ describe("server start", () => {
       expect(loadUnlockedEngine).not.toHaveBeenCalled();
     });
 
-    it.runIf(process.platform === "win32")(
-      "--ssh-agent --runtime-dir on Windows meets the RD-3 refusal before the vault opens",
-      async () => {
+    it("--ssh-agent --runtime-dir on Windows meets the access-list check before the vault opens", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      stubPlatform("win32");
+
+      await expect(
+        run(["--session", "memory", "--ssh-agent", "--runtime-dir", dir]),
+      ).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [`Error: [INVALID_INPUT] --runtime-dir: the access list cannot be read: ${dir}`],
+      ]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(mockAgentSocketServer.start).not.toHaveBeenCalled();
+    });
+
+    describe("on Windows (the platform stubbed)", () => {
+      beforeEach(() => stubPlatform("win32"));
+
+      afterEach(() => {
+        vi.mocked(consumerDirs).mockReset();
+      });
+
+      it("serves one pipe per consumer directory, the consumer's name in it, each granting its consumer's SID", async () => {
+        vi.mocked(assertRuntimeDir).mockImplementation(() => undefined);
+        vi.mocked(consumerDirs).mockImplementation(() => [
+          { consumer: "alice", dir: join(dir, "alice"), sid: "S-1-5-21-1-2-3-1002" },
+          { consumer: "bob", dir: join(dir, "bob"), sid: "S-1-5-21-1-2-3-1003" },
+        ]);
+
+        await run(["--session", "memory", "--ssh-agent", "--runtime-dir", dir]);
+
+        expect(consumerSocketPaths).not.toHaveBeenCalled();
+        expect(mockAgentSocketServer.start.mock.calls).toEqual([
+          [
+            {
+              socketPath: "\\\\.\\pipe\\harpoc-alice-ssh-agent",
+              consumer: "alice",
+              engine: mockEngine,
+              win32ConsumerSid: "S-1-5-21-1-2-3-1002",
+              onError: expect.any(Function),
+            },
+          ],
+          [
+            {
+              socketPath: "\\\\.\\pipe\\harpoc-bob-ssh-agent",
+              consumer: "bob",
+              engine: mockEngine,
+              win32ConsumerSid: "S-1-5-21-1-2-3-1003",
+              onError: expect.any(Function),
+            },
+          ],
+        ]);
+        expect(spies.errorSpy).toHaveBeenCalledWith(
+          `[harpoc] ssh-agent listening on 2 consumer pipes (\\\\.\\pipe\\harpoc-<consumer>-ssh-agent) for the consumer directories under ${dir}`,
+        );
+        expect(spies.exitSpy).not.toHaveBeenCalled();
+      });
+
+      it("without --runtime-dir --ssh-agent defaults to %ProgramData%'s harpoc\\run, asserted before the vault opens", async () => {
         const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+        vi.stubEnv("ProgramData", "C:\\ProgramData");
+
+        await expect(run(["--session", "memory", "--ssh-agent"])).rejects.toThrow("process.exit");
+        expect(assertRuntimeDir).toHaveBeenCalledWith({
+          path: "C:\\ProgramData\\harpoc\\run",
+          source: "%ProgramData%",
+        });
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      });
+
+      it("without --runtime-dir --ssh-agent refuses an unset %ProgramData% with RP-B7-3's message, before the vault opens", async () => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+        vi.stubEnv("ProgramData", undefined);
+
+        await expect(run(["--session", "memory", "--ssh-agent"])).rejects.toThrow("process.exit");
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [
+            "Error: [INVALID_INPUT] %ProgramData% is not set to an absolute path; name the runtime directory with --runtime-dir",
+          ],
+        ]);
+        expect(assertRuntimeDir).not.toHaveBeenCalled();
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      });
+
+      it("refuses a consumer directory entry without an account SID before the vault opens: no pipe without its access list", async () => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+        vi.mocked(assertRuntimeDir).mockImplementation(() => undefined);
+        vi.mocked(consumerDirs).mockImplementation(() => [
+          { consumer: "alice", dir: join(dir, "alice") },
+        ]);
 
         await expect(
           run(["--session", "memory", "--ssh-agent", "--runtime-dir", dir]),
         ).rejects.toThrow("process.exit");
         expect(spies.errorSpy.mock.calls).toEqual([
           [
-            `Error: [INVALID_INPUT] --runtime-dir: not supported on this platform (the owner and mode cannot be checked): ${dir}`,
+            'Error: [INVALID_INPUT] consumer "alice": no account SID resolved for the pipe\'s access list',
           ],
         ]);
         expect(loadUnlockedEngine).not.toHaveBeenCalled();
         expect(mockAgentSocketServer.start).not.toHaveBeenCalled();
-      },
-    );
+      });
+
+      it("a runtime directory listing no consumer names the Windows recipe", async () => {
+        vi.mocked(assertRuntimeDir).mockImplementation(() => undefined);
+        vi.mocked(consumerDirs).mockImplementation(() => []);
+
+        await expect(
+          run(["--session", "memory", "--ssh-agent", "--runtime-dir", dir]),
+        ).rejects.toThrow("process.exit");
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [
+            `Error: [INVALID_INPUT] --runtime-dir: --ssh-agent found no consumer directory under ${dir} (one per agent user: deploy/windows/install-two-identity.ps1)`,
+          ],
+        ]);
+      });
+
+      it("--proxy alone reads no %ProgramData% default: TCP only, no --runtime-dir", async () => {
+        vi.stubEnv("ProgramData", "C:\\ProgramData");
+
+        await run(["--session", "memory", "--proxy"]);
+
+        expect(assertRuntimeDir).not.toHaveBeenCalled();
+        expect(spies.errorSpy).toHaveBeenCalledWith(
+          "[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: no --runtime-dir)",
+        );
+      });
+
+      it("--proxy --runtime-dir checks each consumer directory and starts no proxy.sock", async () => {
+        vi.mocked(assertRuntimeDir).mockImplementation(() => undefined);
+        vi.mocked(consumerDirs).mockImplementation(() => [
+          { consumer: "alice", dir: join(dir, "alice"), sid: "S-1-5-21-1-2-3-1002" },
+        ]);
+
+        await run(["--session", "memory", "--proxy", "--runtime-dir", dir]);
+
+        expect(vi.mocked(consumerDirs).mock.calls).toEqual([
+          [{ path: dir, source: "--runtime-dir" }],
+        ]);
+        expect(consumerSocketPaths).not.toHaveBeenCalled();
+        expect(mockEgressProxy.listenSocket).not.toHaveBeenCalled();
+        expect(spies.errorSpy).toHaveBeenCalledWith(
+          "[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: Windows serves no proxy.sock)",
+        );
+      });
+    });
 
     it("starts one AgentSocketServer per consumer directory on the engine, by name, after the REST listener", async () => {
       const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
@@ -1724,6 +1872,132 @@ describe("server start", () => {
       expect(mockUnlockKeySource.readUnlockCredential.mock.calls.length).toBe(0);
       expect(spies.errorSpy).not.toHaveBeenCalled();
     });
+
+    describe("--unlock-key-dpapi (the DPAPI-sealed key, B7-U3)", () => {
+      const DPAPI_FILE = "C:\\ProgramData\\harpoc\\vault\\unlock-key.dpapi";
+
+      beforeEach(() => {
+        mockUnlockKeySource.readUnlockKeyDpapi.mockResolvedValue(key);
+      });
+
+      afterEach(() => {
+        mockUnlockKeySource.readUnlockKeyDpapi.mockReset();
+      });
+
+      it.each([
+        {
+          argv: ["--rest", "--unlock-key-dpapi", ""],
+          line: "Error: [INVALID_INPUT] --unlock-key-dpapi: empty path",
+        },
+        {
+          argv: ["--unlock-key-dpapi", "--rest"],
+          line: "Error: [INVALID_INPUT] --unlock-key-dpapi: a flag, not a path (give a path that starts with a dash as ./-name)",
+        },
+      ])(
+        "refuses --unlock-key-dpapi's value in $argv first, before the transport check, any read or the vault",
+        async ({ argv, line }) => {
+          const { loadUnlockedEngine, unlockEngineWithKey } =
+            await import("../utils/vault-loader.js");
+
+          await expect(run(argv)).rejects.toThrow("process.exit");
+          expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+          expect(spies.errorSpy.mock.calls).toEqual([[line]]);
+          expect(mockUnlockKeySource.readUnlockKeyDpapi).not.toHaveBeenCalled();
+          expect(loadUnlockedEngine).not.toHaveBeenCalled();
+          expect(vi.mocked(unlockEngineWithKey).mock.calls.length).toBe(0);
+        },
+      );
+
+      it.each([
+        { other: "--unlock-key-file", argv: ["--unlock-key-file", KEY_FILE] },
+        { other: "--unlock-credential", argv: ["--unlock-credential", "harpoc-unlock"] },
+      ])(
+        "refuses --unlock-key-dpapi beside $other before anything is read or the vault opens",
+        async ({ other, argv }) => {
+          const { loadUnlockedEngine, unlockEngineWithKey } =
+            await import("../utils/vault-loader.js");
+
+          await expect(run(["--rest", "--unlock-key-dpapi", DPAPI_FILE, ...argv])).rejects.toThrow(
+            "process.exit",
+          );
+          expect(spies.exitSpy).toHaveBeenCalledWith(1);
+          // The combination-check form: the line, then exit 1 (the stub's throw is handleError's).
+          expect(spies.errorSpy.mock.calls[0]).toEqual([
+            `Error: --unlock-key-dpapi and ${other} exclude each other: one unlock key source per start.`,
+          ]);
+          expect(mockUnlockKeySource.readUnlockKeyDpapi).not.toHaveBeenCalled();
+          expect(mockUnlockKeySource.readUnlockKeyFile).not.toHaveBeenCalled();
+          expect(mockUnlockKeySource.readUnlockCredential.mock.calls.length).toBe(0);
+          expect(loadUnlockedEngine).not.toHaveBeenCalled();
+          expect(vi.mocked(unlockEngineWithKey).mock.calls.length).toBe(0);
+        },
+      );
+
+      it("in file session mode (the default) it is refused SESSION_MODE_CONFLICT naming it, ahead of the platform refusal, nothing read", async () => {
+        const { loadUnlockedEngine, unlockEngineWithKey } =
+          await import("../utils/vault-loader.js");
+
+        await expect(run(["--rest", "--unlock-key-dpapi", DPAPI_FILE])).rejects.toThrow(
+          "process.exit",
+        );
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [
+            `Error: [SESSION_MODE_CONFLICT] ${VaultError.sessionModeConflict("--unlock-key-dpapi").message}`,
+          ],
+        ]);
+        expect(
+          VaultError.sessionModeConflict("--unlock-key-dpapi").message.startsWith(
+            "--unlock-key-dpapi requires --session memory",
+          ),
+        ).toBe(true);
+        expect(mockUnlockKeySource.readUnlockKeyDpapi).not.toHaveBeenCalled();
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        expect(vi.mocked(unlockEngineWithKey).mock.calls.length).toBe(0);
+      });
+
+      it("off Windows it is refused INVALID_INPUT naming the platform, before anything is read or any vault opens", async () => {
+        const { loadUnlockedEngine, unlockEngineWithKey } =
+          await import("../utils/vault-loader.js");
+        stubPlatform("linux");
+
+        await expect(
+          run(["--session", "memory", "--rest", "--unlock-key-dpapi", DPAPI_FILE]),
+        ).rejects.toThrow("process.exit");
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [
+            "Error: [INVALID_INPUT] --unlock-key-dpapi: DPAPI is Windows' own and this platform is linux (systemd's sealer is --unlock-credential)",
+          ],
+        ]);
+        expect(mockUnlockKeySource.readUnlockKeyDpapi).not.toHaveBeenCalled();
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        expect(vi.mocked(unlockEngineWithKey).mock.calls.length).toBe(0);
+      });
+
+      it("on Windows the key is read through readUnlockKeyDpapi before the vault opens and unlocks the daemon's own engine, no standing warning", async () => {
+        const { loadUnlockedEngine, unlockEngineWithKey } =
+          await import("../utils/vault-loader.js");
+        const { startServer } = await import("@harpoc/rest-api");
+        stubPlatform("win32");
+
+        await run(["--session", "memory", "--rest", "--unlock-key-dpapi", DPAPI_FILE]);
+
+        expectNoKeyBytes();
+        expect(mockUnlockKeySource.readUnlockKeyDpapi.mock.calls).toEqual([[DPAPI_FILE]]);
+        expect(mockUnlockKeySource.readUnlockKeyFile).not.toHaveBeenCalled();
+        expect(mockUnlockKeySource.readUnlockCredential.mock.calls.length).toBe(0);
+        await expectUnlockedWithKey();
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        const [read] = mockUnlockKeySource.readUnlockKeyDpapi.mock.invocationCallOrder;
+        const [unlocked] = vi.mocked(unlockEngineWithKey).mock.invocationCallOrder;
+        const [served] = vi.mocked(startServer).mock.invocationCallOrder;
+        expect(read as number).toBeLessThan(unlocked as number);
+        expect(unlocked as number).toBeLessThan(served as number);
+        expect(spies.errorSpy.mock.calls).toEqual([[MEMORY_SESSION]]);
+        expect(spies.exitSpy).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // ── --session and the B-flag conflict (the memory session, B5) ──
@@ -1883,18 +2157,8 @@ describe("server start", () => {
   // ── --issue-token (the issuer-side token rotation, B5) ─────────
 
   describe("--issue-token", () => {
-    const WIN32_REFUSAL =
-      "Error: [INVALID_INPUT] --issue-token: the token file's access list on Windows is not built (deployment model B on Windows is a later tranche)";
     const platform = process.platform;
     let dir: string;
-
-    /**
-     * The platform the action reads for the Windows refusal, stubbed per row so that every row
-     * runs on every leg: the wiring rows as Linux, the refusal rows as win32.
-     */
-    function stubPlatform(value: NodeJS.Platform): void {
-      Object.defineProperty(process, "platform", { value, configurable: true });
-    }
 
     /** A spec for `agent`, its token file in this row's own directory. */
     function spec(agent: string, extra = ""): string {
@@ -2155,18 +2419,17 @@ describe("server start", () => {
       ]);
     });
 
-    it("on Windows --issue-token is refused after its grammar, before anything is read or the vault opens", async () => {
-      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+    // B7 lifts RA-B5-4's refusal: the token file inherits the consumer directory's access list.
+    it("on Windows --issue-token builds and starts the scheduler as on Linux", async () => {
       const { TokenRotationScheduler } = await import("@harpoc/core");
       stubPlatform("win32");
 
-      await expect(
-        run(["--session", "memory", "--rest", "--issue-token", spec("alice")]),
-      ).rejects.toThrow("process.exit");
-      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
-      expect(spies.errorSpy.mock.calls).toEqual([[WIN32_REFUSAL]]);
-      expect(loadUnlockedEngine).not.toHaveBeenCalled();
-      expect(TokenRotationScheduler).not.toHaveBeenCalled();
+      await run(["--session", "memory", "--rest", "--issue-token", spec("alice")]);
+
+      expect(TokenRotationScheduler).toHaveBeenCalledTimes(1);
+      expect(rotationSchedulerCtorCalls[0]?.specs).toEqual([parsed("alice")]);
+      expect(mockRotationScheduler.start).toHaveBeenCalledTimes(1);
+      expect(spies.exitSpy).not.toHaveBeenCalled();
     });
 
     it("on Windows a spec typo still names its field: the grammar precedes the platform", async () => {

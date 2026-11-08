@@ -82,11 +82,11 @@ export interface ModelBScenario {
   observe(deployment: TwoIdentityDeployment, capture: CallCapture): Promise<OutcomeValue>;
 }
 
-function sighted(credentials: string[], ...texts: string[]): boolean {
+export function sighted(credentials: string[], ...texts: string[]): boolean {
   return credentials.some((credential) => texts.some((text) => scan(credential, text).length > 0));
 }
 
-function requireProofs(scenario: string, proofs: Record<string, boolean>): void {
+export function requireProofs(scenario: string, proofs: Record<string, boolean>): void {
   const missing = Object.entries(proofs)
     .filter(([, held]) => !held)
     .map(([name]) => name);
@@ -97,16 +97,19 @@ function requireProofs(scenario: string, proofs: Record<string, boolean>): void 
   }
 }
 
-function newRows(rows: AuditRow[], before: AuditRow[]): AuditRow[] {
+export function newRows(rows: AuditRow[], before: AuditRow[]): AuditRow[] {
   const seen = new Set(before.map((row) => row.id));
   return rows.filter((row) => !seen.has(row.id));
 }
 
-function asOutcome(run: ChildRun | DriverResult): CallOutcome {
+export function asOutcome(run: ChildRun | DriverResult): CallOutcome {
   return { ok: run.code === 0, text: run.stdout, stderr: run.stderr };
 }
 
-async function unlockedHealth(d: TwoIdentityDeployment, capture: CallCapture): Promise<boolean> {
+export async function unlockedHealth(
+  d: TwoIdentityDeployment,
+  capture: CallCapture,
+): Promise<boolean> {
   const health = await fetch(`${d.restOrigin}/api/v1/health`, {
     signal: AbortSignal.timeout(5_000),
   });
@@ -119,7 +122,7 @@ async function unlockedHealth(d: TwoIdentityDeployment, capture: CallCapture): P
 }
 
 /** Settles once `arrival` does; throws if the agent's command ended first (it never reached the upstream). */
-async function untilArrived(
+export async function untilArrived(
   arrival: Promise<unknown>,
   running: Promise<ChildRun | DriverResult[]>,
   what: string,

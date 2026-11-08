@@ -19,13 +19,21 @@ const RUN_DIR = join("/run", "harpoc");
 const CONSUMER_DIR = join(RUN_DIR, "agent");
 
 let spies: CliSpies;
+const platform = process.platform;
+
+/** The platform the action reads for the socket line, stubbed so every row runs on every leg. */
+function stubPlatform(value: NodeJS.Platform): void {
+  Object.defineProperty(process, "platform", { value, configurable: true });
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
   spies = spyCli();
+  stubPlatform("linux");
 });
 
 afterEach(() => {
+  stubPlatform(platform);
   vi.unstubAllEnvs();
   spies.restore();
 });
@@ -111,6 +119,44 @@ describe("proxy env — the consumer's environment block", () => {
         .split("\n")
         .filter((line) => line.startsWith("HARPOC_PLACEHOLDER_")),
     ).toEqual(["HARPOC_PLACEHOLDER_GH_PAT=harpoc:gh-pat"]);
+  });
+});
+
+// B7 (DB-14, RP-B7-4): on Windows the proxy is the loopback TCP listener alone — no proxy.sock.
+describe("proxy env on Windows (the platform stubbed)", () => {
+  beforeEach(() => stubPlatform("win32"));
+
+  it("prints the token file and, in place of the socket line, one # line", async () => {
+    await run(["agent", "secret://gh-pat", "--runtime-dir", RUN_DIR]);
+
+    expect(spies.stdout()).toBe(
+      [
+        "HARPOC_PROXY_URL=http://127.0.0.1:3128",
+        "HARPOC_PROXY_BASE=http://127.0.0.1:3128/",
+        `HARPOC_PROXY_TOKEN_FILE=${join(CONSUMER_DIR, "token.jwt")}`,
+        "# Windows: the proxy serves no socket — the HARPOC_PROXY_SOCKET line is omitted (the TCP listener with the token file's token)",
+        "HARPOC_PLACEHOLDER_GH_PAT=harpoc:gh-pat",
+      ].join("\n"),
+    );
+  });
+
+  it("--json carries no HARPOC_PROXY_SOCKET key", async () => {
+    await run(["agent", "secret://gh-pat", "--runtime-dir", RUN_DIR, "--json"]);
+
+    expect(JSON.parse(spies.stdout())).toEqual({
+      HARPOC_PROXY_URL: "http://127.0.0.1:3128",
+      HARPOC_PROXY_BASE: "http://127.0.0.1:3128/",
+      HARPOC_PROXY_TOKEN_FILE: join(CONSUMER_DIR, "token.jwt"),
+      HARPOC_PLACEHOLDER_GH_PAT: "harpoc:gh-pat",
+    });
+  });
+
+  it("without --runtime-dir prints the same # line as on POSIX", async () => {
+    await run(["agent", "secret://gh-pat"]);
+
+    expect(spies.stdout().split("\n")[2]).toBe(
+      "# no --runtime-dir: the HARPOC_PROXY_TOKEN_FILE and HARPOC_PROXY_SOCKET lines are omitted",
+    );
   });
 });
 
