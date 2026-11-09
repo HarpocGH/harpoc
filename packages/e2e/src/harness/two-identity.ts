@@ -28,13 +28,30 @@ const SSH_AGENT_READY = /\[harpoc\] ssh-agent listening on /;
 const API_KEY_HANDLE = "secret://api-key";
 const SSH_KEY_HANDLE = "secret://deploy-key";
 /** What `harpoc proxy env --json` may hand the agent's environment — sudo's argv is world-readable. */
-const AGENT_ENV_NAMES: readonly string[] = [
+export const AGENT_ENV_NAMES: readonly string[] = [
   "HARPOC_PROXY_URL",
   "HARPOC_PROXY_BASE",
   "HARPOC_PROXY_SOCKET",
   "HARPOC_PROXY_TOKEN_FILE",
   "HARPOC_PLACEHOLDER_API_KEY",
+  "HARPOC_PROXY_CA_FILE",
+  "SSL_CERT_FILE",
+  "NODE_EXTRA_CA_CERTS",
+  "REQUESTS_CA_BUNDLE",
+  "CURL_CA_BUNDLE",
+  "GIT_SSL_CAINFO",
 ];
+
+export function agentEnvironment(
+  printed: Record<string, string>,
+  names: readonly string[],
+): Record<string, string> {
+  const unexpected = Object.keys(printed).filter((name) => !names.includes(name));
+  if (unexpected.length > 0) {
+    throw new Error(`harpoc proxy env printed unexpected variables: ${unexpected.join(", ")}`);
+  }
+  return { ...printed };
+}
 
 /**
  * A user's HTTP client: the bearer read from `tokenFile` by the script itself,
@@ -494,15 +511,8 @@ export async function startTwoIdentityDeployment(
       0,
       "harpoc proxy env as the agent user",
     );
-    const printedEnv = JSON.parse(printed.stdout) as Record<string, string>;
-    const unexpected = Object.keys(printedEnv).filter((name) => !AGENT_ENV_NAMES.includes(name));
-    if (unexpected.length > 0) {
-      throw new Error(`harpoc proxy env printed unexpected variables: ${unexpected.join(", ")}`);
-    }
     const agentEnv: Record<string, string> = {
-      ...Object.fromEntries(
-        Object.entries(printedEnv).filter(([name]) => AGENT_ENV_NAMES.includes(name)),
-      ),
+      ...agentEnvironment(JSON.parse(printed.stdout) as Record<string, string>, AGENT_ENV_NAMES),
       SSH_AUTH_SOCK: consumer.agentSocket,
     };
     const placeholder = agentEnv["HARPOC_PLACEHOLDER_API_KEY"];

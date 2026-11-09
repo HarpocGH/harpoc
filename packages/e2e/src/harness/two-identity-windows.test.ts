@@ -2,8 +2,11 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { resolveCliEntry } from "./fixtures.js";
+import { runCommand } from "./sudo.js";
 import {
   AGENT_DRIVER_WINDOWS,
+  AGENT_ENV_NAMES_WINDOWS,
   B7_MARKER,
   EXISTS_PROBE,
   LIST_DIRECTORY,
@@ -26,9 +29,11 @@ import {
 } from "./two-identity-windows.js";
 import {
   AGENT_DRIVER,
+  AGENT_ENV_NAMES,
   B6_MARKER,
   TOKEN_FILE_REQUEST,
   WRITE_STDIN_TO_FILE,
+  agentEnvironment,
 } from "./two-identity.js";
 
 const SEALED = "C:\\ProgramData\\harpoc\\vault\\harpoc-b7-ab12\\unlock.key.dpapi";
@@ -46,6 +51,35 @@ describe("the Windows layout", () => {
     expect(defaultRuntimeDirWindows("C:\\ProgramData")).toBe("C:\\ProgramData\\harpoc\\run");
     expect(() => defaultRuntimeDirWindows("")).toThrow(/ProgramData is not set/);
   });
+});
+
+describe("the agent's environment on Windows", () => {
+  it("lists what the Linux deployment hands on, without HARPOC_PROXY_SOCKET — Windows has no proxy.sock", () => {
+    expect(AGENT_ENV_NAMES_WINDOWS).toEqual(
+      AGENT_ENV_NAMES.filter((name) => name !== "HARPOC_PROXY_SOCKET"),
+    );
+  });
+
+  it.runIf(process.platform === "win32")(
+    "hands the agent the whole block the built CLI prints on Windows (win32 only: elsewhere the CLI prints HARPOC_PROXY_SOCKET, which this list refuses)",
+    async () => {
+      const [node = "", ...argv] = cliArgv(resolveCliEntry(), [
+        "proxy",
+        "env",
+        "agent1",
+        "secret://api-key",
+        "--runtime-dir",
+        "C:\\ProgramData\\harpoc\\run",
+        "--proxy-port",
+        "4002",
+        "--json",
+      ]);
+      const run = await runCommand(node, argv, { label: "harpoc proxy env" });
+      expect(run.code, run.stderr).toBe(0);
+      const printed = JSON.parse(run.stdout) as Record<string, string>;
+      expect(agentEnvironment(printed, AGENT_ENV_NAMES_WINDOWS)).toEqual(printed);
+    },
+  );
 });
 
 describe("daemonArgsWindows", () => {

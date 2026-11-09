@@ -4,12 +4,15 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { resolveCliEntry } from "./fixtures.js";
 import { runCommand } from "./sudo.js";
 import {
   AGENT_DRIVER,
+  AGENT_ENV_NAMES,
   TOKEN_FILE_REQUEST,
   UNLOCK_CREDENTIAL_NAME,
   WRITE_STDIN_TO_FILE,
+  agentEnvironment,
   consumerPaths,
   daemonArgs,
   issueTokenSpec,
@@ -55,6 +58,43 @@ describe("the two-identity deployment's argv and paths", () => {
       "--issue-token",
       "agent=agent,file=/run/harpoc/agent/token.jwt,scope=use,secrets=api-key+deploy-key,ttl=60",
     ]);
+  });
+});
+
+describe("the agent's environment from harpoc proxy env --json", () => {
+  it("hands the agent the whole block the built CLI prints for it, the api key and a runtime directory", async () => {
+    const run = await runCommand(
+      process.execPath,
+      [
+        resolveCliEntry(),
+        "proxy",
+        "env",
+        "agent",
+        "secret://api-key",
+        "--runtime-dir",
+        "/run/harpoc",
+        "--proxy-port",
+        "41002",
+        "--json",
+      ],
+      { label: "harpoc proxy env" },
+    );
+    expect(run.code, run.stderr).toBe(0);
+    const printed = JSON.parse(run.stdout) as Record<string, string>;
+    expect(agentEnvironment(printed, AGENT_ENV_NAMES)).toEqual(printed);
+  });
+
+  it("refuses a block carrying a variable off its list, naming each one and no value — whatever is handed on rides sudo's world-readable argv", () => {
+    expect(() =>
+      agentEnvironment(
+        {
+          HARPOC_PROXY_URL: "http://127.0.0.1:41002",
+          HARPOC_PROXY_TOKEN: "off-list-value-1",
+          HTTPS_PROXY: "off-list-value-2",
+        },
+        AGENT_ENV_NAMES,
+      ),
+    ).toThrow(/^harpoc proxy env printed unexpected variables: HARPOC_PROXY_TOKEN, HTTPS_PROXY$/);
   });
 });
 

@@ -20,6 +20,7 @@ import {
   TOKEN_FILE_REQUEST,
   TOKEN_TTL_MINUTES,
   WRITE_STDIN_TO_FILE,
+  agentEnvironment,
   expectExit,
   freePort,
   issueTokenSpec,
@@ -40,11 +41,17 @@ const SSH_AGENT_READY = /\[harpoc\] ssh-agent listening on /;
 const API_KEY_HANDLE = "secret://api-key";
 const SSH_KEY_HANDLE = "secret://deploy-key";
 /** What `harpoc proxy env --json` may hand the agent's environment (no `HARPOC_PROXY_SOCKET`: Windows has no `proxy.sock`, RP-B7-7). */
-const AGENT_ENV_NAMES: readonly string[] = [
+export const AGENT_ENV_NAMES_WINDOWS: readonly string[] = [
   "HARPOC_PROXY_URL",
   "HARPOC_PROXY_BASE",
   "HARPOC_PROXY_TOKEN_FILE",
   "HARPOC_PLACEHOLDER_API_KEY",
+  "HARPOC_PROXY_CA_FILE",
+  "SSL_CERT_FILE",
+  "NODE_EXTRA_CA_CERTS",
+  "REQUESTS_CA_BUNDLE",
+  "CURL_CA_BUNDLE",
+  "GIT_SSL_CAINFO",
 ];
 
 /** The Linux driver with the Windows marker: the agent's launcher is found by it like its tools. */
@@ -561,14 +568,10 @@ export async function startTwoAccountDeployment(
       0,
       "harpoc proxy env as the agent account",
     );
-    const printedEnv = JSON.parse(printed.stdout) as Record<string, string>;
-    const unexpected = Object.keys(printedEnv).filter((name) => !AGENT_ENV_NAMES.includes(name));
-    if (unexpected.length > 0) {
-      throw new Error(`harpoc proxy env printed unexpected variables: ${unexpected.join(", ")}`);
-    }
     const agentEnv: Record<string, string> = {
-      ...Object.fromEntries(
-        Object.entries(printedEnv).filter(([name]) => AGENT_ENV_NAMES.includes(name)),
+      ...agentEnvironment(
+        JSON.parse(printed.stdout) as Record<string, string>,
+        AGENT_ENV_NAMES_WINDOWS,
       ),
       SSH_AUTH_SOCK: consumer.agentPipe,
     };
