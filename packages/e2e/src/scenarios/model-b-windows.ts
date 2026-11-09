@@ -1,6 +1,12 @@
 import { spawn } from "node:child_process";
 import { win32 } from "node:path";
-import { AuditEventType, ErrorCode, SESSION_FILE_NAME, VAULT_DB_NAME } from "@harpoc/shared";
+import {
+  AuditEventType,
+  DEFAULT_HTTP_TIMEOUT_MS,
+  ErrorCode,
+  SESSION_FILE_NAME,
+  VAULT_DB_NAME,
+} from "@harpoc/shared";
 import {
   B7_MARKER,
   inventoryRecordText,
@@ -42,6 +48,8 @@ export const NEGATIVE_CONTROL_VALUE_WINDOWS = "b7-negative-control-value-9c3d";
 const REDACTED = "[REDACTED]";
 /** How much of ssh's stderr the pipe row's diagnostic carries, taken from the call its capture recorded (redacted with the capture's needles). */
 const SSH_STDERR_TAIL_LINES = 20;
+/** The command-line row lays a missing proof to its own listing's duration once that listing ran within this margin of the proxy's upstream budget. */
+const LISTING_MARGIN_MS = 5_000;
 const HEADLESS = "b-win-headless-dpapi";
 const VALUE_ROUTE = "b-win-two-account-value-route";
 const VAULT_DIR = "b-win-two-account-vault-dir";
@@ -233,6 +241,9 @@ async function observeInventory(
     .filter((line) => SWEEP_RECORD_VARIABLE.test(line));
   capture.record({ ok: report.code === 0, text: ownLines.join("\n"), stderr: report.stderr });
 
+  const warmUpStarted = Date.now();
+  await listAccountProcesses((argv) => d.asAgent(argv));
+  const warmUpMs = Date.now() - warmUpStarted;
   const echoHold = d.echo.hold();
   const sshHold = d.sshServer.hold();
   const tools = systemPaths();
@@ -245,18 +256,24 @@ async function observeInventory(
     { command: tools.ssh, args: sshArgsWindows(d) },
   ]);
   let entries: Awaited<ReturnType<typeof listAccountProcesses>>;
+  let listingMs: number;
   try {
     await untilArrived(
       Promise.all([echoHold.arrived, sshHold.arrived]),
       driving,
       "the agent's curl and ssh",
     );
+    const listingStarted = Date.now();
     entries = await listAccountProcesses((argv) => d.asAgent(argv));
+    listingMs = Date.now() - listingStarted;
   } finally {
     echoHold.release();
     sshHold.release();
     void driving.catch(() => undefined);
   }
+  process.stderr.write(
+    `[${CMDLINE}] process listing as the agent: warm-up ${String(warmUpMs)} ms, in-row ${String(listingMs)} ms\n`,
+  );
   const results = await driving;
   const verdict = judgeInventory(entries, judged);
   for (const entry of entries) {
@@ -268,20 +285,28 @@ async function observeInventory(
   if (sighted(d.credentials.all, report.stdout, ...results.flatMap((r) => [r.stdout, r.stderr]))) {
     return Outcome.LEAKED;
   }
-  requireProofs(CMDLINE, {
-    ownReportRead: report.code === 0,
-    placeholderInOwnEnvironment: own.env["HARPOC_PLACEHOLDER_API_KEY"] === d.placeholders.apiKey,
-    pipeInOwnEnvironment: own.env["SSH_AUTH_SOCK"] === d.consumer.agentPipe,
-    tokenFileNamedNotRead: own.env["HARPOC_PROXY_TOKEN_FILE"] === d.consumer.tokenFile,
-    runnerJobVariablesAbsent: !Object.keys(own.env).some((name) =>
-      /^(HARPOC_TWO_USER_|GITHUB_|ACTIONS_)/.test(name),
-    ),
-    placeholderListed: verdict.placeholderSeen,
-    curlListed: verdict.commands.includes("curl.exe"),
-    sshListed: verdict.commands.includes("ssh.exe"),
-    daemonListed: verdict.foreignListed.includes(daemonPid),
-    toolsCompleted: results.length === 2 && results.every((r) => r.code === 0),
-  });
+  try {
+    requireProofs(CMDLINE, {
+      ownReportRead: report.code === 0,
+      placeholderInOwnEnvironment: own.env["HARPOC_PLACEHOLDER_API_KEY"] === d.placeholders.apiKey,
+      pipeInOwnEnvironment: own.env["SSH_AUTH_SOCK"] === d.consumer.agentPipe,
+      tokenFileNamedNotRead: own.env["HARPOC_PROXY_TOKEN_FILE"] === d.consumer.tokenFile,
+      runnerJobVariablesAbsent: !Object.keys(own.env).some((name) =>
+        /^(HARPOC_TWO_USER_|GITHUB_|ACTIONS_)/.test(name),
+      ),
+      placeholderListed: verdict.placeholderSeen,
+      curlListed: verdict.commands.includes("curl.exe"),
+      sshListed: verdict.commands.includes("ssh.exe"),
+      daemonListed: verdict.foreignListed.includes(daemonPid),
+      toolsCompleted: results.length === 2 && results.every((r) => r.code === 0),
+    });
+  } catch (err) {
+    if (listingMs < DEFAULT_HTTP_TIMEOUT_MS - LISTING_MARGIN_MS) throw err;
+    throw new Error(
+      `the agent's process listing took ${String(listingMs)} ms against the proxy's upstream budget of ${String(DEFAULT_HTTP_TIMEOUT_MS)} ms — curl.exe could not be held through it; ${(err as Error).message}`,
+      { cause: err },
+    );
+  }
   if (verdict.foreignReadable.length > 0) return Outcome.BYPASSED;
   return Outcome.HANDLE_ONLY;
 }

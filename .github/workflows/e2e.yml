@@ -269,7 +269,9 @@ jobs:
         # account and report the vault unlocked on the health route within 60 s. The scratch
         # vault is made first as harpoc through System.Diagnostics.Process with its profile
         # loaded, as the suite's launcher does: init, then unlock-key enroll --dpapi, a fixed
-        # smoke master password on each child's stdin. The task is then stopped (a kill: no
+        # smoke master password on each child's stdin, one line per prompt: each line flushed,
+        # 2 s apart, no byte-order mark (Process.Start writes one under console code page 65001),
+        # then stdin closed 2 s later (the CLI waits on it). The task is then stopped (a kill: no
         # server.stop row) and unregistered, and the scratch vault's files are removed. A red
         # here is the signal for B7-U2's fallback (a WinSW service with the same account, sealer
         # and layout), not a defect of the suite. It runs whenever the suite ran, green or red (a
@@ -314,12 +316,17 @@ jobs:
             $psi.EnvironmentVariables['TEMP'] = $temp
             $psi.EnvironmentVariables['TMP'] = $temp
             $psi.EnvironmentVariables['HARPOC_SESSION_KEYSTORE'] = 'off'
+            if ([Console]::InputEncoding.GetPreamble().Length -gt 0) { Write-Output "console input code page $([Console]::InputEncoding.CodePage): the children's stdin is written without a byte-order mark"; [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false) }
             $proc = [System.Diagnostics.Process]::Start($psi)
             $stdout = $proc.StandardOutput.ReadToEndAsync()
             $stderr = $proc.StandardError.ReadToEndAsync()
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($InputText)
             try {
-              $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+              foreach ($line in $InputText.TrimEnd("`n") -split "`n") {
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($line + "`n")
+                $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+                $proc.StandardInput.BaseStream.Flush()
+                Start-Sleep -Seconds 2
+              }
               $proc.StandardInput.Close()
             } catch { }
             if (-not $proc.WaitForExit(90000)) {

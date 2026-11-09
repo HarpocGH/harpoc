@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MockInstance } from "vitest";
 import { HELD_OUTCOMES, LEAKED_OUTCOMES } from "../../scripts/recheck.mjs";
 import { INVENTORY_COMMAND } from "../assert/process-inventory-windows.js";
 import { PREREGISTRATION_FILE_B } from "../evidence/paths.js";
@@ -212,21 +213,44 @@ describe("the command-line row's verdict (a stubbed deployment)", () => {
       CommandLine: "C:\\Windows\\System32\\OpenSSH\\ssh.exe -F none -l harpoc-b7 -- 127.0.0.1 true",
     },
   ];
+  const LISTED_WITHOUT_CURL = TOOLS.filter((tool) => tool.Name !== "curl.exe");
   const cmdlineRow = MODEL_B_WINDOWS_SCENARIOS.find(
     (r) => r.scenario === "b-win-two-account-cmdline",
   ) as ModelBWindowsScenario;
+  let stderrWrite: MockInstance<typeof process.stderr.write>;
+
+  beforeEach(() => {
+    stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.useRealTimers();
+    stderrWrite.mockRestore();
   });
 
-  function stubbed(daemonLine: string, tools: object[]): TwoAccountDeployment {
+  /** `events` gets the calls in the row's order, `warmUp` answers the first listing, `listingMs[i]` moves the faked clock during the i-th. */
+  interface StubOptions {
+    events?: string[];
+    warmUp?: object[];
+    listingMs?: number[];
+  }
+
+  function stubbed(
+    daemonLine: string,
+    tools: object[],
+    opts: StubOptions = {},
+  ): TwoAccountDeployment {
     vi.stubEnv("SystemRoot", "C:\\Windows");
     let released = (): void => undefined;
     const finished = new Promise<void>((resolve) => {
       released = resolve;
     });
-    const hold = () => ({ arrived: Promise.resolve(), release: () => released() });
+    const hold = (name: string) => () => {
+      opts.events?.push(`${name} hold`);
+      return { arrived: Promise.resolve(), release: () => released() };
+    };
+    let listings = 0;
     const ok = { code: 0, stdout: "", stderr: "" };
     const report = JSON.stringify({
       env: {
@@ -247,13 +271,22 @@ describe("the command-line row's verdict (a stubbed deployment)", () => {
       consumer: { agentPipe: AGENT_PIPE, tokenFile: TOKEN_FILE },
       agentEnv: { HARPOC_PROXY_BASE: "http://127.0.0.1:3128/" },
       agentFiles: { knownHosts: "C:/b7/known_hosts", identity: "C:/b7/id.pub" },
-      echo: { port: 8443, hold },
-      sshServer: { port: 2222, hold },
-      asAgent: async (argv: string[]) => ({
-        ...ok,
-        stdout: argv.at(-1) === INVENTORY_COMMAND ? listing : report,
-      }),
+      echo: { port: 8443, hold: hold("echo") },
+      sshServer: { port: 2222, hold: hold("ssh") },
+      asAgent: async (argv: string[]) => {
+        if (argv.at(-1) !== INVENTORY_COMMAND) {
+          opts.events?.push("report");
+          return { ...ok, stdout: report };
+        }
+        opts.events?.push("listing");
+        const call = listings++;
+        const ms = opts.listingMs?.[call];
+        if (ms !== undefined) vi.setSystemTime(Date.now() + ms);
+        const warmUp = call === 0 ? opts.warmUp : undefined;
+        return { ...ok, stdout: warmUp === undefined ? listing : JSON.stringify(warmUp) };
+      },
       driveAgent: async () => {
+        opts.events?.push("drive");
         await finished;
         return [ok, ok];
       },
@@ -283,5 +316,59 @@ describe("the command-line row's verdict (a stubbed deployment)", () => {
     expect(
       await cmdlineRow.observe(stubbed(`${DAEMON_LINE} ${API_KEY}`, TOOLS), captureCalls(API_KEY)),
     ).toBe(Outcome.LEAKED);
+  });
+
+  it("runs one warm-up listing as the agent before the holds are armed, its result neither judged nor recorded", async () => {
+    const events: string[] = [];
+    const capture = captureCalls(API_KEY);
+    const warmUp = [
+      { ProcessId: 9001, Name: "node.exe", CommandLine: "node.exe harpoc-b7-warm-up" },
+    ];
+    const observed = await cmdlineRow.observe(
+      stubbed(DAEMON_LINE, TOOLS, { events, warmUp }),
+      capture,
+    );
+    expect(events).toEqual(["report", "listing", "echo hold", "ssh hold", "drive", "listing"]);
+    expect(observed).toBe(Outcome.BYPASSED);
+    expect(capture.calls().some((call) => call.text.startsWith("pid 9001"))).toBe(false);
+  });
+
+  it("lacking its proof after an in-row listing of at least the proxy's upstream budget less 5 s, names the listing against that budget before the proof message, and writes both listings' durations to stderr as one line", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let thrown: unknown;
+    try {
+      await cmdlineRow.observe(
+        stubbed(DAEMON_LINE, LISTED_WITHOUT_CURL, { listingMs: [41_000, 25_000] }),
+        captureCalls(API_KEY),
+      );
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe(
+      "the agent's process listing took 25000 ms against the proxy's upstream budget of 30000 ms — curl.exe could not be held through it; arm is not discriminating: b-win-two-account-cmdline lacks its proof (placeholderListed, curlListed)",
+    );
+    expect(stderrWrite.mock.calls).toEqual([
+      [
+        "[b-win-two-account-cmdline] process listing as the agent: warm-up 41000 ms, in-row 25000 ms\n",
+      ],
+    ]);
+  });
+
+  it("lacking its proof after an in-row listing under that margin, throws the proof message unchanged", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let thrown: unknown;
+    try {
+      await cmdlineRow.observe(
+        stubbed(DAEMON_LINE, LISTED_WITHOUT_CURL, { listingMs: [41_000, 24_999] }),
+        captureCalls(API_KEY),
+      );
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe(
+      "arm is not discriminating: b-win-two-account-cmdline lacks its proof (placeholderListed, curlListed)",
+    );
   });
 });
