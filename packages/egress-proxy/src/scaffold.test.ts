@@ -32,5 +32,6 @@ describeBuildOutput(DIST_ROOT);
 describeCrossPackageImports({
   "@harpoc/shared": () => import("@harpoc/shared"),
   "@harpoc/core": () => import("@harpoc/core"),
+  "@harpoc/cert-manager": () => import("@harpoc/cert-manager"),
 });
-describeWorkspaceDeps(PKG_ROOT, ["@harpoc/shared", "@harpoc/core"]);
+describeWorkspaceDeps(PKG_ROOT, ["@harpoc/shared", "@harpoc/core", "@harpoc/cert-manager"]);

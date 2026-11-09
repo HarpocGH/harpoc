@@ -75,10 +75,10 @@ describe("enum member counts", () => {
     expect(Object.values(OAuthProviderPreset)).toHaveLength(5);
   });
 
-  it("ErrorCode has 119 members", () => {
+  it("ErrorCode has 120 members", () => {
     // Filter out reverse mappings (numeric keys) from TypeScript enum
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(119);
+    expect(members).toHaveLength(120);
   });
 
   it("TokenPrincipalType has 3 members and excludes project", () => {
@@ -235,5 +235,11 @@ describe("ErrorCode deployment model B values (B4)", () => {
     expect(ErrorCode.UNLOCK_KEY_NOT_ENROLLED).toBe("UNLOCK_KEY_NOT_ENROLLED");
     expect(ErrorCode.UNLOCK_KEY_SOURCE_UNSAFE).toBe("UNLOCK_KEY_SOURCE_UNSAFE");
     expect(ErrorCode.UNLOCK_KEY_PASSWORD_REQUIRED).toBe("UNLOCK_KEY_PASSWORD_REQUIRED");
+  });
+});
+
+describe("ErrorCode deployment model B values (B8)", () => {
+  it("ErrorCode carries the CONNECT refusal of a host outside the Harpoc CA", () => {
+    expect(ErrorCode.PROXY_CONNECT_DENIED).toBe("PROXY_CONNECT_DENIED");
   });
 });

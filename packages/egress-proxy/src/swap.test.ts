@@ -48,6 +48,15 @@ describe("swapCredential — the value where the placeholder stood", () => {
     expect(result.url.href).toBe(target().href);
   });
 
+  it.each(["token", "Token"])(
+    "bearer under the %s scheme: Authorization: <the scheme as sent> <value>, the needle the value alone",
+    (scheme) => {
+      const result = swapped({ authorization: `${scheme} harpoc:gh-pat` }, target(), VALUE);
+      expect({ ...result.headers }).toEqual({ authorization: `${scheme} ${VALUE}` });
+      expect(result.needles.map((needle) => Buffer.from(needle).toString("utf8"))).toEqual([VALUE]);
+    },
+  );
+
   it("basic_auth: Authorization: Basic base64(<user>:<value>) with the client's own user", () => {
     const result = swapped(
       { authorization: `Basic ${b64("x-access-token:harpoc:gh-pat")}` },

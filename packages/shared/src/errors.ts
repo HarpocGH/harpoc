@@ -148,6 +148,7 @@ export enum ErrorCode {
   UNLOCK_KEY_NOT_ENROLLED = "UNLOCK_KEY_NOT_ENROLLED",
   UNLOCK_KEY_SOURCE_UNSAFE = "UNLOCK_KEY_SOURCE_UNSAFE",
   UNLOCK_KEY_PASSWORD_REQUIRED = "UNLOCK_KEY_PASSWORD_REQUIRED",
+  PROXY_CONNECT_DENIED = "PROXY_CONNECT_DENIED",
 
   // System
   INTERNAL_ERROR = "INTERNAL_ERROR",
@@ -305,6 +306,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.UNLOCK_KEY_NOT_ENROLLED]: 400,
   [ErrorCode.UNLOCK_KEY_SOURCE_UNSAFE]: 400,
   [ErrorCode.UNLOCK_KEY_PASSWORD_REQUIRED]: 403,
+  [ErrorCode.PROXY_CONNECT_DENIED]: 403,
 
   // System
   [ErrorCode.INTERNAL_ERROR]: 500,
@@ -947,6 +949,39 @@ export class VaultError extends Error {
       reason === undefined
         ? `Egress proxy upstream request failed: ${origin}`
         : `Egress proxy upstream request failed (${reason}): ${origin}`,
+    );
+  }
+
+  /**
+   * A CONNECT to a host outside the proxy CA's host list (deployment model B, M4(ii); RX-B8-15):
+   * the host and port only, an IPv6 literal bracketed.
+   */
+  static proxyConnectDenied(host: string, port: number): VaultError {
+    const authority = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+    return new VaultError(
+      ErrorCode.PROXY_CONNECT_DENIED,
+      `CONNECT to ${authority}:${String(port)} is outside the proxy CA's name constraints (harpoc proxy ca init --name-constraints <host>…)`,
+    );
+  }
+
+  static proxyCaExists(): VaultError {
+    return new VaultError(
+      ErrorCode.DUPLICATE_SECRET,
+      "The Harpoc CA already exists (secret://harpoc-ca); harpoc proxy ca init --force replaces it",
+    );
+  }
+
+  static proxyCaNotConfigured(): VaultError {
+    return new VaultError(
+      ErrorCode.CERT_NOT_CONFIGURED,
+      "No Harpoc CA in this vault (secret://harpoc-ca); harpoc proxy ca init creates one",
+    );
+  }
+
+  static proxyCaExpired(notAfter: string): VaultError {
+    return new VaultError(
+      ErrorCode.CERT_EXPIRED,
+      `The Harpoc CA (secret://harpoc-ca) expired at ${notAfter}; harpoc proxy ca init --force issues a new one`,
     );
   }
 

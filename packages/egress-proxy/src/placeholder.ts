@@ -14,10 +14,12 @@ export interface Placeholder {
 
 /**
  * Where a placeholder stood — `InjectionConfig`'s four placements, the
- * basic-auth one carrying the user the client sent beside the placeholder.
+ * basic-auth one carrying the user the client sent beside the placeholder,
+ * the bearer one the `token` scheme when the client sent that one (the GitHub
+ * CLI's `Authorization: token <p>`), spelled as sent.
  */
 export type Placement =
-  | { type: "bearer" }
+  | { type: "bearer"; scheme?: string }
   | { type: "basic_auth"; user: string }
   | { type: "header"; header_name: string }
   | { type: "query"; query_param: string };
@@ -70,7 +72,7 @@ export function parsePlaceholder(text: string): Placeholder | null {
 
 /**
  * Find the placeholder of one request in the four positions the placement is
- * derived from — `Authorization: Bearer <ph>`, `Authorization: Basic
+ * derived from — `Authorization: Bearer <ph>` (or `token <ph>`), `Authorization: Basic
  * base64(<user>:<ph>)`, any other header whose whole value is `<ph>` and a
  * query parameter whose whole value is `<ph>`. A placeholder-shaped token
  * anywhere else is not a placeholder. `headers` is node's `req.headers`
@@ -97,10 +99,14 @@ export function findPlaceholder(headers: IncomingHttpHeaders, url: URL): Placeho
 }
 
 function authorizationMatch(value: string): PlaceholderMatch | null {
-  const bearer = /^bearer +(.+)$/i.exec(value);
+  const bearer = /^(bearer|token) +(.+)$/i.exec(value);
   if (bearer) {
-    const placeholder = parsePlaceholder(bearer[1] as string);
-    return placeholder ? { placeholder, placement: { type: "bearer" } } : null;
+    const scheme = bearer[1] as string;
+    const placeholder = parsePlaceholder(bearer[2] as string);
+    if (!placeholder) return null;
+    const placement: Placement =
+      scheme.toLowerCase() === "token" ? { type: "bearer", scheme } : { type: "bearer" };
+    return { placeholder, placement };
   }
   const basic = /^basic +([A-Za-z0-9+/]+={0,2})$/i.exec(value);
   if (basic) return basicMatch(basic[1] as string);

@@ -18,14 +18,19 @@ export {
   derBitString,
   derBoolean,
   derContext,
+  derGeneralizedTime,
   derIa5String,
   derInteger,
+  derIntegerFromBytes,
+  derNamedBitString,
   derNull,
   derOctetString,
   derOid,
   derPrintableString,
   derSequence,
   derSet,
+  derTime,
+  derUtcTime,
   derUtf8String,
 } from "./der.js";
 export { CertManager } from "./cert-manager.js";
@@ -48,3 +53,18 @@ export { assertKeyMatchesCert, parseCertificate, splitChain } from "./pem-parser
 export type { ParsedCertificate } from "./pem-parser.js";
 export { RenewalScheduler } from "./renewal-scheduler.js";
 export type { RenewalErrorPhase, RenewalSchedulerOptions } from "./renewal-scheduler.js";
+export {
+  caSigner,
+  createCa,
+  hostPermitted,
+  issueLeaf,
+  MAX_UNCONSTRAINED_CA_DAYS,
+  normalizeHost,
+} from "./x509-issuer.js";
+export type {
+  CaMaterial,
+  CaSigner,
+  CreateCaOptions,
+  LeafCertificate,
+  LeafOptions,
+} from "./x509-issuer.js";

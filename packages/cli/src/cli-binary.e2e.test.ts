@@ -622,6 +622,7 @@ describe("compiled binary smoke: proxy env opens no vault (B2)", () => {
         env,
         { cwd },
       );
+      const caFile = join(runtimeDir, "agent", "ca.pem");
       expect(result.code).toBe(0);
       expect(result.stderr).toBe("");
       expect(result.stdout).toBe(
@@ -633,6 +634,19 @@ describe("compiled binary smoke: proxy env opens no vault (B2)", () => {
             ? "# Windows: the proxy serves no socket — the HARPOC_PROXY_SOCKET line is omitted (the TCP listener with the token file's token)"
             : `HARPOC_PROXY_SOCKET=${join(runtimeDir, "agent", "proxy.sock")}`,
           "HARPOC_PLACEHOLDER_GH_PAT=harpoc:gh-pat",
+          `HARPOC_PROXY_CA_FILE=${caFile}`,
+          `SSL_CERT_FILE=${caFile}`,
+          `NODE_EXTRA_CA_CERTS=${caFile}`,
+          `REQUESTS_CA_BUNDLE=${caFile}`,
+          `CURL_CA_BUNDLE=${caFile}`,
+          `GIT_SSL_CAINFO=${caFile}`,
+          ...(process.platform === "win32"
+            ? [
+                `# Windows: curl on Schannel ignores CURL_CA_BUNDLE and SSL_CERT_FILE — pass --cacert ${caFile} --ssl-revoke-best-effort (or both as .curlrc lines)`,
+                "# Windows: git's schannel backend reads GIT_SSL_CAINFO only with http.schannelUseSSLCAInfo=true, and checks revocation strictly unless http.sslBackend=schannel is set explicitly (git config --global http.sslBackend schannel and git config --global http.schannelUseSSLCAInfo true, or http.sslBackend=openssl)",
+              ]
+            : []),
+          "# HTTPS_PROXY=http://harpoc:<the token in HARPOC_PROXY_TOKEN_FILE>@127.0.0.1:3128 — the token is not printed: set the variable from the token file when the client starts",
           "",
         ].join("\n"),
       );

@@ -223,9 +223,13 @@ export { StdioChildTransport } from "./injection/mcp-stdio-transport.js";
 export type { ChildExitInfo, StdioChildParams } from "./injection/mcp-stdio-transport.js";
 
 // VaultEngine
-export { VaultEngine } from "./vault-engine.js";
+export { PROXY_CA_HANDLE, VaultEngine } from "./vault-engine.js";
 export type {
   AuditChainVerificationReport,
+  CreateProxyCaInput,
+  ProxyCaCertificate,
+  ProxyCaCreated,
+  ProxyCaMaterial,
   ProxyLease,
   ProxyOutcome,
   ProxyTarget,

@@ -219,6 +219,9 @@ importers:
 
   packages/egress-proxy:
     dependencies:
+      '@harpoc/cert-manager':
+        specifier: workspace:*
+        version: link:../cert-manager
       '@harpoc/core':
         specifier: workspace:*
         version: link:../core

@@ -23,6 +23,10 @@ import type {
   VaultApiToken,
 } from "@harpoc/shared";
 import type { Agent } from "undici";
+import { createLeafCache, hostPermitted } from "./ca.js";
+import type { LeafCache, ProxyCaOptions } from "./ca.js";
+import { connectReply, createTunnelHost, parseConnectTarget, tunnelTarget } from "./connect.js";
+import type { Tunnel } from "./connect.js";
 import { findPlaceholder } from "./placeholder.js";
 import type { PlaceholderMatch } from "./placeholder.js";
 import { createRedactingTransform } from "./redact.js";
@@ -68,6 +72,8 @@ export interface EgressProxyOptions {
   bodyIdleTimeoutMs?: number;
   /** Every refusal and failure, value-free: the error the client was answered with, or — for a refusal after the lease behind the generic 500 — the refusal's own code. */
   onError?: (err: VaultError) => void;
+  /** The CA a CONNECT tunnel's TLS is terminated with (`secret://harpoc-ca`); without one CONNECT answers 501. */
+  ca?: ProxyCaOptions;
 }
 
 export interface EgressProxy {
@@ -75,17 +81,20 @@ export interface EgressProxy {
   listenTcp(port: number, host: string): Promise<{ port: number }>;
   /** Listen on a Unix socket (`<runtime-dir>/<consumer>/proxy.sock`), mode 0660, no row of its own; refused on Windows. */
   listenSocket(path: string): Promise<void>;
-  /** Close every listener, end every in-flight request (its lease completed), remove the socket files. */
+  /** Close every listener and tunnel, end every in-flight request (its lease completed), remove the socket files. */
   close(): Promise<void>;
 }
 
 const CHALLENGE = 'Bearer realm="harpoc"';
 
-const CONNECT_REFUSAL = JSON.stringify({
-  error: ErrorCode.INVALID_INPUT,
-  message:
-    "CONNECT is not supported: the egress proxy runs in plain-HTTP rewrite mode (send http://<proxy>/<host>/<path> or an absolute http:// URI)",
-});
+/** A CONNECT's 407 offers both schemes, Basic first: curl's and git's `anyauth` answer a Basic challenge only. */
+const CONNECT_CHALLENGES: [string, string][] = [
+  ["proxy-authenticate", 'Basic realm="harpoc"'],
+  ["proxy-authenticate", CHALLENGE],
+];
+
+const NO_CA_MESSAGE =
+  "CONNECT is not enabled: no proxy CA is enrolled (harpoc proxy ca init, then restart server start --proxy); the plain-HTTP rewrite mode answers http://<proxy>/<host>/<path> and absolute http:// URIs";
 
 interface Refusal {
   status: number;
@@ -102,6 +111,8 @@ function internalProxyError(): VaultError {
 interface Authenticated {
   token: VaultApiToken;
   caller: CallerContext;
+  /** The bearer as sent — a tunnel keeps it to verify every request it carries again. */
+  raw: string;
 }
 
 /** REST's remap: a sealed vault is a temporarily unavailable service (`error-handler.ts`). */
@@ -120,13 +131,21 @@ function hasBody(req: IncomingMessage): boolean {
   );
 }
 
-function refuseConnect(_req: IncomingMessage, socket: Socket): void {
-  // The CONNECT socket is detached from the HTTP server: an unhandled reset would end the process.
-  socket.on("error", () => socket.destroy());
-  socket.end(
-    "HTTP/1.1 501 Not Implemented\r\ncontent-type: application/json\r\nconnection: close\r\n" +
-      `content-length: ${Buffer.byteLength(CONNECT_REFUSAL)}\r\n\r\n${CONNECT_REFUSAL}`,
-  );
+/**
+ * The token of a CONNECT's `Proxy-Authorization: Basic base64(<user>:<token>)`,
+ * the form clients build from `HTTPS_PROXY=http://harpoc:<token>@…`; the user is
+ * ignored. `null` unless the credentials are canonical base64 of UTF-8 text
+ * with a colon and a token without whitespace after it.
+ */
+function basicToken(credentials: string): string | null {
+  const decoded = Buffer.from(credentials, "base64");
+  if (decoded.toString("base64") !== credentials) return null;
+  const text = decoded.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(decoded)) return null;
+  const colon = text.indexOf(":");
+  if (colon === -1) return null;
+  const token = text.slice(colon + 1);
+  return /^\S+$/.test(token) ? token : null;
 }
 
 function listen(server: Server, target: { port: number; host: string } | { path: string }) {
@@ -147,7 +166,7 @@ function closeServer(server: Server): Promise<void> {
 }
 
 export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
-  const { engine } = options;
+  const { engine, onError } = options;
   const limiter = options.rateLimiter ?? new RateLimiter();
   const timeoutMs = options.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
   const bodyIdleTimeoutMs = options.bodyIdleTimeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
@@ -155,14 +174,22 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
   const socketPaths = new Set<string>();
   const dispatchers = new Set<Agent>();
   const inFlight = new Set<Promise<void>>();
+  const caHosts = options.ca?.hosts;
+  const leaves: LeafCache | null =
+    options.ca === undefined ? null : createLeafCache({ ca: options.ca });
+  const tunnels = createTunnelHost((req, res) => track(req, res), timeoutMs);
   let closed = false;
 
-  function refuse(res: ServerResponse, refusal: Refusal): void {
+  function report(err: VaultError): void {
     try {
-      options.onError?.(refusal.reported ?? refusal.error);
+      onError?.(err);
     } catch {
       /* a throwing hook changes no answer */
     }
+  }
+
+  function refuse(res: ServerResponse, refusal: Refusal): void {
+    report(refusal.reported ?? refusal.error);
     if (res.headersSent) {
       res.destroy();
       return;
@@ -176,8 +203,13 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     res.end(body);
   }
 
-  /** `Proxy-Authorization: Bearer <jwt>` on every request (DB-14) — nothing else is read before it. */
-  function authenticate(req: IncomingMessage): Authenticated | Refusal {
+  /**
+   * `Proxy-Authorization: Bearer <jwt>` on every request (DB-14) — nothing else
+   * is read before it. A CONNECT also takes `Basic base64(<user>:<jwt>)`, the
+   * form clients build from a proxy URL's userinfo; a plain-HTTP request stays
+   * Bearer-only (RQ-2).
+   */
+  function authenticate(req: IncomingMessage, connect = false): Authenticated | Refusal {
     const header = req.headers["proxy-authorization"];
     if (header === undefined) {
       return {
@@ -187,16 +219,22 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
       };
     }
     const match = /^Bearer\s+(\S+)$/i.exec(header);
-    if (!match) {
+    const basic = connect && match === null ? /^Basic\s+(\S+)$/i.exec(header) : null;
+    const raw = match ? (match[1] as string) : basic ? basicToken(basic[1] as string) : null;
+    if (raw === null) {
       return {
         status: 401,
         error: new VaultError(ErrorCode.INVALID_TOKEN, "Malformed Proxy-Authorization header"),
         headers: { "www-authenticate": CHALLENGE },
       };
     }
+    return verify(raw, peerOf(req));
+  }
+
+  function verify(raw: string, peer: string | undefined): Authenticated | Refusal {
     let token: VaultApiToken;
     try {
-      token = engine.verifyToken(match[1] as string);
+      token = engine.verifyToken(raw);
     } catch (err) {
       if (!(err instanceof VaultError)) throw err;
       const status = statusOf(err);
@@ -206,7 +244,7 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
         ...(status === 401 ? { headers: { "www-authenticate": CHALLENGE } } : {}),
       };
     }
-    return { token, caller: callerFromToken(token, "proxy", peerOf(req)) };
+    return { token, caller: callerFromToken(token, "proxy", peer), raw };
   }
 
   /**
@@ -366,10 +404,17 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
   }
 
   async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const auth = authenticate(req);
-    if ("error" in auth) return refuse(res, auth);
+    const tunnel = tunnels.tunnelOf(req);
+    // Inside a tunnel the CONNECT's token is verified again for every request:
+    // an expiry or a revocation mid-tunnel answers this request and ends the tunnel.
+    const auth = tunnel === undefined ? authenticate(req) : verify(tunnel.token, tunnel.peer);
+    if ("error" in auth) {
+      if (tunnel !== undefined) res.shouldKeepAlive = false;
+      return refuse(res, auth);
+    }
 
-    const parsed = parseTarget(req.url ?? "");
+    const parsed =
+      tunnel === undefined ? parseTarget(req.url ?? "") : tunnelTarget(req.url ?? "", tunnel);
     if (!parsed.ok) {
       return refuse(res, { status: 400, error: VaultError.invalidInput(parsed.message) });
     }
@@ -389,18 +434,78 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     await broker(req, res, parsed.target, scan.match, auth);
   }
 
-  function newServer(): Server {
-    const server = createServer((req, res) => {
-      const handled = serve(req, res).catch(() => {
-        refuse(res, { status: 500, error: internalProxyError() });
-      });
-      inFlight.add(handled);
-      const settled = (): void => {
-        inFlight.delete(handled);
-      };
-      void handled.then(settled, settled);
+  function track(req: IncomingMessage, res: ServerResponse): void {
+    const handled = serve(req, res).catch(() => {
+      refuse(res, { status: 500, error: internalProxyError() });
     });
-    server.on("connect", refuseConnect);
+    inFlight.add(handled);
+    const settled = (): void => {
+      inFlight.delete(handled);
+    };
+    void handled.then(settled, settled);
+  }
+
+  function refuseConnect(socket: Socket, refusal: Refusal): void {
+    report(refusal.reported ?? refusal.error);
+    const headers: [string, string][] =
+      refusal.status === 407 ? CONNECT_CHALLENGES : Object.entries(refusal.headers ?? {});
+    socket.end(connectReply(refusal.status, refusal.error, headers));
+  }
+
+  /**
+   * `CONNECT <host>:<port>` (B8): authenticate (Bearer or Basic) → the target →
+   * the CA's hosts → the host's leaf → `200` and the TLS tunnel, whose requests
+   * the ladder serves with the target fixed to the tunnel's origin. Every
+   * refusal precedes the 200, closes the connection and writes no row.
+   */
+  function onConnect(req: IncomingMessage, socket: Socket, head: Buffer): void {
+    // The CONNECT socket is detached from the HTTP server: an unhandled reset would end the process.
+    socket.on("error", () => socket.destroy());
+    try {
+      if (closed) {
+        socket.destroy();
+        return;
+      }
+      if (caHosts === undefined || leaves === null) {
+        return refuseConnect(socket, {
+          status: 501,
+          error: VaultError.invalidInput(NO_CA_MESSAGE),
+        });
+      }
+      const auth = authenticate(req, true);
+      if ("error" in auth) return refuseConnect(socket, auth);
+      const target = parseConnectTarget(req.url ?? "");
+      if (!target.ok) {
+        return refuseConnect(socket, {
+          status: 400,
+          error: VaultError.invalidInput(target.message),
+        });
+      }
+      if (!hostPermitted({ hosts: caHosts }, target.host)) {
+        const refusal = VaultError.proxyConnectDenied(target.host, target.port);
+        return refuseConnect(socket, { status: refusal.statusCode, error: refusal });
+      }
+      const context = leaves.contextFor(target.host);
+      const tunnel: Tunnel = {
+        authority: target.authority,
+        host: target.host,
+        port: target.port,
+        token: auth.raw,
+        peer: socket.remoteAddress ? normalizeSocketPeer(socket.remoteAddress) : undefined,
+      };
+      tunnels.open(socket, head, tunnel, context);
+    } catch (err) {
+      // An expired CA refuses every leaf: the authenticated caller gets CERT_EXPIRED and its status.
+      if (err instanceof VaultError) {
+        return refuseConnect(socket, { status: statusOf(err), error: err });
+      }
+      return refuseConnect(socket, { status: 500, error: internalProxyError() });
+    }
+  }
+
+  function newServer(): Server {
+    const server = createServer(track);
+    server.on("connect", onConnect);
     servers.add(server);
     return server;
   }
@@ -468,6 +573,9 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
 
     async close(): Promise<void> {
       closed = true;
+      // The tunnels first: their in-flight requests then settle with the rest.
+      tunnels.close();
+      leaves?.clear();
       const destroying = [...dispatchers].map((dispatcher) => dispatcher.destroy());
       dispatchers.clear();
       const closing = [...servers].map((server) => closeServer(server));

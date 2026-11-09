@@ -39,6 +39,7 @@ import { registerCertCsrCommand } from "./commands/cert/csr.js";
 import { registerCertIssueCommand } from "./commands/cert/issue.js";
 import { registerCertRenewCommand } from "./commands/cert/renew.js";
 import { registerCertAttachCommand } from "./commands/cert/attach.js";
+import { registerProxyCaCommands } from "./commands/proxy/ca.js";
 import { registerProxyEnvCommand } from "./commands/proxy/env.js";
 import { registerSshAgentStatusCommand } from "./commands/ssh-agent/status.js";
 import { registerUnlockKeyEnrollCommand } from "./commands/unlock-key/enroll.js";
@@ -127,6 +128,7 @@ export function buildProgram(): Command {
   // proxy subcommands
   const proxy = program.command("proxy").description("Egress credential proxy");
   registerProxyEnvCommand(proxy);
+  registerProxyCaCommands(proxy);
 
   // ssh-agent subcommands
   const sshAgent = program

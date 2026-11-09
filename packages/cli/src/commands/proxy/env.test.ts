@@ -1,3 +1,5 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -17,6 +19,34 @@ const run = buildCli(
 
 const RUN_DIR = join("/run", "harpoc");
 const CONSUMER_DIR = join(RUN_DIR, "agent");
+
+/** B8 (RD-B8-14): the root's file and the five client variables, after the placeholders. */
+const CA_FILE = join(CONSUMER_DIR, "ca.pem");
+const CA_LINES = [
+  `HARPOC_PROXY_CA_FILE=${CA_FILE}`,
+  `SSL_CERT_FILE=${CA_FILE}`,
+  `NODE_EXTRA_CA_CERTS=${CA_FILE}`,
+  `REQUESTS_CA_BUNDLE=${CA_FILE}`,
+  `CURL_CA_BUNDLE=${CA_FILE}`,
+  `GIT_SSL_CAINFO=${CA_FILE}`,
+];
+const CA_KEYS = {
+  HARPOC_PROXY_CA_FILE: CA_FILE,
+  SSL_CERT_FILE: CA_FILE,
+  NODE_EXTRA_CA_CERTS: CA_FILE,
+  REQUESTS_CA_BUNDLE: CA_FILE,
+  CURL_CA_BUNDLE: CA_FILE,
+  GIT_SSL_CAINFO: CA_FILE,
+};
+const HTTPS_PROXY_LINE =
+  "# HTTPS_PROXY=http://harpoc:<the token in HARPOC_PROXY_TOKEN_FILE>@127.0.0.1:3128 — the token is not printed: set the variable from the token file when the client starts";
+const HTTPS_PROXY_LINE_NO_DIR =
+  "# HTTPS_PROXY=http://harpoc:<the consumer's token>@127.0.0.1:3128 — the token is not printed: set the variable from the token file when the client starts";
+const NO_RUNTIME_DIR_CA =
+  "# no --runtime-dir: the HARPOC_PROXY_CA_FILE line and the five client CA variables are omitted (harpoc proxy ca export writes the root)";
+const WINDOWS_CURL = `# Windows: curl on Schannel ignores CURL_CA_BUNDLE and SSL_CERT_FILE — pass --cacert ${CA_FILE} --ssl-revoke-best-effort (or both as .curlrc lines)`;
+const WINDOWS_GIT =
+  "# Windows: git's schannel backend reads GIT_SSL_CAINFO only with http.schannelUseSSLCAInfo=true, and checks revocation strictly unless http.sslBackend=schannel is set explicitly (git config --global http.sslBackend schannel and git config --global http.schannelUseSSLCAInfo true, or http.sslBackend=openssl)";
 
 let spies: CliSpies;
 const platform = process.platform;
@@ -49,6 +79,8 @@ describe("proxy env — the consumer's environment block", () => {
         `HARPOC_PROXY_TOKEN_FILE=${join(CONSUMER_DIR, "token.jwt")}`,
         `HARPOC_PROXY_SOCKET=${join(CONSUMER_DIR, "proxy.sock")}`,
         "HARPOC_PLACEHOLDER_GH_PAT=harpoc:gh-pat",
+        ...CA_LINES,
+        HTTPS_PROXY_LINE,
       ].join("\n"),
     );
     expect(spies.stderr()).toBe("");
@@ -59,7 +91,7 @@ describe("proxy env — the consumer's environment block", () => {
   it("prints one placeholder per handle in argument order — harpoc://<project>/<name> for a project handle", async () => {
     await run(["agent", "secret://gh-pat", "secret://ci/deploy-key", "--runtime-dir", RUN_DIR]);
 
-    expect(spies.stdout().split("\n").slice(4)).toEqual([
+    expect(spies.stdout().split("\n").slice(4, 6)).toEqual([
       "HARPOC_PLACEHOLDER_GH_PAT=harpoc:gh-pat",
       "HARPOC_PLACEHOLDER_CI_DEPLOY_KEY=harpoc://ci/deploy-key",
     ]);
@@ -74,6 +106,8 @@ describe("proxy env — the consumer's environment block", () => {
         "HARPOC_PROXY_BASE=http://127.0.0.1:3128/",
         "# no --runtime-dir: the HARPOC_PROXY_TOKEN_FILE and HARPOC_PROXY_SOCKET lines are omitted",
         "HARPOC_PLACEHOLDER_GH_PAT=harpoc:gh-pat",
+        NO_RUNTIME_DIR_CA,
+        HTTPS_PROXY_LINE_NO_DIR,
       ].join("\n"),
     );
   });
@@ -107,6 +141,7 @@ describe("proxy env — the consumer's environment block", () => {
       HARPOC_PROXY_TOKEN_FILE: join(CONSUMER_DIR, "token.jwt"),
       HARPOC_PROXY_SOCKET: join(CONSUMER_DIR, "proxy.sock"),
       HARPOC_PLACEHOLDER_GH_PAT: "harpoc:gh-pat",
+      ...CA_KEYS,
     });
   });
 
@@ -136,8 +171,13 @@ describe("proxy env on Windows (the platform stubbed)", () => {
         `HARPOC_PROXY_TOKEN_FILE=${join(CONSUMER_DIR, "token.jwt")}`,
         "# Windows: the proxy serves no socket — the HARPOC_PROXY_SOCKET line is omitted (the TCP listener with the token file's token)",
         "HARPOC_PLACEHOLDER_GH_PAT=harpoc:gh-pat",
+        ...CA_LINES,
+        WINDOWS_CURL,
+        WINDOWS_GIT,
+        HTTPS_PROXY_LINE,
       ].join("\n"),
     );
+    expect(spies.stdout()).not.toContain("GIT_CONFIG_");
   });
 
   it("--json carries no HARPOC_PROXY_SOCKET key", async () => {
@@ -148,7 +188,16 @@ describe("proxy env on Windows (the platform stubbed)", () => {
       HARPOC_PROXY_BASE: "http://127.0.0.1:3128/",
       HARPOC_PROXY_TOKEN_FILE: join(CONSUMER_DIR, "token.jwt"),
       HARPOC_PLACEHOLDER_GH_PAT: "harpoc:gh-pat",
+      ...CA_KEYS,
     });
+  });
+
+  it("without --runtime-dir the curl comment names the exported root", async () => {
+    await run(["agent", "secret://gh-pat"]);
+
+    expect(spies.stdout()).toContain(
+      "# Windows: curl on Schannel ignores CURL_CA_BUNDLE and SSL_CERT_FILE — pass --cacert <the exported root> --ssl-revoke-best-effort (or both as .curlrc lines)",
+    );
   });
 
   it("without --runtime-dir prints the same # line as on POSIX", async () => {
@@ -157,6 +206,40 @@ describe("proxy env on Windows (the platform stubbed)", () => {
     expect(spies.stdout().split("\n")[2]).toBe(
       "# no --runtime-dir: the HARPOC_PROXY_TOKEN_FILE and HARPOC_PROXY_SOCKET lines are omitted",
     );
+  });
+});
+
+// B8 (RD-B8-14, R-C8): the root's file for the clients' trust and the HTTPS_PROXY form.
+describe("proxy env — the Harpoc CA lines (B8)", () => {
+  it("--proxy-port names the daemon's port in the HTTPS_PROXY comment", async () => {
+    await run(["agent", "secret://gh-pat", "--runtime-dir", RUN_DIR, "--proxy-port", "4000"]);
+
+    expect(spies.stdout().split("\n").at(-1)).toBe(
+      "# HTTPS_PROXY=http://harpoc:<the token in HARPOC_PROXY_TOKEN_FILE>@127.0.0.1:4000 — the token is not printed: set the variable from the token file when the client starts",
+    );
+  });
+
+  it("--json carries no comment: no HTTPS_PROXY key", async () => {
+    await run(["agent", "secret://gh-pat", "--runtime-dir", RUN_DIR, "--json"]);
+
+    expect(Object.keys(JSON.parse(spies.stdout()) as Record<string, string>)).not.toContain(
+      "HTTPS_PROXY",
+    );
+  });
+
+  it("never prints the consumer's token: the token file is not read", async () => {
+    const runDir = mkdtempSync(join(tmpdir(), "harpoc-proxy-env-"));
+    try {
+      mkdirSync(join(runDir, "agent"));
+      writeFileSync(join(runDir, "agent", "token.jwt"), "eyJfixture.tokenbody.sig\n");
+
+      await run(["agent", "secret://gh-pat", "--runtime-dir", runDir]);
+      await run(["agent", "secret://gh-pat", "--runtime-dir", runDir, "--json"]);
+
+      expect(spies.stdout()).not.toContain("eyJfixture");
+    } finally {
+      rmSync(runDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
   });
 });
 

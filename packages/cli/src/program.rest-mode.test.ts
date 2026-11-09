@@ -952,6 +952,16 @@ describe("REST_MODE_UNSUPPORTED: the commands without a REST mode", () => {
       message: "unlock-key status has no REST mode; run it on the vault host",
       json: true,
     },
+    {
+      args: ["proxy", "ca", "init", "--name-constraints", "api.github.com", "--json"],
+      message: "proxy ca init has no REST mode; run it on the vault host",
+      json: true,
+    },
+    {
+      args: ["proxy", "ca", "export"],
+      message: "proxy ca export has no REST mode; run it on the vault host",
+      json: false,
+    },
   ];
 
   it.each(unsupported)("refuses $args", async ({ args, message, json }) => {
@@ -1066,6 +1076,7 @@ describe("the REST mode's place in the command tree", () => {
     "oauth",
     "policy",
     "proxy",
+    "proxy ca",
     "secret",
     "server",
     "ssh-agent",
@@ -1114,6 +1125,8 @@ describe("the REST mode's place in the command tree", () => {
     "cert issue",
     "init",
     "oauth connect",
+    "proxy ca export",
+    "proxy ca init",
     "server start",
     "unlock",
     "unlock-key enroll",

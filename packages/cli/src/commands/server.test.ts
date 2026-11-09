@@ -1,4 +1,13 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -30,6 +39,7 @@ const {
     destroy: vi.fn().mockResolvedValue(undefined),
     createToken: vi.fn().mockReturnValue("mock-launch-jwt"),
     auditServerStop: vi.fn(),
+    loadProxyCa: vi.fn().mockResolvedValue(null),
   },
   mockMcpServer: {
     connect: vi.fn().mockResolvedValue(undefined),
@@ -993,6 +1003,278 @@ describe("server start", () => {
       expect(spies.exitSpy).not.toHaveBeenCalled();
 
       onceSpy.mockRestore();
+    });
+  });
+
+  // ── --proxy with the Harpoc CA (B8) ─────────────────────────────
+
+  describe("--proxy with the Harpoc CA (B8)", () => {
+    const CERT_PEM =
+      "-----BEGIN CERTIFICATE-----\nMIIBfixtureINTERMEDIATE\n-----END CERTIFICATE-----\n";
+    const ROOT_PEM = "-----BEGIN CERTIFICATE-----\nMIIBfixtureROOT\n-----END CERTIFICATE-----\n";
+    const KEY_PEM =
+      "-----BEGIN PRIVATE KEY-----\nMIGHfixturecaKEYbody\n-----END PRIVATE KEY-----\n";
+    /** What `loadProxyCa` resolves: a fresh key buffer per start, so the wipe of one is observable. */
+    const loaded = (unconstrained = false) => ({
+      certPem: CERT_PEM,
+      keyPem: Buffer.from(KEY_PEM, "utf8"),
+      rootPem: ROOT_PEM,
+      hosts: ["api.github.com", "127.0.0.1"],
+      unconstrained,
+      notAfter: Date.UTC(2036, 10, 6, 10, 33, 14),
+      fingerprint256:
+        "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89",
+    });
+    let dir: string;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "harpoc-server-proxy-ca-"));
+      mockEngine.loadProxyCa.mockImplementation(async () => loaded());
+    });
+
+    afterEach(() => {
+      mockEngine.loadProxyCa.mockReset();
+      mockEngine.loadProxyCa.mockResolvedValue(null);
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    });
+
+    function consumer(name: string): string {
+      const path = join(dir, name);
+      mkdirSync(path);
+      chmodSync(path, 0o750);
+      return path;
+    }
+
+    it("hands the proxy the intermediate, its key bytes and the stored hosts (lane P's ca option); names CONNECT in the line", async () => {
+      const { createEgressProxy } = await import("@harpoc/egress-proxy");
+
+      await run(["--session", "memory", "--proxy"]);
+
+      expect(mockEngine.loadProxyCa).toHaveBeenCalledTimes(1);
+      expect(createEgressProxy).toHaveBeenCalledWith({
+        engine: mockEngine,
+        ca: {
+          certPem: CERT_PEM,
+          keyPem: expect.any(Buffer),
+          hosts: ["api.github.com", "127.0.0.1"],
+        },
+      });
+      expect(spies.errorSpy.mock.calls).toContainEqual([
+        "[harpoc] Harpoc CA: no consumer directory, no ca.pem written (harpoc proxy ca export prints the certificate)",
+      ]);
+      expect(spies.errorSpy.mock.calls).toContainEqual([
+        "[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: no --runtime-dir) — CONNECT for 2 host(s) (Harpoc CA SHA-256 AB:CD:EF:01:23:45:67:89…)",
+      ]);
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("loads the CA after the vault opens and before the first listener (--rest beside it)", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      const { startServer } = await import("@harpoc/rest-api");
+
+      await run(["--session", "memory", "--rest", "--proxy", "--proxy-port", "4000"]);
+
+      const opened = vi.mocked(loadUnlockedEngine).mock.invocationCallOrder[0] as number;
+      const caLoaded = mockEngine.loadProxyCa.mock.invocationCallOrder[0] as number;
+      const rest = vi.mocked(startServer).mock.invocationCallOrder[0] as number;
+      expect(opened).toBeLessThan(caLoaded);
+      expect(caLoaded).toBeLessThan(rest);
+    });
+
+    // RD-B8-13: the fallback's certificates are unconstrained; the proxy's set is the host list.
+    it("an unconstrained CA still bounds CONNECT by its host list; the line names the certificates and their expiry", async () => {
+      const { createEgressProxy } = await import("@harpoc/egress-proxy");
+      mockEngine.loadProxyCa.mockImplementation(async () => loaded(true));
+
+      await run(["--session", "memory", "--proxy"]);
+
+      expect(vi.mocked(createEgressProxy).mock.calls[0]?.[0]).toMatchObject({
+        ca: { hosts: ["api.github.com", "127.0.0.1"] },
+      });
+      expect(spies.errorSpy.mock.calls).toContainEqual([
+        "[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: no --runtime-dir) — CONNECT for 2 host(s), certificates unconstrained (Harpoc CA SHA-256 AB:CD:EF:01:23:45:67:89…, until 2036-11-06T10:33:14.000Z)",
+      ]);
+    });
+
+    it.skipIf(process.platform === "win32")(
+      "writes the root as <consumer>/ca.pem, 0640, into every consumer directory before the proxy listens (POSIX)",
+      async () => {
+        consumer("alice");
+        consumer("bob");
+        const umask = process.umask(0o077);
+        try {
+          await run(["--session", "memory", "--proxy", "--runtime-dir", dir]);
+        } finally {
+          process.umask(umask);
+        }
+
+        for (const name of ["alice", "bob"]) {
+          const path = join(dir, name, "ca.pem");
+          expect(readFileSync(path, "utf8")).toBe(ROOT_PEM);
+          expect(statSync(path).mode & 0o777).toBe(0o640);
+        }
+        expect(spies.errorSpy.mock.calls).toContainEqual([
+          "[harpoc] Harpoc CA: the certificate written to 2 consumer directories (<consumer>/ca.pem)",
+        ]);
+      },
+    );
+
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+      "a consumer directory the daemon cannot write refuses the start FILE_IO_ERROR naming the file, before the proxy listens (POSIX)",
+      async () => {
+        const alice = consumer("alice");
+        chmodSync(alice, 0o550);
+        try {
+          await expect(
+            run(["--session", "memory", "--proxy", "--runtime-dir", dir]),
+          ).rejects.toThrow("process.exit");
+        } finally {
+          chmodSync(alice, 0o750);
+        }
+
+        expect(spies.errorSpy.mock.calls.at(-1)?.[0]).toMatch(
+          /^Error: \[FILE_IO_ERROR\] could not write the CA certificate .*ca\.pem \(EACCES\)$/,
+        );
+        expect(mockEgressProxy.listenTcp).not.toHaveBeenCalled();
+        expect(mockEngine.destroy).toHaveBeenCalled();
+      },
+    );
+
+    it("an expired CA prints the line and starts without CONNECT (createEgressProxy called with { engine }; no ca.pem written)", async () => {
+      const { createEgressProxy } = await import("@harpoc/egress-proxy");
+      const { startServer } = await import("@harpoc/rest-api");
+      mockEngine.loadProxyCa.mockRejectedValueOnce(
+        VaultError.proxyCaExpired("2026-11-01T00:00:00.000Z"),
+      );
+      stubPlatform("win32");
+      vi.mocked(assertRuntimeDir).mockImplementation(() => undefined);
+      mkdirSync(join(dir, "alice"));
+      vi.mocked(consumerDirs).mockImplementation(() => [
+        { consumer: "alice", dir: join(dir, "alice"), sid: "S-1-5-21-1-2-3-1002" },
+      ]);
+      try {
+        await run([
+          "--session",
+          "memory",
+          "--rest",
+          "--proxy",
+          "--proxy-port",
+          "4000",
+          "--runtime-dir",
+          dir,
+        ]);
+      } finally {
+        vi.mocked(consumerDirs).mockReset();
+        vi.mocked(assertRuntimeDir).mockReset();
+      }
+
+      expect(spies.errorSpy.mock.calls).toContainEqual([
+        "[harpoc] Harpoc CA expired at 2026-11-01T00:00:00.000Z — CONNECT disabled until harpoc proxy ca init --force",
+      ]);
+      expect(createEgressProxy).toHaveBeenCalledWith({ engine: mockEngine });
+      expect(existsSync(join(dir, "alice", "ca.pem"))).toBe(false);
+      expect(spies.errorSpy.mock.calls).toContainEqual([
+        "[harpoc] egress proxy listening on http://127.0.0.1:4000 (TCP only: Windows serves no proxy.sock)",
+      ]);
+      expect(startServer).toHaveBeenCalled();
+      expect(mockEgressProxy.listenTcp).toHaveBeenCalledTimes(1);
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("an expired CA whose refusal names no instant takes the same path: the line with <unknown>, the daemon started without CONNECT", async () => {
+      const { createEgressProxy } = await import("@harpoc/egress-proxy");
+      mockEngine.loadProxyCa.mockRejectedValueOnce(
+        new VaultError(ErrorCode.CERT_EXPIRED, "Certificate expired"),
+      );
+
+      await run(["--session", "memory", "--proxy"]);
+
+      expect(spies.errorSpy.mock.calls).toContainEqual([
+        "[harpoc] Harpoc CA expired at <unknown> — CONNECT disabled until harpoc proxy ca init --force",
+      ]);
+      expect(createEgressProxy).toHaveBeenCalledWith({ engine: mockEngine });
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("zero-fills the key bytes when a listener fails between the CA's load and the proxy's creation", async () => {
+      const { startServer } = await import("@harpoc/rest-api");
+      const material = loaded();
+      mockEngine.loadProxyCa.mockImplementation(async () => material);
+      vi.mocked(startServer).mockRejectedValueOnce(
+        new Error("listen EADDRINUSE: address already in use 127.0.0.1:3000"),
+      );
+
+      await expect(
+        run(["--session", "memory", "--rest", "--proxy", "--proxy-port", "4000"]),
+      ).rejects.toThrow("process.exit");
+
+      expect(material.keyPem.every((byte) => byte === 0)).toBe(true);
+      expect(mockEgressProxy.listenTcp).not.toHaveBeenCalled();
+      expect(mockEngine.destroy).toHaveBeenCalled();
+    });
+
+    it("zero-fills the key bytes once the proxy is created, and never prints the key", async () => {
+      const { createEgressProxy } = await import("@harpoc/egress-proxy");
+
+      await run(["--session", "memory", "--proxy"]);
+
+      const handed = vi.mocked(createEgressProxy).mock.calls[0]?.[0] as unknown as {
+        ca: { keyPem: Buffer };
+      };
+      expect(handed.ca.keyPem.length).toBe(Buffer.byteLength(KEY_PEM));
+      expect(handed.ca.keyPem.every((byte) => byte === 0)).toBe(true);
+      expect(`${spies.stdout()}\n${spies.stderr()}`).not.toContain("fixturecaKEYbody");
+    });
+
+    it("zero-fills the key bytes when the proxy's creation throws", async () => {
+      const { createEgressProxy } = await import("@harpoc/egress-proxy");
+      let handedKey: Buffer | undefined;
+      vi.mocked(createEgressProxy).mockImplementationOnce((options) => {
+        handedKey = (options as unknown as { ca: { keyPem: Buffer } }).ca.keyPem;
+        throw new VaultError(
+          ErrorCode.CERT_INVALID,
+          "Certificate invalid: CA private key PEM is not parseable",
+        );
+      });
+
+      await expect(run(["--session", "memory", "--proxy"])).rejects.toThrow("process.exit");
+
+      expect(handedKey?.every((byte) => byte === 0)).toBe(true);
+      expect(mockEngine.destroy).toHaveBeenCalled();
+    });
+
+    // Model A untouched: without --proxy the CA is never read.
+    it("--rest alone never loads the CA (negative control)", async () => {
+      await run(["--rest"]);
+
+      expect(mockEngine.loadProxyCa).not.toHaveBeenCalled();
+    });
+
+    describe("on Windows (the platform stubbed)", () => {
+      beforeEach(() => stubPlatform("win32"));
+
+      afterEach(() => {
+        vi.mocked(consumerDirs).mockReset();
+        vi.mocked(assertRuntimeDir).mockReset();
+      });
+
+      it("writes ca.pem into each consumer directory the access-list check passed (inherited list, no icacls)", async () => {
+        vi.mocked(assertRuntimeDir).mockImplementation(() => undefined);
+        mkdirSync(join(dir, "alice"));
+        vi.mocked(consumerDirs).mockImplementation(() => [
+          { consumer: "alice", dir: join(dir, "alice"), sid: "S-1-5-21-1-2-3-1002" },
+        ]);
+
+        await run(["--session", "memory", "--proxy", "--runtime-dir", dir]);
+
+        expect(readFileSync(join(dir, "alice", "ca.pem"), "utf8")).toBe(ROOT_PEM);
+        expect(spies.errorSpy.mock.calls).toContainEqual([
+          "[harpoc] Harpoc CA: the certificate written to 1 consumer directory (<consumer>/ca.pem)",
+        ]);
+        expect(spies.errorSpy.mock.calls).toContainEqual([
+          "[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: Windows serves no proxy.sock) — CONNECT for 2 host(s) (Harpoc CA SHA-256 AB:CD:EF:01:23:45:67:89…)",
+        ]);
+      });
     });
   });
 

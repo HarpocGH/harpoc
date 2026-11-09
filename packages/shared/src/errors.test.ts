@@ -160,6 +160,7 @@ const STATUS_CASES = [
   [ErrorCode.UNLOCK_KEY_NOT_ENROLLED, 400],
   [ErrorCode.UNLOCK_KEY_SOURCE_UNSAFE, 400],
   [ErrorCode.UNLOCK_KEY_PASSWORD_REQUIRED, 403],
+  [ErrorCode.PROXY_CONNECT_DENIED, 403],
   // System
   [ErrorCode.INTERNAL_ERROR, 500],
   [ErrorCode.DATABASE_ERROR, 500],
@@ -993,6 +994,51 @@ describe("factory methods", () => {
     expect(err.statusCode).toBe(403);
     expect(err.message).toBe(
       "Enrolling or revoking an unlock key requires an unlock by password in this process",
+    );
+  });
+
+  it.each([
+    ["api.github.com", 443, "CONNECT to api.github.com:443"],
+    ["127.0.0.1", 8443, "CONNECT to 127.0.0.1:8443"],
+    ["::1", 443, "CONNECT to [::1]:443"],
+    ["[::1]", 443, "CONNECT to [::1]:443"],
+  ] as const)(
+    "proxyConnectDenied(%s, %d) maps to 403 and names the host and port alone",
+    (host, port, head) => {
+      const err = VaultError.proxyConnectDenied(host, port);
+      expect(err.code).toBe(ErrorCode.PROXY_CONNECT_DENIED);
+      expect(err.statusCode).toBe(403);
+      expect(err.message).toBe(
+        `${head} is outside the proxy CA's name constraints (harpoc proxy ca init --name-constraints <host>…)`,
+      );
+      expect(err.details).toBeUndefined();
+    },
+  );
+
+  it("proxyCaExists() is DUPLICATE_SECRET (409) and names --force", () => {
+    const err = VaultError.proxyCaExists();
+    expect(err.code).toBe(ErrorCode.DUPLICATE_SECRET);
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toBe(
+      "The Harpoc CA already exists (secret://harpoc-ca); harpoc proxy ca init --force replaces it",
+    );
+  });
+
+  it("proxyCaNotConfigured() is CERT_NOT_CONFIGURED (400) and names proxy ca init", () => {
+    const err = VaultError.proxyCaNotConfigured();
+    expect(err.code).toBe(ErrorCode.CERT_NOT_CONFIGURED);
+    expect(err.statusCode).toBe(400);
+    expect(err.message).toBe(
+      "No Harpoc CA in this vault (secret://harpoc-ca); harpoc proxy ca init creates one",
+    );
+  });
+
+  it("proxyCaExpired() is CERT_EXPIRED (410) and names the expiry and the replacement", () => {
+    const err = VaultError.proxyCaExpired("2026-11-16T10:00:00.000Z");
+    expect(err.code).toBe(ErrorCode.CERT_EXPIRED);
+    expect(err.statusCode).toBe(410);
+    expect(err.message).toBe(
+      "The Harpoc CA (secret://harpoc-ca) expired at 2026-11-16T10:00:00.000Z; harpoc proxy ca init --force issues a new one",
     );
   });
 

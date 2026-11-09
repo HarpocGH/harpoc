@@ -320,6 +320,24 @@ describe("caller authentication — Proxy-Authorization on every request", () =>
       expect(upstream.seen).toHaveLength(0);
     },
   );
+  it("a plain request stays Bearer-only: Basic base64(<user>:<valid token>) is 401 Malformed and nothing is verified (RQ-2)", async () => {
+    const reply = await send(
+      "/user",
+      {
+        "proxy-authorization": `Basic ${Buffer.from(`harpoc:${TOKENS.use}`).toString("base64")}`,
+        authorization: "Bearer harpoc:gh-pat",
+      },
+      { token: null },
+    );
+
+    expect(reply.status).toBe(401);
+    expect(JSON.parse(reply.body)).toEqual({
+      error: ErrorCode.INVALID_TOKEN,
+      message: "Malformed Proxy-Authorization header",
+    });
+    expect(double.verifyToken).not.toHaveBeenCalled();
+    expect(upstream.seen).toHaveLength(0);
+  });
 });
 
 describe("refusals before the lease", () => {
@@ -670,15 +688,18 @@ describe("the upstream leg", () => {
     expect(lease.complete).toHaveBeenCalledWith({ error: ErrorCode.PROXY_UPSTREAM_FAILED });
   });
 
-  it("CONNECT is answered 501 without reaching the engine", async () => {
+  it("CONNECT without a proxy CA is answered 501 naming proxy ca init, before authentication", async () => {
     const answer = await rawProxyExchange(
       port,
       `CONNECT 127.0.0.1:${upstream.port} HTTP/1.1\r\nHost: 127.0.0.1:${upstream.port}\r\nProxy-Authorization: Bearer ${TOKENS.use}\r\n\r\n`,
     );
 
     expect(answer.startsWith("HTTP/1.1 501 Not Implemented\r\n")).toBe(true);
-    expect(JSON.parse(answer.slice(answer.indexOf("\r\n\r\n") + 4))).toMatchObject({
+    expect(answer).toContain("\r\nconnection: close\r\n");
+    expect(JSON.parse(answer.slice(answer.indexOf("\r\n\r\n") + 4))).toEqual({
       error: ErrorCode.INVALID_INPUT,
+      message:
+        "CONNECT is not enabled: no proxy CA is enrolled (harpoc proxy ca init, then restart server start --proxy); the plain-HTTP rewrite mode answers http://<proxy>/<host>/<path> and absolute http:// URIs",
     });
     expect(double.verifyToken).not.toHaveBeenCalled();
     expect(upstream.seen).toHaveLength(0);

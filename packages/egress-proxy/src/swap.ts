@@ -25,7 +25,8 @@ export interface SwapResult {
 
 /**
  * Put the credential where the placeholder stood, with the bytes the HTTP
- * injector's `applyInjectionConfig` sends for the same placement — basic auth
+ * injector's `applyInjectionConfig` sends for the same placement (the `token`
+ * scheme, which the injector has no placement for, kept as the client spelled it) — basic auth
  * as `base64(<user>:<value>)` with the client's own user, a query value
  * serialized as `URLSearchParams` serializes it — and leave every other
  * header and query component as the client sent it. The request is not
@@ -43,7 +44,7 @@ export function swapCredential(
   switch (placement.type) {
     case "bearer":
       assertHeaderSafe(valueStr);
-      headers["authorization"] = `Bearer ${valueStr}`;
+      headers["authorization"] = `${placement.scheme ?? "Bearer"} ${valueStr}`;
       break;
     case "basic_auth": {
       const encoded = Buffer.from(`${placement.user}:${valueStr}`, "utf8").toString("base64");

@@ -23,6 +23,12 @@ import {
   resolveRuntimeDir,
 } from "../utils/runtime-dir.js";
 import { assertIssueTokenFile, parseIssueTokenSpecs } from "../utils/issue-token-spec.js";
+import {
+  connectSummary,
+  loadProxyCaWiring,
+  writeConsumerCaFiles,
+  type ProxyCaWiring,
+} from "../utils/proxy-ca.js";
 
 function resolveUiDistDir(): string {
   const require = createRequire(import.meta.url);
@@ -142,6 +148,7 @@ export function registerServerCommand(program: Command): void {
         cmd: Command,
       ) => {
         let engine: Awaited<ReturnType<typeof loadUnlockedEngine>> | undefined;
+        let proxyCa: ProxyCaWiring | undefined;
         try {
           // Commander takes the next flag as the path (`--token-file
           // --allow-tokenless`, `--token-file --mcp`); a dash-led path is given
@@ -584,6 +591,25 @@ export function registerServerCommand(program: Command): void {
             );
           }
 
+          // The Harpoc CA (B8): loaded once, after the vault opens and before the first listener,
+          // and its certificate written into every consumer directory — a write that fails refuses
+          // the start before any listener's row. Without a CA, or with an expired one (R-C6, a
+          // line on stderr), CONNECT keeps answering 501 and the proxy is created as before.
+          if (opts.proxy) {
+            proxyCa = await loadProxyCaWiring(engine);
+            if (proxyCa !== undefined) {
+              const caDirs = win32
+                ? windowsConsumers.map(({ dir }) => dir)
+                : proxySockets.map((socketPath) => dirname(socketPath));
+              const written = writeConsumerCaFiles(caDirs, proxyCa.rootPem).length;
+              console.error(
+                written === 0
+                  ? "[harpoc] Harpoc CA: no consumer directory, no ca.pem written (harpoc proxy ca export prints the certificate)"
+                  : `[harpoc] Harpoc CA: the certificate written to ${String(written)} consumer director${written === 1 ? "y" : "ies"} (<consumer>/ca.pem)`,
+              );
+            }
+          }
+
           if (opts.mcp) {
             const { createStdioServerFactory } = await import("@harpoc/mcp-server");
             const { serveStdio } = await import("@modelcontextprotocol/server/stdio");
@@ -674,7 +700,16 @@ export function registerServerCommand(program: Command): void {
 
           if (opts.proxy) {
             const { createEgressProxy } = await import("@harpoc/egress-proxy");
-            const proxy = createEgressProxy({ engine });
+            // The proxy parses the key when it is created (caSigner) and keeps no reference to
+            // the bytes: they are zero-filled here, whether the creation succeeds or throws.
+            let proxy: ReturnType<typeof createEgressProxy>;
+            try {
+              proxy = createEgressProxy(
+                proxyCa === undefined ? { engine } : { engine, ca: proxyCa.options },
+              );
+            } finally {
+              proxyCa?.options.keyPem.fill(0);
+            }
             const { port: boundPort } = await proxy.listenTcp(proxyPort, "127.0.0.1");
             egressProxy = proxy;
             proxyBoundPort = boundPort;
@@ -687,8 +722,9 @@ export function registerServerCommand(program: Command): void {
                   : proxySockets.length === 0
                     ? ` (TCP only: no consumer directory under ${runtimeDir.path})`
                     : ` and ${String(proxySockets.length)} consumer socket${proxySockets.length === 1 ? "" : "s"} (<consumer>/proxy.sock)`;
+            const connect = proxyCa === undefined ? "" : connectSummary(proxyCa);
             console.error(
-              `[harpoc] egress proxy listening on http://127.0.0.1:${String(boundPort)}${sockets}`,
+              `[harpoc] egress proxy listening on http://127.0.0.1:${String(boundPort)}${sockets}${connect}`,
             );
           }
 
@@ -763,6 +799,7 @@ export function registerServerCommand(program: Command): void {
             );
           }
         } catch (err: unknown) {
+          proxyCa?.options.keyPem.fill(0);
           await engine?.destroy();
           handleError(err);
         }

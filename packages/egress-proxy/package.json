@@ -1,7 +1,7 @@
 {
   "name": "@harpoc/egress-proxy",
   "version": "1.5.0",
-  "description": "Egress credential proxy (placeholder swap at the egress hop, plain-HTTP rewrite mode) for Harpoc",
+  "description": "Egress credential proxy (placeholder swap at the egress hop: plain-HTTP rewrite mode and CONNECT with a Harpoc CA) for Harpoc",
   "license": "BUSL-1.1",
   "author": "Stefan Gönitzer",
   "repository": {
@@ -21,6 +21,7 @@
     }
   },
   "dependencies": {
+    "@harpoc/cert-manager": "workspace:*",
     "@harpoc/core": "workspace:*",
     "@harpoc/shared": "workspace:*",
     "undici": "^8.11.2"

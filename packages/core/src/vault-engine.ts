@@ -245,6 +245,147 @@ export interface ProxyLease {
   complete(outcome: ProxyOutcome): void;
 }
 
+/** The Harpoc CA's one handle (deployment model B, M4(ii)): a project-less vault-managed certificate. */
+export const PROXY_CA_HANDLE = "secret://harpoc-ca";
+
+/**
+ * `createProxyCa`'s input, as `cert-manager`'s `createCa` returns it (R-X1, two-tier): the
+ * intermediate that signs the leaves, its PKCS#8 key, and the root that signed it — the root's
+ * key was discarded at creation.
+ */
+export interface CreateProxyCaInput {
+  certPem: string;
+  keyPem: string;
+  rootPem: string;
+  /**
+   * The hosts the proxy may terminate CONNECT for (RD-B8-13): required in both modes, stored with
+   * the CA — the certificates carry them as `nameConstraints` unless `unconstrained`.
+   */
+  hosts: readonly string[];
+  /** The certificates carry no `nameConstraints` (the fallback); the host list still bounds the proxy. */
+  unconstrained?: boolean;
+  /** Replace a CA already stored: the old secret is revoked, then the new one imported. */
+  force?: boolean;
+}
+
+/** What `createProxyCa` stored — the two certificates' expiries and fingerprints, never a key. */
+export interface ProxyCaCreated {
+  handle: string;
+  hosts: string[];
+  unconstrained: boolean;
+  notAfter: number;
+  fingerprint256: string;
+  rootNotAfter: number;
+  rootFingerprint256: string;
+  replaced: boolean;
+}
+
+/**
+ * The CA the daemon hands the egress proxy (`loadProxyCa`): the intermediate, its key as the
+ * PEM's bytes — the caller zero-fills them once `caSigner` has parsed them — and the root.
+ * In-process only, never serialized.
+ */
+export interface ProxyCaMaterial {
+  certPem: string;
+  keyPem: Buffer;
+  rootPem: string;
+  hosts: string[];
+  unconstrained: boolean;
+  notAfter: number;
+  fingerprint256: string;
+}
+
+/** The trust anchor (`proxyCaCertificate`) — the root — for `harpoc proxy ca export`. */
+export interface ProxyCaCertificate {
+  handle: string;
+  certPem: string;
+  notBefore: number;
+  notAfter: number;
+  fingerprint256: string;
+}
+
+const PROXY_CA_NAME = "harpoc-ca";
+const PROXY_CA_ACTION = "proxy_ca_init";
+
+/**
+ * The `vault_meta` row holding the CA's host list beside its certificate row (RD-B8-13):
+ * `{ secret_id, hosts, unconstrained }` as JSON, written in the certificate row's transaction and
+ * replaced by the next `--force`. Additive, as M1's rows: an older binary ignores it.
+ */
+const PROXY_CA_META = "proxy_ca";
+
+interface ProxyCaMeta {
+  secret_id: string;
+  hosts: string[];
+  unconstrained: boolean;
+}
+
+function parseProxyCaMeta(raw: string | undefined, secretId: string): ProxyCaMeta | undefined {
+  if (raw === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  const meta = parsed as Partial<ProxyCaMeta> | null;
+  if (
+    meta === null ||
+    typeof meta !== "object" ||
+    meta.secret_id !== secretId ||
+    !Array.isArray(meta.hosts) ||
+    meta.hosts.length === 0 ||
+    !meta.hosts.every((host) => typeof host === "string" && host.length > 0) ||
+    typeof meta.unconstrained !== "boolean"
+  ) {
+    return undefined;
+  }
+  return { secret_id: meta.secret_id, hosts: [...meta.hosts], unconstrained: meta.unconstrained };
+}
+
+function parseCaCertificate(pem: string, what: string): X509Certificate {
+  let cert: X509Certificate;
+  try {
+    cert = new X509Certificate(pem);
+  } catch {
+    throw VaultError.certInvalid(`the Harpoc CA's ${what} PEM is not parseable`);
+  }
+  if (!cert.ca) {
+    throw VaultError.certInvalid(`the Harpoc CA's ${what} is not a CA (basicConstraints CA:TRUE)`);
+  }
+  if (cert.validToDate.getTime() <= Date.now()) {
+    throw VaultError.certExpired(`the Harpoc CA's ${what}`);
+  }
+  return cert;
+}
+
+/**
+ * `createProxyCa`'s pre-write checks, before an existing CA is revoked: both certificates parse,
+ * are CAs and are unexpired; the root is self-signed and signed the intermediate; the key is the
+ * intermediate's. Refusals name no key material.
+ */
+function proxyCaCertificatesOf(input: CreateProxyCaInput): {
+  cert: X509Certificate;
+  root: X509Certificate;
+} {
+  const root = parseCaCertificate(input.rootPem, "root");
+  if (!root.checkIssued(root) || !root.verify(root.publicKey)) {
+    throw VaultError.certInvalid("the Harpoc CA's root is not self-signed");
+  }
+  const cert = parseCaCertificate(input.certPem, "certificate");
+  if (!cert.checkIssued(root) || !cert.verify(root.publicKey)) {
+    throw VaultError.certInvalid("the Harpoc CA's certificate is not issued by its root");
+  }
+  let key: ReturnType<typeof createPrivateKey>;
+  try {
+    key = createPrivateKey(input.keyPem);
+  } catch {
+    throw VaultError.certInvalid("private key PEM is not parseable");
+  }
+  if (!cert.checkPrivateKey(key)) throw VaultError.certPrivateKeyMismatch();
+  return { cert, root };
+}
+
 /** A key a consumer's socket may serve: the secret, its handle, its policy and the derived public half. */
 interface AgentSocketKey {
   secret: Secret;
@@ -3857,6 +3998,11 @@ export class VaultEngine {
     opts?: ImportCertificateOptions,
     project?: string,
     caller?: CallerContext,
+    extra?: {
+      action: string;
+      detail?: Record<string, unknown>;
+      onCommit?: (secretId: string) => void;
+    },
   ): Promise<{ handle: string; secretId: string }> {
     const o = opts ?? {};
 
@@ -3982,6 +4128,7 @@ export class VaultEngine {
         acme_account_iv: accountEnc?.iv ?? null,
         acme_account_tag: accountEnc?.tag ?? null,
       });
+      extra?.onCommit?.(secret.id);
       if (o.certificatePem) {
         s.store.updateSecret(secret.id, { status: SecretStatus.ACTIVE, updated_at: Date.now() });
       }
@@ -3991,11 +4138,12 @@ export class VaultEngine {
         ...callerColumns(caller),
         detail: {
           handle,
-          action: "import_certificate",
+          action: extra?.action ?? "import_certificate",
           subject,
           not_after: notAfter,
           acme: o.acmeIssued === true,
           acme_account: accountEnc !== null,
+          ...extra?.detail,
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
@@ -5504,6 +5652,217 @@ export class VaultEngine {
     const err = VaultError.unlockKeyPasswordRequired();
     this.auditDenied(s, eventType, err, {});
     throw err;
+  }
+
+  // ---------------------------------------------------------------------------
+  // The Harpoc CA (deployment model B, M4(ii))
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Store the egress proxy's CA as the project-less vault-managed certificate
+   * `secret://harpoc-ca` through `importCertificate`'s two commits (the secret
+   * and its `secret.create` row; the certificate row, the ACTIVE transition and
+   * the `cert.issue` row, `action: "proxy_ca_init"`): the intermediate's key
+   * KEK-encrypted, the intermediate as `certificate_pem`, the root as
+   * `chain_pem`, never auto-renewed. The three are checked before anything
+   * changes. A CA already stored refuses `DUPLICATE_SECRET` unless `force`,
+   * which revokes it (its `secret.revoke` row) before the new one is imported —
+   * one CA at a time. Every refusal is a failed `cert.issue` row. The host
+   * list — the proxy's CONNECT set in both modes (RD-B8-13) — is the
+   * `proxy_ca` meta row, written in the certificate row's transaction and
+   * named in the `cert.issue` row (`hosts`, `unconstrained`).
+   */
+  async createProxyCa(input: CreateProxyCaInput): Promise<ProxyCaCreated> {
+    const s = this.assertUnlocked();
+    let secretId: string | undefined;
+    try {
+      const { cert, root } = proxyCaCertificatesOf(input);
+      const hosts = [...input.hosts];
+      if (hosts.length === 0 || !hosts.every((host) => typeof host === "string" && host !== "")) {
+        throw VaultError.invalidInput(
+          "the Harpoc CA needs at least one host (harpoc proxy ca init --name-constraints <host>)",
+        );
+      }
+      const unconstrained = input.unconstrained === true;
+      const existing = await this.findProxyCaSecret(s);
+      if (existing !== undefined) {
+        secretId = existing.id;
+        if (input.force !== true) throw VaultError.proxyCaExists();
+        await this.revokeSecret(PROXY_CA_HANDLE);
+        secretId = undefined;
+      }
+      const { handle } = await this.doImportCertificate(
+        s,
+        PROXY_CA_NAME,
+        input.keyPem,
+        (id) => (secretId = id),
+        { certificatePem: input.certPem, chainPem: input.rootPem, autoRenew: false },
+        undefined,
+        undefined,
+        {
+          action: PROXY_CA_ACTION,
+          detail: { hosts, unconstrained },
+          onCommit: (id) => {
+            const meta: ProxyCaMeta = { secret_id: id, hosts, unconstrained };
+            s.store.setMeta(PROXY_CA_META, JSON.stringify(meta));
+          },
+        },
+      );
+      return {
+        handle,
+        hosts,
+        unconstrained,
+        notAfter: cert.validToDate.getTime(),
+        fingerprint256: cert.fingerprint256,
+        rootNotAfter: root.validToDate.getTime(),
+        rootFingerprint256: root.fingerprint256,
+        replaced: existing !== undefined,
+      };
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.CERT_ISSUE,
+        err,
+        { handle: PROXY_CA_HANDLE, action: PROXY_CA_ACTION },
+        secretId,
+      );
+      throw err;
+    }
+  }
+
+  /**
+   * The CA for `server start --proxy`: null when the vault holds none (nothing
+   * read, no row); otherwise the intermediate, its decrypted key as the PEM's
+   * bytes (the caller zero-fills them after parsing — never a string here) and
+   * the root, and the stored host list (a live CA without it refuses — fail
+   * closed), read once per daemon start with one `secret.read` row (`config:
+   * "certificate_private_key"`, `getCertificatePrivateKey`'s shape) — never one
+   * per leaf. A `harpoc-ca` that is no vault-managed CA refuses
+   * `CERT_NOT_CONFIGURED`, an expired one `CERT_EXPIRED`, a stored certificate
+   * that does not parse `CERT_INVALID`, each with a failed row before the key is
+   * decrypted. The key never reaches a log line, a row or a reply.
+   */
+  async loadProxyCa(): Promise<ProxyCaMaterial | null> {
+    const s = this.assertUnlocked();
+    const secret = await this.findProxyCaSecret(s);
+    if (secret === undefined) return null;
+    const row = isVaultManagedCertificate(s.store, secret)
+      ? s.store.getCertificate(secret.id)
+      : undefined;
+    let certPem: string;
+    let rootPem: string;
+    let meta: ProxyCaMeta;
+    let cert: X509Certificate;
+    try {
+      const stored = parseProxyCaMeta(s.store.getMeta(PROXY_CA_META), secret.id);
+      if (
+        row === undefined ||
+        row.certificate_pem === null ||
+        row.chain_pem === null ||
+        stored === undefined
+      ) {
+        throw VaultError.certNotConfigured(PROXY_CA_HANDLE);
+      }
+      meta = stored;
+      if (row.not_after !== null && row.not_after <= Date.now()) {
+        throw VaultError.proxyCaExpired(new Date(row.not_after).toISOString());
+      }
+      certPem = row.certificate_pem;
+      rootPem = row.chain_pem;
+      try {
+        cert = new X509Certificate(certPem);
+      } catch {
+        throw VaultError.certInvalid("the Harpoc CA's stored certificate is not parseable");
+      }
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.SECRET_READ,
+        err,
+        { config: "certificate_private_key" },
+        secret.id,
+      );
+      throw err;
+    }
+    const key = decrypt(
+      s.kek,
+      row.private_key_encrypted,
+      row.private_key_iv,
+      row.private_key_tag,
+      AAD_CERT_PRIVATE_KEY(secret.id),
+    );
+    try {
+      s.auditLogger.log({
+        eventType: AuditEventType.SECRET_READ,
+        secretId: secret.id,
+        detail: { config: "certificate_private_key" },
+        sessionId: this.sessionId ?? undefined,
+        success: true,
+      });
+    } catch (err) {
+      wipeBuffer(key);
+      throw err;
+    }
+    return {
+      certPem,
+      keyPem: Buffer.from(key.buffer, key.byteOffset, key.byteLength),
+      rootPem,
+      hosts: meta.hosts,
+      unconstrained: meta.unconstrained,
+      notAfter: cert.validToDate.getTime(),
+      fingerprint256: cert.fingerprint256,
+    };
+  }
+
+  /**
+   * The trust anchor for `harpoc proxy ca export` — the root, stored as the
+   * certificate's chain — or null when the vault holds no CA (no row): a read
+   * of the stored chain with one `secret.read` row (`config: "certificate_pem"`,
+   * `getCertificatePem`'s shape); a `harpoc-ca` that is no vault-managed CA or
+   * holds no root refuses `CERT_NOT_CONFIGURED`, a stored root that does not
+   * parse `CERT_INVALID`, each with its one failed row.
+   */
+  async proxyCaCertificate(): Promise<ProxyCaCertificate | null> {
+    const s = this.assertUnlocked();
+    const secret = await this.findProxyCaSecret(s);
+    if (secret === undefined) return null;
+    let rootPem: string;
+    let root: X509Certificate;
+    try {
+      const pem = isVaultManagedCertificate(s.store, secret)
+        ? (s.store.getCertificate(secret.id)?.chain_pem ?? null)
+        : null;
+      if (pem === null) throw VaultError.certNotConfigured(PROXY_CA_HANDLE);
+      rootPem = pem;
+      try {
+        root = new X509Certificate(rootPem);
+      } catch {
+        throw VaultError.certInvalid("the Harpoc CA's stored root certificate is not parseable");
+      }
+    } catch (err) {
+      this.auditDenied(
+        s,
+        AuditEventType.SECRET_READ,
+        err,
+        { config: "certificate_pem" },
+        secret.id,
+      );
+      throw err;
+    }
+    this.auditConfigRead(s, secret.id, undefined, { config: "certificate_pem" });
+    return {
+      handle: PROXY_CA_HANDLE,
+      certPem: rootPem,
+      notBefore: root.validFromDate.getTime(),
+      notAfter: root.validToDate.getTime(),
+      fingerprint256: root.fingerprint256,
+    };
+  }
+
+  /** The live `harpoc-ca` secret, or undefined: a revoked one is no CA. */
+  private async findProxyCaSecret(s: UnlockedState): Promise<Secret | undefined> {
+    const matches = await s.secretManager.findByHandle(PROXY_CA_HANDLE);
+    return matches.find((secret) => secret.status !== SecretStatus.REVOKED);
   }
 
   /**

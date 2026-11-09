@@ -119,12 +119,30 @@ describe("findPlaceholder — the four positions", () => {
   );
 
   it.each([
+    ["token harpoc:k", "token"],
+    ["Token harpoc:k", "Token"],
+    ["TOKEN   harpoc://p/k", "TOKEN"],
+  ])(
+    "the token scheme (the GitHub CLI's Authorization: token <p>) is the bearer placement with the scheme as sent: %j",
+    (authorization, scheme) => {
+      expect(matchOf(findPlaceholder({ authorization }, target())).placement).toStrictEqual({
+        type: "bearer",
+        scheme,
+      });
+    },
+  );
+
+  it.each([
     "Bearer harpoc:k extra",
     "Bearer\tharpoc:k",
     "Bearerharpoc:k",
     "Bearer xharpoc:k",
     "Bearer harpoc:k,harpoc:j",
-    "Token harpoc:k",
+    "token harpoc:k extra",
+    "token\tharpoc:k",
+    "tokenharpoc:k",
+    "Tokens harpoc:k",
+    "Basic-token harpoc:k",
   ])("not a placeholder: Authorization %j", (authorization) => {
     expect(findPlaceholder({ authorization }, target())).toEqual({ outcome: "none" });
   });
