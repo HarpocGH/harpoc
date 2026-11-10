@@ -186,6 +186,15 @@ function killTree(child: ChildProcess, treeKill: TreeKillMechanism | undefined):
   return Promise.resolve();
 }
 
+/** Strips every non-empty string of `secrets`, with its common encodings, from captured output. */
+export function redactCaptured(text: string, secrets: readonly string[] | undefined): string {
+  let out = text;
+  for (const s of secrets ?? []) {
+    if (s.length > 0) out = redactSecretEncodings(out, s);
+  }
+  return out;
+}
+
 /**
  * Spawn a subprocess with no shell (`shell:false`), capture stdout/stderr into
  * capped buffers, enforce a timeout (SIGKILL on exceed) and redact injected
@@ -258,13 +267,6 @@ export async function spawnCaptured(
   const cap = opts.maxOutputBytes ?? MAX_PROCESS_OUTPUT_BYTES;
   const stdout = new CappedOutput(cap);
   const stderr = new CappedOutput(cap);
-  const redactAll = (text: string): string => {
-    let out = text;
-    for (const s of opts.redact ?? []) {
-      if (s.length > 0) out = redactSecretEncodings(out, s);
-    }
-    return out;
-  };
 
   return new Promise<SpawnCapturedResult>((resolvePromise) => {
     let child: ReturnType<typeof spawn>;
@@ -336,8 +338,8 @@ export async function spawnCaptured(
         // The wrapper's own failure (its reserved code AND its marker) is a
         // spawn that never ran — what a Node-level ENOENT is today.
         const wrapperFailed = treeKill === "job" && !timedOut && isJobWrapperFailure(code, rawErr);
-        const out = redactAll(rawOut);
-        const errText = redactAll(rawErr);
+        const out = redactCaptured(rawOut, opts.redact);
+        const errText = redactCaptured(rawErr, opts.redact);
         settle({
           // A timed-out child was killed by the vault, so it reports as killed on
           // every platform: Windows has no signals and surfaces the taskkill as

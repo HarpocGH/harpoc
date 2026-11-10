@@ -17,7 +17,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { getPkgRoot } from "@harpoc/test-utils";
 import { POWERSHELL } from "./helpers/spawn-cli.js";
 
-const deployRoot = resolve(getPkgRoot(import.meta.url), "..", "..", "deploy");
+const repoRoot = resolve(getPkgRoot(import.meta.url), "..", "..");
+const deployRoot = resolve(repoRoot, "deploy");
 
 /** Every shell script under deploy/, relative to it with `/` separators, sorted. */
 const SCRIPTS = readdirSync(deployRoot, { recursive: true, encoding: "utf8" })
@@ -232,6 +233,136 @@ describe("deploy PowerShell scripts (deployment model B on Windows)", () => {
       }
     },
   );
+
+  it("windows/register-service.ps1 grants the vault account Log on as a batch job before it registers the task, reads the grant back before it prompts for the password, and refuses an account that is denied it", () => {
+    const text = psText("windows/register-service.ps1");
+    expect(text).toContain("$BatchLogonRight = 'SeBatchLogonRight'");
+    expect(text).toContain("$DenyBatchLogonRight = 'SeDenyBatchLogonRight'");
+    const elevation = text.lastIndexOf("if (-not (Test-Elevated))");
+    const grant = text.indexOf("Invoke-AccountRights 'add' $account.SID.Value $BatchLogonRight");
+    const register = text.indexOf("Register-ScheduledTask -TaskName");
+    expect(elevation).toBeGreaterThan(-1);
+    expect(grant).toBeGreaterThan(elevation);
+    expect(grant).toBeLessThan(register);
+    const deny = text.indexOf("if ($held -contains $DenyBatchLogonRight)");
+    expect(deny).toBeGreaterThan(elevation);
+    expect(deny).toBeLessThan(grant);
+    const readBack = text.indexOf("-notcontains $BatchLogonRight");
+    expect(readBack).toBeGreaterThan(grant);
+    expect(readBack).toBeLessThan(register);
+    const promptAt = text.indexOf("Read-Host -AsSecureString");
+    expect(promptAt).toBeGreaterThan(readBack);
+    expect(promptAt).toBeLessThan(register);
+  });
+
+  it("windows/register-service.ps1's account-rights helper calls the three LSA account-rights functions and handles no secret", () => {
+    const text = psText("windows/register-service.ps1");
+    const start = text.indexOf("$AccountRightsSource = @'\n");
+    const end = text.indexOf("\n'@\n", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const helper = text.slice(start, end);
+    for (const call of [
+      "LsaEnumerateAccountRights",
+      "LsaAddAccountRights",
+      "LsaRemoveAccountRights",
+    ]) {
+      expect(helper.includes(call), call).toBe(true);
+    }
+    expect(helper).toContain("LsaRemoveAccountRights(policy, SidBytes(sid), false, rights, 1)");
+    expect(/password|plain|credential|securestring|logonuser/i.test(helper)).toBe(false);
+  });
+
+  it("windows/register-service.ps1 -Unregister takes the account name alone, checks elevation itself, and only then removes the task and the right", () => {
+    const text = psText("windows/register-service.ps1");
+    const branch = text.indexOf("if ($Unregister) {");
+    expect(branch).toBeGreaterThan(text.indexOf("cnotmatch"));
+    const refusal = text.indexOf("-Unregister takes -VaultUser alone");
+    const elevation = text.indexOf("if (-not (Test-Elevated))");
+    expect(refusal).toBeGreaterThan(branch);
+    expect(refusal).toBeLessThan(elevation);
+    expect(text.indexOf("Unregister-ScheduledTask -TaskName $TaskName")).toBeGreaterThan(elevation);
+    expect(text.indexOf("Invoke-AccountRights 'remove'")).toBeGreaterThan(elevation);
+    expect(text).toContain(
+      "Get-ScheduledTask -TaskName $TaskName -TaskPath '\\' -ErrorAction SilentlyContinue",
+    );
+    expect(text).toContain(
+      "Unregister-ScheduledTask -TaskName $TaskName -TaskPath '\\' -Confirm:$false",
+    );
+  });
+});
+
+/** The `run:` block of e2e.yml's task smoke step as lines without the block's indentation, read by text from the step's `name:` line; empty when the step or its block is not where it stands. */
+function taskSmokeStep(): string[] {
+  const lines = readFileSync(resolve(repoRoot, ".github", "workflows", "e2e.yml"), "utf8").split(
+    /\r?\n/,
+  );
+  const stepAt = lines.indexOf(
+    "      - name: Register, start and stop the daemon as a startup task (the Password-logon cell)",
+  );
+  const run = lines.indexOf("        run: |", stepAt);
+  if (stepAt < 0 || run < 0 || lines.slice(stepAt + 1, run).some((l) => l.startsWith("      - "))) {
+    return [];
+  }
+  const indent = /^ +/.exec(lines[run + 1] ?? "")?.[0] ?? "";
+  if (indent.length <= 8) return [];
+  const block: string[] = [];
+  for (const line of lines.slice(run + 1)) {
+    if (line.trim() !== "" && !line.startsWith(indent)) break;
+    block.push(line.slice(indent.length));
+  }
+  return block;
+}
+
+describe("e2e.yml's task smoke step (the Password-logon cell, its PowerShell read as text)", () => {
+  it("the step's last statement is $global:LASTEXITCODE = 0, and Invoke-Diagnostic resets it after its try / catch (a native exit code a diagnostic leaves is never the step's status)", () => {
+    const block = taskSmokeStep();
+    expect(block.filter((l) => l.trim() !== "").at(-1)).toBe("$global:LASTEXITCODE = 0");
+    const text = block.join("\n");
+    const start = text.indexOf("function Invoke-Diagnostic(");
+    const end = text.indexOf("\n}\n", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const diagnostic = text.slice(start, end);
+    const guarded = diagnostic.indexOf("\n  try { & $Body } catch {");
+    expect(guarded).toBeGreaterThan(-1);
+    expect(diagnostic.indexOf("\n  $global:LASTEXITCODE = 0", guarded + 1)).toBeGreaterThan(
+      guarded,
+    );
+  });
+
+  it("no statement that writes to the job log names a password variable, and the batch logon's unmanaged copy of the vault account's password is zeroed in a finally", () => {
+    const block = taskSmokeStep();
+    const text = block.join("\n");
+    for (const secret of [
+      "$vaultSecure",
+      "$password",
+      "$smokePassword",
+      "$InputText",
+      "$line",
+      "$bytes",
+      "$env:HARPOC_TWO_USER_VAULT_PASSWORD",
+    ]) {
+      expect(text.includes(secret), secret).toBe(true);
+    }
+    const names =
+      /\$\{?(?:\w+:)?(vaultSecure|password|smokePassword|InputText|line|bytes)\b|HARPOC_TWO_USER_VAULT_PASSWORD/i;
+    const writes =
+      /\b(Write-(Output|Host|Warning|Error|Information|Verbose|Debug)|Out-(String|Host|Default)|throw)\b|(?<![\w.$:-])(echo|write)(?![\w-])|\[(System\.)?Console\]::((Out|Error)\.)?Write|^\s*(\$\{?[\w:]+\}?|"[^"]*"|'[^']*')\s*$/i;
+    const statements = block.filter((l) => !/^\s*#/.test(l));
+    expect(statements.filter((l) => writes.test(l)).length).toBeGreaterThan(0);
+    expect(statements.filter((l) => names.test(l)).length).toBeGreaterThan(0);
+    expect(statements.filter((l) => writes.test(l) && names.test(l))).toEqual([]);
+    expect(text.split("SecureStringTo").length - 1).toBe(1);
+    const probe = text.indexOf("function Test-BatchLogon {");
+    const probeEnd = text.indexOf("\n}\n", probe);
+    expect(probe).toBeGreaterThan(-1);
+    expect(probeEnd).toBeGreaterThan(probe);
+    expect(text.slice(probe, probeEnd)).toContain(
+      "\n  $password = [System.Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($vaultSecure)\n" +
+        "  try { $code = [HarpocSmokeLogon]::Batch($vaultUser, $password) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($password) }\n",
+    );
+  });
 });
 
 /** One argument as the Windows C runtime reads it back (the scripts' ConvertTo-Argument, for paths without quotes). */
@@ -481,6 +612,7 @@ describe.skipIf(process.platform !== "win32")(
       expect(run.stdout.trim().split(/\r?\n/)).toEqual([
         "task Harpoc",
         `principal ${process.env["COMPUTERNAME"] ?? ""}\\harpoc (logon type Password, run level Limited)`,
+        "right SeBatchLogonRight (Log on as a batch job), granted to the principal unless held",
         `execute ${process.execPath}`,
         `argument ${argument}`,
         `working directory ${base}`,
@@ -489,6 +621,40 @@ describe.skipIf(process.platform !== "win32")(
         "dry run: nothing registered",
       ]);
       expect(existsSync(base)).toBe(false);
+    }, 210_000);
+
+    it("register-service.ps1's account-rights helper compiles under the pinned host and lists an account's own rights without a change", () => {
+      const sids = elevated ? ["S-1-0-0", "S-1-5-32-544"] : ["S-1-0-0"];
+      const run = spawnSync(
+        POWERSHELL,
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "$ErrorActionPreference='Stop';$t=$null;$e=$null;$a=[System.Management.Automation.Language.Parser]::ParseFile($env:HARPOC_PS1,[ref]$t,[ref]$e);" +
+            "$s=$a.Find({param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$AccountRightsSource'},$true);" +
+            "Add-Type -TypeDefinition $s.Right.Expression.Value;" +
+            "foreach($sid in $env:HARPOC_SIDS -split ','){[Console]::Out.WriteLine($sid+' '+@([Harpoc.Deploy.AccountRights]::Enumerate($sid)).Count)}",
+        ],
+        {
+          shell: false,
+          windowsHide: true,
+          encoding: "utf8",
+          timeout: PS1_TIMEOUT_MS,
+          env: {
+            ...recipeEnvironment(),
+            HARPOC_PS1: resolve(deployRoot, "windows/register-service.ps1"),
+            HARPOC_SIDS: sids.join(","),
+          },
+        },
+      );
+      expect(run.error).toBeUndefined();
+      expect(run.stderr).toBe("");
+      expect(run.status).toBe(0);
+      const lines = run.stdout.trim().split(/\r?\n/);
+      expect(lines.length).toBe(sids.length);
+      expect(lines[0]).toBe("S-1-0-0 0");
+      if (elevated) expect(lines[1]).toMatch(/^S-1-5-32-544 [1-9]\d*$/);
     }, 210_000);
 
     it.each([
@@ -548,6 +714,16 @@ describe.skipIf(process.platform !== "win32")(
         says: "-IssueToken: not a spec",
       },
       {
+        script: "register-service.ps1",
+        args: () => ["-Unregister", "-DryRun"],
+        says: "-Unregister takes -VaultUser alone",
+      },
+      {
+        script: "register-service.ps1",
+        args: () => ["-Unregister", "-ProgramData", join(root, "ProgramData-unregister")],
+        says: "register-service.ps1: -Unregister takes -VaultUser alone",
+      },
+      {
         script: "enroll-unlock-key.ps1",
         args: () => ["-Out", "relative.dpapi"],
         says: "-Out must be an absolute path",
@@ -570,7 +746,8 @@ describe.skipIf(process.platform !== "win32")(
     );
 
     // Elevated, the scripts pass their administrator check and would create the account, the
-    // directories and the task: the runners run elevated, so this row is the desktop's.
+    // directories and the task, and `-Unregister` would remove the task and the right: the
+    // runners run elevated, so this row is the desktop's.
     it("with valid arguments each script stops at its administrator check for a non-elevated user (exit 1, nothing created)", (ctx) => {
       if (elevated) ctx.skip();
       const programData = join(root, "ProgramData-valid");
@@ -582,6 +759,7 @@ describe.skipIf(process.platform !== "win32")(
           "register-service.ps1",
           ["-Node", process.execPath, "-Cli", cli, "-ProgramData", programData],
         ],
+        ["register-service.ps1", ["-Unregister"]],
         [
           "enroll-unlock-key.ps1",
           ["-Node", process.execPath, "-Cli", cli, "-Out", join(root, "unlock.key.dpapi")],
@@ -595,7 +773,7 @@ describe.skipIf(process.platform !== "win32")(
       }
       expect(existsSync(base)).toBe(false);
       expect(existsSync(join(root, "unlock.key.dpapi"))).toBe(false);
-    }, 570_000);
+    }, 750_000);
 
     // Elevated, the layout is readable and the scripts go on past their checks: like the row above, the desktop's.
     it("on the layout the recipe leaves (harpoc and harpoc\\vault open to SYSTEM and Administrators alone) install-two-identity.ps1 and enroll-unlock-key.ps1 stop at their administrator check for a non-elevated user (exit 1, no PowerShell text)", (ctx) => {

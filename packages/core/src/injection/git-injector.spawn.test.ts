@@ -25,7 +25,10 @@ import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { sshHardeningArgs } from "./ssh-common.js";
 import { system32Path } from "../win32-paths.js";
 
-vi.mock("./spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
+vi.mock("./spawn-captured.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./spawn-captured.js")>();
+  return { ...actual, spawnCaptured: vi.fn() };
+});
 
 // On Windows the ephemeral agent listens on a named pipe, which only the native
 // Win32-OpenSSH client consumes through SSH_AUTH_SOCK; an MSYS build (the
@@ -1677,8 +1680,9 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
         expect(words[iIdx + 1]).toContain("$probe");
         const khPath = /^UserKnownHostsFile="([^"]+)"$/.exec(khWord as string)?.[1] as string;
         const hardening = sshHardeningArgs(khPath, words[iIdx + 1] as string, 120);
-        expect(words.slice(1, 1 + hardening.length)).toEqual(hardening);
-        expect(words).toHaveLength(1 + hardening.length);
+        expect(words.slice(1, 3)).toEqual(["-o", "HostName=github.com"]);
+        expect(words.slice(3, 3 + hardening.length)).toEqual(hardening);
+        expect(words).toHaveLength(3 + hardening.length);
       } finally {
         restoreTempEnv(saved);
         rmSync(spaced, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });

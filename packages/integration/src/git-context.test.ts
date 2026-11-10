@@ -261,6 +261,34 @@ describeGit("Git context (both mechanisms, §4.5.6)", () => {
     },
   );
 
+  // E-24: a git-over-SSH host that is no host name — an `@`, a `%`, a space,
+  // a letter outside ASCII — is refused before the allowlist is consulted,
+  // with the pre-flight's row: the text never becomes a row's `host`. With
+  // the check missing, each meets the allowlist instead (HOST_NOT_ALLOWED,
+  // a row carrying the text), still before any spawn.
+  const NOT_A_HOST: ReadonlyArray<readonly [GitOperation, boolean, string, string]> = [
+    ["clone", false, "a@b@github.com:path", "b@github.com"],
+    ["pull", true, "ssh://%h.github.com/p", "%h.github.com"],
+    ["push", true, "git@github.com #x:p", "github.com #x"],
+    ["fetch", true, "ssh://github.com%2f.x.invalid/p", "github.com%2f"],
+    ["ls-remote", false, "git@bücher.invalid:p", "bücher.invalid"],
+  ];
+
+  it.each(NOT_A_HOST)(
+    "E-24: %s refuses a repository whose SSH host is no host name",
+    async (operation, tree, repository, judged) => {
+      await expectAuditedRefusal(
+        {
+          type: "git",
+          operation,
+          repository,
+          ...(tree ? { working_directory: vault.tmpDir } : {}),
+        },
+        [judged],
+      );
+    },
+  );
+
   it("I1: the token never appears in a rejection", async () => {
     const err = await expectVaultError(
       () =>

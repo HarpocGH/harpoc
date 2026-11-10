@@ -25,7 +25,10 @@ import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { system32Path } from "../win32-paths.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
-vi.mock("./spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
+vi.mock("./spawn-captured.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./spawn-captured.js")>();
+  return { ...actual, spawnCaptured: vi.fn() };
+});
 
 // The SSH row resolves ssh as the injector does; on Windows only the native
 // Win32-OpenSSH client is accepted, so its directory leads the PATH (as in

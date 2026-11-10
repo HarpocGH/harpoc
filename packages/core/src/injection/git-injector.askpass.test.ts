@@ -7,7 +7,10 @@ import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { system32Path } from "../win32-paths.js";
 
-vi.mock("./spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
+vi.mock("./spawn-captured.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./spawn-captured.js")>();
+  return { ...actual, spawnCaptured: vi.fn() };
+});
 // allowed.example resolves nowhere; the partial mock lets it past the DNS step of
 // validateUrl so the repository URL can carry the ports these cases turn on.
 vi.mock("./url-validator.js", async (importOriginal) => {

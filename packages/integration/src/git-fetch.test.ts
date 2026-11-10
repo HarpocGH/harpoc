@@ -87,8 +87,8 @@ describeGit("Git context — fetch through the vault (M6)", () => {
       .filter(Boolean);
 
   function filesUnder(dir: string): string[] {
-    return readdirSync(dir).flatMap((name) => {
-      const path = join(dir, name);
+    return readdirSync(dir).flatMap((entry) => {
+      const path = join(dir, entry);
       return statSync(path).isDirectory() ? filesUnder(path) : [path];
     });
   }

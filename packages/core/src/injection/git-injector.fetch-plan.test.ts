@@ -12,6 +12,7 @@ import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
+import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { GitInjector, fetchRefspecPlan, parseFetchRefspec } from "./git-injector.js";
@@ -20,7 +21,10 @@ import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { system32Path } from "../win32-paths.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
-vi.mock("./spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
+vi.mock("./spawn-captured.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./spawn-captured.js")>();
+  return { ...actual, spawnCaptured: vi.fn() };
+});
 
 // The SSH row resolves ssh as the injector does; on Windows only the native
 // Win32-OpenSSH client is accepted, so its directory leads the PATH (as in
@@ -288,9 +292,14 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       "-f",
       "-t",
       "-n",
+      "-o",
+      "-x",
+      "-o",
+      "-4",
       "-4",
       "-6",
       "-ob",
+      "-o4",
     ];
     await injector.executeWithSecret(
       { type: "git", operation: "fetch", repository: REPO, args, working_directory: wd },
@@ -328,9 +337,12 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       "--server-option=a",
       "--tags",
       "--no-tags",
+      "--server-option=-x",
+      "--server-option=-4",
       "--ipv4",
       "--ipv6",
       "--server-option=b",
+      "--server-option=4",
       "--",
       REPO,
       "+refs/heads/*:refs/heads/*",
@@ -407,6 +419,37 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
     expect(calls().map(([, a]) => gitSubcommand(a))).toEqual(["rev-parse", "config"]);
   });
 
+  it("fetch: a failed remote lookup is returned redacted and flagged, before any credential-bearing step (RG-6)", async () => {
+    const user = Buffer.from(secret()).toString("utf8").split(":")[0] as string;
+    spawnMock.mockImplementation((cmd, args, opts) => {
+      const sub = gitSubcommand(args);
+      if (sub === "config") {
+        return Promise.resolve({
+          ...OK_RESULT,
+          exit_code: 128,
+          stderr: `fatal: unable to read config file '/home/${user}/wd/.git/config'\n`,
+        });
+      }
+      if (MOCKED.includes(sub ?? "")) return Promise.resolve(OK_RESULT);
+      return realSpawnCaptured(cmd, args, opts);
+    });
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    const result = await audited.executeWithSecret(
+      { type: "git", operation: "fetch", repository: REPO, working_directory: wd },
+      secret(),
+      policy(),
+      undefined,
+      "secret-1",
+    );
+    expect(result.exit_code).toBe(128);
+    expect(JSON.stringify(result).includes(user)).toBe(false);
+    expect(result.stderr.includes("[REDACTED]")).toBe(true);
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail.sanitized).toBe(true);
+    expect(calls().map(([, a]) => gitSubcommand(a))).toEqual(["rev-parse", "config"]);
+  });
+
   it("fetch: a remote whose name holds a `*` is no plain ref name, refused before any credential-bearing step", async () => {
     execFileSync(
       GIT as string,
@@ -428,6 +471,63 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
     expect(err.message).toBe(`the working tree's remote for ${REPO} is not a plain ref name`);
     expect(calls().map(([, a]) => gitSubcommand(a))).toEqual(["rev-parse", "config"]);
   });
+
+  it.each([
+    [
+      "pull",
+      [
+        ["rev-parse", "none"],
+        ["for-each-ref", "none"],
+        ["fetch", "list"],
+        ["pull", "list"],
+      ],
+    ],
+    [
+      "push",
+      [
+        ["rev-parse", "none"],
+        ["symbolic-ref", "none"],
+        ["for-each-ref", "none"],
+        ["push", "list"],
+      ],
+    ],
+    [
+      "fetch",
+      [
+        ["rev-parse", "none"],
+        ["config", "none"],
+        ["for-each-ref", "none"],
+        ["fetch", "list"],
+        ["fetch", "list"],
+      ],
+    ],
+  ] as const)(
+    "%s: the working-tree probes carry no redaction list; the network step and the final local step carry the operation's (RG-6)",
+    async (operation, plan) => {
+      spawnMock.mockImplementation((cmd, args, opts) =>
+        ["fetch", "push", "pull"].includes(gitSubcommand(args) ?? "")
+          ? Promise.resolve(OK_RESULT)
+          : realSpawnCaptured(cmd, args, opts),
+      );
+      await injector.executeWithSecret(
+        { type: "git", operation, repository: REPO, working_directory: wd },
+        secret(),
+        policy(),
+        undefined,
+      );
+      const list = JSON.stringify([TOKEN, "git-user"]);
+      expect(
+        calls().map(([, args, opts]) => [
+          gitSubcommand(args),
+          (opts.redact ?? []).length === 0
+            ? "none"
+            : JSON.stringify(opts.redact) === list
+              ? "list"
+              : "other",
+        ]),
+      ).toEqual(plan);
+    },
+  );
 
   it("ls-remote refuses a working_directory and a fetch requires one, before any step", async () => {
     const err = await expectVaultError(

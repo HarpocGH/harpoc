@@ -36,7 +36,10 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
-vi.mock("./spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
+vi.mock("./spawn-captured.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./spawn-captured.js")>();
+  return { ...actual, spawnCaptured: vi.fn() };
+});
 
 const GIT = resolveExecutable("git", controlledPathDirs());
 // Skipped where git does not resolve: the working-tree probes run real git.

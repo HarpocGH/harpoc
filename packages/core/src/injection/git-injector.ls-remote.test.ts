@@ -44,7 +44,13 @@ describeGit("Git ls-remote through an empty relay — real git over smart HTTP (
   const saved: Record<string, string | undefined> = {};
 
   function git(cwd: string, ...args: string[]): string {
-    return execFileSync(GIT as string, args, { cwd, env: gitEnv, encoding: "utf8" });
+    return execFileSync(GIT as string, args, {
+      cwd,
+      env: gitEnv,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 20_000,
+    });
   }
 
   function quiet<T>(run: () => T): T {
@@ -55,7 +61,7 @@ describeGit("Git ls-remote through an empty relay — real git over smart HTTP (
     }
   }
 
-  const url = (name: string) => `http://127.0.0.1:${String(server.port)}/${name}`;
+  const url = (repo: string) => `http://127.0.0.1:${String(server.port)}/${repo}`;
 
   function policy(): InjectionPolicy {
     return {
@@ -107,9 +113,9 @@ describeGit("Git ls-remote through an empty relay — real git over smart HTTP (
     git(seed, "commit", "-q", "-m", "c1");
     git(seed, "tag", "-a", "-m", "annotated", "v1");
     quiet(() => git(seed, "branch", TOKEN));
-    git(srv, "clone", "-q", "--bare", seed, "repo.git");
+    quiet(() => git(srv, "clone", "-q", "--bare", seed, "repo.git"));
     git(srv, "init", "-q", "--bare", "-b", "main", "empty.git");
-    git(srv, "clone", "-q", "--bare", seed, "many.git");
+    quiet(() => git(srv, "clone", "-q", "--bare", seed, "many.git"));
     const head = git(seed, "rev-parse", "HEAD").trim();
     const lines = Array.from(
       { length: 9000 },

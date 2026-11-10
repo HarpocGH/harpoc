@@ -14,6 +14,7 @@ param(
   [string[]]$IssueToken = @(),
   [SecureString]$Password,
   [switch]$DryRun,
+  [switch]$Unregister,
   [switch]$Help
 )
 Set-StrictMode -Version Latest
@@ -21,10 +22,13 @@ $ErrorActionPreference = 'Stop'
 
 $Prog = 'register-service.ps1'
 $TaskName = 'Harpoc'
+$BatchLogonRight = 'SeBatchLogonRight'
+$DenyBatchLogonRight = 'SeDenyBatchLogonRight'
 $Usage = @"
 Usage: $Prog [-VaultUser harpoc] [-Node <node.exe>] [-Cli <the cli package directory>]
          [-ProgramData <path>] [-Proxy] [-SshAgent] [-IssueToken <spec>] [-DryRun]
          [-Password <SecureString>]
+       $Prog -Unregister [-VaultUser harpoc]
 
 Registers the Scheduled Task '$TaskName': at startup, as the local account <VaultUser>
 (default harpoc) with its password stored by the Task Scheduler (logon type Password), it runs
@@ -44,8 +48,177 @@ SecureString and handed to Register-ScheduledTask alone; no secret is printed. A
 replaces the task. For several -IssueToken specs use -Command "& '<this script>' -IssueToken
 '<spec>','<spec>'" (-File passes one string per parameter).
 
+The Task Scheduler starts a task with a stored password only if its account may log on as a
+batch job, which a member of Users alone may not: before it registers the task the script
+grants <VaultUser> the user right Log on as a batch job ($BatchLogonRight) in the local
+security policy, unless the account holds it already, and stops if the account itself is
+denied it ($DenyBatchLogonRight). A denial that reaches the account through a group, or a
+domain policy that rewrites the user rights, still keeps the task from starting.
+-Unregister removes the task and that right (the account, the layout and the sealed key stay,
+and a running daemon is not ended: lock and stop it first). It takes the right from the
+account also where the account held it before this script ran. The right is granted before
+the password is asked for and stays granted if the registration then fails or is aborted,
+until -Unregister removes it.
+
 Exit status: 0 done, 1 not elevated or a command failed, 2 usage error.
 "@
+
+# The user rights an account holds itself, by SID, through the Local Security Authority
+# (LsaEnumerateAccountRights, LsaAddAccountRights, LsaRemoveAccountRights): Windows PowerShell
+# 5.1 has no cmdlet for them. No secret passes through it.
+$AccountRightsSource = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+
+namespace Harpoc.Deploy
+{
+    public static class AccountRights
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LsaUnicodeString
+        {
+            public ushort Length;
+            public ushort MaximumLength;
+            public IntPtr Buffer;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LsaObjectAttributes
+        {
+            public uint Length;
+            public IntPtr RootDirectory;
+            public IntPtr ObjectName;
+            public uint Attributes;
+            public IntPtr SecurityDescriptor;
+            public IntPtr SecurityQualityOfService;
+        }
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaOpenPolicy(IntPtr systemName, ref LsaObjectAttributes attributes, uint access, out IntPtr policy);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaEnumerateAccountRights(IntPtr policy, byte[] sid, out IntPtr rights, out uint count);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaAddAccountRights(IntPtr policy, byte[] sid, LsaUnicodeString[] rights, uint count);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaRemoveAccountRights(IntPtr policy, byte[] sid, [MarshalAs(UnmanagedType.U1)] bool all, LsaUnicodeString[] rights, uint count);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaFreeMemory(IntPtr buffer);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaClose(IntPtr handle);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaNtStatusToWinError(uint status);
+
+        private const uint PolicyCreateAccount = 0x00000010;
+        private const uint PolicyLookupNames = 0x00000800;
+        private const uint ErrorFileNotFound = 2;
+
+        private static byte[] SidBytes(string sid)
+        {
+            SecurityIdentifier identifier = new SecurityIdentifier(sid);
+            byte[] bytes = new byte[identifier.BinaryLength];
+            identifier.GetBinaryForm(bytes, 0);
+            return bytes;
+        }
+
+        private static void Check(uint status, string call)
+        {
+            if (status == 0) return;
+            int error = (int)LsaNtStatusToWinError(status);
+            throw new Win32Exception(error, call + " failed (Win32 error " + error + ")");
+        }
+
+        private static IntPtr Open(uint access)
+        {
+            LsaObjectAttributes attributes = new LsaObjectAttributes();
+            attributes.Length = (uint)Marshal.SizeOf(typeof(LsaObjectAttributes));
+            IntPtr policy;
+            Check(LsaOpenPolicy(IntPtr.Zero, ref attributes, access, out policy), "LsaOpenPolicy");
+            return policy;
+        }
+
+        public static string[] Enumerate(string sid)
+        {
+            IntPtr policy = Open(PolicyLookupNames);
+            try
+            {
+                IntPtr buffer;
+                uint count;
+                uint status = LsaEnumerateAccountRights(policy, SidBytes(sid), out buffer, out count);
+                if (status != 0 && LsaNtStatusToWinError(status) == ErrorFileNotFound) return new string[0];
+                Check(status, "LsaEnumerateAccountRights");
+                try
+                {
+                    string[] names = new string[count];
+                    int size = Marshal.SizeOf(typeof(LsaUnicodeString));
+                    for (int i = 0; i < names.Length; i++)
+                    {
+                        LsaUnicodeString item = (LsaUnicodeString)Marshal.PtrToStructure(new IntPtr(buffer.ToInt64() + (long)i * size), typeof(LsaUnicodeString));
+                        names[i] = Marshal.PtrToStringUni(item.Buffer, item.Length / 2);
+                    }
+                    return names;
+                }
+                finally
+                {
+                    LsaFreeMemory(buffer);
+                }
+            }
+            finally
+            {
+                LsaClose(policy);
+            }
+        }
+
+        private static void Change(string sid, string right, bool add)
+        {
+            IntPtr policy = Open(PolicyLookupNames | PolicyCreateAccount);
+            try
+            {
+                LsaUnicodeString[] rights = new LsaUnicodeString[1];
+                rights[0].Buffer = Marshal.StringToHGlobalUni(right);
+                rights[0].Length = (ushort)(right.Length * 2);
+                rights[0].MaximumLength = (ushort)(right.Length * 2 + 2);
+                try
+                {
+                    if (add)
+                    {
+                        Check(LsaAddAccountRights(policy, SidBytes(sid), rights, 1), "LsaAddAccountRights");
+                        return;
+                    }
+                    uint status = LsaRemoveAccountRights(policy, SidBytes(sid), false, rights, 1);
+                    if (status != 0 && LsaNtStatusToWinError(status) == ErrorFileNotFound) return;
+                    Check(status, "LsaRemoveAccountRights");
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(rights[0].Buffer);
+                }
+            }
+            finally
+            {
+                LsaClose(policy);
+            }
+        }
+
+        public static void Add(string sid, string right)
+        {
+            Change(sid, right, true);
+        }
+
+        public static void Remove(string sid, string right)
+        {
+            Change(sid, right, false);
+        }
+    }
+}
+'@
 
 function Stop-WithError([string]$Message, [int]$Code) {
   [Console]::Error.WriteLine("${Prog}: $Message")
@@ -55,6 +228,20 @@ function Stop-WithError([string]$Message, [int]$Code) {
 function Test-Elevated {
   $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
   return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# list, add or remove a user right of the account with this SID; a failure ends the script (exit 1).
+function Invoke-AccountRights([string]$Operation, [string]$Sid, [string]$Right) {
+  try {
+    if ($null -eq ('Harpoc.Deploy.AccountRights' -as [type])) { Add-Type -TypeDefinition $AccountRightsSource }
+    if ($Operation -eq 'list') { return @([Harpoc.Deploy.AccountRights]::Enumerate($Sid)) }
+    if ($Operation -eq 'add') { [Harpoc.Deploy.AccountRights]::Add($Sid, $Right) }
+    if ($Operation -eq 'remove') { [Harpoc.Deploy.AccountRights]::Remove($Sid, $Right) }
+  } catch {
+    $cause = $_.Exception
+    while ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
+    Stop-WithError "could not $Operation the user rights of ${Sid}: $($cause.Message)" 1
+  }
 }
 
 # One argument as the Windows C runtime parses a command line (CommandLineToArgvW's rules).
@@ -84,6 +271,31 @@ if ($Help) {
 if ($VaultUser -cnotmatch '^[a-z0-9_][a-z0-9_-]{0,19}$') {
   Stop-WithError "not an account name (lowercase letters, digits, '_', '-'; not dash-led; at most 20): $VaultUser" 2
 }
+$principalName = "$env:COMPUTERNAME\$VaultUser"
+
+if ($Unregister) {
+  if ($DryRun -or $Proxy -or $SshAgent -or $IssueToken.Count -gt 0 -or $Node -ne '' -or $Cli -ne '' -or $null -ne $Password -or $PSBoundParameters.ContainsKey('ProgramData')) {
+    Stop-WithError '-Unregister takes -VaultUser alone' 2
+  }
+  if (-not (Test-Elevated)) { Stop-WithError 'must run elevated (an Administrator PowerShell)' 1 }
+  if ($null -ne (Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction SilentlyContinue)) {
+    Unregister-ScheduledTask -TaskName $TaskName -TaskPath '\' -Confirm:$false
+    [Console]::Out.WriteLine("task $TaskName unregistered")
+  } else {
+    [Console]::Out.WriteLine("task $TaskName is not registered")
+  }
+  $account = Get-LocalUser -Name $VaultUser -ErrorAction SilentlyContinue
+  if ($null -eq $account) {
+    [Console]::Out.WriteLine("no local account ${VaultUser}: no user right to remove")
+  } elseif (@(Invoke-AccountRights 'list' $account.SID.Value '') -contains $BatchLogonRight) {
+    Invoke-AccountRights 'remove' $account.SID.Value $BatchLogonRight
+    [Console]::Out.WriteLine("right $BatchLogonRight (Log on as a batch job) removed from $principalName")
+  } else {
+    [Console]::Out.WriteLine("right $BatchLogonRight (Log on as a batch job) is not held by $principalName")
+  }
+  exit 0
+}
+
 if ([string]::IsNullOrEmpty($ProgramData) -or -not [System.IO.Path]::IsPathRooted($ProgramData)) {
   Stop-WithError "-ProgramData must be an absolute path (default `$env:ProgramData)" 2
 }
@@ -117,12 +329,12 @@ if ($Proxy) { $arguments += '--proxy' }
 if ($SshAgent) { $arguments += '--ssh-agent' }
 foreach ($spec in $IssueToken) { $arguments += @('--issue-token', $spec) }
 $argumentLine = ($arguments | ForEach-Object { ConvertTo-Argument $_ }) -join ' '
-$principalName = "$env:COMPUTERNAME\$VaultUser"
 $settingsLine = 'ExecutionTimeLimit=PT0S RestartCount=2 RestartInterval=PT1M MultipleInstances=IgnoreNew StartWhenAvailable AllowStartIfOnBatteries DontStopIfGoingOnBatteries'
 
 if ($DryRun) {
   [Console]::Out.WriteLine("task $TaskName")
   [Console]::Out.WriteLine("principal $principalName (logon type Password, run level Limited)")
+  [Console]::Out.WriteLine("right $BatchLogonRight (Log on as a batch job), granted to the principal unless held")
   [Console]::Out.WriteLine("execute $Node")
   [Console]::Out.WriteLine("argument $argumentLine")
   [Console]::Out.WriteLine("working directory $base")
@@ -133,8 +345,22 @@ if ($DryRun) {
 }
 
 if (-not (Test-Elevated)) { Stop-WithError 'must run elevated (an Administrator PowerShell)' 1 }
-if ($null -eq (Get-LocalUser -Name $VaultUser -ErrorAction SilentlyContinue)) {
+$account = Get-LocalUser -Name $VaultUser -ErrorAction SilentlyContinue
+if ($null -eq $account) {
   Stop-WithError "no such local account: $VaultUser (install-two-identity.ps1 creates it)" 2
+}
+$held = @(Invoke-AccountRights 'list' $account.SID.Value '')
+if ($held -contains $DenyBatchLogonRight) {
+  Stop-WithError "$principalName is denied Log on as a batch job ($DenyBatchLogonRight): the task could not start; remove the denial" 1
+}
+if ($held -contains $BatchLogonRight) {
+  [Console]::Out.WriteLine("right $BatchLogonRight (Log on as a batch job) already held by $principalName")
+} else {
+  Invoke-AccountRights 'add' $account.SID.Value $BatchLogonRight
+  if (@(Invoke-AccountRights 'list' $account.SID.Value '') -notcontains $BatchLogonRight) {
+    Stop-WithError "the grant of $BatchLogonRight to $principalName did not take: the task could not start" 1
+  }
+  [Console]::Out.WriteLine("right $BatchLogonRight (Log on as a batch job) granted to $principalName")
 }
 if ($null -eq $Password) {
   $Password = Read-Host -AsSecureString -Prompt "Windows password of $principalName (stored by the Task Scheduler)"

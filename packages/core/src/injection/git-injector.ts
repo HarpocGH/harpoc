@@ -8,6 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { isIPv6 } from "node:net";
 import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ConnectionConfig, GitAction, GitResult, InjectionPolicy } from "@harpoc/shared";
@@ -27,7 +28,7 @@ import {
   resolveAndMatchCommand,
   resolveExecutable,
 } from "./allowlist.js";
-import { spawnCaptured } from "./spawn-captured.js";
+import { redactCaptured, spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
 import {
@@ -401,6 +402,9 @@ function fetchRefspecsOf(action: GitAction): FetchRefspec[] {
  *  - Target allowlist on both transports (URL patterns for HTTPS, host patterns
  *    for SSH — fail-safe deny), plus SSRF + HTTPS-only for HTTPS remotes and
  *    strict pinned host-key verification for SSH remotes.
+ *  - The SSH host the allowlist judged is the host ssh dials: it leads
+ *    GIT_SSH_COMMAND as `-o HostName=` (sshDialHost), so the destination git
+ *    derives from the address by its own rules names the user and the port at most.
  *  - Command allowlist: the git binary is pinned to a resolved absolute path.
  *  - The credential never enters a git process that reads the caller's
  *    repository config (S1): clone, pull, push, fetch and ls-remote run their
@@ -597,6 +601,13 @@ export class GitInjector {
       this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
       throw VaultError.invalidGitConfig("could not parse SSH host from repository");
     }
+    const dialHost = sshDialHost(host);
+    if (!dialHost) {
+      this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
+      throw VaultError.invalidGitConfig(
+        "SSH host of the repository must be a host name or an IPv6 literal",
+      );
+    }
     // Host allowlist — deny-by-default (an empty list refuses).
     if (!matchesHostAllowlist(host, policy.host_allowlist)) {
       this.audit(action, secretId, { host, error: "HOST_NOT_ALLOWED" }, false, attribution);
@@ -656,6 +667,8 @@ export class GitInjector {
       const env = isolateGitConfig(buildSshEnv(agent.authSock, policy.env_allowlist));
       env.GIT_SSH_COMMAND = toGitSshCommand([
         sshPath,
+        "-o",
+        `HostName=${dialHost}`,
         ...sshHardeningArgs(kh.file, identity.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
       ]);
       env.GIT_TERMINAL_PROMPT = "0";
@@ -875,6 +888,30 @@ function parseSshHost(repository: string): string | null {
   return m ? (m[1] ?? null) : null;
 }
 
+/** The ssh and sftp contexts' host charset (`sshHostSchema`), 255 characters at most. */
+const SSH_HOST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
+
+/**
+ * The host the vault's ssh is told to dial (`-o HostName=`), or null.
+ *
+ * git and ssh read an address by rules of their own — git's bracket rule
+ * (`@[` anywhere in the address), its percent-decoding of an `ssh://` URL
+ * before it looks for the authority's end, ssh's split of the destination at
+ * the last `@` — so the host the allowlist judged is not re-derived from what
+ * they make of it: ssh takes it from `HostName`, the first value it obtains,
+ * whatever host the destination names, and looks the host key up under it.
+ *
+ * `HostName` expands `%h` to the destination's host, ends at whitespace and
+ * reads ` #` as a comment, so only a host ssh reads back as itself is handed
+ * over: a name of letters, digits, `.`, `_` and `-`, or the IPv6 literal of
+ * an `ssh://` URL, without its brackets. Anything else is no SSH host.
+ */
+function sshDialHost(host: string): string | null {
+  if (SSH_HOST_NAME.test(host)) return host;
+  const literal = /^\[([0-9A-Fa-f:.]+)\]$/.exec(host)?.[1];
+  return literal !== undefined && isIPv6(literal) ? literal : null;
+}
+
 function parseGitCredential(value: Uint8Array): { user: string; password: string } {
   const s = Buffer.from(value).toString("utf8");
   const i = s.indexOf(":");
@@ -951,16 +988,29 @@ async function runPlan(
   opts: StepOptions,
 ): Promise<SpawnCapturedResult> {
   const deadline = Date.now() + opts.timeoutMs;
-  const step: GitStep = (args, cwd, env) =>
+  const spawnStep = (
+    args: string[],
+    cwd: string | undefined,
+    env: Record<string, string>,
+    redact: string[],
+  ) =>
     spawnCaptured(gitPath, args, {
       env,
       cwd,
       timeoutMs: Math.max(1, deadline - Date.now()),
-      redact: opts.redact,
+      redact,
       networkIsolation: opts.networkIsolation,
       fsIsolation: opts.fsIsolation,
       strictTreeExit: opts.strictTreeExit,
     });
+  const step: GitStep = (args, cwd, env) => spawnStep(args, cwd, env, opts.redact);
+  const probeStep: GitStep = async (args, cwd, env) => {
+    const r = await spawnStep(args, cwd, env, []);
+    if (succeeded(r)) return r;
+    const stdout = redactCaptured(r.stdout, opts.redact);
+    const stderr = redactCaptured(r.stderr, opts.redact);
+    return { ...r, stdout, stderr, redacted: stdout !== r.stdout || stderr !== r.stderr };
+  };
   const localEnv = baseGitEnv(policy.env_allowlist);
   localEnv.GIT_TERMINAL_PROMPT = "0";
   switch (action.operation) {
@@ -971,7 +1021,7 @@ async function runPlan(
     case "pull":
     case "push":
     case "fetch":
-      return runRelayed(action, hooksDir, networkConfig, networkEnv, localEnv, step);
+      return runRelayed(action, hooksDir, networkConfig, networkEnv, localEnv, step, probeStep);
   }
 }
 
@@ -1170,11 +1220,10 @@ async function runLsRemote(
 /**
  * The working tree's remote whose URL is the repository (RX-B9-4), from the
  * key names `git config --fixed-value` matched against it — git compares the
- * URL, so it is never read back through the output redaction, which replaces
- * a credential username the URL may carry (RX-B9-14): exactly one, and a name
- * that can stand in `refs/remotes/<name>/` (a name carrying the username
- * comes back redacted and is refused here). Anything else is refused rather
- * than guessed.
+ * URL, and the lookup is a probe, read unredacted (RG-6), so a URL or a
+ * remote name carrying the credential's username is found like any other:
+ * exactly one, and a name that can stand in `refs/remotes/<name>/`. Anything
+ * else is refused rather than guessed.
  */
 function remoteOf(listing: string, repository: string): string {
   const names = new Set<string>();
@@ -1209,7 +1258,9 @@ function remoteOf(listing: string, repository: string): string {
  * the agent socket; the one network step (`fetch` of the remote's HEAD or of
  * the fetch's refspecs, or the `push`) runs with `--git-dir` of the relay
  * repository the vault wrote (createRelayRepo). A step that fails ends the
- * operation with its result.
+ * operation with its result. The probes among them are read unredacted — the
+ * vault parses their output and returns it only on a failure, redacted then
+ * (RG-6).
  */
 async function runRelayed(
   action: GitAction,
@@ -1218,12 +1269,14 @@ async function runRelayed(
   networkEnv: Record<string, string>,
   localEnv: Record<string, string>,
   step: GitStep,
+  probeStep: GitStep,
 ): Promise<SpawnCapturedResult> {
   const wd = action.working_directory as string;
   const forced = forcedGitConfig(hooksDir);
   const local = (args: string[]) => step([...forced, ...args], wd, localEnv);
+  const localProbe = (args: string[]) => probeStep([...forced, ...args], wd, localEnv);
 
-  const probe = await local([
+  const probe = await localProbe([
     "rev-parse",
     "--path-format=absolute",
     "--git-path",
@@ -1240,11 +1293,11 @@ async function runRelayed(
 
   let head = `ref: ${RELAY_FETCHED_REF}`;
   if (action.operation === "push") {
-    const symbolic = await local(["symbolic-ref", "-q", "HEAD"]);
+    const symbolic = await localProbe(["symbolic-ref", "-q", "HEAD"]);
     if (symbolic.exit_code === 0) {
       head = `ref: ${symbolic.stdout.trim()}`;
     } else {
-      const detached = await local(["rev-parse", "--verify", "HEAD"]);
+      const detached = await localProbe(["rev-parse", "--verify", "HEAD"]);
       if (!succeeded(detached)) return detached;
       head = detached.stdout.trim();
     }
@@ -1252,7 +1305,7 @@ async function runRelayed(
 
   let refspecs: { network: string[]; local: string[] } | null = null;
   if (action.operation === "fetch") {
-    const remotes = await local([
+    const remotes = await localProbe([
       "config",
       "-z",
       "--name-only",
@@ -1274,7 +1327,7 @@ async function runRelayed(
     );
   }
 
-  const listed = await local(["for-each-ref", "--format=%(objectname) %(refname)"]);
+  const listed = await localProbe(["for-each-ref", "--format=%(objectname) %(refname)"]);
   if (!succeeded(listed)) return listed;
   if (listed.truncated) {
     throw VaultError.gitOperationFailed("the working tree's ref listing exceeds the output cap");

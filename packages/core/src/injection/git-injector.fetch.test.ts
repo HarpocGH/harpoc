@@ -58,7 +58,13 @@ describeGit("Git fetch through the relay — real git over smart HTTP (M6)", () 
   const saved: Record<string, string | undefined> = {};
 
   function git(cwd: string, ...args: string[]): string {
-    return execFileSync(GIT as string, args, { cwd, env: gitEnv, encoding: "utf8" });
+    return execFileSync(GIT as string, args, {
+      cwd,
+      env: gitEnv,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 20_000,
+    });
   }
 
   function quiet<T>(run: () => T): T {
@@ -69,7 +75,7 @@ describeGit("Git fetch through the relay — real git over smart HTTP (M6)", () 
     }
   }
 
-  const url = (name: string) => `http://127.0.0.1:${String(server.port)}/${name}`;
+  const url = (repo: string) => `http://127.0.0.1:${String(server.port)}/${repo}`;
 
   function policy(): InjectionPolicy {
     return {
@@ -364,17 +370,15 @@ describeGit("Git fetch through the relay — real git over smart HTTP (M6)", () 
     expect(oid(wd, "refs/remotes/origin/new")).toBe(remoteNew);
   });
 
-  it("a remote whose name carries the credential's username is refused, never guessed (RX-B9-14)", async () => {
+  it("a remote whose name carries the credential's username is found like any other (RG-6)", async () => {
     quiet(() => git(wd, "remote", "rename", "origin", `${USER}-fork`));
-    const before = refsOf();
-    const err = await expectVaultError(
-      () => fetchThroughInjector({}),
-      ErrorCode.INVALID_GIT_CONFIG,
-    );
-    expect(err.message).toBe(
-      `the working tree's remote for ${url("repo.git")} is not a plain ref name`,
-    );
-    expect(refsOf()).toEqual(before);
+    moveRemote();
+    const result = await fetchThroughInjector({});
+    expect(result.exit_code).toBe(0);
+    const landed = quiet(() => oid(wd, `refs/remotes/${USER}-fork/new`));
+    expect(landed).toBe(oid(join(srv, "repo.git"), "new"));
+    expect(JSON.stringify(result).includes(USER)).toBe(false);
+    expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
   });
 
   it("a submodule whose pointer the fetched commits move is left to the caller: the local fetch does not recurse (RX-B9-16)", async () => {

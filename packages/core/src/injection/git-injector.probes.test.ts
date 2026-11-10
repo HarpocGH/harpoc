@@ -1,0 +1,363 @@
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { GitResult, InjectionPolicy } from "@harpoc/shared";
+import { VaultError } from "@harpoc/shared";
+import type { AuditLogger } from "../audit/audit-logger.js";
+import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { startGitSmartHttp } from "./__fixtures__/git-smart-http.js";
+import type { Listener } from "./__fixtures__/git-smart-http.js";
+import { tierRequired } from "./__fixtures__/platform-tier.js";
+import { GitInjector } from "./git-injector.js";
+
+const GIT = resolveExecutable("git", controlledPathDirs());
+// Skipped where git does not resolve.
+const describeGit = describe.skipIf(GIT === null);
+
+const USER = "probe_user";
+const TOKEN = "PR0BE-TOKEN-xyz";
+const SECRET = new Uint8Array(Buffer.from(`${USER}:${TOKEN}`));
+
+type Scenario = "pull" | "push" | "fetch" | "branch" | "refs";
+
+interface Run {
+  result: GitResult | string;
+  configKept: boolean;
+}
+
+it("ssh-live tier: required legs fail instead of skipping when git is unresolvable", () => {
+  if (GIT === null && tierRequired("ssh-live")) {
+    throw new Error(
+      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no git resolves',
+    );
+  }
+});
+
+describeGit("Git working-tree probes read unredacted — real git over smart HTTP (RG-6)", () => {
+  const injector = new GitInjector(null);
+  let root: string;
+  let srv: string;
+  let bare: string;
+  let seed: string;
+  let home: string;
+  let wd: string;
+  let vaultTemp: string;
+  let server: Listener;
+  let gitEnv: NodeJS.ProcessEnv;
+  const saved: Record<string, string | undefined> = {};
+
+  function git(cwd: string, ...args: string[]): string {
+    try {
+      return execFileSync(GIT as string, args, {
+        cwd,
+        env: gitEnv,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 20_000,
+      });
+    } catch {
+      throw new Error("a git step of the fixture failed");
+    }
+  }
+
+  function quiet<T>(run: () => T): T {
+    try {
+      return run();
+    } catch {
+      throw new Error("a file step of the fixture failed");
+    }
+  }
+
+  const oid = (dir: string, rev: string) => git(dir, "rev-parse", rev).trim();
+  const exitOf = (outcome: GitResult | string) =>
+    typeof outcome === "string" ? outcome : outcome.exit_code;
+  const url = () => `http://127.0.0.1:${String(server.port)}/repo.git`;
+
+  function policy(): InjectionPolicy {
+    return {
+      url_allowlist: [`http://127.0.0.1:${String(server.port)}/*`],
+      command_allowlist: [GIT as string],
+      env_allowlist: [],
+      host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: false,
+      smtp_recipient_allowlist: [],
+      imap_read_only: false,
+      strict_tree_exit: false,
+      proxy: false,
+      ssh_agent_socket: false,
+    };
+  }
+
+  function commit(dir: string, text: string): void {
+    quiet(() => writeFileSync(join(dir, "f.txt"), `${text}\n`));
+    git(dir, "add", "f.txt");
+    git(dir, "commit", "-q", "-m", text);
+  }
+
+  function moveRemote(): void {
+    commit(seed, "remote");
+    git(seed, "push", "-q", bare, "main");
+  }
+
+  async function use(operation: "pull" | "push" | "fetch", args?: string[]): Promise<Run> {
+    const config = quiet(() => readFileSync(join(wd, ".git", "config")));
+    const result = await injector
+      .executeWithSecret(
+        {
+          type: "git",
+          operation,
+          repository: url(),
+          working_directory: wd,
+          ...(args ? { args } : {}),
+        },
+        SECRET,
+        policy(),
+        undefined,
+      )
+      .then(
+        (r) => r,
+        (e: unknown) => (e instanceof VaultError ? e.code : "threw"),
+      );
+    return {
+      result,
+      configKept: quiet(() => readFileSync(join(wd, ".git", "config"))).equals(config),
+    };
+  }
+
+  const scenarios: Record<Scenario, () => Promise<Run[]>> = {
+    pull: async () => {
+      quiet(() => writeFileSync(join(seed, `${USER}.txt`), "named\n"));
+      git(seed, "add", `${USER}.txt`);
+      moveRemote();
+      git(bare, "branch", `${USER}-feature`, "main");
+      return [await use("pull", ["--ff-only"])];
+    },
+    push: async () => {
+      commit(wd, "local");
+      return [await use("push")];
+    },
+    fetch: async () => {
+      moveRemote();
+      git(bare, "branch", `${USER}-feature`, "main");
+      return [await use("fetch")];
+    },
+    branch: async () => {
+      git(wd, "checkout", "-q", "-b", `${USER}-topic`);
+      commit(wd, "topic");
+      return [await use("push")];
+    },
+    refs: async () => {
+      git(wd, "branch", `${USER}-local`, "HEAD~1");
+      git(wd, "tag", `${USER}-tag`, "HEAD~1");
+      moveRemote();
+      return [await use("fetch"), await use("pull", ["--ff-only"])];
+    },
+  };
+
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), "harpoc-git-probes-"));
+    const emptyConfig = join(root, "empty.gitconfig");
+    writeFileSync(emptyConfig, "");
+    gitEnv = {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: emptyConfig,
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_AUTHOR_NAME: "harpoc-test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "harpoc-test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    srv = join(root, "srv");
+    mkdirSync(srv);
+    bare = join(srv, "repo.git");
+  });
+
+  beforeEach(async () => {
+    for (const key of ["TMPDIR", "TMP", "TEMP"]) saved[key] = process.env[key];
+    const run = mkdtempSync(join(root, "run-"));
+    seed = join(run, "seed");
+    git(run, "init", "-q", "-b", "main", seed);
+    for (const n of ["1", "2", "3"]) commit(seed, n);
+    rmSync(bare, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    git(srv, "clone", "-q", "--bare", seed, "repo.git");
+    server = await startGitSmartHttp({
+      git: GIT as string,
+      projectRoot: srv,
+      user: USER,
+      token: TOKEN,
+      env: gitEnv,
+    });
+    home = join(run, `${USER}-home`);
+    quiet(() => mkdirSync(home));
+    wd = join(home, "wd");
+    git(run, "clone", "-q", bare, wd);
+    git(wd, "remote", "set-url", "origin", url());
+    git(wd, "checkout", "-q", "-b", "work");
+    commit(wd, "unpushed");
+    git(wd, "checkout", "-q", "main");
+    vaultTemp = mkdtempSync(join(root, "vault-tmp-"));
+    process.env.TMPDIR = vaultTemp;
+    process.env.TMP = vaultTemp;
+    process.env.TEMP = vaultTemp;
+  });
+
+  afterEach(async () => {
+    for (const key of ["TMPDIR", "TMP", "TEMP"]) {
+      const value = saved[key];
+      if (value === undefined) Reflect.deleteProperty(process.env, key);
+      else process.env[key] = value;
+    }
+    await server.close();
+    expect(readdirSync(vaultTemp)).toEqual([]);
+  });
+
+  afterAll(() => {
+    if (root !== undefined)
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  it("a pull in a tree whose path contains the credential's user name succeeds", async () => {
+    const [pulled] = (await scenarios.pull()) as [Run];
+    expect(exitOf(pulled.result)).toBe(0);
+    expect(oid(wd, "main")).toBe(oid(bare, "main"));
+  });
+
+  it("a push from a tree whose path contains the credential's user name succeeds", async () => {
+    const [pushed] = (await scenarios.push()) as [Run];
+    expect(exitOf(pushed.result)).toBe(0);
+    expect(oid(bare, "main")).toBe(oid(wd, "HEAD"));
+  });
+
+  it("a fetch in a tree whose path contains the credential's user name succeeds", async () => {
+    const [fetched] = (await scenarios.fetch()) as [Run];
+    expect(exitOf(fetched.result)).toBe(0);
+    expect(oid(wd, "refs/remotes/origin/main")).toBe(oid(bare, "main"));
+  });
+
+  it("a push from a checked-out branch whose name carries the credential's user name lands that branch on the remote", async () => {
+    const [pushed] = (await scenarios.branch()) as [Run];
+    expect(exitOf(pushed.result)).toBe(0);
+    expect(oid(bare, `refs/heads/${USER}-topic`)).toBe(oid(wd, "HEAD"));
+  });
+
+  it("a fetch and a pull in a tree that also holds a branch and a tag named with the credential's user name succeed", async () => {
+    const before = oid(wd, "HEAD~1");
+    const [fetched, pulled] = (await scenarios.refs()) as [Run, Run];
+    expect(exitOf(fetched.result)).toBe(0);
+    expect(exitOf(pulled.result)).toBe(0);
+    expect(oid(wd, "refs/remotes/origin/main")).toBe(oid(bare, "main"));
+    expect(oid(wd, "main")).toBe(oid(bare, "main"));
+    expect(oid(wd, `refs/heads/${USER}-local`)).toBe(before);
+    expect(oid(wd, `refs/tags/${USER}-tag`)).toBe(before);
+  });
+
+  it.each([
+    ["a pull", "pull"],
+    ["a push", "push"],
+    ["a fetch", "fetch"],
+    ["a push of a branch named with the user name", "branch"],
+    ["a fetch and a pull beside a branch and a tag named with the user name", "refs"],
+  ] as const)(
+    "the result of %s carries neither the credential's user name nor its token, and .git/config is byte-identical",
+    async (_title, scenario) => {
+      const runs = await scenarios[scenario]();
+      for (const { result, configKept } of runs) {
+        expect(result).toBeTypeOf("object");
+        expect(JSON.stringify(result).includes(USER)).toBe(false);
+        expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+        expect(configKept).toBe(true);
+      }
+    },
+  );
+
+  it("a push from a detached HEAD in a tree whose path contains the credential's user name: the plain push is refused by git as in any tree, --all lands the unpushed branch, and neither result carries the user name or the token", async () => {
+    git(wd, "checkout", "-q", "--detach");
+    commit(wd, "detached");
+    const remoteRefs = () => git(bare, "for-each-ref", "--format=%(refname) %(objectname)");
+    const before = remoteRefs();
+    const plain = await use("push");
+    expect(exitOf(plain.result)).toBe(128);
+    expect(remoteRefs() === before).toBe(true);
+    const all = await use("push", ["--all"]);
+    expect(exitOf(all.result)).toBe(0);
+    expect(oid(bare, "refs/heads/work")).toBe(oid(wd, "refs/heads/work"));
+    for (const { result, configKept } of [plain, all]) {
+      expect(JSON.stringify(result).includes(USER)).toBe(false);
+      expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+      expect(configKept).toBe(true);
+    }
+  });
+
+  it("a clone of a repository whose default branch is named with the credential's user name lands on that branch (it is the only branch at HEAD's commit)", async () => {
+    const named = join(srv, "named.git");
+    rmSync(named, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    git(srv, "clone", "-q", "--bare", seed, "named.git");
+    git(named, "branch", `${USER}-main`, "main");
+    git(named, "update-ref", "refs/heads/main", "main~1");
+    git(named, "symbolic-ref", "HEAD", `refs/heads/${USER}-main`);
+    const dest = join(home, "..", "dest");
+    const result = await injector
+      .executeWithSecret(
+        {
+          type: "git",
+          operation: "clone",
+          repository: `http://127.0.0.1:${String(server.port)}/named.git`,
+          working_directory: dest,
+        },
+        SECRET,
+        policy(),
+        undefined,
+      )
+      .then(
+        (r) => r,
+        (e: unknown) => (e instanceof VaultError ? e.code : "threw"),
+      );
+    expect(exitOf(result)).toBe(0);
+    const onBranch = (() => {
+      try {
+        return git(dest, "symbolic-ref", "--short", "HEAD").trim() === `${USER}-main`;
+      } catch {
+        return false;
+      }
+    })();
+    expect(onBranch).toBe(true);
+    expect(oid(dest, "HEAD")).toBe(oid(named, `refs/heads/${USER}-main`));
+    expect(JSON.stringify(result).includes(USER)).toBe(false);
+    expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+  });
+
+  it("a failed probe's result is returned redacted: a pull in a directory that is no repository", async () => {
+    const plain = join(home, "plain");
+    quiet(() => mkdirSync(plain));
+    quiet(() => writeFileSync(join(plain, ".git"), "gitdir: missing\n"));
+    const log = vi.fn();
+    const audited = new GitInjector({ log } as unknown as AuditLogger);
+    const outcome = await audited
+      .executeWithSecret(
+        { type: "git", operation: "pull", repository: url(), working_directory: plain },
+        SECRET,
+        policy(),
+        undefined,
+        "secret-1",
+      )
+      .then(
+        (r) => r,
+        (e: unknown) => (e instanceof VaultError ? e.code : "threw"),
+      );
+    const returned = typeof outcome === "object";
+    expect(returned).toBe(true);
+    const result = outcome as GitResult;
+    expect(result.exit_code === 0).toBe(false);
+    expect(JSON.stringify(result).includes(USER)).toBe(false);
+    expect(result.stderr.includes("[REDACTED]")).toBe(true);
+    const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+    expect(row.detail.sanitized).toBe(true);
+    expect(JSON.stringify(log.mock.calls).includes(USER)).toBe(false);
+  });
+});

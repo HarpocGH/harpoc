@@ -276,14 +276,30 @@ jobs:
         # here is the signal for B7-U2's fallback (a WinSW service with the same account, sealer
         # and layout), not a defect of the suite. It runs whenever the suite ran, green or red (a
         # red row does not hide the cell); a failure before the suite skips both.
+        # The measurement of the cell's cause: the recipe grants the vault account Log on as a
+        # batch job (SeBatchLogonRight), which a task with a stored password needs and a member
+        # of Users lacks. The step prints, before and after the recipe, the logon rights
+        # (secedit) and a batch logon as the account (LogonUser, logon type 4: the Win32 error
+        # alone), with the Task Scheduler's operational log and the logon auditing switched on
+        # first; after the start it prints the task's state and the account's 4624 / 4625
+        # events, and on a red the task whole (its definition as XML, which holds no password),
+        # the operational log's events for it and a control task as SYSTEM. None of these lines
+        # carries a secret: the account's password stays a SecureString (an unmanaged copy for
+        # LogonUser, zeroed after the call). The teardown is the recipe's own -Unregister, and the
+        # scratch vault's files go as the vault account first: the session file and the sealed
+        # key are owner-only to it, and the runner's own removal of them is refused (measured on
+        # six runs), which would red the step after a green start.
         if: ${{ !cancelled() && (steps.suite.outcome == 'success' || steps.suite.outcome == 'failure') }}
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
           Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          $smokeStart = Get-Date
           $vaultUser = 'harpoc'
           $vaultSecure = ConvertTo-SecureString -String $env:HARPOC_TWO_USER_VAULT_PASSWORD -AsPlainText -Force
+          $vaultSid = 'unresolved'
+          try { $vaultSid = [System.Security.Principal.NTAccount]::new($env:COMPUTERNAME, $vaultUser).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { Write-Output "(the vault account's SID could not be resolved; the rights lines name it unresolved: $($_.Exception.Message))" }
           $node = (Get-Command node.exe -CommandType Application | Select-Object -First 1).Source
           $cli = Join-Path $env:GITHUB_WORKSPACE 'packages\cli'
           $base = Join-Path $env:ProgramData 'harpoc'
@@ -291,11 +307,96 @@ jobs:
           $sealedKey = Join-Path $vaultDir 'unlock.key.dpapi'
           $temp = Join-Path $env:SystemRoot 'Temp'
           $smokePassword = 'b7-smoke-master-password'
+          $system32 = Join-Path $env:SystemRoot 'System32'
+          $taskLog = 'Microsoft-Windows-TaskScheduler/Operational'
+          $logonAudit = '/subcategory:{0CCE9215-69AE-11D9-BED3-505054503030}'
           $inherited = @('ALLUSERSPROFILE', 'CommonProgramFiles', 'ComSpec', 'NUMBER_OF_PROCESSORS', 'OS', 'PATH', 'PATHEXT', 'PROCESSOR_ARCHITECTURE', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'PUBLIC', 'SystemDrive', 'SystemRoot', 'windir')
-          function Invoke-AsVaultAccount([string]$Label, [string[]]$Arguments, [string]$InputText) {
+          try {
+            Add-Type -TypeDefinition (@(
+                'using System;',
+                'using System.Runtime.InteropServices;',
+                'public static class HarpocSmokeLogon {',
+                '  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]',
+                '  private static extern bool LogonUserW(string user, string domain, IntPtr password, int type, int provider, out IntPtr token);',
+                '  [DllImport("kernel32.dll")]',
+                '  private static extern bool CloseHandle(IntPtr handle);',
+                '  public static int Batch(string user, IntPtr password) {',
+                '    IntPtr token;',
+                '    if (!LogonUserW(user, ".", password, 4, 0, out token)) return Marshal.GetLastWin32Error();',
+                '    CloseHandle(token);',
+                '    return 0;',
+                '  }',
+                '}'
+              ) -join "`n")
+          } catch {
+            Write-Output "(the batch logon probe could not be compiled and will not run: $($_.Exception.Message))"
+          }
+          function Invoke-Diagnostic([string]$Title, [scriptblock]$Body) {
+            Write-Output "--- $Title"
+            try { & $Body } catch { Write-Output "(this diagnostic failed: $($_.Exception.Message))" }
+            $global:LASTEXITCODE = 0
+          }
+          function Show-LogonRights {
+            $cfg = Join-Path $env:RUNNER_TEMP ('harpoc-rights-' + [Guid]::NewGuid().ToString('N') + '.inf')
+            & (Join-Path $system32 'secedit.exe') /export /areas USER_RIGHTS /cfg $cfg | Out-Null
+            Write-Output "secedit /export exit $LASTEXITCODE; the vault account is $vaultUser, *$vaultSid"
+            if (Test-Path -LiteralPath $cfg) {
+              Get-Content -LiteralPath $cfg | Where-Object { $_ -match '^Se(Deny)?(Batch|Service|Interactive|Network)LogonRight\b' } | Write-Output
+              Remove-Item -LiteralPath $cfg -Force
+            }
+          }
+          function Test-BatchLogon {
+            if ($null -eq ('HarpocSmokeLogon' -as [type])) { Write-Output "a batch logon (type 4) as ${vaultUser}: not probed (the logon helper did not compile)"; return }
+            $password = [System.Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($vaultSecure)
+            try { $code = [HarpocSmokeLogon]::Batch($vaultUser, $password) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($password) }
+            if ($code -eq 0) { Write-Output "a batch logon (type 4) as ${vaultUser}: granted" } else { Write-Output "a batch logon (type 4) as ${vaultUser}: refused, Win32 error $code (1385: the logon type is not granted; 1326: the name or the password)" }
+          }
+          function Show-TaskLine([string]$Name) {
+            $task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+            if ($null -eq $task) { Write-Output "task ${Name}: not registered"; return }
+            $info = Get-ScheduledTaskInfo -TaskName $Name
+            Write-Output ('task {0}: {1}, LastRunTime {2}, LastTaskResult 0x{3:X8}, NumberOfMissedRuns {4}, logon type {5} as {6}' -f $Name, $task.State, $info.LastRunTime, $info.LastTaskResult, $info.NumberOfMissedRuns, $task.Principal.LogonType, $task.Principal.UserId)
+          }
+          function Show-LogonEvents {
+            $found = @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4624, 4625; StartTime = $smokeStart } -ErrorAction SilentlyContinue | Sort-Object TimeCreated)
+            $shown = 0
+            foreach ($entry in $found) {
+              $data = @{}
+              foreach ($item in ([xml]$entry.ToXml()).Event.EventData.Data) { $data[$item.Name] = $item.'#text' }
+              if ($data['TargetUserName'] -ne $vaultUser) { continue }
+              $shown++
+              Write-Output ('{0:o} event {1}: logon type {2}, status {3}, sub status {4}, logon process {5}, process {6}' -f $entry.TimeCreated, $entry.Id, $data['LogonType'], $data['Status'], $data['SubStatus'], $data['LogonProcessName'], $data['ProcessName'])
+            }
+            Write-Output "$shown of $($found.Count) logon events since the step began name $vaultUser (4624 a logon, 4625 a refusal; type 4 is batch, 2 interactive)"
+          }
+          function Show-TaskEvents {
+            $found = @(Get-WinEvent -FilterHashtable @{ LogName = $taskLog; StartTime = $smokeStart } -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'Harpoc' } | Sort-Object TimeCreated)
+            Write-Output "$($found.Count) Task Scheduler events since the step began name Harpoc"
+            foreach ($entry in $found) { Write-Output ('{0:o} event {1}: {2}' -f $entry.TimeCreated, $entry.Id, ($entry.Message -replace '\s+', ' ')) }
+          }
+          function Show-TaskWhole([string]$Name) {
+            $task = Get-ScheduledTask -TaskName $Name
+            $task | Select-Object TaskName, TaskPath, State, Author, URI | Format-List | Out-String | Write-Output
+            foreach ($part in $task.Principal, $task.Settings, $task.Triggers, $task.Actions, (Get-ScheduledTaskInfo -TaskName $Name)) { $part | Format-List * | Out-String | Write-Output }
+            & (Join-Path $system32 'schtasks.exe') /query /tn $Name /v /fo list
+            Export-ScheduledTask -TaskName $Name | Write-Output
+          }
+          function Test-ControlTask {
+            $control = 'HarpocSmokeControl'
+            try {
+              Register-ScheduledTask -TaskName $control -Action (New-ScheduledTaskAction -Execute (Join-Path $system32 'cmd.exe') -Argument '/c exit 0') -User 'NT AUTHORITY\SYSTEM' -Force | Out-Null
+              Start-ScheduledTask -TaskName $control
+              for ($i = 0; $i -lt 20 -and (Get-ScheduledTaskInfo -TaskName $control).LastTaskResult -eq 267011; $i++) { Start-Sleep -Milliseconds 500 }
+              Show-TaskLine $control
+            } finally {
+              Unregister-ScheduledTask -TaskName $control -Confirm:$false -ErrorAction SilentlyContinue
+            }
+          }
+          function Invoke-AsVaultAccount([string]$Label, [string[]]$Arguments, [string]$InputText, [switch]$Bare) {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = $node
             $argv = @((Join-Path $cli 'dist\index.js'), '--vault-dir', $vaultDir) + $Arguments
+            if ($Bare) { $argv = $Arguments }
             $psi.Arguments = ($argv | ForEach-Object { '"' + $_ + '"' }) -join ' '
             $psi.WorkingDirectory = $base
             $psi.UserName = $vaultUser
@@ -344,9 +445,23 @@ jobs:
           try {
             Invoke-AsVaultAccount 'init' @('init') "$smokePassword`n$smokePassword`n"
             Invoke-AsVaultAccount 'unlock-key enroll --dpapi' @('unlock-key', 'enroll', '--out', $sealedKey, '--dpapi') "$smokePassword`n"
+            Invoke-Diagnostic "the step's own account (whoami /all)" { & (Join-Path $system32 'whoami.exe') /all }
+            Invoke-Diagnostic "the Task Scheduler's operational log, switched on before the registration" {
+              & (Join-Path $system32 'wevtutil.exe') sl $taskLog /e:true
+              Write-Output "wevtutil sl exit $LASTEXITCODE"
+              & (Join-Path $system32 'wevtutil.exe') gl $taskLog | Select-Object -First 2
+            }
+            Invoke-Diagnostic 'the logon auditing (4624 / 4625), as found and then switched on' {
+              & (Join-Path $system32 'auditpol.exe') /get $logonAudit
+              & (Join-Path $system32 'auditpol.exe') /set $logonAudit /success:enable /failure:enable
+            }
+            Invoke-Diagnostic 'the logon rights before the recipe' { Show-LogonRights }
+            Invoke-Diagnostic 'a batch logon before the recipe' { Test-BatchLogon }
             $global:LASTEXITCODE = 0
             & .\deploy\windows\register-service.ps1 -Node $node -Cli $cli -Password $vaultSecure
             if ($LASTEXITCODE -ne 0) { throw "register-service.ps1 exited $LASTEXITCODE" }
+            Invoke-Diagnostic 'the logon rights after the recipe' { Show-LogonRights }
+            Invoke-Diagnostic 'a batch logon after the recipe' { Test-BatchLogon }
             Start-ScheduledTask -TaskName Harpoc
             $state = 'no answer'
             $deadline = [DateTime]::UtcNow.AddSeconds(60)
@@ -360,9 +475,12 @@ jobs:
               Start-Sleep -Seconds 1
             }
             Write-Output "health: $state"
+            Invoke-Diagnostic 'the task after the start' { Show-TaskLine 'Harpoc' }
+            Invoke-Diagnostic "the vault account's logon events" { Show-LogonEvents }
             if ($state -ne 'unlocked') {
-              $info = Get-ScheduledTaskInfo -TaskName Harpoc
-              Write-Output ('task {0}, LastRunTime {1}, LastTaskResult 0x{2:X8}' -f (Get-ScheduledTask -TaskName Harpoc).State, $info.LastRunTime, $info.LastTaskResult)
+              Invoke-Diagnostic "the Task Scheduler's events for the task" { Show-TaskEvents }
+              Invoke-Diagnostic 'the task whole' { Show-TaskWhole 'Harpoc' }
+              Invoke-Diagnostic 'a control task as SYSTEM (does the Task Scheduler launch anything here)' { Test-ControlTask }
               Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object LocalAddress, OwningProcess | Format-Table -AutoSize | Out-String | Write-Output
               Get-Process -Name node -ErrorAction SilentlyContinue | Select-Object Id, ProcessName | Format-Table -AutoSize | Out-String | Write-Output
               throw 'the Harpoc task did not report the vault unlocked within 60 s'
@@ -371,8 +489,23 @@ jobs:
             $failure = $_
           } finally {
             Stop-ScheduledTask -TaskName Harpoc -ErrorAction SilentlyContinue
+            try {
+              $global:LASTEXITCODE = 0
+              & .\deploy\windows\register-service.ps1 -Unregister
+              if ($LASTEXITCODE -ne 0) { throw "register-service.ps1 -Unregister exited $LASTEXITCODE" }
+            } catch {
+              Write-Output "the teardown of the task and the right failed: $($_.Exception.Message)"
+              if ($null -eq $failure) { $failure = $_ }
+            }
             Unregister-ScheduledTask -TaskName Harpoc -Confirm:$false -ErrorAction SilentlyContinue
-            foreach ($name in 'default.vault.db', 'default.vault.db-wal', 'default.vault.db-shm', 'session.json', 'unlock.key.dpapi') {
+            Invoke-Diagnostic 'the logon rights after the teardown' { Show-LogonRights }
+            $scratch = 'default.vault.db', 'default.vault.db-wal', 'default.vault.db-shm', 'session.json', 'unlock.key.dpapi'
+            try {
+              Invoke-AsVaultAccount 'the scratch vault removal' (@('-e', "for (const file of process.argv.slice(1)) require('node:fs').rmSync(file, { force: true, maxRetries: 5, retryDelay: 100 })") + @($scratch | ForEach-Object { Join-Path $vaultDir $_ })) '' -Bare
+            } catch {
+              Write-Output "the scratch vault removal as $vaultUser failed: $($_.Exception.Message)"
+            }
+            foreach ($name in $scratch) {
               $path = Join-Path $vaultDir $name
               for ($attempt = 1; Test-Path -LiteralPath $path; $attempt++) {
                 try {
@@ -390,6 +523,7 @@ jobs:
           }
           if ($null -ne $failure) { throw $failure }
           if ($leftover) { throw 'the scratch vault left files behind (listed above)' }
+          $global:LASTEXITCODE = 0
       - name: Upload the B Windows evidence
         if: always()
         uses: actions/upload-artifact@v7
