@@ -415,12 +415,16 @@ export type DatabaseAction = z.infer<typeof databaseActionSchema>;
  * Git action — request-mediated over HTTPS (credential helper) or process-mediated
  * over SSH (ephemeral ssh-agent), selected by the `repository` transport. The
  * credential never appears in the command output or the agent's context.
+ * `refspecs` (a fetch's remote refs, `refs/heads/…` or `refs/tags/…`) is shape
+ * only here: its grammar and its refusal on every other operation are the
+ * injector's, which every caller path reaches.
  */
 export const gitActionSchema = z.strictObject({
   type: z.literal(ActionType.GIT),
   operation: gitOperationSchema,
   repository: z.string().min(1).max(2048),
   args: z.array(z.string().max(4096)).max(MAX_PROCESS_ARGS).optional(),
+  refspecs: z.array(z.string().min(1).max(1024)).min(1).max(64).optional(),
   working_directory: z.string().min(1).max(4096).optional(),
   timeout_ms: z.number().int().positive().max(300_000).optional(),
 });

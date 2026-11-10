@@ -1,6 +1,7 @@
 /**
- * The relay repository a pull's or push's credential-bearing step runs against
- * is re-validated by the vault immediately before that step and again after it
+ * The relay repository a pull's, push's, fetch's or ls-remote's
+ * credential-bearing step runs against is re-validated by the vault
+ * immediately before that step and again after it
  * (S1, C1.2 fix round 1, F-3): every file the vault wrote byte-equal, nothing
  * else at the relay's top level beforehand, and afterwards no file through which
  * git would read configuration from elsewhere. A same-user writer can still win
@@ -43,6 +44,7 @@ const describeGit = describe.skipIf(GIT === null);
 
 const NULL_GIT_CONFIG = process.platform === "win32" ? "NUL" : "/dev/null";
 const REPO = "https://8.8.8.8/org/repo.git";
+const CREDENTIAL = "git-user:s3cret-token-value";
 /** The network steps and the final local hop answer OK; the working-tree probes run real git. */
 const MOCKED = ["ls-remote", "fetch", "push", "pull", "clone"];
 const PLANTED = "[http]\n\tproxy = http://127.0.0.1:9/\n";
@@ -135,7 +137,7 @@ describeGit(
     const run = (operation: GitAction["operation"]) =>
       injector.executeWithSecret(
         { type: "git", operation, repository: REPO, working_directory: wd },
-        new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+        new Uint8Array(Buffer.from(CREDENTIAL)),
         policy(),
         undefined,
       );
@@ -207,7 +209,7 @@ describeGit(
           repository: REPO,
           working_directory: join(scratch, "dest"),
         },
-        new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+        new Uint8Array(Buffer.from(CREDENTIAL)),
         policy(),
         undefined,
       );
@@ -234,6 +236,72 @@ describeGit(
       );
       await expectVaultError(runClone, ErrorCode.GIT_OPERATION_FAILED);
       expect(subcommands()).toEqual(["ls-remote", "fetch"]);
+      expect(relaysLeft()).toEqual([]);
+    });
+
+    const runFetch = () => {
+      execFileSync(GIT as string, ["-C", wd, "remote", "add", "origin", REPO], {
+        env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: NULL_GIT_CONFIG },
+      });
+      return run("fetch");
+    };
+    const runLsRemote = () =>
+      injector.executeWithSecret(
+        { type: "git", operation: "ls-remote", repository: REPO },
+        new Uint8Array(Buffer.from(CREDENTIAL)),
+        policy(),
+        undefined,
+      );
+
+    /** Runs `tamper` on the relay while a fetch's network step runs (the local fetch has no --git-dir). */
+    function tamperDuringFetchNetworkStep(tamper: (relay: string) => void) {
+      spawnMock.mockImplementation((cmd, args, opts) => {
+        const sub = gitSubcommand(args);
+        if (sub === "fetch" && args.some((a) => a.startsWith("--git-dir="))) {
+          tamper(relayOf(args));
+          return Promise.resolve(OK_RESULT);
+        }
+        if (MOCKED.includes(sub ?? "")) return Promise.resolve(OK_RESULT);
+        return realSpawnCaptured(cmd, args, opts);
+      });
+    }
+
+    it("a relay config changed before a fetch's network step refuses the fetch, and no credential-bearing step runs (M6)", async () => {
+      tamperAtCreation((relay) => appendFileSync(join(relay, "config"), PLANTED));
+      await expectVaultError(runFetch, ErrorCode.GIT_OPERATION_FAILED);
+      expect(subcommands()).toEqual(["rev-parse", "config", "for-each-ref"]);
+      expect(relaysLeft()).toEqual([]);
+    });
+
+    it("a commondir planted during a fetch's network step reports the fetch failed, and the local fetch never runs (M6)", async () => {
+      tamperDuringFetchNetworkStep((relay) =>
+        writeFileSync(join(relay, "commondir"), `${wd}/.git\n`),
+      );
+      await expectVaultError(runFetch, ErrorCode.GIT_OPERATION_FAILED);
+      expect(subcommands()).toEqual(["rev-parse", "config", "for-each-ref", "fetch"]);
+      expect(relaysLeft()).toEqual([]);
+    });
+
+    it("a relay config changed before an ls-remote refuses it with no spawn at all (M6)", async () => {
+      tamperAtCreation((relay) => appendFileSync(join(relay, "config"), PLANTED));
+      await expectVaultError(runLsRemote, ErrorCode.GIT_OPERATION_FAILED);
+      expect(subcommands()).toEqual([]);
+      expect(relaysLeft()).toEqual([]);
+    });
+
+    it("a relay config changed during an ls-remote reports it failed (M6)", async () => {
+      tamperDuringNetworkStep("ls-remote", (relay) =>
+        appendFileSync(join(relay, "config"), PLANTED),
+      );
+      await expectVaultError(runLsRemote, ErrorCode.GIT_OPERATION_FAILED);
+      expect(subcommands()).toEqual(["ls-remote"]);
+      expect(relaysLeft()).toEqual([]);
+    });
+
+    it("control: an untouched relay runs the fetch through to the local fetch (M6)", async () => {
+      const result = await runFetch();
+      expect(result.exit_code).toBe(0);
+      expect(subcommands()).toEqual(["rev-parse", "config", "for-each-ref", "fetch", "fetch"]);
       expect(relaysLeft()).toEqual([]);
     });
 

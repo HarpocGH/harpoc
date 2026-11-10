@@ -181,11 +181,13 @@ export const DatabaseEngine = {
 } as const;
 export type DatabaseEngine = (typeof DatabaseEngine)[keyof typeof DatabaseEngine];
 
-/** Git operation forwarded to the spawned git binary. */
+/** Git operation forwarded to the spawned git binary (the wire value is git's own subcommand name). */
 export const GitOperation = {
   CLONE: "clone",
   PULL: "pull",
   PUSH: "push",
+  FETCH: "fetch",
+  LS_REMOTE: "ls-remote",
 } as const;
 export type GitOperation = (typeof GitOperation)[keyof typeof GitOperation];
 

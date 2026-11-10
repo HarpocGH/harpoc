@@ -356,7 +356,7 @@ describeGit("Git context — hooks of the caller's tree never run (N11)", () => 
       expect((await git(bare, "rev-parse", "refs/heads/main")).trim()).toBe(head);
       expect(authorizedPushes).toBeGreaterThan(0);
       expect(existsSync(prePushMarker)).toBe(false);
-      expect(JSON.stringify(pushed)).not.toContain(PUSH_TOKEN);
+      expect(JSON.stringify(pushed).includes(PUSH_TOKEN)).toBe(false);
       const pushRows = vault.engine
         .queryAudit({ eventType: AuditEventType.SECRET_USE })
         .filter((event) => event.detail?.operation === "push");
@@ -364,6 +364,70 @@ describeGit("Git context — hooks of the caller's tree never run (N11)", () => 
       expect(pushRows[0]).toMatchObject({
         success: true,
         detail: { context: "git", operation: "push", transport: "https", exit_code: 0 },
+      });
+    });
+  });
+
+  // M6 (B9): a fetch through the vault. Its credential-free local step updates
+  // refs in the caller's tree, and git runs the tree's reference-transaction
+  // hook for every ref update a direct fetch commits — the control shows it
+  // fires — so the forced core.hooksPath must hold for that step too.
+  describe("a fetch through the vault (M6)", () => {
+    let controlWt: string;
+    let fetchWt: string;
+    let controlMarker: string;
+    let fetchMarker: string;
+
+    function plantHook(tree: string, marker: string): void {
+      const hook = join(tree, ".git", "hooks", "reference-transaction");
+      const log = marker.replace(/\\/g, "/");
+      writeFileSync(hook, `#!/bin/sh\necho "$1" >> "${log}"\ncat >> "${log}"\n`);
+      chmodSync(hook, 0o755);
+    }
+
+    beforeAll(async () => {
+      controlWt = join(root, "fetch-control");
+      fetchWt = join(root, "fetch-wt");
+      await git(root, "clone", repoUrl, "fetch-control");
+      await git(root, "clone", repoUrl, "fetch-wt");
+      controlMarker = join(root, "fetch-control-marker");
+      fetchMarker = join(root, "fetch-marker");
+      plantHook(controlWt, controlMarker);
+      plantHook(fetchWt, fetchMarker);
+      await git(seed, "push", bare, "HEAD:refs/heads/fetched");
+      await publish();
+    });
+
+    it("control: a direct fetch runs the tree's reference-transaction hook", async () => {
+      await git(controlWt, "fetch", "origin");
+      expect(readFileSync(controlMarker, "utf8")).toContain("refs/remotes/origin/fetched");
+      expect((await git(controlWt, "rev-parse", "refs/remotes/origin/fetched")).trim()).toBe(
+        (await git(bare, "rev-parse", "refs/heads/fetched")).trim(),
+      );
+    });
+
+    it("a fetch through the vault updates the tracking ref and never runs the hook", async () => {
+      const client = new DirectClient(vault.engine);
+      const result = await client.useSecret(handle, {
+        type: "git",
+        operation: "fetch",
+        repository: repoUrl,
+        working_directory: fetchWt,
+      });
+
+      expect(result).toMatchObject({ exit_code: 0 });
+      expect((await git(fetchWt, "rev-parse", "refs/remotes/origin/fetched")).trim()).toBe(
+        (await git(bare, "rev-parse", "refs/heads/fetched")).trim(),
+      );
+      expect(existsSync(fetchMarker)).toBe(false);
+      expect(existsSync(helperLog)).toBe(false);
+      const fetchRows = vault.engine
+        .queryAudit({ eventType: AuditEventType.SECRET_USE })
+        .filter((event) => event.detail?.operation === "fetch");
+      expect(fetchRows).toHaveLength(1);
+      expect(fetchRows[0]).toMatchObject({
+        success: true,
+        detail: { context: "git", operation: "fetch", transport: "https", exit_code: 0 },
       });
     });
   });

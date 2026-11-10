@@ -67,6 +67,7 @@ interface UseOptions {
   param?: string[];
   operation?: string;
   repository?: string;
+  refspec?: string[];
   user?: string;
   // SMTP action
   from?: string;
@@ -151,9 +152,15 @@ export function registerSecretUseCommand(secret: Command): void {
     // Git action (--operation is reused by imap/sftp/docker_registry below)
     .option(
       "--operation <op>",
-      "Operation: clone|pull|push (git); search|fetch|store|move|copy|expunge (imap); upload|download|list (sftp); pull|push (docker_registry)",
+      "Operation: clone|pull|push|fetch|ls-remote (git); search|fetch|store|move|copy|expunge (imap); upload|download|list (sftp); pull|push (docker_registry)",
     )
     .option("--repository <url>", "Git repository URL (git action)")
+    .option(
+      "--refspec <spec>",
+      "Refspec selecting what to fetch from the repository (repeatable, git fetch)",
+      collect,
+      [],
+    )
     // SSH action
     .option("--user <name>", "Remote user (ssh/sftp action)")
     // SMTP action
@@ -378,6 +385,7 @@ export function buildAction(
       type: "git",
       operation: options.operation,
       repository: options.repository,
+      refspecs: options.refspec && options.refspec.length > 0 ? options.refspec : undefined,
       args: options.arg ?? [],
       working_directory: options.cwd,
       timeout_ms,

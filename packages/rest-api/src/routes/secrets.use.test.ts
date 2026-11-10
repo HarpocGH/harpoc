@@ -437,6 +437,74 @@ describe("POST /api/v1/secrets/:handle/use — the v1.3 contexts reach the engin
   );
 });
 
+// B9 (M6): a git fetch with its refspecs and a git ls-remote posted to the use
+// route reach the engine as the parsed action, and a refspecs field of the
+// wrong type is refused before the engine. The engine is a mock.
+describe("POST /api/v1/secrets/:handle/use — git fetch and ls-remote (B9)", () => {
+  const LISTING =
+    "89e6c64ea37d3a40c03b05d08ea2c8c39c68944d\tHEAD\n" +
+    "89e6c64ea37d3a40c03b05d08ea2c8c39c68944d\trefs/heads/main\n";
+
+  const GIT_B9_ROWS: [string, Record<string, unknown>, Record<string, unknown>][] = [
+    [
+      "fetch: the action with its refspecs reaches useSecret whole and the result returns as data",
+      {
+        type: "git",
+        operation: "fetch",
+        repository: "https://127.0.0.1/team/repo.git",
+        refspecs: ["+refs/heads/*", "refs/tags/v1"],
+        args: ["--prune", "--depth=1", "--tags"],
+        working_directory: "/var/harpoc/work",
+        timeout_ms: 300_000,
+      },
+      { type: "git", operation: "fetch", exit_code: 0, stdout: "", stderr: "" },
+    ],
+    [
+      "ls-remote: the action reaches useSecret whole and the listing returns as data unchanged",
+      {
+        type: "git",
+        operation: "ls-remote",
+        repository: "https://127.0.0.1/team/repo.git",
+        args: ["--symref"],
+      },
+      {
+        type: "git",
+        operation: "ls-remote",
+        exit_code: 0,
+        stdout: LISTING,
+        stderr: "",
+      },
+    ],
+  ];
+
+  it.each(GIT_B9_ROWS)("%s", async (_title, action, result) => {
+    engine.useSecret.mockResolvedValueOnce(result);
+    const res = await postUse(action);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toStrictEqual({ data: result });
+    expect(engine.useSecret).toHaveBeenCalledTimes(1);
+    const call = engine.useSecret.mock.calls[0] as unknown[];
+    expect(call[0]).toBe("secret://test-key");
+    expect(call[1]).toStrictEqual(action);
+  });
+
+  it("refuses a refspecs that is not an array 400 SCHEMA_VALIDATION_ERROR naming the field, never reaching the engine", async () => {
+    const res = await postUse({
+      type: "git",
+      operation: "fetch",
+      repository: "https://127.0.0.1/team/repo.git",
+      refspecs: "+refs/heads/*",
+      working_directory: "/var/harpoc/work",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toStrictEqual({
+      error: ErrorCode.SCHEMA_VALIDATION_ERROR,
+      message: "action.refspecs: Invalid input: expected array, received string",
+    });
+    expect(engine.useSecret).not.toHaveBeenCalled();
+  });
+});
+
 // I15 (test-review-2026-10-09): a per-invocation response_mode looser than the
 // secret's policy is refused by the engine before any request executes; the
 // route renders the refusal as 403 with the error body, and the engine's one

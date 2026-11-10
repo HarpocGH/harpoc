@@ -83,9 +83,46 @@ const CLONE_DANGEROUS_ARG_PREFIXES = [
  *  reports as a failed push although the remote moved. */
 const PUSH_DANGEROUS_ARG_PREFIXES = ["-u", "--set-upstream"];
 
+/** A fetch's options reach its credential-free local step verbatim
+ *  (runRelayed); these break the vault's plan or write the caller's config. */
+const FETCH_DANGEROUS_ARG_PREFIXES = [
+  // `-u` is `--update-head-ok`: the checked-out branch's ref may move under its work tree.
+  "-u",
+  "--update-head-ok",
+  // `-m` is `--multiple`: the vault's refspecs are read as remote names.
+  "-m",
+  "--multiple",
+  // Fetches the remotes the working tree configures, never the validated repository.
+  "--all",
+  // Reads refspecs the vault never saw from a stdin it never writes.
+  "--stdin",
+  // Maps the fetched refs onto destinations the caller names, past the vault's.
+  "--refmap",
+  // Records an upstream in the caller's config.
+  "--set-upstream",
+  // Writes a promisor remote into the caller's config, which lazy-fetches later
+  // without the credential.
+  "--filter",
+];
+
+/** An ls-remote's options reach its credential-bearing step. `-u` is no
+ *  ls-remote option on git 2.39 or 2.51 but is `--upload-pack` on a clone, so
+ *  it never reaches that step should git add the short form. */
+const LS_REMOTE_DANGEROUS_ARG_PREFIXES = ["-u"];
+
+/** The denied options beside DANGEROUS_ARG_PREFIXES, per operation. */
+const OPERATION_DANGEROUS_ARG_PREFIXES: Record<GitAction["operation"], readonly string[]> = {
+  clone: CLONE_DANGEROUS_ARG_PREFIXES,
+  pull: [],
+  push: PUSH_DANGEROUS_ARG_PREFIXES,
+  fetch: FETCH_DANGEROUS_ARG_PREFIXES,
+  "ls-remote": LS_REMOTE_DANGEROUS_ARG_PREFIXES,
+};
+
 /**
- * The short options that take a value, per operation (`git <op> -h`, Git for
- * Windows 2.51 and git 2.54 alike; an optional value is taken only when
+ * The short options that take a value, per operation (`git <op> -h` — clone,
+ * pull and push: Git for Windows 2.51 and git 2.54; fetch and ls-remote: Git
+ * for Windows 2.51 and git 2.39; an optional value is taken only when
  * attached, so it ends the cluster as well): in `-xyz` git reads `-x -y -z`
  * until the first of these, and the rest of the token is its value.
  */
@@ -93,6 +130,8 @@ const SHORT_WITH_VALUE: Record<GitAction["operation"], ReadonlySet<string>> = {
   clone: new Set(["j", "o", "b", "u", "c"]),
   pull: new Set(["r", "s", "X", "S", "j", "o"]),
   push: new Set(["o"]),
+  fetch: new Set(["j", "o"]),
+  "ls-remote": new Set(["o"]),
 };
 
 /** Repository transports that can execute local commands — never allowed. */
@@ -200,10 +239,10 @@ interface RelayRepo {
 }
 
 /**
- * The credential-free local hops — the local `pull` and the clone's local
- * `clone` — read the relay and nothing else: the flags refuse every transport
- * but file for what the vault's argv and a default tree ask for
- * (`transport '<x>' not allowed`), such as a submodule fetch or a
+ * The credential-free local hops — the local `pull`, the fetch's local `fetch`
+ * and the clone's local `clone` — read the relay and nothing else: the flags
+ * refuse every transport but file for what the vault's argv and a default
+ * tree ask for (`transport '<x>' not allowed`), such as a submodule fetch or a
  * partial-clone caller's lazy fetch during a pull. A tree's own
  * `protocol.<name>.allow` still applies to that step, which carries no
  * credential.
@@ -250,6 +289,106 @@ const CLONE_FETCH_OPTIONS: FetchOptionSpec = {
   shortWithValue: SHORT_WITH_VALUE.clone,
 };
 
+/** A fetch's `-n` is `--no-tags`; `--prune`, `--force` and the other
+ *  options act on the local step alone, against a relay that holds every
+ *  remote ref the refspecs select. */
+const FETCH_FETCH_OPTIONS: FetchOptionSpec = {
+  flags: [
+    "--tags",
+    "--no-tags",
+    "--unshallow",
+    "--update-shallow",
+    "--refetch",
+    "--ipv4",
+    "--ipv6",
+  ],
+  valued: ["--depth", "--deepen", "--shallow-since", "--shallow-exclude", "--server-option"],
+  short: { t: "--tags", n: "--no-tags", "4": "--ipv4", "6": "--ipv6" },
+  shortValued: { o: "--server-option" },
+  shortWithValue: SHORT_WITH_VALUE.fetch,
+};
+
+/** The refs a fetch brings without `refspecs`: every branch of the remote. */
+const DEFAULT_FETCH_REFSPECS = ["+refs/heads/*"];
+
+/** One caller refspec of a fetch, as parseFetchRefspec admits it. */
+export interface FetchRefspec {
+  /** `+`: the local step takes a non-fast-forward update. */
+  force: boolean;
+  /** `^`: excludes what it matches from the positive refspecs. */
+  negative: boolean;
+  /** The remote ref or pattern, `refs/heads/…` or `refs/tags/…`. */
+  source: string;
+}
+
+/**
+ * A fetch refspec names the remote's refs only (RX-B9-2): `refs/heads/<name>`
+ * or `refs/tags/<name>`, one `*` at most, a leading `+` or `^`. The vault
+ * chooses where both steps store them (fetchRefspecPlan), so a destination, a
+ * short name, an object id and every other namespace are refused.
+ */
+export function parseFetchRefspec(spec: string): FetchRefspec {
+  const negative = spec.startsWith("^");
+  const force = spec.startsWith("+");
+  const source = negative || force ? spec.slice(1) : spec;
+  const stars = source.split("*").length - 1;
+  if (
+    !/^refs\/(heads|tags)\/./.test(source) ||
+    stars > 1 ||
+    !isPlainRefname(source.replace("*", "x"))
+  ) {
+    throw VaultError.invalidGitConfig(`unsupported fetch refspec: ${spec}`);
+  }
+  return { force, negative, source };
+}
+
+/**
+ * The network step's refspecs (into the relay, at the remote's own names) and
+ * the local step's (from the relay into the working tree: a branch under
+ * `refs/remotes/<remote>/`, a tag under `refs/tags/`). Without refspecs a
+ * fetch takes every branch; tags follow as git's own fetch follows them.
+ */
+export function fetchRefspecPlan(
+  refspecs: readonly FetchRefspec[],
+  remote: string,
+): { network: string[]; local: string[] } {
+  const network: string[] = [];
+  const local: string[] = [];
+  for (const { force, negative, source } of refspecs) {
+    if (negative) {
+      network.push(`^${source}`);
+      local.push(`^${source}`);
+      continue;
+    }
+    const destination = source.startsWith("refs/heads/")
+      ? `refs/remotes/${remote}/${source.slice("refs/heads/".length)}`
+      : source;
+    network.push(`+${source}:${source}`);
+    local.push(`${force ? "+" : ""}${source}:${destination}`);
+  }
+  return { network, local };
+}
+
+/** The caller's refspecs of a fetch, parsed, or the default; refused on every other operation. */
+function fetchRefspecsOf(action: GitAction): FetchRefspec[] {
+  if (action.operation !== "fetch") {
+    if (action.refspecs !== undefined) {
+      throw VaultError.invalidGitConfig(`refspecs is only accepted by a fetch`);
+    }
+    return [];
+  }
+  if (action.refspecs?.length === 0) {
+    throw VaultError.invalidGitConfig("refspecs must not be empty");
+  }
+  const parsed = (action.refspecs ?? DEFAULT_FETCH_REFSPECS).map(parseFetchRefspec);
+  if (parsed.every((r) => r.negative)) {
+    throw VaultError.invalidGitConfig(
+      `a fetch needs a refspec that is not negative: ${(action.refspecs ?? []).join(" ")}`,
+    );
+  }
+  return parsed;
+}
+
 /**
  * Executes a Git operation, authenticating over HTTPS (request-mediated, via a
  * git-credential/askpass helper) or SSH (process-mediated, via the ephemeral
@@ -264,12 +403,12 @@ const CLONE_FETCH_OPTIONS: FetchOptionSpec = {
  *    strict pinned host-key verification for SSH remotes.
  *  - Command allowlist: the git binary is pinned to a resolved absolute path.
  *  - The credential never enters a git process that reads the caller's
- *    repository config (S1): clone, pull and push run their network steps
- *    against a vault-written relay repository (runRelayedClone, runRelayed),
- *    re-validated around each step. A writer running as the same OS user can
- *    still change the relay between that check and git's read; closing that
- *    needs OS-level separation of the credential-bearing step, which the vault
- *    does not provide.
+ *    repository config (S1): clone, pull, push, fetch and ls-remote run their
+ *    network steps against a vault-written relay repository (runRelayedClone,
+ *    runRelayed, runLsRemote), re-validated around each step. A writer
+ *    running as the same OS user can still change the relay between that
+ *    check and git's read; closing that needs OS-level separation of the
+ *    credential-bearing step, which the vault does not provide.
  */
 export class GitInjector {
   constructor(private readonly auditLogger: AuditLogger | null) {}
@@ -288,10 +427,21 @@ export class GitInjector {
       throw VaultError.gitUnsupportedTransport(action.repository);
     }
 
-    assertSafeArgs(action.operation, action.args);
-    assertNoPositional(action);
-    if (action.working_directory && action.working_directory.startsWith("-")) {
-      throw VaultError.invalidGitConfig("working_directory must not start with '-'");
+    try {
+      assertKnownOperation(action);
+      assertSafeArgs(action.operation, action.args);
+      assertNoPositional(action);
+      fetchRefspecsOf(action);
+      if (action.working_directory && action.working_directory.startsWith("-")) {
+        throw VaultError.invalidGitConfig("working_directory must not start with '-'");
+      }
+      if (action.repository.trim().startsWith("-")) {
+        throw VaultError.invalidGitConfig("repository must not start with '-'");
+      }
+    } catch (err) {
+      if (err instanceof VaultError)
+        this.audit(action, secretId, { error: err.code }, false, attribution);
+      throw err;
     }
 
     let gitPath: string;
@@ -336,6 +486,8 @@ export class GitInjector {
       assertWorkingTree(action);
     } catch (err) {
       hooks.dispose();
+      if (err instanceof VaultError)
+        this.audit(action, secretId, { error: err.code }, false, attribution);
       throw err;
     }
     const timeoutMs = action.timeout_ms ?? DEFAULT_GIT_TIMEOUT_MS;
@@ -457,6 +609,7 @@ export class GitInjector {
     }
     const sshPath = resolveExecutable("ssh", controlledPathDirs());
     if (!sshPath) {
+      this.audit(action, secretId, { host, error: "INVALID_GIT_CONFIG" }, false, attribution);
       throw VaultError.invalidGitConfig("ssh binary not found on the controlled PATH");
     }
     try {
@@ -473,6 +626,8 @@ export class GitInjector {
       assertWorkingTree(action);
     } catch (err) {
       hooks.dispose();
+      if (err instanceof VaultError)
+        this.audit(action, secretId, { host, error: err.code }, false, attribution);
       throw err;
     }
     const timeoutMs = action.timeout_ms ?? DEFAULT_GIT_TIMEOUT_MS;
@@ -610,7 +765,7 @@ function detectTransport(repository: string): "https" | "ssh" | null {
   if (/^https?:\/\//i.test(repo)) return "https";
   if (/^ssh:\/\//i.test(repo)) return "ssh";
   // scp-like: user@host:path
-  if (/^[^@/]+@[^:/]+:/.test(repo)) return "ssh";
+  if (/^[^@/:]+@[^:/]+:/.test(repo)) return "ssh";
   return null;
 }
 
@@ -651,13 +806,19 @@ function reachesDeniedOption(
   return denied.some((p) => p.startsWith("--") && p.startsWith(name));
 }
 
+/**
+ * An operation the schema never parsed may be anything (RX-B9-13): it must be
+ * a string and an own key of the per-operation table — never an inherited name
+ * such as `constructor` — or it is refused before any table is read.
+ */
+function assertKnownOperation(action: GitAction): void {
+  if (typeof action.operation !== "string" || !Object.hasOwn(SHORT_WITH_VALUE, action.operation)) {
+    throw VaultError.invalidGitConfig("unsupported git operation");
+  }
+}
+
 function assertSafeArgs(operation: GitAction["operation"], args: string[] | undefined): void {
-  const denied =
-    operation === "clone"
-      ? [...DANGEROUS_ARG_PREFIXES, ...CLONE_DANGEROUS_ARG_PREFIXES]
-      : operation === "push"
-        ? [...DANGEROUS_ARG_PREFIXES, ...PUSH_DANGEROUS_ARG_PREFIXES]
-        : DANGEROUS_ARG_PREFIXES;
+  const denied = [...DANGEROUS_ARG_PREFIXES, ...OPERATION_DANGEROUS_ARG_PREFIXES[operation]];
   for (const arg of args ?? []) {
     if (reachesDeniedOption(arg, denied, SHORT_WITH_VALUE[operation])) {
       throw VaultError.invalidGitConfig(`disallowed git argument: ${arg}`);
@@ -674,9 +835,11 @@ function assertSafeArgs(operation: GitAction["operation"], args: string[] | unde
  * be git's repository, with the vault's `-- <repository>` demoted to a
  * refspec: a push aborts on that refspec before connecting, but only
  * incidentally, and an scp-form repository is a valid refspec, so the
- * credential-free local pull connected to the positional's host. All three
- * therefore take option-shaped arguments only; a value goes in the
- * `--option=value` form.
+ * credential-free local pull connected to the positional's host. A fetch's
+ * positional would be the local step's repository, and an ls-remote's the
+ * repository its credential-bearing step lists (git stops at it, so the
+ * vault's `-- <repository>` becomes a pattern). All five therefore take
+ * option-shaped arguments only; a value goes in the `--option=value` form.
  */
 function assertNoPositional(action: GitAction): void {
   const subject =
@@ -684,9 +847,13 @@ function assertNoPositional(action: GitAction): void {
       ? "a push"
       : action.operation === "pull"
         ? "a pull"
-        : action.operation === "clone" && !action.working_directory
-          ? "a clone without working_directory"
-          : null;
+        : action.operation === "fetch"
+          ? "a fetch"
+          : action.operation === "ls-remote"
+            ? "an ls-remote"
+            : action.operation === "clone" && !action.working_directory
+              ? "a clone without working_directory"
+              : null;
   if (subject === null) return;
   for (const arg of action.args ?? []) {
     if (arg === "-" || arg === "--" || arg === "--end-of-options" || !arg.startsWith("-")) {
@@ -704,7 +871,7 @@ function parseSshHost(repository: string): string | null {
       return null;
     }
   }
-  const m = /^[^@/]+@([^:/]+):/.exec(repo);
+  const m = /^[^@/:]+@([^:/]+):/.exec(repo);
   return m ? (m[1] ?? null) : null;
 }
 
@@ -735,6 +902,12 @@ function forcedGitConfig(hooksDir: string): string[] {
 
 function assertWorkingTree(action: GitAction): void {
   if (action.operation === "clone") return;
+  if (action.operation === "ls-remote") {
+    if (action.working_directory !== undefined) {
+      throw VaultError.invalidGitConfig("working_directory is not accepted by ls-remote");
+    }
+    return;
+  }
   const wd = action.working_directory;
   if (!wd) {
     throw VaultError.invalidGitConfig(`working_directory is required for ${action.operation}`);
@@ -764,9 +937,9 @@ function succeeded(r: SpawnCapturedResult): boolean {
  * Every operation is relayed: the credential-bearing steps run against a
  * vault-written relay repository, never in the caller's working tree or clone
  * destination, whose configuration a concurrent writer could plant (S1) — a
- * clone through runRelayedClone, a pull or a push through runRelayed. Every
- * step shares the operation's one timeout budget and the policy's spawn
- * posture.
+ * clone through runRelayedClone, a pull, a push or a fetch through
+ * runRelayed, an ls-remote through runLsRemote. Every step shares the
+ * operation's one timeout budget and the policy's spawn posture.
  */
 async function runPlan(
   action: GitAction,
@@ -790,10 +963,16 @@ async function runPlan(
     });
   const localEnv = baseGitEnv(policy.env_allowlist);
   localEnv.GIT_TERMINAL_PROMPT = "0";
-  if (action.operation === "clone") {
-    return runRelayedClone(action, hooksDir, networkConfig, networkEnv, localEnv, step);
+  switch (action.operation) {
+    case "clone":
+      return runRelayedClone(action, hooksDir, networkConfig, networkEnv, localEnv, step);
+    case "ls-remote":
+      return runLsRemote(action, hooksDir, networkConfig, networkEnv, step);
+    case "pull":
+    case "push":
+    case "fetch":
+      return runRelayed(action, hooksDir, networkConfig, networkEnv, localEnv, step);
   }
-  return runRelayed(action, hooksDir, networkConfig, networkEnv, localEnv, step);
 }
 
 /**
@@ -961,13 +1140,76 @@ async function runRelayedClone(
 }
 
 /**
- * Pull and push (S1, face b): the credential never enters a git process that
- * reads the caller's repository config. The steps run in the working tree —
- * resolving its object directory, its HEAD and its refs, and on a pull the
- * final `pull` from the relay — carry neither the credential nor the agent
- * socket; the one network step (`fetch` of the remote's HEAD, or the `push`)
- * runs with `--git-dir` of the relay repository the vault wrote
- * (createRelayRepo). A step that fails ends the operation with its result.
+ * An ls-remote (RX-B9-5): one credential-bearing `ls-remote` against an empty
+ * relay the vault wrote, as a clone's first step runs, and no local step — no
+ * working tree is read or written. Its output is the remote's ref listing,
+ * returned through the spawn seam's redaction and output cap.
+ */
+async function runLsRemote(
+  action: GitAction,
+  hooksDir: string,
+  networkConfig: string[],
+  networkEnv: Record<string, string>,
+  step: GitStep,
+): Promise<SpawnCapturedResult> {
+  const relay = createRelayRepo({ objectFormat: "sha1", head: RELAY_DEFAULT_HEAD, refs: [] });
+  try {
+    return await networkStep(
+      relay,
+      ["ls-remote", ...(action.args ?? []), "--", action.repository],
+      networkConfig,
+      forcedGitConfig(hooksDir),
+      networkEnv,
+      step,
+    );
+  } finally {
+    relay.dispose();
+  }
+}
+
+/**
+ * The working tree's remote whose URL is the repository (RX-B9-4), from the
+ * key names `git config --fixed-value` matched against it — git compares the
+ * URL, so it is never read back through the output redaction, which replaces
+ * a credential username the URL may carry (RX-B9-14): exactly one, and a name
+ * that can stand in `refs/remotes/<name>/` (a name carrying the username
+ * comes back redacted and is refused here). Anything else is refused rather
+ * than guessed.
+ */
+function remoteOf(listing: string, repository: string): string {
+  const names = new Set<string>();
+  for (const key of listing.split("\0")) {
+    if (key.startsWith("remote.") && key.endsWith(".url")) {
+      names.add(key.slice("remote.".length, -".url".length));
+    }
+  }
+  if (names.size === 0) {
+    throw VaultError.invalidGitConfig(`no remote of the working tree has the URL ${repository}`);
+  }
+  if (names.size > 1) {
+    throw VaultError.invalidGitConfig(
+      `${String(names.size)} remotes of the working tree have the URL ${repository}`,
+    );
+  }
+  const [remote] = [...names] as [string];
+  if (!isPlainRefname(`refs/remotes/${remote}`)) {
+    throw VaultError.invalidGitConfig(
+      `the working tree's remote for ${repository} is not a plain ref name`,
+    );
+  }
+  return remote;
+}
+
+/**
+ * Pull, push and fetch (S1, face b): the credential never enters a git
+ * process that reads the caller's repository config. The steps run in the
+ * working tree — resolving its object directory, its HEAD and its refs (a
+ * fetch also its remote for the repository), and on a pull or a fetch the
+ * final `pull` or `fetch` from the relay — carry neither the credential nor
+ * the agent socket; the one network step (`fetch` of the remote's HEAD or of
+ * the fetch's refspecs, or the `push`) runs with `--git-dir` of the relay
+ * repository the vault wrote (createRelayRepo). A step that fails ends the
+ * operation with its result.
  */
 async function runRelayed(
   action: GitAction,
@@ -1008,6 +1250,30 @@ async function runRelayed(
     }
   }
 
+  let refspecs: { network: string[]; local: string[] } | null = null;
+  if (action.operation === "fetch") {
+    const remotes = await local([
+      "config",
+      "-z",
+      "--name-only",
+      "--fixed-value",
+      "--get-regexp",
+      "--end-of-options",
+      "^remote\\..*\\.url$",
+      action.repository,
+    ]);
+    if (remotes.exit_code !== 0 && remotes.exit_code !== 1) return remotes;
+    if (remotes.truncated) {
+      throw VaultError.gitOperationFailed(
+        "the working tree's remote listing exceeds the output cap",
+      );
+    }
+    refspecs = fetchRefspecPlan(
+      fetchRefspecsOf(action),
+      remoteOf(remotes.stdout, action.repository),
+    );
+  }
+
   const listed = await local(["for-each-ref", "--format=%(objectname) %(refname)"]);
   if (!succeeded(listed)) return listed;
   if (listed.truncated) {
@@ -1015,7 +1281,7 @@ async function runRelayed(
   }
   const refs = parseRefListing(
     listed.stdout,
-    action.operation === "pull" ? RELAY_LOCAL_REF_PREFIX : "refs/",
+    action.operation === "push" ? "refs/" : RELAY_LOCAL_REF_PREFIX,
   );
 
   const relay = createRelayRepo({ objectsDir, shallowFile, objectFormat, head, refs });
@@ -1029,20 +1295,21 @@ async function runRelayed(
       "fetch",
       "--quiet",
       "--no-write-fetch-head",
-      ...forwardedFetchArgs(action.args ?? [], PULL_FETCH_OPTIONS),
+      ...forwardedFetchArgs(action.args ?? [], refspecs ? FETCH_FETCH_OPTIONS : PULL_FETCH_OPTIONS),
       "--",
       action.repository,
-      `+HEAD:${RELAY_FETCHED_REF}`,
+      ...(refspecs ? refspecs.network : [`+HEAD:${RELAY_FETCHED_REF}`]),
     ]);
     if (!succeeded(fetched)) return fetched;
     const merged = await local([
       ...LOCAL_HOP_PROTOCOLS,
       "-c",
       `url.${relay.dir.replace(/\\/g, "/")}.insteadOf=${action.repository}`,
-      "pull",
+      ...(refspecs ? ["fetch", "--no-recurse-submodules", "--refmap="] : ["pull"]),
       ...(action.args ?? []),
       "--",
       action.repository,
+      ...(refspecs ? refspecs.local : []),
     ]);
     return {
       ...merged,
@@ -1116,11 +1383,12 @@ function forwardedFetchArgs(args: string[], spec: FetchOptionSpec): string[] {
 
 /**
  * The relay repository a network step runs against: bare, its config written
- * here and nowhere else. A pull's or push's borrows the caller's objects
- * through `objects/info/alternates` (the step transfers only what the two
- * sides do not share) and holds the caller's refs in `packed-refs` as
+ * here and nowhere else. A pull's, push's or fetch's borrows the caller's
+ * objects through `objects/info/alternates` (the step transfers only what the
+ * two sides do not share) and holds the caller's refs in `packed-refs` as
  * negotiation tips (a push's 1:1, so `--all`, `--tags` and `--mirror` see
- * them; a pull's under RELAY_LOCAL_REF_PREFIX); a clone's starts empty.
+ * them; a pull's and a fetch's under RELAY_LOCAL_REF_PREFIX); a clone's and
+ * an ls-remote's start empty.
  * `core.alternateRefsCommand` replaces the `git --git-dir=<caller>
  * for-each-ref` git would otherwise run in the caller's repository — with the
  * credential in its environment — to list the alternate's refs. A shallow

@@ -69,6 +69,25 @@ describe("GitInjector enforcement (no git binary required)", () => {
     },
   );
 
+  it.each(["clone", "fetch", "ls-remote"] as const)(
+    "refuses a %s of an scp-form repository whose user part holds a colon: git would contact the host before that colon, not the one the vault judges (E-20)",
+    async (operation) => {
+      await expectVaultError(
+        () =>
+          injector.executeWithSecret(
+            gitAction({ operation, repository: "evil.invalid:x@allowed.invalid:p" }),
+            SECRET,
+            policy({
+              command_allowlist: GIT === null ? [] : [GIT],
+              host_allowlist: ["allowed.invalid"],
+            }),
+            undefined,
+          ),
+        ErrorCode.GIT_UNSUPPORTED_TRANSPORT,
+      );
+    },
+  );
+
   it.each([
     "-c",
     "--config",
@@ -252,6 +271,234 @@ describe("GitInjector enforcement (no git binary required)", () => {
         );
       },
     );
+  });
+
+  // M6 (B9): a fetch's options reach its credential-free local step verbatim, an
+  // ls-remote's its credential-bearing step; git's abbreviations measured on Git
+  // for Windows 2.51 and git 2.39 (`--m` is `--multiple`, `--u` an ls-remote's
+  // `--upload-pack`, `--prune` an option of its own beside `--prune-tags`).
+  describe("B9: the fetch and ls-remote tables", () => {
+    const run = (operation: "fetch" | "ls-remote", args: string[]) =>
+      injector.executeWithSecret(
+        gitAction({
+          operation,
+          args,
+          ...(operation === "fetch" ? { working_directory: "./wd" } : {}),
+        }),
+        SECRET,
+        policy(),
+        undefined,
+      );
+
+    it.each([
+      ["fetch", "-u"],
+      ["fetch", "-qu"],
+      ["fetch", "-vu"],
+      ["fetch", "-au"],
+      ["fetch", "-fu"],
+      ["fetch", "-nu"],
+      ["fetch", "-pu"],
+      ["fetch", "-Pu"],
+      ["fetch", "-ku"],
+      ["fetch", "-4u"],
+      ["fetch", "-6u"],
+      ["fetch", "--update-head-ok"],
+      ["fetch", "--update-h"],
+      ["fetch", "--update-"],
+      ["fetch", "-m"],
+      ["fetch", "-tm"],
+      ["fetch", "--multiple"],
+      ["fetch", "--m"],
+      ["fetch", "--all"],
+      ["fetch", "--al"],
+      ["fetch", "--stdin"],
+      ["fetch", "--st"],
+      ["fetch", "--refmap=+refs/heads/*:refs/heads/*"],
+      ["fetch", "--refm=x"],
+      ["fetch", "--ref"],
+      ["fetch", "--set-upstream"],
+      ["fetch", "--set"],
+      ["fetch", "--filter=blob:none"],
+      ["fetch", "--fi=blob:none"],
+      ["fetch", "--upload-pack=/x"],
+      ["fetch", "--upl=/x"],
+      ["fetch", "--recurse-submodules"],
+      ["fetch", "--recurse-submodules-default=yes"],
+      ["fetch", "-c"],
+      ["fetch", "--config-env=X=Y"],
+      ["ls-remote", "-u"],
+      ["ls-remote", "-qu"],
+      ["ls-remote", "-tu"],
+      ["ls-remote", "-bu"],
+      ["ls-remote", "-hu"],
+      ["ls-remote", "--upload-pack=/x"],
+      ["ls-remote", "--u=/x"],
+      ["ls-remote", "--exec=/x"],
+      ["ls-remote", "--exe=/x"],
+      ["ls-remote", "--ex"],
+      ["ls-remote", "-c"],
+      ["ls-remote", "--conf=k=v"],
+      ["ls-remote", "--recurse-submodules"],
+    ] as const)("%s refuses %s", async (operation, arg) => {
+      const err = await expectVaultError(() => run(operation, [arg]), ErrorCode.INVALID_GIT_CONFIG);
+      expect(err.message).toBe(`disallowed git argument: ${arg}`);
+    });
+
+    it.each([
+      ["fetch", "--update-shallow"],
+      ["fetch", "--unshallow"],
+      ["fetch", "--prune"],
+      ["fetch", "-p"],
+      ["fetch", "--prune-tags"],
+      ["fetch", "-P"],
+      ["fetch", "--tags"],
+      ["fetch", "-t"],
+      ["fetch", "-n"],
+      ["fetch", "--no-tags"],
+      ["fetch", "--force"],
+      ["fetch", "-f"],
+      ["fetch", "--append"],
+      ["fetch", "--atomic"],
+      ["fetch", "--dry-run"],
+      ["fetch", "--depth=1"],
+      ["fetch", "--deepen=2"],
+      ["fetch", "--shallow-since=2026-01-01"],
+      ["fetch", "--refetch"],
+      ["fetch", "--server-option=x"],
+      ["fetch", "-ou"],
+      ["fetch", "-ju"],
+      ["fetch", "--jobs=2"],
+      ["fetch", "--no-recurse-submodules"],
+      ["fetch", "--no-write-fetch-head"],
+      ["fetch", "--porcelain"],
+      ["fetch", "--prefetch"],
+      ["fetch", "--negotiation-tip=refs/heads/main"],
+      ["fetch", "--auto-maintenance"],
+      ["fetch", "--write-commit-graph"],
+      ["fetch", "--show-forced-updates"],
+      ["fetch", "-k"],
+      ["fetch", "-4"],
+      ["fetch", "-qv"],
+      ["ls-remote", "--symref"],
+      ["ls-remote", "--heads"],
+      ["ls-remote", "--branches"],
+      ["ls-remote", "-b"],
+      ["ls-remote", "--tags"],
+      ["ls-remote", "-t"],
+      ["ls-remote", "--refs"],
+      ["ls-remote", "-q"],
+      ["ls-remote", "--exit-code"],
+      ["ls-remote", "--exi"],
+      ["ls-remote", "--get-url"],
+      ["ls-remote", "--sort=-version:refname"],
+      ["ls-remote", "--server-option=x"],
+      ["ls-remote", "-ou"],
+    ] as const)("control: %s admits %s (it reaches the allowlist)", async (operation, arg) => {
+      await expect(run(operation, [arg])).rejects.toMatchObject({
+        code: ErrorCode.COMMAND_NOT_ALLOWED,
+      });
+    });
+
+    it.each(["origin", "main", "refs/heads/x", "-", "--", "--end-of-options"])(
+      "a fetch takes no positional argument: %s",
+      async (arg) => {
+        const err = await expectVaultError(() => run("fetch", [arg]), ErrorCode.INVALID_GIT_CONFIG);
+        expect(err.message).toBe(`a fetch takes no positional argument: ${arg}`);
+      },
+    );
+
+    it.each(["origin", "https://8.8.4.4/other.git", "refs/heads/*", "--"])(
+      "an ls-remote takes no positional argument: %s",
+      async (arg) => {
+        const err = await expectVaultError(
+          () => run("ls-remote", [arg]),
+          ErrorCode.INVALID_GIT_CONFIG,
+        );
+        expect(err.message).toBe(`an ls-remote takes no positional argument: ${arg}`);
+      },
+    );
+
+    it.each(["clone", "pull", "push", "ls-remote"] as const)(
+      "refspecs on a %s is refused",
+      async (operation) => {
+        const err = await expectVaultError(
+          () =>
+            injector.executeWithSecret(
+              gitAction({ operation, refspecs: ["refs/heads/main"], working_directory: "./wd" }),
+              SECRET,
+              policy(),
+              undefined,
+            ),
+          ErrorCode.INVALID_GIT_CONFIG,
+        );
+        expect(err.message).toBe("refspecs is only accepted by a fetch");
+      },
+    );
+
+    it("an empty refspecs list on a fetch is refused", async () => {
+      const err = await expectVaultError(
+        () =>
+          injector.executeWithSecret(
+            gitAction({ operation: "fetch", refspecs: [], working_directory: "./wd" }),
+            SECRET,
+            policy(),
+            undefined,
+          ),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
+      expect(err.message).toBe("refspecs must not be empty");
+    });
+
+    it("a fetch refspec outside the grammar is refused before the allowlist, naming it", async () => {
+      const err = await expectVaultError(
+        () =>
+          injector.executeWithSecret(
+            gitAction({
+              operation: "fetch",
+              refspecs: ["refs/heads/a:refs/heads/b"],
+              working_directory: "./wd",
+            }),
+            SECRET,
+            policy(),
+            undefined,
+          ),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
+      expect(err.message).toBe("unsupported fetch refspec: refs/heads/a:refs/heads/b");
+    });
+
+    it("negative refspecs alone are refused", async () => {
+      const err = await expectVaultError(
+        () =>
+          injector.executeWithSecret(
+            gitAction({
+              operation: "fetch",
+              refspecs: ["^refs/heads/wip"],
+              working_directory: "./wd",
+            }),
+            SECRET,
+            policy(),
+            undefined,
+          ),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
+      expect(err.message).toBe("a fetch needs a refspec that is not negative: ^refs/heads/wip");
+    });
+
+    it("control: admitted refspecs reach the allowlist", async () => {
+      await expect(
+        injector.executeWithSecret(
+          gitAction({
+            operation: "fetch",
+            refspecs: ["+refs/heads/*", "^refs/heads/wip/*", "refs/tags/v*"],
+            working_directory: "./wd",
+          }),
+          SECRET,
+          policy(),
+          undefined,
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+    });
   });
 
   it("denies git by default when no command allowlist is set", async () => {
@@ -491,6 +738,23 @@ describeGit("GitInjector target enforcement (git resolvable)", () => {
         undefined,
       ),
     ).rejects.toMatchObject({ code: ErrorCode.HOST_NOT_ALLOWED });
+  });
+
+  it.each([
+    ["git@github.com:org/repo.git", "github.com"],
+    ["user.name@host.example:path", "host.example"],
+  ])("still reads %s as SSH and judges the host %s (E-20 controls)", async (repository, host) => {
+    const err = await expectVaultError(
+      () =>
+        injector.executeWithSecret(
+          gitAction({ repository }),
+          SECRET,
+          allowGit({ host_allowlist: ["allowed.invalid"] }),
+          undefined,
+        ),
+      ErrorCode.HOST_NOT_ALLOWED,
+    );
+    expect(err.message).toBe(`Host not in secret allowlist: ${host}`);
   });
 
   it("requires pinned host keys for an allowlisted SSH remote", async () => {

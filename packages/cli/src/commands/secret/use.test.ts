@@ -1068,6 +1068,235 @@ describe("secret use — buildAction maps each documented flag (I24)", () => {
   });
 });
 
+// B9 (M6): the git operations fetch and ls-remote and the repeatable --refspec,
+// each asserted as the whole action the engine mock receives.
+describe("secret use — git fetch and ls-remote (B9)", () => {
+  const REPOSITORY = "https://127.0.0.1/team/repo.git";
+  const LISTING =
+    "89e6c64ea37d3a40c03b05d08ea2c8c39c68944d\tHEAD\n" +
+    "89e6c64ea37d3a40c03b05d08ea2c8c39c68944d\trefs/heads/main\n";
+  let spies: CliSpies;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.useSecret.mockResolvedValue({
+      type: "git",
+      operation: "fetch",
+      exit_code: 0,
+      stdout: "",
+      stderr: "",
+    });
+    spies = spyCli();
+  });
+
+  afterEach(() => {
+    spies.restore();
+  });
+
+  function actionOf(): Record<string, unknown> {
+    const call = mockEngine.useSecret.mock.calls[0] as unknown[] | undefined;
+    if (!call) throw new Error("useSecret was never called");
+    return call[1] as Record<string, unknown>;
+  }
+
+  it("--operation's help names fetch and ls-remote for git; --refspec is git fetch's, repeatable", () => {
+    const program = new Command();
+    const secret = program.command("secret");
+    registerSecretUseCommand(secret);
+    const use = secret.commands.find((c) => c.name() === "use");
+    const description = (flag: string): string | undefined =>
+      use?.options.find((o) => o.long === flag)?.description;
+    expect(description("--operation")).toBe(
+      "Operation: clone|pull|push|fetch|ls-remote (git); search|fetch|store|move|copy|expunge (imap); upload|download|list (sftp); pull|push (docker_registry)",
+    );
+    expect(description("--refspec")).toBe(
+      "Refspec selecting what to fetch from the repository (repeatable, git fetch)",
+    );
+  });
+
+  it("fetch: repeated --refspec reaches refspecs in order, git options ride --arg", async () => {
+    await run([
+      "secret://k",
+      "--action",
+      "git",
+      "--operation",
+      "fetch",
+      "--repository",
+      REPOSITORY,
+      "--refspec",
+      "+refs/heads/*",
+      "--refspec",
+      "^refs/heads/wip",
+      "--refspec",
+      "refs/tags/v1",
+      "--arg",
+      "--prune",
+      "--arg",
+      "--depth=1",
+      "--arg",
+      "--tags",
+      "--cwd",
+      "/tmp/work",
+    ]);
+    expect(actionOf()).toEqual({
+      type: "git",
+      operation: "fetch",
+      repository: REPOSITORY,
+      refspecs: ["+refs/heads/*", "^refs/heads/wip", "refs/tags/v1"],
+      args: ["--prune", "--depth=1", "--tags"],
+      working_directory: "/tmp/work",
+    });
+  });
+
+  it("fetch: without --refspec the action carries no refspecs", async () => {
+    await run([
+      "secret://k",
+      "--action",
+      "git",
+      "--operation",
+      "fetch",
+      "--repository",
+      REPOSITORY,
+      "--cwd",
+      "/tmp/work",
+    ]);
+    expect(actionOf()).toEqual({
+      type: "git",
+      operation: "fetch",
+      repository: REPOSITORY,
+      args: [],
+      working_directory: "/tmp/work",
+    });
+    expect(actionOf().refspecs).toBeUndefined();
+  });
+
+  it("ls-remote: operation and repository, no refspecs and no working directory", async () => {
+    await run([
+      "secret://k",
+      "--action",
+      "git",
+      "--operation",
+      "ls-remote",
+      "--repository",
+      REPOSITORY,
+    ]);
+    expect(actionOf()).toEqual({
+      type: "git",
+      operation: "ls-remote",
+      repository: REPOSITORY,
+      args: [],
+    });
+  });
+
+  it("--refspec on another git operation reaches the engine whole: the CLI neither refuses nor drops it", async () => {
+    await run([
+      "secret://k",
+      "--action",
+      "git",
+      "--operation",
+      "pull",
+      "--repository",
+      REPOSITORY,
+      "--refspec",
+      "refs/heads/main",
+      "--cwd",
+      "/tmp/work",
+    ]);
+    expect(spies.exitSpy).not.toHaveBeenCalled();
+    expect(mockEngine.useSecret).toHaveBeenCalledTimes(1);
+    expect(actionOf()).toEqual({
+      type: "git",
+      operation: "pull",
+      repository: REPOSITORY,
+      refspecs: ["refs/heads/main"],
+      args: [],
+      working_directory: "/tmp/work",
+    });
+  });
+
+  it("--refspec on a non-git action is not mapped, as --repository is not", async () => {
+    await run(["secret://k", "--url", REPOSITORY, "--refspec", "refs/heads/main"]);
+    expect(actionOf()).toEqual({
+      type: "http",
+      method: "GET",
+      url: REPOSITORY,
+      injection: { type: "bearer" },
+    });
+  });
+
+  it("--action-file conflicts with --refspec, naming it in the INVALID_INPUT refusal", async () => {
+    await expect(
+      run([
+        "secret://k",
+        "--action-file",
+        "/nonexistent/action.json",
+        "--refspec",
+        "refs/heads/main",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(spies.stderr()).toBe(
+      "Error: [INVALID_INPUT] --action-file conflicts with --refspec — supply the action via the file or the flags, not both.",
+    );
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+  });
+
+  it("ls-remote: --json prints the listing exactly, tabs, line feeds and the trailing newline kept", async () => {
+    mockEngine.useSecret.mockResolvedValueOnce({
+      type: "git",
+      operation: "ls-remote",
+      exit_code: 0,
+      stdout: LISTING,
+      stderr: "",
+    });
+    await run([
+      "secret://k",
+      "--action",
+      "git",
+      "--operation",
+      "ls-remote",
+      "--repository",
+      REPOSITORY,
+      "--json",
+    ]);
+    expect(JSON.parse(spies.stdout())).toStrictEqual({
+      type: "git",
+      operation: "ls-remote",
+      exit_code: 0,
+      stdout: LISTING,
+      stderr: "",
+    });
+  });
+
+  it("ls-remote: a non-zero exit_code (--exit-code, no match) is printed and the command exits 0", async () => {
+    mockEngine.useSecret.mockResolvedValueOnce({
+      type: "git",
+      operation: "ls-remote",
+      exit_code: 2,
+      stdout: "",
+      stderr: "",
+    });
+    await run([
+      "secret://k",
+      "--action",
+      "git",
+      "--operation",
+      "ls-remote",
+      "--repository",
+      REPOSITORY,
+      "--arg",
+      "--exit-code",
+    ]);
+    expect(actionOf()).toEqual({
+      type: "git",
+      operation: "ls-remote",
+      repository: REPOSITORY,
+      args: ["--exit-code"],
+    });
+    expect(spies.exitSpy).not.toHaveBeenCalled();
+    expect(spies.stdout()).toBe("type       git\noperation  ls-remote\nexit_code  2");
+  });
+});
+
 describe("secret use — --action-file", () => {
   let spies: CliSpies;
   let tempDir: string;
@@ -1401,6 +1630,26 @@ describe("summarizeResult renders every context", () => {
     expect(summarizeResult({ type: "ssh", exit_code: 255, stdout: "", stderr: "" })).toMatchObject({
       type: "ssh",
       exit_code: 255,
+    });
+  });
+
+  it("git ls-remote previews the listing on one line, as every output channel is previewed", () => {
+    expect(
+      summarizeResult({
+        type: "git",
+        operation: "ls-remote",
+        exit_code: 0,
+        stdout:
+          "89e6c64ea37d3a40c03b05d08ea2c8c39c68944d\tHEAD\n" +
+          "89e6c64ea37d3a40c03b05d08ea2c8c39c68944d\trefs/heads/main\n",
+        stderr: "",
+      }),
+    ).toEqual({
+      type: "git",
+      operation: "ls-remote",
+      exit_code: 0,
+      stdout:
+        "89e6c64ea37d3a40c03b05d08ea2c8c39c68944d HEAD 89e6c64ea37d3a40c03b05d08ea2c8c39c68944d refs/heads/main",
     });
   });
 

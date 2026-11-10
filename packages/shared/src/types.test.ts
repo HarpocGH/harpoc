@@ -5,6 +5,7 @@ import {
   AuditEventType,
   DatabaseEngine,
   FollowRedirects,
+  GitOperation,
   InjectionType,
   OAuthGrantType,
   OAuthProviderPreset,
@@ -167,6 +168,19 @@ describe("DatabaseEngine values", () => {
     ["MONGODB", "mongodb"],
   ] as const)("%s is '%s'", (key, value) => {
     expect(DatabaseEngine[key]).toBe(value);
+  });
+});
+
+describe("GitOperation values", () => {
+  it("has the five git subcommands, in order", () => {
+    expect(Object.values(GitOperation)).toEqual(["clone", "pull", "push", "fetch", "ls-remote"]);
+  });
+
+  it.each([
+    ["FETCH", "fetch"],
+    ["LS_REMOTE", "ls-remote"],
+  ] as const)("%s is '%s'", (key, value) => {
+    expect(GitOperation[key]).toBe(value);
   });
 });
 

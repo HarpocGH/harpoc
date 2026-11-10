@@ -76,6 +76,24 @@ const V13_ACTIONS: UseSecretAction[] = [
   },
 ];
 
+// B9 (M6): the git operations fetch (with its refspecs) and ls-remote.
+const GIT_B9_ACTIONS: UseSecretAction[] = [
+  {
+    type: "git",
+    operation: "fetch",
+    repository: "https://127.0.0.1/team/repo.git",
+    refspecs: ["+refs/heads/*", "refs/tags/v1"],
+    args: ["--prune", "--depth=1", "--tags"],
+    working_directory: "/var/tmp/b9-work",
+  },
+  {
+    type: "git",
+    operation: "ls-remote",
+    repository: "https://127.0.0.1/team/repo.git",
+    args: ["--symref"],
+  },
+];
+
 // I26 (test-review-2026-10-09): the three connection-config groups the SDK
 // had never sent, one config apiece (no group carries a schema default).
 const CONFIG_GROUPS: { group: string; config: ConnectionConfig }[] = [
@@ -229,6 +247,19 @@ describe("DirectClient", () => {
 
   it.each(V13_ACTIONS)(
     "useSecret forwards a $type action to the engine verbatim (I13)",
+    async (action) => {
+      const engine = createMockEngine();
+      const client = new DirectClient(engine as never);
+
+      await client.useSecret("secret://key", action);
+
+      expect(engine.useSecret).toHaveBeenCalledTimes(1);
+      expect(engine.useSecret.mock.calls[0]).toStrictEqual(["secret://key", action]);
+    },
+  );
+
+  it.each(GIT_B9_ACTIONS)(
+    "useSecret forwards a git $operation action to the engine verbatim (B9)",
     async (action) => {
       const engine = createMockEngine();
       const client = new DirectClient(engine as never);

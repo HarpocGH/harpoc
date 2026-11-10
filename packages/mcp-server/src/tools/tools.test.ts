@@ -491,7 +491,7 @@ describe("MCP Tools", () => {
     // hand-maintained MCP-side copy would fail them.
     describe("advertised action schema (v1.3 context widening pin)", () => {
       interface UnionArm {
-        properties?: Record<string, { const?: string }>;
+        properties?: Record<string, { const?: string; enum?: string[] }>;
       }
 
       async function actionArms(): Promise<UnionArm[]> {
@@ -587,6 +587,33 @@ describe("MCP Tools", () => {
         const arm = armFor(await actionArms(), "docker_registry");
         expect(Object.keys(arm.properties ?? {}).sort()).toEqual(
           ["type", "operation", "image", "timeout_ms"].sort(),
+        );
+      });
+
+      it("advertises the git arm's exact key set, refspecs among them, and its five operations (B9)", async () => {
+        const arm = armFor(await actionArms(), "git");
+        expect(Object.keys(arm.properties ?? {}).sort()).toEqual(
+          [
+            "type",
+            "operation",
+            "repository",
+            "refspecs",
+            "args",
+            "working_directory",
+            "timeout_ms",
+          ].sort(),
+        );
+        expect([...(arm.properties?.operation?.enum ?? [])].sort()).toEqual(
+          ["clone", "pull", "push", "fetch", "ls-remote"].sort(),
+        );
+      });
+
+      it("describes the git arm with its five operations and a fetch's refspecs (B9)", async () => {
+        const tool = (await listTools(server)).find((t) => t.name === "use_secret");
+        const action = (tool as InMemoryToolDescriptor).inputSchema.properties?.action as
+          { description?: string } | undefined;
+        expect(action?.description).toContain(
+          "Git: {type:'git', operation:'clone'|'pull'|'push'|'fetch'|'ls-remote', repository, refspecs?, args?, working_directory?} (refspecs on a fetch only; ls-remote returns the remote's refs).",
         );
       });
     });
@@ -805,6 +832,72 @@ describe("MCP Tools", () => {
           type: "websocket",
           messages: ["echo [REDACTED]"],
           close_code: 1000,
+        });
+      });
+    });
+
+    // B9 (M6): the git operations fetch and ls-remote reach the engine as the
+    // client sent them, a fetch's refspecs included; the listing an ls-remote
+    // returns comes back unchanged. The mock engine never connects.
+    describe("git fetch and ls-remote dispatched verbatim (B9)", () => {
+      const LISTING =
+        "89e6c64ea37d3a40c03b05d08ea2c8c39c68944d\tHEAD\n" +
+        "89e6c64ea37d3a40c03b05d08ea2c8c39c68944d\trefs/heads/main\n";
+
+      async function dispatch(
+        action: UseSecretAction,
+        response: UseSecretResponse,
+      ): Promise<Record<string, unknown>> {
+        vi.mocked(engine.useSecret).mockResolvedValue(response);
+        const result = await callTool(server, "use_secret", { handle: "secret://my-key", action });
+
+        expect(result.isError ?? false).toBe(false);
+        expect(engine.useSecret).toHaveBeenCalledTimes(1);
+        const [handle, sent, caller] = vi.mocked(engine.useSecret).mock.calls[0] ?? [];
+        expect(handle).toBe("secret://my-key");
+        expect(sent).toStrictEqual(action);
+        expect(caller).toMatchObject({ principal_id: "tokenless-stdio" });
+        return JSON.parse(getToolText(result)) as Record<string, unknown>;
+      }
+
+      it("fetch: the action with its refspecs reaches the engine verbatim", async () => {
+        const data = await dispatch(
+          {
+            type: "git",
+            operation: "fetch",
+            repository: "https://127.0.0.1:8443/team/repo.git",
+            refspecs: ["+refs/heads/*", "refs/tags/v1"],
+            args: ["--prune", "--depth=1", "--tags"],
+            working_directory: "/var/tmp/b9-work",
+            timeout_ms: 300_000,
+          },
+          { type: "git", operation: "fetch", exit_code: 0, stdout: "", stderr: "" },
+        );
+        expect(data).toEqual({
+          type: "git",
+          operation: "fetch",
+          exit_code: 0,
+          stdout: "",
+          stderr: "",
+        });
+      });
+
+      it("ls-remote: the action reaches the engine verbatim; the listing comes back unchanged", async () => {
+        const data = await dispatch(
+          {
+            type: "git",
+            operation: "ls-remote",
+            repository: "https://127.0.0.1:8443/team/repo.git",
+            args: ["--symref"],
+          },
+          { type: "git", operation: "ls-remote", exit_code: 0, stdout: LISTING, stderr: "" },
+        );
+        expect(data).toEqual({
+          type: "git",
+          operation: "ls-remote",
+          exit_code: 0,
+          stdout: LISTING,
+          stderr: "",
         });
       });
     });

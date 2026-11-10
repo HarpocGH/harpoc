@@ -552,11 +552,42 @@ describe("gitActionSchema", () => {
   const git = { type: "git", operation: "clone", repository: "https://github.com/o/r.git" };
   it.each<[string, Record<string, unknown>, PropertyKey[][]]>([
     ["accepts a minimal clone", {}, []],
-    ["refuses operation fetch", { operation: "fetch" }, [["operation"]]],
+    ["accepts operation fetch", { operation: "fetch" }, []],
+    ["accepts operation ls-remote", { operation: "ls-remote" }, []],
+    ["refuses operation ls_remote", { operation: "ls_remote" }, [["operation"]]],
+    ["refuses operation remote", { operation: "remote" }, [["operation"]]],
     ["refuses an empty repository", { repository: "" }, [["repository"]]],
     ["refuses a 2049-character repository", { repository: "r".repeat(2049) }, [["repository"]]],
     ["accepts 256 args", { args: Array.from({ length: 256 }, () => "-v") }, []],
     ["refuses 257 args", { args: Array.from({ length: 257 }, () => "-v") }, [["args"]]],
+    [
+      "accepts 64 refspecs",
+      { operation: "fetch", refspecs: Array.from({ length: 64 }, () => "refs/heads/main") },
+      [],
+    ],
+    [
+      "refuses 65 refspecs",
+      { operation: "fetch", refspecs: Array.from({ length: 65 }, () => "refs/heads/main") },
+      [["refspecs"]],
+    ],
+    ["refuses an empty refspecs list", { operation: "fetch", refspecs: [] }, [["refspecs"]]],
+    ["refuses an empty refspec", { operation: "fetch", refspecs: [""] }, [["refspecs", 0]]],
+    [
+      "accepts a 1024-character refspec",
+      { operation: "fetch", refspecs: [`refs/heads/${"b".repeat(1013)}`] },
+      [],
+    ],
+    [
+      "refuses a 1025-character refspec",
+      { operation: "fetch", refspecs: [`refs/heads/${"b".repeat(1014)}`] },
+      [["refspecs", 0]],
+    ],
+    ["refuses a non-string refspec", { operation: "fetch", refspecs: [7] }, [["refspecs", 0]]],
+    [
+      "leaves refspecs on another operation to the injector (shape only here)",
+      { operation: "clone", refspecs: ["refs/heads/main"] },
+      [],
+    ],
   ])("%s", (_title, patch, paths) => {
     expect(issuesOf(gitActionSchema, { ...git, ...patch }).map((i) => i.path)).toEqual(paths);
   });

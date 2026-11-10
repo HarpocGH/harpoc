@@ -92,6 +92,23 @@ const V13_ACTIONS: UseSecretAction[] = [
     timeout_ms: 300_000,
   },
 ];
+// B9 (M6): the git operations fetch (with its refspecs) and ls-remote.
+const GIT_B9_ACTIONS: UseSecretAction[] = [
+  {
+    type: "git",
+    operation: "fetch",
+    repository: "https://127.0.0.1/team/repo.git",
+    refspecs: ["+refs/heads/*", "refs/tags/v1"],
+    args: ["--prune", "--depth=1", "--tags"],
+    working_directory: "/var/tmp/b9-work",
+  },
+  {
+    type: "git",
+    operation: "ls-remote",
+    repository: "https://127.0.0.1/team/repo.git",
+    args: ["--symref"],
+  },
+];
 // I26 (test-review-2026-10-09): the three connection-config groups the SDK
 // had never sent, one config apiece (no group carries a schema default).
 const CONFIG_GROUPS: { group: string; config: ConnectionConfig }[] = [
@@ -536,6 +553,20 @@ describe("RestClient", () => {
 
     it.each(V13_ACTIONS)(
       "posts a $type action verbatim as the body's action (I13)",
+      async (action) => {
+        mockFetchResponse({ type: action.type });
+        await client.useSecret(HANDLE, action);
+
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+        expect(url).toBe(`${BASE_URL}/api/v1/secrets/${ENCODED}/use`);
+        expect(init.method).toBe("POST");
+        expect(JSON.parse(init.body as string)).toStrictEqual({ action });
+      },
+    );
+
+    it.each(GIT_B9_ACTIONS)(
+      "posts a git $operation action verbatim as the body's action (B9)",
       async (action) => {
         mockFetchResponse({ type: action.type });
         await client.useSecret(HANDLE, action);
