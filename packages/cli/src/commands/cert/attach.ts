@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { AuditEventType } from "@harpoc/shared";
+import { AuditEventType, VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord, formatTimestamp } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
@@ -25,10 +25,12 @@ export function registerCertAttachCommand(cert: Command): void {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
         if (options.cert.trim() === "") {
-          throw new Error("--cert requires a path to a certificate PEM file.");
+          throw VaultError.invalidInput("--cert requires a path to a certificate PEM file.");
         }
         if (options.chain !== undefined && options.chain.trim() === "") {
-          throw new Error("--chain requires a path to a chain PEM file, or omit it entirely.");
+          throw VaultError.invalidInput(
+            "--chain requires a path to a chain PEM file, or omit it entirely.",
+          );
         }
         // Public material, read before the vault opens: a mistyped path never unlocks it.
         const certificatePem = readPemFile(options.cert, "certificate");

@@ -10,6 +10,7 @@ import {
   assertNativeWin32SshClient,
   buildSshEnv,
   isHostKeyFailure,
+  isSshName,
   sshHardeningArgs,
   writeIdentityFile,
   writeKnownHosts,
@@ -258,6 +259,12 @@ export async function executeSftpAction(
   // parse as an option.
   if (action.host.startsWith("-") || action.user.startsWith("-")) {
     throw VaultError.invalidSshConfig("host and user must not start with '-'");
+  }
+
+  if (!isSshName(action.host) || !isSshName(action.user)) {
+    throw VaultError.invalidSshConfig(
+      "host and user must be names of letters, digits, '.', '_' and '-'",
+    );
   }
 
   // Host target allowlist — deny-by-default (an empty list refuses).

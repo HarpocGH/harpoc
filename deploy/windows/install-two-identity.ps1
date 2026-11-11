@@ -85,7 +85,7 @@ if ($Help) {
 }
 
 $agents = @($AgentUser | ForEach-Object { $_ -split ',' })
-if ($VaultUser -cnotmatch '^[a-z0-9_][a-z0-9_-]{0,19}$') {
+if ($VaultUser -cnotmatch '^[a-z0-9_][a-z0-9_-]{0,19}\z') {
   Stop-WithError "not an account name (lowercase letters, digits, '_', '-'; not dash-led; at most 20): $VaultUser" 2
 }
 if ($VaultUser -match $ReservedDeviceName) {
@@ -100,7 +100,7 @@ if (-not (Test-Path -LiteralPath $ProgramData -PathType Container)) {
 $administratorSids = $null
 $agentSids = @{}
 foreach ($agent in $agents) {
-  if ($agent -cnotmatch '^[a-z0-9_][a-z0-9_-]{0,19}$') {
+  if ($agent -cnotmatch '^[a-z0-9_][a-z0-9_-]{0,19}\z') {
     Stop-WithError "not a consumer name (lowercase letters, digits, '_', '-'; not dash-led; at most 20): $agent" 2
   }
   if ($agent -match $ReservedDeviceName) {

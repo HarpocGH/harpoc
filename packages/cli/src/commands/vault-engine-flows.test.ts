@@ -85,6 +85,7 @@ describe("VaultEngine.unlock and lock, the lockout included", () => {
     await engine2.destroy();
   });
 
+  // An init and six unlocks on the real 2 GiB Argon2id, so the budget is 120 s.
   it("handles lockout after too many failed attempts", async () => {
     await engine.initVault(TEST_PASSWORD);
     await engine.lock();
@@ -102,7 +103,7 @@ describe("VaultEngine.unlock and lock, the lockout included", () => {
     const eng = new VaultEngine({ dbPath, sessionPath });
     await expectVaultError(() => eng.unlock("wrong-pass"), ErrorCode.LOCKOUT_ACTIVE);
     await eng.destroy();
-  });
+  }, 120_000);
 });
 
 describe("VaultEngine.loadSession", () => {

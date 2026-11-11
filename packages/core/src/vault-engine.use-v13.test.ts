@@ -1490,6 +1490,84 @@ describe("useSecret (sftp) — engine dispatch", () => {
   });
 });
 
+describe("useSecret (sftp) — an unparsed user outside the schema's charset is refused in core", () => {
+  const CRAFTED_USER = "evil.example:sub";
+
+  beforeEach(async () => {
+    await initWithSecret("deploy", "FAKE-PRIVATE-KEY-PEM");
+    await engine.setInjectionPolicy("secret://deploy", {
+      host_allowlist: ["deploy.example.com"],
+    });
+    await engine.setConnectionConfig("secret://deploy", {
+      ssh: { known_hosts: ["deploy.example.com ssh-ed25519 AAAA"] },
+    });
+  });
+
+  it("the real executor refuses INVALID_SSH_CONFIG and the failed row carries it", async () => {
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://deploy", { ...SFTP_ACTION, user: CRAFTED_USER }),
+      ErrorCode.INVALID_SSH_CONFIG,
+    );
+    expect(err.message.includes(CRAFTED_USER)).toBe(false);
+    const rows = useRows(false);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.detail).toEqual({
+      context: "sftp",
+      host: "deploy.example.com",
+      operation: "list",
+      port: null,
+      remote_path: "/srv/reports",
+      local_path: null,
+      network_isolation: false,
+      fs_isolation: false,
+      error: ErrorCode.INVALID_SSH_CONFIG,
+    });
+  });
+
+  it("the row keeps the leading-dash refusal's shape, field by field", async () => {
+    const dashErr = await expectVaultError(
+      () => engine.useSecret("secret://deploy", { ...SFTP_ACTION, user: "-l" }),
+      ErrorCode.INVALID_SSH_CONFIG,
+    );
+    expect(dashErr.message === "host and user must not start with '-'").toBe(true);
+    const dashRows = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
+    expect(dashRows).toHaveLength(1);
+    const dashRow = dashRows[0] as unknown as Record<string, unknown>;
+
+    const craftedErr = await expectVaultError(
+      () => engine.useSecret("secret://deploy", { ...SFTP_ACTION, user: CRAFTED_USER }),
+      ErrorCode.INVALID_SSH_CONFIG,
+    );
+    expect(
+      craftedErr.message === "host and user must be names of letters, digits, '.', '_' and '-'",
+    ).toBe(true);
+    const useRowsAfter = engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
+    expect(useRowsAfter).toHaveLength(2);
+    const craftedRow = useRowsAfter.find((row) => row.id !== dashRow.id) as unknown as Record<
+      string,
+      unknown
+    >;
+
+    expect(Object.keys(craftedRow)).toEqual(Object.keys(dashRow));
+    for (const field of Object.keys(dashRow)) {
+      if (field === "id" || field === "timestamp") continue;
+      expect(craftedRow[field], field).toEqual(dashRow[field]);
+    }
+    expect(dashRow.success).toBe(false);
+    expect(dashRow.detail).toEqual({
+      context: "sftp",
+      host: "deploy.example.com",
+      operation: "list",
+      port: null,
+      remote_path: "/srv/reports",
+      local_path: null,
+      network_isolation: false,
+      fs_isolation: false,
+      error: ErrorCode.INVALID_SSH_CONFIG,
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Docker × isolation — engine-level refusal, before any dispatch arm
 // ---------------------------------------------------------------------------

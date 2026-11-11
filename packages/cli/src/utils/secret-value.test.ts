@@ -11,6 +11,7 @@ import {
   readSecretValueFromFile,
   resolveSecretValue,
 } from "./secret-value.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 vi.mock("@harpoc/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@harpoc/core")>();
@@ -287,6 +288,72 @@ describe("resolveSecretValue — decrypt at import", () => {
       (e: unknown) => e as Error,
     );
     expect(err.message).not.toContain("sentinel-passphrase-xyz");
+  });
+});
+
+describe("the input refusals are INVALID_INPUT, their messages unchanged (T4)", () => {
+  const refusals: { label: string; refusal: () => { call: () => unknown; message: string } }[] = [
+    {
+      label: "a missing file",
+      refusal: () => {
+        const missing = join(tempDir, "nope.pem");
+        return {
+          call: () => readSecretValueFromFile(missing),
+          message: `Cannot read file: ${missing}`,
+        };
+      },
+    },
+    {
+      label: "a directory",
+      refusal: () => ({
+        call: () => readSecretValueFromFile(tempDir),
+        message: `Cannot read file: ${tempDir}`,
+      }),
+    },
+    {
+      label: "a file over the 1 MiB cap",
+      refusal: () => {
+        const oversize = writeTemp("big.bin", Buffer.alloc(MAX_SECRET_FILE_BYTES + 1));
+        return {
+          call: () => readSecretValueFromFile(oversize),
+          message: `File exceeds the 1 MiB secret-value limit: ${oversize}`,
+        };
+      },
+    },
+    {
+      label: "an empty file",
+      refusal: () => {
+        const empty = writeTemp("empty", "");
+        return {
+          call: () => readSecretValueFromFile(empty),
+          message: "Secret value cannot be empty.",
+        };
+      },
+    },
+    {
+      label: "an empty prompted value",
+      refusal: () => ({
+        call: () => resolveSecretValue({ input: endedInput(), output: sink() }),
+        message: "Secret value cannot be empty.",
+      }),
+    },
+    {
+      label: "an empty key passphrase",
+      refusal: () => {
+        const encrypted = writeTemp("enc.pem", encryptedPkcs8Ed25519().privateKey);
+        return {
+          call: () =>
+            resolveSecretValue({ fromFile: encrypted, input: endedInput(), output: sink() }),
+          message: "Key passphrase cannot be empty.",
+        };
+      },
+    },
+  ];
+
+  it.each(refusals)("refuses $label", async ({ refusal }) => {
+    const { call, message } = refusal();
+    const err = await expectVaultError(call, ErrorCode.INVALID_INPUT);
+    expect(err.message).toBe(message);
   });
 });
 

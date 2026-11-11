@@ -1,5 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
 import type { Command } from "commander";
+import { VaultError } from "@harpoc/shared";
 import { wipeBuffer } from "@harpoc/core";
 import { CertManager } from "@harpoc/cert-manager";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
@@ -33,18 +34,18 @@ export function readPemFile(path: string, label: string): string {
     if (!stat.isFile()) throw new Error("not a file");
     size = stat.size;
   } catch {
-    throw new Error(`Cannot read ${label} file: ${path}`);
+    throw VaultError.invalidInput(`Cannot read ${label} file: ${path}`);
   }
   if (size > MAX_SECRET_FILE_BYTES) {
-    throw new Error(`The ${label} file exceeds the 1 MiB limit: ${path}`);
+    throw VaultError.invalidInput(`The ${label} file exceeds the 1 MiB limit: ${path}`);
   }
   let pem: string;
   try {
     pem = readFileSync(path, "utf8");
   } catch {
-    throw new Error(`Cannot read ${label} file: ${path}`);
+    throw VaultError.invalidInput(`Cannot read ${label} file: ${path}`);
   }
-  if (pem.trim() === "") throw new Error(`The ${label} file is empty: ${path}`);
+  if (pem.trim() === "") throw VaultError.invalidInput(`The ${label} file is empty: ${path}`);
   return pem;
 }
 
@@ -70,13 +71,15 @@ export function registerCertImportCommand(cert: Command): void {
         // a scripted import with an unset path variable would silently stop
         // and wait for a human to type the key.
         if (options.key.trim() === "") {
-          throw new Error("--key requires a path to a private key PEM file.");
+          throw VaultError.invalidInput("--key requires a path to a private key PEM file.");
         }
         if (options.cert.trim() === "") {
-          throw new Error("--cert requires a path to a certificate PEM file.");
+          throw VaultError.invalidInput("--cert requires a path to a certificate PEM file.");
         }
         if (options.chain !== undefined && options.chain.trim() === "") {
-          throw new Error("--chain requires a path to a chain PEM file, or omit it entirely.");
+          throw VaultError.invalidInput(
+            "--chain requires a path to a chain PEM file, or omit it entirely.",
+          );
         }
 
         // Range-checked before the vault opens: an operator typo must not

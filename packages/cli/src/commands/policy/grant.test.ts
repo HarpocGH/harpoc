@@ -19,10 +19,17 @@ vi.mock("../../utils/vault-loader.js", () => ({
   resolveSecretId: vi.fn().mockResolvedValue("secret-id-1"),
 }));
 
-import { ErrorCode, VaultError } from "@harpoc/shared";
-import { loadUnlockedEngine } from "../../utils/vault-loader.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
+import { loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { registerPolicyGrantCommand } from "./grant.js";
 import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
+
+const actual = await vi.importActual<typeof import("../../utils/vault-loader.js")>(
+  "../../utils/vault-loader.js",
+);
 
 const run = buildCli(
   (program) => registerPolicyGrantCommand(program.command("policy")),
@@ -167,6 +174,90 @@ describe("policy grant --principal-type validation", () => {
       message: 'Invalid permission: "bogus". Valid: list, read, use, create, rotate, revoke, admin',
     });
     expect(mockEngine.grantPolicy).not.toHaveBeenCalled();
+  });
+
+  it("an unknown permission beside an invalid --principal-type reports the permission (T5)", async () => {
+    await expect(
+      run([
+        "secret://k",
+        "--principal-type",
+        "bogus",
+        "--principal-id",
+        "a",
+        "--permissions",
+        "sudo",
+        "--json",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        JSON.stringify({
+          error: "INVALID_INPUT",
+          message:
+            'Invalid permission: "sudo". Valid: list, read, use, create, rotate, revoke, admin',
+        }),
+      ],
+    ]);
+    expect(mockEngine.grantPolicy).not.toHaveBeenCalled();
+  });
+});
+
+describe("policy grant — an unknown handle with a bad permission, on a real engine (T5)", () => {
+  let spies: CliSpies;
+  let vaultDir: string;
+
+  beforeEach(async () => {
+    spies = spyCli();
+    vi.clearAllMocks();
+    vaultDir = mkdtempSync(join(tmpdir(), "harpoc-grant-"));
+    const setup = actual.createEngine(vaultDir);
+    try {
+      await setup.initVault("test-password-123");
+    } finally {
+      await setup.destroy();
+    }
+  });
+
+  afterEach(() => {
+    try {
+      vi.mocked(loadUnlockedEngine).mockReset();
+      vi.mocked(loadUnlockedEngine).mockResolvedValue(mockEngine as never);
+      vi.mocked(resolveSecretId).mockReset();
+      vi.mocked(resolveSecretId).mockResolvedValue("secret-id-1");
+      spies.restore();
+    } finally {
+      rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  it("reports SECRET_NOT_FOUND, not the permission, and writes the failed policy.grant probe row", async () => {
+    vi.mocked(loadUnlockedEngine).mockImplementationOnce(() => actual.loadUnlockedEngine(vaultDir));
+    vi.mocked(resolveSecretId).mockImplementationOnce(actual.resolveSecretId);
+    await expect(
+      run([
+        "secret://nope",
+        "--principal-type",
+        "agent",
+        "--principal-id",
+        "a",
+        "--permissions",
+        "bogus",
+        "--json",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [JSON.stringify({ error: "SECRET_NOT_FOUND", message: "Secret not found: secret://nope" })],
+    ]);
+
+    const reader = await actual.loadUnlockedEngine(vaultDir);
+    try {
+      const rows = reader.queryAudit({ eventType: AuditEventType.POLICY_GRANT });
+      expect(rows.map(({ success, detail }) => ({ success, detail }))).toEqual([
+        { success: false, detail: { handle: "secret://nope", error: "SECRET_NOT_FOUND" } },
+      ]);
+    } finally {
+      await reader.destroy();
+    }
   });
 });
 

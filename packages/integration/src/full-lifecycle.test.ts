@@ -72,6 +72,14 @@ const PARITY_READS: [string, ParityRead, ParityOracle][] = [
     (e) => e.listIssuedTokens({ status: "all" }),
   ],
   ["getHealth", (c) => c.getHealth(), (e) => ({ state: e.getState(), version: HARPOC_VERSION })],
+  [
+    "verifyAuditChain",
+    (c) => c.verifyAuditChain(),
+    (e) => {
+      const { valid, checked, firstBrokenId } = e.verifyAuditChain();
+      return { valid, checked, firstBrokenId };
+    },
+  ],
 ];
 
 const PARITY_REFUSALS: [string, ErrorCode, ParityRead][] = [
@@ -118,7 +126,7 @@ interface ParityWrite {
   member: string;
   /** The audit rows the write appends, in order, every one attributed to the mode's caller. */
   events: string[];
-  prepare?: (engine: VaultEngine, f: WriteFixture) => void;
+  prepare?: (engine: VaultEngine, f: WriteFixture) => void | Promise<void>;
   write: (client: VaultClient, f: WriteFixture) => Promise<unknown>;
   /** The engine's state after the write — the client's answer read against it. */
   oracle: (engine: VaultEngine, f: WriteFixture, got: unknown) => Promise<void> | void;
@@ -263,6 +271,25 @@ const PARITY_WRITES: ParityWrite[] = [
       expect(got).toBeUndefined();
       const [issued] = e.listIssuedTokens({ agent: f.agent, status: "all" });
       expect(issued).toMatchObject({ jti: f.jti, status: "revoked" });
+    },
+  },
+  {
+    member: "deleteMcpServerConfig",
+    events: [AuditEventType.POLICY_REVOKE],
+    prepare: async (e, f) => {
+      await e.setMcpServerConfig(f.handle, {
+        server_name: "github-mcp",
+        transport: "stdio",
+        protocol: "2025-11-25",
+        command: "node",
+        args: ["server.js"],
+        env_var: "GITHUB_TOKEN",
+      });
+    },
+    write: (c, f) => c.deleteMcpServerConfig(f.handle),
+    oracle: async (e, f, got) => {
+      expect(got).toBe(true);
+      expect(await e.getMcpServerConfig(f.handle)).toBeUndefined();
     },
   },
 ];
@@ -460,7 +487,7 @@ describe("Full Lifecycle", () => {
     );
   });
 
-  // ---- Write parity (M-P1-7): the thirteen members on the real engine -----
+  // ---- Write parity (M-P1-7): the fourteen members on the real engine -----
   describe.each([
     ["DirectClient", "d", (): VaultClient => new DirectClient(vault.engine)],
     ["RestClient", "r", (): VaultClient => new RestClient({ baseUrl: restServer.baseUrl, token })],
@@ -469,7 +496,7 @@ describe("Full Lifecycle", () => {
       "%s leaves the engine holding what it answered, attributed to the mode's caller",
       async (member, row) => {
         const f = await writeFixture(vault.engine, `${mode}-${member.toLowerCase()}`);
-        row.prepare?.(vault.engine, f);
+        await row.prepare?.(vault.engine, f);
         const before = Math.max(...vault.engine.queryAudit().map((r) => r.id));
 
         const got = await row.write(makeClient(), f);

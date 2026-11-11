@@ -62,7 +62,7 @@ export function registerRotateSecret(
               {
                 handle: args.handle,
                 status: "pending_rotation",
-                message: `Set new value with: harpoc secret rotate ${parsed.name}`,
+                message: `Set new value with: harpoc secret rotate ${args.handle}`,
               },
               null,
               2,

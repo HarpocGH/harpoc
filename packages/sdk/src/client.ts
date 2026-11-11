@@ -69,6 +69,12 @@ export interface ExpiringReport {
   certificates_nearing_renewal: ExpiringCertificateInfo[];
 }
 
+export interface AuditChainReport {
+  valid: boolean;
+  checked: number;
+  firstBrokenId: number | null;
+}
+
 /**
  * Declared here rather than imported from `@harpoc/cert-manager`: that package
  * is an optional peer (D4), and `client.ts` must stay loadable — and its
@@ -100,6 +106,7 @@ export interface VaultClient {
   getInjectionPolicy(handle: string): Promise<InjectionPolicy>;
   setMcpServerConfig(handle: string, config: McpServerConfigInput): Promise<void>;
   getMcpServerConfig(handle: string): Promise<McpServerConfig | undefined>;
+  deleteMcpServerConfig(handle: string): Promise<boolean>;
   setConnectionConfig(handle: string, config: ConnectionConfig): Promise<void>;
   getConnectionConfig(handle: string): Promise<ConnectionConfig | undefined>;
   deleteConnectionConfig(handle: string): Promise<boolean>;
@@ -107,6 +114,7 @@ export interface VaultClient {
   revokePolicy(handle: string, policyId: string): Promise<void>;
   listPolicies(handle: string): Promise<AccessPolicy[]>;
   queryAudit(options?: AuditQueryOptions): Promise<DecryptedAuditEvent[]>;
+  verifyAuditChain(): Promise<AuditChainReport>;
   registerAgent(input: RegisterAgentInput): Promise<Agent>;
   listAgents(status?: AgentStatusFilter): Promise<Agent[]>;
   getAgent(name: string): Promise<Agent>;

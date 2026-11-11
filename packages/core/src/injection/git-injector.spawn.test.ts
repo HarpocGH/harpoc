@@ -209,10 +209,15 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       expect(opts.env.HARPOC_GIT_USERNAME).toBe("git-user");
       expect(opts.env.HARPOC_GIT_PASSWORD).toBe("s3cret-token-value");
       expect(opts.env.GIT_TERMINAL_PROMPT).toBe("0");
-      // Both credential halves are redacted from any captured output.
       expect(opts.redact).toContain("s3cret-token-value");
-      expect(opts.redact).toContain("git-user");
     }
+    // The ls-remote is the parse step: it carries the secret's own material alone and its
+    // output is parsed, and returned only when the step fails, through the full list, while
+    // the fetch's output is redacted of both halves.
+    const [, , listOpts] = calls[0] as SpawnCall;
+    const [, , fetchOpts] = calls[1] as SpawnCall;
+    expect(JSON.stringify(listOpts.redact) === JSON.stringify(["s3cret-token-value"])).toBe(true);
+    expect((fetchOpts.redact ?? []).includes("git-user")).toBe(true);
     const [, , cloneOpts] = calls[2] as SpawnCall;
     expect(cloneOpts.env.GIT_ASKPASS).toBeUndefined();
     expect(cloneOpts.env.HARPOC_GIT_PASSWORD).toBeUndefined();
@@ -889,7 +894,7 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       undefined,
     );
 
-    const [, , opts] = vi.mocked(spawnCaptured).mock.calls[0] as SpawnCall;
+    const [, , opts] = vi.mocked(spawnCaptured).mock.calls[1] as SpawnCall;
     expect(opts.redact).toContain("s3cret-token-value");
     expect(opts.redact).not.toContain("ab");
   });
@@ -910,7 +915,7 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       undefined,
     );
 
-    const [, , opts] = vi.mocked(spawnCaptured).mock.calls[0] as SpawnCall;
+    const [, , opts] = vi.mocked(spawnCaptured).mock.calls[1] as SpawnCall;
     expect(opts.redact).toContain("s3cret-token-value");
     expect(opts.redact).toContain("abc");
   });

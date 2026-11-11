@@ -251,6 +251,48 @@ describe("cert csr", () => {
     expect(stdoutSpy).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      label: "an invalid --algorithm",
+      flags: ["--algorithm", "dsa"],
+      message: 'Invalid algorithm "dsa". Must be one of: rsa, ec.',
+    },
+    {
+      label: "an invalid --bits",
+      flags: ["--bits", "1024"],
+      message: 'Invalid bits "1024". Must be one of: 2048, 4096.',
+    },
+    {
+      label: "an invalid --curve",
+      flags: ["--curve", "P-512"],
+      message: 'Invalid curve "P-512". Must be one of: P-256, P-384.',
+    },
+    {
+      label: "--bits under the default (ec) algorithm",
+      flags: ["--bits", "4096"],
+      message: "--bits only applies with --algorithm rsa.",
+    },
+    {
+      label: "--curve under --algorithm rsa",
+      flags: ["--algorithm", "rsa", "--curve", "P-384"],
+      message: "--curve only applies with --algorithm ec.",
+    },
+  ])(
+    "refuses $label as an INVALID_INPUT envelope under --json, its message unchanged (T4)",
+    async ({ flags, message }) => {
+      await expect(
+        run(["csr", "web", "--subject", "example.com", ...flags, "--json"]),
+      ).rejects.toThrow("process.exit");
+
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [JSON.stringify({ error: "INVALID_INPUT", message })],
+      ]);
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(stdoutSpy).not.toHaveBeenCalled();
+    },
+  );
+
   it("a missing --subject is refused by commander", async () => {
     await expect(run(["csr", "web"])).rejects.toThrow(/required option '--subject/);
     expect(loadUnlockedEngine).not.toHaveBeenCalled();

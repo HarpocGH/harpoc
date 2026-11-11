@@ -41,12 +41,15 @@ export interface InventoryJudged {
  * query and `null` for the others (measured against `lsass.exe` and
  * `winlogon.exe` from a standard token; `research-evidence.md` § E2) — the
  * row's claim is what the listing shows, not an access the harness exercises.
- * `-InputObject @(...)` keeps one process an array.
+ * `-InputObject @(...)` keeps one process an array. Every non-ASCII character
+ * leaves as a `\uXXXX` escape, so the bytes on the pipe are ASCII whatever the
+ * console's code page (Windows PowerShell writes in the OEM one).
  */
 export const INVENTORY_COMMAND =
   "$ProgressPreference = 'SilentlyContinue'; " +
-  "ConvertTo-Json -InputObject @(Get-CimInstance Win32_Process | " +
-  "Select-Object ProcessId, Name, CommandLine) -Compress";
+  "[regex]::Replace((ConvertTo-Json -InputObject @(Get-CimInstance Win32_Process | " +
+  "Select-Object ProcessId, Name, CommandLine) -Compress), " +
+  "'[^\\x00-\\x7f]', { param($m) '\\u{0:x4}' -f [int][char]$m.Value })";
 
 export function inventoryArgv(systemRoot?: string): string[] {
   return [
@@ -63,7 +66,14 @@ export function inventoryArgv(systemRoot?: string): string[] {
 }
 
 export function parseInventory(stdout: string): InventoryEntry[] {
-  const parsed: unknown = JSON.parse(stdout);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new SyntaxError(
+      `process inventory: the listing (${String(stdout.length)} characters) is not valid JSON`,
+    );
+  }
   if (!Array.isArray(parsed)) throw new Error("process inventory: the listing is not an array");
   return parsed.map((row, index) => {
     const r = row as { ProcessId?: unknown; Name?: unknown; CommandLine?: unknown };

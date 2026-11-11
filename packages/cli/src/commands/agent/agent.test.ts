@@ -25,7 +25,7 @@ vi.mock("../../utils/vault-loader.js", () => ({
 }));
 vi.mock("../../utils/prompt.js", () => ({ promptConfirm: mockPromptConfirm }));
 
-import { loadUnlockedEngine } from "../../utils/vault-loader.js";
+import { loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { registerAgentRegisterCommand } from "./register.js";
 import { registerAgentListCommand } from "./list.js";
 import { registerAgentShowCommand } from "./show.js";
@@ -256,6 +256,80 @@ describe("harpoc agent group", () => {
     it("prints the engine return verbatim under --json", async () => {
       await run(["update", "bot", "--owner", "ops", "--json"]);
       expect(spies.logSpy).toHaveBeenCalledWith(JSON.stringify(AGENT, null, 2));
+    });
+
+    it.each([
+      {
+        label: "--description with --clear-description",
+        flags: ["--description", "a bot", "--clear-description"],
+        message: "--description and --clear-description are mutually exclusive",
+      },
+      {
+        label: "--owner with --clear-owner",
+        flags: ["--owner", "ops", "--clear-owner"],
+        message: "--owner and --clear-owner are mutually exclusive",
+      },
+      {
+        label: "no flag at all",
+        flags: [],
+        message:
+          "Nothing to update. Pass --description, --owner, --clear-description or --clear-owner.",
+      },
+    ])(
+      "refuses $label as an INVALID_INPUT envelope under --json, its message unchanged (T4)",
+      async ({ flags, message }) => {
+        await expect(run(["update", "bot", ...flags, "--json"])).rejects.toThrow("process.exit");
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [JSON.stringify({ error: "INVALID_INPUT", message })],
+        ]);
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(mockEngine.getAgent).not.toHaveBeenCalled();
+        expect(mockEngine.updateAgent).not.toHaveBeenCalled();
+      },
+    );
+
+    it("a locked vault reports VAULT_LOCKED before the flag refusal (T4)", async () => {
+      vi.mocked(loadUnlockedEngine).mockRejectedValueOnce(VaultError.vaultLocked());
+      try {
+        await expect(
+          run(["update", "bot", "--description", "a bot", "--clear-description", "--json"]),
+        ).rejects.toThrow("process.exit");
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [JSON.stringify({ error: "VAULT_LOCKED", message: "Vault is locked" })],
+        ]);
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      } finally {
+        vi.mocked(loadUnlockedEngine).mockReset();
+        vi.mocked(loadUnlockedEngine).mockResolvedValue(mockEngine as never);
+      }
+    });
+
+    it("a bad token reports its refusal before the flag refusal (T4)", async () => {
+      mockEngine.verifyToken.mockImplementation(() => {
+        throw new VaultError(ErrorCode.INVALID_TOKEN, "Invalid token");
+      });
+      try {
+        await expect(
+          run([
+            "update",
+            "bot",
+            "--description",
+            "a bot",
+            "--clear-description",
+            "--token",
+            "jwt-value",
+            "--json",
+          ]),
+        ).rejects.toThrow("process.exit");
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [JSON.stringify({ error: "INVALID_TOKEN", message: "Invalid token" })],
+        ]);
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(mockEngine.verifyToken).toHaveBeenCalledWith("jwt-value");
+        expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+      } finally {
+        mockEngine.verifyToken.mockReset();
+      }
     });
   });
 
@@ -500,6 +574,32 @@ describe("harpoc agent group", () => {
         message:
           'Invalid permission: "bogus". Valid: list, read, use, create, rotate, revoke, admin',
       });
+      expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
+    });
+
+    it("--permissions with --clear is refused before --expires, the permission names and resolveSecretId (T5)", async () => {
+      await expect(
+        run([
+          "permissions",
+          "bot",
+          "secret://k",
+          "--permissions",
+          "bogus",
+          "--clear",
+          "--expires",
+          "5",
+          "--json",
+        ]),
+      ).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [
+          JSON.stringify({
+            error: "INVALID_INPUT",
+            message: "--permissions and --clear are mutually exclusive",
+          }),
+        ],
+      ]);
+      expect(resolveSecretId).not.toHaveBeenCalled();
       expect(mockEngine.setAgentPermissions).not.toHaveBeenCalled();
     });
 

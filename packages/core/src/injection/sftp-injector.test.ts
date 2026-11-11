@@ -1,8 +1,15 @@
 import { generateKeyPairSync } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, InjectionPolicy, SftpAction } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import { buildSftpAuditDetails, executeSftpAction } from "./sftp-injector.js";
+import { spawnCaptured } from "./spawn-captured.js";
+import { expectVaultError } from "@harpoc/test-utils";
+
+vi.mock("./spawn-captured.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./spawn-captured.js")>();
+  return { ...actual, spawnCaptured: vi.fn() };
+});
 
 function makeKeyPem(): string {
   const { privateKey } = generateKeyPairSync("rsa", {
@@ -106,6 +113,77 @@ describe("executeSftpAction enforcement", () => {
         SFTP_CONFIG,
       ),
     ).rejects.toMatchObject({ code: ErrorCode.INVALID_SSH_CONFIG });
+  });
+});
+
+const FIXED_MESSAGE = "host and user must be names of letters, digits, '.', '_' and '-'";
+const DASH_MESSAGE = "host and user must not start with '-'";
+
+const NOT_A_NAME_HOSTS: ReadonlyArray<readonly [string, string]> = [
+  ["an @ ahead of the allowlisted name", "evil.example@ok.example"],
+  ["an ssh:// URI carrying a port", "ssh://evil.example:2222"],
+  ["a :port suffix", "ok.example:2222"],
+  ["a space", "ok example"],
+  ["a %-token", "x%h.example"],
+  ["an IPv6 literal with a zone id", "fe80::1%eth0"],
+  ["a name outside ASCII", "ünï.example"],
+  ["a /", "a/b.example"],
+  ["brackets", "[ok.example]"],
+  ["a #", "ok.example#x"],
+];
+
+const NOT_A_NAME_USERS: ReadonlyArray<readonly [string, string]> = [
+  ["a : that ends sftp's host part", "evil.example:sub"],
+  ["an sftp:// URI", "sftp://x@evil.example:2222/"],
+  ["an @ and brackets", "u@[evil.example]"],
+];
+
+describe("a host or user outside the schema's charset is refused before the allowlist", () => {
+  const spawnMock = vi.mocked(spawnCaptured);
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  async function expectRefused(
+    action: SftpAction,
+    allowed: string,
+    refused: string,
+  ): Promise<void> {
+    const err = await expectVaultError(
+      () => executeSftpAction(action, SECRET, policy({ host_allowlist: [allowed] }), SFTP_CONFIG),
+      ErrorCode.INVALID_SSH_CONFIG,
+    );
+    expect(err.message.includes(refused)).toBe(false);
+    expect(err.message === FIXED_MESSAGE).toBe(true);
+    expect(spawnMock.mock.calls.length).toBe(0);
+  }
+
+  it.each(NOT_A_NAME_HOSTS)(
+    "a host with %s, admitted by the allowlist: INVALID_SSH_CONFIG, nothing spawned",
+    (_label, host) => expectRefused({ ...ACTION, host }, host, host),
+  );
+
+  it.each(NOT_A_NAME_USERS)("a user with %s: INVALID_SSH_CONFIG, nothing spawned", (_label, user) =>
+    expectRefused({ ...ACTION, user }, ACTION.host, user),
+  );
+
+  it("a host outside the charset that the allowlist does not admit: INVALID_SSH_CONFIG, not HOST_NOT_ALLOWED", () =>
+    expectRefused({ ...ACTION, host: "ok.example:2222" }, ACTION.host, "ok.example:2222"));
+
+  it("a dash-led user still meets the leading-dash refusal first, its message unchanged", async () => {
+    const err = await expectVaultError(
+      () =>
+        executeSftpAction(
+          { ...ACTION, user: "-l" },
+          SECRET,
+          policy({ host_allowlist: [ACTION.host] }),
+          SFTP_CONFIG,
+        ),
+      ErrorCode.INVALID_SSH_CONFIG,
+    );
+    expect(err.message === DASH_MESSAGE).toBe(true);
+    expect(spawnMock.mock.calls.length).toBe(0);
   });
 });
 

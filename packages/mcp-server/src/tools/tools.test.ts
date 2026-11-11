@@ -1007,7 +1007,13 @@ describe("MCP Tools", () => {
       const result = await callTool(server, "rotate_secret", { handle: "secret://my-key" });
       const data = JSON.parse(getToolText(result));
       expect(data.status).toBe("pending_rotation");
-      expect(data.message).toContain("harpoc secret rotate");
+      expect(data.message).toBe("Set new value with: harpoc secret rotate secret://my-key");
+    });
+
+    it("the deferred hint names the handle, project included", async () => {
+      const result = await callTool(server, "rotate_secret", { handle: "secret://prod/db-pass" });
+      const data = JSON.parse(getToolText(result));
+      expect(data.message).toBe("Set new value with: harpoc secret rotate secret://prod/db-pass");
     });
 
     it("does not call engine.rotateSecret (deferred)", async () => {

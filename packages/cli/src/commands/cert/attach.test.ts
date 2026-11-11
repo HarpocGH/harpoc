@@ -170,6 +170,31 @@ describe("cert attach", () => {
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      label: "an empty --cert",
+      flags: ["--cert", ""],
+      message: "--cert requires a path to a certificate PEM file.",
+    },
+    {
+      label: "an empty --chain",
+      flags: ["--cert", CERT_PATH, "--chain", ""],
+      message: "--chain requires a path to a chain PEM file, or omit it entirely.",
+    },
+  ])(
+    "refuses $label as an INVALID_INPUT envelope under --json, its message unchanged (T4)",
+    async ({ flags, message }) => {
+      await expect(run(["secret://web", ...flags, "--json"])).rejects.toThrow("process.exit");
+
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [JSON.stringify({ error: "INVALID_INPUT", message })],
+      ]);
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(mockEngine.updateCertificate).not.toHaveBeenCalled();
+    },
+  );
+
   it("a token with 'rotate' attaches and threads the caller into the write and the status read", async () => {
     mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["rotate"] }));
 

@@ -1,9 +1,10 @@
 import type { Command } from "commander";
+import type { McpServerConfig } from "@harpoc/shared";
 import { mcpServerConfigSchema, renderSchemaIssues, VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
-import { restModeOf, restModeUnsupported, runRestMode } from "../../utils/rest-mode.js";
+import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
 function collect(value: string, acc: string[]): string[] {
   acc.push(value);
@@ -23,6 +24,24 @@ interface McpServerOptions {
   delete?: boolean;
   token?: string;
   json?: boolean;
+}
+
+/** The config the flags name, through its schema; a refusal is `SCHEMA_VALIDATION_ERROR`. */
+function parseMcpConfig(options: McpServerOptions): McpServerConfig {
+  const parsed = mcpServerConfigSchema.safeParse({
+    server_name: options.name,
+    transport: options.transport,
+    command: options.command,
+    args: options.arg && options.arg.length > 0 ? options.arg : undefined,
+    env_var: options.envVar,
+    working_directory: options.cwd,
+    url: options.url,
+    protocol: options.protocol,
+  });
+  if (!parsed.success) {
+    throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
+  }
+  return parsed.data;
 }
 
 export function registerSecretMcpServerCommand(secret: Command): void {
@@ -51,27 +70,22 @@ export function registerSecretMcpServerCommand(secret: Command): void {
       try {
         const rest = restModeOf(cmd);
         if (rest) {
-          // DELETE /secrets/:handle/mcp-server exists, but VaultClient has no member for it.
-          if (options.delete) throw restModeUnsupported("secret mcp-server --delete");
           await runRestMode(rest, async (client) => {
+            if (options.delete) {
+              const deleted = await client.deleteMcpServerConfig(handle);
+              printSuccess(
+                deleted
+                  ? `MCP server config removed (${handle})`
+                  : `No MCP server config set (${handle})`,
+              );
+              return;
+            }
             if (options.show || (!options.name && !options.transport)) {
               printJson((await client.getMcpServerConfig(handle)) ?? null);
               return;
             }
-            const parsed = mcpServerConfigSchema.safeParse({
-              server_name: options.name,
-              transport: options.transport,
-              command: options.command,
-              args: options.arg && options.arg.length > 0 ? options.arg : undefined,
-              env_var: options.envVar,
-              working_directory: options.cwd,
-              url: options.url,
-              protocol: options.protocol,
-            });
-            if (!parsed.success) {
-              throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
-            }
-            await client.setMcpServerConfig(handle, parsed.data);
+            const parsed = parseMcpConfig(options);
+            await client.setMcpServerConfig(handle, parsed);
             printSuccess(`MCP server config updated (${handle})`);
           });
           return;
@@ -100,21 +114,9 @@ export function registerSecretMcpServerCommand(secret: Command): void {
 
           const resolved = resolveTokenCallerForHandle(engine, "rotate", handle, tokenValue);
 
-          const parsed = mcpServerConfigSchema.safeParse({
-            server_name: options.name,
-            transport: options.transport,
-            command: options.command,
-            args: options.arg && options.arg.length > 0 ? options.arg : undefined,
-            env_var: options.envVar,
-            working_directory: options.cwd,
-            url: options.url,
-            protocol: options.protocol,
-          });
-          if (!parsed.success) {
-            throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
-          }
+          const parsed = parseMcpConfig(options);
 
-          await engine.setMcpServerConfig(handle, parsed.data, resolved?.caller);
+          await engine.setMcpServerConfig(handle, parsed, resolved?.caller);
           printSuccess(`MCP server config updated (${handle})`);
         } finally {
           await engine.destroy();

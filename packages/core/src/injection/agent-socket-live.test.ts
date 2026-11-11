@@ -1,11 +1,12 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createPrivateKey, randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import ssh2 from "ssh2";
-import type { ParsedKey, Server as SshServer } from "ssh2";
+import type { AuthContext, Connection, ParsedKey, Server as SshServer } from "ssh2";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
 import type { VaultError } from "@harpoc/shared";
@@ -29,7 +30,13 @@ import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { AgentSocketServer } from "./ssh-agent/agent-socket-server.js";
 import { loadPrivateKey } from "./ssh-agent/key-loader.js";
-import { buildSshEnv, sshHardeningArgs, writeIdentityFile, writeKnownHosts } from "./ssh-common.js";
+import {
+  buildSshEnv,
+  sshHardeningArgs,
+  writeIdentityFile,
+  writeKnownHosts,
+  writeTempSshFile,
+} from "./ssh-common.js";
 
 vi.mock("../crypto/argon2.js", async (importOriginal) =>
   (await import("../__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -72,6 +79,7 @@ const CONSUMER = "agent-live";
 const STRANGER = "agent-stranger";
 const HOST_KEY = "ecdsa384_openssh";
 const UNPINNED_HOST_KEY = "rsa_openssh";
+const JUMP_HOST_KEY = "ecdsa521_openssh";
 const KEYS = [
   { handle: "secret://deploy-ed", name: "deploy-ed", fixture: "ed25519_openssh" },
   { handle: "secret://deploy-ec", name: "deploy-ec", fixture: "ecdsa256_openssh" },
@@ -97,6 +105,18 @@ function privateNeedles(name: string): string[] {
   ];
 }
 
+/** The hardening argv as an ssh_config `Host *` block: a ProxyJump's own ssh is passed `-F` and none of the `-o` options. */
+function hardeningConfig(args: readonly string[]): string {
+  const lines = ["Host *"];
+  for (let i = 0; i < args.length; i += 2) {
+    const value = args[i + 1] as string;
+    if (args[i] === "-o") lines.push(`  ${value.replace("=", " ")}`);
+    else if (args[i] === "-i") lines.push(`  IdentityFile "${value}"`);
+    else if (args[i] !== "-F") throw new Error(`unmapped hardening flag ${String(args[i])}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 it("ssh-live tier: required legs fail instead of skipping when ssh is unresolvable", () => {
   if (SSH === null && tierRequired("ssh-live")) {
     throw new Error(
@@ -117,6 +137,10 @@ describe.skipIf(SSH === null)(
   () => {
     let sshServer: SshServer | undefined;
     let port = 0;
+    let jumpServer: SshServer | undefined;
+    let jumpPort = 0;
+    const jumpClients = new Set<Connection>();
+    const jumpEvents: AuthEvent[] = [];
     let tempDir = "";
     let engine: VaultEngine | undefined;
     let socket: AgentSocketServer | undefined;
@@ -143,14 +167,37 @@ describe.skipIf(SSH === null)(
         : join(tempDir, `${consumer}.sock`);
     }
 
+    const pin = (pinPort: number, hostKey: string): string =>
+      `[127.0.0.1]:${String(pinPort)} ${publicLine(hostKey)}`;
+
+    function expectScratchConfigOnly(stderr: string): void {
+      const reads = [...stderr.matchAll(/Reading configuration data ([^\r\n]+)/g)].map((m) =>
+        (m[1] as string).trim(),
+      );
+      expect(reads.length).toBe(2);
+      expect(reads.every((file) => file === "config")).toBe(true);
+      expect(/[\\/]\.ssh[\\/]/.test(stderr)).toBe(false);
+      expect(stderr.includes("ssh_config")).toBe(false);
+    }
+
     function runSsh(
       identityFixture: string,
       authSock: string,
+      viaJump = false,
     ): Promise<{ exit: number | null; stdout: string; stderr: string }> {
-      const kh = writeKnownHosts([`[127.0.0.1]:${String(port)} ${publicLine(HOST_KEY)}`]);
+      const kh = writeKnownHosts([
+        `[127.0.0.1]:${String(port)} ${publicLine(HOST_KEY)}`,
+        ...(viaJump ? [pin(jumpPort, JUMP_HOST_KEY)] : []),
+      ]);
       const identity = writeIdentityFile(publicLine(identityFixture));
+      const hardening = sshHardeningArgs(kh.file, identity.file, 10);
+      const config = viaJump
+        ? writeTempSshFile("harpoc-ssh-cfg-", "config", hardeningConfig(hardening))
+        : undefined;
       const args = [
-        ...sshHardeningArgs(kh.file, identity.file, 10),
+        ...(config === undefined
+          ? hardening
+          : ["-F", basename(config.file), "-J", `testuser@127.0.0.1:${String(jumpPort)}`]),
         "-v",
         "-p",
         String(port),
@@ -165,8 +212,12 @@ describe.skipIf(SSH === null)(
           const child = spawn(SSH as string, args, {
             env: buildSshEnv(authSock, []),
             stdio: ["ignore", "pipe", "pipe"],
+            ...(config === undefined ? {} : { cwd: dirname(config.file) }),
           });
-          const timer = setTimeout(() => child.kill(), 25_000);
+          const timer = setTimeout(() => {
+            child.kill();
+            for (const client of jumpClients) client.end();
+          }, 25_000);
           let stdout = "";
           let stderr = "";
           child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
@@ -180,9 +231,15 @@ describe.skipIf(SSH === null)(
             setImmediate(() => resolve({ exit: code, stdout, stderr }));
           });
         },
-      ).finally(() => {
+      ).finally(async () => {
+        await Promise.all(
+          [...jumpClients].map(
+            (client) => new Promise<void>((resolve) => client.once("close", () => resolve())),
+          ),
+        );
         kh.dispose();
         identity.dispose();
+        config?.dispose();
       });
     }
 
@@ -235,36 +292,37 @@ describe.skipIf(SSH === null)(
         name: k.name,
         parsed: utils.parseKey(fixture(k.fixture)),
       }));
+      const authenticate = (sink: AuthEvent[], ctx: AuthContext): void => {
+        if (ctx.method !== "publickey") {
+          sink.push({ method: ctx.method });
+          ctx.reject(["publickey"]);
+          return;
+        }
+        const offered = userKeys.find(
+          ({ parsed }) =>
+            !(parsed instanceof Error) &&
+            ctx.key.algo === parsed.type &&
+            ctx.key.data.equals(parsed.getPublicSSH()),
+        );
+        if (offered === undefined || offered.parsed instanceof Error || !ctx.signature) {
+          sink.push({ method: ctx.method, key: offered?.name, signed: false });
+          if (offered) ctx.accept();
+          else ctx.reject(["publickey"]);
+          return;
+        }
+        const verified = offered.parsed.verify(
+          ctx.blob as Buffer,
+          ctx.signature,
+          (ctx as unknown as { hashAlgo?: string }).hashAlgo,
+        );
+        needles.push(ctx.signature.toString("base64"), ctx.signature.toString("hex"));
+        sink.push({ method: ctx.method, key: offered.name, signed: true, verified });
+        if (verified) ctx.accept();
+        else ctx.reject(["publickey"]);
+      };
       const srv = new Server({ hostKeys: [fixture(HOST_KEY)] }, (client) => {
         client
-          .on("authentication", (ctx) => {
-            if (ctx.method !== "publickey") {
-              events.push({ method: ctx.method });
-              ctx.reject(["publickey"]);
-              return;
-            }
-            const offered = userKeys.find(
-              ({ parsed }) =>
-                !(parsed instanceof Error) &&
-                ctx.key.algo === parsed.type &&
-                ctx.key.data.equals(parsed.getPublicSSH()),
-            );
-            if (offered === undefined || offered.parsed instanceof Error || !ctx.signature) {
-              events.push({ method: ctx.method, key: offered?.name, signed: false });
-              if (offered) ctx.accept();
-              else ctx.reject(["publickey"]);
-              return;
-            }
-            const verified = offered.parsed.verify(
-              ctx.blob as Buffer,
-              ctx.signature,
-              (ctx as unknown as { hashAlgo?: string }).hashAlgo,
-            );
-            needles.push(ctx.signature.toString("base64"), ctx.signature.toString("hex"));
-            events.push({ method: ctx.method, key: offered.name, signed: true, verified });
-            if (verified) ctx.accept();
-            else ctx.reject(["publickey"]);
-          })
+          .on("authentication", (ctx) => authenticate(events, ctx))
           .on("ready", () => {
             client.on("session", (accept) => {
               accept().on("exec", (acceptExec) => {
@@ -283,6 +341,33 @@ describe.skipIf(SSH === null)(
       await new Promise<void>((resolve) => {
         srv.listen(0, "127.0.0.1", () => {
           port = (srv.address() as { port: number }).port;
+          resolve();
+        });
+      });
+      const hop = new Server({ hostKeys: [fixture(JUMP_HOST_KEY)] }, (client) => {
+        jumpClients.add(client);
+        client
+          .on("authentication", (ctx) => authenticate(jumpEvents, ctx))
+          .on("ready", () => {
+            client.on("tcpip", (accept, reject, info) => {
+              if (info.destIP !== "127.0.0.1" || info.destPort !== port) {
+                reject();
+                return;
+              }
+              const channel = accept();
+              const upstream = connect(port, "127.0.0.1");
+              upstream.on("error", () => channel.destroy());
+              channel.on("close", () => upstream.destroy());
+              channel.pipe(upstream).pipe(channel);
+            });
+          })
+          .on("close", () => jumpClients.delete(client))
+          .on("error", () => undefined);
+      });
+      jumpServer = hop;
+      await new Promise<void>((resolve) => {
+        hop.listen(0, "127.0.0.1", () => {
+          jumpPort = (hop.address() as { port: number }).port;
           resolve();
         });
       });
@@ -348,6 +433,11 @@ describe.skipIf(SSH === null)(
           if (sshServer) sshServer.close(() => resolve());
           else resolve();
         }),
+        new Promise<void>((resolve) => {
+          for (const client of jumpClients) client.end();
+          if (jumpServer) jumpServer.close(() => resolve());
+          else resolve();
+        }),
       ]);
       if (tempDir !== "") {
         rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -360,6 +450,7 @@ describe.skipIf(SSH === null)(
 
     beforeEach(() => {
       events.length = 0;
+      jumpEvents.length = 0;
     });
 
     it("binds and signs for an allowlisted, pinned host: ssh authenticates with key 1 and the engine audits one secret.use row with the bound host", async () => {
@@ -538,6 +629,77 @@ describe.skipIf(SSH === null)(
         });
       } finally {
         sock.close();
+      }
+    }, 30_000);
+
+    it("a jump host and its target are each signed for as a direct session", async () => {
+      await vault().setConnectionConfig("secret://deploy-ed", {
+        ssh: { known_hosts: [pin(port, HOST_KEY), pin(jumpPort, JUMP_HOST_KEY)] },
+      });
+      try {
+        const seen = rowIds();
+        const r = await runSsh("ed25519_openssh", (socket as AgentSocketServer).socketPath, true);
+
+        expectScratchConfigOnly(r.stderr);
+        expect(r.exit, r.stderr).toBe(0);
+        expect(r.stdout.trim()).toBe("live-ok");
+        expect(r.stderr.split("bound agent to hostkey").length - 1).toBe(2);
+        expect(jumpEvents.some((e) => e.key === "deploy-ed" && e.signed && e.verified)).toBe(true);
+        expect(events.some((e) => e.key === "deploy-ed" && e.signed && e.verified)).toBe(true);
+        const rows = rowsSince(seen).sort((a, b) => a.id - b.id);
+        expect(
+          rows.map((row) => [row.success, row.secret_id, row.principal_id, row.detail?.["port"]]),
+        ).toEqual([
+          [true, ids["deploy-ed"], CONSUMER, jumpPort],
+          [true, ids["deploy-ed"], CONSUMER, port],
+        ]);
+        for (const row of rows) {
+          expect(row.detail).toMatchObject({
+            context: "ssh_agent",
+            host: "127.0.0.1",
+            key_type: "ssh-ed25519",
+            interface: "ssh_agent",
+          });
+        }
+        expect(rows.some((row) => row.detail?.["reason"] === "forwarding")).toBe(false);
+      } finally {
+        await vault().setConnectionConfig("secret://deploy-ed", {
+          ssh: { known_hosts: [pin(port, HOST_KEY)] },
+        });
+      }
+    }, 30_000);
+
+    it("ssh -J to a target whose host key the secret does not pin: the jump is signed for, the target's bound listing omits the key so ssh asks no signature there and is denied, and the one secret.use row names the jump", async () => {
+      await vault().setConnectionConfig("secret://deploy-ed", {
+        ssh: { known_hosts: [pin(jumpPort, JUMP_HOST_KEY)] },
+      });
+      try {
+        const seen = rowIds();
+        const r = await runSsh("ed25519_openssh", (socket as AgentSocketServer).socketPath, true);
+
+        expectScratchConfigOnly(r.stderr);
+        expect(r.exit).not.toBe(0);
+        expect(r.stderr).toContain("Permission denied");
+        expect(r.stderr.split("bound agent to hostkey").length - 1).toBe(2);
+        expect(jumpEvents.some((e) => e.key === "deploy-ed" && e.signed && e.verified)).toBe(true);
+        expect(events.some((e) => e.key === "deploy-ed")).toBe(true);
+        expect(events.some((e) => e.signed)).toBe(false);
+        const rows = rowsSince(seen);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          success: true,
+          secret_id: ids["deploy-ed"],
+          principal_id: CONSUMER,
+        });
+        expect(rows[0]?.detail).toMatchObject({
+          context: "ssh_agent",
+          host: "127.0.0.1",
+          port: jumpPort,
+        });
+      } finally {
+        await vault().setConnectionConfig("secret://deploy-ed", {
+          ssh: { known_hosts: [pin(port, HOST_KEY)] },
+        });
       }
     }, 30_000);
 

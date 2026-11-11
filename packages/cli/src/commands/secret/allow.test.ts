@@ -658,3 +658,62 @@ describe("secret allow command — host and env allowlist flags (I25)", () => {
     );
   });
 });
+
+describe("secret allow command — each of the 14 flag groups alone is a set (T5)", () => {
+  const STORED: InjectionPolicy = { ...STORED_POLICY, imap_read_only: false };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED });
+    mockEngine.getConnectionConfig.mockResolvedValue(undefined);
+  });
+
+  it.each<{ flag: string; args: string[]; set: Partial<InjectionPolicy> }>([
+    { flag: "--command", args: ["--command", "git"], set: { command_allowlist: ["git"] } },
+    {
+      flag: "--url",
+      args: ["--url", "https://api.example.com/*"],
+      set: { url_allowlist: ["https://api.example.com/*"] },
+    },
+    { flag: "--host", args: ["--host", "localhost"], set: { host_allowlist: ["localhost"] } },
+    { flag: "--env", args: ["--env", "HOME"], set: { env_allowlist: ["HOME"] } },
+    {
+      flag: "--response-header",
+      args: ["--response-header", "Content-Type"],
+      set: { response_header_allowlist: ["Content-Type"] },
+    },
+    {
+      flag: "--response-mode",
+      args: ["--response-mode", "status_only"],
+      set: { response_mode: "status_only" },
+    },
+    {
+      flag: "--network-isolation",
+      args: ["--network-isolation"],
+      set: { network_isolation: true },
+    },
+    { flag: "--fs-isolation", args: ["--fs-isolation"], set: { fs_isolation: true } },
+    {
+      flag: "--recipient",
+      args: ["--recipient", "*@d.e"],
+      set: { smtp_recipient_allowlist: ["*@d.e"] },
+    },
+    { flag: "--imap-read-only", args: ["--imap-read-only"], set: { imap_read_only: true } },
+    { flag: "--strict-tree-exit", args: ["--strict-tree-exit"], set: { strict_tree_exit: true } },
+    { flag: "--proxy", args: ["--proxy"], set: { proxy: true } },
+    { flag: "--ssh-agent-socket", args: ["--ssh-agent-socket"], set: { ssh_agent_socket: true } },
+    { flag: "--clear", args: ["--clear"], set: { command_allowlist: [] } },
+  ])("$flag alone is a set, not a show", async ({ args, set }) => {
+    await run(["secret://k", ...args]);
+    expect(mockEngine.setInjectionPolicy.mock.calls).toEqual([
+      ["secret://k", { ...STORED, ...set }, { acknowledge_interpreters: false }, undefined],
+    ]);
+    expect(spies.stdout()).toBe("");
+  });
+
+  it("--acknowledge-interpreter alone is a show, not a set", async () => {
+    await run(["secret://k", "--acknowledge-interpreter"]);
+    expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
+    expect(spies.stdout()).toBe(JSON.stringify(STORED, null, 2));
+  });
+});

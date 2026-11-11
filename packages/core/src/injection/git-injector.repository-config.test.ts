@@ -44,8 +44,10 @@ it("ssh-live tier: required legs fail instead of skipping when git is unresolvab
   }
 });
 
+// A dozen real git processes per row, so the budget is 120 s.
 describeGit(
   "Git context — repository, system and global config never see the credential (S1)",
+  { timeout: 120_000 },
   () => {
     const injector = new GitInjector(null);
     let root: string;

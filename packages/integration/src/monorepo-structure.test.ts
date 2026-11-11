@@ -218,6 +218,43 @@ describe("turbo env pass-through (D5, 2026-09-08; the series file 2026-09-09)", 
   });
 });
 
+const OUT_OF_PACKAGE_INPUTS = [
+  "$TURBO_ROOT$/.github/workflows/*.yml",
+  "$TURBO_ROOT$/deploy/**",
+  "$TURBO_ROOT$/package.json",
+  "$TURBO_ROOT$/pnpm-workspace.yaml",
+  "$TURBO_ROOT$/.prettierignore",
+  "$TURBO_ROOT$/packages/*/package.json",
+  "$TURBO_ROOT$/packages/*/src/**/*.ts",
+  "$TURBO_ROOT$/packages/*/src/**/*.tsx",
+];
+
+describe("integration's test task names the files it reads outside its package (W10)", () => {
+  type PackageTurbo = {
+    extends?: string[];
+    tasks: Record<string, { inputs?: string[]; env?: string[]; dependsOn?: string[] }>;
+  };
+  let config: PackageTurbo;
+
+  beforeAll(() => {
+    config = JSON.parse(readFileSync(resolve(pkgRoot, "turbo.json"), "utf-8")) as PackageTurbo;
+  });
+
+  it("extends the root configuration and keeps its package's own files in the hash", () => {
+    expect(config.extends).toEqual(["//"]);
+    expect(config.tasks["test"]?.inputs).toContain("$TURBO_DEFAULT$");
+  });
+
+  it.each(OUT_OF_PACKAGE_INPUTS)("the test inputs name %s", (glob) => {
+    expect(config.tasks["test"]?.inputs).toContain(glob);
+  });
+
+  it("leaves env and dependsOn to the root configuration", () => {
+    expect(config.tasks["test"]?.env).toBeUndefined();
+    expect(config.tasks["test"]?.dependsOn).toBeUndefined();
+  });
+});
+
 describe("the root test script and the lockfile's formatting (DR, 2026-10-27)", () => {
   it("pnpm test runs turbo with --continue=dependencies-successful, so a red package never cancels the others", () => {
     const root = JSON.parse(readFileSync(resolve(monorepoRoot, "package.json"), "utf-8")) as {

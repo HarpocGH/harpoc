@@ -1,6 +1,6 @@
 import type { VaultEngine } from "@harpoc/core";
 import type { CallerContext, Permission, VaultApiToken } from "@harpoc/shared";
-import { callerFromToken, checkTokenScope, parseHandle } from "@harpoc/shared";
+import { callerFromToken, checkTokenScope, parseHandle, VaultError } from "@harpoc/shared";
 
 export const TOKEN_OPTION_DESCRIPTION =
   "Scoped API token: enforces token scope and per-secret access policies, and attributes the call (omit for the trusted local path); prefer the HARPOC_TOKEN environment variable — command-line arguments are visible to other local processes";
@@ -26,7 +26,7 @@ export interface ResolvedToken {
  */
 export function refuseEmptyToken(token: string | undefined): void {
   if (token !== undefined && token.trim() === "") {
-    throw new Error(
+    throw VaultError.invalidInput(
       "--token (or HARPOC_TOKEN) was supplied but empty. Provide a token, or omit it entirely to use the trusted local path.",
     );
   }

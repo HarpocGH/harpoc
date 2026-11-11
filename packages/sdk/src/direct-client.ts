@@ -27,6 +27,7 @@ import type {
 } from "@harpoc/shared";
 import type { AuditQueryOptions, DecryptedAuditEvent, SecretInfo } from "@harpoc/core";
 import type {
+  AuditChainReport,
   CertificateRef,
   CreateSecretInput,
   ExpiringReport,
@@ -170,6 +171,10 @@ export class DirectClient implements VaultClient {
     return this.engine.getMcpServerConfig(handle);
   }
 
+  async deleteMcpServerConfig(handle: string): Promise<boolean> {
+    return this.engine.deleteMcpServerConfig(handle);
+  }
+
   async setConnectionConfig(handle: string, config: ConnectionConfig): Promise<void> {
     const parsed = connectionConfigSchema.safeParse(config);
     if (!parsed.success) {
@@ -215,6 +220,11 @@ export class DirectClient implements VaultClient {
 
   async queryAudit(options?: AuditQueryOptions): Promise<DecryptedAuditEvent[]> {
     return this.engine.queryAudit(options);
+  }
+
+  async verifyAuditChain(): Promise<AuditChainReport> {
+    const { valid, checked, firstBrokenId } = this.engine.verifyAuditChain();
+    return { valid, checked, firstBrokenId };
   }
 
   async registerAgent(input: RegisterAgentInput): Promise<Agent> {

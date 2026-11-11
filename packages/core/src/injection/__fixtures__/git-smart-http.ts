@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+
+const CGI_TIMEOUT_MS = 30_000;
 
 /** One request a fixture listener received. */
 export interface SeenRequest {
@@ -55,8 +58,10 @@ export async function startGitSmartHttp(opts: {
   user: string;
   token: string;
   env: NodeJS.ProcessEnv;
+  cgiTimeoutMs?: number;
 }): Promise<Listener> {
   const requests: SeenRequest[] = [];
+  const children = new Set<ChildProcess>();
   const basic = `Basic ${Buffer.from(`${opts.user}:${opts.token}`).toString("base64")}`;
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     record(req, requests);
@@ -77,6 +82,9 @@ export async function startGitSmartHttp(opts: {
       res.end();
     };
     const cgi = spawn(opts.git, ["http-backend"], {
+      timeout: opts.cgiTimeoutMs ?? CGI_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      stdio: ["pipe", "pipe", "ignore"],
       env: {
         ...opts.env,
         GIT_PROJECT_ROOT: opts.projectRoot,
@@ -98,12 +106,14 @@ export async function startGitSmartHttp(opts: {
           : { GIT_PROTOCOL: String(req.headers["git-protocol"]) }),
       },
     });
+    children.add(cgi);
     cgi.on("error", fail);
     cgi.stdin.on("error", fail);
     req.pipe(cgi.stdin);
     const out: Buffer[] = [];
     cgi.stdout.on("data", (chunk: Buffer) => out.push(chunk));
     cgi.on("close", () => {
+      children.delete(cgi);
       if (res.headersSent) return;
       const raw = Buffer.concat(out);
       const end = raw.indexOf("\r\n\r\n");
@@ -111,20 +121,34 @@ export async function startGitSmartHttp(opts: {
         fail();
         return;
       }
-      let status = 200;
+      let statusCode = 200;
       const headers: Record<string, string> = {};
       for (const line of raw.subarray(0, end).toString("latin1").split("\r\n")) {
         const colon = line.indexOf(":");
-        const name = line.slice(0, colon).trim().toLowerCase();
+        const headerName = line.slice(0, colon).trim().toLowerCase();
         const value = line.slice(colon + 1).trim();
-        if (name === "status") status = Number.parseInt(value, 10);
-        else headers[name] = value;
+        if (headerName === "status") statusCode = Number.parseInt(value, 10);
+        else headers[headerName] = value;
       }
-      res.writeHead(status, headers).end(raw.subarray(end + 4));
+      res.writeHead(statusCode, headers).end(raw.subarray(end + 4));
     });
   });
   const port = await listen(server);
-  return { port, requests, close: closer(server) };
+  const closeServer = closer(server);
+  return {
+    port,
+    requests,
+    close: async () => {
+      const exits = [...children].map(
+        (child) =>
+          new Promise<void>((done) => {
+            child.once("close", () => done());
+            child.kill();
+          }),
+      );
+      await Promise.all([...exits, closeServer()]);
+    },
+  };
 }
 
 /**

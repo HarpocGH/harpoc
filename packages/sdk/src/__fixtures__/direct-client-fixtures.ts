@@ -38,6 +38,7 @@ export interface MockEngine {
   getInjectionPolicy: Mock;
   setMcpServerConfig: Mock;
   getMcpServerConfig: Mock;
+  deleteMcpServerConfig: Mock;
   setConnectionConfig: Mock;
   getConnectionConfig: Mock;
   deleteConnectionConfig: Mock;
@@ -46,6 +47,7 @@ export interface MockEngine {
   revokePolicy: Mock;
   listPolicies: Mock;
   queryAudit: Mock;
+  verifyAuditChain: Mock;
   registerAgent: Mock;
   listAgents: Mock;
   getAgent: Mock;
@@ -112,6 +114,7 @@ export function createMockEngine(): MockEngine {
     }),
     setMcpServerConfig: vi.fn().mockResolvedValue(undefined),
     getMcpServerConfig: vi.fn().mockResolvedValue(undefined),
+    deleteMcpServerConfig: vi.fn().mockResolvedValue(true),
     setConnectionConfig: vi.fn().mockResolvedValue(undefined),
     getConnectionConfig: vi.fn().mockResolvedValue(undefined),
     deleteConnectionConfig: vi.fn().mockResolvedValue(true),
@@ -129,6 +132,18 @@ export function createMockEngine(): MockEngine {
     revokePolicy: vi.fn(),
     listPolicies: vi.fn().mockReturnValue([]),
     queryAudit: vi.fn().mockReturnValue([]),
+    verifyAuditChain: vi.fn().mockReturnValue({
+      valid: true,
+      checked: 12,
+      firstBrokenId: null,
+      tail: {
+        format: "harpoc-audit-anchor/1",
+        vault_id: "vault-1",
+        last_id: 12,
+        timestamp: 1000,
+        row_hmac: "ab".repeat(32),
+      },
+    }),
     registerAgent: vi.fn().mockReturnValue({
       id: "agent-1",
       name: "deploy-bot",

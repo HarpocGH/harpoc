@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import type { SecretType } from "@harpoc/shared";
-import { secretTypeSchema } from "@harpoc/shared";
+import { secretTypeSchema, VaultError } from "@harpoc/shared";
 import { wipeBuffer } from "@harpoc/core";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { resolveSecretValue } from "../../utils/secret-value.js";
@@ -37,7 +37,7 @@ export function registerSecretSetCommand(secret: Command): void {
         const typeStr = options.type ?? "api_key";
         const typeResult = secretTypeSchema.safeParse(typeStr);
         if (!typeResult.success) {
-          throw new Error(
+          throw VaultError.invalidInput(
             `Invalid secret type: "${typeStr}". Valid: api_key, oauth_token, certificate`,
           );
         }

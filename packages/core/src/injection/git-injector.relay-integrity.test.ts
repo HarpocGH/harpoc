@@ -11,12 +11,22 @@
  * check), and the spawn seam edits it while the network step "runs" (after it).
  */
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
+import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
@@ -327,6 +337,54 @@ describeGit(
         });
         await run("pull");
         expect(mode).toBe(0o700);
+      },
+    );
+
+    it("a .git/shallow that is a directory refuses the pull GIT_OPERATION_FAILED with one failed row, and no network step runs (F2-E7)", async () => {
+      mkdirSync(join(wd, ".git", "shallow"));
+      const log = vi.fn();
+      const audited = new GitInjector({ log } as unknown as AuditLogger);
+      await expectVaultError(
+        () =>
+          audited.executeWithSecret(
+            { type: "git", operation: "pull", repository: REPO, working_directory: wd },
+            new Uint8Array(Buffer.from(CREDENTIAL)),
+            policy(),
+            undefined,
+            "secret-1",
+          ),
+        ErrorCode.GIT_OPERATION_FAILED,
+      );
+      expect(log.mock.calls).toEqual([
+        [
+          {
+            eventType: "secret.use",
+            secretId: "secret-1",
+            detail: {
+              context: "git",
+              operation: "pull",
+              transport: "https",
+              error: "GIT_OPERATION_FAILED",
+              network_isolation: false,
+              fs_isolation: false,
+            },
+            success: false,
+          },
+        ],
+      ]);
+      expect(subcommands()).toEqual(["rev-parse", "for-each-ref"]);
+      expect(relaysLeft()).toEqual([]);
+    });
+
+    // POSIX non-root only: win32 ignores the mode bits, and root reads a 0o000 file.
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+      "a .git/shallow the vault cannot read refuses the pull GIT_OPERATION_FAILED, the tree's path in no message (F2-E7)",
+      async () => {
+        const shallow = join(wd, ".git", "shallow");
+        writeFileSync(shallow, "");
+        chmodSync(shallow, 0o000);
+        const err = await expectVaultError(() => run("pull"), ErrorCode.GIT_OPERATION_FAILED);
+        expect(err.message.includes(wd)).toBe(false);
       },
     );
   },

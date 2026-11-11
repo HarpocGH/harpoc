@@ -6,6 +6,8 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -192,6 +194,7 @@ vi.mock("../utils/runtime-dir.js", async (importOriginal) => {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
+import { listWindowsAclSync } from "@harpoc/core";
 import { registerServerCommand } from "./server.js";
 import { buildCli, spyCli, type CliSpies } from "../__fixtures__/cli-harness.js";
 import { assertRuntimeDir, consumerDirs, consumerSocketPaths } from "../utils/runtime-dir.js";
@@ -1797,6 +1800,93 @@ describe("server start", () => {
         expect(loadUnlockedEngine).not.toHaveBeenCalled();
       },
     );
+
+    describe("a link entry under the runtime directory (E-95)", () => {
+      const links: string[] = [];
+
+      afterEach(() => {
+        vi.mocked(listWindowsAclSync).mockReset();
+        for (const path of links.splice(0)) unlinkSync(path);
+      });
+
+      /** `<dir>/run` holding the real consumer directory `bob` (`0750`) and `alice`, a link to a directory beside it — a junction on win32, a symbolic link elsewhere — unlinked after the row; returns the runtime directory. */
+      function runtimeWithLink(): string {
+        const runtime = join(dir, "run");
+        mkdirSync(runtime);
+        mkdirSync(join(runtime, "bob"));
+        chmodSync(join(runtime, "bob"), 0o750);
+        mkdirSync(join(dir, "target"));
+        symlinkSync(join(dir, "target"), join(runtime, "alice"), "junction");
+        links.push(join(runtime, "alice"));
+        return runtime;
+      }
+
+      it("on Windows (the platform stubbed) refuses the start before the vault opens, the link named", async () => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+        stubPlatform("win32");
+        vi.mocked(assertRuntimeDir).mockImplementation(() => undefined);
+        const daemon = "S-1-5-21-1-2-3-1001";
+        vi.mocked(listWindowsAclSync).mockImplementation(() => ({
+          user: daemon,
+          owner: daemon,
+          account: "S-1-5-21-1-2-3-1002",
+          rules: [
+            {
+              allow: true,
+              sid: daemon,
+              rights: 0x1f01ff,
+              inherited: false,
+              inheritance: 3,
+              propagation: 0,
+            },
+          ],
+        }));
+        const runtime = runtimeWithLink();
+
+        await expect(
+          run(["--session", "memory", "--ssh-agent", "--runtime-dir", runtime]),
+        ).rejects.toThrow("process.exit");
+        expect(spies.exitSpy).toHaveBeenCalledWith(1);
+        expect(vi.mocked(consumerDirs).mock.calls).toEqual([
+          [{ path: runtime, source: "--runtime-dir" }],
+        ]);
+        expect(listWindowsAclSync).not.toHaveBeenCalled();
+        expect(consumerSocketPaths).not.toHaveBeenCalled();
+        const line = String(spies.errorSpy.mock.calls[0]?.[0]);
+        expect(line.includes("is a symbolic link or junction")).toBe(true);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [
+            `Error: [INVALID_INPUT] --runtime-dir: the entry is a symbolic link or junction, not a consumer directory: ${join(runtime, "alice")}`,
+          ],
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        expect(mockAgentSocketServer.start).not.toHaveBeenCalled();
+      });
+
+      it("off Windows (the platform stubbed) refuses the start before the vault opens, the link named", async () => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+        vi.mocked(assertRuntimeDir).mockImplementation(() => undefined);
+        const runtime = runtimeWithLink();
+
+        await expect(
+          run(["--session", "memory", "--ssh-agent", "--runtime-dir", runtime]),
+        ).rejects.toThrow("process.exit");
+        expect(spies.exitSpy).toHaveBeenCalledWith(1);
+        expect(vi.mocked(consumerSocketPaths).mock.calls).toEqual([
+          [{ path: runtime, source: "--runtime-dir" }, "ssh-agent.sock"],
+        ]);
+        expect(consumerDirs).not.toHaveBeenCalled();
+        const line = String(spies.errorSpy.mock.calls[0]?.[0]);
+        expect(line.includes("is a symbolic link or junction")).toBe(true);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [
+            `Error: [INVALID_INPUT] --runtime-dir: the entry is a symbolic link or junction, not a consumer directory: ${join(runtime, "alice")}`,
+          ],
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        expect(mockAgentSocketServer.start).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // ── --unlock-key-file / --unlock-credential (the unlock key, B4) ──

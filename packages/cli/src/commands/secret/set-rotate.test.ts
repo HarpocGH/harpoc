@@ -135,6 +135,31 @@ describe("secret set — type validation precedes any prompt (review fix F4)", (
   });
 });
 
+describe("secret set — the --type refusal is an INVALID_INPUT envelope under --json (T4)", () => {
+  beforeEach(() => {
+    spies.exitSpy.mockImplementation(() => {
+      throw new Error("process.exit");
+    });
+  });
+
+  it("an invalid --type prints the INVALID_INPUT envelope, its message unchanged", async () => {
+    await expect(run(["set", "k", "--type", "not-a-type", "--json"])).rejects.toThrow(
+      "process.exit",
+    );
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        JSON.stringify({
+          error: "INVALID_INPUT",
+          message: 'Invalid secret type: "not-a-type". Valid: api_key, oauth_token, certificate',
+        }),
+      ],
+    ]);
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(mockResolveSecretValue).not.toHaveBeenCalled();
+    expect(loadEngineMock).not.toHaveBeenCalled();
+  });
+});
+
 // I30 (test-review-2026-10-09): getting-started documents `secret set --type`
 // with its valid values and `--json`; the invalid value is pinned above.
 describe("secret set — a valid --type and --json (I30)", () => {

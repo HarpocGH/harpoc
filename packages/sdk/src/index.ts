@@ -1,5 +1,6 @@
 export type {
   VaultClient,
+  AuditChainReport,
   CertificateRef,
   CreateSecretInput,
   ExpiringReport,

@@ -1,5 +1,5 @@
-import { readdirSync, statSync, type Dirent, type Stats } from "node:fs";
-import { basename, join, win32 } from "node:path";
+import { lstatSync, readdirSync, statSync, type Dirent, type Stats } from "node:fs";
+import { basename, join, posix, sep, win32 } from "node:path";
 import { listWindowsAclSync } from "@harpoc/core";
 import type { WindowsAclListing } from "@harpoc/core";
 import { agentNameSchema, MAX_UNIX_SOCKET_PATH_BYTES, VaultError } from "@harpoc/shared";
@@ -103,7 +103,7 @@ export function resolveRuntimeDir(
   return undefined;
 }
 
-/** Refuses `INVALID_INPUT` unless the runtime directory is this user's own, `0750` or stricter (win32: its access list). */
+/** Refuses `INVALID_INPUT` unless the runtime directory is this user's own, `0750` or stricter (win32: its access list), and not a symbolic link or junction. */
 export function assertRuntimeDir(dir: RuntimeDir): void {
   assertPrivateDir(dir.path, dir.source, undefined);
 }
@@ -148,7 +148,7 @@ export function agentSocketPipeName(consumer: string): string {
   return name;
 }
 
-/** The consumer directories under the runtime directory, by name: every subdirectory; other entries ignored. */
+/** The consumer directories under the runtime directory, by name: every subdirectory; a link refused, other entries ignored. */
 function consumerNames(runtimeDir: RuntimeDir): string[] {
   let entries: Dirent[];
   try {
@@ -156,6 +156,15 @@ function consumerNames(runtimeDir: RuntimeDir): string[] {
   } catch {
     throw VaultError.invalidInput(
       `${runtimeDir.source}: the consumer directories cannot be listed: ${runtimeDir.path}`,
+    );
+  }
+  const [link] = entries
+    .filter((entry) => entry.isSymbolicLink())
+    .map((entry) => entry.name)
+    .sort();
+  if (link !== undefined) {
+    throw VaultError.invalidInput(
+      `${runtimeDir.source}: the entry is a symbolic link or junction, not a consumer directory: ${join(runtimeDir.path, link)}`,
     );
   }
   return entries
@@ -182,7 +191,7 @@ export function consumerDirs(runtimeDir: RuntimeDir): ConsumerDirEntry[] {
  * directory, by name (POSIX: a Unix socket each). A directory entry is a consumer: its name must
  * be a consumer name, the socket path must fit a Unix socket address and the directory must pass
  * `assertConsumerDir` — a misconfigured consumer refuses the start instead of being skipped.
- * Other entries are ignored.
+ * A link entry is refused; other entries are ignored.
  */
 export function consumerSocketPaths(runtimeDir: RuntimeDir, socketName: string): string[] {
   return consumerNames(runtimeDir).map((consumer) => {
@@ -200,9 +209,9 @@ export function consumerSocketPaths(runtimeDir: RuntimeDir, socketName: string):
 }
 
 /**
- * Refuses `INVALID_INPUT` unless the consumer directory is this user's own, `0750` or stricter;
- * on win32, unless its access list grants nobody but this account, SYSTEM, Administrators and
- * the consumer its name names (read and execute at most).
+ * Refuses `INVALID_INPUT` unless the consumer directory is this user's own, `0750` or stricter,
+ * and not a symbolic link or junction; on win32, unless its access list grants nobody but this
+ * account, SYSTEM, Administrators and the consumer its name names (read and execute at most).
  */
 export function assertConsumerDir(path: string): void {
   assertPrivateDir(path, "consumer directory", basename(path));
@@ -267,12 +276,55 @@ function judgeWindowsDirAcl(
   return { sid: grantee?.sid };
 }
 
+/** What `isLink` hands `lstat`: walking the path's segments from the end — separators and `.` skipped, each `..` consuming the next name to its left — the path exactly as given up to and including the first name no `..` consumes, else (no such name) the path with its trailing separators dropped, never below its root. */
+export function linkProbePath(
+  path: string,
+  flavour: typeof posix = sep === "\\" ? win32 : posix,
+): string {
+  const separators = flavour.sep === "\\" ? "\\/" : "/";
+  const { root } = flavour.parse(path);
+  let end = path.length;
+  let pending = 0;
+  while (end > root.length) {
+    if (separators.includes(path.charAt(end - 1))) {
+      end -= 1;
+      continue;
+    }
+    let start = end;
+    while (start > root.length && !separators.includes(path.charAt(start - 1))) start -= 1;
+    const segment = path.slice(start, end);
+    if (segment === "..") {
+      pending += 1;
+    } else if (segment !== ".") {
+      if (pending === 0) return path.slice(0, end);
+      pending -= 1;
+    }
+    end = start;
+  }
+  const trimmed = path.replace(flavour.sep === "\\" ? /[\\/]+$/ : /\/+$/, "");
+  return trimmed.length < root.length ? root : trimmed;
+}
+
+/** Whether the final component of the directory the path names is a symbolic link or a junction, read by `lstat` on `linkProbePath(path)` — the tail after the last name no `..` consumes canonicalised lexically, everything up to that name left to the kernel's own resolution; false where it cannot be read. */
+export function isLink(path: string): boolean {
+  try {
+    return lstatSync(linkProbePath(path), { throwIfNoEntry: false })?.isSymbolicLink() === true;
+  } catch {
+    return false;
+  }
+}
+
 /** The checks; on win32 returns the consumer's SID when a consumer was named. */
 function assertPrivateDir(
   path: string,
   label: string,
   consumer: string | undefined,
 ): string | undefined {
+  if (isLink(path)) {
+    throw VaultError.invalidInput(
+      `${label}: the path is a symbolic link or junction, not a directory: ${path}`,
+    );
+  }
   let stat: Stats | undefined;
   try {
     stat = statSync(path, { throwIfNoEntry: false });
@@ -303,9 +355,9 @@ function assertPrivateDir(
 }
 
 /**
- * A junction in place of the directory is judged by its own owner and entries, not by its
- * target's — `GetAccessControl` reads the reparse point itself (measured), so the target's access
- * list is never read; the install recipe refuses a reparse point.
+ * A junction would be judged by its own owner and entries, not by its target's —
+ * `GetAccessControl` reads the reparse point itself (measured) — so `assertPrivateDir` refuses a
+ * link before this read; the install recipe refuses a reparse point.
  */
 function assertWindowsDirAcl(
   path: string,

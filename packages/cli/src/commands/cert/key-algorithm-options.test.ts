@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { ErrorCode } from "@harpoc/shared";
 import {
   parseAlgorithm,
   parseBits,
@@ -6,6 +7,7 @@ import {
   assertAlgorithmPairing,
   DEFAULT_KEY_ALGORITHM,
 } from "./key-algorithm-options.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 it("DEFAULT_KEY_ALGORITHM is ec", () => {
   expect(DEFAULT_KEY_ALGORITHM).toBe("ec");
@@ -73,5 +75,38 @@ describe("assertAlgorithmPairing", () => {
     expect(() => assertAlgorithmPairing("rsa", undefined, "P-256")).toThrow(
       "--curve only applies with --algorithm ec.",
     );
+  });
+});
+
+describe("the refusals are INVALID_INPUT, their messages unchanged (T4)", () => {
+  it.each([
+    {
+      label: "parseAlgorithm",
+      call: () => parseAlgorithm("dsa"),
+      message: 'Invalid algorithm "dsa". Must be one of: rsa, ec.',
+    },
+    {
+      label: "parseBits",
+      call: () => parseBits("1024"),
+      message: 'Invalid bits "1024". Must be one of: 2048, 4096.',
+    },
+    {
+      label: "parseCurve",
+      call: () => parseCurve("P-521"),
+      message: 'Invalid curve "P-521". Must be one of: P-256, P-384.',
+    },
+    {
+      label: "assertAlgorithmPairing with --bits under ec",
+      call: () => assertAlgorithmPairing("ec", 2048, undefined),
+      message: "--bits only applies with --algorithm rsa.",
+    },
+    {
+      label: "assertAlgorithmPairing with --curve under rsa",
+      call: () => assertAlgorithmPairing("rsa", undefined, "P-256"),
+      message: "--curve only applies with --algorithm ec.",
+    },
+  ])("$label", async ({ call, message }) => {
+    const err = await expectVaultError(call, ErrorCode.INVALID_INPUT);
+    expect(err.message).toBe(message);
   });
 });

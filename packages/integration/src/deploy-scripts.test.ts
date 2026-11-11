@@ -166,6 +166,26 @@ describe("deploy PowerShell scripts (deployment model B on Windows)", () => {
     },
   );
 
+  it("every account-name pattern of the PowerShell scripts ends with \\z, none with $ (.NET's $ also matches before a final line feed, so a name with a trailing line feed passed it)", () => {
+    const counts = Object.fromEntries(
+      PS_SCRIPTS.map((script) => {
+        const text = psText(script);
+        return [
+          script,
+          {
+            endsZ: text.split("'^[a-z0-9_][a-z0-9_-]{0,19}\\z'").length - 1,
+            endsDollar: text.split("'^[a-z0-9_][a-z0-9_-]{0,19}$'").length - 1,
+          },
+        ];
+      }),
+    );
+    expect(counts).toEqual({
+      "windows/enroll-unlock-key.ps1": { endsZ: 1, endsDollar: 0 },
+      "windows/install-two-identity.ps1": { endsZ: 2, endsDollar: 0 },
+      "windows/register-service.ps1": { endsZ: 1, endsDollar: 0 },
+    });
+  });
+
   // RD-B7-5: a directory named after a device (nul, com1 ...) is the device, not a directory.
   it("windows/install-two-identity.ps1 refuses Windows' reserved device names, as a usage error before its administrator check", () => {
     const text = psText("windows/install-two-identity.ps1");
@@ -292,14 +312,12 @@ describe("deploy PowerShell scripts (deployment model B on Windows)", () => {
   });
 });
 
-/** The `run:` block of e2e.yml's task smoke step as lines without the block's indentation, read by text from the step's `name:` line; empty when the step or its block is not where it stands. */
-function taskSmokeStep(): string[] {
+/** The `run:` block of the e2e.yml step named `stepName` as lines without the block's indentation, read by text from the step's `name:` line; empty when the step or its block is not where it stands. */
+function e2eStepBlock(stepName: string): string[] {
   const lines = readFileSync(resolve(repoRoot, ".github", "workflows", "e2e.yml"), "utf8").split(
     /\r?\n/,
   );
-  const stepAt = lines.indexOf(
-    "      - name: Register, start and stop the daemon as a startup task (the Password-logon cell)",
-  );
+  const stepAt = lines.indexOf(`      - name: ${stepName}`);
   const run = lines.indexOf("        run: |", stepAt);
   if (stepAt < 0 || run < 0 || lines.slice(stepAt + 1, run).some((l) => l.startsWith("      - "))) {
     return [];
@@ -312,6 +330,28 @@ function taskSmokeStep(): string[] {
     block.push(line.slice(indent.length));
   }
   return block;
+}
+
+/** The `run:` block of e2e.yml's task smoke step (`e2eStepBlock`). */
+function taskSmokeStep(): string[] {
+  return e2eStepBlock(
+    "Register, start and stop the daemon as a startup task (the Password-logon cell)",
+  );
+}
+
+/** The `run:` block of e2e.yml's provisioning step (`e2eStepBlock`). */
+function provisioningStep(): string[] {
+  return e2eStepBlock("Create the agent account and provision the layout with the deploy recipe");
+}
+
+/** The index of the `}` that closes the `{` at `openAt` in a step's PowerShell, by brace count (no string there holds a brace); -1 when it is never closed. */
+function closingBrace(text: string, openAt: number): number {
+  let depth = 0;
+  for (let at = openAt; at < text.length; at++) {
+    if (text[at] === "{") depth++;
+    else if (text[at] === "}" && --depth === 0) return at;
+  }
+  return -1;
 }
 
 describe("e2e.yml's task smoke step (the Password-logon cell, its PowerShell read as text)", () => {
@@ -365,13 +405,46 @@ describe("e2e.yml's task smoke step (the Password-logon cell, its PowerShell rea
   });
 });
 
+describe("e2e.yml's provisioning step (the deploy recipe's run, its PowerShell read as text)", () => {
+  it("every Get-LocalGroupMember sits in a try's body with -ErrorAction Stop and a catch that throws naming the exception's type, and the step prints no exception's message (a listing that fails ends the step with a fixed text, never a raw error record)", () => {
+    const text = provisioningStep().join("\n");
+    const lineAt = (at: number): string =>
+      text.slice(text.lastIndexOf("\n", at) + 1).split("\n", 1)[0] ?? "";
+    const guarded = (at: number): boolean => {
+      const tryAt = text.lastIndexOf("try {", at);
+      const tryEnd = tryAt < 0 ? -1 : closingBrace(text, tryAt + "try ".length);
+      if (tryEnd < at || !lineAt(at).includes("-ErrorAction Stop")) return false;
+      if (!text.startsWith(" catch {", tryEnd + 1)) return false;
+      const catchOpen = tryEnd + " catch ".length + 1;
+      const catchEnd = closingBrace(text, catchOpen);
+      const handler = catchEnd < 0 ? "" : text.slice(catchOpen, catchEnd);
+      const sid = /-SID '(S-1-5-32-\d+)'/.exec(lineAt(at))?.[1];
+      return (
+        handler.includes("throw ") &&
+        handler.includes("$_.Exception.GetType().FullName") &&
+        sid !== undefined &&
+        handler.includes(`(${sid})`)
+      );
+    };
+    const calls = [...text.matchAll(/\bGet-LocalGroupMember\b/g)].map((match) => match.index);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.filter((at) => !guarded(at)).map((at) => lineAt(at).trim())).toEqual([]);
+    expect(text.includes(".Exception.Message")).toBe(false);
+    expect(
+      text.includes("$adminSids -contains $vaultSid -or $adminSids -contains $agentSid"),
+      "the Administrators decision compares SIDs",
+    ).toBe(true);
+    expect(text.includes("$_.Name"), "no group listing is read by name").toBe(false);
+  });
+});
+
 /** One argument as the Windows C runtime reads it back (the scripts' ConvertTo-Argument, for paths without quotes). */
 const winArg = (value: string): string => (/\s/.test(value) ? `"${value}"` : value);
 
-/** A recipe row's spawn budget: a module-loading cmdlet answers in tens of seconds under the full gate on windows-latest (`decisions.md` § "The WMI listing series"). */
-const PS1_TIMEOUT_MS = 180_000;
+/** A recipe row's spawn budget: a module-loading cmdlet answers in tens of seconds under the full gate on windows-latest (`decisions.md` § "The WMI listing series"). The budget is 300 s because on a loaded Windows CI leg `register-service.ps1 -DryRun` ran 175 s of the former 180 s, the cost being the first module autoload of a fresh `powershell.exe`. */
+const PS1_TIMEOUT_MS = 300_000;
 
-/** The recipe rows' environment: the inherited one with `PSModulePath` narrowed to the in-box modules the three scripts load (Management, Utility, Security, LocalAccounts, ScheduledTasks). */
+/** The recipe rows' environment: the inherited one with `PSModulePath` set to the in-box modules directory the three scripts load from (Management, Utility, Security, LocalAccounts, ScheduledTasks); Windows PowerShell 5.1 puts `C:\Program Files\WindowsPowerShell\Modules` back ahead of it (measured), so the child searches that directory first, then the in-box one. */
 function recipeEnvironment(): NodeJS.ProcessEnv {
   return {
     ...Object.fromEntries(
@@ -565,7 +638,7 @@ describe.skipIf(process.platform !== "win32")(
         expect(run.stdout).toContain(`Usage: ${script.slice("windows/".length)}`);
         expect(run.stderr, run.measured).toBe("");
       },
-      210_000,
+      330_000,
     );
 
     it("register-service.ps1 -DryRun prints the startup task: the memory session, the DPAPI-sealed key, no time limit — and registers nothing", () => {
@@ -621,7 +694,7 @@ describe.skipIf(process.platform !== "win32")(
         "dry run: nothing registered",
       ]);
       expect(existsSync(base)).toBe(false);
-    }, 210_000);
+    }, 330_000);
 
     it("register-service.ps1's account-rights helper compiles under the pinned host and lists an account's own rights without a change", () => {
       const sids = elevated ? ["S-1-0-0", "S-1-5-32-544"] : ["S-1-0-0"];
@@ -655,7 +728,7 @@ describe.skipIf(process.platform !== "win32")(
       expect(lines.length).toBe(sids.length);
       expect(lines[0]).toBe("S-1-0-0 0");
       if (elevated) expect(lines[1]).toMatch(/^S-1-5-32-544 [1-9]\d*$/);
-    }, 210_000);
+    }, 330_000);
 
     it.each([
       {
@@ -742,7 +815,39 @@ describe.skipIf(process.platform !== "win32")(
         expect(run.stderr).toContain(says);
         expect(run.stderr).not.toContain("must run elevated");
       },
-      210_000,
+      330_000,
+    );
+
+    it.each([
+      {
+        script: "register-service.ps1",
+        args: () => ["-DryRun", "-VaultUser", "harpoc\n", "-Node", process.execPath, "-Cli", cli],
+        otherwise: "the -DryRun exit",
+      },
+      {
+        script: "install-two-identity.ps1",
+        args: () => ["-VaultUser", "harpoc\n", "-ProgramData", "relative"],
+        otherwise: "-ProgramData must be an absolute path",
+      },
+      {
+        script: "enroll-unlock-key.ps1",
+        args: () => ["-VaultUser", "harpoc\n", "-Out", "relative.dpapi"],
+        otherwise: "-Out must be an absolute path",
+      },
+      {
+        script: "register-service.ps1",
+        args: () => ["-Unregister", "-DryRun", "-VaultUser", "harpoc\n"],
+        otherwise: "-Unregister takes -VaultUser alone",
+      },
+    ])(
+      "$script refuses an account name that ends in a line feed (not an account name) with exit 2 before its administrator check, where it otherwise stops at $otherwise",
+      ({ script, args }) => {
+        const run = runPs1(`windows/${script}`, args());
+        expect(run.status, run.measured).toBe(2);
+        expect(run.stderr.startsWith(`${script}: not an account name (`), run.measured).toBe(true);
+        expect(run.stdout, run.measured).toBe("");
+      },
+      330_000,
     );
 
     // Elevated, the scripts pass their administrator check and would create the account, the
@@ -773,7 +878,7 @@ describe.skipIf(process.platform !== "win32")(
       }
       expect(existsSync(base)).toBe(false);
       expect(existsSync(join(root, "unlock.key.dpapi"))).toBe(false);
-    }, 750_000);
+    }, 1_230_000);
 
     // Elevated, the layout is readable and the scripts go on past their checks: like the row above, the desktop's.
     it("on the layout the recipe leaves (harpoc and harpoc\\vault open to SYSTEM and Administrators alone) install-two-identity.ps1 and enroll-unlock-key.ps1 stop at their administrator check for a non-elevated user (exit 1, no PowerShell text)", (ctx) => {
@@ -818,7 +923,7 @@ describe.skipIf(process.platform !== "win32")(
           `${script}: must run elevated (an Administrator PowerShell)\r\n`,
         );
       }
-    }, 630_000);
+    }, 990_000);
 
     it("install-two-identity.ps1 refuses an existing harpoc directory that is a junction (a reparse point) as a usage error before its administrator check", () => {
       const programData = join(root, "ProgramData-junction");
@@ -834,7 +939,7 @@ describe.skipIf(process.platform !== "win32")(
       );
       expect(run.status, run.measured).toBe(2);
       expect(readdirSync(target)).toEqual([]);
-    }, 210_000);
+    }, 330_000);
 
     it("install-two-identity.ps1 refuses an existing harpoc that is a file, not a directory, as a usage error before its administrator check", () => {
       const programData = join(root, "ProgramData-file");
@@ -846,6 +951,6 @@ describe.skipIf(process.platform !== "win32")(
         `install-two-identity.ps1: ${file} exists and is not a directory; remove it\r\n`,
       );
       expect(run.status, run.measured).toBe(2);
-    }, 210_000);
+    }, 330_000);
   },
 );

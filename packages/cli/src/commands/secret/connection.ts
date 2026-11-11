@@ -83,17 +83,7 @@ export function registerSecretConnectionCommand(secret: Command): void {
               );
               return;
             }
-            const hasInput =
-              options.dbTls !== undefined ||
-              options.dbCaFile !== undefined ||
-              options.dbServername !== undefined ||
-              (options.knownHost?.length ?? 0) > 0 ||
-              options.knownHostsFile !== undefined ||
-              options.mailNoTls === true ||
-              options.mailCa !== undefined ||
-              options.gitCa !== undefined ||
-              options.httpCa !== undefined ||
-              options.clear === true;
+            const hasInput = hasConnectionInput(options);
             if (options.show || !hasInput) {
               printJson((await client.getConnectionConfig(handle)) ?? null);
               return;
@@ -101,13 +91,8 @@ export function registerSecretConnectionCommand(secret: Command): void {
             // The merge read is GET .../connection-config, gated on `read` by the route (the
             // in-process token path reads under the write's `rotate`).
             const current = await client.getConnectionConfig(handle);
-            const parsed = connectionConfigSchema.safeParse(
-              mergeConnectionConfig(current, options),
-            );
-            if (!parsed.success) {
-              throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
-            }
-            await client.setConnectionConfig(handle, parsed.data);
+            const merged = parseMergedConnection(current, options);
+            await client.setConnectionConfig(handle, merged);
             printSuccess(`Connection config updated (${handle})`);
           });
           return;
@@ -127,17 +112,7 @@ export function registerSecretConnectionCommand(secret: Command): void {
             return;
           }
 
-          const hasInput =
-            options.dbTls !== undefined ||
-            options.dbCaFile !== undefined ||
-            options.dbServername !== undefined ||
-            (options.knownHost?.length ?? 0) > 0 ||
-            options.knownHostsFile !== undefined ||
-            options.mailNoTls === true ||
-            options.mailCa !== undefined ||
-            options.gitCa !== undefined ||
-            options.httpCa !== undefined ||
-            options.clear === true;
+          const hasInput = hasConnectionInput(options);
           if (options.show || !hasInput) {
             const resolved = resolveTokenCallerForHandle(engine, "read", handle, tokenValue);
             const current = await engine.getConnectionConfig(handle, resolved?.caller);
@@ -153,14 +128,9 @@ export function registerSecretConnectionCommand(secret: Command): void {
           const current = await engine.getConnectionConfig(handle, resolved?.caller, {
             forPermission: "rotate",
           });
-          const config = mergeConnectionConfig(current, options);
+          const merged = parseMergedConnection(current, options);
 
-          const parsed = connectionConfigSchema.safeParse(config);
-          if (!parsed.success) {
-            throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
-          }
-
-          await engine.setConnectionConfig(handle, parsed.data, resolved?.caller);
+          await engine.setConnectionConfig(handle, merged, resolved?.caller);
           printSuccess(`Connection config updated (${handle})`);
         } finally {
           await engine.destroy();
@@ -169,6 +139,34 @@ export function registerSecretConnectionCommand(secret: Command): void {
         handleError(err, options.json);
       }
     });
+}
+
+/** The ten flags that make a call a write: none (or `--show`) makes it a show. */
+function hasConnectionInput(options: ConnectionOptions): boolean {
+  return (
+    options.dbTls !== undefined ||
+    options.dbCaFile !== undefined ||
+    options.dbServername !== undefined ||
+    (options.knownHost?.length ?? 0) > 0 ||
+    options.knownHostsFile !== undefined ||
+    options.mailNoTls === true ||
+    options.mailCa !== undefined ||
+    options.gitCa !== undefined ||
+    options.httpCa !== undefined ||
+    options.clear === true
+  );
+}
+
+/** The merged config through its schema; a refusal is `SCHEMA_VALIDATION_ERROR`. */
+function parseMergedConnection(
+  current: ConnectionConfig | undefined,
+  options: ConnectionOptions,
+): ConnectionConfig {
+  const parsed = connectionConfigSchema.safeParse(mergeConnectionConfig(current, options));
+  if (!parsed.success) {
+    throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
+  }
+  return parsed.data;
 }
 
 const PATH_OPTIONS: ReadonlyArray<readonly [keyof ConnectionOptions, string]> = [

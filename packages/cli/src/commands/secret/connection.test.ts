@@ -320,3 +320,87 @@ describe("mergeConnectionConfig against a real engine", () => {
     }
   });
 });
+
+describe("secret connection command — each of the 10 input flags alone is a set (T5)", () => {
+  const KNOWN_HOST = "h ssh-ed25519 AAAA";
+  const DB: ConnectionConfig = { database: { tls_mode: "require" } };
+  const MERGE_READ = ["secret://k", undefined, { forPermission: "rotate" }];
+  let spies: CliSpies;
+  let caFile: string;
+  let knownHostsFile: string;
+
+  const run = buildCli(
+    (program) => registerSecretConnectionCommand(program.command("secret")),
+    ["secret", "connection"],
+  );
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.getConnectionConfig.mockResolvedValue(DB);
+    caFile = join(tempDir, "ca.pem");
+    writeFileSync(caFile, CA_PEM);
+    knownHostsFile = join(tempDir, "known_hosts");
+    writeFileSync(knownHostsFile, `# pinned\n${KNOWN_HOST}\n`);
+    spies = spyCli();
+  });
+
+  afterEach(() => {
+    spies.restore();
+  });
+
+  it.each<{ flag: string; args: string[]; written: ConnectionConfig }>([
+    {
+      flag: "--db-tls",
+      args: ["--db-tls", "disable"],
+      written: { database: { tls_mode: "disable" } },
+    },
+    {
+      flag: "--db-ca-file",
+      args: ["--db-ca-file", "<ca>"],
+      written: { database: { tls_mode: "require", ca_pem: CA_PEM } },
+    },
+    {
+      flag: "--db-servername",
+      args: ["--db-servername", "localhost"],
+      written: { database: { tls_mode: "require", servername: "localhost" } },
+    },
+    {
+      flag: "--known-host",
+      args: ["--known-host", KNOWN_HOST],
+      written: { ...DB, ssh: { known_hosts: [KNOWN_HOST] } },
+    },
+    {
+      flag: "--known-hosts-file",
+      args: ["--known-hosts-file", "<known-hosts>"],
+      written: { ...DB, ssh: { known_hosts: [KNOWN_HOST] } },
+    },
+    { flag: "--mail-no-tls", args: ["--mail-no-tls"], written: { ...DB, mail: { tls: false } } },
+    {
+      flag: "--mail-ca",
+      args: ["--mail-ca", "<ca>"],
+      written: { ...DB, mail: { tls: { ca: CA_PEM } } },
+    },
+    { flag: "--git-ca", args: ["--git-ca", "<ca>"], written: { ...DB, git: { ca_pem: CA_PEM } } },
+    {
+      flag: "--http-ca",
+      args: ["--http-ca", "<ca>"],
+      written: { ...DB, http: { ca_pem: CA_PEM } },
+    },
+  ])("$flag alone is a set, not a show", async ({ args, written }) => {
+    const paths: Record<string, string> = { "<ca>": caFile, "<known-hosts>": knownHostsFile };
+    await run(["secret://k", ...args.map((arg) => paths[arg] ?? arg)]);
+    expect(mockEngine.getConnectionConfig.mock.calls).toEqual([MERGE_READ]);
+    expect(mockEngine.setConnectionConfig.mock.calls).toEqual([["secret://k", written, undefined]]);
+    expect(spies.stdout()).toBe("");
+  });
+
+  it("--clear alone is a set, not a show: the emptied config is refused, nothing written", async () => {
+    await expect(run(["secret://k", "--clear"])).rejects.toThrow("process.exit");
+    expect(mockEngine.getConnectionConfig.mock.calls).toEqual([MERGE_READ]);
+    expect(mockEngine.setConnectionConfig).not.toHaveBeenCalled();
+    expect(spies.stdout()).toBe("");
+    expect(spies.stderr()).toBe(
+      "Error: [SCHEMA_VALIDATION_ERROR] <root>: connection config must set at least one of database, ssh, mail, git or http",
+    );
+  });
+});

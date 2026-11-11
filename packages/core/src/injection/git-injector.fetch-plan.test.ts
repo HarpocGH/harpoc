@@ -300,6 +300,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       "-6",
       "-ob",
       "-o4",
+      "-o-u",
     ];
     await injector.executeWithSecret(
       { type: "git", operation: "fetch", repository: REPO, args, working_directory: wd },
@@ -343,6 +344,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       "--ipv6",
       "--server-option=b",
       "--server-option=4",
+      "--server-option=-u",
       "--",
       REPO,
       "+refs/heads/*:refs/heads/*",

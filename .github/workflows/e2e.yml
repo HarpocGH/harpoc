@@ -208,7 +208,12 @@ jobs:
           Export-JobVariable 'HARPOC_TWO_USER_AGENT_PASSWORD' $agentPassword
           $agentSecure = ConvertTo-SecureString -String $agentPassword -AsPlainText -Force
           New-LocalUser -Name $agentUser -Password $agentSecure -PasswordNeverExpires -UserMayNotChangePassword -AccountNeverExpires -Description 'Harpoc e2e agent account' | Out-Null
-          if (-not (@(Get-LocalGroupMember -SID 'S-1-5-32-545' | ForEach-Object { $_.SID.Value }) -contains (Get-LocalUser -Name $agentUser).SID.Value)) { Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $agentUser }
+          try {
+            $userSids = @(Get-LocalGroupMember -SID 'S-1-5-32-545' -ErrorAction Stop | ForEach-Object { $_.SID.Value })
+          } catch {
+            throw "could not list the Users group (S-1-5-32-545): $($_.Exception.GetType().FullName)"
+          }
+          if (-not ($userSids -contains (Get-LocalUser -Name $agentUser).SID.Value)) { Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $agentUser }
           $vaultSecure = ConvertTo-SecureString -String $vaultPassword -AsPlainText -Force
           Start-Service -Name seclogon
           Get-Service -Name seclogon | Format-Table Name, Status, StartType -AutoSize | Out-String | Write-Output
@@ -239,8 +244,12 @@ jobs:
           $agentAcl = (& "$env:SystemRoot\System32\icacls.exe" $consumerDir | Out-String)
           if ($LASTEXITCODE -ne 0) { throw "icacls exited $LASTEXITCODE on $consumerDir" }
           if ($agentAcl -notmatch [regex]::Escape("$agentUser`:(OI)(CI)(RX)")) { throw "the consumer directory does not grant $agentUser read and execute" }
-          $admins = @(Get-LocalGroupMember -SID 'S-1-5-32-544' | ForEach-Object { $_.Name })
-          if ($admins -match "\\($vaultUser|$agentUser)$") { throw 'a test account is an administrator' }
+          try {
+            $adminSids = @(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop | ForEach-Object { $_.SID.Value })
+          } catch {
+            throw "could not list the Administrators group (S-1-5-32-544): $($_.Exception.GetType().FullName)"
+          }
+          if ($adminSids -contains $vaultSid -or $adminSids -contains $agentSid) { throw 'a test account is an administrator' }
       - name: Generate the fixture PKI and SSH keys (no fleet)
         # The suite runs its TLS echo and its SSH server in the harness process on this
         # material; the generators are dist-free and run through Git for Windows' bash.

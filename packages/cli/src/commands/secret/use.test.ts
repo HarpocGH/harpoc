@@ -18,6 +18,7 @@ vi.mock("../../utils/vault-loader.js", () => ({
   loadUnlockedEngine: vi.fn().mockResolvedValue(mockEngine),
 }));
 
+import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerSecretUseCommand, summarizeResult } from "./use.js";
 import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
@@ -1507,6 +1508,61 @@ describe("secret use — --action is a closed set", () => {
       expect.objectContaining({ type: "http" }),
       undefined,
     );
+  });
+});
+
+describe("secret use — the flag refusals are INVALID_INPUT envelopes under --json (T4)", () => {
+  let spies: CliSpies;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.useSecret.mockResolvedValue({ type: "http", status: 200 });
+    spies = spyCli();
+  });
+
+  afterEach(() => {
+    spies.restore();
+  });
+
+  it.each([
+    {
+      label: "an unknown --action",
+      flags: ["--action", "bogus"],
+      message:
+        '--action must be one of: http | process | mcp | database | git | ssh | smtp | imap | websocket | sftp | docker_registry (got "bogus")',
+    },
+    {
+      label: "a non-integer --timeout-ms",
+      flags: [...HTTP_ARGS, "--timeout-ms", "5s"],
+      message: '--timeout-ms must be an integer (got "5s")',
+    },
+    {
+      label: "malformed --arguments",
+      flags: ["--action", "mcp", "--server", "s", "--tool", "t", "--arguments", "{"],
+      message: "--arguments must be a valid JSON object",
+    },
+    {
+      label: "a non-integer --uid",
+      flags: [
+        "--action",
+        "imap",
+        "--host",
+        "imap.example.com",
+        "--operation",
+        "fetch",
+        "--uid",
+        "0x10",
+      ],
+      message: '--uid must be an integer (got "0x10")',
+    },
+  ])("refuses $label, its message unchanged", async ({ flags, message }) => {
+    await expect(run(["secret://k", ...flags, "--json"])).rejects.toThrow("process.exit");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [JSON.stringify({ error: "INVALID_INPUT", message })],
+    ]);
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
   });
 });
 

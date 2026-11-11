@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitResult, InjectionPolicy } from "@harpoc/shared";
-import { VaultError } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { startGitSmartHttp } from "./__fixtures__/git-smart-http.js";
@@ -167,6 +167,7 @@ describeGit("Git working-tree probes read unredacted — real git over smart HTT
       ...process.env,
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_CONFIG_GLOBAL: emptyConfig,
+      GIT_DEFAULT_REF_FORMAT: "files",
       GIT_TERMINAL_PROMPT: "0",
       GIT_AUTHOR_NAME: "harpoc-test",
       GIT_AUTHOR_EMAIL: "test@example.com",
@@ -359,5 +360,214 @@ describeGit("Git working-tree probes read unredacted — real git over smart HTT
     const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
     expect(row.detail.sanitized).toBe(true);
     expect(JSON.stringify(log.mock.calls).includes(USER)).toBe(false);
+  });
+
+  describe("the clone reads the remote's HEAD through the parse seam (F2-E10, W7)", () => {
+    const log = vi.fn();
+    let own: Listener | undefined;
+    const traces = ["GIT_TRACE", "GIT_TRACE_PACKET"];
+    const savedTraces: Record<string, string | undefined> = {};
+    const dest = () => join(home, "..", "dest");
+    const at = (port: number, repoPath: string) => `http://127.0.0.1:${String(port)}/${repoPath}`;
+
+    beforeEach(() => {
+      log.mockReset();
+      for (const key of traces) savedTraces[key] = process.env[key];
+    });
+
+    afterEach(async () => {
+      for (const key of traces) {
+        const value = savedTraces[key];
+        if (value === undefined) Reflect.deleteProperty(process.env, key);
+        else process.env[key] = value;
+      }
+      const listener = own;
+      own = undefined;
+      if (listener !== undefined) await listener.close();
+    });
+
+    function bareRepo(repoDir: string): string {
+      const dir = join(srv, repoDir);
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      git(srv, "clone", "-q", "--bare", seed, repoDir);
+      return dir;
+    }
+
+    function onBranch(dir: string, branch: string): boolean {
+      try {
+        return git(dir, "symbolic-ref", "--short", "HEAD").trim() === branch;
+      } catch {
+        return false;
+      }
+    }
+
+    function headIs(dir: string, id: string): boolean {
+      try {
+        return git(dir, "rev-parse", "--verify", "-q", "HEAD").trim() === id;
+      } catch {
+        return false;
+      }
+    }
+
+    async function clone(
+      repository: string,
+      secret: Uint8Array,
+      port: number,
+      extra: { timeout_ms?: number; env_allowlist?: string[] } = {},
+    ): Promise<GitResult | string> {
+      return new GitInjector({ log } as unknown as AuditLogger)
+        .executeWithSecret(
+          {
+            type: "git",
+            operation: "clone",
+            repository,
+            working_directory: dest(),
+            ...(extra.timeout_ms === undefined ? {} : { timeout_ms: extra.timeout_ms }),
+          },
+          secret,
+          {
+            ...policy(),
+            url_allowlist: [`http://127.0.0.1:${String(port)}/*`],
+            env_allowlist: extra.env_allowlist ?? [],
+          },
+          undefined,
+          "secret-1",
+        )
+        .then(
+          (r) => r,
+          (e: unknown) => (e instanceof VaultError ? e.code : "threw"),
+        );
+    }
+
+    it("a clone whose remote HEAD names a branch carrying the credential's user name, with main at the same commit and no master, lands on that branch", async () => {
+      const named = bareRepo("user-head.git");
+      git(named, "branch", `${USER}-main`, "main");
+      git(named, "symbolic-ref", "HEAD", `refs/heads/${USER}-main`);
+      const result = await clone(at(server.port, "user-head.git"), SECRET, server.port);
+      expect(exitOf(result)).toBe(0);
+      expect(onBranch(dest(), `${USER}-main`)).toBe(true);
+      expect(JSON.stringify(result).includes(USER)).toBe(false);
+      expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+      expect(JSON.stringify(log.mock.calls).includes(USER)).toBe(false);
+      expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
+    });
+
+    it("a clone of a remote whose HEAD is detached, under a user name that occurs inside HEAD's object id, checks out that object id", async () => {
+      const detached = bareRepo("detached-head.git");
+      const head = oid(detached, "main");
+      git(detached, "update-ref", "--no-deref", "HEAD", head);
+      const user = head.slice(0, 3);
+      own = await startGitSmartHttp({
+        git: GIT as string,
+        projectRoot: srv,
+        user,
+        token: TOKEN,
+        env: gitEnv,
+      });
+      const result = await clone(
+        at(own.port, "detached-head.git"),
+        new Uint8Array(Buffer.from(`${user}:${TOKEN}`)),
+        own.port,
+      );
+      expect(exitOf(result)).toBe(0);
+      expect(headIs(dest(), head)).toBe(true);
+      expect(JSON.stringify(result).includes(user)).toBe(false);
+      expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+      expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
+    });
+
+    it("a clone whose remote HEAD names a branch carrying the credential's token, with master at the same commit, lands on master: the token stays redacted inside the parse", async () => {
+      const tokened = bareRepo("token-head.git");
+      git(tokened, "branch", "master", "main");
+      git(tokened, "branch", `${TOKEN}-main`, "main");
+      git(tokened, "symbolic-ref", "HEAD", `refs/heads/${TOKEN}-main`);
+      const result = await clone(at(server.port, "token-head.git"), SECRET, server.port);
+      expect(exitOf(result)).toBe(0);
+      expect(onBranch(dest(), "master")).toBe(true);
+      expect(JSON.stringify(result).includes(USER)).toBe(false);
+      expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+      expect(JSON.stringify(log.mock.calls).includes(USER)).toBe(false);
+      expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
+    });
+
+    it("a clone whose remote-HEAD read fails returns it through the full redaction: neither the result nor the audit row carries the user name or the token", async () => {
+      const result = await clone(at(server.port, `${USER}-missing.git`), SECRET, server.port);
+      expect(typeof result === "object").toBe(true);
+      const failed = result as GitResult;
+      expect(failed.exit_code === 0).toBe(false);
+      expect(failed.stderr.includes("[REDACTED]")).toBe(true);
+      expect(JSON.stringify(result).includes(USER)).toBe(false);
+      expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+      const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
+      expect(row.detail.sanitized).toBe(true);
+      expect(JSON.stringify(log.mock.calls).includes(USER)).toBe(false);
+      expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
+    });
+
+    it("a clone whose remote-HEAD read exceeds the step's deadline returns it through the full redaction: neither the result nor the failed audit row carries the user name or the token", async () => {
+      const stall = join(home, "..", "stall.cjs");
+      quiet(() =>
+        writeFileSync(
+          stall,
+          "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10_000);\n",
+        ),
+      );
+      own = await startGitSmartHttp({
+        git: process.execPath,
+        projectRoot: srv,
+        user: USER,
+        token: TOKEN,
+        env: { ...gitEnv, NODE_OPTIONS: `--require="${stall.replaceAll("\\", "/")}"` },
+      });
+      process.env.GIT_TRACE = "1";
+      const result = await clone(at(own.port, `${USER}-stalled.git`), SECRET, own.port, {
+        timeout_ms: 5_000,
+        env_allowlist: ["GIT_TRACE"],
+      });
+      expect(typeof result === "object").toBe(true);
+      const stalled = result as GitResult;
+      expect(stalled.timed_out === true).toBe(true);
+      expect(stalled.error === ErrorCode.PROCESS_TIMEOUT).toBe(true);
+      expect(JSON.stringify(result).includes(USER)).toBe(false);
+      expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+      const row = log.mock.calls.at(-1)?.[0] as { success: boolean };
+      expect(row.success).toBe(false);
+      expect(JSON.stringify(log.mock.calls).includes(USER)).toBe(false);
+      expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
+    });
+
+    it("a clone whose remote-HEAD read passes the output cap parses only its fully redacted copy: a default branch named with the credential's user name is not learned, and neither the result nor the audit row carries the user name or the token", async () => {
+      const filled = bareRepo("filled-head.git");
+      git(filled, "branch", `${USER}-main`, "main");
+      git(filled, "symbolic-ref", "HEAD", `refs/heads/${USER}-main`);
+      const head = oid(filled, "main");
+      const lines = git(filled, "for-each-ref", "--format=%(objectname) %(refname)")
+        .split("\n")
+        .filter((line) => line !== "");
+      for (let i = 0; i < 5_000; i++) {
+        lines.push(`${head} refs/fill/${String(i).padStart(5, "0")}-${"x".repeat(200)}`);
+      }
+      lines.sort((a, b) => (a.slice(a.indexOf(" ")) < b.slice(b.indexOf(" ")) ? -1 : 1));
+      quiet(() =>
+        writeFileSync(
+          join(filled, "packed-refs"),
+          `# pack-refs with: peeled fully-peeled sorted \n${lines.join("\n")}\n`,
+        ),
+      );
+      const fillerCount = git(filled, "for-each-ref", "--format=x", "refs/fill/")
+        .split("\n")
+        .filter((line) => line === "x").length;
+      expect(fillerCount === 5_000).toBe(true);
+      process.env.GIT_TRACE_PACKET = "1";
+      const result = await clone(at(server.port, "filled-head.git"), SECRET, server.port, {
+        env_allowlist: ["GIT_TRACE_PACKET"],
+      });
+      expect(exitOf(result)).toBe(0);
+      expect(onBranch(dest(), "main")).toBe(true);
+      expect(JSON.stringify(result).includes(USER)).toBe(false);
+      expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+      expect(JSON.stringify(log.mock.calls).includes(USER)).toBe(false);
+      expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
+    });
   });
 });

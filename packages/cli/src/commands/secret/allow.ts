@@ -91,6 +91,35 @@ export function mergePolicy(current: InjectionPolicy, options: AllowOptions): In
   };
 }
 
+/** The flag groups a call sets, `--clear` included: none (or `--show`) makes it a show. */
+function countSetFlags(options: AllowOptions): number {
+  return (
+    (options.command?.length ?? 0) +
+    (options.url?.length ?? 0) +
+    (options.host?.length ?? 0) +
+    (options.env?.length ?? 0) +
+    (options.responseHeader?.length ?? 0) +
+    (options.responseMode !== undefined ? 1 : 0) +
+    (options.networkIsolation !== undefined ? 1 : 0) +
+    (options.fsIsolation !== undefined ? 1 : 0) +
+    (options.recipient?.length ?? 0) +
+    (options.imapReadOnly !== undefined ? 1 : 0) +
+    (options.strictTreeExit !== undefined ? 1 : 0) +
+    (options.proxy !== undefined ? 1 : 0) +
+    (options.sshAgentSocket !== undefined ? 1 : 0) +
+    (options.clear ? 1 : 0)
+  );
+}
+
+/** The merged policy through the input schema; a refusal is `SCHEMA_VALIDATION_ERROR`. */
+function parseMergedPolicy(current: InjectionPolicy, options: AllowOptions): InjectionPolicy {
+  const parsed = injectionPolicyInputSchema.safeParse(mergePolicy(current, options));
+  if (!parsed.success) {
+    throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
+  }
+  return parsed.data;
+}
+
 /** The opt-in alone brokers nothing: the URL allowlist is deny-by-default. */
 function noteProxyWithoutUrl(handle: string, options: AllowOptions, policy: InjectionPolicy): void {
   if (options.proxy === true && policy.url_allowlist.length === 0) {
@@ -208,21 +237,7 @@ export function registerSecretAllowCommand(secret: Command): void {
         const rest = restModeOf(cmd);
         if (rest) {
           await runRestMode(rest, async (client) => {
-            const setCount =
-              (options.command?.length ?? 0) +
-              (options.url?.length ?? 0) +
-              (options.host?.length ?? 0) +
-              (options.env?.length ?? 0) +
-              (options.responseHeader?.length ?? 0) +
-              (options.responseMode !== undefined ? 1 : 0) +
-              (options.networkIsolation !== undefined ? 1 : 0) +
-              (options.fsIsolation !== undefined ? 1 : 0) +
-              (options.recipient?.length ?? 0) +
-              (options.imapReadOnly !== undefined ? 1 : 0) +
-              (options.strictTreeExit !== undefined ? 1 : 0) +
-              (options.proxy !== undefined ? 1 : 0) +
-              (options.sshAgentSocket !== undefined ? 1 : 0) +
-              (options.clear ? 1 : 0);
+            const setCount = countSetFlags(options);
             if (options.show || setCount === 0) {
               printJson(await client.getInjectionPolicy(handle));
               return;
@@ -232,36 +247,19 @@ export function registerSecretAllowCommand(secret: Command): void {
               options.sshAgentSocket === true
                 ? await client.getConnectionConfig(handle)
                 : undefined;
-            const parsed = injectionPolicyInputSchema.safeParse(mergePolicy(current, options));
-            if (!parsed.success) {
-              throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
-            }
-            await client.setInjectionPolicy(handle, parsed.data, {
+            const merged = parseMergedPolicy(current, options);
+            await client.setInjectionPolicy(handle, merged, {
               acknowledge_interpreters: options.acknowledgeInterpreter === true,
             });
-            noteProxyWithoutUrl(handle, options, parsed.data);
-            noteSshAgentSocketWithoutHost(handle, options, parsed.data, connection);
+            noteProxyWithoutUrl(handle, options, merged);
+            noteSshAgentSocketWithoutHost(handle, options, merged, connection);
             printSuccess(`Injection policy updated (${handle})`);
           });
           return;
         }
         const engine = await loadUnlockedEngine(vaultDir);
         try {
-          const setCount =
-            (options.command?.length ?? 0) +
-            (options.url?.length ?? 0) +
-            (options.host?.length ?? 0) +
-            (options.env?.length ?? 0) +
-            (options.responseHeader?.length ?? 0) +
-            (options.responseMode !== undefined ? 1 : 0) +
-            (options.networkIsolation !== undefined ? 1 : 0) +
-            (options.fsIsolation !== undefined ? 1 : 0) +
-            (options.recipient?.length ?? 0) +
-            (options.imapReadOnly !== undefined ? 1 : 0) +
-            (options.strictTreeExit !== undefined ? 1 : 0) +
-            (options.proxy !== undefined ? 1 : 0) +
-            (options.sshAgentSocket !== undefined ? 1 : 0) +
-            (options.clear ? 1 : 0);
+          const setCount = countSetFlags(options);
 
           const tokenValue = options.token ?? process.env.HARPOC_TOKEN;
 
@@ -283,19 +281,16 @@ export function registerSecretAllowCommand(secret: Command): void {
             options.sshAgentSocket === true
               ? await engine.getConnectionConfig(handle, resolved?.caller)
               : undefined;
-          const parsed = injectionPolicyInputSchema.safeParse(mergePolicy(current, options));
-          if (!parsed.success) {
-            throw VaultError.schemaValidation(renderSchemaIssues(parsed.error));
-          }
+          const merged = parseMergedPolicy(current, options);
 
           await engine.setInjectionPolicy(
             handle,
-            parsed.data,
+            merged,
             { acknowledge_interpreters: options.acknowledgeInterpreter === true },
             resolved?.caller,
           );
-          noteProxyWithoutUrl(handle, options, parsed.data);
-          noteSshAgentSocketWithoutHost(handle, options, parsed.data, connection);
+          noteProxyWithoutUrl(handle, options, merged);
+          noteSshAgentSocketWithoutHost(handle, options, merged, connection);
           printSuccess(`Injection policy updated (${handle})`);
         } finally {
           await engine.destroy();

@@ -21,6 +21,33 @@ interface PermissionsOptions {
   json?: boolean;
 }
 
+/** The cell's permission list from the flags; each refusal `INVALID_INPUT`, in this order. */
+function parsePermissionFlags(options: PermissionsOptions): Permission[] {
+  if (options.permissions !== undefined && options.clear) {
+    throw VaultError.invalidInput("--permissions and --clear are mutually exclusive");
+  }
+  if (options.permissions === undefined && !options.clear) {
+    throw VaultError.invalidInput(
+      "one of --permissions or --clear is required (an empty cell is never written)",
+    );
+  }
+  // A cleared cell holds no grant to expire: refused, not dropped.
+  if (options.clear && options.expires !== undefined) {
+    throw VaultError.invalidInput("--expires cannot be combined with --clear");
+  }
+
+  const permStrings =
+    options.permissions === undefined ? [] : options.permissions.split(",").map((p) => p.trim());
+  for (const p of permStrings) {
+    if (!permissionSchema.safeParse(p).success) {
+      throw VaultError.invalidInput(
+        `Invalid permission: "${p}". Valid: list, read, use, create, rotate, revoke, admin`,
+      );
+    }
+  }
+  return permStrings as Permission[];
+}
+
 export function registerAgentPermissionsCommand(agent: Command): void {
   agent
     .command("permissions <name> <handle>")
@@ -46,29 +73,7 @@ export function registerAgentPermissionsCommand(agent: Command): void {
         const rest = restModeOf(cmd);
         if (rest) {
           await runRestMode(rest, async (client) => {
-            if (options.permissions !== undefined && options.clear) {
-              throw VaultError.invalidInput("--permissions and --clear are mutually exclusive");
-            }
-            if (options.permissions === undefined && !options.clear) {
-              throw VaultError.invalidInput(
-                "one of --permissions or --clear is required (an empty cell is never written)",
-              );
-            }
-            if (options.clear && options.expires !== undefined) {
-              throw VaultError.invalidInput("--expires cannot be combined with --clear");
-            }
-            const permStrings =
-              options.permissions === undefined
-                ? []
-                : options.permissions.split(",").map((p) => p.trim());
-            for (const p of permStrings) {
-              if (!permissionSchema.safeParse(p).success) {
-                throw VaultError.invalidInput(
-                  `Invalid permission: "${p}". Valid: list, read, use, create, rotate, revoke, admin`,
-                );
-              }
-            }
-            const permissions = permStrings as Permission[];
+            const permissions = parsePermissionFlags(options);
             const result = await client.setAgentPermissions(name, handle, {
               permissions,
               expires_at: expiresAt,
@@ -104,32 +109,7 @@ export function registerAgentPermissionsCommand(agent: Command): void {
             options.token ?? process.env.HARPOC_TOKEN,
           );
 
-          if (options.permissions !== undefined && options.clear) {
-            throw VaultError.invalidInput("--permissions and --clear are mutually exclusive");
-          }
-          if (options.permissions === undefined && !options.clear) {
-            throw VaultError.invalidInput(
-              "one of --permissions or --clear is required (an empty cell is never written)",
-            );
-          }
-          // A cleared cell holds no grant to expire: refused, not dropped.
-          if (options.clear && options.expires !== undefined) {
-            throw VaultError.invalidInput("--expires cannot be combined with --clear");
-          }
-
-          const permStrings =
-            options.permissions === undefined
-              ? []
-              : options.permissions.split(",").map((p) => p.trim());
-          for (const p of permStrings) {
-            const parsed = permissionSchema.safeParse(p);
-            if (!parsed.success) {
-              throw VaultError.invalidInput(
-                `Invalid permission: "${p}". Valid: list, read, use, create, rotate, revoke, admin`,
-              );
-            }
-          }
-          const permissions = permStrings as Permission[];
+          const permissions = parsePermissionFlags(options);
 
           const secretId = await resolveSecretId(
             engine,

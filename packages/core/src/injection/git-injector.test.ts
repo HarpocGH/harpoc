@@ -344,6 +344,14 @@ describe("GitInjector enforcement (no git binary required)", () => {
       expect(err.message).toBe(`disallowed git argument: ${arg}`);
     });
 
+    it("fetch refuses -o -u: a separated value is judged as a token of its own, so a dash-led one that spells a denied option is refused (F1-R1)", async () => {
+      const err = await expectVaultError(
+        () => run("fetch", ["-o", "-u"]),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
+      expect(err.message).toBe("disallowed git argument: -u");
+    });
+
     it.each([
       ["fetch", "--update-shallow"],
       ["fetch", "--unshallow"],

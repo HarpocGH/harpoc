@@ -339,6 +339,16 @@ describe("DirectClient", () => {
     expect(engine.setMcpServerConfig).not.toHaveBeenCalled();
   });
 
+  it("mcp-server config delete delegates to the engine with no caller, through the VaultClient interface", async () => {
+    const engine = createMockEngine();
+    const client: VaultClient = new DirectClient(engine as never);
+
+    await expect(client.deleteMcpServerConfig("secret://key")).resolves.toBe(true);
+
+    expect(engine.deleteMcpServerConfig.mock.calls).toStrictEqual([["secret://key"]]);
+    expect(engine.deleteConnectionConfig).not.toHaveBeenCalled();
+  });
+
   it("connection-config methods delegate to the engine", async () => {
     const engine = createMockEngine();
     const client = new DirectClient(engine as never);
@@ -466,6 +476,36 @@ describe("DirectClient", () => {
 
     await client.queryAudit({ limit: 10 });
     expect(engine.queryAudit).toHaveBeenCalledWith({ limit: 10 });
+  });
+
+  it("verifyAuditChain answers the engine's chain report without the tail, no anchor, through the VaultClient interface", async () => {
+    const engine = createMockEngine();
+    const client: VaultClient = new DirectClient(engine as never);
+
+    await expect(client.verifyAuditChain()).resolves.toStrictEqual({
+      valid: true,
+      checked: 12,
+      firstBrokenId: null,
+    });
+
+    expect(engine.verifyAuditChain.mock.calls).toStrictEqual([[]]);
+  });
+
+  it("verifyAuditChain answers a broken chain as the engine reports it, the tail dropped", async () => {
+    const engine = createMockEngine();
+    engine.verifyAuditChain.mockReturnValueOnce({
+      valid: false,
+      checked: 3,
+      firstBrokenId: 4,
+      tail: null,
+    });
+    const client: VaultClient = new DirectClient(engine as never);
+
+    await expect(client.verifyAuditChain()).resolves.toStrictEqual({
+      valid: false,
+      checked: 3,
+      firstBrokenId: 4,
+    });
   });
 
   describe("agent governance", () => {

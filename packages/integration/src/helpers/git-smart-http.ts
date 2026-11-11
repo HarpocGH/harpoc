@@ -1,8 +1,11 @@
 import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createServer } from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SECOND_CA_CERT_PEM, SECOND_CA_KEY_PEM } from "./cert-fixtures.js";
+
+const CGI_TIMEOUT_MS = 30_000;
 
 /** One request the fixture received. */
 export interface SeenRequest {
@@ -38,8 +41,10 @@ export async function startGitSmartHttps(opts: {
   user: string;
   token: string;
   env: NodeJS.ProcessEnv;
+  cgiTimeoutMs?: number;
 }): Promise<GitSmartHttps> {
   const requests: SeenRequest[] = [];
+  const children = new Set<ChildProcess>();
   const basic = `Basic ${Buffer.from(`${opts.user}:${opts.token}`).toString("base64")}`;
   const server = createServer(
     { cert: SECOND_CA_CERT_PEM, key: SECOND_CA_KEY_PEM },
@@ -62,6 +67,9 @@ export async function startGitSmartHttps(opts: {
         res.end();
       };
       const cgi = spawn(opts.git, ["http-backend"], {
+        timeout: opts.cgiTimeoutMs ?? CGI_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+        stdio: ["pipe", "pipe", "ignore"],
         env: {
           ...opts.env,
           GIT_PROJECT_ROOT: opts.projectRoot,
@@ -83,12 +91,14 @@ export async function startGitSmartHttps(opts: {
             : { GIT_PROTOCOL: String(req.headers["git-protocol"]) }),
         },
       });
+      children.add(cgi);
       cgi.on("error", fail);
       cgi.stdin.on("error", fail);
       req.pipe(cgi.stdin);
       const out: Buffer[] = [];
       cgi.stdout.on("data", (chunk: Buffer) => out.push(chunk));
       cgi.on("close", () => {
+        children.delete(cgi);
         if (res.headersSent) return;
         const raw = Buffer.concat(out);
         const end = raw.indexOf("\r\n\r\n");
@@ -96,16 +106,16 @@ export async function startGitSmartHttps(opts: {
           fail();
           return;
         }
-        let status = 200;
+        let statusCode = 200;
         const headers: Record<string, string> = {};
         for (const line of raw.subarray(0, end).toString("latin1").split("\r\n")) {
           const colon = line.indexOf(":");
-          const name = line.slice(0, colon).trim().toLowerCase();
+          const headerName = line.slice(0, colon).trim().toLowerCase();
           const value = line.slice(colon + 1).trim();
-          if (name === "status") status = Number.parseInt(value, 10);
-          else headers[name] = value;
+          if (headerName === "status") statusCode = Number.parseInt(value, 10);
+          else headers[headerName] = value;
         }
-        res.writeHead(status, headers).end(raw.subarray(end + 4));
+        res.writeHead(statusCode, headers).end(raw.subarray(end + 4));
       });
     },
   );
@@ -116,10 +126,16 @@ export async function startGitSmartHttps(opts: {
   return {
     port: (server.address() as AddressInfo).port,
     requests,
-    close: () =>
-      new Promise<void>((done) => {
-        server.closeAllConnections();
-        server.close(() => done());
-      }),
+    close: async () => {
+      server.closeAllConnections();
+      const exits = [...children].map(
+        (child) =>
+          new Promise<void>((done) => {
+            child.once("close", () => done());
+            child.kill();
+          }),
+      );
+      await Promise.all([...exits, new Promise<void>((done) => server.close(() => done()))]);
+    },
   };
 }

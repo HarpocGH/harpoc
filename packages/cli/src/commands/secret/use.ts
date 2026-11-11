@@ -275,7 +275,9 @@ export function parseActionType(action: string | undefined): ActionTypeName {
   const value = action ?? "http";
   const known = ACTION_TYPES.find((candidate) => candidate === value);
   if (!known) {
-    throw new Error(`--action must be one of: ${ACTION_TYPES.join(" | ")} (got "${value}")`);
+    throw VaultError.invalidInput(
+      `--action must be one of: ${ACTION_TYPES.join(" | ")} (got "${value}")`,
+    );
   }
   return known;
 }
@@ -283,7 +285,7 @@ export function parseActionType(action: string | undefined): ActionTypeName {
 function parseNumericOption(value: string | undefined, flag: string): number | undefined {
   if (value === undefined) return undefined;
   if (!isDecimalInteger(value)) {
-    throw new Error(`${flag} must be an integer (got "${value}")`);
+    throw VaultError.invalidInput(`${flag} must be an integer (got "${value}")`);
   }
   return Number(value);
 }
@@ -355,7 +357,7 @@ export function buildAction(
       try {
         toolArguments = JSON.parse(options.arguments);
       } catch {
-        throw new Error("--arguments must be a valid JSON object");
+        throw VaultError.invalidInput("--arguments must be a valid JSON object");
       }
     }
     return {
@@ -512,7 +514,7 @@ function buildInjectionConfig(options: UseOptions): Record<string, unknown> {
 function parseUidList(values: string[] | undefined, flag: string): number[] {
   return (values ?? []).map((value) => {
     if (!isDecimalInteger(value)) {
-      throw new Error(`${flag} must be an integer (got "${value}")`);
+      throw VaultError.invalidInput(`${flag} must be an integer (got "${value}")`);
     }
     return Number(value);
   });

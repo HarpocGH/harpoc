@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import {
@@ -232,13 +232,23 @@ describe("parseIssueTokenSpecs", () => {
 });
 
 describe("assertIssueTokenFile", () => {
+  const LINK_REFUSAL = "is a symbolic link or junction";
   let dir: string;
+  const links: string[] = [];
+
+  /** A link at `path` to `target`, unlinked after the row: a junction on win32 (no privilege needed), a symbolic link elsewhere (the type is ignored there). */
+  function link(target: string, path: string): string {
+    symlinkSync(target, path, "junction");
+    links.push(path);
+    return path;
+  }
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "harpoc-issue-token-spec-"));
   });
 
   afterEach(() => {
+    for (const path of links.splice(0)) unlinkSync(path);
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
@@ -268,5 +278,59 @@ describe("assertIssueTokenFile", () => {
     mkdirSync(file);
     const err = await expectVaultError(() => assertIssueTokenFile(file), ErrorCode.INVALID_INPUT);
     expect(err.message).toBe(`--issue-token: file ${file} is a directory`);
+  });
+
+  it("refuses a token file whose directory is a link (a junction on Windows, a symbolic link elsewhere)", async () => {
+    mkdirSync(join(dir, "target"));
+    const linked = link(join(dir, "target"), join(dir, "bob"));
+    const file = join(linked, "token.jwt");
+    const err = await expectVaultError(() => assertIssueTokenFile(file), ErrorCode.INVALID_INPUT);
+    expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+    expect(err.message).toBe(
+      `--issue-token: file ${file}: the directory is a symbolic link or junction: ${linked}`,
+    );
+  });
+
+  it("refuses a token file whose directory is a link spelled with a final dot segment, naming the directory as given (a junction on Windows, a symbolic link elsewhere)", async () => {
+    mkdirSync(join(dir, "target"));
+    const linked = `${link(join(dir, "target"), join(dir, "bob"))}${sep}.`;
+    const file = `${linked}${sep}token.jwt`;
+    const err = await expectVaultError(() => assertIssueTokenFile(file), ErrorCode.INVALID_INPUT);
+    expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+    expect(err.message).toBe(
+      `--issue-token: file ${file}: the directory is a symbolic link or junction: ${linked}`,
+    );
+  });
+
+  it("refuses a token file that is a dangling link (a junction on Windows, a symbolic link elsewhere)", async () => {
+    const file = link(join(dir, "missing"), join(dir, "token.jwt"));
+    const err = await expectVaultError(() => assertIssueTokenFile(file), ErrorCode.INVALID_INPUT);
+    expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+    expect(err.message).toBe(`--issue-token: file ${file} is a symbolic link or junction`);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "refuses a token file that is a symbolic link to a file (POSIX; a symbolic link to a file needs a privilege on Windows)",
+    async () => {
+      writeFileSync(join(dir, "real.jwt"), "");
+      const file = link(join(dir, "real.jwt"), join(dir, "token.jwt"));
+      const err = await expectVaultError(() => assertIssueTokenFile(file), ErrorCode.INVALID_INPUT);
+      expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+      expect(err.message).toBe(`--issue-token: file ${file} is a symbolic link or junction`);
+    },
+  );
+
+  it("refuses a token file that is a link to a directory as a link, not as a directory (a junction on Windows, a symbolic link elsewhere)", async () => {
+    mkdirSync(join(dir, "target"));
+    const file = link(join(dir, "target"), join(dir, "token.jwt"));
+    const err = await expectVaultError(() => assertIssueTokenFile(file), ErrorCode.INVALID_INPUT);
+    expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+    expect(err.message).toBe(`--issue-token: file ${file} is a symbolic link or junction`);
+  });
+
+  it("accepts a token file whose directory's parent is a link: only the final component is judged (a junction on Windows, a symbolic link elsewhere)", () => {
+    mkdirSync(join(dir, "real-parent", "alice"), { recursive: true });
+    const linkParent = link(join(dir, "real-parent"), join(dir, "link-parent"));
+    expect(() => assertIssueTokenFile(join(linkParent, "alice", "token.jwt"))).not.toThrow();
   });
 });

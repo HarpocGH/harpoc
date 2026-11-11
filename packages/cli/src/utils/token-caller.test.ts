@@ -97,6 +97,25 @@ describe("refuseEmptyToken", () => {
   });
 });
 
+describe("the empty-token refusal is INVALID_INPUT, its message unchanged (T4)", () => {
+  it.each([
+    { label: "refuseEmptyToken", call: () => refuseEmptyToken("") },
+    {
+      label: "resolveTokenCaller",
+      call: () => resolveTokenCaller(engineWith(payload()), { permission: "use" }, "  "),
+    },
+    {
+      label: "resolveTokenCallerForHandle",
+      call: () => resolveTokenCallerForHandle(engineWith(payload()), "use", "secret://k", "  "),
+    },
+  ])("$label", async ({ call }) => {
+    const err = await expectVaultError(call, ErrorCode.INVALID_INPUT);
+    expect(err.message).toBe(
+      "--token (or HARPOC_TOKEN) was supplied but empty. Provide a token, or omit it entirely to use the trusted local path.",
+    );
+  });
+});
+
 describe("resolveTokenCallerForHandle", () => {
   // A malformed handle with NO token must not throw here: the engine parses
   // the handle itself so its `secret.use` denial audit row still gets

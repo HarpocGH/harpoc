@@ -27,6 +27,7 @@ import type {
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditQueryOptions, DecryptedAuditEvent, SecretInfo } from "@harpoc/core";
 import type {
+  AuditChainReport,
   CertificateRef,
   CreateSecretInput,
   ExpiringReport,
@@ -154,6 +155,14 @@ export class RestClient implements VaultClient {
     return config ?? undefined;
   }
 
+  async deleteMcpServerConfig(handle: string): Promise<boolean> {
+    const result = await this.request<{ deleted: boolean }>(
+      "DELETE",
+      `/api/v1/secrets/${this.encodeHandle(handle)}/mcp-server`,
+    );
+    return result.deleted;
+  }
+
   async setConnectionConfig(handle: string, config: ConnectionConfig): Promise<void> {
     await this.request<{ updated: boolean }>(
       "PUT",
@@ -213,6 +222,19 @@ export class RestClient implements VaultClient {
 
     const qs = params.toString();
     return this.request<DecryptedAuditEvent[]>("GET", `/api/v1/audit${qs ? `?${qs}` : ""}`);
+  }
+
+  async verifyAuditChain(): Promise<AuditChainReport> {
+    const result = await this.request<{
+      valid: boolean;
+      checked: number;
+      first_broken_id: number | null;
+    }>("POST", "/api/v1/audit/verify");
+    return {
+      valid: result.valid,
+      checked: result.checked,
+      firstBrokenId: result.first_broken_id,
+    };
   }
 
   async registerAgent(input: RegisterAgentInput): Promise<Agent> {

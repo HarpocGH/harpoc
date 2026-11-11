@@ -40,7 +40,7 @@ export function registerPolicyRevokeCommand(policy: Command): void {
             const tokenValue = options.token ?? process.env.HARPOC_TOKEN;
             refuseEmptyToken(tokenValue);
             if (tokenValue !== undefined && !options.secret) {
-              throw new Error(
+              throw VaultError.invalidInput(
                 "--secret <handle> is required when using --token: token scope is checked against the secret the policy belongs to.",
               );
             }

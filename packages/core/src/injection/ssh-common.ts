@@ -117,6 +117,14 @@ export function sshHardeningArgs(
   ];
 }
 
+/** The charset of `sshHostSchema` and `sshUserSchema`: 1–255 of letters, digits, `.`, `_`, `-`, not leading with `.`, `_` or `-`. */
+export const SSH_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
+
+/** True when `text` is a name of the ssh and sftp contexts' charset (`SSH_NAME`). */
+export function isSshName(text: string): boolean {
+  return typeof text === "string" && SSH_NAME.test(text);
+}
+
 /** Detect an ssh host-key verification failure (pinned-key mismatch or unknown host). */
 export function isHostKeyFailure(text: string): boolean {
   return (

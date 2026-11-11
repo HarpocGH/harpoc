@@ -249,6 +249,10 @@ const MEMBERS: MemberRow[] = [
     data: MCP_CONFIG,
     returns: MCP_CONFIG,
   }),
+  member("deleteMcpServerConfig", [HANDLE], "DELETE", `/api/v1/secrets/${ENCODED}/mcp-server`, {
+    data: { deleted: true },
+    returns: true,
+  }),
   member(
     "setConnectionConfig",
     [HANDLE, CONNECTION_CONFIG],
@@ -301,6 +305,10 @@ const MEMBERS: MemberRow[] = [
     "/api/v1/audit?secret_id=uuid-1&event_type=secret.read&limit=10&success=false&principal_type=agent&principal_id=a1",
     { data: [], returns: [] },
   ),
+  member("verifyAuditChain", [], "POST", "/api/v1/audit/verify", {
+    data: { valid: true, checked: 12, first_broken_id: null, tail: { last_id: 12 } },
+    returns: { valid: true, checked: 12, firstBrokenId: null },
+  }),
   member("registerAgent", [{ name: "deploy-bot", description: "d" }], "POST", "/api/v1/agents", {
     body: { name: "deploy-bot", description: "d" },
     data: { id: "agent-1", name: "deploy-bot" },
@@ -1304,6 +1312,18 @@ describe("RestClient", () => {
     });
   });
 
+  describe("verifyAuditChain", () => {
+    it("answers a broken chain as the route reports it, the tail dropped", async () => {
+      mockFetchResponse({ valid: false, checked: 3, first_broken_id: 4, tail: { last_id: 4 } });
+
+      await expect(client.verifyAuditChain()).resolves.toStrictEqual({
+        valid: false,
+        checked: 3,
+        firstBrokenId: 4,
+      });
+    });
+  });
+
   describe("error handling", () => {
     it("maps error responses to VaultError with correct code", async () => {
       fetchSpy.mockResolvedValueOnce({
@@ -1388,7 +1408,7 @@ describe("RestClient", () => {
         mockFetchResponse(data);
         const result = await invoke(client);
 
-        expect(result).toEqual(returns);
+        expect(result).toStrictEqual(returns);
         expect(fetchSpy).toHaveBeenCalledTimes(1);
         const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
         expect(url).toBe(`${BASE_URL}${path}`);

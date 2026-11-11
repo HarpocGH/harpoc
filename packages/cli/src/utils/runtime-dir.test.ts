@@ -1,8 +1,17 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { join, parse } from "node:path";
+import { join, parse, posix, sep, win32 } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { TestContext } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import {
   agentSocketPipeName,
@@ -13,6 +22,7 @@ import {
   consumerDirs,
   consumerSocketPaths,
   isPrivateDirMode,
+  linkProbePath,
   resolveRuntimeDir,
   WINDOWS_CONSUMER_DIR_RIGHTS,
   windowsDirAclRefusal,
@@ -51,13 +61,35 @@ function icacls(path: string, ...args: string[]): void {
 const FLAG_AS_PATH =
   "--runtime-dir: a flag, not a path (give a path that starts with a dash as ./-name)";
 
+const LINK_REFUSAL = "is a symbolic link or junction";
+
 let dir: string;
+const links: string[] = [];
+const otherDirs: string[] = [];
+
+/** A link at `path` to `target`, unlinked after the row: a junction on win32 (no privilege needed), a symbolic link elsewhere (the type is ignored there). */
+function link(target: string, path: string): string {
+  symlinkSync(target, path, "junction");
+  links.push(path);
+  return path;
+}
+
+/** A second temporary directory beside `dir`, removed after the row's links. */
+function otherDir(): string {
+  const path = mkdtempSync(join(tmpdir(), "harpoc-runtime-dir-other-"));
+  otherDirs.push(path);
+  return path;
+}
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "harpoc-runtime-dir-"));
 });
 
 afterEach(() => {
+  for (const path of links.splice(0)) unlinkSync(path);
+  for (const path of otherDirs.splice(0)) {
+    rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
   rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
@@ -133,6 +165,57 @@ describe("isPrivateDirMode", () => {
     { mode: 0o720, octal: "0720 (group write alone)" },
   ])("refuses mode $octal", ({ mode }) => {
     expect(isPrivateDirMode(mode)).toBe(false);
+  });
+});
+
+describe("linkProbePath (the tail walk on the text alone, every platform)", () => {
+  it.each([
+    ["/srv/link", "/srv/link"],
+    ["/srv/link/", "/srv/link"],
+    ["/srv/link/.", "/srv/link"],
+    ["/srv/link/./", "/srv/link"],
+    ["/srv/link/sub/..", "/srv/link"],
+    ["/srv/link/sub/../.", "/srv/link"],
+    ["/srv/a/../run", "/srv/a/../run"],
+    ["/srv/a/../x/sub/..", "/srv/a/../x"],
+    ["/var/run/../x", "/var/run/../x"],
+    ["./run", "./run"],
+    ["run/", "run"],
+    ["/", "/"],
+    ["//", "/"],
+    ["/.", "/."],
+    ["", ""],
+    ["/x/..", "/x/.."],
+    ["..", ".."],
+    ["../..", "../.."],
+    ["a/../..", "a/../.."],
+  ])("POSIX: %j is read at %j", (path, probe) => {
+    expect(linkProbePath(path, posix)).toBe(probe);
+  });
+
+  it.each([
+    ["C:\\srv\\link\\.", "C:\\srv\\link"],
+    ["C:\\srv/link/.", "C:\\srv/link"],
+    ["C:/srv/link/./", "C:/srv/link"],
+    ["C:\\srv\\link\\sub\\..", "C:\\srv\\link"],
+    ["C:\\srv\\a\\..\\run", "C:\\srv\\a\\..\\run"],
+    ["C:\\", "C:\\"],
+    ["C:/", "C:/"],
+    ["C:\\x\\..", "C:\\x\\.."],
+    ["C:", "C:"],
+    ["C:..", "C:.."],
+    ["C:rel\\.", "C:rel"],
+    ["\\\\server\\share", "\\\\server\\share"],
+    ["\\\\server\\share\\", "\\\\server\\share\\"],
+    ["\\\\server\\share\\x\\.", "\\\\server\\share\\x"],
+    ["//server/share/x/./", "//server/share/x"],
+    ["..\\..", "..\\.."],
+  ])("win32: %j is read at %j", (path, probe) => {
+    expect(linkProbePath(path, win32)).toBe(probe);
+  });
+
+  it("defaults to this platform's path flavour", () => {
+    expect(linkProbePath(`${join("srv", "link")}${sep}.`)).toBe(join("srv", "link"));
   });
 });
 
@@ -250,6 +333,148 @@ describe("assertRuntimeDir", () => {
       } finally {
         rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "refuses a junction as the runtime directory (Windows; the POSIX twin is a symbolic link)",
+    async () => {
+      mkdirSync(join(dir, "target"));
+      const path = link(join(dir, "target"), join(dir, "run"));
+      const err = await expectVaultError(
+        () => assertRuntimeDir({ path, source: "--runtime-dir" }),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+      expect(err.message).toBe(
+        `--runtime-dir: the path is a symbolic link or junction, not a directory: ${path}`,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "refuses a symbolic link to a 0750 directory as the runtime directory (POSIX; a symbolic link needs a privilege on Windows)",
+    async () => {
+      const target = join(dir, "target");
+      mkdirSync(target);
+      chmodSync(target, 0o750);
+      const path = link(target, join(dir, "run"));
+      const err = await expectVaultError(
+        () => assertRuntimeDir({ path, source: "--runtime-dir" }),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+      expect(err.message).toBe(
+        `--runtime-dir: the path is a symbolic link or junction, not a directory: ${path}`,
+      );
+    },
+  );
+
+  it.each([
+    ["a trailing separator", sep],
+    ["a final dot segment", `${sep}.`],
+    ["a step into a subdirectory and back", `${sep}sub${sep}..`],
+  ])(
+    "refuses a link spelled with %s as the runtime directory, naming the path as given (a junction on Windows, a symbolic link elsewhere)",
+    async (_spelling, suffix) => {
+      const target = join(dir, "target");
+      mkdirSync(join(target, "sub"), { recursive: true });
+      chmodSync(target, 0o750);
+      const path = `${link(target, join(dir, "run"))}${suffix}`;
+      const err = await expectVaultError(
+        () => assertRuntimeDir({ path, source: "--runtime-dir" }),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+      expect(err.message).toBe(
+        `--runtime-dir: the path is a symbolic link or junction, not a directory: ${path}`,
+      );
+    },
+  );
+
+  it("accepts a real runtime directory spelled with a final dot segment: the canonicalised tail does not over-refuse", () => {
+    const real = join(dir, "real");
+    mkdirSync(real);
+    chmodSync(real, 0o750);
+    expect(() =>
+      assertRuntimeDir({ path: `${real}${sep}.`, source: "--runtime-dir" }),
+    ).not.toThrow();
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "accepts a real directory reached as <linked parent>/../<name>, judged where the kernel resolves it, not where the spelling reads (POSIX; win32 resolves .. lexically, so the two places cannot differ there)",
+    () => {
+      const other = otherDir();
+      mkdirSync(join(other, "inner"));
+      mkdirSync(join(other, "run"));
+      chmodSync(join(other, "run"), 0o750);
+      mkdirSync(join(dir, "decoy"));
+      link(join(dir, "decoy"), join(dir, "run"));
+      const linkParent = link(join(other, "inner"), join(dir, "link-parent"));
+      expect(() =>
+        assertRuntimeDir({ path: `${linkParent}/../run`, source: "--runtime-dir" }),
+      ).not.toThrow();
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "refuses a link reached as <linked parent>/../<name>, judged where the kernel resolves it, not where the spelling reads (POSIX; win32 resolves .. lexically, so the two places cannot differ there)",
+    async () => {
+      const other = otherDir();
+      mkdirSync(join(other, "inner"));
+      const target = join(other, "target");
+      mkdirSync(target);
+      chmodSync(target, 0o750);
+      link(target, join(other, "run"));
+      mkdirSync(join(dir, "run"));
+      chmodSync(join(dir, "run"), 0o750);
+      const linkParent = link(join(other, "inner"), join(dir, "link-parent"));
+      const path = `${linkParent}/../run`;
+      const err = await expectVaultError(
+        () => assertRuntimeDir({ path, source: "--runtime-dir" }),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+      expect(err.message).toBe(
+        `--runtime-dir: the path is a symbolic link or junction, not a directory: ${path}`,
+      );
+    },
+  );
+
+  it("refuses a dangling link as the runtime directory as a link, not as a missing directory: the link check precedes the stat (a junction on Windows, a symbolic link elsewhere)", async () => {
+    const path = link(join(dir, "missing"), join(dir, "run"));
+    const err = await expectVaultError(
+      () => assertRuntimeDir({ path, source: "$RUNTIME_DIRECTORY" }),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+    expect(err.message).toBe(
+      `$RUNTIME_DIRECTORY: the path is a symbolic link or junction, not a directory: ${path}`,
+    );
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "accepts a runtime directory whose parent is a symbolic link: only the final component is judged (POSIX; a symbolic link needs a privilege on Windows)",
+    () => {
+      const realParent = join(dir, "real-parent");
+      mkdirSync(join(realParent, "run"), { recursive: true });
+      chmodSync(join(realParent, "run"), 0o750);
+      const linkParent = link(realParent, join(dir, "link-parent"));
+      expect(() =>
+        assertRuntimeDir({ path: join(linkParent, "run"), source: "--runtime-dir" }),
+      ).not.toThrow();
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "accepts a runtime directory whose parent is a junction: only the final component is judged (Windows; the POSIX twin is a symbolic link)",
+    () => {
+      const realParent = join(dir, "real-parent");
+      mkdirSync(join(realParent, "run"), { recursive: true });
+      const linkParent = link(realParent, join(dir, "link-parent"));
+      expect(() =>
+        assertRuntimeDir({ path: join(linkParent, "run"), source: "--runtime-dir" }),
+      ).not.toThrow();
     },
   );
 });
@@ -579,6 +804,28 @@ describe("consumerSocketPaths", () => {
       );
     },
   );
+
+  it.skipIf(process.platform === "win32")(
+    "refuses a symbolic link beside a real consumer directory — never skipped (POSIX; a symbolic link needs a privilege on Windows)",
+    async () => {
+      const runtime = join(dir, "run");
+      mkdirSync(runtime);
+      mkdirSync(join(runtime, "bob"));
+      chmodSync(join(runtime, "bob"), 0o750);
+      const target = join(dir, "target");
+      mkdirSync(target);
+      chmodSync(target, 0o750);
+      const entry = link(target, join(runtime, "alice"));
+      const err = await expectVaultError(
+        () => consumerSocketPaths({ path: runtime, source }, "proxy.sock"),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+      expect(err.message).toBe(
+        `--runtime-dir: the entry is a symbolic link or junction, not a consumer directory: ${entry}`,
+      );
+    },
+  );
 });
 
 describe("consumerDirs", () => {
@@ -614,28 +861,34 @@ describe("consumerDirs", () => {
     },
   );
 
+  /** This account's name as the stand-in consumer, the row skipped where it is not a consumer name. */
+  function standInConsumer(ctx: TestContext): string {
+    const account = userInfo().username.toLowerCase();
+    let standsIn = true;
+    try {
+      assertConsumerName(account);
+    } catch {
+      standsIn = false;
+    }
+    ctx.skip(
+      !standsIn,
+      `this account's name ${JSON.stringify(account)} is not a consumer name (lowercase letters, digits, _ and -), so it cannot stand in for a consumer`,
+    );
+    return account;
+  }
+
   // The stand-in consumer is this account (a local account the runner and the desktop both have);
   // the consumer-rights rule is pinned on fixtures above (windowsDirAclRefusal).
   it.runIf(process.platform === "win32")(
     "on Windows each entry carries the account SID its directory's name names",
     (ctx) => {
-      const name = userInfo().username.toLowerCase();
-      let standsIn = true;
-      try {
-        assertConsumerName(name);
-      } catch {
-        standsIn = false;
-      }
-      ctx.skip(
-        !standsIn,
-        `this account's name ${JSON.stringify(name)} is not a consumer name (lowercase letters, digits, _ and -), so it cannot stand in for a consumer`,
-      );
-      mkdirSync(join(dir, name));
-      icacls(join(dir, name), ...TRUSTED_GRANTS);
+      const account = standInConsumer(ctx);
+      mkdirSync(join(dir, account));
+      icacls(join(dir, account), ...TRUSTED_GRANTS);
       const [entry, ...rest] = consumerDirs({ path: dir, source });
       expect(rest).toEqual([]);
-      expect(entry?.consumer).toBe(name);
-      expect(entry?.dir).toBe(join(dir, name));
+      expect(entry?.consumer).toBe(account);
+      expect(entry?.dir).toBe(join(dir, account));
       expect(entry?.sid).toMatch(/^S-1-5-21-\d+-\d+-\d+-\d+$/);
     },
   );
@@ -650,6 +903,27 @@ describe("consumerDirs", () => {
       );
       expect(err.message).toBe(
         `consumer directory: no local account is named "nosuchuser-b7" (a consumer directory is named for its agent user): ${join(dir, "nosuchuser-b7")}`,
+      );
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "refuses a junction beside a real consumer directory named for this account — never skipped (Windows; the POSIX twin is a symbolic link)",
+    async (ctx) => {
+      const account = standInConsumer(ctx);
+      const runtime = join(dir, "run");
+      mkdirSync(runtime);
+      mkdirSync(join(runtime, account));
+      icacls(join(runtime, account), ...TRUSTED_GRANTS);
+      mkdirSync(join(dir, "target"));
+      const entry = link(join(dir, "target"), join(runtime, `${account}-link`));
+      const err = await expectVaultError(
+        () => consumerDirs({ path: runtime, source }),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+      expect(err.message).toBe(
+        `--runtime-dir: the entry is a symbolic link or junction, not a consumer directory: ${entry}`,
       );
     },
   );
@@ -681,6 +955,34 @@ describe("assertConsumerDir", () => {
       const err = await expectVaultError(() => assertConsumerDir(alice), ErrorCode.INVALID_INPUT);
       expect(err.message).toBe(
         `consumer directory: mode 0770 is not 0750 or stricter (group-writable or world-accessible): ${alice}`,
+      );
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "refuses a junction named for this account as a consumer directory (Windows; the POSIX twin is a symbolic link)",
+    async () => {
+      mkdirSync(join(dir, "target"));
+      const path = link(join(dir, "target"), join(dir, userInfo().username.toLowerCase()));
+      const err = await expectVaultError(() => assertConsumerDir(path), ErrorCode.INVALID_INPUT);
+      expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+      expect(err.message).toBe(
+        `consumer directory: the path is a symbolic link or junction, not a directory: ${path}`,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "refuses a symbolic link to a 0750 directory as a consumer directory (POSIX; a symbolic link needs a privilege on Windows)",
+    async () => {
+      const target = join(dir, "target");
+      mkdirSync(target);
+      chmodSync(target, 0o750);
+      const path = link(target, consumerDir(dir, "alice"));
+      const err = await expectVaultError(() => assertConsumerDir(path), ErrorCode.INVALID_INPUT);
+      expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+      expect(err.message).toBe(
+        `consumer directory: the path is a symbolic link or junction, not a directory: ${path}`,
       );
     },
   );

@@ -6,7 +6,7 @@ import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError, printTable, printJson, formatTimestamp } from "../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../utils/token-caller.js";
 import { parsePositiveInteger } from "../utils/options.js";
-import { restModeOf, runRestMode } from "../utils/rest-mode.js";
+import { restModeOf, restModeUnsupported, runRestMode } from "../utils/rest-mode.js";
 
 const OFF_HOST_GUIDANCE =
   "Store this anchor OFF-HOST (another machine, a sync target the attacker cannot write, or paper).\n" +
@@ -212,6 +212,27 @@ export function registerAuditCommand(program: Command): void {
       const json = Boolean(options.json ?? cmd.optsWithGlobals().json);
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        const rest = restModeOf(cmd);
+        if (rest) {
+          if (options.anchor !== undefined) throw restModeUnsupported("audit verify --anchor");
+          await runRestMode(rest, async (client) => {
+            const report = await client.verifyAuditChain();
+            if (json) {
+              printJson(report);
+            } else if (report.firstBrokenId === null) {
+              console.log(`Audit chain OK — ${report.checked} row(s) verified.`);
+            } else {
+              console.error(
+                `Audit chain BROKEN at row ${report.firstBrokenId} — ${report.checked} verified.`,
+              );
+            }
+            if (!report.valid) {
+              process.exitCode = 1;
+            }
+          });
+          return;
+        }
+
         const engine = await loadUnlockedEngine(vaultDir);
         try {
           const tokenValue =

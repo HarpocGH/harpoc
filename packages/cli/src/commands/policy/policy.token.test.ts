@@ -42,7 +42,7 @@ vi.mock("../../utils/vault-loader.js", () => ({
 import { registerPolicyGrantCommand } from "./grant.js";
 import { registerPolicyRevokeCommand } from "./revoke.js";
 import { registerPolicyListCommand } from "./list.js";
-import { resolveSecretId } from "../../utils/vault-loader.js";
+import { loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
 
 const GRANT_ARGS = [
@@ -148,6 +148,45 @@ describe("policy commands — token path", () => {
   it("revoke: tokenless without --secret is unchanged", async () => {
     await run(["revoke", "pol-1"]);
     expect(mockEngine.revokePolicy).toHaveBeenCalledWith("pol-1", undefined, undefined);
+  });
+
+  it.each([
+    {
+      label: "a token without --secret",
+      token: "jwt-value",
+      line: "Error: [INVALID_INPUT] --secret <handle> is required when using --token: token scope is checked against the secret the policy belongs to.",
+    },
+    {
+      label: "an empty --token, before the --secret check",
+      token: "",
+      line: "Error: [INVALID_INPUT] --token (or HARPOC_TOKEN) was supplied but empty. Provide a token, or omit it entirely to use the trusted local path.",
+    },
+  ])(
+    "revoke: refuses $label INVALID_INPUT, its message unchanged (T4)",
+    async ({ token, line }) => {
+      mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["admin"] }));
+      await expect(run(["revoke", "pol-1", "--token", token])).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls).toEqual([[line]]);
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(mockEngine.verifyToken).not.toHaveBeenCalled();
+      expect(mockEngine.revokePolicy).not.toHaveBeenCalled();
+    },
+  );
+
+  it("revoke: a locked vault reports VAULT_LOCKED before the --secret refusal (T4)", async () => {
+    vi.mocked(loadUnlockedEngine).mockRejectedValueOnce(VaultError.vaultLocked());
+    try {
+      await expect(run(["revoke", "pol-1", "--token", "jwt-value"])).rejects.toThrow(
+        "process.exit",
+      );
+      expect(spies.errorSpy.mock.calls).toEqual([
+        ["Error: Vault is locked. Run 'harpoc unlock' first."],
+      ]);
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    } finally {
+      vi.mocked(loadUnlockedEngine).mockReset();
+      vi.mocked(loadUnlockedEngine).mockResolvedValue(mockEngine as never);
+    }
   });
 
   it("list: with a handle, read scope is checked and the caller passed", async () => {

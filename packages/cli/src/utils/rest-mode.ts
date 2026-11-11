@@ -51,6 +51,7 @@ REST mode (both before the command):
 export const REST_MODE_COMMANDS: ReadonlySet<string> = new Set([
   "lock",
   "audit",
+  "audit verify",
   "secret set",
   "secret get",
   "secret list",

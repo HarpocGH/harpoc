@@ -3,6 +3,7 @@
  * and `cert issue` — one default (`DEFAULT_KEY_ALGORITHM`, EC P-256), one
  * value table, one pairing rule, so the two commands cannot drift.
  */
+import { VaultError } from "@harpoc/shared";
 
 const ALGORITHMS = ["rsa", "ec"] as const;
 export type KeyAlgorithm = (typeof ALGORITHMS)[number];
@@ -35,7 +36,9 @@ function isEcCurve(value: string): value is EcCurve {
  */
 export function parseAlgorithm(value: string): KeyAlgorithm {
   if (!isAlgorithm(value)) {
-    throw new Error(`Invalid algorithm "${value}". Must be one of: ${ALGORITHMS.join(", ")}.`);
+    throw VaultError.invalidInput(
+      `Invalid algorithm "${value}". Must be one of: ${ALGORITHMS.join(", ")}.`,
+    );
   }
   return value;
 }
@@ -44,7 +47,9 @@ export function parseBits(value: string | undefined): RsaKeySize | undefined {
   if (value === undefined) return undefined;
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || !isRsaKeySize(parsed)) {
-    throw new Error(`Invalid bits "${value}". Must be one of: ${RSA_KEY_SIZES.join(", ")}.`);
+    throw VaultError.invalidInput(
+      `Invalid bits "${value}". Must be one of: ${RSA_KEY_SIZES.join(", ")}.`,
+    );
   }
   return parsed;
 }
@@ -52,7 +57,9 @@ export function parseBits(value: string | undefined): RsaKeySize | undefined {
 export function parseCurve(value: string | undefined): EcCurve | undefined {
   if (value === undefined) return undefined;
   if (!isEcCurve(value)) {
-    throw new Error(`Invalid curve "${value}". Must be one of: ${EC_CURVES.join(", ")}.`);
+    throw VaultError.invalidInput(
+      `Invalid curve "${value}". Must be one of: ${EC_CURVES.join(", ")}.`,
+    );
   }
   return value;
 }
@@ -70,9 +77,9 @@ export function assertAlgorithmPairing(
   namedCurve: EcCurve | undefined,
 ): void {
   if (algorithm === "ec" && modulusLength !== undefined) {
-    throw new Error("--bits only applies with --algorithm rsa.");
+    throw VaultError.invalidInput("--bits only applies with --algorithm rsa.");
   }
   if (algorithm === "rsa" && namedCurve !== undefined) {
-    throw new Error("--curve only applies with --algorithm ec.");
+    throw VaultError.invalidInput("--curve only applies with --algorithm ec.");
   }
 }

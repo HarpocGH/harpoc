@@ -35,6 +35,7 @@ import {
   assertNativeWin32SshClient,
   buildSshEnv,
   isHostKeyFailure,
+  SSH_NAME,
   sshHardeningArgs,
   writeIdentityFile,
   writeKnownHosts,
@@ -537,6 +538,7 @@ export class GitInjector {
         r = await runPlan(action, gitPath, hooks.dir, networkConfig, env, policy, {
           timeoutMs,
           redact,
+          parseRedact: [password],
           networkIsolation,
           fsIsolation,
           strictTreeExit: policy.strict_tree_exit === true,
@@ -679,6 +681,7 @@ export class GitInjector {
         r = await runPlan(action, gitPath, hooks.dir, [], env, policy, {
           timeoutMs,
           redact: [keyPem],
+          parseRedact: [keyPem],
           networkIsolation,
           fsIsolation,
           strictTreeExit: policy.strict_tree_exit === true,
@@ -888,9 +891,6 @@ function parseSshHost(repository: string): string | null {
   return m ? (m[1] ?? null) : null;
 }
 
-/** The ssh and sftp contexts' host charset (`sshHostSchema`), 255 characters at most. */
-const SSH_HOST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
-
 /**
  * The host the vault's ssh is told to dial (`-o HostName=`), or null.
  *
@@ -907,7 +907,7 @@ const SSH_HOST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
  * an `ssh://` URL, without its brackets. Anything else is no SSH host.
  */
 function sshDialHost(host: string): string | null {
-  if (SSH_HOST_NAME.test(host)) return host;
+  if (SSH_NAME.test(host)) return host;
   const literal = /^\[([0-9A-Fa-f:.]+)\]$/.exec(host)?.[1];
   return literal !== undefined && isIPv6(literal) ? literal : null;
 }
@@ -955,6 +955,7 @@ function assertWorkingTree(action: GitAction): void {
 interface StepOptions {
   timeoutMs: number;
   redact: string[];
+  parseRedact: readonly string[];
   networkIsolation: boolean;
   fsIsolation: boolean;
   strictTreeExit: boolean;
@@ -1011,11 +1012,35 @@ async function runPlan(
     const stderr = redactCaptured(r.stderr, opts.redact);
     return { ...r, stdout, stderr, redacted: stdout !== r.stdout || stderr !== r.stderr };
   };
+  /**
+   * A credential-bearing step whose output the vault parses; it is returned only when the
+   * step fails, times out or is truncated, and then through the full redaction.
+   */
+  const parseStep: GitStep = async (args, cwd, env) => {
+    const r = await spawnStep(args, cwd, env, [...opts.parseRedact]);
+    if (succeeded(r) && !r.truncated) return r;
+    const stdout = redactCaptured(r.stdout, opts.redact);
+    const stderr = redactCaptured(r.stderr, opts.redact);
+    return {
+      ...r,
+      stdout,
+      stderr,
+      redacted: r.redacted || stdout !== r.stdout || stderr !== r.stderr,
+    };
+  };
   const localEnv = baseGitEnv(policy.env_allowlist);
   localEnv.GIT_TERMINAL_PROMPT = "0";
   switch (action.operation) {
     case "clone":
-      return runRelayedClone(action, hooksDir, networkConfig, networkEnv, localEnv, step);
+      return runRelayedClone(
+        action,
+        hooksDir,
+        networkConfig,
+        networkEnv,
+        localEnv,
+        step,
+        parseStep,
+      );
     case "ls-remote":
       return runLsRemote(action, hooksDir, networkConfig, networkEnv, step);
     case "pull":
@@ -1112,6 +1137,7 @@ async function runRelayedClone(
   networkEnv: Record<string, string>,
   localEnv: Record<string, string>,
   step: GitStep,
+  parseStep: GitStep,
 ): Promise<SpawnCapturedResult> {
   const forced = forcedGitConfig(hooksDir);
   const args = action.args ?? [];
@@ -1125,7 +1151,7 @@ async function runRelayedClone(
       networkConfig,
       forced,
       networkEnv,
-      step,
+      parseStep,
     );
     if (!succeeded(listed)) return listed;
     const remote = parseRemoteHead(listed.stdout);
@@ -1511,7 +1537,9 @@ function createRelayRepo(opts: {
     }
   } catch (err) {
     dispose();
-    throw err;
+    throw err instanceof VaultError
+      ? err
+      : VaultError.gitOperationFailed("the relay repository could not be prepared");
   }
   const expectedTop = [
     ...new Set(["objects", "refs", ...[...written.keys()].map((rel) => rel.split("/")[0])]),

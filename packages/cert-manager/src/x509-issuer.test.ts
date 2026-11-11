@@ -143,9 +143,8 @@ describe("createCa", () => {
   it("encodes an IPv6 entry as address plus a 128-bit mask and a DNS entry beside it", () => {
     const both = createCa({ permittedHosts: ["LocalHost", "::1"], validityDays: 30, now: NOW });
     expect(derHex(both.certPem)).toContain(
-      `a031300b8209${LOCALHOST_HEX}30228720${zeros(15)}01${"ff".repeat(16)}`,
+      `303f0603551d1e0101ff04353033a031300b8209${LOCALHOST_HEX}30228720${zeros(15)}01${"ff".repeat(16)}`,
     );
-    expect(derHex(both.certPem)).not.toContain("a130");
   });
 
   it("writes GeneralizedTime for a notAfter from 2050 on (RFC 5280 4.1.2.5)", () => {

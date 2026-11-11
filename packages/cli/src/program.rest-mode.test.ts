@@ -34,6 +34,7 @@ const {
     setInjectionPolicy: vi.fn(),
     getMcpServerConfig: vi.fn(),
     setMcpServerConfig: vi.fn(),
+    deleteMcpServerConfig: vi.fn(),
     getConnectionConfig: vi.fn(),
     setConnectionConfig: vi.fn(),
     deleteConnectionConfig: vi.fn(),
@@ -41,6 +42,7 @@ const {
     revokePolicy: vi.fn(),
     listPolicies: vi.fn(),
     queryAudit: vi.fn(),
+    verifyAuditChain: vi.fn(),
     registerAgent: vi.fn(),
     listAgents: vi.fn(),
     getAgent: vi.fn(),
@@ -73,6 +75,7 @@ const {
       setInjectionPolicy: vi.fn(),
       getMcpServerConfig: vi.fn(),
       setMcpServerConfig: vi.fn(),
+      deleteMcpServerConfig: vi.fn(),
       getConnectionConfig: vi.fn(),
       setConnectionConfig: vi.fn(),
       deleteConnectionConfig: vi.fn(),
@@ -80,6 +83,7 @@ const {
       grantPolicy: vi.fn(),
       revokePolicy: vi.fn(),
       queryAudit: vi.fn(),
+      verifyAuditChain: vi.fn(),
       getOAuthTokenStatus: vi.fn(),
       refreshOAuthToken: vi.fn(),
       updateCertificate: vi.fn(),
@@ -156,6 +160,7 @@ const TOKEN = "rest-mode.jwt";
 const CONSTRUCTED = { baseUrl: `${BASE}/`, token: TOKEN };
 /** Never created: `ssh-agent status --consumer` probes the one socket path and lists nothing. */
 const NO_RUNTIME_DIR = join(tmpdir(), "harpoc-rest-mode-no-runtime-dir");
+const NO_ANCHOR_FILE = join(tmpdir(), "harpoc-rest-mode-no-anchor.json");
 
 let dir: string;
 let tokenFile: string;
@@ -275,6 +280,14 @@ const CERT_STATUS = {
   renewal_status: "ok",
 };
 const CSR_PEM = "-----BEGIN CERTIFICATE REQUEST-----\nAA==\n-----END CERTIFICATE REQUEST-----\n";
+const CHAIN_REPORT = { valid: true, checked: 12, firstBrokenId: null };
+const CHAIN_TAIL = {
+  format: "harpoc-audit-anchor/1",
+  vault_id: "vault-1",
+  last_id: 12,
+  timestamp: 1_700_000_000_000,
+  row_hmac: "ab".repeat(32),
+};
 const HTTP_ACTION = {
   type: "http",
   method: "GET",
@@ -297,11 +310,13 @@ beforeEach(() => {
   mockEngine.useSecret.mockImplementation(async () => ({ type: "http", status: 200, body: "ok" }));
   mockEngine.getInjectionPolicy.mockResolvedValue(STORED_POLICY);
   mockEngine.getMcpServerConfig.mockResolvedValue(MCP_CONFIG);
+  mockEngine.deleteMcpServerConfig.mockResolvedValue(true);
   mockEngine.getConnectionConfig.mockResolvedValue(CONNECTION);
   mockEngine.deleteConnectionConfig.mockResolvedValue(true);
   mockEngine.listPolicies.mockReturnValue([POLICY]);
   mockEngine.grantPolicy.mockReturnValue(POLICY);
   mockEngine.queryAudit.mockReturnValue([EVENT]);
+  mockEngine.verifyAuditChain.mockReturnValue({ ...CHAIN_REPORT, tail: CHAIN_TAIL });
   mockEngine.getOAuthTokenStatus.mockReturnValue(OAUTH_STATUS);
   mockEngine.refreshOAuthToken.mockResolvedValue(1_700_007_200_000);
   mockEngine.getCertificateStatus.mockReturnValue(CERT_STATUS);
@@ -339,11 +354,13 @@ beforeEach(() => {
   mockClient.useSecret.mockImplementation(async () => ({ type: "http", status: 200, body: "ok" }));
   mockClient.getInjectionPolicy.mockResolvedValue(STORED_POLICY);
   mockClient.getMcpServerConfig.mockResolvedValue(MCP_CONFIG);
+  mockClient.deleteMcpServerConfig.mockResolvedValue(true);
   mockClient.getConnectionConfig.mockResolvedValue(CONNECTION);
   mockClient.deleteConnectionConfig.mockResolvedValue(true);
   mockClient.listPolicies.mockResolvedValue([POLICY]);
   mockClient.grantPolicy.mockResolvedValue(POLICY);
   mockClient.queryAudit.mockResolvedValue([EVENT]);
+  mockClient.verifyAuditChain.mockResolvedValue(CHAIN_REPORT);
   mockClient.getOAuthStatus.mockResolvedValue(OAUTH_STATUS);
   mockClient.refreshOAuthToken.mockResolvedValue(1_700_007_200_000);
   mockClient.getCertificateStatus.mockResolvedValue(CERT_STATUS);
@@ -415,6 +432,7 @@ interface RestRow {
   argv: string[];
   calls: Record<string, unknown[][]>;
   constructed?: Record<string, unknown>;
+  restOutput?: Output;
 }
 
 // Every command the REST mode serves: the RestClient member(s) with the whole argument list,
@@ -518,6 +536,24 @@ const REST_ROWS: RestRow[] = [
     calls: { setMcpServerConfig: [["secret://k", MCP_PARSED]] },
   },
   {
+    argv: ["secret", "mcp-server", "secret://k", "--delete"],
+    calls: { deleteMcpServerConfig: [["secret://k"]] },
+  },
+  {
+    argv: [
+      "secret",
+      "mcp-server",
+      "secret://k",
+      "--delete",
+      "--show",
+      "--name",
+      "srv",
+      "--transport",
+      "http",
+    ],
+    calls: { deleteMcpServerConfig: [["secret://k"]] },
+  },
+  {
     argv: ["secret", "connection", "secret://k", "--show"],
     calls: { getConnectionConfig: [["secret://k"]] },
   },
@@ -537,6 +573,11 @@ const REST_ROWS: RestRow[] = [
     calls: {
       queryAudit: [[{ secretId: undefined, eventType: "secret.read", since: undefined, limit: 5 }]],
     },
+  },
+  {
+    argv: ["audit", "verify"],
+    calls: { verifyAuditChain: [[]] },
+    restOutput: { stdout: "Audit chain OK — 12 row(s) verified.", stderr: "", written: "" },
   },
   {
     argv: ["auth", "list", "--agent", "bot"],
@@ -659,7 +700,7 @@ const withValueFile = (argv: string[]): string[] =>
   argv.map((arg) => (arg === "<value>" ? valueFile : arg));
 
 describe("the REST mode of every REST-capable command (--url / --token-file)", () => {
-  describe.each(REST_ROWS)("harpoc --url … $argv", ({ argv, calls, constructed }) => {
+  describe.each(REST_ROWS)("harpoc --url … $argv", ({ argv, calls, constructed, restOutput }) => {
     it("reaches the RestClient member with the whole argument list, prints what the in-process path prints, loads no vault", async () => {
       const local = await capture(withValueFile(argv));
       vi.mocked(loadUnlockedEngine).mockClear();
@@ -671,7 +712,66 @@ describe("the REST mode of every REST-capable command (--url / --token-file)", (
       expect(clientCalls()).toEqual(calls);
       expect(loadUnlockedEngine).not.toHaveBeenCalled();
       expect(spies.exitSpy).not.toHaveBeenCalled();
-      expect(remote).toEqual(local);
+      expect(remote).toEqual(restOutput ?? local);
+    });
+  });
+
+  it("audit verify --json over REST prints the client's chain report, no tail key (R-A3)", async () => {
+    const exitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      const out = await capture([...rest, "audit", "verify", "--json"]);
+      expect(out).toEqual({
+        stdout: JSON.stringify({ valid: true, checked: 12, firstBrokenId: null }, null, 2),
+        stderr: "",
+        written: "",
+      });
+      expect(clientCalls()).toEqual({ verifyAuditChain: [[]] });
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(process.exitCode).toBeUndefined();
+    } finally {
+      process.exitCode = exitCode;
+    }
+  });
+
+  it("audit verify over REST reports a broken chain on stderr and sets exit code 1 (R-A3)", async () => {
+    mockClient.verifyAuditChain.mockResolvedValueOnce({
+      valid: false,
+      checked: 3,
+      firstBrokenId: 4,
+    });
+    const exitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      const out = await capture([...rest, "audit", "verify"]);
+      expect(out).toEqual({
+        stdout: "",
+        stderr: "Audit chain BROKEN at row 4 — 3 verified.",
+        written: "",
+      });
+      expect(process.exitCode).toBe(1);
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    } finally {
+      process.exitCode = exitCode;
+    }
+  });
+
+  it("secret mcp-server --delete over REST prints the in-process line when no config was set (R-A4)", async () => {
+    mockEngine.deleteMcpServerConfig.mockResolvedValueOnce(false);
+    mockClient.deleteMcpServerConfig.mockResolvedValueOnce(false);
+    const argv = ["secret", "mcp-server", "secret://k", "--delete"];
+    const local = await capture(argv);
+    vi.mocked(loadUnlockedEngine).mockClear();
+
+    const remote = await capture([...rest, ...argv]);
+
+    expect(clientCalls()).toEqual({ deleteMcpServerConfig: [["secret://k"]] });
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    expect(remote).toEqual(local);
+    expect(remote).toEqual({
+      stdout: "",
+      stderr: "OK: No MCP server config set (secret://k)",
+      written: "",
     });
   });
 
@@ -772,6 +872,265 @@ describe("the REST mode of every REST-capable command (--url / --token-file)", (
     expect(clientCalls()).toEqual({});
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
+});
+
+describe("the input refusals of the REST-capable commands under --url (T4)", () => {
+  const refusals: { label: string; refusal: () => { argv: string[]; message: string } }[] = [
+    {
+      label: "cert attach with an empty --cert",
+      refusal: () => ({
+        argv: ["cert", "attach", "secret://k", "--cert", "", "--json"],
+        message: "--cert requires a path to a certificate PEM file.",
+      }),
+    },
+    {
+      label: "cert import with a missing certificate file",
+      refusal: () => {
+        const missing = join(dir, "missing-cert.pem");
+        return {
+          argv: ["cert", "import", "c", "--key", KEY_PATH, "--cert", missing, "--json"],
+          message: `Cannot read certificate file: ${missing}`,
+        };
+      },
+    },
+    {
+      label: "cert csr with an invalid --algorithm",
+      refusal: () => ({
+        argv: ["cert", "csr", "c", "--subject", "svc.example.com", "--algorithm", "dsa", "--json"],
+        message: 'Invalid algorithm "dsa". Must be one of: rsa, ec.',
+      }),
+    },
+    {
+      label: "secret set with an invalid --type",
+      refusal: () => ({
+        argv: ["secret", "set", "k", "--type", "nope", "--json"],
+        message: 'Invalid secret type: "nope". Valid: api_key, oauth_token, certificate',
+      }),
+    },
+    {
+      label: "secret use with an unknown --action",
+      refusal: () => ({
+        argv: ["secret", "use", "secret://k", "--action", "bogus", "--json"],
+        message:
+          '--action must be one of: http | process | mcp | database | git | ssh | smtp | imap | websocket | sftp | docker_registry (got "bogus")',
+      }),
+    },
+  ];
+
+  it.each(refusals)(
+    "refuses $label through the INVALID_INPUT envelope, the server never contacted",
+    async ({ refusal }) => {
+      const { argv, message } = refusal();
+      await expect(run([...rest, ...argv])).rejects.toThrow("process.exit");
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [JSON.stringify({ error: "INVALID_INPUT", message })],
+      ]);
+      expect(clientCalls()).toEqual({});
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("secret allow under --url: each of the 14 flag groups alone is a set (T5)", () => {
+  it.each<{ flag: string; args: string[]; set: Record<string, unknown> }>([
+    { flag: "--command", args: ["--command", "git"], set: { command_allowlist: ["git"] } },
+    {
+      flag: "--url",
+      args: ["--url", "https://api.example.com/*"],
+      set: { url_allowlist: ["https://api.example.com/*"] },
+    },
+    { flag: "--host", args: ["--host", "localhost"], set: { host_allowlist: ["localhost"] } },
+    { flag: "--env", args: ["--env", "HOME"], set: { env_allowlist: ["HOME"] } },
+    {
+      flag: "--response-header",
+      args: ["--response-header", "Content-Type"],
+      set: { response_header_allowlist: ["Content-Type"] },
+    },
+    {
+      flag: "--response-mode",
+      args: ["--response-mode", "status_only"],
+      set: { response_mode: "status_only" },
+    },
+    {
+      flag: "--network-isolation",
+      args: ["--network-isolation"],
+      set: { network_isolation: true },
+    },
+    { flag: "--fs-isolation", args: ["--fs-isolation"], set: { fs_isolation: true } },
+    {
+      flag: "--recipient",
+      args: ["--recipient", "*@d.e"],
+      set: { smtp_recipient_allowlist: ["*@d.e"] },
+    },
+    { flag: "--imap-read-only", args: ["--imap-read-only"], set: { imap_read_only: true } },
+    { flag: "--strict-tree-exit", args: ["--strict-tree-exit"], set: { strict_tree_exit: true } },
+    { flag: "--proxy", args: ["--proxy"], set: { proxy: true } },
+    { flag: "--ssh-agent-socket", args: ["--ssh-agent-socket"], set: { ssh_agent_socket: true } },
+    { flag: "--clear", args: ["--clear"], set: {} },
+  ])("$flag alone is a set, not a show", async ({ args, set }) => {
+    await run([...rest, "secret", "allow", "secret://k", ...args]);
+    expect(mockClient.setInjectionPolicy.mock.calls).toEqual([
+      ["secret://k", { ...STORED_POLICY, ...set }, { acknowledge_interpreters: false }],
+    ]);
+    expect(spies.stdout()).toBe("");
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+  });
+
+  it("--acknowledge-interpreter alone is a show, not a set", async () => {
+    await run([...rest, "secret", "allow", "secret://k", "--acknowledge-interpreter"]);
+    expect(clientCalls()).toEqual({ getInjectionPolicy: [["secret://k"]] });
+    expect(spies.stdout()).toBe(JSON.stringify(STORED_POLICY, null, 2));
+  });
+});
+
+describe("secret connection under --url: each of the 10 input flags alone is a set (T5)", () => {
+  const CA = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+  const KNOWN_HOST = "h ssh-ed25519 AAAA";
+  let paths: Record<string, string>;
+
+  beforeAll(() => {
+    const caFile = join(dir, "ca.pem");
+    const knownHostsFile = join(dir, "known_hosts");
+    writeFileSync(caFile, CA);
+    writeFileSync(knownHostsFile, `# pinned\n${KNOWN_HOST}\n`);
+    paths = { "<ca>": caFile, "<known-hosts>": knownHostsFile };
+  });
+
+  it.each<{ flag: string; args: string[]; written: Record<string, unknown> }>([
+    {
+      flag: "--db-tls",
+      args: ["--db-tls", "require"],
+      written: { database: { tls_mode: "require" } },
+    },
+    {
+      flag: "--db-ca-file",
+      args: ["--db-ca-file", "<ca>"],
+      written: { database: { tls_mode: "disable", ca_pem: CA } },
+    },
+    {
+      flag: "--db-servername",
+      args: ["--db-servername", "localhost"],
+      written: { database: { tls_mode: "disable", servername: "localhost" } },
+    },
+    {
+      flag: "--known-host",
+      args: ["--known-host", KNOWN_HOST],
+      written: { ...CONNECTION, ssh: { known_hosts: [KNOWN_HOST] } },
+    },
+    {
+      flag: "--known-hosts-file",
+      args: ["--known-hosts-file", "<known-hosts>"],
+      written: { ...CONNECTION, ssh: { known_hosts: [KNOWN_HOST] } },
+    },
+    {
+      flag: "--mail-no-tls",
+      args: ["--mail-no-tls"],
+      written: { ...CONNECTION, mail: { tls: false } },
+    },
+    {
+      flag: "--mail-ca",
+      args: ["--mail-ca", "<ca>"],
+      written: { ...CONNECTION, mail: { tls: { ca: CA } } },
+    },
+    {
+      flag: "--git-ca",
+      args: ["--git-ca", "<ca>"],
+      written: { ...CONNECTION, git: { ca_pem: CA } },
+    },
+    {
+      flag: "--http-ca",
+      args: ["--http-ca", "<ca>"],
+      written: { ...CONNECTION, http: { ca_pem: CA } },
+    },
+  ])("$flag alone is a set, not a show", async ({ args, written }) => {
+    await run([...rest, "secret", "connection", "secret://k", ...args.map((a) => paths[a] ?? a)]);
+    expect(clientCalls()).toEqual({
+      getConnectionConfig: [["secret://k"]],
+      setConnectionConfig: [["secret://k", written]],
+    });
+    expect(spies.stdout()).toBe("");
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+  });
+
+  it("--clear alone is a set, not a show: the emptied config is refused, nothing written", async () => {
+    await expect(run([...rest, "secret", "connection", "secret://k", "--clear"])).rejects.toThrow(
+      "process.exit",
+    );
+    expect(clientCalls()).toEqual({ getConnectionConfig: [["secret://k"]] });
+    expect(spies.stdout()).toBe("");
+    expect(spies.stderr()).toBe(
+      "Error: [SCHEMA_VALIDATION_ERROR] <root>: connection config must set at least one of database, ssh, mail, git or http",
+    );
+  });
+});
+
+describe("the flag refusals of agent permissions and policy grant under --url, as in-process (T5)", () => {
+  const PERMISSIONS = ["agent", "permissions", "bot", "secret://k"];
+  const GRANT = ["policy", "grant", "secret://k", "--principal-id", "bot"];
+  const refusals: { command: string; label: string; argv: string[]; message: string }[] = [
+    {
+      command: "agent permissions",
+      label: "--permissions with --clear",
+      argv: [...PERMISSIONS, "--permissions", "use", "--clear", "--json"],
+      message: "--permissions and --clear are mutually exclusive",
+    },
+    {
+      command: "agent permissions",
+      label: "neither --permissions nor --clear",
+      argv: [...PERMISSIONS, "--json"],
+      message: "one of --permissions or --clear is required (an empty cell is never written)",
+    },
+    {
+      command: "agent permissions",
+      label: "--expires with --clear",
+      argv: [...PERMISSIONS, "--clear", "--expires", "5", "--json"],
+      message: "--expires cannot be combined with --clear",
+    },
+    {
+      command: "agent permissions",
+      label: "an unknown permission",
+      argv: [...PERMISSIONS, "--permissions", "bogus", "--json"],
+      message: 'Invalid permission: "bogus". Valid: list, read, use, create, rotate, revoke, admin',
+    },
+    {
+      command: "agent permissions",
+      label: "the exclusion before the other checks",
+      argv: [...PERMISSIONS, "--permissions", "bogus", "--clear", "--expires", "5", "--json"],
+      message: "--permissions and --clear are mutually exclusive",
+    },
+    {
+      command: "policy grant",
+      label: "an unknown permission",
+      argv: [...GRANT, "--principal-type", "agent", "--permissions", "bogus", "--json"],
+      message: 'Invalid permission: "bogus". Valid: list, read, use, create, rotate, revoke, admin',
+    },
+    {
+      command: "policy grant",
+      label: "an invalid --principal-type",
+      argv: [...GRANT, "--principal-type", "bogus", "--permissions", "use", "--json"],
+      message: 'Invalid principal type: "bogus". Valid: agent, tool, project, user',
+    },
+    {
+      command: "policy grant",
+      label: "a bad permission before a bad type",
+      argv: [...GRANT, "--principal-type", "bogus", "--permissions", "sudo", "--json"],
+      message: 'Invalid permission: "sudo". Valid: list, read, use, create, rotate, revoke, admin',
+    },
+  ];
+
+  it.each(refusals)(
+    "$command refuses $label through the INVALID_INPUT envelope, the server never contacted",
+    async ({ argv, message }) => {
+      await expect(run([...rest, ...argv])).rejects.toThrow("process.exit");
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [JSON.stringify({ error: "INVALID_INPUT", message })],
+      ]);
+      expect(clientCalls()).toEqual({});
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("the REST-mode refusals (the root preAction hook), before any prompt, vault or request", () => {
@@ -894,8 +1253,8 @@ describe("REST_MODE_UNSUPPORTED: the commands without a REST mode", () => {
       json: true,
     },
     {
-      args: ["audit", "verify", "--json"],
-      message: "audit verify has no REST mode; run it on the vault host",
+      args: ["audit", "verify", "--anchor", NO_ANCHOR_FILE, "--json"],
+      message: "audit verify --anchor has no REST mode; run it on the vault host",
       json: true,
     },
     {
@@ -921,11 +1280,6 @@ describe("REST_MODE_UNSUPPORTED: the commands without a REST mode", () => {
       ],
       message: "cert issue has no REST mode; run it on the vault host",
       json: true,
-    },
-    {
-      args: ["secret", "mcp-server", "secret://k", "--delete"],
-      message: "secret mcp-server --delete has no REST mode; run it on the vault host",
-      json: false,
     },
     {
       args: ["policy", "list", "--json"],
@@ -1092,6 +1446,7 @@ describe("the REST mode's place in the command tree", () => {
     "agent show",
     "agent update",
     "audit",
+    "audit verify",
     "auth list",
     "auth revoke",
     "cert attach",
@@ -1120,7 +1475,6 @@ describe("the REST mode's place in the command tree", () => {
   ];
   const UNSUPPORTED = [
     "audit anchor",
-    "audit verify",
     "auth token",
     "cert issue",
     "init",

@@ -20,6 +20,29 @@ interface UpdateOptions {
   json?: boolean;
 }
 
+/** The flag refusals, each `INVALID_INPUT`: a set flag beside its clear twin, then no flag at all. */
+function assertUpdateFlags(options: UpdateOptions): void {
+  // Refused, not dropped: a set flag and its clear twin contradict, and
+  // silently letting one win would write the operator's other intent away.
+  if (options.description !== undefined && options.clearDescription) {
+    throw VaultError.invalidInput("--description and --clear-description are mutually exclusive");
+  }
+  if (options.owner !== undefined && options.clearOwner) {
+    throw VaultError.invalidInput("--owner and --clear-owner are mutually exclusive");
+  }
+
+  if (
+    options.description === undefined &&
+    options.owner === undefined &&
+    !options.clearDescription &&
+    !options.clearOwner
+  ) {
+    throw VaultError.invalidInput(
+      "Nothing to update. Pass --description, --owner, --clear-description or --clear-owner.",
+    );
+  }
+}
+
 export function registerAgentUpdateCommand(agent: Command): void {
   agent
     .command("update <name>")
@@ -36,24 +59,7 @@ export function registerAgentUpdateCommand(agent: Command): void {
         const rest = restModeOf(cmd);
         if (rest) {
           await runRestMode(rest, async (client) => {
-            if (options.description !== undefined && options.clearDescription) {
-              throw VaultError.invalidInput(
-                "--description and --clear-description are mutually exclusive",
-              );
-            }
-            if (options.owner !== undefined && options.clearOwner) {
-              throw VaultError.invalidInput("--owner and --clear-owner are mutually exclusive");
-            }
-            if (
-              options.description === undefined &&
-              options.owner === undefined &&
-              !options.clearDescription &&
-              !options.clearOwner
-            ) {
-              throw VaultError.invalidInput(
-                "Nothing to update. Pass --description, --owner, --clear-description or --clear-owner.",
-              );
-            }
+            assertUpdateFlags(options);
             const current = await client.getAgent(name);
             const updated = await client.updateAgent(name, {
               description: options.clearDescription
@@ -84,25 +90,7 @@ export function registerAgentUpdateCommand(agent: Command): void {
             options.token ?? process.env.HARPOC_TOKEN,
           );
 
-          // Refused, not dropped: a set flag and its clear twin contradict, and
-          // silently letting one win would write the operator's other intent away.
-          if (options.description !== undefined && options.clearDescription) {
-            throw new Error("--description and --clear-description are mutually exclusive");
-          }
-          if (options.owner !== undefined && options.clearOwner) {
-            throw new Error("--owner and --clear-owner are mutually exclusive");
-          }
-
-          if (
-            options.description === undefined &&
-            options.owner === undefined &&
-            !options.clearDescription &&
-            !options.clearOwner
-          ) {
-            throw new Error(
-              "Nothing to update. Pass --description, --owner, --clear-description or --clear-owner.",
-            );
-          }
+          assertUpdateFlags(options);
 
           // The engine replaces both fields; an omitted flag here means "keep",
           // so the stored value is read first and sent back unchanged.

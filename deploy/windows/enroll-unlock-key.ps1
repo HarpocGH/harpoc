@@ -85,7 +85,7 @@ if ($Help) {
   exit 0
 }
 
-if ($VaultUser -cnotmatch '^[a-z0-9_][a-z0-9_-]{0,19}$') {
+if ($VaultUser -cnotmatch '^[a-z0-9_][a-z0-9_-]{0,19}\z') {
   Stop-WithError "not an account name (lowercase letters, digits, '_', '-'; not dash-led; at most 20): $VaultUser" 2
 }
 if ([string]::IsNullOrEmpty($ProgramData) -or -not [System.IO.Path]::IsPathRooted($ProgramData)) {

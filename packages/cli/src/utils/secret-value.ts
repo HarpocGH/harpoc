@@ -29,14 +29,14 @@ export function readSecretValueFromFile(path: string): Buffer {
     if (!stat.isFile()) throw new Error("not a file");
     size = stat.size;
   } catch {
-    throw new Error(`Cannot read file: ${path}`);
+    throw VaultError.invalidInput(`Cannot read file: ${path}`);
   }
   if (size > MAX_SECRET_FILE_BYTES) {
-    throw new Error(`File exceeds the 1 MiB secret-value limit: ${path}`);
+    throw VaultError.invalidInput(`File exceeds the 1 MiB secret-value limit: ${path}`);
   }
   const value = readFileSync(path);
   if (value.length === 0) {
-    throw new Error("Secret value cannot be empty.");
+    throw VaultError.invalidInput("Secret value cannot be empty.");
   }
   return value;
 }
@@ -61,7 +61,7 @@ export async function resolveSecretValue(options: ResolveSecretValueOptions): Pr
       options.output,
     );
     if (!typed) {
-      throw new Error("Secret value cannot be empty.");
+      throw VaultError.invalidInput("Secret value cannot be empty.");
     }
     value = Buffer.from(typed, "utf8");
   }
@@ -87,7 +87,7 @@ export async function resolveSecretValue(options: ResolveSecretValueOptions): Pr
     const passphrase = await promptHidden("Key passphrase: ", options.input, options.output);
     if (!passphrase) {
       wipeBuffer(value);
-      throw new Error("Key passphrase cannot be empty.");
+      throw VaultError.invalidInput("Key passphrase cannot be empty.");
     }
     try {
       return decryptKeyForImport(value.toString("utf8"), passphrase);

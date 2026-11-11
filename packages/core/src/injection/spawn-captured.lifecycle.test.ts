@@ -1,7 +1,7 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, watch } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { dirname, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnCaptured } from "./spawn-captured.js";
 
 /**
@@ -98,7 +98,39 @@ async function untilGone(pid: number): Promise<boolean> {
   return true;
 }
 
+/**
+ * The child's marker, created in its stdout write's callback so "before" is in the pipe —
+ * rejected when the spawn settles first or after `boundMs` on `setInterval`, which no row fakes.
+ */
+function untilWritten(path: string, spawned: Promise<unknown>, boundMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const watcher = watch(dirname(path), () => {
+      if (existsSync(path)) end();
+    });
+    const bound = setInterval(() => {
+      if (existsSync(path)) end();
+      else end(new Error(`the child's marker did not appear within ${String(boundMs)} ms`));
+    }, boundMs);
+    const end = (err?: Error): void => {
+      watcher.close();
+      clearInterval(bound);
+      if (err) reject(err);
+      else resolve();
+    };
+    const settled = (): void => {
+      if (existsSync(path)) end();
+      else end(new Error("the spawn settled before the child's marker appeared"));
+    };
+    void spawned.then(settled, settled);
+    if (existsSync(path)) end();
+  });
+}
+
 describe("spawnCaptured lifecycle (M4)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("pins the vulnerability: a surviving grandchild cannot hold the promise open", async () => {
     const started = Date.now();
     const result = await spawnCaptured(
@@ -168,15 +200,24 @@ describe("spawnCaptured lifecycle (M4)", () => {
   }, 15_000);
 
   it("control: a timed-out child with no grandchild still reports its capture", async () => {
-    const result = await spawnCaptured(
-      process.execPath,
-      ["-e", "process.stdout.write('before'); setTimeout(() => {}, 30000);"],
-      { env: {}, timeoutMs: 300 },
-    );
+    await spawnCaptured(process.execPath, ["-e", ""], { env: {}, timeoutMs: 10_000 });
+    const written = join(dir, "written");
+    const script = `process.stdout.write("before", () => require("node:fs").writeFileSync(${JSON.stringify(written)}, "")); setTimeout(() => {}, 20000);`;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const pending = spawnCaptured(process.execPath, ["-e", script], { env: {}, timeoutMs: 300 });
+    try {
+      await untilWritten(written, pending, 10_000);
+      await vi.advanceTimersByTimeAsync(300);
+      const result = await pending;
 
-    expect(result.timed_out).toBe(true);
-    expect(result.stdout).toContain("before");
-    expect(result.spawn_failed).toBe(false);
+      expect(result.timed_out).toBe(true);
+      expect(result.stdout).toContain("before");
+      expect(result.spawn_failed).toBe(false);
+    } finally {
+      await vi.runAllTimersAsync();
+      await pending;
+      vi.useRealTimers();
+    }
     // Times a child out, so on win32 its settlement waits for the descendant
     // sweep — up to the same timeout + 42 s bound as the tree-kill test above
     // (a 15 s budget lost to the 20 s helper bound on windows-latest, 18b58b9).

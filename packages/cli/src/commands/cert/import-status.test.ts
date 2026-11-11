@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { VaultError } from "@harpoc/shared";
+import { ErrorCode, VaultError } from "@harpoc/shared";
 
 const { mockEngine, mockPromptHidden } = vi.hoisted(() => ({
   mockEngine: {
@@ -33,11 +33,17 @@ vi.mock("../../utils/secret-value.js", async (importOriginal) => {
   return { ...actual, resolveSecretValue: vi.fn(actual.resolveSecretValue) };
 });
 
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, readFileSync: vi.fn(actual.readFileSync) };
+});
+
 import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { resolveSecretValue } from "../../utils/secret-value.js";
-import { registerCertImportCommand } from "./import.js";
+import { readPemFile, registerCertImportCommand } from "./import.js";
 import { registerCertStatusCommand } from "./status.js";
 import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 const FIXTURES = fileURLToPath(new URL("../../__fixtures__/certs/", import.meta.url));
 const KEY_PATH = join(FIXTURES, "rsa-key.pem");
@@ -460,6 +466,206 @@ describe("cert import", () => {
     await run(["import", "web", "--key", KEY_PATH, "--cert", CERT_PATH]);
 
     expect(mockEngine.verifyToken).toHaveBeenCalledWith("ambient-jwt");
+  });
+});
+
+/** A certificate file that stats as a regular file and then fails to read. */
+function unreadableCertificate(): string {
+  const path = writeTemp("unreadable.pem", CERT_PEM);
+  vi.mocked(readFileSync).mockImplementationOnce(() => {
+    throw new Error("EACCES");
+  });
+  return path;
+}
+
+describe("cert import — the input refusals are INVALID_INPUT envelopes under --json (T4)", () => {
+  afterEach(() => {
+    vi.mocked(readFileSync).mockReset();
+  });
+
+  const refusals: {
+    label: string;
+    refusal: () => { flags: string[]; message: string; readPath?: string };
+  }[] = [
+    {
+      label: "an empty --key",
+      refusal: () => ({
+        flags: ["--key", "", "--cert", CERT_PATH],
+        message: "--key requires a path to a private key PEM file.",
+      }),
+    },
+    {
+      label: "an empty --cert",
+      refusal: () => ({
+        flags: ["--key", KEY_PATH, "--cert", ""],
+        message: "--cert requires a path to a certificate PEM file.",
+      }),
+    },
+    {
+      label: "an empty --chain",
+      refusal: () => ({
+        flags: ["--key", KEY_PATH, "--cert", CERT_PATH, "--chain", ""],
+        message: "--chain requires a path to a chain PEM file, or omit it entirely.",
+      }),
+    },
+    {
+      label: "a missing certificate file",
+      refusal: () => {
+        const missing = join(tempDir, "missing.pem");
+        return {
+          flags: ["--key", KEY_PATH, "--cert", missing],
+          message: `Cannot read certificate file: ${missing}`,
+        };
+      },
+    },
+    {
+      label: "a certificate file that fails to read",
+      refusal: () => {
+        const unreadable = unreadableCertificate();
+        return {
+          flags: ["--key", KEY_PATH, "--cert", unreadable],
+          message: `Cannot read certificate file: ${unreadable}`,
+          readPath: unreadable,
+        };
+      },
+    },
+    {
+      label: "a certificate file over the 1 MiB cap",
+      refusal: () => {
+        const oversize = writeTemp("huge.pem", "x".repeat(1024 * 1024 + 1));
+        return {
+          flags: ["--key", KEY_PATH, "--cert", oversize],
+          message: `The certificate file exceeds the 1 MiB limit: ${oversize}`,
+        };
+      },
+    },
+    {
+      label: "an empty certificate file",
+      refusal: () => {
+        const empty = writeTemp("empty.pem", "   \n");
+        return {
+          flags: ["--key", KEY_PATH, "--cert", empty],
+          message: `The certificate file is empty: ${empty}`,
+        };
+      },
+    },
+  ];
+
+  it.each(refusals)("refuses $label, its message unchanged", async ({ refusal }) => {
+    const { flags, message, readPath } = refusal();
+
+    await expect(run(["import", "web", ...flags, "--json"])).rejects.toThrow("process.exit");
+
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [JSON.stringify({ error: "INVALID_INPUT", message })],
+    ]);
+    if (readPath !== undefined) {
+      expect(vi.mocked(readFileSync)).toHaveBeenCalledWith(readPath, "utf8");
+    }
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(resolveSecretValue).not.toHaveBeenCalled();
+    expect(mockEngine.importCertificate).not.toHaveBeenCalled();
+  });
+});
+
+describe("readPemFile — the refusals are INVALID_INPUT, their messages unchanged (T4)", () => {
+  afterEach(() => {
+    vi.mocked(readFileSync).mockReset();
+  });
+
+  const refusals: {
+    label: string;
+    refusal: () => { path: string; message: string; readPath?: string };
+  }[] = [
+    {
+      label: "a missing file",
+      refusal: () => {
+        const missing = join(tempDir, "missing.pem");
+        return { path: missing, message: `Cannot read chain file: ${missing}` };
+      },
+    },
+    {
+      label: "a file that fails to read",
+      refusal: () => {
+        const unreadable = unreadableCertificate();
+        return {
+          path: unreadable,
+          message: `Cannot read chain file: ${unreadable}`,
+          readPath: unreadable,
+        };
+      },
+    },
+    {
+      label: "a file over the 1 MiB cap",
+      refusal: () => {
+        const oversize = writeTemp("huge.pem", "x".repeat(1024 * 1024 + 1));
+        return { path: oversize, message: `The chain file exceeds the 1 MiB limit: ${oversize}` };
+      },
+    },
+    {
+      label: "an empty file",
+      refusal: () => {
+        const empty = writeTemp("empty.pem", "   \n");
+        return { path: empty, message: `The chain file is empty: ${empty}` };
+      },
+    },
+  ];
+
+  it.each(refusals)("refuses $label", async ({ refusal }) => {
+    const { path, message, readPath } = refusal();
+    const err = await expectVaultError(() => readPemFile(path, "chain"), ErrorCode.INVALID_INPUT);
+    expect(err.message).toBe(message);
+    if (readPath !== undefined) {
+      expect(vi.mocked(readFileSync)).toHaveBeenCalledWith(readPath, "utf8");
+    }
+  });
+});
+
+describe("cert import — the PEM reads stay after the vault and the token check (T4)", () => {
+  it("a locked vault reports VAULT_LOCKED before a missing certificate file", async () => {
+    vi.mocked(loadUnlockedEngine).mockRejectedValueOnce(VaultError.vaultLocked());
+    try {
+      await expect(
+        run(["import", "web", "--key", KEY_PATH, "--cert", join(tempDir, "missing.pem"), "--json"]),
+      ).rejects.toThrow("process.exit");
+
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [JSON.stringify({ error: "VAULT_LOCKED", message: "Vault is locked" })],
+      ]);
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    } finally {
+      vi.mocked(loadUnlockedEngine).mockReset();
+      vi.mocked(loadUnlockedEngine).mockResolvedValue(mockEngine as never);
+    }
+  });
+
+  it("a token without 'create' reports ACCESS_DENIED before a missing certificate file", async () => {
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["read"] }));
+
+    await expect(
+      run([
+        "import",
+        "web",
+        "--key",
+        KEY_PATH,
+        "--cert",
+        join(tempDir, "missing.pem"),
+        "--token",
+        "jwt-value",
+        "--json",
+      ]),
+    ).rejects.toThrow("process.exit");
+
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        JSON.stringify({
+          error: "ACCESS_DENIED",
+          message: "Access denied: Token lacks permission: create",
+        }),
+      ],
+    ]);
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
   });
 });
 
