@@ -3,6 +3,7 @@ import { ErrorCode, VaultError } from "@harpoc/shared";
 
 const { mockEngine, mockResolveSecretValue } = vi.hoisted(() => ({
   mockEngine: {
+    listSecrets: vi.fn(),
     createSecret: vi.fn(),
     rotateSecret: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),
@@ -31,6 +32,7 @@ let spies: CliSpies;
 beforeEach(() => {
   vi.clearAllMocks();
   loadEngineMock.mockResolvedValue(mockEngine as never);
+  mockEngine.listSecrets.mockReturnValue([]);
   mockEngine.createSecret.mockResolvedValue({ handle: "secret://k", name: "k" });
   mockEngine.rotateSecret.mockResolvedValue(undefined);
   mockResolveSecretValue.mockResolvedValue(Buffer.from("resolved-value", "utf8"));

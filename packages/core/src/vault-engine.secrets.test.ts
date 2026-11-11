@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { AuditEventType, ErrorCode } from "@harpoc/shared";
-import type { CallerContext } from "@harpoc/shared";
+import type { CallerContext, OAuthProviderConfig } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { registerAgents } from "./__fixtures__/engine-seams.js";
@@ -749,5 +749,128 @@ describe("rotateSecret refuses an empty value (Q3, TC-18)", () => {
         },
       },
     ]);
+  });
+});
+
+describe("setSecretValue refuses a pending secret an OAuth flow owns (F2)", () => {
+  const OAUTH_CONFIG: OAuthProviderConfig = {
+    provider: "github",
+    grant_type: "authorization_code",
+    token_endpoint: "http://127.0.0.1:9/token",
+    auth_endpoint: "http://127.0.0.1:9/authorize",
+    client_id: "f2-client-id",
+  };
+  const VALUE = "S3CRET-TOKEN-xyz";
+
+  beforeEach(async () => {
+    await engine.initVault("password");
+  });
+
+  function storedValueColumns(id: string): {
+    status: string;
+    ciphertext: Buffer;
+    ct_iv: Buffer;
+    ct_tag: Buffer;
+  } {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      return db
+        .prepare("SELECT status, ciphertext, ct_iv, ct_tag FROM secrets WHERE id = ?")
+        .get(id) as { status: string; ciphertext: Buffer; ct_iv: Buffer; ct_tag: Buffer };
+    } finally {
+      db.close();
+    }
+  }
+
+  it("answers INVALID_INPUT with the fixed message, the secret still pending with its ciphertext unchanged, one failed secret.create set_value row and no success row", async () => {
+    const { secretId } = await engine.createOAuthSecret("oauth-pending", OAUTH_CONFIG);
+    const before = storedValueColumns(secretId);
+
+    const err = await expectVaultError(
+      () => engine.setSecretValue("secret://oauth-pending", new Uint8Array(Buffer.from(VALUE))),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      "Secret secret://oauth-pending is waiting for its OAuth flow — complete it with harpoc oauth connect",
+    );
+
+    const after = storedValueColumns(secretId);
+    expect(after.status).toBe("pending");
+    expect(
+      after.ciphertext.equals(before.ciphertext) &&
+        after.ct_iv.equals(before.ct_iv) &&
+        after.ct_tag.equals(before.ct_tag),
+    ).toBe(true);
+    expect(
+      engine.queryAudit({ eventType: AuditEventType.SECRET_CREATE }).map((r) => ({
+        success: r.success,
+        secret_id: r.secret_id,
+        principal_id: r.principal_id,
+        detail: r.detail,
+      })),
+    ).toEqual([
+      {
+        success: false,
+        secret_id: secretId,
+        principal_id: null,
+        detail: {
+          handle: "secret://oauth-pending",
+          action: "set_value",
+          error: ErrorCode.INVALID_INPUT,
+        },
+      },
+    ]);
+  });
+
+  it("an OAuth secret whose flow completed keeps the not-pending answer, still active with its ciphertext unchanged, one failed secret.create set_value row", async () => {
+    const { secretId } = await engine.createOAuthSecret("oauth-done", OAUTH_CONFIG);
+    await engine.completeOAuthFlow(secretId, "fixture-access-token");
+    const before = storedValueColumns(secretId);
+
+    const err = await expectVaultError(
+      () => engine.setSecretValue("secret://oauth-done", new Uint8Array(Buffer.from(VALUE))),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      "Secret secret://oauth-done is not pending — use rotate to update an active secret",
+    );
+
+    const after = storedValueColumns(secretId);
+    expect(after.status).toBe("active");
+    expect(
+      after.ciphertext.equals(before.ciphertext) &&
+        after.ct_iv.equals(before.ct_iv) &&
+        after.ct_tag.equals(before.ct_tag),
+    ).toBe(true);
+    expect(
+      engine.queryAudit({ eventType: AuditEventType.SECRET_CREATE }).map((r) => ({
+        success: r.success,
+        secret_id: r.secret_id,
+        principal_id: r.principal_id,
+        detail: r.detail,
+      })),
+    ).toEqual([
+      {
+        success: false,
+        secret_id: secretId,
+        principal_id: null,
+        detail: {
+          handle: "secret://oauth-done",
+          action: "set_value",
+          error: ErrorCode.INVALID_INPUT,
+        },
+      },
+    ]);
+  });
+
+  it("control: a pending secret without an OAuth row still takes its value, an oauth_token-typed one included", async () => {
+    await engine.createSecret({ name: "plain-pending", type: "oauth_token" });
+    const id = await engine.resolveSecretId("secret://plain-pending");
+
+    await engine.setSecretValue("secret://plain-pending", new Uint8Array(Buffer.from(VALUE)));
+
+    expect(storedValueColumns(id).status).toBe("active");
+    const stored = await engine.getSecretValue("secret://plain-pending");
+    expect(Buffer.from(stored).equals(Buffer.from(VALUE))).toBe(true);
   });
 });

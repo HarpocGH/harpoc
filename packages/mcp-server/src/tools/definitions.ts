@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { secretTypeSchema, startOAuthFlowInputSchema, useSecretActionSchema } from "@harpoc/shared";
+import {
+  SecretType,
+  secretTypeSchema,
+  startOAuthFlowInputSchema,
+  useSecretActionSchema,
+} from "@harpoc/shared";
 
 /**
  * The nine tools' advertised contract — name, description and input schema —
@@ -70,6 +75,17 @@ export const CREATE_SECRET_TOOL = {
     }),
   },
 };
+
+/** The pending answer, naming the vault-user command that sets this create's value. */
+export function pendingHint(
+  secretName: string,
+  type: SecretType,
+  project: string | undefined,
+): string {
+  const typeFlag = type === SecretType.API_KEY ? "" : ` --type ${type}`;
+  const projectFlag = project === undefined ? "" : ` --project ${project}`;
+  return `Secret created. Set the value with: harpoc secret set ${secretName}${typeFlag}${projectFlag}`;
+}
 
 export const ROTATE_SECRET_TOOL = {
   name: "rotate_secret",

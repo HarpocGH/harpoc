@@ -919,6 +919,37 @@ describe("MCP Tools", () => {
       expect(data.message).toContain("harpoc secret set");
     });
 
+    it.each([
+      {
+        label: "an unscoped api_key create",
+        args: { name: "new-key", type: "api_key" },
+        command: "harpoc secret set new-key",
+      },
+      {
+        label: "a project-scoped create",
+        args: { name: "new-key", type: "api_key", project: "prod" },
+        command: "harpoc secret set new-key --project prod",
+      },
+      {
+        label: "a certificate-typed create",
+        args: { name: "new-key", type: "certificate" },
+        command: "harpoc secret set new-key --type certificate",
+      },
+      {
+        label: "a project-scoped certificate-typed create",
+        args: { name: "new-key", type: "certificate", project: "prod" },
+        command: "harpoc secret set new-key --type certificate --project prod",
+      },
+    ])(
+      "$label: the pending hint is the command that sets the value (F2)",
+      async ({ args, command }) => {
+        const result = await callTool(server, "create_secret", args);
+        const data = JSON.parse(getToolText(result));
+        expect(data.status).toBe("pending");
+        expect(data.message).toBe(`Secret created. Set the value with: ${command}`);
+      },
+    );
+
     it("passes project to engine; the MCP SDK strips an undeclared top-level key such as a legacy injection config (REST refuses it — R10/A5)", async () => {
       await callTool(server, "create_secret", {
         name: "new-key",

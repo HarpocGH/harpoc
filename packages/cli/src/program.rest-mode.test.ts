@@ -808,6 +808,18 @@ describe("the REST mode of every REST-capable command (--url / --token-file)", (
     expect([...created.value, ...rotated]).toEqual([0, 0]);
   });
 
+  it("secret set over REST still sends createSecret alone and asks for no listing, a pending secret of the name on the server (F2)", async () => {
+    mockClient.listSecrets.mockResolvedValue([{ ...INFO, status: "pending" }]);
+    await run([...rest, "secret", "set", "k", "--from-file", valueFile]);
+    expect(clientCalls()).toEqual({
+      createSecret: [
+        [{ name: "k", type: "api_key", project: undefined, value: expect.any(Uint8Array) }],
+      ],
+    });
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    expect(spies.exitSpy).not.toHaveBeenCalled();
+  });
+
   it("takes the two options in either order before the command (--token-file first)", async () => {
     await run(["--token-file", tokenFile, "--url", BASE, "secret", "list"]);
     expect(MockRestClient.mock.calls).toEqual([[CONSTRUCTED]]);

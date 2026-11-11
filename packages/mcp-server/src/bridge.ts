@@ -14,6 +14,7 @@ import {
   ROTATE_SECRET_TOOL,
   START_OAUTH_FLOW_TOOL,
   USE_SECRET_TOOL,
+  pendingHint,
 } from "./tools/definitions.js";
 
 const EXPIRING_SOON_DAYS = 7;
@@ -156,7 +157,7 @@ export function createBridgeServer(options: CreateBridgeServerOptions): McpServe
     );
     const message =
       result.status === "pending"
-        ? `Secret created. Set the value with: harpoc secret set ${args.name}`
+        ? pendingHint(args.name, args.type, args.project)
         : result.message;
     return text({ handle: result.handle, status: result.status, message });
   });

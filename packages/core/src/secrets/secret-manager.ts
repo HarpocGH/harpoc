@@ -213,6 +213,12 @@ export class SecretManager {
       );
     }
 
+    if (this.store.getOAuthToken(secret.id) !== undefined) {
+      throw VaultError.invalidInput(
+        `Secret ${handle} is waiting for its OAuth flow — complete it with harpoc oauth connect`,
+      );
+    }
+
     // Unwrap DEK
     const dek = unwrapDek(this.kek, secret.wrapped_dek, secret.dek_iv, secret.dek_tag, secret.id);
 

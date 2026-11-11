@@ -220,9 +220,11 @@ export function startNode(argv: string[], opts: StartNodeOptions = {}): CliServe
 
 /**
  * `startNode` as `user` through `sudo -n -u`. sudo forks the command and waits
- * for it; `stop()` signals that command, found as `user`'s child of the sudo
- * process, with `kill` run as `user` — never the setuid sudo process, which
- * cannot relay a SIGKILL and is not the invoking user's to signal everywhere.
+ * for it — with a controlling terminal behind a monitor process of its own, the
+ * command in a new pty; `stop()` signals that command, found as `user`'s child
+ * of the sudo process or of its monitor, with `kill` run as `user` — never the
+ * setuid sudo process, which cannot relay a SIGKILL and is not the invoking
+ * user's to signal everywhere.
  */
 export function startNodeAs(user: string, argv: string[]): CliServer {
   return startChild(
@@ -239,10 +241,28 @@ async function signalCommandAs(
   signal: NodeJS.Signals,
 ): Promise<void> {
   if (sudoPid === undefined) return;
-  const listed = await runChild("pgrep", ["-u", user, "-P", String(sudoPid)], {});
-  for (const pid of listed.stdout.split("\n").filter((line) => line !== "")) {
+  const targets = await childPids(sudoPid, user);
+  if (targets.length === 0) {
+    for (const monitor of await childPids(sudoPid)) {
+      targets.push(...(await childPids(Number(monitor), user)));
+    }
+  }
+  for (const pid of targets) {
     await runAs(user, ["kill", "-s", signal.replace(/^SIG/, ""), pid]);
   }
+}
+
+/** The pids of `parentPid`'s children, of `user`'s alone when one is named (`pgrep -P`). */
+async function childPids(parentPid: number, user?: string): Promise<string[]> {
+  const listed = await runChild(
+    "pgrep",
+    [...(user === undefined ? [] : ["-u", user]), "-P", String(parentPid)],
+    {},
+  );
+  if (listed.code !== 0 && listed.code !== 1) {
+    throw new Error(`pgrep -P ${String(parentPid)} exited ${String(listed.code)}`);
+  }
+  return listed.stdout.split("\n").filter((line) => line.trim() !== "");
 }
 
 function startChild(

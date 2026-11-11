@@ -1,6 +1,13 @@
 import type { Command } from "commander";
-import type { SecretType } from "@harpoc/shared";
-import { secretTypeSchema, VaultError } from "@harpoc/shared";
+import type { CallerContext, SecretType } from "@harpoc/shared";
+import {
+  formatHandle,
+  isValidName,
+  secretTypeSchema,
+  SecretStatus,
+  VaultError,
+} from "@harpoc/shared";
+import type { SecretInfo, VaultEngine } from "@harpoc/core";
 import { wipeBuffer } from "@harpoc/core";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { resolveSecretValue } from "../../utils/secret-value.js";
@@ -15,6 +22,22 @@ interface SecretSetOptions {
   decrypt?: boolean;
   token?: string;
   json?: boolean;
+}
+
+/** The live pending secret this command's handle names, when the caller may list it. */
+function findPendingSecret(
+  engine: VaultEngine,
+  secretName: string,
+  project: string | undefined,
+  caller: CallerContext | undefined,
+): SecretInfo | undefined {
+  if (!isValidName(secretName) || (project !== undefined && !isValidName(project))) {
+    return undefined;
+  }
+  const handle = formatHandle(secretName, project);
+  return engine
+    .listSecrets(project, caller)
+    .find((entry) => entry.handle === handle && entry.status === SecretStatus.PENDING);
 }
 
 export function registerSecretSetCommand(secret: Command): void {
@@ -81,11 +104,31 @@ export function registerSecretSetCommand(secret: Command): void {
             { permission: "create", project: options.project, name },
             options.token ?? process.env.HARPOC_TOKEN,
           );
+          const pendingEntry = findPendingSecret(engine, name, options.project, resolved?.caller);
+          if (pendingEntry !== undefined && pendingEntry.type !== secretType) {
+            throw VaultError.invalidInput(
+              `Secret '${name}' is pending with type ${pendingEntry.type}; pass --type ${pendingEntry.type} to set its value`,
+            );
+          }
           const value = await resolveSecretValue({
             fromFile: options.fromFile,
             noDecrypt: options.decrypt === false,
           });
           try {
+            if (pendingEntry !== undefined) {
+              await engine.setSecretValue(pendingEntry.handle, value, resolved?.caller);
+              if (json) {
+                printJson({
+                  handle: pendingEntry.handle,
+                  status: "created",
+                  message: `Secret ${pendingEntry.handle} value set`,
+                });
+              } else {
+                printSuccess(`Secret '${name}' value set (${pendingEntry.handle})`);
+              }
+              return;
+            }
+
             const result = await engine.createSecret(
               {
                 name,

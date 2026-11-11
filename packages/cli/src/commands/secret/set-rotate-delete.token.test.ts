@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { VaultError } from "@harpoc/shared";
 
 const { mockEngine, mockResolveSecretValue, mockPromptConfirm } = vi.hoisted(() => ({
   mockEngine: {
+    listSecrets: vi.fn(),
     createSecret: vi.fn(),
+    setSecretValue: vi.fn(),
     rotateSecret: vi.fn(),
     revokeSecret: vi.fn(),
     verifyToken: vi.fn(),
@@ -31,6 +34,7 @@ describe("secret set/rotate/delete — token path", () => {
     vi.clearAllMocks();
     mockResolveSecretValue.mockResolvedValue(new TextEncoder().encode("v"));
     mockPromptConfirm.mockResolvedValue(true);
+    mockEngine.listSecrets.mockReturnValue([]);
     mockEngine.createSecret.mockResolvedValue({ handle: "secret://k" });
     mockEngine.rotateSecret.mockResolvedValue(undefined);
     mockEngine.revokeSecret.mockResolvedValue(undefined);
@@ -67,6 +71,46 @@ describe("secret set/rotate/delete — token path", () => {
     expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("[ACCESS_DENIED]"));
     expect(mockResolveSecretValue).not.toHaveBeenCalled();
     expect(mockEngine.createSecret).not.toHaveBeenCalled();
+  });
+
+  it("set: a create-scoped token whose listing holds no pending secret of the name ends as today, DUPLICATE_SECRET from createSecret (F2)", async () => {
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["create"] }));
+    mockEngine.createSecret.mockRejectedValue(VaultError.duplicateSecret("db-key"));
+    await expect(run(["set", "db-key", "--token", "jwt-value"])).rejects.toThrow("process.exit");
+    expect(mockEngine.listSecrets).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({ principal_id: "agent-1", interface: "cli" }),
+    );
+    expect(spies.errorSpy).toHaveBeenCalledWith("Error: Secret already exists: db-key");
+    expect(mockEngine.createSecret).toHaveBeenCalledTimes(1);
+    expect(mockEngine.setSecretValue).not.toHaveBeenCalled();
+  });
+
+  it("set: a pending secret in a create-scoped token's listing is set through setSecretValue with the token's caller (F2)", async () => {
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["create"] }));
+    mockEngine.listSecrets.mockReturnValue([
+      {
+        handle: "secret://db-key",
+        name: "db-key",
+        type: "api_key",
+        project: null,
+        status: "pending",
+        version: 1,
+        createdAt: 1000,
+        updatedAt: 1000,
+        expiresAt: null,
+        rotatedAt: null,
+      },
+    ]);
+    mockEngine.setSecretValue.mockResolvedValue(undefined);
+    await run(["set", "db-key", "--token", "jwt-value"]);
+    expect(mockEngine.setSecretValue).toHaveBeenCalledWith(
+      "secret://db-key",
+      expect.any(Uint8Array),
+      expect.objectContaining({ principal_id: "agent-1", interface: "cli" }),
+    );
+    expect(mockEngine.createSecret).not.toHaveBeenCalled();
+    expect(spies.errorSpy).toHaveBeenCalledWith("OK: Secret 'db-key' value set (secret://db-key)");
   });
 
   it("rotate: rotate-scoped token passes the caller; refusal precedes value collection", async () => {

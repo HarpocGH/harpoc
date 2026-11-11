@@ -10,7 +10,7 @@ import {
 } from "../elicitation/value-collector.js";
 import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
-import { CREATE_SECRET_TOOL } from "./definitions.js";
+import { CREATE_SECRET_TOOL, pendingHint } from "./definitions.js";
 
 const PERMISSION: Permission = "create";
 
@@ -49,7 +49,7 @@ export function registerCreateSecret(
       let status: string = result.status;
       let message =
         result.status === "pending"
-          ? `Secret created. Set the value with: harpoc secret set ${args.name}`
+          ? pendingHint(args.name, args.type, args.project)
           : result.message;
 
       if (result.status === "pending") {

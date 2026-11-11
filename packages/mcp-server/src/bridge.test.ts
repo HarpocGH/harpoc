@@ -249,7 +249,7 @@ describe("the bridge collects no value and drives no browser leg (B1)", () => {
     expect(JSON.parse(text(result))).toEqual({
       handle: "secret://new-key",
       status: "pending",
-      message: "Secret created. Set the value with: harpoc secret set new-key",
+      message: "Secret created. Set the value with: harpoc secret set new-key --project prod",
     });
     expect(client.createSecret).toHaveBeenCalledWith({
       name: "new-key",
@@ -257,6 +257,36 @@ describe("the bridge collects no value and drives no browser leg (B1)", () => {
       project: "prod",
     });
   });
+
+  it.each([
+    {
+      label: "an unscoped api_key create",
+      args: { name: "new-key", type: "api_key" },
+      command: "harpoc secret set new-key",
+    },
+    {
+      label: "a certificate-typed create",
+      args: { name: "new-key", type: "certificate" },
+      command: "harpoc secret set new-key --type certificate",
+    },
+    {
+      label: "a project-scoped certificate-typed create",
+      args: { name: "new-key", type: "certificate", project: "prod" },
+      command: "harpoc secret set new-key --type certificate --project prod",
+    },
+  ])(
+    "$label: the pending hint is the command that sets the value (F2)",
+    async ({ args, command }) => {
+      const result = await bridge.callTool("create_secret", args);
+      expect(result.isError).toBeUndefined();
+      expect(JSON.parse(text(result))).toEqual({
+        handle: "secret://new-key",
+        status: "pending",
+        message: `Secret created. Set the value with: ${command}`,
+      });
+      expect(client.createSecret).toHaveBeenCalledWith(args);
+    },
+  );
 
   it("rotate_secret refuses, naming the vault user's command, and sends nothing", async () => {
     const result = await bridge.callTool("rotate_secret", { handle: "secret://prod/db-pass" });
