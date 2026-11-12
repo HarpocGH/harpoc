@@ -7,6 +7,10 @@ import { errorHandler } from "../middleware/error-handler.js";
 import { createAgentRoutes } from "./agents.js";
 import type { HarpocEnv } from "../types.js";
 
+type ErrorBody = { error: string; message: string };
+type AgentBody = { data: { name: string } };
+type DataBody = { data: unknown };
+
 const ADMIN_TOKEN: VaultApiToken = {
   sub: "admin-agent",
   vault_id: "vault-1",
@@ -107,7 +111,7 @@ describe("GET /api/v1/agents", () => {
   it("lists active agents by default", async () => {
     const res = await app.request("/api/v1/agents", { headers: AUTH });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as { data: [{ name: string }] };
     expect(body.data).toHaveLength(1);
     expect(body.data[0].name).toBe("deploy-bot");
     expect(engine.listAgents).toHaveBeenCalledWith("active", ADMIN_CALLER);
@@ -126,7 +130,7 @@ describe("GET /api/v1/agents", () => {
   it("rejects an unknown ?status= value before the engine call", async () => {
     const res = await app.request("/api/v1/agents?status=live", { headers: AUTH });
     expect(res.status).toBe(400);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe("SCHEMA_VALIDATION_ERROR");
     expect(engine.listAgents).not.toHaveBeenCalled();
   });
@@ -155,7 +159,7 @@ describe("POST /api/v1/agents", () => {
       body: JSON.stringify({ name: "deploy-bot", description: "ships things", owner: "platform" }),
     });
     expect(res.status).toBe(201);
-    const body = await res.json();
+    const body = (await res.json()) as AgentBody;
     expect(body.data.name).toBe("deploy-bot");
     expect(engine.registerAgent).toHaveBeenCalledWith(
       { name: "deploy-bot", description: "ships things", owner: "platform" },
@@ -170,7 +174,7 @@ describe("POST /api/v1/agents", () => {
       body: JSON.stringify({ name: "bad name" }),
     });
     expect(res.status).toBe(400);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe("SCHEMA_VALIDATION_ERROR");
     expect(engine.registerAgent).not.toHaveBeenCalled();
   });
@@ -178,7 +182,7 @@ describe("POST /api/v1/agents", () => {
   it("rejects an empty body with the framing message", async () => {
     const res = await app.request("/api/v1/agents", { method: "POST", headers: JSON_AUTH });
     expect(res.status).toBe(400);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe("SCHEMA_VALIDATION_ERROR");
     expect(body.message).toBe("Request body must be valid JSON");
     expect(engine.registerAgent).not.toHaveBeenCalled();
@@ -191,7 +195,7 @@ describe("POST /api/v1/agents", () => {
       body: "{not json",
     });
     expect(res.status).toBe(400);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.message).toBe("Request body must be valid JSON");
   });
 
@@ -205,7 +209,7 @@ describe("POST /api/v1/agents", () => {
       body: JSON.stringify({ name: "deploy-bot" }),
     });
     expect(res.status).toBe(409);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe("AGENT_EXISTS");
   });
 
@@ -227,7 +231,7 @@ describe("GET /api/v1/agents/:name", () => {
   it("returns one agent", async () => {
     const res = await app.request("/api/v1/agents/deploy-bot", { headers: AUTH });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as AgentBody;
     expect(body.data.name).toBe("deploy-bot");
     expect(engine.getAgent).toHaveBeenCalledWith("deploy-bot", ADMIN_CALLER);
   });
@@ -238,14 +242,14 @@ describe("GET /api/v1/agents/:name", () => {
     });
     const res = await app.request("/api/v1/agents/ghost", { headers: AUTH });
     expect(res.status).toBe(404);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe("AGENT_NOT_FOUND");
   });
 
   it("rejects a malformed :name before the engine call", async () => {
     const res = await app.request("/api/v1/agents/bad%20name", { headers: AUTH });
     expect(res.status).toBe(400);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe("SCHEMA_VALIDATION_ERROR");
     expect(engine.getAgent).not.toHaveBeenCalled();
   });
@@ -268,7 +272,7 @@ describe("PUT /api/v1/agents/:name", () => {
       body: JSON.stringify({ description: "new", owner: "sre" }),
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as AgentBody;
     expect(body.data.name).toBe("deploy-bot");
     expect(engine.updateAgent).toHaveBeenCalledWith(
       "deploy-bot",
@@ -293,7 +297,7 @@ describe("PUT /api/v1/agents/:name", () => {
       headers: JSON_AUTH,
     });
     expect(res.status).toBe(400);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.message).toBe("Request body must be valid JSON");
     expect(engine.updateAgent).not.toHaveBeenCalled();
   });
@@ -331,7 +335,7 @@ describe("POST /api/v1/agents/:name/deactivate", () => {
       headers: AUTH,
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as DataBody;
     expect(body.data).toEqual({ revoked_tokens: 2 });
     expect(engine.deactivateAgent).toHaveBeenCalledWith("deploy-bot", ADMIN_CALLER);
   });
@@ -384,7 +388,7 @@ describe("POST /api/v1/agents/:name/activate", () => {
       headers: AUTH,
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as AgentBody;
     expect(body.data.name).toBe("deploy-bot");
     expect(engine.activateAgent).toHaveBeenCalledWith("deploy-bot", ADMIN_CALLER);
   });
@@ -418,7 +422,7 @@ describe("DELETE /api/v1/agents/:name", () => {
       headers: AUTH,
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as DataBody;
     expect(body.data).toEqual({ revoked_tokens: 2, removed_grants: 3 });
     expect(engine.deleteAgent).toHaveBeenCalledWith("deploy-bot", ADMIN_CALLER);
   });
@@ -457,7 +461,7 @@ describe("GET /api/v1/agents/:name/policies", () => {
   it("lists the agent's grants", async () => {
     const res = await app.request("/api/v1/agents/deploy-bot/policies", { headers: AUTH });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as { data: [{ handle: string }] };
     expect(body.data).toHaveLength(1);
     expect(body.data[0].handle).toBe("secret://test-key");
     expect(engine.listAgentPolicies).toHaveBeenCalledWith("deploy-bot", ADMIN_CALLER);
@@ -487,7 +491,7 @@ describe("PUT /api/v1/agents/:name/secrets/:handle/permissions", () => {
       body: JSON.stringify({ permissions: ["read", "use"], expires_at: 9999 }),
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as DataBody;
     expect(body.data).toEqual({ policy: null, gated_before: false, gated_after: true });
     expect(engine.resolveSecretId).toHaveBeenCalledWith(
       "secret://test-key",
@@ -588,7 +592,7 @@ describe("PUT /api/v1/agents/:name/secrets/:handle/permissions", () => {
       headers: JSON_AUTH,
     });
     expect(res.status).toBe(400);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.message).toBe("Request body must be valid JSON");
     expect(engine.setAgentPermissions).not.toHaveBeenCalled();
   });
@@ -603,7 +607,7 @@ describe("PUT /api/v1/agents/:name/secrets/:handle/permissions", () => {
       body: JSON.stringify({ permissions: ["read"] }),
     });
     expect(res.status).toBe(403);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe("AGENT_INACTIVE");
   });
 

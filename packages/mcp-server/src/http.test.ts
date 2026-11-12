@@ -69,7 +69,6 @@ function mockEngine(overrides: Record<string, unknown> = {}): VaultEngine {
     createSecret: vi
       .fn()
       .mockResolvedValue({ handle: "secret://x", status: "pending", message: "" }),
-    setSecretValue: vi.fn().mockResolvedValue(undefined),
     rotateSecret: vi.fn().mockResolvedValue(undefined),
     revokeSecret: vi.fn().mockResolvedValue(undefined),
     resolveSecretId: vi.fn().mockResolvedValue("uuid-123"),
@@ -1165,9 +1164,9 @@ describe("the 2026-07-28 leg (dual-era, design R1)", () => {
       tokenPayload(["create"]) as unknown as VaultApiToken,
     );
     let captured = "";
-    vi.mocked(engine.setSecretValue).mockImplementation((_handle: string, value: Uint8Array) => {
-      captured = Buffer.from(value).toString("utf8");
-      return Promise.resolve();
+    vi.mocked(engine.createSecret).mockImplementation((input) => {
+      captured = Buffer.from(input.value ?? new Uint8Array(0)).toString("utf8");
+      return Promise.resolve({ handle: "secret://api-key", status: "created", message: "" });
     });
 
     const { client } = await connectModern(server.port, TOKEN, {

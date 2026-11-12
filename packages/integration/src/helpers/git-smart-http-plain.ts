@@ -41,6 +41,7 @@ export async function startGitSmartHttp(opts: {
   user: string;
   token: string;
   env: NodeJS.ProcessEnv;
+  cgiTimeoutMs?: number;
 }): Promise<GitSmartHttp> {
   const requests: SeenGitRequest[] = [];
   const basic = `Basic ${Buffer.from(`${opts.user}:${opts.token}`).toString("base64")}`;
@@ -77,7 +78,8 @@ export async function startGitSmartHttp(opts: {
       res.end();
     };
     const cgi = spawn(opts.git, ["http-backend"], {
-      timeout: CGI_TIMEOUT_MS,
+      timeout: opts.cgiTimeoutMs ?? CGI_TIMEOUT_MS,
+      killSignal: "SIGKILL",
       stdio: ["pipe", "pipe", "ignore"],
       env: {
         ...opts.env,

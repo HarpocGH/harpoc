@@ -52,6 +52,11 @@ export const WINDOWS_RUNTIME_SUBDIR = win32.join("harpoc", "run");
 /** A named pipe's whole name holds at most 256 characters (Microsoft Learn, "Pipe Names"). */
 const MAX_PIPE_NAME_CHARS = 256;
 
+interface DirReader {
+  name: string;
+  role: "consumer" | "agent";
+}
+
 /** A runtime or consumer directory's mode: `0750` or stricter. */
 export function isPrivateDirMode(mode: number): boolean {
   return (mode & GROUP_WRITE_OR_WORLD) === 0;
@@ -181,7 +186,7 @@ function consumerNames(runtimeDir: RuntimeDir): string[] {
 export function consumerDirs(runtimeDir: RuntimeDir): ConsumerDirEntry[] {
   return consumerNames(runtimeDir).map((consumer) => {
     const dir = consumerDir(runtimeDir.path, consumer);
-    const sid = assertPrivateDir(dir, "consumer directory", consumer);
+    const sid = assertPrivateDir(dir, "consumer directory", { name: consumer, role: "consumer" });
     return sid === undefined ? { consumer, dir } : { consumer, dir, sid };
   });
 }
@@ -214,7 +219,12 @@ export function consumerSocketPaths(runtimeDir: RuntimeDir, socketName: string):
  * account, SYSTEM, Administrators and the consumer its name names (read and execute at most).
  */
 export function assertConsumerDir(path: string): void {
-  assertPrivateDir(path, "consumer directory", basename(path));
+  assertPrivateDir(path, "consumer directory", { name: basename(path), role: "consumer" });
+}
+
+/** Refuses `INVALID_INPUT` under `label` unless a token file's directory passes `assertConsumerDir`'s ladder with the spec's agent as its one other reader (win32: `windowsTokenDirAclRefusal`). */
+export function assertTokenDir(dir: string, label: string, agent: string): void {
+  assertPrivateDir(dir, label, { name: agent, role: "agent" });
 }
 
 function hexMask(rights: number): string {
@@ -232,14 +242,26 @@ export function windowsDirAclRefusal(
   acl: WindowsAclListing,
   consumer: string | undefined,
 ): string | undefined {
-  const verdict = judgeWindowsDirAcl(acl, consumer);
+  const verdict = judgeWindowsDirAcl(
+    acl,
+    consumer === undefined ? undefined : { name: consumer, role: "consumer" },
+  );
+  return "refusal" in verdict ? verdict.refusal : undefined;
+}
+
+/** `windowsDirAclRefusal` for a token file's directory: the agent's local account, when its name names one, is the one other reader at read and execute at most, and an agent no local account is named for leaves the directory to this account, SYSTEM and Administrators. */
+export function windowsTokenDirAclRefusal(
+  acl: WindowsAclListing,
+  agent: string,
+): string | undefined {
+  const verdict = judgeWindowsDirAcl(acl, { name: agent, role: "agent" });
   return "refusal" in verdict ? verdict.refusal : undefined;
 }
 
 /** `windowsDirAclRefusal`'s judgement, carrying the consumer's SID when the listing passes. */
 function judgeWindowsDirAcl(
   acl: WindowsAclListing,
-  consumer: string | undefined,
+  reader: DirReader | undefined,
 ): { refusal: string } | { sid: string | undefined } {
   const trusted = new Set([acl.user, SYSTEM_SID, ADMINISTRATORS_SID]);
   if (!trusted.has(acl.owner)) {
@@ -247,30 +269,37 @@ function judgeWindowsDirAcl(
       refusal: `owned by ${acl.owner}, not by this process's account ${acl.user}, SYSTEM or Administrators`,
     };
   }
-  let grantee: { name: string; sid: string } | undefined;
-  if (consumer !== undefined) {
+  let grantee: { name: string; sid: string; role: DirReader["role"] } | undefined;
+  if (reader !== undefined) {
     if (acl.account === undefined || acl.account === null) {
-      return {
-        refusal: `no local account is named ${JSON.stringify(consumer)} (a consumer directory is named for its agent user)`,
-      };
+      if (reader.role === "consumer") {
+        return {
+          refusal: `no local account is named ${JSON.stringify(reader.name)} (a consumer directory is named for its agent user)`,
+        };
+      }
+    } else if (!ACCOUNT_SID.test(acl.account)) {
+      return { refusal: `${JSON.stringify(reader.name)} names ${acl.account}, not a user account` };
+    } else {
+      grantee = { name: reader.name, sid: acl.account, role: reader.role };
     }
-    if (!ACCOUNT_SID.test(acl.account)) {
-      return { refusal: `${JSON.stringify(consumer)} names ${acl.account}, not a user account` };
-    }
-    grantee = { name: consumer, sid: acl.account };
   }
   for (const rule of acl.rules) {
     if (!rule.allow || trusted.has(rule.sid)) continue;
     if (grantee !== undefined && rule.sid === grantee.sid) {
       if ((rule.rights & ~WINDOWS_CONSUMER_DIR_RIGHTS) !== 0) {
         return {
-          refusal: `the access list grants the consumer ${grantee.name} (${rule.sid}) ${hexMask(rule.rights)}; read and execute (0x001200A9) at most`,
+          refusal: `the access list grants the ${grantee.role} ${grantee.name} (${rule.sid}) ${hexMask(rule.rights)}; read and execute (0x001200A9) at most`,
         };
       }
       continue;
     }
+    const others = grantee === undefined ? "" : ` and the ${grantee.role}`;
+    const unnamed =
+      reader !== undefined && grantee === undefined
+        ? ` (no local account is named ${JSON.stringify(reader.name)})`
+        : "";
     return {
-      refusal: `the access list grants ${rule.sid} ${hexMask(rule.rights)}${rule.inherited ? " (inherited)" : ""}; only this process's account, SYSTEM, Administrators${consumer === undefined ? "" : " and the consumer"} may hold a grant`,
+      refusal: `the access list grants ${rule.sid} ${hexMask(rule.rights)}${rule.inherited ? " (inherited)" : ""}; only this process's account, SYSTEM, Administrators${others} may hold a grant${unnamed}`,
     };
   }
   return { sid: grantee?.sid };
@@ -318,7 +347,7 @@ export function isLink(path: string): boolean {
 function assertPrivateDir(
   path: string,
   label: string,
-  consumer: string | undefined,
+  reader: DirReader | undefined,
 ): string | undefined {
   if (isLink(path)) {
     throw VaultError.invalidInput(
@@ -333,7 +362,7 @@ function assertPrivateDir(
   }
   if (stat === undefined) throw VaultError.invalidInput(`${label}: no such directory: ${path}`);
   if (!stat.isDirectory()) throw VaultError.invalidInput(`${label}: not a directory: ${path}`);
-  if (process.platform === "win32") return assertWindowsDirAcl(path, label, consumer);
+  if (process.platform === "win32") return assertWindowsDirAcl(path, label, reader);
   if (process.geteuid === undefined) {
     throw VaultError.invalidInput(
       `${label}: not supported on this platform (the owner and mode cannot be checked): ${path}`,
@@ -362,15 +391,15 @@ function assertPrivateDir(
 function assertWindowsDirAcl(
   path: string,
   label: string,
-  consumer: string | undefined,
+  reader: DirReader | undefined,
 ): string | undefined {
   let acl: WindowsAclListing;
   try {
-    acl = listWindowsAclSync(path, consumer === undefined ? {} : { account: consumer });
+    acl = listWindowsAclSync(path, reader === undefined ? {} : { account: reader.name });
   } catch {
     throw VaultError.invalidInput(`${label}: the access list cannot be read: ${path}`);
   }
-  const verdict = judgeWindowsDirAcl(acl, consumer);
+  const verdict = judgeWindowsDirAcl(acl, reader);
   if ("refusal" in verdict) {
     throw VaultError.invalidInput(`${label}: ${verdict.refusal}: ${path}`);
   }

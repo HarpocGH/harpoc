@@ -8,6 +8,8 @@ import { authMiddleware } from "./auth.js";
 import { errorHandler } from "./error-handler.js";
 import type { HarpocEnv } from "../types.js";
 
+type ErrorBody = { error: string };
+
 const MOCK_TOKEN: VaultApiToken = {
   sub: "test-agent",
   vault_id: "vault-1",
@@ -50,7 +52,7 @@ describe("authMiddleware", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as { sub: string };
     expect(body.sub).toBe("test-agent");
   });
 
@@ -59,7 +61,7 @@ describe("authMiddleware", () => {
 
     const res = await app.request("/test");
     expect(res.status).toBe(401);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe(ErrorCode.INVALID_TOKEN);
   });
 
@@ -82,7 +84,7 @@ describe("authMiddleware", () => {
     });
 
     expect(res.status).toBe(401);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe(ErrorCode.TOKEN_EXPIRED);
   });
 
@@ -94,7 +96,7 @@ describe("authMiddleware", () => {
     });
 
     expect(res.status).toBe(401);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe(ErrorCode.TOKEN_REVOKED);
   });
 

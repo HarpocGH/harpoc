@@ -490,6 +490,29 @@ describeGit("Git working-tree probes read unredacted — real git over smart HTT
       expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
     });
 
+    it("a clone under a credential whose token is its user half, its remote HEAD naming a branch carrying the token with master at the same commit, lands on master: the token stays redacted inside the parse (C-15)", async () => {
+      const tokened = bareRepo("user-token-head.git");
+      git(tokened, "branch", "master", "main");
+      git(tokened, "branch", `${TOKEN}-main`, "main");
+      git(tokened, "symbolic-ref", "HEAD", `refs/heads/${TOKEN}-main`);
+      own = await startGitSmartHttp({
+        git: GIT as string,
+        projectRoot: srv,
+        user: TOKEN,
+        token: "x-oauth-basic",
+        env: gitEnv,
+      });
+      const result = await clone(
+        at(own.port, "user-token-head.git"),
+        new Uint8Array(Buffer.from(`${TOKEN}:x-oauth-basic`)),
+        own.port,
+      );
+      expect(exitOf(result)).toBe(0);
+      expect(onBranch(dest(), "master")).toBe(true);
+      expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+      expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
+    });
+
     it("a clone whose remote-HEAD read fails returns it through the full redaction: neither the result nor the audit row carries the user name or the token", async () => {
       const result = await clone(at(server.port, `${USER}-missing.git`), SECRET, server.port);
       expect(typeof result === "object").toBe(true);
@@ -536,7 +559,7 @@ describeGit("Git working-tree probes read unredacted — real git over smart HTT
       expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
     });
 
-    it("a clone whose remote-HEAD read passes the output cap parses only its fully redacted copy: a default branch named with the credential's user name is not learned, and neither the result nor the audit row carries the user name or the token", async () => {
+    it("a clone whose remote-HEAD read passes the output cap parses the seam's copy: a default branch named with the credential's user name is learned, and neither the result nor the audit row carries the user name or the token (C-16)", async () => {
       const filled = bareRepo("filled-head.git");
       git(filled, "branch", `${USER}-main`, "main");
       git(filled, "symbolic-ref", "HEAD", `refs/heads/${USER}-main`);
@@ -563,7 +586,7 @@ describeGit("Git working-tree probes read unredacted — real git over smart HTT
         env_allowlist: ["GIT_TRACE_PACKET"],
       });
       expect(exitOf(result)).toBe(0);
-      expect(onBranch(dest(), "main")).toBe(true);
+      expect(onBranch(dest(), `${USER}-main`)).toBe(true);
       expect(JSON.stringify(result).includes(USER)).toBe(false);
       expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
       expect(JSON.stringify(log.mock.calls).includes(USER)).toBe(false);

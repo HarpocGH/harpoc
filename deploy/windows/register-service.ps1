@@ -19,6 +19,26 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSModuleAutoLoadingPreference = 'None'
+
+# Import an in-box module by its manifest's path under $PSHOME, never through PSModulePath;
+# a module not found there exactly once ends the script (exit 1).
+function Import-InBoxModule([string]$Name) {
+  $manifests = @()
+  try {
+    $manifests = [System.IO.Directory]::GetFiles([System.IO.Path]::Combine($PSHOME, 'Modules', $Name), "$Name.psd1", [System.IO.SearchOption]::AllDirectories)
+  } catch {
+    $manifests = @()
+  }
+  if ($manifests.Count -ne 1) {
+    [Console]::Error.WriteLine("the in-box module $Name was not found under $PSHOME")
+    exit 1
+  }
+  Import-Module -Name $manifests[0]
+}
+
+Import-InBoxModule 'Microsoft.PowerShell.Utility'
+Import-InBoxModule 'Microsoft.PowerShell.Management'
 
 $Prog = 'register-service.ps1'
 $TaskName = 'Harpoc'
@@ -278,6 +298,8 @@ if ($Unregister) {
     Stop-WithError '-Unregister takes -VaultUser alone' 2
   }
   if (-not (Test-Elevated)) { Stop-WithError 'must run elevated (an Administrator PowerShell)' 1 }
+  Import-InBoxModule 'Microsoft.PowerShell.LocalAccounts'
+  Import-InBoxModule 'ScheduledTasks'
   if ($null -ne (Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction SilentlyContinue)) {
     Unregister-ScheduledTask -TaskName $TaskName -TaskPath '\' -Confirm:$false
     [Console]::Out.WriteLine("task $TaskName unregistered")
@@ -345,6 +367,8 @@ if ($DryRun) {
 }
 
 if (-not (Test-Elevated)) { Stop-WithError 'must run elevated (an Administrator PowerShell)' 1 }
+Import-InBoxModule 'Microsoft.PowerShell.LocalAccounts'
+Import-InBoxModule 'ScheduledTasks'
 $account = Get-LocalUser -Name $VaultUser -ErrorAction SilentlyContinue
 if ($null -eq $account) {
   Stop-WithError "no such local account: $VaultUser (install-two-identity.ps1 creates it)" 2

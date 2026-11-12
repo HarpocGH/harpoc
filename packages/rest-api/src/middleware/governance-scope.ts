@@ -13,7 +13,10 @@ import type { HarpocEnv } from "../types.js";
  * answers before the engine's own assertion can, so the engine's row is the
  * SDK/direct-mode row and this one is the REST row — a probe leaves exactly
  * one, whichever layer refused it. The vault lock (`/api/v1/vault/*`,
- * deployment model B) is vault-wide too and mounts this middleware the same way.
+ * deployment model B) is vault-wide too and mounts this middleware the same way,
+ * and so does the audit chain's verification (`POST /api/v1/audit/verify`, C-12):
+ * the chain spans every row of the vault, so a claimed token is refused it while
+ * `GET /api/v1/audit` still answers that token, filtered to its claim.
  */
 export const unscopedTokenMiddleware: MiddlewareHandler<HarpocEnv> = async (c, next) => {
   const token = c.get("token");

@@ -7,6 +7,8 @@ import { errorHandler } from "../middleware/error-handler.js";
 import { createPolicyRoutes } from "./policies.js";
 import type { HarpocEnv } from "../types.js";
 
+type ErrorBody = { error: string };
+
 const ADMIN_TOKEN: VaultApiToken = {
   sub: "admin-agent",
   vault_id: "vault-1",
@@ -75,7 +77,7 @@ describe("policy routes", () => {
     it("lists policies for a secret", async () => {
       const res = await app.request("/api/v1/secrets/test-key/policies", { headers: AUTH });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as { data: [{ id: string }] };
       expect(body.data).toHaveLength(1);
       expect(body.data[0].id).toBe("policy-1");
       expect(engine.resolveSecretId).toHaveBeenCalledWith(
@@ -113,7 +115,7 @@ describe("policy routes", () => {
         }),
       });
       expect(res.status).toBe(201);
-      const body = await res.json();
+      const body = (await res.json()) as { data: { id: string } };
       expect(body.data.id).toBe("policy-1");
     });
 
@@ -178,7 +180,7 @@ describe("policy routes", () => {
         }),
       });
       expect(res.status).toBe(400);
-      const body = await res.json();
+      const body = (await res.json()) as ErrorBody;
       expect(body.error).toBe("SCHEMA_VALIDATION_ERROR");
       expect(engine.grantPolicy).not.toHaveBeenCalled();
     });
@@ -227,7 +229,7 @@ describe("policy routes", () => {
         headers: AUTH,
       });
       expect(res.status).toBe(404);
-      const body = await res.json();
+      const body = (await res.json()) as ErrorBody;
       expect(body.error).toBe("POLICY_NOT_FOUND");
       expect(engine.listPolicies).not.toHaveBeenCalled();
       expect(engine.revokePolicy).toHaveBeenCalledWith(

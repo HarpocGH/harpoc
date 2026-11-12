@@ -28,6 +28,8 @@ const SCRIPTS = readdirSync(deployRoot, { recursive: true, encoding: "utf8" })
 
 const ENROLL = resolve(deployRoot, "linux", "enroll-unlock-key.sh");
 
+const RUN_SH = resolve(deployRoot, "dev-container", "run.sh");
+
 describe("deploy scripts (deployment model B)", () => {
   it("finds exactly the scripts the deployment ships", () => {
     expect(SCRIPTS).toEqual([
@@ -56,6 +58,87 @@ describe("deploy scripts (deployment model B)", () => {
     const text = readFileSync(ENROLL, "utf8");
     expect(text).toContain('mode="${2:-auto}"');
     expect(text).toContain('--with-key="$mode"');
+  });
+
+  it("dev-container/run.sh refuses with exit 75 while a running container mounts the harpoc-dev-work volume, before docker run (docker ps without -a: a stopped container that still names the volume is no refusal)", () => {
+    const text = readFileSync(RUN_SH, "utf8");
+    const check = text.indexOf('\nrunning="$(docker ps -q --filter volume=harpoc-dev-work)"\n');
+    const refusal = text.indexOf(
+      '\nif [ -n "$running" ]; then\n  echo "run.sh: another run.sh is using the harpoc-dev-work volume" >&2\n  exit 75\nfi\n',
+    );
+    expect(check).toBeGreaterThan(-1);
+    expect(refusal).toBeGreaterThan(check);
+    expect(text.indexOf("docker run ")).toBeGreaterThan(refusal);
+    expect(text.split("docker ps").length - 1).toBe(1);
+  });
+
+  it("dev-container/run.sh runs the whole suite cold and serially: pnpm test --force --concurrency=1 (no replay from /work/.turbo, no starved Argon2 inits)", () => {
+    const lines = readFileSync(RUN_SH, "utf8").split("\n");
+    expect(lines).toContain(
+      `suite='dbus-run-session -- sh -c '"'"'echo harpoc-ci | gnome-keyring-daemon --unlock; keyctl link @u @s || true; pnpm test --force --concurrency=1'"'"`,
+    );
+  });
+
+  it("dev-container/run.sh refuses with exit 2, before its memory check and before docker build, when HARPOC_DEV_MIN_AVAILABLE_MB is not a whole number of MB (a malformed value never skips the memory check)", () => {
+    const text = readFileSync(RUN_SH, "utf8");
+    const guard = text.indexOf(
+      [
+        "",
+        'case "$min_available_mb" in',
+        "  *[!0-9]*)",
+        '    echo "run.sh: HARPOC_DEV_MIN_AVAILABLE_MB must be a whole number of MB (0 skips the check)" >&2',
+        "    exit 2",
+        "    ;;",
+        "esac",
+        "",
+      ].join("\n"),
+    );
+    const read = text.indexOf('\nmin_available_mb="${HARPOC_DEV_MIN_AVAILABLE_MB:-');
+    expect(guard).toBeGreaterThan(-1);
+    expect(read).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(read);
+    expect(text.indexOf('\nif ! [ "$min_available_mb" -eq 0 ]; then\n')).toBeGreaterThan(guard);
+    expect(text.indexOf("docker build ")).toBeGreaterThan(guard);
+  });
+
+  it("dev-container/run.sh refuses with exit 75 before docker build when the host's available memory is under HARPOC_DEV_MIN_AVAILABLE_MB, naming both numbers (default 8192, 0 skips the check; FreePhysicalMemory under Git Bash, MemAvailable on Linux, no check elsewhere)", () => {
+    const text = readFileSync(RUN_SH, "utf8");
+    const read = text.indexOf('\nmin_available_mb="${HARPOC_DEV_MIN_AVAILABLE_MB:-8192}"\n');
+    const check = text.indexOf(
+      [
+        "",
+        'if ! [ "$min_available_mb" -eq 0 ]; then',
+        '  case "$(uname -s)" in',
+        "    MINGW* | MSYS*)",
+        '      available_mb="$(powershell.exe -NoProfile -Command "[int]((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory/1024)")"',
+        "      available_mb=${available_mb%$'\\r'}",
+        "      ;;",
+        "    Linux) available_mb=\"$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo)\" ;;",
+        "    *) available_mb= ;;",
+        "  esac",
+        '  if [ -n "$available_mb" ] && ! [ "$available_mb" -ge "$min_available_mb" ]; then',
+        '    echo "run.sh: the host has $available_mb MB of memory available, under HARPOC_DEV_MIN_AVAILABLE_MB=$min_available_mb (0 skips the check)" >&2',
+        "    exit 75",
+        "  fi",
+        "fi",
+        "",
+      ].join("\n"),
+    );
+    expect(read).toBeGreaterThan(-1);
+    expect(check).toBeGreaterThan(read);
+    expect(text.indexOf("docker build ")).toBeGreaterThan(check);
+    expect(text.split("HARPOC_DEV_MIN_AVAILABLE_MB:-").length - 1).toBe(1);
+  });
+
+  it("dev-container/run.sh's usage text names HARPOC_DEV_MIN_AVAILABLE_MB with its default and the value that skips the check", () => {
+    const text = readFileSync(RUN_SH, "utf8");
+    const start = text.indexOf("cat <<USAGE\n");
+    const end = text.indexOf("\nUSAGE\n", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(text.slice(start, end)).toContain(
+      "\n  HARPOC_DEV_MIN_AVAILABLE_MB\n                     the host's available memory in MB below which run.sh refuses\n                     (default 8192; 0 skips the check)",
+    );
   });
 });
 
@@ -165,6 +248,96 @@ describe("deploy PowerShell scripts (deployment model B on Windows)", () => {
       expect(psText(script)).toContain("\n[CmdletBinding(PositionalBinding = $false)]\nparam(\n");
     },
   );
+
+  it.each(PS_SCRIPTS)(
+    "%s turns module auto-loading off directly after $ErrorActionPreference, then defines Import-InBoxModule and imports Utility and Management with it: its one Import-Module takes the manifest's path under $PSHOME, never a bare module name, and a module not found there exactly once ends the script with exit 1",
+    (script) => {
+      const text = psText(script);
+      const head = [
+        "$ErrorActionPreference = 'Stop'",
+        "$PSModuleAutoLoadingPreference = 'None'",
+        "",
+        "# Import an in-box module by its manifest's path under $PSHOME, never through PSModulePath;",
+        "# a module not found there exactly once ends the script (exit 1).",
+        "function Import-InBoxModule([string]$Name) {",
+        "  $manifests = @()",
+        "  try {",
+        "    $manifests = [System.IO.Directory]::GetFiles([System.IO.Path]::Combine($PSHOME, 'Modules', $Name), \"$Name.psd1\", [System.IO.SearchOption]::AllDirectories)",
+        "  } catch {",
+        "    $manifests = @()",
+        "  }",
+        "  if ($manifests.Count -ne 1) {",
+        '    [Console]::Error.WriteLine("the in-box module $Name was not found under $PSHOME")',
+        "    exit 1",
+        "  }",
+        "  Import-Module -Name $manifests[0]",
+        "}",
+        "",
+        "Import-InBoxModule 'Microsoft.PowerShell.Utility'",
+        "Import-InBoxModule 'Microsoft.PowerShell.Management'",
+        ...(script === "windows/install-two-identity.ps1"
+          ? ["Import-InBoxModule 'Microsoft.PowerShell.LocalAccounts'"]
+          : []),
+        "",
+        "$Prog = ",
+      ].join("\n");
+      expect(text).toContain(`)\nSet-StrictMode -Version Latest\n${head}`);
+      expect(text.split("$PSModuleAutoLoadingPreference").length - 1).toBe(1);
+      expect(text.split("Import-Module").length - 1).toBe(1);
+      expect(text.split("function Import-InBoxModule(").length - 1).toBe(1);
+    },
+  );
+
+  it("each elevated half imports its modules after its elevation check and before its first state-changing call, so a module the image lacks ends the script before any account, grant, registration or write: enroll-unlock-key.ps1 before Start-Process, install-two-identity.ps1 before New-LocalUser, register-service.ps1's -Unregister before Unregister-ScheduledTask and its registration before the grant", () => {
+    const halves = [
+      {
+        script: "windows/enroll-unlock-key.ps1",
+        checks: 1,
+        nth: 0,
+        imports: ["Microsoft.PowerShell.LocalAccounts", "Microsoft.PowerShell.Security"],
+        change: "Start-Process -FilePath $Node",
+      },
+      {
+        script: "windows/install-two-identity.ps1",
+        checks: 1,
+        nth: 0,
+        imports: ["Microsoft.PowerShell.Security"],
+        change: "New-LocalUser -Name $VaultUser",
+      },
+      {
+        script: "windows/register-service.ps1",
+        checks: 2,
+        nth: 0,
+        imports: ["Microsoft.PowerShell.LocalAccounts", "ScheduledTasks"],
+        change: "Unregister-ScheduledTask -TaskName $TaskName",
+      },
+      {
+        script: "windows/register-service.ps1",
+        checks: 2,
+        nth: 1,
+        imports: ["Microsoft.PowerShell.LocalAccounts", "ScheduledTasks"],
+        change: "Invoke-AccountRights 'add' $account.SID.Value $BatchLogonRight",
+      },
+    ];
+    for (const half of halves) {
+      const text = psText(half.script);
+      const checks = [...text.matchAll(/if \(-not \(Test-Elevated\)\)/g)].map(
+        (match) => match.index,
+      );
+      expect(checks.length, half.script).toBe(half.checks);
+      const elevation = checks[half.nth] ?? -1;
+      expect(elevation, half.script).toBeGreaterThan(-1);
+      expect(text.split(half.change).length - 1, half.change).toBe(1);
+      const change = text.indexOf(half.change);
+      for (const moduleName of half.imports) {
+        const at = text.indexOf(`Import-InBoxModule '${moduleName}'`, elevation);
+        expect(at, `${half.script}: ${moduleName} after the elevation check`).toBeGreaterThan(
+          elevation,
+        );
+        expect(at, `${half.script}: ${moduleName} before ${half.change}`).toBeLessThan(change);
+      }
+    }
+  });
 
   it("every account-name pattern of the PowerShell scripts ends with \\z, none with $ (.NET's $ also matches before a final line feed, so a name with a trailing line feed passed it)", () => {
     const counts = Object.fromEntries(
@@ -312,11 +485,28 @@ describe("deploy PowerShell scripts (deployment model B on Windows)", () => {
   });
 });
 
+/** The lines of the workflow file `workflow` under .github/workflows/, read by text. */
+function workflowLines(workflow: "ci.yml" | "e2e.yml"): string[] {
+  return readFileSync(resolve(repoRoot, ".github", "workflows", workflow), "utf8").split(/\r?\n/);
+}
+
+/** The steps of the job `jobId` in `workflow`, each as its lines with their indentation from its `- ` line to the next step or the job's end; empty when the job is not where it stands. */
+function workflowJobSteps(workflow: "ci.yml" | "e2e.yml", jobId: string): string[][] {
+  const lines = workflowLines(workflow);
+  const jobAt = lines.indexOf(`  ${jobId}:`);
+  if (jobAt < 0) return [];
+  const steps: string[][] = [];
+  for (const line of lines.slice(jobAt + 1)) {
+    if (/^ {0,2}\S/.test(line)) break;
+    if (line.startsWith("      - ")) steps.push([line]);
+    else steps.at(-1)?.push(line);
+  }
+  return steps;
+}
+
 /** The `run:` block of the e2e.yml step named `stepName` as lines without the block's indentation, read by text from the step's `name:` line; empty when the step or its block is not where it stands. */
 function e2eStepBlock(stepName: string): string[] {
-  const lines = readFileSync(resolve(repoRoot, ".github", "workflows", "e2e.yml"), "utf8").split(
-    /\r?\n/,
-  );
+  const lines = workflowLines("e2e.yml");
   const stepAt = lines.indexOf(`      - name: ${stepName}`);
   const run = lines.indexOf("        run: |", stepAt);
   if (stepAt < 0 || run < 0 || lines.slice(stepAt + 1, run).some((l) => l.startsWith("      - "))) {
@@ -438,13 +628,57 @@ describe("e2e.yml's provisioning step (the deploy recipe's run, its PowerShell r
   });
 });
 
+describe("e2e.yml's two-identity-windows job (its steps read as text)", () => {
+  it("runs e2e's four Windows unit files after the task smoke step, unless the run was cancelled, under pwsh and with no tier variable (the seven win32-gated rows, no fleet, outside the gate)", () => {
+    const steps = workflowJobSteps("e2e.yml", "two-identity-windows");
+    const smokeAt = steps.findIndex(
+      (step) =>
+        step[0] ===
+        "      - name: Register, start and stop the daemon as a startup task (the Password-logon cell)",
+    );
+    const unitAt = steps.findIndex(
+      (step) => step[0] === "      - name: Run e2e's Windows unit files (no fleet)",
+    );
+    expect(smokeAt).toBeGreaterThan(-1);
+    expect(steps[unitAt]).toEqual([
+      "      - name: Run e2e's Windows unit files (no fleet)",
+      "        if: ${{ !cancelled() }}",
+      "        shell: pwsh",
+      "        run: pnpm --filter @harpoc/e2e test:e2e src/assert/process-inventory-windows.test.ts src/harness/runas-windows.test.ts src/harness/two-identity-windows.test.ts src/harness/fixtures.test.ts",
+    ]);
+    expect(unitAt).toBeGreaterThan(smokeAt);
+  });
+});
+
+describe("ci.yml's Linux filesystem-isolation probe step (read as text)", () => {
+  it("names no ubuntu release in its name, its comment or its notice (neither today's image nor an ubuntu-<version>: the image moves, and the step prints which tier it offers)", () => {
+    const probes = workflowJobSteps("ci.yml", "build-and-test").filter(
+      (step) =>
+        (step[0] ?? "").startsWith("      - name: Probe filesystem isolation (diagnostic") &&
+        step.includes("        if: runner.os == 'Linux'"),
+    );
+    expect(probes.length).toBe(1);
+    const step = probes[0] ?? [];
+    const comment = step.filter((line) => line.startsWith("        # "));
+    const notices = [...step.join("\n").matchAll(/::notice::([^"\n]*)/g)].map(
+      (match) => match[1] ?? "",
+    );
+    expect(comment.length).toBeGreaterThan(0);
+    expect(notices.length).toBe(1);
+    expect(notices[0]?.startsWith("setpriv Landlock unavailable (")).toBe(true);
+    expect(
+      [step[0] ?? "", ...comment, ...notices].filter((text) => /today's|ubuntu[- ]?\d/i.test(text)),
+    ).toEqual([]);
+  });
+});
+
 /** One argument as the Windows C runtime reads it back (the scripts' ConvertTo-Argument, for paths without quotes). */
 const winArg = (value: string): string => (/\s/.test(value) ? `"${value}"` : value);
 
 /** A recipe row's spawn budget: a module-loading cmdlet answers in tens of seconds under the full gate on windows-latest (`decisions.md` § "The WMI listing series"). The budget is 300 s because on a loaded Windows CI leg `register-service.ps1 -DryRun` ran 175 s of the former 180 s, the cost being the first module autoload of a fresh `powershell.exe`. */
 const PS1_TIMEOUT_MS = 300_000;
 
-/** The recipe rows' environment: the inherited one with `PSModulePath` set to the in-box modules directory the three scripts load from (Management, Utility, Security, LocalAccounts, ScheduledTasks); Windows PowerShell 5.1 puts `C:\Program Files\WindowsPowerShell\Modules` back ahead of it (measured), so the child searches that directory first, then the in-box one. */
+/** The recipe rows' environment: the inherited one with `PSModulePath` narrowed to the in-box modules directory the three scripts import from (Management, Utility, Security, LocalAccounts, ScheduledTasks); Windows PowerShell 5.1 puts `C:\Program Files\WindowsPowerShell\Modules` back ahead of the narrowed path (measured), so the child sees that directory, then the in-box one; a recipe child loads no module through either: each recipe turns auto-loading off and imports a module by its manifest's path under `$PSHOME`. */
 function recipeEnvironment(): NodeJS.ProcessEnv {
   return {
     ...Object.fromEntries(
@@ -535,6 +769,7 @@ describe.skipIf(process.platform !== "win32")(
     function runPs1(
       script: string,
       args: string[],
+      env: NodeJS.ProcessEnv = recipeEnvironment(),
     ): { status: number | null; stdout: string; stderr: string; measured: string } {
       const started = performance.now();
       const run = spawnSync(
@@ -553,7 +788,7 @@ describe.skipIf(process.platform !== "win32")(
           windowsHide: true,
           encoding: "utf8",
           timeout: PS1_TIMEOUT_MS,
-          env: recipeEnvironment(),
+          env,
         },
       );
       const ended = performance.now();
@@ -631,6 +866,80 @@ describe.skipIf(process.platform !== "win32")(
     );
 
     it.each(PS_SCRIPTS)(
+      "%s calls only commands it resolves without auto-loading (the census through the pinned host's parser): a function it defines, a native program by its path under $env:SystemRoot, a cmdlet of Microsoft.PowerShell.Core, or a cmdlet whose module an Import-InBoxModule call imports before the call, in a block that encloses it",
+      (script) => {
+        const run = spawnSync(
+          POWERSHELL,
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$PSModuleAutoLoadingPreference='None';" +
+              "foreach($m in 'Microsoft.PowerShell.Utility','Microsoft.PowerShell.Management','Microsoft.PowerShell.Security','Microsoft.PowerShell.LocalAccounts','ScheduledTasks'){Import-Module -Name ([System.IO.Directory]::GetFiles([System.IO.Path]::Combine($PSHOME,'Modules',$m),$m+'.psd1',[System.IO.SearchOption]::AllDirectories)[0])};" +
+              "$t=$null;$e=$null;$a=[System.Management.Automation.Language.Parser]::ParseFile($env:HARPOC_PS1,[ref]$t,[ref]$e);" +
+              "[Console]::Out.WriteLine('errors '+$e.Count);" +
+              "foreach($f in $a.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$true)){[Console]::Out.WriteLine('function '+$f.Name)};" +
+              "$sets=@($a.FindAll({param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [System.Management.Automation.Language.VariableExpressionAst]},$true));" +
+              "foreach($c in $a.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst]},$true)){$name=$c.GetCommandName();$v=$c.CommandElements[0];" +
+              "if($null -eq $name){$by='';if($c.InvocationOperator -eq 'Ampersand' -and $v -is [System.Management.Automation.Language.VariableExpressionAst]){$by=@($sets|Where-Object{$_.Left.VariablePath.UserPath -eq $v.VariablePath.UserPath}|ForEach-Object{$_.Right.Extent.Text}) -join ' | '};" +
+              "[Console]::Out.WriteLine('native '+$c.Extent.StartLineNumber+' '+$by)}else{" +
+              "$info=@(Get-Command -Name $name -ListImported -ErrorAction SilentlyContinue);$module='-';if($info.Count -gt 0 -and $info[0].ModuleName -ne ''){$module=$info[0].ModuleName};" +
+              "[Console]::Out.WriteLine('command '+$c.Extent.StartOffset+' '+$c.Extent.StartLineNumber+' '+$name+' '+$module);" +
+              "if($name -eq 'Import-InBoxModule' -and $c.CommandElements.Count -eq 2 -and $c.CommandElements[1] -is [System.Management.Automation.Language.StringConstantExpressionAst]){" +
+              "$b=$c.Parent;while($null -ne $b -and -not($b -is [System.Management.Automation.Language.StatementBlockAst] -or $b -is [System.Management.Automation.Language.NamedBlockAst])){$b=$b.Parent};" +
+              "[Console]::Out.WriteLine('import '+$c.Extent.StartOffset+' '+$b.Extent.StartOffset+' '+$b.Extent.EndOffset+' '+$c.CommandElements[1].Value)}}}",
+          ],
+          {
+            shell: false,
+            windowsHide: true,
+            encoding: "utf8",
+            timeout: PS1_TIMEOUT_MS,
+            env: { ...recipeEnvironment(), HARPOC_PS1: resolve(deployRoot, script) },
+          },
+        );
+        expect(run.error).toBeUndefined();
+        expect(run.stderr).toBe("");
+        expect(run.status).toBe(0);
+        const rows = run.stdout.trim().split(/\r?\n/);
+        expect(rows[0]).toBe("errors 0");
+        const fields = rows.map((row) => row.split(" "));
+        const defined = new Set(fields.filter((f) => f[0] === "function").map((f) => f[1] ?? ""));
+        const imports = fields
+          .filter((f) => f[0] === "import")
+          .map(([, at, from, to, source]) => ({
+            at: Number(at),
+            from: Number(from),
+            to: Number(to),
+            source: source ?? "",
+          }));
+        const commands = fields
+          .filter((f) => f[0] === "command")
+          .map(([, at, line, command, source]) => ({
+            at: Number(at),
+            line: line ?? "",
+            command: command ?? "",
+            source: source ?? "",
+          }));
+        expect(commands.length).toBeGreaterThan(0);
+        const unresolved = commands
+          .filter(
+            ({ at, command, source }) =>
+              !defined.has(command) &&
+              source !== "Microsoft.PowerShell.Core" &&
+              !imports.some((i) => i.source === source && i.at < at && i.from <= at && at <= i.to),
+          )
+          .map(({ line, command, source }) => `line ${line}: ${command} (${source})`);
+        const byExpression = rows
+          .filter((row) => row.startsWith("native "))
+          .filter(
+            (row) => !/^native \d+ Join-Path \$env:SystemRoot 'System32\\[\w.-]+\.exe'$/.test(row),
+          );
+        expect([...unresolved, ...byExpression]).toEqual([]);
+      },
+      PS1_TIMEOUT_MS + 30_000,
+    );
+
+    it.each(PS_SCRIPTS)(
       "%s -Help prints its usage and exits 0",
       (script) => {
         const run = runPs1(script, ["-Help"]);
@@ -638,97 +947,244 @@ describe.skipIf(process.platform !== "win32")(
         expect(run.stdout).toContain(`Usage: ${script.slice("windows/".length)}`);
         expect(run.stderr, run.measured).toBe("");
       },
-      330_000,
+      PS1_TIMEOUT_MS + 30_000,
     );
 
-    it("register-service.ps1 -DryRun prints the startup task: the memory session, the DPAPI-sealed key, no time limit — and registers nothing", () => {
-      const programData = join(root, "ProgramData");
-      mkdirSync(programData);
-      const base = join(programData, "harpoc");
-      const spec = `agent=agent-k,file=${join(base, "run", "agent-k", "token.jwt")},scope=use,secrets=api-key`;
-      const run = runPs1("windows/register-service.ps1", [
-        "-DryRun",
-        "-Node",
-        process.execPath,
-        "-Cli",
-        cli,
-        "-ProgramData",
-        programData,
-        "-Proxy",
-        "-SshAgent",
-        "-IssueToken",
-        spec,
-      ]);
-      expect(run.stderr, run.measured).toBe("");
-      expect(run.status, run.measured).toBe(0);
-      const vault = join(base, "vault");
-      const argument = [
-        join(cli, "dist", "index.js"),
-        "--vault-dir",
-        vault,
-        "server",
-        "start",
-        "--rest",
-        "--session",
-        "memory",
-        "--unlock-key-dpapi",
-        join(vault, "unlock.key.dpapi"),
-        "--runtime-dir",
-        join(base, "run"),
-        "--proxy",
-        "--ssh-agent",
-        "--issue-token",
-        spec,
-      ]
-        .map(winArg)
-        .join(" ");
-      expect(run.stdout.trim().split(/\r?\n/)).toEqual([
-        "task Harpoc",
-        `principal ${process.env["COMPUTERNAME"] ?? ""}\\harpoc (logon type Password, run level Limited)`,
-        "right SeBatchLogonRight (Log on as a batch job), granted to the principal unless held",
-        `execute ${process.execPath}`,
-        `argument ${argument}`,
-        `working directory ${base}`,
-        "trigger at startup",
-        "settings ExecutionTimeLimit=PT0S RestartCount=2 RestartInterval=PT1M MultipleInstances=IgnoreNew StartWhenAvailable AllowStartIfOnBatteries DontStopIfGoingOnBatteries",
-        "dry run: nothing registered",
-      ]);
-      expect(existsSync(base)).toBe(false);
-    }, 330_000);
+    it(
+      "register-service.ps1 -DryRun prints the startup task: the memory session, the DPAPI-sealed key, no time limit — and registers nothing",
+      () => {
+        const programData = join(root, "ProgramData");
+        mkdirSync(programData);
+        const base = join(programData, "harpoc");
+        const spec = `agent=agent-k,file=${join(base, "run", "agent-k", "token.jwt")},scope=use,secrets=api-key`;
+        const run = runPs1("windows/register-service.ps1", [
+          "-DryRun",
+          "-Node",
+          process.execPath,
+          "-Cli",
+          cli,
+          "-ProgramData",
+          programData,
+          "-Proxy",
+          "-SshAgent",
+          "-IssueToken",
+          spec,
+        ]);
+        expect(run.stderr, run.measured).toBe("");
+        expect(run.status, run.measured).toBe(0);
+        const vault = join(base, "vault");
+        const argument = [
+          join(cli, "dist", "index.js"),
+          "--vault-dir",
+          vault,
+          "server",
+          "start",
+          "--rest",
+          "--session",
+          "memory",
+          "--unlock-key-dpapi",
+          join(vault, "unlock.key.dpapi"),
+          "--runtime-dir",
+          join(base, "run"),
+          "--proxy",
+          "--ssh-agent",
+          "--issue-token",
+          spec,
+        ]
+          .map(winArg)
+          .join(" ");
+        expect(run.stdout.trim().split(/\r?\n/)).toEqual([
+          "task Harpoc",
+          `principal ${process.env["COMPUTERNAME"] ?? ""}\\harpoc (logon type Password, run level Limited)`,
+          "right SeBatchLogonRight (Log on as a batch job), granted to the principal unless held",
+          `execute ${process.execPath}`,
+          `argument ${argument}`,
+          `working directory ${base}`,
+          "trigger at startup",
+          "settings ExecutionTimeLimit=PT0S RestartCount=2 RestartInterval=PT1M MultipleInstances=IgnoreNew StartWhenAvailable AllowStartIfOnBatteries DontStopIfGoingOnBatteries",
+          "dry run: nothing registered",
+        ]);
+        expect(existsSync(base)).toBe(false);
+      },
+      PS1_TIMEOUT_MS + 30_000,
+    );
 
-    it("register-service.ps1's account-rights helper compiles under the pinned host and lists an account's own rights without a change", () => {
-      const sids = elevated ? ["S-1-0-0", "S-1-5-32-544"] : ["S-1-0-0"];
-      const run = spawnSync(
-        POWERSHELL,
-        [
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          "$ErrorActionPreference='Stop';$t=$null;$e=$null;$a=[System.Management.Automation.Language.Parser]::ParseFile($env:HARPOC_PS1,[ref]$t,[ref]$e);" +
-            "$s=$a.Find({param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$AccountRightsSource'},$true);" +
-            "Add-Type -TypeDefinition $s.Right.Expression.Value;" +
-            "foreach($sid in $env:HARPOC_SIDS -split ','){[Console]::Out.WriteLine($sid+' '+@([Harpoc.Deploy.AccountRights]::Enumerate($sid)).Count)}",
-        ],
-        {
-          shell: false,
-          windowsHide: true,
-          encoding: "utf8",
-          timeout: PS1_TIMEOUT_MS,
-          env: {
-            ...recipeEnvironment(),
-            HARPOC_PS1: resolve(deployRoot, "windows/register-service.ps1"),
-            HARPOC_SIDS: sids.join(","),
-          },
-        },
+    function standIn(label: string): { env: NodeJS.ProcessEnv; marker: string } {
+      const dir = join(root, `stand-in-${label}`);
+      const moduleDir = join(dir, "Microsoft.PowerShell.Management");
+      mkdirSync(moduleDir, { recursive: true });
+      writeFileSync(
+        join(moduleDir, "Microsoft.PowerShell.Management.psd1"),
+        "@{ RootModule = 'Microsoft.PowerShell.Management.psm1'; ModuleVersion = '1.0'; FunctionsToExport = @('Test-Path', 'Join-Path'); CmdletsToExport = @(); AliasesToExport = @(); VariablesToExport = @() }\n",
       );
-      expect(run.error).toBeUndefined();
-      expect(run.stderr).toBe("");
-      expect(run.status).toBe(0);
-      const lines = run.stdout.trim().split(/\r?\n/);
-      expect(lines.length).toBe(sids.length);
-      expect(lines[0]).toBe("S-1-0-0 0");
-      if (elevated) expect(lines[1]).toMatch(/^S-1-5-32-544 [1-9]\d*$/);
-    }, 330_000);
+      writeFileSync(
+        join(moduleDir, "Microsoft.PowerShell.Management.psm1"),
+        [
+          "[System.IO.File]::WriteAllText([System.IO.Path]::Combine($PSScriptRoot, 'loaded.marker'), 'loaded')",
+          "function Test-Path([string]$LiteralPath, [string]$PathType) {",
+          "  if ($PathType -eq 'Leaf') { return [System.IO.File]::Exists($LiteralPath) }",
+          "  return [System.IO.Directory]::Exists($LiteralPath)",
+          "}",
+          "function Join-Path([string]$Path, [string]$ChildPath) {",
+          "  return [System.IO.Path]::Combine($Path, $ChildPath)",
+          "}",
+          "",
+        ].join("\n"),
+      );
+      const env = recipeEnvironment();
+      return {
+        env: { ...env, PSModulePath: `${dir};${env["PSModulePath"] ?? ""}` },
+        marker: join(moduleDir, "loaded.marker"),
+      };
+    }
+
+    it(
+      "register-service.ps1 -DryRun under a PSModulePath whose first directory holds a stand-in Microsoft.PowerShell.Management (Test-Path and Join-Path) prints today's registration and exits 0, and the stand-in never loads: the recipe imports the in-box module by its path under $PSHOME",
+      () => {
+        const { env, marker } = standIn("dry-run");
+        const run = runPs1(
+          "windows/register-service.ps1",
+          ["-DryRun", "-Node", process.execPath, "-Cli", cli],
+          env,
+        );
+        const base = join(process.env["ProgramData"] ?? "", "harpoc");
+        const vault = join(base, "vault");
+        const argument = [
+          join(cli, "dist", "index.js"),
+          "--vault-dir",
+          vault,
+          "server",
+          "start",
+          "--rest",
+          "--session",
+          "memory",
+          "--unlock-key-dpapi",
+          join(vault, "unlock.key.dpapi"),
+          "--runtime-dir",
+          join(base, "run"),
+        ]
+          .map(winArg)
+          .join(" ");
+        expect(run.stderr, run.measured).toBe("");
+        expect(run.status, run.measured).toBe(0);
+        expect(run.stdout.trim().split(/\r?\n/)).toEqual([
+          "task Harpoc",
+          `principal ${process.env["COMPUTERNAME"] ?? ""}\\harpoc (logon type Password, run level Limited)`,
+          "right SeBatchLogonRight (Log on as a batch job), granted to the principal unless held",
+          `execute ${process.execPath}`,
+          `argument ${argument}`,
+          `working directory ${base}`,
+          "trigger at startup",
+          "settings ExecutionTimeLimit=PT0S RestartCount=2 RestartInterval=PT1M MultipleInstances=IgnoreNew StartWhenAvailable AllowStartIfOnBatteries DontStopIfGoingOnBatteries",
+          "dry run: nothing registered",
+        ]);
+        expect(existsSync(marker), run.measured).toBe(false);
+      },
+      PS1_TIMEOUT_MS + 30_000,
+    );
+
+    it.each([
+      {
+        script: "install-two-identity.ps1",
+        args: () => ["-ProgramData", root, "-AgentUser", "Agent"],
+        says: "not a consumer name",
+      },
+      {
+        script: "enroll-unlock-key.ps1",
+        args: () => [
+          "-Node",
+          process.execPath,
+          "-Cli",
+          join(root, "absent"),
+          "-Out",
+          join(root, "stand-in.dpapi"),
+        ],
+        says: "-Cli: no built CLI",
+      },
+    ])(
+      "$script under a PSModulePath whose first directory holds a stand-in Microsoft.PowerShell.Management refuses ($says) with exit 2 after its first Test-Path, and the stand-in never loads",
+      ({ script, args, says }) => {
+        const { env, marker } = standIn(script);
+        const run = runPs1(`windows/${script}`, args(), env);
+        expect(run.status, run.measured).toBe(2);
+        expect(run.stderr.startsWith(`${script}: `), run.measured).toBe(true);
+        expect(run.stderr).toContain(says);
+        expect(existsSync(marker), run.measured).toBe(false);
+      },
+      PS1_TIMEOUT_MS + 30_000,
+    );
+
+    it(
+      "register-service.ps1's account-rights helper compiles under the pinned host and lists an account's own rights without a change",
+      () => {
+        const sids = elevated ? ["S-1-0-0", "S-1-5-32-544"] : ["S-1-0-0"];
+        const run = spawnSync(
+          POWERSHELL,
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$ErrorActionPreference='Stop';$t=$null;$e=$null;$a=[System.Management.Automation.Language.Parser]::ParseFile($env:HARPOC_PS1,[ref]$t,[ref]$e);" +
+              "$s=$a.Find({param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$AccountRightsSource'},$true);" +
+              "Add-Type -TypeDefinition $s.Right.Expression.Value;" +
+              "foreach($sid in $env:HARPOC_SIDS -split ','){[Console]::Out.WriteLine($sid+' '+@([Harpoc.Deploy.AccountRights]::Enumerate($sid)).Count)}",
+          ],
+          {
+            shell: false,
+            windowsHide: true,
+            encoding: "utf8",
+            timeout: PS1_TIMEOUT_MS,
+            env: {
+              ...recipeEnvironment(),
+              HARPOC_PS1: resolve(deployRoot, "windows/register-service.ps1"),
+              HARPOC_SIDS: sids.join(","),
+            },
+          },
+        );
+        expect(run.error).toBeUndefined();
+        expect(run.stderr).toBe("");
+        expect(run.status).toBe(0);
+        const lines = run.stdout.trim().split(/\r?\n/);
+        expect(lines.length).toBe(sids.length);
+        expect(lines[0]).toBe("S-1-0-0 0");
+        if (elevated) expect(lines[1]).toMatch(/^S-1-5-32-544 [1-9]\d*$/);
+      },
+      PS1_TIMEOUT_MS + 30_000,
+    );
+
+    it(
+      "register-service.ps1's Import-InBoxModule, taken through the pinned host's parser and run in a scratch host at its default error preference, ends the host with exit 1 and its not-found line for a module that is not under $PSHOME, and nothing after the call runs (the three recipes' helpers are one text, pinned above)",
+      () => {
+        const run = spawnSync(
+          POWERSHELL,
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$t=$null;$e=$null;$a=[System.Management.Automation.Language.Parser]::ParseFile($env:HARPOC_PS1,[ref]$t,[ref]$e);" +
+              "$f=$a.Find({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Import-InBoxModule'},$true);" +
+              ". ([scriptblock]::Create($f.Extent.Text));" +
+              "Import-InBoxModule 'Harpoc.NoSuchModule';" +
+              "[Console]::Out.WriteLine('after Import-InBoxModule')",
+          ],
+          {
+            shell: false,
+            windowsHide: true,
+            encoding: "utf8",
+            timeout: PS1_TIMEOUT_MS,
+            env: {
+              ...recipeEnvironment(),
+              HARPOC_PS1: resolve(deployRoot, "windows/register-service.ps1"),
+            },
+          },
+        );
+        expect(run.error).toBeUndefined();
+        expect(run.status).toBe(1);
+        expect(run.stderr).toContain("the in-box module Harpoc.NoSuchModule was not found under");
+        expect(run.stdout.includes("after Import-InBoxModule")).toBe(false);
+      },
+      PS1_TIMEOUT_MS + 30_000,
+    );
 
     it.each([
       {
@@ -815,7 +1271,7 @@ describe.skipIf(process.platform !== "win32")(
         expect(run.stderr).toContain(says);
         expect(run.stderr).not.toContain("must run elevated");
       },
-      330_000,
+      PS1_TIMEOUT_MS + 30_000,
     );
 
     it.each([
@@ -847,110 +1303,126 @@ describe.skipIf(process.platform !== "win32")(
         expect(run.stderr.startsWith(`${script}: not an account name (`), run.measured).toBe(true);
         expect(run.stdout, run.measured).toBe("");
       },
-      330_000,
+      PS1_TIMEOUT_MS + 30_000,
     );
 
     // Elevated, the scripts pass their administrator check and would create the account, the
     // directories and the task, and `-Unregister` would remove the task and the right: the
     // runners run elevated, so this row is the desktop's.
-    it("with valid arguments each script stops at its administrator check for a non-elevated user (exit 1, nothing created)", (ctx) => {
-      if (elevated) ctx.skip();
-      const programData = join(root, "ProgramData-valid");
-      mkdirSync(programData);
-      const base = join(programData, "harpoc");
-      for (const [script, args] of [
-        ["install-two-identity.ps1", ["-ProgramData", programData]],
-        [
-          "register-service.ps1",
-          ["-Node", process.execPath, "-Cli", cli, "-ProgramData", programData],
-        ],
-        ["register-service.ps1", ["-Unregister"]],
-        [
-          "enroll-unlock-key.ps1",
-          ["-Node", process.execPath, "-Cli", cli, "-Out", join(root, "unlock.key.dpapi")],
-        ],
-      ] as const) {
-        const run = runPs1(`windows/${script}`, [...args]);
-        expect(run.status, run.measured).toBe(1);
-        expect(run.stderr, run.measured).toBe(
-          `${script}: must run elevated (an Administrator PowerShell)\r\n`,
-        );
-      }
-      expect(existsSync(base)).toBe(false);
-      expect(existsSync(join(root, "unlock.key.dpapi"))).toBe(false);
-    }, 1_230_000);
+    it(
+      "with valid arguments each script stops at its administrator check for a non-elevated user (exit 1, nothing created)",
+      (ctx) => {
+        if (elevated) ctx.skip();
+        const programData = join(root, "ProgramData-valid");
+        mkdirSync(programData);
+        const base = join(programData, "harpoc");
+        for (const [script, args] of [
+          ["install-two-identity.ps1", ["-ProgramData", programData]],
+          [
+            "register-service.ps1",
+            ["-Node", process.execPath, "-Cli", cli, "-ProgramData", programData],
+          ],
+          ["register-service.ps1", ["-Unregister"]],
+          [
+            "enroll-unlock-key.ps1",
+            ["-Node", process.execPath, "-Cli", cli, "-Out", join(root, "unlock.key.dpapi")],
+          ],
+        ] as const) {
+          const run = runPs1(`windows/${script}`, [...args]);
+          expect(run.status, run.measured).toBe(1);
+          expect(run.stderr, run.measured).toBe(
+            `${script}: must run elevated (an Administrator PowerShell)\r\n`,
+          );
+        }
+        expect(existsSync(base)).toBe(false);
+        expect(existsSync(join(root, "unlock.key.dpapi"))).toBe(false);
+      },
+      4 * PS1_TIMEOUT_MS + 30_000,
+    );
 
     // Elevated, the layout is readable and the scripts go on past their checks: like the row above, the desktop's.
-    it("on the layout the recipe leaves (harpoc and harpoc\\vault open to SYSTEM and Administrators alone) install-two-identity.ps1 and enroll-unlock-key.ps1 stop at their administrator check for a non-elevated user (exit 1, no PowerShell text)", (ctx) => {
-      if (elevated) ctx.skip();
-      const programData = join(root, "ProgramData-installed");
-      const base = join(programData, "harpoc");
-      const vault = join(base, "vault");
-      mkdirSync(vault, { recursive: true });
-      writeFileSync(join(vault, "unlock.key.dpapi"), "");
-      for (const dir of [vault, base]) {
-        denied.unshift(dir);
-        const acl = spawnSync(
-          ICACLS,
-          [dir, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"],
-          { shell: false, windowsHide: true, encoding: "utf8", timeout: 30_000 },
-        );
-        expect(acl.status).toBe(0);
-      }
-      for (const [script, args] of [
-        ["install-two-identity.ps1", ["-ProgramData", programData]],
-        [
-          "enroll-unlock-key.ps1",
-          ["-Node", process.execPath, "-Cli", cli, "-ProgramData", programData],
-        ],
-        [
-          "enroll-unlock-key.ps1",
+    it(
+      "on the layout the recipe leaves (harpoc and harpoc\\vault open to SYSTEM and Administrators alone) install-two-identity.ps1 and enroll-unlock-key.ps1 stop at their administrator check for a non-elevated user (exit 1, no PowerShell text)",
+      (ctx) => {
+        if (elevated) ctx.skip();
+        const programData = join(root, "ProgramData-installed");
+        const base = join(programData, "harpoc");
+        const vault = join(base, "vault");
+        mkdirSync(vault, { recursive: true });
+        writeFileSync(join(vault, "unlock.key.dpapi"), "");
+        for (const dir of [vault, base]) {
+          denied.unshift(dir);
+          const acl = spawnSync(
+            ICACLS,
+            [dir, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"],
+            { shell: false, windowsHide: true, encoding: "utf8", timeout: 30_000 },
+          );
+          expect(acl.status).toBe(0);
+        }
+        for (const [script, args] of [
+          ["install-two-identity.ps1", ["-ProgramData", programData]],
           [
-            "-Node",
-            process.execPath,
-            "-Cli",
-            cli,
-            "-ProgramData",
-            programData,
-            "-Out",
-            join(vault, "absent.dpapi"),
+            "enroll-unlock-key.ps1",
+            ["-Node", process.execPath, "-Cli", cli, "-ProgramData", programData],
           ],
-        ],
-      ] as const) {
-        const run = runPs1(`windows/${script}`, [...args]);
-        expect(run.status, run.measured).toBe(1);
+          [
+            "enroll-unlock-key.ps1",
+            [
+              "-Node",
+              process.execPath,
+              "-Cli",
+              cli,
+              "-ProgramData",
+              programData,
+              "-Out",
+              join(vault, "absent.dpapi"),
+            ],
+          ],
+        ] as const) {
+          const run = runPs1(`windows/${script}`, [...args]);
+          expect(run.status, run.measured).toBe(1);
+          expect(run.stderr, run.measured).toBe(
+            `${script}: must run elevated (an Administrator PowerShell)\r\n`,
+          );
+        }
+      },
+      3 * (PS1_TIMEOUT_MS + 30_000),
+    );
+
+    it(
+      "install-two-identity.ps1 refuses an existing harpoc directory that is a junction (a reparse point) as a usage error before its administrator check",
+      () => {
+        const programData = join(root, "ProgramData-junction");
+        const target = join(root, "junction-target");
+        mkdirSync(programData);
+        mkdirSync(target);
+        const link = join(programData, "harpoc");
+        symlinkSync(target, link, "junction");
+        junction = link;
+        const run = runPs1("windows/install-two-identity.ps1", ["-ProgramData", programData]);
         expect(run.stderr, run.measured).toBe(
-          `${script}: must run elevated (an Administrator PowerShell)\r\n`,
+          `install-two-identity.ps1: ${link} is a reparse point (junction or symbolic link); remove it\r\n`,
         );
-      }
-    }, 990_000);
+        expect(run.status, run.measured).toBe(2);
+        expect(readdirSync(target)).toEqual([]);
+      },
+      PS1_TIMEOUT_MS + 30_000,
+    );
 
-    it("install-two-identity.ps1 refuses an existing harpoc directory that is a junction (a reparse point) as a usage error before its administrator check", () => {
-      const programData = join(root, "ProgramData-junction");
-      const target = join(root, "junction-target");
-      mkdirSync(programData);
-      mkdirSync(target);
-      const link = join(programData, "harpoc");
-      symlinkSync(target, link, "junction");
-      junction = link;
-      const run = runPs1("windows/install-two-identity.ps1", ["-ProgramData", programData]);
-      expect(run.stderr, run.measured).toBe(
-        `install-two-identity.ps1: ${link} is a reparse point (junction or symbolic link); remove it\r\n`,
-      );
-      expect(run.status, run.measured).toBe(2);
-      expect(readdirSync(target)).toEqual([]);
-    }, 330_000);
-
-    it("install-two-identity.ps1 refuses an existing harpoc that is a file, not a directory, as a usage error before its administrator check", () => {
-      const programData = join(root, "ProgramData-file");
-      mkdirSync(programData);
-      const file = join(programData, "harpoc");
-      writeFileSync(file, "");
-      const run = runPs1("windows/install-two-identity.ps1", ["-ProgramData", programData]);
-      expect(run.stderr, run.measured).toBe(
-        `install-two-identity.ps1: ${file} exists and is not a directory; remove it\r\n`,
-      );
-      expect(run.status, run.measured).toBe(2);
-    }, 330_000);
+    it(
+      "install-two-identity.ps1 refuses an existing harpoc that is a file, not a directory, as a usage error before its administrator check",
+      () => {
+        const programData = join(root, "ProgramData-file");
+        mkdirSync(programData);
+        const file = join(programData, "harpoc");
+        writeFileSync(file, "");
+        const run = runPs1("windows/install-two-identity.ps1", ["-ProgramData", programData]);
+        expect(run.stderr, run.measured).toBe(
+          `install-two-identity.ps1: ${file} exists and is not a directory; remove it\r\n`,
+        );
+        expect(run.status, run.measured).toBe(2);
+      },
+      PS1_TIMEOUT_MS + 30_000,
+    );
   },
 );

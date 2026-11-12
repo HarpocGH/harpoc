@@ -14,6 +14,7 @@ import {
   ROTATE_SECRET_TOOL,
   START_OAUTH_FLOW_TOOL,
   USE_SECRET_TOOL,
+  oauthConnectCommand,
   pendingHint,
 } from "./tools/definitions.js";
 
@@ -210,12 +211,8 @@ export function createBridgeServer(options: CreateBridgeServerOptions): McpServe
       // the vault's process, which polls and completes in the background.
       return text(await forward((client) => client.startOAuthFlow({ ...args })));
     }
-    const command =
-      args.grant_type === "client_credentials"
-        ? `harpoc oauth connect ${args.name} --client-credentials --provider ${args.provider} --client-id ${args.client_id}`
-        : `harpoc oauth connect ${args.name} --provider ${args.provider} --client-id ${args.client_id}`;
     throw notOverTheBridge(
-      `start_oauth_flow's ${args.grant_type} grant is not available through the REST bridge. Complete it as the vault user: ${command}`,
+      `start_oauth_flow's ${args.grant_type} grant is not available through the REST bridge. Complete it as the vault user: ${oauthConnectCommand(args)}`,
     );
   });
 

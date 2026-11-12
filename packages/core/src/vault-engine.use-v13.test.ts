@@ -1,8 +1,8 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ConnectionConfig,
@@ -1568,6 +1568,190 @@ describe("useSecret (sftp) — an unparsed user outside the schema's charset is 
   });
 });
 
+const CHARSET_MESSAGE = "host and user must be names of letters, digits, '.', '_' and '-'";
+
+const NON_STRINGS: ReadonlyArray<readonly [string, unknown]> = [
+  ["a number", 5],
+  ["undefined", undefined],
+  ["null", null],
+  ["an array", ["-x"]],
+  ["an object", {}],
+];
+
+const NON_STRING_FIELDS = (["host", "user"] as const).flatMap((field) =>
+  NON_STRINGS.map(([label, value]) => [field, label, value] as const),
+);
+
+const SSH_ACTION: UseSecretAction = {
+  type: "ssh",
+  host: "deploy.example.com",
+  user: "deploy",
+  command: "whoami",
+};
+
+describe("useSecret (ssh) — a non-string host or user of an unparsed caller is refused in core", () => {
+  beforeEach(async () => {
+    await initWithSecret("deploy", "FAKE-PRIVATE-KEY-PEM");
+  });
+
+  it.each(NON_STRING_FIELDS)(
+    "a %s that is %s: INVALID_SSH_CONFIG, not INTERNAL_ERROR, one failed row without the field",
+    async (field, _label, value) => {
+      const err = await expectVaultError(
+        () =>
+          engine.useSecret("secret://deploy", {
+            ...SSH_ACTION,
+            [field]: value,
+          } as unknown as UseSecretAction),
+        ErrorCode.INVALID_SSH_CONFIG,
+      );
+      expect(err.message === CHARSET_MESSAGE).toBe(true);
+      const rows = useRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.success).toBe(false);
+      const kept = field === "host" ? { user: "deploy" } : { host: "deploy.example.com" };
+      expect(rows[0]?.detail).toStrictEqual({
+        context: "ssh",
+        ...kept,
+        error: ErrorCode.INVALID_SSH_CONFIG,
+      });
+    },
+  );
+});
+
+describe("useSecret (sftp) — a non-string host or user of an unparsed caller is refused in core", () => {
+  beforeEach(async () => {
+    await initWithSecret("deploy", "FAKE-PRIVATE-KEY-PEM");
+  });
+
+  it.each(NON_STRING_FIELDS)(
+    "a %s that is %s: INVALID_SSH_CONFIG, not INTERNAL_ERROR, one failed row without the field",
+    async (field, _label, value) => {
+      const err = await expectVaultError(
+        () =>
+          engine.useSecret("secret://deploy", {
+            ...SFTP_ACTION,
+            [field]: value,
+          } as unknown as UseSecretAction),
+        ErrorCode.INVALID_SSH_CONFIG,
+      );
+      expect(err.message === CHARSET_MESSAGE).toBe(true);
+      const rows = useRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.success).toBe(false);
+      const kept = field === "host" ? {} : { host: "deploy.example.com" };
+      expect(rows[0]?.detail).toStrictEqual({
+        context: "sftp",
+        ...kept,
+        operation: "list",
+        port: null,
+        remote_path: "/srv/reports",
+        local_path: null,
+        network_isolation: false,
+        fs_isolation: false,
+        error: ErrorCode.INVALID_SSH_CONFIG,
+      });
+    },
+  );
+});
+
+const PATH_DASH_MESSAGE = "sftp path must not start with '-' (would be parsed as an sftp option)";
+const LOCAL_PATH_REQUIRED = "local_path is required for upload";
+
+const NON_STRING_LOCAL_PATHS: ReadonlyArray<readonly [string, unknown, string]> = [
+  ["a number", 5, PATH_DASH_MESSAGE],
+  ["undefined", undefined, LOCAL_PATH_REQUIRED],
+  ["null", null, LOCAL_PATH_REQUIRED],
+  ["an array", ["-x"], PATH_DASH_MESSAGE],
+  ["an object", {}, PATH_DASH_MESSAGE],
+];
+
+describe("useSecret (sftp) — a non-string remote_path or local_path of an unparsed caller is refused like a malformed path", () => {
+  let binDir: string;
+  let savedPath: string | undefined;
+
+  beforeEach(async () => {
+    binDir = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-v13-sftp-bin-")));
+    const sftpPath = join(binDir, process.platform === "win32" ? "sftp.exe" : "sftp");
+    writeFileSync(sftpPath, "", { mode: 0o755 });
+    savedPath = process.env.PATH;
+    process.env.PATH = binDir + delimiter + (savedPath ?? "");
+    await initWithSecret("deploy", "FAKE-PRIVATE-KEY-PEM");
+    await engine.setInjectionPolicy("secret://deploy", {
+      host_allowlist: ["deploy.example.com"],
+      command_allowlist: [sftpPath],
+    });
+    await engine.setConnectionConfig("secret://deploy", {
+      ssh: { known_hosts: ["deploy.example.com ssh-ed25519 AAAA"] },
+    });
+  });
+
+  afterEach(() => {
+    if (savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = savedPath;
+    rmSync(binDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  it.each(NON_STRINGS)(
+    "a remote_path that is %s: INVALID_INPUT with the leading-dash path message, one failed row without remote_path",
+    async (_label, value) => {
+      const err = await expectVaultError(
+        () =>
+          engine.useSecret("secret://deploy", {
+            ...SFTP_ACTION,
+            remote_path: value,
+          } as unknown as UseSecretAction),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message === PATH_DASH_MESSAGE).toBe(true);
+      const rows = useRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.success).toBe(false);
+      expect(rows[0]?.detail).toStrictEqual({
+        context: "sftp",
+        host: "deploy.example.com",
+        operation: "list",
+        port: null,
+        local_path: null,
+        network_isolation: false,
+        fs_isolation: false,
+        error: ErrorCode.INVALID_INPUT,
+      });
+    },
+  );
+
+  it.each(NON_STRING_LOCAL_PATHS)(
+    "an upload's local_path that is %s: INVALID_INPUT with the message the malformed path meets today, one failed row with local_path null",
+    async (_label, value, message) => {
+      const err = await expectVaultError(
+        () =>
+          engine.useSecret("secret://deploy", {
+            ...SFTP_ACTION,
+            operation: "upload",
+            remote_path: "/srv/report.pdf",
+            local_path: value,
+          } as unknown as UseSecretAction),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message === message).toBe(true);
+      const rows = useRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.success).toBe(false);
+      expect(rows[0]?.detail).toStrictEqual({
+        context: "sftp",
+        host: "deploy.example.com",
+        operation: "upload",
+        port: null,
+        remote_path: "/srv/report.pdf",
+        local_path: null,
+        network_isolation: false,
+        fs_isolation: false,
+        error: ErrorCode.INVALID_INPUT,
+      });
+    },
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Docker × isolation — engine-level refusal, before any dispatch arm
 // ---------------------------------------------------------------------------
@@ -1635,6 +1819,64 @@ describe("docker_registry × isolation — refused before the dispatch arm", () 
       error: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
     });
   });
+
+  const ISOLATION_MESSAGE = VaultError.networkIsolationUnavailable(
+    "network isolation cannot be enforced across the Docker daemon boundary — the daemon, " +
+      "not the spawned CLI, performs registry egress; remove the requirement via: " +
+      "secret allow <handle> --no-network-isolation",
+  ).message;
+
+  it("a string image's denial row and message are today's, byte for byte", async () => {
+    await engine.setInjectionPolicy("secret://reg", { network_isolation: true });
+    const calls = installSeams(engine, {});
+
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://reg", DOCKER_ACTION),
+      ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+    );
+
+    expect(err.message === ISOLATION_MESSAGE).toBe(true);
+    const rows = useRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.success).toBe(false);
+    expect(JSON.stringify(rows[0]?.detail)).toBe(
+      '{"context":"docker_registry","image":"registry.example.com/app:1.0","operation":"pull",' +
+        '"network_isolation":true,"error":"NETWORK_ISOLATION_UNAVAILABLE"}',
+    );
+    expect(calls.docker).toHaveLength(0);
+  });
+
+  it.each([
+    ["a number", 5],
+    ["an array", ["-x"]],
+  ] as const)(
+    "an image that is %s: NETWORK_ISOLATION_UNAVAILABLE with today's message, one denial row without an image key, nothing dispatched",
+    async (_label, value) => {
+      await engine.setInjectionPolicy("secret://reg", { network_isolation: true });
+      const calls = installSeams(engine, {});
+
+      const err = await expectVaultError(
+        () =>
+          engine.useSecret("secret://reg", {
+            ...DOCKER_ACTION,
+            image: value,
+          } as unknown as UseSecretAction),
+        ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+      );
+
+      expect(err.message === ISOLATION_MESSAGE).toBe(true);
+      const rows = useRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.success).toBe(false);
+      expect(rows[0]?.detail).toStrictEqual({
+        context: "docker_registry",
+        operation: "pull",
+        network_isolation: true,
+        error: ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+      });
+      expect(calls.docker).toHaveLength(0);
+    },
+  );
 
   it("leaves the request-mediated v1.3 contexts unaffected by the isolation flags", async () => {
     await engine.setInjectionPolicy("secret://reg", {
@@ -1837,6 +2079,35 @@ describe("useSecret (docker_registry) — engine dispatch", () => {
 
     expect(calls.docker).toHaveLength(0);
   });
+});
+
+describe("useSecret (docker_registry) — a non-string image of an unparsed caller is refused like a dash-led reference", () => {
+  beforeEach(async () => {
+    await initWithSecret("reg", "robot:regpass");
+  });
+
+  it.each(NON_STRINGS)(
+    "an image that is %s: INVALID_INPUT with the leading-dash message, not INTERNAL_ERROR, one failed row without registry or image",
+    async (_label, value) => {
+      const err = await expectVaultError(
+        () =>
+          engine.useSecret("secret://reg", {
+            ...DOCKER_ACTION,
+            image: value,
+          } as unknown as UseSecretAction),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message === "docker image reference must not start with '-'").toBe(true);
+      const rows = useRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.success).toBe(false);
+      expect(rows[0]?.detail).toStrictEqual({
+        context: "docker_registry",
+        operation: "pull",
+        error: ErrorCode.INVALID_INPUT,
+      });
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

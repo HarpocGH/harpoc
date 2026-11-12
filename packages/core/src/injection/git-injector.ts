@@ -35,6 +35,7 @@ import {
   assertNativeWin32SshClient,
   buildSshEnv,
   isHostKeyFailure,
+  isSshName,
   SSH_NAME,
   sshHardeningArgs,
   writeIdentityFile,
@@ -426,13 +427,11 @@ export class GitInjector {
     secretId?: string,
     attribution?: AuditAttribution,
   ): Promise<GitResult> {
-    const transport = detectTransport(action.repository);
-    if (!transport) {
-      this.audit(action, secretId, { error: "GIT_UNSUPPORTED_TRANSPORT" }, false, attribution);
-      throw VaultError.gitUnsupportedTransport(action.repository);
-    }
-
+    let transport: "https" | "ssh" | null;
     try {
+      assertRepositoryShape(action);
+      transport = detectTransport(action.repository);
+      if (!transport) throw VaultError.gitUnsupportedTransport(action.repository);
       assertKnownOperation(action);
       assertSafeArgs(action.operation, action.args);
       assertNoPositional(action);
@@ -440,7 +439,7 @@ export class GitInjector {
       if (action.working_directory && action.working_directory.startsWith("-")) {
         throw VaultError.invalidGitConfig("working_directory must not start with '-'");
       }
-      if (action.repository.trim().startsWith("-")) {
+      if (action.repository.startsWith("-")) {
         throw VaultError.invalidGitConfig("repository must not start with '-'");
       }
     } catch (err) {
@@ -473,20 +472,29 @@ export class GitInjector {
     attribution: AuditAttribution | undefined,
   ): Promise<GitResult> {
     // Mandatory floor: HTTPS + SSRF. Above it the per-secret URL allowlist, deny-by-default.
+    let url: URL;
     try {
-      await validateUrl(action.repository);
+      ({ url } = await validateUrl(action.repository));
     } catch (err) {
       if (err instanceof VaultError)
         this.audit(action, secretId, { error: err.code }, false, attribution);
       throw err;
     }
-    if (!matchesUrlAllowlist(action.repository, policy.url_allowlist)) {
+    const judged = url.href;
+    if (!matchesUrlAllowlist(judged, policy.url_allowlist)) {
       this.audit(action, secretId, { error: "URL_NOT_ALLOWED" }, false, attribution);
       throw VaultError.urlNotAllowed(action.repository);
     }
 
     const { user, password } = parseGitCredential(secretValue);
-    const hooks = createEmptyHooksDir();
+    let hooks: { dir: string; dispose: () => void };
+    try {
+      hooks = createEmptyHooksDir();
+    } catch (err) {
+      if (err instanceof VaultError)
+        this.audit(action, secretId, { error: err.code }, false, attribution);
+      throw err;
+    }
     try {
       assertWorkingTree(action);
     } catch (err) {
@@ -501,14 +509,22 @@ export class GitInjector {
       askpass = writeAskpass();
     } catch (err) {
       hooks.dispose();
-      throw err;
+      const failure = tempFileFailure(err);
+      this.audit(action, secretId, { error: failure.code }, false, attribution);
+      throw failure;
     }
     let ca: TempSshFile | null = null;
     try {
-      ca =
-        config?.git === undefined
-          ? null
-          : writeTempSshFile("harpoc-git-ca-", "ca.pem", config.git.ca_pem);
+      try {
+        ca =
+          config?.git === undefined
+            ? null
+            : writeTempSshFile("harpoc-git-ca-", "ca.pem", config.git.ca_pem);
+      } catch (err) {
+        const failure = tempFileFailure(err);
+        this.audit(action, secretId, { error: failure.code }, false, attribution);
+        throw failure;
+      }
       const networkConfig = [
         ...HTTPS_FORCED_CONFIG,
         ...(ca
@@ -527,18 +543,30 @@ export class GitInjector {
       env.HARPOC_GIT_USERNAME = user;
       env.HARPOC_GIT_PASSWORD = password;
       // Binds the credential to the validated origin (see ASKPASS_HELPER_SRC).
-      env.HARPOC_GIT_ORIGIN = new URL(action.repository).origin.toLowerCase();
+      env.HARPOC_GIT_ORIGIN = url.origin.toLowerCase();
       // The username is credential material too, down to the shared floor
       // (MIN_REDACTABLE_FRAGMENT); shorter fragments stay unredacted.
-      const redact = user.length >= MIN_REDACTABLE_FRAGMENT ? [password, user] : [password];
+      const joined = `${user}:${password}`;
+      const redactable = (s: string) => s.length >= MIN_REDACTABLE_FRAGMENT;
+      const redact = [
+        ...(redactable(joined) ? [joined] : []),
+        password,
+        ...(redactable(user) ? [user] : []),
+      ];
+      const tokenInUser = (password === "" || password === "x-oauth-basic") && redactable(user);
       const networkIsolation = policy.network_isolation === true;
       const fsIsolation = policy.fs_isolation === true;
       let r: SpawnCapturedResult;
       try {
         r = await runPlan(action, gitPath, hooks.dir, networkConfig, env, policy, {
+          networkRepository: judged,
           timeoutMs,
           redact,
-          parseRedact: [password],
+          parseRedact: [
+            ...(redactable(joined) ? [joined] : []),
+            password,
+            ...(tokenInUser ? [user] : []),
+          ],
           networkIsolation,
           fsIsolation,
           strictTreeExit: policy.strict_tree_exit === true,
@@ -598,17 +626,28 @@ export class GitInjector {
     secretId: string | undefined,
     attribution: AuditAttribution | undefined,
   ): Promise<GitResult> {
-    const host = parseSshHost(action.repository);
-    if (!host) {
+    const address = parseSshHost(action.repository);
+    if (!address) {
       this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
       throw VaultError.invalidGitConfig("could not parse SSH host from repository");
     }
+    const { host } = address;
     const dialHost = sshDialHost(host);
     if (!dialHost) {
       this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
       throw VaultError.invalidGitConfig(
         "SSH host of the repository must be a host name or an IPv6 literal",
       );
+    }
+    if (address.user !== null && !isSshName(address.user)) {
+      this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
+      throw VaultError.invalidGitConfig(
+        "SSH user of the repository must be a name of letters, digits, '.', '_' and '-' that begins with a letter or a digit",
+      );
+    }
+    if (address.password) {
+      this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
+      throw VaultError.invalidGitConfig("an SSH repository address must not carry a password");
     }
     // Host allowlist — deny-by-default (an empty list refuses).
     if (!matchesHostAllowlist(host, policy.host_allowlist)) {
@@ -634,7 +673,14 @@ export class GitInjector {
     }
 
     const keyPem = Buffer.from(secretValue).toString("utf8");
-    const hooks = createEmptyHooksDir();
+    let hooks: { dir: string; dispose: () => void };
+    try {
+      hooks = createEmptyHooksDir();
+    } catch (err) {
+      if (err instanceof VaultError)
+        this.audit(action, secretId, { host, error: err.code }, false, attribution);
+      throw err;
+    }
     try {
       assertWorkingTree(action);
     } catch (err) {
@@ -649,7 +695,9 @@ export class GitInjector {
       kh = writeKnownHosts(knownHosts);
     } catch (err) {
       hooks.dispose();
-      throw err;
+      const failure = tempFileFailure(err);
+      this.audit(action, secretId, { host, error: failure.code }, false, attribution);
+      throw failure;
     }
 
     let agent: EphemeralSshAgent;
@@ -665,7 +713,13 @@ export class GitInjector {
 
     let identity: TempSshFile | null = null;
     try {
-      identity = writeIdentityFile(agent.publicKeyOpenssh);
+      try {
+        identity = writeIdentityFile(agent.publicKeyOpenssh);
+      } catch (err) {
+        const failure = tempFileFailure(err);
+        this.audit(action, secretId, { host, error: failure.code }, false, attribution);
+        throw failure;
+      }
       const env = isolateGitConfig(buildSshEnv(agent.authSock, policy.env_allowlist));
       env.GIT_SSH_COMMAND = toGitSshCommand([
         sshPath,
@@ -679,6 +733,7 @@ export class GitInjector {
       let r: SpawnCapturedResult;
       try {
         r = await runPlan(action, gitPath, hooks.dir, [], env, policy, {
+          networkRepository: action.repository,
           timeoutMs,
           redact: [keyPem],
           parseRedact: [keyPem],
@@ -775,8 +830,17 @@ export class GitInjector {
   }
 }
 
-function detectTransport(repository: string): "https" | "ssh" | null {
-  const repo = repository.trim();
+/** A repository the schema never parsed may be anything: it must be a string that is its own trimmed reading, or a check would judge a spelling git never receives. */
+function assertRepositoryShape(action: GitAction): void {
+  const repository: unknown = action.repository;
+  if (typeof repository !== "string" || repository.trim() !== repository) {
+    throw VaultError.invalidGitConfig(
+      "repository must be a string without leading or trailing whitespace",
+    );
+  }
+}
+
+function detectTransport(repo: string): "https" | "ssh" | null {
   if (FORBIDDEN_REPO_PREFIXES.some((p) => repo.toLowerCase().startsWith(p))) return null;
   if (/^https?:\/\//i.test(repo)) return "https";
   if (/^ssh:\/\//i.test(repo)) return "ssh";
@@ -786,7 +850,8 @@ function detectTransport(repository: string): "https" | "ssh" | null {
 }
 
 /**
- * Whether `arg` reaches one of the denied options.
+ * The entry of `denied` that `arg` reaches — the table's own string, never
+ * the caller's text — or null.
  *
  * Name matching alone is not enough: git resolves any *unambiguous prefix* of a
  * long option, so `--templ=<dir>` reaches `--template` and `--conf=k=v` reaches
@@ -800,26 +865,33 @@ function detectTransport(repository: string): "https" | "ssh" | null {
  * option that takes a value (`shortWithValue`), and a denied letter reached on
  * the way — that one included — denies the token.
  */
-function reachesDeniedOption(
+function deniedOptionReached(
   arg: string,
   denied: readonly string[],
   shortWithValue: ReadonlySet<string>,
-): boolean {
+): string | null {
   const a = arg.trim();
-  if (denied.some((p) => a === p || a.startsWith(p))) return true;
+  let hit: string | null = null;
+  for (const p of denied) {
+    if (a.startsWith(p) && (hit === null || p.length > hit.length)) hit = p;
+  }
+  if (hit !== null) return hit;
 
   if (/^-[^-]/.test(a)) {
-    const deniedShort = new Set(denied.filter((p) => /^-[^-]$/.test(p)).map((p) => p[1]));
+    const deniedShort = new Map(
+      denied.filter((p) => /^-[^-]$/.test(p)).map((p): [string, string] => [p.slice(1), p]),
+    );
     for (const ch of a.slice(1)) {
-      if (deniedShort.has(ch)) return true;
+      const entry = deniedShort.get(ch);
+      if (entry !== undefined) return entry;
       if (shortWithValue.has(ch)) break;
     }
   }
 
   const eq = a.indexOf("=");
-  const name = eq >= 0 ? a.slice(0, eq) : a;
-  if (!name.startsWith("--") || name.length <= 2) return false;
-  return denied.some((p) => p.startsWith("--") && p.startsWith(name));
+  const optionName = eq >= 0 ? a.slice(0, eq) : a;
+  if (!optionName.startsWith("--") || optionName.length <= 2) return null;
+  return denied.find((p) => p.startsWith("--") && p.startsWith(optionName)) ?? null;
 }
 
 /**
@@ -836,8 +908,9 @@ function assertKnownOperation(action: GitAction): void {
 function assertSafeArgs(operation: GitAction["operation"], args: string[] | undefined): void {
   const denied = [...DANGEROUS_ARG_PREFIXES, ...OPERATION_DANGEROUS_ARG_PREFIXES[operation]];
   for (const arg of args ?? []) {
-    if (reachesDeniedOption(arg, denied, SHORT_WITH_VALUE[operation])) {
-      throw VaultError.invalidGitConfig(`disallowed git argument: ${arg}`);
+    const entry = deniedOptionReached(arg, denied, SHORT_WITH_VALUE[operation]);
+    if (entry !== null) {
+      throw VaultError.invalidGitConfig(`disallowed git argument: ${entry}`);
     }
   }
 }
@@ -878,17 +951,27 @@ function assertNoPositional(action: GitAction): void {
   }
 }
 
-function parseSshHost(repository: string): string | null {
-  const repo = repository.trim();
+/** The host, the user (null where an `ssh://` address names none) and whether an `ssh://` address carries a password, as the vault reads them, or null. */
+function parseSshHost(
+  repo: string,
+): { host: string; user: string | null; password: boolean } | null {
   if (/^ssh:\/\//i.test(repo)) {
     try {
-      return new URL(repo).hostname || null;
+      const url = new URL(repo);
+      if (!url.hostname) return null;
+      return { host: url.hostname, user: url.username || null, password: url.password !== "" };
     } catch {
       return null;
     }
   }
-  const m = /^[^@/:]+@([^:/]+):/.exec(repo);
-  return m ? (m[1] ?? null) : null;
+  const m = /^([^@/:]+)@([^:/]+):/.exec(repo);
+  if (!m) return null;
+  const user = m[1] as string;
+  return {
+    host: m[2] as string,
+    user: user.startsWith("[") ? user.slice(1) : user,
+    password: false,
+  };
 }
 
 /**
@@ -953,6 +1036,7 @@ function assertWorkingTree(action: GitAction): void {
 }
 
 interface StepOptions {
+  networkRepository: string;
   timeoutMs: number;
   redact: string[];
   parseRedact: readonly string[];
@@ -1014,11 +1098,11 @@ async function runPlan(
   };
   /**
    * A credential-bearing step whose output the vault parses; it is returned only when the
-   * step fails, times out or is truncated, and then through the full redaction.
+   * step fails or times out, and then through the full redaction.
    */
   const parseStep: GitStep = async (args, cwd, env) => {
     const r = await spawnStep(args, cwd, env, [...opts.parseRedact]);
-    if (succeeded(r) && !r.truncated) return r;
+    if (succeeded(r)) return r;
     const stdout = redactCaptured(r.stdout, opts.redact);
     const stderr = redactCaptured(r.stderr, opts.redact);
     return {
@@ -1034,6 +1118,7 @@ async function runPlan(
     case "clone":
       return runRelayedClone(
         action,
+        opts.networkRepository,
         hooksDir,
         networkConfig,
         networkEnv,
@@ -1042,11 +1127,20 @@ async function runPlan(
         parseStep,
       );
     case "ls-remote":
-      return runLsRemote(action, hooksDir, networkConfig, networkEnv, step);
+      return runLsRemote(action, opts.networkRepository, hooksDir, networkConfig, networkEnv, step);
     case "pull":
     case "push":
     case "fetch":
-      return runRelayed(action, hooksDir, networkConfig, networkEnv, localEnv, step, probeStep);
+      return runRelayed(
+        action,
+        opts.networkRepository,
+        hooksDir,
+        networkConfig,
+        networkEnv,
+        localEnv,
+        step,
+        probeStep,
+      );
   }
 }
 
@@ -1132,6 +1226,7 @@ function parseRemoteHead(stdout: string): {
  */
 async function runRelayedClone(
   action: GitAction,
+  networkRepository: string,
   hooksDir: string,
   networkConfig: string[],
   networkEnv: Record<string, string>,
@@ -1147,7 +1242,7 @@ async function runRelayedClone(
   try {
     const listed = await networkStep(
       relay,
-      ["ls-remote", "--symref", "--", action.repository, "HEAD"],
+      ["ls-remote", "--symref", "--", networkRepository, "HEAD"],
       networkConfig,
       forced,
       networkEnv,
@@ -1178,7 +1273,7 @@ async function runRelayedClone(
         "--no-write-fetch-head",
         ...forwardedFetchArgs(args, CLONE_FETCH_OPTIONS),
         "--",
-        action.repository,
+        networkRepository,
         ...refspecs,
       ],
       networkConfig,
@@ -1223,6 +1318,7 @@ async function runRelayedClone(
  */
 async function runLsRemote(
   action: GitAction,
+  networkRepository: string,
   hooksDir: string,
   networkConfig: string[],
   networkEnv: Record<string, string>,
@@ -1232,7 +1328,7 @@ async function runLsRemote(
   try {
     return await networkStep(
       relay,
-      ["ls-remote", ...(action.args ?? []), "--", action.repository],
+      ["ls-remote", ...(action.args ?? []), "--", networkRepository],
       networkConfig,
       forcedGitConfig(hooksDir),
       networkEnv,
@@ -1290,6 +1386,7 @@ function remoteOf(listing: string, repository: string): string {
  */
 async function runRelayed(
   action: GitAction,
+  networkRepository: string,
   hooksDir: string,
   networkConfig: string[],
   networkEnv: Record<string, string>,
@@ -1368,7 +1465,7 @@ async function runRelayed(
     const network = (args: string[]) =>
       networkStep(relay, args, networkConfig, forced, networkEnv, step);
     if (action.operation === "push") {
-      return await network(["push", ...(action.args ?? []), "--", action.repository]);
+      return await network(["push", ...(action.args ?? []), "--", networkRepository]);
     }
     const fetched = await network([
       "fetch",
@@ -1376,7 +1473,7 @@ async function runRelayed(
       "--no-write-fetch-head",
       ...forwardedFetchArgs(action.args ?? [], refspecs ? FETCH_FETCH_OPTIONS : PULL_FETCH_OPTIONS),
       "--",
-      action.repository,
+      networkRepository,
       ...(refspecs ? refspecs.network : [`+HEAD:${RELAY_FETCHED_REF}`]),
     ]);
     if (!succeeded(fetched)) return fetched;
@@ -1493,7 +1590,16 @@ function createRelayRepo(opts: {
   refs: string[];
 }): RelayRepo {
   const { objectsDir, shallowFile, objectFormat, head, refs } = opts;
-  const dir = mkdtempSync(join(tmpdir(), "harpoc-git-relay-"));
+  const unprepared = (err: unknown) =>
+    err instanceof VaultError
+      ? err
+      : VaultError.gitOperationFailed("the relay repository could not be prepared");
+  let dir: string;
+  try {
+    dir = mkdtempSync(join(tmpdir(), "harpoc-git-relay-"));
+  } catch (err) {
+    throw unprepared(err);
+  }
   const dispose = () => {
     try {
       rmSync(dir, { recursive: true, force: true });
@@ -1537,9 +1643,7 @@ function createRelayRepo(opts: {
     }
   } catch (err) {
     dispose();
-    throw err instanceof VaultError
-      ? err
-      : VaultError.gitOperationFailed("the relay repository could not be prepared");
+    throw unprepared(err);
   }
   const expectedTop = [
     ...new Set(["objects", "refs", ...[...written.keys()].map((rel) => rel.split("/")[0])]),
@@ -1573,7 +1677,13 @@ function createRelayRepo(opts: {
       throw VaultError.gitOperationFailed("the relay repository changed outside the vault");
     }
   };
-  const setHead = (value: string) => write("HEAD", `${value}\n`);
+  const setHead = (value: string) => {
+    try {
+      write("HEAD", `${value}\n`);
+    } catch (err) {
+      throw unprepared(err);
+    }
+  };
   return { dir, dispose, verify, setHead };
 }
 
@@ -1615,12 +1725,27 @@ function isolateGitConfig(env: Record<string, string>): Record<string, string> {
 }
 
 /**
+ * A temporary file or directory of the git context that could not be written, as
+ * the context's one coded failure (C-17); a `VaultError` passes unchanged.
+ */
+function tempFileFailure(err: unknown): VaultError {
+  return err instanceof VaultError
+    ? err
+    : VaultError.gitOperationFailed("a temporary file of the git context could not be prepared");
+}
+
+/**
  * An empty directory git is pointed at through `core.hooksPath` for one run
  * (N11): git looks hooks up there and nowhere else, so nothing in the
  * caller's `.git/hooks` executes. Vault-authored and empty by construction.
  */
 function createEmptyHooksDir(): { dir: string; dispose: () => void } {
-  const dir = mkdtempSync(join(tmpdir(), "harpoc-git-hooks-"));
+  let dir: string;
+  try {
+    dir = mkdtempSync(join(tmpdir(), "harpoc-git-hooks-"));
+  } catch (err) {
+    throw tempFileFailure(err);
+  }
   return {
     dir,
     dispose: () => {
@@ -1635,7 +1760,12 @@ function createEmptyHooksDir(): { dir: string; dispose: () => void } {
 
 /** Vault-authored askpass launcher + helper in a temp dir; credential passed via env, not argv. */
 function writeAskpass(): { launcher: string; dispose: () => void } {
-  const dir = mkdtempSync(join(tmpdir(), "harpoc-git-"));
+  let dir: string;
+  try {
+    dir = mkdtempSync(join(tmpdir(), "harpoc-git-"));
+  } catch (err) {
+    throw tempFileFailure(err);
+  }
   const helper = join(dir, "askpass.mjs");
   const node = process.execPath;
   let launcher: string;
@@ -1650,7 +1780,7 @@ function writeAskpass(): { launcher: string; dispose: () => void } {
     }
   } catch (err) {
     rmSync(dir, { recursive: true, force: true });
-    throw err;
+    throw tempFileFailure(err);
   }
   return {
     launcher,

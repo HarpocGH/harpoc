@@ -7,7 +7,7 @@ import {
   verify,
   X509Certificate,
 } from "node:crypto";
-import type { KeyObject } from "node:crypto";
+import type { KeyObject, webcrypto } from "node:crypto";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
@@ -80,7 +80,7 @@ export async function startAcmeDouble(options: { httpPort: number }): Promise<Ac
   const requests: AcmeDoubleRequest[] = [];
   const csrPublicKeys: Buffer[] = [];
   const nonces = new Set<string>();
-  const accounts = new Map<string, JsonWebKey>();
+  const accounts = new Map<string, webcrypto.JsonWebKey>();
   const orders: Order[] = [];
   const authorizations: Authorization[] = [];
   let origin = "";
@@ -149,7 +149,9 @@ export async function startAcmeDouble(options: { httpPort: number }): Promise<Ac
     if (header.alg !== "ES256") return problem(res, 400, "badSignatureAlgorithm");
     if (header.url !== `${origin}${path}`) return problem(res, 401, "unauthorized");
     const isNewAccount = path === "/new-account";
-    const jwk = isNewAccount ? (header.jwk as JsonWebKey) : accounts.get(String(header.kid));
+    const jwk = isNewAccount
+      ? (header.jwk as webcrypto.JsonWebKey)
+      : accounts.get(String(header.kid));
     if (jwk === undefined) return problem(res, 400, "accountDoesNotExist");
     const signingInput = Buffer.from(`${jws.protected}.${jws.payload}`);
     const key = createPublicKey({ key: jwk, format: "jwk" });
@@ -319,7 +321,7 @@ function children(der: Buffer): Buffer[] {
   return out;
 }
 
-function thumbprint(jwk: JsonWebKey): string {
+function thumbprint(jwk: webcrypto.JsonWebKey): string {
   const canonical = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y });
   return createHash("sha256").update(canonical).digest("base64url");
 }

@@ -265,7 +265,7 @@ const SITES: ScopeSite[] = [
     untouched: (m) => [m.engine.resolveSecretId, m.engine.setAgentPermissions],
   },
   {
-    site: "audit.ts:12",
+    site: "audit.ts:18",
     method: "GET",
     route: "/api/v1/audit",
     path: "/api/v1/audit",
@@ -274,7 +274,7 @@ const SITES: ScopeSite[] = [
     untouched: (m) => [m.engine.queryAudit],
   },
   {
-    site: "audit.ts:69",
+    site: "audit.ts:75",
     method: "POST",
     route: "/api/v1/audit/verify",
     path: "/api/v1/audit/verify",

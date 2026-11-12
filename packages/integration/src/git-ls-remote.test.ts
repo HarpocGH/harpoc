@@ -215,7 +215,8 @@ describeGit("Git context — ls-remote through the vault (M6)", () => {
 
       expect(result.operation).toBe("ls-remote");
       expect(result.exit_code).toBe(128);
-      expect(result.stderr.includes("remote: denied for [REDACTED]:[REDACTED]")).toBe(true);
+      expect(result.stderr.includes("remote: denied for [REDACTED]\n")).toBe(true);
+      expect(result.stderr.includes("[REDACTED]:[REDACTED]")).toBe(false);
       const json = JSON.stringify(result);
       expect(json.includes(TOKEN) || json.includes(BASIC) || json.includes(USER)).toBe(false);
       expect(lastRow()).toMatchObject({

@@ -23,11 +23,6 @@ function collectSources(dir: URL, prefix: string): { path: string; url: URL }[] 
 const RAW_THROW = /\b(?:new\s+)?Error\s*\(/g;
 
 const ALLOWED: Record<string, { count: number; reason: string }> = {
-  "commands/audit.ts": {
-    count: 1,
-    reason:
-      "audit anchor's empty-chain refusal is a state refusal, not an input refusal, and no code among the 120 fits it (C-8)",
-  },
   "utils/prompt.ts": {
     count: 1,
     reason: "the hidden prompt's Ctrl+C is a cancellation, not an input refusal (C-8)",

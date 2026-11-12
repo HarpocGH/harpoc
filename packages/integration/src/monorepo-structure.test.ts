@@ -1,11 +1,12 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { describeBuildOutput, getPkgRoot } from "@harpoc/test-utils";
 
 const pkgRoot = getPkgRoot(import.meta.url);
 const monorepoRoot = resolve(pkgRoot, "..", "..");
 const sharedDistDir = resolve(monorepoRoot, "packages", "shared", "dist");
+const sharedSrcDir = resolve(monorepoRoot, "packages", "shared", "src");
 
 const WORKSPACE = readdirSync(resolve(monorepoRoot, "packages"), { withFileTypes: true })
   .filter(
@@ -83,6 +84,72 @@ function yamlBlock(yaml: string, key: string): string[] {
   }
   return block;
 }
+
+/** The index just past the literal that opens at `from` and closes with `quote` (in a template, just past a `${` too), skipping escaped characters and a `/` inside a regular expression's `[…]`; an unclosed string or regular expression ends at its line's end. */
+function literalEnd(source: string, from: number, quote: string): number {
+  let inClass = false;
+  for (let at = from + 1; at < source.length; at++) {
+    const c = source.charAt(at);
+    if (c === "\\") at++;
+    else if (quote === "`" && c === "$" && source.charAt(at + 1) === "{") return at + 2;
+    else if (quote === "/" && (c === "[" || c === "]")) inClass = c === "[";
+    else if (c === quote && !inClass) return at + 1;
+    else if (c === "\n" && quote !== "`") return at;
+  }
+  return source.length;
+}
+
+/** A TypeScript source without its comments (`uncommented`) and, in `code`, also without the text of its string, template and regular-expression literals — a template's `${…}` stays code, and a `/` opens a regular expression only after an operator other than a postfix `++` or `--`, an opening bracket, a brace, a comma, a semicolon or a keyword that is not a property's name, and is division after anything else. */
+function stripSource(source: string): { code: string; uncommented: string } {
+  const regexMayOpen =
+    /(?:^|[(,=:[!&|?{};*%<>~^]|(?<!\+)\+|(?<!-)-|(?<![.$])\b(?:return|typeof|case|do|else|in|of|new|delete|void|throw|instanceof|yield|await))\s*$/;
+  const templates: number[] = [];
+  let code = "";
+  let uncommented = "";
+  let at = 0;
+  while (at < source.length) {
+    const c = source.charAt(at);
+    const two = source.slice(at, at + 2);
+    if (two === "//" || two === "/*") {
+      const ends = source.indexOf(two === "//" ? "\n" : "*/", at + 2);
+      at = ends < 0 ? source.length : two === "//" ? ends : ends + 2;
+      code += " ";
+      uncommented += " ";
+    } else if (
+      c === '"' ||
+      c === "'" ||
+      c === "`" ||
+      (c === "}" && templates.at(-1) === 0) ||
+      (c === "/" && regexMayOpen.test(code))
+    ) {
+      if (c === "}") templates.pop();
+      const quote = c === "}" ? "`" : c;
+      const end = literalEnd(source, at, quote);
+      const interpolates = quote === "`" && source.slice(end - 2, end) === "${";
+      if (interpolates) templates.push(0);
+      code += quote === "`" ? `${c}${interpolates ? "${" : "`"}` : '""';
+      uncommented += source.slice(at, end);
+      at = end;
+    } else {
+      if (templates.length > 0 && (c === "{" || c === "}")) {
+        templates[templates.length - 1] = (templates.at(-1) ?? 0) + (c === "{" ? 1 : -1);
+      }
+      code += c;
+      uncommented += c;
+      at++;
+    }
+  }
+  return { code, uncommented };
+}
+
+const NODE_ONLY_GLOBALS = [
+  "Buffer",
+  "process",
+  "__dirname",
+  "__filename",
+  "setImmediate",
+  "global",
+] as const;
 
 describe("shared", () => {
   describeBuildOutput(sharedDistDir);
@@ -218,6 +285,62 @@ describe("turbo env pass-through (D5, 2026-09-08; the series file 2026-09-09)", 
   });
 });
 
+describe("turbo's global hash names the root files every package's tasks read (T7)", () => {
+  it("globalDependencies names tsconfig.base.json and eslint.config.js", () => {
+    const turbo = JSON.parse(readFileSync(resolve(monorepoRoot, "turbo.json"), "utf-8")) as {
+      globalDependencies?: string[];
+    };
+    expect(turbo.globalDependencies).toEqual(["tsconfig.base.json", "eslint.config.js"]);
+  });
+});
+
+describe("the base lib is ES2022 without DOM (U-4, C-24)", () => {
+  it("tsconfig.base.json's lib is ES2022 alone and only web-ui's tsconfig.json names a DOM lib", () => {
+    const base = JSON.parse(readFileSync(resolve(monorepoRoot, "tsconfig.base.json"), "utf-8")) as {
+      compilerOptions: { lib?: string[] };
+    };
+    expect(base.compilerOptions.lib).toEqual(["ES2022"]);
+    const namingDom = WORKSPACE.flatMap((pkg) =>
+      readdirSync(resolve(monorepoRoot, "packages", pkg))
+        .filter((file) => /^tsconfig.*\.json$/.test(file))
+        .map((file) => `packages/${pkg}/${file}`),
+    ).filter((path) => {
+      const config = JSON.parse(readFileSync(resolve(monorepoRoot, path), "utf-8")) as {
+        compilerOptions?: { lib?: string[] };
+      };
+      return (config.compilerOptions?.lib ?? []).some((lib) => /^dom(\.|$)/i.test(lib));
+    });
+    expect(namingDom).toEqual(["packages/web-ui/tsconfig.json"]);
+  });
+
+  it("shared's product code names no Node-only global and imports no node: module (it builds with Node's types, and web-ui runs it in the browser)", () => {
+    const files = readdirSync(sharedSrcDir, { recursive: true, encoding: "utf8" })
+      .map((path) => path.split(sep).join("/"))
+      .filter(
+        (path) =>
+          path.endsWith(".ts") &&
+          !path.endsWith(".test.ts") &&
+          !path.split("/").includes("__fixtures__"),
+      )
+      .sort();
+    expect(files.length).toBeGreaterThan(0);
+    const uses = files.flatMap((file) => {
+      const { code, uncommented } = stripSource(readFileSync(resolve(sharedSrcDir, file), "utf8"));
+      const found = [
+        ...[...uncommented.matchAll(/(?<![\w$.])(?:from|import\s*\(?)\s*["'`](node:[^"'`]*)/g)].map(
+          (match) => match[1] ?? "",
+        ),
+        ...(/(?<![\w$])require\s*\(/.test(code) ? ["require("] : []),
+        ...NODE_ONLY_GLOBALS.filter((identifier) =>
+          new RegExp(`(?<![\\w$])${identifier}(?![\\w$])`).test(code),
+        ),
+      ];
+      return found.map((identifier) => `${file}: ${identifier}`);
+    });
+    expect(uses).toEqual([]);
+  });
+});
+
 const OUT_OF_PACKAGE_INPUTS = [
   "$TURBO_ROOT$/.github/workflows/*.yml",
   "$TURBO_ROOT$/deploy/**",
@@ -227,6 +350,7 @@ const OUT_OF_PACKAGE_INPUTS = [
   "$TURBO_ROOT$/packages/*/package.json",
   "$TURBO_ROOT$/packages/*/src/**/*.ts",
   "$TURBO_ROOT$/packages/*/src/**/*.tsx",
+  "!$TURBO_ROOT$/**/NUL",
 ];
 
 describe("integration's test task names the files it reads outside its package (W10)", () => {

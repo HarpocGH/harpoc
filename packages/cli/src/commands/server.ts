@@ -440,7 +440,7 @@ export function registerServerCommand(program: Command): void {
               `${runtimeDir.source}: --ssh-agent found no consumer directory under ${runtimeDir.path} (one per agent user: ${recipe})`,
             );
           }
-          for (const { file } of rotationSpecs) assertIssueTokenFile(file);
+          for (const { file, agent } of rotationSpecs) assertIssueTokenFile(file, agent);
 
           const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir as string | undefined);
           // The unlock key is read last, after every refusal above — a bad source never costs a

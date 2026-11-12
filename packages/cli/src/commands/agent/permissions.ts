@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import type { Permission } from "@harpoc/shared";
+import type { Permission, SetAgentPermissionsResult } from "@harpoc/shared";
 import { AuditEventType, VaultError, permissionSchema } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import {
@@ -48,6 +48,34 @@ function parsePermissionFlags(options: PermissionsOptions): Permission[] {
   return permStrings as Permission[];
 }
 
+/** The cell: the record, the gating flip on stderr and the last line, or JSON under `--json`. */
+function printPermissionsResult(
+  agentName: string,
+  handle: string,
+  permissions: Permission[],
+  result: SetAgentPermissionsResult,
+  json: boolean | undefined,
+): void {
+  if (json) {
+    printJson(result);
+  } else {
+    printRecord({
+      Agent: agentName,
+      Secret: handle,
+      Permissions: result.policy ? result.policy.permissions.join(", ") : null,
+      Expires: formatTimestamp(result.policy?.expires_at ?? null),
+    });
+    if (result.gated_before !== result.gated_after) {
+      console.error(
+        result.gated_after
+          ? `Note: ${handle} received its first grant — until now no agent or tool token could reach it.`
+          : `Note: ${handle} has no grants left — no agent or tool token can reach it until one is written.`,
+      );
+    }
+    printSuccess(permissions.length > 0 ? "Permissions set." : "Permissions cleared.");
+  }
+}
+
 export function registerAgentPermissionsCommand(agent: Command): void {
   agent
     .command("permissions <name> <handle>")
@@ -78,24 +106,7 @@ export function registerAgentPermissionsCommand(agent: Command): void {
               permissions,
               expires_at: expiresAt,
             });
-            if (options.json) {
-              printJson(result);
-            } else {
-              printRecord({
-                Agent: name,
-                Secret: handle,
-                Permissions: result.policy ? result.policy.permissions.join(", ") : null,
-                Expires: formatTimestamp(result.policy?.expires_at ?? null),
-              });
-              if (result.gated_before !== result.gated_after) {
-                console.error(
-                  result.gated_after
-                    ? `Note: ${handle} received its first grant — until now no agent or tool token could reach it.`
-                    : `Note: ${handle} has no grants left — no agent or tool token can reach it until one is written.`,
-                );
-              }
-              printSuccess(permissions.length > 0 ? "Permissions set." : "Permissions cleared.");
-            }
+            printPermissionsResult(name, handle, permissions, result, options.json);
           });
           return;
         }
@@ -126,24 +137,7 @@ export function registerAgentPermissionsCommand(agent: Command): void {
             resolved?.caller,
           );
 
-          if (options.json) {
-            printJson(result);
-          } else {
-            printRecord({
-              Agent: name,
-              Secret: handle,
-              Permissions: result.policy ? result.policy.permissions.join(", ") : null,
-              Expires: formatTimestamp(result.policy?.expires_at ?? null),
-            });
-            if (result.gated_before !== result.gated_after) {
-              console.error(
-                result.gated_after
-                  ? `Note: ${handle} received its first grant — until now no agent or tool token could reach it.`
-                  : `Note: ${handle} has no grants left — no agent or tool token can reach it until one is written.`,
-              );
-            }
-            printSuccess(permissions.length > 0 ? "Permissions set." : "Permissions cleared.");
-          }
+          printPermissionsResult(name, handle, permissions, result, options.json);
         } finally {
           await engine.destroy();
         }

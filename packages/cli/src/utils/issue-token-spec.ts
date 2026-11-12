@@ -10,7 +10,7 @@ import {
 import type { Permission } from "@harpoc/shared";
 import type { TokenRotationSpec } from "@harpoc/core";
 import { parsePositiveInteger } from "./options.js";
-import { isLink } from "./runtime-dir.js";
+import { assertTokenDir, isLink } from "./runtime-dir.js";
 
 const REQUIRED_KEYS = ["agent", "file", "scope", "secrets"] as const;
 const KEYS: ReadonlySet<string> = new Set<string>([...REQUIRED_KEYS, "ttl"]);
@@ -109,9 +109,10 @@ function statOrUndefined(path: string): Stats | undefined {
 /**
  * Refuses `INVALID_INPUT` unless the token file's directory exists and the file is not a
  * directory, neither being a symbolic link or junction: each rotation writes a temporary beside
- * the file and renames it over the file.
+ * the file and renames it over the file. The directory is then judged as a consumer directory is,
+ * with the spec's agent as its one other reader (`assertTokenDir`).
  */
-export function assertIssueTokenFile(file: string): void {
+export function assertIssueTokenFile(file: string, agent: string): void {
   const dir = dirname(file);
   if (isLink(dir)) {
     throw refuse(`file ${file}: the directory is a symbolic link or junction: ${dir}`);
@@ -121,4 +122,5 @@ export function assertIssueTokenFile(file: string): void {
   if (!dirStat.isDirectory()) throw refuse(`file ${file}: not a directory: ${dir}`);
   if (isLink(file)) throw refuse(`file ${file} is a symbolic link or junction`);
   if (statOrUndefined(file)?.isDirectory() === true) throw refuse(`file ${file} is a directory`);
+  assertTokenDir(dir, `--issue-token: file ${file}`, agent);
 }

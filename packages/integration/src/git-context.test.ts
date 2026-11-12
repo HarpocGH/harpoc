@@ -238,7 +238,8 @@ describeGit("Git context (both mechanisms, §4.5.6)", () => {
   // `github.com` while git hands ssh `evil.invalid`. Refused as an unsupported
   // transport before any git process; with only `detectTransport`'s pattern
   // widened back, `parseSshHost` finds no host (INVALID_GIT_CONFIG), and with
-  // `parseSshHost` widened as well, the allowlisted host meets the absent
+  // `parseSshHost` widened as well, the user check refuses the colon-bearing
+  // user (INVALID_GIT_CONFIG, no host in the row) before the allowlist and the
   // known-host pin, either way still before any spawn.
   const COLON_USER: ReadonlyArray<readonly [GitOperation, boolean]> = [
     ["pull", true],

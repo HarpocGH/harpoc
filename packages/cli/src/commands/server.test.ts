@@ -2548,12 +2548,31 @@ describe("server start", () => {
       };
     }
 
+    const DAEMON = "S-1-5-21-1-2-3-1001";
+    const ace = (sid: string, rights: number) => ({
+      allow: true,
+      sid,
+      rights,
+      inherited: true,
+      inheritance: 3,
+      propagation: 0,
+    });
+    const TRUSTED = [DAEMON, "S-1-5-18", "S-1-5-32-544"].map((sid) => ace(sid, 0x1f01ff));
+    const listing = (rules = TRUSTED) => ({ user: DAEMON, owner: DAEMON, account: null, rules });
+
+    /** The token directory listed as a mkdtemp directory on win32 — the trusted three alone, the agent naming no local account; on a win32 host the row takes win32's judgement, since the POSIX ladder reads `process.geteuid`, which Windows lacks. */
+    function trustedThreeListing(): void {
+      if (platform === "win32") stubPlatform("win32");
+      vi.mocked(listWindowsAclSync).mockImplementation(() => listing());
+    }
+
     beforeEach(() => {
       dir = mkdtempSync(join(tmpdir(), "harpoc-server-issue-token-"));
       stubPlatform("linux");
     });
 
     afterEach(() => {
+      vi.mocked(listWindowsAclSync).mockReset();
       stubPlatform(platform);
       rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     });
@@ -2562,6 +2581,7 @@ describe("server start", () => {
       const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
       const { startServer } = await import("@harpoc/rest-api");
       const { TokenRotationScheduler } = await import("@harpoc/core");
+      trustedThreeListing();
 
       await run(["--session", "memory", "--rest", "--issue-token", spec("alice")]);
 
@@ -2592,6 +2612,7 @@ describe("server start", () => {
 
     it("the listeners wait for the first mint: startServer is not called before start() resolves", async () => {
       const { startServer } = await import("@harpoc/rest-api");
+      trustedThreeListing();
       let release: () => void = () => undefined;
       mockRotationScheduler.start.mockReturnValueOnce(
         new Promise<void>((resolve) => {
@@ -2610,6 +2631,7 @@ describe("server start", () => {
     });
 
     it("two specs: one scheduler for both, in order; the line names both agents", async () => {
+      trustedThreeListing();
       await run([
         "--session",
         "memory",
@@ -2630,6 +2652,7 @@ describe("server start", () => {
 
     // A consumer of the proxy alone uses the token there: no listener couples with --issue-token.
     it("beside --proxy alone the rotation starts before the proxy listens", async () => {
+      trustedThreeListing();
       await run(["--session", "memory", "--proxy", "--issue-token", spec("alice")]);
 
       const [started] = mockRotationScheduler.start.mock.invocationCallOrder;
@@ -2642,6 +2665,7 @@ describe("server start", () => {
       const { startServer } = await import("@harpoc/rest-api");
       const refusal = VaultError.agentNotFound("alice");
       mockRotationScheduler.start.mockRejectedValueOnce(refusal);
+      trustedThreeListing();
 
       await expect(
         run(["--session", "memory", "--rest", "--issue-token", spec("alice")]),
@@ -2658,6 +2682,7 @@ describe("server start", () => {
     it("SIGTERM stops the rotation first: before the refresh drain, every stop row and destroy", async () => {
       const onSpy = vi.spyOn(process, "on");
       spies.exitSpy.mockImplementation(() => undefined as never);
+      trustedThreeListing();
 
       await run([
         "--session",
@@ -2686,6 +2711,7 @@ describe("server start", () => {
     it("the shutdown awaits the rotation's stop: nothing else stops while a mint is in flight", async () => {
       const onSpy = vi.spyOn(process, "on");
       spies.exitSpy.mockImplementation(() => undefined as never);
+      trustedThreeListing();
       let releaseStop: () => void = () => undefined;
       mockRotationScheduler.stop.mockReturnValueOnce(
         new Promise<void>((resolve) => {
@@ -2711,6 +2737,7 @@ describe("server start", () => {
     it("onError prints the agent and the code alone, a non-VaultError as INTERNAL_ERROR; silent once shutdown began", async () => {
       const onSpy = vi.spyOn(process, "on");
       spies.exitSpy.mockImplementation(() => undefined as never);
+      trustedThreeListing();
       const needle = "needle-4a1f-not-for-stderr";
 
       await run(["--session", "memory", "--rest", "--issue-token", spec("alice")]);
@@ -2791,10 +2818,76 @@ describe("server start", () => {
       ]);
     });
 
+    const STARTS = [
+      { label: "--issue-token alone", argv: (s: string) => ["--rest", "--issue-token", s] },
+      {
+        label: "with --runtime-dir",
+        argv: (s: string) => ["--rest", "--runtime-dir", dir, "--issue-token", s],
+      },
+      { label: "under --proxy", argv: (s: string) => ["--proxy", "--issue-token", s] },
+    ];
+
+    it.skipIf(process.platform === "win32").each(STARTS)(
+      "$label: a token directory at 0755 is refused INVALID_INPUT naming it, before the vault opens (chmod; POSIX)",
+      async ({ argv }) => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+        const { createEgressProxy } = await import("@harpoc/egress-proxy");
+        const { TokenRotationScheduler } = await import("@harpoc/core");
+        const tokenDir = join(dir, "alice");
+        mkdirSync(tokenDir);
+        chmodSync(tokenDir, 0o755);
+        const file = join(tokenDir, "token.jwt");
+
+        await expect(
+          run(["--session", "memory", ...argv(`agent=alice,file=${file},scope=use,secrets=db-*`)]),
+        ).rejects.toThrow("process.exit");
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [
+            `Error: [INVALID_INPUT] --issue-token: file ${file}: mode 0755 is not 0750 or stricter (group-writable or world-accessible): ${tokenDir}`,
+          ],
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        expect(TokenRotationScheduler).not.toHaveBeenCalled();
+        expect(createEgressProxy).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(STARTS)(
+      "$label on Windows (the platform stubbed): a token directory whose access list grants Users is refused INVALID_INPUT naming it, before the vault opens",
+      async ({ argv }) => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+        const { createEgressProxy } = await import("@harpoc/egress-proxy");
+        const { TokenRotationScheduler } = await import("@harpoc/core");
+        stubPlatform("win32");
+        const tokenDir = join(dir, "alice");
+        mkdirSync(tokenDir);
+        const file = join(tokenDir, "token.jwt");
+        vi.mocked(listWindowsAclSync).mockImplementation((path) =>
+          listing(path === tokenDir ? [...TRUSTED, ace("S-1-5-32-545", 0x1200a9)] : TRUSTED),
+        );
+
+        await expect(
+          run(["--session", "memory", ...argv(`agent=alice,file=${file},scope=use,secrets=db-*`)]),
+        ).rejects.toThrow("process.exit");
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [
+            `Error: [INVALID_INPUT] --issue-token: file ${file}: the access list grants S-1-5-32-545 0x001200A9 (inherited); only this process's account, SYSTEM, Administrators may hold a grant (no local account is named "alice"): ${tokenDir}`,
+          ],
+        ]);
+        expect(listWindowsAclSync).toHaveBeenCalledWith(tokenDir, { account: "alice" });
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        expect(TokenRotationScheduler).not.toHaveBeenCalled();
+        expect(createEgressProxy).not.toHaveBeenCalled();
+      },
+    );
+
     // B7 lifts RA-B5-4's refusal: the token file inherits the consumer directory's access list.
     it("on Windows --issue-token builds and starts the scheduler as on Linux", async () => {
       const { TokenRotationScheduler } = await import("@harpoc/core");
       stubPlatform("win32");
+      trustedThreeListing();
 
       await run(["--session", "memory", "--rest", "--issue-token", spec("alice")]);
 

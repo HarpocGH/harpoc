@@ -12,6 +12,7 @@ import {
   isHostKeyFailure,
   isSshName,
   sshHardeningArgs,
+  startsWithDash,
   writeIdentityFile,
   writeKnownHosts,
   writeTempSshFile,
@@ -24,19 +25,20 @@ import type { TreeKillMechanism } from "./win32-job-wrapper.js";
  * credential or file content. Every field the builder writes is request- or
  * policy-derived (available before the operation runs), so the same projection
  * covers both a successful use and a denial: `buildSftpAuditDetails` needs only
- * the action and the policy's two isolation flags, not a result. Optional are the
- * six result-derived keys (`sanitized`, `descendant_sweep`, `tree_kill`,
- * `strict_tree_exit`, `isolation_mechanism`, `fs_isolation_mechanism`): the engine folds them
- * onto a row whose spawn returned a result — a success, or a graceful
- * non-throwing failure such as PROCESS_TIMEOUT; a throw — before the spawn, or
- * from `toSftpResult` after it — carries the request- and policy-derived keys
- * only.
+ * the action and the policy's two isolation flags, not a result. Optional are
+ * `host` and `remote_path`, each left out when the action's value is not a
+ * string, and the six result-derived keys (`sanitized`, `descendant_sweep`,
+ * `tree_kill`, `strict_tree_exit`, `isolation_mechanism`,
+ * `fs_isolation_mechanism`), which the engine folds onto a row whose spawn
+ * returned a result — a success, or a graceful non-throwing failure such as
+ * PROCESS_TIMEOUT; a throw — before the spawn, or from `toSftpResult` after
+ * it — carries the request- and policy-derived keys only.
  */
 export interface SftpAuditDetails {
-  host: string;
+  host?: string;
   operation: string;
   port: number | null;
-  remote_path: string;
+  remote_path?: string;
   local_path: string | null;
   /** The policy's network-isolation demand — on every row, like git's and ssh's (2026-10-14). */
   network_isolation: boolean;
@@ -87,11 +89,11 @@ export function buildSftpAuditDetails(
   policy: InjectionPolicy,
 ): SftpAuditDetails {
   return {
-    host: action.host,
+    ...(typeof action.host === "string" ? { host: action.host } : {}),
     operation: action.operation,
     port: action.port ?? null,
-    remote_path: action.remote_path,
-    local_path: action.local_path ?? null,
+    ...(typeof action.remote_path === "string" ? { remote_path: action.remote_path } : {}),
+    local_path: typeof action.local_path === "string" ? action.local_path : null,
     network_isolation: policy.network_isolation === true,
     fs_isolation: policy.fs_isolation === true,
   };
@@ -143,8 +145,8 @@ function hasBatchControlCharacters(value: string): boolean {
  *    the checks above (a newline is the one character that could inject a
  *    second scripted command).
  */
-function quotePath(path: string): string {
-  if (path.startsWith("-")) {
+function quotePath(path: unknown): string {
+  if (typeof path !== "string" || path.startsWith("-")) {
     throw VaultError.invalidInput(
       "sftp path must not start with '-' (would be parsed as an sftp option)",
     );
@@ -257,7 +259,7 @@ export async function executeSftpAction(
   // Defense in depth beside the schema's first-character anchor (mirrors the
   // SSH context): host and user reach argv, so a leading dash must never
   // parse as an option.
-  if (action.host.startsWith("-") || action.user.startsWith("-")) {
+  if (startsWithDash(action.host) || startsWithDash(action.user)) {
     throw VaultError.invalidSshConfig("host and user must not start with '-'");
   }
 

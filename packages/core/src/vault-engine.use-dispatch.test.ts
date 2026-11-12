@@ -632,4 +632,17 @@ describe("useSecret (MCP proxy)", () => {
     expect(registryOf(engine).get(secretId)).toBeUndefined();
     expect(terminateReasons()).toEqual(["config_removed"]);
   });
+
+  it("a deleted server config's mcp.terminate row follows its policy.revoke row", async () => {
+    await spawnLiveDownstream();
+
+    await expect(engine.deleteMcpServerConfig("secret://mcpuse")).resolves.toBe(true);
+
+    const revokes = engine.queryAudit({ eventType: AuditEventType.POLICY_REVOKE });
+    const terminates = engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
+    expect(revokes).toHaveLength(1);
+    expect(terminates).toHaveLength(1);
+    expect(terminates[0]?.detail?.reason).toBe("config_removed");
+    expect(terminates[0]?.id).toBeGreaterThan(revokes[0]?.id as number);
+  });
 });

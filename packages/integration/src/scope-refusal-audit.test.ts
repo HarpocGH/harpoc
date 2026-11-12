@@ -15,12 +15,14 @@ describe("every REST scope refusal writes an access.denied row (D2g)", () => {
   let server: TestServer;
   let projectScoped: string;
   let readOnly: string;
+  let claimedAdmin: string;
 
   beforeAll(async () => {
     vault = createTestVault();
     await vault.engine.initVault(PASSWORD);
     registerAgents(vault.engine, "scoped-agent");
     registerAgents(vault.engine, "reader");
+    registerAgents(vault.engine, "claimed-admin");
     for (const project of ["other", "acme"]) {
       await vault.engine.createSecret({
         name: "db",
@@ -33,6 +35,9 @@ describe("every REST scope refusal writes an access.denied row (D2g)", () => {
       project: "acme",
     });
     readOnly = vault.engine.createToken("reader", ["read", "list"], 600_000);
+    claimedAdmin = vault.engine.createToken("claimed-admin", ["admin"], 600_000, {
+      project: "acme",
+    });
     server = startTestServer(vault.engine);
   });
 
@@ -79,6 +84,24 @@ describe("every REST scope refusal writes an access.denied row (D2g)", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.principal_id).toBe("reader");
     expect(rows[0]?.detail).toMatchObject({ reason: "permission", interface: "rest" });
+  });
+
+  it("a project-claimed admin token on POST /api/v1/audit/verify: 403 and one governance row with its principal (C-12)", async () => {
+    const res = await call("POST", "/api/v1/audit/verify", claimedAdmin);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(ErrorCode.ACCESS_DENIED);
+    const rows = denied().filter((r) => r.detail?.operation === "POST /api/v1/audit/verify");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.success).toBe(false);
+    expect(rows[0]?.secret_id).toBeNull();
+    expect(rows[0]?.principal_type).toBe("agent");
+    expect(rows[0]?.principal_id).toBe("claimed-admin");
+    expect(rows[0]?.detail).toEqual({
+      operation: "POST /api/v1/audit/verify",
+      error: ErrorCode.ACCESS_DENIED,
+      reason: "governance",
+      interface: "rest",
+    });
   });
 
   it("an admitted call leaves no access.denied row", async () => {

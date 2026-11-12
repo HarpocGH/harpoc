@@ -1,10 +1,15 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import type { Command } from "commander";
+import type { AuditChainVerification, DecryptedAuditEvent, VaultEngine } from "@harpoc/core";
 import type { AuditChainAnchor, AuditEventType } from "@harpoc/shared";
-import { VaultError, auditChainAnchorSchema, auditScopeFromToken } from "@harpoc/shared";
+import { ErrorCode, VaultError, auditChainAnchorSchema, auditScopeFromToken } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError, printTable, printJson, formatTimestamp } from "../utils/output.js";
-import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../utils/token-caller.js";
+import {
+  resolveTokenCaller,
+  TOKEN_OPTION_DESCRIPTION,
+  type ResolvedToken,
+} from "../utils/token-caller.js";
 import { parsePositiveInteger } from "../utils/options.js";
 import { restModeOf, restModeUnsupported, runRestMode } from "../utils/rest-mode.js";
 
@@ -38,6 +43,53 @@ function readAnchorFile(path: string): AuditChainAnchor {
 function tailLine(tail: AuditChainAnchor | null): string {
   if (!tail) return "Tail link: none (no chained audit rows).";
   return `Tail link: row ${tail.last_id} · hmac ${tail.row_hmac} · ${formatTimestamp(tail.timestamp)}`;
+}
+
+/** A claimed token is refused the vault-wide chain, its governance row written first (C-12). */
+function refuseClaimedToken(
+  engine: Pick<VaultEngine, "auditGovernanceRefusal">,
+  resolved: ResolvedToken | undefined,
+  operation: string,
+): void {
+  if (resolved && (resolved.payload.project || resolved.payload.secrets?.length)) {
+    engine.auditGovernanceRefusal(resolved.caller, operation);
+    throw VaultError.accessDenied("governance requires an unscoped admin token");
+  }
+}
+
+/** The audit events: the table, or the events as JSON under `--json`. */
+function printAuditEvents(events: DecryptedAuditEvent[], json: boolean | undefined): void {
+  if (json) {
+    printJson(events);
+  } else {
+    // NULL principal columns render "-", never "local": rows written
+    // before attribution shipped are NULL regardless of caller, so
+    // NULL ⇒ trusted-local holds only for post-upgrade rows.
+    const rows = events.map((e) => ({
+      ID: e.id,
+      Time: formatTimestamp(e.timestamp),
+      Event: e.event_type,
+      Secret: e.secret_id ?? "-",
+      Principal: e.principal_type && e.principal_id ? `${e.principal_type}:${e.principal_id}` : "-",
+      IP: e.ip_address ?? "-",
+      Session: e.session_id ? e.session_id.slice(0, 8) + "..." : "-",
+      Success: e.success ? "yes" : "no",
+    }));
+    printTable(rows);
+  }
+}
+
+/** The chain's verdict: the OK line on stdout, or the BROKEN line on stderr. */
+function printChainVerdict(
+  report: Pick<AuditChainVerification, "checked" | "firstBrokenId">,
+): void {
+  if (report.firstBrokenId === null) {
+    console.log(`Audit chain OK — ${report.checked} row(s) verified.`);
+  } else {
+    console.error(
+      `Audit chain BROKEN at row ${report.firstBrokenId} — ${report.checked} verified.`,
+    );
+  }
 }
 
 export function registerAuditCommand(program: Command): void {
@@ -85,25 +137,7 @@ export function registerAuditCommand(program: Command): void {
                 since,
                 limit,
               });
-              if (options.json) {
-                printJson(events);
-              } else {
-                printTable(
-                  events.map((e) => ({
-                    ID: e.id,
-                    Time: formatTimestamp(e.timestamp),
-                    Event: e.event_type,
-                    Secret: e.secret_id ?? "-",
-                    Principal:
-                      e.principal_type && e.principal_id
-                        ? `${e.principal_type}:${e.principal_id}`
-                        : "-",
-                    IP: e.ip_address ?? "-",
-                    Session: e.session_id ? e.session_id.slice(0, 8) + "..." : "-",
-                    Success: e.success ? "yes" : "no",
-                  })),
-                );
-              }
+              printAuditEvents(events, options.json);
             });
             return;
           }
@@ -126,27 +160,7 @@ export function registerAuditCommand(program: Command): void {
               resolved ? auditScopeFromToken(resolved.payload) : undefined,
             );
 
-            if (options.json) {
-              printJson(events);
-            } else {
-              // NULL principal columns render "-", never "local": rows written
-              // before attribution shipped are NULL regardless of caller, so
-              // NULL ⇒ trusted-local holds only for post-upgrade rows.
-              const rows = events.map((e) => ({
-                ID: e.id,
-                Time: formatTimestamp(e.timestamp),
-                Event: e.event_type,
-                Secret: e.secret_id ?? "-",
-                Principal:
-                  e.principal_type && e.principal_id
-                    ? `${e.principal_type}:${e.principal_id}`
-                    : "-",
-                IP: e.ip_address ?? "-",
-                Session: e.session_id ? e.session_id.slice(0, 8) + "..." : "-",
-                Success: e.success ? "yes" : "no",
-              }));
-              printTable(rows);
-            }
+            printAuditEvents(events, options.json);
           } finally {
             await engine.destroy();
           }
@@ -174,11 +188,13 @@ export function registerAuditCommand(program: Command): void {
             options.token ??
             (cmd.optsWithGlobals() as { token?: string }).token ??
             process.env.HARPOC_TOKEN;
-          resolveTokenCaller(engine, { permission: "admin" }, tokenValue);
+          const resolved = resolveTokenCaller(engine, { permission: "admin" }, tokenValue);
+          refuseClaimedToken(engine, resolved, "audit anchor");
 
           const anchor = engine.getAuditChainTail();
           if (!anchor) {
-            throw new Error(
+            throw new VaultError(
+              ErrorCode.VAULT_CORRUPTED,
               "No anchorable audit chain tail — the log is empty or its last row carries no link (run harpoc audit verify).",
             );
           }
@@ -219,12 +235,8 @@ export function registerAuditCommand(program: Command): void {
             const report = await client.verifyAuditChain();
             if (json) {
               printJson(report);
-            } else if (report.firstBrokenId === null) {
-              console.log(`Audit chain OK — ${report.checked} row(s) verified.`);
             } else {
-              console.error(
-                `Audit chain BROKEN at row ${report.firstBrokenId} — ${report.checked} verified.`,
-              );
+              printChainVerdict(report);
             }
             if (!report.valid) {
               process.exitCode = 1;
@@ -239,7 +251,8 @@ export function registerAuditCommand(program: Command): void {
             options.token ??
             (cmd.optsWithGlobals() as { token?: string }).token ??
             process.env.HARPOC_TOKEN;
-          resolveTokenCaller(engine, { permission: "admin" }, tokenValue);
+          const resolved = resolveTokenCaller(engine, { permission: "admin" }, tokenValue);
+          refuseClaimedToken(engine, resolved, "audit verify");
 
           const anchor = options.anchor ? readAnchorFile(options.anchor) : undefined;
           const result = engine.verifyAuditChain(anchor ? { anchor } : undefined);
@@ -248,13 +261,7 @@ export function registerAuditCommand(program: Command): void {
           } else {
             console.log(tailLine(result.tail));
             // Chain and anchor are independent signals — report both, always.
-            if (result.firstBrokenId === null) {
-              console.log(`Audit chain OK — ${result.checked} row(s) verified.`);
-            } else {
-              console.error(
-                `Audit chain BROKEN at row ${result.firstBrokenId} — ${result.checked} verified.`,
-              );
-            }
+            printChainVerdict(result);
             if (result.anchor) {
               if (result.anchor.status === "ok") {
                 console.log(`Anchor OK — row ${result.anchor.lastId} intact.`);

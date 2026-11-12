@@ -14,6 +14,26 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSModuleAutoLoadingPreference = 'None'
+
+# Import an in-box module by its manifest's path under $PSHOME, never through PSModulePath;
+# a module not found there exactly once ends the script (exit 1).
+function Import-InBoxModule([string]$Name) {
+  $manifests = @()
+  try {
+    $manifests = [System.IO.Directory]::GetFiles([System.IO.Path]::Combine($PSHOME, 'Modules', $Name), "$Name.psd1", [System.IO.SearchOption]::AllDirectories)
+  } catch {
+    $manifests = @()
+  }
+  if ($manifests.Count -ne 1) {
+    [Console]::Error.WriteLine("the in-box module $Name was not found under $PSHOME")
+    exit 1
+  }
+  Import-Module -Name $manifests[0]
+}
+
+Import-InBoxModule 'Microsoft.PowerShell.Utility'
+Import-InBoxModule 'Microsoft.PowerShell.Management'
 
 $Prog = 'enroll-unlock-key.ps1'
 $SystemSid = 'S-1-5-18'
@@ -114,6 +134,8 @@ if (-not [System.IO.Path]::IsPathRooted($entry) -or -not (Test-Path -LiteralPath
 }
 
 if (-not (Test-Elevated)) { Stop-WithError 'must run elevated (an Administrator PowerShell)' 1 }
+Import-InBoxModule 'Microsoft.PowerShell.LocalAccounts'
+Import-InBoxModule 'Microsoft.PowerShell.Security'
 if (-not (Test-Path -LiteralPath (Split-Path -Parent $Out) -PathType Container)) {
   Stop-WithError "-Out: no such directory: $(Split-Path -Parent $Out)" 2
 }

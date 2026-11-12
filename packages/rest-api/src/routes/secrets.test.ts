@@ -11,6 +11,8 @@ import {
   createMockEngine,
 } from "./__fixtures__/secrets-app.js";
 
+type ListBody = { data: [{ name: string }] };
+
 let app: Hono<HarpocEnv>;
 let engine: ReturnType<typeof createMockEngine>;
 
@@ -24,7 +26,7 @@ describe("secret routes", () => {
     it("lists secrets", async () => {
       const res = await app.request("/api/v1/secrets", { headers: AUTH });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as ListBody;
       expect(body.data).toHaveLength(1);
       expect(body.data[0].name).toBe("test-key");
       expect(engine.verifyToken).toHaveBeenCalledTimes(1);
@@ -61,12 +63,12 @@ describe("secret routes", () => {
     it("filters the list by * patterns", async () => {
       engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["test-*"] });
       const res = await app.request("/api/v1/secrets", { headers: AUTH });
-      const body = await res.json();
+      const body = (await res.json()) as ListBody;
       expect(body.data).toHaveLength(1);
 
       engine.verifyToken.mockReturnValue({ ...MOCK_TOKEN, secrets: ["db-*"] });
       const res2 = await app.request("/api/v1/secrets", { headers: AUTH });
-      const body2 = await res2.json();
+      const body2 = (await res2.json()) as ListBody;
       expect(body2.data).toHaveLength(0);
     });
 
@@ -99,7 +101,7 @@ describe("secret routes", () => {
         body: JSON.stringify({ name: "new-key", type: "api_key" }),
       });
       expect(res.status).toBe(201);
-      const body = await res.json();
+      const body = (await res.json()) as { data: { handle: string } };
       expect(body.data.handle).toBe("secret://new-key");
     });
 
@@ -155,7 +157,7 @@ describe("secret routes", () => {
     it("returns secret info", async () => {
       const res = await app.request("/api/v1/secrets/test-key", { headers: AUTH });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as { data: { name: string } };
       expect(body.data.name).toBe("test-key");
       expect(engine.getSecretInfo).toHaveBeenCalledWith("secret://test-key", EXPECTED_CALLER);
     });
@@ -171,7 +173,7 @@ describe("secret routes", () => {
     it("returns secret value as base64", async () => {
       const res = await app.request("/api/v1/secrets/test-key/value", { headers: AUTH });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as { data: { value: string } };
       expect(body.data.value).toBe(Buffer.from("Hello").toString("base64"));
     });
   });
@@ -192,7 +194,7 @@ describe("secret routes", () => {
         headers: AUTH,
       });
       expect(res.status).toBe(400);
-      const body = await res.json();
+      const body = (await res.json()) as { error: string };
       expect(body.error).toBe(ErrorCode.INVALID_INPUT);
     });
 

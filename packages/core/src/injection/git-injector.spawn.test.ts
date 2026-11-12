@@ -20,7 +20,7 @@ import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { GitInjector } from "./git-injector.js";
-import { spawnCaptured } from "./spawn-captured.js";
+import { redactCaptured, spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { sshHardeningArgs } from "./ssh-common.js";
 import { system32Path } from "../win32-paths.js";
@@ -216,7 +216,10 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
     // the fetch's output is redacted of both halves.
     const [, , listOpts] = calls[0] as SpawnCall;
     const [, , fetchOpts] = calls[1] as SpawnCall;
-    expect(JSON.stringify(listOpts.redact) === JSON.stringify(["s3cret-token-value"])).toBe(true);
+    expect(
+      JSON.stringify(listOpts.redact) ===
+        JSON.stringify(["git-user:s3cret-token-value", "s3cret-token-value"]),
+    ).toBe(true);
     expect((fetchOpts.redact ?? []).includes("git-user")).toBe(true);
     const [, , cloneOpts] = calls[2] as SpawnCall;
     expect(cloneOpts.env.GIT_ASKPASS).toBeUndefined();
@@ -919,6 +922,126 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
     expect(opts.redact).toContain("s3cret-token-value");
     expect(opts.redact).toContain("abc");
   });
+
+  async function cloneWith(stored: string): Promise<SpawnCall[]> {
+    await injector.executeWithSecret(
+      { type: "git", operation: "clone", repository: "https://8.8.8.8/org/repo.git" },
+      new Uint8Array(Buffer.from(stored)),
+      policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] }),
+      undefined,
+    );
+    return spawnMock.mock.calls as SpawnCall[];
+  }
+
+  it.each([
+    ["a user:password credential", "git-user:s3cret-token-value", "git-user:s3cret-token-value"],
+    ["a bare token", "s3cret-token-value", "x-access-token:s3cret-token-value"],
+  ])(
+    "the redaction list holds the joined user:password form an HTTP Basic header encodes: %s",
+    async (_title, stored, joined) => {
+      const [, , fetchOpts] = (await cloneWith(stored))[1] as SpawnCall;
+      expect((fetchOpts.redact ?? []).includes(joined)).toBe(true);
+    },
+  );
+
+  it.each([
+    [0, "ci-bot"],
+    [1, "deploy7"],
+    [2, "git-user"],
+  ])(
+    "a Basic header of the credential is redacted whole (a user name of length %i mod 3)",
+    async (residue, user) => {
+      expect(user.length % 3).toBe(residue);
+      const [, , fetchOpts] = (await cloneWith(`${user}:s3cret-token-value`))[1] as SpawnCall;
+      const basic = Buffer.from(`${user}:s3cret-token-value`).toString("base64");
+      expect(
+        redactCaptured(`Authorization: Basic ${basic}`, fetchOpts.redact) ===
+          "Authorization: Basic [REDACTED]",
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    [0, "ci-bot"],
+    [1, "deploy7"],
+    [2, "git-user"],
+  ])(
+    "a Basic header of the credential in the clone's returned listing, redacted by the parse list and then the full list, is redacted whole (a user name of length %i mod 3; K3-R2)",
+    async (residue, user) => {
+      expect(user.length % 3).toBe(residue);
+      const calls = await cloneWith(`${user}:s3cret-token-value`);
+      const [, , listOpts] = calls[0] as SpawnCall;
+      const [, , fetchOpts] = calls[1] as SpawnCall;
+      const basic = Buffer.from(`${user}:s3cret-token-value`).toString("base64");
+      expect(
+        redactCaptured(
+          redactCaptured(`Authorization: Basic ${basic}`, listOpts.redact),
+          fetchOpts.redact,
+        ) === "Authorization: Basic [REDACTED]",
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    [
+      "a token in the user half beside the placeholder password",
+      "ghp-fixture-0001-token-value:x-oauth-basic",
+      (list: string[]) => list.includes("ghp-fixture-0001-token-value"),
+    ],
+    [
+      "a token in the user half beside an empty password",
+      "ghp-fixture-0001-token-value:",
+      (list: string[]) => list.includes("ghp-fixture-0001-token-value"),
+    ],
+    [
+      "a bare token",
+      "s3cret-token-value",
+      (list: string[]) =>
+        JSON.stringify(list) ===
+        JSON.stringify(["x-access-token:s3cret-token-value", "s3cret-token-value"]),
+    ],
+  ])(
+    "the clone's ls-remote is parsed with the token redacted wherever the stored shape puts it (C-15): %s",
+    async (_title, stored, holds) => {
+      const [, , listOpts] = (await cloneWith(stored))[0] as SpawnCall;
+      expect(holds(listOpts.redact ?? [])).toBe(true);
+    },
+  );
+
+  it("the clone's ls-remote parse list holds no user half under the shared floor beside the placeholder password (MIN_REDACTABLE_FRAGMENT)", async () => {
+    const [, , listOpts] = (await cloneWith("ab:x-oauth-basic"))[0] as SpawnCall;
+    expect((listOpts.redact ?? []).includes("ab")).toBe(false);
+  });
+
+  it("a successful but truncated ls-remote listing is parsed from the seam's copy: the relay's HEAD at the fetch names the default branch that carries the credential's user name (C-16)", async () => {
+    let headAtFetch: string | undefined;
+    spawnMock.mockImplementation((_cmd, args) => {
+      const sub = gitSubcommand(args);
+      if (sub === "ls-remote") {
+        return Promise.resolve({
+          ...OK_RESULT,
+          truncated: true,
+          stdout: `ref: refs/heads/git-user-main\tHEAD\n${"e".repeat(40)}\tHEAD\n`,
+        });
+      }
+      if (sub === "fetch") {
+        const relay = (args.find((a) => a.startsWith("--git-dir=")) as string).slice(
+          "--git-dir=".length,
+        );
+        headAtFetch = readFileSync(join(relay, "HEAD"), "utf8");
+      }
+      return Promise.resolve(OK_RESULT);
+    });
+    const result = await injector.executeWithSecret(
+      { type: "git", operation: "clone", repository: "https://8.8.8.8/org/repo.git" },
+      new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+      policy({ command_allowlist: [GIT as string], url_allowlist: ["https://8.8.8.8/*"] }),
+      undefined,
+    );
+    expect(result.exit_code).toBe(0);
+    expect(JSON.stringify(result).includes("git-user")).toBe(false);
+    expect(headAtFetch === "ref: refs/heads/git-user-main\n").toBe(true);
+  });
 });
 
 // H6: target control for Git-over-HTTPS must survive past the initially supplied
@@ -1340,6 +1463,81 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
         ),
       ).rejects.toMatchObject({ code: ErrorCode.INVALID_GIT_CONFIG });
       expect(spawnMock).not.toHaveBeenCalled();
+    },
+  );
+
+  const CALLER_SPELLING = "HTTPS://8.8.8.8:443/org/./repo.git";
+  const JUDGED_URL = "https://8.8.8.8/org/repo.git";
+
+  it.each([
+    { operation: "clone", tree: false, steps: ["ls-remote", "fetch", "clone"] },
+    { operation: "ls-remote", tree: false, steps: ["ls-remote"] },
+    { operation: "pull", tree: true, steps: ["rev-parse", "for-each-ref", "fetch", "pull"] },
+    {
+      operation: "push",
+      tree: true,
+      steps: ["rev-parse", "symbolic-ref", "for-each-ref", "push"],
+    },
+    {
+      operation: "fetch",
+      tree: true,
+      steps: ["rev-parse", "config", "for-each-ref", "fetch", "fetch"],
+    },
+  ] as const)(
+    "$operation: the credential-bearing step is handed the URL the vault judged; every other step keeps the caller's spelling (C-19)",
+    async ({ operation, tree, steps }) => {
+      const wd = tree ? initRepo() : undefined;
+      try {
+        if (wd !== undefined) {
+          if (operation === "fetch") {
+            execFileSync(GIT as string, ["-C", wd, "remote", "add", "origin", CALLER_SPELLING], {
+              env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: NULL_GIT_CONFIG },
+              stdio: ["ignore", "pipe", "pipe"],
+              timeout: 20_000,
+            });
+          }
+          relayWithRealProbes();
+        }
+        const result = await injector.executeWithSecret(
+          {
+            type: "git",
+            operation,
+            repository: CALLER_SPELLING,
+            ...(wd !== undefined ? { working_directory: wd } : {}),
+          },
+          new Uint8Array(Buffer.from("git-user:s3cret-token-value")),
+          httpsPolicy(),
+          undefined,
+        );
+        expect(result.exit_code).toBe(0);
+        const calls = spawnMock.mock.calls as SpawnCall[];
+        expect(calls.map(([, a]) => gitSubcommand(a))).toEqual(steps);
+        const network = calls.filter(([, , o]) => o.env.GIT_ASKPASS !== undefined);
+        expect(network).toHaveLength(operation === "clone" ? 2 : 1);
+        for (const [, args] of network) {
+          expect(args[args.indexOf("--") + 1] === JUDGED_URL).toBe(true);
+        }
+        const hops = calls.filter(
+          ([, a, o]) => o.env.GIT_ASKPASS === undefined && a.includes("--"),
+        );
+        expect(hops).toHaveLength(operation === "push" || operation === "ls-remote" ? 0 : 1);
+        for (const [, args] of hops) {
+          const rewrite = args.find((a) => /^url\..+\.insteadOf=/.test(a)) as string;
+          expect(
+            rewrite.slice(rewrite.indexOf(".insteadOf=") + ".insteadOf=".length) ===
+              CALLER_SPELLING,
+          ).toBe(true);
+          expect(args[args.indexOf("--") + 1] === CALLER_SPELLING).toBe(true);
+        }
+        if (operation === "fetch") {
+          const [, lookup] = calls.find(([, a]) => gitSubcommand(a) === "config") as SpawnCall;
+          expect(lookup.at(-1) === CALLER_SPELLING).toBe(true);
+        }
+      } finally {
+        if (wd !== undefined) {
+          rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        }
+      }
     },
   );
 });

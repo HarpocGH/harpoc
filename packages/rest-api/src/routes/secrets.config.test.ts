@@ -9,6 +9,10 @@ import {
   createMockEngine,
 } from "./__fixtures__/secrets-app.js";
 
+type ErrorBody = { error: string; message: string };
+type DataBody = { data: unknown };
+type DeletedBody = { data: { deleted: boolean } };
+
 let app: Hono<HarpocEnv>;
 let engine: ReturnType<typeof createMockEngine>;
 
@@ -25,7 +29,7 @@ describe("secret routes", () => {
         headers: AUTH,
       });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as DataBody;
       expect(body.data).toEqual({
         url_allowlist: [],
         command_allowlist: [],
@@ -140,7 +144,7 @@ describe("secret routes", () => {
         headers: AUTH,
       });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as { data: { fs_isolation: boolean } };
       expect(body.data.fs_isolation).toBe(true);
     });
 
@@ -232,7 +236,7 @@ describe("secret routes", () => {
         body: JSON.stringify({ ...FULL_POLICY, command_allowlist: ["python"] }),
       });
       expect(res.status).toBe(400);
-      const body = await res.json();
+      const body = (await res.json()) as ErrorBody;
       expect(body.error).toBe(ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED);
     });
 
@@ -319,7 +323,7 @@ describe("secret routes", () => {
         }),
       });
       expect(res.status).toBe(400);
-      const body = await res.json();
+      const body = (await res.json()) as ErrorBody;
       expect(body.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
       expect(body.message).toContain("smtp_recipient_allowlist.0:");
     });
@@ -332,7 +336,7 @@ describe("secret routes", () => {
         headers: AUTH,
       });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as DataBody;
       expect(body.data).toBeNull();
     });
 
@@ -415,7 +419,7 @@ describe("secret routes", () => {
         headers: AUTH,
       });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as DeletedBody;
       expect(body.data.deleted).toBe(true);
       expect(engine.deleteMcpServerConfig).toHaveBeenCalledWith(
         "secret://test-key",
@@ -431,7 +435,7 @@ describe("secret routes", () => {
         headers: AUTH,
       });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as DataBody;
       expect(body.data).toBeNull();
     });
 
@@ -491,7 +495,7 @@ describe("secret routes", () => {
         headers: AUTH,
       });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as DeletedBody;
       expect(body.data.deleted).toBe(true);
       expect(engine.deleteConnectionConfig).toHaveBeenCalledWith(
         "secret://test-key",

@@ -7,7 +7,7 @@ import { collectValueFromTty } from "../elicitation/tty-prompt.js";
 import { collectValueViaUrlElicitation } from "../elicitation/value-collector.js";
 import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
-import { START_OAUTH_FLOW_TOOL } from "./definitions.js";
+import { START_OAUTH_FLOW_TOOL, oauthConnectCommand } from "./definitions.js";
 
 const PERMISSION: Permission = "create";
 
@@ -41,7 +41,7 @@ export function registerStartOauthFlow(
         status: "pending_authorization",
         message:
           `OAuth secret created (PENDING). Complete the browser authorization with: ` +
-          `harpoc oauth connect ${args.name} --provider ${args.provider} --client-id ${args.client_id}`,
+          oauthConnectCommand(args),
       });
     }
 
@@ -66,7 +66,7 @@ export function registerStartOauthFlow(
         status: "not_created",
         message:
           `No out-of-band channel was available to collect the client secret, so nothing was created. Create it with: ` +
-          `harpoc oauth connect ${args.name} --client-credentials --provider ${args.provider} --client-id ${args.client_id}`,
+          oauthConnectCommand(args),
       });
     }
     let clientSecret: string;

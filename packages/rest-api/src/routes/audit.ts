@@ -1,8 +1,14 @@
 import { Hono } from "hono";
-import { auditQuerySchema, auditScopeFromToken } from "@harpoc/shared";
+import { auditQuerySchema, auditScopeFromToken, isDecimalInteger } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkScope } from "../middleware/scope.js";
 import { schemaValidationError } from "../utils/schema-error.js";
+
+/** A query number read as `1*DIGIT`, or its text handed on for the schema to refuse (C-12). */
+function decimalQuery(value: string | undefined): number | string | undefined {
+  if (!value) return undefined;
+  return isDecimalInteger(value) ? Number(value) : value;
+}
 
 export function createAuditRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();
@@ -25,9 +31,9 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
     const raw = {
       secret_id: secretId ?? undefined,
       event_type: eventType ?? undefined,
-      since: since ? parseInt(since, 10) : undefined,
-      until: until ? parseInt(until, 10) : undefined,
-      limit: limit ? parseInt(limit, 10) : undefined,
+      since: decimalQuery(since),
+      until: decimalQuery(until),
+      limit: decimalQuery(limit),
       success:
         success === undefined
           ? undefined

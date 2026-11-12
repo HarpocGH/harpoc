@@ -2389,7 +2389,7 @@ export class VaultEngine {
       err,
       {
         context: "docker_registry",
-        image: action.image,
+        ...(typeof action.image === "string" ? { image: action.image } : {}),
         operation: action.operation,
         ...(wantsNetwork ? { network_isolation: true } : { fs_isolation: true }),
       },
@@ -3003,24 +3003,27 @@ export class VaultEngine {
         handle,
       },
     );
+    const removed = s.store.transaction(() => {
+      const deleted = s.store.deleteMcpServer(secret.id);
+      s.auditLogger.log({
+        eventType: AuditEventType.POLICY_REVOKE,
+        secretId: secret.id,
+        ...callerColumns(caller),
+        detail: {
+          policy: "mcp_server",
+          ...(deleted ? {} : { deleted: false }),
+          ...callerInterfaceDetail(caller),
+        },
+        sessionId: this.sessionId ?? undefined,
+      });
+      return deleted;
+    });
     await s.mcpRegistry.terminate(
       secret.id,
       "config_removed",
       attributionFromCaller(caller, this.sessionId),
     );
-    return s.store.transaction(() => {
-      const deleted = s.store.deleteMcpServer(secret.id);
-      if (deleted) {
-        s.auditLogger.log({
-          eventType: AuditEventType.POLICY_REVOKE,
-          secretId: secret.id,
-          ...callerColumns(caller),
-          detail: { policy: "mcp_server", ...callerInterfaceDetail(caller) },
-          sessionId: this.sessionId ?? undefined,
-        });
-      }
-      return deleted;
-    });
+    return removed;
   }
 
   // ---------------------------------------------------------------------------
@@ -3179,15 +3182,17 @@ export class VaultEngine {
     );
     return s.store.transaction(() => {
       const deleted = s.store.deleteConnectionConfig(secret.id);
-      if (deleted) {
-        s.auditLogger.log({
-          eventType: AuditEventType.POLICY_REVOKE,
-          secretId: secret.id,
-          ...callerColumns(caller),
-          detail: { policy: "connection", ...callerInterfaceDetail(caller) },
-          sessionId: this.sessionId ?? undefined,
-        });
-      }
+      s.auditLogger.log({
+        eventType: AuditEventType.POLICY_REVOKE,
+        secretId: secret.id,
+        ...callerColumns(caller),
+        detail: {
+          policy: "connection",
+          ...(deleted ? {} : { deleted: false }),
+          ...callerInterfaceDetail(caller),
+        },
+        sessionId: this.sessionId ?? undefined,
+      });
       return deleted;
     });
   }

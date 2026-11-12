@@ -168,8 +168,8 @@ describe("RX-B9-12: a pre-flight refusal writes one failed secret.use row and no
   }
 
   it.each<[string, Record<string, unknown>, string]>([
-    ["clone", { args: ["--upload-pack=/x"] }, "disallowed git argument: --upload-pack=/x"],
-    ["pull", { args: ["--conf=k=v"] }, "disallowed git argument: --conf=k=v"],
+    ["clone", { args: ["--upload-pack=/x"] }, "disallowed git argument: --upload-pack"],
+    ["pull", { args: ["--conf=k=v"] }, "disallowed git argument: --config"],
     ["push", { args: ["-u"] }, "disallowed git argument: -u"],
     ["fetch", { args: ["--multiple"] }, "disallowed git argument: --multiple"],
     ["ls-remote", { args: ["-u"] }, "disallowed git argument: -u"],
@@ -240,6 +240,72 @@ describe("RX-B9-12: a pre-flight refusal writes one failed secret.use row and no
     expect(thrown).not.toBeInstanceOf(VaultError);
     expect(log).not.toHaveBeenCalled();
     expect(spawnMock).not.toHaveBeenCalled();
+  });
+});
+
+const OPERATIONS = ["clone", "pull", "push", "fetch", "ls-remote"] as const;
+
+const NOT_A_STRING: ReadonlyArray<readonly [string, unknown]> = [
+  ["a number", 5],
+  ["undefined", undefined],
+  ["an array", ["x"]],
+];
+
+const SURROUNDED: ReadonlyArray<readonly [string, string]> = (
+  [
+    ["an HTTPS", REPO],
+    ["an SSH", "git@allowed.invalid:org/repo.git"],
+  ] as const
+).flatMap(([transport, address]) =>
+  (
+    [
+      ["space", " "],
+      ["tab", "\t"],
+      ["line feed", "\n"],
+    ] as const
+  ).flatMap(([kind, space]): Array<readonly [string, string]> => [
+    [`a leading ${kind} before ${transport} address`, `${space}${address}`],
+    [`a trailing ${kind} after ${transport} address`, `${address}${space}`],
+  ]),
+);
+
+describe("C-14: a repository that is no string, or begins or ends with whitespace, is refused before the transport is read", () => {
+  const spawnMock = vi.mocked(spawnCaptured);
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  async function expectShapeRefused(operation: string, repository: unknown): Promise<void> {
+    const { log, injector } = recorder();
+    const err = await expectVaultError(
+      () =>
+        injector.executeWithSecret(
+          unparsed(operation, { repository }),
+          SECRET,
+          policy(),
+          undefined,
+          "secret-1",
+        ),
+      ErrorCode.INVALID_GIT_CONFIG,
+    );
+    expect(
+      err.message === "repository must be a string without leading or trailing whitespace",
+    ).toBe(true);
+    expect(log.mock.calls).toEqual([[failedRow({ operation, error: "INVALID_GIT_CONFIG" })]]);
+    expect(spawnMock).not.toHaveBeenCalled();
+  }
+
+  describe.each(NOT_A_STRING)("a repository that is %s", (_label, repository) => {
+    it.each(OPERATIONS)("%s: INVALID_GIT_CONFIG, one row, nothing spawned", (operation) =>
+      expectShapeRefused(operation, repository),
+    );
+  });
+
+  describe.each(SURROUNDED)("%s", (_label, repository) => {
+    it.each(OPERATIONS)("%s: INVALID_GIT_CONFIG, one row, nothing spawned", (operation) =>
+      expectShapeRefused(operation, repository),
+    );
   });
 });
 
@@ -467,7 +533,9 @@ describeGit("E-19, E-20: a repository git reads otherwise than the vault: one fa
         ),
       ErrorCode.INVALID_GIT_CONFIG,
     );
-    expect(err.message).toBe("repository must not start with '-'");
+    expect(
+      err.message === "repository must be a string without leading or trailing whitespace",
+    ).toBe(true);
     expect(log.mock.calls).toEqual([
       [failedRow({ operation: "ls-remote", error: "INVALID_GIT_CONFIG" })],
     ]);

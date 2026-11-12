@@ -16,6 +16,7 @@ import type {
   UseSecretResponse,
 } from "@harpoc/shared";
 import { VaultError } from "@harpoc/shared";
+import type { OAuthManager } from "@harpoc/oauth-proxy";
 import { InjectionGuard } from "../guards/injection-guard.js";
 import { RateLimiter } from "../guards/rate-limiter.js";
 import { ScopeGuard } from "../guards/scope-guard.js";
@@ -26,6 +27,7 @@ import { registerCreateSecret } from "./create-secret.js";
 import { registerRotateSecret } from "./rotate-secret.js";
 import { registerRevokeSecret } from "./revoke-secret.js";
 import { registerCheckHealth } from "./check-health.js";
+import { registerStartOauthFlow } from "./start-oauth-flow.js";
 
 function mockEngine(): VaultEngine {
   return {
@@ -81,7 +83,6 @@ function mockEngine(): VaultEngine {
       status: "pending",
       message: "Secret created without value",
     }),
-    setSecretValue: vi.fn().mockResolvedValue(undefined),
     rotateSecret: vi.fn().mockResolvedValue(undefined),
     revokeSecret: vi.fn().mockResolvedValue(undefined),
     resolveSecretId: vi.fn().mockResolvedValue("uuid-123"),
@@ -950,6 +951,42 @@ describe("MCP Tools", () => {
       },
     );
 
+    it.each([
+      {
+        label: "-x, an unscoped api_key create",
+        args: { name: "-x", type: "api_key" },
+        command: 'harpoc secret set "--" -x',
+      },
+      {
+        label: "--help, an unscoped api_key create",
+        args: { name: "--help", type: "api_key" },
+        command: 'harpoc secret set "--" --help',
+      },
+      {
+        label: "-p, a project-scoped create",
+        args: { name: "-p", type: "api_key", project: "proj" },
+        command: 'harpoc secret set --project proj "--" -p',
+      },
+      {
+        label: "--from-file, a certificate-typed create",
+        args: { name: "--from-file", type: "certificate" },
+        command: 'harpoc secret set --type certificate "--" --from-file',
+      },
+      {
+        label: "-p, a project-scoped certificate-typed create",
+        args: { name: "-p", type: "certificate", project: "proj" },
+        command: 'harpoc secret set --type certificate --project proj "--" -p',
+      },
+    ])(
+      '$label: a name that begins with - is printed after a quoted "--", the options first (C-5, M2-R1)',
+      async ({ args, command }) => {
+        const result = await callTool(server, "create_secret", args);
+        const data = JSON.parse(getToolText(result));
+        expect(data.status).toBe("pending");
+        expect(data.message).toBe(`Secret created. Set the value with: ${command}`);
+      },
+    );
+
     it("passes project to engine; the MCP SDK strips an undeclared top-level key such as a legacy injection config (REST refuses it — R10/A5)", async () => {
       await callTool(server, "create_secret", {
         name: "new-key",
@@ -1027,6 +1064,85 @@ describe("MCP Tools", () => {
       });
       expect(getToolText(result)).toContain("rate limit");
     });
+  });
+
+  describe("start_oauth_flow's hints", () => {
+    const GRANTS = [
+      {
+        grant: "authorization_code",
+        lead: "OAuth secret created (PENDING). Complete the browser authorization with: harpoc oauth connect",
+        flags: "--provider github",
+      },
+      {
+        grant: "client_credentials",
+        lead: "No out-of-band channel was available to collect the client secret, so nothing was created. Create it with: harpoc oauth connect",
+        flags: "--client-credentials --provider github",
+      },
+    ];
+
+    beforeEach(() => {
+      Object.assign(engine, {
+        createOAuthSecret: vi.fn().mockResolvedValue({ handle: "secret://gh", secretId: "uuid-1" }),
+      });
+      registerStartOauthFlow(
+        server,
+        engine,
+        scopeGuard,
+        rateLimiter,
+        {} as unknown as OAuthManager,
+      );
+    });
+
+    async function hintOf(grant: string, secretName: string, clientId: string): Promise<string> {
+      const result = await callTool(server, "start_oauth_flow", {
+        name: secretName,
+        provider: "github",
+        grant_type: grant,
+        client_id: clientId,
+      });
+      expect(result.isError ?? false).toBe(false);
+      return (JSON.parse(getToolText(result)) as { message: string }).message;
+    }
+
+    it.each(
+      GRANTS.flatMap((g) => ["a b", "x;y", "$(z)", "-x"].map((clientId) => ({ ...g, clientId }))),
+    )(
+      "$grant: a client_id of $clientId is not a plain word and is printed as <client-id> (C-5)",
+      async ({ grant, lead, flags, clientId }) => {
+        expect(await hintOf(grant, "gh", clientId)).toBe(
+          `${lead} gh ${flags} --client-id <client-id>`,
+        );
+      },
+    );
+
+    it.each(
+      GRANTS.flatMap((g) =>
+        ["client-123", "1234-abc.apps.googleusercontent.com", "_m2m:tenant@idp/app+v=1-x"].map(
+          (clientId) => ({ ...g, clientId }),
+        ),
+      ),
+    )(
+      "$grant: a plain-word client_id of $clientId is printed as today",
+      async ({ grant, lead, flags, clientId }) => {
+        expect(await hintOf(grant, "gh", clientId)).toBe(
+          `${lead} gh ${flags} --client-id ${clientId}`,
+        );
+      },
+    );
+
+    it.each(
+      GRANTS.flatMap((g) => [
+        { ...g, secretName: "-x", clientId: "cid", printed: "cid" },
+        { ...g, secretName: "--help", clientId: "a b", printed: "<client-id>" },
+      ]),
+    )(
+      '$grant: a name of $secretName that begins with - is printed after a quoted "--", the options first (C-5, M2-R1)',
+      async ({ grant, lead, flags, secretName, clientId, printed }) => {
+        expect(await hintOf(grant, secretName, clientId)).toBe(
+          `${lead} ${flags} --client-id ${printed} "--" ${secretName}`,
+        );
+      },
+    );
   });
 
   describe("rotate_secret", () => {
@@ -1579,7 +1695,7 @@ describe("token-derived caller wiring (engine-level policy enforcement)", () => 
     expect(engine.revokeSecret).toHaveBeenCalledWith("secret://api/my-key", EXPECTED_CALLER);
   });
 
-  it("create_secret passes the caller to the out-of-band value set", async () => {
+  it("create_secret passes the caller to the create that carries the out-of-band value", async () => {
     (engine.createSecret as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       handle: "secret://api/api-new",
       status: "pending",
@@ -1603,9 +1719,14 @@ describe("token-derived caller wiring (engine-level policy enforcement)", () => 
 
     await wire.callTool("create_secret", { name: "api-new", type: "api_key", project: "api" });
 
-    expect(engine.setSecretValue).toHaveBeenCalledWith(
-      "secret://api/api-new",
-      expect.anything(),
+    expect(engine.createSecret).toHaveBeenCalledTimes(1);
+    expect(engine.createSecret).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "api-new",
+        type: "api_key",
+        project: "api",
+        value: expect.anything(),
+      }),
       EXPECTED_CALLER,
     );
   });

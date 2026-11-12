@@ -26,6 +26,7 @@ import {
   resolveRuntimeDir,
   WINDOWS_CONSUMER_DIR_RIGHTS,
   windowsDirAclRefusal,
+  windowsTokenDirAclRefusal,
 } from "./runtime-dir.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
@@ -658,6 +659,76 @@ describe("windowsDirAclRefusal (a listing by SID, every platform)", () => {
     expect(windowsDirAclRefusal({ ...layout(), account: "S-1-1-0" }, "everyone")).toBe(
       '"everyone" names S-1-1-0, not a user account',
     );
+  });
+});
+
+describe("windowsTokenDirAclRefusal (a token file's directory, its agent the one other reader; a listing by SID, every platform)", () => {
+  const ME = "S-1-5-21-2619733007-1928661584-3550714090-1001";
+  const ALICE = "S-1-5-21-2619733007-1928661584-3550714090-1002";
+  const BOB = "S-1-5-21-2619733007-1928661584-3550714090-1003";
+  const full = (sid: string) => ({
+    allow: true,
+    sid,
+    rights: 0x1f01ff,
+    inherited: false,
+    inheritance: 3,
+    propagation: 0,
+  });
+  const rx = (sid: string, inherited = false) => ({
+    allow: true,
+    sid,
+    rights: 0x1200a9,
+    inherited,
+    inheritance: 3,
+    propagation: 0,
+  });
+  const trusted = [full("S-1-5-18"), full("S-1-5-32-544"), full(ME)];
+  const listing = (account: string | null, rules = trusted) => ({
+    user: ME,
+    owner: ME,
+    account,
+    rules,
+  });
+
+  it("accepts the agent's SID at read and execute (0x001200A9): its consumer directory as the recipe leaves it", () => {
+    expect(
+      windowsTokenDirAclRefusal(listing(ALICE, [...trusted, rx(ALICE)]), "alice"),
+    ).toBeUndefined();
+  });
+
+  it("refuses the agent's SID granted write, naming the mask (icacls (RX,W) is 0x001201BF)", () => {
+    expect(
+      windowsTokenDirAclRefusal(
+        listing(ALICE, [...trusted, { ...rx(ALICE), rights: 0x1201bf }]),
+        "alice",
+      ),
+    ).toBe(
+      `the access list grants the agent alice (${ALICE}) 0x001201BF; read and execute (0x001200A9) at most`,
+    );
+  });
+
+  it("refuses another SID — another agent's consumer directory named in alice's spec", () => {
+    expect(windowsTokenDirAclRefusal(listing(ALICE, [...trusted, rx(BOB)]), "alice")).toBe(
+      `the access list grants ${BOB} 0x001200A9; only this process's account, SYSTEM, Administrators and the agent may hold a grant`,
+    );
+  });
+
+  it("accepts an agent no local account is named for when the list grants nobody else: a mkdtemp directory of the single-account layout", () => {
+    expect(windowsTokenDirAclRefusal(listing(null), "alice")).toBeUndefined();
+  });
+
+  it("refuses an agent no local account is named for beside another entry: BUILTIN\\Users inherited from %ProgramData%", () => {
+    expect(
+      windowsTokenDirAclRefusal(listing(null, [...trusted, rx("S-1-5-32-545", true)]), "alice"),
+    ).toBe(
+      `the access list grants S-1-5-32-545 0x001200A9 (inherited); only this process's account, SYSTEM, Administrators may hold a grant (no local account is named "alice")`,
+    );
+  });
+
+  it("refuses an agent whose name resolves to a well-known group's SID, never admitting the group's entry as the agent's (BUILTIN\\Users)", () => {
+    expect(
+      windowsTokenDirAclRefusal(listing("S-1-5-32-545", [...trusted, rx("S-1-5-32-545")]), "users"),
+    ).toBe('"users" names S-1-5-32-545, not a user account');
   });
 });
 

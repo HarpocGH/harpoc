@@ -10,6 +10,8 @@ import { createOAuthRoutes } from "./oauth.js";
 import type { HarpocEnv } from "../types.js";
 import { silenceAuditLines } from "@harpoc/test-utils";
 
+type DataBody = { data: unknown };
+
 const MOCK_TOKEN: VaultApiToken = {
   sub: "test-agent",
   vault_id: "vault-1",
@@ -143,7 +145,7 @@ describe("POST /api/v1/oauth/authorize — client_credentials", () => {
   it("returns 201 with the authorized flow result", async () => {
     const res = await authorize(CLIENT_CREDENTIALS_BODY);
     expect(res.status).toBe(201);
-    const body = await res.json();
+    const body = (await res.json()) as { data: { status: string; handle: string } };
     expect(body.data.status).toBe("authorized");
     expect(body.data.handle).toBe("secret://gh-app");
     // oauth-proxy's startOAuthFlowResult shapes this result field by field; the
@@ -184,7 +186,9 @@ describe("POST /api/v1/oauth/authorize — device_code", () => {
   it("returns 201 with auth_url and user_code", async () => {
     const res = await authorize(DEVICE_CODE_BODY);
     expect(res.status).toBe(201);
-    const body = await res.json();
+    const body = (await res.json()) as {
+      data: { handle: string; status: string; auth_url: string; user_code: string };
+    };
     expect(body.data.handle).toBe("secret://gh-dev");
     expect(body.data.status).toBe("pending_authorization");
     expect(body.data.auth_url).toBe("https://github.com/login/device");
@@ -211,7 +215,9 @@ describe("POST /api/v1/oauth/authorize — authorization_code (D2: background fl
   it("returns 201 pending_authorization with the auth URL without awaiting completion", async () => {
     const res = await authorize(AUTH_CODE_BODY);
     expect(res.status).toBe(201);
-    const body = await res.json();
+    const body = (await res.json()) as {
+      data: { handle: string; status: string; auth_url: string; message: unknown };
+    };
     expect(body.data.handle).toBe("secret://gh-web");
     expect(body.data.status).toBe("pending_authorization");
     expect(body.data.auth_url).toBe(
@@ -334,7 +340,7 @@ describe("GET /api/v1/oauth/:handle/status", () => {
   it("returns the token status for the resolved secret id", async () => {
     const res = await app.request("/api/v1/oauth/gh-app/status", { headers: AUTH });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as DataBody;
     expect(body.data).toEqual(OAUTH_STATUS);
     expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://gh-app", EXPECTED_CALLER);
     expect(engine.getOAuthTokenStatus).toHaveBeenCalledWith(
@@ -383,7 +389,7 @@ describe("POST /api/v1/oauth/:handle/refresh", () => {
       headers: AUTH,
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as DataBody;
     expect(body.data).toEqual({ refreshed: true, expires_at: 1_700_000_003_600 });
     expect(engine.refreshOAuthToken).toHaveBeenCalledWith(
       "secret-uuid-1",
@@ -439,7 +445,7 @@ describe("POST /api/v1/oauth/:handle/refresh", () => {
       headers: AUTH,
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as DataBody;
     expect(body.data).toEqual({ refreshed: true, expires_at: null });
   });
 });

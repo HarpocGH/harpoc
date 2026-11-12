@@ -111,8 +111,16 @@ describe("MCP server config", () => {
     expect(events[0]?.detail).toEqual({ policy: "mcp_server" });
   });
 
-  it("returns false when deleting a nonexistent config", async () => {
+  it("returns false when deleting a nonexistent config and audits POLICY_REVOKE with deleted: false", async () => {
     expect(await engine.deleteMcpServerConfig("secret://mcp")).toBe(false);
+    const events = engine.queryAudit({ eventType: AuditEventType.POLICY_REVOKE });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      success: true,
+      secret_id: await engine.resolveSecretId("secret://mcp"),
+      principal_type: null,
+    });
+    expect(events[0]?.detail).toEqual({ policy: "mcp_server", deleted: false });
   });
 
   const writeStoredMcpConfig = async (handle: string, plaintext: string): Promise<void> => {
@@ -311,8 +319,16 @@ describe("connection config", () => {
     expect(events[0]?.detail).toEqual({ policy: "connection" });
   });
 
-  it("returns false when deleting a nonexistent config", async () => {
+  it("returns false when deleting a nonexistent config and audits POLICY_REVOKE with deleted: false", async () => {
     expect(await engine.deleteConnectionConfig("secret://conn")).toBe(false);
+    const events = engine.queryAudit({ eventType: AuditEventType.POLICY_REVOKE });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      success: true,
+      secret_id: await engine.resolveSecretId("secret://conn"),
+      principal_type: null,
+    });
+    expect(events[0]?.detail).toEqual({ policy: "connection", deleted: false });
   });
 
   it("round-trips the v1.3 mail group (CA pin and plaintext opt-out)", async () => {

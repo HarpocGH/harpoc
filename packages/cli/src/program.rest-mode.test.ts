@@ -886,6 +886,239 @@ describe("the REST mode of every REST-capable command (--url / --token-file)", (
   });
 });
 
+describe("the rendering twins print the same bytes in-process and under --url (C4)", () => {
+  const MODES = ["in-process", "--url"] as const;
+  type Mode = (typeof MODES)[number];
+  type Printed = ["stdout" | "stderr", string];
+
+  const inMode = (mode: Mode, argv: string[]): string[] =>
+    mode === "--url" ? [...rest, ...argv] : argv;
+
+  const printed = async (args: string[]): Promise<Printed[]> => {
+    spies.logSpy.mockClear();
+    spies.errorSpy.mockClear();
+    await run(args);
+    const tagged = (spy: MockInstance, stream: Printed[0]) =>
+      spy.mock.calls.map((call, i) => {
+        const line: Printed = [stream, call.map(String).join(" ")];
+        return { at: spy.mock.invocationCallOrder[i] ?? 0, line };
+      });
+    return [...tagged(spies.logSpy, "stdout"), ...tagged(spies.errorSpy, "stderr")]
+      .sort((a, b) => a.at - b.at)
+      .map(({ line }) => line);
+  };
+
+  const expectBranch = (mode: Mode, runs: number): void => {
+    expect(vi.mocked(loadUnlockedEngine).mock.calls.length).toBe(mode === "in-process" ? runs : 0);
+    expect(MockRestClient.mock.calls.length).toBe(mode === "--url" ? runs : 0);
+  };
+
+  const UPDATED = {
+    ...AGENT,
+    description: "nightly sync",
+    owner: "ops",
+    updated_at: 1_700_000_360_000,
+  };
+
+  it.each(MODES)(
+    "agent update prints the record and its last line, --json the agent (%s)",
+    async (mode) => {
+      mockEngine.updateAgent.mockReturnValue(UPDATED);
+      mockClient.updateAgent.mockResolvedValue(UPDATED);
+      const argv = ["agent", "update", "bot", "--owner", "ops"];
+
+      expect(await printed(inMode(mode, argv))).toEqual([
+        ["stdout", "Name         bot"],
+        ["stdout", "Status       active"],
+        ["stdout", "Owner        ops"],
+        ["stdout", "Description  nightly sync"],
+        ["stdout", "Updated      2023-11-14 22:19:20Z"],
+        ["stderr", "OK: Agent updated."],
+      ]);
+      expect(await printed(inMode(mode, [...argv, "--json"]))).toEqual([
+        ["stdout", JSON.stringify(UPDATED, null, 2)],
+      ]);
+      expectBranch(mode, 2);
+    },
+  );
+
+  const FIRST_GRANT = {
+    policy: { ...POLICY, permissions: ["use", "read"], expires_at: 1_700_003_600_000 },
+    gated_before: false,
+    gated_after: true,
+  };
+  const NO_GRANT_LEFT = { policy: null, gated_before: true, gated_after: false };
+
+  it.each(MODES)(
+    "agent permissions prints the record, both gating notes and both last lines, --json the result (%s)",
+    async (mode) => {
+      const argv = ["agent", "permissions", "bot", "secret://k"];
+      mockEngine.setAgentPermissions.mockReturnValue(FIRST_GRANT);
+      mockClient.setAgentPermissions.mockResolvedValue(FIRST_GRANT);
+
+      expect(await printed(inMode(mode, [...argv, "--permissions", "use,read"]))).toEqual([
+        ["stdout", "Agent        bot"],
+        ["stdout", "Secret       secret://k"],
+        ["stdout", "Permissions  use, read"],
+        ["stdout", "Expires      2023-11-14 23:13:20Z"],
+        [
+          "stderr",
+          "Note: secret://k received its first grant — until now no agent or tool token could reach it.",
+        ],
+        ["stderr", "OK: Permissions set."],
+      ]);
+      expect(await printed(inMode(mode, [...argv, "--permissions", "use,read", "--json"]))).toEqual(
+        [["stdout", JSON.stringify(FIRST_GRANT, null, 2)]],
+      );
+
+      mockEngine.setAgentPermissions.mockReturnValue(NO_GRANT_LEFT);
+      mockClient.setAgentPermissions.mockResolvedValue(NO_GRANT_LEFT);
+      expect(await printed(inMode(mode, [...argv, "--clear"]))).toEqual([
+        ["stdout", "Agent        bot"],
+        ["stdout", "Secret       secret://k"],
+        ["stdout", "Permissions  -"],
+        ["stdout", "Expires      -"],
+        [
+          "stderr",
+          "Note: secret://k has no grants left — no agent or tool token can reach it until one is written.",
+        ],
+        ["stderr", "OK: Permissions cleared."],
+      ]);
+      expectBranch(mode, 3);
+    },
+  );
+
+  const GRANTED = { ...POLICY, permissions: ["use", "read"] };
+  const GRANTED_EXPIRING = { ...GRANTED, expires_at: 1_700_003_600_000 };
+
+  it.each(MODES)(
+    "policy grant prints the record with expires_at null and set and its last line, --json the policy (%s)",
+    async (mode) => {
+      const argv = [
+        "policy",
+        "grant",
+        "secret://k",
+        "--principal-type",
+        "agent",
+        "--principal-id",
+        "bot",
+        "--permissions",
+        "use,read",
+      ];
+      mockEngine.grantPolicy.mockReturnValue(GRANTED);
+      mockClient.grantPolicy.mockResolvedValue(GRANTED);
+
+      expect(await printed(inMode(mode, argv))).toEqual([
+        ["stdout", "Policy ID    pol-1-0000-0000"],
+        ["stdout", "Secret       secret://k"],
+        ["stdout", "Principal    agent:bot"],
+        ["stdout", "Permissions  use, read"],
+        ["stdout", "Expires      -"],
+        ["stderr", "OK: Policy granted."],
+      ]);
+      expect(await printed(inMode(mode, [...argv, "--json"]))).toEqual([
+        ["stdout", JSON.stringify(GRANTED, null, 2)],
+      ]);
+
+      mockEngine.grantPolicy.mockReturnValue(GRANTED_EXPIRING);
+      mockClient.grantPolicy.mockResolvedValue(GRANTED_EXPIRING);
+      expect(await printed(inMode(mode, [...argv, "--expires", "60"]))).toEqual([
+        ["stdout", "Policy ID    pol-1-0000-0000"],
+        ["stdout", "Secret       secret://k"],
+        ["stdout", "Principal    agent:bot"],
+        ["stdout", "Permissions  use, read"],
+        ["stdout", "Expires      2023-11-14T23:13:20.000Z"],
+        ["stderr", "OK: Policy granted."],
+      ]);
+      expectBranch(mode, 3);
+    },
+  );
+
+  const UNATTRIBUTED = {
+    id: 8,
+    timestamp: 1_700_000_060_000,
+    event_type: "vault.unlock",
+    secret_id: null,
+    principal_type: null,
+    principal_id: null,
+    ip_address: "127.0.0.1",
+    session_id: null,
+    success: false,
+    detail: null,
+  };
+
+  it.each(MODES)(
+    "audit prints the table, a NULL principal as -, --json the events (%s)",
+    async (mode) => {
+      mockEngine.queryAudit.mockReturnValue([UNATTRIBUTED, EVENT]);
+      mockClient.queryAudit.mockResolvedValue([UNATTRIBUTED, EVENT]);
+
+      expect(await printed(inMode(mode, ["audit"]))).toEqual([
+        [
+          "stdout",
+          "ID  Time                  Event         Secret  Principal  IP         Session      Success",
+        ],
+        [
+          "stdout",
+          "--  --------------------  ------------  ------  ---------  ---------  -----------  -------",
+        ],
+        [
+          "stdout",
+          "8   2023-11-14 22:14:20Z  vault.unlock  -       -          127.0.0.1  -            no     ",
+        ],
+        [
+          "stdout",
+          "7   2023-11-14 22:13:20Z  secret.read   sid-1   agent:bot  -          01234567...  yes    ",
+        ],
+      ]);
+      expect(await printed(inMode(mode, ["audit", "--json"]))).toEqual([
+        ["stdout", JSON.stringify([UNATTRIBUTED, EVENT], null, 2)],
+      ]);
+      expectBranch(mode, 2);
+    },
+  );
+
+  const BROKEN = { valid: false, checked: 3, firstBrokenId: 4 };
+  const TAIL_LINE = `Tail link: row 12 · hmac ${"ab".repeat(32)} · 2023-11-14 22:13:20Z`;
+
+  it.each(MODES)(
+    "audit verify prints the OK and BROKEN lines, the tail line in-process only, --json the report (%s)",
+    async (mode) => {
+      const tail: Printed[] = mode === "in-process" ? [["stdout", TAIL_LINE]] : [];
+      const exitCode = process.exitCode;
+      process.exitCode = undefined;
+      try {
+        expect(await printed(inMode(mode, ["audit", "verify"]))).toEqual([
+          ...tail,
+          ["stdout", "Audit chain OK — 12 row(s) verified."],
+        ]);
+        expect(await printed(inMode(mode, ["audit", "verify", "--json"]))).toEqual([
+          [
+            "stdout",
+            JSON.stringify(
+              mode === "in-process" ? { ...CHAIN_REPORT, tail: CHAIN_TAIL } : CHAIN_REPORT,
+              null,
+              2,
+            ),
+          ],
+        ]);
+        expect(process.exitCode).toBeUndefined();
+
+        mockEngine.verifyAuditChain.mockReturnValue({ ...BROKEN, tail: CHAIN_TAIL });
+        mockClient.verifyAuditChain.mockResolvedValue(BROKEN);
+        expect(await printed(inMode(mode, ["audit", "verify"]))).toEqual([
+          ...tail,
+          ["stderr", "Audit chain BROKEN at row 4 — 3 verified."],
+        ]);
+        expect(process.exitCode).toBe(1);
+        expectBranch(mode, 3);
+      } finally {
+        process.exitCode = exitCode;
+      }
+    },
+  );
+});
+
 describe("the input refusals of the REST-capable commands under --url (T4)", () => {
   const refusals: { label: string; refusal: () => { argv: string[]; message: string } }[] = [
     {

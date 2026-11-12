@@ -31,6 +31,14 @@ describe("matchesHostAllowlist", () => {
     expect(matchesHostAllowlist("a.example.com", ["*.example.com"])).toBe(true);
     expect(matchesHostAllowlist("example.com", ["*.example.com"])).toBe(false);
   });
+
+  it("folds ASCII letters only: a target host carrying a non-ASCII letter matches no pattern", () => {
+    expect(matchesHostAllowlist("\u212Araken.example", ["kraken.example"])).toBe(false);
+  });
+
+  it("folds ASCII letters only: a non-ASCII pattern does not fold onto an ASCII host", () => {
+    expect(matchesHostAllowlist("kraken.example", ["\u212Araken.example"])).toBe(false);
+  });
 });
 
 describe("matchesHostPortAllowlist", () => {
@@ -55,6 +63,16 @@ describe("matchesHostPortAllowlist", () => {
     expect(matchesHostPortAllowlist("evil.example.com", 5432, ["*.db.example.com:5432"])).toBe(
       false,
     );
+  });
+
+  it("a target host carrying a non-ASCII letter matches no pattern, not even its own spelling", () => {
+    expect(matchesHostPortAllowlist("b\u00fccher.example", 5432, ["b\u00fccher.example"])).toBe(
+      false,
+    );
+  });
+
+  it("a capital sigma ending the target host does not fold onto a final-sigma pattern", () => {
+    expect(matchesHostPortAllowlist("x.a\u03a3", 1, ["x.a\u03c2"])).toBe(false);
   });
 });
 
@@ -132,6 +150,12 @@ describe("matchesUrlAllowlist", () => {
 
   it("rejects an unparseable URL when the allowlist is non-empty", () => {
     expect(matchesUrlAllowlist("not-a-url", ["https://api.github.com/*"])).toBe(false);
+  });
+
+  it("matches a non-ASCII URL host in the form the URL parser maps it to", () => {
+    expect(matchesUrlAllowlist("https://\u212Araken.example/x", ["https://kraken.example/*"])).toBe(
+      true,
+    );
   });
 });
 

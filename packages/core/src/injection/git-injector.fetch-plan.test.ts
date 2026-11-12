@@ -517,7 +517,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
         policy(),
         undefined,
       );
-      const list = JSON.stringify([TOKEN, "git-user"]);
+      const list = JSON.stringify([`git-user:${TOKEN}`, TOKEN, "git-user"]);
       expect(
         calls().map(([, args, opts]) => [
           gitSubcommand(args),

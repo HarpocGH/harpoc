@@ -12,6 +12,7 @@ import {
   executeDockerRegistryAction,
   parseImageReference,
 } from "./docker-injector.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 vi.mock("../spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
 
@@ -145,6 +146,30 @@ describe("executeDockerRegistryAction enforcement", () => {
     ).rejects.toMatchObject({ code: ErrorCode.INVALID_INPUT });
     expect(spawnCaptured).not.toHaveBeenCalled();
   });
+});
+
+const NON_STRINGS: ReadonlyArray<readonly [string, unknown]> = [
+  ["a number", 5],
+  ["undefined", undefined],
+  ["null", null],
+  ["an array", ["-x"]],
+  ["an object", {}],
+];
+
+describe("a non-string image of an unparsed caller is refused like a dash-led reference", () => {
+  it.each(NON_STRINGS)(
+    "an image that is %s: INVALID_INPUT with the leading-dash message, a row projection without registry or image, nothing spawned",
+    async (_label, value) => {
+      const action = { ...PULL_ACTION, image: value } as unknown as DockerRegistryAction;
+      const err = await expectVaultError(
+        () => executeDockerRegistryAction(action, SECRET, allowed()),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message === "docker image reference must not start with '-'").toBe(true);
+      expect(buildDockerAuditDetails(action)).toStrictEqual({ operation: "pull" });
+      expect(spawnCaptured).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("executeDockerRegistryAction result mapping", () => {

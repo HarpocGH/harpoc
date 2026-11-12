@@ -12,6 +12,7 @@ import {
   isHostKeyFailure,
   isSshName,
   sshHardeningArgs,
+  startsWithDash,
   writeIdentityFile,
   writeKnownHosts,
 } from "./ssh-common.js";
@@ -40,7 +41,7 @@ export class SshInjector {
   ): Promise<SshResult> {
     // Defense in depth beside the schema's first-character anchor: host and
     // user reach ssh's argv, so a leading dash must never parse as an option.
-    if (action.host.startsWith("-") || action.user.startsWith("-")) {
+    if (startsWithDash(action.host) || startsWithDash(action.user)) {
       this.audit(action, secretId, { error: "INVALID_SSH_CONFIG" }, false, attribution);
       throw VaultError.invalidSshConfig("host and user must not start with '-'");
     }
@@ -204,9 +205,9 @@ export class SshInjector {
           secretId,
           detail: {
             context: "ssh",
-            host: action.host,
+            ...(typeof action.host === "string" ? { host: action.host } : {}),
             ...(action.port !== undefined ? { port: action.port } : {}),
-            user: action.user,
+            ...(typeof action.user === "string" ? { user: action.user } : {}),
             ...detail,
           },
           success,

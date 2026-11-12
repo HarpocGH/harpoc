@@ -30,50 +30,66 @@ export function registerCreateSecret(
     rateLimiter.checkLimit(`create:${args.project ?? ""}/${args.name}`);
 
     const modern = isModernRequest(ctx);
+    const refuseTakenName = async () => {
+      if (await engine.secretNameTaken(args.name, args.project)) {
+        throw VaultError.duplicateSecret(args.name);
+      }
+    };
     const finishCreate = async (
       collect: () => Promise<{ value: Uint8Array | null; channel: string }>,
     ) => {
-      // Create secret without a value — it starts in "pending" status. The
-      // value is then collected out-of-band, per the thesis's channel
+      // The value is collected out-of-band first, per the thesis's channel
       // priority: URL-mode elicitation > controlling-terminal prompt >
-      // deferred (CLI: harpoc secret set).
-      const result = await engine.createSecret(
-        {
-          name: args.name,
-          type: args.type,
-          project: args.project,
-        },
-        scopeGuard.caller,
-      );
-
-      let status: string = result.status;
-      let message =
-        result.status === "pending"
-          ? pendingHint(args.name, args.type, args.project)
-          : result.message;
-
-      if (result.status === "pending") {
-        const collected = await collect();
-        if (collected.value) {
-          try {
-            // The caller is attribution only here: the row is written by the
-            // token that just created the secret (`create` is interface-scoped),
-            // and under R1 that token holds no grant on the fresh secret — the
-            // set is part of creation, not a later access (N17).
-            await engine.setSecretValue(result.handle, collected.value, scopeGuard.caller);
-          } finally {
-            collected.value.fill(0);
-          }
-          status = "created";
-          message = `Secret created. The value was collected via ${collected.channel}, out-of-band of the model context.`;
+      // deferred (CLI: harpoc secret set); with none the secret starts in
+      // "pending" status.
+      const collected = await collect();
+      let answer: { handle: string; status: string; message: string };
+      if (collected.value) {
+        try {
+          // The value is part of creation, not a later access (N17): one
+          // create carries it, under the caller's attribution (`create` is
+          // interface-scoped), in one transaction with its one row.
+          const result = await engine.createSecret(
+            {
+              name: args.name,
+              type: args.type,
+              project: args.project,
+              value: collected.value,
+            },
+            scopeGuard.caller,
+          );
+          answer = {
+            handle: result.handle,
+            status: "created",
+            message: `Secret created. The value was collected via ${collected.channel}, out-of-band of the model context.`,
+          };
+        } finally {
+          collected.value.fill(0);
         }
+      } else {
+        const result = await engine.createSecret(
+          {
+            name: args.name,
+            type: args.type,
+            project: args.project,
+          },
+          scopeGuard.caller,
+        );
+        answer = {
+          handle: result.handle,
+          status: result.status,
+          message:
+            result.status === "pending"
+              ? pendingHint(args.name, args.type, args.project)
+              : result.message,
+        };
       }
 
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify({ handle: result.handle, status, message }, null, 2),
+            text: JSON.stringify(answer, null, 2),
           },
         ],
       };
@@ -106,15 +122,13 @@ export function registerCreateSecret(
           operation: "create",
           principal: scopeGuard.principalBinding,
           target: `${args.project ?? ""}/${args.name}`,
-          preflight: async () => {
-            if (await engine.secretNameTaken(args.name, args.project)) {
-              throw VaultError.duplicateSecret(args.name);
-            }
-          },
+          preflight: refuseTakenName,
         },
         (value) => finishCreate(() => collectOutOfBand(value)),
       );
       if (round.kind !== "fallthrough") return round.result;
+    } else {
+      await refuseTakenName();
     }
 
     return finishCreate(() => collectOutOfBand(null));

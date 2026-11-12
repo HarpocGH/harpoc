@@ -132,6 +132,35 @@ const PINNED: ConnectionConfig = {
 // the allowlist's "yes" — and then the spawn seam — instead of HOST_NOT_ALLOWED.
 const ADMITTING = ["allowed.invalid", "*.allowed.invalid", "*.invalid", "[::1]", "127.0.0.1"];
 
+const USER_NOT_A_NAME =
+  "SSH user of the repository must be a name of letters, digits, '.', '_' and '-' that begins with a letter or a digit";
+
+/** A refusal before the allowlist: the fixed message, one failed row without a host or a user, nothing spawned. */
+async function expectRefusedEarly(
+  operation: (typeof OPERATIONS)[number],
+  repository: string,
+  message: string,
+  key: string,
+  where: Record<string, unknown> = {},
+) {
+  const { log, injector } = recorder();
+  const err = await expectVaultError(
+    () =>
+      injector.executeWithSecret(
+        unparsed(operation, { repository, ...where }),
+        new Uint8Array(Buffer.from(key)),
+        policy(ADMITTING),
+        PINNED,
+        "secret-1",
+      ),
+    ErrorCode.INVALID_GIT_CONFIG,
+  );
+  expect(err.message === message).toBe(true);
+  expect(log.mock.calls).toEqual([[failedRow({ operation, error: "INVALID_GIT_CONFIG" })]]);
+  expect(vi.mocked(spawnCaptured).mock.calls.length).toBe(0);
+  return err;
+}
+
 // The judged host of each: `b@x.invalid`, `evil.invalid%2f.allowed.invalid`, `%h.allowed.invalid`,
 // `evil.invalid #.allowed.invalid`, `evil.invalid<LF>.allowed.invalid`, `"evil.invalid".allowed.invalid`,
 // `-oProxyCommand=x.allowed.invalid`, `-x.allowed.invalid`, `b<u-umlaut>cher.allowed.invalid`, `[`,
@@ -223,27 +252,130 @@ describeGit("E-24: a judged host ssh would not read back as itself is refused", 
   });
 });
 
+const NOT_A_USER: ReadonlyArray<readonly [string, string, string]> = [
+  ["an scp user with a %-token", "x%hy@allowed.invalid:p", "x%hy"],
+  ["a URL user with a %-token", "ssh://x%hy@allowed.invalid/p", "x%hy"],
+  [
+    "an scp user with an environment expansion",
+    "a$" + "{HOME}b@allowed.invalid:p",
+    "a$" + "{HOME}b",
+  ],
+  [
+    "a URL user with an environment expansion",
+    "ssh://a$" + "{HOME}b@allowed.invalid/p",
+    "a$" + "{HOME}b",
+  ],
+  ["a URL user with an @", "ssh://a@b@allowed.invalid/p", "a@b"],
+  ["an scp user with a leading _", "_git@allowed.invalid:p", "_git"],
+  ["a URL user with a leading _", "ssh://_git@allowed.invalid/p", "_git"],
+  ["an scp user with a letter outside ASCII", "jürgen@allowed.invalid:p", "jürgen"],
+  ["a URL user with a letter outside ASCII", "ssh://jürgen@allowed.invalid/p", "jürgen"],
+  ["an scp user of 256 characters", `${"a".repeat(256)}@allowed.invalid:p`, "a".repeat(256)],
+  ["a URL user of 256 characters", `ssh://${"a".repeat(256)}@allowed.invalid/p`, "a".repeat(256)],
+];
+
+describeGit("C-14: an SSH user part that is no name is refused before the allowlist", () => {
+  const spawnMock = vi.mocked(spawnCaptured);
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  describe.each(NOT_A_USER)("%s", (_label, repository, user) => {
+    it.each(OPERATIONS)(
+      "%s: INVALID_GIT_CONFIG, one row without a host or a user, nothing spawned",
+      async (operation) => {
+        const err = await expectRefusedEarly(operation, repository, USER_NOT_A_NAME, "not-a-key");
+        expect(err.message.includes(user)).toBe(false);
+      },
+    );
+  });
+
+  it.each(OPERATIONS)(
+    "%s of an ssh:// address carrying a password: INVALID_GIT_CONFIG, one row without a host or a user, nothing spawned",
+    async (operation) => {
+      const err = await expectRefusedEarly(
+        operation,
+        "ssh://u:x@allowed.invalid/p",
+        "an SSH repository address must not carry a password",
+        "not-a-key",
+      );
+      expect(err.message.includes("u:x")).toBe(false);
+    },
+  );
+
+  it("control: a user of 255 characters reaches the known-host pin", async () => {
+    const { log, injector } = recorder();
+    await expectVaultError(
+      () =>
+        injector.executeWithSecret(
+          unparsed("ls-remote", { repository: `${"a".repeat(255)}@allowed.invalid:p` }),
+          new Uint8Array(Buffer.from("not-a-key")),
+          policy(ADMITTING),
+          undefined,
+          "secret-1",
+        ),
+      ErrorCode.SSH_NOT_CONFIGURED,
+    );
+    expect(log.mock.calls).toEqual([
+      [failedRow({ operation: "ls-remote", host: "allowed.invalid", error: "SSH_NOT_CONFIGURED" })],
+    ]);
+  });
+
+  it("control: a host and a user that are both no names meet the host's refusal", async () => {
+    await expectRefusedEarly(
+      "ls-remote",
+      "x%hy@bücher.allowed.invalid:p",
+      "SSH host of the repository must be a host name or an IPv6 literal",
+      "not-a-key",
+    );
+  });
+
+  it("control: with an allowlist that admits nothing the user's refusal is the same row", async () => {
+    const { log, injector } = recorder();
+    const err = await expectVaultError(
+      () =>
+        injector.executeWithSecret(
+          unparsed("ls-remote", { repository: "x%hy@allowed.invalid:p" }),
+          new Uint8Array(Buffer.from("not-a-key")),
+          policy([]),
+          PINNED,
+          "secret-1",
+        ),
+      ErrorCode.INVALID_GIT_CONFIG,
+    );
+    expect(err.message === USER_NOT_A_NAME).toBe(true);
+    expect(log.mock.calls).toEqual([
+      [failedRow({ operation: "ls-remote", error: "INVALID_GIT_CONFIG" })],
+    ]);
+    expect(spawnMock.mock.calls.length).toBe(0);
+  });
+});
+
 // Addresses git reads otherwise than the vault (measured on git 2.39.5 and 2.51.0, research-host.md
-// appendix A; the last row on git 2.51.0, where git hands ssh the word
+// appendix A; the last row of READ_OTHERWISE_USER on git 2.51.0, where git hands ssh the word
 // `ssh://x@evil.invalid:2222`): the vault judges `allowed.invalid`; git hands ssh a destination
-// whose host is `evil.invalid`, `fd00::1` or `allow<TAB>ed.invalid`.
+// whose host is `evil.invalid`, `fd00::1` (in READ_OTHERWISE_USER) or `allow<TAB>ed.invalid`.
 const READ_OTHERWISE: ReadonlyArray<readonly [string, string]> = [
   ["git's bracket rule behind an scp path", "git@allowed.invalid:x@[evil.invalid]:z"],
   ["a bracketed scp address holding a second @", "[git@allowed.invalid:x@evil.invalid]:z"],
   ["@[ deeper in an scp path", "git@allowed.invalid:p/@[evil.invalid]/q:r"],
+  ["a # in the URL authority", "ssh://allowed.invalid#@evil.invalid/p"],
+  ["a ? in the URL authority", "ssh://allowed.invalid?@evil.invalid/p"],
+  ["@[ in the URL path", "ssh://git@allowed.invalid/x@[evil.invalid]/p"],
+  ["@[ in the URL path with a port", "ssh://allowed.invalid/@[evil.invalid]:2222/p"],
+  ["a percent-encoded @[ in the URL path", "ssh://git@allowed.invalid/x%40%5Bevil.invalid%5D/p"],
+];
+
+const READ_OTHERWISE_USER: ReadonlyArray<readonly [string, string]> = [
   ["a percent-encoded / in the URL userinfo", "ssh://evil.invalid%2F@allowed.invalid/p"],
   [
     "a percent-encoded port and / in the URL userinfo",
     "ssh://evil.invalid%3A2222%2F@allowed.invalid/p",
   ],
-  ["a # in the URL authority", "ssh://allowed.invalid#@evil.invalid/p"],
-  ["a ? in the URL authority", "ssh://allowed.invalid?@evil.invalid/p"],
   ["a bracketed URL userinfo", "ssh://[evil.invalid]@allowed.invalid/p"],
   ["a bracketed URL userinfo with a port", "ssh://[evil.invalid:2222]@allowed.invalid/p"],
   ["an IPv6 literal as the URL userinfo", "ssh://[fd00::1]@allowed.invalid/p"],
-  ["@[ in the URL path", "ssh://git@allowed.invalid/x@[evil.invalid]/p"],
-  ["@[ in the URL path with a port", "ssh://allowed.invalid/@[evil.invalid]:2222/p"],
-  ["a percent-encoded @[ in the URL path", "ssh://git@allowed.invalid/x%40%5Bevil.invalid%5D/p"],
   [
     "a percent-encoded :// in a bracketed URL userinfo",
     "ssh://ssh%3A%2F%2Fx@[evil.invalid:2222]@allowed.invalid/p",
@@ -266,8 +398,6 @@ const LEGITIMATE: ReadonlyArray<readonly [string, string, string]> = [
   ["ssh://git@allowed.invalid/org/repo.git", "allowed.invalid", "allowed.invalid"],
   ["ssh://git@allowed.invalid:2222/org/repo.git", "allowed.invalid", "allowed.invalid"],
   ["ssh://allowed.invalid/~git/repo.git", "allowed.invalid", "allowed.invalid"],
-  ["ssh://us%65r@allowed.invalid/p%20q/r.git", "allowed.invalid", "allowed.invalid"],
-  ["ssh://a%40b@allowed.invalid/p", "allowed.invalid", "allowed.invalid"],
   ["ssh://git@ALLOWED.INVALID/p", "ALLOWED.INVALID", "ALLOWED.INVALID"],
   ["git@sub_host.allowed.invalid:p", "sub_host.allowed.invalid", "sub_host.allowed.invalid"],
   [
@@ -277,6 +407,11 @@ const LEGITIMATE: ReadonlyArray<readonly [string, string, string]> = [
   ],
   ["ssh://git@127.0.0.1:2222/p", "127.0.0.1", "127.0.0.1"],
   ["ssh://git@[::1]:2222/p", "::1", "[::1]"],
+];
+
+const PERCENT_ENCODED_USER: ReadonlyArray<readonly [string, string]> = [
+  ["a percent-encoded letter in the URL user", "ssh://us%65r@allowed.invalid/p%20q/r.git"],
+  ["a percent-encoded @ in the URL user", "ssh://a%40b@allowed.invalid/p"],
 ];
 
 const NETWORK_STEPS: Record<(typeof OPERATIONS)[number], number> = {
@@ -370,6 +505,22 @@ describeGitSsh(
         expectDialed(operation, repository, hostName, rowHost),
       );
     });
+
+    describe.each([...READ_OTHERWISE_USER, ...PERCENT_ENCODED_USER])(
+      "%s: the user part is no name",
+      (_label, repository) => {
+        it.each(OPERATIONS)(
+          "%s: INVALID_GIT_CONFIG, one row without a host or a user, nothing spawned",
+          async (operation) => {
+            const tree =
+              operation === "clone" || operation === "ls-remote"
+                ? {}
+                : { working_directory: scratch };
+            await expectRefusedEarly(operation, repository, USER_NOT_A_NAME, key, tree);
+          },
+        );
+      },
+    );
   },
 );
 
@@ -484,6 +635,19 @@ describeGitSshPosix(
     describe("control: ssh://git@[::1]:2222/p", () => {
       it.each(OPERATIONS)("%s: ssh -G reports hostname ::1", (operation) =>
         expectSshDials(operation, "ssh://git@[::1]:2222/p", "::1", "[::1]"),
+      );
+    });
+
+    describe.each(READ_OTHERWISE_USER)("%s: the user part is no name", (_label, repository) => {
+      it.each(OPERATIONS)(
+        "%s: INVALID_GIT_CONFIG, one row without a host or a user, nothing spawned",
+        async (operation) => {
+          const where =
+            operation === "clone" || operation === "ls-remote"
+              ? {}
+              : { working_directory: tree(repository) };
+          await expectRefusedEarly(operation, repository, USER_NOT_A_NAME, key, where);
+        },
       );
     });
   },

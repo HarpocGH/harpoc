@@ -1,5 +1,5 @@
 /**
- * E-24, live: the vault's ssh reaches the host the allowlist judged. Five
+ * E-24, live: the vault's ssh reaches the host the allowlist judged. Two
  * addresses git reads otherwise than the vault — git hands ssh a destination
  * on 127.0.0.2 and the listener's port — and two it reads alike; the listener
  * is on 127.0.0.1 alone, pinned as `[127.0.0.1]:<port>`, so a session on it
@@ -14,6 +14,7 @@ import ssh2 from "ssh2";
 import type { ParsedKey, Server as SshServer } from "ssh2";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
@@ -21,6 +22,7 @@ import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { GitInjector } from "./git-injector.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
 import { system32Path } from "../win32-paths.js";
+import { expectVaultError } from "@harpoc/test-utils";
 
 const { Server, utils } = ssh2;
 
@@ -63,24 +65,9 @@ interface Session {
 const ADDRESSES: ReadonlyArray<readonly [string, (port: number) => string, string | null]> = [
   ["a # in the URL authority", (port) => `ssh://127.0.0.1#@127.0.0.2:${String(port)}/p`, null],
   [
-    "a bracketed URL userinfo with a port",
-    (port) => `ssh://[127.0.0.2:${String(port)}]@127.0.0.1/p`,
-    null,
-  ],
-  [
     "@[ in the URL path with a port",
     (port) => `ssh://127.0.0.1/@[127.0.0.2]:${String(port)}/p`,
     null,
-  ],
-  [
-    "a percent-encoded port and / in the URL userinfo",
-    (port) => `ssh://127.0.0.2%3A${String(port)}%2F@127.0.0.1/p`,
-    null,
-  ],
-  [
-    "a percent-encoded :// in a bracketed URL userinfo",
-    (port) => `ssh://ssh%3A%2F%2Fx@[127.0.0.2:${String(port)}]@127.0.0.1/p`,
-    "x",
   ],
   [
     "control: ssh:// with a port",
@@ -91,6 +78,21 @@ const ADDRESSES: ReadonlyArray<readonly [string, (port: number) => string, strin
     "control: the bracketed scp form with a port",
     (port) => `[git@127.0.0.1:${String(port)}]:org/repo.git`,
     "git",
+  ],
+];
+
+const USER_NOT_A_NAME: ReadonlyArray<readonly [string, (port: number) => string]> = [
+  [
+    "a bracketed URL userinfo with a port",
+    (port) => `ssh://[127.0.0.2:${String(port)}]@127.0.0.1/p`,
+  ],
+  [
+    "a percent-encoded port and / in the URL userinfo",
+    (port) => `ssh://127.0.0.2%3A${String(port)}%2F@127.0.0.1/p`,
+  ],
+  [
+    "a percent-encoded :// in a bracketed URL userinfo",
+    (port) => `ssh://ssh%3A%2F%2Fx@[127.0.0.2:${String(port)}]@127.0.0.1/p`,
   ],
 ];
 
@@ -220,6 +222,44 @@ describeLive("E-24, live: the vault's ssh reaches the judged host, whatever git 
       expect(rows[0]?.detail?.transport).toBe("ssh");
       expect(rows[0]?.detail?.host).toBe("127.0.0.1");
       expect("error" in (rows[0]?.detail ?? {})).toBe(false);
+    },
+    30_000,
+  );
+
+  it.each(USER_NOT_A_NAME)(
+    "%s: the user part is no name, INVALID_GIT_CONFIG, one row without a host, no session",
+    async (_title, address) => {
+      const log = vi.fn();
+      const injector = new GitInjector({ log } as unknown as AuditLogger);
+      const config: ConnectionConfig = {
+        ssh: { known_hosts: [`[127.0.0.1]:${String(port)} ${hostPubLine}`] },
+      };
+      const err = await expectVaultError(
+        () =>
+          injector.executeWithSecret(
+            { type: "git", operation: "ls-remote", repository: address(port), timeout_ms: 20_000 },
+            new Uint8Array(Buffer.from(USER_KEY_PEM)),
+            policy(),
+            config,
+            "secret-1",
+          ),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
+      expect(
+        err.message ===
+          "SSH user of the repository must be a name of letters, digits, '.', '_' and '-' that begins with a letter or a digit",
+      ).toBe(true);
+      expect(sessions.length).toBe(0);
+      expect(log.mock.calls).toEqual([
+        [
+          {
+            eventType: "secret.use",
+            secretId: "secret-1",
+            detail: { context: "git", operation: "ls-remote", error: "INVALID_GIT_CONFIG" },
+            success: false,
+          },
+        ],
+      ]);
     },
     30_000,
   );

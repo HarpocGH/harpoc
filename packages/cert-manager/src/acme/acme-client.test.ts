@@ -52,10 +52,10 @@ interface Call {
   method: string;
   headers: Record<string, string>;
   body: string;
-  redirect: RequestRedirect | undefined;
+  redirect: RequestInit["redirect"];
 }
 
-const headerRecord = (init: HeadersInit | undefined): Record<string, string> => {
+const headerRecord = (init: RequestInit["headers"]): Record<string, string> => {
   const record: Record<string, string> = {};
   new Headers(init).forEach((value, key) => {
     record[key] = value;

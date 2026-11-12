@@ -484,6 +484,7 @@ describe.runIf(process.platform === "win32")("win32 — the real wrapper", () =>
     });
     expect(wrapped.status).toBe(0);
     expect(wrapped.stdout).toBe(direct.stdout);
+    // csc.exe compiles the real wrapper into a fresh cache (60 s bound), so the budget is 120 s.
   }, 120_000);
 
   it("a missing payload is the wrapper's 9009 with the marker", async () => {

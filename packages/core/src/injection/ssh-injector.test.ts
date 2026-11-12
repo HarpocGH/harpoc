@@ -249,3 +249,53 @@ describe("a host or user outside the schema's charset is refused before the allo
     expect(spawnMock.mock.calls.length).toBe(0);
   });
 });
+
+const NON_STRINGS: ReadonlyArray<readonly [string, unknown]> = [
+  ["a number", 5],
+  ["undefined", undefined],
+  ["null", null],
+  ["an array", ["-x"]],
+  ["an object", {}],
+];
+
+const NON_STRING_FIELDS = (["host", "user"] as const).flatMap((field) =>
+  NON_STRINGS.map(([label, value]) => [field, label, value] as const),
+);
+
+describe("a non-string host or user of an unparsed caller is refused with the charset refusal", () => {
+  const spawnMock = vi.mocked(spawnCaptured);
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it.each(NON_STRING_FIELDS)(
+    "a %s that is %s: INVALID_SSH_CONFIG with the charset message, one failed row without the field, nothing spawned",
+    async (field, _label, value) => {
+      const { log, injector } = recorder();
+      const err = await expectVaultError(
+        () =>
+          injector.executeWithSecret(
+            { ...ACTION, [field]: value } as unknown as SshAction,
+            SECRET,
+            policy({ host_allowlist: [ACTION.host] }),
+            SSH_CONFIG,
+            "secret-1",
+          ),
+        ErrorCode.INVALID_SSH_CONFIG,
+      );
+      expect(err.message === FIXED_MESSAGE).toBe(true);
+      const rows = rowsOf(log);
+      expect(rows.length).toBe(1);
+      expect(rows[0]?.eventType).toBe("secret.use");
+      expect(rows[0]?.success).toBe(false);
+      const kept = field === "host" ? { user: ACTION.user } : { host: ACTION.host };
+      expect(rows[0]?.detail).toStrictEqual({
+        context: "ssh",
+        ...kept,
+        error: "INVALID_SSH_CONFIG",
+      });
+      expect(spawnMock.mock.calls.length).toBe(0);
+    },
+  );
+});

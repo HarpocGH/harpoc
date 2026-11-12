@@ -61,8 +61,9 @@ function matchesUrlPattern(target: URL, pattern: string): boolean {
 }
 
 function matchHost(patternHost: string, host: string): boolean {
+  if (/\P{ASCII}/u.test(host)) return false;
   const p = canonicalPatternHost(patternHost);
-  const h = host.toLowerCase();
+  const h = asciiLowerCase(host);
   if (p === h) return true;
   if (p.startsWith("*.")) {
     const suffix = p.slice(1); // ".example.com"
@@ -77,13 +78,18 @@ function matchHost(patternHost: string, host: string): boolean {
  * same host. Anything else is lowercased only.
  */
 function canonicalPatternHost(patternHost: string): string {
-  const lower = patternHost.toLowerCase();
+  const lower = asciiLowerCase(patternHost);
   if (!lower.startsWith("[")) return lower;
   try {
     return new URL(`http://${lower}/`).hostname;
   } catch {
     return lower;
   }
+}
+
+/** Lower-cases the ASCII letters `A`–`Z` alone; every other character stays as written. */
+function asciiLowerCase(value: string): string {
+  return value.replace(/[A-Z]+/g, (run) => run.toLowerCase());
 }
 
 // ---------------------------------------------------------------------------

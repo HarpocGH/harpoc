@@ -16,6 +16,8 @@ import { createCertificateRoutes } from "./certificates.js";
 import type { HarpocEnv } from "../types.js";
 import { silenceAuditLines } from "@harpoc/test-utils";
 
+type DataBody = { data: unknown };
+
 const MOCK_TOKEN: VaultApiToken = {
   sub: "test-agent",
   vault_id: "vault-1",
@@ -136,7 +138,7 @@ describe("POST /api/v1/certificates/import", () => {
   it("returns 201 with the handle and a snake_case secret_id", async () => {
     const res = await post("/api/v1/certificates/import", IMPORT_BODY);
     expect(res.status).toBe(201);
-    const body = await res.json();
+    const body = (await res.json()) as DataBody;
     expect(body.data).toEqual({ handle: "secret://my-cert", secret_id: "secret-uuid-1" });
   });
 
@@ -232,7 +234,7 @@ describe("POST /api/v1/certificates/csr", () => {
   it("returns 201 with the handle and csr_pem", async () => {
     const res = await post("/api/v1/certificates/csr", CSR_BODY);
     expect(res.status).toBe(201);
-    const body = await res.json();
+    const body = (await res.json()) as DataBody;
     expect(body.data).toEqual({ handle: "secret://my-csr", csr_pem: CSR_PEM });
   });
 
@@ -322,7 +324,7 @@ describe("POST /api/v1/certificates/:handle/renew", () => {
   it("returns 200 with the certificate status", async () => {
     const res = await post("/api/v1/certificates/my-cert/renew", {});
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as DataBody;
     expect(body.data).toEqual(CERT_STATUS);
     expect(certManager.renewCertificate).toHaveBeenCalledWith("secret-uuid-1", {
       caller: EXPECTED_CALLER,
@@ -384,7 +386,7 @@ describe("GET /api/v1/certificates/:handle/status", () => {
   it("returns the certificate status for the resolved secret id", async () => {
     const res = await app.request("/api/v1/certificates/my-cert/status", { headers: AUTH });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as DataBody;
     expect(body.data).toEqual(CERT_STATUS);
     expect(engine.resolveSecretId).toHaveBeenCalledWith("secret://my-cert", EXPECTED_CALLER);
     expect(engine.getCertificateStatus).toHaveBeenCalledWith(

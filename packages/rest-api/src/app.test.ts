@@ -89,7 +89,7 @@ describe("createApp integration", () => {
 
     const res = await app.request("/api/v1/health", { headers: HOST });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as { data: { state: string; version: string } };
     expect(body.data.state).toBe("unlocked");
     expect(body.data.version).toBe(HARPOC_VERSION);
   });

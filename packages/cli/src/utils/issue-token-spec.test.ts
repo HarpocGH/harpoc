@@ -1,6 +1,16 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { join, parse, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import {
@@ -9,6 +19,25 @@ import {
   parseIssueTokenSpecs,
 } from "./issue-token-spec.js";
 import { expectVaultError } from "@harpoc/test-utils";
+
+/** `icacls.exe` on a directory this file created, through no shell, under a deadline. */
+function icacls(path: string, ...args: string[]): void {
+  const res = spawnSync(
+    `${process.env.SystemRoot as string}\\System32\\icacls.exe`,
+    [path, ...args],
+    {
+      shell: false,
+      windowsHide: true,
+      timeout: 15_000,
+      encoding: "utf8",
+    },
+  );
+  if (res.status !== 0) {
+    expect.fail(
+      `icacls ${[path, ...args].join(" ")} exited ${String(res.status)}${res.error === undefined ? "" : ` (${res.error.message})`}: ${res.stderr}`,
+    );
+  }
+}
 
 const FILE = "/run/harpoc/alice/token.jwt";
 const REQUIRED = "(agent, file, scope and secrets are required)";
@@ -233,6 +262,7 @@ describe("parseIssueTokenSpecs", () => {
 
 describe("assertIssueTokenFile", () => {
   const LINK_REFUSAL = "is a symbolic link or junction";
+  const AGENT = "nosuchuser-c1";
   let dir: string;
   const links: string[] = [];
 
@@ -253,14 +283,17 @@ describe("assertIssueTokenFile", () => {
   });
 
   it("accepts a token file to be created in an existing directory, and an existing file", () => {
-    expect(() => assertIssueTokenFile(join(dir, "token.jwt"))).not.toThrow();
+    expect(() => assertIssueTokenFile(join(dir, "token.jwt"), AGENT)).not.toThrow();
     writeFileSync(join(dir, "old.jwt"), "");
-    expect(() => assertIssueTokenFile(join(dir, "old.jwt"))).not.toThrow();
+    expect(() => assertIssueTokenFile(join(dir, "old.jwt"), AGENT)).not.toThrow();
   });
 
   it("refuses a token file whose directory does not exist", async () => {
     const file = join(dir, "missing", "token.jwt");
-    const err = await expectVaultError(() => assertIssueTokenFile(file), ErrorCode.INVALID_INPUT);
+    const err = await expectVaultError(
+      () => assertIssueTokenFile(file, AGENT),
+      ErrorCode.INVALID_INPUT,
+    );
     expect(err.message).toBe(
       `--issue-token: file ${file}: no such directory: ${join(dir, "missing")}`,
     );
@@ -269,14 +302,20 @@ describe("assertIssueTokenFile", () => {
   it("refuses a token file whose directory is a file", async () => {
     writeFileSync(join(dir, "plain"), "");
     const file = join(dir, "plain", "token.jwt");
-    const err = await expectVaultError(() => assertIssueTokenFile(file), ErrorCode.INVALID_INPUT);
+    const err = await expectVaultError(
+      () => assertIssueTokenFile(file, AGENT),
+      ErrorCode.INVALID_INPUT,
+    );
     expect(err.message).toBe(`--issue-token: file ${file}: not a directory: ${join(dir, "plain")}`);
   });
 
   it("refuses a token file that is a directory: the rotation renames a file over it", async () => {
     const file = join(dir, "token.jwt");
     mkdirSync(file);
-    const err = await expectVaultError(() => assertIssueTokenFile(file), ErrorCode.INVALID_INPUT);
+    const err = await expectVaultError(
+      () => assertIssueTokenFile(file, AGENT),
+      ErrorCode.INVALID_INPUT,
+    );
     expect(err.message).toBe(`--issue-token: file ${file} is a directory`);
   });
 
@@ -284,7 +323,10 @@ describe("assertIssueTokenFile", () => {
     mkdirSync(join(dir, "target"));
     const linked = link(join(dir, "target"), join(dir, "bob"));
     const file = join(linked, "token.jwt");
-    const err = await expectVaultError(() => assertIssueTokenFile(file), ErrorCode.INVALID_INPUT);
+    const err = await expectVaultError(
+      () => assertIssueTokenFile(file, AGENT),
+      ErrorCode.INVALID_INPUT,
+    );
     expect(err.message.includes(LINK_REFUSAL)).toBe(true);
     expect(err.message).toBe(
       `--issue-token: file ${file}: the directory is a symbolic link or junction: ${linked}`,
@@ -295,7 +337,10 @@ describe("assertIssueTokenFile", () => {
     mkdirSync(join(dir, "target"));
     const linked = `${link(join(dir, "target"), join(dir, "bob"))}${sep}.`;
     const file = `${linked}${sep}token.jwt`;
-    const err = await expectVaultError(() => assertIssueTokenFile(file), ErrorCode.INVALID_INPUT);
+    const err = await expectVaultError(
+      () => assertIssueTokenFile(file, AGENT),
+      ErrorCode.INVALID_INPUT,
+    );
     expect(err.message.includes(LINK_REFUSAL)).toBe(true);
     expect(err.message).toBe(
       `--issue-token: file ${file}: the directory is a symbolic link or junction: ${linked}`,
@@ -304,7 +349,10 @@ describe("assertIssueTokenFile", () => {
 
   it("refuses a token file that is a dangling link (a junction on Windows, a symbolic link elsewhere)", async () => {
     const file = link(join(dir, "missing"), join(dir, "token.jwt"));
-    const err = await expectVaultError(() => assertIssueTokenFile(file), ErrorCode.INVALID_INPUT);
+    const err = await expectVaultError(
+      () => assertIssueTokenFile(file, AGENT),
+      ErrorCode.INVALID_INPUT,
+    );
     expect(err.message.includes(LINK_REFUSAL)).toBe(true);
     expect(err.message).toBe(`--issue-token: file ${file} is a symbolic link or junction`);
   });
@@ -314,7 +362,10 @@ describe("assertIssueTokenFile", () => {
     async () => {
       writeFileSync(join(dir, "real.jwt"), "");
       const file = link(join(dir, "real.jwt"), join(dir, "token.jwt"));
-      const err = await expectVaultError(() => assertIssueTokenFile(file), ErrorCode.INVALID_INPUT);
+      const err = await expectVaultError(
+        () => assertIssueTokenFile(file, AGENT),
+        ErrorCode.INVALID_INPUT,
+      );
       expect(err.message.includes(LINK_REFUSAL)).toBe(true);
       expect(err.message).toBe(`--issue-token: file ${file} is a symbolic link or junction`);
     },
@@ -323,14 +374,83 @@ describe("assertIssueTokenFile", () => {
   it("refuses a token file that is a link to a directory as a link, not as a directory (a junction on Windows, a symbolic link elsewhere)", async () => {
     mkdirSync(join(dir, "target"));
     const file = link(join(dir, "target"), join(dir, "token.jwt"));
-    const err = await expectVaultError(() => assertIssueTokenFile(file), ErrorCode.INVALID_INPUT);
+    const err = await expectVaultError(
+      () => assertIssueTokenFile(file, AGENT),
+      ErrorCode.INVALID_INPUT,
+    );
     expect(err.message.includes(LINK_REFUSAL)).toBe(true);
     expect(err.message).toBe(`--issue-token: file ${file} is a symbolic link or junction`);
   });
 
   it("accepts a token file whose directory's parent is a link: only the final component is judged (a junction on Windows, a symbolic link elsewhere)", () => {
     mkdirSync(join(dir, "real-parent", "alice"), { recursive: true });
+    chmodSync(join(dir, "real-parent", "alice"), 0o750);
     const linkParent = link(join(dir, "real-parent"), join(dir, "link-parent"));
-    expect(() => assertIssueTokenFile(join(linkParent, "alice", "token.jwt"))).not.toThrow();
+    expect(() => assertIssueTokenFile(join(linkParent, "alice", "token.jwt"), AGENT)).not.toThrow();
   });
+
+  it.skipIf(process.platform === "win32").each([
+    { mode: 0o755, octal: "0755", why: "world-accessible" },
+    { mode: 0o770, octal: "0770", why: "group-writable" },
+  ])(
+    "refuses a token file whose directory is $why ($octal), naming the directory (chmod; POSIX: mode bits)",
+    async ({ mode, octal }) => {
+      chmodSync(dir, mode);
+      const file = join(dir, "token.jwt");
+      const err = await expectVaultError(
+        () => assertIssueTokenFile(file, AGENT),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message).toBe(
+        `--issue-token: file ${file}: mode ${octal} is not 0750 or stricter (group-writable or world-accessible): ${dir}`,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === "win32" || process.geteuid?.() === 0)(
+    "refuses a token file whose directory another uid owns (the filesystem root, root's own; POSIX only, skipped where the suite runs as root)",
+    async () => {
+      const root = parse(dir).root;
+      const file = join(root, "harpoc-c1-token.jwt");
+      const err = await expectVaultError(
+        () => assertIssueTokenFile(file, AGENT),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message).toBe(
+        `--issue-token: file ${file}: owned by uid 0, not by this process's uid ${String(process.geteuid?.())}: ${root}`,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === "win32").each([
+    { mode: 0o700, octal: "0700 (mkdtemp's)" },
+    { mode: 0o750, octal: "0750" },
+    { mode: 0o2750, octal: "02750 (set-group-ID: the recipe's consumer directory)" },
+  ])("accepts a token file whose directory is $octal (chmod; POSIX: mode bits)", ({ mode }) => {
+    chmodSync(dir, mode);
+    expect((statSync(dir).mode & 0o7777) === mode).toBe(true);
+    expect(() => assertIssueTokenFile(join(dir, "token.jwt"), AGENT)).not.toThrow();
+  });
+
+  it.runIf(process.platform === "win32")(
+    "refuses a token file whose directory's access list grants Users read and execute — the token file would inherit it (Windows; icacls on this row's own directory)",
+    async () => {
+      icacls(dir, "/grant", "*S-1-5-32-545:(OI)(CI)(RX)");
+      const file = join(dir, "token.jwt");
+      const err = await expectVaultError(
+        () => assertIssueTokenFile(file, AGENT),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message).toBe(
+        `--issue-token: file ${file}: the access list grants S-1-5-32-545 0x001200A9; only this process's account, SYSTEM, Administrators may hold a grant (no local account is named "${AGENT}"): ${dir}`,
+      );
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "accepts a token file in a mkdtemp directory on Windows: the trusted three alone, the agent naming no local account",
+    () => {
+      expect(() => assertIssueTokenFile(join(dir, "token.jwt"), AGENT)).not.toThrow();
+    },
+  );
 });

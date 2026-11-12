@@ -16,6 +16,9 @@ the container, so its docker row skips). Needs Docker; on Windows run it from Gi
   HARPOC_DEV_TIERS   the tiers the run requires (default for test and shell:
                      secret-service,keyring,isolation,fs-isolation,ssh-live,two-uid;
                      for e2e-b: two-uid)
+  HARPOC_DEV_MIN_AVAILABLE_MB
+                     the host's available memory in MB below which run.sh refuses
+                     (default 8192; 0 skips the check)
 USAGE
 }
 
@@ -39,6 +42,13 @@ case "$mode" in
   *) default_tiers=secret-service,keyring,isolation,fs-isolation,ssh-live,two-uid ;;
 esac
 tiers="${HARPOC_DEV_TIERS:-$default_tiers}"
+min_available_mb="${HARPOC_DEV_MIN_AVAILABLE_MB:-8192}"
+case "$min_available_mb" in
+  *[!0-9]*)
+    echo "run.sh: HARPOC_DEV_MIN_AVAILABLE_MB must be a whole number of MB (0 skips the check)" >&2
+    exit 2
+    ;;
+esac
 
 host_path() {
   case "$(uname -s)" in
@@ -51,6 +61,21 @@ case "$(uname -s)" in
   MINGW* | MSYS*) export MSYS_NO_PATHCONV=1 ;;
 esac
 
+if ! [ "$min_available_mb" -eq 0 ]; then
+  case "$(uname -s)" in
+    MINGW* | MSYS*)
+      available_mb="$(powershell.exe -NoProfile -Command "[int]((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory/1024)")"
+      available_mb=${available_mb%$'\r'}
+      ;;
+    Linux) available_mb="$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo)" ;;
+    *) available_mb= ;;
+  esac
+  if [ -n "$available_mb" ] && ! [ "$available_mb" -ge "$min_available_mb" ]; then
+    echo "run.sh: the host has $available_mb MB of memory available, under HARPOC_DEV_MIN_AVAILABLE_MB=$min_available_mb (0 skips the check)" >&2
+    exit 75
+  fi
+fi
+
 docker build -t harpoc-dev -f "$(host_path "$here/Dockerfile")" "$(host_path "$repo/deploy")"
 
 prepare='set -eu
@@ -61,7 +86,7 @@ cd /work
 pnpm install --frozen-lockfile --store-dir /pnpm-store
 pnpm build'
 
-suite='dbus-run-session -- sh -c '"'"'echo harpoc-ci | gnome-keyring-daemon --unlock; keyctl link @u @s || true; pnpm test'"'"
+suite='dbus-run-session -- sh -c '"'"'echo harpoc-ci | gnome-keyring-daemon --unlock; keyctl link @u @s || true; pnpm test --force --concurrency=1'"'"
 
 # The copied fixtures carry the bind mount's mode (0755 after --chmod=go-w, still world-readable): regenerated, the client key is 0600 (dev).
 e2e_b='rm -rf packages/e2e/fixtures/pki/out packages/e2e/fixtures/keys/out
@@ -80,6 +105,12 @@ run_args=(
   --env HARPOC_TWO_UID_VAULT_USER=harpoc
   --env HARPOC_TWO_UID_AGENT_USER=agent
 )
+
+running="$(docker ps -q --filter volume=harpoc-dev-work)"
+if [ -n "$running" ]; then
+  echo "run.sh: another run.sh is using the harpoc-dev-work volume" >&2
+  exit 75
+fi
 
 if [ "$mode" = shell ]; then
   docker run -it "${run_args[@]}" harpoc-dev bash -c "$prepare

@@ -70,14 +70,15 @@ process.stdout.write(out + "\\n");
  * never a credential. Every field the builder writes is request-derived (the
  * registry is parsed from the image reference), so the same projection covers
  * both a successful use and a denial, exactly like the SFTP context. Optional
- * are the four result-derived keys (`sanitized`, `descendant_sweep`,
- * `tree_kill`, `strict_tree_exit`): the engine folds them onto whichever row
+ * are `registry` and `image`, left out when the action's image is not a
+ * string, and the four result-derived keys (`sanitized`, `descendant_sweep`,
+ * `tree_kill`, `strict_tree_exit`), which the engine folds onto whichever row
  * the spawn produced — a success, or a graceful non-throwing failure such as
  * PROCESS_TIMEOUT — never onto a refusal row, which never reached a spawn.
  */
 export interface DockerAuditDetails {
-  registry: string;
-  image: string;
+  registry?: string;
+  image?: string;
   operation: string;
   /** Present only when the credential redaction changed the captured output (E70). */
   sanitized?: true;
@@ -111,8 +112,9 @@ export interface DockerExecution {
  * engine calls it for both success and failed `secret.use` rows. */
 export function buildDockerAuditDetails(action: DockerRegistryAction): DockerAuditDetails {
   return {
-    registry: parseImageReference(action.image).registry,
-    image: action.image,
+    ...(typeof action.image === "string"
+      ? { registry: parseImageReference(action.image).registry, image: action.image }
+      : {}),
     operation: action.operation,
   };
 }
@@ -325,7 +327,7 @@ async function runDocker(
   // flag. The schema's image grammar refuses one too, but VaultEngine.useSecret
   // and DirectClient.useSecret take the action unparsed — on that path this
   // guard is the only check.
-  if (action.image.startsWith("-")) {
+  if (typeof action.image !== "string" || action.image.startsWith("-")) {
     throw VaultError.invalidInput("docker image reference must not start with '-'");
   }
 

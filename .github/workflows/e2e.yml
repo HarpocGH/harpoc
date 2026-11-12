@@ -533,6 +533,10 @@ jobs:
           if ($null -ne $failure) { throw $failure }
           if ($leftover) { throw 'the scratch vault left files behind (listed above)' }
           $global:LASTEXITCODE = 0
+      - name: Run e2e's Windows unit files (no fleet)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: pnpm --filter @harpoc/e2e test:e2e src/assert/process-inventory-windows.test.ts src/harness/runas-windows.test.ts src/harness/two-identity-windows.test.ts src/harness/fixtures.test.ts
       - name: Upload the B Windows evidence
         if: always()
         uses: actions/upload-artifact@v7

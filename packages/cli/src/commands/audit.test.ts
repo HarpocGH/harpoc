@@ -1,13 +1,15 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from "vitest";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
     queryAudit: vi.fn().mockReturnValue([]),
     getAuditChainTail: vi.fn(),
     verifyAuditChain: vi.fn(),
+    verifyToken: vi.fn(),
+    auditGovernanceRefusal: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),
   },
 }));
@@ -18,9 +20,10 @@ vi.mock("../utils/vault-loader.js", () => ({
 }));
 
 import { ErrorCode, VaultError } from "@harpoc/shared";
+import type { VaultApiToken } from "@harpoc/shared";
 import { loadUnlockedEngine } from "../utils/vault-loader.js";
 import { registerAuditCommand } from "./audit.js";
-import { buildCli, spyCli, type CliSpies } from "../__fixtures__/cli-harness.js";
+import { buildCli, spyCli, tokenFixture, type CliSpies } from "../__fixtures__/cli-harness.js";
 
 const run = buildCli(registerAuditCommand, ["audit"]);
 
@@ -297,6 +300,18 @@ describe("audit anchor / verify --anchor", () => {
     expect(spies.stderr()).toContain("No anchorable audit chain tail");
   });
 
+  it("a tail without a link is refused as a VAULT_CORRUPTED envelope under --json (C-13)", async () => {
+    mockEngine.getAuditChainTail.mockReturnValue(null);
+    await expect(run(["anchor", "--json"])).rejects.toThrow("process.exit");
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
+      error: "VAULT_CORRUPTED",
+      message:
+        "No anchorable audit chain tail — the log is empty or its last row carries no link (run harpoc audit verify).",
+    });
+    expect(spies.logSpy).not.toHaveBeenCalled();
+  });
+
   it("verify always prints the current tail link, without and with --json", async () => {
     mockEngine.verifyAuditChain.mockReturnValue({
       valid: true,
@@ -403,3 +418,91 @@ describe("audit anchor / verify --anchor", () => {
     expect(mockEngine.verifyAuditChain).not.toHaveBeenCalled();
   });
 });
+
+const SCOPED_CLAIMS: Array<[string, Partial<VaultApiToken>]> = [
+  ["project", { project: "acme" }],
+  ["secrets", { secrets: ["*"] }],
+];
+
+const ADMIN_CALLER = {
+  principal_type: "agent",
+  principal_id: "agent-1",
+  interface: "cli",
+  admin_scope: true,
+};
+
+const CHAIN_COMMANDS: Array<[string, () => Mock]> = [
+  ["verify", () => mockEngine.verifyAuditChain],
+  ["anchor", () => mockEngine.getAuditChainTail],
+];
+
+describe.each(CHAIN_COMMANDS)(
+  "audit %s --token: the chain is vault-wide (C-12)",
+  (command, reads) => {
+    let spies: CliSpies;
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      mockEngine.verifyAuditChain.mockReturnValue({
+        valid: true,
+        checked: 3,
+        firstBrokenId: null,
+        tail: validAnchor,
+      });
+      mockEngine.getAuditChainTail.mockReturnValue(validAnchor);
+      spies = spyCli();
+      process.exitCode = undefined;
+    });
+
+    afterEach(() => {
+      spies.restore();
+      process.exitCode = undefined;
+    });
+
+    it.each(SCOPED_CLAIMS)(
+      "refuses a %s-claimed admin token ACCESS_DENIED with one governance row before the chain is read",
+      async (_claim, claims) => {
+        mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["admin"], ...claims }));
+
+        await expect(run([command, "--token", "jwt-value"])).rejects.toThrow("process.exit");
+
+        expect(spies.exitSpy).toHaveBeenCalledWith(1);
+        expect(spies.stderr()).toContain(
+          "[ACCESS_DENIED] Access denied: governance requires an unscoped admin token",
+        );
+        expect(mockEngine.auditGovernanceRefusal).toHaveBeenCalledTimes(1);
+        expect(mockEngine.auditGovernanceRefusal).toHaveBeenCalledWith(
+          { ...ADMIN_CALLER, ...claims },
+          `audit ${command}`,
+        );
+        expect(reads()).not.toHaveBeenCalled();
+        expect(spies.logSpy).not.toHaveBeenCalled();
+      },
+    );
+
+    it("renders the refusal as the ACCESS_DENIED envelope under --json", async () => {
+      mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["admin"], project: "acme" }));
+
+      await expect(run([command, "--token", "jwt-value", "--json"])).rejects.toThrow(
+        "process.exit",
+      );
+
+      expect(JSON.parse(String(spies.errorSpy.mock.calls[0]?.[0]))).toEqual({
+        error: "ACCESS_DENIED",
+        message: "Access denied: governance requires an unscoped admin token",
+      });
+      expect(mockEngine.auditGovernanceRefusal).toHaveBeenCalledTimes(1);
+      expect(reads()).not.toHaveBeenCalled();
+    });
+
+    it("still reads the chain for an unscoped admin token, with no governance row", async () => {
+      mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["admin"] }));
+
+      await run([command, "--token", "jwt-value"]);
+
+      expect(reads()).toHaveBeenCalledTimes(1);
+      expect(mockEngine.auditGovernanceRefusal).not.toHaveBeenCalled();
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+  },
+);

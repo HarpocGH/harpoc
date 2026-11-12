@@ -114,20 +114,20 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
             unshare -rn -- /bin/true && echo "unshare -rn OK after sysctl" || echo "::warning::unshare -rn still failing"
           }
-      - name: Probe filesystem isolation (diagnostic - setpriv expected unavailable on ubuntu-24.04, bwrap expected OK)
+      - name: Probe filesystem isolation (diagnostic - setpriv Landlock or bwrap)
         if: runner.os == 'Linux'
-        # ubuntu-24.04 (today's ubuntu-latest image) ships util-linux 2.39,
-        # whose `setpriv` has no `--landlock-*` options; the filesystem tier on
-        # this leg is delivered by bubblewrap's read-only root bind (the second
-        # tier, Wave 3 step 9) under the userns grant the step above arranged.
-        # "fs-isolation" is REQUIRED on this leg, so a bwrap warning here
-        # foretells a test failure below. The argv are byte-identical to
+        # util-linux before 2.40 has no `setpriv --landlock-*`; there the
+        # filesystem tier is bubblewrap's read-only root bind under the userns
+        # grant the step above arranged, and with a newer util-linux on a
+        # Landlock kernel the vault takes setpriv first — this step prints which.
+        # "fs-isolation" is REQUIRED on this leg, so a warning from a tier in
+        # use foretells a test failure below. The argv are byte-identical to
         # LANDLOCK_PREFIX_ARGS, BWRAP_FS_PREFIX_ARGS and
         # BWRAP_COMBINED_PREFIX_ARGS in packages/core/src/injection/.
         # Diagnostic only: never fails.
         run: |
           setpriv --version || true
-          setpriv --landlock-access fs --landlock-rule path-beneath:execute,read-file,read-dir:/ --landlock-rule path-beneath:write-file:/dev/null -- /bin/true && echo "setpriv Landlock OK" || echo "::notice::setpriv Landlock unavailable (expected on util-linux 2.39)"
+          setpriv --landlock-access fs --landlock-rule path-beneath:execute,read-file,read-dir:/ --landlock-rule path-beneath:write-file:/dev/null -- /bin/true && echo "setpriv Landlock OK" || echo "::notice::setpriv Landlock unavailable (util-linux before 2.40 or no Landlock)"
           bwrap --version || true
           bwrap --ro-bind / / --dev /dev --die-with-parent -- /bin/true && echo "bwrap read-only root OK" || echo "::warning::bwrap filesystem probe failed"
           bwrap --ro-bind / / --dev /dev --unshare-net --die-with-parent -- /bin/true && echo "bwrap combined OK" || echo "::warning::bwrap combined probe failed"

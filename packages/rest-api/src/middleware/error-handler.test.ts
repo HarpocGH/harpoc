@@ -4,6 +4,8 @@ import { ErrorCode, VaultError } from "@harpoc/shared";
 import { errorHandler } from "./error-handler.js";
 import type { HarpocEnv } from "../types.js";
 
+type ErrorBody = { error: string; message: string; details?: unknown };
+
 function createTestApp(thrower: () => never) {
   const app = new Hono<HarpocEnv>();
   app.onError(errorHandler);
@@ -19,7 +21,7 @@ describe("errorHandler", () => {
 
     const res = await app.request("/test");
     expect(res.status).toBe(404);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe(ErrorCode.SECRET_NOT_FOUND);
     expect(body.message).toContain("mykey");
   });
@@ -31,7 +33,7 @@ describe("errorHandler", () => {
 
     const res = await app.request("/test");
     expect(res.status).toBe(503);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe(ErrorCode.VAULT_LOCKED);
   });
 
@@ -42,7 +44,7 @@ describe("errorHandler", () => {
 
     const res = await app.request("/test");
     expect(res.status).toBe(403);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe(ErrorCode.ACCESS_DENIED);
   });
 
@@ -62,7 +64,7 @@ describe("errorHandler", () => {
 
     const res = await app.request("/test");
     expect(res.status).toBe(500);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe(ErrorCode.INTERNAL_ERROR);
     expect(body.message).toBe("Internal server error");
   });
@@ -73,7 +75,7 @@ describe("errorHandler", () => {
     });
 
     const res = await app.request("/test");
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.message).toBe("Internal server error");
     expect(body.message).not.toContain("postgres");
   });
@@ -98,7 +100,7 @@ describe("errorHandler", () => {
 
       const res = await app.request("/test");
       expect(res.status).toBe(expectedStatus);
-      const body = await res.json();
+      const body = (await res.json()) as ErrorBody;
       expect(body.error).toBe(code);
     }
   });
@@ -112,7 +114,7 @@ describe("errorHandler", () => {
 
     const res = await app.request("/test");
     expect(res.status).toBe(429);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe(ErrorCode.LOCKOUT_ACTIVE);
     expect(body.details).toEqual({ retry_after_ms: 30000 });
   });

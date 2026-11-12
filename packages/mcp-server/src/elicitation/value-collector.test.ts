@@ -469,7 +469,6 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       createSecret: vi
         .fn()
         .mockResolvedValue({ handle: "secret://api-key", status: "pending", message: "" }),
-      setSecretValue: vi.fn().mockResolvedValue(undefined),
       rotateSecret: vi.fn().mockResolvedValue(undefined),
       getState: vi.fn().mockReturnValue("unlocked"),
       queryAudit: vi.fn().mockReturnValue([]),
@@ -504,9 +503,9 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
   it("create_secret collects the value through the one-time form", async () => {
     const engine = mockEngine();
     let captured = "";
-    vi.mocked(engine.setSecretValue).mockImplementation((_handle: string, value: Uint8Array) => {
-      captured = Buffer.from(value).toString("utf8");
-      return Promise.resolve();
+    vi.mocked(engine.createSecret).mockImplementation((input) => {
+      captured = Buffer.from(input.value ?? new Uint8Array(0)).toString("utf8");
+      return Promise.resolve({ handle: "secret://api-key", status: "created", message: "" });
     });
 
     const { client, close } = await connect(engine, {
@@ -535,9 +534,9 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         message: string;
       };
       expect(payload.status).toBe("created");
-      expect(engine.setSecretValue).toHaveBeenCalledWith(
-        "secret://api-key",
-        expect.anything(),
+      expect(engine.createSecret).toHaveBeenCalledTimes(1);
+      expect(engine.createSecret).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "api-key", type: "api_key", value: expect.anything() }),
         expect.objectContaining({
           principal_type: "user",
           principal_id: "tokenless-stdio",
@@ -602,7 +601,8 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       };
       expect(createdPayload.status).toBe("pending");
       expect(createdPayload.message).toContain("harpoc secret set");
-      expect(engine.setSecretValue).not.toHaveBeenCalled();
+      expect(engine.createSecret).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(engine.createSecret).mock.calls[0]?.[0]).not.toHaveProperty("value");
 
       const rotated = (await client.callTool({
         name: "rotate_secret",
@@ -626,9 +626,9 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       .spyOn(ttyPrompt, "collectValueFromTty")
       .mockResolvedValue(new Uint8Array(Buffer.from("typed-at-the-terminal", "utf8")));
     let captured = "";
-    vi.mocked(engine.setSecretValue).mockImplementation((_handle: string, value: Uint8Array) => {
-      captured = Buffer.from(value).toString("utf8");
-      return Promise.resolve();
+    vi.mocked(engine.createSecret).mockImplementation((input) => {
+      captured = Buffer.from(input.value ?? new Uint8Array(0)).toString("utf8");
+      return Promise.resolve({ handle: "secret://api-key", status: "created", message: "" });
     });
 
     const { client, close } = await connect(
@@ -675,9 +675,9 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       .spyOn(ttyPrompt, "collectValueFromTty")
       .mockResolvedValue(new Uint8Array(Buffer.from("typed-at-the-terminal", "utf8")));
     let captured = "";
-    vi.mocked(engine.setSecretValue).mockImplementation((_handle: string, value: Uint8Array) => {
-      captured = Buffer.from(value).toString("utf8");
-      return Promise.resolve();
+    vi.mocked(engine.createSecret).mockImplementation((input) => {
+      captured = Buffer.from(input.value ?? new Uint8Array(0)).toString("utf8");
+      return Promise.resolve({ handle: "secret://api-key", status: "created", message: "" });
     });
 
     const { client, close } = await connect(
@@ -703,6 +703,30 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
     } finally {
       tty.mockRestore();
       await close();
+    }
+  });
+
+  it("create_secret's legacy leg zeroes the terminal-typed value when the engine refuses the create", async () => {
+    const engine = mockEngine();
+    vi.mocked(engine.createSecret).mockRejectedValue(VaultError.duplicateSecret("api-key"));
+    const typed = new Uint8Array(Buffer.from("typed-at-the-terminal", "utf8"));
+    const tty = vi.spyOn(ttyPrompt, "collectValueFromTty").mockResolvedValue(typed);
+
+    const wire = await connect(engine, { capabilities: {} }, { enableTtyPrompt: true });
+    try {
+      const result = (await wire.client.callTool({
+        name: "create_secret",
+        arguments: { name: "api-key", type: "api_key" },
+      })) as { isError?: boolean; content: Array<{ text: string }> };
+      expect(result.isError).toBe(true);
+      expect((result.content[0]?.text ?? "").includes("Secret already exists: api-key")).toBe(true);
+      expect(tty).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(engine.createSecret).mock.calls[0]?.[0].value === typed).toBe(true);
+      expect(typed.length).toBe("typed-at-the-terminal".length);
+      expect(typed.every((byte) => byte === 0)).toBe(true);
+    } finally {
+      tty.mockRestore();
+      await wire.close();
     }
   });
 
@@ -832,9 +856,9 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
     it("create_secret round-trips the value through the one-time form", async () => {
       const engine = mockEngine();
       let captured = "";
-      vi.mocked(engine.setSecretValue).mockImplementation((_handle: string, value: Uint8Array) => {
-        captured = Buffer.from(value).toString("utf8");
-        return Promise.resolve();
+      vi.mocked(engine.createSecret).mockImplementation((input) => {
+        captured = Buffer.from(input.value ?? new Uint8Array(0)).toString("utf8");
+        return Promise.resolve({ handle: "secret://api-key", status: "created", message: "" });
       });
 
       const modern = await connectModern(engine);
@@ -857,9 +881,9 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         });
         const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
         expect(payload.status).toBe("created");
-        expect(engine.setSecretValue).toHaveBeenCalledWith(
-          "secret://api-key",
-          expect.anything(),
+        expect(engine.createSecret).toHaveBeenCalledTimes(1);
+        expect(engine.createSecret).toHaveBeenCalledWith(
+          expect.objectContaining({ name: "api-key", type: "api_key", value: expect.anything() }),
           expect.objectContaining({ principal_id: "tokenless-stdio" }),
         );
         expect(captured).toBe("browser-entered-value");
@@ -887,7 +911,8 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         };
         expect(payload.status).toBe("pending");
         expect(payload.message).toContain("harpoc secret set");
-        expect(engine.setSecretValue).not.toHaveBeenCalled();
+        expect(engine.createSecret).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(engine.createSecret).mock.calls[0]?.[0]).not.toHaveProperty("value");
       } finally {
         await modern.close();
       }
@@ -927,9 +952,9 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
     it("refuses a genuine requestState with one character flipped", async () => {
       const engine = mockEngine();
       let captured = "";
-      vi.mocked(engine.setSecretValue).mockImplementation((_handle: string, value: Uint8Array) => {
-        captured = Buffer.from(value).toString("utf8");
-        return Promise.resolve();
+      vi.mocked(engine.createSecret).mockImplementation((input) => {
+        captured = Buffer.from(input.value ?? new Uint8Array(0)).toString("utf8");
+        return Promise.resolve({ handle: "secret://api-key", status: "created", message: "" });
       });
 
       const modern = await connectModern(engine);
@@ -1053,7 +1078,6 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
             "requestState names no live value collection for this caller",
           );
           expect(engine.createSecret).not.toHaveBeenCalled();
-          expect(engine.setSecretValue).not.toHaveBeenCalled();
         } finally {
           await modern.close();
         }
@@ -1265,9 +1289,9 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         .spyOn(ttyPrompt, "collectValueFromTty")
         .mockResolvedValue(new Uint8Array(Buffer.from("typed-at-the-terminal", "utf8")));
       let captured = "";
-      vi.mocked(engine.setSecretValue).mockImplementation((_handle: string, value: Uint8Array) => {
-        captured = Buffer.from(value).toString("utf8");
-        return Promise.resolve();
+      vi.mocked(engine.createSecret).mockImplementation((input) => {
+        captured = Buffer.from(input.value ?? new Uint8Array(0)).toString("utf8");
+        return Promise.resolve({ handle: "secret://api-key", status: "created", message: "" });
       });
 
       const modern = await connectModern(engine, true);

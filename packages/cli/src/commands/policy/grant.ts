@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import type { Permission, PrincipalType } from "@harpoc/shared";
+import type { AccessPolicy, Permission, PrincipalType } from "@harpoc/shared";
 import { AuditEventType, VaultError, permissionSchema, principalTypeSchema } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, resolveSecretId } from "../../utils/vault-loader.js";
 import { handleError, printSuccess, printJson, printRecord } from "../../utils/output.js";
@@ -38,6 +38,26 @@ function parseGrantFlags(options: GrantOptions): {
   return { permissions: permStrings as Permission[], principalType: parsedType.data };
 }
 
+/** The granted policy: the record and its last line, or the policy as JSON under `--json`. */
+function printGrantedPolicy(
+  handle: string,
+  policyResult: AccessPolicy,
+  json: boolean | undefined,
+): void {
+  if (json) {
+    printJson(policyResult);
+  } else {
+    printRecord({
+      "Policy ID": policyResult.id,
+      Secret: handle,
+      Principal: `${policyResult.principal_type}:${policyResult.principal_id}`,
+      Permissions: policyResult.permissions.join(", "),
+      Expires: policyResult.expires_at ? new Date(policyResult.expires_at).toISOString() : "-",
+    });
+    printSuccess("Policy granted.");
+  }
+}
+
 export function registerPolicyGrantCommand(policy: Command): void {
   policy
     .command("grant <handle>")
@@ -71,20 +91,7 @@ export function registerPolicyGrantCommand(policy: Command): void {
               permissions,
               expires_at: expiresAt,
             });
-            if (options.json) {
-              printJson(policyResult);
-            } else {
-              printRecord({
-                "Policy ID": policyResult.id,
-                Secret: handle,
-                Principal: `${policyResult.principal_type}:${policyResult.principal_id}`,
-                Permissions: policyResult.permissions.join(", "),
-                Expires: policyResult.expires_at
-                  ? new Date(policyResult.expires_at).toISOString()
-                  : "-",
-              });
-              printSuccess("Policy granted.");
-            }
+            printGrantedPolicy(handle, policyResult, options.json);
           });
           return;
         }
@@ -120,20 +127,7 @@ export function registerPolicyGrantCommand(policy: Command): void {
             resolved?.caller,
           );
 
-          if (options.json) {
-            printJson(policyResult);
-          } else {
-            printRecord({
-              "Policy ID": policyResult.id,
-              Secret: handle,
-              Principal: `${policyResult.principal_type}:${policyResult.principal_id}`,
-              Permissions: policyResult.permissions.join(", "),
-              Expires: policyResult.expires_at
-                ? new Date(policyResult.expires_at).toISOString()
-                : "-",
-            });
-            printSuccess("Policy granted.");
-          }
+          printGrantedPolicy(handle, policyResult, options.json);
         } finally {
           await engine.destroy();
         }

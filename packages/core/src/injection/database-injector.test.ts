@@ -12,6 +12,22 @@ import {
   injector,
   policy,
 } from "./__fixtures__/database-injector-doubles.js";
+import { validateHostPort } from "./url-validator.js";
+
+const NON_ASCII_HOST = vi.hoisted(() => "b\u00fccher.example");
+
+vi.mock("./url-validator.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./url-validator.js")>();
+  return {
+    ...actual,
+    validateHostPort: vi.fn(async (host: string, port: number) => {
+      if (host === NON_ASCII_HOST) {
+        return { host, port, resolvedAddress: "203.0.113.7" };
+      }
+      return actual.validateHostPort(host, port);
+    }),
+  };
+});
 
 const driverQueries = vi.hoisted(() => [] as { engine: string; args: unknown[] }[]);
 vi.mock("pg", () => ({
@@ -75,6 +91,39 @@ describe("DatabaseInjector", () => {
       ),
     ).rejects.toMatchObject({ code: ErrorCode.HOST_NOT_ALLOWED });
     expect(mock.lastConnect).toBeUndefined();
+  });
+
+  it("refuses an unparsed host carrying a non-ASCII letter HOST_NOT_ALLOWED with its row, before the SSRF floor", async () => {
+    const spy = vi.mocked(validateHostPort);
+    spy.mockClear();
+    const log = vi.fn();
+    const mock = new MockAdapter({ rows: [] });
+    const inj = new DatabaseInjector({ log } as unknown as AuditLogger, { postgresql: mock });
+    await expectVaultError(
+      () =>
+        inj.executeWithSecret(
+          action({ host: NON_ASCII_HOST }),
+          SECRET,
+          policy({ host_allowlist: [NON_ASCII_HOST] }),
+          undefined,
+          "secret-1",
+        ),
+      ErrorCode.HOST_NOT_ALLOWED,
+    );
+    expect(spy).not.toHaveBeenCalled();
+    expect(mock.lastConnect).toBeUndefined();
+    expect(log).toHaveBeenCalledTimes(1);
+    const row = log.mock.calls[0]?.[0] as AuditLogOptions;
+    expect(row.success).toBe(false);
+    expect(row.secretId).toBe("secret-1");
+    expect(row.detail).toEqual({
+      context: "database",
+      engine: "postgresql",
+      database: "app",
+      host: NON_ASCII_HOST,
+      port: 5432,
+      error: "HOST_NOT_ALLOWED",
+    });
   });
 
   it("allows a matching host:port allowlist entry", async () => {

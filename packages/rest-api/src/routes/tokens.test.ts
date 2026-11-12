@@ -7,6 +7,8 @@ import { errorHandler } from "../middleware/error-handler.js";
 import { createTokenRoutes } from "./tokens.js";
 import type { HarpocEnv } from "../types.js";
 
+type ErrorBody = { error: string; message: string };
+
 const ADMIN_TOKEN: VaultApiToken = {
   sub: "admin-agent",
   vault_id: "vault-1",
@@ -84,7 +86,7 @@ describe("GET /api/v1/tokens", () => {
   it("lists issued tokens", async () => {
     const res = await app.request("/api/v1/tokens", { headers: AUTH });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as { data: [{ jti: string }] };
     expect(body.data).toHaveLength(1);
     expect(body.data[0].jti).toBe("jti-1");
     expect(engine.listIssuedTokens).toHaveBeenCalledWith({}, ADMIN_CALLER);
@@ -101,7 +103,7 @@ describe("GET /api/v1/tokens", () => {
   it("rejects an unknown ?status= value before the engine call", async () => {
     const res = await app.request("/api/v1/tokens?status=live", { headers: AUTH });
     expect(res.status).toBe(400);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe("SCHEMA_VALIDATION_ERROR");
     expect(engine.listIssuedTokens).not.toHaveBeenCalled();
   });
@@ -109,7 +111,7 @@ describe("GET /api/v1/tokens", () => {
   it("rejects a malformed ?agent= value before the engine call", async () => {
     const res = await app.request("/api/v1/tokens?agent=bad%20name", { headers: AUTH });
     expect(res.status).toBe(400);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe("SCHEMA_VALIDATION_ERROR");
     expect(engine.listIssuedTokens).not.toHaveBeenCalled();
   });
@@ -120,7 +122,7 @@ describe("GET /api/v1/tokens", () => {
     });
     const res = await app.request("/api/v1/tokens?agent=ghost", { headers: AUTH });
     expect(res.status).toBe(404);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe("AGENT_NOT_FOUND");
   });
 
@@ -144,7 +146,7 @@ describe("DELETE /api/v1/tokens/:jti", () => {
   it("revokes the token", async () => {
     const res = await app.request("/api/v1/tokens/jti-1", { method: "DELETE", headers: AUTH });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as { data: unknown };
     expect(body.data).toEqual({ revoked: true });
     expect(engine.revokeToken).toHaveBeenCalledWith("jti-1", ADMIN_CALLER);
   });
@@ -173,7 +175,7 @@ describe("DELETE /api/v1/tokens/:jti", () => {
       headers: AUTH,
     });
     expect(res.status).toBe(400);
-    const body = await res.json();
+    const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe("INVALID_INPUT");
     expect(body.message).toBe("Unknown token jti: jti-9");
   });

@@ -1,10 +1,13 @@
 import { z } from "zod";
 import {
+  MAX_NAME_LENGTH,
+  OAuthGrantType,
   SecretType,
   secretTypeSchema,
   startOAuthFlowInputSchema,
   useSecretActionSchema,
 } from "@harpoc/shared";
+import type { StartOAuthFlowInput } from "@harpoc/shared";
 
 /**
  * The nine tools' advertised contract — name, description and input schema —
@@ -65,11 +68,13 @@ export const CREATE_SECRET_TOOL = {
       name: z
         .string()
         .regex(/^[a-zA-Z0-9_-]+$/)
+        .max(MAX_NAME_LENGTH)
         .describe("Secret name (alphanumeric, hyphens, underscores)"),
       type: secretTypeSchema.describe("Secret type"),
       project: z
         .string()
         .regex(/^[a-zA-Z0-9_-]+$/)
+        .max(MAX_NAME_LENGTH)
         .optional()
         .describe("Project namespace"),
     }),
@@ -84,7 +89,25 @@ export function pendingHint(
 ): string {
   const typeFlag = type === SecretType.API_KEY ? "" : ` --type ${type}`;
   const projectFlag = project === undefined ? "" : ` --project ${project}`;
-  return `Secret created. Set the value with: harpoc secret set ${secretName}${typeFlag}${projectFlag}`;
+  const command = secretName.startsWith("-")
+    ? `harpoc secret set${typeFlag}${projectFlag} "--" ${secretName}`
+    : `harpoc secret set ${secretName}${typeFlag}${projectFlag}`;
+  return `Secret created. Set the value with: ${command}`;
+}
+
+const PLAIN_HINT_WORD = /^[A-Za-z0-9_][A-Za-z0-9._:@/+=-]*$/;
+
+/** The vault-user `harpoc oauth connect` command that completes a `start_oauth_flow` grant. */
+export function oauthConnectCommand(
+  flow: Pick<StartOAuthFlowInput, "name" | "provider" | "grant_type" | "client_id">,
+): string {
+  const grantFlag =
+    flow.grant_type === OAuthGrantType.CLIENT_CREDENTIALS ? " --client-credentials" : "";
+  const clientId = PLAIN_HINT_WORD.test(flow.client_id) ? flow.client_id : "<client-id>";
+  const flags = `${grantFlag} --provider ${flow.provider} --client-id ${clientId}`;
+  return flow.name.startsWith("-")
+    ? `harpoc oauth connect${flags} "--" ${flow.name}`
+    : `harpoc oauth connect ${flow.name}${flags}`;
 }
 
 export const ROTATE_SECRET_TOOL = {

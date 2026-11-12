@@ -288,6 +288,46 @@ describe("the bridge collects no value and drives no browser leg (B1)", () => {
     },
   );
 
+  it.each([
+    {
+      label: "-x, an unscoped api_key create",
+      args: { name: "-x", type: "api_key" },
+      command: 'harpoc secret set "--" -x',
+    },
+    {
+      label: "--help, an unscoped api_key create",
+      args: { name: "--help", type: "api_key" },
+      command: 'harpoc secret set "--" --help',
+    },
+    {
+      label: "-p, a project-scoped create",
+      args: { name: "-p", type: "api_key", project: "proj" },
+      command: 'harpoc secret set --project proj "--" -p',
+    },
+    {
+      label: "--from-file, a certificate-typed create",
+      args: { name: "--from-file", type: "certificate" },
+      command: 'harpoc secret set --type certificate "--" --from-file',
+    },
+    {
+      label: "-p, a project-scoped certificate-typed create",
+      args: { name: "-p", type: "certificate", project: "proj" },
+      command: 'harpoc secret set --type certificate --project proj "--" -p',
+    },
+  ])(
+    '$label: a name that begins with - is printed after a quoted "--", the options first (C-5, M2-R1)',
+    async ({ args, command }) => {
+      const result = await bridge.callTool("create_secret", args);
+      expect(result.isError).toBeUndefined();
+      expect(JSON.parse(text(result))).toEqual({
+        handle: "secret://new-key",
+        status: "pending",
+        message: `Secret created. Set the value with: ${command}`,
+      });
+      expect(client.createSecret).toHaveBeenCalledWith(args);
+    },
+  );
+
   it("rotate_secret refuses, naming the vault user's command, and sends nothing", async () => {
     const result = await bridge.callTool("rotate_secret", { handle: "secret://prod/db-pass" });
     expect(result.isError).toBe(true);
@@ -316,6 +356,68 @@ describe("the bridge collects no value and drives no browser leg (B1)", () => {
     expect(client.startOAuthFlow).not.toHaveBeenCalled();
   });
 
+  describe("start_oauth_flow's hints (C-5)", () => {
+    const GRANTS = [
+      { grant: "authorization_code", flags: "--provider github" },
+      { grant: "client_credentials", flags: "--client-credentials --provider github" },
+    ];
+
+    async function refusalOf(grant: string, secretName: string, clientId: string): Promise<string> {
+      const result = await bridge.callTool("start_oauth_flow", {
+        name: secretName,
+        provider: "github",
+        grant_type: grant,
+        client_id: clientId,
+      });
+      expect(result.isError).toBe(true);
+      expect(client.startOAuthFlow).not.toHaveBeenCalled();
+      return text(result);
+    }
+
+    const lead = (grant: string): string =>
+      `start_oauth_flow's ${grant} grant is not available through the REST bridge. Complete it as the vault user: harpoc oauth connect`;
+
+    it.each(
+      GRANTS.flatMap((g) => ["a b", "x;y", "$(z)", "-x"].map((clientId) => ({ ...g, clientId }))),
+    )(
+      "$grant: a client_id of $clientId is not a plain word and is printed as <client-id>",
+      async ({ grant, flags, clientId }) => {
+        expect(await refusalOf(grant, "gh", clientId)).toBe(
+          `${lead(grant)} gh ${flags} --client-id <client-id>`,
+        );
+      },
+    );
+
+    it.each(
+      GRANTS.flatMap((g) =>
+        ["client-123", "1234-abc.apps.googleusercontent.com", "_m2m:tenant@idp/app+v=1-x"].map(
+          (clientId) => ({ ...g, clientId }),
+        ),
+      ),
+    )(
+      "$grant: a plain-word client_id of $clientId is printed as today",
+      async ({ grant, flags, clientId }) => {
+        expect(await refusalOf(grant, "gh", clientId)).toBe(
+          `${lead(grant)} gh ${flags} --client-id ${clientId}`,
+        );
+      },
+    );
+
+    it.each(
+      GRANTS.flatMap((g) => [
+        { ...g, secretName: "-x", clientId: "cid", printed: "cid" },
+        { ...g, secretName: "--help", clientId: "a b", printed: "<client-id>" },
+      ]),
+    )(
+      '$grant: a name of $secretName that begins with - is printed after a quoted "--", the options first (M2-R1)',
+      async ({ grant, flags, secretName, clientId, printed }) => {
+        expect(await refusalOf(grant, secretName, clientId)).toBe(
+          `${lead(grant)} ${flags} --client-id ${printed} "--" ${secretName}`,
+        );
+      },
+    );
+  });
+
   it("start_oauth_flow device_code forwards the shared field set to the REST flow", async () => {
     const result = await bridge.callTool("start_oauth_flow", {
       name: "gh",
@@ -337,6 +439,46 @@ describe("the bridge collects no value and drives no browser leg (B1)", () => {
       grant_type: "device_code",
       client_id: "cid",
     });
+  });
+});
+
+describe("the bridge refuses at its own boundary what the shared tool schemas refuse (M1-R1)", () => {
+  let fetchSpy: Mock;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: async () => ({
+        data: { handle: "secret://new-key", status: "pending", message: "Secret created" },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("create_secret with a 256-character name answers the input-validation error and makes no REST request", async () => {
+    const bridge = await connectInMemoryClient(
+      createBridgeServer({
+        client: () => new RestClient({ baseUrl: BASE_URL, token: "bridge.jwt" }),
+        baseUrl: BASE_URL,
+      }),
+    );
+    try {
+      const result = await bridge.callTool("create_secret", {
+        name: "a".repeat(256),
+        type: "api_key",
+      });
+      expect(fetchSpy.mock.calls.length).toBe(0);
+      expect(result.isError).toBe(true);
+      expect(text(result)).toContain("Input validation error");
+      expect(text(result)).toMatch(/name: Too big/);
+    } finally {
+      await bridge.close();
+    }
   });
 });
 

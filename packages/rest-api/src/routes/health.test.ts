@@ -7,6 +7,15 @@ import { authMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import type { HarpocEnv } from "../types.js";
 
+type HealthBody = { data: { state: string; version: string } };
+type ExpiringBody = {
+  data: {
+    expiring: [{ name: string }];
+    oauth_refresh_needed: [{ name: string }];
+    certificates_nearing_renewal: [{ name: string }];
+  };
+};
+
 const MOCK_TOKEN: VaultApiToken = {
   sub: "test-agent",
   vault_id: "vault-1",
@@ -70,7 +79,7 @@ describe("health routes", () => {
 
     const res = await app.request("/api/v1/health");
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as HealthBody;
     expect(body.data.state).toBe("unlocked");
     expect(body.data.version).toBe(HARPOC_VERSION);
   });
@@ -79,7 +88,7 @@ describe("health routes", () => {
     const { app } = createTestApp(VaultState.SEALED);
 
     const res = await app.request("/api/v1/health");
-    const body = await res.json();
+    const body = (await res.json()) as HealthBody;
     expect(body.data.state).toBe("sealed");
   });
 
@@ -115,7 +124,7 @@ describe("health routes", () => {
     ]);
 
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
-    const body = await res.json();
+    const body = (await res.json()) as ExpiringBody;
     expect(body.data.expiring).toHaveLength(1);
     expect(body.data.expiring[0].name).toBe("key0");
   });
@@ -129,11 +138,11 @@ describe("health routes", () => {
     ]);
 
     const res = await app.request("/api/v1/health/expiring?days=1", { headers: AUTH });
-    const body = await res.json();
+    const body = (await res.json()) as ExpiringBody;
     expect(body.data.expiring).toHaveLength(0);
 
     const res2 = await app.request("/api/v1/health/expiring?days=30", { headers: AUTH });
-    const body2 = await res2.json();
+    const body2 = (await res2.json()) as ExpiringBody;
     expect(body2.data.expiring).toHaveLength(1);
   });
 
@@ -146,7 +155,7 @@ describe("health routes", () => {
     ]);
 
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
-    const body = await res.json();
+    const body = (await res.json()) as ExpiringBody;
     expect(body.data.expiring).toHaveLength(0);
   });
 
@@ -178,7 +187,7 @@ describe("health routes", () => {
 
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as ExpiringBody;
     expect(body.data.expiring).toHaveLength(1);
     expect(body.data.expiring[0].name).toBe("db-prod");
   });
@@ -207,7 +216,7 @@ describe("health routes", () => {
 
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as ExpiringBody;
     expect(Array.isArray(body.data.expiring)).toBe(true);
     expect(body.data.oauth_refresh_needed).toEqual([]);
     expect(body.data.certificates_nearing_renewal).toEqual([]);
@@ -258,7 +267,7 @@ describe("health routes", () => {
 
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as ExpiringBody;
     expect(body.data.oauth_refresh_needed).toHaveLength(1);
     expect(body.data.oauth_refresh_needed[0].name).toBe("db-prod");
   });
@@ -306,7 +315,7 @@ describe("health routes", () => {
 
     const res = await app.request("/api/v1/health/expiring", { headers: AUTH });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as ExpiringBody;
     expect(body.data.certificates_nearing_renewal).toHaveLength(1);
     expect(body.data.certificates_nearing_renewal[0].name).toBe("db-prod");
   });

@@ -57,7 +57,7 @@ function grandchildScript(opts: {
       detached: ${opts.escape ? "true" : "false"},
     });
     ${opts.escape ? "gc.unref();" : ""}
-    ${opts.pidPath ? `require("node:fs").writeFileSync(${JSON.stringify(opts.pidPath)}, String(gc.pid));` : ""}
+    ${opts.pidPath ? `const fs = require("node:fs"); fs.writeFileSync(${JSON.stringify(`${opts.pidPath}.tmp`)}, String(gc.pid)); fs.renameSync(${JSON.stringify(`${opts.pidPath}.tmp`)}, ${JSON.stringify(opts.pidPath)});` : ""}
     console.log("child-done");
     ${opts.parentWaits ? "setTimeout(() => {}, 60000);" : ""}
   `;
@@ -99,8 +99,9 @@ async function untilGone(pid: number): Promise<boolean> {
 }
 
 /**
- * The child's marker, created in its stdout write's callback so "before" is in the pipe —
- * rejected when the spawn settles first or after `boundMs` on `setInterval`, which no row fakes.
+ * The child's marker — the empty file its stdout write's callback creates, so "before" is in the
+ * pipe, or the pid file renamed into place whole — rejected when the spawn settles first or after
+ * `boundMs` on `setInterval`, which no row fakes.
  */
 function untilWritten(path: string, spawned: Promise<unknown>, boundMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -152,7 +153,8 @@ describe("spawnCaptured lifecycle (M4)", () => {
   // win32 `taskkill /T`'s descendant snapshot is taken once — the
   // spawn-during-kill window is the descendant sweep's to close, pinned in
   // descendant-sweep.test.ts and spawn-captured.sweep.test.ts, not here); the
-  // 5 s timeout leaves the child's boot and its spawn well inside. Survival is
+  // 5 s timeout fires on a faked clock advanced only once the pid file exists,
+  // so the child's boot and its spawn are inside by construction. Survival is
   // pinned by liveness after settlement, not by a marker on the grandchild's
   // own clock, which raced taskkill's delivery under load (the forced gate's
   // sole miss at three tranches, 2026-08-30 → 09-01): the grandchild holds far
@@ -163,26 +165,41 @@ describe("spawnCaptured lifecycle (M4)", () => {
   // 2026-09-07); the /T-only shape is a detached grandchild, the sweep's case.
   // On POSIX the group signal is the whole mechanism.
   it("the timeout kills the whole process tree, not just the direct child", async () => {
+    await spawnCaptured(process.execPath, ["-e", ""], { env: {}, timeoutMs: 10_000 });
     const pidFile = join(dir, "grandchild.pid");
-    const result = await spawnCaptured(
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const pending = spawnCaptured(
       process.execPath,
       ["-e", grandchildScript({ holdMs: GRANDCHILD_HOLD_MS, pidPath: pidFile, parentWaits: true })],
       { env: {}, timeoutMs: 5_000 },
     );
+    let pid: number;
+    try {
+      await untilWritten(pidFile, pending, 10_000);
 
-    // Written by the child the moment it spawned the grandchild, well before
-    // the 5 s kill: a missing file is a child that never got that far — a
-    // different failure from a survivor. Read and recorded before any
-    // assertion, so a red below never leaves the grandchild to nobody.
-    const pid = Number(readFileSync(pidFile, "utf8"));
-    survivor = Number.isInteger(pid) && pid > 0 ? pid : undefined;
-    expect(survivor).toBeDefined();
+      // Written by the child the moment it spawned the grandchild, well before
+      // the 5 s kill: a missing file is a child that never got that far — a
+      // different failure from a survivor. Read and recorded before any
+      // assertion, so a red below never leaves the grandchild to nobody.
+      pid = Number(readFileSync(pidFile, "utf8"));
+      survivor = Number.isInteger(pid) && pid > 0 ? pid : undefined;
+      expect(survivor).toBeDefined();
 
-    expect(result.timed_out).toBe(true);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(2_000); // KILL_SETTLE_MS (spawn-captured.ts): the backstop must fire, so a surviving descendant reds at untilGone
+      const result = await pending;
+
+      expect(result.timed_out).toBe(true);
+    } finally {
+      await vi.runAllTimersAsync();
+      await pending;
+      vi.useRealTimers();
+    }
 
     await expect(untilGone(pid)).resolves.toBe(true);
     survivor = undefined;
-    // Budget: 5 s timeout + up to 42 s of win32 taskkill wait and sweep + a 10 s poll.
+    // Budget: a 10 s warm-up bound + a 10 s marker bound + the real kill + a 10 s poll;
+    // the product's own bounds are faked here.
   }, 60_000);
 
   it("control: an ordinary command still returns its full output and exit code", async () => {
@@ -219,7 +236,7 @@ describe("spawnCaptured lifecycle (M4)", () => {
       vi.useRealTimers();
     }
     // Times a child out, so on win32 its settlement waits for the descendant
-    // sweep — up to the same timeout + 42 s bound as the tree-kill test above
+    // sweep — up to timeout + 42 s, `spawnCaptured`'s own win32 worst case
     // (a 15 s budget lost to the 20 s helper bound on windows-latest, 18b58b9).
   }, 60_000);
 

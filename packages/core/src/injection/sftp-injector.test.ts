@@ -1,5 +1,8 @@
 import { generateKeyPairSync } from "node:crypto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, InjectionPolicy, SftpAction } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import { buildSftpAuditDetails, executeSftpAction } from "./sftp-injector.js";
@@ -185,6 +188,135 @@ describe("a host or user outside the schema's charset is refused before the allo
     expect(err.message === DASH_MESSAGE).toBe(true);
     expect(spawnMock.mock.calls.length).toBe(0);
   });
+});
+
+const NON_STRINGS: ReadonlyArray<readonly [string, unknown]> = [
+  ["a number", 5],
+  ["undefined", undefined],
+  ["null", null],
+  ["an array", ["-x"]],
+  ["an object", {}],
+];
+
+const NON_STRING_FIELDS = (["host", "user"] as const).flatMap((field) =>
+  NON_STRINGS.map(([label, value]) => [field, label, value] as const),
+);
+
+describe("a non-string host or user of an unparsed caller is refused with the charset refusal", () => {
+  const spawnMock = vi.mocked(spawnCaptured);
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it.each(NON_STRING_FIELDS)(
+    "a %s that is %s: INVALID_SSH_CONFIG with the charset message, a row projection without the field, nothing spawned",
+    async (field, _label, value) => {
+      const action = { ...ACTION, [field]: value } as unknown as SftpAction;
+      const err = await expectVaultError(
+        () =>
+          executeSftpAction(action, SECRET, policy({ host_allowlist: [ACTION.host] }), SFTP_CONFIG),
+        ErrorCode.INVALID_SSH_CONFIG,
+      );
+      expect(err.message === FIXED_MESSAGE).toBe(true);
+      const kept = field === "host" ? {} : { host: ACTION.host };
+      expect(buildSftpAuditDetails(action, policy())).toStrictEqual({
+        ...kept,
+        operation: "list",
+        port: null,
+        remote_path: "/srv/reports",
+        local_path: null,
+        network_isolation: false,
+        fs_isolation: false,
+      });
+      expect(spawnMock.mock.calls.length).toBe(0);
+    },
+  );
+});
+
+const PATH_DASH_MESSAGE = "sftp path must not start with '-' (would be parsed as an sftp option)";
+const LOCAL_PATH_REQUIRED = "local_path is required for upload";
+
+const NON_STRING_LOCAL_PATHS: ReadonlyArray<readonly [string, unknown, string]> = [
+  ["a number", 5, PATH_DASH_MESSAGE],
+  ["undefined", undefined, LOCAL_PATH_REQUIRED],
+  ["null", null, LOCAL_PATH_REQUIRED],
+  ["an array", ["-x"], PATH_DASH_MESSAGE],
+  ["an object", {}, PATH_DASH_MESSAGE],
+];
+
+describe("a non-string remote_path or local_path of an unparsed caller is refused like a malformed path", () => {
+  const spawnMock = vi.mocked(spawnCaptured);
+  let binDir: string;
+  let sftpPath: string;
+  let savedPath: string | undefined;
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+    binDir = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-sftp-bin-")));
+    sftpPath = join(binDir, process.platform === "win32" ? "sftp.exe" : "sftp");
+    writeFileSync(sftpPath, "", { mode: 0o755 });
+    savedPath = process.env.PATH;
+    process.env.PATH = binDir + delimiter + (savedPath ?? "");
+  });
+
+  afterEach(() => {
+    if (savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = savedPath;
+    rmSync(binDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  function allowed(): InjectionPolicy {
+    return policy({ host_allowlist: [ACTION.host], command_allowlist: [sftpPath] });
+  }
+
+  it.each(NON_STRINGS)(
+    "a remote_path that is %s: INVALID_INPUT with the leading-dash path message, a row projection without remote_path, nothing spawned",
+    async (_label, value) => {
+      const action = { ...ACTION, remote_path: value } as unknown as SftpAction;
+      const err = await expectVaultError(
+        () => executeSftpAction(action, SECRET, allowed(), SFTP_CONFIG),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message === PATH_DASH_MESSAGE).toBe(true);
+      expect(buildSftpAuditDetails(action, policy())).toStrictEqual({
+        host: ACTION.host,
+        operation: "list",
+        port: null,
+        local_path: null,
+        network_isolation: false,
+        fs_isolation: false,
+      });
+      expect(spawnMock.mock.calls.length).toBe(0);
+    },
+  );
+
+  it.each(NON_STRING_LOCAL_PATHS)(
+    "an upload's local_path that is %s: INVALID_INPUT with the message the malformed path meets today, local_path null in the row projection, nothing spawned",
+    async (_label, value, message) => {
+      const action = {
+        ...ACTION,
+        operation: "upload",
+        remote_path: "/srv/report.pdf",
+        local_path: value,
+      } as unknown as SftpAction;
+      const err = await expectVaultError(
+        () => executeSftpAction(action, SECRET, allowed(), SFTP_CONFIG),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message === message).toBe(true);
+      expect(buildSftpAuditDetails(action, policy())).toStrictEqual({
+        host: ACTION.host,
+        operation: "upload",
+        port: null,
+        remote_path: "/srv/report.pdf",
+        local_path: null,
+        network_isolation: false,
+        fs_isolation: false,
+      });
+      expect(spawnMock.mock.calls.length).toBe(0);
+    },
+  );
 });
 
 describe("buildSftpAuditDetails", () => {

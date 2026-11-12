@@ -33,7 +33,7 @@ describe("secret routes", () => {
         }),
       });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as { data: { status: number } };
       expect(body.data.status).toBe(200);
     });
 
@@ -76,7 +76,7 @@ describe("secret routes", () => {
         }),
       });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as { data: { type: string; exit_code: number } };
       expect(body.data.type).toBe("process");
       expect(body.data.exit_code).toBe(0);
     });
@@ -105,7 +105,9 @@ describe("secret routes", () => {
         }),
       });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as {
+        data: { type: string; messages: string[]; close_code: number };
+      };
       expect(body.data.type).toBe("websocket");
       expect(body.data.messages).toEqual(["hello from server"]);
       expect(body.data.close_code).toBe(1000);
@@ -202,7 +204,7 @@ describe("secret routes", () => {
         }),
       });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as { data: { body: string } };
       expect(body.data.body).not.toContain("sk_live_abcdefghij1234567890");
       expect(body.data.body).toContain("[REDACTED]");
     });
@@ -221,7 +223,7 @@ describe("secret routes", () => {
           action: { type: "process", command: "gh", env_var: "GH_TOKEN" },
         }),
       });
-      const body = await res.json();
+      const body = (await res.json()) as { data: { stdout: string } };
       expect(body.data.stdout).not.toContain("sk_live_abcdefghij1234567890");
       expect(body.data.stdout).toContain("[REDACTED]");
     });
@@ -239,7 +241,7 @@ describe("secret routes", () => {
         }),
       });
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as { data: { type: string; content: [{ text: string }] } };
       expect(body.data.type).toBe("mcp");
       expect(body.data.content[0].text).toBe("downstream result");
     });
@@ -266,7 +268,9 @@ describe("secret routes", () => {
           action: { type: "mcp", server: "github-mcp", tool: "leaky" },
         }),
       });
-      const body = await res.json();
+      const body = (await res.json()) as {
+        data: { content: [{ text: string }]; structured_content: { note: string } };
+      };
       expect(JSON.stringify(body)).not.toContain("sk_live_abcdefghij1234567890");
       expect(body.data.content[0].text).toContain("[REDACTED]");
       expect(body.data.structured_content.note).toContain("[REDACTED]");

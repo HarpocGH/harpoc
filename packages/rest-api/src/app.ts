@@ -137,11 +137,13 @@ export function createApp(engine: VaultEngine, options?: CreateAppOptions): Hono
   app.use("/api/v1/tokens/*", authMiddleware);
   app.use("/api/v1/vault/*", authMiddleware);
 
-  // Governance and the lock are vault-wide: a project- or secrets-claimed
-  // token is refused on these prefixes before any route reads a body (R11/N12).
+  // Governance, the lock and the audit chain's verification are vault-wide: a
+  // project- or secrets-claimed token is refused on these paths before any
+  // route reads a body (R11/N12, C-12).
   app.use("/api/v1/agents/*", unscopedTokenMiddleware);
   app.use("/api/v1/tokens/*", unscopedTokenMiddleware);
   app.use("/api/v1/vault/*", unscopedTokenMiddleware);
+  app.use("/api/v1/audit/verify", unscopedTokenMiddleware);
 
   // Routes
   app.route("/api/v1/secrets", createSecretRoutes());

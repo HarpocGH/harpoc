@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+import type { Agent } from "@harpoc/shared";
 import { VaultError } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import {
@@ -43,6 +44,22 @@ function assertUpdateFlags(options: UpdateOptions): void {
   }
 }
 
+/** The updated agent: the record and its last line, or the agent as JSON under `--json`. */
+function printUpdatedAgent(updated: Agent, json: boolean | undefined): void {
+  if (json) {
+    printJson(updated);
+  } else {
+    printRecord({
+      Name: updated.name,
+      Status: updated.status,
+      Owner: updated.owner,
+      Description: updated.description,
+      Updated: formatTimestamp(updated.updated_at),
+    });
+    printSuccess("Agent updated.");
+  }
+}
+
 export function registerAgentUpdateCommand(agent: Command): void {
   agent
     .command("update <name>")
@@ -67,18 +84,7 @@ export function registerAgentUpdateCommand(agent: Command): void {
                 : (options.description ?? current.description ?? undefined),
               owner: options.clearOwner ? undefined : (options.owner ?? current.owner ?? undefined),
             });
-            if (options.json) {
-              printJson(updated);
-            } else {
-              printRecord({
-                Name: updated.name,
-                Status: updated.status,
-                Owner: updated.owner,
-                Description: updated.description,
-                Updated: formatTimestamp(updated.updated_at),
-              });
-              printSuccess("Agent updated.");
-            }
+            printUpdatedAgent(updated, options.json);
           });
           return;
         }
@@ -106,18 +112,7 @@ export function registerAgentUpdateCommand(agent: Command): void {
             resolved?.caller,
           );
 
-          if (options.json) {
-            printJson(updated);
-          } else {
-            printRecord({
-              Name: updated.name,
-              Status: updated.status,
-              Owner: updated.owner,
-              Description: updated.description,
-              Updated: formatTimestamp(updated.updated_at),
-            });
-            printSuccess("Agent updated.");
-          }
+          printUpdatedAgent(updated, options.json);
         } finally {
           await engine.destroy();
         }

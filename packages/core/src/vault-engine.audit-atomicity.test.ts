@@ -7,7 +7,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { AuditEventType, ErrorCode, SecretStatus } from "@harpoc/shared";
 import type { OAuthProviderConfig } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
-import { registerAgents } from "./__fixtures__/engine-seams.js";
+import { registerAgents, registryOf } from "./__fixtures__/engine-seams.js";
+import { STDIO_CONFIG } from "./injection/__fixtures__/mcp-downstream.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
@@ -318,6 +319,35 @@ describe("fail-closed audit: policy and config writes", () => {
 
     expect(await engine.deleteMcpServerConfig("secret://mcp-del")).toBe(true);
     expect(auditCount(AuditEventType.POLICY_REVOKE)).toBe(1);
+  });
+
+  it("deleteMcpServerConfig: a delete whose audit write fails leaves the live child running and writes no mcp.terminate", async () => {
+    await engine.createSecret({
+      name: "mcp-live",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("mcp-live-value")),
+    });
+    await engine.setInjectionPolicy(
+      "secret://mcp-live",
+      { command_allowlist: [process.execPath] },
+      { acknowledge_interpreters: true },
+    );
+    await engine.setMcpServerConfig("secret://mcp-live", STDIO_CONFIG);
+    await engine.useSecret("secret://mcp-live", { type: "mcp", server: "test-mcp", tool: "echo" });
+    const secretId = await engine.resolveSecretId("secret://mcp-live");
+    const pid = registryOf(engine).get(secretId)?.stdioTransport?.pid;
+    if (pid === undefined) throw new Error("expected a live stdio downstream child");
+    failNextAuditInsert();
+
+    await expect(engine.deleteMcpServerConfig("secret://mcp-live")).rejects.toThrow(
+      "audit unavailable",
+    );
+
+    expect(registryOf(engine).get(secretId)).toBeDefined();
+    expect(() => process.kill(pid, 0)).not.toThrow();
+    expect(auditCount(AuditEventType.MCP_TERMINATE)).toBe(0);
+    expect(auditCount(AuditEventType.POLICY_REVOKE)).toBe(0);
+    expect(await engine.getMcpServerConfig("secret://mcp-live")).toBeDefined();
   });
 
   it("setConnectionConfig rolls back the config when the audit write fails", async () => {
