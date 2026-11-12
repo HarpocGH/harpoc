@@ -483,6 +483,37 @@ describe("deploy PowerShell scripts (deployment model B on Windows)", () => {
       "Unregister-ScheduledTask -TaskName $TaskName -TaskPath '\\' -Confirm:$false",
     );
   });
+
+  it("windows/enroll-unlock-key.ps1 names a launch that could not start: directly after Start-Process and before its generic failure, an exit of -1073741502 (0xC0000142) ends the script with exit 1 and a message of its own naming the desktop the launch needs, and its usage text says where to run it", () => {
+    const text = psText("windows/enroll-unlock-key.ps1");
+    const launch = "$process = Start-Process -FilePath $Node";
+    const branch = "if ($process.ExitCode -eq -1073741502) {";
+    const generic = "if ($process.ExitCode -ne 0) {";
+    const genericFailure =
+      '  Stop-WithError "the enrolment as $VaultUser failed (exit $($process.ExitCode)); nothing sealed" 1';
+    const desktopFailure =
+      "  Stop-WithError \"the CLI could not start as $VaultUser (exit 0xC0000142: the process could not initialise): a launch as another account needs this session's desktop - run this script in an elevated PowerShell window on the machine's own desktop (the console or a Remote Desktop session), not from a scheduled task or a service; nothing sealed\" 1";
+    for (const needle of [launch, branch, generic, genericFailure, desktopFailure]) {
+      expect(text.split(needle).length - 1, needle).toBe(1);
+    }
+    const launchAt = text.indexOf(launch);
+    const branchAt = text.indexOf(branch);
+    expect(branchAt).toBeGreaterThan(launchAt);
+    expect(branchAt).toBeLessThan(text.indexOf(generic));
+    expect(text).toContain(
+      ` -Wait -PassThru\n${branch}\n${desktopFailure}\n}\n${generic}\n${genericFailure}\n}\n`,
+    );
+    const usage = [
+      "Run it in an elevated PowerShell window on the machine's own desktop (the console or a Remote",
+      "Desktop session): it asks for a password and opens a console window. If the launch as",
+      "<VaultUser> ends before the CLI starts with exit 0xC0000142 - seen for the same Win32 call",
+      "from a scheduled task - the script says so; nothing is sealed.",
+    ].join("\n");
+    expect(text.split(usage).length - 1).toBe(1);
+    expect(text).toContain(
+      `No byte of the key and no password is printed.\n\n${usage}\n\nExit status:`,
+    );
+  });
 });
 
 /** The lines of the workflow file `workflow` under .github/workflows/, read by text. */

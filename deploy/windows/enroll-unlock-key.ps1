@@ -56,6 +56,11 @@ the old sealed file first (this script never overwrites one), then restart the d
 <node> defaults to the node.exe on PATH, <cli> to $env:ProgramFiles\harpoc\packages\cli: both
 must be readable by the vault account. No byte of the key and no password is printed.
 
+Run it in an elevated PowerShell window on the machine's own desktop (the console or a Remote
+Desktop session): it asks for a password and opens a console window. If the launch as
+<VaultUser> ends before the CLI starts with exit 0xC0000142 - seen for the same Win32 call
+from a scheduled task - the script says so; nothing is sealed.
+
 Exit status: 0 done, 1 not elevated or a command failed, 2 usage error.
 "@
 
@@ -148,6 +153,9 @@ $credential = Get-Credential -UserName "$env:COMPUTERNAME\$VaultUser" -Message "
 $arguments = @($entry, '--vault-dir', $vaultDir, 'unlock-key', 'enroll', '--out', $Out, '--dpapi')
 $argumentLine = ($arguments | ForEach-Object { ConvertTo-Argument $_ }) -join ' '
 $process = Start-Process -FilePath $Node -ArgumentList $argumentLine -Credential $credential -LoadUserProfile -WorkingDirectory (Split-Path -Parent $vaultDir) -Wait -PassThru
+if ($process.ExitCode -eq -1073741502) {
+  Stop-WithError "the CLI could not start as $VaultUser (exit 0xC0000142: the process could not initialise): a launch as another account needs this session's desktop - run this script in an elevated PowerShell window on the machine's own desktop (the console or a Remote Desktop session), not from a scheduled task or a service; nothing sealed" 1
+}
 if ($process.ExitCode -ne 0) {
   Stop-WithError "the enrolment as $VaultUser failed (exit $($process.ExitCode)); nothing sealed" 1
 }
