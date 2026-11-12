@@ -425,12 +425,21 @@ describe("assertIssueTokenFile", () => {
   it.skipIf(process.platform === "win32").each([
     { mode: 0o700, octal: "0700 (mkdtemp's)" },
     { mode: 0o750, octal: "0750" },
-    { mode: 0o2750, octal: "02750 (set-group-ID: the recipe's consumer directory)" },
   ])("accepts a token file whose directory is $octal (chmod; POSIX: mode bits)", ({ mode }) => {
     chmodSync(dir, mode);
     expect((statSync(dir).mode & 0o7777) === mode).toBe(true);
     expect(() => assertIssueTokenFile(join(dir, "token.jwt"), AGENT)).not.toThrow();
   });
+
+  it.skipIf(process.platform === "win32" || process.platform === "darwin")(
+    "accepts a token file whose directory is 02750 (set-group-ID: the recipe's consumer directory; chmod; POSIX: mode bits — not on macOS, where the runner's chmod returns without the set-group-ID bit: ci.yml 43159556338)",
+    () => {
+      const mode = 0o2750;
+      chmodSync(dir, mode);
+      expect((statSync(dir).mode & 0o7777) === mode).toBe(true);
+      expect(() => assertIssueTokenFile(join(dir, "token.jwt"), AGENT)).not.toThrow();
+    },
+  );
 
   it.runIf(process.platform === "win32")(
     "refuses a token file whose directory's access list grants Users read and execute — the token file would inherit it (Windows; icacls on this row's own directory)",

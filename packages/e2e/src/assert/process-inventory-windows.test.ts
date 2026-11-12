@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { CHILD_TIMEOUT_MS } from "../harness/child.js";
-import { windowsCommandLine } from "../harness/runas-windows.js";
+import { systemPaths, windowsCommandLine } from "../harness/runas-windows.js";
 import { runCommand } from "../harness/sudo.js";
 import {
   B7_MARKER,
@@ -157,6 +157,29 @@ describe("the inventory command", () => {
 const READY_SCRIPT = "process.stdout.write('ready'); setInterval(() => {}, 1000)";
 const NON_ASCII_ARGUMENT = "unit-fixture-\u2192-\u00fc";
 
+/** Whether this process holds an administrator's full token, asked of the pinned Windows PowerShell; a probe that fails or times out reads as not elevated. */
+function callerIsElevated(): boolean {
+  const probe = spawnSync(
+    systemPaths().powershell,
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
+    ],
+    {
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      timeout: CHILD_TIMEOUT_MS,
+      encoding: "utf8",
+    },
+  );
+  return probe.status === 0 && probe.stdout.trim() === "True";
+}
+
+const ELEVATED = process.platform === "win32" && callerIsElevated();
+
 /** Runs `body` with the pid of a marked child that has written its readiness, then kills the child and awaits its exit. */
 async function whileMarkedChildRuns(
   argument: string,
@@ -200,16 +223,24 @@ describe.skipIf(process.platform !== "win32")("the inventory on this host", () =
     runCommand(argv[0] ?? "", argv.slice(1), { label: "process inventory" });
 
   it(
-    "carries a marked child's command line and not a system service process's",
+    "carries a marked child's command line",
     async () => {
       await whileMarkedChildRuns("unit-fixture-argument", async (pid) => {
         const entries = await listAccountProcesses(read);
         const own = entries.find((e) => e.pid === pid);
         expect(own?.commandLine?.includes("unit-fixture-argument")).toBe(true);
-        const system = entries.filter((e) => e.name.toLowerCase() === "lsass.exe");
-        expect(system.length).toBe(1);
-        expect(system[0]?.commandLine === null).toBe(true);
       });
+    },
+    CHILD_TIMEOUT_MS + 10_000,
+  );
+
+  it.skipIf(ELEVATED)(
+    "lists a system service process without its command line (an unelevated caller; skipped where the caller is an administrator with the full token, who may read it)",
+    async () => {
+      const entries = await listAccountProcesses(read);
+      const system = entries.filter((e) => e.name.toLowerCase() === "lsass.exe");
+      expect(system.length).toBe(1);
+      expect(system[0]?.commandLine === null).toBe(true);
     },
     CHILD_TIMEOUT_MS + 10_000,
   );
