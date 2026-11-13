@@ -7,6 +7,7 @@ import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { VaultEngineOptions } from "./vault-engine.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
+import { nonReadAuditCount } from "./__fixtures__/engine-seams.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -269,7 +270,7 @@ describe("lockout refusals in the audit trail", () => {
         ErrorCode.INVALID_PASSWORD,
       );
     }
-    const before = engine.queryAudit().length;
+    const before = nonReadAuditCount(engine);
 
     await expectVaultError(
       () => engine.changePassword("correct-pass", "new-pass1"),
@@ -277,7 +278,7 @@ describe("lockout refusals in the audit trail", () => {
     );
 
     const rows = engine.queryAudit();
-    expect(rows).toHaveLength(before + 1);
+    expect(nonReadAuditCount(engine)).toBe(before + 1);
     expect(rows[0]).toMatchObject({
       event_type: AuditEventType.VAULT_PASSWORD_CHANGE,
       success: false,

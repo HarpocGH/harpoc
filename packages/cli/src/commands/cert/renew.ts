@@ -60,6 +60,7 @@ export function registerCertRenewCommand(cert: Command): void {
             "rotate",
             handle,
             options.token ?? process.env.HARPOC_TOKEN,
+            "cert renew",
           );
           const secretId = await resolveSecretId(
             engine,

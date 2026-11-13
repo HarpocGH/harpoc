@@ -98,6 +98,7 @@ export function registerAuditCommand(program: Command): void {
     .description("Query the audit log")
     .option("--secret <id>", "Filter by secret ID")
     .option("--event <type>", "Filter by event type")
+    .option("--exclude-event <type>", "Exclude an event type")
     .option("--since <date>", "Filter events after date (ISO 8601)")
     .option("--limit <count>", "Maximum number of events", "50")
     .option("--json", "Output as JSON")
@@ -107,6 +108,7 @@ export function registerAuditCommand(program: Command): void {
         options: {
           secret?: string;
           event?: string;
+          excludeEvent?: string;
           since?: string;
           limit?: string;
           json?: boolean;
@@ -134,6 +136,7 @@ export function registerAuditCommand(program: Command): void {
               const events = await client.queryAudit({
                 secretId: options.secret,
                 eventType: options.event as AuditEventType | undefined,
+                excludeEventType: options.excludeEvent as AuditEventType | undefined,
                 since,
                 limit,
               });
@@ -148,16 +151,23 @@ export function registerAuditCommand(program: Command): void {
               options.token ??
               (cmd.optsWithGlobals() as { token?: string }).token ??
               process.env.HARPOC_TOKEN;
-            const resolved = resolveTokenCaller(engine, { permission: "admin" }, tokenValue);
+            const resolved = resolveTokenCaller(
+              engine,
+              { permission: "admin" },
+              tokenValue,
+              "audit",
+            );
 
             const events = engine.queryAudit(
               {
                 secretId: options.secret,
                 eventType: options.event as AuditEventType | undefined,
+                excludeEventType: options.excludeEvent as AuditEventType | undefined,
                 since,
                 limit,
               },
               resolved ? auditScopeFromToken(resolved.payload) : undefined,
+              resolved?.caller,
             );
 
             printAuditEvents(events, options.json);
@@ -188,10 +198,15 @@ export function registerAuditCommand(program: Command): void {
             options.token ??
             (cmd.optsWithGlobals() as { token?: string }).token ??
             process.env.HARPOC_TOKEN;
-          const resolved = resolveTokenCaller(engine, { permission: "admin" }, tokenValue);
+          const resolved = resolveTokenCaller(
+            engine,
+            { permission: "admin" },
+            tokenValue,
+            "audit anchor",
+          );
           refuseClaimedToken(engine, resolved, "audit anchor");
 
-          const anchor = engine.getAuditChainTail();
+          const anchor = engine.getAuditChainTail(resolved?.caller);
           if (!anchor) {
             throw new VaultError(
               ErrorCode.VAULT_CORRUPTED,
@@ -251,11 +266,16 @@ export function registerAuditCommand(program: Command): void {
             options.token ??
             (cmd.optsWithGlobals() as { token?: string }).token ??
             process.env.HARPOC_TOKEN;
-          const resolved = resolveTokenCaller(engine, { permission: "admin" }, tokenValue);
+          const resolved = resolveTokenCaller(
+            engine,
+            { permission: "admin" },
+            tokenValue,
+            "audit verify",
+          );
           refuseClaimedToken(engine, resolved, "audit verify");
 
           const anchor = options.anchor ? readAnchorFile(options.anchor) : undefined;
-          const result = engine.verifyAuditChain(anchor ? { anchor } : undefined);
+          const result = engine.verifyAuditChain(anchor ? { anchor } : undefined, resolved?.caller);
           if (json) {
             printJson(result);
           } else {

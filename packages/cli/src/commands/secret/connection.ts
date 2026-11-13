@@ -102,7 +102,13 @@ export function registerSecretConnectionCommand(secret: Command): void {
           const tokenValue = options.token ?? process.env.HARPOC_TOKEN;
 
           if (options.delete) {
-            const resolved = resolveTokenCallerForHandle(engine, "rotate", handle, tokenValue);
+            const resolved = resolveTokenCallerForHandle(
+              engine,
+              "rotate",
+              handle,
+              tokenValue,
+              "secret connection",
+            );
             const deleted = await engine.deleteConnectionConfig(handle, resolved?.caller);
             printSuccess(
               deleted
@@ -114,13 +120,25 @@ export function registerSecretConnectionCommand(secret: Command): void {
 
           const hasInput = hasConnectionInput(options);
           if (options.show || !hasInput) {
-            const resolved = resolveTokenCallerForHandle(engine, "read", handle, tokenValue);
+            const resolved = resolveTokenCallerForHandle(
+              engine,
+              "read",
+              handle,
+              tokenValue,
+              "secret connection",
+            );
             const current = await engine.getConnectionConfig(handle, resolved?.caller);
             printJson(current ?? null);
             return;
           }
 
-          const resolved = resolveTokenCallerForHandle(engine, "rotate", handle, tokenValue);
+          const resolved = resolveTokenCallerForHandle(
+            engine,
+            "rotate",
+            handle,
+            tokenValue,
+            "secret connection",
+          );
           // The merge read rides the write's permission (D8): `rotate` is the
           // gate setConnectionConfig itself applies, so nothing a caller could
           // not already write is read, and the `secret.read` row names the

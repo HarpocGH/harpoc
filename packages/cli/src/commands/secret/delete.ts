@@ -39,6 +39,7 @@ export function registerSecretDeleteCommand(secret: Command): void {
               "revoke",
               handle,
               options.token ?? process.env.HARPOC_TOKEN,
+              "secret delete",
             );
             if (!options.confirm) {
               const yes = await promptConfirm(`Delete secret ${handle}?`);

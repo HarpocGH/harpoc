@@ -53,10 +53,21 @@ export function registerPolicyListCommand(policy: Command): void {
             let resolved: ResolvedToken | undefined;
             let secretId: string | undefined;
             if (handle) {
-              resolved = resolveTokenCallerForHandle(engine, "read", handle, tokenValue);
+              resolved = resolveTokenCallerForHandle(
+                engine,
+                "read",
+                handle,
+                tokenValue,
+                "policy list",
+              );
               secretId = await resolveSecretId(engine, handle, resolved?.caller);
             } else {
-              resolved = resolveTokenCaller(engine, { permission: "read" }, tokenValue);
+              resolved = resolveTokenCaller(
+                engine,
+                { permission: "read" },
+                tokenValue,
+                "policy list",
+              );
             }
 
             const policies = engine.listPolicies(secretId, resolved?.caller, handle);

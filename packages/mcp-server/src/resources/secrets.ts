@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { ResourceTemplate } from "@modelcontextprotocol/server";
 import type { VaultEngine } from "@harpoc/core";
 import { formatHandle, parseHandle } from "@harpoc/shared";
+import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
 
 export function decodeHandlePath(variable: string): string {
@@ -16,6 +17,7 @@ export function registerSecretsResource(
   server: McpServer,
   engine: VaultEngine,
   scopeGuard: ScopeGuard,
+  rateLimiter: RateLimiter,
 ): void {
   // Static: list all secrets
   server.registerResource(
@@ -27,6 +29,7 @@ export function registerSecretsResource(
     },
     async (uri) => {
       scopeGuard.checkAccess("list", undefined, undefined, `resources/read ${uri.href}`);
+      rateLimiter.checkLimit();
       const secrets = scopeGuard.filterByScope(engine.listSecrets(undefined, scopeGuard.caller));
       const result = secrets.map((s) => ({
         handle: s.handle,
@@ -55,6 +58,7 @@ export function registerSecretsResource(
           undefined,
           "resources/list secret://vault/secrets/{name}",
         );
+        rateLimiter.checkLimit();
         const secrets = scopeGuard.filterByScope(engine.listSecrets(undefined, scopeGuard.caller));
         return {
           resources: secrets.map((s) => {
@@ -78,6 +82,7 @@ export function registerSecretsResource(
         `secret://${decodeHandlePath(variables.name as string)}`,
       );
       scopeGuard.checkAccess("read", project, name, `resources/read ${uri.href}`);
+      rateLimiter.checkLimit();
 
       const secret = await engine.getSecretInfo(formatHandle(name, project), scopeGuard.caller);
       return {

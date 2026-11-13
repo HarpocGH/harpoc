@@ -102,6 +102,11 @@ describe.skipIf(process.platform === "win32")(
         (row) => row.detail?.["context"] === "ssh_agent",
       );
 
+    const listingRows = async (): Promise<AuditRow[]> =>
+      (await auditRows(AuditEventType.VAULT_READ)).filter(
+        (row) => row.detail?.["operation"] === "agent_socket_identities",
+      );
+
     function userauthFor(sessionId: Buffer): Buffer {
       return buildUserauthRequest({
         sessionId,
@@ -259,6 +264,88 @@ describe.skipIf(process.platform === "win32")(
         error: ErrorCode.SSH_AGENT_UNBOUND,
         reason: "unbound",
       });
+    }, 60_000);
+
+    it("each listing writes one vault.read row naming its consumer — the count, the bound host key's fingerprint, count 0 for a host key no secret pins — and an inactive consumer's listing a failed row", async () => {
+      const before = (await listingRows()).length;
+      const unpinned = generateHostKey();
+      const pinnedSession = randomBytes(32);
+      const unpinnedSession = randomBytes(32);
+
+      const sock = await connectAgent(socketOf(GRANTED));
+      try {
+        expect((await requestIdentities(sock)).identities).toHaveLength(1);
+        expect((await bindSession(sock, (host as HostKey).binding(pinnedSession))).type).toBe(
+          SSH_AGENT_SUCCESS,
+        );
+        expect((await requestIdentities(sock)).identities).toHaveLength(1);
+      } finally {
+        sock.destroy();
+      }
+      const hop = await connectAgent(socketOf(GRANTED));
+      try {
+        expect((await bindSession(hop, unpinned.binding(unpinnedSession))).type).toBe(
+          SSH_AGENT_SUCCESS,
+        );
+        expect((await requestIdentities(hop)).identities).toEqual([]);
+      } finally {
+        hop.destroy();
+      }
+      await cli(["agent", "deactivate", UNGRANTED]);
+      try {
+        const inactive = await connectAgent(socketOf(UNGRANTED));
+        try {
+          expect((await requestIdentities(inactive)).identities).toEqual([]);
+        } finally {
+          inactive.destroy();
+        }
+      } finally {
+        await cli(["agent", "activate", UNGRANTED]);
+      }
+
+      const after = await listingRows();
+      const rows = after.slice(0, after.length - before);
+      expect(
+        rows.map((row) => [row.success, row.secret_id, row.principal_id, row.ip_address]),
+      ).toEqual([
+        [false, null, UNGRANTED, null],
+        [true, null, GRANTED, null],
+        [true, null, GRANTED, null],
+        [true, null, GRANTED, null],
+      ]);
+      expect(rows.map((row) => row.detail)).toEqual([
+        {
+          operation: "agent_socket_identities",
+          bound: false,
+          error: ErrorCode.AGENT_INACTIVE,
+          interface: "ssh_agent",
+        },
+        {
+          operation: "agent_socket_identities",
+          bound: true,
+          count: 0,
+          host_key_fingerprint: sshFingerprint(unpinned.hostKeyBlob),
+          interface: "ssh_agent",
+        },
+        {
+          operation: "agent_socket_identities",
+          bound: true,
+          count: 1,
+          host_key_fingerprint: sshFingerprint((host as HostKey).hostKeyBlob),
+          interface: "ssh_agent",
+        },
+        { operation: "agent_socket_identities", bound: false, count: 1, interface: "ssh_agent" },
+      ]);
+      const serialized = JSON.stringify(rows.map((row) => row.detail));
+      const named = [HANDLE, GRANTED, UNGRANTED, "127.0.0.1"];
+      for (const text of named) expect(serialized.includes(text)).toBe(false);
+      for (const sid of [pinnedSession, unpinnedSession]) {
+        expect(serialized.includes(sid.toString("hex"))).toBe(false);
+        expect(serialized.includes(sid.toString("base64"))).toBe(false);
+      }
+      for (const blob of [keyBlob, (host as HostKey).hostKeyBlob, unpinned.hostKeyBlob]) {
+        expect(serialized.includes(blob.toString("base64"))).toBe(false);
+      }
     }, 60_000);
 
     it("neither the private key nor a session identifier reaches the daemon's output, the CLI's output or the audit trail", async () => {

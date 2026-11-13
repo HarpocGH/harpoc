@@ -8,6 +8,7 @@ import { expectVaultError } from "@harpoc/test-utils";
 import type { DecryptedAuditEvent } from "./audit/audit-query.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
 import { VaultEngine } from "./vault-engine.js";
+import { nonReadAuditCount } from "./__fixtures__/engine-seams.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -32,6 +33,10 @@ function failNextAuditInsert(): void {
 
 function rows(eventType: AuditEventType): DecryptedAuditEvent[] {
   return engine.queryAudit({ eventType });
+}
+
+function vaultReads(operation: string): DecryptedAuditEvent[] {
+  return rows(AuditEventType.VAULT_READ).filter((row) => row.detail?.operation === operation);
 }
 
 async function makeSecret(name: string, project?: string): Promise<string> {
@@ -153,12 +158,12 @@ describe("setAgentPermissions", () => {
   it("writes nothing at all for an empty cell on an agent with no rows", async () => {
     const secretId = await makeSecret("db-password");
     engine.registerAgent({ name: "alpha" });
-    const before = engine.queryAudit().length;
+    const before = nonReadAuditCount(engine);
 
     const result = engine.setAgentPermissions("alpha", secretId, [], undefined, "test-admin");
 
     expect(result).toMatchObject({ policy: null, gated_before: false, gated_after: false });
-    expect(engine.queryAudit()).toHaveLength(before);
+    expect(nonReadAuditCount(engine)).toBe(before);
   });
 
   it("leaves another agent's grant on the same secret intact", async () => {
@@ -326,7 +331,7 @@ describe("setAgentPermissions", () => {
     const secretId = await makeSecret("db-password");
     engine.registerAgent({ name: "alpha" });
     const first = engine.setAgentPermissions("alpha", secretId, ["read"], undefined, "test-admin");
-    const auditBefore = engine.queryAudit().length;
+    const auditBefore = nonReadAuditCount(engine);
 
     failNextAuditInsert();
     expect(() =>
@@ -337,9 +342,14 @@ describe("setAgentPermissions", () => {
     expect(stored).toHaveLength(1);
     expect(stored[0]?.id).toBe(first.policy?.id);
     expect(stored[0]?.permissions).toEqual(["read"]);
-    expect(engine.queryAudit().filter((r) => r.detail?.config !== "access_policies")).toHaveLength(
-      auditBefore,
-    );
+    expect(
+      engine
+        .queryAudit()
+        .filter(
+          (r) =>
+            r.event_type !== AuditEventType.VAULT_READ && r.detail?.config !== "access_policies",
+        ),
+    ).toHaveLength(auditBefore);
   });
 
   it("refuses on a sealed vault", async () => {
@@ -355,13 +365,13 @@ describe("setAgentPermissions", () => {
 });
 
 describe("listAgentPolicies", () => {
-  it("resolves the handle of every non-expired grant and writes no audit row", async () => {
+  it("resolves the handle of every non-expired grant and writes one vault.read row and no other", async () => {
     const plain = await makeSecret("db-password");
     const scoped = await makeSecret("api-key", "billing");
     engine.registerAgent({ name: "alpha" });
     const a = engine.setAgentPermissions("alpha", plain, ["read"], undefined, "test-admin");
     const b = engine.setAgentPermissions("alpha", scoped, ["use"], undefined, "test-admin");
-    const before = engine.queryAudit().length;
+    const before = nonReadAuditCount(engine);
 
     const listed = engine.listAgentPolicies("alpha");
 
@@ -378,7 +388,8 @@ describe("listAgentPolicies", () => {
       permissions: ["use"],
     });
     expect(listed[0]?.created_at).toBeGreaterThan(0);
-    expect(engine.queryAudit()).toHaveLength(before);
+    expect(nonReadAuditCount(engine)).toBe(before);
+    expect(vaultReads("list_agent_policies")).toHaveLength(1);
   });
 
   it("excludes expired rows", async () => {
@@ -440,6 +451,143 @@ describe("listAgentPolicies", () => {
 
     await expectVaultError(() => engine.listAgentPolicies("alpha"), ErrorCode.VAULT_LOCKED);
   });
+});
+
+describe("the grant listings' vault.read rows (A5)", () => {
+  const OPERATOR: CallerContext = {
+    principal_type: "user",
+    principal_id: "operator",
+    interface: "rest",
+  };
+  const ADMIN_USER: CallerContext = { ...OPERATOR, admin_scope: true };
+
+  async function grantedVault(): Promise<string[]> {
+    const ledger = await makeSecret("ledger", "finance");
+    const payroll = await makeSecret("payroll");
+    engine.registerAgent({ name: "ledger-bot" });
+    engine.setAgentPermissions("ledger-bot", ledger, ["read"], undefined, "test-admin");
+    engine.setAgentPermissions("ledger-bot", payroll, ["use"], undefined, "test-admin");
+    return [ledger, payroll];
+  }
+
+  const NAMES = ["ledger-bot", "ledger", "payroll", "finance", "secret://"];
+
+  it("listAgentPolicies: one row after the read — the count, the caller's principal — naming no agent, secret or handle", async () => {
+    const ids = await grantedVault();
+    const before = nonReadAuditCount(engine);
+
+    expect(engine.listAgentPolicies("ledger-bot", OPERATOR)).toHaveLength(2);
+
+    expect(nonReadAuditCount(engine)).toBe(before);
+    const reads = vaultReads("list_agent_policies");
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toMatchObject({
+      event_type: AuditEventType.VAULT_READ,
+      secret_id: null,
+      principal_type: "user",
+      principal_id: "operator",
+      success: true,
+    });
+    expect(reads[0]?.detail).toEqual({
+      operation: "list_agent_policies",
+      count: 2,
+      interface: "rest",
+    });
+    const serialized = JSON.stringify(reads[0]?.detail);
+    for (const text of [...NAMES, ...ids]) expect(serialized.includes(text)).toBe(false);
+  });
+
+  it("listAgentPolicies on the trusted path writes its row with NULL principal columns and no interface key", async () => {
+    await grantedVault();
+
+    engine.listAgentPolicies("ledger-bot");
+
+    expect(
+      vaultReads("list_agent_policies").map((row) => [
+        row.principal_type,
+        row.principal_id,
+        row.detail,
+      ]),
+    ).toEqual([[null, null, { operation: "list_agent_policies", count: 2 }]]);
+  });
+
+  it("listAgentPolicies of an unknown agent stays AGENT_NOT_FOUND with one failed vault.read row of its operation, naming no agent", async () => {
+    await expectVaultError(
+      () => engine.listAgentPolicies("missing", OPERATOR),
+      ErrorCode.AGENT_NOT_FOUND,
+    );
+
+    const reads = vaultReads("list_agent_policies");
+    expect(reads.map((row) => [row.success, row.principal_id, row.detail])).toEqual([
+      [
+        false,
+        "operator",
+        { operation: "list_agent_policies", error: "AGENT_NOT_FOUND", interface: "rest" },
+      ],
+    ]);
+    expect(JSON.stringify(reads[0]?.detail).includes("missing")).toBe(false);
+  });
+
+  it("listPolicies without a secret: one vault.read row with the count — the trusted path with NULL principal columns, an admin-scoped user token with its own — naming no secret or principal", async () => {
+    const ids = await grantedVault();
+    const before = nonReadAuditCount(engine);
+
+    expect(engine.listPolicies()).toHaveLength(2);
+    expect(engine.listPolicies(undefined, ADMIN_USER)).toHaveLength(2);
+
+    expect(nonReadAuditCount(engine)).toBe(before);
+    const reads = vaultReads("list_policies");
+    expect(reads.map((row) => [row.secret_id, row.principal_id, row.detail])).toEqual([
+      [null, "operator", { operation: "list_policies", count: 2, interface: "rest" }],
+      [null, null, { operation: "list_policies", count: 2 }],
+    ]);
+    const serialized = JSON.stringify(reads.map((row) => row.detail));
+    for (const text of [...NAMES, ...ids]) expect(serialized.includes(text)).toBe(false);
+  });
+
+  it("listPolicies with a secret id keeps its secret.read row and writes no vault.read row", async () => {
+    const [ledger] = await grantedVault();
+
+    expect(engine.listPolicies(ledger, ADMIN_USER)).toHaveLength(1);
+
+    expect(vaultReads("list_policies")).toEqual([]);
+    expect(
+      rows(AuditEventType.SECRET_READ)
+        .filter((row) => row.detail?.config === "access_policies")
+        .map((row) => [row.secret_id, row.principal_id, row.detail]),
+    ).toEqual([[ledger, "operator", { config: "access_policies", interface: "rest" }]]);
+  });
+
+  it("listPolicies refuses a scoped caller without a secret id INVALID_INPUT before any read, with no row (U-7)", async () => {
+    await grantedVault();
+    const before = nonReadAuditCount(engine);
+
+    await expectVaultError(
+      () => engine.listPolicies(undefined, agent("ledger-bot")),
+      ErrorCode.INVALID_INPUT,
+    );
+
+    expect(nonReadAuditCount(engine)).toBe(before);
+    expect(vaultReads("list_policies")).toEqual([]);
+  });
+
+  it.each([
+    ["listAgentPolicies", "list_agent_policies", () => engine.listAgentPolicies("ledger-bot")],
+    ["listPolicies", "list_policies", () => engine.listPolicies()],
+  ])(
+    "%s throws the logger's error and returns nothing when its row cannot be written",
+    async (_label, operation, read) => {
+      await grantedVault();
+      failNextAuditInsert();
+
+      let answer: unknown;
+      expect(() => {
+        answer = read();
+      }).toThrow("audit unavailable");
+      expect(answer).toBeUndefined();
+      expect(vaultReads(operation)).toEqual([]);
+    },
+  );
 });
 
 describe("queryAudit principal filter", () => {

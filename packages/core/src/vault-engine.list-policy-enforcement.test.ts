@@ -6,8 +6,10 @@ import { vi } from "vitest";
 import type { CallerContext, Permission, PrincipalType } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
+import type { DecryptedAuditEvent } from "./audit/audit-query.js";
+import type { SqliteStore } from "./storage/sqlite-store.js";
 import { VaultEngine } from "./vault-engine.js";
-import { registerAgents } from "./__fixtures__/engine-seams.js";
+import { nonReadAuditCount, registerAgents } from "./__fixtures__/engine-seams.js";
 
 /**
  * W2 — `list` as live policy vocabulary: enumeration is filtered by the
@@ -75,6 +77,12 @@ function listedNames(caller?: CallerContext, project?: string): string[] {
     .listSecrets(project, caller)
     .map((s) => s.name)
     .sort();
+}
+
+function listingRows(): DecryptedAuditEvent[] {
+  return engine
+    .queryAudit({ eventType: AuditEventType.VAULT_READ })
+    .filter((row) => row.detail?.operation === "list_secrets");
 }
 
 describe("explicit grant (R1)", () => {
@@ -241,14 +249,18 @@ describe("filter/gate agreement (shared principal set)", () => {
 });
 
 describe("audit", () => {
-  it("filtering is silent — a restricted enumeration writes no audit row", async () => {
+  it("a restricted enumeration writes one vault.read row a listing, the filtered secret counted as withheld, and no other row", async () => {
     const id = await makeSecret("quiet");
     grant(id, "agent", "alice", ["use"]);
 
-    const before = engine.queryAudit({}).length;
+    const before = nonReadAuditCount(engine);
     expect(listedNames(agent("mallory"))).toEqual([]);
     expect(listedNames(agent("alice"))).toEqual([]);
-    expect(engine.queryAudit({}).length).toBe(before);
+    expect(nonReadAuditCount(engine)).toBe(before);
+    expect(listingRows().map((row) => [row.principal_id, row.detail])).toEqual([
+      ["alice", { operation: "list_secrets", count: 0, withheld: 1 }],
+      ["mallory", { operation: "list_secrets", count: 0, withheld: 1 }],
+    ]);
   });
 
   it("the audit chain stays valid across a mixed sequence", async () => {
@@ -259,6 +271,178 @@ describe("audit", () => {
     await engine.getSecretInfo("secret://chain-mix", agent("alice")).catch(() => undefined);
 
     expect(engine.verifyAuditChain().valid).toBe(true);
+  });
+});
+
+describe("the listing's vault.read row (A4)", () => {
+  const NAMES = ["ledger", "payroll", "invoices", "budget", "forecast"];
+  const LISTER: CallerContext = {
+    principal_type: "agent",
+    principal_id: "alice",
+    interface: "rest",
+    remote_address: "127.0.0.1",
+  };
+  const OPERATOR: CallerContext = {
+    principal_type: "user",
+    principal_id: "operator",
+    interface: "rest",
+    admin_scope: true,
+  };
+
+  function liveStore(): SqliteStore {
+    return (engine as unknown as { store: SqliteStore }).store;
+  }
+
+  it("a token with two of five grants: one row after the read — count 2, withheld 3, the caller's principal — naming no secret", async () => {
+    const ids: string[] = [];
+    for (const name of NAMES) ids.push(await makeSecret(name));
+    grant(ids[0] as string, "agent", "alice", ["list"]);
+    grant(ids[3] as string, "agent", "alice", ["admin"]);
+    const before = nonReadAuditCount(engine);
+
+    const listed = engine.listSecrets(undefined, LISTER);
+
+    expect(listed.map((s) => s.name).sort()).toEqual(["budget", "ledger"]);
+    expect(nonReadAuditCount(engine)).toBe(before);
+    const rows = listingRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      event_type: AuditEventType.VAULT_READ,
+      secret_id: null,
+      principal_type: "agent",
+      principal_id: "alice",
+      ip_address: "127.0.0.1",
+      success: true,
+    });
+    expect(rows[0]?.detail).toEqual({
+      operation: "list_secrets",
+      count: 2,
+      withheld: 3,
+      interface: "rest",
+    });
+    for (const name of NAMES) {
+      expect(JSON.stringify(rows[0]?.detail).includes(name)).toBe(false);
+    }
+  });
+
+  it("a project filter the vault holds is recorded verbatim, count and withheld taken within that project", async () => {
+    const granted = await makeSecret("ledger", "finance");
+    await makeSecret("payroll", "finance");
+    await makeSecret("forecast");
+    grant(granted, "agent", "alice", ["list"]);
+
+    expect(listedNames(LISTER, "finance")).toEqual(["ledger"]);
+
+    const [row] = listingRows();
+    expect(row?.detail).toEqual({
+      operation: "list_secrets",
+      project: "finance",
+      count: 1,
+      withheld: 1,
+      interface: "rest",
+    });
+    for (const name of ["ledger", "payroll", "forecast"]) {
+      expect(JSON.stringify(row?.detail).includes(name)).toBe(false);
+    }
+  });
+
+  it("a project the vault does not hold is recorded as its presence only; a held project stays verbatim though the filter withholds all of it (TW-R1)", async () => {
+    const typed = "typed-not-held-7c1";
+    await makeSecret("ledger", "finance");
+
+    expect(listedNames(LISTER, typed)).toEqual([]);
+    expect(listedNames(LISTER, "finance")).toEqual([]);
+
+    const [held, unheld] = listingRows();
+    expect(JSON.stringify(unheld?.detail).includes(typed)).toBe(false);
+    expect(unheld?.detail).toEqual({
+      operation: "list_secrets",
+      project: true,
+      count: 0,
+      withheld: 0,
+      interface: "rest",
+    });
+    expect(held?.detail).toEqual({
+      operation: "list_secrets",
+      project: "finance",
+      count: 0,
+      withheld: 1,
+      interface: "rest",
+    });
+  });
+
+  it("a caller the filter does not apply to records withheld 0: the trusted path with NULL principal columns and no interface key, an admin-scoped user token with its own", async () => {
+    const id = await makeSecret("ledger");
+    await makeSecret("payroll");
+    grant(id, "agent", "alice", ["use"]);
+
+    expect(listedNames()).toEqual(["ledger", "payroll"]);
+    expect(listedNames(OPERATOR)).toEqual(["ledger", "payroll"]);
+
+    expect(listingRows().map((row) => [row.principal_type, row.principal_id, row.detail])).toEqual([
+      ["user", "operator", { operation: "list_secrets", count: 2, withheld: 0, interface: "rest" }],
+      [null, null, { operation: "list_secrets", count: 2, withheld: 0 }],
+    ]);
+  });
+
+  it.each([
+    ["a token caller", LISTER],
+    ["the trusted path", undefined],
+  ])(
+    "for %s the listing throws the logger's error and returns nothing when its row cannot be written",
+    async (_label, caller) => {
+      const id = await makeSecret("ledger");
+      grant(id, "agent", "alice", ["list"]);
+      const before = listingRows().length;
+      vi.spyOn(liveStore(), "insertAuditEvent").mockImplementationOnce(() => {
+        throw new Error("audit unavailable");
+      });
+
+      let answer: unknown;
+      expect(() => {
+        answer = engine.listSecrets(undefined, caller);
+      }).toThrow("audit unavailable");
+      expect(answer).toBeUndefined();
+      expect(listingRows()).toHaveLength(before);
+    },
+  );
+
+  it("a caller of one project lists; an admin scoped to another project finds no vault.read row on the trail, an unscoped read finds it (A-2)", async () => {
+    const id = await makeSecret("ledger", "finance");
+    grant(id, "project", "finance", ["list"]);
+    const financeAgent: CallerContext = {
+      principal_type: "agent",
+      principal_id: "fin-bot",
+      project: "finance",
+      interface: "rest",
+    };
+    const webAdmin: CallerContext = {
+      principal_type: "agent",
+      principal_id: "web-admin",
+      project: "web",
+      admin_scope: true,
+      interface: "rest",
+    };
+
+    expect(listedNames(financeAgent, "finance")).toEqual(["ledger"]);
+
+    const scoped = engine.queryAudit({}, { project: "web" }, webAdmin);
+    expect(scoped.length).toBeGreaterThan(0);
+    expect(scoped.filter((row) => row.event_type === AuditEventType.VAULT_READ)).toEqual([]);
+    const unscoped = engine.queryAudit({}, undefined, OPERATOR);
+    const listings = unscoped.filter((row) => row.detail?.operation === "list_secrets");
+    expect(listings.map((row) => [row.principal_id, row.detail])).toEqual([
+      [
+        "fin-bot",
+        {
+          operation: "list_secrets",
+          project: "finance",
+          count: 1,
+          withheld: 0,
+          interface: "rest",
+        },
+      ],
+    ]);
   });
 });
 

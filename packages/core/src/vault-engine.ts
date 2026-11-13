@@ -172,14 +172,14 @@ import { validateUrl } from "./injection/url-validator.js";
 import type { WebsocketExecution } from "./injection/websocket-injector.js";
 import { buildWsAuditDetails, executeWebsocketAction } from "./injection/websocket-injector.js";
 import { setJobWrapperUnavailableHandler } from "./injection/win32-job-wrapper.js";
-import type { SecretInfo } from "./secrets/secret-manager.js";
+import type { SecretInfo, SecretListEntry } from "./secrets/secret-manager.js";
 import { SecretManager } from "./secrets/secret-manager.js";
 import { isVaultManagedCertificate } from "./secrets/vault-managed-certificate.js";
 import { SessionManager } from "./session/session-manager.js";
 import type { SessionExpectation } from "./session/session-manager.js";
 import type { SessionKeyProtector } from "./session/session-key-protector.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
-import type { CertificateRow, OAuthTokenRow } from "./storage/sqlite-store.js";
+import type { AgentRow, CertificateRow, OAuthTokenRow } from "./storage/sqlite-store.js";
 
 export interface VaultEngineOptions {
   dbPath: string;
@@ -583,6 +583,56 @@ function computeCertificateRenewalStatus(row: CertificateRow): CertificateStatus
   return "ok";
 }
 
+const AUDIT_EVENT_TYPES: ReadonlySet<string> = new Set(Object.values(AuditEventType));
+const PRINCIPAL_TYPES: ReadonlySet<string> = new Set(Object.values(PrincipalType));
+const AGENT_STATUS_FILTERS: ReadonlySet<string> = new Set([...Object.values(AgentStatus), "all"]);
+const TOKEN_STATUS_FILTERS: ReadonlySet<string> = new Set([
+  ...Object.values(IssuedTokenStatus),
+  "all",
+]);
+
+/** A filter value as a `vault.read` row records it: verbatim when its vocabulary holds it, else by its presence (A-3). */
+function closedFilter(value: string, vocabulary: ReadonlySet<string>): string | true {
+  return vocabulary.has(value) ? value : true;
+}
+
+/** The filters a trail query applied, as its `vault.read` row records them: a closed vocabulary verbatim, any other filter by its presence (A-3). */
+function auditQueryFilters(options: AuditQueryOptions | undefined): Record<string, unknown> {
+  const filters: Record<string, unknown> = {};
+  if (options?.eventType) filters.event_type = closedFilter(options.eventType, AUDIT_EVENT_TYPES);
+  if (options?.excludeEventType) {
+    filters.exclude_event_type = closedFilter(options.excludeEventType, AUDIT_EVENT_TYPES);
+  }
+  if (options?.principalType) {
+    filters.principal_type = closedFilter(options.principalType, PRINCIPAL_TYPES);
+  }
+  if (options?.principalId) filters.principal_id = true;
+  if (options?.secretId) filters.secret_id = true;
+  if (options?.since) filters.since = true;
+  if (options?.until) filters.until = true;
+  if (options?.success !== undefined) filters.success = Boolean(options.success);
+  if (options?.limit) filters.limit = Number(options.limit);
+  return filters;
+}
+
+const REGISTRY_REFUSALS: ReadonlySet<string> = new Set([
+  ErrorCode.AGENT_NOT_FOUND,
+  ErrorCode.AGENT_EXISTS,
+  ErrorCode.AGENT_INACTIVE,
+]);
+const CREATE_REFUSALS: ReadonlySet<string> = new Set([
+  ErrorCode.DUPLICATE_SECRET,
+  ErrorCode.INVALID_SECRET_NAME,
+  ErrorCode.INVALID_PROJECT_NAME,
+]);
+const TOKEN_REFUSALS: ReadonlySet<string> = new Set([
+  ErrorCode.INVALID_SECRET_NAME,
+  ErrorCode.INVALID_INPUT,
+  ErrorCode.AGENT_NOT_FOUND,
+  ErrorCode.AGENT_INACTIVE,
+]);
+const MINTED_JTI = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 /**
  * Central orchestrator for the vault. Manages lifecycle, secrets, policies, audit, and JWT auth.
  */
@@ -643,7 +693,8 @@ export class VaultEngine {
     { version: number; ctIv: string; publicKeyBlob: Buffer | null }
   >();
   /**
-   * The agent sockets' per-secret signature bucket, `use_secret`'s budget
+   * The agent sockets' per-secret signature buckets and per-consumer listing
+   * buckets (`listing:<consumer>`), `use_secret`'s budget
    * (`RATE_LIMIT_USE_SECRET` a minute): the socket answers no token, so no
    * interface in front of the engine limits it as REST, MCP and the proxy do.
    */
@@ -1067,18 +1118,28 @@ export class VaultEngine {
     caller?: CallerContext,
   ): Promise<CreateSecretResponse> {
     const s = this.assertUnlocked();
-    // Audit row committed in the same transaction as the secret row (NM3):
-    // a crash cannot yield a created-but-unaudited secret, and an unwritable
-    // audit log rolls the create back.
-    return s.secretManager.createSecret(input, (result, secretId) => {
-      s.auditLogger.log({
-        eventType: AuditEventType.SECRET_CREATE,
-        secretId,
-        ...callerColumns(caller),
-        detail: { handle: result.handle, status: result.status, ...callerInterfaceDetail(caller) },
-        sessionId: this.sessionId ?? undefined,
+    try {
+      // Audit row committed in the same transaction as the secret row (NM3):
+      // a crash cannot yield a created-but-unaudited secret, and an unwritable
+      // audit log rolls the create back.
+      return await s.secretManager.createSecret(input, (result, secretId) => {
+        s.auditLogger.log({
+          eventType: AuditEventType.SECRET_CREATE,
+          secretId,
+          ...callerColumns(caller),
+          detail: {
+            handle: result.handle,
+            status: result.status,
+            ...callerInterfaceDetail(caller),
+          },
+          sessionId: this.sessionId ?? undefined,
+        });
       });
-    });
+    } catch (err) {
+      this.refuseAudited(s, AuditEventType.SECRET_CREATE, err, {}, caller, {
+        codes: CREATE_REFUSALS,
+      });
+    }
   }
 
   async getSecretInfo(handle: string, caller?: CallerContext): Promise<SecretInfo> {
@@ -1160,24 +1221,26 @@ export class VaultEngine {
    * principals may enumerate (thesis §4.6 `list`): a secret is listed only
    * when a grant to one of the caller's principals carries `list` or `admin`
    * (R1, 2026-09-01: a secret with no rows is listed to no token caller), so a
-   * read-gated secret's metadata row cannot be recovered from the listing. Filtering is silent —
-   * enumeration writes no audit row, here as before. An absent caller is the
-   * trusted local path (CLI, in-process SDK) and sees everything; so does an
+   * read-gated secret's metadata row cannot be recovered from the listing.
+   * Filtering is silent per secret; the listing's one `vault.read` row counts
+   * what it withheld. An absent caller is the trusted local path (CLI,
+   * in-process SDK) and sees everything; so does an
    * admin-scoped user-type token since R7 (v1.4.1), the one caller class the
    * per-secret gate exempts — a gated secret must not vanish from the
    * operator's own listing while they may still address it.
    */
   listSecrets(project?: string, caller?: CallerContext): SecretInfo[] {
     const s = this.assertUnlocked();
-    if (!caller || isAdminUserCaller(caller)) return s.secretManager.listSecrets(project);
+    const { entries, listable } = this.listableEntries(s, project, caller);
+    const listed = listable.map((entry) => entry.info);
 
-    const entries = s.secretManager.listSecretsWithIds(project);
-    const permitted = s.policyEngine.filterPermitted(
-      entries.map((entry) => entry.id),
-      this.callerPrincipals(caller),
-      "list",
-    );
-    return entries.filter((entry) => permitted.has(entry.id)).map((entry) => entry.info);
+    this.auditVaultRead(s, caller, {
+      operation: "list_secrets",
+      ...(project !== undefined ? { project: entries.length > 0 ? project : true } : {}),
+      count: listed.length,
+      withheld: entries.length - listed.length,
+    });
+    return listed;
   }
 
   async setSecretValue(handle: string, value: Uint8Array, caller?: CallerContext): Promise<void> {
@@ -1250,12 +1313,31 @@ export class VaultEngine {
 
   /**
    * Whether an active secret of this name exists in the project — the
-   * duplicate check `createSecret` makes, without the create and without an
-   * audit row: the modern MCP leg asks before it opens a value form (P3-35).
+   * duplicate check `createSecret` makes, without the create, recorded as one
+   * `vault.read` row that holds `found` and no name: the modern MCP leg asks
+   * before it opens a value form (P3-35).
    */
-  async secretNameTaken(name: string, project?: string): Promise<boolean> {
+  async secretNameTaken(name: string, project?: string, caller?: CallerContext): Promise<boolean> {
     const s = this.assertUnlocked();
-    return s.secretManager.hasActiveSecret(name, project);
+    const found = await s.secretManager.hasActiveSecret(name, project);
+    this.auditVaultRead(s, caller, {
+      operation: "name_taken",
+      ...(project !== undefined ? { project: found ? project : true } : {}),
+      found,
+    });
+    return found;
+  }
+
+  /** The MCP pre-check's refusal of a name `secretNameTaken` found taken: `createSecret`'s `DUPLICATE_SECRET`, with its failed `secret.create` row. */
+  async refuseTakenSecretName(name: string, caller?: CallerContext): Promise<never> {
+    const s = this.assertUnlocked();
+    this.refuseAudited(
+      s,
+      AuditEventType.SECRET_CREATE,
+      VaultError.duplicateSecret(name),
+      {},
+      caller,
+    );
   }
 
   /**
@@ -2080,10 +2162,11 @@ export class VaultEngine {
    * which is active, each under its handle — and on a bound connection only
    * those whose pinned `ssh.known_hosts` holds the bound host key (R-P3, RT-1:
    * the pin alone — `host_allowlist` is judged at the signature, so ssh offers
-   * the key and a refusal is recorded). An enumeration like `listSecrets`, it
-   * writes no listing row of its own; a deactivated or unregistered consumer is
-   * served nothing, a value that is no loadable private key is skipped. Only
-   * these keys are ever decrypted, each once per stored value, and wiped. It
+   * the key and a refusal is recorded). It draws on the consumer's listing
+   * bucket, then writes one `vault.read` row; a deactivated or unregistered
+   * consumer is served nothing (a failed row), a value that is no loadable
+   * private key is skipped. Only these keys are ever decrypted, each once per
+   * stored value, and wiped. It
    * fails closed: a key whose ciphertext does not decrypt (`VAULT_CORRUPTED`)
    * fails the consumer's listing and signatures until that secret is revoked
    * or rotated, and one whose expiry crosses during the enumeration
@@ -2100,17 +2183,37 @@ export class VaultEngine {
     }
     // A listing is no use of a secret: it keeps no session alive (polled without a token).
     let s = this.assertUnlockedWithoutSlide();
-    if (s.agentRegistry.findByName(caller.principal_id)?.status !== AgentStatus.ACTIVE) return [];
+    this.agentSocketLimiter.checkSecret(`listing:${caller.principal_id}`, true);
+    const fingerprint =
+      binding === null ? {} : { host_key_fingerprint: sshKeyFingerprint(binding.hostKeyBlob) };
+    const read = { operation: "agent_socket_identities", bound: binding !== null };
+    const agent = s.agentRegistry.findByName(caller.principal_id);
+    if (agent?.status !== AgentStatus.ACTIVE) {
+      const err = agent
+        ? VaultError.agentInactive(agent.name)
+        : VaultError.agentNotFound(caller.principal_id);
+      this.auditDenied(
+        s,
+        AuditEventType.VAULT_READ,
+        err,
+        { ...read, ...fingerprint },
+        undefined,
+        caller,
+      );
+      return [];
+    }
     const keys = await this.agentSocketKeys(s, caller);
     // A seal during a decrypt: the keys are gone, so is the answer.
     s = this.assertUnlockedWithoutSlide();
-    return keys
+    const listed = keys
       .filter(
         (key) =>
           binding === null ||
           this.agentSocketHost(s, key.secret.id, key.policy, binding.hostKeyBlob) !== null,
       )
       .map((key) => ({ publicKeyBlob: key.publicKeyBlob, comment: key.handle }));
+    this.auditVaultRead(s, caller, { ...read, count: listed.length, ...fingerprint });
+    return listed;
   }
 
   /**
@@ -3774,7 +3877,16 @@ export class VaultEngine {
     );
 
     const oauthRow = s.store.getOAuthToken(secretId);
-    if (!oauthRow) throw VaultError.oauthNotConfigured();
+    if (!oauthRow) {
+      this.refuseAudited(
+        s,
+        AuditEventType.SECRET_READ,
+        VaultError.oauthNotConfigured(),
+        { config: "oauth_status" },
+        caller,
+        { secretId },
+      );
+    }
 
     const secret = s.store.getSecret(secretId);
 
@@ -3906,9 +4018,10 @@ export class VaultEngine {
    * may see it — health surfaces get handle/name/project plus the derived
    * refresh state and nothing else.
    *
-   * Policy-filtered like `listSecrets` (W2) and silent for the same reason: a
-   * gated secret must not be recoverable from an expiry census, and enumeration
-   * writes no audit row. An absent caller is the trusted local path.
+   * Policy-filtered like `listSecrets` (W2) and silent per secret for the same
+   * reason: a gated secret must not be recoverable from an expiry census; the
+   * read's one `vault.read` row counts what it withheld. An absent caller is
+   * the trusted local path.
    */
   getExpiringOAuthTokenStatuses(
     withinMs: number,
@@ -3919,13 +4032,16 @@ export class VaultEngine {
     // KEK-decrypts every secret name in the vault, and a health census with
     // nothing expiring is the common case.
     const rows = s.store.getExpiringOAuthTokens(withinMs);
-    if (rows.length === 0) return [];
-
-    const infoById = this.secretInfoById(s, caller);
+    const infoById =
+      rows.length === 0 ? new Map<string, SecretInfo>() : this.secretInfoById(s, caller);
     const out: ExpiringOAuthTokenInfo[] = [];
+    let withheld = 0;
     for (const row of rows) {
       const info = infoById.get(row.secret_id);
-      if (!info) continue;
+      if (!info) {
+        withheld++;
+        continue;
+      }
       out.push({
         handle: info.handle,
         name: info.name,
@@ -3936,6 +4052,8 @@ export class VaultEngine {
         refresh_status: computeOAuthRefreshStatus(row),
       });
     }
+
+    this.auditVaultRead(s, caller, { operation: "expiring_oauth", count: out.length, withheld });
     return out;
   }
 
@@ -4301,7 +4419,16 @@ export class VaultEngine {
     );
 
     const row = s.store.getCertificate(secretId);
-    if (!row) throw VaultError.certNotConfigured();
+    if (!row) {
+      this.refuseAudited(
+        s,
+        AuditEventType.SECRET_READ,
+        VaultError.certNotConfigured(),
+        { config: "certificate_status" },
+        caller,
+        { secretId },
+      );
+    }
 
     const status: CertificateStatus = {
       secret_id: secretId,
@@ -4350,7 +4477,16 @@ export class VaultEngine {
     );
 
     const row = s.store.getCertificate(secretId);
-    if (!row) throw VaultError.certNotConfigured();
+    if (!row) {
+      this.refuseAudited(
+        s,
+        AuditEventType.SECRET_READ,
+        VaultError.certNotConfigured(),
+        { config: "certificate_pem" },
+        caller,
+        { secretId },
+      );
+    }
     const pems = {
       certificatePem: row.certificate_pem,
       chainPem: row.chain_pem,
@@ -4389,7 +4525,16 @@ export class VaultEngine {
     );
 
     const row = s.store.getCertificate(secretId);
-    if (!row) throw VaultError.certNotConfigured();
+    if (!row) {
+      this.refuseAudited(
+        s,
+        AuditEventType.SECRET_READ,
+        VaultError.certNotConfigured(),
+        { config: "certificate_private_key" },
+        caller,
+        { secretId },
+      );
+    }
 
     const pem = decrypt(
       s.kek,
@@ -4446,13 +4591,16 @@ export class VaultEngine {
       .filter(
         (row) => row.not_after !== null && row.not_after <= now + row.renew_before_days * DAY_MS,
       );
-    if (rows.length === 0) return [];
-
-    const infoById = this.secretInfoById(s, caller);
+    const infoById =
+      rows.length === 0 ? new Map<string, SecretInfo>() : this.secretInfoById(s, caller);
     const out: ExpiringCertificateInfo[] = [];
+    let withheld = 0;
     for (const row of rows) {
       const info = infoById.get(row.secret_id);
-      if (!info) continue;
+      if (!info) {
+        withheld++;
+        continue;
+      }
       out.push({
         handle: info.handle,
         name: info.name,
@@ -4464,6 +4612,12 @@ export class VaultEngine {
         renewal_status: computeCertificateRenewalStatus(row),
       });
     }
+
+    this.auditVaultRead(s, caller, {
+      operation: "expiring_certificates",
+      count: out.length,
+      withheld,
+    });
     return out;
   }
 
@@ -4472,7 +4626,7 @@ export class VaultEngine {
    * ACME-issued. The blob carries the account's private key, so it reads under
    * the same `read` gate and writes the same explicit `secret.read` row as
    * `getCertificatePrivateKey` (V2) — the absent-account case decrypts nothing
-   * and therefore records nothing.
+   * and records one `vault.read` row, `found: false`.
    *
    * `handle` is the string the interface resolved the id from — it lets a
    * concealed refusal read exactly like an unknown handle (R5); absent, the
@@ -4491,8 +4645,20 @@ export class VaultEngine {
     );
 
     const row = s.store.getCertificate(secretId);
-    if (!row) throw VaultError.certNotConfigured();
-    if (!row.acme_account_encrypted || !row.acme_account_iv || !row.acme_account_tag) return null;
+    if (!row) {
+      this.refuseAudited(
+        s,
+        AuditEventType.SECRET_READ,
+        VaultError.certNotConfigured(),
+        { config: "acme_account" },
+        caller,
+        { secretId },
+      );
+    }
+    if (!row.acme_account_encrypted || !row.acme_account_iv || !row.acme_account_tag) {
+      this.auditVaultRead(s, caller, { operation: "acme_account", found: false });
+      return null;
+    }
 
     const dec = decrypt(
       s.kek,
@@ -4554,10 +4720,10 @@ export class VaultEngine {
   /**
    * Write the `access.denied` row every interface scope refusal leaves — no
    * secret id, the refusing principal's columns, the operation as the interface
-   * names it (`<METHOD> <path>` on REST, the tool or resource on MCP, the engine
-   * method for governance) and the branch that refused (D2g, 2026-09-23). The
-   * row commits standalone before the interface throws; a sealed engine throws
-   * `VAULT_LOCKED` from here instead.
+   * names it (`<METHOD> <path>` on REST, the tool or resource on MCP, the command
+   * path on the CLI, the engine method for governance) and the branch that
+   * refused (D2g, 2026-09-23). The row commits standalone before the interface
+   * throws; a sealed engine throws `VAULT_LOCKED` from here instead.
    */
   auditScopeRefusal(
     caller: CallerContext | undefined,
@@ -4590,37 +4756,59 @@ export class VaultEngine {
   registerAgent(input: RegisterAgentInput, caller?: CallerContext): Agent {
     const s = this.assertUnlocked();
     this.assertUnscopedGovernanceCaller(caller, "registerAgent");
-    return s.store.transaction(() => {
-      const row = s.agentRegistry.register(input);
+    try {
+      return s.store.transaction(() => {
+        const row = s.agentRegistry.register(input);
 
-      s.auditLogger.log({
-        eventType: AuditEventType.AGENT_REGISTER,
-        ...callerColumns(caller),
-        detail: {
-          name: row.name,
-          ...(row.owner !== null ? { owner: row.owner } : {}),
-          ...callerInterfaceDetail(caller),
-        },
-        sessionId: this.sessionId ?? undefined,
+        s.auditLogger.log({
+          eventType: AuditEventType.AGENT_REGISTER,
+          ...callerColumns(caller),
+          detail: {
+            name: row.name,
+            ...(row.owner !== null ? { owner: row.owner } : {}),
+            ...callerInterfaceDetail(caller),
+          },
+          sessionId: this.sessionId ?? undefined,
+        });
+
+        return s.agentRegistry.toAgent(row);
       });
-
-      return s.agentRegistry.toAgent(row);
-    });
+    } catch (err) {
+      this.refuseAudited(s, AuditEventType.AGENT_REGISTER, err, {}, caller, {
+        codes: REGISTRY_REFUSALS,
+      });
+    }
   }
 
-  /** Governance read: unaudited on success (design §5.6); the caller is consulted only for the unscoped-token rule (N12). */
+  /** Governance read: one `vault.read` row on success (U-3); the caller meets the unscoped-token rule (N12) and attributes the row. */
   getAgent(name: string, caller?: CallerContext): Agent {
     const s = this.assertUnlocked();
     this.assertUnscopedGovernanceCaller(caller, "getAgent");
-    return s.agentRegistry.toAgent(s.agentRegistry.getByName(name));
+    let row: AgentRow;
+    try {
+      row = s.agentRegistry.getByName(name);
+    } catch (err) {
+      this.refuseAudited(s, AuditEventType.VAULT_READ, err, { operation: "get_agent" }, caller, {
+        codes: REGISTRY_REFUSALS,
+      });
+    }
+    const agent = s.agentRegistry.toAgent(row);
+    this.auditVaultRead(s, caller, { operation: "get_agent", found: true });
+    return agent;
   }
 
-  /** Governance read: unaudited on success (design §5.6); the caller is consulted only for the unscoped-token rule (N12). */
+  /** Governance read: one `vault.read` row on success (U-3); the caller meets the unscoped-token rule (N12) and attributes the row. */
   listAgents(status: AgentStatus | "all" = AgentStatus.ACTIVE, caller?: CallerContext): Agent[] {
     const s = this.assertUnlocked();
     this.assertUnscopedGovernanceCaller(caller, "listAgents");
     const now = Date.now();
-    return s.agentRegistry.list(status).map((row) => s.agentRegistry.toAgent(row, now));
+    const agents = s.agentRegistry.list(status).map((row) => s.agentRegistry.toAgent(row, now));
+    this.auditVaultRead(s, caller, {
+      operation: "list_agents",
+      status: closedFilter(status, AGENT_STATUS_FILTERS),
+      count: agents.length,
+    });
+    return agents;
   }
 
   /**
@@ -4635,36 +4823,48 @@ export class VaultEngine {
       (field) => input[field] !== undefined,
     );
 
-    return s.store.transaction(() => {
-      const row = s.agentRegistry.updateMetadata(name, input);
+    try {
+      return s.store.transaction(() => {
+        const row = s.agentRegistry.updateMetadata(name, input);
 
-      s.auditLogger.log({
-        eventType: AuditEventType.AGENT_UPDATE,
-        ...callerColumns(caller),
-        detail: { name: row.name, fields, ...callerInterfaceDetail(caller) },
-        sessionId: this.sessionId ?? undefined,
+        s.auditLogger.log({
+          eventType: AuditEventType.AGENT_UPDATE,
+          ...callerColumns(caller),
+          detail: { name: row.name, fields, ...callerInterfaceDetail(caller) },
+          sessionId: this.sessionId ?? undefined,
+        });
+
+        return s.agentRegistry.toAgent(row);
       });
-
-      return s.agentRegistry.toAgent(row);
-    });
+    } catch (err) {
+      this.refuseAudited(s, AuditEventType.AGENT_UPDATE, err, {}, caller, {
+        codes: REGISTRY_REFUSALS,
+      });
+    }
   }
 
   /** Reactivate a deactivated agent. Status only: tokens revoked on the way out stay revoked. */
   activateAgent(name: string, caller?: CallerContext): Agent {
     const s = this.assertUnlocked();
     this.assertUnscopedGovernanceCaller(caller, "activateAgent");
-    return s.store.transaction(() => {
-      const row = s.agentRegistry.setStatus(name, AgentStatus.ACTIVE);
+    try {
+      return s.store.transaction(() => {
+        const row = s.agentRegistry.setStatus(name, AgentStatus.ACTIVE);
 
-      s.auditLogger.log({
-        eventType: AuditEventType.AGENT_ACTIVATE,
-        ...callerColumns(caller),
-        detail: { name: row.name, ...callerInterfaceDetail(caller) },
-        sessionId: this.sessionId ?? undefined,
+        s.auditLogger.log({
+          eventType: AuditEventType.AGENT_ACTIVATE,
+          ...callerColumns(caller),
+          detail: { name: row.name, ...callerInterfaceDetail(caller) },
+          sessionId: this.sessionId ?? undefined,
+        });
+
+        return s.agentRegistry.toAgent(row);
       });
-
-      return s.agentRegistry.toAgent(row);
-    });
+    } catch (err) {
+      this.refuseAudited(s, AuditEventType.AGENT_ACTIVATE, err, {}, caller, {
+        codes: REGISTRY_REFUSALS,
+      });
+    }
   }
 
   /**
@@ -4678,23 +4878,33 @@ export class VaultEngine {
   deactivateAgent(name: string, caller?: CallerContext): { revoked_tokens: number } {
     const s = this.assertUnlocked();
     this.assertUnscopedGovernanceCaller(caller, "deactivateAgent");
-    return s.store.transaction(() => {
-      const existing = s.agentRegistry.getByName(name);
-      const row =
-        existing.status === AgentStatus.INACTIVE
-          ? existing
-          : s.agentRegistry.setStatus(name, AgentStatus.INACTIVE);
-      const revokedTokens = this.revokeLiveTokensForAgent(s, row.id, "agent_deactivated", caller);
+    try {
+      return s.store.transaction(() => {
+        const existing = s.agentRegistry.getByName(name);
+        const row =
+          existing.status === AgentStatus.INACTIVE
+            ? existing
+            : s.agentRegistry.setStatus(name, AgentStatus.INACTIVE);
+        const revokedTokens = this.revokeLiveTokensForAgent(s, row.id, "agent_deactivated", caller);
 
-      s.auditLogger.log({
-        eventType: AuditEventType.AGENT_DEACTIVATE,
-        ...callerColumns(caller),
-        detail: { name: row.name, revoked_tokens: revokedTokens, ...callerInterfaceDetail(caller) },
-        sessionId: this.sessionId ?? undefined,
+        s.auditLogger.log({
+          eventType: AuditEventType.AGENT_DEACTIVATE,
+          ...callerColumns(caller),
+          detail: {
+            name: row.name,
+            revoked_tokens: revokedTokens,
+            ...callerInterfaceDetail(caller),
+          },
+          sessionId: this.sessionId ?? undefined,
+        });
+
+        return { revoked_tokens: revokedTokens };
       });
-
-      return { revoked_tokens: revokedTokens };
-    });
+    } catch (err) {
+      this.refuseAudited(s, AuditEventType.AGENT_DEACTIVATE, err, {}, caller, {
+        codes: REGISTRY_REFUSALS,
+      });
+    }
   }
 
   /**
@@ -4710,41 +4920,47 @@ export class VaultEngine {
   ): { revoked_tokens: number; removed_grants: number } {
     const s = this.assertUnlocked();
     this.assertUnscopedGovernanceCaller(caller, "deleteAgent");
-    return s.store.transaction(() => {
-      const row = s.agentRegistry.getByName(name);
-      const revokedTokens = this.revokeLiveTokensForAgent(s, row.id, "agent_deleted", caller);
+    try {
+      return s.store.transaction(() => {
+        const row = s.agentRegistry.getByName(name);
+        const revokedTokens = this.revokeLiveTokensForAgent(s, row.id, "agent_deleted", caller);
 
-      const removed = s.store.deletePoliciesForPrincipal("agent", row.name);
-      for (const policy of removed) {
+        const removed = s.store.deletePoliciesForPrincipal("agent", row.name);
+        for (const policy of removed) {
+          s.auditLogger.log({
+            eventType: AuditEventType.POLICY_REVOKE,
+            secretId: policy.secret_id,
+            ...callerColumns(caller),
+            detail: {
+              policy_id: policy.id,
+              reason: "agent_deleted",
+              ...callerInterfaceDetail(caller),
+            },
+            sessionId: this.sessionId ?? undefined,
+          });
+        }
+
+        s.agentRegistry.delete(row.name);
+
         s.auditLogger.log({
-          eventType: AuditEventType.POLICY_REVOKE,
-          secretId: policy.secret_id,
+          eventType: AuditEventType.AGENT_DELETE,
           ...callerColumns(caller),
           detail: {
-            policy_id: policy.id,
-            reason: "agent_deleted",
+            name: row.name,
+            revoked_tokens: revokedTokens,
+            removed_grants: removed.length,
             ...callerInterfaceDetail(caller),
           },
           sessionId: this.sessionId ?? undefined,
         });
-      }
 
-      s.agentRegistry.delete(row.name);
-
-      s.auditLogger.log({
-        eventType: AuditEventType.AGENT_DELETE,
-        ...callerColumns(caller),
-        detail: {
-          name: row.name,
-          revoked_tokens: revokedTokens,
-          removed_grants: removed.length,
-          ...callerInterfaceDetail(caller),
-        },
-        sessionId: this.sessionId ?? undefined,
+        return { revoked_tokens: revokedTokens, removed_grants: removed.length };
       });
-
-      return { revoked_tokens: revokedTokens, removed_grants: removed.length };
-    });
+    } catch (err) {
+      this.refuseAudited(s, AuditEventType.AGENT_DELETE, err, {}, caller, {
+        codes: REGISTRY_REFUSALS,
+      });
+    }
   }
 
   /**
@@ -4808,7 +5024,15 @@ export class VaultEngine {
       throw VaultError.invalidInput(CREATE_NOT_GRANTABLE_MESSAGE);
     }
     const s = this.assertUnlocked();
-    if (input.principalType === "agent") s.agentRegistry.assertActive(input.principalId);
+    if (input.principalType === "agent") {
+      try {
+        s.agentRegistry.assertActive(input.principalId);
+      } catch (err) {
+        this.refuseAudited(s, AuditEventType.POLICY_GRANT, err, {}, caller, {
+          codes: REGISTRY_REFUSALS,
+        });
+      }
+    }
     this.checkResolvedCallerPolicy(
       s,
       input.secretId,
@@ -4848,10 +5072,23 @@ export class VaultEngine {
     // row name the secret the revoked grant belonged to.
     const existing = s.store.getPolicy(policyId);
     if (!existing) {
-      throw new VaultError(ErrorCode.POLICY_NOT_FOUND, `Policy not found: ${policyId}`);
+      this.refuseAudited(
+        s,
+        AuditEventType.POLICY_REVOKE,
+        new VaultError(ErrorCode.POLICY_NOT_FOUND, `Policy not found: ${policyId}`),
+        {},
+        caller,
+      );
     }
     if (expectedSecretId !== undefined && existing.secret_id !== expectedSecretId) {
-      throw new VaultError(ErrorCode.POLICY_NOT_FOUND, `Policy not found: ${policyId}`);
+      this.refuseAudited(
+        s,
+        AuditEventType.POLICY_REVOKE,
+        new VaultError(ErrorCode.POLICY_NOT_FOUND, `Policy not found: ${policyId}`),
+        {},
+        caller,
+        { secretId: existing.secret_id },
+      );
     }
     this.checkResolvedCallerPolicy(
       s,
@@ -4902,7 +5139,11 @@ export class VaultEngine {
       );
     }
     const policies = s.policyEngine.listPolicies(secretId);
-    if (secretId) this.auditConfigRead(s, secretId, caller, { config: "access_policies" });
+    if (secretId) {
+      this.auditConfigRead(s, secretId, caller, { config: "access_policies" });
+    } else {
+      this.auditVaultRead(s, caller, { operation: "list_policies", count: policies.length });
+    }
     return policies;
   }
 
@@ -4935,7 +5176,13 @@ export class VaultEngine {
     }
     const s = this.assertUnlocked();
     this.assertUnscopedGovernanceCaller(caller, "setAgentPermissions");
-    s.agentRegistry.assertActive(agentName);
+    try {
+      s.agentRegistry.assertActive(agentName);
+    } catch (err) {
+      this.refuseAudited(s, AuditEventType.POLICY_GRANT, err, {}, caller, {
+        codes: REGISTRY_REFUSALS,
+      });
+    }
     this.checkResolvedCallerPolicy(
       s,
       secretId,
@@ -4994,8 +5241,8 @@ export class VaultEngine {
 
   /**
    * The agent's row of the matrix: its non-expired grants with the secret
-   * handle resolved. Governance read — unaudited on success (design §5.6) and
-   * the caller is consulted only for the unscoped-token rule (N12).
+   * handle resolved. Governance read — one `vault.read` row on success (U-3);
+   * the caller meets the unscoped-token rule (N12) and attributes the row.
    * Registration is checked with `getByName`, not `assertActive`: deactivation
    * keeps an agent's grants (see {@link deactivateAgent}), so hiding them would
    * misreport what a reactivation would restore. A grant whose secret no longer
@@ -5004,7 +5251,19 @@ export class VaultEngine {
   listAgentPolicies(agentName: string, caller?: CallerContext): AgentPolicy[] {
     const s = this.assertUnlocked();
     this.assertUnscopedGovernanceCaller(caller, "listAgentPolicies");
-    const name = s.agentRegistry.getByName(agentName).name;
+    let name: string;
+    try {
+      name = s.agentRegistry.getByName(agentName).name;
+    } catch (err) {
+      this.refuseAudited(
+        s,
+        AuditEventType.VAULT_READ,
+        err,
+        { operation: "list_agent_policies" },
+        caller,
+        { codes: REGISTRY_REFUSALS },
+      );
+    }
     const now = Date.now();
 
     const handles = new Map(
@@ -5027,6 +5286,7 @@ export class VaultEngine {
       });
     }
 
+    this.auditVaultRead(s, caller, { operation: "list_agent_policies", count: listed.length });
     return listed;
   }
 
@@ -5041,28 +5301,40 @@ export class VaultEngine {
    * can no longer read every secret's audit detail — nor use `secret_id` as a
    * targeted oracle (L10). Rows without a `secret_id` (vault lifecycle, token
    * issuance, server start) stay visible, except a failed row of a per-secret
-   * event type or `access.denied`, whose detail may name a handle (S6).
+   * event type or `access.denied`, whose detail may name a handle (S6), and a
+   * `vault.read` row (A-2).
    *
    * The visibility filter is applied inside the query, ahead of `limit`, so a
    * scoped token gets up to `limit` rows it may see. An absent scope is the
    * unrestricted case: no filtering work is done at all.
    */
-  queryAudit(options?: AuditQueryOptions, scope?: AuditVisibilityScope): DecryptedAuditEvent[] {
+  queryAudit(
+    options?: AuditQueryOptions,
+    scope?: AuditVisibilityScope,
+    caller?: CallerContext,
+  ): DecryptedAuditEvent[] {
     const s = this.assertUnlocked();
+    let page: DecryptedAuditEvent[];
     if (!scope || (scope.project === undefined && !scope.secrets?.length)) {
-      return s.auditQuery.query(options);
+      page = s.auditQuery.query(options);
+    } else {
+      const visible = s.secretManager
+        .listSecretsWithIds()
+        .filter(
+          (entry) =>
+            (scope.project === undefined || entry.info.project === scope.project) &&
+            matchesSecretNameScope(entry.info.name, scope.secrets),
+        )
+        .map((entry) => entry.id);
+      page = s.auditQuery.query({ ...options, visibleSecretIds: visible });
     }
 
-    const visible = s.secretManager
-      .listSecretsWithIds()
-      .filter(
-        (entry) =>
-          (scope.project === undefined || entry.info.project === scope.project) &&
-          matchesSecretNameScope(entry.info.name, scope.secrets),
-      )
-      .map((entry) => entry.id);
-
-    return s.auditQuery.query({ ...options, visibleSecretIds: visible });
+    this.auditVaultRead(s, caller, {
+      operation: "audit_query",
+      ...auditQueryFilters(options),
+      count: page.length,
+    });
+    return page;
   }
 
   /**
@@ -5167,14 +5439,46 @@ export class VaultEngine {
   }
 
   /**
-   * The current audit-chain tail as an exportable anchor, or null when the log
-   * is empty or its newest row carries no link. The anchor contains nothing
-   * sensitive — its value against tail truncation and rollback comes entirely
-   * from the operator storing it OFF-HOST (the vault cannot supply that trust
-   * domain itself).
+   * The current audit-chain tail as an exportable anchor: this call's own
+   * `vault.read` row, written first, so the anchor anchors it. The anchor
+   * contains nothing sensitive — its value against tail truncation and rollback
+   * comes entirely from the operator storing it OFF-HOST (the vault cannot
+   * supply that trust domain itself).
    */
-  getAuditChainTail(): AuditChainAnchor | null {
+  getAuditChainTail(caller?: CallerContext): AuditChainAnchor | null {
     const s = this.assertUnlocked();
+    this.auditVaultRead(s, caller, { operation: "audit_anchor" });
+    return this.chainTailAnchor(s);
+  }
+
+  /**
+   * Verify the tamper-evidence HMAC chain over the audit log. With an anchor,
+   * additionally assert the anchored row still exists with exactly that link —
+   * detecting tail truncation and rollback, which the chain alone cannot see.
+   * The result always carries the current tail for comparison/re-anchoring.
+   */
+  verifyAuditChain(
+    options?: { anchor?: AuditChainAnchor },
+    caller?: CallerContext,
+  ): AuditChainVerificationReport {
+    const s = this.assertUnlocked();
+    const anchor = options?.anchor;
+    if (anchor && anchor.vault_id !== s.vaultId) {
+      throw new VaultError(
+        ErrorCode.INVALID_INPUT,
+        `Anchor was taken from a different vault (anchor ${anchor.vault_id}, this vault ${s.vaultId})`,
+      );
+    }
+    this.auditVaultRead(s, caller, { operation: "audit_verify" });
+    const verification = s.auditQuery.verifyChain(
+      anchor
+        ? { lastId: anchor.last_id, rowHmac: new Uint8Array(Buffer.from(anchor.row_hmac, "hex")) }
+        : undefined,
+    );
+    return { ...verification, tail: this.chainTailAnchor(s) };
+  }
+
+  private chainTailAnchor(s: UnlockedState): AuditChainAnchor | null {
     const tail = s.auditQuery.chainTail();
     if (!tail) return null;
     return {
@@ -5184,29 +5488,6 @@ export class VaultEngine {
       timestamp: tail.timestamp,
       row_hmac: Buffer.from(tail.rowHmac).toString("hex"),
     };
-  }
-
-  /**
-   * Verify the tamper-evidence HMAC chain over the audit log. With an anchor,
-   * additionally assert the anchored row still exists with exactly that link —
-   * detecting tail truncation and rollback, which the chain alone cannot see.
-   * The result always carries the current tail for comparison/re-anchoring.
-   */
-  verifyAuditChain(options?: { anchor?: AuditChainAnchor }): AuditChainVerificationReport {
-    const s = this.assertUnlocked();
-    const anchor = options?.anchor;
-    if (anchor && anchor.vault_id !== s.vaultId) {
-      throw new VaultError(
-        ErrorCode.INVALID_INPUT,
-        `Anchor was taken from a different vault (anchor ${anchor.vault_id}, this vault ${s.vaultId})`,
-      );
-    }
-    const verification = s.auditQuery.verifyChain(
-      anchor
-        ? { lastId: anchor.last_id, rowHmac: new Uint8Array(Buffer.from(anchor.row_hmac, "hex")) }
-        : undefined,
-    );
-    return { ...verification, tail: this.getAuditChainTail() };
   }
 
   // ---------------------------------------------------------------------------
@@ -5235,7 +5516,7 @@ export class VaultEngine {
    * `TokenRotationScheduler`): the row gains `rotation: true`, and before the
    * mint the subject's registration and the replaced token's revocation are
    * judged by `assertRotationLive`, whose refusals are audited. Without it the
-   * method and its row are as before.
+   * success row is as before.
    */
   createToken(
     subject: string,
@@ -5250,35 +5531,43 @@ export class VaultEngine {
     },
   ): string {
     const s = this.assertUnlocked();
+    const effectiveType = options?.principalType ?? "agent";
+    let agent: AgentRow | undefined;
 
-    for (const pattern of options?.secrets ?? []) {
-      if (!isValidSecretNamePattern(pattern)) {
+    try {
+      for (const pattern of options?.secrets ?? []) {
+        if (!isValidSecretNamePattern(pattern)) {
+          throw new VaultError(
+            ErrorCode.INVALID_SECRET_NAME,
+            `Invalid secret name pattern: "${pattern}" — letters, digits, "_", "-" and "*" wildcards only`,
+          );
+        }
+      }
+
+      if (
+        options?.principalType !== undefined &&
+        !Object.values(TokenPrincipalTypeValues).includes(options.principalType)
+      ) {
         throw new VaultError(
-          ErrorCode.INVALID_SECRET_NAME,
-          `Invalid secret name pattern: "${pattern}" — letters, digits, "_", "-" and "*" wildcards only`,
+          ErrorCode.INVALID_INPUT,
+          `Invalid principal type: "${options.principalType as string}". Valid: agent, tool, user`,
         );
       }
-    }
 
-    if (
-      options?.principalType !== undefined &&
-      !Object.values(TokenPrincipalTypeValues).includes(options.principalType)
-    ) {
-      throw new VaultError(
-        ErrorCode.INVALID_INPUT,
-        `Invalid principal type: "${options.principalType as string}". Valid: agent, tool, user`,
-      );
-    }
+      if (options?.label !== undefined && options.label.length > TOKEN_LABEL_MAX_LENGTH) {
+        throw VaultError.invalidInput(`Token label exceeds ${TOKEN_LABEL_MAX_LENGTH} characters`);
+      }
 
-    if (options?.label !== undefined && options.label.length > TOKEN_LABEL_MAX_LENGTH) {
-      throw VaultError.invalidInput(`Token label exceeds ${TOKEN_LABEL_MAX_LENGTH} characters`);
+      if (options?.rotation !== undefined) {
+        this.assertRotationLive(s, subject, effectiveType, options.rotation.previousJti);
+      }
+      agent = effectiveType === "agent" ? s.agentRegistry.assertActive(subject) : undefined;
+    } catch (err) {
+      if (options?.rotation !== undefined) throw err;
+      this.refuseAudited(s, AuditEventType.TOKEN_CREATE, err, {}, undefined, {
+        codes: TOKEN_REFUSALS,
+      });
     }
-
-    const effectiveType = options?.principalType ?? "agent";
-    if (options?.rotation !== undefined) {
-      this.assertRotationLive(s, subject, effectiveType, options.rotation.previousJti);
-    }
-    const agent = effectiveType === "agent" ? s.agentRegistry.assertActive(subject) : undefined;
 
     const effectiveTtl = Math.min(Math.max(ttlMs, 0), MAX_TOKEN_TTL_MS);
     const now = Math.floor(Date.now() / 1000);
@@ -5344,7 +5633,7 @@ export class VaultEngine {
    * pruned at the token's expiry (a re-mint delayed past it). A refusal writes
    * a failed `token.create` row `{ subject, principal_type, rotation: true,
    * error }` before the throw, so the rotator stops with its cause on the
-   * trail; `auth token`'s refusals stay row-less.
+   * trail; `auth token`'s refusals write `{ error }` alone.
    */
   private assertRotationLive(
     s: UnlockedState,
@@ -5419,7 +5708,7 @@ export class VaultEngine {
    * issued-token registry supplies the token's expiry, so the denylist entry
    * lives exactly as long as the token it names, and a jti the registry does
    * not know is refused with `INVALID_INPUT` (an input check ahead of any
-   * write — unaudited, like the schema gates). `verifyToken` prunes entries
+   * write; its failed row records a minted-shape jti alone). `verifyToken` prunes entries
    * whose `expires_at` has passed before it consults them; `createToken`
    * stores `expires_at = exp × 1000` and a token is accepted only while
    * `exp > ⌊now / 1000⌋`, so a still-valid token's entry is never pruned. A
@@ -5436,7 +5725,13 @@ export class VaultEngine {
     this.assertUnscopedGovernanceCaller(caller, "revokeToken");
     const issued = s.store.getIssuedToken(jti);
     if (!issued) {
-      throw VaultError.invalidInput(`Unknown token jti: ${jti}`);
+      this.refuseAudited(
+        s,
+        AuditEventType.TOKEN_REVOKE,
+        VaultError.invalidInput(`Unknown token jti: ${jti}`),
+        MINTED_JTI.test(jti) ? { jti } : {},
+        caller,
+      );
     }
     s.store.transaction(() => {
       s.store.insertRevokedToken(jti, issued.expires_at);
@@ -5458,8 +5753,8 @@ export class VaultEngine {
    * never a JWT. Status is derived, not stored: a revocation stamp wins over
    * an elapsed expiry, so a token revoked before it lapsed reads `revoked`.
    *
-   * Governance read: unaudited on success (design §5.6); the caller is
-   * consulted only for the unscoped-token rule (N12).
+   * Governance read: one `vault.read` row on success (U-3); the caller meets
+   * the unscoped-token rule (N12) and attributes the row.
    */
   listIssuedTokens(
     filter?: { agent?: string; status?: IssuedTokenStatusFilter },
@@ -5468,12 +5763,19 @@ export class VaultEngine {
     const s = this.assertUnlocked();
     this.assertUnscopedGovernanceCaller(caller, "listIssuedTokens");
 
-    const agentId =
-      filter?.agent !== undefined ? s.agentRegistry.getByName(filter.agent).id : undefined;
+    let agentId: string | undefined;
+    try {
+      agentId =
+        filter?.agent !== undefined ? s.agentRegistry.getByName(filter.agent).id : undefined;
+    } catch (err) {
+      this.refuseAudited(s, AuditEventType.VAULT_READ, err, { operation: "list_tokens" }, caller, {
+        codes: REGISTRY_REFUSALS,
+      });
+    }
     const status = filter?.status ?? IssuedTokenStatus.ACTIVE;
     const now = Date.now();
 
-    return s.store
+    const tokens = s.store
       .listIssuedTokens(agentId !== undefined ? { agentId } : undefined)
       .map((row) => ({
         jti: row.jti,
@@ -5495,6 +5797,14 @@ export class VaultEngine {
               : IssuedTokenStatus.ACTIVE,
       }))
       .filter((token) => status === "all" || token.status === status);
+
+    this.auditVaultRead(s, caller, {
+      operation: "list_tokens",
+      status: closedFilter(status, TOKEN_STATUS_FILTERS),
+      ...(filter?.agent !== undefined ? { agent: true } : {}),
+      count: tokens.length,
+    });
+    return tokens;
   }
 
   // ---------------------------------------------------------------------------
@@ -5641,13 +5951,17 @@ export class VaultEngine {
   }
 
   /**
-   * Whether the unlock-key slot is enrolled, and since when. Unaudited, as the
-   * listings are (RC-B3-6): a presence read that touches no key.
+   * Whether the unlock-key slot is enrolled, and since when. One `vault.read`
+   * row, as the listings write (U-3): a presence read that touches no key.
    */
-  async unlockKeyStatus(): Promise<{ enrolled: boolean; enrolledAt?: string }> {
+  async unlockKeyStatus(
+    caller?: CallerContext,
+  ): Promise<{ enrolled: boolean; enrolledAt?: string }> {
     const s = this.assertUnlocked();
-    if (s.store.getMeta("wrapped_kek_uk") === undefined) return { enrolled: false };
-    const enrolledAt = s.store.getMeta("unlock_key_enrolled_at");
+    const enrolled = s.store.getMeta("wrapped_kek_uk") !== undefined;
+    const enrolledAt = enrolled ? s.store.getMeta("unlock_key_enrolled_at") : undefined;
+    this.auditVaultRead(s, caller, { operation: "unlock_key_status" });
+    if (!enrolled) return { enrolled: false };
     return enrolledAt === undefined ? { enrolled: true } : { enrolled: true, enrolledAt };
   }
 
@@ -5736,10 +6050,11 @@ export class VaultEngine {
   }
 
   /**
-   * The CA for `server start --proxy`: null when the vault holds none (nothing
-   * read, no row); otherwise the intermediate, its decrypted key as the PEM's
-   * bytes (the caller zero-fills them after parsing — never a string here) and
-   * the root, and the stored host list (a live CA without it refuses — fail
+   * The CA for `server start --proxy`: null when the vault holds none (one
+   * `vault.read` row, `found: false`); otherwise the intermediate, its
+   * decrypted key as the PEM's bytes (the caller zero-fills them after
+   * parsing — never a string here) and the root, and the stored host list
+   * (a live CA without it refuses — fail
    * closed), read once per daemon start with one `secret.read` row (`config:
    * "certificate_private_key"`, `getCertificatePrivateKey`'s shape) — never one
    * per leaf. A `harpoc-ca` that is no vault-managed CA refuses
@@ -5750,7 +6065,10 @@ export class VaultEngine {
   async loadProxyCa(): Promise<ProxyCaMaterial | null> {
     const s = this.assertUnlocked();
     const secret = await this.findProxyCaSecret(s);
-    if (secret === undefined) return null;
+    if (secret === undefined) {
+      this.auditVaultRead(s, undefined, { operation: "proxy_ca", found: false });
+      return null;
+    }
     const row = isVaultManagedCertificate(s.store, secret)
       ? s.store.getCertificate(secret.id)
       : undefined;
@@ -5821,16 +6139,20 @@ export class VaultEngine {
 
   /**
    * The trust anchor for `harpoc proxy ca export` — the root, stored as the
-   * certificate's chain — or null when the vault holds no CA (no row): a read
-   * of the stored chain with one `secret.read` row (`config: "certificate_pem"`,
-   * `getCertificatePem`'s shape); a `harpoc-ca` that is no vault-managed CA or
-   * holds no root refuses `CERT_NOT_CONFIGURED`, a stored root that does not
-   * parse `CERT_INVALID`, each with its one failed row.
+   * certificate's chain — or null when the vault holds no CA (one `vault.read`
+   * row, `found: false`): a read of the stored chain with one `secret.read`
+   * row (`config: "certificate_pem"`, `getCertificatePem`'s shape); a
+   * `harpoc-ca` that is no vault-managed CA or holds no root refuses
+   * `CERT_NOT_CONFIGURED`, a stored root that does not parse `CERT_INVALID`,
+   * each with its one failed row.
    */
   async proxyCaCertificate(): Promise<ProxyCaCertificate | null> {
     const s = this.assertUnlocked();
     const secret = await this.findProxyCaSecret(s);
-    if (secret === undefined) return null;
+    if (secret === undefined) {
+      this.auditVaultRead(s, undefined, { operation: "proxy_ca", found: false });
+      return null;
+    }
     let rootPem: string;
     let root: X509Certificate;
     try {
@@ -5922,6 +6244,19 @@ export class VaultEngine {
     });
   }
 
+  private auditVaultRead(
+    s: UnlockedState,
+    caller: CallerContext | undefined,
+    detail: Record<string, unknown>,
+  ): void {
+    s.auditLogger.log({
+      eventType: AuditEventType.VAULT_READ,
+      ...callerColumns(caller),
+      detail: { ...detail, ...callerInterfaceDetail(caller) },
+      sessionId: this.sessionId ?? undefined,
+    });
+  }
+
   /**
    * R5's existence rule applied to an ambiguous handle (ruled 2026-09-02): a
    * bare name that resolves to more than one secret answered AMBIGUOUS_HANDLE
@@ -5973,6 +6308,20 @@ export class VaultEngine {
     });
   }
 
+  private refuseAudited(
+    s: UnlockedState,
+    eventType: AuditEventType,
+    err: unknown,
+    detail: Record<string, unknown>,
+    caller: CallerContext | undefined,
+    options: { secretId?: string; codes?: ReadonlySet<string> } = {},
+  ): never {
+    if (options.codes === undefined || (err instanceof VaultError && options.codes.has(err.code))) {
+      this.auditDenied(s, eventType, err, detail, options.secretId, caller);
+    }
+    throw err;
+  }
+
   /**
    * Every secret the caller may enumerate, keyed by internal id — the join
    * table the row-shaped expiry accessors project through. Same filter as
@@ -5987,21 +6336,23 @@ export class VaultEngine {
    * caller may not enumerate that secret and the row is dropped.
    */
   private secretInfoById(s: UnlockedState, caller?: CallerContext): Map<string, SecretInfo> {
-    const entries = s.secretManager.listSecretsWithIds(undefined);
-    const permitted =
-      caller && !isAdminUserCaller(caller)
-        ? s.policyEngine.filterPermitted(
-            entries.map((entry) => entry.id),
-            this.callerPrincipals(caller),
-            "list",
-          )
-        : null;
+    const { listable } = this.listableEntries(s, undefined, caller);
+    return new Map(listable.map((entry) => [entry.id, entry.info]));
+  }
 
-    const map = new Map<string, SecretInfo>();
-    for (const entry of entries) {
-      if (!permitted || permitted.has(entry.id)) map.set(entry.id, entry.info);
-    }
-    return map;
+  private listableEntries(
+    s: UnlockedState,
+    project: string | undefined,
+    caller: CallerContext | undefined,
+  ): { entries: SecretListEntry[]; listable: SecretListEntry[] } {
+    const entries = s.secretManager.listSecretsWithIds(project);
+    if (!caller || isAdminUserCaller(caller)) return { entries, listable: entries };
+    const permitted = s.policyEngine.filterPermitted(
+      entries.map((entry) => entry.id),
+      this.callerPrincipals(caller),
+      "list",
+    );
+    return { entries, listable: entries.filter((entry) => permitted.has(entry.id)) };
   }
 
   /**

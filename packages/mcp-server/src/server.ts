@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { CertManager } from "@harpoc/cert-manager";
 import type { VaultEngine } from "@harpoc/core";
 import { OAuthManager } from "@harpoc/oauth-proxy";
-import type { AccessInterface } from "@harpoc/shared";
+import type { AccessInterface, VaultApiToken } from "@harpoc/shared";
 import { ErrorCode, HARPOC_VERSION, VaultError } from "@harpoc/shared";
 import { valueRequestState } from "./elicitation/request-state.js";
 import { InjectionGuard } from "./guards/injection-guard.js";
@@ -88,6 +88,12 @@ export function createDefaultOAuthManager(engine: VaultEngine): OAuthManager {
   });
 }
 
+const LAUNCH_REFUSALS: ReadonlySet<string> = new Set([
+  ErrorCode.INVALID_TOKEN,
+  ErrorCode.TOKEN_EXPIRED,
+  ErrorCode.TOKEN_REVOKED,
+]);
+
 interface SharedServerParts {
   rateLimiter: RateLimiter;
   injectionGuard: InjectionGuard;
@@ -105,7 +111,21 @@ function resolveScopeGuard(options: CreateMcpServerOptions, rateLimiter: RateLim
   const accessInterface = options.accessInterface ?? "mcp";
 
   if (launchToken) {
-    const token = engine.verifyToken(launchToken);
+    let token: VaultApiToken;
+    try {
+      token = engine.verifyToken(launchToken);
+    } catch (err) {
+      if (accessInterface === "mcp" && err instanceof VaultError && LAUNCH_REFUSALS.has(err.code)) {
+        engine.auditServerStart({
+          transport: "stdio",
+          tokenless: false,
+          ttyPrompt: options.enableTtyPrompt ?? false,
+          success: false,
+          error: err.code,
+        });
+      }
+      throw err;
+    }
     if (accessInterface === "mcp") {
       // One row per stdio process start (R4/B22), before the guard and the
       // server like the waiver: no record, no server. The Streamable HTTP
@@ -201,10 +221,10 @@ function buildMcpServer(
   registerRenewCertificate(server, engine, scopeGuard, rateLimiter, certManager);
 
   // Register resources
-  registerSecretsResource(server, engine, scopeGuard);
-  registerHealthResource(server, engine, scopeGuard);
-  registerAuditResource(server, engine, scopeGuard);
-  registerProjectsResource(server, engine, scopeGuard);
+  registerSecretsResource(server, engine, scopeGuard, rateLimiter);
+  registerHealthResource(server, engine, scopeGuard, rateLimiter);
+  registerAuditResource(server, engine, scopeGuard, rateLimiter);
+  registerProjectsResource(server, engine, scopeGuard, rateLimiter);
 
   return server;
 }

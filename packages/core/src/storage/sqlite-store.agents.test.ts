@@ -179,7 +179,7 @@ describe("agents", () => {
     expect(store.deleteAgent("agent-id-1")).toBe(false);
   });
 
-  it("reads the most recent attributed audit timestamp as last-active", () => {
+  it("reads the most recent attributed audit timestamp that is not a read as last-active", () => {
     store.insertAgent(makeAgent());
     expect(store.agentLastActiveAt("alpha")).toBeNull();
 

@@ -101,6 +101,7 @@ export function registerCertCsrCommand(cert: Command): void {
             engine,
             { permission: "create", project: options.project, name },
             options.token ?? process.env.HARPOC_TOKEN,
+            "cert csr",
           );
 
           const manager = new CertManager(engine);

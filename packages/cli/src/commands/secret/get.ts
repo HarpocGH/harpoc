@@ -59,6 +59,7 @@ export function registerSecretGetCommand(secret: Command): void {
               "read",
               handle,
               options.token ?? process.env.HARPOC_TOKEN,
+              "secret get",
             );
             if (options.value) {
               const value = await engine.getSecretValue(handle, resolved?.caller);

@@ -213,6 +213,7 @@ export class RestClient implements VaultClient {
     const params = new URLSearchParams();
     if (options?.secretId) params.set("secret_id", options.secretId);
     if (options?.eventType) params.set("event_type", options.eventType);
+    if (options?.excludeEventType) params.set("exclude_event_type", options.excludeEventType);
     if (options?.since !== undefined) params.set("since", String(options.since));
     if (options?.until !== undefined) params.set("until", String(options.until));
     if (options?.limit !== undefined) params.set("limit", String(options.limit));

@@ -52,6 +52,7 @@ export function registerSecretRotateCommand(secret: Command): void {
             "rotate",
             handle,
             options.token ?? process.env.HARPOC_TOKEN,
+            "secret rotate",
           );
           const newValue = await resolveSecretValue({
             fromFile: options.fromFile,

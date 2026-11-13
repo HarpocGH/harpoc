@@ -14,6 +14,7 @@ const { mockEngine } = vi.hoisted(() => ({
     }),
     refreshOAuthToken: vi.fn().mockResolvedValue(2_000_000_000_000),
     verifyToken: vi.fn(),
+    auditScopeRefusal: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),
   },
 }));

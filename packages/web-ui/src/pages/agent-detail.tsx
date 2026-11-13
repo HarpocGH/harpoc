@@ -100,7 +100,13 @@ export function AgentDetailPage({ api, name }: { api: ApiClient; name: string })
   // rows it just killed are exactly what the operator looks for afterwards.
   const tokens = useAsync(() => api.listTokens({ agent: name, status: "all" }), [name]);
   const activity = useAsync(
-    () => api.queryAudit({ principal_type: "agent", principal_id: name, limit: 50 }),
+    () =>
+      api.queryAudit({
+        principal_type: "agent",
+        principal_id: name,
+        limit: 50,
+        exclude_event_type: "vault.read",
+      }),
     [name],
   );
 

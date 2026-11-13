@@ -50,6 +50,7 @@ export interface AuditChainVerification {
 export interface AuditQueryOptions {
   secretId?: string;
   eventType?: AuditEventType;
+  excludeEventType?: AuditEventType;
   since?: number;
   until?: number;
   limit?: number;
@@ -73,6 +74,7 @@ export class AuditQuery {
     const filter: AuditFilter = {
       secretId: options?.secretId,
       eventType: options?.eventType,
+      excludeEventType: options?.excludeEventType,
       since: options?.since,
       until: options?.until,
       limit: options?.limit,

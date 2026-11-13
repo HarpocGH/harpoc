@@ -33,6 +33,7 @@ export function registerAgentDeactivateCommand(agent: Command): void {
             engine,
             { permission: "admin" },
             options.token ?? process.env.HARPOC_TOKEN,
+            "agent deactivate",
           );
 
           const result = engine.deactivateAgent(name, resolved?.caller);

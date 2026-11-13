@@ -36,8 +36,8 @@ describe("enum member counts", () => {
     expect(Object.values(Permission)).toHaveLength(7);
   });
 
-  it("AuditEventType has 38 members", () => {
-    expect(Object.values(AuditEventType)).toHaveLength(38);
+  it("AuditEventType has 39 members", () => {
+    expect(Object.values(AuditEventType)).toHaveLength(39);
   });
 
   it("PrincipalType has 4 members", () => {
@@ -255,5 +255,11 @@ describe("ErrorCode deployment model B values (B4)", () => {
 describe("ErrorCode deployment model B values (B8)", () => {
   it("ErrorCode carries the CONNECT refusal of a host outside the Harpoc CA", () => {
     expect(ErrorCode.PROXY_CONNECT_DENIED).toBe("PROXY_CONNECT_DENIED");
+  });
+});
+
+describe("AuditEventType audit completeness values (A1)", () => {
+  it("AuditEventType carries the vault's read event", () => {
+    expect(AuditEventType.VAULT_READ).toBe("vault.read");
   });
 });

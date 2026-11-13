@@ -26,6 +26,13 @@ const NON_ADMIN_TOKEN: VaultApiToken = {
   scope: ["read", "list"],
 };
 
+const ADMIN_CALLER = {
+  principal_type: "agent",
+  principal_id: "admin-agent",
+  interface: "rest",
+  admin_scope: true,
+};
+
 function createMockEngine(token: VaultApiToken = ADMIN_TOKEN) {
   return {
     verifyToken: vi.fn().mockReturnValue(token),
@@ -97,6 +104,7 @@ describe("audit routes", () => {
       },
       // Unrestricted admin token: no scope filter is applied (L10).
       undefined,
+      ADMIN_CALLER,
     );
   });
 
@@ -128,6 +136,7 @@ describe("audit routes", () => {
         limit: undefined,
       },
       undefined,
+      ADMIN_CALLER,
     );
   });
 
@@ -148,7 +157,11 @@ describe("audit routes", () => {
 
     await app.request("/api/v1/audit", { headers: AUTH });
 
-    expect(engine.queryAudit).toHaveBeenCalledWith(expect.anything(), { secrets: ["db-*"] });
+    expect(engine.queryAudit).toHaveBeenCalledWith(
+      expect.anything(),
+      { secrets: ["db-*"] },
+      { ...ADMIN_CALLER, secrets: ["db-*"] },
+    );
   });
 
   it("passes a project-scoped token's scope to the engine", async () => {
@@ -167,7 +180,11 @@ describe("audit routes", () => {
       headers: AUTH,
     });
 
-    expect(engine.queryAudit).toHaveBeenCalledWith(expect.anything(), { project: "finance" });
+    expect(engine.queryAudit).toHaveBeenCalledWith(
+      expect.anything(),
+      { project: "finance" },
+      { ...ADMIN_CALLER, project: "finance" },
+    );
   });
 
   it("passes success=false to engine.queryAudit", async () => {
@@ -175,6 +192,7 @@ describe("audit routes", () => {
     expect(engine.queryAudit).toHaveBeenCalledWith(
       expect.objectContaining({ success: false }),
       undefined,
+      ADMIN_CALLER,
     );
   });
 
@@ -183,6 +201,7 @@ describe("audit routes", () => {
     expect(engine.queryAudit).toHaveBeenCalledWith(
       expect.objectContaining({ success: true }),
       undefined,
+      ADMIN_CALLER,
     );
   });
 
@@ -200,6 +219,7 @@ describe("audit routes", () => {
     expect(engine.queryAudit).toHaveBeenCalledWith(
       expect.objectContaining({ principalType: "agent", principalId: "deploy-bot" }),
       undefined,
+      ADMIN_CALLER,
     );
   });
 
@@ -208,6 +228,7 @@ describe("audit routes", () => {
     expect(engine.queryAudit).toHaveBeenCalledWith(
       expect.objectContaining({ principalType: undefined, principalId: "deploy-bot" }),
       undefined,
+      ADMIN_CALLER,
     );
   });
 
@@ -244,7 +265,30 @@ describe("audit routes", () => {
     expect(engine.queryAudit).toHaveBeenCalledWith(
       expect.objectContaining({ limit: 5 }),
       undefined,
+      ADMIN_CALLER,
     );
+  });
+
+  it("passes exclude_event_type to engine.queryAudit as excludeEventType (A-9)", async () => {
+    const res = await app.request("/api/v1/audit?exclude_event_type=vault.read", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    expect(engine.queryAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ excludeEventType: "vault.read" }),
+      undefined,
+      ADMIN_CALLER,
+    );
+  });
+
+  it("refuses an exclude_event_type outside the enum 400 SCHEMA_VALIDATION_ERROR before the query", async () => {
+    const res = await app.request("/api/v1/audit?exclude_event_type=secret.list", {
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as ErrorBody;
+    expect(body.error).toBe("SCHEMA_VALIDATION_ERROR");
+    expect(engine.queryAudit).not.toHaveBeenCalled();
   });
 });
 
@@ -289,13 +333,6 @@ describe("the chain's verification and the trail's listing through createApp (C-
     ["secrets", { secrets: ["*"] }],
   ];
 
-  const ADMIN_CALLER = {
-    principal_type: "agent",
-    principal_id: "admin-agent",
-    interface: "rest",
-    admin_scope: true,
-  };
-
   const HOST_AUTH = { host: "localhost", ...AUTH };
 
   function serveThroughApp(token: VaultApiToken): void {
@@ -337,7 +374,10 @@ describe("the chain's verification and the trail's listing through createApp (C-
 
       expect(res.status).toBe(200);
       expect(engine.queryAudit).toHaveBeenCalledTimes(1);
-      expect(engine.queryAudit).toHaveBeenCalledWith(expect.anything(), claims);
+      expect(engine.queryAudit).toHaveBeenCalledWith(expect.anything(), claims, {
+        ...ADMIN_CALLER,
+        ...claims,
+      });
       expect(engine.auditGovernanceRefusal).not.toHaveBeenCalled();
       expect(engine.auditScopeRefusal).not.toHaveBeenCalled();
     },
@@ -351,6 +391,7 @@ describe("the chain's verification and the trail's listing through createApp (C-
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ data: { valid: true, checked: 12, first_broken_id: null } });
     expect(engine.verifyAuditChain).toHaveBeenCalledTimes(1);
+    expect(engine.verifyAuditChain).toHaveBeenCalledWith(undefined, ADMIN_CALLER);
     expect(engine.auditGovernanceRefusal).not.toHaveBeenCalled();
     expect(engine.auditScopeRefusal).not.toHaveBeenCalled();
   });

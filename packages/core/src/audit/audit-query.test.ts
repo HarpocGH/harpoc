@@ -60,6 +60,14 @@ describe("AuditQuery", () => {
     expect(events[0]?.event_type).toBe("vault.unlock");
   });
 
+  it("excludeEventType drops the rows of that type (A-9)", () => {
+    logger.log({ eventType: AuditEventType.VAULT_READ });
+    logger.log({ eventType: AuditEventType.VAULT_UNLOCK });
+
+    const events = query.query({ excludeEventType: AuditEventType.VAULT_READ });
+    expect(events.map((event) => event.event_type)).toEqual(["vault.unlock"]);
+  });
+
   it("respects limit", () => {
     for (let i = 0; i < 5; i++) {
       logger.log({ eventType: AuditEventType.SECRET_READ });

@@ -40,15 +40,19 @@ export function refuseEmptyToken(token: string | undefined): void {
  * local path, unchanged: no caller, no policy check, unattributed audit rows.
  */
 export function resolveTokenCaller(
-  engine: Pick<VaultEngine, "verifyToken">,
+  engine: Pick<VaultEngine, "verifyToken" | "auditScopeRefusal">,
   target: TokenScopeTarget,
   token: string | undefined,
+  command: string,
 ): ResolvedToken | undefined {
   if (token === undefined) return undefined;
   refuseEmptyToken(token);
   const payload = engine.verifyToken(token);
-  checkTokenScope(payload, target.permission, target.project, target.name);
-  return { payload, caller: callerFromToken(payload, "cli") };
+  const caller = callerFromToken(payload, "cli");
+  checkTokenScope(payload, target.permission, target.project, target.name, (reason) =>
+    engine.auditScopeRefusal(caller, command, reason),
+  );
+  return { payload, caller };
 }
 
 /**
@@ -59,13 +63,14 @@ export function resolveTokenCaller(
  * validity, then verification, then scope.
  */
 export function resolveTokenCallerForHandle(
-  engine: Pick<VaultEngine, "verifyToken">,
+  engine: Pick<VaultEngine, "verifyToken" | "auditScopeRefusal">,
   permission: Permission,
   handle: string,
   token: string | undefined,
+  command: string,
 ): ResolvedToken | undefined {
   if (token === undefined) return undefined;
   refuseEmptyToken(token);
   const { project, name } = parseHandle(handle);
-  return resolveTokenCaller(engine, { permission, project, name }, token);
+  return resolveTokenCaller(engine, { permission, project, name }, token, command);
 }

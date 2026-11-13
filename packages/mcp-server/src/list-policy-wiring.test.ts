@@ -131,7 +131,7 @@ describe("tools", () => {
 
 describe("resources", () => {
   it("secrets-list passes the caller", async () => {
-    registerSecretsResource(server, engine, scopeGuard);
+    registerSecretsResource(server, engine, scopeGuard, new RateLimiter());
 
     const text = firstText(await readResource(server, "secret://vault/secrets"));
     expect(engine.listSecrets).toHaveBeenCalledWith(undefined, EXPECTED_CALLER);
@@ -140,7 +140,7 @@ describe("resources", () => {
   });
 
   it("vault-health passes the caller", async () => {
-    registerHealthResource(server, engine, scopeGuard);
+    registerHealthResource(server, engine, scopeGuard, new RateLimiter());
 
     const text = firstText(await readResource(server, "secret://vault/health"));
     expect(engine.listSecrets).toHaveBeenCalledWith(undefined, EXPECTED_CALLER);
@@ -148,7 +148,7 @@ describe("resources", () => {
   });
 
   it("projects census passes the caller", async () => {
-    registerProjectsResource(server, engine, scopeGuard);
+    registerProjectsResource(server, engine, scopeGuard, new RateLimiter());
 
     const text = firstText(await readResource(server, "secret://vault/projects"));
     expect(engine.listSecrets).toHaveBeenCalledWith(undefined, EXPECTED_CALLER);
@@ -157,7 +157,7 @@ describe("resources", () => {
   });
 
   it("secret-by-name reads the advertised handle path through the gated getSecretInfo, not the listing", async () => {
-    registerSecretsResource(server, engine, scopeGuard);
+    registerSecretsResource(server, engine, scopeGuard, new RateLimiter());
 
     const text = firstText(await readResource(server, "secret://vault/secrets/api%2Fvisible"));
     expect(engine.getSecretInfo).toHaveBeenCalledWith("secret://api/visible", EXPECTED_CALLER);
@@ -169,7 +169,7 @@ describe("resources", () => {
     (
       engine.getSecretInfo as unknown as { mockRejectedValue: (e: Error) => void }
     ).mockRejectedValue(new Error("ACCESS_DENIED"));
-    registerSecretsResource(server, engine, scopeGuard);
+    registerSecretsResource(server, engine, scopeGuard, new RateLimiter());
 
     await expect(
       invokeHandler(server, "resources/read", { uri: "secret://vault/secrets/visible" }),

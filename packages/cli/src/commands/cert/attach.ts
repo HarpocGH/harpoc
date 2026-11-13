@@ -65,6 +65,7 @@ export function registerCertAttachCommand(cert: Command): void {
             "rotate",
             handle,
             options.token ?? process.env.HARPOC_TOKEN,
+            "cert attach",
           );
           const secretId = await resolveSecretId(
             engine,

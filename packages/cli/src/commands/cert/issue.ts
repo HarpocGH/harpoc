@@ -138,6 +138,7 @@ export function registerCertIssueCommand(cert: Command): void {
             engine,
             { permission: "create", project: options.project, name },
             options.token ?? process.env.HARPOC_TOKEN,
+            "cert issue",
           );
 
           const manager = new CertManager(engine);

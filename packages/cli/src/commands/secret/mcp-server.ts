@@ -95,7 +95,13 @@ export function registerSecretMcpServerCommand(secret: Command): void {
           const tokenValue = options.token ?? process.env.HARPOC_TOKEN;
 
           if (options.delete) {
-            const resolved = resolveTokenCallerForHandle(engine, "rotate", handle, tokenValue);
+            const resolved = resolveTokenCallerForHandle(
+              engine,
+              "rotate",
+              handle,
+              tokenValue,
+              "secret mcp-server",
+            );
             const deleted = await engine.deleteMcpServerConfig(handle, resolved?.caller);
             printSuccess(
               deleted
@@ -106,13 +112,25 @@ export function registerSecretMcpServerCommand(secret: Command): void {
           }
 
           if (options.show || (!options.name && !options.transport)) {
-            const resolved = resolveTokenCallerForHandle(engine, "read", handle, tokenValue);
+            const resolved = resolveTokenCallerForHandle(
+              engine,
+              "read",
+              handle,
+              tokenValue,
+              "secret mcp-server",
+            );
             const config = await engine.getMcpServerConfig(handle, resolved?.caller);
             printJson(config ?? null);
             return;
           }
 
-          const resolved = resolveTokenCallerForHandle(engine, "rotate", handle, tokenValue);
+          const resolved = resolveTokenCallerForHandle(
+            engine,
+            "rotate",
+            handle,
+            tokenValue,
+            "secret mcp-server",
+          );
 
           const parsed = parseMcpConfig(options);
 

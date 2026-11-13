@@ -482,6 +482,44 @@ describe("the bridge refuses at its own boundary what the shared tool schemas re
   });
 });
 
+describe("the bridge's audit resource leaves read rows out of its window (TW-R2)", () => {
+  let fetchSpy: Mock;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: AUDIT }),
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("secret://vault/audit/recent requests /api/v1/audit with the query limit 50 and exclude_event_type vault.read", async () => {
+    const bridge = await connectInMemoryClient(
+      createBridgeServer({
+        client: () => new RestClient({ baseUrl: BASE_URL, token: "bridge.jwt" }),
+        baseUrl: BASE_URL,
+      }),
+    );
+    try {
+      await bridge.readResource("secret://vault/audit/recent");
+      expect(fetchSpy.mock.calls.length).toBe(1);
+      const sent = new URL((fetchSpy.mock.calls[0] as [string])[0]);
+      expect(sent.pathname).toBe("/api/v1/audit");
+      expect(Object.fromEntries(sent.searchParams)).toEqual({
+        exclude_event_type: AuditEventType.VAULT_READ,
+        limit: "50",
+      });
+    } finally {
+      await bridge.close();
+    }
+  });
+});
+
 describe("the bridge's client failures (B1)", () => {
   it("an unreachable REST server is a descriptive error, never fetch's own message", async () => {
     const client = {

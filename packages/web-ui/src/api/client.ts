@@ -88,6 +88,7 @@ export interface AuditVerifyReport {
 export interface AuditQueryFilters {
   secret_id?: string;
   event_type?: AuditEventType;
+  exclude_event_type?: AuditEventType;
   since?: number;
   until?: number;
   limit?: number;

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it, expect, vi } from "vitest";
 import {
+  AuditEventType,
   ENCRYPTED_KEY_IMPORT_REFUSAL,
   ErrorCode,
   HARPOC_VERSION,
@@ -476,6 +477,16 @@ describe("DirectClient", () => {
 
     await client.queryAudit({ limit: 10 });
     expect(engine.queryAudit).toHaveBeenCalledWith({ limit: 10 });
+  });
+
+  it("queryAudit hands excludeEventType to the engine in the options object, with no caller (A-9)", async () => {
+    const engine = createMockEngine();
+    const client: VaultClient = new DirectClient(engine as never);
+
+    await client.queryAudit({ excludeEventType: AuditEventType.VAULT_READ, limit: 10 });
+    expect(engine.queryAudit.mock.calls).toStrictEqual([
+      [{ excludeEventType: AuditEventType.VAULT_READ, limit: 10 }],
+    ]);
   });
 
   it("verifyAuditChain answers the engine's chain report without the tail, no anchor, through the VaultClient interface", async () => {

@@ -1,7 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission } from "@harpoc/shared";
-import { VaultError } from "@harpoc/shared";
 import { collectValueFromTty } from "../elicitation/tty-prompt.js";
 import {
   collectValueViaUrlElicitation,
@@ -31,8 +30,8 @@ export function registerCreateSecret(
 
     const modern = isModernRequest(ctx);
     const refuseTakenName = async () => {
-      if (await engine.secretNameTaken(args.name, args.project)) {
-        throw VaultError.duplicateSecret(args.name);
+      if (await engine.secretNameTaken(args.name, args.project, scopeGuard.caller)) {
+        await engine.refuseTakenSecretName(args.name, scopeGuard.caller);
       }
     };
     const finishCreate = async (

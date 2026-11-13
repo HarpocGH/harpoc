@@ -349,7 +349,9 @@ describe("L10 — audit visibility scope", () => {
     const apiId = await engine.resolveSecretId("secret://api-key");
     const all = engine.queryAudit();
     expect(all.map((r) => r.secret_id)).toContain(apiId);
-    expect(engine.queryAudit({}, undefined).length).toBe(all.length);
+    const withoutReads = (rows: Array<{ event_type: string }>) =>
+      rows.filter((r) => r.event_type !== AuditEventType.VAULT_READ);
+    expect(withoutReads(engine.queryAudit({}, undefined)).length).toBe(withoutReads(all).length);
   });
 });
 

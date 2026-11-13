@@ -2,12 +2,19 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CallerContext } from "@harpoc/shared";
-import { AuditEventType, ErrorCode, SecretType, TOKEN_LABEL_MAX_LENGTH } from "@harpoc/shared";
+import type { AgentStatus, CallerContext, IssuedTokenStatusFilter } from "@harpoc/shared";
+import {
+  AGENT_DESCRIPTION_MAX_LENGTH,
+  AuditEventType,
+  ErrorCode,
+  SecretType,
+  TOKEN_LABEL_MAX_LENGTH,
+} from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import type { DecryptedAuditEvent } from "./audit/audit-query.js";
 import type { IssuedTokenRow, SqliteStore } from "./storage/sqlite-store.js";
 import { VaultEngine } from "./vault-engine.js";
+import { nonReadAuditCount } from "./__fixtures__/engine-seams.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -34,6 +41,16 @@ function failNextAuditInsert(): void {
 
 function rows(eventType: AuditEventType): DecryptedAuditEvent[] {
   return engine.queryAudit({ eventType });
+}
+
+function vaultReads(...operations: string[]): DecryptedAuditEvent[] {
+  return rows(AuditEventType.VAULT_READ).filter((row) =>
+    operations.includes(row.detail?.operation as string),
+  );
+}
+
+function failedDetails(eventType: AuditEventType): unknown[] {
+  return engine.queryAudit({ eventType, success: false }).map((row) => row.detail);
 }
 
 /**
@@ -106,10 +123,14 @@ describe("registerAgent", () => {
     expect(registered[0]?.success).toBe(true);
   });
 
-  it("refuses a duplicate registration with AGENT_EXISTS", async () => {
+  it("refuses a duplicate registration with AGENT_EXISTS and one failed agent.register row carrying the error alone", async () => {
     engine.registerAgent({ name: "alpha" });
     await expectVaultError(() => engine.registerAgent({ name: "alpha" }), ErrorCode.AGENT_EXISTS);
-    expect(rows(AuditEventType.AGENT_REGISTER)).toHaveLength(1);
+    const registered = rows(AuditEventType.AGENT_REGISTER);
+    expect(registered.filter((row) => row.success)).toHaveLength(1);
+    expect(failedDetails(AuditEventType.AGENT_REGISTER)).toEqual([
+      { error: ErrorCode.AGENT_EXISTS },
+    ]);
   });
 
   it("refuses an invalid name before writing anything", async () => {
@@ -146,12 +167,13 @@ describe("registerAgent", () => {
 });
 
 describe("getAgent / listAgents", () => {
-  it("reads back an agent by name without writing an audit row", () => {
+  it("reads back an agent by name and writes one vault.read row and no other", () => {
     engine.registerAgent({ name: "alpha" });
-    const before = engine.queryAudit().length;
+    const before = nonReadAuditCount(engine);
 
     expect(engine.getAgent("alpha")).toMatchObject({ name: "alpha", status: "active" });
-    expect(engine.queryAudit()).toHaveLength(before);
+    expect(nonReadAuditCount(engine)).toBe(before);
+    expect(vaultReads("get_agent")).toHaveLength(1);
   });
 
   it("refuses an unknown agent with AGENT_NOT_FOUND naming the register command", async () => {
@@ -179,6 +201,31 @@ describe("getAgent / listAgents", () => {
     seedToken("alpha", "jti-live");
 
     expect(engine.getAgent("alpha")).toMatchObject({ active_tokens: 1, grants: 1 });
+  });
+
+  it("an agent's listing does not move its last_active_at; a later non-read row of the same agent does (TW-R3)", async () => {
+    const secretId = await makeSecret("db-password");
+    engine.registerAgent({ name: "alpha" });
+    engine.grantPolicy(
+      { secretId, principalType: "agent", principalId: "alpha", permissions: ["read", "list"] },
+      "test-admin",
+    );
+    const alpha: CallerContext = { principal_type: "agent", principal_id: "alpha" };
+    const start = Date.now();
+
+    vi.useFakeTimers({ now: start + 60_000, toFake: ["Date"] });
+    try {
+      await engine.getSecretInfo("secret://db-password", alpha);
+      vi.setSystemTime(start + 120_000);
+      expect(engine.listSecrets(undefined, alpha)).toHaveLength(1);
+      expect(engine.getAgent("alpha").last_active_at).toBe(start + 60_000);
+
+      vi.setSystemTime(start + 180_000);
+      await engine.getSecretInfo("secret://db-password", alpha);
+      expect(engine.getAgent("alpha").last_active_at).toBe(start + 180_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -485,23 +532,30 @@ describe("sealed vault", () => {
 });
 
 describe("createToken registration gate", () => {
-  it("refuses an unregistered agent-typed subject and writes nothing", async () => {
+  it("refuses an unregistered agent-typed subject with one failed token.create row and no token", async () => {
     const err = await expectVaultError(
       () => engine.createToken("ghost", ["use"]),
       ErrorCode.AGENT_NOT_FOUND,
     );
     expect(err.message).toContain("harpoc agent register ghost");
 
-    expect(rows(AuditEventType.TOKEN_CREATE)).toHaveLength(0);
+    const created = rows(AuditEventType.TOKEN_CREATE);
+    expect(created.map((row) => [row.success, row.principal_id, row.detail])).toEqual([
+      [false, null, { error: ErrorCode.AGENT_NOT_FOUND }],
+    ]);
+    expect(JSON.stringify(created[0]?.detail).includes("ghost")).toBe(false);
     expect(liveStore().listIssuedTokens()).toHaveLength(0);
   });
 
-  it("refuses a deactivated agent with AGENT_INACTIVE", async () => {
+  it("refuses a deactivated agent with AGENT_INACTIVE and one failed token.create row", async () => {
     engine.registerAgent({ name: "ghost" });
     engine.deactivateAgent("ghost");
 
     await expectVaultError(() => engine.createToken("ghost", ["use"]), ErrorCode.AGENT_INACTIVE);
     expect(liveStore().listIssuedTokens()).toHaveLength(0);
+    expect(failedDetails(AuditEventType.TOKEN_CREATE)).toEqual([
+      { error: ErrorCode.AGENT_INACTIVE },
+    ]);
   });
 
   it("issues for a registered agent and records the claims metadata", () => {
@@ -548,15 +602,20 @@ describe("createToken registration gate", () => {
     expect(rows(AuditEventType.TOKEN_CREATE)[0]?.detail).not.toHaveProperty("label");
   });
 
-  it("refuses a label over the maximum length before writing anything", async () => {
+  it("refuses a label over the maximum length with one failed token.create row that carries no label, and no token", async () => {
     engine.registerAgent({ name: "ghost" });
+    const label = `refused-label-${"x".repeat(256)}`;
 
     await expectVaultError(
-      () => engine.createToken("ghost", ["use"], 60_000, { label: "x".repeat(256) }),
+      () => engine.createToken("ghost", ["use"], 60_000, { label }),
       ErrorCode.INVALID_INPUT,
     );
     expect(liveStore().listIssuedTokens()).toHaveLength(0);
-    expect(rows(AuditEventType.TOKEN_CREATE)).toHaveLength(0);
+    const created = rows(AuditEventType.TOKEN_CREATE);
+    expect(created.map((row) => [row.success, row.detail])).toEqual([
+      [false, { error: ErrorCode.INVALID_INPUT }],
+    ]);
+    expect(JSON.stringify(created[0]).includes("refused-label")).toBe(false);
   });
 
   it("accepts a label exactly at the maximum length", () => {
@@ -600,7 +659,7 @@ describe("createToken registration gate", () => {
 });
 
 describe("grantPolicy registration gate", () => {
-  it("refuses an unregistered agent principal before writing a policy row", async () => {
+  it("refuses an unregistered agent principal before writing a policy row, with one failed policy.grant row", async () => {
     const secretId = await makeSecret("db-password");
 
     await expectVaultError(
@@ -608,14 +667,19 @@ describe("grantPolicy registration gate", () => {
         engine.grantPolicy(
           { secretId, principalType: "agent", principalId: "ghost2", permissions: ["read"] },
           "test-admin",
+          CALLER,
         ),
       ErrorCode.AGENT_NOT_FOUND,
     );
     expect(engine.listPolicies(secretId)).toHaveLength(0);
-    expect(rows(AuditEventType.POLICY_GRANT)).toHaveLength(0);
+    const granted = rows(AuditEventType.POLICY_GRANT);
+    expect(
+      granted.map((row) => [row.success, row.secret_id, row.principal_id, row.detail]),
+    ).toEqual([[false, null, "admin-1", { error: ErrorCode.AGENT_NOT_FOUND, interface: "rest" }]]);
+    expect(JSON.stringify(granted[0]?.detail).includes("ghost2")).toBe(false);
   });
 
-  it("refuses a deactivated agent principal with AGENT_INACTIVE", async () => {
+  it("refuses a deactivated agent principal with AGENT_INACTIVE and one failed policy.grant row", async () => {
     const secretId = await makeSecret("db-password");
     engine.registerAgent({ name: "ghost2" });
     engine.deactivateAgent("ghost2");
@@ -628,6 +692,9 @@ describe("grantPolicy registration gate", () => {
         ),
       ErrorCode.AGENT_INACTIVE,
     );
+    expect(failedDetails(AuditEventType.POLICY_GRANT)).toEqual([
+      { error: ErrorCode.AGENT_INACTIVE },
+    ]);
   });
 
   it("refuses a create grant before reaching the registration gate", async () => {
@@ -715,16 +782,17 @@ describe("listIssuedTokens", () => {
     );
   });
 
-  it("orders newest first and writes no audit row", () => {
+  it("orders newest first and writes one vault.read row and no other", () => {
     engine.registerAgent({ name: "ghost" });
     engine.createToken("ghost", ["read"]);
     engine.createToken("ghost", ["use"]);
-    const before = engine.queryAudit().length;
+    const before = nonReadAuditCount(engine);
 
     const listed = engine.listIssuedTokens();
     expect(listed).toHaveLength(2);
     expect(listed[0]?.issued_at).toBeGreaterThanOrEqual(listed[1]?.issued_at as number);
-    expect(engine.queryAudit()).toHaveLength(before);
+    expect(nonReadAuditCount(engine)).toBe(before);
+    expect(vaultReads("list_tokens")).toHaveLength(1);
   });
 
   it("keeps the row of a deleted agent with a null agent name", () => {
@@ -778,5 +846,288 @@ describe("revokeToken attribution", () => {
     expect(row?.principal_type).toBeNull();
     expect(row?.principal_id).toBeNull();
     expect(row?.detail).toEqual({ jti });
+  });
+});
+
+describe("the registry reads' vault.read rows (A5)", () => {
+  const NAMES = ["ledger-bot", "payroll-bot"];
+
+  function storedJtis(): string[] {
+    return liveStore()
+      .listIssuedTokens()
+      .map((row) => row.jti);
+  }
+
+  it("getAgent: one row after the read — found true, the caller's principal — naming no agent", () => {
+    engine.registerAgent({ name: "ledger-bot" });
+    const before = nonReadAuditCount(engine);
+
+    expect(engine.getAgent("ledger-bot", CALLER)).toMatchObject({ name: "ledger-bot" });
+
+    expect(nonReadAuditCount(engine)).toBe(before);
+    const reads = vaultReads("get_agent");
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toMatchObject({
+      event_type: AuditEventType.VAULT_READ,
+      secret_id: null,
+      principal_type: "user",
+      principal_id: "admin-1",
+      success: true,
+    });
+    expect(reads[0]?.detail).toEqual({ operation: "get_agent", found: true, interface: "rest" });
+    expect(JSON.stringify(reads[0]?.detail).includes("ledger-bot")).toBe(false);
+  });
+
+  it("listAgents: one row a call — the status verbatim, the count, the caller's principal — naming no agent", () => {
+    engine.registerAgent({ name: "ledger-bot" });
+    engine.registerAgent({ name: "payroll-bot" });
+    engine.deactivateAgent("payroll-bot");
+    const before = nonReadAuditCount(engine);
+
+    expect(engine.listAgents(undefined, CALLER).map((a) => a.name)).toEqual(["ledger-bot"]);
+    expect(engine.listAgents("inactive", CALLER).map((a) => a.name)).toEqual(["payroll-bot"]);
+    expect(engine.listAgents("all", CALLER)).toHaveLength(2);
+
+    expect(nonReadAuditCount(engine)).toBe(before);
+    const reads = vaultReads("list_agents");
+    expect(reads.map((row) => [row.principal_type, row.principal_id, row.detail])).toEqual([
+      ["user", "admin-1", { operation: "list_agents", status: "all", count: 2, interface: "rest" }],
+      [
+        "user",
+        "admin-1",
+        { operation: "list_agents", status: "inactive", count: 1, interface: "rest" },
+      ],
+      [
+        "user",
+        "admin-1",
+        { operation: "list_agents", status: "active", count: 1, interface: "rest" },
+      ],
+    ]);
+    const serialized = JSON.stringify(reads.map((row) => row.detail));
+    for (const name of NAMES) expect(serialized.includes(name)).toBe(false);
+  });
+
+  it("listIssuedTokens: one row a call — the status verbatim, the agent filter by its presence, the count — naming no agent, label or jti", () => {
+    engine.registerAgent({ name: "ledger-bot" });
+    engine.registerAgent({ name: "payroll-bot" });
+    engine.createToken("ledger-bot", ["use"], 60_000, { label: "nightly-sync" });
+    engine.createToken("payroll-bot", ["use"]);
+    const jtis = storedJtis();
+    expect(jtis).toHaveLength(2);
+    const before = nonReadAuditCount(engine);
+
+    expect(engine.listIssuedTokens({ agent: "ledger-bot", status: "all" }, CALLER)).toHaveLength(1);
+    expect(engine.listIssuedTokens(undefined, CALLER)).toHaveLength(2);
+
+    expect(nonReadAuditCount(engine)).toBe(before);
+    const reads = vaultReads("list_tokens");
+    expect(reads.map((row) => [row.principal_type, row.principal_id, row.detail])).toEqual([
+      [
+        "user",
+        "admin-1",
+        { operation: "list_tokens", status: "active", count: 2, interface: "rest" },
+      ],
+      [
+        "user",
+        "admin-1",
+        { operation: "list_tokens", status: "all", agent: true, count: 1, interface: "rest" },
+      ],
+    ]);
+    const serialized = JSON.stringify(reads.map((row) => row.detail));
+    for (const text of [...NAMES, "nightly-sync", ...jtis]) {
+      expect(serialized.includes(text)).toBe(false);
+    }
+  });
+
+  it("a status outside its vocabulary is recorded by its presence, the text in no part of the detail", () => {
+    engine.registerAgent({ name: "ledger-bot" });
+
+    expect(engine.listAgents("ledger-owner" as AgentStatus, CALLER)).toEqual([]);
+    expect(
+      engine.listIssuedTokens({ status: "payroll-run" as IssuedTokenStatusFilter }, CALLER),
+    ).toEqual([]);
+
+    const reads = vaultReads("list_agents", "list_tokens");
+    expect(reads.map((row) => row.detail)).toEqual([
+      { operation: "list_tokens", status: true, count: 0, interface: "rest" },
+      { operation: "list_agents", status: true, count: 0, interface: "rest" },
+    ]);
+    const serialized = JSON.stringify(reads.map((row) => row.detail));
+    for (const text of ["ledger-owner", "payroll-run"]) {
+      expect(serialized.includes(text)).toBe(false);
+    }
+  });
+
+  it("the trusted path writes the three rows with NULL principal columns and no interface key", () => {
+    engine.registerAgent({ name: "ledger-bot" });
+
+    engine.getAgent("ledger-bot");
+    engine.listAgents();
+    engine.listIssuedTokens();
+
+    expect(
+      vaultReads("get_agent", "list_agents", "list_tokens").map((row) => [
+        row.principal_type,
+        row.principal_id,
+        row.detail,
+      ]),
+    ).toEqual([
+      [null, null, { operation: "list_tokens", status: "active", count: 0 }],
+      [null, null, { operation: "list_agents", status: "active", count: 1 }],
+      [null, null, { operation: "get_agent", found: true }],
+    ]);
+  });
+
+  it("an unknown agent stays AGENT_NOT_FOUND on getAgent and the token filter, each with one failed vault.read row of its operation naming no agent", async () => {
+    await expectVaultError(() => engine.getAgent("missing", CALLER), ErrorCode.AGENT_NOT_FOUND);
+    await expectVaultError(
+      () => engine.listIssuedTokens({ agent: "missing" }, CALLER),
+      ErrorCode.AGENT_NOT_FOUND,
+    );
+
+    const reads = vaultReads("get_agent", "list_tokens");
+    expect(reads.map((row) => [row.success, row.principal_id, row.detail])).toEqual([
+      [false, "admin-1", { operation: "list_tokens", error: "AGENT_NOT_FOUND", interface: "rest" }],
+      [false, "admin-1", { operation: "get_agent", error: "AGENT_NOT_FOUND", interface: "rest" }],
+    ]);
+    expect(JSON.stringify(reads.map((row) => row.detail)).includes("missing")).toBe(false);
+  });
+
+  it.each([
+    ["getAgent", "get_agent", () => engine.getAgent("ledger-bot", CALLER)],
+    ["listAgents", "list_agents", () => engine.listAgents("all", CALLER)],
+    ["listIssuedTokens", "list_tokens", () => engine.listIssuedTokens({ status: "all" }, CALLER)],
+  ])(
+    "%s throws the logger's error and returns nothing when its row cannot be written",
+    (_label, operation, read) => {
+      engine.registerAgent({ name: "ledger-bot" });
+      failNextAuditInsert();
+
+      let answer: unknown;
+      expect(() => {
+        answer = read();
+      }).toThrow("audit unavailable");
+      expect(answer).toBeUndefined();
+      expect(vaultReads(operation)).toEqual([]);
+    },
+  );
+
+  it("an admin scoped to a project finds none of these rows on the trail; an unscoped read finds them (A-2)", () => {
+    engine.registerAgent({ name: "ledger-bot" });
+    engine.getAgent("ledger-bot", CALLER);
+    engine.listAgents("all", CALLER);
+    engine.listIssuedTokens(undefined, CALLER);
+
+    const scoped = engine.queryAudit({}, { project: "web" });
+    expect(scoped.length).toBeGreaterThan(0);
+    expect(scoped.filter((row) => row.event_type === AuditEventType.VAULT_READ)).toEqual([]);
+    expect(
+      vaultReads("get_agent", "list_agents", "list_tokens").map((row) => row.detail?.operation),
+    ).toEqual(["list_tokens", "list_agents", "get_agent"]);
+  });
+});
+
+describe("the registry's refusals write one failed row of the operation's own type (A7)", () => {
+  const UNKNOWN = "unknown-ledger-bot";
+
+  it.each([
+    ["updateAgent", AuditEventType.AGENT_UPDATE, () => engine.updateAgent(UNKNOWN, {}, CALLER)],
+    ["activateAgent", AuditEventType.AGENT_ACTIVATE, () => engine.activateAgent(UNKNOWN, CALLER)],
+    [
+      "deactivateAgent",
+      AuditEventType.AGENT_DEACTIVATE,
+      () => engine.deactivateAgent(UNKNOWN, CALLER),
+    ],
+    ["deleteAgent", AuditEventType.AGENT_DELETE, () => engine.deleteAgent(UNKNOWN, CALLER)],
+  ])(
+    "%s of an unknown agent: AGENT_NOT_FOUND, one failed row with the caller's principal and the error alone",
+    async (_label, eventType, refused) => {
+      await expectVaultError(refused, ErrorCode.AGENT_NOT_FOUND);
+
+      const written = rows(eventType);
+      expect(
+        written.map((row) => [row.success, row.secret_id, row.principal_id, row.detail]),
+      ).toEqual([
+        [false, null, "admin-1", { error: ErrorCode.AGENT_NOT_FOUND, interface: "rest" }],
+      ]);
+      expect(JSON.stringify(written[0]).includes(UNKNOWN)).toBe(false);
+    },
+  );
+
+  it("registerAgent of a taken name: the failed agent.register row carries the caller's principal, not the name", async () => {
+    engine.registerAgent({ name: "ledger-bot" });
+
+    await expectVaultError(
+      () => engine.registerAgent({ name: "ledger-bot", owner: "ops" }, CALLER),
+      ErrorCode.AGENT_EXISTS,
+    );
+
+    const failed = engine.queryAudit({ eventType: AuditEventType.AGENT_REGISTER, success: false });
+    expect(failed.map((row) => [row.principal_id, row.detail])).toEqual([
+      ["admin-1", { error: ErrorCode.AGENT_EXISTS, interface: "rest" }],
+    ]);
+    expect(JSON.stringify(failed[0]?.detail).includes("ledger-bot")).toBe(false);
+  });
+
+  it.each([
+    ["an unknown agent", ErrorCode.AGENT_NOT_FOUND, false],
+    ["a deactivated agent", ErrorCode.AGENT_INACTIVE, true],
+  ])(
+    "setAgentPermissions for %s: one failed policy.grant row with the error alone, no secret id, no cell written",
+    async (_label, code, registered) => {
+      const secretId = await makeSecret("db-password");
+      if (registered) {
+        engine.registerAgent({ name: UNKNOWN });
+        engine.deactivateAgent(UNKNOWN);
+      }
+
+      await expectVaultError(
+        () => engine.setAgentPermissions(UNKNOWN, secretId, ["read"], undefined, "op", CALLER),
+        code,
+      );
+
+      expect(engine.listPolicies(secretId)).toHaveLength(0);
+      const granted = rows(AuditEventType.POLICY_GRANT);
+      expect(
+        granted.map((row) => [row.success, row.secret_id, row.principal_id, row.detail]),
+      ).toEqual([[false, null, "admin-1", { error: code, interface: "rest" }]]);
+      expect(JSON.stringify(granted[0]).includes(UNKNOWN)).toBe(false);
+    },
+  );
+
+  it("createToken with a principal type outside agent, tool and user: one failed token.create row that carries no principal type", async () => {
+    await expectVaultError(
+      () =>
+        engine.createToken("svc", ["use"], 60_000, {
+          principalType: "refused-principal" as never,
+        }),
+      ErrorCode.INVALID_INPUT,
+    );
+
+    const created = rows(AuditEventType.TOKEN_CREATE);
+    expect(created.map((row) => [row.success, row.detail])).toEqual([
+      [false, { error: ErrorCode.INVALID_INPUT }],
+    ]);
+    expect(JSON.stringify(created[0]).includes("refused-principal")).toBe(false);
+    expect(liveStore().listIssuedTokens()).toHaveLength(0);
+  });
+
+  it("a schema refusal before any read stays row-less (U-7): an invalid name on registerAgent and updateAgent", async () => {
+    engine.registerAgent({ name: "ledger-bot" });
+    const before = nonReadAuditCount(engine);
+
+    await expectVaultError(
+      () => engine.registerAgent({ name: "bad name" }),
+      ErrorCode.INVALID_INPUT,
+    );
+    await expectVaultError(
+      () =>
+        engine.updateAgent("ledger-bot", {
+          description: "d".repeat(AGENT_DESCRIPTION_MAX_LENGTH + 1),
+        }),
+      ErrorCode.INVALID_INPUT,
+    );
+
+    expect(nonReadAuditCount(engine)).toBe(before);
   });
 });

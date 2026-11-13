@@ -4,6 +4,7 @@ import { ErrorCode, VaultError } from "@harpoc/shared";
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
     verifyToken: vi.fn(),
+    auditScopeRefusal: vi.fn(),
     grantPolicy: vi.fn().mockReturnValue({
       id: "pol-1",
       secret_id: "sid-1",
@@ -207,5 +208,21 @@ describe("policy commands — token path", () => {
       expect.objectContaining({ interface: "cli" }),
       undefined,
     );
+  });
+
+  it("list: handle-less, a token without read writes the refusal's access.denied row under its command path (A8)", async () => {
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["use"] }));
+    await expect(run(["list", "--token", "jwt-value"])).rejects.toThrow("process.exit");
+    expect(spies.stderr()).toBe(
+      "Error: [ACCESS_DENIED] Access denied: Token lacks permission: read",
+    );
+    expect(mockEngine.listPolicies).not.toHaveBeenCalled();
+    expect(mockEngine.auditScopeRefusal.mock.calls).toEqual([
+      [
+        { principal_type: "agent", principal_id: "agent-1", interface: "cli" },
+        "policy list",
+        "permission",
+      ],
+    ]);
   });
 });

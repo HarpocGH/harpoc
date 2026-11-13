@@ -9,6 +9,7 @@ const { mockEngine, mockResolveSecretValue, mockPromptConfirm } = vi.hoisted(() 
     rotateSecret: vi.fn(),
     revokeSecret: vi.fn(),
     verifyToken: vi.fn(),
+    auditScopeRefusal: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),
   },
   mockResolveSecretValue: vi.fn(),

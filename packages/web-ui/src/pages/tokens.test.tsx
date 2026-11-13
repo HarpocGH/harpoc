@@ -42,6 +42,21 @@ const href = (selector: string): string | undefined =>
 const SELF_REVOKE_WARNING =
   "This is the token this session is using — revoking it signs you out. Revoke anyway?";
 
+/** Clicks the filter form's Apply button. */
+function apply(): void {
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+}
+
+/** Submits the filter form, as Enter in the agent filter does. */
+function pressEnter(): void {
+  const form = (screen.getByLabelText("Agent") as HTMLInputElement).form;
+  if (form === null) throw new Error("filter form missing");
+  fireEvent.submit(form);
+}
+
+/** Waits for the flushed tick, so a negative reads the settled page. */
+const flushed = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
 describe("TokensPage", () => {
   it("lists a token's claims metadata across the columns", async () => {
     render(<TokensPage api={api()} />);
@@ -103,11 +118,45 @@ describe("TokensPage", () => {
     render(<TokensPage api={api({ listTokens })} />);
     await waitFor(() => expect(listTokens).toHaveBeenCalledWith({ status: "active" }));
     fireEvent.input(screen.getByLabelText("Agent"), { target: { value: "ci-bot" } });
+    apply();
     await waitFor(() =>
       expect(listTokens).toHaveBeenCalledWith({ status: "active", agent: "ci-bot" }),
     );
     fireEvent.input(screen.getByLabelText("Agent"), { target: { value: "" } });
+    apply();
     await waitFor(() => expect(listTokens).toHaveBeenLastCalledWith({ status: "active" }));
+  });
+
+  it("sends no query on a keystroke in the agent filter", async () => {
+    const listTokens = vi.fn().mockResolvedValue([token()]);
+    render(<TokensPage api={api({ listTokens })} />);
+    await waitFor(() => expect(listTokens).toHaveBeenCalledTimes(1));
+    fireEvent.input(screen.getByLabelText("Agent"), { target: { value: "ci-b" } });
+    fireEvent.input(screen.getByLabelText("Agent"), { target: { value: "ci-bo" } });
+    await flushed();
+    expect(listTokens).toHaveBeenCalledTimes(1);
+  });
+
+  it("applies the typed agent filter on Enter", async () => {
+    const listTokens = vi.fn().mockResolvedValue([token()]);
+    render(<TokensPage api={api({ listTokens })} />);
+    await waitFor(() => expect(listTokens).toHaveBeenCalledTimes(1));
+    fireEvent.input(screen.getByLabelText("Agent"), { target: { value: "ci-bot" } });
+    pressEnter();
+    await waitFor(() =>
+      expect(listTokens).toHaveBeenLastCalledWith({ status: "active", agent: "ci-bot" }),
+    );
+    expect(listTokens).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-queries at once on a status change, leaving an unapplied agent draft out", async () => {
+    const listTokens = vi.fn().mockResolvedValue([token()]);
+    render(<TokensPage api={api({ listTokens })} />);
+    await waitFor(() => expect(listTokens).toHaveBeenCalledTimes(1));
+    fireEvent.input(screen.getByLabelText("Agent"), { target: { value: "ci-bot" } });
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "all" } });
+    await waitFor(() => expect(listTokens).toHaveBeenLastCalledWith({ status: "all" }));
+    expect(listTokens).toHaveBeenCalledTimes(2);
   });
 
   it("counts an expiry under the hour down in minutes, in the warn tone", async () => {

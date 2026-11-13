@@ -1,6 +1,7 @@
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
 import type { McpConnectionRegistry } from "../injection/mcp-registry.js";
 import type { SecretManager } from "../secrets/secret-manager.js";
+import type { SqliteStore } from "../storage/sqlite-store.js";
 import type { VaultEngine } from "../vault-engine.js";
 
 /**
@@ -39,4 +40,16 @@ export function retainDecryptedValues(engine: VaultEngine): Uint8Array[] {
     return value;
   };
   return retained;
+}
+
+/**
+ * The number of audit rows whose type is not `vault.read`, counted in the
+ * engine's store rather than through `queryAudit` (test seam — private field).
+ */
+export function nonReadAuditCount(engine: VaultEngine): number {
+  const { db } = (engine as unknown as { store: SqliteStore }).store;
+  const row = db
+    .prepare("SELECT COUNT(*) AS count FROM audit_log WHERE event_type != ?")
+    .get(AuditEventType.VAULT_READ) as { count: number };
+  return row.count;
 }

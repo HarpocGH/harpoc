@@ -43,6 +43,7 @@ export function registerAgentShowCommand(agent: Command): void {
             engine,
             { permission: "admin" },
             options.token ?? process.env.HARPOC_TOKEN,
+            "agent show",
           );
 
           const found = engine.getAgent(name, resolved?.caller);

@@ -87,6 +87,19 @@ function send(token: string, headers: Record<string, string> = {}): Promise<Prox
   });
 }
 
+interface SqliteHandle {
+  prepare(sql: string): { get(...params: unknown[]): unknown };
+}
+
+/** The number of audit rows whose type is not `vault.read`, counted in the engine's store. */
+function nonReadAuditCount(of: VaultEngine): number {
+  const { db } = (of as unknown as { store: { db: SqliteHandle } }).store;
+  const row = db
+    .prepare("SELECT COUNT(*) AS count FROM audit_log WHERE event_type != ?")
+    .get(AuditEventType.VAULT_READ) as { count: number };
+  return row.count;
+}
+
 // A pass-through has no CA pin: the fixture CA joins the default store, which
 // tls.setDefaultCACertificates needs (Node >= 22.19 / 24.5).
 describe.skipIf(!CAN_SET_DEFAULT_CA)("a pass-through against a real engine", () => {
@@ -122,13 +135,13 @@ describe("the proxy against a real engine", () => {
       token = engine.createToken("agent-a", ["use"]);
       engine.revokeToken(engine.verifyToken(token).jti);
     }
-    const rowsBefore = engine.queryAudit().length;
+    const rowsBefore = nonReadAuditCount(engine);
 
     const reply = await send(token, { authorization: "Bearer harpoc:gh-pat" });
 
     expect(reply.status).toBe(status);
     expect(JSON.parse(reply.body)).toMatchObject({ error: code });
-    expect(engine.queryAudit()).toHaveLength(rowsBefore);
+    expect(nonReadAuditCount(engine)).toBe(rowsBefore);
     expect(resolveForProxy).not.toHaveBeenCalled();
     expect(upstream.seen).toHaveLength(0);
   });

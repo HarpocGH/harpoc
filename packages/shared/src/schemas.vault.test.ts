@@ -100,6 +100,16 @@ describe("auditQuerySchema", () => {
   it("rejects an empty principal_id (v1.4)", () => {
     expect(() => auditQuerySchema.parse({ principal_id: "" })).toThrow();
   });
+
+  it("auditQuerySchema accepts an exclude_event_type of the enum", () => {
+    expect(auditQuerySchema.parse({ exclude_event_type: "vault.read" }).exclude_event_type).toBe(
+      "vault.read",
+    );
+  });
+
+  it("auditQuerySchema refuses an exclude_event_type outside the enum", () => {
+    expect(auditQuerySchema.safeParse({ exclude_event_type: "secret.list" }).success).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

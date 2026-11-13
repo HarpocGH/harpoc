@@ -4,6 +4,7 @@ const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
     listSecrets: vi.fn(),
     verifyToken: vi.fn(),
+    auditScopeRefusal: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),
   },
 }));
@@ -74,6 +75,23 @@ describe("secret list — token path", () => {
     );
     expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("[ACCESS_DENIED]"));
     expect(mockEngine.listSecrets).not.toHaveBeenCalled();
+  });
+
+  it("the cross-project refusal writes its access.denied row through the engine, its message unchanged (A8)", async () => {
+    mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: ["list"], project: "api" }));
+    await expect(run(["--project", "other", "--token", "jwt-value"])).rejects.toThrow(
+      "process.exit",
+    );
+    expect(spies.stderr()).toBe(
+      "Error: [ACCESS_DENIED] Access denied: Token is scoped to project: api",
+    );
+    expect(mockEngine.auditScopeRefusal.mock.calls).toEqual([
+      [
+        { principal_type: "agent", principal_id: "agent-1", project: "api", interface: "cli" },
+        "secret list",
+        "project",
+      ],
+    ]);
   });
 
   it("treats --project '' as absent (H4) — the token's project still applies", async () => {

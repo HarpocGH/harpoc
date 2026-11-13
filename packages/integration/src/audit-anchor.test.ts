@@ -126,7 +126,7 @@ describe("audit-chain anchor across the real database file", () => {
 
     const plain = vault.engine.verifyAuditChain();
     expect(plain.valid).toBe(false);
-    expect(plain.checked).toBe(0);
+    expect(plain.checked).toBe(1);
   });
 
   it("a fresh anchor keeps verifying as rows are appended", async () => {

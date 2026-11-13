@@ -1,5 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Mock } from "vitest";
+import { createApiClient } from "../api/client";
 import type { ApiClient } from "../api/client";
 import { makeEvent } from "../__fixtures__/builders";
 import { AuditPage } from "./audit";
@@ -24,6 +26,34 @@ function api(over: Partial<ApiClient> = {}): ApiClient {
   } as ApiClient;
 }
 
+/** Clicks the filter form's Apply button. */
+function apply(): void {
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+}
+
+/** Submits the filter form, as Enter in one of its text inputs does. */
+function pressEnter(): void {
+  const form = (screen.getByLabelText("Principal id") as HTMLInputElement).form;
+  if (form === null) throw new Error("filter form missing");
+  fireEvent.submit(form);
+}
+
+/** Types into the three text filters without applying them. */
+function typeTextFilters(): void {
+  fireEvent.input(screen.getByLabelText("Event type"), { target: { value: "secret.use" } });
+  fireEvent.input(screen.getByLabelText("Principal id"), { target: { value: "ci-bot" } });
+  fireEvent.input(screen.getByLabelText("Limit"), { target: { value: "25" } });
+}
+
+/** Waits for the flushed tick, so a negative reads the settled page. */
+const flushed = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** The query parameters of one request a stubbed fetch received. */
+function queryOf(fetchFn: Mock<typeof fetch>, index: number): URLSearchParams {
+  const url = String(fetchFn.mock.calls[index]?.[0] ?? "");
+  return new URLSearchParams(url.includes("?") ? url.slice(url.indexOf("?") + 1) : "");
+}
+
 describe("AuditPage", () => {
   it("renders rows and marks failures in the bad tone", async () => {
     render(<AuditPage api={api()} />);
@@ -45,6 +75,7 @@ describe("AuditPage", () => {
     render(<AuditPage api={fake} />);
     fireEvent.change(screen.getByLabelText("Principal type"), { target: { value: "agent" } });
     fireEvent.input(screen.getByLabelText("Principal id"), { target: { value: "ci-bot" } });
+    apply();
     await waitFor(() =>
       expect(fake.queryAudit).toHaveBeenCalledWith(
         expect.objectContaining({ principal_type: "agent", principal_id: "ci-bot" }),
@@ -56,12 +87,14 @@ describe("AuditPage", () => {
     const fake = api();
     render(<AuditPage api={fake} />);
     fireEvent.input(screen.getByLabelText("Principal id"), { target: { value: "ci-bot" } });
+    apply();
     await waitFor(() =>
       expect(fake.queryAudit).toHaveBeenCalledWith(
         expect.objectContaining({ principal_id: "ci-bot" }),
       ),
     );
     fireEvent.input(screen.getByLabelText("Principal id"), { target: { value: "" } });
+    apply();
     await waitFor(() =>
       expect(fake.queryAudit).toHaveBeenLastCalledWith(
         expect.objectContaining({ principal_id: undefined }),
@@ -75,12 +108,14 @@ describe("AuditPage", () => {
     const fake = api();
     render(<AuditPage api={fake} />);
     fireEvent.input(screen.getByLabelText("Event type"), { target: { value: "secret.use" } });
+    apply();
     await waitFor(() =>
       expect(fake.queryAudit).toHaveBeenCalledWith(
         expect.objectContaining({ event_type: "secret.use" }),
       ),
     );
     fireEvent.input(screen.getByLabelText("Event type"), { target: { value: "" } });
+    apply();
     await waitFor(() =>
       expect(fake.queryAudit).toHaveBeenLastCalledWith(
         expect.objectContaining({ event_type: undefined }),
@@ -92,13 +127,156 @@ describe("AuditPage", () => {
     const fake = api();
     render(<AuditPage api={fake} />);
     fireEvent.input(screen.getByLabelText("Limit"), { target: { value: "25" } });
+    apply();
     await waitFor(() =>
       expect(fake.queryAudit).toHaveBeenCalledWith(expect.objectContaining({ limit: 25 })),
     );
     fireEvent.input(screen.getByLabelText("Limit"), { target: { value: "" } });
+    apply();
     await waitFor(() =>
       expect(fake.queryAudit).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 100 })),
     );
+  });
+
+  it("applies a zero limit as 100 and shows the applied limit in the input", async () => {
+    const fake = api();
+    render(<AuditPage api={fake} />);
+    fireEvent.input(screen.getByLabelText("Limit"), { target: { value: "25" } });
+    apply();
+    await waitFor(() =>
+      expect(fake.queryAudit).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 25 })),
+    );
+    fireEvent.input(screen.getByLabelText("Limit"), { target: { value: "0" } });
+    apply();
+    await waitFor(() =>
+      expect(fake.queryAudit).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 100 })),
+    );
+    expect((screen.getByLabelText("Limit") as HTMLInputElement).value).toBe("100");
+  });
+
+  it("sends no query on a keystroke in the event type, principal id or limit input", async () => {
+    const fake = api();
+    render(<AuditPage api={fake} />);
+    await waitFor(() => expect(fake.queryAudit).toHaveBeenCalledTimes(1));
+    typeTextFilters();
+    await flushed();
+    expect(fake.queryAudit).toHaveBeenCalledTimes(1);
+  });
+
+  it("applies the three typed text filters in one query on Apply", async () => {
+    const fake = api();
+    render(<AuditPage api={fake} />);
+    await waitFor(() => expect(fake.queryAudit).toHaveBeenCalledTimes(1));
+    typeTextFilters();
+    apply();
+    await waitFor(() =>
+      expect(fake.queryAudit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ event_type: "secret.use", principal_id: "ci-bot", limit: 25 }),
+      ),
+    );
+    expect(fake.queryAudit).toHaveBeenCalledTimes(2);
+  });
+
+  it("applies the three typed text filters in one query on Enter", async () => {
+    const fake = api();
+    render(<AuditPage api={fake} />);
+    await waitFor(() => expect(fake.queryAudit).toHaveBeenCalledTimes(1));
+    typeTextFilters();
+    pressEnter();
+    await waitFor(() =>
+      expect(fake.queryAudit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ event_type: "secret.use", principal_id: "ci-bot", limit: 25 }),
+      ),
+    );
+    expect(fake.queryAudit).toHaveBeenCalledTimes(2);
+  });
+
+  it("queries at once on a select change, leaving an unapplied text draft out", async () => {
+    const fake = api();
+    render(<AuditPage api={fake} />);
+    await waitFor(() => expect(fake.queryAudit).toHaveBeenCalledTimes(1));
+    fireEvent.input(screen.getByLabelText("Principal id"), { target: { value: "ci-bot" } });
+    fireEvent.change(screen.getByLabelText("Outcome"), { target: { value: "failed" } });
+    await waitFor(() =>
+      expect(fake.queryAudit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ success: false, principal_id: undefined }),
+      ),
+    );
+    expect(fake.queryAudit).toHaveBeenCalledTimes(2);
+  });
+
+  it("queries at once on a principal type change, with no Apply", async () => {
+    const fake = api();
+    render(<AuditPage api={fake} />);
+    await waitFor(() => expect(fake.queryAudit).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByLabelText("Principal type"), { target: { value: "agent" } });
+    await waitFor(() =>
+      expect(fake.queryAudit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ principal_type: "agent" }),
+      ),
+    );
+    expect(fake.queryAudit).toHaveBeenCalledTimes(2);
+  });
+
+  it("hides reads at first: show reads is unticked and the first query excludes vault.read", async () => {
+    const fake = api();
+    render(<AuditPage api={fake} />);
+    await waitFor(() => expect(fake.queryAudit).toHaveBeenCalledTimes(1));
+    expect(fake.queryAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ exclude_event_type: "vault.read" }),
+    );
+    expect((screen.getByLabelText("show reads") as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("queries at once without the exclusion once show reads is ticked, and with it once unticked", async () => {
+    const fake = api();
+    render(<AuditPage api={fake} />);
+    await waitFor(() => expect(fake.queryAudit).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByLabelText("show reads"));
+    await waitFor(() =>
+      expect(fake.queryAudit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ exclude_event_type: undefined }),
+      ),
+    );
+    fireEvent.click(screen.getByLabelText("show reads"));
+    await waitFor(() =>
+      expect(fake.queryAudit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ exclude_event_type: "vault.read" }),
+      ),
+    );
+    expect(fake.queryAudit).toHaveBeenCalledTimes(3);
+  });
+
+  it("omits the exclusion while the applied event type is vault.read, and sends it for any other", async () => {
+    const fake = api();
+    render(<AuditPage api={fake} />);
+    fireEvent.input(screen.getByLabelText("Event type"), { target: { value: "vault.read" } });
+    apply();
+    await waitFor(() =>
+      expect(fake.queryAudit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ event_type: "vault.read", exclude_event_type: undefined }),
+      ),
+    );
+    fireEvent.input(screen.getByLabelText("Event type"), { target: { value: "secret.use" } });
+    apply();
+    await waitFor(() =>
+      expect(fake.queryAudit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ event_type: "secret.use", exclude_event_type: "vault.read" }),
+      ),
+    );
+    expect((screen.getByLabelText("show reads") as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("sends exclude_event_type=vault.read on the wire, and drops the parameter once show reads is ticked", async () => {
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
+    );
+    render(<AuditPage api={createApiClient(() => "t", fetchFn)} />);
+    await waitFor(() => expect(fetchFn).toHaveBeenCalledTimes(1));
+    expect(queryOf(fetchFn, 0).get("exclude_event_type")).toBe("vault.read");
+    fireEvent.click(screen.getByLabelText("show reads"));
+    await waitFor(() => expect(fetchFn).toHaveBeenCalledTimes(2));
+    expect(queryOf(fetchFn, 1).has("exclude_event_type")).toBe(false);
   });
 
   it("prefilters from the hash query the agent detail links to", async () => {

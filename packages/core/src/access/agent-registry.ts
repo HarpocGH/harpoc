@@ -116,7 +116,7 @@ export class AgentRegistry {
   /**
    * Project a stored row onto the wire type, adding the three fields that are
    * counted rather than stored: last activity (the newest audit row attributed
-   * to the agent), live tokens and unexpired grants.
+   * to the agent that is not a read), live tokens and unexpired grants.
    */
   toAgent(row: AgentRow, now = Date.now()): Agent {
     return {

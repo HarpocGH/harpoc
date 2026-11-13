@@ -119,7 +119,7 @@ export function statusLines(statuses: ConsumerSocketStatus[], runtimeDir: string
     }
     if (status.identities === null) {
       return [
-        `consumer ${status.consumer}: listening — the identities request was refused (a locked vault refuses it) ${where}`,
+        `consumer ${status.consumer}: listening — the identities request was refused (a locked vault or a spent listing budget refuses it) ${where}`,
       ];
     }
     const count = status.identities.length;

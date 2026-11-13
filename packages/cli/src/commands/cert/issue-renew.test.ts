@@ -10,6 +10,7 @@ const { mockEngine, mockCertManager, mockIssueWithAcme, mockRenewCertificate, mo
     return {
       mockEngine: {
         verifyToken: vi.fn(),
+        auditScopeRefusal: vi.fn(),
         destroy: vi.fn().mockResolvedValue(undefined),
       },
       mockIssueWithAcme: issueWithAcme,

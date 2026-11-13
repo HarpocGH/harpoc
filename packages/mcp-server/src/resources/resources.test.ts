@@ -9,7 +9,8 @@ import {
 import type { SecretInfo } from "@harpoc/core";
 import type { VaultEngine } from "@harpoc/core";
 import type { Permission, VaultApiToken } from "@harpoc/shared";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, TOKENLESS_STDIO_PRINCIPAL, VaultError } from "@harpoc/shared";
+import { RateLimiter } from "../guards/rate-limiter.js";
 import { ScopeGuard } from "../guards/scope-guard.js";
 import { registerSecretsResource } from "./secrets.js";
 import { registerHealthResource } from "./health.js";
@@ -126,7 +127,7 @@ describe("MCP Resources", () => {
 
   describe("secrets resource", () => {
     beforeEach(() => {
-      registerSecretsResource(server, engine, scopeGuard);
+      registerSecretsResource(server, engine, scopeGuard, new RateLimiter());
     });
 
     it("returns list of secrets at secret://vault/secrets", async () => {
@@ -264,7 +265,7 @@ describe("MCP Resources", () => {
         updatedAt: 5000,
       };
       const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
-      registerSecretsResource(srv, mockEngine([staging, prod]), scopeGuard);
+      registerSecretsResource(srv, mockEngine([staging, prod]), scopeGuard, new RateLimiter());
       const { client } = await inMemoryClientFor(srv);
       const uris = (await client.listResources()).resources.map((r) => r.uri);
       expect(uris).toEqual([
@@ -299,7 +300,7 @@ describe("MCP Resources", () => {
           seen,
         );
         const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
-        registerSecretsResource(srv, engine, scoped);
+        registerSecretsResource(srv, engine, scoped, new RateLimiter());
 
         await expectVaultError(
           () => invokeHandler(srv, "resources/read", { uri }),
@@ -314,7 +315,7 @@ describe("MCP Resources", () => {
 
   describe("health resource", () => {
     beforeEach(() => {
-      registerHealthResource(server, engine, scopeGuard);
+      registerHealthResource(server, engine, scopeGuard, new RateLimiter());
     });
 
     it("returns vault state and secret counts", async () => {
@@ -352,7 +353,7 @@ describe("MCP Resources", () => {
 
   describe("audit resource", () => {
     beforeEach(() => {
-      registerAuditResource(server, engine, scopeGuard);
+      registerAuditResource(server, engine, scopeGuard, new RateLimiter());
     });
 
     it("returns recent audit events", async () => {
@@ -370,13 +371,36 @@ describe("MCP Resources", () => {
       await readResource(server, "secret://vault/audit/recent");
 
       expect(engine.queryAudit).toHaveBeenCalledTimes(1);
-      expect(engine.queryAudit).toHaveBeenCalledWith({ limit: 50 }, undefined);
+      expect(engine.queryAudit).toHaveBeenCalledWith(
+        { limit: 50, excludeEventType: AuditEventType.VAULT_READ },
+        undefined,
+        {
+          principal_type: "user",
+          principal_id: TOKENLESS_STDIO_PRINCIPAL,
+          interface: "mcp",
+          admin_scope: true,
+        },
+      );
+    });
+
+    it("asks the engine for its 50-row window with vault.read rows excluded, and says so (TW-R2)", async () => {
+      const { client } = await inMemoryClientFor(server);
+      const listed = (await client.listResources()).resources.find(
+        (r) => r.uri === "secret://vault/audit/recent",
+      );
+      await readResource(server, "secret://vault/audit/recent");
+
+      expect(vi.mocked(engine.queryAudit).mock.calls[0]?.[0]).toEqual({
+        limit: 50,
+        excludeEventType: AuditEventType.VAULT_READ,
+      });
+      expect(listed?.description).toBe("Last 50 audit log entries, reads excluded (metadata only)");
     });
   });
 
   describe("projects resource", () => {
     beforeEach(() => {
-      registerProjectsResource(server, engine, scopeGuard);
+      registerProjectsResource(server, engine, scopeGuard, new RateLimiter());
     });
 
     it("returns projects with secret counts", async () => {
@@ -406,7 +430,7 @@ describe("MCP Resources", () => {
     it("secrets resource filters by project scope", async () => {
       const scoped = new ScopeGuard(makeScopedToken({ project: "prod" }));
       const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
-      registerSecretsResource(srv, engine, scoped);
+      registerSecretsResource(srv, engine, scoped, new RateLimiter());
 
       const result = await readResource(srv, "secret://vault/secrets");
       const data = JSON.parse(getResourceText(result));
@@ -418,7 +442,7 @@ describe("MCP Resources", () => {
     it("secrets resource filters by secret name scope", async () => {
       const scoped = new ScopeGuard(makeScopedToken({ secrets: ["my-key"] }));
       const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
-      registerSecretsResource(srv, engine, scoped);
+      registerSecretsResource(srv, engine, scoped, new RateLimiter());
 
       const result = await readResource(srv, "secret://vault/secrets");
       const data = JSON.parse(getResourceText(result));
@@ -429,7 +453,7 @@ describe("MCP Resources", () => {
     it("a project-scoped token lists its project's secret and reads it at the advertised URI", async () => {
       const scoped = new ScopeGuard(makeScopedToken({ project: "prod", scope: ["list", "read"] }));
       const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
-      registerSecretsResource(srv, engine, scoped);
+      registerSecretsResource(srv, engine, scoped, new RateLimiter());
       const { client } = await inMemoryClientFor(srv);
 
       const uris = (await client.listResources()).resources.map((r) => r.uri);
@@ -459,7 +483,7 @@ describe("MCP Resources", () => {
         seen,
       );
       const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
-      registerSecretsResource(srv, engine, scoped);
+      registerSecretsResource(srv, engine, scoped, new RateLimiter());
 
       await expectVaultError(
         () => invokeHandler(srv, "resources/read", { uri }),
@@ -491,7 +515,7 @@ describe("MCP Resources", () => {
         );
       const serverFor = (vault: VaultEngine): McpServer => {
         const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
-        registerSecretsResource(srv, vault, new ScopeGuard(token));
+        registerSecretsResource(srv, vault, new ScopeGuard(token), new RateLimiter());
         return srv;
       };
       for (const vault of [ungranted, mockEngine([])]) {
@@ -516,7 +540,7 @@ describe("MCP Resources", () => {
     it("health resource respects scope filtering", async () => {
       const scoped = new ScopeGuard(makeScopedToken({ project: "prod" }));
       const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
-      registerHealthResource(srv, engine, scoped);
+      registerHealthResource(srv, engine, scoped, new RateLimiter());
 
       const result = await readResource(srv, "secret://vault/health");
       const data = JSON.parse(getResourceText(result));
@@ -526,7 +550,7 @@ describe("MCP Resources", () => {
     it("projects resource respects scope filtering", async () => {
       const scoped = new ScopeGuard(makeScopedToken({ project: "prod" }));
       const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
-      registerProjectsResource(srv, engine, scoped);
+      registerProjectsResource(srv, engine, scoped, new RateLimiter());
 
       const result = await readResource(srv, "secret://vault/projects");
       const data = JSON.parse(getResourceText(result)) as Array<{
@@ -543,24 +567,37 @@ describe("MCP Resources", () => {
     it("audit resource passes the token's project/name scope to the engine", async () => {
       const scoped = new ScopeGuard(makeScopedToken({ project: "prod", secrets: ["db-*"] }));
       const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
-      registerAuditResource(srv, engine, scoped);
+      registerAuditResource(srv, engine, scoped, new RateLimiter());
 
       await readResource(srv, "secret://vault/audit/recent");
 
-      expect(engine.queryAudit).toHaveBeenCalledWith(expect.anything(), {
-        project: "prod",
-        secrets: ["db-*"],
-      });
+      expect(engine.queryAudit).toHaveBeenCalledWith(
+        expect.anything(),
+        { project: "prod", secrets: ["db-*"] },
+        {
+          principal_type: "agent",
+          principal_id: "scoped-agent",
+          project: "prod",
+          secrets: ["db-*"],
+          interface: "mcp",
+          admin_scope: true,
+        },
+      );
     });
 
     it("audit resource passes no scope for an unrestricted admin token", async () => {
       const unrestricted = new ScopeGuard(makeScopedToken());
       const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
-      registerAuditResource(srv, engine, unrestricted);
+      registerAuditResource(srv, engine, unrestricted, new RateLimiter());
 
       await readResource(srv, "secret://vault/audit/recent");
 
-      expect(engine.queryAudit).toHaveBeenCalledWith(expect.anything(), undefined);
+      expect(engine.queryAudit).toHaveBeenCalledWith(expect.anything(), undefined, {
+        principal_type: "agent",
+        principal_id: "scoped-agent",
+        interface: "mcp",
+        admin_scope: true,
+      });
     });
 
     it("audit resource requires admin permission", async () => {
@@ -573,7 +610,7 @@ describe("MCP Resources", () => {
         seen,
       );
       const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
-      registerAuditResource(srv, engine, listOnly);
+      registerAuditResource(srv, engine, listOnly, new RateLimiter());
 
       await expect(
         invokeHandler(srv, "resources/read", { uri: "secret://vault/audit/recent" }),
@@ -652,7 +689,7 @@ describe("MCP Resources", () => {
             seen,
           );
           const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
-          register(srv, engine, guard);
+          register(srv, engine, guard, new RateLimiter());
 
           await expectVaultError(() => invokeHandler(srv, method, params), ErrorCode.ACCESS_DENIED);
           expect(seen).toHaveBeenCalledExactlyOnceWith(operation, "permission");
@@ -660,6 +697,107 @@ describe("MCP Resources", () => {
           expect(engine.getSecretInfo).not.toHaveBeenCalled();
         },
       );
+    });
+  });
+
+  describe("every resource callback consults the global rate limiter (A-7)", () => {
+    interface LimitedCallback {
+      label: string;
+      register: (srv: McpServer, vault: VaultEngine, limiter: RateLimiter) => void;
+      method: "resources/read" | "resources/list";
+      params: Record<string, unknown>;
+      engineCall: "listSecrets" | "getSecretInfo" | "queryAudit";
+    }
+
+    const CALLBACKS: LimitedCallback[] = [
+      {
+        label: "secret://vault/secrets",
+        register: (srv, vault, limiter) =>
+          registerSecretsResource(srv, vault, new ScopeGuard(null), limiter),
+        method: "resources/read",
+        params: { uri: "secret://vault/secrets" },
+        engineCall: "listSecrets",
+      },
+      {
+        label: "the by-name template's read",
+        register: (srv, vault, limiter) =>
+          registerSecretsResource(srv, vault, new ScopeGuard(null), limiter),
+        method: "resources/read",
+        params: { uri: "secret://vault/secrets/my-key" },
+        engineCall: "getSecretInfo",
+      },
+      {
+        label: "the by-name template's list",
+        register: (srv, vault, limiter) =>
+          registerSecretsResource(srv, vault, new ScopeGuard(null), limiter),
+        method: "resources/list",
+        params: {},
+        engineCall: "listSecrets",
+      },
+      {
+        label: "secret://vault/health",
+        register: (srv, vault, limiter) =>
+          registerHealthResource(srv, vault, new ScopeGuard(null), limiter),
+        method: "resources/read",
+        params: { uri: "secret://vault/health" },
+        engineCall: "listSecrets",
+      },
+      {
+        label: "secret://vault/projects",
+        register: (srv, vault, limiter) =>
+          registerProjectsResource(srv, vault, new ScopeGuard(null), limiter),
+        method: "resources/read",
+        params: { uri: "secret://vault/projects" },
+        engineCall: "listSecrets",
+      },
+      {
+        label: "secret://vault/audit/recent",
+        register: (srv, vault, limiter) =>
+          registerAuditResource(srv, vault, new ScopeGuard(null), limiter),
+        method: "resources/read",
+        params: { uri: "secret://vault/audit/recent" },
+        engineCall: "queryAudit",
+      },
+    ];
+
+    it.each(CALLBACKS)(
+      "$label is refused RATE_LIMIT_EXCEEDED once the global tier is spent, before the engine is called",
+      async ({ register, method, params, engineCall }) => {
+        const vault = mockEngine();
+        const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
+        register(srv, vault, new RateLimiter(1, 10_000, 10_000));
+
+        await invokeHandler(srv, method, params);
+        await expectVaultError(
+          () => invokeHandler(srv, method, params),
+          ErrorCode.RATE_LIMIT_EXCEEDED,
+        );
+        expect(vault[engineCall]).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(CALLBACKS)(
+      "control: $label answers twice under a default limiter",
+      async ({ register, method, params, engineCall }) => {
+        const vault = mockEngine();
+        const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
+        register(srv, vault, new RateLimiter());
+
+        await invokeHandler(srv, method, params);
+        await invokeHandler(srv, method, params);
+        expect(vault[engineCall]).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it("over the wire the refused read carries the tools' message", async () => {
+      const srv = track(new McpServer({ name: "test", version: "0.0.0" }));
+      registerAuditResource(srv, engine, new ScopeGuard(null), new RateLimiter(1, 10_000, 10_000));
+
+      await readResource(srv, "secret://vault/audit/recent");
+      await expect(readResource(srv, "secret://vault/audit/recent")).rejects.toThrow(
+        "Global rate limit exceeded",
+      );
+      expect(engine.queryAudit).toHaveBeenCalledTimes(1);
     });
   });
 });

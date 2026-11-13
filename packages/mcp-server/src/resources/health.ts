@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import type { VaultEngine } from "@harpoc/core";
+import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
 
 const EXPIRING_SOON_DAYS = 7;
@@ -8,6 +9,7 @@ export function registerHealthResource(
   server: McpServer,
   engine: VaultEngine,
   scopeGuard: ScopeGuard,
+  rateLimiter: RateLimiter,
 ): void {
   server.registerResource(
     "vault-health",
@@ -15,6 +17,7 @@ export function registerHealthResource(
     { description: "Vault state and secret health summary", mimeType: "application/json" },
     async (uri) => {
       scopeGuard.checkAccess("list", undefined, undefined, `resources/read ${uri.href}`);
+      rateLimiter.checkLimit();
 
       const secrets = scopeGuard.filterByScope(engine.listSecrets(undefined, scopeGuard.caller));
       const byStatus: Record<string, number> = {};

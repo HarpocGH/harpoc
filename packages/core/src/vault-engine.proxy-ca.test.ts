@@ -8,7 +8,7 @@ import type { CallerContext } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretStatus, SecretType } from "@harpoc/shared";
 import { PROXY_CA_HANDLE, VaultEngine } from "./vault-engine.js";
 import type { DecryptedAuditEvent } from "./audit/audit-query.js";
-import { registerAgents } from "./__fixtures__/engine-seams.js";
+import { nonReadAuditCount, registerAgents } from "./__fixtures__/engine-seams.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
@@ -70,6 +70,10 @@ function liveStore(): SqliteStore {
 
 function everyRowText(): string {
   return JSON.stringify(engine.queryAudit({ limit: 1000 }));
+}
+
+function vaultReads(operation: string): DecryptedAuditEvent[] {
+  return rows(AuditEventType.VAULT_READ).filter((row) => row.detail?.operation === operation);
 }
 
 describe("createProxyCa — secret://harpoc-ca", () => {
@@ -255,11 +259,16 @@ describe("createProxyCa — secret://harpoc-ca", () => {
 });
 
 describe("loadProxyCa — the daemon's one read", () => {
-  it("is null on a vault without a CA, and reads nothing", async () => {
-    const before = engine.queryAudit({ limit: 1000 }).length;
+  it("is null on a vault without a CA: one vault.read row found: false, NULL principal, and no other row", async () => {
+    const before = nonReadAuditCount(engine);
 
     expect(await engine.loadProxyCa()).toBeNull();
-    expect(engine.queryAudit({ limit: 1000 })).toHaveLength(before);
+    expect(nonReadAuditCount(engine)).toBe(before);
+    const reads = vaultReads("proxy_ca");
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toMatchObject({ secret_id: null, principal_type: null, success: true });
+    expect(reads[0]?.detail).toEqual({ operation: "proxy_ca", found: false });
+    expect(JSON.stringify(reads[0]?.detail).includes("harpoc-ca")).toBe(false);
   });
 
   it("hands the intermediate, its key as bytes and the root, with one secret.read row of the key", async () => {
@@ -276,6 +285,7 @@ describe("loadProxyCa — the daemon's one read", () => {
     expect(material?.fingerprint256).toBe(INTERMEDIATE.fingerprint256);
     expect(material?.hosts).toEqual(HOSTS);
     expect(material?.unconstrained).toBe(false);
+    expect(vaultReads("proxy_ca")).toEqual([]);
     const reads = rows(AuditEventType.SECRET_READ, secretId);
     expect(reads).toHaveLength(1);
     expect(reads[0]).toMatchObject({ success: true, principal_type: null });
@@ -295,12 +305,15 @@ describe("loadProxyCa — the daemon's one read", () => {
     expect(second?.keyPem.toString("utf8") === CA.keyPem).toBe(true);
   });
 
-  it("is null once the CA is revoked (secret delete), and reads nothing", async () => {
+  it("is null once the CA is revoked (secret delete): no secret.read row, one vault.read row found: false", async () => {
     await engine.createProxyCa(CA);
     await engine.revokeSecret(PROXY_CA_HANDLE);
 
     expect((await engine.loadProxyCa()) === null).toBe(true);
     expect(rows(AuditEventType.SECRET_READ)).toHaveLength(0);
+    expect(vaultReads("proxy_ca").map((row) => row.detail)).toEqual([
+      { operation: "proxy_ca", found: false },
+    ]);
   });
 
   it("refuses a harpoc-ca that is no vault-managed certificate CERT_NOT_CONFIGURED with a failed row", async () => {
@@ -373,9 +386,14 @@ describe("loadProxyCa — the daemon's one read", () => {
 });
 
 describe("proxyCaCertificate — the export's read", () => {
-  it("is null without a CA and writes no row", async () => {
+  it("is null without a CA: no secret.read row, one vault.read row found: false", async () => {
     expect(await engine.proxyCaCertificate()).toBeNull();
     expect(rows(AuditEventType.SECRET_READ)).toHaveLength(0);
+    const reads = vaultReads("proxy_ca");
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toMatchObject({ secret_id: null, principal_type: null, success: true });
+    expect(reads[0]?.detail).toEqual({ operation: "proxy_ca", found: false });
+    expect(JSON.stringify(reads[0]?.detail).includes("harpoc-ca")).toBe(false);
   });
 
   it("returns the root — the trust anchor — and its window with one secret.read row of the PEMs", async () => {
@@ -389,6 +407,7 @@ describe("proxyCaCertificate — the export's read", () => {
       notAfter: ROOT.validToDate.getTime(),
       fingerprint256: ROOT.fingerprint256,
     });
+    expect(vaultReads("proxy_ca")).toEqual([]);
     const reads = rows(AuditEventType.SECRET_READ, secretId);
     expect(reads).toHaveLength(1);
     expect(reads[0]?.detail).toEqual({ config: "certificate_pem" });
@@ -493,5 +512,97 @@ describe("secret://harpoc-ca is never a credential", () => {
       () => engine.getSecretValue(PROXY_CA_HANDLE),
       ErrorCode.CERT_VALUE_UNSUPPORTED,
     );
+  });
+});
+
+describe("the reads that can find nothing write found: false (A-6)", () => {
+  const CERT_NAME = "web-cert";
+  const READER: CallerContext = {
+    principal_type: "agent",
+    principal_id: "alice",
+    interface: "rest",
+    remote_address: "127.0.0.1",
+  };
+
+  function failNextAuditInsert(): void {
+    vi.spyOn(liveStore(), "insertAuditEvent").mockImplementationOnce(() => {
+      throw new Error("audit unavailable");
+    });
+  }
+
+  async function certificateWithoutAccount(): Promise<string> {
+    const { secretId } = await engine.importCertificate(CERT_NAME, fx("ec-key.pem"), {
+      certificatePem: fx("ec-cert.pem"),
+    });
+    registerAgents(engine, "alice");
+    engine.grantPolicy(
+      { secretId, principalType: "agent", principalId: "alice", permissions: ["read"] },
+      "test-admin",
+    );
+    return secretId;
+  }
+
+  it.each([
+    { read: "loadProxyCa", call: () => engine.loadProxyCa() },
+    { read: "proxyCaCertificate", call: () => engine.proxyCaCertificate() },
+  ])(
+    "$read without a CA throws the logger's error and answers nothing when its row cannot be written",
+    async ({ call }) => {
+      failNextAuditInsert();
+
+      await expect(call()).rejects.toThrow("audit unavailable");
+      expect(vaultReads("proxy_ca")).toEqual([]);
+    },
+  );
+
+  it("getAcmeAccount without a stored account: null, one vault.read row found: false with the caller's principal and no secret id, no secret.read row", async () => {
+    const secretId = await certificateWithoutAccount();
+
+    expect(engine.getAcmeAccount(secretId, READER, `secret://${CERT_NAME}`)).toBeNull();
+
+    expect(rows(AuditEventType.SECRET_READ, secretId)).toEqual([]);
+    const reads = vaultReads("acme_account");
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toMatchObject({
+      secret_id: null,
+      principal_type: "agent",
+      principal_id: "alice",
+      ip_address: "127.0.0.1",
+      success: true,
+    });
+    expect(reads[0]?.detail).toEqual({
+      operation: "acme_account",
+      found: false,
+      interface: "rest",
+    });
+    expect(JSON.stringify(reads[0]?.detail).includes(CERT_NAME)).toBe(false);
+    expect(JSON.stringify(reads[0]?.detail).includes(secretId)).toBe(false);
+  });
+
+  it("getAcmeAccount with a stored account writes the secret.read row it writes today and no vault.read row", async () => {
+    const { secretId } = await engine.importCertificate(CERT_NAME, fx("ec-key.pem"), {
+      certificatePem: fx("ec-cert.pem"),
+      acmeIssued: true,
+      acmeAccountJson: JSON.stringify({ accountUrl: "u" }),
+    });
+
+    expect(engine.getAcmeAccount(secretId)).toContain("accountUrl");
+
+    expect(vaultReads("acme_account")).toEqual([]);
+    const reads = rows(AuditEventType.SECRET_READ, secretId);
+    expect(reads).toHaveLength(1);
+    expect(reads[0]?.detail).toEqual({ config: "acme_account" });
+  });
+
+  it("getAcmeAccount without a stored account throws the logger's error and returns nothing when its row cannot be written", async () => {
+    const secretId = await certificateWithoutAccount();
+    failNextAuditInsert();
+
+    let answer: unknown;
+    expect(() => {
+      answer = engine.getAcmeAccount(secretId, READER);
+    }).toThrow("audit unavailable");
+    expect(answer).toBeUndefined();
+    expect(vaultReads("acme_account")).toEqual([]);
   });
 });

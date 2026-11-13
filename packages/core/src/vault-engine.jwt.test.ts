@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CallerContext } from "@harpoc/shared";
 import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
@@ -95,6 +96,21 @@ describe("JWT tokens", () => {
         ErrorCode.INVALID_SECRET_NAME,
       );
     }
+  });
+
+  it("an invalid pattern's refusal writes one failed token.create row that carries neither the pattern nor the subject", async () => {
+    await expectVaultError(
+      () => engine.createToken("user-1", ["use"], 60_000, { secrets: ["refused/pattern*"] }),
+      ErrorCode.INVALID_SECRET_NAME,
+    );
+
+    const created = engine.queryAudit({ eventType: AuditEventType.TOKEN_CREATE });
+    expect(created.map((r) => [r.success, r.principal_id, r.detail])).toEqual([
+      [false, null, { error: ErrorCode.INVALID_SECRET_NAME }],
+    ]);
+    const serialized = JSON.stringify(created[0]?.detail);
+    expect(serialized.includes("refused/pattern")).toBe(false);
+    expect(serialized.includes("user-1")).toBe(false);
   });
 
   it("rejects invalid token", async () => {
@@ -246,7 +262,7 @@ describe("JWT tokens", () => {
     }
   });
 
-  it("refuses an unknown jti with INVALID_INPUT and writes nothing", async () => {
+  it("refuses an unknown jti with INVALID_INPUT, revokes nothing and writes one failed token.revoke row: text of no minted shape is in no part of it", async () => {
     const err = await expectVaultError(
       () => Promise.resolve().then(() => engine.revokeToken("manual-jti")),
       ErrorCode.INVALID_INPUT,
@@ -255,12 +271,36 @@ describe("JWT tokens", () => {
 
     const db = new Database(dbPath, { readonly: true });
     const row = db.prepare("SELECT jti FROM revoked_tokens WHERE jti = ?").get("manual-jti");
-    const audit = db
-      .prepare("SELECT COUNT(*) AS c FROM audit_log WHERE event_type = ?")
-      .get(AuditEventType.TOKEN_REVOKE) as { c: number };
     db.close();
     expect(row).toBeUndefined();
-    expect(audit.c).toBe(0);
+    const revokes = engine.queryAudit({ eventType: AuditEventType.TOKEN_REVOKE });
+    expect(revokes.map((r) => [r.success, r.principal_id, r.detail])).toEqual([
+      [false, null, { error: ErrorCode.INVALID_INPUT }],
+    ]);
+    expect(JSON.stringify(revokes[0]?.detail).includes("manual-jti")).toBe(false);
+  });
+
+  it("an unknown jti of the shape createToken mints is recorded on the failed token.revoke row beside the caller's principal", async () => {
+    const minted = engine.verifyToken(engine.createToken("user-1", ["read"])).jti;
+    const unknown = `${minted.slice(0, -12)}${"0".repeat(12)}`;
+    expect(unknown).not.toBe(minted);
+    const caller: CallerContext = {
+      principal_type: "user",
+      principal_id: "operator",
+      interface: "rest",
+    };
+
+    const err = await expectVaultError(
+      () => Promise.resolve().then(() => engine.revokeToken(unknown, caller)),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(`Unknown token jti: ${unknown}`);
+
+    const failed = engine.queryAudit({ eventType: AuditEventType.TOKEN_REVOKE, success: false });
+    expect(failed.map((r) => [r.principal_id, r.detail])).toEqual([
+      ["operator", { jti: unknown, error: ErrorCode.INVALID_INPUT, interface: "rest" }],
+    ]);
+    expect(engine.listIssuedTokens({ status: "all" }).map((t) => t.status)).toEqual(["active"]);
   });
 
   it("accepts an already-expired token: the mirror stamps and the entry prunes", async () => {

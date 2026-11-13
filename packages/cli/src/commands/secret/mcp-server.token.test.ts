@@ -6,6 +6,7 @@ const { mockEngine } = vi.hoisted(() => ({
     setMcpServerConfig: vi.fn(),
     deleteMcpServerConfig: vi.fn(),
     verifyToken: vi.fn(),
+    auditScopeRefusal: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),
   },
 }));

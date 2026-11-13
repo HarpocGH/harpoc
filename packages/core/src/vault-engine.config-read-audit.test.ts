@@ -205,6 +205,61 @@ describe("a granted configuration read is audited (E75a)", () => {
 
     expect(readsFor(id).filter((r) => r.success)).toHaveLength(0);
   });
+
+  it.each([
+    {
+      config: "oauth_status",
+      code: ErrorCode.OAUTH_NOT_CONFIGURED,
+      read: (id: string, c?: CallerContext) =>
+        Promise.resolve().then(() => engine.getOAuthTokenStatus(id, c, "secret://not-set")),
+    },
+    {
+      config: "certificate_status",
+      code: ErrorCode.CERT_NOT_CONFIGURED,
+      read: (id: string, c?: CallerContext) =>
+        Promise.resolve().then(() => engine.getCertificateStatus(id, c, "secret://not-set")),
+    },
+    {
+      config: "certificate_pem",
+      code: ErrorCode.CERT_NOT_CONFIGURED,
+      read: (id: string, c?: CallerContext) =>
+        Promise.resolve().then(() => engine.getCertificatePem(id, c, "secret://not-set")),
+    },
+    {
+      config: "certificate_private_key",
+      code: ErrorCode.CERT_NOT_CONFIGURED,
+      read: (id: string, c?: CallerContext) =>
+        engine.getCertificatePrivateKey(id, c, "secret://not-set"),
+    },
+    {
+      config: "acme_account",
+      code: ErrorCode.CERT_NOT_CONFIGURED,
+      read: (id: string, c?: CallerContext) =>
+        Promise.resolve().then(() => engine.getAcmeAccount(id, c, "secret://not-set")),
+    },
+  ])(
+    "$config: $code after the gate writes one failed secret.read row — the secret's id, the config kind, the error",
+    async ({ config, code, read }) => {
+      const id = await makeSecret("not-set");
+      grant(id, "alice", ["read"]);
+
+      await expectVaultError(() => read(id, agent("alice")), code);
+      await expectVaultError(() => read(id), code);
+
+      expect(JSON.stringify(readsFor(id).filter((r) => !r.success)).includes("not-set")).toBe(
+        false,
+      );
+      expect(
+        readsFor(id)
+          .filter((r) => !r.success)
+          .map((r) => [r.secret_id, r.principal_id, r.detail]),
+      ).toEqual([
+        [id, null, { config, error: code }],
+        [id, "alice", { config, error: code, interface: "rest" }],
+      ]);
+      expect(readsFor(id).filter((r) => r.success)).toHaveLength(0);
+    },
+  );
 });
 
 // E75a fallout: `listPolicies(secretId)` writes a row on every call, so the
@@ -238,19 +293,67 @@ describe("revokePolicy's membership check is inside the engine (E75a fallout)", 
     expect(engine.listPolicies(idA).some((p) => p.id === policyId)).toBe(true);
   });
 
-  it("a caller admin on its own secret probing another secret's policy id is refused before the caller check — no row names the probe", async () => {
+  it("a caller admin on its own secret probing another secret's policy id is refused before the caller check, with one failed policy.revoke row on the probed policy's own secret — a reader scoped to the caller's secret finds it no more than an unknown id's", async () => {
     const { secretId: idA, policyId } = await policyOn("policy-scope-probed");
     const idB = await makeSecret("policy-scope-own");
     grant(idB, "mallory", ["admin"]);
+    const failedForOwnReader = () =>
+      engine.queryAudit(
+        { eventType: AuditEventType.POLICY_REVOKE, success: false },
+        { secrets: ["policy-scope-own"] },
+      );
 
     const err = await expectVaultError(
       () => Promise.resolve().then(() => engine.revokePolicy(policyId, agent("mallory"), idB)),
       ErrorCode.POLICY_NOT_FOUND,
     );
     expect(err.message).toBe(`Policy not found: ${policyId}`);
-    expect(engine.queryAudit({ eventType: AuditEventType.POLICY_REVOKE })).toHaveLength(0);
+    expect(failedForOwnReader()).toEqual([]);
+    await expectVaultError(
+      () =>
+        Promise.resolve().then(() =>
+          engine.revokePolicy("refused-policy-id", agent("mallory"), idB),
+        ),
+      ErrorCode.POLICY_NOT_FOUND,
+    );
+    expect(failedForOwnReader()).toEqual([]);
+
+    const revokes = engine.queryAudit({ eventType: AuditEventType.POLICY_REVOKE });
+    const serialized = JSON.stringify(revokes.map((r) => r.detail));
+    expect(serialized.includes(policyId)).toBe(false);
+    expect(serialized.includes(idB)).toBe(false);
+    expect(revokes.map((r) => [r.success, r.secret_id, r.principal_id, r.detail])).toEqual([
+      [false, null, "mallory", { error: ErrorCode.POLICY_NOT_FOUND, interface: "rest" }],
+      [false, idA, "mallory", { error: ErrorCode.POLICY_NOT_FOUND, interface: "rest" }],
+    ]);
     expect(engine.listPolicies(idA).some((p) => p.id === policyId)).toBe(true);
   });
+
+  it.each([
+    ["with no expected secret", false],
+    ["with an expected secret", true],
+  ])(
+    "an unknown policy id %s is POLICY_NOT_FOUND with one failed policy.revoke row: no secret id, not the id",
+    async (_label, expected) => {
+      const idB = await makeSecret("policy-scope-unknown");
+      grant(idB, "mallory", ["admin"]);
+      const unknown = "refused-policy-id";
+
+      await expectVaultError(
+        () =>
+          Promise.resolve().then(() =>
+            engine.revokePolicy(unknown, agent("mallory"), expected ? idB : undefined),
+          ),
+        ErrorCode.POLICY_NOT_FOUND,
+      );
+
+      const revokes = engine.queryAudit({ eventType: AuditEventType.POLICY_REVOKE });
+      expect(revokes.map((r) => [r.success, r.secret_id, r.principal_id, r.detail])).toEqual([
+        [false, null, "mallory", { error: ErrorCode.POLICY_NOT_FOUND, interface: "rest" }],
+      ]);
+      expect(JSON.stringify(revokes[0]).includes(unknown)).toBe(false);
+    },
+  );
 
   it("the matching expected id revokes", async () => {
     const { secretId: idA, policyId } = await policyOn("policy-scope-match");

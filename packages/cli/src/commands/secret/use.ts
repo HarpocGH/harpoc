@@ -263,7 +263,7 @@ export function resolveCaller(
   handle: string,
   token: string | undefined,
 ): CallerContext | undefined {
-  return resolveTokenCallerForHandle(engine, "use", handle, token)?.caller;
+  return resolveTokenCallerForHandle(engine, "use", handle, token, "secret use")?.caller;
 }
 
 /**

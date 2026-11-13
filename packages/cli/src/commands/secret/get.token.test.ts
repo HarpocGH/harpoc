@@ -5,6 +5,7 @@ const { mockEngine } = vi.hoisted(() => ({
     getSecretInfo: vi.fn(),
     getSecretValue: vi.fn(),
     verifyToken: vi.fn(),
+    auditScopeRefusal: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),
   },
 }));

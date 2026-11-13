@@ -103,6 +103,7 @@ export function registerSecretSetCommand(secret: Command): void {
             engine,
             { permission: "create", project: options.project, name },
             options.token ?? process.env.HARPOC_TOKEN,
+            "secret set",
           );
           const pendingEntry = findPendingSecret(engine, name, options.project, resolved?.caller);
           if (pendingEntry !== undefined && pendingEntry.type !== secretType) {

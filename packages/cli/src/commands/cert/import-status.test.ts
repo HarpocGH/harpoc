@@ -11,6 +11,7 @@ const { mockEngine, mockPromptHidden } = vi.hoisted(() => ({
     importCertificate: vi.fn(),
     getCertificateStatus: vi.fn(),
     verifyToken: vi.fn(),
+    auditScopeRefusal: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),
   },
   mockPromptHidden: vi.fn(),

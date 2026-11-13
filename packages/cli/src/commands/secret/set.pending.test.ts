@@ -119,12 +119,22 @@ async function trail(id: string): Promise<TrailRow[]> {
   );
 }
 
-/** The number of rows in the vault's whole audit log. */
-async function auditRowCount(): Promise<number> {
-  return withVault(async (engine) => engine.queryAudit().length);
+interface SqliteHandle {
+  prepare(sql: string): { get(...params: unknown[]): unknown };
 }
 
-/** The listed statuses of the secrets a handle names, sorted (a listing writes no audit row). */
+/** The number of non-read rows in the vault's audit log. */
+async function auditRowCount(): Promise<number> {
+  return withVault(async (engine) => {
+    const { db } = (engine as unknown as { store: { db: SqliteHandle } }).store;
+    const row = db
+      .prepare("SELECT COUNT(*) AS count FROM audit_log WHERE event_type != ?")
+      .get(AuditEventType.VAULT_READ) as { count: number };
+    return row.count;
+  });
+}
+
+/** The listed statuses of the secrets a handle names, sorted (a listing writes one vault.read row). */
 async function statusesOf(handle: string): Promise<string[]> {
   return withVault(async (engine) =>
     engine
@@ -268,7 +278,7 @@ describe("secret set gives a pending secret its value (F2)", () => {
     expect(await holds("secret://pend-d", VALUE)).toBe(true);
   });
 
-  it("(e) an active secret of that name still ends DUPLICATE_SECRET after the value resolver is consulted once, and writes no row", async () => {
+  it("(e) an active secret of that name still ends DUPLICATE_SECRET after the value resolver is consulted once, and writes one failed secret.create row carrying the error alone", async () => {
     const id = await withVault(async (engine) => {
       const { handle } = await engine.createSecret({
         name: "act-e",
@@ -277,6 +287,13 @@ describe("secret set gives a pending secret its value (F2)", () => {
       });
       return engine.resolveSecretId(handle);
     });
+    const failedCreates = () =>
+      withVault(async (engine) =>
+        engine
+          .queryAudit({ eventType: AuditEventType.SECRET_CREATE, success: false })
+          .map((row) => [row.secret_id, row.principal_id, row.detail]),
+      );
+    const failedBefore = await failedCreates();
     const rowsBefore = await auditRowCount();
 
     await expect(set(["act-e"])).rejects.toThrow("process.exit");
@@ -285,7 +302,11 @@ describe("secret set gives a pending secret its value (F2)", () => {
     expect(spies.stderr()).toBe("Error: Secret already exists: act-e");
     expect(mockResolveSecretValue).toHaveBeenCalledTimes(1);
     expect(allWiped()).toBe(true);
-    expect(await auditRowCount()).toBe(rowsBefore);
+    expect(await auditRowCount()).toBe(rowsBefore + 1);
+    const failedAfter = await failedCreates();
+    const failed = failedAfter.slice(0, failedAfter.length - failedBefore.length);
+    expect(failed).toEqual([[null, null, { error: "DUPLICATE_SECRET" }]]);
+    expect(JSON.stringify(failed).includes("act-e")).toBe(false);
     expect(await trail(id)).toEqual([createRow("secret://act-e", "created")]);
     expect(await holds("secret://act-e", OTHER_VALUE)).toBe(true);
   });

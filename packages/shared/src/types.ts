@@ -88,6 +88,7 @@ export const AuditEventType = {
   VAULT_UNLOCK_KEY_ENROLL: "vault.unlock_key.enroll",
   /** The unlock-key slot was removed (deployment model B, M1). */
   VAULT_UNLOCK_KEY_REVOKE: "vault.unlock_key.revoke",
+  VAULT_READ: "vault.read",
 } as const;
 export type AuditEventType = (typeof AuditEventType)[keyof typeof AuditEventType];
 

@@ -1232,6 +1232,7 @@ export type IssuedTokenStatusFilter = z.infer<typeof issuedTokenStatusFilterSche
 export const auditQuerySchema = z.object({
   secret_id: z.uuid().optional(),
   event_type: auditEventTypeSchema.optional(),
+  exclude_event_type: auditEventTypeSchema.optional(),
   since: z.number().int().nonnegative().optional(),
   until: z.number().int().nonnegative().optional(),
   success: z.boolean().optional(),

@@ -1,11 +1,13 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import type { VaultEngine } from "@harpoc/core";
+import type { RateLimiter } from "../guards/rate-limiter.js";
 import type { ScopeGuard } from "../guards/scope-guard.js";
 
 export function registerProjectsResource(
   server: McpServer,
   engine: VaultEngine,
   scopeGuard: ScopeGuard,
+  rateLimiter: RateLimiter,
 ): void {
   server.registerResource(
     "projects",
@@ -13,6 +15,7 @@ export function registerProjectsResource(
     { description: "Distinct projects with secret counts", mimeType: "application/json" },
     async (uri) => {
       scopeGuard.checkAccess("list", undefined, undefined, `resources/read ${uri.href}`);
+      rateLimiter.checkLimit();
 
       const secrets = scopeGuard.filterByScope(engine.listSecrets(undefined, scopeGuard.caller));
       const counts = new Map<string, number>();

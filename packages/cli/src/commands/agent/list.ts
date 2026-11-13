@@ -42,6 +42,7 @@ export function registerAgentListCommand(agent: Command): void {
             engine,
             { permission: "admin" },
             options.token ?? process.env.HARPOC_TOKEN,
+            "agent list",
           );
 
           const agents = engine.listAgents(

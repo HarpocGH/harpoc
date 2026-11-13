@@ -29,6 +29,10 @@ export function AuditPage({ api }: { api: ApiClient }) {
     return PRINCIPAL_TYPES.find((t) => t === value) ?? "";
   });
   const [principalId, setPrincipalId] = useState(() => hashQuery().get("principal_id") ?? "");
+  const [showReads, setShowReads] = useState(false);
+  const [eventTypeDraft, setEventTypeDraft] = useState(eventType);
+  const [principalIdDraft, setPrincipalIdDraft] = useState(principalId);
+  const [limitDraft, setLimitDraft] = useState(String(limit));
   const [report, setReport] = useState<AuditVerifyReport | null>(null);
   const [verifyError, setVerifyError] = useState<string | null>(null);
 
@@ -39,23 +43,33 @@ export function AuditPage({ api }: { api: ApiClient }) {
         // surfaced as the load error, not pre-empted with client-side
         // validation against the known-type union.
         event_type: eventType === "" ? undefined : (eventType as AuditEventType),
+        exclude_event_type: showReads || eventType === "vault.read" ? undefined : "vault.read",
         success: successFilter === "all" ? undefined : successFilter === "ok",
         principal_type: principalType === "" ? undefined : principalType,
         principal_id: principalId === "" ? undefined : principalId,
         limit,
       }),
-    [eventType, successFilter, principalType, principalId, limit],
+    [eventType, showReads, successFilter, principalType, principalId, limit],
   );
+
+  const onApply = (event: Event): void => {
+    event.preventDefault();
+    setEventType(eventTypeDraft);
+    setPrincipalId(principalIdDraft);
+    const next = Number(limitDraft) || 100;
+    setLimit(next);
+    setLimitDraft(String(next));
+  };
 
   return (
     <>
       <h1>Audit</h1>
-      <div class="panel">
+      <form class="panel" noValidate onSubmit={onApply}>
         <label for="event-type">Event type</label>
         <input
           id="event-type"
-          value={eventType}
-          onInput={(e) => setEventType(e.currentTarget.value)}
+          value={eventTypeDraft}
+          onInput={(e) => setEventTypeDraft(e.currentTarget.value)}
         />
         <label for="outcome">Outcome</label>
         <select
@@ -84,8 +98,8 @@ export function AuditPage({ api }: { api: ApiClient }) {
         <input
           id="principal-id"
           autocomplete="off"
-          value={principalId}
-          onInput={(e) => setPrincipalId(e.currentTarget.value)}
+          value={principalIdDraft}
+          onInput={(e) => setPrincipalIdDraft(e.currentTarget.value)}
         />
         <label for="limit">Limit</label>
         <input
@@ -93,9 +107,19 @@ export function AuditPage({ api }: { api: ApiClient }) {
           type="number"
           min={1}
           max={1000}
-          value={limit}
-          onInput={(e) => setLimit(Number(e.currentTarget.value) || 100)}
+          value={limitDraft}
+          onInput={(e) => setLimitDraft(e.currentTarget.value)}
         />
+        <button type="submit">Apply</button>
+        <label for="show-reads">
+          <input
+            id="show-reads"
+            type="checkbox"
+            checked={showReads}
+            onChange={(e) => setShowReads(e.currentTarget.checked)}
+          />
+          show reads
+        </label>
         <button
           type="button"
           onClick={() => {
@@ -116,7 +140,7 @@ export function AuditPage({ api }: { api: ApiClient }) {
           <p class="error-text">chain broken at row {report.first_broken_id ?? "?"}</p>
         )}
         {verifyError !== null && <p class="error-text">{verifyError}</p>}
-      </div>
+      </form>
 
       {events.error && <p class="error-text">{events.error.message}</p>}
       {events.data && events.data.length === 0 && (

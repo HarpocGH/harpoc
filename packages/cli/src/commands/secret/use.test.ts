@@ -9,6 +9,7 @@ const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
     useSecret: vi.fn(),
     verifyToken: vi.fn(),
+    auditScopeRefusal: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),
   },
 }));
@@ -157,6 +158,13 @@ describe("secret use — token denials refuse before the injection runs", () => 
       ["secret://api-key", ...HTTP_ARGS, "--token", "jwt", "--json"],
       ErrorCode.ACCESS_DENIED,
     );
+    expect(mockEngine.auditScopeRefusal.mock.calls).toEqual([
+      [
+        { principal_type: "agent", principal_id: "agent-1", interface: "cli" },
+        "secret use",
+        "permission",
+      ],
+    ]);
   });
 
   it("refuses a project-scoped token on another project's secret", async () => {
@@ -165,6 +173,13 @@ describe("secret use — token denials refuse before the injection runs", () => 
       ["secret://web/api-key", ...HTTP_ARGS, "--token", "jwt", "--json"],
       ErrorCode.ACCESS_DENIED,
     );
+    expect(mockEngine.auditScopeRefusal.mock.calls).toEqual([
+      [
+        { principal_type: "agent", principal_id: "agent-1", project: "api", interface: "cli" },
+        "secret use",
+        "project",
+      ],
+    ]);
   });
 
   it("refuses a name-pattern-scoped token on a non-matching secret", async () => {
@@ -173,6 +188,18 @@ describe("secret use — token denials refuse before the injection runs", () => 
       ["secret://api-key", ...HTTP_ARGS, "--token", "jwt", "--json"],
       ErrorCode.ACCESS_DENIED,
     );
+    expect(mockEngine.auditScopeRefusal.mock.calls).toEqual([
+      [
+        {
+          principal_type: "agent",
+          principal_id: "agent-1",
+          secrets: ["db-*"],
+          interface: "cli",
+        },
+        "secret use",
+        "secret",
+      ],
+    ]);
   });
 
   it("refuses an expired token (verification, not scope)", async () => {

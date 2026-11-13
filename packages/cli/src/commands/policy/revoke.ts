@@ -47,7 +47,13 @@ export function registerPolicyRevokeCommand(policy: Command): void {
             let resolved: ResolvedToken | undefined;
             let secretId: string | undefined;
             if (options.secret) {
-              resolved = resolveTokenCallerForHandle(engine, "admin", options.secret, tokenValue);
+              resolved = resolveTokenCallerForHandle(
+                engine,
+                "admin",
+                options.secret,
+                tokenValue,
+                "policy revoke",
+              );
               secretId = await resolveSecretId(
                 engine,
                 options.secret,

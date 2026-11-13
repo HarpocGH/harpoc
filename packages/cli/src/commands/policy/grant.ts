@@ -103,6 +103,7 @@ export function registerPolicyGrantCommand(policy: Command): void {
             "admin",
             handle,
             options.token ?? process.env.HARPOC_TOKEN,
+            "policy grant",
           );
 
           // Resolve the handle to get the internal secret UUID

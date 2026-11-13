@@ -378,6 +378,24 @@ describe("AgentSocketServer: one responder per connection over the engine", () =
     expect((await requestIdentities(client)).type).toBe(SSH_AGENT_IDENTITIES_ANSWER);
   });
 
+  it("a listing the engine refuses RATE_LIMIT_EXCEEDED answers SSH_AGENT_FAILURE and reaches onError with the code; a signature on the connection is still served", async () => {
+    double.listAgentSocketIdentities.mockRejectedValueOnce(
+      new VaultError(ErrorCode.RATE_LIMIT_EXCEEDED, "Per-secret rate limit exceeded"),
+    );
+    const server = await start();
+    const client = await connect(server.socketPath);
+
+    expect((await requestIdentities(client)).type).toBe(SSH_AGENT_FAILURE);
+    expect(onError.mock.calls.map(([err]) => err.code)).toEqual([ErrorCode.RATE_LIMIT_EXCEEDED]);
+    const reply = await requestSignature(client, {
+      keyBlob: ECDSA,
+      data: Buffer.from("x"),
+      flags: 0,
+    });
+    expect(reply.type).toBe(SSH_AGENT_SIGN_RESPONSE);
+    expect(double.signForAgentSocket).toHaveBeenCalledTimes(1);
+  });
+
   it("a sealed engine answers SSH_AGENT_FAILURE to identities and sign alike", async () => {
     double.listAgentSocketIdentities.mockRejectedValue(VaultError.vaultLocked());
     double.signForAgentSocket.mockRejectedValue(VaultError.vaultLocked());

@@ -131,6 +131,7 @@ export function registerCertImportCommand(cert: Command): void {
             engine,
             { permission: "create", project: options.project, name },
             options.token ?? process.env.HARPOC_TOKEN,
+            "cert import",
           );
 
           const certificatePem = readPemFile(options.cert, "certificate");

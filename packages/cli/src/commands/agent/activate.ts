@@ -31,6 +31,7 @@ export function registerAgentActivateCommand(agent: Command): void {
             engine,
             { permission: "admin" },
             options.token ?? process.env.HARPOC_TOKEN,
+            "agent activate",
           );
 
           const activated = engine.activateAgent(name, resolved?.caller);

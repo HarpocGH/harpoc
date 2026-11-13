@@ -8,6 +8,7 @@ import type { CertificateStatus } from "@harpoc/shared";
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
     verifyToken: vi.fn(),
+    auditScopeRefusal: vi.fn(),
     updateCertificate: vi.fn(),
     getCertificateStatus: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),

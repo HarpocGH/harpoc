@@ -94,6 +94,7 @@ export function registerAgentUpdateCommand(agent: Command): void {
             engine,
             { permission: "admin" },
             options.token ?? process.env.HARPOC_TOKEN,
+            "agent update",
           );
 
           assertUpdateFlags(options);

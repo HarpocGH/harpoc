@@ -874,3 +874,108 @@ describe("setSecretValue refuses a pending secret an OAuth flow owns (F2)", () =
     expect(Buffer.from(stored).equals(Buffer.from(VALUE))).toBe(true);
   });
 });
+
+describe("createSecret's refusals write one failed secret.create row (A7)", () => {
+  const CREATOR: CallerContext = {
+    principal_type: "agent",
+    principal_id: "creator",
+    interface: "rest",
+  };
+
+  beforeEach(async () => {
+    await engine.initVault("password");
+  });
+
+  function creates(success: boolean) {
+    return engine.queryAudit({ eventType: AuditEventType.SECRET_CREATE, success });
+  }
+
+  it("a taken name: DUPLICATE_SECRET as before, one failed row with the error alone — no secret id, no name — and no second success row", async () => {
+    await engine.createSecret({ name: "ledger-key", type: "api_key", project: "finance" });
+
+    const err = await expectVaultError(
+      () => engine.createSecret({ name: "ledger-key", type: "api_key", project: "finance" }),
+      ErrorCode.DUPLICATE_SECRET,
+    );
+    expect(err.message).toBe("Secret already exists: ledger-key");
+
+    const failed = creates(false);
+    expect(
+      failed.map((row) => [row.secret_id, row.principal_type, row.principal_id, row.detail]),
+    ).toEqual([[null, null, null, { error: ErrorCode.DUPLICATE_SECRET }]]);
+    expect(JSON.stringify(failed[0]?.detail).includes("ledger-key")).toBe(false);
+    expect(creates(true)).toHaveLength(1);
+  });
+
+  it("a taken name refused for a caller: the failed row carries its principal and interface", async () => {
+    await engine.createSecret({ name: "ledger-key", type: "api_key" });
+
+    await expectVaultError(
+      () => engine.createSecret({ name: "ledger-key", type: "api_key" }, CREATOR),
+      ErrorCode.DUPLICATE_SECRET,
+    );
+
+    const failed = creates(false);
+    expect(
+      failed.map((row) => [row.secret_id, row.principal_type, row.principal_id, row.detail]),
+    ).toEqual([
+      [null, "agent", "creator", { error: ErrorCode.DUPLICATE_SECRET, interface: "rest" }],
+    ]);
+    expect(JSON.stringify(failed[0]?.detail).includes("ledger-key")).toBe(false);
+  });
+
+  it.each([
+    {
+      code: ErrorCode.INVALID_SECRET_NAME,
+      input: { name: "refused name.with-dot", project: undefined },
+      refused: "refused name.with-dot",
+    },
+    {
+      code: ErrorCode.INVALID_PROJECT_NAME,
+      input: { name: "ledger-key", project: "refused project/slash" },
+      refused: "refused project/slash",
+    },
+  ])(
+    "$code: one failed row with the error alone, the refused text in no part of it, nothing created",
+    async ({ code, input, refused }) => {
+      await expectVaultError(
+        () => engine.createSecret({ ...input, type: "api_key" }, CREATOR),
+        code,
+      );
+
+      const failed = creates(false);
+      expect(failed.map((row) => [row.secret_id, row.principal_id, row.detail])).toEqual([
+        [null, "creator", { error: code, interface: "rest" }],
+      ]);
+      expect(JSON.stringify(failed[0]).includes(refused)).toBe(false);
+      expect(creates(true)).toHaveLength(0);
+      expect(engine.listSecrets()).toHaveLength(0);
+    },
+  );
+
+  it("the MCP pre-check's refusal: refuseTakenSecretName answers DUPLICATE_SECRET with the create's failed row, beside the name check's own read row", async () => {
+    await engine.createSecret({ name: "ledger-key", type: "api_key" });
+
+    expect(await engine.secretNameTaken("ledger-key", undefined, CREATOR)).toBe(true);
+    const err = await expectVaultError(
+      () => engine.refuseTakenSecretName("ledger-key", CREATOR),
+      ErrorCode.DUPLICATE_SECRET,
+    );
+    expect(err.message).toBe("Secret already exists: ledger-key");
+
+    const failed = creates(false);
+    expect(
+      failed.map((row) => [row.secret_id, row.principal_type, row.principal_id, row.detail]),
+    ).toEqual([
+      [null, "agent", "creator", { error: ErrorCode.DUPLICATE_SECRET, interface: "rest" }],
+    ]);
+    expect(
+      engine
+        .queryAudit({ eventType: AuditEventType.VAULT_READ })
+        .filter((row) => row.detail?.operation === "name_taken")
+        .map((row) => row.detail),
+    ).toEqual([{ operation: "name_taken", found: true, interface: "rest" }]);
+    expect(JSON.stringify(failed[0]?.detail).includes("ledger-key")).toBe(false);
+    expect(creates(true)).toHaveLength(1);
+  });
+});

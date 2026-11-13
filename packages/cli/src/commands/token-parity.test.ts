@@ -47,6 +47,7 @@ const { mockEngine, mockManager, mockCertManager, mockResolveSecretValue, mockPr
         setAgentPermissions: vi.fn(),
         listIssuedTokens: vi.fn(),
         verifyToken: vi.fn(),
+        auditScopeRefusal: vi.fn(),
         destroy: vi.fn().mockResolvedValue(undefined),
       },
       mockManager: manager,
@@ -144,6 +145,17 @@ function tokenCommandPaths(parent: Command, prefix: string[] = []): string[][] {
     paths.push(...tokenCommandPaths(child, path));
   }
   return paths;
+}
+
+/**
+ * The command path a row's argv types after `harpoc`: the longest token-bearing
+ * path it starts with.
+ */
+function commandPathOf(argv: string[]): string {
+  const [longest] = tokenCommandPaths(buildProgram())
+    .filter((path) => path.every((segment, i) => argv[i] === segment))
+    .sort((a, b) => b.length - a.length);
+  return (longest ?? []).join(" ");
 }
 
 async function run(args: string[]): Promise<void> {
@@ -489,6 +501,18 @@ describe("token permission map (Task 9 pin)", () => {
         expect.stringContaining(`Token lacks permission: ${permission}`),
       );
       expect(PROBES[call]).not.toHaveBeenCalled();
+    });
+
+    it("writes the refusal's access.denied row once, under the command's path (A8)", async () => {
+      mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: [] }));
+      await expect(run([...argv, "--token", "jwt-value"])).rejects.toThrow("process.exit");
+      expect(mockEngine.auditScopeRefusal.mock.calls).toEqual([
+        [
+          { principal_type: "agent", principal_id: "agent-1", interface: "cli" },
+          commandPathOf(argv),
+          "permission",
+        ],
+      ]);
     });
 
     it(`executes with '${permission}' scope`, async () => {

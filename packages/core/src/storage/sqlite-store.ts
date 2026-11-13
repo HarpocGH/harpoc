@@ -41,6 +41,7 @@ export interface SecretFilter {
 export interface AuditFilter {
   secretId?: string;
   eventType?: AuditEventType;
+  excludeEventType?: AuditEventType;
   since?: number;
   until?: number;
   limit?: number;
@@ -53,7 +54,7 @@ export interface AuditFilter {
    * instead of the visible remainder of the newest `limit` rows. Rows without
    * a `secret_id` stay visible, except a failed row of a per-secret event type
    * or `access.denied`, whose detail may name a handle the caller may not
-   * address (S6).
+   * address (S6), and a `vault.read` row (A-2).
    */
   visibleSecretIds?: string[];
 }
@@ -81,6 +82,13 @@ const HIDE_SECRETLESS_FAILURES =
   " AND NOT (secret_id IS NULL AND success = 0 AND event_type IN (" +
   [...HIDDEN_SECRETLESS_FAILURE_TYPES].map((type) => `'${type}'`).join(",") +
   "))";
+
+const HIDDEN_FROM_SCOPED_READER_TYPES: ReadonlySet<string> = new Set([AuditEventType.VAULT_READ]);
+
+const HIDE_FROM_SCOPED_READERS =
+  " AND event_type NOT IN (" +
+  [...HIDDEN_FROM_SCOPED_READER_TYPES].map((type) => `'${type}'`).join(",") +
+  ")";
 
 /** Raw audit row plus its chain link, for tamper-evidence verification. */
 export interface AuditChainRow {
@@ -698,6 +706,10 @@ export class SqliteStore {
       sql += " AND event_type = ?";
       params.push(filter.eventType);
     }
+    if (filter?.excludeEventType) {
+      sql += " AND event_type != ?";
+      params.push(filter.excludeEventType);
+    }
     if (filter?.principalType) {
       sql += " AND principal_type = ?";
       params.push(filter.principalType);
@@ -729,6 +741,7 @@ export class SqliteStore {
           ? " AND secret_id IS NULL"
           : ` AND (secret_id IS NULL OR secret_id IN (${ids.map(() => "?").join(",")}))`;
       sql += HIDE_SECRETLESS_FAILURES;
+      sql += HIDE_FROM_SCOPED_READERS;
       params.push(...ids);
     }
 
@@ -743,10 +756,12 @@ export class SqliteStore {
     let events = rows.map((row) => this.rowToAuditEvent(row));
     if (ids !== undefined && !inlineVisibility) {
       const visible = new Set(ids);
-      events = events.filter((event) =>
-        event.secret_id === null
-          ? event.success || !HIDDEN_SECRETLESS_FAILURE_TYPES.has(event.event_type)
-          : visible.has(event.secret_id),
+      events = events.filter(
+        (event) =>
+          !HIDDEN_FROM_SCOPED_READER_TYPES.has(event.event_type) &&
+          (event.secret_id === null
+            ? event.success || !HIDDEN_SECRETLESS_FAILURE_TYPES.has(event.event_type)
+            : visible.has(event.secret_id)),
       );
       if (filter?.limit) events = events.slice(0, filter.limit);
     }
@@ -851,13 +866,13 @@ export class SqliteStore {
     return result.changes > 0;
   }
 
-  /** Most recent audit timestamp attributed to this agent, or null if it has none. */
+  /** Most recent non-read audit timestamp attributed to this agent, or null if it has none. */
   agentLastActiveAt(name: string): number | null {
     const row = this.db
       .prepare(
-        "SELECT MAX(timestamp) AS last_active FROM audit_log WHERE principal_type = 'agent' AND principal_id = ?",
+        "SELECT MAX(timestamp) AS last_active FROM audit_log WHERE principal_type = 'agent' AND principal_id = ? AND event_type != ?",
       )
-      .get(name) as { last_active: number | null };
+      .get(name, AuditEventType.VAULT_READ) as { last_active: number | null };
     return row.last_active ?? null;
   }
 

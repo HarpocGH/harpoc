@@ -210,6 +210,57 @@ describe("createMcpServer", () => {
     );
   });
 
+  it.each([
+    ["an expired", VaultError.tokenExpired()],
+    ["a revoked", VaultError.tokenRevoked()],
+    ["a forged", new VaultError(ErrorCode.INVALID_TOKEN, "Invalid token signature")],
+  ])(
+    "%s launch token: the stdio start refuses with its code and one failed server.start row carrying the code alone",
+    (_label, refusal) => {
+      const launchToken = "header.refused-launch-token.signature";
+      const engine = mockEngine({
+        verifyToken: vi.fn().mockImplementation(() => {
+          throw refusal;
+        }),
+      });
+
+      expect(() => createMcpServer({ engine, launchToken, enableTtyPrompt: true })).toThrow(
+        refusal,
+      );
+
+      expect(engine.auditServerStart).toHaveBeenCalledTimes(1);
+      expect(engine.auditServerStart).toHaveBeenCalledWith({
+        transport: "stdio",
+        tokenless: false,
+        ttyPrompt: true,
+        success: false,
+        error: refusal.code,
+      });
+      const recorded = JSON.stringify(vi.mocked(engine.auditServerStart).mock.calls);
+      expect(recorded.includes("refused-launch-token")).toBe(false);
+    },
+  );
+
+  it("a refused token on the Streamable HTTP leg and a locked engine's refusal write no start row", () => {
+    const refusing = (refusal: VaultError) =>
+      mockEngine({
+        verifyToken: vi.fn().mockImplementation(() => {
+          throw refusal;
+        }),
+      });
+    const http = refusing(VaultError.tokenExpired());
+    expect(() =>
+      createMcpServer({ engine: http, launchToken: "expired.jwt", accessInterface: "mcp-http" }),
+    ).toThrow(expect.objectContaining({ code: ErrorCode.TOKEN_EXPIRED }));
+    const locked = refusing(VaultError.vaultLocked());
+    expect(() => createMcpServer({ engine: locked, launchToken: "any.jwt" })).toThrow(
+      expect.objectContaining({ code: ErrorCode.VAULT_LOCKED }),
+    );
+
+    expect(http.auditServerStart).not.toHaveBeenCalled();
+    expect(locked.auditServerStart).not.toHaveBeenCalled();
+  });
+
   it("registers all 9 tools", async () => {
     const engine = mockEngine();
     const server = createMcpServer({ engine, allowTokenless: true });

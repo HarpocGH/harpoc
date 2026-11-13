@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ErrorCode } from "@harpoc/shared";
+import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import type {
   CallerContext,
   ExpiringCertificateInfo,
@@ -14,8 +14,10 @@ import type {
   Permission,
   PrincipalType,
 } from "@harpoc/shared";
+import type { DecryptedAuditEvent } from "./audit/audit-query.js";
+import type { SqliteStore } from "./storage/sqlite-store.js";
 import { VaultEngine } from "./vault-engine.js";
-import { registerAgents } from "./__fixtures__/engine-seams.js";
+import { nonReadAuditCount, registerAgents } from "./__fixtures__/engine-seams.js";
 
 /**
  * D5 — the expiring-status projections hand out metadata only: no encrypted
@@ -78,6 +80,12 @@ function grant(
 ): void {
   if (principalType === "agent") registerAgents(engine, principalId);
   engine.grantPolicy({ secretId, principalType, principalId, permissions }, "test-admin");
+}
+
+function readRows(operation: string): DecryptedAuditEvent[] {
+  return engine
+    .queryAudit({ eventType: AuditEventType.VAULT_READ })
+    .filter((row) => row.detail?.operation === operation);
 }
 
 /**
@@ -235,16 +243,21 @@ describe("getExpiringOAuthTokenStatuses", () => {
     ]);
   });
 
-  it("silently drops policy-gated secrets for a token-derived caller", async () => {
+  it("drops policy-gated secrets for a token-derived caller: one vault.read row a read, the dropped row counted as withheld, and no other row", async () => {
     const { secretId } = await engine.createOAuthSecret("gated", oauthConfig());
     await engine.completeOAuthFlow(secretId, "at-1", "rt-1", Date.now() + 30 * MINUTE_MS);
     grant(secretId, "agent", "alice", ["use"]);
 
-    const before = engine.queryAudit({}).length;
+    const before = nonReadAuditCount(engine);
     expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS, agent("mallory"))).toEqual([]);
     expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS, agent("alice"))).toEqual([]);
     expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS)).toHaveLength(1);
-    expect(engine.queryAudit({}).length).toBe(before);
+    expect(nonReadAuditCount(engine)).toBe(before);
+    expect(readRows("expiring_oauth").map((row) => [row.principal_id, row.detail])).toEqual([
+      [null, { operation: "expiring_oauth", count: 1, withheld: 0 }],
+      ["alice", { operation: "expiring_oauth", count: 0, withheld: 1 }],
+      ["mallory", { operation: "expiring_oauth", count: 0, withheld: 1 }],
+    ]);
   });
 
   it("a `list` grant restores the row for its principal only", async () => {
@@ -397,18 +410,23 @@ describe("getExpiringCertificateStatuses", () => {
     expect(projected.auto_renew).toBe(engine.getCertificateStatus(secretId).auto_renew);
   });
 
-  it("silently drops policy-gated secrets for a token-derived caller", async () => {
+  it("drops policy-gated secrets for a token-derived caller: one vault.read row a read, the dropped row counted as withheld, and no other row", async () => {
     const { secretId } = await engine.importCertificate("gated", fx("expired-key.pem"), {
       certificatePem: fx("expired-cert.pem"),
       renewBeforeDays: 1,
     });
     grant(secretId, "agent", "alice", ["use"]);
 
-    const before = engine.queryAudit({}).length;
+    const before = nonReadAuditCount(engine);
     expect(engine.getExpiringCertificateStatuses(agent("mallory"))).toEqual([]);
     expect(engine.getExpiringCertificateStatuses(agent("alice"))).toEqual([]);
     expect(engine.getExpiringCertificateStatuses()).toHaveLength(1);
-    expect(engine.queryAudit({}).length).toBe(before);
+    expect(nonReadAuditCount(engine)).toBe(before);
+    expect(readRows("expiring_certificates").map((row) => [row.principal_id, row.detail])).toEqual([
+      [null, { operation: "expiring_certificates", count: 1, withheld: 0 }],
+      ["alice", { operation: "expiring_certificates", count: 0, withheld: 1 }],
+      ["mallory", { operation: "expiring_certificates", count: 0, withheld: 1 }],
+    ]);
   });
 
   it("a `list` grant restores the row for its principal only", async () => {
@@ -512,4 +530,103 @@ describe("projection/accessor agreement", () => {
     expect(projected).toHaveLength(rows.length);
     expect(projected[0]?.access_token_expires_at).toBe(rows[0]?.access_token_expires_at);
   });
+});
+
+describe("the expiring reads' vault.read rows (A4)", () => {
+  const READER: CallerContext = {
+    principal_type: "agent",
+    principal_id: "alice",
+    interface: "rest",
+    remote_address: "127.0.0.1",
+  };
+  const NAMES = ["ledger-oauth", "payroll-oauth", "ledger-cert", "payroll-cert"];
+
+  function liveStore(): SqliteStore {
+    return (engine as unknown as { store: SqliteStore }).store;
+  }
+
+  async function expiringPair(): Promise<void> {
+    for (const name of ["ledger-oauth", "payroll-oauth"]) {
+      const { secretId } = await engine.createOAuthSecret(name, oauthConfig());
+      await engine.completeOAuthFlow(secretId, "at-1", "rt-1", Date.now() + 30 * MINUTE_MS);
+      if (name === "ledger-oauth") grant(secretId, "agent", "alice", ["list"]);
+    }
+    for (const name of ["ledger-cert", "payroll-cert"]) {
+      const { secretId } = await engine.importCertificate(name, fx("expired-key.pem"), {
+        certificatePem: fx("expired-cert.pem"),
+        renewBeforeDays: 1,
+      });
+      if (name === "ledger-cert") grant(secretId, "agent", "alice", ["list"]);
+    }
+  }
+
+  it.each([
+    {
+      operation: "expiring_oauth",
+      read: () => engine.getExpiringOAuthTokenStatuses(HOUR_MS, READER),
+    },
+    {
+      operation: "expiring_certificates",
+      read: () => engine.getExpiringCertificateStatuses(READER),
+    },
+  ])(
+    "$operation: one row after the read — count, withheld, the caller's principal — naming no secret",
+    async ({ operation, read }) => {
+      await expiringPair();
+
+      expect(read()).toHaveLength(1);
+
+      const rows = readRows(operation);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        secret_id: null,
+        principal_type: "agent",
+        principal_id: "alice",
+        ip_address: "127.0.0.1",
+        success: true,
+      });
+      expect(rows[0]?.detail).toEqual({ operation, count: 1, withheld: 1, interface: "rest" });
+      for (const name of NAMES) {
+        expect(JSON.stringify(rows[0]?.detail).includes(name)).toBe(false);
+      }
+    },
+  );
+
+  it("with nothing expiring each read still writes its one row: count 0, withheld 0", () => {
+    expect(engine.getExpiringOAuthTokenStatuses(HOUR_MS, READER)).toEqual([]);
+    expect(engine.getExpiringCertificateStatuses()).toEqual([]);
+
+    expect(readRows("expiring_oauth").map((row) => [row.principal_id, row.detail])).toEqual([
+      ["alice", { operation: "expiring_oauth", count: 0, withheld: 0, interface: "rest" }],
+    ]);
+    expect(readRows("expiring_certificates").map((row) => [row.principal_id, row.detail])).toEqual([
+      [null, { operation: "expiring_certificates", count: 0, withheld: 0 }],
+    ]);
+  });
+
+  it.each([
+    {
+      operation: "expiring_oauth",
+      read: () => engine.getExpiringOAuthTokenStatuses(HOUR_MS, READER),
+    },
+    {
+      operation: "expiring_certificates",
+      read: () => engine.getExpiringCertificateStatuses(READER),
+    },
+  ])(
+    "$operation throws the logger's error and returns nothing when its row cannot be written",
+    async ({ operation, read }) => {
+      await expiringPair();
+      vi.spyOn(liveStore(), "insertAuditEvent").mockImplementationOnce(() => {
+        throw new Error("audit unavailable");
+      });
+
+      let answer: unknown;
+      expect(() => {
+        answer = read();
+      }).toThrow("audit unavailable");
+      expect(answer).toBeUndefined();
+      expect(readRows(operation)).toEqual([]);
+    },
+  );
 });

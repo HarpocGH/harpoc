@@ -46,7 +46,7 @@ afterEach(async () => {
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
-describe("createToken without the rotation option (model A unchanged)", () => {
+describe("createToken without the rotation option (model A's success row unchanged)", () => {
   it("writes the token.create row with subject, jti, scope and principal_type alone — no rotation key", () => {
     const token = engine.createToken("bot", ["use"], 60_000);
 
@@ -60,11 +60,12 @@ describe("createToken without the rotation option (model A unchanged)", () => {
     });
   });
 
-  it("refuses a deactivated agent AGENT_INACTIVE and writes no row", async () => {
+  it("refuses a deactivated agent AGENT_INACTIVE and writes one failed row with the error alone — no rotation key", async () => {
     engine.deactivateAgent("bot");
 
     await expectVaultError(() => engine.createToken("bot", ["use"]), ErrorCode.AGENT_INACTIVE);
-    expect(engine.queryAudit({ eventType: AuditEventType.TOKEN_CREATE })).toHaveLength(0);
+    expect(tokenRows(false).map((row) => row.detail)).toEqual([{ error: "AGENT_INACTIVE" }]);
+    expect(tokenRows(true)).toHaveLength(0);
   });
 });
 

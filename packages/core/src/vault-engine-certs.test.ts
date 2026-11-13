@@ -1176,7 +1176,7 @@ describe("certificate accessors", () => {
     expect(JSON.stringify(reads[0]?.detail)).not.toContain("privateKeyPem");
   });
 
-  it("getAcmeAccount writes no read row when no account is stored", () => {
+  it("getAcmeAccount writes no secret.read row when no account is stored", () => {
     expect(engine.getAcmeAccount(secretId)).toBeNull();
     expect(engine.queryAudit({ eventType: AuditEventType.SECRET_READ }).length).toBe(0);
   });

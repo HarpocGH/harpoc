@@ -2,7 +2,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { VaultEngine } from "@harpoc/core";
-import { ErrorCode, VAULT_DB_NAME, SESSION_FILE_NAME, VaultError } from "@harpoc/shared";
+import {
+  AuditEventType,
+  ErrorCode,
+  VAULT_DB_NAME,
+  SESSION_FILE_NAME,
+  VaultError,
+} from "@harpoc/shared";
 import type { AccessPolicy, Permission, PrincipalType } from "@harpoc/shared";
 
 export interface TestVault {
@@ -45,6 +51,22 @@ export function registerAgents(engine: VaultEngine, ...names: string[]): void {
       if (!(err instanceof VaultError) || err.code !== ErrorCode.AGENT_EXISTS) throw err;
     }
   }
+}
+
+interface SqliteHandle {
+  prepare(sql: string): { get(...params: unknown[]): unknown };
+}
+
+/**
+ * The number of audit rows whose type is not `vault.read`, counted in the
+ * engine's store rather than through `queryAudit` (core's `nonReadAuditCount`).
+ */
+export function nonReadAuditCount(engine: VaultEngine): number {
+  const { db } = (engine as unknown as { store: { db: SqliteHandle } }).store;
+  const row = db
+    .prepare("SELECT COUNT(*) AS count FROM audit_log WHERE event_type != ?")
+    .get(AuditEventType.VAULT_READ) as { count: number };
+  return row.count;
 }
 
 /**

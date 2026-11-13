@@ -40,6 +40,7 @@ export function registerCertStatusCommand(cert: Command): void {
             "read",
             handle,
             options.token ?? process.env.HARPOC_TOKEN,
+            "cert status",
           );
           const secretId = await resolveSecretId(engine, handle, resolved?.caller);
           const status = engine.getCertificateStatus(secretId, resolved?.caller, handle);

@@ -9,7 +9,7 @@ import { AAD_CONNECTION_CONFIG, AAD_MCP_SERVER_CONFIG } from "@harpoc/shared";
 import type { CallerContext, Permission, TokenPrincipalType } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
-import { registerAgents } from "./__fixtures__/engine-seams.js";
+import { nonReadAuditCount, registerAgents } from "./__fixtures__/engine-seams.js";
 import { decrypt, encrypt } from "./crypto/aes-gcm.js";
 import {
   FIXTURE_CERT_PEM,
@@ -464,11 +464,11 @@ describe("the value tools' pre-flights (P3-35)", () => {
     expect(await engine.secretNameTaken("taken")).toBe(false);
   });
 
-  it("secretNameTaken writes no audit row", async () => {
-    const before = engine.queryAudit({}).length;
+  it("secretNameTaken writes no row but its vault.read row", async () => {
+    const before = nonReadAuditCount(engine);
     await engine.secretNameTaken("taken");
     await engine.secretNameTaken("unknown");
-    expect(engine.queryAudit({}).length).toBe(before);
+    expect(nonReadAuditCount(engine)).toBe(before);
   });
 
   it("assertRotateAllowed refuses an unknown handle as SECRET_NOT_FOUND with a denied secret.rotate row", async () => {

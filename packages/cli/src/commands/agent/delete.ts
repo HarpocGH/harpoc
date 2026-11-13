@@ -52,6 +52,7 @@ export function registerAgentDeleteCommand(agent: Command): void {
               engine,
               { permission: "admin" },
               options.token ?? process.env.HARPOC_TOKEN,
+              "agent delete",
             );
 
             const current = engine.getAgent(name, resolved?.caller);

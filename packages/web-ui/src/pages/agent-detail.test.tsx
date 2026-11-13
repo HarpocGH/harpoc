@@ -80,7 +80,7 @@ describe("AgentDetailPage", () => {
     expect(screen.getByText("expired", { selector: ".chip" }).getAttribute("data-tone")).toBe("");
   });
 
-  it("reads recent activity through the principal filters and links to the audit page", async () => {
+  it("reads recent activity through the principal filters, read rows left out (TW-R4), and links to the audit page", async () => {
     const queryAudit = vi.fn().mockResolvedValue([event()]);
     render(<AgentDetailPage api={api({ queryAudit })} name="ci-bot" />);
     await waitFor(() =>
@@ -90,6 +90,7 @@ describe("AgentDetailPage", () => {
       principal_type: "agent",
       principal_id: "ci-bot",
       limit: 50,
+      exclude_event_type: "vault.read",
     });
     expect(screen.getByText("secret.use")).toBeTruthy();
     expect(href('a[href^="#/audit"]')).toBe("#/audit?principal_type=agent&principal_id=ci-bot");

@@ -57,6 +57,7 @@ export function registerAuthListCommand(auth: Command): void {
               engine,
               { permission: "admin" },
               options.token ?? process.env.HARPOC_TOKEN,
+              "auth list",
             );
 
             const tokens = engine.listIssuedTokens(

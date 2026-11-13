@@ -4,7 +4,12 @@ import { createApp } from "@harpoc/rest-api";
 import { startMcpHttpServer } from "@harpoc/mcp-server";
 import type { McpHttpServer } from "@harpoc/mcp-server";
 import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
-import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
+import {
+  createTestVault,
+  destroyTestVault,
+  nonReadAuditCount,
+  registerAgents,
+} from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { silenceAuditLines } from "@harpoc/test-utils";
 
@@ -469,10 +474,10 @@ describe("per-secret access policy enforcement end-to-end", () => {
       expect(granted).toContain("w2-gated");
     });
 
-    it("the trusted local path still enumerates everything, silently and with a valid chain", async () => {
+    it("the trusted local path still enumerates everything; each listing writes one vault.read row naming no secret, and the chain stays valid", async () => {
       // Minted first: token creation is itself an audited mutation.
       const other = vault.engine.createToken("other-agent", ["list"]);
-      const before = vault.engine.queryAudit({}).length;
+      const before = nonReadAuditCount(vault.engine);
 
       const local = vault.engine.listSecrets().map((s) => s.name);
       expect(local).toContain("w2-gated");
@@ -480,8 +485,23 @@ describe("per-secret access policy enforcement end-to-end", () => {
 
       await restList(other);
 
-      // Enumeration — permitted or filtered — writes no audit row.
-      expect(vault.engine.queryAudit({}).length).toBe(before);
+      // Enumeration — permitted or filtered — writes one vault.read row and no other row.
+      expect(nonReadAuditCount(vault.engine)).toBe(before);
+      const listings = vault.engine
+        .queryAudit({ eventType: AuditEventType.VAULT_READ })
+        .filter((row) => row.detail?.operation === "list_secrets")
+        .slice(0, 2);
+      expect(listings.map((row) => [row.principal_type, row.principal_id, row.detail])).toEqual([
+        [
+          "agent",
+          "other-agent",
+          { operation: "list_secrets", count: 0, withheld: local.length, interface: "rest" },
+        ],
+        [null, null, { operation: "list_secrets", count: local.length, withheld: 0 }],
+      ]);
+      for (const name of local) {
+        expect(JSON.stringify(listings.map((row) => row.detail)).includes(name)).toBe(false);
+      }
       expect(vault.engine.verifyAuditChain().valid).toBe(true);
     });
   });

@@ -3,12 +3,14 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CallerContext } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, VaultState } from "@harpoc/shared";
 import type { DecryptedAuditEvent } from "./audit/audit-query.js";
 import { VaultEngine } from "./vault-engine.js";
 import type { VaultEngineOptions } from "./vault-engine.js";
 import type { SessionKeyProtector } from "./session/session-key-protector.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
+import { nonReadAuditCount } from "./__fixtures__/engine-seams.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
@@ -83,6 +85,12 @@ function rowsOf(reader: VaultEngine, eventType: AuditEventType): DecryptedAuditE
   return reader.queryAudit({ eventType });
 }
 
+function statusReads(reader: VaultEngine): DecryptedAuditEvent[] {
+  return rowsOf(reader, AuditEventType.VAULT_READ).filter(
+    (row) => row.detail?.operation === "unlock_key_status",
+  );
+}
+
 function liveStore(of: VaultEngine): SqliteStore {
   return (of as unknown as { store: SqliteStore }).store;
 }
@@ -126,7 +134,7 @@ describe("enrolment (enrollUnlockKey, unlockKeyStatus)", () => {
     expect(values.includes(Buffer.from(key).toString("base64"))).toBe(false);
   });
 
-  it("unlockKeyStatus reports no slot, the slot with its enrolment time, then none after revoke — unaudited", async () => {
+  it("unlockKeyStatus reports no slot, the slot with its enrolment time, then none after revoke — one vault.read row a read and no other", async () => {
     await engine.initVault(PASSWORD);
     expect(await engine.unlockKeyStatus()).toEqual({ enrolled: false });
 
@@ -134,9 +142,9 @@ describe("enrolment (enrollUnlockKey, unlockKeyStatus)", () => {
     await engine.enrollUnlockKey();
     const after = new Date().toISOString();
 
-    const rows = engine.queryAudit().length;
+    const rows = nonReadAuditCount(engine);
     const status = await engine.unlockKeyStatus();
-    expect(engine.queryAudit()).toHaveLength(rows);
+    expect(nonReadAuditCount(engine)).toBe(rows);
     expect(status.enrolled).toBe(true);
     const enrolledAt = status.enrolledAt as string;
     expect(enrolledAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
@@ -145,6 +153,7 @@ describe("enrolment (enrollUnlockKey, unlockKeyStatus)", () => {
 
     await engine.revokeUnlockKey();
     expect(await engine.unlockKeyStatus()).toEqual({ enrolled: false });
+    expect(statusReads(engine)).toHaveLength(3);
   });
 
   it("writes one vault.unlock_key.enroll row per enrolment — replaced false, then true — and a replaced key stops unlocking", async () => {
@@ -223,6 +232,58 @@ describe("enrolment (enrollUnlockKey, unlockKeyStatus)", () => {
     await expectVaultError(() => engine.enrollUnlockKey(), ErrorCode.VAULT_LOCKED);
     await expectVaultError(() => engine.revokeUnlockKey(), ErrorCode.VAULT_LOCKED);
     await expectVaultError(() => engine.unlockKeyStatus(), ErrorCode.VAULT_LOCKED);
+  });
+});
+
+describe("unlockKeyStatus' vault.read row (A5)", () => {
+  const OPERATOR: CallerContext = {
+    principal_type: "user",
+    principal_id: "operator",
+    interface: "cli",
+  };
+
+  it("the trusted path: one row after the read — NULL principal columns, no interface key, no enrolment time — and the answer unchanged", async () => {
+    await engine.initVault(PASSWORD);
+    await engine.enrollUnlockKey();
+    const before = nonReadAuditCount(engine);
+
+    const status = await engine.unlockKeyStatus();
+
+    expect(status).toEqual({ enrolled: true, enrolledAt: readMeta("unlock_key_enrolled_at") });
+    expect(nonReadAuditCount(engine)).toBe(before);
+    const reads = statusReads(engine);
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toMatchObject({
+      event_type: AuditEventType.VAULT_READ,
+      secret_id: null,
+      principal_type: null,
+      principal_id: null,
+      success: true,
+      session_id: expect.any(String),
+    });
+    expect(reads[0]?.detail).toEqual({ operation: "unlock_key_status" });
+    expect(JSON.stringify(reads[0]?.detail).includes(status.enrolledAt as string)).toBe(false);
+  });
+
+  it("with a caller: the caller's principal and interface on the row", async () => {
+    await engine.initVault(PASSWORD);
+
+    expect(await engine.unlockKeyStatus(OPERATOR)).toEqual({ enrolled: false });
+
+    expect(
+      statusReads(engine).map((row) => [row.principal_type, row.principal_id, row.detail]),
+    ).toEqual([["user", "operator", { operation: "unlock_key_status", interface: "cli" }]]);
+  });
+
+  it("throws the logger's error and answers nothing when its row cannot be written", async () => {
+    await engine.initVault(PASSWORD);
+    await engine.enrollUnlockKey();
+    failNextAuditInsert(engine);
+
+    await expect(engine.unlockKeyStatus()).rejects.toBe(INJECTED);
+    vi.restoreAllMocks();
+
+    expect(statusReads(engine)).toEqual([]);
   });
 });
 

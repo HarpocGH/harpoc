@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { VaultError, matchesSecretNameScope } from "@harpoc/shared";
+import { matchesSecretNameScope } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printTable, printJson, formatTimestamp } from "../../utils/output.js";
 import { resolveTokenCaller, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
@@ -61,18 +61,14 @@ export function registerSecretListCommand(secret: Command): void {
           try {
             const resolved = resolveTokenCaller(
               engine,
-              { permission: "list" },
+              { permission: "list", project: options.project || undefined },
               options.token ?? process.env.HARPOC_TOKEN,
+              "secret list",
             );
             // H4: for a token-bearing call, absent and empty are the same request (REST
             // parity). Tokenless, an explicit --project "" keeps its fail-closed empty
             // filter exactly as before token support.
             const project = resolved ? options.project || undefined : options.project;
-            if (resolved?.payload.project && project && project !== resolved.payload.project) {
-              throw VaultError.accessDenied(
-                `Token is scoped to project: ${resolved.payload.project}`,
-              );
-            }
             const effectiveProject = project ?? resolved?.payload.project;
             let secrets = engine.listSecrets(effectiveProject, resolved?.caller);
             const namePatterns = resolved?.payload.secrets;

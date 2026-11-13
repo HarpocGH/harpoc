@@ -175,7 +175,7 @@ describe("ssh-agent status — each consumer's socket, as ssh-add -l reads it", 
       `consumer d: not listening — no answer within 2 s ${socket("d")}`,
       `consumer e: not listening — not an ssh-agent answer ${socket("e")}`,
       `consumer f: not listening — unreachable ${socket("f")}`,
-      `consumer g: listening — the identities request was refused (a locked vault refuses it) ${socket("g")}`,
+      `consumer g: listening — the identities request was refused (a locked vault or a spent listing budget refuses it) ${socket("g")}`,
     ]);
   });
 

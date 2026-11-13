@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { auditQuerySchema, auditScopeFromToken, isDecimalInteger } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import { checkScope } from "../middleware/scope.js";
+import { callerOf } from "../utils/caller.js";
 import { schemaValidationError } from "../utils/schema-error.js";
 
 /** A query number read as `1*DIGIT`, or its text handed on for the schema to refuse (C-12). */
@@ -21,6 +22,7 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
 
     const secretId = c.req.query("secret_id");
     const eventType = c.req.query("event_type");
+    const excludeEventType = c.req.query("exclude_event_type");
     const since = c.req.query("since");
     const until = c.req.query("until");
     const limit = c.req.query("limit");
@@ -31,6 +33,7 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
     const raw = {
       secret_id: secretId ?? undefined,
       event_type: eventType ?? undefined,
+      exclude_event_type: excludeEventType ?? undefined,
       since: decimalQuery(since),
       until: decimalQuery(until),
       limit: decimalQuery(limit),
@@ -58,6 +61,7 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
       {
         secretId: parsed.data.secret_id,
         eventType: parsed.data.event_type,
+        excludeEventType: parsed.data.exclude_event_type,
         since: parsed.data.since,
         until: parsed.data.until,
         limit: parsed.data.limit,
@@ -66,6 +70,7 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
         principalId: parsed.data.principal_id,
       },
       auditScopeFromToken(token),
+      callerOf(c),
     );
 
     return c.json({ data: events });
@@ -75,7 +80,7 @@ export function createAuditRoutes(): Hono<HarpocEnv> {
     checkScope(c, "admin");
 
     const engine = c.get("engine");
-    const report = engine.verifyAuditChain();
+    const report = engine.verifyAuditChain(undefined, callerOf(c));
     // The tail is anchor material with a CLI-only export path (`harpoc audit
     // anchor`) — an anchor stored via the browser would live on the same disk
     // it guards.

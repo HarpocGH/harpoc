@@ -6,6 +6,7 @@ const { mockEngine } = vi.hoisted(() => ({
     getConnectionConfig: vi.fn().mockResolvedValue(undefined),
     setInjectionPolicy: vi.fn().mockResolvedValue(undefined),
     verifyToken: vi.fn(),
+    auditScopeRefusal: vi.fn(),
     destroy: vi.fn().mockResolvedValue(undefined),
   },
 }));

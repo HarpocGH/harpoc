@@ -39,6 +39,7 @@ function countdown(expiresAt: number, now: number): string {
 export function TokensPage({ api }: { api: ApiClient }) {
   const [status, setStatus] = useState<IssuedTokenStatusFilter>("active");
   const [agent, setAgent] = useState("");
+  const [agentDraft, setAgentDraft] = useState("");
   const [error, setError] = useState<Error | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -46,6 +47,11 @@ export function TokensPage({ api }: { api: ApiClient }) {
     () => api.listTokens({ status, ...(agent === "" ? {} : { agent }) }),
     [status, agent],
   );
+
+  const onApply = (event: Event): void => {
+    event.preventDefault();
+    setAgent(agentDraft);
+  };
 
   const onRevoke = (row: IssuedToken): void => {
     setError(null);
@@ -82,7 +88,7 @@ export function TokensPage({ api }: { api: ApiClient }) {
         What is currently authenticating against this vault. The registry keeps claims metadata only
         — the JWT itself is never stored, and none is ever minted from this UI.
       </p>
-      <div class="panel">
+      <form class="panel" onSubmit={onApply}>
         <label for="token-status">Status</label>
         <select
           id="token-status"
@@ -99,10 +105,11 @@ export function TokensPage({ api }: { api: ApiClient }) {
         <input
           id="token-agent"
           autocomplete="off"
-          value={agent}
-          onInput={(e) => setAgent(e.currentTarget.value)}
+          value={agentDraft}
+          onInput={(e) => setAgentDraft(e.currentTarget.value)}
         />
-      </div>
+        <button type="submit">Apply</button>
+      </form>
 
       {tokens.error && <p class="error-text">{tokens.error.message}</p>}
       {error && <p class="error-text">{error.message}</p>}

@@ -7,6 +7,7 @@ import {
   AuditEventType,
   ErrorCode,
   SecretType,
+  TOKENLESS_STDIO_PRINCIPAL,
   tokenlessStdioCaller,
   VaultError,
 } from "@harpoc/shared";
@@ -343,7 +344,7 @@ describe("the gate's resolved secret is reused by the wrapped method (R16)", () 
 // `tokenless-stdio` caller lost a listing the absent caller it replaces had.
 // It is an admin-user caller (R7); only a genuinely scoped token is refused.
 describe("the vault-wide listPolicies form admits the admin-user classes (R16)", () => {
-  it("the tokenless-stdio caller lists vault-wide and writes no row", async () => {
+  it("the tokenless-stdio caller lists vault-wide, keeps its secret.read count and writes one vault.read row", async () => {
     const id = await makeSecret("vault-wide");
     grant(id, "alice", ["read"]);
     const before = engine.queryAudit({ eventType: AuditEventType.SECRET_READ }).length;
@@ -352,6 +353,19 @@ describe("the vault-wide listPolicies form admits the admin-user classes (R16)",
 
     expect(policies.map((p) => p.secret_id)).toEqual([id]);
     expect(engine.queryAudit({ eventType: AuditEventType.SECRET_READ })).toHaveLength(before);
+    const reads = engine
+      .queryAudit({ eventType: AuditEventType.VAULT_READ })
+      .filter((row) => row.detail?.operation === "list_policies");
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toMatchObject({
+      secret_id: null,
+      principal_type: "user",
+      principal_id: TOKENLESS_STDIO_PRINCIPAL,
+    });
+    expect(reads[0]?.detail).toEqual({ operation: "list_policies", count: 1, interface: "mcp" });
+    const serialized = JSON.stringify(reads[0]?.detail);
+    expect(serialized.includes("vault-wide")).toBe(false);
+    expect(serialized.includes(id)).toBe(false);
   });
 
   it("a scoped token caller must still name the secret", async () => {
@@ -361,5 +375,85 @@ describe("the vault-wide listPolicies form admits the admin-user classes (R16)",
       ErrorCode.INVALID_INPUT,
     );
     expect(err.message).toBe("A secret id is required to list access policies");
+  });
+});
+
+describe("secretNameTaken writes its vault.read row (A4)", () => {
+  const CHECKER: CallerContext = {
+    principal_type: "agent",
+    principal_id: "bob",
+    interface: "mcp",
+    remote_address: "127.0.0.1",
+  };
+
+  function nameTakenRows() {
+    return engine
+      .queryAudit({ eventType: AuditEventType.VAULT_READ })
+      .filter((row) => row.detail?.operation === "name_taken");
+  }
+
+  beforeEach(async () => {
+    await engine.createSecret({
+      name: "ledger",
+      type: SecretType.API_KEY,
+      project: "finance",
+      value: VALUE,
+    });
+  });
+
+  it("one row after the lookup: found true for a live name, false for an unknown one, the project verbatim when the name was found there and as its presence otherwise, the caller's principal, no name", async () => {
+    expect(await engine.secretNameTaken("ledger", "finance", CHECKER)).toBe(true);
+    expect(await engine.secretNameTaken("payroll", "finance", CHECKER)).toBe(false);
+    expect(await engine.secretNameTaken("ledger", undefined, CHECKER)).toBe(false);
+
+    const rows = nameTakenRows();
+    expect(
+      rows.map((row) => [row.secret_id, row.principal_type, row.principal_id, row.ip_address]),
+    ).toEqual([
+      [null, "agent", "bob", "127.0.0.1"],
+      [null, "agent", "bob", "127.0.0.1"],
+      [null, "agent", "bob", "127.0.0.1"],
+    ]);
+    expect(rows.map((row) => row.detail)).toEqual([
+      { operation: "name_taken", found: false, interface: "mcp" },
+      { operation: "name_taken", project: true, found: false, interface: "mcp" },
+      { operation: "name_taken", project: "finance", found: true, interface: "mcp" },
+    ]);
+    for (const name of ["ledger", "payroll"]) {
+      expect(JSON.stringify(rows.map((row) => row.detail)).includes(name)).toBe(false);
+    }
+  });
+
+  it("a project the vault does not hold is recorded as its presence only (TW-R1)", async () => {
+    const typed = "typed-not-held-7c1";
+    expect(await engine.secretNameTaken("ledger", typed, CHECKER)).toBe(false);
+
+    const [row] = nameTakenRows();
+    expect(JSON.stringify(row?.detail).includes(typed)).toBe(false);
+    expect(row?.detail).toEqual({
+      operation: "name_taken",
+      project: true,
+      found: false,
+      interface: "mcp",
+    });
+  });
+
+  it("the trusted path writes the row with NULL principal columns and no interface key", async () => {
+    expect(await engine.secretNameTaken("ledger", "finance")).toBe(true);
+
+    expect(
+      nameTakenRows().map((row) => [row.principal_type, row.principal_id, row.detail]),
+    ).toEqual([[null, null, { operation: "name_taken", project: "finance", found: true }]]);
+  });
+
+  it("throws the logger's error and answers nothing when its row cannot be written", async () => {
+    vi.spyOn(storeOf(engine), "insertAuditEvent").mockImplementationOnce(() => {
+      throw new Error("audit unavailable");
+    });
+
+    await expect(engine.secretNameTaken("ledger", "finance", CHECKER)).rejects.toThrow(
+      "audit unavailable",
+    );
+    expect(nameTakenRows()).toEqual([]);
   });
 });

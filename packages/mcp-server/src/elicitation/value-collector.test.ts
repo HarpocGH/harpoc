@@ -7,7 +7,7 @@ import { connectModernInMemoryClient } from "@harpoc/test-utils";
 import type { InMemoryMcpClient } from "@harpoc/test-utils";
 import type { VaultEngine } from "@harpoc/core";
 import type { OAuthManager } from "@harpoc/oauth-proxy";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode, tokenlessStdioCaller, VaultError } from "@harpoc/shared";
 import { createMcpServer } from "../server.js";
 import type { CreateMcpServerOptions } from "../server.js";
 import { valueRequestState } from "./request-state.js";
@@ -1422,7 +1422,9 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
     });
 
     it("create_secret refuses a taken name at round 1, before any form opens", async () => {
-      const engine = mockEngine();
+      const engine = mockEngine({
+        refuseTakenSecretName: vi.fn().mockRejectedValue(VaultError.duplicateSecret("api-key")),
+      });
       vi.mocked(engine.secretNameTaken).mockResolvedValue(true);
       const modern = await connectModern(engine);
       const open: Awaited<ReturnType<typeof startValueCollector>>[] = [];
@@ -1430,7 +1432,15 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         const result = await modern.callTool("create_secret", { name: "api-key", type: "api_key" });
         expect(result.isError).toBe(true);
         expect(result.content[0]?.text).toContain("Secret already exists: api-key");
-        expect(engine.secretNameTaken).toHaveBeenCalledWith("api-key", undefined);
+        expect(engine.secretNameTaken).toHaveBeenCalledWith(
+          "api-key",
+          undefined,
+          tokenlessStdioCaller("mcp"),
+        );
+        expect(engine.refuseTakenSecretName).toHaveBeenCalledWith(
+          "api-key",
+          tokenlessStdioCaller("mcp"),
+        );
         open.push(
           await startValueCollector({
             subject: "probe-1",

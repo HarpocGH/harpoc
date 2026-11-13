@@ -1,7 +1,14 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import { RestClient } from "@harpoc/sdk";
 import type { VaultClient } from "@harpoc/sdk";
-import { ErrorCode, HARPOC_VERSION, VaultError, formatHandle, parseHandle } from "@harpoc/shared";
+import {
+  AuditEventType,
+  ErrorCode,
+  HARPOC_VERSION,
+  VaultError,
+  formatHandle,
+  parseHandle,
+} from "@harpoc/shared";
 import { readLaunchTokenFile } from "./cli-options.js";
 import { decodeHandlePath } from "./resources/secrets.js";
 import {
@@ -306,9 +313,14 @@ export function createBridgeServer(options: CreateBridgeServerOptions): McpServe
   server.registerResource(
     "audit-recent",
     "secret://vault/audit/recent",
-    { description: "Last 50 audit log entries (metadata only)", mimeType: "application/json" },
+    {
+      description: "Last 50 audit log entries, reads excluded (metadata only)",
+      mimeType: "application/json",
+    },
     async (uri) => {
-      const events = await forward((client) => client.queryAudit({ limit: 50 }));
+      const events = await forward((client) =>
+        client.queryAudit({ limit: 50, excludeEventType: AuditEventType.VAULT_READ }),
+      );
       return json(
         uri,
         events.map((e) => ({

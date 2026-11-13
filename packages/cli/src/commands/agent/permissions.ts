@@ -118,6 +118,7 @@ export function registerAgentPermissionsCommand(agent: Command): void {
             "admin",
             handle,
             options.token ?? process.env.HARPOC_TOKEN,
+            "agent permissions",
           );
 
           const permissions = parsePermissionFlags(options);

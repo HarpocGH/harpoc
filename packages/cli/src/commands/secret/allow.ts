@@ -264,13 +264,25 @@ export function registerSecretAllowCommand(secret: Command): void {
           const tokenValue = options.token ?? process.env.HARPOC_TOKEN;
 
           if (options.show || setCount === 0) {
-            const resolved = resolveTokenCallerForHandle(engine, "read", handle, tokenValue);
+            const resolved = resolveTokenCallerForHandle(
+              engine,
+              "read",
+              handle,
+              tokenValue,
+              "secret allow",
+            );
             const policy = await engine.getInjectionPolicy(handle, resolved?.caller);
             printJson(policy);
             return;
           }
 
-          const resolved = resolveTokenCallerForHandle(engine, "admin", handle, tokenValue);
+          const resolved = resolveTokenCallerForHandle(
+            engine,
+            "admin",
+            handle,
+            tokenValue,
+            "secret allow",
+          );
           // The merge read is attributed like the write it feeds: `admin`
           // satisfies the `read` gate this call runs, so nothing a caller
           // could not already reach is read and the row names the principal.

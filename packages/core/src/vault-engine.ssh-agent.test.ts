@@ -16,7 +16,12 @@ import {
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { AgentBinding, AgentSignRequest } from "./injection/ssh-agent/agent-connection.js";
-import { registerAgents, registryOf, retainDecryptedValues } from "./__fixtures__/engine-seams.js";
+import {
+  nonReadAuditCount,
+  registerAgents,
+  registryOf,
+  retainDecryptedValues,
+} from "./__fixtures__/engine-seams.js";
 import {
   buildUserauthRequest,
   fixtureKnownHostsLine,
@@ -116,6 +121,11 @@ function ed25519PublicKey(blob: Buffer): KeyObject {
 
 const useRows = (secretId?: string) =>
   engine.queryAudit({ eventType: AuditEventType.SECRET_USE, secretId });
+const LISTING = "agent_socket_identities";
+const listingRows = () =>
+  engine
+    .queryAudit({ eventType: AuditEventType.VAULT_READ })
+    .filter((row) => row.detail?.["operation"] === LISTING);
 const allZero = (buf: Uint8Array): boolean => buf.every((b) => b === 0);
 const store = (): SqliteStore => (engine as unknown as { store: SqliteStore }).store;
 
@@ -217,14 +227,17 @@ describe("listAgentSocketIdentities — the keys a consumer's socket lists", () 
     expect(await engine.listAgentSocketIdentities(agentSocketCaller("ghost"), null)).toEqual([]);
   });
 
-  it("an expired key drops out without the lazy transition — the enumeration writes no row", async () => {
+  it("an expired key drops out without the lazy transition — the enumeration writes its one vault.read row and no other", async () => {
     store().updateSecret(ids["deploy-ed"] as string, { expires_at: Date.now() - 1000 });
+    const before = nonReadAuditCount(engine);
 
     expect(await engine.listAgentSocketIdentities(caller(), null)).toEqual([
       { publicKeyBlob: EC_KEY, comment: "secret://deploy-ec" },
     ]);
     expect(engine.queryAudit({ eventType: AuditEventType.SECRET_EXPIRE })).toHaveLength(0);
     expect(useRows()).toHaveLength(0);
+    expect(nonReadAuditCount(engine)).toBe(before);
+    expect(listingRows().map((row) => row.detail?.["count"])).toEqual([1]);
   });
 
   it("decrypts only the keys it may serve, each once per stored value, and wipes every buffer; a rotation re-derives", async () => {
@@ -269,6 +282,220 @@ describe("listAgentSocketIdentities — the keys a consumer's socket lists", () 
       () => engine.listAgentSocketIdentities(caller(), null),
       ErrorCode.VAULT_LOCKED,
     );
+  });
+});
+
+describe("listAgentSocketIdentities — the listing's vault.read row and its bucket (A6)", () => {
+  const HOST_A_FINGERPRINT = "SHA256:bP78DfpGjDBVPrHoEx6Q+ZZrTMW6YdkiLJaMDLnQSvU";
+  const HOST_C_FINGERPRINT = "SHA256:x0wqZripSfHc9nQIqNx1c05R9Fpe0qmpL2Vg/S8iAh8";
+  const NAMES = ["deploy-ed", "deploy-ec", "api-token", "ec-optout", "rsa-other", CONSUMER];
+
+  it("an unbound listing writes one row after the read — bound false, the count, the consumer's principal — naming no handle and no key", async () => {
+    const before = nonReadAuditCount(engine);
+
+    expect(await engine.listAgentSocketIdentities(caller(), null)).toHaveLength(2);
+
+    expect(nonReadAuditCount(engine)).toBe(before);
+    const rows = listingRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      event_type: AuditEventType.VAULT_READ,
+      secret_id: null,
+      principal_type: "agent",
+      principal_id: CONSUMER,
+      ip_address: null,
+      success: true,
+    });
+    expect(rows[0]?.detail).toEqual({
+      operation: LISTING,
+      bound: false,
+      count: 2,
+      interface: "ssh_agent",
+    });
+    const serialized = JSON.stringify(rows[0]?.detail);
+    for (const name of NAMES) expect(serialized.includes(name)).toBe(false);
+    for (const blob of [ED_KEY, EC_KEY]) {
+      expect(serialized.includes(blob.toString("base64"))).toBe(false);
+    }
+  });
+
+  it("a bound listing records the bound host key's fingerprint; a host key no served secret pins writes count 0 with its own (the unpinned hop)", async () => {
+    expect(await engine.listAgentSocketIdentities(caller(), boundTo(HOST_A))).toHaveLength(1);
+    expect(await engine.listAgentSocketIdentities(caller(), boundTo(HOST_C))).toEqual([]);
+
+    const rows = listingRows();
+    expect(rows.map((row) => [row.success, row.principal_id, row.detail])).toEqual([
+      [
+        true,
+        CONSUMER,
+        {
+          operation: LISTING,
+          bound: true,
+          count: 0,
+          host_key_fingerprint: HOST_C_FINGERPRINT,
+          interface: "ssh_agent",
+        },
+      ],
+      [
+        true,
+        CONSUMER,
+        {
+          operation: LISTING,
+          bound: true,
+          count: 1,
+          host_key_fingerprint: HOST_A_FINGERPRINT,
+          interface: "ssh_agent",
+        },
+      ],
+    ]);
+    const serialized = JSON.stringify(rows.map((row) => row.detail));
+    for (const name of [...NAMES, "github.test", "gitlab.test"]) {
+      expect(serialized.includes(name)).toBe(false);
+    }
+    for (const blob of [HOST_A, HOST_C, ED_KEY]) {
+      expect(serialized.includes(blob.toString("base64"))).toBe(false);
+    }
+  });
+
+  it("a deactivated or unregistered consumer is listed nothing and writes a failed row naming it and the code, no key decrypted", async () => {
+    const retained = retainDecryptedValues(engine);
+    engine.deactivateAgent(CONSUMER);
+    const before = nonReadAuditCount(engine);
+
+    expect(await engine.listAgentSocketIdentities(caller(), null)).toEqual([]);
+    expect(
+      await engine.listAgentSocketIdentities(agentSocketCaller("ghost"), boundTo(HOST_A)),
+    ).toEqual([]);
+
+    expect(retained).toHaveLength(0);
+    expect(nonReadAuditCount(engine)).toBe(before);
+    expect(
+      listingRows().map((row) => [
+        row.success,
+        row.secret_id,
+        row.principal_type,
+        row.principal_id,
+        row.detail,
+      ]),
+    ).toEqual([
+      [
+        false,
+        null,
+        "agent",
+        "ghost",
+        {
+          operation: LISTING,
+          bound: true,
+          host_key_fingerprint: HOST_A_FINGERPRINT,
+          error: ErrorCode.AGENT_NOT_FOUND,
+          interface: "ssh_agent",
+        },
+      ],
+      [
+        false,
+        null,
+        "agent",
+        CONSUMER,
+        {
+          operation: LISTING,
+          bound: false,
+          error: ErrorCode.AGENT_INACTIVE,
+          interface: "ssh_agent",
+        },
+      ],
+    ]);
+    const serialized = JSON.stringify(listingRows().map((row) => row.detail));
+    for (const name of [...NAMES, "ghost"]) expect(serialized.includes(name)).toBe(false);
+  });
+
+  it("the 121st listing of one consumer inside a minute is refused RATE_LIMIT_EXCEEDED with no row, while a signature in the same minute is still served", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      for (let i = 0; i < RATE_LIMIT_USE_SECRET; i++) {
+        await engine.listAgentSocketIdentities(caller(), boundTo(HOST_A));
+      }
+      expect(listingRows()).toHaveLength(RATE_LIMIT_USE_SECRET);
+
+      await expectVaultError(
+        () => engine.listAgentSocketIdentities(caller(), boundTo(HOST_A)),
+        ErrorCode.RATE_LIMIT_EXCEEDED,
+      );
+      expect(listingRows()).toHaveLength(RATE_LIMIT_USE_SECRET);
+      await engine.signForAgentSocket(caller(), signRequest(ED_KEY, boundTo(HOST_A)));
+      expect(useRows(ids["deploy-ed"]).map((row) => row.success)).toEqual([true]);
+      expect(
+        await engine.listAgentSocketIdentities(agentSocketCaller("other-bot"), null),
+      ).toHaveLength(1);
+
+      vi.setSystemTime(Date.now() + 60_000);
+      expect(await engine.listAgentSocketIdentities(caller(), boundTo(HOST_A))).toHaveLength(1);
+      expect(listingRows().filter((row) => row.principal_id === CONSUMER)).toHaveLength(
+        RATE_LIMIT_USE_SECRET + 1,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the bucket comes first: served, empty and refused listings draw on one consumer's bucket, and past it the refusal writes no row", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const served = Math.floor(RATE_LIMIT_USE_SECRET / 3);
+      const refused = RATE_LIMIT_USE_SECRET - 2 * served;
+      for (let i = 0; i < served; i++) {
+        expect(await engine.listAgentSocketIdentities(caller(), null)).toHaveLength(2);
+        expect(await engine.listAgentSocketIdentities(caller(), boundTo(HOST_C))).toEqual([]);
+      }
+      engine.deactivateAgent(CONSUMER);
+      for (let i = 0; i < refused; i++) {
+        expect(await engine.listAgentSocketIdentities(caller(), null)).toEqual([]);
+      }
+      expect(listingRows().map((row) => row.success)).toEqual([
+        ...Array<boolean>(refused).fill(false),
+        ...Array<boolean>(2 * served).fill(true),
+      ]);
+
+      await expectVaultError(
+        () => engine.listAgentSocketIdentities(caller(), null),
+        ErrorCode.RATE_LIMIT_EXCEEDED,
+      );
+      expect(listingRows()).toHaveLength(RATE_LIMIT_USE_SECRET);
+      expect(
+        await engine.listAgentSocketIdentities(agentSocketCaller("other-bot"), null),
+      ).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["a served listing", CONSUMER],
+    ["an unregistered consumer's listing", "ghost"],
+  ])(
+    "%s throws the logger's error and returns nothing when its row cannot be written",
+    async (_label, consumer) => {
+      vi.spyOn(store(), "insertAuditEvent").mockImplementationOnce(() => {
+        throw new Error("audit unavailable");
+      });
+
+      let answer: unknown;
+      await expect(
+        (async () => {
+          answer = await engine.listAgentSocketIdentities(agentSocketCaller(consumer), null);
+        })(),
+      ).rejects.toThrow("audit unavailable");
+      expect(answer).toBeUndefined();
+      expect(listingRows()).toEqual([]);
+    },
+  );
+
+  it("an admin scoped to a project finds no listing row on the trail; an unscoped read finds it (A-2)", async () => {
+    await engine.listAgentSocketIdentities(caller(), null);
+
+    const scoped = engine.queryAudit({}, { project: "web" });
+    expect(scoped.length).toBeGreaterThan(0);
+    expect(scoped.filter((row) => row.event_type === AuditEventType.VAULT_READ)).toEqual([]);
+    expect(listingRows().map((row) => row.principal_id)).toEqual([CONSUMER]);
   });
 });
 

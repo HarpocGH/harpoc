@@ -53,6 +53,7 @@ describe("audit --since validation", () => {
     expect(mockEngine.queryAudit).toHaveBeenCalledWith(
       expect.objectContaining({ since: new Date("2026-07-01").getTime() }),
       undefined,
+      undefined,
     );
   });
 
@@ -60,6 +61,7 @@ describe("audit --since validation", () => {
     await run(["--json"]);
     expect(mockEngine.queryAudit).toHaveBeenCalledWith(
       expect.objectContaining({ since: undefined }),
+      undefined,
       undefined,
     );
   });
@@ -126,9 +128,47 @@ describe("audit --secret (I29)", () => {
     await run(["--secret", "secret-id-7", "--json"]);
     expect(mockEngine.queryAudit).toHaveBeenCalledTimes(1);
     expect(mockEngine.queryAudit).toHaveBeenCalledWith(
-      { secretId: "secret-id-7", eventType: undefined, since: undefined, limit: 50 },
+      {
+        secretId: "secret-id-7",
+        eventType: undefined,
+        excludeEventType: undefined,
+        since: undefined,
+        limit: 50,
+      },
+      undefined,
       undefined,
     );
+  });
+});
+
+describe("audit --exclude-event (A-9)", () => {
+  let spies: CliSpies;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    spies = spyCli();
+  });
+
+  afterEach(() => {
+    spies.restore();
+  });
+
+  it("--exclude-event reaches queryAudit as excludeEventType, the trusted path passing no caller", async () => {
+    await run(["--exclude-event", "vault.read", "--json"]);
+    expect(mockEngine.queryAudit).toHaveBeenCalledTimes(1);
+    expect(mockEngine.queryAudit.mock.calls).toEqual([
+      [
+        {
+          secretId: undefined,
+          eventType: undefined,
+          excludeEventType: "vault.read",
+          since: undefined,
+          limit: 50,
+        },
+        undefined,
+        undefined,
+      ],
+    ]);
   });
 });
 
@@ -278,6 +318,7 @@ describe("audit anchor / verify --anchor", () => {
   it("prints the anchor JSON to stdout and the off-host guidance to stderr", async () => {
     mockEngine.getAuditChainTail.mockReturnValue(validAnchor);
     await run(["anchor"]);
+    expect(mockEngine.getAuditChainTail.mock.calls).toEqual([[undefined]]);
     expect(JSON.parse(spies.stdout())).toEqual(validAnchor);
     expect(spies.stderr()).toContain("OFF-HOST");
     expect(spies.stdout()).not.toContain("OFF-HOST");
@@ -341,7 +382,7 @@ describe("audit anchor / verify --anchor", () => {
     const file = join(tempDir, "a.anchor");
     writeFileSync(file, JSON.stringify(validAnchor), "utf8");
     await run(["verify", "--anchor", file]);
-    expect(mockEngine.verifyAuditChain).toHaveBeenCalledWith({ anchor: validAnchor });
+    expect(mockEngine.verifyAuditChain).toHaveBeenCalledWith({ anchor: validAnchor }, undefined);
     expect(spies.stdout()).toContain(`Anchor OK — row ${validAnchor.last_id} intact`);
     expect(process.exitCode).toBeUndefined();
   });
