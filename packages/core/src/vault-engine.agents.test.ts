@@ -602,20 +602,18 @@ describe("createToken registration gate", () => {
     expect(rows(AuditEventType.TOKEN_CREATE)[0]?.detail).not.toHaveProperty("label");
   });
 
-  it("refuses a label over the maximum length with one failed token.create row that carries no label, and no token", async () => {
+  it("refuses a label over the maximum length before any vault state is read: no row (U-7), no token", async () => {
     engine.registerAgent({ name: "ghost" });
     const label = `refused-label-${"x".repeat(256)}`;
+    const before = nonReadAuditCount(engine);
 
     await expectVaultError(
       () => engine.createToken("ghost", ["use"], 60_000, { label }),
       ErrorCode.INVALID_INPUT,
     );
     expect(liveStore().listIssuedTokens()).toHaveLength(0);
-    const created = rows(AuditEventType.TOKEN_CREATE);
-    expect(created.map((row) => [row.success, row.detail])).toEqual([
-      [false, { error: ErrorCode.INVALID_INPUT }],
-    ]);
-    expect(JSON.stringify(created[0]).includes("refused-label")).toBe(false);
+    expect(nonReadAuditCount(engine)).toBe(before);
+    expect(rows(AuditEventType.TOKEN_CREATE)).toEqual([]);
   });
 
   it("accepts a label exactly at the maximum length", () => {
@@ -1095,7 +1093,9 @@ describe("the registry's refusals write one failed row of the operation's own ty
     },
   );
 
-  it("createToken with a principal type outside agent, tool and user: one failed token.create row that carries no principal type", async () => {
+  it("createToken with a principal type outside agent, tool and user is refused before any vault state is read: no row (U-7), no token", async () => {
+    const before = nonReadAuditCount(engine);
+
     await expectVaultError(
       () =>
         engine.createToken("svc", ["use"], 60_000, {
@@ -1104,11 +1104,8 @@ describe("the registry's refusals write one failed row of the operation's own ty
       ErrorCode.INVALID_INPUT,
     );
 
-    const created = rows(AuditEventType.TOKEN_CREATE);
-    expect(created.map((row) => [row.success, row.detail])).toEqual([
-      [false, { error: ErrorCode.INVALID_INPUT }],
-    ]);
-    expect(JSON.stringify(created[0]).includes("refused-principal")).toBe(false);
+    expect(nonReadAuditCount(engine)).toBe(before);
+    expect(rows(AuditEventType.TOKEN_CREATE)).toEqual([]);
     expect(liveStore().listIssuedTokens()).toHaveLength(0);
   });
 

@@ -8,7 +8,7 @@ import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { VaultEngineOptions } from "./vault-engine.js";
-import { registerAgents } from "./__fixtures__/engine-seams.js";
+import { nonReadAuditCount, registerAgents } from "./__fixtures__/engine-seams.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -98,19 +98,16 @@ describe("JWT tokens", () => {
     }
   });
 
-  it("an invalid pattern's refusal writes one failed token.create row that carries neither the pattern nor the subject", async () => {
+  it("an invalid pattern is refused before any vault state is read and writes no row (U-7)", async () => {
+    const before = nonReadAuditCount(engine);
+
     await expectVaultError(
       () => engine.createToken("user-1", ["use"], 60_000, { secrets: ["refused/pattern*"] }),
       ErrorCode.INVALID_SECRET_NAME,
     );
 
-    const created = engine.queryAudit({ eventType: AuditEventType.TOKEN_CREATE });
-    expect(created.map((r) => [r.success, r.principal_id, r.detail])).toEqual([
-      [false, null, { error: ErrorCode.INVALID_SECRET_NAME }],
-    ]);
-    const serialized = JSON.stringify(created[0]?.detail);
-    expect(serialized.includes("refused/pattern")).toBe(false);
-    expect(serialized.includes("user-1")).toBe(false);
+    expect(nonReadAuditCount(engine)).toBe(before);
+    expect(engine.queryAudit({ eventType: AuditEventType.TOKEN_CREATE })).toEqual([]);
   });
 
   it("rejects invalid token", async () => {

@@ -1,17 +1,18 @@
 /**
- * DDL constants for the vault database — the v1.5 baseline at schema 12.
- * The 1.0–1.4 line's migrations 001–012 were collapsed into this set on
- * 2026-08-30 (compromise audit R2); their history lives in the docs repo's
- * implementation-history.md. Every table is a SQLite STRICT table; every
- * timestamp is milliseconds.
+ * DDL constants for the vault database — the v1.5 baseline at schema 12 and
+ * the steps past it. The 1.0–1.4 line's migrations 001–012 were collapsed into
+ * the baseline on 2026-08-30 (compromise audit R2); their history lives in the
+ * docs repo's implementation-history.md. Every table is a SQLite STRICT table;
+ * every timestamp is milliseconds.
  */
 
 /**
- * The schema version the baseline creates and the highest this binary knows.
- * A vault stamped above it is refused; one stamped below it (1–11, the retired
- * migration ladder) cannot be upgraded and is refused too — see runMigrations.
+ * The schema version every open brings a store to and the highest this binary
+ * knows. A vault stamped above it is refused; one stamped below the baseline
+ * (1–11, the retired migration ladder) cannot be upgraded and is refused too —
+ * see runMigrations.
  */
-export const LATEST_SCHEMA_VERSION = 12;
+export const LATEST_SCHEMA_VERSION = 13;
 
 export const CREATE_VAULT_META = `
 CREATE TABLE IF NOT EXISTS vault_meta (
@@ -111,11 +112,21 @@ CREATE TABLE IF NOT EXISTS audit_log (
 ) STRICT;
 `;
 
-/** The principal index serves last-active and the audit attribution filter. */
+/** The principal index serves the audit attribution filter. */
 export const CREATE_AUDIT_LOG_INDEXES = `
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log (timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_secret_id ON audit_log (secret_id);
 CREATE INDEX IF NOT EXISTS idx_audit_principal ON audit_log (principal_type, principal_id, timestamp);
+`;
+
+/**
+ * Schema 13: serves last-active, which leaves an agent's `vault.read` rows out
+ * (`agentLastActiveAt`) — one seek however many reads trail the agent's last
+ * other row. The literal is `AuditEventType.VAULT_READ`'s value.
+ */
+export const CREATE_AUDIT_PRINCIPAL_ACTIVE_INDEX = `
+CREATE INDEX IF NOT EXISTS idx_audit_principal_active
+  ON audit_log (principal_type, principal_id, timestamp) WHERE event_type != 'vault.read';
 `;
 
 /** `expires_at` is milliseconds like every other timestamp (R2/C36). */

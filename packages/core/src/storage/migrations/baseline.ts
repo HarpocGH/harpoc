@@ -19,12 +19,14 @@ import {
   CREATE_SECRETS,
   CREATE_SECRETS_INDEXES,
   CREATE_VAULT_META,
-  LATEST_SCHEMA_VERSION,
 } from "../schema.js";
 
-/** The v1.5 baseline: the complete schema in one step, applied to an empty store only. */
+/**
+ * The v1.5 baseline, frozen at schema 12: that schema whole in one step, applied
+ * to an empty store only; runMigrations' steps past 12 follow it.
+ */
 export const baselineSchema = {
-  version: LATEST_SCHEMA_VERSION,
+  version: 12,
   up: [
     CREATE_VAULT_META,
     CREATE_SECRETS,

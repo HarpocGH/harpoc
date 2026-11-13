@@ -37,6 +37,8 @@ export function dropAuditRowHmacConstraint(db: SqlExecHandle): void {
     CREATE INDEX idx_audit_timestamp ON audit_log (timestamp);
     CREATE INDEX idx_audit_secret_id ON audit_log (secret_id);
     CREATE INDEX idx_audit_principal ON audit_log (principal_type, principal_id, timestamp);
+    CREATE INDEX idx_audit_principal_active
+      ON audit_log (principal_type, principal_id, timestamp) WHERE event_type != 'vault.read';
   `);
 }
 

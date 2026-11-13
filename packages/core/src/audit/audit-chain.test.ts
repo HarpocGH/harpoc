@@ -256,6 +256,33 @@ describe("audit chain: NULL links are not a free pass", () => {
     store.db.prepare("UPDATE audit_log SET row_hmac = NULL WHERE id >= ?").run(fromId);
   }
 
+  function auditIndexes(of: SqliteStore): unknown[] {
+    const list = of.db.prepare("PRAGMA index_list(audit_log)").all() as {
+      name: string;
+      unique: number;
+      partial: number;
+    }[];
+    return list
+      .map(({ name, unique, partial }) => ({
+        name,
+        unique,
+        partial,
+        columns: (of.db.prepare(`PRAGMA index_info(${name})`).all() as { name: string }[]).map(
+          (c) => c.name,
+        ),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  it("the rebuilt table keeps every index the store gives audit_log", () => {
+    const fresh = new SqliteStore(":memory:");
+    try {
+      expect(auditIndexes(store)).toEqual(auditIndexes(fresh));
+    } finally {
+      fresh.close();
+    }
+  });
+
   it("pins the vulnerability: nulling a suffix then rewriting it is detected", () => {
     const ids: number[] = [];
     for (let i = 0; i < 5; i++) {

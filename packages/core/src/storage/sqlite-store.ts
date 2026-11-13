@@ -19,7 +19,7 @@ import {
   VaultError,
 } from "@harpoc/shared";
 import { baselineSchema } from "./migrations/baseline.js";
-import { LATEST_SCHEMA_VERSION } from "./schema.js";
+import { CREATE_AUDIT_PRINCIPAL_ACTIVE_INDEX, LATEST_SCHEMA_VERSION } from "./schema.js";
 
 /** True for a better-sqlite3 UNIQUE/PRIMARY-KEY constraint violation. */
 export function isUniqueConstraintError(err: unknown): boolean {
@@ -310,26 +310,50 @@ export class SqliteStore {
 
   /**
    * Bring the store to LATEST_SCHEMA_VERSION. An empty store gets the v1.5
-   * baseline in one transaction; a store from the retired 1.0–1.4 migration
-   * ladder (schema 1–11) cannot be upgraded and is refused before any DDL.
-   * Migrations past the baseline chain below the baseline block as
+   * baseline (schema 12) in one transaction; a store from the retired 1.0–1.4
+   * migration ladder (schema 1–11) cannot be upgraded and is refused before any
+   * DDL. Migrations past the baseline chain below the baseline block as
    * `if (currentVersion < N) { transaction { exec; setMeta } }` steps, one per
    * version, exactly the shape the ladder had — a one-time reset, not a
-   * no-migrations policy.
+   * no-migrations policy. An empty store runs the baseline and then every step.
+   * A transaction that fails is DATABASE_ERROR naming the step and SQLite's
+   * result code, never the driver's message.
    */
   private runMigrations(): void {
-    const currentVersion = this.getMigrationVersion();
+    let currentVersion = this.getMigrationVersion();
     if (currentVersion === 0) {
-      this.db.transaction(() => {
+      this.applyMigration(`the v1.5 baseline (schema ${baselineSchema.version})`, () => {
         this.db.exec(baselineSchema.up);
         this.setMeta("schema_version", String(baselineSchema.version));
-      })();
-      return;
+      });
+      currentVersion = baselineSchema.version;
     }
     if (currentVersion < baselineSchema.version) {
       throw VaultError.vaultCorrupted(
         `Vault schema ${currentVersion} predates the v1.5 baseline (${baselineSchema.version}) and cannot be upgraded — move or delete the vault directory and run harpoc init`,
       );
+    }
+    if (currentVersion < 13) {
+      this.applyMigration("schema step 13", () => {
+        this.db.exec(CREATE_AUDIT_PRINCIPAL_ACTIVE_INDEX);
+        this.setMeta("schema_version", "13");
+      });
+    }
+  }
+
+  private applyMigration(step: string, run: () => void): void {
+    try {
+      this.db.transaction(run)();
+    } catch (err) {
+      if (err instanceof VaultError) throw err;
+      const code =
+        err instanceof Error &&
+        "code" in err &&
+        typeof err.code === "string" &&
+        /^SQLITE_[A-Z_]+$/.test(err.code)
+          ? err.code
+          : "unknown";
+      throw VaultError.databaseError(`${step} could not be applied (${code})`);
     }
   }
 
@@ -866,13 +890,17 @@ export class SqliteStore {
     return result.changes > 0;
   }
 
-  /** Most recent non-read audit timestamp attributed to this agent, or null if it has none. */
+  /**
+   * Most recent non-read audit timestamp attributed to this agent, or null if
+   * it has none. The read type stands in the SQL text, not as a parameter: the
+   * planner then proves idx_audit_principal_active's predicate once, at prepare.
+   */
   agentLastActiveAt(name: string): number | null {
     const row = this.db
       .prepare(
-        "SELECT MAX(timestamp) AS last_active FROM audit_log WHERE principal_type = 'agent' AND principal_id = ? AND event_type != ?",
+        `SELECT MAX(timestamp) AS last_active FROM audit_log WHERE principal_type = 'agent' AND principal_id = ? AND event_type != '${AuditEventType.VAULT_READ}'`,
       )
-      .get(name, AuditEventType.VAULT_READ) as { last_active: number | null };
+      .get(name) as { last_active: number | null };
     return row.last_active ?? null;
   }
 

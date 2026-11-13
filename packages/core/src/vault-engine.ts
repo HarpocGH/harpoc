@@ -620,14 +620,8 @@ const REGISTRY_REFUSALS: ReadonlySet<string> = new Set([
   ErrorCode.AGENT_EXISTS,
   ErrorCode.AGENT_INACTIVE,
 ]);
-const CREATE_REFUSALS: ReadonlySet<string> = new Set([
-  ErrorCode.DUPLICATE_SECRET,
-  ErrorCode.INVALID_SECRET_NAME,
-  ErrorCode.INVALID_PROJECT_NAME,
-]);
+const CREATE_REFUSALS: ReadonlySet<string> = new Set([ErrorCode.DUPLICATE_SECRET]);
 const TOKEN_REFUSALS: ReadonlySet<string> = new Set([
-  ErrorCode.INVALID_SECRET_NAME,
-  ErrorCode.INVALID_INPUT,
   ErrorCode.AGENT_NOT_FOUND,
   ErrorCode.AGENT_INACTIVE,
 ]);
@@ -693,8 +687,8 @@ export class VaultEngine {
     { version: number; ctIv: string; publicKeyBlob: Buffer | null }
   >();
   /**
-   * The agent sockets' per-secret signature buckets and per-consumer listing
-   * buckets (`listing:<consumer>`), `use_secret`'s budget
+   * The agent sockets' per-secret signature buckets and per-consumer signature
+   * and listing buckets (`sign:<consumer>`, `listing:<consumer>`), `use_secret`'s budget
    * (`RATE_LIMIT_USE_SECRET` a minute): the socket answers no token, so no
    * interface in front of the engine limits it as REST, MCP and the proxy do.
    */
@@ -2244,6 +2238,7 @@ export class VaultEngine {
     }
     // Only the signature slides the session (below); a refusal keeps none alive.
     let s = this.assertUnlockedWithoutSlide();
+    this.agentSocketLimiter.checkSecret(`sign:${caller.principal_id}`, true);
     const keyBlob = request.keyBlob;
     const unresolved = { context: "ssh_agent", key_fingerprint: sshKeyFingerprint(keyBlob) };
 

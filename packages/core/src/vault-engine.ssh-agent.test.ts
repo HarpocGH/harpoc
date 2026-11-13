@@ -37,6 +37,7 @@ import {
 } from "./injection/__fixtures__/ssh-agent-capture.js";
 import { parseSessionBind, verifyHostKeySignature } from "./injection/ssh-agent/session-bind.js";
 import { SshReader } from "./injection/ssh-agent/ssh-wire.js";
+import type { AgentRegistry } from "./access/agent-registry.js";
 import type { SecretManager } from "./secrets/secret-manager.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
 
@@ -128,6 +129,8 @@ const listingRows = () =>
     .filter((row) => row.detail?.["operation"] === LISTING);
 const allZero = (buf: Uint8Array): boolean => buf.every((b) => b === 0);
 const store = (): SqliteStore => (engine as unknown as { store: SqliteStore }).store;
+const agentRegistry = (): AgentRegistry =>
+  (engine as unknown as { agentRegistry: AgentRegistry }).agentRegistry;
 
 beforeEach(async () => {
   tempDir = join(tmpdir(), `harpoc-sshagent-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -924,25 +927,41 @@ describe("the agent socket's session slide and signature budget", () => {
     expect(slide).toHaveBeenCalledTimes(1);
   });
 
-  it("limits each key to use_secret's budget a minute, counted after the grant; the next request is RATE_LIMIT_EXCEEDED with no row", async () => {
+  it("limits each key to use_secret's budget a minute across its consumers, counted after the grant; the next request is RATE_LIMIT_EXCEEDED with no row", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
+      registerAgents(engine, "third-bot");
+      engine.grantPolicy(
+        {
+          secretId: ids["deploy-ed"] as string,
+          principalType: "agent",
+          principalId: "other-bot",
+          permissions: ["use"],
+        },
+        "test-admin",
+      );
       await engine.listAgentSocketIdentities(caller(), null);
       for (let i = 0; i < 5; i++) {
         await expectVaultError(
           () =>
             engine.signForAgentSocket(
-              agentSocketCaller("other-bot"),
+              agentSocketCaller("third-bot"),
               signRequest(ED_KEY, boundTo(HOST_A)),
             ),
           ErrorCode.SECRET_NOT_FOUND,
         );
       }
-      for (let i = 0; i < RATE_LIMIT_USE_SECRET; i++) {
-        await expectVaultError(
-          () => engine.signForAgentSocket(caller(), signRequest(ED_KEY, null)),
-          ErrorCode.SSH_AGENT_UNBOUND,
-        );
+      const mine = Math.ceil(RATE_LIMIT_USE_SECRET / 2);
+      for (const [consumer, count] of [
+        [CONSUMER, mine],
+        ["other-bot", RATE_LIMIT_USE_SECRET - mine],
+      ] as const) {
+        for (let i = 0; i < count; i++) {
+          await expectVaultError(
+            () => engine.signForAgentSocket(agentSocketCaller(consumer), signRequest(ED_KEY, null)),
+            ErrorCode.SSH_AGENT_UNBOUND,
+          );
+        }
       }
       const rows = useRows(ids["deploy-ed"]).length;
 
@@ -955,6 +974,137 @@ describe("the agent socket's session slide and signature budget", () => {
 
       vi.setSystemTime(Date.now() + 60_000);
       await engine.signForAgentSocket(caller(), signRequest(ED_KEY, boundTo(HOST_A)));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("signForAgentSocket — the consumer's signature bucket, ahead of the first row", () => {
+  const failedUseRows = (consumer: string) =>
+    useRows().filter((row) => !row.success && row.principal_id === consumer);
+
+  it("an unknown key blob: each request inside the consumer's budget writes one failed row, the first past it is RATE_LIMIT_EXCEEDED with none; another consumer has its own budget", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      for (let i = 0; i < RATE_LIMIT_USE_SECRET; i++) {
+        await expectVaultError(
+          () => engine.signForAgentSocket(caller(), signRequest(UNKNOWN_KEY, boundTo(HOST_A))),
+          ErrorCode.SECRET_NOT_FOUND,
+        );
+      }
+      expect(failedUseRows(CONSUMER)).toHaveLength(RATE_LIMIT_USE_SECRET);
+
+      await expectVaultError(
+        () => engine.signForAgentSocket(caller(), signRequest(UNKNOWN_KEY, boundTo(HOST_A))),
+        ErrorCode.RATE_LIMIT_EXCEEDED,
+      );
+      await expectVaultError(
+        () => engine.signForAgentSocket(caller(), signRequest(ED_KEY, boundTo(HOST_A))),
+        ErrorCode.RATE_LIMIT_EXCEEDED,
+      );
+      expect(useRows()).toHaveLength(RATE_LIMIT_USE_SECRET);
+
+      await expectVaultError(
+        () =>
+          engine.signForAgentSocket(
+            agentSocketCaller("other-bot"),
+            signRequest(UNKNOWN_KEY, boundTo(HOST_A)),
+          ),
+        ErrorCode.SECRET_NOT_FOUND,
+      );
+      expect(failedUseRows("other-bot")).toHaveLength(1);
+
+      vi.setSystemTime(Date.now() + 60_000);
+      await engine.signForAgentSocket(caller(), signRequest(ED_KEY, boundTo(HOST_A)));
+      expect(useRows(ids["deploy-ed"]).map((row) => row.success)).toEqual([true]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["an unregistered consumer", "ghost", ErrorCode.AGENT_NOT_FOUND],
+    ["a deactivated consumer", CONSUMER, ErrorCode.AGENT_INACTIVE],
+  ])(
+    "%s: each request inside its budget writes one failed row, the first past it is RATE_LIMIT_EXCEEDED with none, before the registry is read",
+    async (_label, consumer, code) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        if (consumer === CONSUMER) engine.deactivateAgent(CONSUMER);
+        for (let i = 0; i < RATE_LIMIT_USE_SECRET; i++) {
+          await expectVaultError(
+            () =>
+              engine.signForAgentSocket(
+                agentSocketCaller(consumer),
+                signRequest(ED_KEY, boundTo(HOST_A)),
+              ),
+            code,
+          );
+        }
+        expect(failedUseRows(consumer)).toHaveLength(RATE_LIMIT_USE_SECRET);
+
+        const findByName = vi.spyOn(agentRegistry(), "findByName");
+        await expectVaultError(
+          () =>
+            engine.signForAgentSocket(
+              agentSocketCaller(consumer),
+              signRequest(ED_KEY, boundTo(HOST_A)),
+            ),
+          ErrorCode.RATE_LIMIT_EXCEEDED,
+        );
+        expect(findByName).not.toHaveBeenCalled();
+        expect(useRows()).toHaveLength(RATE_LIMIT_USE_SECRET);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("the listing's bucket and the signature's do not drain each other", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      for (let i = 0; i < RATE_LIMIT_USE_SECRET; i++) {
+        await expectVaultError(
+          () => engine.signForAgentSocket(caller(), signRequest(UNKNOWN_KEY, boundTo(HOST_A))),
+          ErrorCode.SECRET_NOT_FOUND,
+        );
+      }
+      await expectVaultError(
+        () => engine.signForAgentSocket(caller(), signRequest(ED_KEY, boundTo(HOST_A))),
+        ErrorCode.RATE_LIMIT_EXCEEDED,
+      );
+
+      expect(await engine.listAgentSocketIdentities(caller(), boundTo(HOST_A))).toHaveLength(1);
+      expect(listingRows().map((row) => [row.success, row.principal_id])).toEqual([
+        [true, CONSUMER],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a signature counts against the consumer's bucket: its budget is shared across its keys", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const withEd = Math.ceil(RATE_LIMIT_USE_SECRET / 2);
+      for (let i = 0; i < withEd; i++) {
+        await engine.signForAgentSocket(caller(), signRequest(ED_KEY, boundTo(HOST_A)));
+      }
+      for (let i = withEd; i < RATE_LIMIT_USE_SECRET; i++) {
+        await engine.signForAgentSocket(caller(), signRequest(EC_KEY, boundTo(HOST_B)));
+      }
+      expect(useRows().filter((row) => row.success)).toHaveLength(RATE_LIMIT_USE_SECRET);
+
+      await expectVaultError(
+        () => engine.signForAgentSocket(caller(), signRequest(EC_KEY, boundTo(HOST_B))),
+        ErrorCode.RATE_LIMIT_EXCEEDED,
+      );
+      await expectVaultError(
+        () => engine.signForAgentSocket(caller(), signRequest(ED_KEY, boundTo(HOST_A))),
+        ErrorCode.RATE_LIMIT_EXCEEDED,
+      );
+      expect(useRows()).toHaveLength(RATE_LIMIT_USE_SECRET);
     } finally {
       vi.useRealTimers();
     }

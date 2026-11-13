@@ -624,6 +624,65 @@ describe("e2e.yml's task smoke step (the Password-logon cell, its PowerShell rea
         "  try { $code = [HarpocSmokeLogon]::Batch($vaultUser, $password) } finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($password) }\n",
     );
   });
+
+  it("runs register-service.ps1 a second time once the health route read unlocked and the task's instance is stopped (at most 30 s for it to leave Running), before the teardown, its [Console]::Out captured and printed, and fails unless that run exits 0 and prints the recipe's already-held line for the vault account (the branch where the account holds SeBatchLogonRight)", () => {
+    const recipe = psText("windows/register-service.ps1");
+    expect(recipe).toContain("\n$BatchLogonRight = 'SeBatchLogonRight'\n");
+    expect(recipe).toContain('\n$principalName = "$env:COMPUTERNAME\\$VaultUser"\n');
+    expect(recipe).toContain(
+      '\nif ($held -contains $BatchLogonRight) {\n  [Console]::Out.WriteLine("right $BatchLogonRight (Log on as a batch job) already held by $principalName")\n} else {\n',
+    );
+    expect(recipe).toContain("\nExit status: 0 done, 1 not elevated or a command failed");
+    const text = taskSmokeStep().join("\n");
+    const register =
+      "& .\\deploy\\windows\\register-service.ps1 -Node $node -Cli $cli -Password $vaultSecure";
+    expect(text.split(register).length - 1).toBe(2);
+    const first = text.indexOf(register);
+    const second = text.indexOf(register, first + 1);
+    const gate = text.indexOf("\n  if ($state -ne 'unlocked') {");
+    const gateEnd = gate < 0 ? -1 : closingBrace(text, text.indexOf("{", gate));
+    const teardown = text.indexOf("\n} catch {\n  $failure = $_\n} finally {\n");
+    const unregister = text.indexOf("& .\\deploy\\windows\\register-service.ps1 -Unregister");
+    expect(first).toBeGreaterThan(-1);
+    expect(gate).toBeGreaterThan(first);
+    expect(gateEnd).toBeGreaterThan(gate);
+    expect(second).toBeGreaterThan(gateEnd);
+    expect(teardown).toBeGreaterThan(second);
+    expect(unregister).toBeGreaterThan(teardown);
+    const stop = text.indexOf("\n  Stop-ScheduledTask -TaskName Harpoc\n", gateEnd);
+    const wait = text.indexOf(
+      "\n  while ((Get-ScheduledTask -TaskName Harpoc).State -eq 'Running'",
+      gateEnd,
+    );
+    expect(stop).toBeGreaterThan(gateEnd);
+    expect(wait).toBeGreaterThan(stop);
+    expect(second).toBeGreaterThan(wait);
+    expect(text.slice(gateEnd + 1, teardown)).toBe(
+      [
+        "",
+        "  Stop-ScheduledTask -TaskName Harpoc",
+        "  $stopDeadline = [DateTime]::UtcNow.AddSeconds(30)",
+        "  while ((Get-ScheduledTask -TaskName Harpoc).State -eq 'Running' -and [DateTime]::UtcNow -lt $stopDeadline) { Start-Sleep -Seconds 1 }",
+        "  if ((Get-ScheduledTask -TaskName Harpoc).State -eq 'Running') { throw 'the Harpoc task still read Running 30 s after Stop-ScheduledTask, before the second registration' }",
+        "  $global:LASTEXITCODE = 0",
+        "  $rerunWriter = New-Object System.IO.StringWriter",
+        "  $consoleOut = [Console]::Out",
+        "  [Console]::SetOut($rerunWriter)",
+        "  try {",
+        "    & .\\deploy\\windows\\register-service.ps1 -Node $node -Cli $cli -Password $vaultSecure",
+        "    $rerunExit = $LASTEXITCODE",
+        "  } finally {",
+        "    [Console]::SetOut($consoleOut)",
+        "    $rerunOutput = $rerunWriter.ToString()",
+        "    Write-Output '--- the recipe run a second time, the vault account holding the right'",
+        "    Write-Output $rerunOutput",
+        "  }",
+        '  if ($rerunExit -ne 0) { throw "register-service.ps1 run a second time exited $rerunExit" }',
+        '  if (-not $rerunOutput.Contains("right SeBatchLogonRight (Log on as a batch job) already held by $env:COMPUTERNAME\\$vaultUser")) { throw "register-service.ps1 run a second time did not print that $env:COMPUTERNAME\\$vaultUser already holds SeBatchLogonRight" }',
+        "  Invoke-Diagnostic 'the task after the second registration' { Show-TaskLine 'Harpoc' }",
+      ].join("\n"),
+    );
+  });
 });
 
 describe("e2e.yml's provisioning step (the deploy recipe's run, its PowerShell read as text)", () => {

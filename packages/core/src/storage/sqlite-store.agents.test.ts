@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccessPolicy, AuditEvent, Secret } from "@harpoc/shared";
 import { AuditEventType, SecretStatus, SecretType } from "@harpoc/shared";
 import type { AgentRow, IssuedTokenRow } from "./sqlite-store.js";
@@ -193,6 +193,22 @@ describe("agents", () => {
 
     expect(store.agentLastActiveAt("alpha")).toBe(NOW - 500);
     expect(store.agentLastActiveAt("beta")).toBe(NOW + 80_000);
+  });
+
+  it("plans last-active's own statement, the agent's name its one parameter, on idx_audit_principal_active", () => {
+    const prepare = vi.spyOn(store.db, "prepare");
+    store.agentLastActiveAt("alpha");
+    const statements = prepare.mock.calls.map((call) => call[0]);
+    prepare.mockRestore();
+    expect(statements).toHaveLength(1);
+    const sql = statements[0];
+
+    const plan = store.db.prepare(`EXPLAIN QUERY PLAN ${sql as string}`).all("alpha") as {
+      detail: string;
+    }[];
+    expect(plan.map((step) => step.detail)).toEqual([
+      expect.stringMatching(/USING (COVERING )?INDEX idx_audit_principal_active /),
+    ]);
   });
 });
 

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuditEventType } from "@harpoc/shared";
+import { baselineSchema } from "./migrations/baseline.js";
 import { SqliteStore } from "./sqlite-store.js";
 import { LATEST_SCHEMA_VERSION } from "./schema.js";
 import { sqliteErrorCode } from "@harpoc/test-utils";
@@ -60,7 +61,9 @@ function insertBareOAuthRow(secretId: string, authMethodClause: string): void {
 }
 
 describe("v1.5 baseline DDL (R2)", () => {
-  it("creates the twelve tables and stamps schema_version 12", () => {
+  it("creates the twelve tables; the baseline stays frozen at schema 12 and a fresh store ends at the latest, 13", () => {
+    expect(baselineSchema.version).toBe(12);
+    expect(LATEST_SCHEMA_VERSION).toBe(13);
     expect(store.getMeta("schema_version")).toBe(String(LATEST_SCHEMA_VERSION));
     expect(objectNames("table")).toEqual([
       "access_policies",
@@ -78,9 +81,10 @@ describe("v1.5 baseline DDL (R2)", () => {
     ]);
   });
 
-  it("creates the sixteen indexes, the live-name partial unique index included", () => {
+  it("creates the sixteen baseline indexes and schema 13's partial index, the live-name partial unique index included", () => {
     expect(objectNames("index")).toEqual([
       "idx_audit_principal",
+      "idx_audit_principal_active",
       "idx_audit_secret_id",
       "idx_audit_timestamp",
       "idx_certs_expiry",

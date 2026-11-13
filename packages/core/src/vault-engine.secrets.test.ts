@@ -9,7 +9,7 @@ import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import type { CallerContext, OAuthProviderConfig } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
-import { registerAgents } from "./__fixtures__/engine-seams.js";
+import { nonReadAuditCount, registerAgents } from "./__fixtures__/engine-seams.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -875,7 +875,7 @@ describe("setSecretValue refuses a pending secret an OAuth flow owns (F2)", () =
   });
 });
 
-describe("createSecret's refusals write one failed secret.create row (A7)", () => {
+describe("createSecret's refusals: a taken name writes one failed secret.create row (A7), a malformed one none", () => {
   const CREATOR: CallerContext = {
     principal_type: "agent",
     principal_id: "creator",
@@ -936,18 +936,18 @@ describe("createSecret's refusals write one failed secret.create row (A7)", () =
       refused: "refused project/slash",
     },
   ])(
-    "$code: one failed row with the error alone, the refused text in no part of it, nothing created",
+    "$code: refused before any vault state is read, so no row (U-7), the message unchanged, nothing created",
     async ({ code, input, refused }) => {
-      await expectVaultError(
+      const before = nonReadAuditCount(engine);
+
+      const err = await expectVaultError(
         () => engine.createSecret({ ...input, type: "api_key" }, CREATOR),
         code,
       );
+      expect(err.message.includes(refused)).toBe(true);
 
-      const failed = creates(false);
-      expect(failed.map((row) => [row.secret_id, row.principal_id, row.detail])).toEqual([
-        [null, "creator", { error: code, interface: "rest" }],
-      ]);
-      expect(JSON.stringify(failed[0]).includes(refused)).toBe(false);
+      expect(nonReadAuditCount(engine)).toBe(before);
+      expect(creates(false)).toEqual([]);
       expect(creates(true)).toHaveLength(0);
       expect(engine.listSecrets()).toHaveLength(0);
     },

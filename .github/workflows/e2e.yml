@@ -494,6 +494,26 @@ jobs:
               Get-Process -Name node -ErrorAction SilentlyContinue | Select-Object Id, ProcessName | Format-Table -AutoSize | Out-String | Write-Output
               throw 'the Harpoc task did not report the vault unlocked within 60 s'
             }
+            Stop-ScheduledTask -TaskName Harpoc
+            $stopDeadline = [DateTime]::UtcNow.AddSeconds(30)
+            while ((Get-ScheduledTask -TaskName Harpoc).State -eq 'Running' -and [DateTime]::UtcNow -lt $stopDeadline) { Start-Sleep -Seconds 1 }
+            if ((Get-ScheduledTask -TaskName Harpoc).State -eq 'Running') { throw 'the Harpoc task still read Running 30 s after Stop-ScheduledTask, before the second registration' }
+            $global:LASTEXITCODE = 0
+            $rerunWriter = New-Object System.IO.StringWriter
+            $consoleOut = [Console]::Out
+            [Console]::SetOut($rerunWriter)
+            try {
+              & .\deploy\windows\register-service.ps1 -Node $node -Cli $cli -Password $vaultSecure
+              $rerunExit = $LASTEXITCODE
+            } finally {
+              [Console]::SetOut($consoleOut)
+              $rerunOutput = $rerunWriter.ToString()
+              Write-Output '--- the recipe run a second time, the vault account holding the right'
+              Write-Output $rerunOutput
+            }
+            if ($rerunExit -ne 0) { throw "register-service.ps1 run a second time exited $rerunExit" }
+            if (-not $rerunOutput.Contains("right SeBatchLogonRight (Log on as a batch job) already held by $env:COMPUTERNAME\$vaultUser")) { throw "register-service.ps1 run a second time did not print that $env:COMPUTERNAME\$vaultUser already holds SeBatchLogonRight" }
+            Invoke-Diagnostic 'the task after the second registration' { Show-TaskLine 'Harpoc' }
           } catch {
             $failure = $_
           } finally {
