@@ -125,7 +125,7 @@ describe("McpInjector — validation", () => {
 
       // The connection was not torn down by the refusal — it is the *call*
       // that is refused, so the next permitted call still reuses it.
-      expect(registry.get("secret-1")).toBe(live);
+      expect(Object.is(registry.get("secret-1"), live)).toBe(true);
     });
   });
 });
@@ -282,7 +282,7 @@ describe("McpInjector — lifecycle (thesis §4.5.4)", () => {
     });
 
     // Removed on crash — no auto-respawn.
-    expect(registry.get("secret-1")).toBeUndefined();
+    expect(Object.is(registry.get("secret-1"), undefined)).toBe(true);
   });
 
   it("respawns on the next invocation after a crash", async () => {
@@ -321,13 +321,13 @@ describe("McpInjector — lifecycle (thesis §4.5.4)", () => {
     await run(mcpAction("echo"));
     expect(registry.get("secret-1")).toBeDefined();
     await registry.closeAll("session_end");
-    expect(registry.get("secret-1")).toBeUndefined();
+    expect(Object.is(registry.get("secret-1"), undefined)).toBe(true);
   });
 
   it("killAllSync clears the registry without awaiting", async () => {
     await run(mcpAction("echo"));
     registry.killAllSync();
-    expect(registry.get("secret-1")).toBeUndefined();
+    expect(Object.is(registry.get("secret-1"), undefined)).toBe(true);
   });
 
   it("a handshake failure (the child exits before initialize) surfaces as MCP_CONNECT_FAILED and retries fresh", async () => {

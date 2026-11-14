@@ -176,26 +176,31 @@ describe("audit --exclude-event (A-9)", () => {
 
 const FILTER_REFUSALS = [
   {
+    kind: "unknown",
     option: "--event",
     typed: "secret.raed",
     message: "--event: not an audit event type",
   },
   {
+    kind: "unknown",
     option: "--exclude-event",
     typed: "secret.raed",
     message: "--exclude-event: not an audit event type",
   },
   {
+    kind: "unknown",
     option: "--secret",
     typed: "not-an-id",
     message: "--secret: not a secret id",
   },
   {
+    kind: "empty",
     option: "--event",
     typed: "",
     message: "--event: not an audit event type",
   },
   {
+    kind: "empty",
     option: "--secret",
     typed: "",
     message: "--secret: not a secret id",
@@ -215,7 +220,7 @@ describe("audit's filters are judged before the vault opens (C-11)", () => {
   });
 
   it.each(FILTER_REFUSALS)(
-    "refuses an unknown $option value as the fixed INVALID_INPUT envelope, nothing opened",
+    "refuses an $kind $option value as the fixed INVALID_INPUT envelope, nothing opened",
     async ({ option, typed, message }) => {
       await expect(run([option, typed, "--json"])).rejects.toThrow("process.exit");
       expect(spies.exitSpy.mock.calls).toEqual([[1]]);
@@ -229,7 +234,7 @@ describe("audit's filters are judged before the vault opens (C-11)", () => {
   );
 
   it.each(FILTER_REFUSALS)(
-    "on a locked vault an unknown $option value still reports INVALID_INPUT, not VAULT_LOCKED",
+    "on a locked vault an $kind $option value still reports INVALID_INPUT, not VAULT_LOCKED",
     async ({ option, typed, message }) => {
       vi.mocked(loadUnlockedEngine).mockRejectedValueOnce(
         new VaultError(ErrorCode.VAULT_LOCKED, "Vault is locked"),

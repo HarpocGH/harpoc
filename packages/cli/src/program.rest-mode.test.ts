@@ -1179,17 +1179,28 @@ describe("the input refusals of the REST-capable commands under --url (T4)", () 
 
 describe("audit's filters under --url are judged before any request (C-11)", () => {
   it.each([
-    { option: "--event", typed: "secret.raed", message: "--event: not an audit event type" },
     {
+      kind: "unknown",
+      option: "--event",
+      typed: "secret.raed",
+      message: "--event: not an audit event type",
+    },
+    {
+      kind: "unknown",
       option: "--exclude-event",
       typed: "secret.raed",
       message: "--exclude-event: not an audit event type",
     },
-    { option: "--secret", typed: "not-an-id", message: "--secret: not a secret id" },
-    { option: "--event", typed: "", message: "--event: not an audit event type" },
-    { option: "--secret", typed: "", message: "--secret: not a secret id" },
+    {
+      kind: "unknown",
+      option: "--secret",
+      typed: "not-an-id",
+      message: "--secret: not a secret id",
+    },
+    { kind: "empty", option: "--event", typed: "", message: "--event: not an audit event type" },
+    { kind: "empty", option: "--secret", typed: "", message: "--secret: not a secret id" },
   ])(
-    "refuses an unknown $option value as the fixed INVALID_INPUT envelope, the server never contacted",
+    "refuses an $kind $option value as the fixed INVALID_INPUT envelope, the server never contacted",
     async ({ option, typed, message }) => {
       await expect(run([...rest, "audit", option, typed, "--json"])).rejects.toThrow(
         "process.exit",
