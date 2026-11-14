@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   mkdirSync,
@@ -29,6 +28,7 @@ import {
   windowsTokenDirAclRefusal,
 } from "./runtime-dir.js";
 import { expectVaultError } from "@harpoc/test-utils";
+import { icacls } from "../__fixtures__/icacls.js";
 
 /** `icacls /inheritance:r` with this account, SYSTEM and Administrators full — the recipe's base. */
 const TRUSTED_GRANTS = [
@@ -40,24 +40,6 @@ const TRUSTED_GRANTS = [
   "/grant:r",
   "*S-1-5-32-544:(OI)(CI)F",
 ];
-
-function icacls(path: string, ...args: string[]): void {
-  const res = spawnSync(
-    `${process.env.SystemRoot as string}\\System32\\icacls.exe`,
-    [path, ...args],
-    {
-      shell: false,
-      windowsHide: true,
-      timeout: 15_000,
-      encoding: "utf8",
-    },
-  );
-  if (res.status !== 0) {
-    expect.fail(
-      `icacls ${[path, ...args].join(" ")} exited ${String(res.status)}${res.error === undefined ? "" : ` (${res.error.message})`}: ${res.stderr}`,
-    );
-  }
-}
 
 const FLAG_AS_PATH =
   "--runtime-dir: a flag, not a path (give a path that starts with a dash as ./-name)";
@@ -564,6 +546,7 @@ describe("windowsDirAclRefusal (a listing by SID, every platform)", () => {
     user: ME,
     owner: ME,
     account: AGENT,
+    accountClass: "User" as const,
     rules,
   });
   const consumerRx = {
@@ -653,12 +636,48 @@ describe("windowsDirAclRefusal (a listing by SID, every platform)", () => {
   });
 
   it("refuses a consumer directory whose name names no local account, or a well-known group", () => {
-    expect(windowsDirAclRefusal({ ...layout(), account: null }, "agent1")).toBe(
-      'no local account is named "agent1" (a consumer directory is named for its agent user)',
-    );
+    expect(
+      windowsDirAclRefusal({ user: ME, owner: ME, account: null, rules: layout().rules }, "agent1"),
+    ).toBe('no local account is named "agent1" (a consumer directory is named for its agent user)');
     expect(windowsDirAclRefusal({ ...layout(), account: "S-1-1-0" }, "everyone")).toBe(
       '"everyone" names S-1-1-0, not a user account',
     );
+  });
+
+  it("refuses a consumer directory whose name names a group's S-1-5-21 SID (accountClass Group) granted read and execute, with the user-account refusal", () => {
+    expect(
+      windowsDirAclRefusal(
+        { ...layout([...layout().rules, consumerRx]), accountClass: "Group" },
+        "agent1",
+      ),
+    ).toBe(`"agent1" names ${AGENT}, not a user account`);
+  });
+
+  it("refuses the same listing whose account reads as neither a user nor a group (accountClass other)", () => {
+    expect(
+      windowsDirAclRefusal(
+        { ...layout([...layout().rules, consumerRx]), accountClass: "other" },
+        "agent1",
+      ),
+    ).toBe(`"agent1" names ${AGENT}, not a user account`);
+  });
+
+  it("refuses the same listing carrying the account's SID and no class (no accountClass)", () => {
+    expect(
+      windowsDirAclRefusal(
+        { user: ME, owner: ME, account: AGENT, rules: [...layout().rules, consumerRx] },
+        "agent1",
+      ),
+    ).toBe(`"agent1" names ${AGENT}, not a user account`);
+  });
+
+  it("accepts the same listing whose account reads as a user (accountClass User)", () => {
+    expect(
+      windowsDirAclRefusal(
+        { ...layout([...layout().rules, consumerRx]), accountClass: "User" },
+        "agent1",
+      ),
+    ).toBeUndefined();
   });
 });
 
@@ -687,6 +706,7 @@ describe("windowsTokenDirAclRefusal (a token file's directory, its agent the one
     user: ME,
     owner: ME,
     account,
+    ...(account === null ? {} : { accountClass: "User" as const }),
     rules,
   });
 
@@ -729,6 +749,42 @@ describe("windowsTokenDirAclRefusal (a token file's directory, its agent the one
     expect(
       windowsTokenDirAclRefusal(listing("S-1-5-32-545", [...trusted, rx("S-1-5-32-545")]), "users"),
     ).toBe('"users" names S-1-5-32-545, not a user account');
+  });
+
+  it("refuses an agent whose name names a group's S-1-5-21 SID (accountClass Group) granted read and execute, with the user-account refusal", () => {
+    expect(
+      windowsTokenDirAclRefusal(
+        { ...listing(ALICE, [...trusted, rx(ALICE)]), accountClass: "Group" },
+        "alice",
+      ),
+    ).toBe(`"alice" names ${ALICE}, not a user account`);
+  });
+
+  it("refuses the same listing whose account reads as neither a user nor a group (accountClass other)", () => {
+    expect(
+      windowsTokenDirAclRefusal(
+        { ...listing(ALICE, [...trusted, rx(ALICE)]), accountClass: "other" },
+        "alice",
+      ),
+    ).toBe(`"alice" names ${ALICE}, not a user account`);
+  });
+
+  it("refuses the same listing carrying the account's SID and no class (no accountClass)", () => {
+    expect(
+      windowsTokenDirAclRefusal(
+        { user: ME, owner: ME, account: ALICE, rules: [...trusted, rx(ALICE)] },
+        "alice",
+      ),
+    ).toBe(`"alice" names ${ALICE}, not a user account`);
+  });
+
+  it("accepts the same listing whose account reads as a user (accountClass User)", () => {
+    expect(
+      windowsTokenDirAclRefusal(
+        { ...listing(ALICE, [...trusted, rx(ALICE)]), accountClass: "User" },
+        "alice",
+      ),
+    ).toBeUndefined();
   });
 });
 

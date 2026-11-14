@@ -108,6 +108,26 @@ describe("hostsForHostKey — over a secret's pin list", () => {
     ]);
   });
 
+  it("keeps a look-alike and its ASCII sibling on one line apart (ASCII fold only)", () => {
+    expect(hostsForHostKey([line("\u212Aexample.com,kexample.com")], KEY)).toEqual([
+      { host: "\u212Aexample.com" },
+      { host: "kexample.com" },
+    ]);
+  });
+
+  it("keeps a look-alike and its ASCII sibling on two lines apart (ASCII fold only)", () => {
+    expect(hostsForHostKey([line("\u212Aexample.com"), line("kexample.com")], KEY)).toEqual([
+      { host: "\u212Aexample.com" },
+      { host: "kexample.com" },
+    ]);
+  });
+
+  it("still gives an ASCII case variant once", () => {
+    expect(hostsForHostKey([line("Example.com,example.com")], KEY)).toEqual([
+      { host: "Example.com" },
+    ]);
+  });
+
   it("gives nothing when an @revoked line holds the key, whatever else the list pins", () => {
     expect(hostsForHostKey([line("a.example"), `@revoked ${line("old.example")}`], KEY)).toEqual(
       [],

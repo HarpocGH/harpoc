@@ -21,6 +21,9 @@ import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { ImapRunner, SmtpRunner } from "./vault-engine.js";
+import type { AuditLogger } from "./audit/audit-logger.js";
+import { MockAdapter } from "./injection/__fixtures__/database-injector-doubles.js";
+import { DatabaseInjector } from "./injection/database-injector.js";
 import type { DockerExecution } from "./injection/docker/docker-injector.js";
 import { startFakeWsServer } from "./injection/__fixtures__/fake-ws-server.js";
 import type { FsIsolationMechanism } from "./injection/fs-isolation.js";
@@ -461,7 +464,10 @@ describe("useSecret (smtp) — engine dispatch", () => {
   it("maps a raw filesystem error out of the injector to a path-free VaultError", async () => {
     installSeams(engine, {
       smtp: () => {
-        throw new Error("ENOENT: no such file or directory, stat '/home/agent/.ssh/id_ed25519'");
+        throw Object.assign(
+          new Error("ENOENT: no such file or directory, stat '/home/agent/.ssh/id_ed25519'"),
+          { code: "ENOENT" },
+        );
       },
     });
 
@@ -2108,6 +2114,310 @@ describe("useSecret (docker_registry) — a non-string image of an unparsed call
       });
     },
   );
+});
+
+const NON_STRING_HOSTS: ReadonlyArray<readonly [string, unknown]> = [
+  ["a number", 123],
+  ["null", null],
+  ["an object", {}],
+  ["an array", ["db.example:5432"]],
+];
+
+const HOST_TYPE_MESSAGE = "host must be a string";
+
+const DATABASE_ACTION: UseSecretAction = {
+  type: "database",
+  engine: "postgresql",
+  host: "db.example.com",
+  database: "app",
+  query: "SELECT 1",
+};
+
+function installDatabaseDouble(e: VaultEngine): MockAdapter {
+  const mock = new MockAdapter({ rows: [] });
+  const internals = e as unknown as {
+    auditLogger: AuditLogger;
+    databaseInjector: DatabaseInjector;
+  };
+  internals.databaseInjector = new DatabaseInjector(internals.auditLogger, { postgresql: mock });
+  return mock;
+}
+
+describe("useSecret (database) — a non-string host of an unparsed caller is refused in core", () => {
+  beforeEach(async () => {
+    await initWithSecret("db", "admin:dbpass");
+    await engine.setInjectionPolicy("secret://db", { host_allowlist: ["db.example.com"] });
+  });
+
+  it.each(NON_STRING_HOSTS)(
+    "a host that is %s: INVALID_DATABASE_CONFIG, not INTERNAL_ERROR, one failed row without host, no connect",
+    async (_label, value) => {
+      const mock = installDatabaseDouble(engine);
+      const err = await expectVaultError(
+        () =>
+          engine.useSecret("secret://db", {
+            ...DATABASE_ACTION,
+            host: value,
+          } as unknown as UseSecretAction),
+        ErrorCode.INVALID_DATABASE_CONFIG,
+      );
+      expect(err.message === HOST_TYPE_MESSAGE).toBe(true);
+      expect(mock.lastConnect).toBeUndefined();
+      const rows = useRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.success).toBe(false);
+      expect(rows[0]?.detail).toStrictEqual({
+        context: "database",
+        engine: "postgresql",
+        database: "app",
+        error: ErrorCode.INVALID_DATABASE_CONFIG,
+      });
+    },
+  );
+
+  it("an embedded port out of range: INVALID_DATABASE_CONFIG as today, exactly one failed row, no connect", async () => {
+    const mock = installDatabaseDouble(engine);
+    const err = await expectVaultError(
+      () =>
+        engine.useSecret("secret://db", {
+          ...DATABASE_ACTION,
+          host: "db.example:99999",
+        } as UseSecretAction),
+      ErrorCode.INVALID_DATABASE_CONFIG,
+    );
+    expect(err.message).toBe("embedded port out of range (1-65535)");
+    expect(mock.lastConnect).toBeUndefined();
+    const rows = useRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.success).toBe(false);
+    expect(rows[0]?.detail).toStrictEqual({
+      context: "database",
+      engine: "postgresql",
+      database: "app",
+      error: ErrorCode.INVALID_DATABASE_CONFIG,
+    });
+  });
+
+  it("control: a string host outside the allowlist keeps today's outcome, message and row", async () => {
+    const mock = installDatabaseDouble(engine);
+    const err = await expectVaultError(
+      () =>
+        engine.useSecret("secret://db", {
+          ...DATABASE_ACTION,
+          host: "unlisted.example.net",
+        } as UseSecretAction),
+      ErrorCode.HOST_NOT_ALLOWED,
+    );
+    expect(err.message).toBe("Host not in secret allowlist: unlisted.example.net:5432");
+    expect(mock.lastConnect).toBeUndefined();
+    expect(useRows()).toEqual([
+      {
+        success: false,
+        detail: {
+          context: "database",
+          engine: "postgresql",
+          database: "app",
+          host: "unlisted.example.net",
+          port: 5432,
+          error: ErrorCode.HOST_NOT_ALLOWED,
+        },
+      },
+    ]);
+  });
+});
+
+describe("useSecret (smtp) — a non-string host of an unparsed caller is refused in core", () => {
+  let sends: SmtpSendOptions[];
+
+  beforeEach(async () => {
+    await initWithSecret("mail", "ops@example.com:mailpass");
+    await engine.setInjectionPolicy("secret://mail", { host_allowlist: ["smtp.example.com"] });
+    sends = [];
+    (engine as unknown as { smtpInjector: SmtpRunner }).smtpInjector = new SmtpInjector({
+      sendSmtp: (opts) => {
+        sends.push(opts);
+        return Promise.resolve({ accepted: 1, messageId: null });
+      },
+    });
+  });
+
+  it.each(NON_STRING_HOSTS)(
+    "a host that is %s: INVALID_INPUT, not FILE_IO_ERROR, one failed row without host, unsent",
+    async (_label, value) => {
+      const err = await expectVaultError(
+        () =>
+          engine.useSecret("secret://mail", {
+            ...SMTP_ACTION,
+            host: value,
+          } as unknown as UseSecretAction),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message === HOST_TYPE_MESSAGE).toBe(true);
+      expect(sends).toEqual([]);
+      const rows = useRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.success).toBe(false);
+      expect(rows[0]?.detail).toStrictEqual({
+        context: "smtp",
+        from: "ops@example.com",
+        recipients: ["dev@example.com"],
+        attachment_paths: [],
+        attachment_total_bytes: 0,
+        error: ErrorCode.INVALID_INPUT,
+      });
+    },
+  );
+
+  it("control: a string host outside the allowlist keeps today's outcome, message and row", async () => {
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://mail", { ...SMTP_ACTION, host: "unlisted.example.net" }),
+      ErrorCode.HOST_NOT_ALLOWED,
+    );
+    expect(err.message).toBe("Host not in secret allowlist: unlisted.example.net:465");
+    expect(sends).toEqual([]);
+    expect(useRows()).toEqual([
+      {
+        success: false,
+        detail: {
+          context: "smtp",
+          host: "unlisted.example.net",
+          from: "ops@example.com",
+          recipients: ["dev@example.com"],
+          attachment_paths: [],
+          attachment_total_bytes: 0,
+          error: ErrorCode.HOST_NOT_ALLOWED,
+        },
+      },
+    ]);
+  });
+});
+
+describe("useSecret (smtp) — the arm reads only a node:fs system error as an attachment failure", () => {
+  beforeEach(async () => {
+    await initWithSecret("mail", "ops@example.com:mailpass");
+  });
+
+  it("a raw TypeError out of the injector reads INTERNAL_ERROR, one failed row", async () => {
+    installSeams(engine, {
+      smtp: () => {
+        throw new TypeError("Cannot read properties of undefined (reading 'length')");
+      },
+    });
+
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://mail", SMTP_ACTION),
+      ErrorCode.INTERNAL_ERROR,
+    );
+
+    expect(err.message).toBe("the injection context failed unexpectedly");
+    expect(useRows()).toEqual([
+      {
+        success: false,
+        detail: {
+          context: "smtp",
+          host: "smtp.example.com",
+          from: "ops@example.com",
+          recipients: ["dev@example.com"],
+          attachment_paths: [],
+          attachment_total_bytes: 0,
+          error: ErrorCode.INTERNAL_ERROR,
+        },
+      },
+    ]);
+  });
+
+  it("control: a raw error whose code is ENOENT reads FILE_IO_ERROR 'an attachment could not be read', one failed row", async () => {
+    installSeams(engine, {
+      smtp: () => {
+        throw Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" });
+      },
+    });
+
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://mail", SMTP_ACTION),
+      ErrorCode.FILE_IO_ERROR,
+    );
+
+    expect(err.message).toBe("an attachment could not be read");
+    expect(useRows()).toEqual([
+      {
+        success: false,
+        detail: {
+          context: "smtp",
+          host: "smtp.example.com",
+          from: "ops@example.com",
+          recipients: ["dev@example.com"],
+          attachment_paths: [],
+          attachment_total_bytes: 0,
+          error: ErrorCode.FILE_IO_ERROR,
+        },
+      },
+    ]);
+  });
+});
+
+describe("useSecret (imap) — a non-string host of an unparsed caller is refused in core", () => {
+  let connects: ImapConnectOptions[];
+
+  beforeEach(async () => {
+    await initWithSecret("inbox", "ops@example.com:mailpass");
+    await engine.setInjectionPolicy("secret://inbox", { host_allowlist: ["imap.example.com"] });
+    connects = [];
+    (engine as unknown as { imapInjector: ImapRunner }).imapInjector = new ImapInjector({
+      connectImap: (opts) => {
+        connects.push(opts);
+        return Promise.reject(new Error("connectImap must not be called"));
+      },
+    });
+  });
+
+  it.each(NON_STRING_HOSTS)(
+    "a host that is %s: INVALID_INPUT, not INTERNAL_ERROR, one failed row without host, no connect",
+    async (_label, value) => {
+      const err = await expectVaultError(
+        () =>
+          engine.useSecret("secret://inbox", {
+            ...IMAP_ACTION,
+            host: value,
+          } as unknown as UseSecretAction),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message === HOST_TYPE_MESSAGE).toBe(true);
+      expect(connects).toEqual([]);
+      const rows = useRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.success).toBe(false);
+      expect(rows[0]?.detail).toStrictEqual({
+        context: "imap",
+        mailbox: "INBOX",
+        operation: "search",
+        uid_count: 0,
+        error: ErrorCode.INVALID_INPUT,
+      });
+    },
+  );
+
+  it("control: a string host outside the allowlist keeps today's outcome, message and row", async () => {
+    const err = await expectVaultError(
+      () => engine.useSecret("secret://inbox", { ...IMAP_ACTION, host: "unlisted.example.net" }),
+      ErrorCode.HOST_NOT_ALLOWED,
+    );
+    expect(err.message).toBe("Host not in secret allowlist: unlisted.example.net:993");
+    expect(connects).toEqual([]);
+    expect(useRows()).toEqual([
+      {
+        success: false,
+        detail: {
+          context: "imap",
+          host: "unlisted.example.net",
+          mailbox: "INBOX",
+          operation: "search",
+          uid_count: 0,
+          error: ErrorCode.HOST_NOT_ALLOWED,
+        },
+      },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------

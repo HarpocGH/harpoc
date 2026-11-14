@@ -19,13 +19,15 @@ vi.mock("../utils/vault-loader.js", () => ({
   loadUnlockedEngine: vi.fn().mockResolvedValue(mockEngine),
 }));
 
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
 import { loadUnlockedEngine } from "../utils/vault-loader.js";
 import { registerAuditCommand } from "./audit.js";
 import { buildCli, spyCli, tokenFixture, type CliSpies } from "../__fixtures__/cli-harness.js";
 
 const run = buildCli(registerAuditCommand, ["audit"]);
+
+const SECRET_ID = "0190c9d2-7b4a-7c3e-8f12-3456789abcde";
 
 describe("audit --since validation", () => {
   let spies: CliSpies;
@@ -125,11 +127,11 @@ describe("audit --secret (I29)", () => {
   });
 
   it("--secret reaches queryAudit as secretId, the other filters at their defaults", async () => {
-    await run(["--secret", "secret-id-7", "--json"]);
+    await run(["--secret", SECRET_ID, "--json"]);
     expect(mockEngine.queryAudit).toHaveBeenCalledTimes(1);
     expect(mockEngine.queryAudit).toHaveBeenCalledWith(
       {
-        secretId: "secret-id-7",
+        secretId: SECRET_ID,
         eventType: undefined,
         excludeEventType: undefined,
         since: undefined,
@@ -170,6 +172,98 @@ describe("audit --exclude-event (A-9)", () => {
       ],
     ]);
   });
+});
+
+const FILTER_REFUSALS = [
+  {
+    option: "--event",
+    typed: "secret.raed",
+    message: "--event: not an audit event type",
+  },
+  {
+    option: "--exclude-event",
+    typed: "secret.raed",
+    message: "--exclude-event: not an audit event type",
+  },
+  {
+    option: "--secret",
+    typed: "not-an-id",
+    message: "--secret: not a secret id",
+  },
+  {
+    option: "--event",
+    typed: "",
+    message: "--event: not an audit event type",
+  },
+  {
+    option: "--secret",
+    typed: "",
+    message: "--secret: not a secret id",
+  },
+];
+
+describe("audit's filters are judged before the vault opens (C-11)", () => {
+  let spies: CliSpies;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    spies = spyCli();
+  });
+
+  afterEach(() => {
+    spies.restore();
+  });
+
+  it.each(FILTER_REFUSALS)(
+    "refuses an unknown $option value as the fixed INVALID_INPUT envelope, nothing opened",
+    async ({ option, typed, message }) => {
+      await expect(run([option, typed, "--json"])).rejects.toThrow("process.exit");
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(typed !== "" && `${spies.stdout()}\n${spies.stderr()}`.includes(typed)).toBe(false);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [JSON.stringify({ error: "INVALID_INPUT", message })],
+      ]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(mockEngine.queryAudit).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(FILTER_REFUSALS)(
+    "on a locked vault an unknown $option value still reports INVALID_INPUT, not VAULT_LOCKED",
+    async ({ option, typed, message }) => {
+      vi.mocked(loadUnlockedEngine).mockRejectedValueOnce(
+        new VaultError(ErrorCode.VAULT_LOCKED, "Vault is locked"),
+      );
+      try {
+        await expect(run([option, typed, "--json"])).rejects.toThrow("process.exit");
+        expect(typed !== "" && `${spies.stdout()}\n${spies.stderr()}`.includes(typed)).toBe(false);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [JSON.stringify({ error: "INVALID_INPUT", message })],
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      } finally {
+        vi.mocked(loadUnlockedEngine).mockReset();
+        vi.mocked(loadUnlockedEngine).mockResolvedValue(mockEngine as never);
+      }
+    },
+  );
+
+  it.each([
+    ["--event", "eventType"],
+    ["--exclude-event", "excludeEventType"],
+  ] as const)(
+    "every AuditEventType member passes %s and reaches queryAudit as %s (Review Focus 7)",
+    async (option, key) => {
+      const members = Object.values(AuditEventType);
+      for (const member of members) {
+        await run([option, member, "--json"]);
+      }
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+      expect(
+        mockEngine.queryAudit.mock.calls.map((call) => (call[0] as Record<string, unknown>)[key]),
+      ).toEqual(members);
+    },
+  );
 });
 
 describe("audit table Principal column (by whom, thesis §4.3.4)", () => {

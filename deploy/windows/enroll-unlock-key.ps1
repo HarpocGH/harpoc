@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+#Requires -PSEdition Desktop
 # Harpoc deployment model B on Windows: enrol the unlock key sealed with DPAPI under the vault
 # account (README.md, "Deployment models"). Run from an elevated Windows PowerShell after
 # install-two-identity.ps1 and the vault's init:
@@ -150,6 +151,10 @@ if ($null -eq $vaultAccount) {
 }
 
 $credential = Get-Credential -UserName "$env:COMPUTERNAME\$VaultUser" -Message "Windows password of ${VaultUser}, the account the unlock key is sealed for"
+if ($null -eq $credential) { Stop-WithError 'no credential was entered (the prompt was cancelled); nothing sealed' 1 }
+if (@($VaultUser, ".\$VaultUser", "$([Environment]::MachineName)\$VaultUser") -notcontains $credential.UserName) {
+  Stop-WithError "the credential names another account than $VaultUser; nothing sealed" 1
+}
 $arguments = @($entry, '--vault-dir', $vaultDir, 'unlock-key', 'enroll', '--out', $Out, '--dpapi')
 $argumentLine = ($arguments | ForEach-Object { ConvertTo-Argument $_ }) -join ' '
 $process = Start-Process -FilePath $Node -ArgumentList $argumentLine -Credential $credential -LoadUserProfile -WorkingDirectory (Split-Path -Parent $vaultDir) -Wait -PassThru

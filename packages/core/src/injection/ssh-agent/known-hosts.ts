@@ -1,3 +1,4 @@
+import { asciiLowerCase } from "../allowlist.js";
 import { SshReader } from "./ssh-wire.js";
 
 /**
@@ -46,7 +47,7 @@ export function hostsForHostKey(lines: readonly string[], hostKeyBlob: Buffer): 
   const hosts: KnownHost[] = [];
   for (const line of lines) {
     for (const known of matchKnownHostsLine(line, hostKeyBlob)) {
-      const id = `${known.host.toLowerCase()} ${known.port ?? ""}`;
+      const id = `${asciiLowerCase(known.host)} ${known.port ?? ""}`;
       if (seen.has(id)) continue;
       seen.add(id);
       hosts.push(known);

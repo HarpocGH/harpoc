@@ -1,6 +1,7 @@
 import type { MiddlewareHandler } from "hono";
 import { VaultError } from "@harpoc/shared";
 import { callerOf } from "../utils/caller.js";
+import { requestOperation } from "./request-operation.js";
 import type { HarpocEnv } from "../types.js";
 
 /**
@@ -21,7 +22,7 @@ import type { HarpocEnv } from "../types.js";
 export const unscopedTokenMiddleware: MiddlewareHandler<HarpocEnv> = async (c, next) => {
   const token = c.get("token");
   if (token.project || token.secrets?.length) {
-    c.get("engine").auditGovernanceRefusal(callerOf(c), `${c.req.method} ${c.req.path}`);
+    c.get("engine").auditGovernanceRefusal(callerOf(c), requestOperation(c));
     throw VaultError.accessDenied("governance requires an unscoped admin token");
   }
   await next();

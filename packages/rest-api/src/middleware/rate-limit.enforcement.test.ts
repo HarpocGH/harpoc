@@ -32,6 +32,18 @@ const MOCK_TOKEN: VaultApiToken = {
 
 const HOST = { host: "localhost" };
 const AUTH = { ...HOST, authorization: "Bearer valid" };
+const USE_POST: RequestInit = {
+  method: "POST",
+  headers: { ...AUTH, "content-type": "application/json" },
+  body: JSON.stringify({
+    action: {
+      type: "http",
+      method: "GET",
+      url: "https://api.example.com/ping",
+      injection: { type: "bearer" },
+    },
+  }),
+};
 
 function createMockEngine() {
   return {
@@ -206,23 +218,13 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
 
   it("use carries its own, higher tier", async () => {
     const instance = app();
-    const post = {
-      method: "POST",
-      headers: { ...AUTH, "content-type": "application/json" },
-      body: JSON.stringify({
-        action: {
-          type: "http",
-          method: "GET",
-          url: "https://api.example.com/ping",
-          injection: { type: "bearer" },
-        },
-      }),
-    };
 
     // Past the ordinary per-secret bound, still fine: `use` has its own bucket.
-    expect(await hammer(instance, "/api/v1/secrets/k/use", RATE_LIMIT_USE_SECRET, post)).toBe(200);
+    expect(await hammer(instance, "/api/v1/secrets/k/use", RATE_LIMIT_USE_SECRET, USE_POST)).toBe(
+      200,
+    );
 
-    const overflow = await instance.request("/api/v1/secrets/k/use", post);
+    const overflow = await instance.request("/api/v1/secrets/k/use", USE_POST);
     expect(overflow.status).toBe(429);
   });
 
@@ -263,6 +265,44 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
 
     expect(engine.verifyToken).toHaveBeenCalledTimes(1);
     expect(auditLineSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("/use draws its own bucket apart from the read routes (T-(2))", () => {
+  it("sixty GETs of a handle at one instant leave its /use answered", async () => {
+    const instance = app();
+
+    expect(await hammer(instance, "/api/v1/secrets/k", RATE_LIMIT_PER_SECRET)).toBe(200);
+
+    const use = await instance.request("/api/v1/secrets/k/use", USE_POST);
+    expect(use.status).not.toBe(429);
+    expect(use.status).toBe(200);
+  });
+
+  it("120 /use draws of a handle leave its GET answered", async () => {
+    const instance = app();
+
+    expect(await hammer(instance, "/api/v1/secrets/k/use", RATE_LIMIT_USE_SECRET, USE_POST)).toBe(
+      200,
+    );
+
+    const get = await instance.request("/api/v1/secrets/k", { headers: AUTH });
+    expect(get.status).toBe(200);
+  });
+
+  it("control: the 121st /use is 429 RATE_LIMIT_EXCEEDED and writes no row", async () => {
+    const engine = { ...createMockEngine(), auditScopeRefusal: vi.fn() };
+    const instance = createApp(engine as never);
+
+    expect(await hammer(instance, "/api/v1/secrets/k/use", RATE_LIMIT_USE_SECRET, USE_POST)).toBe(
+      200,
+    );
+
+    const overflow = await instance.request("/api/v1/secrets/k/use", USE_POST);
+    expect(overflow.status).toBe(429);
+    expect(((await overflow.json()) as { error?: string }).error).toBe("RATE_LIMIT_EXCEEDED");
+    expect(engine.useSecret).toHaveBeenCalledTimes(RATE_LIMIT_USE_SECRET);
+    expect(engine.auditScopeRefusal).not.toHaveBeenCalled();
   });
 });
 
@@ -429,5 +469,88 @@ describe("the REST request-audit line (M-P3-3)", () => {
     const res = await app().request("/api/v1/health/expiring", { headers: AUTH });
     expect(res.status).toBe(200);
     expect(auditLineSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("the request-audit line writes a token-shaped path segment as <token> (C-10)", () => {
+  const PASTED_TOKEN = [
+    "eyJhbGciOiJFZERTQSJ9",
+    "eyJzdWIiOiJ0ZXN0LWFnZW50In0",
+    "c2ln-bmF0_dXJl",
+  ].join(".");
+  const MINTED_JTI = "019a7c3e-5b2d-7f10-8a4b-3c2d1e0f9a8b";
+  const CLAIMED_TOKEN: VaultApiToken = { ...MOCK_TOKEN, project: "acme" };
+
+  function engineFor(token: VaultApiToken) {
+    const engine = { ...createMockEngine(), auditGovernanceRefusal: vi.fn() };
+    engine.verifyToken.mockReturnValue(token);
+    return engine;
+  }
+
+  beforeEach(() => {
+    auditLineSpy.mockClear();
+  });
+
+  it("a claimed token's DELETE /api/v1/tokens/<a whole token> writes <token>, not the token", async () => {
+    const res = await createApp(engineFor(CLAIMED_TOKEN) as never).request(
+      `/api/v1/tokens/${PASTED_TOKEN}`,
+      { method: "DELETE", headers: AUTH },
+    );
+    expect(res.status).toBe(403);
+    expect(auditLineSpy).toHaveBeenCalledTimes(1);
+    const [format, method, path, status, principal, ip] = auditLineSpy.mock.calls[0] as unknown[];
+    expect(format).toBe(AUDIT_FORMAT);
+    expect(method).toBe("DELETE");
+    expect(path === "/api/v1/tokens/<token>").toBe(true);
+    expect(status).toBe(403);
+    expect(principal).toBe("test-agent");
+    expect(ip).toBe("unknown");
+    expect(JSON.stringify(auditLineSpy.mock.calls).includes(PASTED_TOKEN)).toBe(false);
+  });
+
+  it("control characters in the path are written as their percent-escapes, one line a request", async () => {
+    const res = await createApp(engineFor(CLAIMED_TOKEN) as never).request(
+      "/api/v1/tokens/x%0D%0Ay%1Bz",
+      { method: "DELETE", headers: AUTH },
+    );
+    expect(res.status).toBe(403);
+    expect(auditLineSpy).toHaveBeenCalledTimes(1);
+    const path = auditLineSpy.mock.calls[0]?.[2] as string;
+    expect(/[\p{Cc}\u2028\u2029]/u.test(path)).toBe(false);
+    expect(path).toBe("/api/v1/tokens/x%0D%0Ay%1Bz");
+  });
+
+  it.each([
+    [
+      "a minted jti",
+      "DELETE",
+      `/api/v1/tokens/${MINTED_JTI}`,
+      `/api/v1/tokens/${MINTED_JTI}`,
+      CLAIMED_TOKEN,
+      403,
+    ],
+    [
+      "a percent-encoded name",
+      "GET",
+      "/api/v1/secrets/my%20name",
+      "/api/v1/secrets/my name",
+      MOCK_TOKEN,
+      400,
+    ],
+  ])("control: %s is written as before", async (_label, method, path, written, token, status) => {
+    const res = await createApp(engineFor(token) as never).request(path, {
+      method,
+      headers: AUTH,
+    });
+    expect(res.status).toBe(status);
+    expect(auditLineSpy).toHaveBeenCalledTimes(1);
+    expect(auditLineSpy).toHaveBeenCalledWith(
+      AUDIT_FORMAT,
+      method,
+      written,
+      status,
+      "test-agent",
+      "unknown",
+    );
   });
 });

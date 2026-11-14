@@ -48,6 +48,10 @@ const SSH = resolveNativeSshClient("ssh");
 // Skipped where git (and, for the SSH transport, the native ssh client) does not resolve.
 const describeGit = describe.skipIf(GIT === null);
 const describeGitSsh = describe.skipIf(GIT === null || SSH === null);
+// POSIX only besides: on win32 the agent serves a named pipe and creates no socket directory.
+const describeGitSshPosix = describe.skipIf(
+  GIT === null || SSH === null || process.platform === "win32",
+);
 
 function overrideTempEnv(dir: string): { TMPDIR?: string; TMP?: string; TEMP?: string } {
   const saved = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
@@ -127,6 +131,8 @@ const SSH_CONFIG: ConnectionConfig = {
 };
 const TEMP_FILE_UNPREPARED = "a temporary file of the git context could not be prepared";
 const RELAY_UNPREPARED = "the relay repository could not be prepared";
+const AGENT_DIR_UNCREATED =
+  "Ephemeral ssh-agent failed: the agent's socket directory could not be created";
 
 let tempRoot: string;
 let saved: { TMPDIR?: string; TMP?: string; TEMP?: string };
@@ -193,9 +199,31 @@ async function expectCodedRow(
   message: string,
   detail: Record<string, unknown>,
 ): Promise<void> {
-  const err = await expectVaultError(run, ErrorCode.GIT_OPERATION_FAILED);
+  await expectFailedRow(
+    run,
+    ErrorCode.GIT_OPERATION_FAILED,
+    `Git operation failed: ${message}`,
+    detail,
+  );
+}
+
+async function expectAgentFailedRow(
+  run: () => Promise<unknown>,
+  detail: Record<string, unknown>,
+): Promise<void> {
+  await expectFailedRow(run, ErrorCode.SSH_AGENT_FAILED, AGENT_DIR_UNCREATED, detail);
+}
+
+/** `run` fails with the code and fixed message, names no temp path and writes one failed row. */
+async function expectFailedRow(
+  run: () => Promise<unknown>,
+  code: ErrorCode,
+  fullMessage: string,
+  detail: Record<string, unknown>,
+): Promise<void> {
+  const err = await expectVaultError(run, code);
   expect(err.message.includes(tempRoot)).toBe(false);
-  expect(err.message === `Git operation failed: ${message}`).toBe(true);
+  expect(err.message === fullMessage).toBe(true);
   expect(log.mock.calls).toEqual([
     [
       {
@@ -359,6 +387,19 @@ describeGit("the askpass write fails (HTTPS)", () => {
         realRmSync(leftover, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
     }
+  });
+});
+
+describeGitSshPosix("the agent's socket directory cannot be created (SSH)", () => {
+  it("ends SSH_AGENT_FAILED with one failed row naming the host, nothing spawned and no directory left", async () => {
+    failMkdtemp((prefix) => basename(prefix) === "harpoc-agent-", "ENOSPC");
+    await expectAgentFailedRow(() => useSsh(rsaKeyPem()), {
+      operation: "clone",
+      host: "github.com",
+      error: "SSH_AGENT_FAILED",
+    });
+    expect(readdirSync(tempRoot)).toEqual([]);
+    expect(spawnCaptured).not.toHaveBeenCalled();
   });
 });
 

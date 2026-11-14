@@ -2,16 +2,17 @@ import type { Context } from "hono";
 import { checkTokenScope, parseHandle } from "@harpoc/shared";
 import type { Permission, ScopeRefusalReason } from "@harpoc/shared";
 import { callerOf } from "../utils/caller.js";
+import { requestOperation } from "./request-operation.js";
 import type { HarpocEnv } from "../types.js";
 
 /**
  * Record a token-scope refusal on this request — one `access.denied` row naming
- * `<METHOD> <path>` (Hono's normalised path, percent-encoding kept, no query;
- * never `routePath`) under the requesting principal — before the route throws
- * (D2g, 2026-09-23).
+ * `<METHOD> <path>` (Hono's normalised path, decoded but for reserved escapes, no query;
+ * never `routePath`; as `requestPath` writes it, C-10) under the requesting
+ * principal — before the route throws (D2g, 2026-09-23).
  */
 export function recordScopeRefusal(c: Context<HarpocEnv>, reason: ScopeRefusalReason): void {
-  c.get("engine").auditScopeRefusal(callerOf(c), `${c.req.method} ${c.req.path}`, reason);
+  c.get("engine").auditScopeRefusal(callerOf(c), requestOperation(c), reason);
 }
 
 /**

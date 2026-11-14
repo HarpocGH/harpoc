@@ -107,6 +107,30 @@ describe("Governance refuses a project-claimed admin token (R11/N12)", () => {
     // dual-stack `::ffff:127.0.0.1` read as the dotted form here.
     expect(row?.ip_address).toBe("127.0.0.1");
   });
+
+  it("REST: a whole token pasted as the jti is recorded as <token> in the access.denied row's operation, a minted jti as before (C-10)", async () => {
+    const masked = "DELETE /api/v1/tokens/<token>";
+    const minted = `DELETE /api/v1/tokens/${scopedJti}`;
+    const count = (operation: string): number =>
+      vault.engine
+        .queryAudit({ eventType: AuditEventType.ACCESS_DENIED })
+        .filter((r) => r.detail?.operation === operation).length;
+    const maskedBefore = count(masked);
+    const mintedBefore = count(minted);
+
+    for (const segment of [unscoped, scopedJti]) {
+      const res = await fetch(`${server.baseUrl}/api/v1/tokens/${segment}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${scoped}` },
+      });
+      expect(res.status).toBe(403);
+    }
+
+    expect(count(masked)).toBe(maskedBefore + 1);
+    expect(count(minted)).toBe(mintedBefore + 1);
+    const denied = vault.engine.queryAudit({ eventType: AuditEventType.ACCESS_DENIED });
+    expect(JSON.stringify(denied).includes(unscoped)).toBe(false);
+  });
 });
 
 describe("Governance refuses a secrets-claimed admin token (S3)", () => {

@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
-import type { SpawnOptions } from "node:child_process";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Mock } from "vitest";
 import { sweepDescendants } from "./descendant-sweep.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import { forceJobWrapperUnavailableForTests } from "./win32-job-wrapper.js";
@@ -58,6 +60,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   forceJobWrapperUnavailableForTests(null);
   if (leftAlive !== undefined) {
     try {
@@ -235,6 +238,62 @@ describe("spawnCaptured → descendant sweep wiring", () => {
       expect(result.descendant_sweep).toEqual({ killed: 0, failed: false });
     },
     20_000,
+  );
+
+  // The taskkill helper is the win32 taskkill tier's alone; POSIX signals the group.
+  it.runIf(process.platform === "win32")(
+    "a taskkill helper that never closes is killed at its bound, and the spawn settles",
+    async () => {
+      const emitter = new EventEmitter();
+      const helperKill: Mock<ChildProcess["kill"]> = vi.fn(() => {
+        queueMicrotask(() => emitter.emit("close", null, "SIGTERM"));
+        return true;
+      });
+      const helper = Object.assign(emitter, { kill: helperKill });
+      let childStarted = false;
+      let childSpawned: () => void = () => undefined;
+      const spawned = new Promise<void>((resolve) => {
+        childSpawned = resolve;
+      });
+      spawnMock.mockImplementation(
+        (command: string, args: readonly string[], options: SpawnOptions) => {
+          if (command.toLowerCase().endsWith("taskkill.exe")) {
+            return helper as unknown as ChildProcess;
+          }
+          const child = realSpawn(command, args, options);
+          leftAlive = child.pid;
+          childStarted = true;
+          childSpawned();
+          return child;
+        },
+      );
+
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const pending = spawnCaptured(NODE, ["-e", HANG], { env: {}, timeoutMs: 300 });
+      try {
+        await Promise.race([spawned, pending]);
+        expect(childStarted).toBe(true);
+        await vi.advanceTimersByTimeAsync(300);
+        expect(
+          spawnMock.mock.calls.some(([command]) => command.toLowerCase().endsWith("taskkill.exe")),
+        ).toBe(true);
+        await vi.advanceTimersByTimeAsync(9_999);
+        expect(helperKill).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(helperKill).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+        expect(result.timed_out).toBe(true);
+        expect(sweepMock).toHaveBeenCalledTimes(1);
+      } finally {
+        await vi.runAllTimersAsync();
+        await pending;
+        vi.useRealTimers();
+      }
+    },
+    15_000,
   );
 
   it("a child that exits on its own is never swept", async () => {

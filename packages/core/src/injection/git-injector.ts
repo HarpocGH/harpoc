@@ -8,7 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { isIPv6 } from "node:net";
+import { isIPv4, isIPv6 } from "node:net";
 import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ConnectionConfig, GitAction, GitResult, InjectionPolicy } from "@harpoc/shared";
@@ -110,8 +110,10 @@ const FETCH_DANGEROUS_ARG_PREFIXES = [
 
 /** An ls-remote's options reach its credential-bearing step. `-u` is no
  *  ls-remote option on git 2.39 or 2.51 but is `--upload-pack` on a clone, so
- *  it never reaches that step should git add the short form. */
-const LS_REMOTE_DANGEROUS_ARG_PREFIXES = ["-u"];
+ *  it never reaches that step should git add the short form. Nor are `-4`,
+ *  `-6`, `--ipv4` and `--ipv6`, and an IP version would unbind the pinned
+ *  address, so they never reach that step should git add them. */
+const LS_REMOTE_DANGEROUS_ARG_PREFIXES = ["-u", "-4", "-6", "--ipv4", "--ipv6"];
 
 /** The denied options beside DANGEROUS_ARG_PREFIXES, per operation. */
 const OPERATION_DANGEROUS_ARG_PREFIXES: Record<GitAction["operation"], readonly string[]> = {
@@ -139,6 +141,10 @@ const SHORT_WITH_VALUE: Record<GitAction["operation"], ReadonlySet<string>> = {
 
 /** Repository transports that can execute local commands — never allowed. */
 const FORBIDDEN_REPO_PREFIXES = ["ext::", "fd::", "file:", "git+"];
+
+/** The fixed message of every refusal of an SSH repository address's user part. */
+const SSH_USER_NOT_A_NAME =
+  "SSH user of the repository must be a name of letters, digits, '.', '_' and '-' that begins with a letter or a digit";
 
 /**
  * The bundled askpass helper: prints the username or token from the environment,
@@ -311,6 +317,24 @@ const FETCH_FETCH_OPTIONS: FetchOptionSpec = {
   shortWithValue: SHORT_WITH_VALUE.fetch,
 };
 
+/** A push's options, read only for the IP version its network step asks for (pinAdmitsAskedIpVersions). */
+const PUSH_IP_OPTIONS: FetchOptionSpec = {
+  flags: ["--ipv4", "--ipv6"],
+  valued: ["--repo", "--push-option"],
+  short: { "4": "--ipv4", "6": "--ipv6" },
+  shortValued: { o: "--push-option" },
+  shortWithValue: SHORT_WITH_VALUE.push,
+};
+
+/** The spec that reads each operation's arguments as its network step receives them; an ls-remote takes no IP version option. */
+const NETWORK_IP_OPTIONS: Record<GitAction["operation"], FetchOptionSpec | null> = {
+  clone: CLONE_FETCH_OPTIONS,
+  pull: PULL_FETCH_OPTIONS,
+  push: PUSH_IP_OPTIONS,
+  fetch: FETCH_FETCH_OPTIONS,
+  "ls-remote": null,
+};
+
 /** The refs a fetch brings without `refspecs`: every branch of the remote. */
 const DEFAULT_FETCH_REFSPECS = ["+refs/heads/*"];
 
@@ -404,9 +428,9 @@ function fetchRefspecsOf(action: GitAction): FetchRefspec[] {
  *  - Target allowlist on both transports (URL patterns for HTTPS, host patterns
  *    for SSH — fail-safe deny), plus SSRF + HTTPS-only for HTTPS remotes and
  *    strict pinned host-key verification for SSH remotes.
- *  - The SSH host the allowlist judged is the host ssh dials: it leads
- *    GIT_SSH_COMMAND as `-o HostName=` (sshDialHost), so the destination git
- *    derives from the address by its own rules names the user and the port at most.
+ *  - The SSH host and user the vault judged are the ones ssh dials: they lead
+ *    GIT_SSH_COMMAND as `-o HostName=` (sshDialHost) and `-o User=`, so the
+ *    destination git derives from the address by its own rules names the port at most.
  *  - Command allowlist: the git binary is pinned to a resolved absolute path.
  *  - The credential never enters a git process that reads the caller's
  *    repository config (S1): clone, pull, push, fetch and ls-remote run their
@@ -471,10 +495,17 @@ export class GitInjector {
     secretId: string | undefined,
     attribution: AuditAttribution | undefined,
   ): Promise<GitResult> {
+    if (hostLeadsWithSign(action.repository)) {
+      this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
+      throw VaultError.invalidGitConfig(
+        "HTTPS host of the repository must not begin with '-' or '+'",
+      );
+    }
     // Mandatory floor: HTTPS + SSRF. Above it the per-secret URL allowlist, deny-by-default.
     let url: URL;
+    let resolvedAddresses: string[] | undefined;
     try {
-      ({ url } = await validateUrl(action.repository));
+      ({ url, resolvedAddresses } = await validateUrl(action.repository));
     } catch (err) {
       if (err instanceof VaultError)
         this.audit(action, secretId, { error: err.code }, false, attribution);
@@ -484,6 +515,12 @@ export class GitInjector {
     if (!matchesUrlAllowlist(judged, policy.url_allowlist)) {
       this.audit(action, secretId, { error: "URL_NOT_ALLOWED" }, false, attribution);
       throw VaultError.urlNotAllowed(action.repository);
+    }
+    if (resolvedAddresses && !pinAdmitsAskedIpVersions(action, resolvedAddresses)) {
+      this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
+      throw VaultError.invalidGitConfig(
+        "repository host has no address of the requested IP version",
+      );
     }
 
     const { user, password } = parseGitCredential(secretValue);
@@ -525,6 +562,7 @@ export class GitInjector {
         this.audit(action, secretId, { error: failure.code }, false, attribution);
         throw failure;
       }
+      const pinNames = [...new Set([url.hostname, url.hostname.replace(/\.$/, "")])];
       const networkConfig = [
         ...HTTPS_FORCED_CONFIG,
         ...(ca
@@ -535,6 +573,14 @@ export class GitInjector {
               "http.schannelUseSSLCAInfo=true",
               ...(process.platform === "win32" ? WIN32_PINNED_CA_CONFIG : []),
             ]
+          : []),
+        ...(resolvedAddresses
+          ? pinNames.flatMap((name) => [
+              "-c",
+              `http.curloptResolve=${name}:${url.port || "443"}:${resolvedAddresses
+                .map((a) => (isIPv6(a) ? `[${a}]` : a))
+                .join(",")}`,
+            ])
           : []),
       ];
       const env = baseGitEnv(policy.env_allowlist);
@@ -641,13 +687,16 @@ export class GitInjector {
     }
     if (address.user !== null && !isSshName(address.user)) {
       this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
-      throw VaultError.invalidGitConfig(
-        "SSH user of the repository must be a name of letters, digits, '.', '_' and '-' that begins with a letter or a digit",
-      );
+      throw VaultError.invalidGitConfig(SSH_USER_NOT_A_NAME);
     }
     if (address.password) {
       this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
       throw VaultError.invalidGitConfig("an SSH repository address must not carry a password");
+    }
+    const afterScheme = action.repository.slice("ssh://".length);
+    if (address.user === null && (afterScheme.includes("@") || afterScheme.includes("%40"))) {
+      this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
+      throw VaultError.invalidGitConfig(SSH_USER_NOT_A_NAME);
     }
     // Host allowlist — deny-by-default (an empty list refuses).
     if (!matchesHostAllowlist(host, policy.host_allowlist)) {
@@ -725,6 +774,7 @@ export class GitInjector {
         sshPath,
         "-o",
         `HostName=${dialHost}`,
+        ...(address.user !== null ? ["-o", `User=${address.user}`] : []),
         ...sshHardeningArgs(kh.file, identity.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
       ]);
       env.GIT_TERMINAL_PROMPT = "0";
@@ -837,6 +887,15 @@ function assertRepositoryShape(action: GitAction): void {
     throw VaultError.invalidGitConfig(
       "repository must be a string without leading or trailing whitespace",
     );
+  }
+}
+
+/** Whether an HTTP(S) repository's host begins with a character `http.curloptResolve` reads as an instruction (`-` removes an entry, `+` names the host behind it). */
+function hostLeadsWithSign(repository: string): boolean {
+  try {
+    return /^[-+]/.test(new URL(repository).hostname);
+  } catch {
+    return false;
   }
 }
 
@@ -1555,6 +1614,16 @@ function forwardedFetchArgs(args: string[], spec: FetchOptionSpec): string[] {
     }
   }
   return out;
+}
+
+/** Whether the pin holds an address of every IP version the caller's arguments ask the network step for — libcurl drops a pinned address of another version and resolves the name itself. */
+function pinAdmitsAskedIpVersions(action: GitAction, resolvedAddresses: string[]): boolean {
+  const spec = NETWORK_IP_OPTIONS[action.operation];
+  const asked = spec ? forwardedFetchArgs(action.args ?? [], spec) : [];
+  return (
+    (!asked.includes("--ipv4") || resolvedAddresses.some((a) => isIPv4(a))) &&
+    (!asked.includes("--ipv6") || resolvedAddresses.some((a) => isIPv6(a)))
+  );
 }
 
 /**

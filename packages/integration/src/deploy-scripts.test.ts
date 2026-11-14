@@ -11,7 +11,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { getPkgRoot } from "@harpoc/test-utils";
@@ -140,6 +140,46 @@ describe("deploy scripts (deployment model B)", () => {
       "\n  HARPOC_DEV_MIN_AVAILABLE_MB\n                     the host's available memory in MB below which run.sh refuses\n                     (default 8192; 0 skips the check)",
     );
   });
+
+  it("dev-container/run.sh names its container harpoc-dev-run in run_args, which every docker run passes, beside the volume check (two runs never share the volume)", () => {
+    const text = readFileSync(RUN_SH, "utf8");
+    const start = text.indexOf("\nrun_args=(\n");
+    const end = text.indexOf("\n)\n", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(text.slice(start, end).split("\n")).toContain("  --name harpoc-dev-run");
+    expect(text.split("--name ").length - 1).toBe(1);
+    const launches = text.split("\n").filter((l) => l.includes("docker run "));
+    expect(launches).toHaveLength(3);
+    expect(launches.every((l) => l.includes('"${run_args[@]}"'))).toBe(true);
+    expect(
+      text.indexOf('\nrunning="$(docker ps -q --filter volume=harpoc-dev-work)"\n'),
+    ).toBeGreaterThan(end);
+  });
+
+  it("dev-container/run.sh's copy excludes NUL and %SystemDrive% by name at any depth, not anchored at the root (the other excludes, --chmod=go-w and --delete unchanged)", () => {
+    const text = readFileSync(RUN_SH, "utf8");
+    expect(text.split("\n")).toEqual(
+      expect.arrayContaining([
+        "rsync -a --chmod=go-w --delete --exclude node_modules --exclude dist --exclude .turbo --exclude coverage \\",
+        "  --exclude /.git/ --exclude /.superpowers/ --exclude /.claude/ --exclude NUL \\",
+        '  --exclude "%SystemDrive%/" /src/ /work/',
+      ]),
+    );
+    expect(text.includes("--exclude /NUL")).toBe(false);
+    expect(text.includes('"/%SystemDrive%/"')).toBe(false);
+  });
+
+  it("dev-container/run.sh's usage text names docker rm harpoc-dev-run as the remedy for a container left stopped under that name", () => {
+    const text = readFileSync(RUN_SH, "utf8");
+    const start = text.indexOf("cat <<USAGE\n");
+    const end = text.indexOf("\nUSAGE\n", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(text.slice(start, end)).toContain(
+      "\nThe container runs under the name harpoc-dev-run; one left stopped under that name\n(a crash before --rm removed it) makes the next run.sh fail until you remove it with\ndocker rm harpoc-dev-run.\n",
+    );
+  });
 });
 
 describe.skipIf(process.platform === "win32")(
@@ -208,6 +248,21 @@ const PS_SCRIPTS = readdirSync(deployRoot, { recursive: true, encoding: "utf8" }
 
 const ICACLS = join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "icacls.exe");
 
+/** The first `pwsh.exe` on PATH on win32, or "" where PowerShell 7 does not resolve. */
+const PWSH =
+  process.platform === "win32"
+    ? ((process.env["PATH"] ?? "")
+        .split(";")
+        .filter((dir) => dir !== "")
+        .map((dir) => join(dir, "pwsh.exe"))
+        .find((path) => existsSync(path)) ?? "")
+    : "";
+
+/** Whether this session's account is a local account of this machine (USERDOMAIN equals COMPUTERNAME, case ignored). */
+const LOCAL_SESSION_ACCOUNT =
+  (process.env["USERDOMAIN"] ?? "").toLowerCase() ===
+  (process.env["COMPUTERNAME"] ?? "").toLowerCase();
+
 const psText = (script: string): string => readFileSync(resolve(deployRoot, script), "utf8");
 
 describe("deploy PowerShell scripts (deployment model B on Windows)", () => {
@@ -239,6 +294,18 @@ describe("deploy PowerShell scripts (deployment model B on Windows)", () => {
       expect(/#Requires\s+-RunAsAdministrator/i.test(text)).toBe(false);
       expect(text).toContain("IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)");
       expect(text.indexOf("if (-not (Test-Elevated))")).toBeGreaterThan(text.indexOf("cnotmatch"));
+    },
+  );
+
+  it.each(PS_SCRIPTS)(
+    "%s requires Windows PowerShell by directive: line 2 is #Requires -PSEdition Desktop under line 1's #Requires -Version 5.1 (PowerShell 7 refuses the script before any line runs, -Help and -DryRun included)",
+    (script) => {
+      const text = psText(script);
+      expect(text.split("\n").slice(0, 2)).toEqual([
+        "#Requires -Version 5.1",
+        "#Requires -PSEdition Desktop",
+      ]);
+      expect(text.split("#Requires").length - 1).toBe(2);
     },
   );
 
@@ -514,6 +581,25 @@ describe("deploy PowerShell scripts (deployment model B on Windows)", () => {
       `No byte of the key and no password is printed.\n\n${usage}\n\nExit status:`,
     );
   });
+
+  it("windows/enroll-unlock-key.ps1 judges what Get-Credential returned before it launches anything: the two statements after the prompt end the script with exit 1 when no credential was entered and when the credential names another account than the vault's (<vault user>, .\\<vault user> or <machine>\\<vault user>, case ignored), both before $arguments =", () => {
+    const text = psText("windows/enroll-unlock-key.ps1");
+    const prompt =
+      '$credential = Get-Credential -UserName "$env:COMPUTERNAME\\$VaultUser" -Message "Windows password of ${VaultUser}, the account the unlock key is sealed for"';
+    const noCredential =
+      "if ($null -eq $credential) { Stop-WithError 'no credential was entered (the prompt was cancelled); nothing sealed' 1 }";
+    const anotherAccount = [
+      'if (@($VaultUser, ".\\$VaultUser", "$([Environment]::MachineName)\\$VaultUser") -notcontains $credential.UserName) {',
+      '  Stop-WithError "the credential names another account than $VaultUser; nothing sealed" 1',
+      "}",
+    ].join("\n");
+    const launch = "\n$arguments = @($entry, ";
+    for (const needle of [prompt, noCredential, anotherAccount, launch]) {
+      expect(text.split(needle).length - 1, needle).toBe(1);
+    }
+    expect(text).toContain(`\n${prompt}\n${noCredential}\n${anotherAccount}${launch}`);
+    expect(text.indexOf("Start-Process -FilePath $Node")).toBeGreaterThan(text.indexOf(launch));
+  });
 });
 
 /** The lines of the workflow file `workflow` under .github/workflows/, read by text. */
@@ -565,7 +651,7 @@ function provisioningStep(): string[] {
   return e2eStepBlock("Create the agent account and provision the layout with the deploy recipe");
 }
 
-/** The index of the `}` that closes the `{` at `openAt` in a step's PowerShell, by brace count (no string there holds a brace); -1 when it is never closed. */
+/** The index of the `}` that closes the `{` at `openAt` in a step's PowerShell, by brace count (every brace a string there holds is paired); -1 when it is never closed. */
 function closingBrace(text: string, openAt: number): number {
   let depth = 0;
   for (let at = openAt; at < text.length; at++) {
@@ -759,6 +845,111 @@ describe("ci.yml's Linux filesystem-isolation probe step (read as text)", () => 
     expect(
       [step[0] ?? "", ...comment, ...notices].filter((text) => /today's|ubuntu[- ]?\d/i.test(text)),
     ).toEqual([]);
+  });
+});
+
+describe("ci.yml's two Linux user-namespace steps (their comments read as text)", () => {
+  it("the comments of the bwrap profile step and the node 24 network probe step claim no bwrap for BOTH dimensions, name no ubuntu release and cite no implementation plan of the docs repository", () => {
+    const steps = workflowJobSteps("ci.yml", "build-and-test");
+    const named = [
+      "      - name: Grant bwrap user namespaces through a targeted AppArmor profile (node 22 leg - the operator's second route)",
+      "      - name: Probe network isolation (diagnostic; relaxes the userns restriction on the node 24 leg)",
+    ].map((name) => steps.filter((step) => step[0] === name));
+    expect(named.map((found) => found.length)).toEqual([1, 1]);
+    const comments = named.map((found) =>
+      (found[0] ?? [])
+        .filter((line) => line.startsWith("        # "))
+        .map((line) => line.slice("        # ".length)),
+    );
+    expect(comments.map((lines) => lines.length > 0)).toEqual([true, true]);
+    const text = comments.flat().join(" ");
+    expect(text.match(/BOTH\s+dimensions/g) ?? []).toEqual([]);
+    expect(text.match(/ubuntu[- ]?\d/gi) ?? []).toEqual([]);
+    expect(text.match(/implementation-plan-/g) ?? []).toEqual([]);
+  });
+});
+
+const MEASURING_STEP =
+  "Measure the enrolment recipe's launch as the vault account from this step and from a one-shot task (read-outs only)";
+
+/** The `run:` block of e2e.yml's measuring step (`e2eStepBlock`). */
+function measuringStep(): string[] {
+  return e2eStepBlock(MEASURING_STEP);
+}
+
+describe("e2e.yml's measuring step (the enrolment recipe's launch, its PowerShell read as text)", () => {
+  it("stands in the two-identity-windows job after the task smoke step under Windows PowerShell, prints its five read-outs in order, each on one line of its own: step-launch-exit=, task-launch-exit=, step-interactive=, task-interactive=, task-recipe-exit=, and reads a launch whose exit code is $null as unread and a launch that throws as threw on both sides", () => {
+    const steps = workflowJobSteps("e2e.yml", "two-identity-windows");
+    const smokeAt = steps.findIndex(
+      (step) =>
+        step[0] ===
+        "      - name: Register, start and stop the daemon as a startup task (the Password-logon cell)",
+    );
+    const measureAt = steps.findIndex((step) => step[0] === `      - name: ${MEASURING_STEP}`);
+    expect(smokeAt).toBeGreaterThan(-1);
+    expect(measureAt).toBeGreaterThan(smokeAt);
+    expect(steps[measureAt]).toContain("        shell: powershell");
+    const block = measuringStep();
+    const markers = [
+      "step-launch-exit",
+      "task-launch-exit",
+      "step-interactive",
+      "task-interactive",
+      "task-recipe-exit",
+    ];
+    const printed = markers.map((marker) =>
+      block.flatMap((line, at) => (line.startsWith(`Write-Output "${marker}=$`) ? [at] : [])),
+    );
+    expect(printed.map((ats) => ats.length)).toEqual([1, 1, 1, 1, 1]);
+    const order = printed.map((ats) => ats[0] ?? -1);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    const unread = [
+      "if ($null -eq $process.ExitCode) { $stepLaunchExit = 'unread' } else { $stepLaunchExit = [string]$process.ExitCode }",
+      "if ($null -eq $process.ExitCode) { Write-Readout 'task-launch-exit=unread' } else { Write-Readout \"task-launch-exit=$($process.ExitCode)\" }",
+    ];
+    expect(unread.map((line) => block.filter((l) => l.trim() === line).length)).toEqual([1, 1]);
+    const threw = ["$stepLaunchExit = 'threw'", "Write-Readout 'task-launch-exit=threw'"];
+    expect(threw.map((line) => block.filter((l) => l.trim() === line).length)).toEqual([1, 1]);
+    expect(block.filter((l) => /^\s*Write-Readout "task-launch-exit=/.test(l))).toEqual([]);
+    expect(
+      block.filter((l) => /\$stepLaunchExit = \[string\]\$process\.ExitCode$/.test(l)),
+    ).toEqual([]);
+  });
+
+  it("no statement that writes to the job log names the vault account's password or a variable that holds it; the password variables leave the environment before the first launch, the unmanaged copy is freed in a finally, and the cleanup finally unregisters the task", () => {
+    const block = measuringStep();
+    const text = block.join("\n");
+    for (const secret of ["$vaultSecure", "$env:HARPOC_TWO_USER_VAULT_PASSWORD", "$unmanaged"]) {
+      expect(text.includes(secret), secret).toBe(true);
+    }
+    const names =
+      /\$\{?(?:\w+:)?(vaultSecure|secure|unmanaged|unit|pair|credential|HarpocMeasureCredential)\b|HARPOC_TWO_USER_(VAULT|AGENT)_PASSWORD/i;
+    const writes =
+      /\b(Write-(Output|Host|Warning|Error|Information|Verbose|Debug)|Write-Readout|Out-(String|Host|Default)|throw)\b|(?<![\w.$:-])(echo|write)(?![\w-])|\[(System\.)?Console\]::((Out|Error)\.)?Write|^\s*(\$\{?[\w:]+\}?|"[^"]*"|'[^']*')\s*$/i;
+    const statements = block.filter((l) => !/^\s*#/.test(l));
+    expect(statements.filter((l) => writes.test(l)).length).toBeGreaterThan(0);
+    expect(statements.filter((l) => names.test(l)).length).toBeGreaterThan(0);
+    expect(statements.filter((l) => writes.test(l) && names.test(l))).toEqual([]);
+    const removal = text.indexOf(
+      "\nRemove-Item -Path 'Env:HARPOC_TWO_USER_VAULT_PASSWORD', 'Env:HARPOC_TWO_USER_AGENT_PASSWORD' -ErrorAction SilentlyContinue\n",
+    );
+    expect(removal).toBeGreaterThan(-1);
+    expect(text.indexOf("Start-Process")).toBeGreaterThan(removal);
+    const alloc = text.indexOf("SecureStringToGlobalAllocUnicode($vaultSecure)");
+    const zeroFinally = text.indexOf("} finally {", alloc);
+    const zero = text.indexOf("ZeroFreeGlobalAllocUnicode($unmanaged)", alloc);
+    expect(alloc).toBeGreaterThan(-1);
+    expect(zeroFinally).toBeGreaterThan(alloc);
+    expect(zero).toBeGreaterThan(zeroFinally);
+    expect(closingBrace(text, text.indexOf("{", zeroFinally))).toBeGreaterThan(zero);
+    const cleanup = text.indexOf(
+      "} finally {",
+      text.indexOf("(the task's measurement stopped early"),
+    );
+    const unregister = text.indexOf("Unregister-ScheduledTask -TaskName $taskName", cleanup);
+    expect(cleanup).toBeGreaterThan(-1);
+    expect(unregister).toBeGreaterThan(cleanup);
+    expect(closingBrace(text, text.indexOf("{", cleanup))).toBeGreaterThan(unregister);
   });
 });
 
@@ -1511,6 +1702,91 @@ describe.skipIf(process.platform !== "win32")(
           `install-two-identity.ps1: ${file} exists and is not a directory; remove it\r\n`,
         );
         expect(run.status, run.measured).toBe(2);
+      },
+      PS1_TIMEOUT_MS + 30_000,
+    );
+
+    // Not elevated, the script stops at its administrator check before the prompt, and the vault
+    // account must be a local account the -VaultUser grammar admits: these rows are the elevated
+    // legs' (the runners run elevated). This session's account is the -VaultUser, so where it is no
+    // local account of this machine (USERDOMAIN differs from COMPUTERNAME) the rows skip.
+    it.skipIf(!LOCAL_SESSION_ACCOUNT).for([
+      {
+        shadow: "a function returning nothing",
+        getCredential: "function Get-Credential { }",
+        says: () => "no credential was entered (the prompt was cancelled); nothing sealed",
+      },
+      {
+        shadow: "a function returning another user name",
+        getCredential:
+          "function Get-Credential { $p = [System.Security.SecureString]::new(); foreach ($c in 'w1-dummy-password'.ToCharArray()) { $p.AppendChar($c) }; [System.Management.Automation.PSCredential]::new($env:COMPUTERNAME + '\\harpoc-other', $p) }",
+        says: (vaultUser: string) =>
+          `the credential names another account than ${vaultUser}; nothing sealed`,
+      },
+    ])(
+      "enroll-unlock-key.ps1 run in-process with Get-Credential shadowed by $shadow ends with exit 1 and its own message before anything is launched",
+      { timeout: PS1_TIMEOUT_MS + 30_000 },
+      ({ getCredential, says }, ctx) => {
+        const vaultUser = userInfo().username.toLowerCase();
+        if (!elevated || !/^[a-z0-9_][a-z0-9_-]{0,19}$/.test(vaultUser)) ctx.skip();
+        const run = spawnSync(
+          POWERSHELL,
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            `${getCredential};` +
+              "function Start-Process { [Console]::Out.WriteLine('Start-Process called'); exit 3 };" +
+              "& $env:HARPOC_PS1 -VaultUser $env:HARPOC_VAULT_USER -Node $env:HARPOC_NODE -Cli $env:HARPOC_CLI -ProgramData $env:HARPOC_PROGRAM_DATA -Out $env:HARPOC_OUT;" +
+              "exit $LASTEXITCODE",
+          ],
+          {
+            shell: false,
+            windowsHide: true,
+            encoding: "utf8",
+            timeout: PS1_TIMEOUT_MS,
+            env: {
+              ...recipeEnvironment(),
+              HARPOC_PS1: resolve(deployRoot, "windows/enroll-unlock-key.ps1"),
+              HARPOC_VAULT_USER: vaultUser,
+              HARPOC_NODE: process.execPath,
+              HARPOC_CLI: cli,
+              HARPOC_PROGRAM_DATA: root,
+              HARPOC_OUT: join(root, "enroll-shadowed.dpapi"),
+            },
+          },
+        );
+        expect(run.error).toBeUndefined();
+        expect(run.stderr).toBe(`enroll-unlock-key.ps1: ${says(vaultUser)}\r\n`);
+        expect(run.status).toBe(1);
+        expect(run.stdout).toBe("");
+        expect(existsSync(join(root, "enroll-shadowed.dpapi"))).toBe(false);
+      },
+    );
+
+    // PowerShell 7 is not on every host: the row runs where pwsh resolves on PATH (the runner image has it).
+    it.skipIf(PWSH === "").each(PS_SCRIPTS)(
+      "%s -Help under PowerShell 7 (pwsh) exits non-zero before any line runs: no usage, no module refusal",
+      (script) => {
+        const run = spawnSync(
+          PWSH,
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            resolve(deployRoot, script),
+            "-Help",
+          ],
+          { shell: false, windowsHide: true, encoding: "utf8", timeout: PS1_TIMEOUT_MS },
+        );
+        expect(run.error).toBeUndefined();
+        expect(run.status).not.toBe(0);
+        expect(run.stdout.includes("Usage:")).toBe(false);
+        expect(run.stderr.includes("was not found under")).toBe(false);
       },
       PS1_TIMEOUT_MS + 30_000,
     );

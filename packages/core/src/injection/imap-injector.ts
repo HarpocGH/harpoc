@@ -59,7 +59,7 @@ export type ImapOperationFields =
  * result touched — never message content or a credential.
  */
 export interface ImapAuditDetails {
-  host: string;
+  host?: string;
   mailbox: string;
   operation: string;
   uid_count: number;
@@ -136,7 +136,7 @@ export function buildImapAuditDetails(
   result: ImapOperationFields,
 ): ImapAuditDetails {
   return {
-    host: action.host,
+    ...(typeof action.host === "string" ? { host: action.host } : {}),
     mailbox: action.mailbox,
     operation: action.operation.kind,
     uid_count: resultUidCount(result),
@@ -332,6 +332,8 @@ export async function executeImapAction(
 
 /** Split `host` (which may embed `:port`) and an optional explicit port. */
 function resolveHostPort(action: ImapAction): { host: string; port: number } {
+  const hostField: unknown = action.host;
+  if (typeof hostField !== "string") throw VaultError.invalidInput("host must be a string");
   const match = /^(.*):(\d+)$/.exec(action.host);
   if (match && match[1] !== undefined && match[2] !== undefined) {
     const embedded = Number.parseInt(match[2], 10);

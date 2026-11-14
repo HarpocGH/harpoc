@@ -13,6 +13,10 @@ local Linux leg, opens a shell there (shell), or runs the deployment model B e2e
 (e2e-b: the fixture PKI and SSH keys, then src/model-b.e2e.test.ts; no Docker inside
 the container, so its docker row skips). Needs Docker; on Windows run it from Git Bash.
 
+The container runs under the name harpoc-dev-run; one left stopped under that name
+(a crash before --rm removed it) makes the next run.sh fail until you remove it with
+docker rm harpoc-dev-run.
+
   HARPOC_DEV_TIERS   the tiers the run requires (default for test and shell:
                      secret-service,keyring,isolation,fs-isolation,ssh-live,two-uid;
                      for e2e-b: two-uid)
@@ -80,8 +84,8 @@ docker build -t harpoc-dev -f "$(host_path "$here/Dockerfile")" "$(host_path "$r
 
 prepare='set -eu
 rsync -a --chmod=go-w --delete --exclude node_modules --exclude dist --exclude .turbo --exclude coverage \
-  --exclude /.git/ --exclude /.superpowers/ --exclude /.claude/ --exclude /NUL \
-  --exclude "/%SystemDrive%/" /src/ /work/
+  --exclude /.git/ --exclude /.superpowers/ --exclude /.claude/ --exclude NUL \
+  --exclude "%SystemDrive%/" /src/ /work/
 cd /work
 pnpm install --frozen-lockfile --store-dir /pnpm-store
 pnpm build'
@@ -96,6 +100,7 @@ pnpm --filter @harpoc/e2e test:e2e src/model-b.e2e.test.ts'
 
 run_args=(
   --rm --init
+  --name harpoc-dev-run
   --security-opt seccomp=unconfined
   --security-opt apparmor=unconfined
   --mount "type=bind,source=$(host_path "$repo"),target=/src,readonly"

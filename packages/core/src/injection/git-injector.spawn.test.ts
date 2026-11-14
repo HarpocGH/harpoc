@@ -1883,9 +1883,9 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
         expect(words[iIdx + 1]).toContain("$probe");
         const khPath = /^UserKnownHostsFile="([^"]+)"$/.exec(khWord as string)?.[1] as string;
         const hardening = sshHardeningArgs(khPath, words[iIdx + 1] as string, 120);
-        expect(words.slice(1, 3)).toEqual(["-o", "HostName=github.com"]);
-        expect(words.slice(3, 3 + hardening.length)).toEqual(hardening);
-        expect(words).toHaveLength(3 + hardening.length);
+        expect(words.slice(1, 5)).toEqual(["-o", "HostName=github.com", "-o", "User=git"]);
+        expect(words.slice(5, 5 + hardening.length)).toEqual(hardening);
+        expect(words).toHaveLength(5 + hardening.length);
       } finally {
         restoreTempEnv(saved);
         rmSync(spaced, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });

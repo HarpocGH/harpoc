@@ -376,10 +376,10 @@ describe("CONNECT — refusals before the 200, each closing the connection, none
   });
 
   it.each([
-    ["an expired token", TOKENS.expired, 401, ErrorCode.TOKEN_EXPIRED],
-    ["a revoked token", TOKENS.revoked, 401, ErrorCode.TOKEN_REVOKED],
-    ["a sealed vault", TOKENS.sealed, 503, ErrorCode.VAULT_LOCKED],
-  ])("%s is refused %i with the engine's code", async (_t, token, status, code) => {
+    ["an expired token", 401, TOKENS.expired, ErrorCode.TOKEN_EXPIRED],
+    ["a revoked token", 401, TOKENS.revoked, ErrorCode.TOKEN_REVOKED],
+    ["a sealed vault", 503, TOKENS.sealed, ErrorCode.VAULT_LOCKED],
+  ])("%s is refused %i with the engine's code", async (_t, status, token, code) => {
     const answer = await openTunnel({
       port,
       authority: `127.0.0.1:${upstream.port}`,

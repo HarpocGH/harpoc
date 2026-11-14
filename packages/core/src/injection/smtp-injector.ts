@@ -48,7 +48,7 @@ export interface SmtpOAuth {
  * plus the total attachment bytes — never a body, header value or credential.
  */
 export interface SmtpAuditDetails {
-  host: string;
+  host?: string;
   from: string;
   recipients: string[];
   attachment_paths: string[];
@@ -94,7 +94,7 @@ export function buildSmtpAuditDetails(
   attachments: readonly SmtpResolvedAttachment[],
 ): SmtpAuditDetails {
   return {
-    host: action.host,
+    ...(typeof action.host === "string" ? { host: action.host } : {}),
     from: action.from,
     recipients: collectRecipients(action),
     attachment_paths: attachments.map((a) => a.path),
@@ -373,6 +373,8 @@ function collectRecipients(action: SmtpAction): string[] {
  * explicit `port` overrides it (mirrors the database injector).
  */
 function resolveHostPort(action: SmtpAction): { host: string; port: number } {
+  const hostField: unknown = action.host;
+  if (typeof hostField !== "string") throw VaultError.invalidInput("host must be a string");
   const fallback = action.security === "tls" ? DEFAULT_SMTP_TLS_PORT : DEFAULT_SMTP_STARTTLS_PORT;
   const match = /^(.*):(\d+)$/.exec(action.host);
   if (match && match[1] !== undefined && match[2] !== undefined) {

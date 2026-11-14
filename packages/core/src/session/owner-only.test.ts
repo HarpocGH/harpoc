@@ -93,6 +93,31 @@ describe("parseWindowsAcl", () => {
   });
 
   it.each([
+    ["User", "account S-1-5-21-1-2-3-1001 User", "User"],
+    ["Group", "account S-1-5-21-1-2-3-1001 Group", "Group"],
+    ["another class as other", "account S-1-5-21-1-2-3-1001 Computer", "other"],
+    ["the script's failed read as other", "account S-1-5-21-1-2-3-1001 other", "other"],
+    ["a missing class as other", "account S-1-5-21-1-2-3-1001", "other"],
+  ])("reads the account's class: %s", (_, line, accountClass) => {
+    expect(parseWindowsAcl(`user S-1-5-18\nowner S-1-5-18\n${line}\n`)).toStrictEqual({
+      user: "S-1-5-18",
+      owner: "S-1-5-18",
+      account: "S-1-5-21-1-2-3-1001",
+      accountClass,
+      rules: [],
+    });
+  });
+
+  it("reads 'account -' as before: null, with no class", () => {
+    expect(parseWindowsAcl("user S-1-5-18\nowner S-1-5-18\naccount -\n")).toStrictEqual({
+      user: "S-1-5-18",
+      owner: "S-1-5-18",
+      account: null,
+      rules: [],
+    });
+  });
+
+  it.each([
     [
       "a localized name in place of a SID",
       "user S-1-5-18\nowner S-1-5-18\nrule 0 Everyone 001F01FF 0 0 0\n",
@@ -187,9 +212,10 @@ describe.runIf(process.platform === "win32")(
       expect(bySid.get(USERS_SID)?.rights).toBe(WINDOWS_READ_EXECUTE_RIGHTS);
     });
 
-    it("resolves the asked account machine-qualified: this account's name to its SID, a well-known group's name to none", () => {
+    it("resolves the asked account machine-qualified: this account's name to its SID and class User, a well-known group's name to none", () => {
       const own = listWindowsAclSync(dir, { account: userInfo().username });
       expect(own.account).toBe(own.user);
+      expect(own.accountClass).toBe("User");
       expect(listWindowsAclSync(dir, { account: "users" }).account).toBeNull();
       expect(listWindowsAclSync(dir, { account: "everyone" }).account).toBeNull();
     });

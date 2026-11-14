@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+#Requires -PSEdition Desktop
 # Harpoc deployment model B on Windows: the two-identity layout (README.md, "Deployment models").
 # Run from an elevated Windows PowerShell:
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy\windows\install-two-identity.ps1 -AgentUser <agent>[,<agent>...]

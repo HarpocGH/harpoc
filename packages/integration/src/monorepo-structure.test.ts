@@ -1,5 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { builtinModules } from "node:module";
 import { resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { describeBuildOutput, getPkgRoot } from "@harpoc/test-utils";
 
@@ -338,6 +340,37 @@ describe("the base lib is ES2022 without DOM (U-4, C-24)", () => {
       return found.map((identifier) => `${file}: ${identifier}`);
     });
     expect(uses).toEqual([]);
+  });
+
+  it("eslint.config.js refuses the same names in shared's product code, require, node: imports, Node's builtin modules by their bare names, globalThis.process and globalThis.Buffer included (C-3)", async () => {
+    type FlatConfig = { files?: unknown; ignores?: unknown; rules?: Record<string, unknown> };
+    const { default: configs } = (await import(
+      pathToFileURL(resolve(monorepoRoot, "eslint.config.js")).href
+    )) as { default: FlatConfig[] };
+    const blocks = configs.filter(
+      (config) => JSON.stringify(config.files) === JSON.stringify(["packages/shared/src/**/*.ts"]),
+    );
+    expect(blocks).toHaveLength(1);
+    const block = blocks[0] as FlatConfig;
+    expect(block.ignores).toEqual([
+      "packages/shared/src/**/*.test.ts",
+      "packages/shared/src/**/__fixtures__/**",
+    ]);
+    expect(block.rules).toEqual({
+      "no-restricted-globals": ["error", ...NODE_ONLY_GLOBALS, "require"],
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: builtinModules.filter((name) => !name.startsWith("node:")),
+          patterns: ["node:*"],
+        },
+      ],
+      "no-restricted-properties": [
+        "error",
+        { object: "globalThis", property: "process" },
+        { object: "globalThis", property: "Buffer" },
+      ],
+    });
   });
 });
 

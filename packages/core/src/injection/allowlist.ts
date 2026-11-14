@@ -88,7 +88,7 @@ function canonicalPatternHost(patternHost: string): string {
 }
 
 /** Lower-cases the ASCII letters `A`–`Z` alone; every other character stays as written. */
-function asciiLowerCase(value: string): string {
+export function asciiLowerCase(value: string): string {
   return value.replace(/[A-Z]+/g, (run) => run.toLowerCase());
 }
 

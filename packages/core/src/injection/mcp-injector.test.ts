@@ -307,10 +307,14 @@ describe("McpInjector — lifecycle (thesis §4.5.4)", () => {
   });
 
   it("terminates and respawns when the config changes", async () => {
-    const before = await run(mcpAction("pid"));
+    await run(mcpAction("pid"));
+    const first = registry.get("secret-1");
+    expect(first).toBeDefined();
     const changed: McpServerConfig = { ...STDIO_CONFIG, working_directory: process.cwd() };
-    const after = await run(mcpAction("pid"), { config: changed });
-    expect(after.content).not.toEqual(before.content);
+    await run(mcpAction("pid"), { config: changed });
+    const second = registry.get("secret-1");
+    expect(second).toBeDefined();
+    expect(Object.is(second, first)).toBe(false);
   });
 
   it("closeAll terminates live servers", async () => {

@@ -422,6 +422,14 @@ describe("useSecret (MCP proxy)", () => {
         }),
       ErrorCode.MCP_SERVER_NOT_CONFIGURED,
     );
+
+    const failed = engine.queryAudit({ eventType: AuditEventType.SECRET_USE, success: false });
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.detail).toEqual({
+      handle: "secret://mcpuse",
+      context: "mcp",
+      error: ErrorCode.MCP_SERVER_NOT_CONFIGURED,
+    });
   });
 
   it("forwards a tool call to a spawned stdio server with the credential injected", async () => {

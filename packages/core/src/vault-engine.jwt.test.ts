@@ -14,6 +14,9 @@ vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
 );
 
+const UNKNOWN_JTI_MESSAGE =
+  "Unknown token jti (not a token id this vault mints; harpoc auth list shows the jti)";
+
 let tempDir: string;
 let dbPath: string;
 let sessionPath: string;
@@ -264,7 +267,8 @@ describe("JWT tokens", () => {
       () => Promise.resolve().then(() => engine.revokeToken("manual-jti")),
       ErrorCode.INVALID_INPUT,
     );
-    expect(err.message).toBe("Unknown token jti: manual-jti");
+    expect(err.message === UNKNOWN_JTI_MESSAGE).toBe(true);
+    expect(err.message.includes("manual-jti")).toBe(false);
 
     const db = new Database(dbPath, { readonly: true });
     const row = db.prepare("SELECT jti FROM revoked_tokens WHERE jti = ?").get("manual-jti");
@@ -275,6 +279,23 @@ describe("JWT tokens", () => {
       [false, null, { error: ErrorCode.INVALID_INPUT }],
     ]);
     expect(JSON.stringify(revokes[0]?.detail).includes("manual-jti")).toBe(false);
+  });
+
+  it("a whole token handed to revokeToken is refused INVALID_INPUT and is in neither the message nor the failed token.revoke row", async () => {
+    const token = engine.createToken("user-1", ["read"]);
+
+    const err = await expectVaultError(
+      () => Promise.resolve().then(() => engine.revokeToken(token)),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message === UNKNOWN_JTI_MESSAGE).toBe(true);
+    expect(err.message.includes(token)).toBe(false);
+
+    const failed = engine.queryAudit({ eventType: AuditEventType.TOKEN_REVOKE, success: false });
+    expect(failed.length).toBe(1);
+    expect(Object.keys(failed[0]?.detail ?? {})).toEqual(["error"]);
+    expect(JSON.stringify(failed[0]?.detail).includes(token)).toBe(false);
+    expect(engine.listIssuedTokens({ status: "all" }).map((t) => t.status)).toEqual(["active"]);
   });
 
   it("an unknown jti of the shape createToken mints is recorded on the failed token.revoke row beside the caller's principal", async () => {

@@ -70,10 +70,11 @@ export class RateLimiter {
     // idle buckets are never refilled, so testing the stored value alone
     // evicted nothing, ever (L8).
     if (this.secretBuckets.size > 1000) {
+      const sweepLimit = Math.max(this.perSecretLimit, this.useSecretLimit);
       for (const [id, b] of this.secretBuckets) {
         if (b === bucket) continue; // the in-flight bucket is decremented next
-        const idleRefill = Math.floor(((now - b.lastRefill) / 60_000) * this.perSecretLimit);
-        if (b.tokens + idleRefill >= this.perSecretLimit) {
+        const idleRefill = Math.floor(((now - b.lastRefill) / 60_000) * sweepLimit);
+        if (b.tokens + idleRefill >= sweepLimit) {
           this.secretBuckets.delete(id);
         }
       }

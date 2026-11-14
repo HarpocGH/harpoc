@@ -168,7 +168,9 @@ describe("DELETE /api/v1/tokens/:jti", () => {
 
   it("an unknown jti is refused 400 INVALID_INPUT — the registry is authoritative", async () => {
     engine.revokeToken.mockImplementationOnce(() => {
-      throw VaultError.invalidInput("Unknown token jti: jti-9");
+      throw VaultError.invalidInput(
+        "Unknown token jti (not a token id this vault mints; harpoc auth list shows the jti)",
+      );
     });
     const res = await app.request("/api/v1/tokens/jti-9", {
       method: "DELETE",
@@ -177,7 +179,9 @@ describe("DELETE /api/v1/tokens/:jti", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as ErrorBody;
     expect(body.error).toBe("INVALID_INPUT");
-    expect(body.message).toBe("Unknown token jti: jti-9");
+    expect(body.message).toBe(
+      "Unknown token jti (not a token id this vault mints; harpoc auth list shows the jti)",
+    );
   });
 
   it("requires admin scope before the engine call", async () => {

@@ -243,7 +243,7 @@ function isIpAddress(host: string): boolean {
 
 /**
  * A bare host the floor can classify as what the dialer will dial: not empty,
- * no whitespace or control character, brackets only as one `[<IPv6 literal>]`
+ * no whitespace, control or non-ASCII character, brackets only as one `[<IPv6 literal>]`
  * pair, no `@`, a bracketed or `:`-bearing host that is an IPv6 literal
  * spelled in the IPv6-literal alphabet alone — `isIPv6` as the dialer judges
  * it (so `1:2:3` and `:::` are not literals), the alphabet keeping a zone id
@@ -256,6 +256,7 @@ function isIpAddress(host: string): boolean {
 function isWellFormedHost(host: string): boolean {
   if (host.length === 0) return false;
   if (/[\s\p{Cc}]/u.test(host)) return false;
+  if (/\P{ASCII}/u.test(host)) return false;
   const bracketed = /^\[(.*)\]$/.exec(host);
   const inner = bracketed?.[1] ?? host;
   if (/[[\]@]/.test(inner)) return false;

@@ -91,7 +91,20 @@ export class DatabaseInjector {
   ): Promise<DatabaseResult> {
     const resolved = this.resolveAdapter(action, secretId, attribution);
 
-    const { host, port } = parseHostPort(action.host, action.port, defaultDbPort(action.engine));
+    let target: { host: string; port: number };
+    try {
+      const hostField: unknown = action.host;
+      if (typeof hostField !== "string") {
+        throw VaultError.invalidDatabaseConfig("host must be a string");
+      }
+      target = parseHostPort(hostField, action.port, defaultDbPort(action.engine));
+    } catch (err) {
+      if (err instanceof VaultError) {
+        this.audit(action, secretId, { error: err.code }, false, attribution);
+      }
+      throw err;
+    }
+    const { host, port } = target;
 
     // Target allowlist — deny-by-default; an unlisted or redirected host:port is refused before connecting.
     if (!matchesHostPortAllowlist(host, port, policy.host_allowlist)) {

@@ -81,6 +81,11 @@ export const CREATE_SECRET_TOOL = {
   },
 };
 
+/** A name or project for a hint: `--` quoted, so Windows PowerShell 5.1 keeps it. */
+export function hintWord(value: string): string {
+  return value === "--" ? '"--"' : value;
+}
+
 /** The pending answer, naming the vault-user command that sets this create's value. */
 export function pendingHint(
   secretName: string,
@@ -88,25 +93,57 @@ export function pendingHint(
   project: string | undefined,
 ): string {
   const typeFlag = type === SecretType.API_KEY ? "" : ` --type ${type}`;
-  const projectFlag = project === undefined ? "" : ` --project ${project}`;
+  const projectFlag = project === undefined ? "" : ` --project ${hintWord(project)}`;
   const command = secretName.startsWith("-")
-    ? `harpoc secret set${typeFlag}${projectFlag} "--" ${secretName}`
+    ? `harpoc secret set${typeFlag}${projectFlag} "--" ${hintWord(secretName)}`
     : `harpoc secret set ${secretName}${typeFlag}${projectFlag}`;
   return `Secret created. Set the value with: ${command}`;
 }
 
 const PLAIN_HINT_WORD = /^[A-Za-z0-9_][A-Za-z0-9._:@/+=-]*$/;
 
+/** A hint's ` <flag> <value>`, the placeholder for a value that is not a plain word. */
+function optionFlag(flag: string, value: string | undefined, placeholder: string): string {
+  if (value === undefined) return "";
+  return ` ${flag} ${PLAIN_HINT_WORD.test(value) ? value : placeholder}`;
+}
+
 /** The vault-user `harpoc oauth connect` command that completes a `start_oauth_flow` grant. */
 export function oauthConnectCommand(
-  flow: Pick<StartOAuthFlowInput, "name" | "provider" | "grant_type" | "client_id">,
+  flow: Pick<
+    StartOAuthFlowInput,
+    | "name"
+    | "provider"
+    | "grant_type"
+    | "client_id"
+    | "project"
+    | "scopes"
+    | "token_endpoint_auth_method"
+    | "auth_endpoint"
+    | "token_endpoint"
+    | "device_authorization_endpoint"
+  >,
 ): string {
   const grantFlag =
     flow.grant_type === OAuthGrantType.CLIENT_CREDENTIALS ? " --client-credentials" : "";
   const clientId = PLAIN_HINT_WORD.test(flow.client_id) ? flow.client_id : "<client-id>";
-  const flags = `${grantFlag} --provider ${flow.provider} --client-id ${clientId}`;
+  const scopes =
+    flow.scopes === undefined
+      ? ""
+      : flow.scopes.length > 0 && flow.scopes.every((scope) => PLAIN_HINT_WORD.test(scope))
+        ? ` --scopes ${flow.scopes.length > 1 ? `"${flow.scopes.join(",")}"` : flow.scopes.join(",")}`
+        : " --scopes <scopes>";
+  const flags =
+    `${grantFlag} --provider ${flow.provider} --client-id ${clientId}${scopes}` +
+    (flow.token_endpoint_auth_method === undefined
+      ? ""
+      : ` --auth-method ${flow.token_endpoint_auth_method}`) +
+    optionFlag("--auth-endpoint", flow.auth_endpoint, "<auth-endpoint>") +
+    optionFlag("--token-endpoint", flow.token_endpoint, "<token-endpoint>") +
+    optionFlag("--device-endpoint", flow.device_authorization_endpoint, "<device-endpoint>") +
+    (flow.project === undefined ? "" : ` --project ${hintWord(flow.project)}`);
   return flow.name.startsWith("-")
-    ? `harpoc oauth connect${flags} "--" ${flow.name}`
+    ? `harpoc oauth connect${flags} "--" ${hintWord(flow.name)}`
     : `harpoc oauth connect ${flow.name}${flags}`;
 }
 

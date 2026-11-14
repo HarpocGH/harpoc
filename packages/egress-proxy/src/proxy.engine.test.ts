@@ -128,7 +128,7 @@ describe("the proxy against a real engine", () => {
     ["an expired token", "expired", 401, ErrorCode.TOKEN_EXPIRED],
     ["a revoked token", "revoked", 401, ErrorCode.TOKEN_REVOKED],
     ["a malformed token", "malformed", 401, ErrorCode.INVALID_TOKEN],
-  ])("%s is %i %s and writes no audit row", async (_title, kind, status, code) => {
+  ])("%s (%s) is %i %s and writes no audit row", async (_title, kind, status, code) => {
     let token = "not-a-jwt";
     if (kind === "expired") token = engine.createToken("agent-a", ["use"], 0);
     if (kind === "revoked") {

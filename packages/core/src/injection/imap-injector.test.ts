@@ -13,6 +13,13 @@ import { expectVaultError } from "@harpoc/test-utils";
 
 const SECRET = "imapuser:imappass";
 
+const NON_STRING_HOSTS: ReadonlyArray<readonly [string, unknown]> = [
+  ["a number", 123],
+  ["null", null],
+  ["an object", {}],
+  ["an array", ["db.example:5432"]],
+];
+
 /** Build a full ImapAction from a partial (bypasses the schema — the injector
  * receives an already-validated action; tests exercise its own guards). */
 function baseAction(partial: Record<string, unknown> = {}): ImapAction {
@@ -124,6 +131,51 @@ describe("ImapInjector — imap_read_only mutation gate (fires before any socket
       undefined,
     );
     expect(result).toEqual({ type: "imap", operation: "expunge", affected: 0 });
+  });
+});
+
+describe("ImapInjector — a non-string host is refused before the allowlist", () => {
+  it.each(NON_STRING_HOSTS)(
+    "a host that is %s: INVALID_INPUT 'host must be a string', zero connections",
+    async (_label, value) => {
+      const { fn, calls } = connectMustNotBeCalled();
+      const injector = new ImapInjector({ connectImap: fn });
+
+      const err = await expectVaultError(
+        () =>
+          injector.run(
+            baseAction({ host: value }),
+            SECRET,
+            basePolicy({ host_allowlist: ["imap.example.com"] }),
+            undefined,
+            undefined,
+          ),
+        ErrorCode.INVALID_INPUT,
+      );
+
+      expect(err.message === "host must be a string").toBe(true);
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it("control: a string host outside the allowlist keeps today's outcome and message", async () => {
+    const { fn, calls } = connectMustNotBeCalled();
+    const injector = new ImapInjector({ connectImap: fn });
+
+    const err = await expectVaultError(
+      () =>
+        injector.run(
+          baseAction({ host: "unlisted.example.net" }),
+          SECRET,
+          basePolicy({ host_allowlist: ["imap.example.com"] }),
+          undefined,
+          undefined,
+        ),
+      ErrorCode.HOST_NOT_ALLOWED,
+    );
+
+    expect(err.message).toBe("Host not in secret allowlist: unlisted.example.net:993");
+    expect(calls).toEqual([]);
   });
 });
 
@@ -448,6 +500,19 @@ describe("ImapInjector — audit details shape", () => {
       auth_account: "agent@example.com",
     });
   });
+
+  it.each(NON_STRING_HOSTS)(
+    "buildImapAuditDetails carries no host key for a host that is %s",
+    (_label, value) => {
+      expect(
+        buildImapAuditDetails(baseAction({ host: value, mailbox: "Work" }), { affected: 0 }),
+      ).toStrictEqual({
+        mailbox: "Work",
+        operation: "search",
+        uid_count: 0,
+      });
+    },
+  );
 
   it("reports uid_count 0 for a zero-affected mutating result", () => {
     const action = baseAction({ operation: { kind: "expunge" } });

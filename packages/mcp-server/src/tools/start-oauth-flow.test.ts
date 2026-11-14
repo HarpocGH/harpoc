@@ -264,7 +264,7 @@ describe("start_oauth_flow", () => {
       status: "not_created",
       message:
         "No out-of-band channel was available to collect the client secret, so nothing was created. Create it with: " +
-        "harpoc oauth connect m2m --client-credentials --provider custom --client-id client-123",
+        "harpoc oauth connect m2m --client-credentials --provider custom --client-id client-123 --token-endpoint https://idp.example.com/oauth/token",
     });
   });
 

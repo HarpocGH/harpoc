@@ -63,6 +63,8 @@ export interface WindowsAclListing extends WindowsAcl {
   rules: WindowsAclEntry[];
   /** The local account `account` names, by SID; null when no local account has that name; absent when none was asked. */
   account?: string | null;
+  /** The class of the local account `account` names: `User`, `Group`, or `other` when it reads as neither or not at all; set whenever `account` is a SID. */
+  accountClass?: "User" | "Group" | "other";
 }
 
 /** `FileSystemRights.ReadAndExecute | Synchronize` — `icacls`' `(RX)`, measured 0x001200A9. */
@@ -102,6 +104,7 @@ const ACL_SCRIPT =
   "if($i.Length -gt 1 -and $i[1].Trim() -ne ''){" +
   "$n=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($i[1].Trim()));" +
   "try{$v=[System.Security.Principal.NTAccount]::new([System.Environment]::MachineName,$n).Translate($s).Value}catch{$v='-'};" +
+  "if($v -ne '-'){try{$c=[System.DirectoryServices.DirectoryEntry]::new('WinNT://'+[System.Environment]::MachineName+'/'+$n).SchemaClassName}catch{$c='other'};$v=$v+' '+$c};" +
   "[System.Console]::Out.WriteLine('account '+$v)};" +
   "foreach($r in $a.GetAccessRules($true,$true,$s)){[System.Console]::Out.WriteLine(" +
   RULE_LINE.replace("%RIGHTS%", "FileSystemRights") +
@@ -231,14 +234,15 @@ export async function restrictWindowsPipeToAccount(
 }
 
 /**
- * The listing scripts' output: `user <sid>`, `owner <sid>`, `account <sid | ->`
- * when an account was asked, then per rule `rule <0 allow | 1 deny> <sid>
+ * The listing scripts' output: `user <sid>`, `owner <sid>`, `account <sid> <class>`
+ * or `account -` when an account was asked, then per rule `rule <0 allow | 1 deny> <sid>
  * <mask, 8 hex digits> <inherited 0 | 1> <inheritance flags> <propagation flags>`.
  */
 export function parseWindowsAcl(text: string): WindowsAclListing {
   let user: string | undefined;
   let owner: string | undefined;
   let account: string | null | undefined;
+  let accountClass: WindowsAclListing["accountClass"];
   const rules: WindowsAclEntry[] = [];
   for (const line of text.split(/\r?\n/)) {
     if (line.trim() === "") continue;
@@ -248,13 +252,16 @@ export function parseWindowsAcl(text: string): WindowsAclListing {
       user = first;
     } else if (tag === "owner" && fields.length === 1 && SID_PATTERN.test(first ?? "")) {
       owner = first;
+    } else if (tag === "account" && fields.length === 1 && account === undefined && first === "-") {
+      account = null;
     } else if (
       tag === "account" &&
-      fields.length === 1 &&
+      fields.length <= 2 &&
       account === undefined &&
-      (first === "-" || SID_PATTERN.test(first ?? ""))
+      SID_PATTERN.test(first ?? "")
     ) {
-      account = first === "-" ? null : (first as string);
+      account = first as string;
+      accountClass = second === "User" || second === "Group" ? second : "other";
     } else if (
       tag === "rule" &&
       fields.length === 6 &&
@@ -278,5 +285,8 @@ export function parseWindowsAcl(text: string): WindowsAclListing {
     }
   }
   if (user === undefined || owner === undefined) throw new Error("ACL listing: incomplete output");
-  return account === undefined ? { user, owner, rules } : { user, owner, account, rules };
+  if (account === undefined) return { user, owner, rules };
+  return accountClass === undefined
+    ? { user, owner, account, rules }
+    : { user, owner, account, accountClass, rules };
 }

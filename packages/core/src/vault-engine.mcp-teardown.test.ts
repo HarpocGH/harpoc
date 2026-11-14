@@ -43,6 +43,7 @@ let tempDir: string;
 let dbPath: string;
 let sessionPath: string;
 let engine: VaultEngine;
+let second: VaultEngine | undefined;
 
 const VALUE = Buffer.from("super-secret-value", "utf8");
 
@@ -56,8 +57,13 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await engine.destroy();
-  rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  try {
+    await second?.destroy();
+  } finally {
+    second = undefined;
+    await engine.destroy();
+    rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
 });
 
 function agent(id: string, project?: string): CallerContext {
@@ -99,6 +105,20 @@ function terminateRows(): { secretId: string | null; reason: unknown }[] {
   return engine
     .queryAudit({ eventType: AuditEventType.MCP_TERMINATE })
     .map((row) => ({ secretId: row.secret_id, reason: row.detail?.reason }));
+}
+
+function failedUseRows(secretId: string) {
+  return engine.queryAudit({ eventType: AuditEventType.SECRET_USE, secretId, success: false });
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ESRCH") return false;
+    throw err;
+  }
 }
 
 const NODE = process.execPath;
@@ -247,6 +267,66 @@ describe("L2 — downstream teardown on revoke and expiry", () => {
     ).rejects.toMatchObject({ code: ErrorCode.SECRET_REVOKED });
 
     expect(terminateRows().map((r) => r.reason)).toContain("secret_unusable");
+  });
+
+  it("a config removed by another process ends the child at the next use (config_removed)", async () => {
+    const id = await makeSecret("mcp-config-gone");
+    await spawnDownstream("secret://mcp-config-gone", "test-mcp");
+    const pid = registryOf(engine).get(id)?.stdioTransport?.pid;
+    if (pid === undefined) throw new Error("expected a live stdio downstream child");
+    expect(isAlive(pid)).toBe(true);
+
+    second = new VaultEngine({ dbPath, sessionPath: join(tempDir, "other-session.json") });
+    await second.unlock("password");
+    await expect(second.deleteMcpServerConfig("secret://mcp-config-gone")).resolves.toBe(true);
+    await second.destroy();
+    second = undefined;
+
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://mcp-config-gone", {
+          type: "mcp",
+          server: "test-mcp",
+          tool: "leak",
+        }),
+      ErrorCode.MCP_SERVER_NOT_CONFIGURED,
+    );
+
+    expect(registryOf(engine).get(id) === undefined).toBe(true);
+    await vi.waitFor(() => expect(isAlive(pid)).toBe(false));
+    expect(terminateRows()).toEqual([{ secretId: id, reason: "config_removed" }]);
+    const failed = failedUseRows(id);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.detail).toEqual({
+      handle: "secret://mcp-config-gone",
+      context: "mcp",
+      error: ErrorCode.MCP_SERVER_NOT_CONFIGURED,
+    });
+    const [terminate] = terminatesFor(id);
+    expect(terminate?.id).toBeLessThan(failed[0]?.id as number);
+  });
+
+  it("control: a secret that never had a config writes the failed row and no mcp.terminate row", async () => {
+    const id = await makeSecret("mcp-never-configured");
+
+    await expectVaultError(
+      () =>
+        engine.useSecret("secret://mcp-never-configured", {
+          type: "mcp",
+          server: "test-mcp",
+          tool: "leak",
+        }),
+      ErrorCode.MCP_SERVER_NOT_CONFIGURED,
+    );
+
+    expect(terminateRows()).toHaveLength(0);
+    const failed = failedUseRows(id);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.detail).toEqual({
+      handle: "secret://mcp-never-configured",
+      context: "mcp",
+      error: ErrorCode.MCP_SERVER_NOT_CONFIGURED,
+    });
   });
 
   it("lazy expiry terminates the child", async () => {

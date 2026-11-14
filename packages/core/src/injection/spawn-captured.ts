@@ -166,7 +166,10 @@ function killTree(child: ChildProcess, treeKill: TreeKillMechanism | undefined):
         clearTimeout(bound);
         resolve();
       };
-      const bound = setTimeout(delivered, KILL_HELPER_TIMEOUT_MS);
+      const bound = setTimeout(() => {
+        killer.kill();
+        delivered();
+      }, KILL_HELPER_TIMEOUT_MS);
       if (bound.unref) bound.unref();
       killer.on("error", () => {
         killDirect();

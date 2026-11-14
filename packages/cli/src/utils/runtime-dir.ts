@@ -277,7 +277,7 @@ function judgeWindowsDirAcl(
           refusal: `no local account is named ${JSON.stringify(reader.name)} (a consumer directory is named for its agent user)`,
         };
       }
-    } else if (!ACCOUNT_SID.test(acl.account)) {
+    } else if (!ACCOUNT_SID.test(acl.account) || acl.accountClass !== "User") {
       return { refusal: `${JSON.stringify(reader.name)} names ${acl.account}, not a user account` };
     } else {
       grantee = { name: reader.name, sid: acl.account, role: reader.role };

@@ -168,7 +168,7 @@ export function createSecretRoutes(): Hono<HarpocEnv> {
     }
 
     const handle = buildHandle(c.req.param("handle"));
-    c.get("limiter").checkSecret(handle, true);
+    c.get("limiter").checkSecret(`use:${handle}`, true);
     const result = await engine.useSecret(handle, parsed.data.action, callerOf(c));
 
     // Sanitize response to prevent credential leakage (parity across interfaces)

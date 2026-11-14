@@ -2,7 +2,14 @@ import { readFileSync, writeFileSync } from "node:fs";
 import type { Command } from "commander";
 import type { AuditChainVerification, DecryptedAuditEvent, VaultEngine } from "@harpoc/core";
 import type { AuditChainAnchor, AuditEventType } from "@harpoc/shared";
-import { ErrorCode, VaultError, auditChainAnchorSchema, auditScopeFromToken } from "@harpoc/shared";
+import {
+  ErrorCode,
+  VaultError,
+  auditChainAnchorSchema,
+  auditEventTypeSchema,
+  auditQuerySchema,
+  auditScopeFromToken,
+} from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../utils/vault-loader.js";
 import { handleError, printTable, printJson, formatTimestamp } from "../utils/output.js";
 import {
@@ -43,6 +50,17 @@ function readAnchorFile(path: string): AuditChainAnchor {
 function tailLine(tail: AuditChainAnchor | null): string {
   if (!tail) return "Tail link: none (no chained audit rows).";
   return `Tail link: row ${tail.last_id} · hmac ${tail.row_hmac} · ${formatTimestamp(tail.timestamp)}`;
+}
+
+/** An event-type option judged against the enum; the refusal names the option, never the value (C-11). */
+function parseEventTypeOption(
+  value: string | undefined,
+  option: string,
+): AuditEventType | undefined {
+  if (value === undefined) return undefined;
+  const parsed = auditEventTypeSchema.safeParse(value);
+  if (!parsed.success) throw VaultError.invalidInput(`${option}: not an audit event type`);
+  return parsed.data;
 }
 
 /** A claimed token is refused the vault-wide chain, its governance row written first (C-12). */
@@ -130,13 +148,22 @@ export function registerAuditCommand(program: Command): void {
             );
           }
 
+          const eventType = parseEventTypeOption(options.event, "--event");
+          const excludeEventType = parseEventTypeOption(options.excludeEvent, "--exclude-event");
+          if (
+            options.secret !== undefined &&
+            !auditQuerySchema.shape.secret_id.safeParse(options.secret).success
+          ) {
+            throw VaultError.invalidInput("--secret: not a secret id");
+          }
+
           const rest = restModeOf(cmd);
           if (rest) {
             await runRestMode(rest, async (client) => {
               const events = await client.queryAudit({
                 secretId: options.secret,
-                eventType: options.event as AuditEventType | undefined,
-                excludeEventType: options.excludeEvent as AuditEventType | undefined,
+                eventType,
+                excludeEventType,
                 since,
                 limit,
               });
@@ -161,8 +188,8 @@ export function registerAuditCommand(program: Command): void {
             const events = engine.queryAudit(
               {
                 secretId: options.secret,
-                eventType: options.event as AuditEventType | undefined,
-                excludeEventType: options.excludeEvent as AuditEventType | undefined,
+                eventType,
+                excludeEventType,
                 since,
                 limit,
               },

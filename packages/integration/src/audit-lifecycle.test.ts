@@ -51,7 +51,7 @@ const VALUE = new Uint8Array(Buffer.from("lifecycle-value"));
 // an in-process engine on the same vault reads them back.
 describe("server lifecycle rows through the spawned CLI", () => {
   let vaultDir: string;
-  let engine: VaultEngine;
+  let engine: VaultEngine | undefined;
 
   beforeAll(async () => {
     vaultDir = mkdtempSync(join(tmpdir(), "harpoc-lifecycle-"));
@@ -59,8 +59,11 @@ describe("server lifecycle rows through the spawned CLI", () => {
       dbPath: join(vaultDir, VAULT_DB_NAME),
       sessionPath: join(vaultDir, SESSION_FILE_NAME),
     });
-    await init.initVault(PASSWORD);
-    await init.destroy();
+    try {
+      await init.initVault(PASSWORD);
+    } finally {
+      await init.destroy();
+    }
     const unlock = await runCli(["unlock"], {
       vaultDir,
       stdin: `${PASSWORD}\n`,
@@ -75,13 +78,13 @@ describe("server lifecycle rows through the spawned CLI", () => {
   }, 120_000);
 
   afterAll(async () => {
-    await engine.destroy();
+    await engine?.destroy();
     rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("stdin EOF is a graceful stop: a server.stop row with trigger transport_closed, exit 0", async () => {
-    registerAgents(engine, "eof-agent");
-    const token = engine.createToken("eof-agent", ["read", "list"]);
+    registerAgents(engine as VaultEngine, "eof-agent");
+    const token = (engine as VaultEngine).createToken("eof-agent", ["read", "list"]);
     const tokenFile = join(vaultDir, "launch-token");
     writeFileSync(tokenFile, `${token}\n`, { encoding: "utf8", mode: 0o600 });
     const env = { ...process.env };
@@ -102,14 +105,14 @@ describe("server lifecycle rows through the spawned CLI", () => {
     }
     expect(server.stdoutSoFar()).toBe("");
 
-    const start = engine
+    const start = (engine as VaultEngine)
       .queryAudit({ eventType: AuditEventType.SERVER_START })
       .find((r) => r.detail?.subject === "eof-agent");
     expect(start?.detail).toMatchObject({
       transport: "stdio",
       tokenless: false,
     });
-    const stops = engine.queryAudit({ eventType: AuditEventType.SERVER_STOP });
+    const stops = (engine as VaultEngine).queryAudit({ eventType: AuditEventType.SERVER_STOP });
     expect(stops).toHaveLength(1);
     expect(stops[0]?.detail).toMatchObject({
       transport: "stdio",
@@ -117,18 +120,18 @@ describe("server lifecycle rows through the spawned CLI", () => {
       trigger: "transport_closed",
     });
     expect(stops[0]?.principal_type).toBeNull();
-    expect(engine.verifyAuditChain().valid).toBe(true);
+    expect((engine as VaultEngine).verifyAuditChain().valid).toBe(true);
   }, 60_000);
 
   it("a REST request's socket peer lands in ip_address (E75i)", async () => {
-    registerAgents(engine, "ip-agent");
-    await engine.createSecret({
+    registerAgents(engine as VaultEngine, "ip-agent");
+    await (engine as VaultEngine).createSecret({
       name: "ip-key",
       type: SecretType.API_KEY,
       value: VALUE,
     });
-    await grantOn(engine, "secret://ip-key", "ip-agent", ["read", "list"]);
-    const token = engine.createToken("ip-agent", ["read", "list", "admin"]);
+    await grantOn(engine as VaultEngine, "secret://ip-key", "ip-agent", ["read", "list"]);
+    const token = (engine as VaultEngine).createToken("ip-agent", ["read", "list", "admin"]);
 
     const { server, port } = await startCliServerOnFreePort(
       (p) => ["server", "start", "--rest", "--port", String(p)],
@@ -158,7 +161,7 @@ describe("server lifecycle rows through the spawned CLI", () => {
       expect(mine.length).toBeGreaterThan(0);
       for (const row of mine) expect(row.ip_address).toBe("127.0.0.1");
 
-      const restStart = engine
+      const restStart = (engine as VaultEngine)
         .queryAudit({ eventType: AuditEventType.SERVER_START })
         .find((r) => r.detail?.transport === "rest");
       expect(restStart?.detail).toMatchObject({ tokenless: false, port });
@@ -186,11 +189,11 @@ describe("server lifecycle rows through the spawned CLI", () => {
       await new Promise<void>((resolve) => blocker.close(() => resolve()));
     }
 
-    const starts = engine
+    const starts = (engine as VaultEngine)
       .queryAudit({ eventType: AuditEventType.SERVER_START })
       .filter((r) => r.detail?.port === port);
     expect(starts).toHaveLength(0);
-    expect(engine.verifyAuditChain().valid).toBe(true);
+    expect((engine as VaultEngine).verifyAuditChain().valid).toBe(true);
   }, 60_000);
 });
 
@@ -364,7 +367,7 @@ const MCP_ENTRY = join(
 // the built binary, the real banner, the row read back by an in-process engine.
 describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
   let vaultDir: string;
-  let engine: VaultEngine;
+  let engine: VaultEngine | undefined;
   let tokenFile: string;
 
   // Both pipes are drained from the first tick (R4, 2026-09-07): an undrained
@@ -390,8 +393,11 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
       dbPath: join(vaultDir, VAULT_DB_NAME),
       sessionPath: join(vaultDir, SESSION_FILE_NAME),
     });
-    await init.initVault(PASSWORD);
-    await init.destroy();
+    try {
+      await init.initVault(PASSWORD);
+    } finally {
+      await init.destroy();
+    }
     // `harpoc-mcp` opens an existing session and refuses a locked vault, so the
     // twin unlocks through the CLI exactly as the one above does.
     const unlock = await runCli(["unlock"], {
@@ -412,7 +418,7 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
   }, 120_000);
 
   afterAll(async () => {
-    await engine.destroy();
+    await engine?.destroy();
     rmSync(vaultDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
@@ -429,11 +435,11 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
     // No request was sent, so the JSON-RPC stream carried nothing.
     expect(mcp.stdoutSoFar()).toBe("");
 
-    const start = engine
+    const start = (engine as VaultEngine)
       .queryAudit({ eventType: AuditEventType.SERVER_START })
       .find((r) => r.detail?.subject === "mcp-eof-agent");
     expect(start?.detail).toMatchObject({ transport: "stdio", tokenless: false });
-    const stops = engine.queryAudit({ eventType: AuditEventType.SERVER_STOP });
+    const stops = (engine as VaultEngine).queryAudit({ eventType: AuditEventType.SERVER_STOP });
     expect(stops).toHaveLength(1);
     expect(stops[0]?.detail).toMatchObject({
       transport: "stdio",
@@ -441,7 +447,7 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
       trigger: "transport_closed",
     });
     expect(stops[0]?.principal_type).toBeNull();
-    expect(engine.verifyAuditChain().valid).toBe(true);
+    expect((engine as VaultEngine).verifyAuditChain().valid).toBe(true);
   }, 60_000);
 
   // win32 `child.kill("SIGTERM")` terminates the process without delivering a
@@ -460,11 +466,11 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
       }
       expect(mcp.stdoutSoFar()).toBe("");
 
-      const stops = engine.queryAudit({ eventType: AuditEventType.SERVER_STOP });
+      const stops = (engine as VaultEngine).queryAudit({ eventType: AuditEventType.SERVER_STOP });
       expect(stops.filter((r) => r.detail?.trigger === "SIGTERM")).toHaveLength(1);
       const sigterm = stops.find((r) => r.detail?.trigger === "SIGTERM");
       expect(sigterm?.detail).toMatchObject({ transport: "stdio", tokenless: false });
-      expect(engine.verifyAuditChain().valid).toBe(true);
+      expect((engine as VaultEngine).verifyAuditChain().valid).toBe(true);
     },
     60_000,
   );

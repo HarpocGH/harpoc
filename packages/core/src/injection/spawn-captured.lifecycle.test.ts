@@ -19,11 +19,11 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "harpoc-spawn-lifecycle-"));
 });
 
-/** The grandchild's pid when the tree-kill case has read it and not yet seen it gone. */
+/** The grandchild's pid when a case has read it and not yet seen it gone. */
 let survivor: number | undefined;
 
 afterEach(() => {
-  // A survivor is the failure the tree-kill case reports; never let it outlive the test.
+  // A grandchild a case has read never outlives the test.
   if (survivor !== undefined) {
     try {
       process.kill(survivor, "SIGKILL");
@@ -133,20 +133,25 @@ describe("spawnCaptured lifecycle (M4)", () => {
   });
 
   it("pins the vulnerability: a surviving grandchild cannot hold the promise open", async () => {
-    const started = Date.now();
+    const pidFile = join(dir, "grandchild.pid");
     const result = await spawnCaptured(
       process.execPath,
-      ["-e", grandchildScript({ holdMs: 8_000, parentWaits: false, escape: true })],
+      [
+        "-e",
+        grandchildScript({ holdMs: 8_000, pidPath: pidFile, parentWaits: false, escape: true }),
+      ],
       { env: {}, timeoutMs: 20_000 },
     );
-    const elapsed = Date.now() - started;
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    survivor = Number.isInteger(pid) && pid > 0 ? pid : undefined;
 
     // The child exits immediately; only the grandchild's inherited pipe is
     // still open. Settlement must follow the child's exit, not the pipe.
     expect(result.exit_code).toBe(0);
     expect(result.stdout).toContain("child-done");
     expect(result.timed_out).toBe(false);
-    expect(elapsed).toBeLessThan(4_000);
+    expect(survivor).toBeDefined();
+    expect(isAlive(pid)).toBe(true);
   }, 25_000);
 
   // Discriminating only if the grandchild exists when the timeout fires (on

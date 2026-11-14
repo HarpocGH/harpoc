@@ -107,7 +107,7 @@ describe("RateLimiter", () => {
         limiter.checkSecret(`s-${i}`);
         limiter.checkSecret(`s-${i}`);
       }
-      vi.advanceTimersByTime(12_000); // one refilled token, still short of 5
+      vi.advanceTimersByTime(12_000); // too short for a full refill at the sweep's rate
       limiter.checkSecret("s-0");
       expect(buckets(limiter).size).toBe(1001);
     });

@@ -121,7 +121,7 @@ describe("RateLimiter", () => {
       limiter.checkLimit(`s-${i}`);
       limiter.checkLimit(`s-${i}`);
     }
-    // Only ~12s of idleness: one refilled token, still below the limit.
+    // Only ~12s of idleness: too short for a full refill at the sweep's rate.
     vi.advanceTimersByTime(12_000);
     const buckets = (limiter as unknown as { secretBuckets: Map<string, unknown> }).secretBuckets;
     limiter.checkLimit("s-0");

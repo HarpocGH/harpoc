@@ -528,3 +528,70 @@ describe("executeSmtpAction (free function, default deps)", () => {
     expect(typeof executeSmtpAction).toBe("function");
   });
 });
+
+const NON_STRING_HOSTS: ReadonlyArray<readonly [string, unknown]> = [
+  ["a number", 123],
+  ["null", null],
+  ["an object", {}],
+  ["an array", ["db.example:5432"]],
+];
+
+describe("SmtpInjector — a non-string host is refused before the allowlist", () => {
+  it.each(NON_STRING_HOSTS)(
+    "a host that is %s: INVALID_INPUT 'host must be a string', nothing read or sent",
+    async (_label, value) => {
+      const probed: string[] = [];
+      const { fn, calls } = makeFakeSend();
+      const injector = new SmtpInjector({ sendSmtp: fn, ...throwingFsProbe(probed) });
+
+      const err = await expectVaultError(
+        () =>
+          injector.run(
+            baseAction({ host: value }),
+            SECRET,
+            basePolicy({ host_allowlist: ["smtp.example.com"] }),
+            undefined,
+            undefined,
+          ),
+        ErrorCode.INVALID_INPUT,
+      );
+
+      expect(err.message === "host must be a string").toBe(true);
+      expect(probed).toEqual([]);
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it.each(NON_STRING_HOSTS)(
+    "buildSmtpAuditDetails carries no host key for a host that is %s",
+    (_label, value) => {
+      const details = buildSmtpAuditDetails(baseAction({ host: value }), []);
+      expect(details).toStrictEqual({
+        from: "sender@example.com",
+        recipients: ["to@example.com"],
+        attachment_paths: [],
+        attachment_total_bytes: 0,
+      });
+    },
+  );
+
+  it("control: a string host outside the allowlist keeps today's outcome and message", async () => {
+    const { fn, calls } = makeFakeSend();
+    const injector = new SmtpInjector({ sendSmtp: fn });
+
+    const err = await expectVaultError(
+      () =>
+        injector.run(
+          baseAction({ host: "unlisted.example.net" }),
+          SECRET,
+          basePolicy({ host_allowlist: ["smtp.example.com"] }),
+          undefined,
+          undefined,
+        ),
+      ErrorCode.HOST_NOT_ALLOWED,
+    );
+
+    expect(err.message).toBe("Host not in secret allowlist: unlisted.example.net:465");
+    expect(calls).toEqual([]);
+  });
+});

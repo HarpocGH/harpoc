@@ -52,7 +52,13 @@ export class EphemeralSshAgent {
     if (process.platform === "win32") {
       authSock = `\\\\.\\pipe\\harpoc-ssh-${randomBytes(12).toString("hex")}`;
     } else {
-      tempDir = mkdtempSync(join(tmpdir(), "harpoc-agent-"));
+      try {
+        tempDir = mkdtempSync(join(tmpdir(), "harpoc-agent-"));
+      } catch {
+        return Promise.reject(
+          VaultError.sshAgentFailed("the agent's socket directory could not be created"),
+        );
+      }
       authSock = join(tempDir, "agent.sock");
     }
 

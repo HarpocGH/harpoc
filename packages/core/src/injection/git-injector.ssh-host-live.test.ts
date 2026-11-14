@@ -1,11 +1,11 @@
 /**
- * E-24, live: the vault's ssh reaches the host the allowlist judged. Two
- * addresses git reads otherwise than the vault — git hands ssh a destination
- * on 127.0.0.2 and the listener's port — and two it reads alike; the listener
- * is on 127.0.0.1 alone, pinned as `[127.0.0.1]:<port>`, so a session on it
- * shows ssh dialled the judged host and checked the host key under it. The
- * listener answers every `exec` with exit status 1: git's own failure is the
- * expected result, the listener's record is the assertion.
+ * E-24, live: the vault's ssh reaches the host the allowlist judged. One
+ * address git reads otherwise than the vault (a destination on 127.0.0.2 and
+ * the listener's port) and two it reads alike reach the listener; the rest are
+ * refused first. The listener is on 127.0.0.1 alone, pinned as `[127.0.0.1]:<port>`,
+ * so a session on it shows ssh dialled the judged host and checked the host
+ * key under it. The listener answers every `exec` with exit status 1: git's
+ * own failure is the expected result, the listener's record is the assertion.
  */
 import { readFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
@@ -60,14 +60,12 @@ interface Session {
   command: string;
 }
 
-// [title, the address for the listener's port, the user the listener sees where the address names
-// it plainly]
-const ADDRESSES: ReadonlyArray<readonly [string, (port: number) => string, string | null]> = [
-  ["a # in the URL authority", (port) => `ssh://127.0.0.1#@127.0.0.2:${String(port)}/p`, null],
+// [title, the address for the listener's port, the user the listener sees]
+const ADDRESSES: ReadonlyArray<readonly [string, (port: number) => string, string]> = [
   [
-    "@[ in the URL path with a port",
-    (port) => `ssh://127.0.0.1/@[127.0.0.2]:${String(port)}/p`,
-    null,
+    "a # in the URL authority behind a named user",
+    (port) => `ssh://git@127.0.0.1#@127.0.0.2:${String(port)}/p`,
+    "git",
   ],
   [
     "control: ssh:// with a port",
@@ -82,6 +80,8 @@ const ADDRESSES: ReadonlyArray<readonly [string, (port: number) => string, strin
 ];
 
 const USER_NOT_A_NAME: ReadonlyArray<readonly [string, (port: number) => string]> = [
+  ["a # in the URL authority", (port) => `ssh://127.0.0.1#@127.0.0.2:${String(port)}/p`],
+  ["@[ in the URL path with a port", (port) => `ssh://127.0.0.1/@[127.0.0.2]:${String(port)}/p`],
   [
     "a bracketed URL userinfo with a port",
     (port) => `ssh://[127.0.0.2:${String(port)}]@127.0.0.1/p`,
@@ -216,7 +216,7 @@ describeLive("E-24, live: the vault's ssh reaches the judged host, whatever git 
       expect(result.timed_out === true).toBe(false);
       expect(sessions.length).toBe(1);
       expect(sessions[0]?.command.startsWith("git-upload-pack ")).toBe(true);
-      expect(user === null || sessions[0]?.username === user).toBe(true);
+      expect(sessions[0]?.username === user).toBe(true);
       const rows = log.mock.calls.map((c) => c[0] as AuditLogOptions);
       expect(rows.length).toBe(1);
       expect(rows[0]?.detail?.transport).toBe("ssh");
@@ -227,7 +227,7 @@ describeLive("E-24, live: the vault's ssh reaches the judged host, whatever git 
   );
 
   it.each(USER_NOT_A_NAME)(
-    "%s: the user part is no name, INVALID_GIT_CONFIG, one row without a host, no session",
+    "%s: refused for its user part, INVALID_GIT_CONFIG, one row without a host, no session",
     async (_title, address) => {
       const log = vi.fn();
       const injector = new GitInjector({ log } as unknown as AuditLogger);

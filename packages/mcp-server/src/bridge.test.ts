@@ -328,6 +328,34 @@ describe("the bridge collects no value and drives no browser leg (B1)", () => {
     },
   );
 
+  it.each([
+    {
+      label: "the name --",
+      args: { name: "--", type: "api_key" },
+      command: 'harpoc secret set "--" "--"',
+    },
+    {
+      label: "the project --",
+      args: { name: "new-key", type: "api_key", project: "--" },
+      command: 'harpoc secret set new-key --project "--"',
+    },
+    {
+      label: "the name -- in the project -- with a certificate type",
+      args: { name: "--", type: "certificate", project: "--" },
+      command: 'harpoc secret set --type certificate --project "--" "--" "--"',
+    },
+  ])(
+    '$label: a name or project that is exactly -- is printed as "--" (C-14)',
+    async ({ args, command }) => {
+      const result = await bridge.callTool("create_secret", args);
+      expect(result.isError).toBeUndefined();
+      expect((JSON.parse(text(result)) as { message: string }).message).toBe(
+        `Secret created. Set the value with: ${command}`,
+      );
+      expect(client.createSecret).toHaveBeenCalledWith(args);
+    },
+  );
+
   it("rotate_secret refuses, naming the vault user's command, and sends nothing", async () => {
     const result = await bridge.callTool("rotate_secret", { handle: "secret://prod/db-pass" });
     expect(result.isError).toBe(true);
@@ -416,6 +444,113 @@ describe("the bridge collects no value and drives no browser leg (B1)", () => {
         );
       },
     );
+
+    const AUTH = "https://127.0.0.1:8443/authorize";
+    const TOKEN = "https://127.0.0.1:8443/token";
+    const DEVICE = "https://127.0.0.1:8443/device";
+
+    it.each(
+      GRANTS.flatMap((g) => {
+        const custom = `${g.flags.replace("--provider github", "--provider custom")} --client-id cid`;
+        return [
+          {
+            label: "project proj",
+            extra: { project: "proj" },
+            tail: `gh ${g.flags} --client-id cid --project proj`,
+          },
+          {
+            label: "project proj and the name -x",
+            extra: { name: "-x", project: "proj" },
+            tail: `${g.flags} --client-id cid --project proj "--" -x`,
+          },
+          {
+            label: "the single scope repo",
+            extra: { scopes: ["repo"] },
+            tail: `gh ${g.flags} --client-id cid --scopes repo`,
+          },
+          {
+            label: "scopes repo and read:org",
+            extra: { scopes: ["repo", "read:org"] },
+            tail: `gh ${g.flags} --client-id cid --scopes "repo,read:org"`,
+          },
+          {
+            label: "a scope that is not a plain word",
+            extra: { scopes: ["repo", "a b"] },
+            tail: `gh ${g.flags} --client-id cid --scopes <scopes>`,
+          },
+          {
+            label: "a scope that holds a comma",
+            extra: { scopes: ["a,b"] },
+            tail: `gh ${g.flags} --client-id cid --scopes <scopes>`,
+          },
+          {
+            label: "an empty scope list",
+            extra: { scopes: [] },
+            tail: `gh ${g.flags} --client-id cid --scopes <scopes>`,
+          },
+          {
+            label: "client_secret_basic",
+            extra: { token_endpoint_auth_method: "client_secret_basic" },
+            tail: `gh ${g.flags} --client-id cid --auth-method client_secret_basic`,
+          },
+          {
+            label: "a custom provider's three endpoints",
+            extra: {
+              provider: "custom",
+              auth_endpoint: AUTH,
+              token_endpoint: TOKEN,
+              device_authorization_endpoint: DEVICE,
+            },
+            tail: `gh ${custom} --auth-endpoint ${AUTH} --token-endpoint ${TOKEN} --device-endpoint ${DEVICE}`,
+          },
+          {
+            label: "a custom provider's endpoints that are not plain words",
+            extra: {
+              provider: "custom",
+              auth_endpoint: `${AUTH}?tenant=a`,
+              token_endpoint: `${TOKEN}?tenant=a`,
+              device_authorization_endpoint: `${DEVICE}?tenant=a`,
+            },
+            tail: `gh ${custom} --auth-endpoint <auth-endpoint> --token-endpoint <token-endpoint> --device-endpoint <device-endpoint>`,
+          },
+          {
+            label: "the name --",
+            extra: { name: "--" },
+            tail: `${g.flags} --client-id cid "--" "--"`,
+          },
+          {
+            label: "the project --",
+            extra: { project: "--" },
+            tail: `gh ${g.flags} --client-id cid --project "--"`,
+          },
+          {
+            label: "every option the flow sets and the name -x",
+            extra: {
+              name: "-x",
+              provider: "custom",
+              scopes: ["repo", "read:org"],
+              token_endpoint_auth_method: "client_secret_basic",
+              auth_endpoint: AUTH,
+              token_endpoint: TOKEN,
+              device_authorization_endpoint: DEVICE,
+              project: "proj",
+            },
+            tail: `${custom} --scopes "repo,read:org" --auth-method client_secret_basic --auth-endpoint ${AUTH} --token-endpoint ${TOKEN} --device-endpoint ${DEVICE} --project proj "--" -x`,
+          },
+        ].map((row) => ({ ...g, ...row }));
+      }),
+    )("$grant: $label prints every option the flow set (C-14)", async ({ grant, extra, tail }) => {
+      const result = await bridge.callTool("start_oauth_flow", {
+        name: "gh",
+        provider: "github",
+        grant_type: grant,
+        client_id: "cid",
+        ...extra,
+      });
+      expect(result.isError).toBe(true);
+      expect(client.startOAuthFlow).not.toHaveBeenCalled();
+      expect(text(result)).toBe(`${lead(grant)} ${tail}`);
+    });
   });
 
   it("start_oauth_flow device_code forwards the shared field set to the REST flow", async () => {

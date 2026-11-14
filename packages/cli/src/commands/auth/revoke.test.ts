@@ -60,11 +60,17 @@ describe("auth revoke (registry-authoritative, R9/C33-A)", () => {
 
   it("surfaces the engine's refusal of an unknown jti", async () => {
     mockEngine.revokeToken.mockImplementationOnce(() => {
-      throw VaultError.invalidInput("Unknown token jti: nope");
+      throw VaultError.invalidInput(
+        "Unknown token jti (not a token id this vault mints; harpoc auth list shows the jti)",
+      );
     });
     await expect(run(["nope"])).rejects.toThrow("process.exit");
     expect(spies.exitSpy).toHaveBeenCalledWith(1);
-    expect(spies.errorSpy).toHaveBeenCalledWith(expect.stringContaining("Unknown token jti: nope"));
+    expect(spies.errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "Unknown token jti (not a token id this vault mints; harpoc auth list shows the jti)",
+      ),
+    );
     expect(mockEngine.destroy).toHaveBeenCalled();
   });
 });

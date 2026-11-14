@@ -299,14 +299,14 @@ describe("caller authentication — Proxy-Authorization on every request", () =>
   });
 
   it.each([
-    ["not a Bearer credential", "Basic dXNlcjpwdw==", 401, ErrorCode.INVALID_TOKEN],
-    ["an invalid token", "Bearer tok-bogus", 401, ErrorCode.INVALID_TOKEN],
-    ["an expired token", `Bearer ${TOKENS.expired}`, 401, ErrorCode.TOKEN_EXPIRED],
-    ["a revoked token", `Bearer ${TOKENS.revoked}`, 401, ErrorCode.TOKEN_REVOKED],
-    ["a sealed vault", `Bearer ${TOKENS.sealed}`, 503, ErrorCode.VAULT_LOCKED],
+    ["not a Bearer credential", 401, "Basic dXNlcjpwdw==", ErrorCode.INVALID_TOKEN],
+    ["an invalid token", 401, "Bearer tok-bogus", ErrorCode.INVALID_TOKEN],
+    ["an expired token", 401, `Bearer ${TOKENS.expired}`, ErrorCode.TOKEN_EXPIRED],
+    ["a revoked token", 401, `Bearer ${TOKENS.revoked}`, ErrorCode.TOKEN_REVOKED],
+    ["a sealed vault", 503, `Bearer ${TOKENS.sealed}`, ErrorCode.VAULT_LOCKED],
   ])(
     "%s is refused %i with its code; no lease, nothing upstream",
-    async (_t, header, status, code) => {
+    async (_t, status, header, code) => {
       const reply = await proxyRequest({
         port,
         path: `/127.0.0.1:${upstream.port}/user`,

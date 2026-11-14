@@ -98,6 +98,17 @@ describe("validateHostPort DNS resolution", () => {
     expect(lookupMock).toHaveBeenCalledExactlyOnceWith("db.example.test");
   });
 
+  it.each([
+    ["bücher.example", 5432],
+    ["\u212Aexample.com", 993],
+  ])("refuses the non-ASCII host %j as ill-formed before the lookup", async (host, port) => {
+    lookupMock.mockResolvedValue({ address: "93.184.216.34", family: 4 });
+
+    const err = await expectVaultError(() => validateHostPort(host, port), ErrorCode.SSRF_BLOCKED);
+    expect(err.message).toBe(`SSRF blocked: ${JSON.stringify(host)} is not a well-formed host`);
+    expect(lookupMock).not.toHaveBeenCalled();
+  });
+
   it("returns the resolved public address for pinning and the hostname unchanged", async () => {
     lookupMock.mockResolvedValue({ address: "93.184.216.34", family: 4 });
 

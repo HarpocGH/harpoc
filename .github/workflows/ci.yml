@@ -59,11 +59,12 @@ jobs:
         # The node 24 leg relaxes the global sysctl (next step) and so
         # exercises `unshare` for the network tier; this leg grants `userns`
         # to /usr/bin/bwrap alone, so `unshare -rn` keeps failing and the vault
-        # falls to bwrap for BOTH dimensions - the second tier's live proof,
-        # and the route getting-started.md documents for operators who will
-        # not relax the restriction host-wide. Verified by the step 9 probe
-        # (implementation-plan-compromise-wave3-isolation-r7-2026-09-04.md).
-        # 2026-11-06: ubuntu-latest moved from ubuntu-24.04 to ubuntu-26.04 and
+        # takes bwrap for the network tier and for the combined demand (the
+        # filesystem tier alone takes setpriv's Landlock where util-linux has
+        # it - the probe step below prints which) - the second tier's live
+        # proof, and the route getting-started.md documents for operators who
+        # will not relax the restriction host-wide.
+        # 2026-11-06: ubuntu-latest moved to a newer ubuntu image and
         # the bare profile stopped working there (bwrap: loopback: Failed
         # RTM_NEWADDR: Operation not permitted - the loopback setup inside the
         # new network namespace lost CAP_NET_ADMIN under the image's AppArmor).
@@ -100,7 +101,7 @@ jobs:
           fi
       - name: Probe network isolation (diagnostic; relaxes the userns restriction on the node 24 leg)
         if: runner.os == 'Linux' && matrix.node-version == 24
-        # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor
+        # The ubuntu image restricts unprivileged user namespaces via AppArmor
         # (apparmor_restrict_unprivileged_userns). The suite's live probe
         # skips gracefully either way; this step surfaces the real error so
         # a skipped leg is diagnosable from the log. If it reports denial,

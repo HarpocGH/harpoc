@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MockInstance } from "vitest";
 import { Command } from "commander";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
 
 const {
   mockEngine,
@@ -1175,6 +1175,60 @@ describe("the input refusals of the REST-capable commands under --url (T4)", () 
       expect(loadUnlockedEngine).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("audit's filters under --url are judged before any request (C-11)", () => {
+  it.each([
+    { option: "--event", typed: "secret.raed", message: "--event: not an audit event type" },
+    {
+      option: "--exclude-event",
+      typed: "secret.raed",
+      message: "--exclude-event: not an audit event type",
+    },
+    { option: "--secret", typed: "not-an-id", message: "--secret: not a secret id" },
+    { option: "--event", typed: "", message: "--event: not an audit event type" },
+    { option: "--secret", typed: "", message: "--secret: not a secret id" },
+  ])(
+    "refuses an unknown $option value as the fixed INVALID_INPUT envelope, the server never contacted",
+    async ({ option, typed, message }) => {
+      await expect(run([...rest, "audit", option, typed, "--json"])).rejects.toThrow(
+        "process.exit",
+      );
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(typed !== "" && `${spies.stdout()}\n${spies.stderr()}`.includes(typed)).toBe(false);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [JSON.stringify({ error: "INVALID_INPUT", message })],
+      ]);
+      expect(clientCalls()).toEqual({});
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["--event", "eventType"],
+    ["--exclude-event", "excludeEventType"],
+  ] as const)(
+    "every AuditEventType member passes %s and reaches the client as %s (Review Focus 7)",
+    async (option, key) => {
+      const members = Object.values(AuditEventType);
+      for (const member of members) {
+        await run([...rest, "audit", option, member, "--json"]);
+      }
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+      expect(
+        mockClient.queryAudit.mock.calls.map((call) => (call[0] as Record<string, unknown>)[key]),
+      ).toEqual(members);
+    },
+  );
+
+  it("a secret id passes --secret and reaches the client as secretId", async () => {
+    const secretId = "0190c9d2-7b4a-7c3e-8f12-3456789abcde";
+    await run([...rest, "audit", "--secret", secretId, "--json"]);
+    expect(spies.exitSpy).not.toHaveBeenCalled();
+    expect(clientCalls()).toEqual({
+      queryAudit: [[{ secretId, eventType: undefined, since: undefined, limit: 50 }]],
+    });
+  });
 });
 
 describe("secret allow under --url: each of the 14 flag groups alone is a set (T5)", () => {

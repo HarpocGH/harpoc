@@ -1236,7 +1236,7 @@ describe("the 2026-07-28 leg (dual-era, design R1)", () => {
         status: "not_created",
         message:
           "No out-of-band channel was available to collect the client secret, so nothing was created. Create it with: " +
-          "harpoc oauth connect m2m --client-credentials --provider custom --client-id client-123",
+          "harpoc oauth connect m2m --client-credentials --provider custom --client-id client-123 --token-endpoint https://idp.example.com/oauth/token",
       });
       expect(createOAuthSecret).not.toHaveBeenCalled();
       expect(exchange).not.toHaveBeenCalled();

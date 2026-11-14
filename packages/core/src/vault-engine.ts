@@ -503,11 +503,15 @@ function attemptedAttachments(action: SmtpAction): SmtpResolvedAttachment[] {
  * except a raw `node:fs` error from the attachment `realpath`/`stat`/`readFile` calls,
  * whose message carries the filesystem path. Remapped path-free here so no raw
  * error message reaches an interface boundary (design §7.1 reuses
- * `FILE_IO_ERROR` for an unreadable attachment).
+ * `FILE_IO_ERROR` for an unreadable attachment); a throw that carries no
+ * system error `code` is not an attachment failure and goes to {@link toVaultError}.
  */
 function mapSmtpThrow(err: unknown): VaultError {
   if (err instanceof VaultError) return err;
-  return new VaultError(ErrorCode.FILE_IO_ERROR, "an attachment could not be read");
+  if (typeof (err as { code?: unknown } | null | undefined)?.code === "string") {
+    return new VaultError(ErrorCode.FILE_IO_ERROR, "an attachment could not be read");
+  }
+  return toVaultError(err);
 }
 
 /**
@@ -1581,6 +1585,14 @@ export class VaultEngine {
         case "mcp": {
           const config = this.loadMcpServerConfig(s, secret.id);
           if (!config) {
+            await s.mcpRegistry.terminate(secret.id, "config_removed", attribution);
+            this.auditUse(
+              s,
+              secret.id,
+              { handle, context: "mcp", error: ErrorCode.MCP_SERVER_NOT_CONFIGURED },
+              false,
+              attribution,
+            );
             throw VaultError.mcpServerNotConfigured(handle);
           }
           return await s.mcpInjector.executeWithSecret(
@@ -5720,11 +5732,16 @@ export class VaultEngine {
     this.assertUnscopedGovernanceCaller(caller, "revokeToken");
     const issued = s.store.getIssuedToken(jti);
     if (!issued) {
+      const minted = MINTED_JTI.test(jti);
       this.refuseAudited(
         s,
         AuditEventType.TOKEN_REVOKE,
-        VaultError.invalidInput(`Unknown token jti: ${jti}`),
-        MINTED_JTI.test(jti) ? { jti } : {},
+        VaultError.invalidInput(
+          minted
+            ? `Unknown token jti: ${jti}`
+            : "Unknown token jti (not a token id this vault mints; harpoc auth list shows the jti)",
+        ),
+        minted ? { jti } : {},
         caller,
       );
     }

@@ -37,7 +37,7 @@ jobs:
           sleep 1
           echo "port 22 after:"; sudo ss -tlnp 'sport = :22' || true
       - name: Relax the AppArmor userns restriction for network isolation
-        # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor, so
+        # The ubuntu image restricts unprivileged user namespaces via AppArmor, so
         # `unshare -rn` fails and the vault's live isolation probe reports the
         # platform cannot deliver. That is correct fail-closed behaviour — and
         # it is why the §6.2.6 network-isolation arm, which pre-registers
@@ -552,6 +552,220 @@ jobs:
           }
           if ($null -ne $failure) { throw $failure }
           if ($leftover) { throw 'the scratch vault left files behind (listed above)' }
+          $global:LASTEXITCODE = 0
+      - name: Measure the enrolment recipe's launch as the vault account from this step and from a one-shot task (read-outs only)
+        # A measurement, not a check: the step prints five read-outs and fails only when one of
+        # them cannot be read; it asserts no value. The expectations, written before the first
+        # run: from this step the recipe's own launch form - Start-Process with the vault
+        # account's credential and -LoadUserProfile -Wait -PassThru on node -e "process.exit(0)"
+        # - exits 0 (step-launch-exit=0); from a one-shot scheduled task's batch logon the same
+        # form exits -1073741502, 0xC0000142 (task-launch-exit=-1073741502);
+        # [Environment]::UserInteractive is read in both sessions (step-interactive=,
+        # task-interactive=); and deploy/windows/enroll-unlock-key.ps1, run in that task in
+        # process with Get-Credential shadowed by a function returning the vault account's
+        # credential as <machine>\harpoc, under a 120 s bound, exits 1 with its named 0xC0000142
+        # message (task-recipe-exit=1, the message among the task's lines). A launch read-out of
+        # unread means the launch was made but Windows PowerShell 5.1 could not read the ended
+        # child's exit code (its Process object never took the handle); it fails nothing. A launch
+        # that throws is recorded as threw (the exception's type and message are printed beside
+        # it). The task runs as this step's own account, an administrator, with logon type S4U (a
+        # batch logon that stores no password) at run level Highest: the recipe checks elevation.
+        # The vault account's password is the provisioning step's masked one, read from the
+        # environment into a SecureString as the task smoke step reads it and removed from this
+        # process's environment before any launch; it reaches the task over a named pipe whose
+        # access list admits this account alone, byte by byte from an unmanaged copy zeroed after
+        # the write - never on a command line, in the log or in a file. The task's script and its
+        # read-outs sit in a directory under RUNNER_TEMP whose access list admits this account
+        # alone, and neither holds a password. The recipe's -Out names a new file carrying the
+        # run's GUID that the CLI never reaches (it prompts first). The finally removes the task
+        # on every path, then a CLI the recipe left running past the bound (its command line
+        # carries the GUID) and the directory.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          $vaultUser = 'harpoc'
+          $vaultSecure = $null
+          if (-not [string]::IsNullOrEmpty($env:HARPOC_TWO_USER_VAULT_PASSWORD)) { $vaultSecure = ConvertTo-SecureString -String $env:HARPOC_TWO_USER_VAULT_PASSWORD -AsPlainText -Force }
+          Remove-Item -Path 'Env:HARPOC_TWO_USER_VAULT_PASSWORD', 'Env:HARPOC_TWO_USER_AGENT_PASSWORD' -ErrorAction SilentlyContinue
+          $stepLaunchExit = 'missing'
+          $taskLaunchExit = 'missing'
+          $stepInteractive = 'missing'
+          $taskInteractive = 'missing'
+          $taskRecipeExit = 'missing'
+          $node = (Get-Command node.exe -CommandType Application | Select-Object -First 1).Source
+          $base = Join-Path $env:ProgramData 'harpoc'
+          $cli = Join-Path $env:GITHUB_WORKSPACE 'packages\cli'
+          $recipe = Join-Path $env:GITHUB_WORKSPACE 'deploy\windows\enroll-unlock-key.ps1'
+          $guid = [Guid]::NewGuid().ToString('N')
+          $taskName = "HarpocMeasure-$guid"
+          $pipeName = "harpoc-measure-$guid"
+          $work = Join-Path $env:RUNNER_TEMP "harpoc-measure-$guid"
+          $results = Join-Path $work 'readouts.txt'
+          $taskScript = Join-Path $work 'measure.ps1'
+          $out = Join-Path $base "vault\harpoc-measure-$guid.key.dpapi"
+          $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+          function ConvertTo-Literal([string]$Value) { return "'" + $Value.Replace("'", "''") + "'" }
+          function Test-TaskDone {
+            try { return (Test-Path -LiteralPath $results) -and (@(Get-Content -LiteralPath $results) -contains 'task-done') } catch { return $false }
+          }
+          $taskText = @'
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $results = __RESULTS__
+          function Write-Readout([string]$Text) { [System.IO.File]::AppendAllText($results, "$Text`n", (New-Object System.Text.UTF8Encoding($false))) }
+          try {
+            Write-Readout "task-interactive=$([Environment]::UserInteractive)"
+            $secure = New-Object System.Security.SecureString
+            $client = New-Object System.IO.Pipes.NamedPipeClientStream('.', __PIPE__, [System.IO.Pipes.PipeDirection]::In)
+            $pair = New-Object byte[] 2
+            try {
+              $client.Connect(60000)
+              while ($client.Read($pair, 0, 1) -eq 1 -and $client.Read($pair, 1, 1) -eq 1) { $secure.AppendChar([char]([int]$pair[0] -bor ([int]$pair[1] -shl 8))) }
+            } finally {
+              [Array]::Clear($pair, 0, 2)
+              $client.Dispose()
+            }
+            $secure.MakeReadOnly()
+            $credential = New-Object System.Management.Automation.PSCredential("$([Environment]::MachineName)\harpoc", $secure)
+            try {
+              $process = Start-Process -FilePath __NODE__ -ArgumentList '-e "process.exit(0)"' -Credential $credential -LoadUserProfile -WorkingDirectory __BASE__ -Wait -PassThru
+              if ($null -eq $process.ExitCode) { Write-Readout 'task-launch-exit=unread' } else { Write-Readout "task-launch-exit=$($process.ExitCode)" }
+            } catch {
+              Write-Readout 'task-launch-exit=threw'
+              Write-Readout "the launch from the task threw $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+            }
+            $runspace = [runspacefactory]::CreateRunspace()
+            $runspace.Open()
+            $runspace.SessionStateProxy.SetVariable('HarpocMeasureCredential', $credential)
+            $shell = [PowerShell]::Create()
+            $shell.Runspace = $runspace
+            [void]$shell.AddScript((@(
+                'param($Recipe, $Node, $Cli, $Out)',
+                'function Get-Credential { $global:HarpocMeasureCredential }',
+                '$global:LASTEXITCODE = 0',
+                'try { & $Recipe -Node $Node -Cli $Cli -Out $Out; "exit $global:LASTEXITCODE" } catch { "uncaught $($_.Exception.GetType().FullName)" }'
+              ) -join "`n"))
+            [void]$shell.AddParameter('Recipe', __RECIPE__).AddParameter('Node', __NODE__).AddParameter('Cli', __CLI__).AddParameter('Out', __OUT__)
+            $recipeOut = New-Object System.IO.StringWriter
+            $recipeError = New-Object System.IO.StringWriter
+            $consoleOut = [Console]::Out
+            $consoleError = [Console]::Error
+            [Console]::SetOut($recipeOut)
+            [Console]::SetError($recipeError)
+            try {
+              $async = $shell.BeginInvoke()
+              if ($async.AsyncWaitHandle.WaitOne(120000)) {
+                $ends = @($shell.EndInvoke($async))
+                Write-Readout "task-recipe-exit=$((@($ends) | Select-Object -Last 1) -replace '^exit ', '')"
+              } else {
+                [void]$shell.BeginStop($null, $null)
+                Write-Readout 'task-recipe-exit=timeout (120 s)'
+              }
+            } finally {
+              [Console]::SetOut($consoleOut)
+              [Console]::SetError($consoleError)
+            }
+            foreach ($row in ($recipeOut.ToString() -split "`r?`n")) { if ($row -ne '') { Write-Readout "the recipe's stdout: $row" } }
+            foreach ($row in ($recipeError.ToString() -split "`r?`n")) { if ($row -ne '') { Write-Readout "the recipe's stderr: $row" } }
+          } catch {
+            Write-Readout "the task's script stopped early: $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          } finally {
+            Write-Readout 'task-done'
+          }
+          '@
+          $taskText = $taskText.Replace('__RESULTS__', (ConvertTo-Literal $results)).Replace('__PIPE__', (ConvertTo-Literal $pipeName)).Replace('__NODE__', (ConvertTo-Literal $node)).Replace('__BASE__', (ConvertTo-Literal $base)).Replace('__RECIPE__', (ConvertTo-Literal $recipe)).Replace('__CLI__', (ConvertTo-Literal $cli)).Replace('__OUT__', (ConvertTo-Literal $out))
+          $stepInteractive = [string][Environment]::UserInteractive
+          if ($null -eq $vaultSecure) {
+            Write-Output "(the vault account's password is not in this step's environment - the provisioning step exports it; nothing is launched)"
+          } else {
+            $credential = New-Object System.Management.Automation.PSCredential("$([Environment]::MachineName)\$vaultUser", $vaultSecure)
+            try {
+              $process = Start-Process -FilePath $node -ArgumentList '-e "process.exit(0)"' -Credential $credential -LoadUserProfile -WorkingDirectory $base -Wait -PassThru
+              if ($null -eq $process.ExitCode) { $stepLaunchExit = 'unread' } else { $stepLaunchExit = [string]$process.ExitCode }
+            } catch {
+              $stepLaunchExit = 'threw'
+              Write-Output "(the launch from this step threw $($_.Exception.GetType().FullName): $($_.Exception.Message))"
+            }
+            $server = $null
+            try {
+              $workSecurity = New-Object System.Security.AccessControl.DirectorySecurity
+              $workSecurity.SetAccessRuleProtection($true, $false)
+              $workSecurity.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me.User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+              [void][System.IO.Directory]::CreateDirectory($work, $workSecurity)
+              [System.IO.File]::WriteAllText($taskScript, $taskText, (New-Object System.Text.UTF8Encoding($false)))
+              $pipeSecurity = New-Object System.IO.Pipes.PipeSecurity
+              $pipeSecurity.SetAccessRuleProtection($true, $false)
+              $pipeSecurity.AddAccessRule((New-Object System.IO.Pipes.PipeAccessRule($me.User, 'FullControl', 'Allow')))
+              $server = New-Object System.IO.Pipes.NamedPipeServerStream($pipeName, [System.IO.Pipes.PipeDirection]::Out, 1, [System.IO.Pipes.PipeTransmissionMode]::Byte, [System.IO.Pipes.PipeOptions]::Asynchronous, 0, 0, $pipeSecurity)
+              $action = New-ScheduledTaskAction -Execute (Join-Path $PSHOME 'powershell.exe') -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$taskScript`""
+              $principal = New-ScheduledTaskPrincipal -UserId $me.Name -LogonType S4U -RunLevel Highest
+              $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+              Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings | Out-Null
+              Start-ScheduledTask -TaskName $taskName
+              $connect = $server.WaitForConnectionAsync()
+              if (-not $connect.Wait(90000)) { throw 'the task did not open the pipe within 90 s' }
+              $unmanaged = [System.Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($vaultSecure)
+              try {
+                for ($i = 0; $i -lt $vaultSecure.Length; $i++) {
+                  $unit = [System.Runtime.InteropServices.Marshal]::ReadInt16($unmanaged, 2 * $i)
+                  $server.WriteByte([byte]($unit -band 0xFF))
+                  $server.WriteByte([byte](($unit -shr 8) -band 0xFF))
+                }
+                $unit = 0
+                $server.Flush()
+                $server.WaitForPipeDrain()
+              } finally {
+                [System.Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($unmanaged)
+              }
+              $server.Dispose()
+              $server = $null
+              $deadline = [DateTime]::UtcNow.AddSeconds(240)
+              while ([DateTime]::UtcNow -lt $deadline -and -not (Test-TaskDone)) { Start-Sleep -Seconds 2 }
+              if (-not (Test-TaskDone)) { Write-Output '(the task did not finish within 240 s)' }
+            } catch {
+              Write-Output "(the task's measurement stopped early: $($_.Exception.GetType().FullName): $($_.Exception.Message))"
+            } finally {
+              if ($null -ne $server) { $server.Dispose() }
+              try {
+                $info = Get-ScheduledTaskInfo -TaskName $taskName
+                Write-Output ('the one-shot task: LastRunTime {0}, LastTaskResult 0x{1:X8}, logon type S4U as {2}, run level Highest' -f $info.LastRunTime, $info.LastTaskResult, $me.Name)
+              } catch {
+                Write-Output "(the one-shot task's state could not be read: $($_.Exception.GetType().FullName))"
+              }
+              Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+              Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+              if ($null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { Write-Output "the one-shot task $taskName is removed" } else { Write-Output "::warning::the one-shot task $taskName is still registered" }
+              Get-CimInstance -ClassName Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue | Where-Object { $null -ne $_.CommandLine -and $_.CommandLine.Contains($guid) } | ForEach-Object {
+                Write-Output "stopping the recipe's CLI left running past the bound (process $($_.ProcessId))"
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+              }
+              try {
+                if (Test-Path -LiteralPath $results) {
+                  foreach ($row in @(Get-Content -LiteralPath $results)) {
+                    if ($row -match '^task-launch-exit=(.+)$') { $taskLaunchExit = $Matches[1] }
+                    elseif ($row -match '^task-interactive=(.+)$') { $taskInteractive = $Matches[1] }
+                    elseif ($row -match '^task-recipe-exit=(.+)$') { $taskRecipeExit = $Matches[1] }
+                    elseif ($row -ne 'task-done') { Write-Output "task: $row" }
+                  }
+                } else {
+                  Write-Output '(the task wrote no read-outs)'
+                }
+              } catch {
+                Write-Output "(the task's read-outs could not be read: $($_.Exception.GetType().FullName))"
+              }
+              Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+          Write-Output "step-launch-exit=$stepLaunchExit"
+          Write-Output "task-launch-exit=$taskLaunchExit"
+          Write-Output "step-interactive=$stepInteractive"
+          Write-Output "task-interactive=$taskInteractive"
+          Write-Output "task-recipe-exit=$taskRecipeExit"
+          if (@($stepLaunchExit, $taskLaunchExit, $stepInteractive, $taskInteractive, $taskRecipeExit) -contains 'missing') { throw 'a read-out is missing (its line above reads missing)' }
           $global:LASTEXITCODE = 0
       - name: Run e2e's Windows unit files (no fleet)
         if: ${{ !cancelled() }}

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Mock } from "vitest";
 import type { ConnectionConfig } from "@harpoc/shared";
 import { ErrorCode, MAX_DB_RESULT_BYTES } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
@@ -444,6 +445,110 @@ describe("DatabaseInjector", () => {
       const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
       expect(res.truncated).toBeFalsy();
       expect(res.rows).toHaveLength(2);
+    });
+  });
+});
+
+const NON_STRING_HOSTS: ReadonlyArray<readonly [string, unknown]> = [
+  ["a number", 123],
+  ["null", null],
+  ["an object", {}],
+  ["an array", ["db.example:5432"]],
+];
+
+describe("DatabaseInjector — a refusal of the host field writes one failed row", () => {
+  function auditedInjector(): { inj: DatabaseInjector; mock: MockAdapter; log: Mock } {
+    vi.mocked(validateHostPort).mockClear();
+    const log = vi.fn();
+    const mock = new MockAdapter({ rows: [] });
+    const inj = new DatabaseInjector({ log } as unknown as AuditLogger, { postgresql: mock });
+    return { inj, mock, log };
+  }
+
+  it.each(NON_STRING_HOSTS)(
+    "a host that is %s: INVALID_DATABASE_CONFIG 'host must be a string', one failed row without host, no connect",
+    async (_label, value) => {
+      const { inj, mock, log } = auditedInjector();
+      const err = await expectVaultError(
+        () =>
+          inj.executeWithSecret(
+            action({ host: value as string }),
+            SECRET,
+            policy(),
+            undefined,
+            "secret-1",
+          ),
+        ErrorCode.INVALID_DATABASE_CONFIG,
+      );
+      expect(err.message === "host must be a string").toBe(true);
+      expect(vi.mocked(validateHostPort)).not.toHaveBeenCalled();
+      expect(mock.lastConnect).toBeUndefined();
+      expect(log).toHaveBeenCalledTimes(1);
+      const row = log.mock.calls[0]?.[0] as AuditLogOptions;
+      expect(row.success).toBe(false);
+      expect(row.secretId).toBe("secret-1");
+      expect(row.detail).toStrictEqual({
+        context: "database",
+        engine: "postgresql",
+        database: "app",
+        error: "INVALID_DATABASE_CONFIG",
+      });
+    },
+  );
+
+  it("an embedded port out of range: INVALID_DATABASE_CONFIG as today, exactly one failed row without host, no connect", async () => {
+    const { inj, mock, log } = auditedInjector();
+    const err = await expectVaultError(
+      () =>
+        inj.executeWithSecret(
+          action({ host: "db.example:99999" }),
+          SECRET,
+          policy(),
+          undefined,
+          "secret-1",
+        ),
+      ErrorCode.INVALID_DATABASE_CONFIG,
+    );
+    expect(err.message).toBe("embedded port out of range (1-65535)");
+    expect(vi.mocked(validateHostPort)).not.toHaveBeenCalled();
+    expect(mock.lastConnect).toBeUndefined();
+    expect(log).toHaveBeenCalledTimes(1);
+    const row = log.mock.calls[0]?.[0] as AuditLogOptions;
+    expect(row.success).toBe(false);
+    expect(row.secretId).toBe("secret-1");
+    expect(row.detail).toStrictEqual({
+      context: "database",
+      engine: "postgresql",
+      database: "app",
+      error: "INVALID_DATABASE_CONFIG",
+    });
+  });
+
+  it("control: a string host outside the allowlist keeps today's outcome, message and row", async () => {
+    const { inj, mock, log } = auditedInjector();
+    const err = await expectVaultError(
+      () =>
+        inj.executeWithSecret(
+          action({ host: "8.8.8.8" }),
+          SECRET,
+          policy({ host_allowlist: ["9.9.9.9"] }),
+          undefined,
+          "secret-1",
+        ),
+      ErrorCode.HOST_NOT_ALLOWED,
+    );
+    expect(err.message).toBe("Host not in secret allowlist: 8.8.8.8:5432");
+    expect(mock.lastConnect).toBeUndefined();
+    expect(log).toHaveBeenCalledTimes(1);
+    const row = log.mock.calls[0]?.[0] as AuditLogOptions;
+    expect(row.success).toBe(false);
+    expect(row.detail).toStrictEqual({
+      context: "database",
+      engine: "postgresql",
+      database: "app",
+      host: "8.8.8.8",
+      port: 5432,
+      error: "HOST_NOT_ALLOWED",
     });
   });
 });

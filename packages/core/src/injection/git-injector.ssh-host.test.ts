@@ -1,8 +1,8 @@
 /**
  * E-24: for a git-over-SSH use the host the allowlist judges and the audit row
- * names is the host the vault's ssh dials. `-o HostName=<judged host>` leads
- * GIT_SSH_COMMAND on every credential-bearing step, so the destination git
- * derives from the address by its own rules names the user and the port at most; a judged
+ * names is the host the vault's ssh dials. `-o HostName=<judged host>` and a named user's
+ * `-o User=<judged user>` lead GIT_SSH_COMMAND on every credential-bearing step, so the
+ * destination git derives from the address by its own rules names the port at most; a judged
  * host ssh would not read back as itself is refused before any spawn, with
  * one failed row that never carries it. Blocks 1 and 2 mock the spawn seam;
  * block 3 runs real git against a stand-in `ssh` that asks the real client
@@ -360,11 +360,15 @@ const READ_OTHERWISE: ReadonlyArray<readonly [string, string]> = [
   ["git's bracket rule behind an scp path", "git@allowed.invalid:x@[evil.invalid]:z"],
   ["a bracketed scp address holding a second @", "[git@allowed.invalid:x@evil.invalid]:z"],
   ["@[ deeper in an scp path", "git@allowed.invalid:p/@[evil.invalid]/q:r"],
+  ["@[ in the URL path", "ssh://git@allowed.invalid/x@[evil.invalid]/p"],
+  ["a percent-encoded @[ in the URL path", "ssh://git@allowed.invalid/x%40%5Bevil.invalid%5D/p"],
+];
+
+const NULL_USER_WITH_AT: ReadonlyArray<readonly [string, string]> = [
   ["a # in the URL authority", "ssh://allowed.invalid#@evil.invalid/p"],
   ["a ? in the URL authority", "ssh://allowed.invalid?@evil.invalid/p"],
-  ["@[ in the URL path", "ssh://git@allowed.invalid/x@[evil.invalid]/p"],
   ["@[ in the URL path with a port", "ssh://allowed.invalid/@[evil.invalid]:2222/p"],
-  ["a percent-encoded @[ in the URL path", "ssh://git@allowed.invalid/x%40%5Bevil.invalid%5D/p"],
+  ["a percent-encoded @[ in the URL path", "ssh://allowed.invalid/x%40%5Bevil.invalid%5D/p"],
 ];
 
 const READ_OTHERWISE_USER: ReadonlyArray<readonly [string, string]> = [
@@ -390,23 +394,24 @@ const DROPPED_TAB: readonly [string, string] = [
   "ssh://git@allow\ted.invalid/p",
 ];
 
-// [repository, the HostName value, the row's host]
-const LEGITIMATE: ReadonlyArray<readonly [string, string, string]> = [
-  ["git@allowed.invalid:org/repo.git", "allowed.invalid", "allowed.invalid"],
-  ["user.name@allowed.invalid:path", "allowed.invalid", "allowed.invalid"],
-  ["[git@allowed.invalid:2222]:org/repo.git", "allowed.invalid", "allowed.invalid"],
-  ["ssh://git@allowed.invalid/org/repo.git", "allowed.invalid", "allowed.invalid"],
-  ["ssh://git@allowed.invalid:2222/org/repo.git", "allowed.invalid", "allowed.invalid"],
-  ["ssh://allowed.invalid/~git/repo.git", "allowed.invalid", "allowed.invalid"],
-  ["ssh://git@ALLOWED.INVALID/p", "ALLOWED.INVALID", "ALLOWED.INVALID"],
-  ["git@sub_host.allowed.invalid:p", "sub_host.allowed.invalid", "sub_host.allowed.invalid"],
+// [repository, the HostName value, the row's host, the User value]
+const LEGITIMATE: ReadonlyArray<readonly [string, string, string, string | null]> = [
+  ["git@allowed.invalid:org/repo.git", "allowed.invalid", "allowed.invalid", "git"],
+  ["user.name@allowed.invalid:path", "allowed.invalid", "allowed.invalid", "user.name"],
+  ["[git@allowed.invalid:2222]:org/repo.git", "allowed.invalid", "allowed.invalid", "git"],
+  ["ssh://git@allowed.invalid/org/repo.git", "allowed.invalid", "allowed.invalid", "git"],
+  ["ssh://git@allowed.invalid:2222/org/repo.git", "allowed.invalid", "allowed.invalid", "git"],
+  ["ssh://allowed.invalid/~git/repo.git", "allowed.invalid", "allowed.invalid", null],
+  ["ssh://git@ALLOWED.INVALID/p", "ALLOWED.INVALID", "ALLOWED.INVALID", "git"],
+  ["git@sub_host.allowed.invalid:p", "sub_host.allowed.invalid", "sub_host.allowed.invalid", "git"],
   [
     "git@xn--bcher-kva.allowed.invalid:p",
     "xn--bcher-kva.allowed.invalid",
     "xn--bcher-kva.allowed.invalid",
+    "git",
   ],
-  ["ssh://git@127.0.0.1:2222/p", "127.0.0.1", "127.0.0.1"],
-  ["ssh://git@[::1]:2222/p", "::1", "[::1]"],
+  ["ssh://git@127.0.0.1:2222/p", "127.0.0.1", "127.0.0.1", "git"],
+  ["ssh://git@[::1]:2222/p", "::1", "[::1]", "git"],
 ];
 
 const PERCENT_ENCODED_USER: ReadonlyArray<readonly [string, string]> = [
@@ -463,10 +468,12 @@ describeGitSsh(
       repository: string,
       hostName: string,
       rowHost: string,
+      user: string | null,
     ): Promise<void> {
       const { log, injector } = recorder();
       const tree =
         operation === "clone" || operation === "ls-remote" ? {} : { working_directory: scratch };
+      const userPair = user === null ? "" : ` -o User=${user}`;
       await injector.executeWithSecret(
         unparsed(operation, { repository, ...tree }),
         new Uint8Array(Buffer.from(key)),
@@ -481,9 +488,12 @@ describeGitSsh(
       for (const [, args, opts] of network) {
         const command = opts.env.GIT_SSH_COMMAND as string;
         // The pair is the command's first option and its only HostName.
-        expect(command.indexOf(" -o ")).toBe(command.indexOf(` -o HostName=${hostName} -F none `));
+        expect(command.indexOf(" -o ")).toBe(
+          command.indexOf(` -o HostName=${hostName}${userPair} -F none `),
+        );
         expect(command.indexOf(" -o ") > 0).toBe(true);
         expect(command.split("HostName=").length).toBe(2);
+        expect(command.split(" -o User=").length).toBe(user === null ? 1 : 2);
         // git still receives the address as the caller wrote it, behind `--`.
         expect(args[args.indexOf("--") + 1]).toBe(repository);
       }
@@ -496,15 +506,31 @@ describeGitSsh(
 
     describe.each([...READ_OTHERWISE, DROPPED_TAB])("%s", (_label, repository) => {
       it.each(OPERATIONS)("%s: the vault's ssh is told to dial the judged host", (operation) =>
-        expectDialed(operation, repository, "allowed.invalid", "allowed.invalid"),
+        expectDialed(operation, repository, "allowed.invalid", "allowed.invalid", "git"),
       );
     });
 
-    describe.each(LEGITIMATE)("control: %s", (repository, hostName, rowHost) => {
+    describe.each(LEGITIMATE)("control: %s", (repository, hostName, rowHost, user) => {
       it.each(OPERATIONS)("%s: HostName is the address's own host", (operation) =>
-        expectDialed(operation, repository, hostName, rowHost),
+        expectDialed(operation, repository, hostName, rowHost, user),
       );
     });
+
+    describe.each(NULL_USER_WITH_AT)(
+      "%s: an ssh:// address that names no user holds an @",
+      (_label, repository) => {
+        it.each(OPERATIONS)(
+          "%s: INVALID_GIT_CONFIG, one row without a host or a user, nothing spawned",
+          async (operation) => {
+            const tree =
+              operation === "clone" || operation === "ls-remote"
+                ? {}
+                : { working_directory: scratch };
+            await expectRefusedEarly(operation, repository, USER_NOT_A_NAME, key, tree);
+          },
+        );
+      },
+    );
 
     describe.each([...READ_OTHERWISE_USER, ...PERCENT_ENCODED_USER])(
       "%s: the user part is no name",
@@ -603,6 +629,7 @@ describeGitSshPosix(
       repository: string,
       hostname: string,
       rowHost: string,
+      user: string,
     ): Promise<void> {
       const { log, injector } = recorder();
       const where =
@@ -617,10 +644,11 @@ describeGitSshPosix(
         "secret-1",
       );
       expect(result.exit_code === 0).toBe(false);
-      const hostnames = readFileSync(out, "utf8")
-        .split("\n")
-        .filter((line) => line.startsWith("hostname "));
-      expect(hostnames).toEqual([`hostname ${hostname}`]);
+      const lines = readFileSync(out, "utf8").split("\n");
+      expect(lines.filter((line) => line.startsWith("hostname "))).toEqual([
+        `hostname ${hostname}`,
+      ]);
+      expect(lines.filter((line) => line.startsWith("user "))).toEqual([`user ${user}`]);
       const rows = log.mock.calls.map((c) => c[0] as AuditLogOptions);
       expect(rows.length).toBe(1);
       expect(rows[0]?.detail?.host).toBe(rowHost);
@@ -628,13 +656,13 @@ describeGitSshPosix(
 
     describe.each(READ_OTHERWISE)("%s", (_label, repository) => {
       it.each(OPERATIONS)("%s: ssh -G reports hostname allowed.invalid", (operation) =>
-        expectSshDials(operation, repository, "allowed.invalid", "allowed.invalid"),
+        expectSshDials(operation, repository, "allowed.invalid", "allowed.invalid", "git"),
       );
     });
 
     describe("control: ssh://git@[::1]:2222/p", () => {
       it.each(OPERATIONS)("%s: ssh -G reports hostname ::1", (operation) =>
-        expectSshDials(operation, "ssh://git@[::1]:2222/p", "::1", "[::1]"),
+        expectSshDials(operation, "ssh://git@[::1]:2222/p", "::1", "[::1]", "git"),
       );
     });
 

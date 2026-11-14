@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+#Requires -PSEdition Desktop
 # Harpoc deployment model B on Windows: the vault daemon as a startup Scheduled Task running as
 # the vault account, unlocked from the DPAPI-sealed unlock key (README.md, "Deployment models").
 # Run from an elevated Windows PowerShell after install-two-identity.ps1 and enroll-unlock-key.ps1:
