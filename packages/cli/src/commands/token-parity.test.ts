@@ -390,6 +390,13 @@ const ROWS: Row[] = [
   },
 ];
 
+const FIXTURE_PATH_TITLES = new Map([
+  [KEY_PATH, "<key.pem>"],
+  [CERT_PATH, "<cert.pem>"],
+]);
+const titled = (rows: Row[]): [string, Row][] =>
+  rows.map((row) => [row.argv.map((arg) => FIXTURE_PATH_TITLES.get(arg) ?? arg).join(" "), row]);
+
 describe("token permission map (Task 9 pin)", () => {
   let spies: CliSpies;
   let stdoutWriteSpy: MockInstance;
@@ -493,55 +500,58 @@ describe("token permission map (Task 9 pin)", () => {
     stdoutWriteSpy.mockRestore();
   });
 
-  describe.each(ROWS)("token permission map: $argv", ({ argv, permission, call, resolve }) => {
-    it(`refuses a token without '${permission}' before the engine call`, async () => {
-      mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: [] }));
-      await expect(run([...argv, "--token", "jwt-value"])).rejects.toThrow("process.exit");
-      expect(spies.errorSpy).toHaveBeenCalledWith(
-        expect.stringContaining(`Token lacks permission: ${permission}`),
-      );
-      expect(PROBES[call]).not.toHaveBeenCalled();
-    });
+  describe.each(titled(ROWS))(
+    "token permission map: %s",
+    (_title, { argv, permission, call, resolve }) => {
+      it(`refuses a token without '${permission}' before the engine call`, async () => {
+        mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: [] }));
+        await expect(run([...argv, "--token", "jwt-value"])).rejects.toThrow("process.exit");
+        expect(spies.errorSpy).toHaveBeenCalledWith(
+          expect.stringContaining(`Token lacks permission: ${permission}`),
+        );
+        expect(PROBES[call]).not.toHaveBeenCalled();
+      });
 
-    it("writes the refusal's access.denied row once, under the command's path (A8)", async () => {
-      mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: [] }));
-      await expect(run([...argv, "--token", "jwt-value"])).rejects.toThrow("process.exit");
-      expect(mockEngine.auditScopeRefusal.mock.calls).toEqual([
-        [
-          { principal_type: "agent", principal_id: "agent-1", interface: "cli" },
-          commandPathOf(argv),
-          "permission",
-        ],
-      ]);
-    });
+      it("writes the refusal's access.denied row once, under the command's path (A8)", async () => {
+        mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: [] }));
+        await expect(run([...argv, "--token", "jwt-value"])).rejects.toThrow("process.exit");
+        expect(mockEngine.auditScopeRefusal.mock.calls).toEqual([
+          [
+            { principal_type: "agent", principal_id: "agent-1", interface: "cli" },
+            commandPathOf(argv),
+            "permission",
+          ],
+        ]);
+      });
 
-    it(`executes with '${permission}' scope`, async () => {
-      mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: [permission] }));
-      await run([...argv, "--token", "jwt-value"]);
-      expect(PROBES[call]).toHaveBeenCalled();
-    });
-
-    if (resolve !== undefined) {
-      it("resolves the handle with the token's caller and the command's event type (D2b)", async () => {
+      it(`executes with '${permission}' scope`, async () => {
         mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: [permission] }));
         await run([...argv, "--token", "jwt-value"]);
-        const caller = expect.objectContaining({
-          principal_type: "agent",
-          principal_id: "agent-1",
-          interface: "cli",
-        });
-        if (resolve === "default") {
-          expect(resolveSecretId).toHaveBeenCalledWith(mockEngine, "secret://k", caller);
-        } else {
-          expect(resolveSecretId).toHaveBeenCalledWith(mockEngine, "secret://k", caller, resolve);
-        }
+        expect(PROBES[call]).toHaveBeenCalled();
       });
-    }
-  });
 
-  describe.each(ROWS.filter((row) => row.callerArg !== undefined))(
-    "token caller threading: $argv",
-    ({ argv, permission, callerArg }) => {
+      if (resolve !== undefined) {
+        it("resolves the handle with the token's caller and the command's event type (D2b)", async () => {
+          mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: [permission] }));
+          await run([...argv, "--token", "jwt-value"]);
+          const caller = expect.objectContaining({
+            principal_type: "agent",
+            principal_id: "agent-1",
+            interface: "cli",
+          });
+          if (resolve === "default") {
+            expect(resolveSecretId).toHaveBeenCalledWith(mockEngine, "secret://k", caller);
+          } else {
+            expect(resolveSecretId).toHaveBeenCalledWith(mockEngine, "secret://k", caller, resolve);
+          }
+        });
+      }
+    },
+  );
+
+  describe.each(titled(ROWS.filter((row) => row.callerArg !== undefined)))(
+    "token caller threading: %s",
+    (_title, { argv, permission, callerArg }) => {
       it("passes the token's caller to every engine call the command makes (I26)", async () => {
         mockEngine.verifyToken.mockReturnValue(tokenFixture({ scope: [permission] }));
         await run([...argv, "--token", "jwt-value"]);

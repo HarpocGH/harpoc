@@ -699,22 +699,33 @@ const REST_ROWS: RestRow[] = [
 const withValueFile = (argv: string[]): string[] =>
   argv.map((arg) => (arg === "<value>" ? valueFile : arg));
 
+const FIXTURE_PATH_TITLES = new Map([
+  [KEY_PATH, "<key.pem>"],
+  [CERT_PATH, "<cert.pem>"],
+  [NO_RUNTIME_DIR, "<runtime-dir>"],
+]);
+const titled = (rows: RestRow[]): [string, RestRow][] =>
+  rows.map((row) => [row.argv.map((arg) => FIXTURE_PATH_TITLES.get(arg) ?? arg).join(" "), row]);
+
 describe("the REST mode of every REST-capable command (--url / --token-file)", () => {
-  describe.each(REST_ROWS)("harpoc --url … $argv", ({ argv, calls, constructed, restOutput }) => {
-    it("reaches the RestClient member with the whole argument list, prints what the in-process path prints, loads no vault", async () => {
-      const local = await capture(withValueFile(argv));
-      vi.mocked(loadUnlockedEngine).mockClear();
-      MockRestClient.mockClear();
+  describe.each(titled(REST_ROWS))(
+    "harpoc --url … %s",
+    (_title, { argv, calls, constructed, restOutput }) => {
+      it("reaches the RestClient member with the whole argument list, prints what the in-process path prints, loads no vault", async () => {
+        const local = await capture(withValueFile(argv));
+        vi.mocked(loadUnlockedEngine).mockClear();
+        MockRestClient.mockClear();
 
-      const remote = await capture([...rest, ...withValueFile(argv)]);
+        const remote = await capture([...rest, ...withValueFile(argv)]);
 
-      expect(MockRestClient.mock.calls).toEqual([[constructed ?? CONSTRUCTED]]);
-      expect(clientCalls()).toEqual(calls);
-      expect(loadUnlockedEngine).not.toHaveBeenCalled();
-      expect(spies.exitSpy).not.toHaveBeenCalled();
-      expect(remote).toEqual(restOutput ?? local);
-    });
-  });
+        expect(MockRestClient.mock.calls).toEqual([[constructed ?? CONSTRUCTED]]);
+        expect(clientCalls()).toEqual(calls);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        expect(spies.exitSpy).not.toHaveBeenCalled();
+        expect(remote).toEqual(restOutput ?? local);
+      });
+    },
+  );
 
   it("audit verify --json over REST prints the client's chain report, no tail key (R-A3)", async () => {
     const exitCode = process.exitCode;
