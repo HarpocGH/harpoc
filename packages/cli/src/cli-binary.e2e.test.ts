@@ -659,10 +659,8 @@ describe("compiled binary smoke: proxy env opens no vault (B2)", () => {
 
 describe("compiled binary smoke: ssh-agent status opens no vault (B3)", () => {
   it("reports each consumer directory's socket from the filesystem alone, exit 0, nothing created", async () => {
-    const cwd = join(
-      tmpdir(),
-      `harpoc-sshagentstatus-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    );
+    // The short name keeps the socket path inside darwin's 104-byte sun_path under its long $TMPDIR.
+    const cwd = join(tmpdir(), `harpoc-sas-${Math.random().toString(36).slice(2)}`);
     mkdirSync(cwd);
     try {
       const env: NodeJS.ProcessEnv = { ...process.env, HOME: cwd, USERPROFILE: cwd };

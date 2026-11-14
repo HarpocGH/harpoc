@@ -138,8 +138,9 @@ let tempRoot: string;
 let saved: { TMPDIR?: string; TMP?: string; TEMP?: string };
 let log: Mock;
 
+// The short prefix keeps the agent's socket inside darwin's 104-byte sun_path under its long $TMPDIR.
 beforeEach(() => {
-  tempRoot = mkdtempSync(join(tmpdir(), "harpoc-git-tempfiles-"));
+  tempRoot = mkdtempSync(join(tmpdir(), "harpoc-git-tf-"));
   saved = overrideTempEnv(tempRoot);
   vi.mocked(spawnCaptured).mockReset();
   log = vi.fn();

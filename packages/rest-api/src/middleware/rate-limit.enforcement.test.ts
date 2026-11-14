@@ -118,6 +118,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+// A row that drains the global bucket sends a thousand requests, so its budget is 30 s.
 describe("REST rate limiting is enforced on the wired app (T8)", () => {
   it("the global tier bounds an authenticated route", async () => {
     const instance = app();
@@ -128,7 +129,7 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
     expect(overflow.status).toBe(429);
     const body = (await overflow.json()) as { error?: string };
     expect(body.error).toBe("RATE_LIMIT_EXCEEDED");
-  });
+  }, 30_000);
 
   /**
    * The collection route spends exactly one token per request. It used to
@@ -147,7 +148,7 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
     }
 
     expect(served).toBe(RATE_LIMIT_GLOBAL);
-  });
+  }, 30_000);
 
   it("the per-secret tier bounds a single handle well before the global one", async () => {
     const instance = app();
@@ -192,7 +193,7 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
 
     const tokensOverflow = await instance.request("/api/v1/tokens", { headers: AUTH });
     expect(tokensOverflow.status).toBe(429);
-  });
+  }, 30_000);
 
   /**
    * The vault prefix's own registration, ahead of authentication (B1): once
@@ -214,7 +215,7 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
     const admin = await instance.request("/api/v1/vault/lock", { method: "POST", headers: AUTH });
     expect(admin.status).toBe(429);
     expect(engine.lock).not.toHaveBeenCalled();
-  });
+  }, 30_000);
 
   it("use carries its own, higher tier", async () => {
     const instance = app();
@@ -236,7 +237,7 @@ describe("REST rate limiting is enforced on the wired app (T8)", () => {
     // before the limiter and must stay reachable for liveness probes.
     const res = await instance.request("/api/v1/health", { headers: HOST });
     expect(res.status).toBe(200);
-  });
+  }, 30_000);
 
   it("control: a fresh app starts with a full bucket", async () => {
     const instance = app();
@@ -367,7 +368,7 @@ describe("the per-secret tier on /value, DELETE and rotate; the global tier on /
     const res = await instance.request("/api/v1/health/expiring", { headers: AUTH });
     expect(res.status).toBe(429);
     expect(((await res.json()) as { error?: string }).error).toBe("RATE_LIMIT_EXCEEDED");
-  });
+  }, 30_000);
 });
 
 // M-T2b-11 (test-review-2026-10-09): the limiter answers before the token
@@ -386,7 +387,7 @@ describe("rate limiting runs before authentication (M-T2b-11)", () => {
     const res = await instance.request("/api/v1/secrets/k", { headers: HOST });
     expect(res.status).toBe(429);
     expect(((await res.json()) as { error?: string }).error).toBe("RATE_LIMIT_EXCEEDED");
-  });
+  }, 30_000);
 });
 
 // M-P3-3 (test-review-2026-10-09): the request-audit line — its content, the
