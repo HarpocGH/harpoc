@@ -19,6 +19,7 @@ import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
+import { generateEd25519HostKeys } from "./__fixtures__/ssh2-host-keys.js";
 import { GitInjector } from "./git-injector.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
 import { system32Path } from "../win32-paths.js";
@@ -104,7 +105,7 @@ describeLive("E-24, live: the vault's ssh reaches the judged host, whatever git 
   const sessions: Session[] = [];
 
   beforeAll(async () => {
-    const hostKeys = utils.generateKeyPairSync("ed25519");
+    const hostKeys = generateEd25519HostKeys();
     hostPubLine = hostKeys.public.split(/\s+/).slice(0, 2).join(" ");
 
     const probeAgent = await EphemeralSshAgent.start(USER_KEY_PEM);

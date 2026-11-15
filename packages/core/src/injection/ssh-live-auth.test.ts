@@ -8,6 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveExecutable } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
+import { generateEd25519HostKeys } from "./__fixtures__/ssh2-host-keys.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
 import { buildSshEnv, sshHardeningArgs, writeIdentityFile, writeKnownHosts } from "./ssh-common.js";
 
@@ -74,7 +75,7 @@ describeSsh("live SSH authentication through the ephemeral agent", () => {
   const events: AuthEvent[] = [];
 
   beforeAll(async () => {
-    const hostKeys = utils.generateKeyPairSync("ed25519");
+    const hostKeys = generateEd25519HostKeys();
     hostPubLine = hostKeys.public.split(/\s+/).slice(0, 2).join(" ");
 
     const probeAgent = await EphemeralSshAgent.start(USER_KEY_PEM);
